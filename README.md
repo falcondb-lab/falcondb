@@ -1,10 +1,72 @@
 # FalconDB
 
+[![CI](https://github.com/falcondb-lab/falcondb/actions/workflows/ci.yml/badge.svg)](https://github.com/falcondb-lab/falcondb/actions/workflows/ci.yml)
+![MSRV](https://img.shields.io/badge/MSRV-1.75-blue)
+![License](https://img.shields.io/badge/license-Apache--2.0-green)
+
 **PG-Compatible Distributed In-Memory OLTP Database** — written in Rust.
 
-Falcon v0.1.0 (M1) provides stable OLTP, fast/slow-path transactions,
-WAL-based primary–replica replication, promote/failover, MVCC garbage
-collection, and reproducible benchmarks.
+FalconDB provides stable OLTP, fast/slow-path transactions, WAL-based
+primary–replica replication with gRPC streaming, promote/failover, MVCC
+garbage collection, and reproducible benchmarks.
+
+### Supported Platforms
+
+| Platform | Build | Test | Status |
+|----------|:-----:|:----:|--------|
+| **Linux** (x86_64, Ubuntu 22.04+) | ✅ | ✅ | Primary CI target |
+| **Windows** (x86_64, MSVC) | ✅ | ✅ | CI target |
+| **macOS** (x86_64 / aarch64) | ✅ | ✅ | Community tested |
+
+**MSRV**: Rust **1.75** (`rust-version = "1.75"` in `Cargo.toml`)
+
+### PG Protocol Compatibility
+
+| Feature | Status | Notes |
+|---------|:------:|-------|
+| Simple query protocol | ✅ | Single + multi-statement |
+| Extended query (Parse/Bind/Execute) | ✅ | Prepared statements + portals |
+| Auth: Trust | ✅ | Any user accepted |
+| Auth: MD5 | ✅ | PG auth type 5 |
+| Auth: SCRAM-SHA-256 | ✅ | PG 10+ compatible |
+| Auth: Password (cleartext) | ✅ | PG auth type 3 |
+| TLS/SSL | ✅ | SSLRequest → upgrade when configured |
+| COPY IN/OUT | ✅ | Text and CSV formats |
+| `psql` 12+ | ✅ | Fully tested |
+| `pgbench` (init + run) | ✅ | Built-in scripts work |
+| JDBC (pgjdbc 42.x) | ✅ | Tested with 42.7+ |
+| Cancel request | ⚠️ | Accepted, not acted upon |
+| LISTEN/NOTIFY | ❌ | Not implemented |
+| Logical replication protocol | ❌ | Uses gRPC instead |
+
+See [docs/protocol_compatibility.md](docs/protocol_compatibility.md) for full test procedures.
+
+### SQL Coverage
+
+| Category | Supported |
+|----------|-----------|
+| **DDL** | CREATE/DROP/ALTER TABLE, CREATE/DROP INDEX, CREATE/DROP VIEW, CREATE/DROP SEQUENCE, TRUNCATE |
+| **DML** | INSERT (incl. ON CONFLICT, RETURNING, SELECT), UPDATE (incl. FROM, RETURNING), DELETE (incl. USING, RETURNING), COPY |
+| **Queries** | WHERE, ORDER BY, LIMIT/OFFSET, DISTINCT, GROUP BY/HAVING, JOINs (INNER/LEFT/RIGHT/FULL/CROSS/NATURAL), subqueries (scalar/IN/EXISTS/correlated), CTEs (incl. RECURSIVE), UNION/INTERSECT/EXCEPT, window functions |
+| **Aggregates** | COUNT, SUM, AVG, MIN, MAX, STRING_AGG, BOOL_AND/OR, ARRAY_AGG |
+| **Types** | INT, BIGINT, FLOAT8, TEXT, BOOLEAN, TIMESTAMP, DATE, JSONB, ARRAY, SERIAL/BIGSERIAL |
+| **Transactions** | BEGIN/COMMIT/ROLLBACK, Read Committed, Snapshot Isolation |
+| **Functions** | 500+ scalar functions (string, math, date/time, crypto, JSON, array) |
+| **Observability** | SHOW falcon.*, EXPLAIN, EXPLAIN ANALYZE, CHECKPOINT, ANALYZE TABLE |
+
+### Not Supported (current)
+
+- Stored procedures / PL/pgSQL
+- Triggers
+- Materialized views
+- Foreign data wrappers (FDW)
+- Logical replication / CDC
+- Online schema change (concurrent index build)
+- Multi-tenancy / row-level security
+- Automatic rebalancing (manual shard split only)
+- Custom types (beyond JSONB)
+- Full-text search (tsvector/tsquery)
+- Partitioned tables (PARTITION BY)
 
 ---
 
@@ -586,6 +648,22 @@ chmod +x scripts/demo_replication.sh
 
 Starts a primary and replica via gRPC, writes data, verifies replication,
 and shows replication metrics.
+
+### E2E Failover Demo (two-node, closed-loop)
+
+```bash
+# Linux / macOS / WSL
+chmod +x scripts/e2e_two_node_failover.sh
+./scripts/e2e_two_node_failover.sh
+
+# Windows PowerShell
+.\scripts\e2e_two_node_failover.ps1
+```
+
+Full closed-loop test: start primary → start replica → write data → verify
+replication → kill primary → promote replica → verify old data readable →
+write new data → output PASS/FAIL. On failure, prints last 50 lines of each
+node's log plus port/PID diagnostics.
 
 ---
 
