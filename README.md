@@ -559,13 +559,98 @@ Core PG-compatible functions including: `UPPER`, `LOWER`, `LENGTH`, `SUBSTRING`,
 
 ---
 
+## Quick Start Demo
+
+### Linux / macOS / WSL
+
+```bash
+chmod +x scripts/demo_standalone.sh
+./scripts/demo_standalone.sh
+```
+
+Builds FalconDB, starts a standalone node, runs SQL smoke tests via `psql`,
+and executes a quick benchmark — all in one command.
+
+### Windows (PowerShell)
+
+```powershell
+.\scripts\demo_standalone.ps1
+```
+
+### Primary + Replica replication demo
+
+```bash
+chmod +x scripts/demo_replication.sh
+./scripts/demo_replication.sh
+```
+
+Starts a primary and replica via gRPC, writes data, verifies replication,
+and shows replication metrics.
+
+---
+
+## Developer Setup
+
+### Windows
+
+```powershell
+.\scripts\setup_windows.ps1
+```
+
+Checks/installs: MSVC C++ build tools, Rust toolchain, protoc (vendored),
+psql client, git EOL config. See `scripts/setup_windows.ps1` for details.
+
+### Linux / macOS
+
+```bash
+# Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# psql (for testing)
+sudo apt install postgresql-client    # Debian/Ubuntu
+brew install libpq                    # macOS
+
+# Build
+cargo build --workspace
+```
+
+### Default config template
+
+```bash
+cargo run -p falcon_server -- --print-default-config > falcon.toml
+```
+
+---
+
 ## Roadmap
 
-| Phase | Scope |
-|-------|-------|
-| **M1** (current) | Stable OLTP, fast/slow-path txns, WAL replication, failover, GC, benchmarking |
-| **M2** | gRPC WAL streaming (tonic), multi-node deployment, checkpoint/snapshot |
-| **M3** | Production hardening: read-only replicas, graceful shutdown, health checks, query timeout, connection limits |
+| Phase | Scope | Details |
+|-------|-------|---------|
+| **M1** ✅ | Stable OLTP, fast/slow-path txns, WAL replication, failover, GC, benchmarks | Released |
+| **M2** 🔄 | gRPC WAL streaming (tonic), multi-node deployment, checkpoint/snapshot, durability policies | [docs/roadmap.md](docs/roadmap.md) |
+| **M3** | Production hardening: TLS, query timeout, connection limits, plan cache, slow query log | Planned |
+| **M4** | Analytics: columnstore, vectorized execution, multi-tenancy, cross-region | Future |
+
+See [docs/roadmap.md](docs/roadmap.md) for detailed acceptance criteria per milestone.
+
+### RPO / RTO
+
+FalconDB supports three durability policies: `local-fsync` (default, RPO > 0 possible),
+`quorum-ack` (RPO = 0 with quorum), and `all-ack` (strongest, highest latency).
+See [docs/rpo_rto.md](docs/rpo_rto.md) for full RPO/RTO analysis and recommendations.
+
+---
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | System architecture, crate structure, data flow |
+| [docs/roadmap.md](docs/roadmap.md) | Milestone definitions and acceptance criteria |
+| [docs/rpo_rto.md](docs/rpo_rto.md) | RPO/RTO guarantees per durability policy |
+| [docs/show_commands_schema.md](docs/show_commands_schema.md) | Stable output schema for all `SHOW falcon.*` commands |
+| [docs/protocol_compatibility.md](docs/protocol_compatibility.md) | PG client compatibility matrix (psql, JDBC, pgbench) |
+| [docs/feature_gap_analysis.md](docs/feature_gap_analysis.md) | Known gaps and improvement areas |
 
 ---
 
