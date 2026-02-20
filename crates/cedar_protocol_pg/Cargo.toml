@@ -1,0 +1,21 @@
+[package]
+name = "cedar_protocol_pg"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cedar_common = { path = "../cedar_common" }
+cedar_cluster = { path = "../cedar_cluster" }
+cedar_sql_frontend = { path = "../cedar_sql_frontend" }
+cedar_planner = { path = "../cedar_planner" }
+cedar_executor = { path = "../cedar_executor" }
+cedar_storage = { path = "../cedar_storage" }
+cedar_txn = { path = "../cedar_txn" }
+cedar_observability = { path = "../cedar_observability" }
+tokio.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+md-5.workspace = true
+sha2.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true

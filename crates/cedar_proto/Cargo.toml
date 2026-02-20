@@ -1,0 +1,14 @@
+[package]
+name = "cedar_proto"
+version.workspace = true
+edition.workspace = true
+description = "Generated protobuf types and tonic gRPC stubs for Cedar replication."
+
+[dependencies]
+prost.workspace = true
+tonic.workspace = true
+tokio-stream.workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true
+protoc-bin-vendored = "3"

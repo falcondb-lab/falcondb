@@ -1,0 +1,15 @@
+[package]
+name = "cedar_common"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bytes.workspace = true
+toml.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+xxhash-rust.workspace = true
+tracing.workspace = true

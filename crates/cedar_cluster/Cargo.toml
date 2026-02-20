@@ -1,0 +1,25 @@
+[package]
+name = "cedar_cluster"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cedar_common = { path = "../cedar_common" }
+cedar_executor = { path = "../cedar_executor" }
+cedar_planner = { path = "../cedar_planner" }
+cedar_proto = { path = "../cedar_proto" }
+cedar_sql_frontend = { path = "../cedar_sql_frontend" }
+cedar_storage = { path = "../cedar_storage" }
+cedar_txn = { path = "../cedar_txn" }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+dashmap.workspace = true
+xxhash-rust.workspace = true
+tonic.workspace = true
+prost.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+async-trait.workspace = true
+parking_lot.workspace = true
+

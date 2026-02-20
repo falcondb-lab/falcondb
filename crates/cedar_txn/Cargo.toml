@@ -1,0 +1,12 @@
+[package]
+name = "cedar_txn"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cedar_common = { path = "../cedar_common" }
+cedar_storage = { path = "../cedar_storage" }
+tokio.workspace = true
+parking_lot.workspace = true
+dashmap.workspace = true
+tracing.workspace = true

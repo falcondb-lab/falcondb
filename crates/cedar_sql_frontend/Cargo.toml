@@ -1,0 +1,9 @@
+[package]
+name = "cedar_sql_frontend"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cedar_common = { path = "../cedar_common" }
+sqlparser.workspace = true
+tracing.workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "cedar_executor"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cedar_common = { path = "../cedar_common" }
+cedar_storage = { path = "../cedar_storage" }
+cedar_txn = { path = "../cedar_txn" }
+cedar_planner = { path = "../cedar_planner" }
+cedar_sql_frontend = { path = "../cedar_sql_frontend" }
+sqlparser.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+regex.workspace = true
+md-5.workspace = true
+sha2.workspace = true
+base64.workspace = true
+serde_json.workspace = true
+bincode.workspace = true
