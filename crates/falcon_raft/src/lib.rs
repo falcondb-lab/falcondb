@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::network::{NetworkFactory, RaftRouter, RouterNetworkFactory};
 use crate::store::{ApplyFn, LogStore, StateMachine};
-use crate::types::{CedarRequest, TypeConfig};
+use crate::types::{FalconRequest, TypeConfig};
 
 /// A log entry proposed to the Raft group.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,7 +95,7 @@ impl RaftNode {
 
     pub async fn propose(&self, data: Vec<u8>) -> Result<(), ConsensusError> {
         self.raft
-            .client_write(CedarRequest::Write { data })
+            .client_write(FalconRequest::Write { data })
             .await
             .map_err(|e| ConsensusError::ProposalFailed(format!("{}", e)))?;
         Ok(())
@@ -210,15 +210,15 @@ impl RaftGroup {
 
     /// Propose a write entry (routes to leader automatically).
     pub async fn propose(&self, data: Vec<u8>) -> Result<(), ConsensusError> {
-        self.propose_req(CedarRequest::Write { data }).await
+        self.propose_req(FalconRequest::Write { data }).await
     }
 
     /// Propose a no-op entry (leader confirmation without side effects).
     pub async fn propose_noop(&self) -> Result<(), ConsensusError> {
-        self.propose_req(CedarRequest::Noop).await
+        self.propose_req(FalconRequest::Noop).await
     }
 
-    async fn propose_req(&self, req: CedarRequest) -> Result<(), ConsensusError> {
+    async fn propose_req(&self, req: FalconRequest) -> Result<(), ConsensusError> {
         let mut last_err = ConsensusError::ProposalFailed("no nodes available".into());
         for &id in &self.node_ids {
             if let Some(raft) = self.router.get_node(id) {

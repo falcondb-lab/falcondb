@@ -1,4 +1,4 @@
-﻿#[test]
+#[test]
 fn test_diagnostic_array_matrix() {
     let (storage, txn_mgr, executor) = setup();
     let txn = txn_mgr.begin(IsolationLevel::ReadCommitted);
@@ -6,7 +6,7 @@ fn test_diagnostic_array_matrix() {
     let mut total = 0u32;
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_LOG6(ARRAY[3,8,1], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 0.0688_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -18,7 +18,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_LOG6(ARRAY[2,5,0], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.1155_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -30,7 +30,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_LOG6(ARRAY[2,3,0], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 3.0445_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -42,7 +42,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_LOG6(ARRAY[10,100,1], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.2736_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -54,7 +54,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_LOG6(ARRAY[2,5,0], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.1155_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -66,7 +66,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_LOG6(ARRAY[3,4,0], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 6.091_f64).abs() >= 0.02_f64 {
                     fails += 1;
@@ -78,7 +78,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_RANGE6(ARRAY[2,8,0], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.3863_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -90,7 +90,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_DEV6(ARRAY[2,8,0], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 3.399_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -102,7 +102,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_RANGE6(ARRAY[1,2,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 63.0_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -114,7 +114,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_DEV6(ARRAY[2,8,0], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 0.6931_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -126,7 +126,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_RANGE6(ARRAY[1,-5,3], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 4.0_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -138,7 +138,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_DEV6(ARRAY[1,3,5], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 9.978_f64).abs() >= 0.1_f64 {
                     fails += 1;
@@ -150,7 +150,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_ABS6(ARRAY[3,-4,0], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 8.333_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -162,7 +162,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_RANGE6(ARRAY[2,8,0], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.3863_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -174,7 +174,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_ABS6(ARRAY[2,-7,3], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 12.0_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -186,7 +186,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_RANGE6(ARRAY[1,3,5], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 24.0_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -198,7 +198,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_ABS6(ARRAY[2,0,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 2.7726_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -210,7 +210,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_RANGE6(ARRAY[-3,7,1], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 6.0_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -222,7 +222,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_DEV6(ARRAY[1,2,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 0.8645_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -234,7 +234,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_ABS6(ARRAY[-2,5,-3], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 10.0_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -246,7 +246,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_DEV6(ARRAY[1,2,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 29.017_f64).abs() >= 0.1_f64 {
                     fails += 1;
@@ -258,7 +258,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_LOG7(ARRAY[2,5,3], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 3.4012_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -270,7 +270,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_LOG7(ARRAY[2,5,3], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 3.4012_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -282,7 +282,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_RANGE7(ARRAY[-2,5,-3], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 21.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -294,7 +294,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_RANGE7(ARRAY[2,5,10], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.6094_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -306,7 +306,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_DEV7(ARRAY[1,2,8], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 29.017_f64).abs() >= 0.1_f64 {
                     fails += 1;
@@ -318,7 +318,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_LOG7(ARRAY[2,3,5], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 6.8024_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -330,7 +330,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_RANGE7(ARRAY[2,5,10], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.6094_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -342,7 +342,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_RANGE7(ARRAY[-3,1,7], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 6.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -354,7 +354,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_LOG7(ARRAY[2,3,5], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 6.8024_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -366,7 +366,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_DEV7(ARRAY[1,2,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 0.8645_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -378,7 +378,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_RANGE7(ARRAY[-3,1,7], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 6.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -390,7 +390,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_DEV7(ARRAY[1,2,3], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 3.2998_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -402,7 +402,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_DEV7(ARRAY[2,3,5], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 0.3748_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -414,7 +414,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_DEV7(ARRAY[-2,5,-1], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.6997_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -426,7 +426,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_DEV7(ARRAY[-4,2,-6], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.6330_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -438,7 +438,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_RANGE8(ARRAY[2,5,10], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.6094_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -450,7 +450,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_RANGE8(ARRAY[1,3,5], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 24.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -462,7 +462,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_RANGE8(ARRAY[-3,7,-1], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 6.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -474,7 +474,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_RANGE8(ARRAY[2,8,4], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.3863_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -486,7 +486,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_DEV8(ARRAY[1,2,3], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 3.2998_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -498,7 +498,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_DEV8(ARRAY[-2,5,-8], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 2.449_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -510,7 +510,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_DEV8(ARRAY[2,8,4], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 0.5660_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -522,7 +522,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_DEV8(ARRAY[1,2,3], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 3.2998_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -534,7 +534,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_DEV8(ARRAY[-3,5,-7], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.6330_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -546,7 +546,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_DEV8(ARRAY[2,8,4], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 0.5660_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -558,7 +558,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_RANGE9(ARRAY[1,2,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 63.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -570,7 +570,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_RANGE9(ARRAY[-3,5,-7], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 4.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -582,7 +582,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_RANGE9(ARRAY[2,8,4], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.3863_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -594,7 +594,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_RANGE9(ARRAY[1,2,8], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 63.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -606,7 +606,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_RANGE9(ARRAY[-3,5,-7], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 4.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -618,7 +618,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_RANGE9(ARRAY[2,8,4], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.3863_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -630,7 +630,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_DEV9(ARRAY[1,2,3], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 3.2998_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -642,7 +642,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_DEV9(ARRAY[-3,5,-7], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.6330_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -654,7 +654,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_DEV9(ARRAY[2,8,4], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 0.5660_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -666,7 +666,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_DEV9(ARRAY[1,2,3], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 3.2998_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -678,7 +678,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_DEV9(ARRAY[-3,5,-7], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.6330_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -690,7 +690,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_DEV9(ARRAY[2,8,4], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 0.5660_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -702,7 +702,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_RANGE10(ARRAY[1,2,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 63.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -714,7 +714,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_RANGE10(ARRAY[-3,5,-7], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 4.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -726,7 +726,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_RANGE10(ARRAY[2,8,4], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.3863_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -738,7 +738,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_RANGE10(ARRAY[1,2,8], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 63.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -750,7 +750,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_RANGE10(ARRAY[-3,5,-7], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 4.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -762,7 +762,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_RANGE10(ARRAY[2,8,4], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.3863_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -774,7 +774,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_DEV10(ARRAY[1,2,3], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 3.2998_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -786,7 +786,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_DEV10(ARRAY[-3,5,-7], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.6330_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -798,7 +798,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_DEV10(ARRAY[2,8,4], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 0.5660_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -810,7 +810,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_DEV10(ARRAY[1,2,3], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 3.2998_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -822,7 +822,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_DEV10(ARRAY[-3,5,-7], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.6330_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -834,7 +834,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_DEV10(ARRAY[2,8,4], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 0.5660_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -846,7 +846,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_RANGE11(ARRAY[1,2,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 63.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -858,7 +858,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_RANGE11(ARRAY[-5,3,-1], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 4.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -870,7 +870,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_RANGE11(ARRAY[2,8,4], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.3863_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -882,7 +882,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_RANGE11(ARRAY[1,3,5], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 24.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -894,7 +894,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_RANGE11(ARRAY[-3,7,-1], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 6.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -906,7 +906,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_RANGE11(ARRAY[2,8,4], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.3863_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -918,7 +918,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_DEV11(ARRAY[1,2,3], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 3.2998_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -930,7 +930,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_DEV11(ARRAY[-2,5,-8], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 2.4495_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -942,7 +942,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_DEV11(ARRAY[1,2,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 0.8547_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -954,7 +954,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_DEV11(ARRAY[1,3,5], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 9.9778_f64).abs() >= 0.1_f64 {
                     fails += 1;
@@ -966,7 +966,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_DEV11(ARRAY[-3,7,-1], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 2.4944_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -978,7 +978,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_DEV11(ARRAY[2,8,32], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.1320_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -990,7 +990,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_RANGE12(ARRAY[2,3,7], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 45.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1002,7 +1002,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_RANGE12(ARRAY[-5,3,-8], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 5.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1014,7 +1014,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_RANGE12(ARRAY[1,2,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 2.0794_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1026,7 +1026,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_RANGE12(ARRAY[2,5,3], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 21.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1038,7 +1038,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_RANGE12(ARRAY[-3,7,-1], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 6.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1050,7 +1050,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_RANGE12(ARRAY[1,3,9], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 2.1972_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1062,7 +1062,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_DEV12(ARRAY[1,2,3], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 3.2998_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1074,7 +1074,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_DEV12(ARRAY[-2,5,-3], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.2472_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1086,7 +1086,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_DEV12(ARRAY[1,3,9], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 0.8976_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1098,7 +1098,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_DEV12(ARRAY[1,2,3], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 3.2998_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1110,7 +1110,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_DEV12(ARRAY[-2,5,-3], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.2472_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1122,7 +1122,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_DEV12(ARRAY[1,3,9], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 0.8976_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1134,7 +1134,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_RANGE13(ARRAY[1,2,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 63.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1146,7 +1146,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_RANGE13(ARRAY[-5,3,-1], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 4.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1158,7 +1158,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_RANGE13(ARRAY[1,3,9], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 2.1972_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1170,7 +1170,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_RANGE13(ARRAY[2,5,1], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 24.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1182,7 +1182,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_RANGE13(ARRAY[-3,7,-2], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 5.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1194,7 +1194,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_RANGE13(ARRAY[2,8,1], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 2.0794_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1206,7 +1206,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_DEV13(ARRAY[1,2,3], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 3.2998_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1218,7 +1218,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_DEV13(ARRAY[-3,6,-9], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 2.449_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1230,7 +1230,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_DEV13(ARRAY[1,2,3], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 3.2998_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1242,7 +1242,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_DEV13(ARRAY[-3,6,-9], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 2.449_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1254,7 +1254,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_DEV13(ARRAY[1,2,8], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 0.8646_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1266,7 +1266,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_RANGE14(ARRAY[1,2,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 63.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1278,7 +1278,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_RANGE14(ARRAY[-3,6,-9], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 6.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1290,7 +1290,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_RANGE14(ARRAY[1,2,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 2.0794_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1302,7 +1302,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_RANGE14(ARRAY[1,2,8], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 63.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1314,7 +1314,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_RANGE14(ARRAY[-3,6,-9], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 6.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1326,7 +1326,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_RANGE14(ARRAY[1,2,8], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 2.0794_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1338,7 +1338,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_DEV14(ARRAY[1,2,3], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 3.2998_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1350,7 +1350,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_DEV14(ARRAY[-3,6,-9], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 2.449_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1362,7 +1362,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_DEV14(ARRAY[1,2,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 0.8645_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1374,7 +1374,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_DEV14(ARRAY[1,2,3], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 3.2998_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1386,7 +1386,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_DEV14(ARRAY[2,-5,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 2.449_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1398,7 +1398,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_DEV14(ARRAY[1,2,8], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 0.8645_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1410,7 +1410,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_DEV15(ARRAY[1,2,3], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 3.2998_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1422,7 +1422,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_DEV15(ARRAY[2,-5,8], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 2.449_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1434,7 +1434,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_DEV15(ARRAY[1,2,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 0.8645_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1446,7 +1446,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_DEV15(ARRAY[1,2,3], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 3.2998_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1458,7 +1458,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_RANGE15(ARRAY[1,-5,3], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 4.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1470,7 +1470,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_RANGE15(ARRAY[1,2,8], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 2.0794_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1482,7 +1482,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_RANGE15(ARRAY[1,2,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 63.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1494,7 +1494,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_RANGE15(ARRAY[1,-5,3], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 4.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1506,7 +1506,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_RANGE15(ARRAY[1,2,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 2.0794_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1518,7 +1518,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_RANGE15(ARRAY[1,-5,3], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 24.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1530,7 +1530,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_DEV15(ARRAY[2,-6,4], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.6329_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1542,7 +1542,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_MEAN15(ARRAY[1,2,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 0.9242_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1554,7 +1554,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_MEAN15(ARRAY[2,-3,4], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 9.6667_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1566,7 +1566,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_MEAN15(ARRAY[2,-6,4], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 4.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1578,7 +1578,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_MEAN15(ARRAY[1,-5,3], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 0.9027_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1590,7 +1590,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_MEAN15(ARRAY[2,3,6], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 16.3333_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1602,7 +1602,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_MEAN15(ARRAY[3,-7,2], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 4.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1614,7 +1614,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_SUM15(ARRAY[3,-5,2], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 10.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1626,7 +1626,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_SUM15(ARRAY[2,-3,5], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 3.4012_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1638,7 +1638,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_SUM15(ARRAY[2,3,4], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 29.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1650,7 +1650,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_SUM15(ARRAY[4,-7,2], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 13.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1662,7 +1662,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_SUM15(ARRAY[3,-4,5], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 50.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1674,7 +1674,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_PROD15(ARRAY[2,-3,5], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 30.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1686,7 +1686,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_PROD15(ARRAY[2,3,4], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 576.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1698,7 +1698,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_PROD15(ARRAY[2,-3,7], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 42.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1710,7 +1710,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_PROD15(ARRAY[2,-3,4], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 576.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1722,7 +1722,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_PROD16(ARRAY[2,-3,4], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 24.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1734,7 +1734,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_PROD16(ARRAY[2,3,4], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 576.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1746,7 +1746,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_PROD16(ARRAY[2,-3,5], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 30.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1758,7 +1758,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_PROD16(ARRAY[2,-3,4], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 576.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1770,7 +1770,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_RANGE16(ARRAY[-5,2,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 6.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1782,7 +1782,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_RANGE16(ARRAY[-4,2,-7], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 5.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1794,7 +1794,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_RANGE16(ARRAY[1,2,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 63.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1806,7 +1806,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_RANGE16(ARRAY[2,-5,3], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 21.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1818,7 +1818,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_RANGE17(ARRAY[1,2,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 63.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1830,7 +1830,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_RANGE17(ARRAY[3,-7,2], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 5.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1842,7 +1842,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_RANGE17(ARRAY[5,-2,8], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 6.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1854,7 +1854,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_RANGE17(ARRAY[2,-3,4], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 12.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1866,7 +1866,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_RANGE18(ARRAY[3,-7,2], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 5.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1878,7 +1878,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_RANGE18(ARRAY[3,-7,2], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 5.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1890,7 +1890,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_RANGE19(ARRAY[5,-3,7], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 4.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1902,7 +1902,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_RANGE19(ARRAY[2,-3,5], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 21.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1914,7 +1914,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_RANGE20(ARRAY[1,2,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 63.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1926,7 +1926,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_RANGE21(ARRAY[2,4,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.3863_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1938,7 +1938,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_RANGE21(ARRAY[-3,1,5], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 4.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1950,7 +1950,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_NORM21(ARRAY[3,4,0], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 5.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1962,7 +1962,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_NORM21(ARRAY[2.718281828, 7.389056099], 1, 2, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 2.2360_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -1974,7 +1974,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_RANGE21(ARRAY[-5,2,8], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 6.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1986,7 +1986,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_RANGE21(ARRAY[1,2,3], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 8.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -1998,7 +1998,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_NORM21(ARRAY[2.718281828, 20.085536923], 2, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 3.1623_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -2010,7 +2010,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_NORM21(ARRAY[3,-4,0], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 5.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -2022,7 +2022,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_DEV22(ARRAY[1,2,3], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 3.2998_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -2034,7 +2034,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_NORM22(ARRAY[2,4,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 2.5935_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -2046,7 +2046,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_DEV22(ARRAY[-1,3,-5], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.6330_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -2058,7 +2058,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_NORM22(ARRAY[3,4,5], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 4.0825_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -2070,7 +2070,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_DEV22(ARRAY[2,8,32], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.1333_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -2082,7 +2082,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_RANGE22(ARRAY[-3,7,-2], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 5.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -2094,7 +2094,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_NORM22(ARRAY[2,3,4], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 18.788_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -2106,7 +2106,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_RANGE22(ARRAY[2,4,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.3863_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -2118,7 +2118,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_RANGE23(ARRAY[-5,3,-8], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 5.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -2130,7 +2130,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_RANGE22(ARRAY[1,3,5], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 24.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -2142,7 +2142,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_NORM23(ARRAY[2,4,8], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 2.593_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -2154,7 +2154,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_DEV22(ARRAY[2,-6,4], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.633_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -2166,7 +2166,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_DEV23(ARRAY[1,2,3], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 3.300_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -2178,7 +2178,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_DEV22(ARRAY[2,4,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 0.566_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -2190,7 +2190,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_DEV23(ARRAY[2,-6,4], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.633_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -2202,7 +2202,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_DEV22(ARRAY[1,2,3], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 3.300_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -2214,7 +2214,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_DEV23(ARRAY[2,-4,8], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 0.566_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -2226,7 +2226,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_NORM22(ARRAY[-1,2,-3], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 6.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -2238,7 +2238,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_NORM23(ARRAY[3,-4,0], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 5.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -2250,7 +2250,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_RANGE23(ARRAY[2,4,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.3863_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -2262,7 +2262,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_RANGE23(ARRAY[-3,4,-5], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 16.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -2274,7 +2274,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_DEV23(ARRAY[2,4,6], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 13.199_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -2286,7 +2286,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_NORM24(ARRAY[2,4,8], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 4.1589_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -2298,7 +2298,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_RANGE21(ARRAY[-3,1,5], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 4.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -2310,7 +2310,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_NORM21(ARRAY[3,4], 2, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 5.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -2322,7 +2322,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_NORM23(ARRAY[-3,1,5], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 9.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -2334,7 +2334,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_DEV24(ARRAY[2,-4,6], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.633_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -2346,7 +2346,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_RANGE24(ARRAY[2,4,8], 1, 3, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.386_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -2358,7 +2358,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_RMS_RANGE24(ARRAY[1,-3,5], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 24.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -2370,7 +2370,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_RMS_NORM24(ARRAY[3,4], 1, 2, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 3.536_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -2382,7 +2382,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_DEV24(ARRAY[1,10,100], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 1.880_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -2394,7 +2394,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_LOG_NORM24(ARRAY[2,8], 1, 2, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 2.773_f64).abs() >= 0.01_f64 {
                     fails += 1;
@@ -2406,7 +2406,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_ABS_RANGE24(ARRAY[-3,5,-1], 3, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 4.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -2418,7 +2418,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_ROW_ABS_DEV24(ARRAY[2,8], 1, 2, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 3.0_f64).abs() >= 0.001_f64 {
                     fails += 1;
@@ -2430,7 +2430,7 @@ fn test_diagnostic_array_matrix() {
     }
     total += 1;
     match run_sql(&storage, &txn_mgr, &executor, "SELECT ARRAY_MATRIX_COLUMN_LOG_RANGE24(ARRAY[3,6], 2, 1, 0)", Some(&txn)) {
-        Ok(cedar_executor::ExecutionResult::Query { rows, .. }) => {
+        Ok(falcon_executor::ExecutionResult::Query { rows, .. }) => {
             if let Datum::Float64(v) = rows[0].values[0] {
                 if (v - 0.6931_f64).abs() >= 0.01_f64 {
                     fails += 1;

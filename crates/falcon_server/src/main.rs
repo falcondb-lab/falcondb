@@ -53,11 +53,24 @@ struct Cli {
     /// gRPC listen address for replication service (overrides config).
     #[arg(long)]
     grpc_addr: Option<String>,
+
+    /// Print the default configuration as TOML and exit.
+    #[arg(long)]
+    print_default_config: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // --print-default-config: dump default TOML and exit
+    if cli.print_default_config {
+        let default_config = FalconConfig::default();
+        let toml_str = toml::to_string_pretty(&default_config)
+            .expect("failed to serialize default config");
+        println!("{}", toml_str);
+        return Ok(());
+    }
 
     // Initialize observability
     falcon_observability::init_tracing();

@@ -1,5 +1,5 @@
 # Local development cluster configuration
-# Usage: cargo run -p cedar_server -- -c tools/local_cluster.toml
+# Usage: cargo run -p falcon_server -- -c tools/local_cluster.toml
 
 [server]
 pg_listen_addr = "0.0.0.0:5433"
@@ -10,7 +10,7 @@ max_connections = 128
 [storage]
 memory_limit_bytes = 0
 wal_enabled = false
-data_dir = "./cedar_dev_data"
+data_dir = "./falcon_dev_data"
 
 [gc]
 enabled = true

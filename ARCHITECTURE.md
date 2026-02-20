@@ -1,4 +1,4 @@
-# CedarDB — PG-Compatible Distributed In-Memory OLTP
+# FalconDB — PG-Compatible Distributed In-Memory OLTP
 
 ## 1. Architecture Overview
 
@@ -160,7 +160,7 @@ Future (M2+): disaggregate into dedicated compute / storage / meta roles.
 | Item | Detail |
 |------|--------|
 | **Responsibility** | Shared types, error hierarchy, config, codec, PG type system, datum representation |
-| **Core types** | `Datum`, `DataType`, `Row`, `OwnedRow`, `TableId`, `ShardId`, `NodeId`, `CedarError`, `Config` |
+| **Core types** | `Datum`, `DataType`, `Row`, `OwnedRow`, `TableId`, `ShardId`, `NodeId`, `FalconError`, `Config` |
 | **Dependencies** | None (leaf crate) |
 
 ---
@@ -209,7 +209,7 @@ Future (M2+): disaggregate into dedicated compute / storage / meta roles.
 | **BTree index** | `crossbeam-skiplist` or custom | MIT | Concurrent ordered index | Limited range scan perf | Behind `Index` trait; can swap to ART/Bw-Tree later |
 | **WAL** | Custom (thin) | — | Simple append-only log; no need for complex lib | Must get fsync right | `WalWriter` trait; could swap to `wal` crate or io_uring backend |
 | **Config** | `serde` + `toml` | MIT | Standard config parsing | — | — |
-| **Error** | `thiserror` (libs) + `anyhow` (bin) | MIT | Typed errors in libs, ergonomic in binary | — | `CedarError` enum with `thiserror` |
+| **Error** | `thiserror` (libs) + `anyhow` (bin) | MIT | Typed errors in libs, ergonomic in binary | — | `FalconError` enum with `thiserror` |
 | **CLI** | `clap` | MIT | Arg parsing for server binary | — | — |
 
 **Fork policy**: No forks. All dependencies used as published crates. Abstraction traits at every boundary ensure future replacement without forking.
@@ -251,7 +251,7 @@ Future (M2+): disaggregate into dedicated compute / storage / meta roles.
 - **Replication-safe**: respects replica applied timestamps
 - **Lock-free per key**: per-chain pruning via DashMap iteration, no global lock, no stop-the-world
 - **Background runner**: `GcRunner` thread with configurable interval and batch size
-- **Observability**: `SHOW cedar.gc_stats` exposes safepoint, reclaimed versions/bytes, chain stats
+- **Observability**: `SHOW falcon.gc_stats` exposes safepoint, reclaimed versions/bytes, chain stats
 
 ### 5.5 Replication (M1)
 
@@ -266,23 +266,23 @@ Future (M2+): disaggregate into dedicated compute / storage / meta roles.
 ## 6. Repository Structure & Core Traits
 
 ```
-cedar/
+falcon/
 ├── Cargo.toml                  (workspace root)
 ├── README.md                   (M1 user guide: build, cluster, config, promote, bench, metrics)
 ├── ARCHITECTURE.md             (this file)
 ├── crates/
-│   ├── cedar_common/           (shared types, errors, config, datum, schema)
-│   ├── cedar_protocol_pg/      (PG wire protocol, SHOW command handling)
-│   ├── cedar_sql_frontend/     (parser, binder, analyzer)
-│   ├── cedar_planner/          (logical + physical planning, routing hints)
-│   ├── cedar_executor/         (operator execution, expression evaluation)
-│   ├── cedar_txn/              (transaction management, MVCC, OCC, stats)
-│   ├── cedar_storage/          (in-memory tables, indexes, WAL, GC)
-│   ├── cedar_raft/             (Raft consensus stub)
-│   ├── cedar_cluster/          (replication, failover, scatter/gather, shard map)
-│   ├── cedar_observability/    (metrics, tracing, logging setup)
-│   ├── cedar_server/           (main binary + integration tests)
-│   └── cedar_bench/            (YCSB benchmark harness)
+│   ├── falcon_common/           (shared types, errors, config, datum, schema)
+│   ├── falcon_protocol_pg/      (PG wire protocol, SHOW command handling)
+│   ├── falcon_sql_frontend/     (parser, binder, analyzer)
+│   ├── falcon_planner/          (logical + physical planning, routing hints)
+│   ├── falcon_executor/         (operator execution, expression evaluation)
+│   ├── falcon_txn/              (transaction management, MVCC, OCC, stats)
+│   ├── falcon_storage/          (in-memory tables, indexes, WAL, GC)
+│   ├── falcon_raft/             (Raft consensus stub)
+│   ├── falcon_cluster/          (replication, failover, scatter/gather, shard map)
+│   ├── falcon_observability/    (metrics, tracing, logging setup)
+│   ├── falcon_server/           (main binary + integration tests)
+│   └── falcon_bench/            (YCSB benchmark harness)
 ├── bench_configs/              (frozen M1 benchmark configurations)
 ├── scripts/                    (failover exercise, benchmark runner)
 └── proto/                      (protobuf definitions for internal RPC)
@@ -328,9 +328,9 @@ pub trait Executor: Send + Sync + 'static {
 ### 6.2 Error Strategy
 
 - Library crates: `thiserror` enums (`StorageError`, `TxnError`, `ProtocolError`, etc.)
-- All roll up to `CedarError` in `common` via `From` impls
+- All roll up to `FalconError` in `common` via `From` impls
 - Binary (`main.rs`): `anyhow` for top-level wiring
-- PG error mapping: `CedarError → PgErrorResponse` (SQLSTATE codes)
+- PG error mapping: `FalconError → PgErrorResponse` (SQLSTATE codes)
 
 ### 6.3 Async Strategy
 
@@ -382,25 +382,25 @@ pub trait Executor: Send + Sync + 'static {
 | Level | Scope | Tools |
 |-------|-------|-------|
 | **Unit** | Parser, executor operators, MVCC visibility, GC chain, OCC validation | `#[test]` |
-| **Integration** | Full SQL pipeline: DDL, DML, joins, subqueries, aggregates, window fns | `cedar_server/tests/integration_test.rs` |
-| **Cluster** | Replication, failover, promote, scatter/gather, GC+replication combined | `cedar_cluster/src/tests.rs` |
-| **Handler** | SHOW commands (gc_stats, replication_stats, txn_stats, txn_history) | `cedar_protocol_pg/src/handler.rs` |
-| **Benchmark** | YCSB workloads, fast vs slow path, scale-out, failover impact | `cedar_bench` |
+| **Integration** | Full SQL pipeline: DDL, DML, joins, subqueries, aggregates, window fns | `falcon_server/tests/integration_test.rs` |
+| **Cluster** | Replication, failover, promote, scatter/gather, GC+replication combined | `falcon_cluster/src/tests.rs` |
+| **Handler** | SHOW commands (gc_stats, replication_stats, txn_stats, txn_history) | `falcon_protocol_pg/src/handler.rs` |
+| **Benchmark** | YCSB workloads, fast vs slow path, scale-out, failover impact | `falcon_bench` |
 | **Data integrity** | Crash-recovery, WAL replay, GC+promote combined correctness | Automated tests |
 
 ### 8.2 Test Counts (837 tests)
 
 | Crate | Tests | Coverage |
 |-------|-------|----------|
-| `cedar_cluster` | 197 | Replication, failover, scatter/gather, GC, serde, async transport, gRPC e2e, proto roundtrip, checkpoint streaming, backoff, config serde |
-| `cedar_server` (integration) | 304 | Full SQL end-to-end, error paths, SHOW commands, ANALYZE, read-only enforcement, JSONB, correlated subqueries, FK cascading, ALTER COLUMN TYPE, recursive CTEs, sequences, window functions |
-| `cedar_storage` | 94 | MVCC, WAL, GC, indexes, OCC, 2PC recovery, WAL observer, snapshot checkpoint, table statistics |
-| `cedar_planner` | 71 | Plan generation, routing hints, distributed wrapping, view/DDL plans |
-| `cedar_executor` | 39 | Operator execution, expression evaluation |
-| `cedar_sql_frontend` | 71 | Parsing, binding, analysis, view expansion, ALTER TABLE rename |
-| `cedar_txn` | 23 | Txn lifecycle, OCC, stats, history |
-| `cedar_protocol_pg` | 34 | SHOW commands, error paths, txn lifecycle, statement timeout parsing, PgServer config, idle timeout, information_schema, views, plan cache |
-| `cedar_raft` | 4 | Raft stub |
+| `falcon_cluster` | 197 | Replication, failover, scatter/gather, GC, serde, async transport, gRPC e2e, proto roundtrip, checkpoint streaming, backoff, config serde |
+| `falcon_server` (integration) | 304 | Full SQL end-to-end, error paths, SHOW commands, ANALYZE, read-only enforcement, JSONB, correlated subqueries, FK cascading, ALTER COLUMN TYPE, recursive CTEs, sequences, window functions |
+| `falcon_storage` | 94 | MVCC, WAL, GC, indexes, OCC, 2PC recovery, WAL observer, snapshot checkpoint, table statistics |
+| `falcon_planner` | 71 | Plan generation, routing hints, distributed wrapping, view/DDL plans |
+| `falcon_executor` | 39 | Operator execution, expression evaluation |
+| `falcon_sql_frontend` | 71 | Parsing, binding, analysis, view expansion, ALTER TABLE rename |
+| `falcon_txn` | 23 | Txn lifecycle, OCC, stats, history |
+| `falcon_protocol_pg` | 34 | SHOW commands, error paths, txn lifecycle, statement timeout parsing, PgServer config, idle timeout, information_schema, views, plan cache |
+| `falcon_raft` | 4 | Raft stub |
 | **Total** | **837** | `cargo clippy --workspace`: 0 warnings |
 
 ### 8.3 Acceptance Criteria (M1)
@@ -451,7 +451,7 @@ Replica Node                                                                    
   apply_wal_record_to_engine()  ──▶  Replica StorageEngine
 ```
 
-**Proto service** (`proto/cedar_replication.proto`):
+**Proto service** (`proto/falcon_replication.proto`):
 
 | RPC | Type | Purpose |
 |-----|------|---------|
@@ -459,7 +459,7 @@ Replica Node                                                                    
 | `AckWal` | unary | Replica acks applied LSN for lag tracking |
 | `GetCheckpoint` | server-streaming | New replica requests full snapshot for bootstrap |
 
-**Transport abstraction** (`cedar_cluster::replication`):
+**Transport abstraction** (`falcon_cluster::replication`):
 
 | Trait | Sync/Async | Usage |
 |-------|------------|-------|
@@ -468,10 +468,10 @@ Replica Node                                                                    
 
 **Wire format**: `WalChunk` / `LsnWalRecord` serialized as JSON via serde in the proto `record_payload` bytes field. Rust types are the source of truth; proto is the envelope.
 
-**Codegen**: `cargo build -p cedar_cluster --features grpc-codegen` (requires `protoc`). Generated code goes to `src/generated/`.
+**Codegen**: `cargo build -p falcon_cluster --features grpc-codegen` (requires `protoc`). Generated code goes to `src/generated/`.
 
 **M2 delivered**:
-1. ✅ `protoc` v28.3 installed, tonic codegen generates `cedar.replication.rs`
+1. ✅ `protoc` v28.3 installed, tonic codegen generates `falcon.replication.rs`
 2. ✅ `GrpcTransport.pull_wal_chunk()` wired to tonic `WalReplicationClient`
 3. ✅ `WalReplication` tonic server trait implemented on `WalReplicationService`
 4. ✅ `StorageEngine::set_wal_observer()` — all WAL writes feed `ReplicationLog` on primary
@@ -488,7 +488,7 @@ Replica Node                                                                    
 ### 8.6 M3 Production Hardening
 
 **Replica read-only enforcement**:
-- `Executor::new_read_only()` rejects all DDL/DML writes with `CedarError::ReadOnly` (PG SQLSTATE `25006`)
+- `Executor::new_read_only()` rejects all DDL/DML writes with `FalconError::ReadOnly` (PG SQLSTATE `25006`)
 - Guards on CREATE TABLE, DROP TABLE, ALTER TABLE, INSERT, UPDATE, DELETE, TRUNCATE, CREATE INDEX, DROP INDEX
 - SELECT, SHOW, EXPLAIN, BEGIN/COMMIT/ROLLBACK remain allowed
 - Dynamically switchable via `set_read_only()` for failover role changes
@@ -498,7 +498,7 @@ Replica Node                                                                    
 - On Ctrl+C: stops accepting new connections, drains active connections (configurable timeout, default 10s), flushes WAL
 - Active connection tracking via `Arc<AtomicUsize>` counter
 
-**Health check HTTP server** (`cedar_server::health`):
+**Health check HTTP server** (`falcon_server::health`):
 - Lightweight TCP-based HTTP server on `admin_listen_addr` (default `:8080`)
 - `GET /health` — liveness probe (always 200, includes uptime and role)
 - `GET /ready` — readiness probe (200 if ready, 503 if not; includes active connections)
@@ -516,7 +516,7 @@ Replica Node                                                                    
 - Timeout returns PG error with SQLSTATE `57014` ("canceling statement due to statement timeout")
 
 **Connection observability**:
-- `SHOW cedar.connections` returns active_connections and max_connections
+- `SHOW falcon.connections` returns active_connections and max_connections
 - Shared `Arc<AtomicUsize>` counter wired to both `PgServer` and `Executor`
 - EXPLAIN support via `PhysicalPlan::ShowConnections`
 
@@ -527,20 +527,20 @@ Replica Node                                                                    
 
 ### 8.8 M4.1 — Table Statistics Collector
 
-**Data structures** (`cedar_storage/src/stats.rs`):
+**Data structures** (`falcon_storage/src/stats.rs`):
 - `TableStatistics` — per-table stats: `table_name`, `row_count`, `column_stats`, `collected_at`
 - `ColumnStats` — per-column stats: `column_name`, `distinct_count`, `null_count`, `min_value`, `max_value`, `avg_width`
 - `collect_column_stats(schema, rows)` — computes column stats from row data using `HashSet` for distinct counting
 
-**Storage engine integration** (`cedar_storage/src/engine.rs`):
+**Storage engine integration** (`falcon_storage/src/engine.rs`):
 - `table_stats: DashMap<TableId, TableStatistics>` cached in `StorageEngine`
 - `analyze_table(name)` — snapshot-scans all committed rows (sentinel `TxnId::MAX`/`Timestamp::MAX`), collects stats, caches result
 - `get_table_stats(id)` / `get_all_table_stats()` — retrieve cached statistics
 
 **SQL commands**:
 - `ANALYZE TABLE <name>` — triggers statistics collection, returns summary (table_name, row_count, columns_analyzed)
-- `SHOW cedar.table_stats` — displays all cached stats (per-column detail)
-- `SHOW cedar.table_stats_<name>` — displays stats for a specific table
+- `SHOW falcon.table_stats` — displays all cached stats (per-column detail)
+- `SHOW falcon.table_stats_<name>` — displays stats for a specific table
 
 **Pipeline wiring**:
 - Binder: `BoundStatement::Analyze { table_name }` / `BoundStatement::ShowTableStats { table_name }`
@@ -562,7 +562,7 @@ Replica Node                                                                    
 - `EXPLAIN` only formats the plan tree — does **not** execute the inner statement
 - `EXPLAIN ANALYZE` **executes** the inner statement (including DML — UPDATE/DELETE will mutate data), then appends an `Actual:` summary line with real metrics
 
-**Distributed handling** (`cedar_cluster/src/query_engine.rs`):
+**Distributed handling** (`falcon_cluster/src/query_engine.rs`):
 - `PhysicalPlan::ExplainAnalyze` routes to shard 0's local executor (the executor handles timing internally)
 - `wrap_distributed` recursively wraps the inner plan, preserving the `ExplainAnalyze` wrapper
 
@@ -574,22 +574,22 @@ Actual: rows=3, cols=2, time=0.042ms
 
 ### 8.10 M4.5 — Slow Query Log
 
-**Data structure** (`cedar_protocol_pg/src/slow_query_log.rs`):
+**Data structure** (`falcon_protocol_pg/src/slow_query_log.rs`):
 - `SlowQueryLog` — thread-safe ring buffer with configurable threshold and capacity
 - `SlowQueryEntry` — sql text, duration, timestamp_ms, session_id
 - `record(sql, duration, session_id)` — logs if duration ≥ threshold
 - `snapshot()` → `(Vec<SlowQueryEntry>, total_count)` — read without clearing
 - `clear()` / `set_threshold()` — runtime reconfiguration
 
-**Handler integration** (`cedar_protocol_pg/src/handler.rs`):
+**Handler integration** (`falcon_protocol_pg/src/handler.rs`):
 - `QueryHandler` holds `Arc<SlowQueryLog>`, shared across all sessions
 - `with_slow_query_log(log)` builder method for injection
 - Query execution timed via `std::time::Instant`; recorded after commit/abort
 
 **SQL commands**:
 - `SET log_min_duration_statement = <ms>` — set threshold (0 or -1 or default = disabled)
-- `SHOW cedar.slow_queries` — displays threshold, total count, and recent entries with SQL preview, duration, session, timestamp
-- `RESET cedar.slow_queries` — clears log entries and counter
+- `SHOW falcon.slow_queries` — displays threshold, total count, and recent entries with SQL preview, duration, session, timestamp
+- `RESET falcon.slow_queries` — clears log entries and counter
 
 **Output format** (metric / value columns):
 ```
@@ -601,16 +601,16 @@ query_1         | session=5 duration=152.300ms ts=1739... sql=SELECT ...
 
 ### 8.11 M4.6 — Snapshot Checkpoint
 
-**Storage infrastructure** (`cedar_storage/src/wal.rs`, `cedar_storage/src/engine.rs`):
+**Storage infrastructure** (`falcon_storage/src/wal.rs`, `falcon_storage/src/engine.rs`):
 - `CheckpointData` — serializable snapshot: catalog + all committed rows + WAL segment/LSN position
 - `StorageEngine::checkpoint()` — flush WAL, snapshot all committed rows, write `checkpoint.bin` atomically (tmp+rename), append `WalRecord::Checkpoint` marker, purge old WAL segments
 - `StorageEngine::recover()` — load checkpoint (if exists), replay WAL from checkpoint segment onward, abort uncommitted txns, rebuild secondary indexes
 - `WalWriter::purge_segments_before(segment_id)` — removes old WAL segment files
 
-**SQL command** (handled in `cedar_protocol_pg/src/handler.rs`):
+**SQL command** (handled in `falcon_protocol_pg/src/handler.rs`):
 - `CHECKPOINT` — triggers `storage.checkpoint()`, returns `OK segment=<N> rows=<N>`
 - Returns error if WAL is not enabled (in-memory-only mode)
-- `SHOW cedar.checkpoint_stats` — displays WAL enabled status, records written, flushes
+- `SHOW falcon.checkpoint_stats` — displays WAL enabled status, records written, flushes
 
 **Recovery flow**:
 1. Load `checkpoint.bin` → restore catalog + committed rows
@@ -622,7 +622,7 @@ query_1         | session=5 duration=152.300ms ts=1739... sql=SELECT ...
 
 ### 8.12 M4.7 — PG Protocol Hardening (Prepared Statements)
 
-**Extended query protocol** (`cedar_protocol_pg/src/server.rs`):
+**Extended query protocol** (`falcon_protocol_pg/src/server.rs`):
 - `Parse` → stores SQL in `session.prepared_statements[name]`, returns `ParseComplete`
 - `Bind` → resolves statement to portal in `session.portals[portal]`, returns `BindComplete`
 - `Describe` → calls `handler.describe_query(sql)` to return real `RowDescription` with column names and PG type OIDs; sends `ParameterDescription` (empty, no param support yet) for statement describes
@@ -630,7 +630,7 @@ query_1         | session=5 duration=152.300ms ts=1739... sql=SELECT ...
 - `Close` → properly removes entries from `prepared_statements` or `portals`
 - `Sync` → sends `ReadyForQuery` with correct txn status byte
 
-**`QueryHandler::describe_query(sql)`** (`cedar_protocol_pg/src/handler.rs`):
+**`QueryHandler::describe_query(sql)`** (`falcon_protocol_pg/src/handler.rs`):
 - Parses, binds, plans the SQL without executing
 - Extracts output `FieldDescription` from `PhysicalPlan` (column names + PG type OIDs)
 - Handles `SeqScan`, `NestedLoopJoin`, `HashJoin`, `Explain`, `ExplainAnalyze`, `DistPlan`
@@ -643,7 +643,7 @@ query_1         | session=5 duration=152.300ms ts=1739... sql=SELECT ...
 
 ### 8.13 M5.1 — Information Schema (Catalog Queries)
 
-**Supported virtual tables** (`cedar_protocol_pg/src/handler.rs`):
+**Supported virtual tables** (`falcon_protocol_pg/src/handler.rs`):
 
 | Virtual Table | Columns | Description |
 |---------------|---------|-------------|
@@ -676,7 +676,7 @@ Views are expanded at bind time by injecting the view's SQL as an implicit CTE. 
 4. Registers it as a `BoundCte` with a unique `TableId` (2_000_000+ range)
 5. The executor materializes the CTE data, preserving all filters and projections
 
-**Catalog storage** (`cedar_common/src/schema.rs`):
+**Catalog storage** (`falcon_common/src/schema.rs`):
 - `ViewDef { name, query_sql, or_replace }` stored in `Catalog::views`
 - `Catalog::add_view()`, `find_view()`, `drop_view()` manage view lifecycle
 
@@ -694,7 +694,7 @@ Views are expanded at bind time by injecting the view's SQL as an implicit CTE. 
 
 ### 8.16 M5.4 — Query Plan Cache
 
-**Data structure** (`cedar_protocol_pg/src/plan_cache.rs`):
+**Data structure** (`falcon_protocol_pg/src/plan_cache.rs`):
 - `PlanCache` — thread-safe (`RwLock`) LRU-like cache of `PhysicalPlan` by normalized SQL
 - Configurable capacity (default 256 entries)
 - SQL normalization: trim, lowercase, collapse whitespace
@@ -706,20 +706,20 @@ Views are expanded at bind time by injecting the view's SQL as an implicit CTE. 
 - **Eviction**: when at capacity, evicts the entry with lowest access count
 - **Invalidation**: schema generation incremented on any DDL (`CREATE/DROP/ALTER TABLE`, `CREATE/DROP VIEW`); stale entries lazily removed on next `get()`
 
-**Integration** (`cedar_protocol_pg/src/handler.rs`):
+**Integration** (`falcon_protocol_pg/src/handler.rs`):
 - `QueryHandler` holds `Arc<PlanCache>` shared across all sessions
 - Before bind+plan: check cache for matching normalized SQL
 - After planning: store plan in cache
 - After DDL execution: `plan_cache.invalidate()`
 
-**SQL command**: `SHOW cedar.plan_cache` — displays entries, capacity, hits, misses, hit_rate_pct
+**SQL command**: `SHOW falcon.plan_cache` — displays entries, capacity, hits, misses, hit_rate_pct
 
 ### 8.22 M7.1 — Sequence Functions
 
 **SQL commands**:
 - `CREATE SEQUENCE <name> [START WITH <n>]` — creates a named sequence with configurable start value (default 1)
 - `DROP SEQUENCE <name>` / `DROP SEQUENCE IF EXISTS <name>` — removes a sequence
-- `SHOW cedar.sequences` — lists all sequences with name and current value
+- `SHOW falcon.sequences` — lists all sequences with name and current value
 
 **Functions**:
 - `nextval('<name>')` — increments and returns next value (atomic)

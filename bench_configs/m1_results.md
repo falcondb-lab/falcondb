@@ -1,4 +1,4 @@
-# Cedar M1 Benchmark Results (Release Build)
+# Falcon M1 Benchmark Results (Release Build)
 
 Machine: Windows, single-process, in-memory (no WAL)
 Seed: 42, Isolation: ReadCommitted

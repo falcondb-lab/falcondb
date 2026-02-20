@@ -1,13 +1,13 @@
 # Routing Inference Design
 
 ## Overview
-Cedar's planner infers transaction routing from the physical plan to determine
+Falcon's planner infers transaction routing from the physical plan to determine
 whether a query can use the fast-path (single-shard) or must use the slow-path
 (cross-shard 2PC).
 
 ## Key Components
 
-### TxnRoutingHint (cedar_planner)
+### TxnRoutingHint (falcon_planner)
 - `involved_shards: Vec<ShardId>` — shards touched by the plan
 - `single_shard_proven: bool` — true if provably single-shard
 - `inference_reason: String` — human-readable explanation

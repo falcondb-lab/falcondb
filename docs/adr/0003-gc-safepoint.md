@@ -19,4 +19,4 @@ lagging replicas might still read.
 ## Consequences
 - Memory remains stable under long-running OLTP workloads.
 - Long-running transactions or lagging replicas delay GC (by design).
-- Observable via `SHOW cedar.gc_stats`.
+- Observable via `SHOW falcon.gc_stats`.

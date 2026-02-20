@@ -4,7 +4,7 @@
 Accepted (M1)
 
 ## Context
-Cedar needs to distinguish single-shard transactions (fast-path) from
+Falcon needs to distinguish single-shard transactions (fast-path) from
 cross-shard transactions (slow-path / 2PC) to optimize commit latency.
 
 ## Decision

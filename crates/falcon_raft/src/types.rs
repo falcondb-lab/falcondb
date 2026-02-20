@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 ///   by calling the registered `ApplyCallback`.
 /// - `Noop`: a no-op heartbeat entry (used for leader confirmation).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum CedarRequest {
+pub enum FalconRequest {
     /// A write operation (serialized WAL record or opaque payload).
     Write { data: Vec<u8> },
     /// No-op entry — used to confirm leadership without side effects.
@@ -21,7 +21,7 @@ pub enum CedarRequest {
 
 /// Application response data — returned after applying a log entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum CedarResponse {
+pub enum FalconResponse {
     Ok,
     /// Returned for Noop entries.
     Noop,
@@ -29,8 +29,8 @@ pub enum CedarResponse {
 
 openraft::declare_raft_types!(
     pub TypeConfig:
-        D            = CedarRequest,
-        R            = CedarResponse,
+        D            = FalconRequest,
+        R            = FalconResponse,
         NodeId       = u64,
         Node         = BasicNode,
         Entry        = openraft::Entry<TypeConfig>,

@@ -4,7 +4,7 @@
 Accepted (M1)
 
 ## Context
-Cedar requires primary-replica replication for high availability.
+Falcon requires primary-replica replication for high availability.
 The M1 model must be simple, correct, and extensible to gRPC streaming (M2).
 
 ## Decision

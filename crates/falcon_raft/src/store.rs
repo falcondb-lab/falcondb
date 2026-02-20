@@ -4,7 +4,7 @@
 //! `RaftStateMachine`, and `RaftSnapshotBuilder` traits.
 //!
 //! The `StateMachine` optionally holds an `ApplyCallback` that is called
-//! for every `CedarRequest::Write` entry applied. This allows the Raft
+//! for every `FalconRequest::Write` entry applied. This allows the Raft
 //! state machine to forward committed WAL records to a `StorageEngine`.
 
 use std::collections::BTreeMap;
@@ -19,7 +19,7 @@ use openraft::{
 };
 use tokio::sync::Mutex;
 
-use crate::types::{CedarResponse, TypeConfig};
+use crate::types::{FalconResponse, TypeConfig};
 
 /// Thread-safe apply callback: called for each committed `Write` entry.
 pub type ApplyFn = Arc<dyn Fn(&[u8]) -> Result<(), String> + Send + Sync>;
@@ -150,7 +150,7 @@ impl RaftLogStorage<TypeConfig> for LogStore {
 
 /// In-memory state machine — implements `RaftStateMachine` for openraft.
 ///
-/// When `apply_fn` is set, every committed `CedarRequest::Write` entry
+/// When `apply_fn` is set, every committed `FalconRequest::Write` entry
 /// is forwarded to the callback (e.g. to apply WAL records to StorageEngine).
 pub struct StateMachine {
     last_applied: Option<LogId<u64>>,
@@ -214,7 +214,7 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
     async fn apply<I>(
         &mut self,
         entries: I,
-    ) -> Result<Vec<CedarResponse>, StorageError<u64>>
+    ) -> Result<Vec<FalconResponse>, StorageError<u64>>
     where
         I: IntoIterator<Item = Entry<TypeConfig>> + Send,
         I::IntoIter: Send,
@@ -225,11 +225,11 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
 
             match entry.payload {
                 EntryPayload::Blank => {
-                    responses.push(CedarResponse::Ok);
+                    responses.push(FalconResponse::Ok);
                 }
                 EntryPayload::Normal(ref req) => {
                     match req {
-                        crate::types::CedarRequest::Write { ref data } => {
+                        crate::types::FalconRequest::Write { ref data } => {
                             self.data.push(data.clone());
                             // Forward to StorageEngine if a callback is registered.
                             if let Some(ref cb) = self.apply_fn {
@@ -249,17 +249,17 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
                                     });
                                 }
                             }
-                            responses.push(CedarResponse::Ok);
+                            responses.push(FalconResponse::Ok);
                         }
-                        crate::types::CedarRequest::Noop => {
-                            responses.push(CedarResponse::Noop);
+                        crate::types::FalconRequest::Noop => {
+                            responses.push(FalconResponse::Noop);
                         }
                     }
                 }
                 EntryPayload::Membership(ref mem) => {
                     self.last_membership =
                         StoredMembership::new(Some(*entry.get_log_id()), mem.clone());
-                    responses.push(CedarResponse::Ok);
+                    responses.push(FalconResponse::Ok);
                 }
             }
         }

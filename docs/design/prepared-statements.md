@@ -2,7 +2,7 @@
 
 ## Overview
 
-CedarDB supports parameterized SQL through two complementary mechanisms:
+FalconDB supports parameterized SQL through two complementary mechanisms:
 
 1. **Extended Query Protocol** — the PostgreSQL wire-protocol messages (`Parse`, `Bind`,
    `Describe`, `Execute`, `Close`, `Sync`) used by drivers such as libpq, JDBC, and
@@ -36,7 +36,7 @@ Client
 
 ## Key Data Structures
 
-### PreparedStatement (`cedar_protocol_pg::session`)
+### PreparedStatement (`falcon_protocol_pg::session`)
 
 | Field                | Type                              | Description                                    |
 |----------------------|-----------------------------------|------------------------------------------------|
@@ -46,7 +46,7 @@ Client
 | `inferred_param_types` | `Vec<Option<DataType>>`         | Types inferred by the binder                   |
 | `row_desc`           | `Vec<FieldDescriptionCompact>`    | Cached column metadata for Describe            |
 
-### Portal (`cedar_protocol_pg::session`)
+### Portal (`falcon_protocol_pg::session`)
 
 | Field       | Type                   | Description                                  |
 |-------------|------------------------|----------------------------------------------|
@@ -117,31 +117,31 @@ type hint:
 
 ## Prometheus Metrics
 
-All metrics are defined in `cedar_observability` and recorded in
-`cedar_protocol_pg::server`.
+All metrics are defined in `falcon_observability` and recorded in
+`falcon_protocol_pg::server`.
 
 ### Counters
 
 | Metric                              | Labels            | Description                                   |
 |-------------------------------------|-------------------|-----------------------------------------------|
-| `cedar_prepared_stmt_ops_total`     | `op`, `path`      | Extended protocol operations (parse, bind, execute, describe, close) |
-| `cedar_prepared_stmt_sql_cmds_total`| `cmd`             | SQL-level commands (prepare, execute, deallocate) |
+| `falcon_prepared_stmt_ops_total`     | `op`, `path`      | Extended protocol operations (parse, bind, execute, describe, close) |
+| `falcon_prepared_stmt_sql_cmds_total`| `cmd`             | SQL-level commands (prepare, execute, deallocate) |
 
 ### Histograms
 
 | Metric                                    | Labels    | Description                           |
 |-------------------------------------------|-----------|---------------------------------------|
-| `cedar_prepared_stmt_parse_duration_us`   | `success` | Parse (prepare_statement) latency     |
-| `cedar_prepared_stmt_bind_duration_us`    | —         | Bind operation latency                |
-| `cedar_prepared_stmt_execute_duration_us` | `success` | Execute operation latency             |
-| `cedar_prepared_stmt_param_count`         | —         | Number of parameters per Bind         |
+| `falcon_prepared_stmt_parse_duration_us`   | `success` | Parse (prepare_statement) latency     |
+| `falcon_prepared_stmt_bind_duration_us`    | —         | Bind operation latency                |
+| `falcon_prepared_stmt_execute_duration_us` | `success` | Execute operation latency             |
+| `falcon_prepared_stmt_param_count`         | —         | Number of parameters per Bind         |
 
 ### Gauges
 
 | Metric                              | Description                              |
 |--------------------------------------|------------------------------------------|
-| `cedar_prepared_stmt_active`         | Current prepared statements in session   |
-| `cedar_prepared_stmt_portals_active` | Current portals in session               |
+| `falcon_prepared_stmt_active`         | Current prepared statements in session   |
+| `falcon_prepared_stmt_portals_active` | Current portals in session               |
 
 ### Label values
 
@@ -179,7 +179,7 @@ Client                          Server
 ## Limitations
 
 - **No plan caching across executions** — each Parse re-plans the query. A future
-  plan cache (`cedar_protocol_pg::plan_cache`) is in progress.
+  plan cache (`falcon_protocol_pg::plan_cache`) is in progress.
 - **SQL-level EXECUTE always uses legacy path** — parameters are text-substituted
   rather than passed as typed `Datum` values.
 - **Timestamp/Date/Array/Jsonb parameters** are stored as text and rely on the

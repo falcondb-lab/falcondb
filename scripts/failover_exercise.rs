@@ -1,4 +1,4 @@
-//! Cedar M1 Failover Exercise Script
+//! Falcon M1 Failover Exercise Script
 //!
 //! This is a self-contained Rust program that exercises the full
 //! failover lifecycle:
@@ -11,15 +11,15 @@
 //! 6. Write new data on promoted primary
 //! 7. Verify all data integrity
 //!
-//! Run:  cargo run -p cedar_cluster --example failover_exercise
+//! Run:  cargo run -p falcon_cluster --example failover_exercise
 
 use std::time::Instant;
 
-use cedar_cluster::replication::ShardReplicaGroup;
-use cedar_common::datum::{Datum, OwnedRow};
-use cedar_common::schema::{ColumnDef, TableSchema};
-use cedar_common::types::*;
-use cedar_storage::wal::WalRecord;
+use falcon_cluster::replication::ShardReplicaGroup;
+use falcon_common::datum::{Datum, OwnedRow};
+use falcon_common::schema::{ColumnDef, TableSchema};
+use falcon_common::types::*;
+use falcon_storage::wal::WalRecord;
 
 fn test_schema() -> TableSchema {
     TableSchema {
@@ -64,7 +64,7 @@ fn test_schema() -> TableSchema {
 
 fn main() {
     println!("╔══════════════════════════════════════════════════╗");
-    println!("║     Cedar M1 — Failover Exercise Script         ║");
+    println!("║     Falcon M1 — Failover Exercise Script         ║");
     println!("╚══════════════════════════════════════════════════╝\n");
 
     // ── Step 1: Create cluster ──

@@ -1,5 +1,5 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let proto_file = "proto/cedar_replication.proto";
+    let proto_file = "proto/falcon_replication.proto";
     println!("cargo:rerun-if-changed={}", proto_file);
     println!("cargo:rerun-if-changed=proto");
 

@@ -4,7 +4,7 @@
 Accepted (M1) — Frozen for M1 release.
 
 ## Context
-Cedar M1 needs a clear, documented commit ack policy that balances
+Falcon M1 needs a clear, documented commit ack policy that balances
 latency against data loss risk. The choice directly affects RPO/RTO
 and user expectations.
 
@@ -71,7 +71,7 @@ Client                Primary                    Replica
   a `ReplicationMode` enum without changing the core commit path.
 
 ## Observability
-- `SHOW cedar.replication_stats`: promote_count, last_failover_time_ms
+- `SHOW falcon.replication_stats`: promote_count, last_failover_time_ms
 - `ReplicaRunnerMetrics`: applied_lsn, chunks_applied, records_applied,
   reconnect_count, connected
 - `WalReplicationService::replication_lag()`: per-replica LSN lag
@@ -80,4 +80,4 @@ Client                Primary                    Replica
 - `tests/failover.rs`: end-to-end failover exercise
 - `replica_runner_tests::test_replica_runner_e2e_cross_node`: real gRPC
   replication with data verification
-- `cedar_bench --failover`: benchmark with failover mid-workload
+- `falcon_bench --failover`: benchmark with failover mid-workload

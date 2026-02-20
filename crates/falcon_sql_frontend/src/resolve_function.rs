@@ -1,4 +1,4 @@
-﻿use crate::types::ScalarFunc;
+use crate::types::ScalarFunc;
 
 /// Resolve a SQL function name to its ScalarFunc variant.
 /// Returns None for functions that need special handling (aggregates, NOW, DATE_TRUNC, etc).

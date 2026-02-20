@@ -1,5 +1,5 @@
-# CedarDB — Primary Node Configuration
-# Start with: cargo run -p cedar_server -- -c examples/primary.toml
+# FalconDB — Primary Node Configuration
+# Start with: cargo run -p falcon_server -- -c examples/primary.toml
 
 [server]
 pg_listen_addr = "0.0.0.0:5433"
@@ -12,7 +12,7 @@ idle_timeout_ms = 0
 [storage]
 memory_limit_bytes = 0
 wal_enabled = true
-data_dir = "./cedar_data_primary"
+data_dir = "./falcon_data_primary"
 
 [wal]
 group_commit = true

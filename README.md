@@ -71,13 +71,13 @@ cargo run -p falcon_server -- --role replica --pg-addr 0.0.0.0:5435 \
 
 > **Note**: M2 gRPC WAL streaming is in progress. The `--role` flag is
 > accepted but actual network replication requires `protoc` and tonic
-> codegen (`cargo build -p cedar_cluster --features grpc-codegen`).
+> codegen (`cargo build -p falcon_cluster --features grpc-codegen`).
 > M1 in-process replication remains available via the Rust API.
 
 ### Programmatic cluster setup (Rust API)
 
 ```rust
-use cedar_cluster::replication::ShardReplicaGroup;
+use falcon_cluster::replication::ShardReplicaGroup;
 
 // Creates 1 primary + 1 replica with shared schema
 let mut group = ShardReplicaGroup::new(ShardId(0), &[schema]).unwrap();
@@ -93,7 +93,7 @@ group.catch_up_replica(0).unwrap();
 
 ## 3. Primary / Replica Configuration
 
-### Configuration file (`cedar.toml`)
+### Configuration file (`falcon.toml`)
 
 ```toml
 [server]
@@ -168,7 +168,7 @@ Promote semantics:
 
 ### Failover exercise (end-to-end)
 
-See `crates/cedar_cluster/examples/failover_exercise.rs` for a self-contained example that:
+See `crates/falcon_cluster/examples/failover_exercise.rs` for a self-contained example that:
 
 1. Creates a cluster (1 primary + 1 replica)
 2. Writes test data on primary
@@ -183,8 +183,8 @@ See `crates/cedar_cluster/examples/failover_exercise.rs` for a self-contained ex
 cargo run -p falcon_cluster --example failover_exercise
 
 # Run failover-related tests
-cargo test -p cedar_cluster -- promote_fencing_tests
-cargo test -p cedar_cluster -- m1_full_lifecycle
+cargo test -p falcon_cluster -- promote_fencing_tests
+cargo test -p falcon_cluster -- m1_full_lifecycle
 ```
 
 ### Failover observability

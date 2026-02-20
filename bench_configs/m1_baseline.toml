@@ -1,9 +1,9 @@
-# Cedar M1 Frozen Benchmark Configurations
+# Falcon M1 Frozen Benchmark Configurations
 # ==========================================
 # These parameters are frozen after M1. Do NOT change metric definitions
 # or default values post-M1 release.
 #
-# Random seed: 42 (hardcoded in cedar_bench)
+# Random seed: 42 (hardcoded in falcon_bench)
 # Isolation: ReadCommitted (default)
 #
 # Required evaluation matrix (§4.1):
@@ -13,13 +13,13 @@
 # Run all configurations:
 #   ./scripts/run_m1_benchmark.sh
 # Or manually:
-#   cargo run -p cedar_bench -- <flags> --export csv
+#   cargo run -p falcon_bench -- <flags> --export csv
 
 # ── Configuration 1: High Local (90:10) ──────────────────────────
 # Simulates typical OLTP where most txns are single-shard.
 #
-# cargo run -p cedar_bench -- --ops 20000 --read-pct 50 --local-pct 90 --shards 4 --export csv
-# cargo run -p cedar_bench -- --ops 20000 --read-pct 50 --local-pct 90 --shards 4 --export json
+# cargo run -p falcon_bench -- --ops 20000 --read-pct 50 --local-pct 90 --shards 4 --export csv
+# cargo run -p falcon_bench -- --ops 20000 --read-pct 50 --local-pct 90 --shards 4 --export json
 
 [config_1_high_local]
 ops = 20000
@@ -33,7 +33,7 @@ description = "High-local (90% LocalTxn, 10% GlobalTxn)"
 # ── Configuration 2: Balanced (50:50) ────────────────────────────
 # Stress test: half cross-shard txns. Tests slow-path overhead.
 #
-# cargo run -p cedar_bench -- --ops 20000 --read-pct 50 --local-pct 50 --shards 4 --export csv
+# cargo run -p falcon_bench -- --ops 20000 --read-pct 50 --local-pct 50 --shards 4 --export csv
 
 [config_2_balanced]
 ops = 20000
@@ -47,7 +47,7 @@ description = "Balanced (50% LocalTxn, 50% GlobalTxn)"
 # ── Configuration 3: All Global (0:100) ─────────────────────────
 # Worst case: every txn is cross-shard. Baseline for fast-path benefit.
 #
-# cargo run -p cedar_bench -- --ops 20000 --read-pct 50 --local-pct 0 --shards 4 --export csv
+# cargo run -p falcon_bench -- --ops 20000 --read-pct 50 --local-pct 0 --shards 4 --export csv
 
 [config_3_all_global]
 ops = 20000
@@ -59,25 +59,25 @@ isolation = "rc"
 description = "All-global (0% LocalTxn, 100% GlobalTxn)"
 
 # ── Chart 1: TPS vs Shard Count ─────────────────────────────────
-# cargo run -p cedar_bench -- --scaleout --ops 10000 --export csv
+# cargo run -p falcon_bench -- --scaleout --ops 10000 --export csv
 
 [chart_1_scaleout]
 ops = 10000
 description = "TPS vs shard count (1/2/4/8 shards)"
-command = "cargo run -p cedar_bench -- --scaleout --ops 10000 --export csv"
+command = "cargo run -p falcon_bench -- --scaleout --ops 10000 --export csv"
 
 # ── Chart 2: Fast vs Slow p99 Latency ───────────────────────────
-# cargo run -p cedar_bench -- --compare --ops 20000 --export csv
+# cargo run -p falcon_bench -- --compare --ops 20000 --export csv
 
 [chart_2_fast_vs_slow]
 ops = 20000
 description = "p99 latency: Fast-Path ON vs OFF"
-command = "cargo run -p cedar_bench -- --compare --ops 20000 --export csv"
+command = "cargo run -p falcon_bench -- --compare --ops 20000 --export csv"
 
 # ── Chart 3: Failover Before/After ──────────────────────────────
-# cargo run -p cedar_bench -- --failover --ops 10000 --export csv
+# cargo run -p falcon_bench -- --failover --ops 10000 --export csv
 
 [chart_3_failover]
 ops = 10000
 description = "Failover: before/after TPS + latency + data integrity"
-command = "cargo run -p cedar_bench -- --failover --ops 10000 --export csv"
+command = "cargo run -p falcon_bench -- --failover --ops 10000 --export csv"

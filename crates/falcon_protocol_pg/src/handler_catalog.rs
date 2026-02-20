@@ -368,7 +368,7 @@ impl QueryHandler {
 
     /// pg_catalog.pg_type — type OID mapping for ORMs and drivers.
     fn handle_pg_type(&self, sql_lower: &str) -> Vec<BackendMessage> {
-        // Static list of Cedar-supported types mapped to PG OIDs.
+        // Static list of Falcon-supported types mapped to PG OIDs.
         let builtin_types: Vec<(i32, &str, i16, &str, &str)> = vec![
             // (oid, typname, typlen, typtype, typnamespace_nspname)
             (16,   "bool",       1,  "b", "pg_catalog"),

@@ -1,4 +1,4 @@
-# CedarDB Feature Gap Analysis
+# FalconDB Feature Gap Analysis
 
 > Generated: 2026-02-19  
 > Scope: Full codebase audit across all 12 crates
@@ -7,7 +7,7 @@
 
 ## 1. DROP INDEX — No-Op (Severity: HIGH)
 
-**Location:** `cedar_executor/src/executor.rs:351-357`
+**Location:** `falcon_executor/src/executor.rs:351-357`
 
 ```rust
 PhysicalPlan::DropIndex { index_name } => {
@@ -26,7 +26,7 @@ PhysicalPlan::DropIndex { index_name } => {
 
 ## 2. Authentication — Trust-Only (Severity: HIGH)
 
-**Location:** `cedar_protocol_pg/src/server.rs:295-296`
+**Location:** `falcon_protocol_pg/src/server.rs:295-296`
 
 ```rust
 // Trust auth: send AuthenticationOk immediately
@@ -35,13 +35,13 @@ send_message(&mut stream, &BackendMessage::AuthenticationOk).await?;
 
 **Problem:** Every connection is accepted without any password check. The codec already defines `AuthenticationCleartextPassword`, `AuthenticationMd5Password`, and `PasswordMessage`, but none of them are used in the connection handshake. Any client connecting to the port gets full read/write access.
 
-**Fix:** Add a configurable auth mode (`trust` / `password` / `md5`) in `CedarConfig`, store hashed credentials, and implement the challenge-response flow in `handle_client()`.
+**Fix:** Add a configurable auth mode (`trust` / `password` / `md5`) in `FalconConfig`, store hashed credentials, and implement the challenge-response flow in `handle_client()`.
 
 ---
 
 ## 3. SAVEPOINT — Name-Only, No Undo (Severity: HIGH)
 
-**Location:** `cedar_protocol_pg/src/handler.rs:682-731`
+**Location:** `falcon_protocol_pg/src/handler.rs:682-731`
 
 **Problem:** `SAVEPOINT`, `ROLLBACK TO`, and `RELEASE` only manipulate a `Vec<String>` of savepoint names in the session. No actual transaction state is captured, and `ROLLBACK TO <savepoint>` does **not** undo any DML executed after the savepoint. This means the feature is cosmetically present (no error) but semantically broken.
 
@@ -51,7 +51,7 @@ send_message(&mut stream, &BackendMessage::AuthenticationOk).await?;
 
 ## 4. Missing Data Types (Severity: MEDIUM)
 
-**Location:** `cedar_common/src/types.rs` — `enum DataType`; `cedar_common/src/datum.rs` — `enum Datum`
+**Location:** `falcon_common/src/types.rs` — `enum DataType`; `falcon_common/src/datum.rs` — `enum Datum`
 
 Currently supported: `Boolean, Int32, Int64, Float64, Text, Timestamp, Date, Array, Jsonb`
 
@@ -70,7 +70,7 @@ Currently supported: `Boolean, Int32, Int64, Float64, Text, Timestamp, Date, Arr
 
 ## 5. Cancel Request Not Supported (Severity: MEDIUM)
 
-**Location:** `cedar_protocol_pg/src/codec.rs:146-148`
+**Location:** `falcon_protocol_pg/src/codec.rs:146-148`
 
 ```rust
 if version == 80877102 {
@@ -100,11 +100,11 @@ if version == 80877102 {
 
 ## 8. Raft Network — Single-Node Stub (Severity: MEDIUM)
 
-**Location:** `cedar_raft/src/network.rs`
+**Location:** `falcon_raft/src/network.rs`
 
 **Problem:** The `NetworkFactory` returns a `NetworkConnection` that fails all RPCs with `Unreachable("single-node mode")`. This means Raft consensus **only works in single-node mode** — no multi-node replication or leader election is possible through the Raft layer.
 
-**Note:** CedarDB has a separate WAL-based streaming replication (primary→replica via gRPC) that does work for multi-node. But the Raft layer cannot be used for multi-node consensus until a real network implementation is provided.
+**Note:** FalconDB has a separate WAL-based streaming replication (primary→replica via gRPC) that does work for multi-node. But the Raft layer cannot be used for multi-node consensus until a real network implementation is provided.
 
 **Fix:** Implement `RaftNetwork` using tonic gRPC to forward `AppendEntries`, `Vote`, and `InstallSnapshot` RPCs to remote nodes.
 
@@ -112,7 +112,7 @@ if version == 80877102 {
 
 ## 9. Cluster Membership — Empty Placeholder (Severity: MEDIUM)
 
-**Location:** `cedar_cluster/src/cluster/membership.rs`
+**Location:** `falcon_cluster/src/cluster/membership.rs`
 
 ```rust
 //! Cluster membership management (placeholder for future node discovery).
@@ -125,7 +125,7 @@ if version == 80877102 {
 
 ## 10. Planner — No Index Scan Planning (Severity: MEDIUM)
 
-**Location:** `cedar_planner/src/planner.rs`
+**Location:** `falcon_planner/src/planner.rs`
 
 **Problem:** The planner always produces `SeqScan`, `NestedLoopJoin`, or `HashJoin` nodes. There is **no IndexScan plan node**. Index scans are opportunistically applied *inside the executor* (`try_pk_point_lookup`, `try_index_scan_predicate`) after the SeqScan plan has already been chosen.
 
@@ -137,7 +137,7 @@ if version == 80877102 {
 
 ## 11. Views — Not WAL-Logged (Severity: MEDIUM)
 
-**Location:** `cedar_storage/src/engine.rs:386-420`
+**Location:** `falcon_storage/src/engine.rs:386-420`
 
 **Problem:** `CREATE VIEW` and `DROP VIEW` modify the in-memory catalog but are **not written to the WAL**. After a crash and recovery, all views are lost. Tables are correctly WAL-logged (`WalRecord::CreateTable`, `WalRecord::DropTable`), but there are no `WalRecord::CreateView` / `WalRecord::DropView` variants.
 
@@ -147,7 +147,7 @@ if version == 80877102 {
 
 ## 12. ALTER TABLE — Not WAL-Logged (Severity: MEDIUM)
 
-**Location:** `cedar_storage/src/engine.rs:422-620`
+**Location:** `falcon_storage/src/engine.rs:422-620`
 
 **Problem:** All `ALTER TABLE` operations (add/drop/rename column, rename table, change column type, set/drop default, set/drop not null) modify the in-memory catalog but produce **no WAL records**. After crash recovery, schema modifications are lost.
 
@@ -157,7 +157,7 @@ if version == 80877102 {
 
 ## 13. Sequences — Not WAL-Logged (Severity: MEDIUM)
 
-**Location:** `cedar_storage/src/engine.rs:491-510` (executor) + `StorageEngine::sequences` DashMap
+**Location:** `falcon_storage/src/engine.rs:491-510` (executor) + `StorageEngine::sequences` DashMap
 
 **Problem:** `CREATE SEQUENCE`, `DROP SEQUENCE`, and `NEXTVAL` calls modify an in-memory `DashMap<String, AtomicI64>` with no WAL durability. Sequence state is lost on restart.
 
@@ -165,7 +165,7 @@ if version == 80877102 {
 
 ## 14. TRUNCATE — Not WAL-Logged (Severity: LOW)
 
-**Location:** `cedar_storage/src/engine.rs:622-635`
+**Location:** `falcon_storage/src/engine.rs:622-635`
 
 **Problem:** `TRUNCATE TABLE` replaces the in-memory `MemTable` but writes no WAL record. If a crash occurs after TRUNCATE, the data may reappear from WAL replay.
 
@@ -173,7 +173,7 @@ if version == 80877102 {
 
 ## 15. Describe for Aggregates/Expressions Returns TEXT OID (Severity: LOW)
 
-**Location:** `cedar_protocol_pg/src/handler.rs:2076-2088`
+**Location:** `falcon_protocol_pg/src/handler.rs:2076-2088`
 
 ```rust
 BoundProjection::Aggregate(_, _, alias, _, _)
@@ -191,7 +191,7 @@ BoundProjection::Aggregate(_, _, alias, _, _)
 
 ## 16. No Memory Budget Enforcement (Severity: LOW)
 
-**Location:** `cedar_common/src/config.rs:36` — `memory_limit_bytes: u64`
+**Location:** `falcon_common/src/config.rs:36` — `memory_limit_bytes: u64`
 
 **Problem:** The config accepts `memory_limit_bytes` but it is never checked anywhere. The storage engine, executor, and join operators will grow unbounded until OOM.
 
@@ -199,7 +199,7 @@ BoundProjection::Aggregate(_, _, alias, _, _)
 
 ## 17. No Background GC Thread (Severity: LOW)
 
-**Problem:** GC is only triggered manually via `SHOW cedar_gc`. There is no automatic periodic GC sweep. Long-running workloads will accumulate stale MVCC versions until `run_gc()` is explicitly called.
+**Problem:** GC is only triggered manually via `SHOW falcon_gc`. There is no automatic periodic GC sweep. Long-running workloads will accumulate stale MVCC versions until `run_gc()` is explicitly called.
 
 **Fix:** Spawn a background tokio task that periodically calls `engine.gc_sweep(txn_mgr.min_active_ts())`.
 
@@ -207,7 +207,7 @@ BoundProjection::Aggregate(_, _, alias, _, _)
 
 ## 18. SSL/TLS Not Implemented (Severity: LOW)
 
-**Location:** `cedar_protocol_pg/src/server.rs` — SSLRequest handling
+**Location:** `falcon_protocol_pg/src/server.rs` — SSLRequest handling
 
 **Problem:** When a client sends `SSLRequest`, the server responds with `N` (SSL not supported). Encrypted connections are not possible.
 

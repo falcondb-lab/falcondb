@@ -1,11 +1,11 @@
 #!/bin/bash
-# Cedar Failover Demonstration
+# Falcon Failover Demonstration
 # Runs the failover exercise example.
 
 set -euo pipefail
 
-echo "=== Cedar Failover Exercise ==="
+echo "=== Falcon Failover Exercise ==="
 echo ""
-cargo run -p cedar_cluster --example failover_exercise
+cargo run -p falcon_cluster --example failover_exercise
 echo ""
 echo "=== Failover Exercise Complete ==="
