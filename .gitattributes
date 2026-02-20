@@ -1,0 +1,36 @@
+# Force LF for all text files by default
+* text=auto eol=lf
+
+# Rust sources
+*.rs text eol=lf
+
+# Config / build
+*.toml text eol=lf
+*.lock text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Documentation
+*.md text eol=lf
+*.txt text eol=lf
+
+# Proto
+*.proto text eol=lf
+
+# Shell scripts — must stay LF even on Windows
+*.sh text eol=lf
+
+# PowerShell — CRLF is fine
+*.ps1 text eol=crlf
+
+# Batch files — CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary files — never touch
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.wasm binary
