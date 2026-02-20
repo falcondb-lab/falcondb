@@ -867,7 +867,64 @@ async fn handle_connection_with_timeout(
                             }
                         }
                     } else {
-                        handler.handle_query(&sql, &mut session)
+                        // No statement_timeout: run in spawn_blocking so we can
+                        // poll the cancellation flag concurrently.
+                        let handler_ref = &handler;
+                        let query_future = tokio::task::spawn_blocking({
+                            let sql = sql.clone();
+                            let handler = handler_ref.clone();
+                            let mut sess = session.take_for_timeout();
+                            move || {
+                                let responses = handler.handle_query(&sql, &mut sess);
+                                (responses, sess)
+                            }
+                        });
+
+                        let cancel_flag = cancelled.clone();
+                        let cancel_poll = async {
+                            loop {
+                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                                if cancel_flag.load(Ordering::SeqCst) {
+                                    break;
+                                }
+                            }
+                        };
+
+                        tokio::select! {
+                            result = query_future => {
+                                match result {
+                                    Ok((responses, returned_session)) => {
+                                        session.restore_from_timeout(returned_session);
+                                        // Check if cancel arrived just as query finished
+                                        if cancelled.swap(false, Ordering::SeqCst) {
+                                            vec![BackendMessage::ErrorResponse {
+                                                severity: "ERROR".into(),
+                                                code: "57014".into(),
+                                                message: "canceling statement due to user request".into(),
+                                            }]
+                                        } else {
+                                            responses
+                                        }
+                                    }
+                                    Err(e) => {
+                                        vec![BackendMessage::ErrorResponse {
+                                            severity: "ERROR".into(),
+                                            code: "XX000".into(),
+                                            message: format!("Internal error: {}", e),
+                                        }]
+                                    }
+                                }
+                            }
+                            _ = cancel_poll => {
+                                cancelled.store(false, Ordering::SeqCst);
+                                tracing::info!("Query cancelled mid-execution for session {}", session_id);
+                                vec![BackendMessage::ErrorResponse {
+                                    severity: "ERROR".into(),
+                                    code: "57014".into(),
+                                    message: "canceling statement due to user request".into(),
+                                }]
+                            }
+                        }
                     };
 
                     for response in &responses {

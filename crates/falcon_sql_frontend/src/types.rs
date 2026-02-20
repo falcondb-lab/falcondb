@@ -598,6 +598,11 @@ pub enum ScalarFunc {
     JsonbEach,
     JsonbEachText,
     RowToJson,
+    // ── Generated extended functions (pattern-based) ──
+    /// ARRAY_MATRIX_{ROW|COLUMN}_{operation}{suffix}(arr, rows, cols, idx)
+    ArrayMatrixFunc(String),
+    /// STRING_{name}_ENCODE(fields...) / STRING_{name}_DECODE(line, idx)
+    StringEncodingFunc { name: String, encode: bool },
 }
 
 #[derive(Debug, Clone)]

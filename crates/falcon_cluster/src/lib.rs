@@ -15,6 +15,7 @@ pub mod routing;
 pub mod sharded_engine;
 pub mod sharding;
 pub mod two_phase;
+pub mod cross_shard;
 pub mod fault_injection;
 
 /// Protobuf types and tonic client/server for WAL replication.

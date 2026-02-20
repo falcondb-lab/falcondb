@@ -1,6 +1,7 @@
 pub mod cloud;
 pub mod compat;
 pub mod config;
+pub mod consistency;
 pub mod datum;
 pub mod edition;
 pub mod error;

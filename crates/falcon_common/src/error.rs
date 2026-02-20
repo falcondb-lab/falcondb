@@ -230,7 +230,10 @@ impl FalconError {
             FalconError::Storage(StorageError::MemoryLimitExceeded { .. }) => "53200",
             FalconError::Txn(TxnError::MemoryPressure(_)) => "53000",
             FalconError::Txn(TxnError::MemoryLimitExceeded(_)) => "53200",
+            FalconError::Txn(TxnError::WalBacklogExceeded(_)) => "53300",
+            FalconError::Txn(TxnError::ReplicationLagExceeded(_)) => "53301",
             FalconError::ReadOnly(_) => "25006",
+            FalconError::Cluster(ClusterError::Consensus(_)) => "58000",
             _ => "XX000",
         }
     }

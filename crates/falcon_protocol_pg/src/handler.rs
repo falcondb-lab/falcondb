@@ -1,7 +1,9 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use falcon_cluster::{DistributedQueryEngine, ReplicaRunnerMetrics};
+use falcon_cluster::{DistributedQueryEngine, HAReplicaGroup, ReplicaRunnerMetrics, SyncReplicationWaiter};
+use falcon_common::consistency::CommitPolicy;
+use parking_lot::RwLock;
 use falcon_common::datum::Datum;
 use falcon_common::types::ShardId;
 use falcon_common::error::FalconError;
@@ -51,6 +53,12 @@ pub struct QueryHandler {
     pub(crate) hotspot_detector: Arc<falcon_storage::hotspot::HotspotDetector>,
     /// DK-9: Consistency verifier for self-verification.
     pub(crate) consistency_verifier: Arc<falcon_storage::verification::ConsistencyVerifier>,
+    /// Active commit policy: determines durability guarantees before client ACK.
+    pub(crate) commit_policy: CommitPolicy,
+    /// Sync replication waiter: enforces quorum-ack / semi-sync / sync durability.
+    pub(crate) sync_waiter: Option<Arc<SyncReplicationWaiter>>,
+    /// HA replica group for sync replication LSN tracking.
+    pub(crate) ha_group: Option<Arc<RwLock<HAReplicaGroup>>>,
 }
 
 impl QueryHandler {
@@ -76,6 +84,9 @@ impl QueryHandler {
             security_manager: Arc::new(falcon_storage::security_manager::SecurityManager::new()),
             hotspot_detector: Arc::new(falcon_storage::hotspot::HotspotDetector::default()),
             consistency_verifier: Arc::new(falcon_storage::verification::ConsistencyVerifier::default()),
+            commit_policy: CommitPolicy::default(),
+            sync_waiter: None,
+            ha_group: None,
         }
     }
 
@@ -108,7 +119,25 @@ impl QueryHandler {
             security_manager: Arc::new(falcon_storage::security_manager::SecurityManager::new()),
             hotspot_detector: Arc::new(falcon_storage::hotspot::HotspotDetector::default()),
             consistency_verifier: Arc::new(falcon_storage::verification::ConsistencyVerifier::default()),
+            commit_policy: CommitPolicy::default(),
+            sync_waiter: None,
+            ha_group: None,
         }
+    }
+
+    /// Set the commit policy for durability guarantees.
+    pub fn set_commit_policy(&mut self, policy: CommitPolicy) {
+        self.commit_policy = policy;
+    }
+
+    /// Configure synchronous replication waiter for quorum-ack / semi-sync / sync modes.
+    pub fn set_sync_replication(
+        &mut self,
+        waiter: Arc<SyncReplicationWaiter>,
+        group: Arc<RwLock<HAReplicaGroup>>,
+    ) {
+        self.sync_waiter = Some(waiter);
+        self.ha_group = Some(group);
     }
 
     /// Set replica runner metrics for SHOW falcon.replica_stats.
@@ -221,7 +250,20 @@ impl QueryHandler {
                 PhysicalPlan::Commit => {
                     if let Some(ref txn) = session.txn {
                         match self.txn_mgr.commit(txn.txn_id) {
-                            Ok(_) => {
+                            Ok(commit_ts) => {
+                                // Sync replication: wait for replicas to ack before responding
+                                if let (Some(ref waiter), Some(ref group)) = (&self.sync_waiter, &self.ha_group) {
+                                    let timeout = std::time::Duration::from_secs(5);
+                                    let group_read = group.read();
+                                    if let Err(e) = waiter.wait_for_commit(commit_ts.0, &group_read, timeout) {
+                                        tracing::warn!("Sync replication wait failed after COMMIT: {}", e);
+                                        // Commit succeeded locally but replication timed out —
+                                        // report as warning, not error (data is durable on primary).
+                                        messages.push(BackendMessage::NoticeResponse {
+                                            message: format!("sync replication timeout: {}", e),
+                                        });
+                                    }
+                                }
                                 session.txn = None;
                                 session.autocommit = true;
                                 self.flush_txn_stats();

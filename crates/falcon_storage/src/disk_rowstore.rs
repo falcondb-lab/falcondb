@@ -437,10 +437,14 @@ impl DiskRowstoreTable {
 
         for &page_id in leaves.iter() {
             if let Some(page) = self.pool.fetch_page(page_id) {
-                for (pk, row) in page.read_rows() {
-                    // Only include rows still in the index (not deleted)
-                    if idx.contains_key(&pk) {
-                        results.push((pk, row));
+                for (slot_idx, (pk, row)) in page.read_rows().into_iter().enumerate() {
+                    // Only include rows whose index entry points to this exact location.
+                    // After update (delete+insert), stale row data remains in the page
+                    // but the index points to the new location.
+                    if let Some(&(idx_page, idx_slot)) = idx.get(&pk) {
+                        if idx_page == page_id && idx_slot == slot_idx {
+                            results.push((pk, row));
+                        }
                     }
                 }
             }

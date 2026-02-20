@@ -225,6 +225,30 @@ impl AuditLog {
         self.events.lock().len()
     }
 
+    /// Wait until the background drain thread has processed all pending events
+    /// in the channel. Useful in tests to avoid race conditions.
+    pub fn flush(&self) {
+        // Spin until buffered_count == total_events - dropped_events (i.e. channel is drained).
+        // The drain thread is always running, so this converges quickly.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let total = self.total_events.load(Ordering::SeqCst);
+            let dropped = self.dropped_events.load(Ordering::SeqCst);
+            let buffered = self.events.lock().len() as u64;
+            let expected = total.saturating_sub(dropped);
+            // Account for capacity eviction: buffered may be less than expected
+            // if capacity < expected. In that case, check buffered >= min(expected, capacity).
+            let target = expected.min(self.capacity as u64);
+            if buffered >= target {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                break; // safety valve
+            }
+            std::thread::yield_now();
+        }
+    }
+
     /// Clear all events from the buffer.
     pub fn clear(&self) {
         self.events.lock().clear();
@@ -257,6 +281,7 @@ mod tests {
         let log = AuditLog::new();
         log.record_login(SYSTEM_TENANT_ID, RoleId(0), "falcon", 1, Some("127.0.0.1".into()), true);
         log.record_ddl(SYSTEM_TENANT_ID, RoleId(0), "falcon", 1, "CREATE TABLE t(id INT)", true);
+        log.flush();
 
         assert_eq!(log.total_events(), 2);
         assert_eq!(log.buffered_count(), 2);
@@ -274,6 +299,7 @@ mod tests {
         for i in 0..5 {
             log.record_login(SYSTEM_TENANT_ID, RoleId(0), "falcon", i, None, true);
         }
+        log.flush();
         assert_eq!(log.buffered_count(), 3);
         assert_eq!(log.total_events(), 5);
 
@@ -290,6 +316,7 @@ mod tests {
         log.record_login(SYSTEM_TENANT_ID, RoleId(0), "falcon", 1, None, true);
         log.record_ddl(SYSTEM_TENANT_ID, RoleId(0), "falcon", 1, "CREATE TABLE x(id INT)", true);
         log.record_login(SYSTEM_TENANT_ID, RoleId(1), "alice", 2, None, false);
+        log.flush();
 
         let logins = log.snapshot_by_type(AuditEventType::Login, 10);
         assert_eq!(logins.len(), 1);
@@ -306,6 +333,7 @@ mod tests {
         log.record_login(TenantId(1), RoleId(10), "alice", 1, None, true);
         log.record_login(TenantId(2), RoleId(20), "bob", 2, None, true);
         log.record_ddl(TenantId(1), RoleId(10), "alice", 1, "CREATE TABLE t(x INT)", true);
+        log.flush();
 
         let t1_events = log.snapshot_by_tenant(TenantId(1), 10);
         assert_eq!(t1_events.len(), 2);
@@ -316,6 +344,7 @@ mod tests {
     fn test_clear() {
         let log = AuditLog::new();
         log.record_login(SYSTEM_TENANT_ID, RoleId(0), "falcon", 1, None, true);
+        log.flush();
         assert_eq!(log.buffered_count(), 1);
 
         log.clear();
@@ -328,6 +357,7 @@ mod tests {
         let log = AuditLog::new();
         log.record_login(SYSTEM_TENANT_ID, RoleId(0), "falcon", 1, None, true);
         log.record_login(SYSTEM_TENANT_ID, RoleId(0), "falcon", 2, None, true);
+        log.flush();
 
         let snap = log.snapshot(10);
         assert_eq!(snap[0].event_id, 2);
@@ -342,6 +372,7 @@ mod tests {
             TenantId(1), RoleId(0), "falcon", 1,
             "GRANT SELECT ON users TO alice",
         );
+        log.flush();
         let snap = log.snapshot(1);
         assert_eq!(snap[0].event_type, AuditEventType::PrivilegeChange);
         assert!(snap[0].detail.contains("GRANT SELECT"));

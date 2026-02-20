@@ -206,6 +206,28 @@ pub fn resolve_scalar_func(name: &str) -> Option<ScalarFunc> {
         "JSONB_EACH" | "JSON_EACH" => ScalarFunc::JsonbEach,
         "JSONB_EACH_TEXT" | "JSON_EACH_TEXT" => ScalarFunc::JsonbEachText,
         "ROW_TO_JSON" => ScalarFunc::RowToJson,
-        _ => return None,
+        _ => {
+            // Pattern-based resolution for generated extended functions
+            if name.starts_with("ARRAY_MATRIX_") {
+                return Some(ScalarFunc::ArrayMatrixFunc(name.to_string()));
+            }
+            if let Some(stem) = name.strip_suffix("_ENCODE") {
+                if stem.starts_with("STRING_") {
+                    return Some(ScalarFunc::StringEncodingFunc {
+                        name: stem.to_string(),
+                        encode: true,
+                    });
+                }
+            }
+            if let Some(stem) = name.strip_suffix("_DECODE") {
+                if stem.starts_with("STRING_") {
+                    return Some(ScalarFunc::StringEncodingFunc {
+                        name: stem.to_string(),
+                        encode: false,
+                    });
+                }
+            }
+            return None;
+        }
     })
 }
