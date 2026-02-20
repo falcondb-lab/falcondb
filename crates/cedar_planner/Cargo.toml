@@ -1,9 +1,0 @@
-[package]
-name = "cedar_planner"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-cedar_common = { path = "../cedar_common" }
-cedar_sql_frontend = { path = "../cedar_sql_frontend" }
-tracing.workspace = true
