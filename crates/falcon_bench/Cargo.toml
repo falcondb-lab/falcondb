@@ -1,0 +1,13 @@
+[package]
+name = "falcon_bench"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+falcon_common = { path = "../falcon_common" }
+falcon_cluster = { path = "../falcon_cluster" }
+falcon_storage = { path = "../falcon_storage" }
+falcon_txn = { path = "../falcon_txn" }
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true

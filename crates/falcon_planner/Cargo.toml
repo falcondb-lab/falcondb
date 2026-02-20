@@ -1,0 +1,9 @@
+[package]
+name = "falcon_planner"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+falcon_common = { path = "../falcon_common" }
+falcon_sql_frontend = { path = "../falcon_sql_frontend" }
+tracing.workspace = true

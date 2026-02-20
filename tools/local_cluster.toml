@@ -1,0 +1,19 @@
+# Local development cluster configuration
+# Usage: cargo run -p cedar_server -- -c tools/local_cluster.toml
+
+[server]
+pg_listen_addr = "0.0.0.0:5433"
+admin_listen_addr = "0.0.0.0:8080"
+node_id = 1
+max_connections = 128
+
+[storage]
+memory_limit_bytes = 0
+wal_enabled = false
+data_dir = "./cedar_dev_data"
+
+[gc]
+enabled = true
+interval_ms = 5000
+batch_size = 0
+min_chain_length = 2

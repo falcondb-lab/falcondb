@@ -1,0 +1,80 @@
+syntax = "proto3";
+
+package falcon.replication;
+
+// ---------------------------------------------------------------------------
+// WAL Streaming Service — M2
+//
+// Primary streams WAL chunks to replicas via bidirectional gRPC streaming.
+// Replicas ack their applied LSN back to primary for lag tracking.
+// ---------------------------------------------------------------------------
+
+service WalReplication {
+  // Server-streaming: replica subscribes to WAL from a given LSN.
+  // Primary pushes WalChunk messages as new WAL records are appended.
+  rpc SubscribeWal(SubscribeWalRequest) returns (stream WalChunkMessage);
+
+  // Unary: replica acks its applied LSN to primary.
+  rpc AckWal(AckWalRequest) returns (AckWalResponse);
+
+  // Unary: replica requests a full checkpoint for bootstrap (new replica join).
+  rpc GetCheckpoint(GetCheckpointRequest) returns (stream CheckpointChunk);
+}
+
+// ---------------------------------------------------------------------------
+// Subscribe WAL
+// ---------------------------------------------------------------------------
+
+message SubscribeWalRequest {
+  uint64 shard_id = 1;
+  uint64 from_lsn = 2;
+  uint32 max_records_per_chunk = 3;
+}
+
+message WalChunkMessage {
+  uint64 shard_id = 1;
+  uint64 start_lsn = 2;
+  uint64 end_lsn = 3;
+  repeated WalRecordEntry records = 4;
+  uint32 checksum = 5;
+}
+
+message WalRecordEntry {
+  uint64 lsn = 1;
+  // Serialized WalRecord (serde_json or bincode).
+  // Using bytes allows us to evolve the WalRecord enum without proto changes.
+  bytes record_payload = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Ack WAL
+// ---------------------------------------------------------------------------
+
+message AckWalRequest {
+  uint64 shard_id = 1;
+  uint64 replica_id = 2;
+  uint64 applied_lsn = 3;
+}
+
+message AckWalResponse {
+  bool success = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Checkpoint (for new replica bootstrap)
+// ---------------------------------------------------------------------------
+
+message GetCheckpointRequest {
+  uint64 shard_id = 1;
+}
+
+message CheckpointChunk {
+  // Sequence number within the checkpoint stream (0-indexed).
+  uint32 chunk_index = 1;
+  // Total number of chunks (known after first chunk).
+  uint32 total_chunks = 2;
+  // Serialized checkpoint data fragment.
+  bytes data = 3;
+  // The WAL LSN at checkpoint time — replica replays from here.
+  uint64 checkpoint_lsn = 4;
+}

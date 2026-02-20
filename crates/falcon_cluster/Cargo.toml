@@ -1,0 +1,25 @@
+[package]
+name = "falcon_cluster"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+falcon_common = { path = "../falcon_common" }
+falcon_executor = { path = "../falcon_executor" }
+falcon_planner = { path = "../falcon_planner" }
+falcon_proto = { path = "../falcon_proto" }
+falcon_sql_frontend = { path = "../falcon_sql_frontend" }
+falcon_storage = { path = "../falcon_storage" }
+falcon_txn = { path = "../falcon_txn" }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+dashmap.workspace = true
+xxhash-rust.workspace = true
+tonic.workspace = true
+prost.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+async-trait.workspace = true
+parking_lot.workspace = true
+

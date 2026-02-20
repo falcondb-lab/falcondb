@@ -1,0 +1,20 @@
+[package]
+name = "falcon_executor"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+falcon_common = { path = "../falcon_common" }
+falcon_storage = { path = "../falcon_storage" }
+falcon_txn = { path = "../falcon_txn" }
+falcon_planner = { path = "../falcon_planner" }
+falcon_sql_frontend = { path = "../falcon_sql_frontend" }
+sqlparser.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+regex.workspace = true
+md-5.workspace = true
+sha2.workspace = true
+base64.workspace = true
+serde_json.workspace = true
+bincode.workspace = true

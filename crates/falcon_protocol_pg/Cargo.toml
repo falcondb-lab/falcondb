@@ -1,0 +1,21 @@
+[package]
+name = "falcon_protocol_pg"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+falcon_common = { path = "../falcon_common" }
+falcon_cluster = { path = "../falcon_cluster" }
+falcon_sql_frontend = { path = "../falcon_sql_frontend" }
+falcon_planner = { path = "../falcon_planner" }
+falcon_executor = { path = "../falcon_executor" }
+falcon_storage = { path = "../falcon_storage" }
+falcon_txn = { path = "../falcon_txn" }
+falcon_observability = { path = "../falcon_observability" }
+tokio.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+md-5.workspace = true
+sha2.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true

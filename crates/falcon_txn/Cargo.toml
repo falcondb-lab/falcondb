@@ -1,0 +1,12 @@
+[package]
+name = "falcon_txn"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+falcon_common = { path = "../falcon_common" }
+falcon_storage = { path = "../falcon_storage" }
+tokio.workspace = true
+parking_lot.workspace = true
+dashmap.workspace = true
+tracing.workspace = true
