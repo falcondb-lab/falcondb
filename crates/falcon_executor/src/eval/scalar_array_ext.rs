@@ -304,6 +304,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                         }
                     }
                     Datum::Jsonb(v) => v.to_string(),
+                    Datum::Decimal(m, s) => falcon_common::datum::decimal_to_string(*m, *s),
                 }
             }
             match args.first() {

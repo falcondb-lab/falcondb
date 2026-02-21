@@ -186,6 +186,14 @@ impl RecordBatch {
         RecordBatch { columns, num_rows, selection: None }
     }
 
+    /// Build a RecordBatch directly from pre-computed column vectors (columnar scan path).
+    /// Each element of `columns` is a Vec<Datum> for one column; all must have equal length.
+    pub fn from_columns(columns: Vec<Vec<Datum>>) -> Self {
+        let num_rows = columns.first().map(|c| c.len()).unwrap_or(0);
+        let col_vecs = columns.iter().map(|c| ColumnVector::from_datums(c)).collect();
+        RecordBatch { columns: col_vecs, num_rows, selection: None }
+    }
+
     /// Materialise active rows back to OwnedRow format.
     pub fn to_rows(&self) -> Vec<OwnedRow> {
         let indices = self.active_indices();
@@ -802,6 +810,7 @@ fn hash_datum(d: &Datum) -> u64 {
             arr.len().hash(&mut hasher);
         }
         Datum::Jsonb(v) => v.to_string().hash(&mut hasher),
+        Datum::Decimal(m, s) => { m.hash(&mut hasher); s.hash(&mut hasher); }
     }
     hasher.finish()
 }

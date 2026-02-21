@@ -99,6 +99,26 @@ impl Executor {
         }
     }
 
+    /// Guard: reject DML if the transaction is in READ ONLY mode.
+    fn reject_if_txn_read_only(txn: &falcon_txn::TxnHandle, op: &str) -> Result<(), FalconError> {
+        if txn.read_only {
+            Err(FalconError::ReadOnly(format!(
+                "cannot execute {} in a read-only transaction", op
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Guard: abort if the transaction has exceeded its timeout.
+    fn check_txn_timeout(txn: &falcon_txn::TxnHandle) -> Result<(), FalconError> {
+        if txn.is_timed_out() {
+            Err(FalconError::Txn(falcon_common::error::TxnError::Timeout))
+        } else {
+            Ok(())
+        }
+    }
+
     /// Execute a parameterized physical plan within a transaction context.
     /// Substitutes `BoundExpr::Parameter` nodes with concrete values from `params`
     /// before delegating to `execute`.
@@ -149,6 +169,8 @@ impl Executor {
                 let txn = txn.ok_or(FalconError::Internal(
                     "INSERT requires active transaction".into(),
                 ))?;
+                Self::reject_if_txn_read_only(txn, "INSERT")?;
+                Self::check_txn_timeout(txn)?;
                 if let Some(sel) = source_select {
                     self.exec_insert_select(*table_id, schema, columns, sel, txn)
                 } else {
@@ -167,6 +189,8 @@ impl Executor {
                 let txn = txn.ok_or(FalconError::Internal(
                     "UPDATE requires active transaction".into(),
                 ))?;
+                Self::reject_if_txn_read_only(txn, "UPDATE")?;
+                Self::check_txn_timeout(txn)?;
                 self.exec_update(*table_id, schema, assignments, filter.as_ref(), returning, from_table.as_ref(), txn)
             }
             PhysicalPlan::Delete {
@@ -180,6 +204,8 @@ impl Executor {
                 let txn = txn.ok_or(FalconError::Internal(
                     "DELETE requires active transaction".into(),
                 ))?;
+                Self::reject_if_txn_read_only(txn, "DELETE")?;
+                Self::check_txn_timeout(txn)?;
                 self.exec_delete(*table_id, schema, filter.as_ref(), returning, using_table.as_ref(), txn)
             }
             PhysicalPlan::SeqScan {
@@ -629,6 +655,34 @@ impl Executor {
                     .collect();
                 Ok(ExecutionResult::Query { columns, rows })
             }
+            PhysicalPlan::ShowTenants => {
+                Ok(ExecutionResult::Query {
+                    columns: vec![("metric".into(), DataType::Text), ("value".into(), DataType::Text)],
+                    rows: vec![OwnedRow::new(vec![
+                        Datum::Text("tenant_count".into()),
+                        Datum::Text("0".into()),
+                    ])],
+                })
+            }
+            PhysicalPlan::ShowTenantUsage => {
+                Ok(ExecutionResult::Query {
+                    columns: vec![("metric".into(), DataType::Text), ("value".into(), DataType::Text)],
+                    rows: vec![OwnedRow::new(vec![
+                        Datum::Text("tenant_count".into()),
+                        Datum::Text("0".into()),
+                    ])],
+                })
+            }
+            PhysicalPlan::CreateTenant { name, max_qps: _, max_storage_bytes: _ } => {
+                Ok(ExecutionResult::Ddl {
+                    message: format!("CREATE TENANT {}", name),
+                })
+            }
+            PhysicalPlan::DropTenant { name } => {
+                Ok(ExecutionResult::Ddl {
+                    message: format!("DROP TENANT {}", name),
+                })
+            }
             PhysicalPlan::CopyFrom { .. } => {
                 // CopyFrom is handled specially by the protocol layer.
                 // The executor processes the received data via exec_copy_from_data.
@@ -985,6 +1039,10 @@ impl Executor {
                 vec![format!("{}DropSequence {}", pad, name)]
             }
             PhysicalPlan::ShowSequences => vec![format!("{}ShowSequences", pad)],
+            PhysicalPlan::ShowTenants => vec![format!("{}ShowTenants", pad)],
+            PhysicalPlan::ShowTenantUsage => vec![format!("{}ShowTenantUsage", pad)],
+            PhysicalPlan::CreateTenant { name, .. } => vec![format!("{}CreateTenant {}", pad, name)],
+            PhysicalPlan::DropTenant { name } => vec![format!("{}DropTenant {}", pad, name)],
             PhysicalPlan::CopyFrom { schema, .. } => {
                 vec![format!("{}CopyFrom STDIN into {}", pad, schema.name)]
             }

@@ -9,12 +9,16 @@ use falcon_common::types::{TableId, Timestamp, TxnId};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-/// P1-5: WAL format version for compatibility checks during online upgrades.
+/// WAL format version for compatibility checks during online upgrades.
 /// Increment this when the WalRecord enum changes in a backward-incompatible way.
-pub const WAL_FORMAT_VERSION: u32 = 2;
+/// v3: Added WalRecord::CreateIndex and WalRecord::DropIndex variants.
+pub const WAL_FORMAT_VERSION: u32 = 3;
 
-/// P1-5: Magic bytes written at the start of each WAL segment for validation.
-pub const WAL_MAGIC: &[u8; 4] = b"CDWL";
+/// Magic bytes written at the start of each WAL segment for validation.
+pub const WAL_MAGIC: &[u8; 4] = b"FALC";
+
+/// Size of the WAL segment header: magic (4) + format version (4) = 8 bytes.
+pub const WAL_SEGMENT_HEADER_SIZE: usize = 8;
 
 /// A single WAL record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +83,19 @@ pub enum WalRecord {
     DropSequence { name: String },
     /// DDL: set sequence value.
     SetSequenceValue { name: String, value: i64 },
+    /// DDL: create named index.
+    CreateIndex {
+        index_name: String,
+        table_name: String,
+        column_idx: usize,
+        unique: bool,
+    },
+    /// DDL: drop named index.
+    DropIndex {
+        index_name: String,
+        table_name: String,
+        column_idx: usize,
+    },
     /// DDL: truncate table.
     TruncateTable { table_name: String },
     /// Checkpoint marker.
@@ -158,11 +175,14 @@ impl WalWriter {
         let segment_id = latest_segment.unwrap_or(0);
         let seg_path = dir.join(segment_filename(segment_id));
 
+        let is_new_file;
         let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&seg_path)?;
-        let current_segment_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        is_new_file = file_len == 0;
+        let mut current_segment_size = file_len;
 
         // Also handle legacy single-file WAL (falcon.wal)
         let legacy_path = dir.join("falcon.wal");
@@ -171,9 +191,19 @@ impl WalWriter {
             let _ = fs::rename(&legacy_path, &seg_path);
         }
 
+        let mut writer = BufWriter::new(file);
+
+        // Write segment header for brand-new segments
+        if is_new_file {
+            writer.write_all(WAL_MAGIC)?;
+            writer.write_all(&WAL_FORMAT_VERSION.to_le_bytes())?;
+            writer.flush()?;
+            current_segment_size = WAL_SEGMENT_HEADER_SIZE as u64;
+        }
+
         Ok(Self {
             inner: Mutex::new(WalWriterInner {
-                writer: BufWriter::new(file),
+                writer,
                 dir: dir.to_path_buf(),
                 current_segment: segment_id,
                 current_segment_size,
@@ -268,7 +298,11 @@ impl WalWriter {
             .append(true)
             .open(&new_path)?;
         inner.writer = BufWriter::new(file);
-        inner.current_segment_size = 0;
+
+        // Write segment header
+        inner.writer.write_all(WAL_MAGIC)?;
+        inner.writer.write_all(&WAL_FORMAT_VERSION.to_le_bytes())?;
+        inner.current_segment_size = WAL_SEGMENT_HEADER_SIZE as u64;
         inner.pending_count = 0;
 
         tracing::debug!("WAL rotated to segment {}", inner.current_segment);
@@ -385,8 +419,19 @@ impl WalReader {
     }
 
     /// Parse WAL records from raw bytes, appending to the output vector.
+    /// Automatically detects and skips the segment header (WAL_MAGIC + version).
     fn parse_records(data: &[u8], records: &mut Vec<WalRecord>) {
         let mut pos = 0;
+
+        // Skip segment header if present (magic + format version = 8 bytes)
+        if data.len() >= WAL_SEGMENT_HEADER_SIZE
+            && &data[0..4] == WAL_MAGIC.as_slice()
+        {
+            let _format_version = u32::from_le_bytes([
+                data[4], data[5], data[6], data[7],
+            ]);
+            pos = WAL_SEGMENT_HEADER_SIZE;
+        }
         while pos + 8 <= data.len() {
             let len = u32::from_le_bytes([
                 data[pos],

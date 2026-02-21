@@ -40,6 +40,7 @@ impl QueryHandler {
             "falcon.two_phase" => Some(self.show_falcon_two_phase()),
             "falcon.slow_txns" => Some(self.show_falcon_slow_txns()),
             "falcon.tenants" => Some(self.show_falcon_tenants()),
+            "falcon.tenant_usage" => Some(self.show_falcon_tenant_usage()),
             "falcon.audit_log" => Some(self.show_falcon_audit_log()),
             "falcon.sla_stats" => Some(self.show_falcon_sla_stats()),
             "falcon.license" => Some(self.show_falcon_license()),
@@ -51,6 +52,16 @@ impl QueryHandler {
             "falcon.hotspots" => Some(self.show_falcon_hotspots()),
             "falcon.verification" => Some(self.show_falcon_verification()),
             "falcon.latency_contract" => Some(self.show_falcon_latency_contract()),
+            "falcon.cluster_events" => Some(self.show_falcon_cluster_events()),
+            "falcon.node_lifecycle" => Some(self.show_falcon_node_lifecycle()),
+            "falcon.rebalance_plan" => Some(self.show_falcon_rebalance_plan()),
+            "falcon.priority_scheduler" => Some(self.show_falcon_priority_scheduler()),
+            "falcon.token_bucket" => Some(self.show_falcon_token_bucket()),
+            "falcon.two_phase_config" => Some(self.show_falcon_two_phase_config()),
+            "falcon.fault_injection" => Some(self.show_falcon_fault_injection()),
+            "falcon.observability_catalog" => Some(self.show_falcon_observability_catalog()),
+            "falcon.security_audit" => Some(self.show_falcon_security_audit()),
+            "falcon.wire_compat" => Some(self.show_falcon_wire_compat()),
             _ => None,
         }
     }
@@ -755,6 +766,39 @@ impl QueryHandler {
         )
     }
 
+    fn show_falcon_tenant_usage(&self) -> Vec<BackendMessage> {
+        let snapshots = self.tenant_registry.all_tenant_snapshots();
+        if snapshots.is_empty() {
+            return self.single_row_result(
+                vec![("metric", 30, -1), ("value", 30, -1)],
+                vec![vec![Some("tenant_count".into()), Some("0".into())]],
+            );
+        }
+        let columns = vec![
+            ("tenant_id", 23, 4),
+            ("name", 64, -1),
+            ("status", 16, -1),
+            ("active_txns", 23, 4),
+            ("txns_committed", 20, 8),
+            ("txns_aborted", 20, 8),
+            ("memory_bytes", 20, 8),
+            ("quota_exceeded", 20, 8),
+            ("current_qps", 20, 8),
+        ];
+        let rows: Vec<Vec<Option<String>>> = snapshots.iter().map(|s| vec![
+            Some(s.tenant_id.0.to_string()),
+            Some(s.tenant_name.clone()),
+            Some(format!("{:?}", s.status)),
+            Some(s.active_txns.to_string()),
+            Some(s.txns_committed.to_string()),
+            Some(s.txns_aborted.to_string()),
+            Some(s.memory_bytes.to_string()),
+            Some(s.quota_exceeded_count.to_string()),
+            Some(format!("{:.1}", s.current_qps)),
+        ]).collect();
+        self.single_row_result(columns, rows)
+    }
+
     fn show_falcon_audit_log(&self) -> Vec<BackendMessage> {
         let events = self.audit_log.snapshot(50);
         let mut rows = vec![
@@ -997,6 +1041,539 @@ impl QueryHandler {
         ];
         self.single_row_result(
             vec![("metric", 25, -1), ("value", 25, -1)],
+            rows,
+        )
+    }
+
+    // ── Cluster Operations Closure ──────────────────────────────────────
+
+    fn show_falcon_cluster_events(&self) -> Vec<BackendMessage> {
+        let events = self.cluster_admin.event_log().snapshot();
+        let rows: Vec<Vec<Option<String>>> = events
+            .iter()
+            .map(|e| {
+                vec![
+                    Some(e.seq.to_string()),
+                    Some(e.timestamp_ms.to_string()),
+                    Some(e.category.to_string()),
+                    Some(e.severity.to_string()),
+                    Some(e.node_id.to_string()),
+                    Some(if e.shard_id == u64::MAX { "N/A".into() } else { e.shard_id.to_string() }),
+                    Some(e.from_state.clone()),
+                    Some(e.to_state.clone()),
+                    Some(e.message.clone()),
+                ]
+            })
+            .collect();
+        if rows.is_empty() {
+            return self.single_row_result(
+                vec![
+                    ("seq", 20, -1), ("timestamp_ms", 20, -1), ("category", 25, -1),
+                    ("severity", 25, -1), ("node_id", 20, -1), ("shard_id", 20, -1),
+                    ("from_state", 25, -1), ("to_state", 25, -1), ("message", 25, -1),
+                ],
+                vec![vec![
+                    Some("(no events)".into()), Some("".into()), Some("".into()),
+                    Some("".into()), Some("".into()), Some("".into()),
+                    Some("".into()), Some("".into()), Some("".into()),
+                ]],
+            );
+        }
+        self.single_row_result(
+            vec![
+                ("seq", 20, -1), ("timestamp_ms", 20, -1), ("category", 25, -1),
+                ("severity", 25, -1), ("node_id", 20, -1), ("shard_id", 20, -1),
+                ("from_state", 25, -1), ("to_state", 25, -1), ("message", 25, -1),
+            ],
+            rows,
+        )
+    }
+
+    fn show_falcon_node_lifecycle(&self) -> Vec<BackendMessage> {
+        let scale_outs = self.cluster_admin.scale_out_snapshot();
+        let scale_ins = self.cluster_admin.scale_in_snapshot();
+
+        let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+
+        for op in &scale_outs {
+            rows.push(vec![
+                Some("scale_out".into()),
+                Some(op.node_id.0.to_string()),
+                Some(op.state.to_string()),
+                Some(format!("{:.1}s", op.elapsed().as_secs_f64())),
+                Some(op.error.clone().unwrap_or_default()),
+            ]);
+        }
+        for op in &scale_ins {
+            rows.push(vec![
+                Some("scale_in".into()),
+                Some(op.node_id.0.to_string()),
+                Some(op.state.to_string()),
+                Some(format!("{:.1}s", op.elapsed().as_secs_f64())),
+                Some(op.error.clone().unwrap_or_default()),
+            ]);
+        }
+
+        if rows.is_empty() {
+            rows.push(vec![
+                Some("(none)".into()), Some("".into()), Some("".into()),
+                Some("".into()), Some("".into()),
+            ]);
+        }
+
+        self.single_row_result(
+            vec![
+                ("operation", 25, -1), ("node_id", 20, -1), ("state", 25, -1),
+                ("elapsed", 25, -1), ("error", 25, -1),
+            ],
+            rows,
+        )
+    }
+
+    fn show_falcon_rebalance_plan(&self) -> Vec<BackendMessage> {
+        if let Some(ref dist) = self.dist_engine {
+            let snapshot = dist.shard_load_snapshot();
+            let planner = falcon_cluster::rebalancer::RebalancePlanner::new(
+                falcon_cluster::rebalancer::RebalancerConfig::default(),
+            );
+            let plan = dist.rebalance_plan(&planner);
+
+            let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+            rows.push(vec![
+                Some("summary".into()),
+                Some("".into()),
+                Some("".into()),
+                Some(format!("{} tasks", plan.tasks.len())),
+                Some(format!("{} rows", plan.total_rows_to_move())),
+                Some(plan.estimated_duration_display()),
+            ]);
+            rows.push(vec![
+                Some("imbalance_ratio".into()),
+                Some("".into()),
+                Some("".into()),
+                Some(format!("{:.3}", snapshot.imbalance_ratio())),
+                Some(format!("{} total rows", snapshot.total_rows())),
+                Some("".into()),
+            ]);
+
+            for task in &plan.tasks {
+                rows.push(vec![
+                    Some("move".into()),
+                    Some(format!("shard_{} → shard_{}", task.source_shard.0, task.target_shard.0)),
+                    Some(task.table_name.clone()),
+                    Some(format!("{} rows", task.rows_to_move)),
+                    Some("pending".into()),
+                    Some(format!("~{}ms", task.estimated_time_ms)),
+                ]);
+            }
+
+            if plan.tasks.is_empty() {
+                rows.push(vec![
+                    Some("(balanced)".into()),
+                    Some("".into()),
+                    Some("".into()),
+                    Some("no moves needed".into()),
+                    Some("".into()),
+                    Some("".into()),
+                ]);
+            }
+
+            self.single_row_result(
+                vec![
+                    ("type", 25, -1), ("shards", 25, -1), ("table", 25, -1),
+                    ("detail", 25, -1), ("status", 25, -1), ("estimated_time", 25, -1),
+                ],
+                rows,
+            )
+        } else {
+            self.single_row_result(
+                vec![("metric", 25, -1), ("value", 25, -1)],
+                vec![vec![
+                    Some("rebalance_plan".into()),
+                    Some("single-shard mode — rebalance not applicable".into()),
+                ]],
+            )
+        }
+    }
+
+    /// Handle cluster admin commands dispatched from the query handler.
+    /// Commands: `SELECT falcon_add_node(id)`, `SELECT falcon_remove_node(id)`,
+    ///           `SELECT falcon_promote_leader(shard_id)`,
+    ///           `SELECT falcon_rebalance_apply()`.
+    pub(crate) fn handle_cluster_admin_command(
+        &self,
+        command: &str,
+        args: &[&str],
+    ) -> Option<Vec<BackendMessage>> {
+        match command {
+            "falcon_add_node" => {
+                let node_id: u64 = args.first()
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(0);
+                if node_id == 0 {
+                    return Some(self.single_row_result(
+                        vec![("result", 25, -1)],
+                        vec![vec![Some("ERROR: invalid node_id (must be > 0)".into())]],
+                    ));
+                }
+                match self.cluster_admin.begin_scale_out(falcon_common::types::NodeId(node_id)) {
+                    Ok(()) => Some(self.single_row_result(
+                        vec![("result", 25, -1)],
+                        vec![vec![Some(format!("Scale-out initiated for node {}", node_id))]],
+                    )),
+                    Err(e) => Some(self.single_row_result(
+                        vec![("result", 25, -1)],
+                        vec![vec![Some(format!("ERROR: {}", e))]],
+                    )),
+                }
+            }
+            "falcon_remove_node" => {
+                let node_id: u64 = args.first()
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(0);
+                if node_id == 0 {
+                    return Some(self.single_row_result(
+                        vec![("result", 25, -1)],
+                        vec![vec![Some("ERROR: invalid node_id (must be > 0)".into())]],
+                    ));
+                }
+                match self.cluster_admin.begin_scale_in(falcon_common::types::NodeId(node_id)) {
+                    Ok(()) => Some(self.single_row_result(
+                        vec![("result", 25, -1)],
+                        vec![vec![Some(format!("Scale-in initiated for node {}", node_id))]],
+                    )),
+                    Err(e) => Some(self.single_row_result(
+                        vec![("result", 25, -1)],
+                        vec![vec![Some(format!("ERROR: {}", e))]],
+                    )),
+                }
+            }
+            "falcon_promote_leader" => {
+                let shard_id: u64 = args.first()
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(u64::MAX);
+                if shard_id == u64::MAX {
+                    return Some(self.single_row_result(
+                        vec![("result", 25, -1)],
+                        vec![vec![Some("ERROR: invalid shard_id".into())]],
+                    ));
+                }
+                self.cluster_admin.log_leader_transfer(
+                    falcon_common::types::ShardId(shard_id),
+                    falcon_common::types::NodeId(0),
+                    falcon_common::types::NodeId(0),
+                );
+                Some(self.single_row_result(
+                    vec![("result", 25, -1)],
+                    vec![vec![Some(format!(
+                        "Leader promotion requested for shard {} (will execute on next failover cycle)",
+                        shard_id
+                    ))]],
+                ))
+            }
+            "falcon_rebalance_apply" => {
+                if self.dist_engine.is_none() {
+                    return Some(self.single_row_result(
+                        vec![("result", 25, -1)],
+                        vec![vec![Some("ERROR: single-shard mode — rebalance not applicable".into())]],
+                    ));
+                }
+                let planner = falcon_cluster::rebalancer::RebalancePlanner::new(
+                    falcon_cluster::rebalancer::RebalancerConfig::default(),
+                );
+                let plan = self.dist_engine.as_ref().unwrap().rebalance_plan(&planner);
+                let num_tasks = plan.tasks.len();
+                let total_rows = plan.total_rows_to_move();
+
+                self.cluster_admin.log_rebalance_plan(num_tasks, total_rows);
+
+                if plan.tasks.is_empty() {
+                    return Some(self.single_row_result(
+                        vec![("result", 25, -1)],
+                        vec![vec![Some("Cluster is balanced — no migration needed".into())]],
+                    ));
+                }
+
+                self.cluster_admin.log_rebalance_start(num_tasks);
+
+                let start = std::time::Instant::now();
+                let (completed, failed, rows_migrated) =
+                    self.dist_engine.as_ref().unwrap().rebalance_execute(&plan);
+
+                self.cluster_admin.log_rebalance_complete(
+                    completed, failed, rows_migrated, start.elapsed(),
+                );
+
+                Some(self.single_row_result(
+                    vec![("result", 25, -1)],
+                    vec![vec![Some(format!(
+                        "Rebalance complete: {}/{} tasks, {} rows migrated in {:.1}s",
+                        completed, num_tasks, rows_migrated, start.elapsed().as_secs_f64(),
+                    ))]],
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    fn show_falcon_priority_scheduler(&self) -> Vec<BackendMessage> {
+        let snap = self.priority_scheduler.snapshot();
+        let rows = vec![
+            vec![Some("high_active".into()), Some(snap.high_active.to_string())],
+            vec![Some("high_admitted".into()), Some(snap.high_admitted.to_string())],
+            vec![Some("high_rejected".into()), Some(snap.high_rejected.to_string())],
+            vec![Some("normal_active".into()), Some(snap.normal_active.to_string())],
+            vec![Some("normal_max".into()), Some(snap.normal_max.to_string())],
+            vec![Some("normal_admitted".into()), Some(snap.normal_admitted.to_string())],
+            vec![Some("normal_rejected".into()), Some(snap.normal_rejected.to_string())],
+            vec![Some("normal_wait_us".into()), Some(snap.normal_wait_us.to_string())],
+            vec![Some("low_active".into()), Some(snap.low_active.to_string())],
+            vec![Some("low_max".into()), Some(snap.low_max.to_string())],
+            vec![Some("low_admitted".into()), Some(snap.low_admitted.to_string())],
+            vec![Some("low_rejected".into()), Some(snap.low_rejected.to_string())],
+            vec![Some("low_wait_us".into()), Some(snap.low_wait_us.to_string())],
+            vec![Some("high_waiters".into()), Some(snap.high_waiters.to_string())],
+        ];
+        self.single_row_result(
+            vec![("metric", 25, -1), ("value", 25, -1)],
+            rows,
+        )
+    }
+
+    fn show_falcon_token_bucket(&self) -> Vec<BackendMessage> {
+        let snap = self.rebalance_token_bucket.snapshot();
+        let rows = vec![
+            vec![Some("rate_per_sec".into()), Some(snap.rate_per_sec.to_string())],
+            vec![Some("burst".into()), Some(snap.burst.to_string())],
+            vec![Some("available_tokens".into()), Some(snap.available_tokens.to_string())],
+            vec![Some("paused".into()), Some(snap.paused.to_string())],
+            vec![Some("total_consumed".into()), Some(snap.total_consumed.to_string())],
+            vec![Some("total_acquired".into()), Some(snap.total_acquired.to_string())],
+            vec![Some("total_rejected".into()), Some(snap.total_rejected.to_string())],
+            vec![Some("total_wait_us".into()), Some(snap.total_wait_us.to_string())],
+        ];
+        self.single_row_result(
+            vec![("metric", 25, -1), ("value", 25, -1)],
+            rows,
+        )
+    }
+
+    fn show_falcon_two_phase_config(&self) -> Vec<BackendMessage> {
+        let dl = self.decision_log.snapshot();
+        let tc = self.timeout_controller.snapshot();
+        let ss = self.slow_shard_tracker.snapshot();
+
+        let rows = vec![
+            // Decision log
+            vec![Some("decision_log.total_logged".into()), Some(dl.total_logged.to_string())],
+            vec![Some("decision_log.total_applied".into()), Some(dl.total_applied.to_string())],
+            vec![Some("decision_log.current_entries".into()), Some(dl.current_entries.to_string())],
+            vec![Some("decision_log.unapplied_count".into()), Some(dl.unapplied_count.to_string())],
+            vec![Some("decision_log.max_entries".into()), Some(dl.max_entries.to_string())],
+            // Layered timeouts
+            vec![Some("timeout.soft_ms".into()), Some(tc.soft_timeout_ms.to_string())],
+            vec![Some("timeout.hard_ms".into()), Some(tc.hard_timeout_ms.to_string())],
+            vec![Some("timeout.per_shard_us".into()), Some(tc.per_shard_timeout_us.to_string())],
+            vec![Some("timeout.total_soft_timeouts".into()), Some(tc.total_soft_timeouts.to_string())],
+            vec![Some("timeout.total_hard_timeouts".into()), Some(tc.total_hard_timeouts.to_string())],
+            vec![Some("timeout.total_shard_timeouts".into()), Some(tc.total_shard_timeouts.to_string())],
+            // Slow-shard policy
+            vec![Some("slow_shard.policy".into()), Some(ss.policy.to_string())],
+            vec![Some("slow_shard.threshold_us".into()), Some(ss.slow_threshold_us.to_string())],
+            vec![Some("slow_shard.hedge_delay_us".into()), Some(ss.hedge_delay_us.to_string())],
+            vec![Some("slow_shard.max_hedged_inflight".into()), Some(ss.max_hedged_inflight.to_string())],
+            vec![Some("slow_shard.total_slow_detected".into()), Some(ss.total_slow_detected.to_string())],
+            vec![Some("slow_shard.total_fast_aborts".into()), Some(ss.total_fast_aborts.to_string())],
+            vec![Some("slow_shard.total_hedged_sent".into()), Some(ss.total_hedged_sent.to_string())],
+            vec![Some("slow_shard.total_hedged_won".into()), Some(ss.total_hedged_won.to_string())],
+            vec![Some("slow_shard.hedged_inflight".into()), Some(ss.hedged_inflight.to_string())],
+        ];
+        self.single_row_result(
+            vec![("metric", 40, -1), ("value", 25, -1)],
+            rows,
+        )
+    }
+
+    fn show_falcon_fault_injection(&self) -> Vec<BackendMessage> {
+        let snap = self.fault_injector.full_snapshot();
+        let rows = vec![
+            vec![Some("leader_killed".into()), Some(snap.leader_killed.to_string())],
+            vec![Some("replica_delay_us".into()), Some(snap.replica_delay_us.to_string())],
+            vec![Some("wal_corruption_armed".into()), Some(snap.wal_corruption_armed.to_string())],
+            vec![Some("disk_delay_us".into()), Some(snap.disk_delay_us.to_string())],
+            vec![Some("faults_fired".into()), Some(snap.faults_fired.to_string())],
+            // Partition
+            vec![Some("partition.active".into()), Some(snap.partition.active.to_string())],
+            vec![Some("partition.group_a".into()), Some(format!("{:?}", snap.partition.group_a))],
+            vec![Some("partition.group_b".into()), Some(format!("{:?}", snap.partition.group_b))],
+            vec![Some("partition.partition_count".into()), Some(snap.partition.partition_count.to_string())],
+            vec![Some("partition.heal_count".into()), Some(snap.partition.heal_count.to_string())],
+            vec![Some("partition.total_events".into()), Some(snap.partition.total_events.to_string())],
+            // Jitter
+            vec![Some("jitter.enabled".into()), Some(snap.jitter.enabled.to_string())],
+            vec![Some("jitter.base_us".into()), Some(snap.jitter.base_us.to_string())],
+            vec![Some("jitter.amplitude_us".into()), Some(snap.jitter.amplitude_us.to_string())],
+            vec![Some("jitter.mode".into()), Some(snap.jitter.mode.to_string())],
+            vec![Some("jitter.total_events".into()), Some(snap.jitter.total_events.to_string())],
+        ];
+        self.single_row_result(
+            vec![("metric", 40, -1), ("value", 25, -1)],
+            rows,
+        )
+    }
+
+    fn show_falcon_observability_catalog(&self) -> Vec<BackendMessage> {
+        let commands: Vec<(&str, &str, &str)> = vec![
+            // Core
+            ("falcon.version", "Server version and build info", "v0.1"),
+            ("falcon.health", "Basic health status", "v0.1"),
+            ("falcon.node_role", "Current node role", "v0.1"),
+            // Transactions
+            ("falcon.txn", "Current session transaction state", "v0.1"),
+            ("falcon.txn_stats", "Transaction statistics", "v0.1"),
+            ("falcon.txn_history", "Recent transaction history", "v0.1"),
+            ("falcon.slow_txns", "Slow/long-running transactions", "v0.3"),
+            // Storage & WAL
+            ("falcon.wal_stats", "WAL write/flush/backlog statistics", "v0.1"),
+            ("falcon.gc_stats", "GC sweep statistics", "v0.1"),
+            ("falcon.gc_safepoint", "GC safepoint and active txn count", "v0.1"),
+            ("falcon.memory_pressure", "Memory usage, limits, pressure state", "v0.1"),
+            ("falcon.checkpoint_stats", "Checkpoint statistics", "v0.2"),
+            // Replication & HA
+            ("falcon.replication_stats", "Replication lag, applied LSN", "v0.1"),
+            ("falcon.replication", "Replication configuration", "v0.2"),
+            ("falcon.replica_stats", "Per-replica statistics", "v0.2"),
+            ("falcon.replica_health", "Replica health and connectivity", "v0.3"),
+            ("falcon.ha_status", "HA group status", "v0.3"),
+            // Cluster & Sharding
+            ("falcon.cluster", "Cluster topology and membership", "v0.2"),
+            ("falcon.shards", "Shard map and distribution", "v0.2"),
+            ("falcon.shard_stats", "Per-shard statistics", "v0.2"),
+            ("falcon.scatter_stats", "Scatter/gather query statistics", "v0.2"),
+            ("falcon.query_routing", "Query routing decisions", "v0.2"),
+            ("falcon.dist_capabilities", "Distributed query capabilities", "v0.2"),
+            ("falcon.rebalance_status", "Shard rebalancer status", "v0.3"),
+            ("falcon.two_phase", "2PC coordinator statistics", "v0.3"),
+            // Query Processing
+            ("falcon.slow_queries", "Slow query log entries", "v0.3"),
+            ("falcon.plan_cache", "Plan cache hit/miss statistics", "v0.3"),
+            // Multi-Tenancy
+            ("falcon.tenants", "Registered tenants", "v0.4"),
+            ("falcon.tenant_usage", "Per-tenant resource usage", "v0.4"),
+            // Enterprise & Security
+            ("falcon.license", "License information and edition", "v0.4"),
+            ("falcon.metering", "Resource metering per tenant", "v0.4"),
+            ("falcon.security", "Security posture", "v0.4"),
+            ("falcon.health_score", "Weighted health score", "v0.4"),
+            ("falcon.compat", "Compatibility information", "v0.4"),
+            ("falcon.audit_log", "Recent audit log entries", "v0.4"),
+            ("falcon.sla_stats", "SLA priority latency statistics", "v0.4"),
+            // Production Hardening (v0.5+)
+            ("falcon.admission", "Admission control permits", "v0.5"),
+            ("falcon.hotspots", "Hotspot detection results", "v0.5"),
+            ("falcon.verification", "Consistency verification status", "v0.5"),
+            ("falcon.latency_contract", "Latency contract and SLO targets", "v0.5"),
+            ("falcon.cluster_events", "Cluster event log", "v0.5"),
+            ("falcon.node_lifecycle", "Node lifecycle state machines", "v0.5"),
+            ("falcon.rebalance_plan", "Rebalance migration plan", "v0.5"),
+            // Tail Latency Governance (v0.6)
+            ("falcon.priority_scheduler", "Priority queue scheduler metrics", "v0.6"),
+            ("falcon.token_bucket", "Token bucket rate limiter metrics", "v0.6"),
+            // Deterministic 2PC (v0.7)
+            ("falcon.two_phase_config", "Decision log, timeouts, slow-shard policy", "v0.7"),
+            // Chaos Engineering (v0.8)
+            ("falcon.fault_injection", "Fault injector state", "v0.8"),
+            // Security Hardening (v0.9)
+            ("falcon.security_audit", "Auth rate limiter, password policy, SQL firewall", "v0.9"),
+            // Release Engineering (v0.9)
+            ("falcon.wire_compat", "Version, WAL format, snapshot format, min compatible", "v0.9"),
+            // Meta
+            ("falcon.observability_catalog", "This catalog of all SHOW commands", "v0.8"),
+        ];
+
+        let rows: Vec<Vec<Option<String>>> = commands
+            .iter()
+            .map(|(cmd, desc, since)| {
+                vec![
+                    Some(format!("SHOW {}", cmd)),
+                    Some(desc.to_string()),
+                    Some(since.to_string()),
+                ]
+            })
+            .collect();
+
+        self.single_row_result(
+            vec![("command", 40, -1), ("description", 50, -1), ("since", 10, -1)],
+            rows,
+        )
+    }
+
+    fn show_falcon_security_audit(&self) -> Vec<BackendMessage> {
+        let auth = self.auth_rate_limiter.snapshot();
+        let pw = self.password_policy.snapshot();
+        let fw = self.sql_firewall.snapshot();
+
+        let rows = vec![
+            // Auth rate limiter
+            vec![Some("auth.max_failures".into()), Some(auth.max_failures.to_string())],
+            vec![Some("auth.lockout_duration_secs".into()), Some(auth.lockout_duration_secs.to_string())],
+            vec![Some("auth.failure_window_secs".into()), Some(auth.failure_window_secs.to_string())],
+            vec![Some("auth.tracked_sources".into()), Some(auth.tracked_sources.to_string())],
+            vec![Some("auth.active_lockouts".into()), Some(auth.active_lockouts.to_string())],
+            vec![Some("auth.total_checks".into()), Some(auth.total_checks.to_string())],
+            vec![Some("auth.total_lockouts".into()), Some(auth.total_lockouts.to_string())],
+            vec![Some("auth.total_failures".into()), Some(auth.total_failures_recorded.to_string())],
+            // Password policy
+            vec![Some("password.min_length".into()), Some(pw.min_length.to_string())],
+            vec![Some("password.require_uppercase".into()), Some(pw.require_uppercase.to_string())],
+            vec![Some("password.require_lowercase".into()), Some(pw.require_lowercase.to_string())],
+            vec![Some("password.require_digit".into()), Some(pw.require_digit.to_string())],
+            vec![Some("password.require_special".into()), Some(pw.require_special.to_string())],
+            vec![Some("password.max_age_days".into()), Some(pw.max_age_days.to_string())],
+            vec![Some("password.total_checks".into()), Some(pw.total_checks.to_string())],
+            vec![Some("password.total_rejections".into()), Some(pw.total_rejections.to_string())],
+            // SQL firewall
+            vec![Some("firewall.detect_injection".into()), Some(fw.detect_injection.to_string())],
+            vec![Some("firewall.block_dangerous".into()), Some(fw.block_dangerous.to_string())],
+            vec![Some("firewall.block_stacking".into()), Some(fw.block_stacking.to_string())],
+            vec![Some("firewall.max_statement_length".into()), Some(fw.max_statement_length.to_string())],
+            vec![Some("firewall.custom_patterns".into()), Some(fw.custom_patterns_count.to_string())],
+            vec![Some("firewall.total_checks".into()), Some(fw.total_checks.to_string())],
+            vec![Some("firewall.total_blocked".into()), Some(fw.total_blocked.to_string())],
+            vec![Some("firewall.injection_detected".into()), Some(fw.injection_detected.to_string())],
+            vec![Some("firewall.dangerous_blocked".into()), Some(fw.dangerous_blocked.to_string())],
+            vec![Some("firewall.stacking_blocked".into()), Some(fw.stacking_blocked.to_string())],
+            vec![Some("firewall.overlength_blocked".into()), Some(fw.overlength_blocked.to_string())],
+        ];
+        self.single_row_result(
+            vec![("metric", 40, -1), ("value", 25, -1)],
+            rows,
+        )
+    }
+
+    fn show_falcon_wire_compat(&self) -> Vec<BackendMessage> {
+        use falcon_storage::upgrade::{
+            FALCON_VERSION_MAJOR, FALCON_VERSION_MINOR, FALCON_VERSION_PATCH,
+            MIN_COMPATIBLE_MAJOR, MIN_COMPATIBLE_MINOR,
+            SNAPSHOT_FORMAT_VERSION, VersionHeader,
+        };
+        use falcon_storage::wal::WAL_FORMAT_VERSION;
+
+        let current = VersionHeader::current();
+        let rows = vec![
+            vec![Some("server_version".into()), Some(current.version_string())],
+            vec![Some("wal_format_version".into()), Some(WAL_FORMAT_VERSION.to_string())],
+            vec![Some("snapshot_format_version".into()), Some(SNAPSHOT_FORMAT_VERSION.to_string())],
+            vec![Some("min_compatible_major".into()), Some(MIN_COMPATIBLE_MAJOR.to_string())],
+            vec![Some("min_compatible_minor".into()), Some(MIN_COMPATIBLE_MINOR.to_string())],
+            vec![Some("version_major".into()), Some(FALCON_VERSION_MAJOR.to_string())],
+            vec![Some("version_minor".into()), Some(FALCON_VERSION_MINOR.to_string())],
+            vec![Some("version_patch".into()), Some(FALCON_VERSION_PATCH.to_string())],
+            vec![Some("wal_magic".into()), Some("FALC".into())],
+            vec![Some("wal_segment_header_bytes".into()), Some("8".into())],
+        ];
+        self.single_row_result(
+            vec![("property", 35, -1), ("value", 20, -1)],
             rows,
         )
     }

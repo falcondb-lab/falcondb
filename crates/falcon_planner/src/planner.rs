@@ -174,6 +174,16 @@ impl Planner {
             BoundStatement::CreateSequence { name, start } => Ok(PhysicalPlan::CreateSequence { name: name.clone(), start: *start }),
             BoundStatement::DropSequence { name, if_exists } => Ok(PhysicalPlan::DropSequence { name: name.clone(), if_exists: *if_exists }),
             BoundStatement::ShowSequences => Ok(PhysicalPlan::ShowSequences),
+            BoundStatement::ShowTenants => Ok(PhysicalPlan::ShowTenants),
+            BoundStatement::ShowTenantUsage => Ok(PhysicalPlan::ShowTenantUsage),
+            BoundStatement::CreateTenant { name, max_qps, max_storage_bytes } => {
+                Ok(PhysicalPlan::CreateTenant {
+                    name: name.clone(),
+                    max_qps: *max_qps,
+                    max_storage_bytes: *max_storage_bytes,
+                })
+            }
+            BoundStatement::DropTenant { name } => Ok(PhysicalPlan::DropTenant { name: name.clone() }),
             BoundStatement::CopyFrom { table_id, schema, columns, csv, delimiter, header, null_string, quote, escape } => {
                 Ok(PhysicalPlan::CopyFrom {
                     table_id: *table_id, schema: schema.clone(), columns: columns.clone(),

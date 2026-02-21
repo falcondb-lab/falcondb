@@ -63,7 +63,11 @@ impl DistributedExecutor {
         // Validate shard IDs first (before spawning threads).
         for &sid in target_shards {
             if self.engine.shard(sid).is_none() {
-                return Err(FalconError::Internal(format!("Shard {:?} not found", sid)));
+                return Err(FalconError::internal_bug(
+                    "E-SCATTER-001",
+                    format!("Shard {:?} not found during pre-validation", sid),
+                    format!("target_shards={:?}", target_shards),
+                ));
             }
         }
 
@@ -75,7 +79,13 @@ impl DistributedExecutor {
                         let engine = &self.engine;
                         let subplan_ref = &subplan;
                         s.spawn(move || {
-                            let shard = engine.shard(shard_id).unwrap();
+                            let shard = engine.shard(shard_id).ok_or_else(|| {
+                                FalconError::internal_bug(
+                                    "E-SCATTER-002",
+                                    format!("Shard {:?} disappeared during execution", shard_id),
+                                    "shard was validated before spawn but missing at execution time",
+                                )
+                            })?;
 
                             // Retry once on transient failure.
                             let max_attempts = 2u8;
@@ -91,11 +101,13 @@ impl DistributedExecutor {
 
                                 // Check timeout
                                 if total_start.elapsed() > timeout {
-                                    return Err(FalconError::Internal(format!(
-                                        "Scatter/gather timeout after {}ms (shard {:?})",
-                                        timeout.as_millis(),
-                                        shard_id,
-                                    )));
+                                    return Err(FalconError::Transient {
+                                        reason: format!(
+                                            "Scatter/gather timeout after {}ms (shard {:?})",
+                                            timeout.as_millis(), shard_id,
+                                        ),
+                                        retry_after_ms: 100,
+                                    });
                                 }
 
                                 match result {
@@ -124,7 +136,13 @@ impl DistributedExecutor {
                     })
                     .collect();
 
-                handles.into_iter().map(|h| h.join().unwrap()).collect()
+                handles.into_iter().map(|h| {
+                    h.join().unwrap_or_else(|_| Err(FalconError::internal_bug(
+                        "E-SCATTER-003",
+                        "Shard thread panicked during scatter execution",
+                        "std::thread::JoinHandle returned Err — indicates panic in spawned thread",
+                    )))
+                }).collect()
             });
 
         // Collect results — apply failure policy.
@@ -152,10 +170,13 @@ impl DistributedExecutor {
             let msgs: Vec<String> = failed_shards.iter()
                 .map(|(sid, msg)| format!("shard_{}: {}", sid.0, msg))
                 .collect();
-            return Err(FalconError::Internal(format!(
-                "Scatter failed ({} of {} shards): {}",
-                failed_shards.len(), target_shards.len(), msgs.join("; "),
-            )));
+            return Err(FalconError::Transient {
+                reason: format!(
+                    "Scatter failed ({} of {} shards): {}",
+                    failed_shards.len(), target_shards.len(), msgs.join("; "),
+                ),
+                retry_after_ms: 100,
+            });
         }
 
         // BestEffort: at least one shard must succeed.
@@ -163,9 +184,12 @@ impl DistributedExecutor {
             let msgs: Vec<String> = failed_shards.iter()
                 .map(|(sid, msg)| format!("shard_{}: {}", sid.0, msg))
                 .collect();
-            return Err(FalconError::Internal(format!(
-                "All {} shards failed: {}", target_shards.len(), msgs.join("; "),
-            )));
+            return Err(FalconError::Transient {
+                reason: format!(
+                    "All {} shards failed: {}", target_shards.len(), msgs.join("; "),
+                ),
+                retry_after_ms: 200,
+            });
         }
         let shard_results = collected;
 
@@ -182,10 +206,13 @@ impl DistributedExecutor {
 
         // Memory guard: reject if total rows exceed configured limit.
         if total_rows_gathered > self.gather_limits.max_rows_buffered {
-            return Err(FalconError::Internal(format!(
-                "Gather phase aborted: {} rows exceeds max_rows_buffered limit of {}",
-                total_rows_gathered, self.gather_limits.max_rows_buffered,
-            )));
+            return Err(FalconError::Transient {
+                reason: format!(
+                    "Gather phase aborted: {} rows exceeds max_rows_buffered limit of {}",
+                    total_rows_gathered, self.gather_limits.max_rows_buffered,
+                ),
+                retry_after_ms: 0,
+            });
         }
 
         let merged_rows = match strategy {

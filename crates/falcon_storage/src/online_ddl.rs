@@ -197,7 +197,7 @@ impl OnlineDdlManager {
     pub fn register(&self, table_id: TableId, kind: DdlOpKind) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let op = DdlOperation::new(id, table_id, kind);
-        let mut ops = self.operations.lock().unwrap();
+        let mut ops = self.operations.lock().unwrap_or_else(|p| p.into_inner());
         ops.insert(id, op);
         self.gc_completed(&mut ops);
         id
@@ -205,28 +205,28 @@ impl OnlineDdlManager {
 
     /// Transition an operation to Running.
     pub fn start(&self, id: u64) {
-        if let Some(op) = self.operations.lock().unwrap().get_mut(&id) {
+        if let Some(op) = self.operations.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&id) {
             op.start();
         }
     }
 
     /// Transition an operation to Backfilling.
     pub fn begin_backfill(&self, id: u64, total_rows: u64) {
-        if let Some(op) = self.operations.lock().unwrap().get_mut(&id) {
+        if let Some(op) = self.operations.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&id) {
             op.begin_backfill(total_rows);
         }
     }
 
     /// Record backfill progress.
     pub fn record_progress(&self, id: u64, rows: u64) {
-        if let Some(op) = self.operations.lock().unwrap().get_mut(&id) {
+        if let Some(op) = self.operations.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&id) {
             op.record_progress(rows);
         }
     }
 
     /// Transition an operation to Completed.
     pub fn complete(&self, id: u64) {
-        if let Some(op) = self.operations.lock().unwrap().get_mut(&id) {
+        if let Some(op) = self.operations.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&id) {
             op.complete();
             tracing::info!(
                 "Online DDL #{} completed: {} ({}ms)",
@@ -239,7 +239,7 @@ impl OnlineDdlManager {
 
     /// Transition an operation to Failed.
     pub fn fail(&self, id: u64, error: String) {
-        if let Some(op) = self.operations.lock().unwrap().get_mut(&id) {
+        if let Some(op) = self.operations.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&id) {
             op.fail(error.clone());
             tracing::warn!("Online DDL #{} failed: {} — {}", id, op.kind, error);
         }
@@ -247,14 +247,14 @@ impl OnlineDdlManager {
 
     /// Get a snapshot of a specific operation.
     pub fn get(&self, id: u64) -> Option<DdlOperation> {
-        self.operations.lock().unwrap().get(&id).cloned()
+        self.operations.lock().unwrap_or_else(|p| p.into_inner()).get(&id).cloned()
     }
 
     /// List all active (non-completed, non-failed) operations.
     pub fn list_active(&self) -> Vec<DdlOperation> {
         self.operations
             .lock()
-            .unwrap()
+            .unwrap_or_else(|p| p.into_inner())
             .values()
             .filter(|op| op.phase != DdlPhase::Completed && op.phase != DdlPhase::Failed)
             .cloned()
@@ -263,7 +263,7 @@ impl OnlineDdlManager {
 
     /// List all operations (including completed).
     pub fn list_all(&self) -> Vec<DdlOperation> {
-        self.operations.lock().unwrap().values().cloned().collect()
+        self.operations.lock().unwrap_or_else(|p| p.into_inner()).values().cloned().collect()
     }
 
     /// Garbage-collect old completed operations beyond max_history.

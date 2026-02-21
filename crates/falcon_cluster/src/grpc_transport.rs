@@ -754,8 +754,15 @@ impl CheckpointAssembler {
             )));
         }
         let mut data = Vec::new();
-        for chunk in &self.received {
-            data.extend_from_slice(chunk.as_ref().unwrap());
+        for (i, chunk) in self.received.iter().enumerate() {
+            match chunk.as_ref() {
+                Some(bytes) => data.extend_from_slice(bytes),
+                None => {
+                    return Err(FalconError::Internal(format!(
+                        "Checkpoint reassembly: chunk {} is None (should have been caught by completeness check)", i
+                    )));
+                }
+            }
         }
         Ok(data)
     }

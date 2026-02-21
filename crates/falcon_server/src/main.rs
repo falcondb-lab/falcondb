@@ -12,6 +12,7 @@ use falcon_common::types::ShardId;
 use falcon_executor::Executor;
 use falcon_protocol_pg::server::PgServer;
 use falcon_storage::engine::StorageEngine;
+use falcon_storage::gc::{GcConfig, GcRunner};
 use falcon_storage::memory::MemoryBudget;
 use falcon_txn::TxnManager;
 
@@ -67,10 +68,13 @@ async fn main() -> Result<()> {
     if cli.print_default_config {
         let default_config = FalconConfig::default();
         let toml_str = toml::to_string_pretty(&default_config)
-            .expect("failed to serialize default config");
+            .unwrap_or_else(|e| format!("# failed to serialize default config: {}", e));
         println!("{}", toml_str);
         return Ok(());
     }
+
+    // Install crash domain panic hook (must be before any other initialization)
+    falcon_common::crash_domain::install_panic_hook();
 
     // Initialize observability
     falcon_observability::init_tracing();
@@ -242,6 +246,26 @@ async fn main() -> Result<()> {
         tracing::info!("Connection idle timeout: {}ms", config.server.idle_timeout_ms);
     }
 
+    // Start background GC runner (if enabled in config)
+    let _gc_runner = if config.gc.enabled {
+        let gc_config = GcConfig {
+            enabled: true,
+            interval_ms: config.gc.interval_ms,
+            batch_size: config.gc.batch_size,
+            min_chain_length: config.gc.min_chain_length,
+            max_chain_length: 0,
+            min_sweep_interval_ms: 0,
+        };
+        tracing::info!(
+            "Background GC runner started (interval={}ms, batch_size={}, min_chain_length={})",
+            gc_config.interval_ms, gc_config.batch_size, gc_config.min_chain_length,
+        );
+        Some(GcRunner::start(storage.clone(), txn_mgr.clone(), gc_config))
+    } else {
+        tracing::info!("Background GC runner disabled (gc.enabled=false)");
+        None
+    };
+
     // Role-based replication startup
     let mut replica_runner_handle: Option<falcon_cluster::ReplicaRunnerHandle> = None;
     match config.replication.role {
@@ -250,7 +274,9 @@ async fn main() -> Result<()> {
             tracing::info!("Role: PRIMARY — gRPC replication service on {}", grpc_addr);
 
             // Use the replication_log that is already wired to the WAL observer
-            let log = replication_log.clone().expect("replication_log must exist for Primary");
+            let log = replication_log.clone().ok_or_else(|| {
+                anyhow::anyhow!("replication_log must exist for Primary role")
+            })?;
             let svc = falcon_cluster::grpc_transport::WalReplicationService::new();
             svc.set_storage(storage.clone());
             for i in 0..num_shards {
@@ -259,7 +285,7 @@ async fn main() -> Result<()> {
 
             let grpc_addr_parsed: std::net::SocketAddr = grpc_addr
                 .parse()
-                .expect("Invalid grpc_listen_addr");
+                .map_err(|e| anyhow::anyhow!("Invalid grpc_listen_addr '{}': {}", grpc_addr, e))?;
 
             tokio::spawn(async move {
                 use falcon_cluster::proto::wal_replication_server::WalReplicationServer;
@@ -398,7 +424,7 @@ async fn wait_for_shutdown_signal() -> &'static str {
     {
         use tokio::signal::unix::{signal, SignalKind};
         let mut sigterm = signal(SignalKind::terminate())
-            .expect("Failed to register SIGTERM handler");
+            .unwrap_or_else(|e| panic!("Failed to register SIGTERM handler: {}", e));
         tokio::select! {
             _ = tokio::signal::ctrl_c() => "SIGINT (Ctrl+C) received",
             _ = sigterm.recv() => "SIGTERM received",

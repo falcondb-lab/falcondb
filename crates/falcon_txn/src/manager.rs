@@ -15,11 +15,13 @@ use falcon_common::kernel::TxnLatencyBreakdown;
 use falcon_storage::engine::StorageEngine;
 
 /// Slow-path mode for cross-shard transactions.
+/// - `Xa2Pc`: XA-style two-phase commit (default, fully implemented).
+/// - `AutocommitSplit`: split a multi-shard write into per-shard autocommit txns
+///   (weaker consistency, used for bulk-load scenarios).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlowPathMode {
     Xa2Pc,
     AutocommitSplit,
-    Saga,
 }
 
 /// Classification captured at transaction begin.
@@ -81,6 +83,52 @@ pub struct TxnHandle {
     pub priority: TxnPriority,
     /// DK-1: Per-phase latency breakdown.
     pub latency_breakdown: TxnLatencyBreakdown,
+    /// v1.2: Transaction access mode (READ ONLY / READ WRITE).
+    /// When true, any DML (INSERT/UPDATE/DELETE) is rejected.
+    pub read_only: bool,
+    /// v1.2: Per-transaction timeout in milliseconds (0 = no timeout).
+    pub timeout_ms: u64,
+    /// v1.2: Execution summary counters.
+    pub exec_summary: TxnExecSummary,
+}
+
+/// Execution summary for a transaction (v1.2).
+/// Tracks statement counts, rows affected, and timing.
+#[derive(Debug, Clone, Default)]
+pub struct TxnExecSummary {
+    /// Number of statements executed in this transaction.
+    pub statement_count: u64,
+    /// Total rows read across all statements.
+    pub rows_read: u64,
+    /// Total rows written (inserted + updated + deleted).
+    pub rows_written: u64,
+    /// Total rows inserted.
+    pub rows_inserted: u64,
+    /// Total rows updated.
+    pub rows_updated: u64,
+    /// Total rows deleted.
+    pub rows_deleted: u64,
+}
+
+impl TxnExecSummary {
+    pub fn record_read(&mut self, count: u64) {
+        self.rows_read += count;
+    }
+    pub fn record_insert(&mut self, count: u64) {
+        self.rows_inserted += count;
+        self.rows_written += count;
+    }
+    pub fn record_update(&mut self, count: u64) {
+        self.rows_updated += count;
+        self.rows_written += count;
+    }
+    pub fn record_delete(&mut self, count: u64) {
+        self.rows_deleted += count;
+        self.rows_written += count;
+    }
+    pub fn record_statement(&mut self) {
+        self.statement_count += 1;
+    }
 }
 
 /// A completed transaction record for the history ring buffer.
@@ -123,6 +171,26 @@ impl TxnHandle {
             IsolationLevel::ReadCommitted => current_ts,
             IsolationLevel::SnapshotIsolation | IsolationLevel::Serializable => self.start_ts,
         }
+    }
+
+    /// Check if this transaction has exceeded its timeout.
+    /// Returns true if the transaction should be aborted due to timeout.
+    pub fn is_timed_out(&self) -> bool {
+        if self.timeout_ms == 0 {
+            return false;
+        }
+        if let Some(begin) = self.begin_instant {
+            begin.elapsed().as_millis() as u64 >= self.timeout_ms
+        } else {
+            false
+        }
+    }
+
+    /// Elapsed time since transaction began, in milliseconds.
+    pub fn elapsed_ms(&self) -> u64 {
+        self.begin_instant
+            .map(|b| b.elapsed().as_millis() as u64)
+            .unwrap_or(0)
     }
 
     /// Derive a lightweight TxnContext for cross-layer enforcement.
@@ -670,6 +738,9 @@ impl TxnManager {
             tenant_id: SYSTEM_TENANT_ID,
             priority: TxnPriority::Normal,
             latency_breakdown: TxnLatencyBreakdown::default(),
+            read_only: false,
+            timeout_ms: 0,
+            exec_summary: TxnExecSummary::default(),
         };
 
         self.active_txns.insert(txn_id, handle.clone());

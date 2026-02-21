@@ -10,7 +10,7 @@ use falcon_txn::TxnHandle;
 
 use crate::expr_engine::ExprEngine;
 use crate::executor::{Executor, CteData, ExecutionResult};
-use crate::vectorized::{RecordBatch, vectorized_filter, is_vectorizable};
+use crate::vectorized::{RecordBatch, vectorized_filter, vectorized_aggregate, is_vectorizable};
 use crate::parallel::parallel_filter;
 
 impl Executor {
@@ -314,6 +314,25 @@ impl Executor {
         let has_agg = projections.iter().any(|p| matches!(p, BoundProjection::Aggregate(..)));
 
         if (has_agg || !group_by.is_empty() || !grouping_sets.is_empty()) && !has_window {
+            // ── Vectorized columnar aggregate path (ColumnStore tables only) ──
+            // When: pure aggregate (no GROUP BY, no correlated filter, no HAVING subquery),
+            // and the table is a ColumnStore — use scan_columnar to get typed column vectors
+            // directly, bypassing row-at-a-time OwnedRow deserialization.
+            let is_simple_agg = group_by.is_empty()
+                && grouping_sets.is_empty()
+                && having.is_none()
+                && !filter_has_correlated_sub
+                && virtual_rows.is_empty()
+                && table_id != TableId(0)
+                && cte_data.get(&table_id).is_none();
+
+            if is_simple_agg {
+                let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+                if let Some(col_vecs) = self.storage.scan_columnar(table_id, txn.txn_id, read_ts) {
+                    return self.exec_columnar_aggregate(col_vecs, schema, projections, mat_filter.as_ref(), order_by, limit, offset, distinct);
+                }
+            }
+
             return self.exec_aggregate(&raw_rows, schema, projections, mat_filter.as_ref(), group_by, grouping_sets, mat_having.as_ref(), order_by, limit, offset, distinct);
         }
 

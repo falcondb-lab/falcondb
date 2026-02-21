@@ -1391,6 +1391,30 @@ impl StorageEngine {
                         engine.tables.insert(table_id, Arc::new(MemTable::new(schema)));
                     }
                 }
+                WalRecord::CreateIndex { index_name, table_name, column_idx, unique } => {
+                    if !engine.index_registry.contains_key(index_name.as_str()) {
+                        let _ = engine.create_index_impl(table_name, *column_idx, *unique);
+                        if let Some(table_schema) = engine.catalog.read().find_table(table_name) {
+                            engine.index_registry.insert(
+                                index_name.to_lowercase(),
+                                IndexMeta {
+                                    table_id: table_schema.id,
+                                    table_name: table_name.clone(),
+                                    column_idx: *column_idx,
+                                    unique: *unique,
+                                },
+                            );
+                        }
+                    }
+                }
+                WalRecord::DropIndex { index_name, table_name: _, column_idx } => {
+                    if let Some((_, meta)) = engine.index_registry.remove(index_name.as_str()) {
+                        if let Some(table_ref) = engine.tables.get(&meta.table_id) {
+                            let mut indexes = table_ref.secondary_indexes.write();
+                            indexes.retain(|idx| idx.column_idx != *column_idx);
+                        }
+                    }
+                }
                 WalRecord::PrepareTxn { .. } => {
                     // Prepared but not committed records remain invisible after recovery.
                 }
@@ -1447,6 +1471,7 @@ pub(crate) fn datatype_to_cast_target(dt: &falcon_common::types::DataType) -> St
         DataType::Date => "date".into(),
         DataType::Jsonb => "jsonb".into(),
         DataType::Array(_) => "text".into(),
+        DataType::Decimal(_, _) => "numeric".into(),
     }
 }
 

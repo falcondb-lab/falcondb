@@ -39,6 +39,8 @@ pub struct AuditLog {
     total_events: AtomicU64,
     /// Events dropped because the channel was full (backpressure indicator).
     dropped_events: AtomicU64,
+    /// Total events consumed by the drain thread (monotonic).
+    drained_count: Arc<AtomicU64>,
     /// Background drain thread handle (kept alive for the lifetime of AuditLog).
     _drain_thread: std::thread::JoinHandle<()>,
 }
@@ -52,6 +54,8 @@ impl AuditLog {
         let (tx, rx) = mpsc::sync_channel::<AuditEvent>(AUDIT_CHANNEL_CAPACITY);
         let events = Arc::new(Mutex::new(VecDeque::with_capacity(capacity)));
         let events_clone = events.clone();
+        let drained_count = Arc::new(AtomicU64::new(0));
+        let drained_clone = drained_count.clone();
 
         let drain_thread = std::thread::Builder::new()
             .name("falcon-audit-drain".into())
@@ -62,6 +66,7 @@ impl AuditLog {
                         buf.pop_front();
                     }
                     buf.push_back(event);
+                    drained_clone.fetch_add(1, Ordering::Release);
                 }
             })
             .expect("failed to spawn audit drain thread");
@@ -73,6 +78,7 @@ impl AuditLog {
             next_event_id: AtomicU64::new(1),
             total_events: AtomicU64::new(0),
             dropped_events: AtomicU64::new(0),
+            drained_count,
             _drain_thread: drain_thread,
         }
     }
@@ -228,18 +234,17 @@ impl AuditLog {
     /// Wait until the background drain thread has processed all pending events
     /// in the channel. Useful in tests to avoid race conditions.
     pub fn flush(&self) {
-        // Spin until buffered_count == total_events - dropped_events (i.e. channel is drained).
-        // The drain thread is always running, so this converges quickly.
+        // Wait until the drain thread has consumed all successfully-sent events.
+        // drained_count is incremented by the drain thread after each event is
+        // moved into the ring buffer, so when drained == sent we know the
+        // channel is empty and the buffer is up-to-date.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
             let total = self.total_events.load(Ordering::SeqCst);
             let dropped = self.dropped_events.load(Ordering::SeqCst);
-            let buffered = self.events.lock().len() as u64;
-            let expected = total.saturating_sub(dropped);
-            // Account for capacity eviction: buffered may be less than expected
-            // if capacity < expected. In that case, check buffered >= min(expected, capacity).
-            let target = expected.min(self.capacity as u64);
-            if buffered >= target {
+            let sent = total.saturating_sub(dropped);
+            let drained = self.drained_count.load(Ordering::Acquire);
+            if drained >= sent {
                 break;
             }
             if std::time::Instant::now() > deadline {

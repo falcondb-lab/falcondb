@@ -20,6 +20,10 @@ pub enum Datum {
     Date(i32),        // days since Unix epoch (1970-01-01)
     Array(Vec<Datum>), // PostgreSQL-style array
     Jsonb(JsonValue), // JSONB stored as serde_json::Value
+    /// Fixed-point decimal for financial precision: mantissa × 10^(-scale).
+    /// e.g. Decimal(12345, 2) = 123.45
+    /// Supports up to 38 significant digits (i128 range).
+    Decimal(i128, u8),
 }
 
 impl Datum {
@@ -40,7 +44,8 @@ impl Datum {
                     .unwrap_or(DataType::Text); // default to Text for empty/all-null arrays
                 Some(DataType::Array(Box::new(elem_type)))
             }
-            Datum::Jsonb(_) => Some(DataType::Jsonb)
+            Datum::Jsonb(_) => Some(DataType::Jsonb),
+            Datum::Decimal(_, scale) => Some(DataType::Decimal(38, *scale)),
         }
     }
 
@@ -70,6 +75,7 @@ impl Datum {
             Datum::Int32(v) => Some(*v as f64),
             Datum::Int64(v) => Some(*v as f64),
             Datum::Float64(v) => Some(*v),
+            Datum::Decimal(m, s) => Some(*m as f64 / 10f64.powi(*s as i32)),
             _ => None,
         }
     }
@@ -100,7 +106,9 @@ impl Datum {
                 }
             }
             Datum::Date(days) => {
-                let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+                // SAFETY: 1970-01-01 is always a valid date — unwrap_or fallback is unreachable.
+                let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+                    .unwrap_or(chrono::NaiveDate::MIN);
                 if let Some(d) = epoch.checked_add_signed(chrono::Duration::days(*days as i64)) {
                     Some(d.format("%Y-%m-%d").to_string())
                 } else {
@@ -116,6 +124,7 @@ impl Datum {
                 Some(format!("{{{}}}", inner.join(",")))
             }
             Datum::Jsonb(v) => Some(v.to_string()),
+            Datum::Decimal(m, s) => Some(decimal_to_string(*m, *s)),
         }
     }
 
@@ -129,8 +138,34 @@ impl Datum {
             (Datum::Float64(a), Datum::Float64(b)) => Some(Datum::Float64(a + b)),
             (Datum::Float64(a), Datum::Int64(b)) => Some(Datum::Float64(a + *b as f64)),
             (Datum::Float64(a), Datum::Int32(b)) => Some(Datum::Float64(a + *b as f64)),
+            (Datum::Decimal(a, sa), Datum::Decimal(b, sb)) => {
+                Some(decimal_add(*a, *sa, *b, *sb))
+            }
+            (Datum::Decimal(a, sa), Datum::Int64(b)) => {
+                Some(decimal_add(*a, *sa, *b as i128 * 10i128.pow(*sa as u32), *sa))
+            }
+            (Datum::Int64(a), Datum::Decimal(b, sb)) => {
+                Some(decimal_add(*a as i128 * 10i128.pow(*sb as u32), *sb, *b, *sb))
+            }
             _ => None,
         }
+    }
+
+    /// Create a Decimal from a string like "123.45" or "-0.001".
+    pub fn parse_decimal(s: &str) -> Option<Datum> {
+        let s = s.trim();
+        if s.is_empty() {
+            return None;
+        }
+        let (int_part, frac_part) = if let Some(dot_pos) = s.find('.') {
+            (&s[..dot_pos], &s[dot_pos + 1..])
+        } else {
+            (s, "")
+        };
+        let scale = frac_part.len() as u8;
+        let combined = format!("{}{}", int_part, frac_part);
+        let mantissa: i128 = combined.parse().ok()?;
+        Some(Datum::Decimal(mantissa, scale))
     }
 }
 
@@ -145,7 +180,8 @@ impl fmt::Display for Datum {
             Datum::Text(s) => write!(f, "{}", s),
             Datum::Timestamp(us) => write!(f, "{}", us),
             Datum::Date(days) => {
-                let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+                let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+                    .unwrap_or(chrono::NaiveDate::MIN);
                 if let Some(d) = epoch.checked_add_signed(chrono::Duration::days(*days as i64)) {
                     write!(f, "{}", d.format("%Y-%m-%d"))
                 } else {
@@ -161,6 +197,7 @@ impl fmt::Display for Datum {
                 write!(f, "}}")
             }
             Datum::Jsonb(v) => write!(f, "{}", v),
+            Datum::Decimal(m, s) => write!(f, "{}", decimal_to_string(*m, *s)),
         }
     }
 }
@@ -184,6 +221,21 @@ impl PartialEq for Datum {
             (Datum::Date(a), Datum::Date(b)) => a == b,
             (Datum::Array(a), Datum::Array(b)) => a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x == y),
             (Datum::Jsonb(a), Datum::Jsonb(b)) => a == b,
+            (Datum::Decimal(a, sa), Datum::Decimal(b, sb)) => {
+                if sa == sb { a == b }
+                else {
+                    let (na, nb) = decimal_normalize(*a, *sa, *b, *sb);
+                    na == nb
+                }
+            }
+            (Datum::Decimal(a, sa), Datum::Int64(b)) => {
+                let bm = *b as i128 * 10i128.pow(*sa as u32);
+                *a == bm
+            }
+            (Datum::Int64(a), Datum::Decimal(b, sb)) => {
+                let am = *a as i128 * 10i128.pow(*sb as u32);
+                am == *b
+            }
             _ => false,
         }
     }
@@ -214,6 +266,13 @@ impl Hash for Datum {
                 7u8.hash(state);
                 v.to_string().hash(state);
             }
+            Datum::Decimal(m, s) => {
+                9u8.hash(state);
+                // Normalize: remove trailing zeros for consistent hashing
+                let (nm, ns) = decimal_trim(*m, *s);
+                nm.hash(state);
+                ns.hash(state);
+            }
         }
     }
 }
@@ -236,6 +295,26 @@ impl PartialOrd for Datum {
             (Datum::Text(a), Datum::Text(b)) => a.partial_cmp(b),
             (Datum::Timestamp(a), Datum::Timestamp(b)) => a.partial_cmp(b),
             (Datum::Date(a), Datum::Date(b)) => a.partial_cmp(b),
+            (Datum::Decimal(a, sa), Datum::Decimal(b, sb)) => {
+                let (na, nb) = decimal_normalize(*a, *sa, *b, *sb);
+                na.partial_cmp(&nb)
+            }
+            (Datum::Decimal(a, sa), Datum::Int64(b)) => {
+                let bm = *b as i128 * 10i128.pow(*sa as u32);
+                a.partial_cmp(&bm)
+            }
+            (Datum::Int64(a), Datum::Decimal(b, sb)) => {
+                let am = *a as i128 * 10i128.pow(*sb as u32);
+                am.partial_cmp(b)
+            }
+            (Datum::Decimal(a, sa), Datum::Float64(b)) => {
+                let af = *a as f64 / 10f64.powi(*sa as i32);
+                af.partial_cmp(b)
+            }
+            (Datum::Float64(a), Datum::Decimal(b, sb)) => {
+                let bf = *b as f64 / 10f64.powi(*sb as i32);
+                a.partial_cmp(&bf)
+            }
             (Datum::Array(_), Datum::Array(_)) => None, // arrays not orderable
             _ => None,
         }
@@ -282,5 +361,176 @@ impl fmt::Display for OwnedRow {
             write!(f, "{}", v)?;
         }
         write!(f, ")")
+    }
+}
+
+// ── Decimal helper functions ────────────────────────────────────────────
+
+/// Convert a (mantissa, scale) decimal to its string representation.
+/// e.g. (12345, 2) → "123.45", (-1, 3) → "-0.001", (100, 0) → "100"
+pub fn decimal_to_string(mantissa: i128, scale: u8) -> String {
+    if scale == 0 {
+        return mantissa.to_string();
+    }
+    let negative = mantissa < 0;
+    let abs = mantissa.unsigned_abs();
+    let s = abs.to_string();
+    let scale = scale as usize;
+    let result = if s.len() <= scale {
+        // Need leading zeros: e.g. 1 with scale 3 → "0.001"
+        let zeros = scale - s.len();
+        format!("0.{}{}", "0".repeat(zeros), s)
+    } else {
+        let (int_part, frac_part) = s.split_at(s.len() - scale);
+        format!("{}.{}", int_part, frac_part)
+    };
+    if negative {
+        format!("-{}", result)
+    } else {
+        result
+    }
+}
+
+/// Normalize two decimals to the same scale, returning (a_normalized, b_normalized).
+fn decimal_normalize(a: i128, sa: u8, b: i128, sb: u8) -> (i128, i128) {
+    if sa == sb {
+        (a, b)
+    } else if sa > sb {
+        let diff = (sa - sb) as u32;
+        (a, b * 10i128.pow(diff))
+    } else {
+        let diff = (sb - sa) as u32;
+        (a * 10i128.pow(diff), b)
+    }
+}
+
+/// Add two decimals, returning a Datum::Decimal with the larger scale.
+fn decimal_add(a: i128, sa: u8, b: i128, sb: u8) -> Datum {
+    let max_scale = sa.max(sb);
+    let (na, nb) = decimal_normalize(a, sa, b, sb);
+    Datum::Decimal(na + nb, max_scale)
+}
+
+/// Remove trailing zeros from a decimal for canonical form.
+fn decimal_trim(mut mantissa: i128, mut scale: u8) -> (i128, u8) {
+    if mantissa == 0 {
+        return (0, 0);
+    }
+    while scale > 0 && mantissa % 10 == 0 {
+        mantissa /= 10;
+        scale -= 1;
+    }
+    (mantissa, scale)
+}
+
+/// Subtract two decimals.
+pub fn decimal_sub(a: i128, sa: u8, b: i128, sb: u8) -> Datum {
+    let max_scale = sa.max(sb);
+    let (na, nb) = decimal_normalize(a, sa, b, sb);
+    Datum::Decimal(na - nb, max_scale)
+}
+
+/// Multiply two decimals.
+pub fn decimal_mul(a: i128, sa: u8, b: i128, sb: u8) -> Datum {
+    Datum::Decimal(a * b, sa + sb)
+}
+
+/// Divide two decimals with a target result scale.
+pub fn decimal_div(a: i128, sa: u8, b: i128, sb: u8, result_scale: u8) -> Option<Datum> {
+    if b == 0 {
+        return None;
+    }
+    // Scale up numerator to get desired precision
+    let target_scale = result_scale.max(sa).max(sb);
+    let extra = (target_scale as u32) + (sb as u32) - (sa as u32);
+    let scaled_a = a * 10i128.pow(extra);
+    Some(Datum::Decimal(scaled_a / b, target_scale))
+}
+
+#[cfg(test)]
+mod decimal_tests {
+    use super::*;
+
+    #[test]
+    fn test_decimal_to_string() {
+        assert_eq!(decimal_to_string(12345, 2), "123.45");
+        assert_eq!(decimal_to_string(-12345, 2), "-123.45");
+        assert_eq!(decimal_to_string(1, 3), "0.001");
+        assert_eq!(decimal_to_string(-1, 3), "-0.001");
+        assert_eq!(decimal_to_string(100, 0), "100");
+        assert_eq!(decimal_to_string(0, 2), "0.00");
+    }
+
+    #[test]
+    fn test_decimal_parse() {
+        assert_eq!(Datum::parse_decimal("123.45"), Some(Datum::Decimal(12345, 2)));
+        assert_eq!(Datum::parse_decimal("-0.001"), Some(Datum::Decimal(-1, 3)));
+        assert_eq!(Datum::parse_decimal("100"), Some(Datum::Decimal(100, 0)));
+        assert_eq!(Datum::parse_decimal(""), None);
+    }
+
+    #[test]
+    fn test_decimal_add() {
+        let a = Datum::Decimal(12345, 2); // 123.45
+        let b = Datum::Decimal(6789, 2);  // 67.89
+        assert_eq!(a.add(&b), Some(Datum::Decimal(19134, 2))); // 191.34
+    }
+
+    #[test]
+    fn test_decimal_add_different_scales() {
+        let a = Datum::Decimal(100, 1); // 10.0
+        let b = Datum::Decimal(5, 2);   // 0.05
+        assert_eq!(a.add(&b), Some(Datum::Decimal(1005, 2))); // 10.05
+    }
+
+    #[test]
+    fn test_decimal_add_int() {
+        let a = Datum::Decimal(12345, 2); // 123.45
+        let b = Datum::Int64(10);
+        assert_eq!(a.add(&b), Some(Datum::Decimal(13345, 2))); // 133.45
+    }
+
+    #[test]
+    fn test_decimal_eq() {
+        assert_eq!(Datum::Decimal(100, 1), Datum::Decimal(1000, 2)); // 10.0 == 10.00
+        assert_eq!(Datum::Decimal(1000, 2), Datum::Int64(10)); // 10.00 == 10
+    }
+
+    #[test]
+    fn test_decimal_ord() {
+        assert!(Datum::Decimal(12345, 2) > Datum::Decimal(12344, 2));
+        assert!(Datum::Decimal(100, 1) > Datum::Int64(9));
+        assert!(Datum::Decimal(100, 1) < Datum::Int64(11));
+    }
+
+    #[test]
+    fn test_decimal_display() {
+        assert_eq!(format!("{}", Datum::Decimal(12345, 2)), "123.45");
+        assert_eq!(format!("{}", Datum::Decimal(-1, 3)), "-0.001");
+    }
+
+    #[test]
+    fn test_decimal_pg_text() {
+        assert_eq!(Datum::Decimal(12345, 2).to_pg_text(), Some("123.45".to_string()));
+    }
+
+    #[test]
+    fn test_decimal_sub_mul_div() {
+        assert_eq!(decimal_sub(12345, 2, 6789, 2), Datum::Decimal(5556, 2)); // 55.56
+        assert_eq!(decimal_mul(100, 2, 200, 2), Datum::Decimal(20000, 4)); // 0.2000
+        assert_eq!(decimal_div(100, 2, 3, 0, 6), Some(Datum::Decimal(333333, 6)));
+        assert_eq!(decimal_div(100, 2, 0, 0, 6), None); // div by zero
+    }
+
+    #[test]
+    fn test_decimal_hash_consistency() {
+        use std::collections::hash_map::DefaultHasher;
+        fn hash_datum(d: &Datum) -> u64 {
+            let mut h = DefaultHasher::new();
+            d.hash(&mut h);
+            h.finish()
+        }
+        // 10.0 and 10.00 should hash the same (after normalization)
+        assert_eq!(hash_datum(&Datum::Decimal(100, 1)), hash_datum(&Datum::Decimal(1000, 2)));
     }
 }

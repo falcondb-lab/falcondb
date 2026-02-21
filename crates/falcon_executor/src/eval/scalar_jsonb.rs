@@ -254,6 +254,12 @@ fn datum_to_json_value(d: &Datum) -> JsonValue {
         }
         Datum::Array(arr) => JsonValue::Array(arr.iter().map(datum_to_json_value).collect()),
         Datum::Jsonb(v) => v.clone(),
+        Datum::Decimal(m, s) => {
+            let f = *m as f64 / 10f64.powi(*s as i32);
+            serde_json::Number::from_f64(f)
+                .map(JsonValue::Number)
+                .unwrap_or(JsonValue::Null)
+        }
     }
 }
 

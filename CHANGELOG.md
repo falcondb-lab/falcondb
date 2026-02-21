@@ -33,6 +33,93 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.9.0] — 2026-02-21
+
+### Added — Release Engineering (Production Candidate)
+- WAL segment header: every new segment starts with `FALC` magic + format version (8-byte header)
+- `WAL_SEGMENT_HEADER_SIZE` constant and backward-compatible reader (legacy headerless segments still readable)
+- `DeprecatedFieldChecker`: backward-compatible config schema with 6 deprecated field mappings
+  - `[cedar]` → `[server]`, `cedar_data_dir` → `storage.data_dir`, `wal.sync` → `wal.sync_mode`
+  - `replication.master_endpoint` → `replication.primary_endpoint`, `replication.slave_mode` → `replication.role`
+  - `storage.max_memory` → `memory.node_limit_bytes`
+- `SHOW falcon.wire_compat`: version, WAL format, snapshot format, min compatible version
+- `docs/wire_compatibility.md`: comprehensive wire/WAL/snapshot/config compatibility policy
+- Prometheus metrics: `falcon_compat_wal_format_version`, `falcon_compat_snapshot_format_version`
+
+### Changed
+- WAL writer: writes segment header on new segment creation and rotation
+- WAL reader: auto-detects and skips segment header on read
+- Roadmap v0.9.0: all deliverables marked ✅
+
+---
+
+## [0.8.0] — 2026-02-21
+
+### Added — Chaos Engineering Coverage
+- Network partition simulation: `partition_nodes()`, `heal_partition()`, `can_communicate()`
+- CPU/IO jitter injection: `JitterConfig` with presets (light/heavy/cpu_only/io_only/disabled)
+- `FaultInjectorSnapshot`: combined snapshot of all fault state (base + partition + jitter)
+- `ChaosScenario::NetworkPartition` and `ChaosScenario::CpuIoJitter` variants
+- `SHOW falcon.fault_injection`: 16-row display (base + partition.* + jitter.*)
+- Prometheus metrics: `falcon_chaos_{faults_fired, partition_active, partition_count, partition_heal_count, partition_events, jitter_enabled, jitter_events}`
+- 15 new fault injection tests (6 partition + 7 jitter + 2 combined)
+
+---
+
+## [0.7.0] — 2026-02-21
+
+### Added — Deterministic 2PC Transactions
+- `CoordinatorDecisionLog`: durable commit decisions with WAL-backed persistence
+- `LayeredTimeoutController`: soft/hard timeouts with configurable policy (FailFast/BestEffort)
+- `SlowShardTracker`: slow shard detection with hedged requests and fast-abort
+- `SHOW falcon.two_phase_config`: decision log, timeout, slow-shard policy metrics
+- Prometheus metrics: `falcon_2pc_{decision_log_*, soft_timeouts, hard_timeouts, shard_timeouts, slow_shard_*}`
+
+---
+
+## [0.6.0] — 2026-02-21
+
+### Added — Tail Latency Governance & Backpressure
+- `PriorityScheduler`: three-lane priority queue (High/Normal/Low) with backpressure
+- `TokenBucket`: rate limiter for DDL/backfill/rebalance operations
+- `SHOW falcon.priority_scheduler` and `SHOW falcon.token_bucket`
+- Prometheus metrics: `falcon_scheduler_*` (13 gauges), `falcon_token_bucket_*` (8 gauges with labels)
+
+---
+
+## [0.5.0] — 2026-02-21
+
+### Added — Operationally Usable
+- `ClusterAdmin`: scale-out/in state machines, leader transfer, rebalance plan
+- `ClusterEventLog`: structured event log for all cluster state transitions
+- `local_cluster_harness.sh`: 3-node start/stop/failover/smoke test
+- `rolling_upgrade_smoke.sh`: rolling upgrade verification
+- `ops_playbook.md`: scale-out/in, failover, rolling upgrade procedures
+- `SHOW falcon.{admission, hotspots, verification, latency_contract, cluster_events, node_lifecycle, rebalance_plan}`
+
+---
+
+## [0.4.0] — 2026-02-20
+
+### Added — Production Hardening Alpha
+- `FalconError` unified error model with `ErrorKind`, SQLSTATE mapping, retry hints
+- `bail_user!` / `bail_retryable!` / `bail_transient!` macros
+- `ErrorContext` trait (`.ctx()` / `.ctx_with()`)
+- `install_panic_hook()` + `catch_request()` + `PanicThrottle` crash domain
+- `DiagBundle` + `DiagBundleBuilder` + JSON export
+- `deny_unwrap.sh`, `ci_production_gate.sh`, `ci_production_gate_v2.sh`
+- `docs/error_model.md`, `docs/production_readiness.md`
+- Columnstore vectorized aggregation + multi-tenancy + lag-aware routing
+- `SHOW falcon.tenants`, `SHOW falcon.tenant_usage`
+- Enterprise security: `SecurityManager`, `AuditLog`, `RoleCatalog` with RBAC
+- `SHOW falcon.{license, metering, security, health_score, compat, audit_log, sla_stats}`
+
+### Changed
+- Product renamed from CedarDB to FalconDB (all code references, package names, metrics, commands)
+- Core path unwrap elimination: 0 unwraps in 4 critical crates
+
+---
+
 ## [0.3.0] — 2026-02-20
 
 ### Added — M3: Production Hardening

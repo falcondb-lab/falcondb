@@ -270,6 +270,7 @@ impl Hash for DatumKey {
                 // Shallow hash — just use length for arrays
             }
             Datum::Jsonb(v) => v.to_string().hash(state),
+            Datum::Decimal(m, s) => { m.hash(state); s.hash(state); }
         }
     }
 }
@@ -285,6 +286,14 @@ fn datum_cmp(a: &Datum, b: &Datum) -> Option<std::cmp::Ordering> {
         (Datum::Timestamp(x), Datum::Timestamp(y)) => Some(x.cmp(y)),
         (Datum::Date(x), Datum::Date(y)) => Some(x.cmp(y)),
         (Datum::Boolean(x), Datum::Boolean(y)) => Some(x.cmp(y)),
+        (Datum::Decimal(a, sa), Datum::Decimal(b, sb)) => {
+            let (na, nb) = if sa == sb { (*a, *b) } else if sa > sb {
+                (*a, *b * 10i128.pow((*sa - *sb) as u32))
+            } else {
+                (*a * 10i128.pow((*sb - *sa) as u32), *b)
+            };
+            Some(na.cmp(&nb))
+        }
         _ => None,
     }
 }
@@ -315,6 +324,7 @@ fn datum_width(d: &Datum) -> usize {
         Datum::Text(s) => s.len(),
         Datum::Array(arr) => arr.len() * 8, // rough estimate
         Datum::Jsonb(v) => v.to_string().len(),
+        Datum::Decimal(_, _) => 16, // i128 = 16 bytes
     }
 }
 

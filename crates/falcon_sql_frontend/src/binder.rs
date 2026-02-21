@@ -198,6 +198,8 @@ impl Binder {
                         Ok(BoundStatement::ShowTableStats { table_name: Some(tname) })
                     }
                     "falcon_sequences" => Ok(BoundStatement::ShowSequences),
+                    "falcon_tenants" => Ok(BoundStatement::ShowTenants),
+                    "falcon_tenant_usage" => Ok(BoundStatement::ShowTenantUsage),
                     _ => Err(SqlError::Unsupported(format!("SHOW {}", var_name))),
                 }
             }

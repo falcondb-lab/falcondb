@@ -257,6 +257,20 @@ impl Executor {
             for (i, val) in source_row.values.iter().enumerate() {
                 values[columns[i]] = val.clone();
             }
+
+            // Enforce NOT NULL constraints
+            for (i, val) in values.iter().enumerate() {
+                if val.is_null() && !schema.columns[i].nullable {
+                    return Err(FalconError::Execution(ExecutionError::TypeError(
+                        format!("NULL value in column '{}' violates NOT NULL constraint", schema.columns[i].name),
+                    )));
+                }
+            }
+
+            // Enforce CHECK constraints
+            let check_row = OwnedRow::new(values.clone());
+            self.eval_check_constraints(schema, &check_row)?;
+
             let row = OwnedRow::new(values);
             self.storage.insert(table_id, row, txn.txn_id)?;
             count += 1;
@@ -825,5 +839,6 @@ fn datatype_to_cast_target(dt: &DataType) -> String {
         DataType::Date => "date".into(),
         DataType::Jsonb => "jsonb".into(),
         DataType::Array(_) => "array".into(),
+        DataType::Decimal(_, _) => "numeric".into(),
     }
 }

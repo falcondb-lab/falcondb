@@ -16,6 +16,7 @@ use falcon_txn::TxnManager;
 use crate::codec::{self, BackendMessage, FrontendMessage};
 use crate::connection_pool::{ConnectionPool, PoolConfig};
 use crate::handler::QueryHandler;
+use crate::notify::NotificationHub;
 use crate::session::PgSession;
 
 /// Entry in the cancellation registry for a session.
@@ -55,6 +56,8 @@ pub struct PgServer {
     cancel_registry: CancellationRegistry,
     /// Optional server-side connection pool.
     connection_pool: Option<Arc<ConnectionPool>>,
+    /// Shared LISTEN/NOTIFY hub — all sessions share this so NOTIFY reaches all listeners.
+    notification_hub: Arc<NotificationHub>,
 }
 
 impl PgServer {
@@ -80,6 +83,7 @@ impl PgServer {
             auth_config: AuthConfig::default(),
             cancel_registry: Arc::new(DashMap::new()),
             connection_pool: None,
+            notification_hub: Arc::new(NotificationHub::new()),
         }
     }
 
@@ -108,6 +112,7 @@ impl PgServer {
             auth_config: AuthConfig::default(),
             cancel_registry: Arc::new(DashMap::new()),
             connection_pool: None,
+            notification_hub: Arc::new(NotificationHub::new()),
         }
     }
 
@@ -263,6 +268,7 @@ impl PgServer {
         let auth_config = self.auth_config.clone();
         let cancel_reg = self.cancel_registry.clone();
         let replica_metrics = self.replica_metrics.clone();
+        let notification_hub = self.notification_hub.clone();
 
         // Increment active connections now; the handler will decrement on exit.
         // The actual max_connections check happens after the startup handshake
@@ -283,7 +289,7 @@ impl PgServer {
                         if let Err(e) = handle_connection_with_timeout(
                             stream, session_id, handler, timeout_ms, idle_ms,
                             max_connections, active.clone(),
-                            auth_config, cancel_reg.clone(),
+                            auth_config, cancel_reg.clone(), notification_hub.clone(),
                         ).await {
                             tracing::error!("Connection error (session {}): {}", session_id, e);
                         }
@@ -332,7 +338,7 @@ impl PgServer {
                 if let Err(e) = handle_connection_with_timeout(
                     stream, session_id, handler, timeout_ms, idle_ms,
                     max_connections, active.clone(),
-                    auth_config, cancel_reg.clone(),
+                    auth_config, cancel_reg.clone(), notification_hub,
                 ).await {
                     tracing::error!("Connection error (session {}): {}", session_id, e);
                 }
@@ -356,9 +362,10 @@ async fn handle_connection_with_timeout(
     active_connections: Arc<AtomicUsize>,
     auth_config: AuthConfig,
     cancel_registry: CancellationRegistry,
+    notification_hub: Arc<NotificationHub>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut buf = BytesMut::with_capacity(8192);
-    let mut session = PgSession::new(session_id);
+    let mut session = PgSession::new_with_hub(session_id, notification_hub);
     session.statement_timeout_ms = default_statement_timeout_ms;
 
     // Generate a random secret key for this session's cancel support
@@ -1353,6 +1360,7 @@ fn decode_param_value(
         Some(DataType::Date) => Datum::Text(s.to_string()),
         Some(DataType::Array(_)) => Datum::Text(s.to_string()), // arrays as text for now
         Some(DataType::Jsonb) => Datum::Text(s.to_string()),    // jsonb as text for now
+        Some(DataType::Decimal(_, _)) => Datum::parse_decimal(s).unwrap_or(Datum::Text(s.to_string())),
         None => {
             // No type hint: try integer, then float, then text
             if let Ok(i) = s.parse::<i64>() {
@@ -1460,6 +1468,10 @@ fn decode_param_value_binary(
         Some(DataType::Text) | Some(DataType::Timestamp) | Some(DataType::Date)
         | Some(DataType::Jsonb) | Some(DataType::Array(_)) => {
             Datum::Text(String::from_utf8_lossy(bytes).into_owned())
+        }
+        Some(DataType::Decimal(_, _)) => {
+            let s = String::from_utf8_lossy(bytes);
+            Datum::parse_decimal(&s).unwrap_or(Datum::Text(s.into_owned()))
         }
         None => {
             // No type hint: try to infer from byte length

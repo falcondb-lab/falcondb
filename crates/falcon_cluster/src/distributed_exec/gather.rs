@@ -264,6 +264,7 @@ pub(crate) fn encode_group_key(group_by_indices: &[usize], values: &[Datum]) -> 
             Datum::Date(v) => { key.push(9); key.extend_from_slice(&v.to_be_bytes()); }
             Datum::Array(arr) => { key.push(7); let s = format!("{:?}", arr); key.extend_from_slice(&(s.len() as u32).to_be_bytes()); key.extend_from_slice(s.as_bytes()); }
             Datum::Jsonb(v) => { key.push(8); let s = v.to_string(); key.extend_from_slice(&(s.len() as u32).to_be_bytes()); key.extend_from_slice(s.as_bytes()); }
+            Datum::Decimal(m, s) => { key.push(10); key.push(*s); key.extend_from_slice(&m.to_be_bytes()); }
         }
     }
     key

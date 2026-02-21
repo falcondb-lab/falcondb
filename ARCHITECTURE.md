@@ -253,13 +253,51 @@ Future (M2+): disaggregate into dedicated compute / storage / meta roles.
 - **Background runner**: `GcRunner` thread with configurable interval and batch size
 - **Observability**: `SHOW falcon.gc_stats` exposes safepoint, reclaimed versions/bytes, chain stats
 
-### 5.5 Replication (M1)
+### 5.5 Replication — Architecture Decision: WAL Shipping (primary path) vs Raft (future)
 
-- **WAL shipping**: `WalChunk` frames with `start_lsn`, `end_lsn`, CRC32 checksum
-- **Commit Ack (Scheme A)**: commit ack = primary WAL durable (fsync). Primary does not wait for replicas.
-- **Ack tracking**: replicas report `applied_lsn`; primary tracks per-replica ack LSNs for reconnect/resume
-- **Transport**: `ReplicationTransport` trait with `InProcessTransport` and `ChannelTransport` implementations
-- **Promote/failover**: 5-step fencing protocol (fence old primary → catch up → swap → unfence → update shard map)
+FalconDB has **two replication mechanisms** that coexist intentionally:
+
+#### WAL Shipping (current primary path — M1/M2)
+
+```
+Primary ──WAL chunks──▶ Replica(s)
+         (gRPC stream, tonic, SubscribeWal RPC)
+```
+
+- **Transport**: `ReplicationTransport` trait → `InProcessTransport` (tests) → `GrpcTransport` (production, tonic gRPC)
+- **Wire**: `WalChunk` frames with `start_lsn`, `end_lsn`, CRC32 checksum; JSON-serialized `WalRecord` payloads
+- **Commit Ack (Scheme A)**: primary commits when WAL is durable (fsync). Replicas apply asynchronously.
+- **Quorum Ack (Scheme B)**: `SyncReplicationWaiter` blocks commit until N replicas report `applied_lsn ≥ commit_lsn`.
+- **Bootstrap**: new replica calls `GetCheckpoint` RPC → receives full `CheckpointData` snapshot → switches to WAL stream.
+- **Promote/failover**: 5-step fencing protocol (fence → catch-up → swap → unfence → update shard map).
+- **Status**: **fully implemented and tested** (9/9 `m2_multinode_e2e` tests pass).
+
+#### Raft (`falcon_raft` crate — future path, M4+)
+
+```
+[future] Per-shard Raft group ──AppendEntries──▶ Followers
+         (openraft, bring-your-own transport)
+```
+
+- **Current state**: single-node stub only. `RaftNetwork` returns `Unreachable("single-node mode")` for all RPCs.
+- **Why it exists**: placeholder for future strong-consistency per-shard consensus (linearizable reads, automatic leader election).
+- **Why WAL shipping is used instead**: WAL shipping is simpler, lower latency (no leader election overhead), and sufficient for primary-replica HA. Raft adds value only when you need automatic leader election across ≥3 nodes without a separate orchestrator.
+- **Migration path**: when Raft is implemented, `ReplicationTransport` will be backed by Raft `AppendEntries` instead of direct WAL streaming. The storage engine and executor layers are unaffected.
+- **Do not confuse**: WAL shipping replicas are **not** Raft followers. They apply WAL records directly to `StorageEngine` via `apply_wal_record_to_engine()`.
+
+#### Cancel Request Implementation
+
+PG cancel requests are fully implemented using `AtomicBool` polling (not `tokio::CancellationToken`):
+
+```
+Client ──CancelRequest(pid, secret)──▶ Server (new TCP conn)
+Server: cancel_registry[pid].cancelled.store(true)
+Query loop: polls cancelled every 50ms via tokio::select!
+```
+
+- **Why `AtomicBool` not `CancellationToken`**: the query executor runs in `spawn_blocking` (sync context); `CancellationToken` requires async context. The 50ms poll loop in the async wrapper achieves equivalent behaviour.
+- **Latency**: cancel takes effect within 50ms of the client request arriving.
+- **Extended query protocol**: cancel flag is checked at the start of each `Execute` message and after `spawn_blocking` returns.
 
 ---
 

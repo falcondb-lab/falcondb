@@ -133,7 +133,7 @@ impl PlanCache {
 
     /// Get cache statistics.
     pub fn stats(&self) -> PlanCacheStats {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read().unwrap_or_else(|p| p.into_inner());
         let total = inner.hits + inner.misses;
         PlanCacheStats {
             entries: inner.entries.len(),

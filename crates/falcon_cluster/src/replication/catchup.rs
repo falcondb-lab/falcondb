@@ -127,6 +127,14 @@ pub fn apply_wal_record_to_engine(
         WalRecord::TruncateTable { table_name } => {
             let _ = engine.truncate_table(table_name);
         }
+        WalRecord::CreateIndex { index_name, table_name, column_idx, unique } => {
+            if !engine.index_exists(index_name) {
+                let _ = engine.create_named_index(index_name, table_name, *column_idx, *unique);
+            }
+        }
+        WalRecord::DropIndex { index_name, .. } => {
+            let _ = engine.drop_index(index_name);
+        }
         WalRecord::Checkpoint { .. } => {
             // No-op for replica replay.
         }

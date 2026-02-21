@@ -719,7 +719,7 @@ impl FailoverOrchestrator {
                 }
                 tracing::info!("FailoverOrchestrator stopped");
             })
-            .expect("Failed to spawn failover orchestrator thread");
+            .unwrap_or_else(|e| panic!("Failed to spawn failover orchestrator thread: {}", e));
 
         FailoverOrchestratorHandle {
             stop_flag,

@@ -6277,6 +6277,9 @@ mod txn_context_tests {
             tenant_id: falcon_common::tenant::SYSTEM_TENANT_ID,
             priority: falcon_common::security::TxnPriority::Normal,
             latency_breakdown: falcon_common::kernel::TxnLatencyBreakdown::default(),
+            read_only: false,
+            timeout_ms: 0,
+            exec_summary: falcon_txn::manager::TxnExecSummary::default(),
         };
 
         let ctx = handle.to_context();

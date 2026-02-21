@@ -164,6 +164,11 @@ fn encode_datum_for_hash(buf: &mut Vec<u8>, datum: &Datum) {
             buf.extend_from_slice(s.as_bytes());
             buf.push(0x00);
         }
+        Datum::Decimal(m, s) => {
+            buf.push(0x0A);
+            buf.push(*s);
+            buf.extend_from_slice(&m.to_le_bytes());
+        }
     }
 }
 

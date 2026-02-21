@@ -559,6 +559,13 @@ impl StorageEngine {
                 unique,
             },
         );
+
+        self.append_and_flush_wal(&WalRecord::CreateIndex {
+            index_name: index_name.to_string(),
+            table_name: table_name.to_string(),
+            column_idx,
+            unique,
+        })?;
         Ok(())
     }
 
@@ -575,6 +582,12 @@ impl StorageEngine {
             let mut indexes = memtable.secondary_indexes.write();
             indexes.retain(|idx| idx.column_idx != meta.column_idx);
         }
+
+        self.append_and_flush_wal(&WalRecord::DropIndex {
+            index_name: index_name.to_string(),
+            table_name: meta.table_name.clone(),
+            column_idx: meta.column_idx,
+        })?;
         Ok(())
     }
 
@@ -595,7 +608,7 @@ impl StorageEngine {
             let memtable = table_ref.value();
             {
                 let indexes = memtable.secondary_indexes.read();
-                if indexes.iter().any(|idx| idx.column_idx == column_idx) {
+                if indexes.iter().any(|idx| idx.column_idx == column_idx && idx.column_indices.is_empty()) {
                     return Ok(()); // Already indexed
                 }
             }
@@ -605,20 +618,139 @@ impl StorageEngine {
                 crate::memtable::SecondaryIndex::new(column_idx)
             };
             // Backfill existing rows (and check uniqueness for unique indexes)
-            let mut seen_keys: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
-            for entry in memtable.data.iter() {
-                let pk = entry.key().clone();
-                let chain = entry.value();
-                if let Some(row) = chain.read_latest() {
-                    let key_bytes = crate::memtable::encode_column_value(&row.values[column_idx]);
-                    if unique && !seen_keys.insert(key_bytes.clone()) {
-                        return Err(StorageError::DuplicateKey);
-                    }
-                    new_index.insert(key_bytes, pk);
-                }
-            }
+            self.backfill_index(&new_index, memtable, unique)?;
             let mut indexes = memtable.secondary_indexes.write();
             indexes.push(new_index);
+        }
+        Ok(())
+    }
+
+    /// Create a composite (multi-column) index.
+    pub fn create_composite_index(
+        &self,
+        index_name: &str,
+        table_name: &str,
+        column_indices: Vec<usize>,
+        unique: bool,
+    ) -> Result<(), StorageError> {
+        let catalog = self.catalog.read();
+        let table = catalog
+            .find_table(table_name)
+            .ok_or(StorageError::TableNotFound(TableId(0)))?;
+        let table_id = table.id;
+        drop(catalog);
+
+        if let Some(table_ref) = self.tables.get(&table_id) {
+            let memtable = table_ref.value();
+            let new_index = crate::memtable::SecondaryIndex::new_composite(column_indices.clone(), unique);
+            self.backfill_index(&new_index, memtable, unique)?;
+            let mut indexes = memtable.secondary_indexes.write();
+            indexes.push(new_index);
+        }
+
+        self.index_registry.insert(
+            index_name.to_lowercase(),
+            IndexMeta {
+                table_id,
+                table_name: table_name.to_string(),
+                column_idx: *column_indices.first().unwrap_or(&0),
+                unique,
+            },
+        );
+        Ok(())
+    }
+
+    /// Create a covering index (with INCLUDE columns for index-only scans).
+    pub fn create_covering_index(
+        &self,
+        index_name: &str,
+        table_name: &str,
+        column_indices: Vec<usize>,
+        covering_columns: Vec<usize>,
+        unique: bool,
+    ) -> Result<(), StorageError> {
+        let catalog = self.catalog.read();
+        let table = catalog
+            .find_table(table_name)
+            .ok_or(StorageError::TableNotFound(TableId(0)))?;
+        let table_id = table.id;
+        drop(catalog);
+
+        if let Some(table_ref) = self.tables.get(&table_id) {
+            let memtable = table_ref.value();
+            let new_index = crate::memtable::SecondaryIndex::new_covering(
+                column_indices.clone(), covering_columns, unique,
+            );
+            self.backfill_index(&new_index, memtable, unique)?;
+            let mut indexes = memtable.secondary_indexes.write();
+            indexes.push(new_index);
+        }
+
+        self.index_registry.insert(
+            index_name.to_lowercase(),
+            IndexMeta {
+                table_id,
+                table_name: table_name.to_string(),
+                column_idx: *column_indices.first().unwrap_or(&0),
+                unique,
+            },
+        );
+        Ok(())
+    }
+
+    /// Create a prefix index (truncated key for long text columns).
+    pub fn create_prefix_index(
+        &self,
+        index_name: &str,
+        table_name: &str,
+        column_idx: usize,
+        prefix_len: usize,
+    ) -> Result<(), StorageError> {
+        let catalog = self.catalog.read();
+        let table = catalog
+            .find_table(table_name)
+            .ok_or(StorageError::TableNotFound(TableId(0)))?;
+        let table_id = table.id;
+        drop(catalog);
+
+        if let Some(table_ref) = self.tables.get(&table_id) {
+            let memtable = table_ref.value();
+            let new_index = crate::memtable::SecondaryIndex::new_prefix(column_idx, prefix_len);
+            self.backfill_index(&new_index, memtable, false)?;
+            let mut indexes = memtable.secondary_indexes.write();
+            indexes.push(new_index);
+        }
+
+        self.index_registry.insert(
+            index_name.to_lowercase(),
+            IndexMeta {
+                table_id,
+                table_name: table_name.to_string(),
+                column_idx,
+                unique: false,
+            },
+        );
+        Ok(())
+    }
+
+    /// Backfill an index from existing table data.
+    fn backfill_index(
+        &self,
+        index: &crate::memtable::SecondaryIndex,
+        memtable: &crate::memtable::MemTable,
+        unique: bool,
+    ) -> Result<(), StorageError> {
+        let mut seen_keys: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+        for entry in memtable.data.iter() {
+            let pk = entry.key().clone();
+            let chain = entry.value();
+            if let Some(row) = chain.read_latest() {
+                let key_bytes = index.encode_key(&row);
+                if unique && !seen_keys.insert(key_bytes.clone()) {
+                    return Err(StorageError::DuplicateKey);
+                }
+                index.insert(key_bytes, pk);
+            }
         }
         Ok(())
     }

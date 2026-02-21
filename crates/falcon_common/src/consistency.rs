@@ -607,6 +607,9 @@ pub mod pg_error_codes {
     /// Unique constraint violation.
     pub const UNIQUE_VIOLATION: &str = "23505";
 
+    /// CHECK constraint violation.
+    pub const CHECK_VIOLATION: &str = "23514";
+
     /// Transaction in wrong state for this operation.
     pub const INVALID_TRANSACTION_STATE: &str = "25000";
 

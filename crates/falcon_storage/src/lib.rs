@@ -3,6 +3,7 @@ mod engine_ddl;
 mod engine_dml;
 pub mod gc;
 pub mod index;
+pub mod lsm;
 pub mod memtable;
 pub mod memory;
 pub mod mvcc;

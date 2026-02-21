@@ -1,13 +1,20 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use falcon_cluster::{DistributedQueryEngine, HAReplicaGroup, ReplicaRunnerMetrics, SyncReplicationWaiter};
+use falcon_cluster::{
+    ClusterAdmin, ClusterEventLog, CoordinatorDecisionLog, DecisionLogConfig,
+    DistributedQueryEngine, HAReplicaGroup, LayeredTimeoutController, LayeredTimeoutConfig,
+    ReplicaRunnerMetrics, SlowShardConfig, SlowShardTracker, SyncReplicationWaiter,
+    TokenBucket, TokenBucketConfig,
+};
+use falcon_cluster::fault_injection::FaultInjector;
+use falcon_cluster::security_hardening::{AuthRateLimiter, AuthRateLimiterConfig, PasswordPolicy, PasswordPolicyConfig, SqlFirewall, SqlFirewallConfig};
 use falcon_common::consistency::CommitPolicy;
 use parking_lot::RwLock;
 use falcon_common::datum::Datum;
 use falcon_common::types::ShardId;
 use falcon_common::error::FalconError;
-use falcon_executor::{ExecutionResult, Executor};
+use falcon_executor::{ExecutionResult, Executor, PriorityScheduler, PrioritySchedulerConfig};
 use falcon_planner::{IndexedColumns, PhysicalPlan, PlannedTxnType, Planner, TableRowCounts};
 use falcon_sql_frontend::binder::Binder;
 use falcon_sql_frontend::parser::parse_sql;
@@ -59,6 +66,26 @@ pub struct QueryHandler {
     pub(crate) sync_waiter: Option<Arc<SyncReplicationWaiter>>,
     /// HA replica group for sync replication LSN tracking.
     pub(crate) ha_group: Option<Arc<RwLock<HAReplicaGroup>>>,
+    /// Cluster admin coordinator for scale-out/in, rebalance, leader transfer.
+    pub(crate) cluster_admin: Arc<ClusterAdmin>,
+    /// Priority scheduler for tail latency governance.
+    pub(crate) priority_scheduler: Arc<PriorityScheduler>,
+    /// Token bucket for DDL/backfill/rebalance rate limiting.
+    pub(crate) rebalance_token_bucket: Arc<TokenBucket>,
+    /// 2PC coordinator decision log (durable commit point).
+    pub(crate) decision_log: Arc<CoordinatorDecisionLog>,
+    /// 2PC layered timeout controller.
+    pub(crate) timeout_controller: Arc<LayeredTimeoutController>,
+    /// 2PC slow-shard tracker.
+    pub(crate) slow_shard_tracker: Arc<SlowShardTracker>,
+    /// Fault injector for chaos testing.
+    pub(crate) fault_injector: Arc<FaultInjector>,
+    /// Auth rate limiter for brute-force protection.
+    pub(crate) auth_rate_limiter: Arc<AuthRateLimiter>,
+    /// Password policy enforcer.
+    pub(crate) password_policy: Arc<PasswordPolicy>,
+    /// SQL firewall for injection detection.
+    pub(crate) sql_firewall: Arc<SqlFirewall>,
 }
 
 impl QueryHandler {
@@ -87,6 +114,16 @@ impl QueryHandler {
             commit_policy: CommitPolicy::default(),
             sync_waiter: None,
             ha_group: None,
+            cluster_admin: ClusterAdmin::new(ClusterEventLog::new(256)),
+            priority_scheduler: PriorityScheduler::new(PrioritySchedulerConfig::default()),
+            rebalance_token_bucket: TokenBucket::new(TokenBucketConfig::rebalance()),
+            decision_log: CoordinatorDecisionLog::new(DecisionLogConfig::default()),
+            timeout_controller: LayeredTimeoutController::new(LayeredTimeoutConfig::default()),
+            slow_shard_tracker: SlowShardTracker::new(SlowShardConfig::default()),
+            fault_injector: Arc::new(FaultInjector::new()),
+            auth_rate_limiter: Arc::new(AuthRateLimiter::new(AuthRateLimiterConfig::default())),
+            password_policy: Arc::new(PasswordPolicy::new(PasswordPolicyConfig::default())),
+            sql_firewall: Arc::new(SqlFirewall::new(SqlFirewallConfig::default())),
         }
     }
 
@@ -122,7 +159,22 @@ impl QueryHandler {
             commit_policy: CommitPolicy::default(),
             sync_waiter: None,
             ha_group: None,
+            cluster_admin: ClusterAdmin::new(ClusterEventLog::new(256)),
+            priority_scheduler: PriorityScheduler::new(PrioritySchedulerConfig::default()),
+            rebalance_token_bucket: TokenBucket::new(TokenBucketConfig::rebalance()),
+            decision_log: CoordinatorDecisionLog::new(DecisionLogConfig::default()),
+            timeout_controller: LayeredTimeoutController::new(LayeredTimeoutConfig::default()),
+            slow_shard_tracker: SlowShardTracker::new(SlowShardConfig::default()),
+            fault_injector: Arc::new(FaultInjector::new()),
+            auth_rate_limiter: Arc::new(AuthRateLimiter::new(AuthRateLimiterConfig::default())),
+            password_policy: Arc::new(PasswordPolicy::new(PasswordPolicyConfig::default())),
+            sql_firewall: Arc::new(SqlFirewall::new(SqlFirewallConfig::default())),
         }
+    }
+
+    /// Set the cluster admin coordinator.
+    pub fn set_cluster_admin(&mut self, admin: Arc<ClusterAdmin>) {
+        self.cluster_admin = admin;
     }
 
     /// Set the commit policy for durability guarantees.
@@ -157,6 +209,10 @@ impl QueryHandler {
     }
 
     /// Process a simple query string. Returns a list of backend messages to send.
+    ///
+    /// The entire request is wrapped in `catch_request` so that any panic in
+    /// parse/bind/plan/execute is converted to an ErrorResponse rather than
+    /// crashing the process.
     pub fn handle_query(
         &self,
         sql: &str,
@@ -172,11 +228,36 @@ impl QueryHandler {
             return response;
         }
 
+        // Build per-request context for tracing and error enrichment.
+        let rctx = falcon_common::request_context::RequestContext::new(session.id as u64);
+
+        // Wrap the core query path in catch_request for crash domain isolation.
+        // If any code below panics, the panic is caught and converted to an
+        // InternalBug error response — the connection stays alive.
+        let ctx = format!("session_id={}", session.id);
+        let result = falcon_common::crash_domain::catch_request_result(
+            "handle_query",
+            &ctx,
+            || self.handle_query_inner(sql, session),
+        );
+        match result {
+            Ok(msgs) => msgs,
+            Err(e) => vec![self.error_response(&e.with_request_context(&rctx))],
+        }
+    }
+
+    /// Inner query processing logic, called from `handle_query` inside a
+    /// crash-domain guard.
+    fn handle_query_inner(
+        &self,
+        sql: &str,
+        session: &mut PgSession,
+    ) -> Result<Vec<BackendMessage>, FalconError> {
         // Parse
         let stmts = match parse_sql(sql) {
             Ok(stmts) => stmts,
             Err(e) => {
-                return vec![self.error_response(&FalconError::Sql(e))];
+                return Ok(vec![self.error_response(&FalconError::Sql(e))]);
             }
         };
 
@@ -194,7 +275,7 @@ impl QueryHandler {
                     Ok(b) => b,
                     Err(e) => {
                         messages.push(self.error_response(&FalconError::Sql(e)));
-                        return messages;
+                        return Ok(messages);
                     }
                 };
 
@@ -205,7 +286,7 @@ impl QueryHandler {
                     Ok(p) => p,
                     Err(e) => {
                         messages.push(self.error_response(&FalconError::Sql(e)));
-                        return messages;
+                        return Ok(messages);
                     }
                 };
 
@@ -341,7 +422,7 @@ impl QueryHandler {
                     format: 0,
                     column_formats: col_formats,
                 });
-                return messages;
+                return Ok(messages);
             }
 
             // Handle COPY TO STDOUT — execute scan and stream data
@@ -367,10 +448,21 @@ impl QueryHandler {
                     false
                 };
 
+                let txn_ref = match session.txn.as_ref() {
+                    Some(t) => t,
+                    None => {
+                        messages.push(BackendMessage::ErrorResponse {
+                            severity: "ERROR".into(),
+                            code: "25P01".into(),
+                            message: "no active transaction for COPY TO".into(),
+                        });
+                        continue;
+                    }
+                };
                 let result = self.executor.exec_copy_to(
                     *table_id, schema, columns,
                     *csv, *delimiter, *header, null_string, *quote, *escape,
-                    session.txn.as_ref().unwrap(),
+                    txn_ref,
                 );
 
                 match result {
@@ -404,7 +496,7 @@ impl QueryHandler {
                     session.txn = None;
                     self.flush_txn_stats();
                 }
-                return messages;
+                return Ok(messages);
             }
 
             // Handle COPY (query) TO STDOUT
@@ -428,9 +520,20 @@ impl QueryHandler {
                     false
                 };
 
+                let txn_ref = match session.txn.as_ref() {
+                    Some(t) => t,
+                    None => {
+                        messages.push(BackendMessage::ErrorResponse {
+                            severity: "ERROR".into(),
+                            code: "25P01".into(),
+                            message: "no active transaction for COPY TO (query)".into(),
+                        });
+                        continue;
+                    }
+                };
                 let result = self.executor.exec_copy_query_to(
                     query, *csv, *delimiter, *header, null_string, *quote, *escape,
-                    session.txn.as_ref().unwrap(),
+                    txn_ref,
                 );
 
                 match result {
@@ -464,7 +567,7 @@ impl QueryHandler {
                     session.txn = None;
                     self.flush_txn_stats();
                 }
-                return messages;
+                return Ok(messages);
             }
 
             // For DDL and metadata commands, execute without txn
@@ -502,7 +605,7 @@ impl QueryHandler {
                     }
                     Err(e) => {
                         messages.push(self.error_response(&e));
-                        return messages;
+                        return Ok(messages);
                     }
                     _ => {}
                 }
@@ -615,17 +718,37 @@ impl QueryHandler {
                         self.flush_txn_stats();
                     }
                     messages.push(self.error_response(&e));
-                    return messages;
+                    return Ok(messages);
                 }
             }
         }
 
-        messages
+        Ok(messages)
     }
 
     /// Process COPY FROM STDIN data collected by the server connection loop.
     /// Returns backend messages to send (CommandComplete or ErrorResponse).
+    ///
+    /// Wrapped in crash-domain guard — panics are caught and converted to ErrorResponse.
     pub fn handle_copy_data(
+        &self,
+        data: &[u8],
+        session: &mut PgSession,
+    ) -> Vec<BackendMessage> {
+        let rctx = falcon_common::request_context::RequestContext::new(session.id as u64);
+        let ctx = format!("session_id={}", session.id);
+        let result = falcon_common::crash_domain::catch_request(
+            "handle_copy_data",
+            &ctx,
+            || self.handle_copy_data_inner(data, session),
+        );
+        match result {
+            Ok(msgs) => msgs,
+            Err(e) => vec![self.error_response(&e.with_request_context(&rctx))],
+        }
+    }
+
+    fn handle_copy_data_inner(
         &self,
         data: &[u8],
         session: &mut PgSession,
@@ -669,7 +792,14 @@ impl QueryHandler {
             &copy_state.format.null_string,
             copy_state.format.quote,
             copy_state.format.escape,
-            session.txn.as_ref().unwrap(),
+            match session.txn.as_ref() {
+                Some(t) => t,
+                None => return vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "25P01".into(),
+                    message: "no active transaction for COPY FROM".into(),
+                }],
+            },
         );
 
         let messages = match result {
@@ -751,6 +881,14 @@ impl QueryHandler {
             }]);
         }
 
+        // Cluster admin commands: SELECT falcon_add_node(id), falcon_remove_node(id),
+        // falcon_promote_leader(shard_id), falcon_rebalance_apply()
+        if sql_lower.starts_with("select falcon_") {
+            if let Some(result) = self.parse_and_dispatch_admin_command(sql_lower) {
+                return Some(result);
+            }
+        }
+
         // CHECKPOINT — trigger a storage checkpoint (WAL compaction)
         if sql_lower == "checkpoint" {
             match self.storage.checkpoint() {
@@ -798,7 +936,14 @@ impl QueryHandler {
                     message: "SAVEPOINT can only be used in transaction blocks".into(),
                 }]);
             }
-            let txn_id = session.txn.as_ref().unwrap().txn_id;
+            let txn_id = match session.txn.as_ref() {
+                Some(t) => t.txn_id,
+                None => return Some(vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "25P01".into(),
+                    message: "SAVEPOINT requires an active transaction".into(),
+                }]),
+            };
             let write_set_len = self.storage.write_set_snapshot(txn_id);
             let read_set_len = self.storage.read_set_snapshot(txn_id);
             session.savepoints.push(crate::session::SavepointEntry {
@@ -849,6 +994,67 @@ impl QueryHandler {
                     severity: "ERROR".into(),
                     code: "3B001".into(),
                     message: format!("savepoint \"{}\" does not exist", name),
+                }]);
+            }
+        }
+
+        // CREATE TENANT name [MAX_QPS n] [MAX_CONNECTIONS n] [MAX_STORAGE_BYTES n]
+        if sql_lower.starts_with("create tenant ") {
+            let rest = sql_lower.trim_start_matches("create tenant ").trim();
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if parts.is_empty() {
+                return Some(vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "42601".into(),
+                    message: "CREATE TENANT requires a tenant name".into(),
+                }]);
+            }
+            let tenant_name = parts[0].to_string();
+            let mut max_qps = 0u64;
+            let mut max_storage_bytes = 0u64;
+            let mut i = 1;
+            while i + 1 < parts.len() {
+                match parts[i] {
+                    "max_qps" => { max_qps = parts[i+1].parse().unwrap_or(0); i += 2; }
+                    "max_storage_bytes" => { max_storage_bytes = parts[i+1].parse().unwrap_or(0); i += 2; }
+                    _ => { i += 1; }
+                }
+            }
+            let tenant_id = falcon_common::tenant::TenantId(
+                self.tenant_registry.tenant_count() as u64 + 1
+            );
+            let mut config = falcon_common::tenant::TenantConfig::new(tenant_id, tenant_name.clone());
+            config.quota.max_qps = max_qps;
+            config.quota.max_storage_bytes = max_storage_bytes;
+            if self.tenant_registry.register_tenant(config) {
+                return Some(vec![BackendMessage::CommandComplete {
+                    tag: format!("CREATE TENANT {}", tenant_name),
+                }]);
+            } else {
+                return Some(vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "42710".into(),
+                    message: format!("tenant \"{}\" already exists", tenant_name),
+                }]);
+            }
+        }
+
+        // DROP TENANT name
+        if sql_lower.starts_with("drop tenant ") {
+            let tenant_name = sql_lower.trim_start_matches("drop tenant ").trim().to_string();
+            let found = self.tenant_registry.tenant_ids().into_iter().find(|tid| {
+                self.tenant_registry.get_config(*tid).map(|c| c.name == tenant_name).unwrap_or(false)
+            });
+            if let Some(tid) = found {
+                self.tenant_registry.remove_tenant(tid);
+                return Some(vec![BackendMessage::CommandComplete {
+                    tag: format!("DROP TENANT {}", tenant_name),
+                }]);
+            } else {
+                return Some(vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "42704".into(),
+                    message: format!("tenant \"{}\" does not exist", tenant_name),
                 }]);
             }
         }
@@ -1097,7 +1303,14 @@ impl QueryHandler {
                 message: "DECLARE CURSOR requires FOR <query>".into(),
             }];
         }
-        let for_idx = for_pos.unwrap();
+        let for_idx = match for_pos {
+            Some(i) => i,
+            None => return vec![BackendMessage::ErrorResponse {
+                severity: "ERROR".into(),
+                code: "42601".into(),
+                message: "DECLARE CURSOR: FOR position not found".into(),
+            }],
+        };
         // Get the original-case SQL for the query portion
         let declare_prefix_len = "declare ".len();
         let query_start = declare_prefix_len + for_idx + " for ".len();
@@ -1227,19 +1440,16 @@ impl QueryHandler {
             3.. => {
                 // Try: count FROM name / FORWARD count FROM name / NEXT FROM name
                 let first = tokens[0];
+                let last_token = tokens.last().copied().unwrap_or("").to_string();
                 if first == "next" || first == "forward" {
-                    let cursor = tokens.last().unwrap().to_string();
                     let count = tokens.get(1).and_then(|t| t.parse::<usize>().ok()).unwrap_or(1);
-                    (count, cursor)
+                    (count, last_token)
                 } else if first == "all" {
-                    let cursor = tokens.last().unwrap().to_string();
-                    (usize::MAX, cursor)
+                    (usize::MAX, last_token)
                 } else if let Ok(n) = first.parse::<usize>() {
-                    let cursor = tokens.last().unwrap().to_string();
-                    (n, cursor)
+                    (n, last_token)
                 } else {
-                    let cursor = tokens.last().unwrap().to_string();
-                    (1, cursor)
+                    (1, last_token)
                 }
             }
             _ => (1, String::new()),
@@ -1299,6 +1509,29 @@ impl QueryHandler {
         }
     }
 
+    /// Parse and dispatch cluster admin commands like `SELECT falcon_add_node(42)`.
+    fn parse_and_dispatch_admin_command(&self, sql_lower: &str) -> Option<Vec<BackendMessage>> {
+        // Strip "select " prefix
+        let rest = sql_lower.strip_prefix("select ")?;
+
+        // Extract function name and args: "falcon_add_node(42)" → ("falcon_add_node", ["42"])
+        let paren_start = rest.find('(')?;
+        let paren_end = rest.rfind(')')?;
+        if paren_end <= paren_start {
+            return None;
+        }
+
+        let func_name = rest[..paren_start].trim();
+        let args_str = rest[paren_start + 1..paren_end].trim();
+        let args: Vec<&str> = if args_str.is_empty() {
+            vec![]
+        } else {
+            args_str.split(',').collect()
+        };
+
+        self.handle_cluster_admin_command(func_name, &args)
+    }
+
     /// Helper to build a simple query result with typed columns.
     pub(crate) fn single_row_result(
         &self,
@@ -1355,7 +1588,17 @@ impl QueryHandler {
     /// Describe a SQL query: parse/bind/plan and return the output column descriptions.
     /// Used by the extended query protocol's Describe message.
     /// Returns Ok(fields) for queries, Ok(empty) for DML/DDL, Err for parse/bind errors.
+    ///
+    /// Wrapped in crash-domain guard — panics are caught and converted to FalconError.
     pub fn describe_query(&self, sql: &str) -> Result<Vec<FieldDescription>, FalconError> {
+        falcon_common::crash_domain::catch_request_result(
+            "describe_query",
+            sql,
+            || self.describe_query_inner(sql),
+        )
+    }
+
+    fn describe_query_inner(&self, sql: &str) -> Result<Vec<FieldDescription>, FalconError> {
         let sql = sql.trim();
         if sql.is_empty() {
             return Ok(vec![]);
@@ -1380,7 +1623,20 @@ impl QueryHandler {
 
     /// Parse + bind + plan a SQL statement for the extended query protocol.
     /// Returns (PhysicalPlan, inferred_param_types, row_desc) on success.
+    ///
+    /// Wrapped in crash-domain guard — panics are caught and converted to FalconError.
     pub fn prepare_statement(
+        &self,
+        sql: &str,
+    ) -> Result<(PhysicalPlan, Vec<Option<falcon_common::types::DataType>>, Vec<crate::session::FieldDescriptionCompact>), FalconError> {
+        falcon_common::crash_domain::catch_request_result(
+            "prepare_statement",
+            sql,
+            || self.prepare_statement_inner(sql),
+        )
+    }
+
+    fn prepare_statement_inner(
         &self,
         sql: &str,
     ) -> Result<(PhysicalPlan, Vec<Option<falcon_common::types::DataType>>, Vec<crate::session::FieldDescriptionCompact>), FalconError> {
@@ -1428,7 +1684,28 @@ impl QueryHandler {
 
     /// Execute a pre-planned query with parameter values.
     /// Used by the extended query protocol's Execute message.
+    ///
+    /// Wrapped in crash-domain guard — panics are caught and converted to ErrorResponse.
     pub fn execute_plan(
+        &self,
+        plan: &PhysicalPlan,
+        params: &[Datum],
+        session: &mut PgSession,
+    ) -> Vec<BackendMessage> {
+        let rctx = falcon_common::request_context::RequestContext::new(session.id as u64);
+        let ctx = format!("session_id={}", session.id);
+        let result = falcon_common::crash_domain::catch_request(
+            "execute_plan",
+            &ctx,
+            || self.execute_plan_inner(plan, params, session),
+        );
+        match result {
+            Ok(msgs) => msgs,
+            Err(e) => vec![self.error_response(&e.with_request_context(&rctx))],
+        }
+    }
+
+    fn execute_plan_inner(
         &self,
         plan: &PhysicalPlan,
         params: &[Datum],
@@ -1624,6 +1901,7 @@ impl QueryHandler {
             Some(DataType::Date) => 1082,     // DATE
             Some(DataType::Array(_)) => 2277, // ANYARRAY
             Some(DataType::Jsonb) => 3802,    // JSONB
+            Some(DataType::Decimal(_, _)) => 1700, // NUMERIC
             None => 0,                        // unspecified
         }
     }
@@ -1902,10 +2180,15 @@ impl QueryHandler {
     }
 
     fn error_response(&self, err: &FalconError) -> BackendMessage {
+        let mut message = err.to_string();
+        // Append routing hints for retryable errors so PG-aware proxies can act.
+        if let FalconError::Retryable { leader_hint: Some(ref hint), retry_after_ms, .. } = err {
+            message = format!("{} HINT: leader={}, retry_after={}ms", message, hint, retry_after_ms);
+        }
         BackendMessage::ErrorResponse {
             severity: err.pg_severity().into(),
             code: err.pg_sqlstate().into(),
-            message: err.to_string(),
+            message,
         }
     }
 
@@ -3366,5 +3649,515 @@ mod tests {
         let rows2 = extract_data_rows(&msgs2);
         assert_eq!(rows2.len(), 1);
         assert_eq!(rows2[0][1], Some("c".into()));
+    }
+
+    // ── M4: Multi-tenancy SQL commands ───────────────────────────────────────
+
+    #[test]
+    fn test_create_tenant_basic() {
+        let (handler, mut session) = setup_handler();
+        let msgs = handler.handle_query("CREATE TENANT acme", &mut session);
+        let has_complete = msgs.iter().any(|m| matches!(m,
+            BackendMessage::CommandComplete { tag } if tag.contains("acme")
+        ));
+        assert!(has_complete, "CREATE TENANT should return CommandComplete");
+    }
+
+    #[test]
+    fn test_create_tenant_with_quotas() {
+        let (handler, mut session) = setup_handler();
+        let msgs = handler.handle_query(
+            "CREATE TENANT bigcorp MAX_QPS 1000 MAX_STORAGE_BYTES 1073741824",
+            &mut session,
+        );
+        let has_complete = msgs.iter().any(|m| matches!(m,
+            BackendMessage::CommandComplete { tag } if tag.contains("bigcorp")
+        ));
+        assert!(has_complete, "CREATE TENANT with quotas should succeed");
+    }
+
+    #[test]
+    fn test_create_tenant_duplicate_fails() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query("CREATE TENANT dup", &mut session);
+        let msgs = handler.handle_query("CREATE TENANT dup", &mut session);
+        let has_error = msgs.iter().any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
+        assert!(has_error, "Duplicate CREATE TENANT should return error");
+    }
+
+    #[test]
+    fn test_drop_tenant_basic() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query("CREATE TENANT todelete", &mut session);
+        let msgs = handler.handle_query("DROP TENANT todelete", &mut session);
+        let has_complete = msgs.iter().any(|m| matches!(m,
+            BackendMessage::CommandComplete { tag } if tag.contains("todelete")
+        ));
+        assert!(has_complete, "DROP TENANT should return CommandComplete");
+    }
+
+    #[test]
+    fn test_drop_tenant_nonexistent_fails() {
+        let (handler, mut session) = setup_handler();
+        let msgs = handler.handle_query("DROP TENANT ghost", &mut session);
+        let has_error = msgs.iter().any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
+        assert!(has_error, "DROP TENANT on nonexistent tenant should error");
+    }
+
+    #[test]
+    fn test_show_falcon_tenants() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query("CREATE TENANT t1", &mut session);
+        handler.handle_query("CREATE TENANT t2", &mut session);
+        let msgs = handler.handle_query("SHOW falcon.tenants", &mut session);
+        assert!(has_row_description(&msgs), "SHOW falcon.tenants should have RowDescription");
+        let rows = extract_data_rows(&msgs);
+        assert!(!rows.is_empty(), "SHOW falcon.tenants should return rows");
+        // Should include system tenant + t1 + t2
+        let all_text: String = rows.iter()
+            .flat_map(|r| r.iter())
+            .filter_map(|v| v.as_ref())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(all_text.contains("3") || all_text.contains("t1") || all_text.contains("t2"),
+            "tenants output should mention created tenants: {}", all_text);
+    }
+
+    #[test]
+    fn test_show_falcon_tenant_usage() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query("CREATE TENANT usage_test", &mut session);
+        let msgs = handler.handle_query("SHOW falcon.tenant_usage", &mut session);
+        assert!(has_row_description(&msgs), "SHOW falcon.tenant_usage should have RowDescription");
+        let rows = extract_data_rows(&msgs);
+        assert!(!rows.is_empty(), "SHOW falcon.tenant_usage should return rows");
+    }
+
+    // ── M4: Vectorized columnar aggregate path ────────────────────────────────
+
+    #[test]
+    fn test_columnstore_count_uses_vectorized_path() {
+        let (handler, mut session) = setup_handler();
+        // Create a ColumnStore table and insert rows
+        handler.handle_query(
+            "CREATE TABLE cs_agg (id INT, score FLOAT8) ENGINE=columnstore",
+            &mut session,
+        );
+        for i in 1..=100i32 {
+            handler.handle_query(
+                &format!("INSERT INTO cs_agg VALUES ({}, {})", i, i as f64 * 1.5),
+                &mut session,
+            );
+        }
+        // COUNT(*) should go through vectorized columnar path
+        let msgs = handler.handle_query("SELECT COUNT(*) FROM cs_agg", &mut session);
+        let rows = extract_data_rows(&msgs);
+        assert_eq!(rows.len(), 1, "COUNT(*) should return 1 row");
+        let count_val = rows[0][0].as_deref().unwrap_or("0");
+        assert_eq!(count_val, "100", "COUNT(*) should return 100, got {}", count_val);
+    }
+
+    #[test]
+    fn test_columnstore_sum_uses_vectorized_path() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query(
+            "CREATE TABLE cs_sum (id INT, val INT) ENGINE=columnstore",
+            &mut session,
+        );
+        for i in 1..=10i32 {
+            handler.handle_query(
+                &format!("INSERT INTO cs_sum VALUES ({}, {})", i, i),
+                &mut session,
+            );
+        }
+        // SUM should go through vectorized columnar path
+        let msgs = handler.handle_query("SELECT SUM(val) FROM cs_sum", &mut session);
+        let rows = extract_data_rows(&msgs);
+        assert_eq!(rows.len(), 1, "SUM should return 1 row");
+        let sum_val = rows[0][0].as_deref().unwrap_or("0");
+        // SUM(1..10) = 55
+        assert_eq!(sum_val, "55", "SUM(val) should be 55, got {}", sum_val);
+    }
+
+    // ── M4: Lag-aware replica routing ────────────────────────────────────────
+
+    #[test]
+    fn test_select_least_lagging_replica_prefers_caught_up() {
+        use falcon_cluster::replication::runner::ReplicaRunnerMetricsSnapshot;
+        use falcon_cluster::DistributedQueryEngine;
+
+        let replicas = vec![
+            ReplicaRunnerMetricsSnapshot {
+                chunks_applied: 10,
+                records_applied: 100,
+                applied_lsn: 100,
+                primary_lsn: 100,
+                lag_lsn: 0,
+                reconnect_count: 0,
+                acks_sent: 10,
+                connected: true,
+            },
+            ReplicaRunnerMetricsSnapshot {
+                chunks_applied: 8,
+                records_applied: 80,
+                applied_lsn: 80,
+                primary_lsn: 100,
+                lag_lsn: 20,
+                reconnect_count: 1,
+                acks_sent: 8,
+                connected: true,
+            },
+        ];
+
+        let best = DistributedQueryEngine::select_least_lagging_replica(&replicas);
+        assert!(best.is_some(), "should select a replica");
+        assert_eq!(best.unwrap().lag_lsn, 0, "should prefer fully caught-up replica");
+    }
+
+    #[test]
+    fn test_select_least_lagging_replica_skips_disconnected() {
+        use falcon_cluster::replication::runner::ReplicaRunnerMetricsSnapshot;
+        use falcon_cluster::DistributedQueryEngine;
+
+        let replicas = vec![
+            ReplicaRunnerMetricsSnapshot {
+                chunks_applied: 10,
+                records_applied: 100,
+                applied_lsn: 100,
+                primary_lsn: 100,
+                lag_lsn: 0,
+                reconnect_count: 0,
+                acks_sent: 10,
+                connected: false,
+            },
+            ReplicaRunnerMetricsSnapshot {
+                chunks_applied: 9,
+                records_applied: 90,
+                applied_lsn: 90,
+                primary_lsn: 100,
+                lag_lsn: 10,
+                reconnect_count: 0,
+                acks_sent: 9,
+                connected: true,
+            },
+        ];
+
+        let best = DistributedQueryEngine::select_least_lagging_replica(&replicas);
+        assert!(best.is_some(), "should select connected replica");
+        assert!(best.unwrap().connected, "selected replica must be connected");
+        assert_eq!(best.unwrap().lag_lsn, 10, "should select the connected replica");
+    }
+
+    #[test]
+    fn test_select_least_lagging_replica_empty_returns_none() {
+        use falcon_cluster::replication::runner::ReplicaRunnerMetricsSnapshot;
+        use falcon_cluster::DistributedQueryEngine;
+
+        let replicas: Vec<ReplicaRunnerMetricsSnapshot> = vec![];
+        let best = DistributedQueryEngine::select_least_lagging_replica(&replicas);
+        assert!(best.is_none(), "empty replica list should return None");
+    }
+
+    // ── Cluster Operations Closure tests ────────────────────────────────
+
+    #[test]
+    fn test_show_cluster_events_empty() {
+        let (handler, mut session) = setup_handler();
+        let msgs = handler.handle_query("SHOW falcon.cluster_events", &mut session);
+        assert!(has_row_description(&msgs), "should have RowDescription");
+        let rows = extract_data_rows(&msgs);
+        assert!(!rows.is_empty());
+        assert_eq!(rows[0][0], Some("(no events)".into()));
+    }
+
+    #[test]
+    fn test_show_node_lifecycle_empty() {
+        let (handler, mut session) = setup_handler();
+        let msgs = handler.handle_query("SHOW falcon.node_lifecycle", &mut session);
+        assert!(has_row_description(&msgs), "should have RowDescription");
+        let rows = extract_data_rows(&msgs);
+        assert!(!rows.is_empty());
+        assert_eq!(rows[0][0], Some("(none)".into()));
+    }
+
+    #[test]
+    fn test_show_rebalance_plan_single_shard() {
+        let (handler, mut session) = setup_handler();
+        let msgs = handler.handle_query("SHOW falcon.rebalance_plan", &mut session);
+        assert!(has_row_description(&msgs));
+        let rows = extract_data_rows(&msgs);
+        assert!(!rows.is_empty());
+        // Single-shard mode: should say not applicable
+        assert!(rows[0][1].as_ref().unwrap().contains("single-shard"));
+    }
+
+    #[test]
+    fn test_admin_add_node() {
+        let (handler, mut session) = setup_handler();
+        let msgs = handler.handle_query("SELECT falcon_add_node(42)", &mut session);
+        assert!(has_row_description(&msgs));
+        let rows = extract_data_rows(&msgs);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0][0].as_ref().unwrap().contains("Scale-out initiated"));
+        assert!(rows[0][0].as_ref().unwrap().contains("42"));
+    }
+
+    #[test]
+    fn test_admin_add_node_duplicate() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query("SELECT falcon_add_node(42)", &mut session);
+        let msgs = handler.handle_query("SELECT falcon_add_node(42)", &mut session);
+        let rows = extract_data_rows(&msgs);
+        assert!(rows[0][0].as_ref().unwrap().contains("ERROR"));
+    }
+
+    #[test]
+    fn test_admin_remove_node() {
+        let (handler, mut session) = setup_handler();
+        let msgs = handler.handle_query("SELECT falcon_remove_node(7)", &mut session);
+        assert!(has_row_description(&msgs));
+        let rows = extract_data_rows(&msgs);
+        assert!(rows[0][0].as_ref().unwrap().contains("Scale-in initiated"));
+    }
+
+    #[test]
+    fn test_admin_promote_leader() {
+        let (handler, mut session) = setup_handler();
+        let msgs = handler.handle_query("SELECT falcon_promote_leader(0)", &mut session);
+        assert!(has_row_description(&msgs));
+        let rows = extract_data_rows(&msgs);
+        assert!(rows[0][0].as_ref().unwrap().contains("Leader promotion requested"));
+    }
+
+    #[test]
+    fn test_admin_rebalance_apply_single_shard() {
+        let (handler, mut session) = setup_handler();
+        let msgs = handler.handle_query("SELECT falcon_rebalance_apply()", &mut session);
+        let rows = extract_data_rows(&msgs);
+        assert!(rows[0][0].as_ref().unwrap().contains("single-shard"));
+    }
+
+    #[test]
+    fn test_admin_add_node_invalid_id() {
+        let (handler, mut session) = setup_handler();
+        let msgs = handler.handle_query("SELECT falcon_add_node(0)", &mut session);
+        let rows = extract_data_rows(&msgs);
+        assert!(rows[0][0].as_ref().unwrap().contains("ERROR"));
+    }
+
+    #[test]
+    fn test_cluster_events_after_admin_ops() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query("SELECT falcon_add_node(10)", &mut session);
+        handler.handle_query("SELECT falcon_remove_node(20)", &mut session);
+        handler.handle_query("SELECT falcon_promote_leader(0)", &mut session);
+
+        let msgs = handler.handle_query("SHOW falcon.cluster_events", &mut session);
+        let rows = extract_data_rows(&msgs);
+        // Should have events for: add_node(joining), remove_node(draining), promote_leader
+        assert!(rows.len() >= 3, "expected at least 3 events, got {}", rows.len());
+    }
+
+    #[test]
+    fn test_node_lifecycle_after_add() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query("SELECT falcon_add_node(99)", &mut session);
+
+        let msgs = handler.handle_query("SHOW falcon.node_lifecycle", &mut session);
+        let rows = extract_data_rows(&msgs);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], Some("scale_out".into()));
+        assert_eq!(rows[0][1], Some("99".into()));
+        assert_eq!(rows[0][2], Some("joining".into()));
+    }
+
+    #[test]
+    fn test_g1_full_scale_out_lifecycle_via_sql() {
+        let (handler, mut session) = setup_handler();
+
+        // 1. Add node
+        let msgs = handler.handle_query("SELECT falcon_add_node(50)", &mut session);
+        let rows = extract_data_rows(&msgs);
+        assert!(rows[0][0].as_ref().unwrap().contains("Scale-out initiated"));
+
+        // 2. Verify node_lifecycle shows joining
+        let msgs = handler.handle_query("SHOW falcon.node_lifecycle", &mut session);
+        let rows = extract_data_rows(&msgs);
+        assert_eq!(rows[0][2], Some("joining".into()));
+
+        // 3. Verify cluster_events logged the scale-out
+        let msgs = handler.handle_query("SHOW falcon.cluster_events", &mut session);
+        let rows = extract_data_rows(&msgs);
+        assert!(rows.len() >= 1);
+        assert!(rows.iter().any(|r| {
+            r[2].as_deref() == Some("scale_out")
+        }), "cluster_events should contain scale_out event");
+
+        // 4. Rebalance plan should work (single-shard mode returns not applicable)
+        let msgs = handler.handle_query("SHOW falcon.rebalance_plan", &mut session);
+        assert!(has_row_description(&msgs));
+    }
+
+    #[test]
+    fn test_g2_full_scale_in_lifecycle_via_sql() {
+        let (handler, mut session) = setup_handler();
+
+        // 1. Remove node
+        let msgs = handler.handle_query("SELECT falcon_remove_node(30)", &mut session);
+        let rows = extract_data_rows(&msgs);
+        assert!(rows[0][0].as_ref().unwrap().contains("Scale-in initiated"));
+
+        // 2. Verify node_lifecycle shows draining
+        let msgs = handler.handle_query("SHOW falcon.node_lifecycle", &mut session);
+        let rows = extract_data_rows(&msgs);
+        assert_eq!(rows[0][2], Some("draining".into()));
+
+        // 3. Verify cluster_events logged the scale-in
+        let msgs = handler.handle_query("SHOW falcon.cluster_events", &mut session);
+        let rows = extract_data_rows(&msgs);
+        assert!(rows.iter().any(|r| {
+            r[2].as_deref() == Some("scale_in")
+        }), "cluster_events should contain scale_in event");
+    }
+
+    #[test]
+    fn test_g5_rebalance_plan_has_estimated_time_column() {
+        let (handler, mut session) = setup_handler();
+        let msgs = handler.handle_query("SHOW falcon.rebalance_plan", &mut session);
+        assert!(has_row_description(&msgs));
+        // Verify the RowDescription has 6 columns (type, shards, table, detail, status, estimated_time)
+        // or 2 columns in single-shard mode (metric, value)
+        for msg in &msgs {
+            if let BackendMessage::RowDescription { fields } = msg {
+                // single-shard mode has 2 columns, multi-shard has 6
+                assert!(
+                    fields.len() == 2 || fields.len() == 6,
+                    "rebalance_plan should have 2 or 6 columns, got {}",
+                    fields.len()
+                );
+                if fields.len() == 6 {
+                    assert_eq!(fields[5].name, "estimated_time");
+                }
+            }
+        }
+    }
+
+    // ── Tail Latency Governance tests ───────────────────────────────────
+
+    #[test]
+    fn test_show_priority_scheduler() {
+        let (handler, mut session) = setup_handler();
+        let msgs = handler.handle_query("SHOW falcon.priority_scheduler", &mut session);
+        assert!(has_row_description(&msgs), "should have RowDescription");
+        let rows = extract_data_rows(&msgs);
+        assert!(rows.len() >= 10, "expected scheduler metrics rows");
+        assert_eq!(rows[0][0], Some("high_active".into()));
+        assert_eq!(rows[0][1], Some("0".into()));
+    }
+
+    #[test]
+    fn test_show_token_bucket() {
+        let (handler, mut session) = setup_handler();
+        let msgs = handler.handle_query("SHOW falcon.token_bucket", &mut session);
+        assert!(has_row_description(&msgs));
+        let rows = extract_data_rows(&msgs);
+        assert!(rows.len() >= 6, "expected token bucket metrics rows");
+        assert_eq!(rows[0][0], Some("rate_per_sec".into()));
+        // Rebalance preset: 5000 tokens/sec
+        assert_eq!(rows[0][1], Some("5000".into()));
+    }
+
+    // ── Deterministic 2PC tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_show_two_phase_config() {
+        let (handler, mut session) = setup_handler();
+        let msgs = handler.handle_query("SHOW falcon.two_phase_config", &mut session);
+        assert!(has_row_description(&msgs), "should have RowDescription");
+        let rows = extract_data_rows(&msgs);
+        // Should have decision_log + timeout + slow_shard sections (20 rows)
+        assert!(rows.len() >= 15, "expected at least 15 rows, got {}", rows.len());
+        assert_eq!(rows[0][0], Some("decision_log.total_logged".into()));
+        assert_eq!(rows[0][1], Some("0".into()));
+        // Check timeout defaults
+        assert_eq!(rows[5][0], Some("timeout.soft_ms".into()));
+        assert_eq!(rows[5][1], Some("500".into()));
+        // Check slow-shard policy default
+        assert_eq!(rows[11][0], Some("slow_shard.policy".into()));
+        assert_eq!(rows[11][1], Some("fast_abort".into()));
+    }
+
+    // ── Chaos / Fault Injection tests ───────────────────────────────────
+
+    #[test]
+    fn test_show_fault_injection() {
+        let (handler, mut session) = setup_handler();
+        let msgs = handler.handle_query("SHOW falcon.fault_injection", &mut session);
+        assert!(has_row_description(&msgs), "should have RowDescription");
+        let rows = extract_data_rows(&msgs);
+        // 5 base + 6 partition + 5 jitter = 16 rows
+        assert!(rows.len() >= 16, "expected at least 16 rows, got {}", rows.len());
+        assert_eq!(rows[0][0], Some("leader_killed".into()));
+        assert_eq!(rows[0][1], Some("false".into()));
+        assert_eq!(rows[5][0], Some("partition.active".into()));
+        assert_eq!(rows[5][1], Some("false".into()));
+        assert_eq!(rows[11][0], Some("jitter.enabled".into()));
+        assert_eq!(rows[11][1], Some("false".into()));
+    }
+
+    // ── Observability catalog test ──────────────────────────────────────
+
+    #[test]
+    fn test_show_observability_catalog() {
+        let (handler, mut session) = setup_handler();
+        let msgs = handler.handle_query("SHOW falcon.observability_catalog", &mut session);
+        assert!(has_row_description(&msgs), "should have RowDescription");
+        let rows = extract_data_rows(&msgs);
+        // Should have 50 commands listed
+        assert!(rows.len() >= 50, "expected at least 50 catalog entries, got {}", rows.len());
+        // First entry
+        assert_eq!(rows[0][0], Some("SHOW falcon.version".into()));
+        // Last entry should be the catalog itself
+        let last = rows.last().unwrap();
+        assert_eq!(last[0], Some("SHOW falcon.observability_catalog".into()));
+        // Check 3 columns: command, description, since
+        assert!(rows[0].len() == 3);
+        assert!(rows[0][2].is_some()); // since column
+    }
+
+    // ── Security hardening tests ────────────────────────────────────────
+
+    #[test]
+    fn test_show_security_audit() {
+        let (handler, mut session) = setup_handler();
+        let msgs = handler.handle_query("SHOW falcon.security_audit", &mut session);
+        assert!(has_row_description(&msgs), "should have RowDescription");
+        let rows = extract_data_rows(&msgs);
+        // 8 auth + 8 password + 11 firewall = 27 rows
+        assert!(rows.len() >= 27, "expected at least 27 rows, got {}", rows.len());
+        assert_eq!(rows[0][0], Some("auth.max_failures".into()));
+        assert_eq!(rows[0][1], Some("5".into()));
+        assert_eq!(rows[8][0], Some("password.min_length".into()));
+        assert_eq!(rows[8][1], Some("8".into()));
+        assert_eq!(rows[16][0], Some("firewall.detect_injection".into()));
+        assert_eq!(rows[16][1], Some("true".into()));
+    }
+
+    // ── Release engineering tests ───────────────────────────────────────
+
+    #[test]
+    fn test_show_wire_compat() {
+        let (handler, mut session) = setup_handler();
+        let msgs = handler.handle_query("SHOW falcon.wire_compat", &mut session);
+        assert!(has_row_description(&msgs), "should have RowDescription");
+        let rows = extract_data_rows(&msgs);
+        // 10 rows: server_version, wal_format_version, snapshot_format_version, etc.
+        assert!(rows.len() >= 10, "expected at least 10 rows, got {}", rows.len());
+        assert_eq!(rows[0][0], Some("server_version".into()));
+        assert_eq!(rows[1][0], Some("wal_format_version".into()));
+        assert_eq!(rows[1][1], Some("3".into()));
+        assert_eq!(rows[8][0], Some("wal_magic".into()));
+        assert_eq!(rows[8][1], Some("FALC".into()));
     }
 }

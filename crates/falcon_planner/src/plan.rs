@@ -213,6 +213,14 @@ pub enum PhysicalPlan {
     DropSequence { name: String, if_exists: bool },
     /// SHOW falcon.sequences
     ShowSequences,
+    /// Multi-tenancy: SHOW falcon.tenants
+    ShowTenants,
+    /// Multi-tenancy: SHOW falcon.tenant_usage
+    ShowTenantUsage,
+    /// Multi-tenancy: CREATE TENANT name
+    CreateTenant { name: String, max_qps: u64, max_storage_bytes: u64 },
+    /// Multi-tenancy: DROP TENANT name
+    DropTenant { name: String },
     /// COPY table FROM STDIN — bulk import
     CopyFrom {
         table_id: TableId,

@@ -12,6 +12,32 @@ pub struct FalconConfig {
     pub spill: SpillConfig,
     #[serde(default)]
     pub memory: MemoryConfig,
+    #[serde(default)]
+    pub gc: GcSectionConfig,
+}
+
+/// GC configuration section in falcon.toml.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GcSectionConfig {
+    /// Enable background GC (default: true).
+    pub enabled: bool,
+    /// Interval between GC sweeps in milliseconds (default: 1000).
+    pub interval_ms: u64,
+    /// Max keys per sweep (0 = unlimited).
+    pub batch_size: usize,
+    /// Minimum version chain length before GC considers a key (default: 2).
+    pub min_chain_length: usize,
+}
+
+impl Default for GcSectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_ms: 1000,
+            batch_size: 0,
+            min_chain_length: 2,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -388,6 +414,191 @@ impl Default for FalconConfig {
             replication: ReplicationConfig::default(),
             spill: SpillConfig::default(),
             memory: MemoryConfig::default(),
+            gc: GcSectionConfig::default(),
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Deprecated field checker — backward-compatible config migration
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A deprecated config field mapping.
+#[derive(Debug, Clone)]
+pub struct DeprecatedField {
+    /// The old field path (e.g. "cedar.data_dir").
+    pub old_path: String,
+    /// The new field path (e.g. "storage.data_dir"), or empty if removed.
+    pub new_path: String,
+    /// Version when the field was deprecated.
+    pub deprecated_since: String,
+    /// Version when the field will be removed (empty = not yet scheduled).
+    pub removed_in: String,
+}
+
+/// Result of checking a TOML config string for deprecated fields.
+#[derive(Debug, Clone)]
+pub struct DeprecatedFieldReport {
+    /// Warnings for deprecated fields found.
+    pub warnings: Vec<String>,
+    /// Number of deprecated fields detected.
+    pub deprecated_count: usize,
+}
+
+impl DeprecatedFieldReport {
+    pub fn has_warnings(&self) -> bool {
+        !self.warnings.is_empty()
+    }
+}
+
+/// Checks TOML config text for deprecated/renamed fields and emits warnings.
+///
+/// This enables backward-compatible config: old field names are warned but not errored.
+pub struct DeprecatedFieldChecker {
+    fields: Vec<DeprecatedField>,
+}
+
+impl DeprecatedFieldChecker {
+    /// Create a checker with the built-in deprecated field registry.
+    pub fn new() -> Self {
+        Self {
+            fields: vec![
+                // CedarDB → FalconDB rename (v0.4)
+                DeprecatedField {
+                    old_path: "cedar".into(),
+                    new_path: "server".into(),
+                    deprecated_since: "v0.4.0".into(),
+                    removed_in: "v1.0.0".into(),
+                },
+                DeprecatedField {
+                    old_path: "cedar_data_dir".into(),
+                    new_path: "storage.data_dir".into(),
+                    deprecated_since: "v0.4.0".into(),
+                    removed_in: "v1.0.0".into(),
+                },
+                // Old sync_mode values
+                DeprecatedField {
+                    old_path: "wal.sync".into(),
+                    new_path: "wal.sync_mode".into(),
+                    deprecated_since: "v0.3.0".into(),
+                    removed_in: "v1.0.0".into(),
+                },
+                // Old replication field names
+                DeprecatedField {
+                    old_path: "replication.master_endpoint".into(),
+                    new_path: "replication.primary_endpoint".into(),
+                    deprecated_since: "v0.2.0".into(),
+                    removed_in: "v1.0.0".into(),
+                },
+                DeprecatedField {
+                    old_path: "replication.slave_mode".into(),
+                    new_path: "replication.role".into(),
+                    deprecated_since: "v0.2.0".into(),
+                    removed_in: "v1.0.0".into(),
+                },
+                // Old memory config
+                DeprecatedField {
+                    old_path: "storage.max_memory".into(),
+                    new_path: "memory.node_limit_bytes".into(),
+                    deprecated_since: "v0.6.0".into(),
+                    removed_in: "v1.0.0".into(),
+                },
+            ],
+        }
+    }
+
+    /// Add a custom deprecated field mapping.
+    pub fn add_field(&mut self, field: DeprecatedField) {
+        self.fields.push(field);
+    }
+
+    /// Check a raw TOML config string for deprecated fields.
+    /// Returns warnings (not errors) for each deprecated field found.
+    pub fn check_toml(&self, toml_text: &str) -> DeprecatedFieldReport {
+        let mut warnings = Vec::new();
+        let mut deprecated_count = 0;
+
+        for field in &self.fields {
+            // Simple line-based detection: check if the old field path appears as a key
+            let patterns = Self::field_patterns(&field.old_path);
+            for pattern in &patterns {
+                if toml_text.contains(pattern) {
+                    deprecated_count += 1;
+                    if field.new_path.is_empty() {
+                        warnings.push(format!(
+                            "Config field '{}' is deprecated since {} and will be removed in {}. This field has no replacement.",
+                            field.old_path, field.deprecated_since, field.removed_in
+                        ));
+                    } else {
+                        warnings.push(format!(
+                            "Config field '{}' is deprecated since {}. Use '{}' instead. Will be removed in {}.",
+                            field.old_path, field.deprecated_since, field.new_path, field.removed_in
+                        ));
+                    }
+                    break; // Don't double-count
+                }
+            }
+        }
+
+        DeprecatedFieldReport {
+            warnings,
+            deprecated_count,
+        }
+    }
+
+    /// Emit warnings via tracing for any deprecated fields found.
+    pub fn check_and_warn(&self, toml_text: &str) -> DeprecatedFieldReport {
+        let report = self.check_toml(toml_text);
+        for warning in &report.warnings {
+            tracing::warn!("{}", warning);
+        }
+        report
+    }
+
+    /// Get the full registry of deprecated fields (for SHOW command).
+    pub fn registry(&self) -> &[DeprecatedField] {
+        &self.fields
+    }
+
+    /// Generate patterns to search for a field path in TOML text.
+    fn field_patterns(path: &str) -> Vec<String> {
+        let parts: Vec<&str> = path.split('.').collect();
+        let mut patterns = Vec::new();
+        if parts.len() == 1 {
+            // Top-level section: [cedar] or cedar.
+            patterns.push(format!("[{}]", parts[0]));
+            patterns.push(format!("{} =", parts[0]));
+            patterns.push(format!("{}=", parts[0]));
+        } else {
+            // Nested field: replication.master_endpoint
+            let key = parts.last().unwrap();
+            patterns.push(format!("{} =", key));
+            patterns.push(format!("{}=", key));
+        }
+        patterns
+    }
+}
+
+impl Default for DeprecatedFieldChecker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Snapshot for observability.
+#[derive(Debug, Clone)]
+pub struct DeprecatedFieldCheckerSnapshot {
+    pub total_registered: usize,
+    pub fields: Vec<(String, String, String, String)>, // (old, new, since, removed_in)
+}
+
+impl DeprecatedFieldChecker {
+    pub fn snapshot(&self) -> DeprecatedFieldCheckerSnapshot {
+        DeprecatedFieldCheckerSnapshot {
+            total_registered: self.fields.len(),
+            fields: self.fields.iter().map(|f| {
+                (f.old_path.clone(), f.new_path.clone(), f.deprecated_since.clone(), f.removed_in.clone())
+            }).collect(),
         }
     }
 }
@@ -481,5 +692,87 @@ mod tests {
         config.role = NodeRole::Analytics;
         config.primary_endpoint = "http://primary:50051".to_string();
         assert!(config.validate().is_ok());
+    }
+
+    // ── DeprecatedFieldChecker tests ──
+
+    #[test]
+    fn test_deprecated_checker_no_deprecated_fields() {
+        let checker = DeprecatedFieldChecker::new();
+        let toml = r#"
+[server]
+pg_listen_addr = "0.0.0.0:5433"
+
+[storage]
+data_dir = "./falcon_data"
+"#;
+        let report = checker.check_toml(toml);
+        assert!(!report.has_warnings());
+        assert_eq!(report.deprecated_count, 0);
+    }
+
+    #[test]
+    fn test_deprecated_checker_detects_cedar_section() {
+        let checker = DeprecatedFieldChecker::new();
+        let toml = r#"
+[cedar]
+pg_listen_addr = "0.0.0.0:5433"
+"#;
+        let report = checker.check_toml(toml);
+        assert!(report.has_warnings());
+        assert_eq!(report.deprecated_count, 1);
+        assert!(report.warnings[0].contains("cedar"));
+        assert!(report.warnings[0].contains("server"));
+    }
+
+    #[test]
+    fn test_deprecated_checker_detects_master_endpoint() {
+        let checker = DeprecatedFieldChecker::new();
+        let toml = r#"
+[replication]
+master_endpoint = "http://primary:50051"
+"#;
+        let report = checker.check_toml(toml);
+        assert!(report.has_warnings());
+        assert!(report.warnings[0].contains("master_endpoint"));
+        assert!(report.warnings[0].contains("primary_endpoint"));
+    }
+
+    #[test]
+    fn test_deprecated_checker_detects_multiple() {
+        let checker = DeprecatedFieldChecker::new();
+        let toml = r#"
+[cedar]
+pg_listen_addr = "0.0.0.0:5433"
+
+[replication]
+master_endpoint = "http://primary:50051"
+slave_mode = true
+"#;
+        let report = checker.check_toml(toml);
+        assert_eq!(report.deprecated_count, 3);
+        assert_eq!(report.warnings.len(), 3);
+    }
+
+    #[test]
+    fn test_deprecated_checker_custom_field() {
+        let mut checker = DeprecatedFieldChecker::new();
+        checker.add_field(DeprecatedField {
+            old_path: "custom.old_field".into(),
+            new_path: "custom.new_field".into(),
+            deprecated_since: "v0.9.0".into(),
+            removed_in: "v1.0.0".into(),
+        });
+        let toml = "old_field = 42\n";
+        let report = checker.check_toml(toml);
+        assert!(report.has_warnings());
+    }
+
+    #[test]
+    fn test_deprecated_checker_snapshot() {
+        let checker = DeprecatedFieldChecker::new();
+        let snap = checker.snapshot();
+        assert_eq!(snap.total_registered, 6);
+        assert_eq!(snap.fields.len(), 6);
     }
 }

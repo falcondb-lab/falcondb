@@ -81,7 +81,7 @@ cargo build --workspace
 # Build release
 cargo build --release --workspace
 
-# Run tests (932 tests across 12 crates + root integration)
+# Run tests (1,917 tests across 13 crates + root integration)
 cargo test --workspace
 
 # Lint
@@ -704,10 +704,14 @@ cargo run -p falcon_server -- --print-default-config > falcon.toml
 
 | Phase | Scope | Details |
 |-------|-------|---------|
-| **M1** ✅ | Stable OLTP, fast/slow-path txns, WAL replication, failover, GC, benchmarks | Released |
-| **M2** 🔄 | gRPC WAL streaming (tonic), multi-node deployment, checkpoint/snapshot, durability policies | [docs/roadmap.md](docs/roadmap.md) |
-| **M3** | Production hardening: TLS, query timeout, connection limits, plan cache, slow query log | Planned |
-| **M4** | Analytics: columnstore, vectorized execution, multi-tenancy, cross-region | Future |
+| **v0.1–v0.4** ✅ | OLTP foundation, WAL, failover, gRPC streaming, TLS, columnstore, multi-tenancy | Released |
+| **v0.4.x** ✅ | Production hardening: error model, crash domain, unwrap=0 in core crates | Released |
+| **v0.5** ✅ | Operationally usable: cluster admin, rebalance, scale-out/in, ops playbook | Released |
+| **v0.6** ✅ | Latency-controlled OLTP: priority scheduler, token bucket, backpressure | Released |
+| **v0.7** ✅ | Deterministic 2PC: decision log, layered timeouts, slow-shard tracker | Released |
+| **v0.8** ✅ | Chaos-ready: fault injection, network partition, CPU/IO jitter, observability pass | Released |
+| **v0.9** ✅ | Production candidate: security hardening, WAL versioning, wire compat, config compat | Released |
+| **v1.0** 📋 | Production-grade database kernel | [docs/roadmap.md](docs/roadmap.md) |
 
 See [docs/roadmap.md](docs/roadmap.md) for detailed acceptance criteria per milestone.
 
@@ -729,6 +733,16 @@ See [docs/rpo_rto.md](docs/rpo_rto.md) for full RPO/RTO analysis and recommendat
 | [docs/show_commands_schema.md](docs/show_commands_schema.md) | Stable output schema for all `SHOW falcon.*` commands |
 | [docs/protocol_compatibility.md](docs/protocol_compatibility.md) | PG client compatibility matrix (psql, JDBC, pgbench) |
 | [docs/feature_gap_analysis.md](docs/feature_gap_analysis.md) | Known gaps and improvement areas |
+| [docs/error_model.md](docs/error_model.md) | Unified error model, SQLSTATE mapping, retry hints |
+| [docs/observability.md](docs/observability.md) | Prometheus metrics, SHOW commands, slow query log |
+| [docs/production_readiness.md](docs/production_readiness.md) | Production readiness checklist |
+| [docs/production_readiness_report.md](docs/production_readiness_report.md) | Full production readiness audit |
+| [docs/ops_playbook.md](docs/ops_playbook.md) | Scale-out/in, failover, rolling upgrade procedures |
+| [docs/chaos_matrix.md](docs/chaos_matrix.md) | 30 chaos scenarios with expected behavior |
+| [docs/security.md](docs/security.md) | Security features, RBAC, SQL firewall, audit |
+| [docs/wire_compatibility.md](docs/wire_compatibility.md) | WAL/snapshot/wire/config compatibility policy |
+| [docs/performance_baseline.md](docs/performance_baseline.md) | P99 latency targets and benchmark methodology |
+| [CHANGELOG.md](CHANGELOG.md) | Semantic versioning changelog (v0.1–v0.9) |
 
 ---
 
@@ -739,15 +753,16 @@ See [docs/rpo_rto.md](docs/rpo_rto.md) for full RPO/RTO analysis and recommendat
 cargo test --workspace
 
 # By crate
-cargo test -p falcon_storage    # 94 tests (MVCC, WAL, GC, indexes, 2PC recovery, WAL observer, snapshot checkpoint, table statistics)
-cargo test -p falcon_cluster    # 200 tests (replication, failover, scatter/gather, serde, gRPC e2e, proto roundtrip, checkpoint streaming, backoff)
-cargo test -p falcon_server     # 337 integration tests (SQL end-to-end, error paths, SHOW commands, ANALYZE, read-only enforcement)
-cargo test -p falcon_txn        # 26 tests (txn lifecycle, OCC, stats, GC safepoint observability)
-cargo test -p falcon_planner    # 76 tests (routing hints, distributed wrapping, shard key inference)
-cargo test -p falcon_executor   # 39 tests
-cargo test -p falcon_sql_frontend # 69 tests (binder, predicate normalization, param inference, volatile detection)
-cargo test -p falcon_protocol_pg  # 72 tests (SHOW commands, error paths, txn lifecycle, statement timeout, PgServer config, idle timeout)
-cargo test --test integration_test  # 15 tests (root integration: DDL, DML, RETURNING clause, transactions)
+cargo test -p falcon_storage    # 291 tests (MVCC, WAL, GC, indexes, audit, backup, upgrade, security, LSM engine)
+cargo test -p falcon_cluster    # 404 tests (replication, failover, scatter/gather, 2PC, chaos, security, rebalance gates)
+cargo test -p falcon_server     # 131 tests (SQL end-to-end, error paths, SHOW commands)
+cargo test -p falcon_txn        # 53 tests (txn lifecycle, OCC, stats, GC safepoint)
+cargo test -p falcon_planner    # 42 tests (routing hints, distributed wrapping, shard key inference)
+cargo test -p falcon_executor   # 58 tests (governor, priority scheduler, vectorized)
+cargo test -p falcon_common     # 176 tests (error model, config, security, crash domain)
+cargo test -p falcon_sql_frontend # 141 tests (binder, predicate normalization, param inference)
+cargo test -p falcon_protocol_pg  # 180 tests (SHOW commands, error paths, txn lifecycle, handler, v0.5 gates)
+cargo test --test integration_test  # 12 tests (root integration: DDL, DML, RETURNING clause, transactions)
 
 # Lint
 cargo clippy --workspace       # must be 0 warnings

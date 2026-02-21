@@ -76,6 +76,9 @@ pub enum DataType {
     Date,
     Array(Box<DataType>),
     Jsonb,
+    /// Fixed-point decimal: Decimal(precision, scale).
+    /// precision = total significant digits (max 38), scale = digits after decimal point.
+    Decimal(u8, u8),
 }
 
 impl DataType {
@@ -91,6 +94,7 @@ impl DataType {
             DataType::Date => 1082,
             DataType::Array(_) => 2277, // anyarray OID
             DataType::Jsonb => 3802, // jsonb OID
+            DataType::Decimal(_, _) => 1700, // numeric OID
         }
     }
 
@@ -106,6 +110,7 @@ impl DataType {
             DataType::Date => 4,
             DataType::Array(_) => -1,
             DataType::Jsonb => -1,
+            DataType::Decimal(_, _) => -1, // variable length
         }
     }
 
@@ -128,6 +133,7 @@ impl DataType {
                 _ => 2277, // anyarray
             },
             DataType::Jsonb => 3802,
+            DataType::Decimal(_, _) => 1700, // numeric
         }
     }
 
@@ -150,6 +156,7 @@ impl DataType {
                 _ => "anyarray",
             },
             DataType::Jsonb => "jsonb",
+            DataType::Decimal(_, _) => "numeric",
         }
     }
 
@@ -159,6 +166,7 @@ impl DataType {
             DataType::Int32 => Some(32),
             DataType::Int64 => Some(64),
             DataType::Float64 => Some(53),
+            DataType::Decimal(p, _) => Some(*p as i32),
             _ => None,
         }
     }
@@ -167,6 +175,7 @@ impl DataType {
     pub fn numeric_scale(&self) -> Option<i32> {
         match self {
             DataType::Int32 | DataType::Int64 => Some(0),
+            DataType::Decimal(_, s) => Some(*s as i32),
             _ => None,
         }
     }
@@ -192,6 +201,7 @@ impl DataType {
             DataType::Date => "date",
             DataType::Array(_) => "ARRAY",
             DataType::Jsonb => "jsonb",
+            DataType::Decimal(_, _) => "numeric",
         }
     }
 }
@@ -208,6 +218,7 @@ impl fmt::Display for DataType {
             DataType::Date => write!(f, "DATE"),
             DataType::Array(inner) => write!(f, "{}[]", inner),
             DataType::Jsonb => write!(f, "JSONB"),
+            DataType::Decimal(p, s) => write!(f, "DECIMAL({},{})", p, s),
         }
     }
 }

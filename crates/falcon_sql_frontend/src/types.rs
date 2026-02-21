@@ -47,6 +47,14 @@ pub enum BoundStatement {
     CreateSequence { name: String, start: i64 },
     DropSequence { name: String, if_exists: bool },
     ShowSequences,
+    /// Multi-tenancy: SHOW falcon.tenants
+    ShowTenants,
+    /// Multi-tenancy: SHOW falcon.tenant_usage
+    ShowTenantUsage,
+    /// Multi-tenancy: CREATE TENANT name [MAX_QPS n] [MAX_STORAGE_BYTES n]
+    CreateTenant { name: String, max_qps: u64, max_storage_bytes: u64 },
+    /// Multi-tenancy: DROP TENANT name
+    DropTenant { name: String },
     /// COPY table FROM STDIN
     CopyFrom {
         table_id: TableId,

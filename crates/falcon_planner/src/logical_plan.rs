@@ -152,6 +152,10 @@ pub enum LogicalPlan {
     Analyze { table_name: String },
     ShowTableStats { table_name: Option<String> },
     ShowSequences,
+    ShowTenants,
+    ShowTenantUsage,
+    CreateTenant { name: String, max_qps: u64, max_storage_bytes: u64 },
+    DropTenant { name: String },
 
     // ── COPY ────────────────────────────────────────────────────────
     CopyFrom {
@@ -275,6 +279,16 @@ impl LogicalPlan {
                 table_name: table_name.clone(),
             }),
             BoundStatement::ShowSequences => Ok(LogicalPlan::ShowSequences),
+            BoundStatement::ShowTenants => Ok(LogicalPlan::ShowTenants),
+            BoundStatement::ShowTenantUsage => Ok(LogicalPlan::ShowTenantUsage),
+            BoundStatement::CreateTenant { name, max_qps, max_storage_bytes } => {
+                Ok(LogicalPlan::CreateTenant {
+                    name: name.clone(),
+                    max_qps: *max_qps,
+                    max_storage_bytes: *max_storage_bytes,
+                })
+            }
+            BoundStatement::DropTenant { name } => Ok(LogicalPlan::DropTenant { name: name.clone() }),
 
             // ── COPY ─────────────────────────────────────────────────
             BoundStatement::CopyFrom { table_id, schema, columns, csv, delimiter, header, null_string, quote, escape } => {

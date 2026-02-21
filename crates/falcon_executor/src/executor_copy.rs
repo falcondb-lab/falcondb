@@ -367,6 +367,10 @@ fn parse_datum(field: &str, data_type: &DataType) -> Result<Datum, String> {
                 Err(format!("Cannot parse '{}' as ARRAY", field))
             }
         }
+        DataType::Decimal(_, _) => {
+            Datum::parse_decimal(field)
+                .ok_or_else(|| format!("Cannot parse '{}' as DECIMAL", field))
+        }
     }
 }
 
@@ -401,5 +405,6 @@ fn datum_to_text(datum: &Datum) -> String {
             let inner: Vec<String> = elements.iter().map(datum_to_text).collect();
             format!("{{{}}}", inner.join(","))
         }
+        Datum::Decimal(m, s) => falcon_common::datum::decimal_to_string(*m, *s),
     }
 }

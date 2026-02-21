@@ -79,6 +79,21 @@ run_gate P0 "gRPC: proto roundtrip + transport" \
 run_gate P0 "WAL: observer + replication log" \
   cargo test -p falcon_storage -- wal_observer --no-fail-fast
 
+run_gate P0 "2PC: in-doubt resolver convergence (coordinator crash scenario)" \
+  cargo test -p falcon_cluster -- indoubt --no-fail-fast
+
+run_gate P0 "2PC: TxnOutcomeCache hit/miss/eviction" \
+  cargo test -p falcon_cluster -- test_cache --no-fail-fast
+
+run_gate P0 "Circuit breaker: shard failure → open → recovery → close" \
+  cargo test -p falcon_cluster -- circuit_breaker --no-fail-fast
+
+run_gate P0 "Crash domain: panic isolation + InternalBug conversion" \
+  cargo test -p falcon_common -- crash_domain --no-fail-fast
+
+run_gate P0 "Admission: connection/query/write limits enforced" \
+  cargo test -p falcon_cluster -- admission --no-fail-fast
+
 # ═══════════════════════════════════════════════════════════════════
 # P1 GATES — Warning only (non-blocking, creates issues)
 # ═══════════════════════════════════════════════════════════════════
@@ -99,6 +114,21 @@ run_gate P1 "SHOW: falcon.wal_stats + node_role" \
 
 run_gate P1 "SHOW: falcon.gc_stats + txn_stats" \
   cargo test -p falcon_protocol_pg -- show_falcon --no-fail-fast
+
+run_gate P1 "Observability: RequestContext + StageLatency fields" \
+  cargo test -p falcon_common -- request_context --no-fail-fast
+
+run_gate P1 "Diagnostic bundle: JSON export + topology + inflight" \
+  cargo test -p falcon_common -- diag_bundle --no-fail-fast
+
+run_gate P1 "Query Governor: row/byte/time/memory limits" \
+  cargo test -p falcon_executor -- governor --no-fail-fast
+
+run_gate P1 "Memory budget: soft/hard limit enforcement" \
+  cargo test -p falcon_cluster -- test_memory_budget --no-fail-fast
+
+run_gate P1 "Error classification: SQLSTATE + retry semantics" \
+  cargo test -p falcon_common -- error_classification --no-fail-fast
 
 # ═══════════════════════════════════════════════════════════════════
 # Summary

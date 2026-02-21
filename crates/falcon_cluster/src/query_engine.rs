@@ -70,7 +70,9 @@ impl DistributedQueryEngine {
 
     /// Get the last scatter/gather stats for observability.
     pub fn last_scatter_stats(&self) -> ScatterStats {
-        self.last_scatter_stats.lock().unwrap().clone()
+        self.last_scatter_stats.lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// Health check: probe each shard with a trivial read transaction.
@@ -95,7 +97,7 @@ impl DistributedQueryEngine {
                     })
                 })
                 .collect();
-            handles.into_iter().map(|h| h.join().unwrap()).collect()
+            handles.into_iter().filter_map(|h| h.join().ok()).collect()
         })
     }
 
@@ -131,7 +133,7 @@ impl DistributedQueryEngine {
             // EXPLAIN ANALYZE: execute on shard 0 (local executor handles timing)
             PhysicalPlan::ExplainAnalyze(_) => {
                 let shard = self.engine.shard(ShardId(0)).ok_or_else(|| {
-                    FalconError::Internal("No shard 0 available".into())
+                    FalconError::internal_bug("E-QE-001", "No shard 0 available", "ExplainAnalyze dispatch")
                 })?;
                 let local_exec = Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
                 local_exec.execute(plan, txn)
@@ -162,8 +164,8 @@ impl DistributedQueryEngine {
             PhysicalPlan::Update { table_id, schema, assignments, filter, returning, from_table } => {
                 if let Some(target_shard) = self.resolve_filter_shard(schema, filter.as_ref()) {
                     self.execute_on_shard_auto_txn(target_shard, plan)
-                } else if filter.as_ref().is_some_and(Self::expr_has_subquery) {
-                    let mat_filter = self.materialize_dml_filter(filter.as_ref().unwrap())?;
+                } else if let Some(f) = filter.as_ref().filter(|f| Self::expr_has_subquery(f)) {
+                    let mat_filter = self.materialize_dml_filter(f)?;
                     let mat_plan = PhysicalPlan::Update {
                         table_id: *table_id,
                         schema: schema.clone(),
@@ -186,8 +188,8 @@ impl DistributedQueryEngine {
             PhysicalPlan::Delete { table_id, schema, filter, returning, using_table } => {
                 if let Some(target_shard) = self.resolve_filter_shard(schema, filter.as_ref()) {
                     self.execute_on_shard_auto_txn(target_shard, plan)
-                } else if filter.as_ref().is_some_and(Self::expr_has_subquery) {
-                    let mat_filter = self.materialize_dml_filter(filter.as_ref().unwrap())?;
+                } else if let Some(f) = filter.as_ref().filter(|f| Self::expr_has_subquery(f)) {
+                    let mat_filter = self.materialize_dml_filter(f)?;
                     let mat_plan = PhysicalPlan::Delete {
                         table_id: *table_id,
                         schema: schema.clone(),
@@ -220,12 +222,61 @@ impl DistributedQueryEngine {
             // Everything else: execute on shard 0
             other => {
                 let shard = self.engine.shard(ShardId(0)).ok_or_else(|| {
-                    FalconError::Internal("No shard 0 available".into())
+                    FalconError::internal_bug("E-QE-002", "No shard 0 available", "default plan dispatch")
                 })?;
                 let local_exec = Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
                 local_exec.execute(other, txn)
             }
         }
+    }
+
+    // ── Cross-region / lag-aware replica routing ─────────────────────────────
+
+    /// Lag-aware replica routing: given a set of replica metrics, select the
+    /// replica with the lowest `lag_lsn`. Returns `None` if no replicas are
+    /// available (caller falls back to primary).
+    ///
+    /// Used for cross-region read routing: analytics/replica nodes that are
+    /// caught up (lag_lsn == 0) are preferred; among lagging replicas the one
+    /// with the smallest lag is chosen.
+    pub fn select_least_lagging_replica<'a>(
+        replicas: &'a [crate::replication::runner::ReplicaRunnerMetricsSnapshot],
+    ) -> Option<&'a crate::replication::runner::ReplicaRunnerMetricsSnapshot> {
+        replicas
+            .iter()
+            .filter(|r| r.connected)
+            .min_by_key(|r| r.lag_lsn)
+    }
+
+    /// Route a read-only query to the least-lagging available replica shard,
+    /// falling back to shard 0 (primary) if no replicas are available or all
+    /// replicas exceed `max_lag_lsn`.
+    ///
+    /// `replica_metrics`: per-shard replica metrics (shard_id → metrics).
+    /// `max_lag_lsn`: maximum acceptable lag in LSN units (0 = require fully caught up).
+    pub fn route_read_to_replica(
+        &self,
+        plan: &PhysicalPlan,
+        txn: Option<&TxnHandle>,
+        replica_metrics: &[(ShardId, crate::replication::runner::ReplicaRunnerMetricsSnapshot)],
+        max_lag_lsn: u64,
+    ) -> Result<ExecutionResult, FalconError> {
+        // Find the shard whose replica has the lowest lag within the threshold.
+        let best = replica_metrics
+            .iter()
+            .filter(|(_, m)| m.connected && m.lag_lsn <= max_lag_lsn)
+            .min_by_key(|(_, m)| m.lag_lsn)
+            .map(|(sid, _)| *sid);
+
+        let target_shard = best.unwrap_or(ShardId(0));
+
+        tracing::debug!(
+            shard_id = target_shard.0,
+            "lag-aware routing: selected shard (max_lag_lsn={})",
+            max_lag_lsn,
+        );
+
+        self.execute_on_shard(target_shard, plan, txn)
     }
 
     /// Execute a plan on a specific shard.
@@ -236,7 +287,11 @@ impl DistributedQueryEngine {
         txn: Option<&TxnHandle>,
     ) -> Result<ExecutionResult, FalconError> {
         let shard = self.engine.shard(shard_id).ok_or_else(|| {
-            FalconError::Internal(format!("Shard {:?} not found", shard_id))
+            FalconError::internal_bug(
+                "E-QE-003",
+                format!("Shard {:?} not found", shard_id),
+                "execute_on_shard dispatch",
+            )
         })?;
         let local_exec = Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
         local_exec.execute(plan, txn)
@@ -295,6 +350,54 @@ impl DistributedQueryEngine {
         }
     }
 
+    /// Collect a shard load snapshot for rebalance planning.
+    pub fn shard_load_snapshot(&self) -> crate::rebalancer::ShardLoadSnapshot {
+        crate::rebalancer::ShardLoadSnapshot::collect(&self.engine)
+    }
+
+    /// Generate a rebalance plan (dry-run) from current shard loads.
+    pub fn rebalance_plan(
+        &self,
+        planner: &crate::rebalancer::RebalancePlanner,
+    ) -> crate::rebalancer::MigrationPlan {
+        let snapshot = self.shard_load_snapshot();
+        planner.plan(&snapshot, &self.engine)
+    }
+
+    /// Execute a rebalance plan. Returns (tasks_completed, tasks_failed, rows_migrated).
+    pub fn rebalance_execute(
+        &self,
+        plan: &crate::rebalancer::MigrationPlan,
+    ) -> (usize, usize, u64) {
+        let migrator = crate::rebalancer::ShardMigrator::new(
+            crate::rebalancer::RebalancerConfig::default(),
+        );
+        let mut completed = 0usize;
+        let mut failed = 0usize;
+        let mut rows_migrated = 0u64;
+
+        for task in &plan.tasks {
+            let status = migrator.execute_task(task, &self.engine);
+            match status.phase {
+                crate::rebalancer::MigrationPhase::Completed => {
+                    completed += 1;
+                    rows_migrated += status.rows_migrated;
+                }
+                _ => {
+                    failed += 1;
+                    if let Some(ref err) = status.error {
+                        tracing::warn!(
+                            "Rebalance task failed: {:?} → {:?} ({}): {}",
+                            task.source_shard, task.target_shard, task.table_name, err
+                        );
+                    }
+                }
+            }
+        }
+
+        (completed, failed, rows_migrated)
+    }
+
     /// Access the underlying two-phase coordinator for multi-shard writes.
     pub fn two_phase_coordinator(&self) -> &TwoPhaseCoordinator {
         &self.two_pc
@@ -327,7 +430,7 @@ impl DistributedQueryEngine {
             PhysicalPlan::NestedLoopJoin { left_table_id, joins, filter, order_by, limit, offset, .. }
             | PhysicalPlan::HashJoin { left_table_id, joins, filter, order_by, limit, offset, .. }
                 => (left_table_id, joins, filter, order_by, limit, offset),
-            _ => return Err(FalconError::Internal("exec_explain_coordinator_join: not a join plan".into())),
+            _ => return Err(FalconError::internal_bug("E-QE-006", "exec_explain_coordinator_join: not a join plan", "plan type mismatch")),
         };
         {
             // Show tables involved
@@ -681,7 +784,7 @@ impl DistributedQueryEngine {
         let (left_table_id, joins) = match plan {
             PhysicalPlan::NestedLoopJoin { left_table_id, joins, .. }
             | PhysicalPlan::HashJoin { left_table_id, joins, .. } => (*left_table_id, joins),
-            _ => return Err(FalconError::Internal("exec_coordinator_join called on non-join plan".into())),
+            _ => return Err(FalconError::internal_bug("E-QE-007", "exec_coordinator_join called on non-join plan", "plan type mismatch")),
         };
         let mut table_ids = vec![left_table_id];
         for join in joins { table_ids.push(join.right_table_id); }
@@ -767,7 +870,7 @@ impl DistributedQueryEngine {
 
         // Build EXPLAIN output with plan structure + execution stats.
         let shard0 = self.engine.shard(ShardId(0)).ok_or_else(|| {
-            FalconError::Internal("No shard 0 available".into())
+            FalconError::internal_bug("E-QE-008", "No shard 0 available", "exec_explain_analyze_coordinator")
         })?;
         let local_exec = Executor::new(shard0.storage.clone(), shard0.txn_mgr.clone());
         let plan_lines = local_exec.format_plan(inner, 0);
@@ -890,7 +993,11 @@ impl DistributedQueryEngine {
                         })
                     })
                     .collect();
-                handles.into_iter().map(|h| h.join().unwrap()).collect()
+                handles.into_iter()
+                    .map(|h| h.join().unwrap_or_else(|_| Err(FalconError::internal_bug(
+                        "E-QE-001", "shard thread panicked", "exec_ddl_all_shards"
+                    ))))
+                    .collect()
             });
 
         let mut first_result = None;
@@ -900,7 +1007,7 @@ impl DistributedQueryEngine {
                 first_result = Some(result);
             }
         }
-        first_result.ok_or_else(|| FalconError::Internal("No shards available".into()))
+        first_result.ok_or_else(|| FalconError::internal_bug("E-QE-009", "No shards available", "exec_gc_all_shards"))
     }
 
     /// Execute a DML plan on a specific shard with an auto-commit transaction.
@@ -910,7 +1017,7 @@ impl DistributedQueryEngine {
         plan: &PhysicalPlan,
     ) -> Result<ExecutionResult, FalconError> {
         let shard = self.engine.shard(shard_id).ok_or_else(|| {
-            FalconError::Internal(format!("Shard {:?} not found", shard_id))
+            FalconError::internal_bug("E-QE-010", format!("Shard {:?} not found", shard_id), "exec_dml_autocommit")
         })?;
         let local_exec = Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
         let txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
@@ -933,7 +1040,7 @@ impl DistributedQueryEngine {
             PhysicalPlan::Insert {
                 table_id, schema, columns, rows, source_select, returning, on_conflict,
             } => (*table_id, schema, columns, rows, source_select, returning, on_conflict),
-            _ => return Err(FalconError::Internal("exec_insert_split called with non-Insert".into())),
+            _ => return Err(FalconError::internal_bug("E-QE-011", "exec_insert_split called with non-Insert", "plan type mismatch")),
         };
 
         // INSERT ... SELECT — execute the SELECT at coordinator level to see all
@@ -993,7 +1100,7 @@ impl DistributedQueryEngine {
                         let sid = *shard_id;
                         s.spawn(move || {
                             let shard = engine.shard(sid).ok_or_else(|| {
-                                FalconError::Internal(format!("Shard {:?} not found", sid))
+                                FalconError::internal_bug("E-QE-012", format!("Shard {:?} not found", sid), "exec_insert_split parallel")
                             })?;
                             let local_exec =
                                 Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
@@ -1008,7 +1115,9 @@ impl DistributedQueryEngine {
                     })
                     .collect();
                 shard_plans.iter().map(|(sid, _)| *sid)
-                    .zip(handles.into_iter().map(|h| h.join().unwrap()))
+                    .zip(handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(FalconError::internal_bug(
+                        "E-QE-002", "shard thread panicked", "exec_dist_plan scatter"
+                    )))))
                     .collect()
             });
 
@@ -1030,10 +1139,13 @@ impl DistributedQueryEngine {
         }
 
         if !errors.is_empty() {
-            return Err(FalconError::Internal(format!(
-                "INSERT failed on {}/{} shards ({} succeeded): {}",
-                errors.len(), shard_count, succeeded, errors.join("; ")
-            )));
+            return Err(FalconError::Transient {
+                reason: format!(
+                    "INSERT failed on {}/{} shards ({} succeeded): {}",
+                    errors.len(), shard_count, succeeded, errors.join("; ")
+                ),
+                retry_after_ms: 100,
+            });
         }
 
         Ok(ExecutionResult::Dml {
@@ -1102,7 +1214,11 @@ impl DistributedQueryEngine {
                         })
                     })
                     .collect();
-                handles.into_iter().map(|h| h.join().unwrap()).collect()
+                handles.into_iter()
+                    .map(|h| h.join().unwrap_or_else(|_| Err(FalconError::internal_bug(
+                        "E-QE-003", "shard thread panicked", "exec_gc_all_shards"
+                    ))))
+                    .collect()
             });
 
         let mut total_chains = 0i64;
@@ -1150,10 +1266,18 @@ impl DistributedQueryEngine {
                 let handles: Vec<_> = shards
                     .iter()
                     .map(|sid| {
-                        let shard = self.engine.shard(*sid).unwrap();
+                        let shard = self.engine.shard(*sid);
                         let plan_ref = plan;
                         let shard_id = sid.0;
                         s.spawn(move || {
+                            let shard = match shard {
+                                Some(s) => s,
+                                None => return (shard_id, Err(FalconError::internal_bug(
+                                    "E-QE-004",
+                                    format!("DML dispatch: shard {} not found", shard_id),
+                                    "execute_dml_on_shards",
+                                ))),
+                            };
                             let local_exec = Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
                             let txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
                             let result = local_exec.execute(plan_ref, Some(&txn));
@@ -1165,7 +1289,13 @@ impl DistributedQueryEngine {
                         })
                     })
                     .collect();
-                handles.into_iter().map(|h| h.join().unwrap()).collect()
+                handles.into_iter().map(|h| {
+                    h.join().unwrap_or_else(|_| (0, Err(FalconError::internal_bug(
+                        "E-QE-005",
+                        "DML dispatch: shard thread panicked",
+                        "std::thread::JoinHandle returned Err",
+                    ))))
+                }).collect()
             });
 
         Self::merge_dml_results(results, shard_count)
@@ -1205,10 +1335,13 @@ impl DistributedQueryEngine {
         }
 
         if !errors.is_empty() {
-            return Err(FalconError::Internal(format!(
-                "DML failed on {}/{} shards ({} succeeded): {}",
-                errors.len(), shard_count, succeeded, errors.join("; ")
-            )));
+            return Err(FalconError::Transient {
+                reason: format!(
+                    "DML failed on {}/{} shards ({} succeeded): {}",
+                    errors.len(), shard_count, succeeded, errors.join("; ")
+                ),
+                retry_after_ms: 100,
+            });
         }
 
         // If any shard returned RETURNING rows, return merged Query result
@@ -1248,7 +1381,11 @@ impl DistributedQueryEngine {
                         })
                     })
                     .collect();
-                handles.into_iter().map(|h| h.join().unwrap()).collect()
+                handles.into_iter()
+                    .map(|h| h.join().unwrap_or_else(|_| (usize::MAX, Err(FalconError::internal_bug(
+                        "E-QE-004", "shard thread panicked", "exec_dml_all_shards"
+                    )))))
+                    .collect()
             });
 
         Self::merge_dml_results(results, shard_count)
@@ -1429,7 +1566,7 @@ impl DistributedQueryEngine {
                 Ok(ExecutionResult::Query { rows, .. }) => rows.len(),
                 _ => 0,
             };
-            *self.last_scatter_stats.lock().unwrap() = ScatterStats {
+            *self.last_scatter_stats.lock().unwrap_or_else(|p| p.into_inner()) = ScatterStats {
                 shards_participated: 1,
                 total_rows_gathered: row_count,
                 per_shard_latency_us: vec![(single_shard.0, elapsed)],
@@ -1456,7 +1593,9 @@ impl DistributedQueryEngine {
         // Validate shard IDs
         for &sid in target_shards {
             if self.engine.shard(sid).is_none() {
-                return Err(FalconError::Internal(format!("Shard {:?} not found", sid)));
+                return Err(FalconError::internal_bug(
+                    "E-QE-013", format!("Shard {:?} not found", sid), "exec_dist_plan pre-validation",
+                ));
             }
         }
 
@@ -1475,13 +1614,20 @@ impl DistributedQueryEngine {
                         s.spawn(move || {
                             // Check if already cancelled before starting
                             if cancelled_ref.load(Ordering::Relaxed) {
-                                return Err(FalconError::Internal(format!(
-                                    "DistPlan cancelled before shard {:?} started",
-                                    shard_id,
-                                )));
+                                return Err(FalconError::Transient {
+                                    reason: format!(
+                                        "DistPlan cancelled before shard {:?} started", shard_id,
+                                    ),
+                                    retry_after_ms: 50,
+                                });
                             }
 
-                            let shard = engine.shard(shard_id).unwrap();
+                            let shard = match engine.shard(shard_id) {
+                                Some(s) => s,
+                                None => return Err(FalconError::Cluster(
+                                    falcon_common::error::ClusterError::ShardNotFound(shard_id.0)
+                                )),
+                            };
 
                             // Retry once on transient failure.
                             let max_attempts = 2u8;
@@ -1505,12 +1651,13 @@ impl DistributedQueryEngine {
                                 // Check timeout and signal cancellation
                                 if total_start.elapsed() > timeout {
                                     cancelled_ref.store(true, Ordering::Relaxed);
-                                    return Err(FalconError::Internal(format!(
-                                        "DistPlan timeout after {}ms (shard {:?}, latency={}us)",
-                                        timeout.as_millis(),
-                                        shard_id,
-                                        latency_us,
-                                    )));
+                                    return Err(FalconError::Transient {
+                                        reason: format!(
+                                            "DistPlan timeout after {}ms (shard {:?}, latency={}us)",
+                                            timeout.as_millis(), shard_id, latency_us,
+                                        ),
+                                        retry_after_ms: 100,
+                                    });
                                 }
 
                                 match result {
@@ -1523,8 +1670,10 @@ impl DistributedQueryEngine {
                                         });
                                     }
                                     Ok(_) => {
-                                        return Err(FalconError::Internal(
-                                            "DistPlan subplan must return Query result".into(),
+                                        return Err(FalconError::internal_bug(
+                                            "E-QE-014",
+                                            "DistPlan subplan must return Query result",
+                                            format!("shard {:?}", shard_id),
                                         ));
                                     }
                                     Err(e) => {
@@ -1544,7 +1693,11 @@ impl DistributedQueryEngine {
                     })
                     .collect();
 
-                handles.into_iter().map(|h| h.join().unwrap()).collect()
+                handles.into_iter()
+                    .map(|h| h.join().unwrap_or_else(|_| Err(FalconError::internal_bug(
+                        "E-QE-005", "shard thread panicked", "exec_dist_plan_scatter"
+                    ))))
+                    .collect()
             });
 
         // Collect results — partial failure resilience: log errors, continue with successful shards.
@@ -1565,9 +1718,12 @@ impl DistributedQueryEngine {
             let msgs: Vec<String> = failed_shards.iter()
                 .map(|(sid, msg)| format!("shard_{}: {}", sid.0, msg))
                 .collect();
-            return Err(FalconError::Internal(format!(
-                "All {} shards failed: {}", target_shards.len(), msgs.join("; "),
-            )));
+            return Err(FalconError::Transient {
+                reason: format!(
+                    "All {} shards failed: {}", target_shards.len(), msgs.join("; "),
+                ),
+                retry_after_ms: 200,
+            });
         }
 
         // ── Gather: merge using the same logic as DistributedExecutor ──

@@ -56,7 +56,7 @@ impl SlowQueryLog {
     /// Record a query if it exceeds the threshold.
     /// Returns `true` if the query was logged.
     pub fn record(&self, sql: &str, duration: Duration, session_id: i32) -> bool {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         if inner.threshold.is_zero() || duration < inner.threshold {
             return false;
         }
@@ -80,23 +80,23 @@ impl SlowQueryLog {
 
     /// Get the current threshold.
     pub fn threshold(&self) -> Duration {
-        self.inner.lock().unwrap().threshold
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).threshold
     }
 
     /// Set the threshold. `Duration::ZERO` disables logging.
     pub fn set_threshold(&self, threshold: Duration) {
-        self.inner.lock().unwrap().threshold = threshold;
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).threshold = threshold;
     }
 
     /// Get a snapshot of all entries and the total count.
     pub fn snapshot(&self) -> (Vec<SlowQueryEntry>, u64) {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         (inner.entries.clone(), inner.total_count)
     }
 
     /// Clear all entries and reset the counter.
     pub fn clear(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         inner.entries.clear();
         inner.total_count = 0;
     }

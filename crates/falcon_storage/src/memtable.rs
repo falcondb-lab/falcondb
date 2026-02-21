@@ -104,6 +104,13 @@ fn encode_datum_to_bytes(datum: &Datum, buf: &mut Vec<u8>) {
             buf.extend_from_slice(s.as_bytes());
             buf.push(0x00);
         }
+        Datum::Decimal(mantissa, scale) => {
+            buf.push(0x0A);
+            buf.push(*scale);
+            // Encode mantissa as big-endian i128 with sign flip for correct ordering
+            let encoded = (*mantissa as u128) ^ (1u128 << 127);
+            buf.extend_from_slice(&encoded.to_be_bytes());
+        }
     }
 }
 
@@ -117,10 +124,21 @@ pub struct MemTable {
     pub secondary_indexes: RwLock<Vec<SecondaryIndex>>,
 }
 
-/// A secondary index on a single column using a BTreeMap.
+/// A secondary index on one or more columns using a BTreeMap.
+/// Single-column indexes use `column_idx`; composite indexes use `column_indices`.
 pub struct SecondaryIndex {
     pub column_idx: usize,
+    /// For composite indexes: ordered list of column indices.
+    /// Empty means single-column index (use `column_idx`).
+    pub column_indices: Vec<usize>,
     pub unique: bool,
+    /// Optional list of column indices whose values are stored alongside the
+    /// index key ("covering" / "INCLUDE" columns). When present, an index-only
+    /// scan can return these values without touching the heap.
+    pub covering_columns: Vec<usize>,
+    /// For prefix indexes: max byte length of the indexed key prefix.
+    /// 0 means full-value index (no prefix truncation).
+    pub prefix_len: usize,
     pub tree: RwLock<BTreeMap<Vec<u8>, Vec<PrimaryKey>>>,
 }
 
@@ -128,7 +146,10 @@ impl SecondaryIndex {
     pub fn new(column_idx: usize) -> Self {
         Self {
             column_idx,
+            column_indices: vec![],
             unique: false,
+            covering_columns: vec![],
+            prefix_len: 0,
             tree: RwLock::new(BTreeMap::new()),
         }
     }
@@ -136,9 +157,78 @@ impl SecondaryIndex {
     pub fn new_unique(column_idx: usize) -> Self {
         Self {
             column_idx,
+            column_indices: vec![],
             unique: true,
+            covering_columns: vec![],
+            prefix_len: 0,
             tree: RwLock::new(BTreeMap::new()),
         }
+    }
+
+    /// Create a composite (multi-column) index.
+    pub fn new_composite(column_indices: Vec<usize>, unique: bool) -> Self {
+        let first = column_indices.first().copied().unwrap_or(0);
+        Self {
+            column_idx: first,
+            column_indices,
+            unique,
+            covering_columns: vec![],
+            prefix_len: 0,
+            tree: RwLock::new(BTreeMap::new()),
+        }
+    }
+
+    /// Create a composite index with covering (INCLUDE) columns.
+    pub fn new_covering(column_indices: Vec<usize>, covering: Vec<usize>, unique: bool) -> Self {
+        let first = column_indices.first().copied().unwrap_or(0);
+        Self {
+            column_idx: first,
+            column_indices,
+            unique,
+            covering_columns: covering,
+            prefix_len: 0,
+            tree: RwLock::new(BTreeMap::new()),
+        }
+    }
+
+    /// Create a prefix index (truncates key to prefix_len bytes).
+    pub fn new_prefix(column_idx: usize, prefix_len: usize) -> Self {
+        Self {
+            column_idx,
+            column_indices: vec![],
+            unique: false, // prefix indexes cannot enforce uniqueness
+            covering_columns: vec![],
+            prefix_len,
+            tree: RwLock::new(BTreeMap::new()),
+        }
+    }
+
+    /// Returns true if this is a composite (multi-column) index.
+    pub fn is_composite(&self) -> bool {
+        self.column_indices.len() > 1
+    }
+
+    /// Returns the column indices this index covers (for key matching).
+    pub fn key_columns(&self) -> &[usize] {
+        if self.column_indices.is_empty() {
+            std::slice::from_ref(&self.column_idx)
+        } else {
+            &self.column_indices
+        }
+    }
+
+    /// Encode a composite key from a row.
+    pub fn encode_key(&self, row: &OwnedRow) -> Vec<u8> {
+        let cols = self.key_columns();
+        let mut buf = Vec::new();
+        for &col_idx in cols {
+            let datum = row.get(col_idx).unwrap_or(&Datum::Null);
+            encode_datum_to_bytes(datum, &mut buf);
+        }
+        if self.prefix_len > 0 && buf.len() > self.prefix_len {
+            buf.truncate(self.prefix_len);
+        }
+        buf
     }
 
     pub fn insert(&self, key_bytes: Vec<u8>, pk: PrimaryKey) {
@@ -169,6 +259,43 @@ impl SecondaryIndex {
                 tree.remove(key_bytes);
             }
         }
+    }
+
+    /// Prefix scan: return all PKs whose key starts with the given prefix.
+    /// Useful for composite index leftmost-prefix queries and prefix indexes.
+    pub fn prefix_scan(&self, prefix: &[u8]) -> Vec<PrimaryKey> {
+        let tree = self.tree.read();
+        let mut result = Vec::new();
+        // BTreeMap range scan from prefix to prefix+1
+        let start = prefix.to_vec();
+        let mut end = prefix.to_vec();
+        // Increment the last byte to form an exclusive upper bound
+        let mut carry = true;
+        for byte in end.iter_mut().rev() {
+            if carry {
+                if *byte == 0xFF {
+                    *byte = 0x00;
+                } else {
+                    *byte += 1;
+                    carry = false;
+                }
+            }
+        }
+        if carry {
+            // All 0xFF — scan to end
+            for (k, pks) in tree.range(start..) {
+                if k.starts_with(prefix) {
+                    result.extend(pks.iter().cloned());
+                } else {
+                    break;
+                }
+            }
+        } else {
+            for (_k, pks) in tree.range(start..end) {
+                result.extend(pks.iter().cloned());
+            }
+        }
+        result
     }
 }
 
@@ -387,8 +514,8 @@ impl MemTable {
                 if !idx.unique {
                     continue;
                 }
-                if let Some(datum) = new_row.get(idx.column_idx) {
-                    let key_bytes = encode_column_value(datum);
+                {
+                    let key_bytes = idx.encode_key(&new_row);
                     // Check if another committed PK already owns this key
                     idx.check_unique(&key_bytes, pk).map_err(|_| {
                         falcon_common::error::StorageError::UniqueViolation {
@@ -408,10 +535,8 @@ impl MemTable {
         let indexes = self.secondary_indexes.read();
         for idx in indexes.iter() {
             if idx.unique {
-                if let Some(datum) = row.get(idx.column_idx) {
-                    let key_bytes = encode_column_value(datum);
-                    idx.check_unique(&key_bytes, pk)?;
-                }
+                let key_bytes = idx.encode_key(row);
+                idx.check_unique(&key_bytes, pk)?;
             }
         }
         Ok(())
@@ -433,19 +558,15 @@ impl MemTable {
         // Remove old index entries (if there was a prior committed version)
         if let Some(old_row) = old_data {
             for idx in indexes.iter() {
-                if let Some(datum) = old_row.get(idx.column_idx) {
-                    let key_bytes = encode_column_value(datum);
-                    idx.remove(&key_bytes, pk);
-                }
+                let key_bytes = idx.encode_key(old_row);
+                idx.remove(&key_bytes, pk);
             }
         }
         // Add new index entries (if the new version is not a tombstone)
         if let Some(new_row) = new_data {
             for idx in indexes.iter() {
-                if let Some(datum) = new_row.get(idx.column_idx) {
-                    let key_bytes = encode_column_value(datum);
-                    idx.insert(key_bytes, pk.clone());
-                }
+                let key_bytes = idx.encode_key(new_row);
+                idx.insert(key_bytes, pk.clone());
             }
         }
     }
@@ -459,18 +580,14 @@ impl MemTable {
         // Check unique constraints first (before mutating any index)
         for idx in indexes.iter() {
             if idx.unique {
-                if let Some(datum) = row.get(idx.column_idx) {
-                    let key_bytes = encode_column_value(datum);
-                    idx.check_unique(&key_bytes, pk)?;
-                }
+                let key_bytes = idx.encode_key(row);
+                idx.check_unique(&key_bytes, pk)?;
             }
         }
         // All checks passed — insert into all indexes
         for idx in indexes.iter() {
-            if let Some(datum) = row.get(idx.column_idx) {
-                let key_bytes = encode_column_value(datum);
-                idx.insert(key_bytes, pk.clone());
-            }
+            let key_bytes = idx.encode_key(row);
+            idx.insert(key_bytes, pk.clone());
         }
         Ok(())
     }
@@ -480,10 +597,8 @@ impl MemTable {
     fn index_remove_row(&self, pk: &PrimaryKey, row: &OwnedRow) {
         let indexes = self.secondary_indexes.read();
         for idx in indexes.iter() {
-            if let Some(datum) = row.get(idx.column_idx) {
-                let key_bytes = encode_column_value(datum);
-                idx.remove(&key_bytes, pk);
-            }
+            let key_bytes = idx.encode_key(row);
+            idx.remove(&key_bytes, pk);
         }
     }
 
@@ -502,12 +617,214 @@ impl MemTable {
             let chain = entry.value();
             if let Some(row) = chain.read_latest() {
                 for idx in indexes.iter() {
-                    if let Some(datum) = row.get(idx.column_idx) {
-                        let key_bytes = encode_column_value(datum);
-                        idx.insert(key_bytes, pk.clone());
-                    }
+                    let key_bytes = idx.encode_key(&row);
+                    idx.insert(key_bytes, pk.clone());
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod index_tests {
+    use super::*;
+    use falcon_common::datum::Datum;
+    use falcon_common::schema::{ColumnDef, TableSchema};
+    use falcon_common::types::{DataType, TableId, TxnId};
+
+    fn col(name: &str, dt: DataType, pk: bool) -> ColumnDef {
+        ColumnDef {
+            id: falcon_common::types::ColumnId(0),
+            name: name.to_string(),
+            data_type: dt,
+            nullable: !pk,
+            is_primary_key: pk,
+            default_value: None,
+            is_serial: false,
+        }
+    }
+
+    fn test_schema() -> TableSchema {
+        TableSchema {
+            id: TableId(1),
+            name: "test".to_string(),
+            columns: vec![
+                col("id", DataType::Int64, true),
+                col("a", DataType::Int64, false),
+                col("b", DataType::Text, false),
+                col("c", DataType::Int64, false),
+            ],
+            primary_key_columns: vec![0],
+            ..Default::default()
+        }
+    }
+
+    fn make_pk(id: i64) -> PrimaryKey {
+        encode_column_value(&Datum::Int64(id))
+    }
+
+    fn make_row(id: i64, a: i64, b: &str, c: i64) -> OwnedRow {
+        OwnedRow::new(vec![
+            Datum::Int64(id),
+            Datum::Int64(a),
+            Datum::Text(b.to_string()),
+            Datum::Int64(c),
+        ])
+    }
+
+    #[test]
+    fn test_composite_index_encode_key() {
+        let idx = SecondaryIndex::new_composite(vec![1, 2], false);
+        let row = make_row(1, 10, "hello", 20);
+        let key = idx.encode_key(&row);
+        assert!(!key.is_empty());
+
+        // Different row with same (a, b) should produce same key
+        let row2 = make_row(2, 10, "hello", 99);
+        assert_eq!(idx.encode_key(&row2), key);
+
+        // Different (a, b) should produce different key
+        let row3 = make_row(3, 10, "world", 20);
+        assert_ne!(idx.encode_key(&row3), key);
+    }
+
+    #[test]
+    fn test_composite_index_insert_lookup() {
+        let idx = SecondaryIndex::new_composite(vec![1, 2], false);
+        let row1 = make_row(1, 10, "hello", 20);
+        let row2 = make_row(2, 10, "hello", 30);
+        let row3 = make_row(3, 20, "world", 40);
+
+        let pk1 = make_pk(1);
+        let pk2 = make_pk(2);
+        let pk3 = make_pk(3);
+
+        idx.insert(idx.encode_key(&row1), pk1.clone());
+        idx.insert(idx.encode_key(&row2), pk2.clone());
+        idx.insert(idx.encode_key(&row3), pk3.clone());
+
+        // Lookup by exact composite key (a=10, b="hello")
+        let key = idx.encode_key(&row1);
+        let tree = idx.tree.read();
+        let found = tree.get(&key).unwrap();
+        assert_eq!(found.len(), 2);
+        assert!(found.contains(&pk1));
+        assert!(found.contains(&pk2));
+    }
+
+    #[test]
+    fn test_composite_unique_index() {
+        let idx = SecondaryIndex::new_composite(vec![1, 2], true);
+        let row1 = make_row(1, 10, "hello", 20);
+        let pk1 = make_pk(1);
+        let pk2 = make_pk(2);
+
+        idx.insert(idx.encode_key(&row1), pk1.clone());
+
+        let key = idx.encode_key(&row1);
+        assert!(idx.check_unique(&key, &pk2).is_err());
+        assert!(idx.check_unique(&key, &pk1).is_ok());
+    }
+
+    #[test]
+    fn test_prefix_index() {
+        let idx = SecondaryIndex::new_prefix(2, 3);
+        let row1 = make_row(1, 10, "hello", 20);
+        let row2 = make_row(2, 10, "help", 30);
+        let row3 = make_row(3, 10, "world", 40);
+
+        let key1 = idx.encode_key(&row1);
+        let key2 = idx.encode_key(&row2);
+        let key3 = idx.encode_key(&row3);
+
+        assert_eq!(key1.len(), 3);
+        assert_eq!(key2.len(), 3);
+        assert_eq!(key1, key2); // both truncated to same prefix
+        assert_ne!(key1, key3);
+    }
+
+    #[test]
+    fn test_prefix_scan() {
+        let idx = SecondaryIndex::new(1);
+        let pk1 = make_pk(1);
+        let pk2 = make_pk(2);
+
+        let key1 = encode_column_value(&Datum::Int64(10));
+        let key2 = encode_column_value(&Datum::Int64(20));
+
+        idx.insert(key1.clone(), pk1.clone());
+        idx.insert(key2.clone(), pk2.clone());
+
+        let results = idx.prefix_scan(&key1);
+        assert!(results.contains(&pk1));
+        assert!(!results.contains(&pk2));
+    }
+
+    #[test]
+    fn test_covering_index_metadata() {
+        let idx = SecondaryIndex::new_covering(vec![1, 2], vec![3], false);
+        assert!(idx.is_composite());
+        assert_eq!(idx.key_columns(), &[1, 2]);
+        assert_eq!(idx.covering_columns, vec![3]);
+        assert!(!idx.unique);
+    }
+
+    #[test]
+    fn test_single_column_key_columns() {
+        let idx = SecondaryIndex::new(2);
+        assert!(!idx.is_composite());
+        assert_eq!(idx.key_columns(), &[2]);
+    }
+
+    #[test]
+    fn test_composite_index_remove() {
+        let idx = SecondaryIndex::new_composite(vec![1, 2], false);
+        let row = make_row(1, 10, "hello", 20);
+        let pk = make_pk(1);
+
+        let key = idx.encode_key(&row);
+        idx.insert(key.clone(), pk.clone());
+        { let tree = idx.tree.read(); assert!(tree.get(&key).is_some()); }
+
+        idx.remove(&key, &pk);
+        { let tree = idx.tree.read(); assert!(tree.get(&key).is_none()); }
+    }
+
+    #[test]
+    fn test_decimal_index_encoding() {
+        let d1 = Datum::Decimal(12345, 2);
+        let d2 = Datum::Decimal(12346, 2);
+        let d3 = Datum::Decimal(-100, 2);
+
+        let k1 = encode_column_value(&d1);
+        let k2 = encode_column_value(&d2);
+        let k3 = encode_column_value(&d3);
+
+        assert!(k3 < k1);
+        assert!(k1 < k2);
+    }
+
+    #[test]
+    fn test_memtable_composite_index_commit() {
+        let schema = test_schema();
+        let mt = MemTable::new(schema);
+
+        {
+            let mut indexes = mt.secondary_indexes.write();
+            indexes.push(SecondaryIndex::new_composite(vec![1, 2], false));
+        }
+
+        let txn = TxnId(100);
+        let row = make_row(1, 10, "hello", 20);
+
+        let pk = mt.insert(row.clone(), txn).unwrap();
+        mt.commit_keys(txn, falcon_common::types::Timestamp(200), &[pk.clone()]).unwrap();
+
+        let indexes = mt.secondary_indexes.read();
+        let idx = &indexes[0];
+        let key = idx.encode_key(&row);
+        let tree = idx.tree.read();
+        let pks = tree.get(&key).unwrap();
+        assert!(pks.contains(&pk));
     }
 }

@@ -178,6 +178,23 @@ impl StorageEngine {
         Err(StorageError::TableNotFound(table_id))
     }
 
+    /// Columnar scan: returns one Vec<Datum> per column for vectorized aggregate execution.
+    /// Only available for ColumnStore tables; returns None for rowstore/disk tables.
+    /// The executor uses this to bypass row-at-a-time deserialization for analytics queries.
+    pub fn scan_columnar(
+        &self,
+        table_id: TableId,
+        txn_id: TxnId,
+        read_ts: Timestamp,
+    ) -> Option<Vec<Vec<falcon_common::datum::Datum>>> {
+        let cs = self.columnstore_tables.get(&table_id)?;
+        let num_cols = cs.schema.columns.len();
+        let columns = (0..num_cols)
+            .map(|col_idx| cs.column_scan(col_idx, txn_id, read_ts))
+            .collect();
+        Some(columns)
+    }
+
     /// Perform an index scan: look up PKs via secondary index, then fetch rows.
     /// Returns (pk_bytes, row) pairs visible to the given txn.
     pub fn index_scan(

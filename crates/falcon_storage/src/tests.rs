@@ -1843,6 +1843,61 @@ mod recovery_tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn test_recovery_create_index_durability() {
+        let dir = std::env::temp_dir().join(format!("falcon_recovery_create_index_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Phase 1: create table + create named index, then "crash"
+        {
+            let engine = StorageEngine::new(Some(&dir)).unwrap();
+            engine.create_table(recovery_schema()).unwrap();
+            engine.create_named_index("idx_val", "rec_test", 1, false).unwrap();
+        }
+
+        // Phase 2: recover — index must be present in the registry
+        let engine = StorageEngine::recover(&dir).unwrap();
+        assert!(
+            engine.index_exists("idx_val"),
+            "CREATE INDEX must survive WAL recovery"
+        );
+        let indexed = engine.get_indexed_columns(TableId(1));
+        assert!(
+            indexed.iter().any(|(col, _)| *col == 1),
+            "recovered index must cover column 1"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_recovery_drop_index_durability() {
+        let dir = std::env::temp_dir().join(format!("falcon_recovery_drop_index_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Phase 1: create table + index, then drop the index
+        {
+            let engine = StorageEngine::new(Some(&dir)).unwrap();
+            engine.create_table(recovery_schema()).unwrap();
+            engine.create_named_index("idx_val", "rec_test", 1, false).unwrap();
+            engine.drop_index("idx_val").unwrap();
+        }
+
+        // Phase 2: recover — index must NOT be present
+        let engine = StorageEngine::recover(&dir).unwrap();
+        assert!(
+            !engine.index_exists("idx_val"),
+            "DROP INDEX must survive WAL recovery — index should be gone"
+        );
+        let indexed = engine.get_indexed_columns(TableId(1));
+        assert!(
+            !indexed.iter().any(|(col, _)| *col == 1),
+            "dropped index must not cover column 1 after recovery"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]
@@ -3373,5 +3428,276 @@ mod wal_observer_tests {
 
         let snap2 = engine.gc_stats_snapshot();
         assert!(snap2.total_reclaimed_versions > 0, "GC should reclaim after replica catches up");
+    }
+}
+
+// ===========================================================================
+// ColumnStore / DiskRowstore integration tests
+// Verifies visibility semantics when accessed through StorageEngine.
+// Note: these storage backends do not implement MVCC versioning — they use
+// last-write-wins semantics. Tests document and verify this behaviour.
+// ===========================================================================
+
+#[cfg(test)]
+mod columnstore_integration_tests {
+    use crate::engine::StorageEngine;
+    use falcon_common::config::NodeRole;
+    use falcon_common::datum::{Datum, OwnedRow};
+    use falcon_common::schema::{ColumnDef, StorageType, TableSchema};
+    use falcon_common::types::{ColumnId, DataType, TableId, Timestamp, TxnId, TxnType};
+
+    fn cs_schema() -> TableSchema {
+        TableSchema {
+            id: TableId(500),
+            name: "cs_test".into(),
+            columns: vec![
+                ColumnDef {
+                    id: ColumnId(0),
+                    name: "id".into(),
+                    data_type: DataType::Int64,
+                    nullable: false,
+                    is_primary_key: true,
+                    default_value: None,
+                    is_serial: false,
+                },
+                ColumnDef {
+                    id: ColumnId(1),
+                    name: "val".into(),
+                    data_type: DataType::Text,
+                    nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                    is_serial: false,
+                },
+            ],
+            primary_key_columns: vec![0],
+            storage_type: StorageType::Columnstore,
+            ..Default::default()
+        }
+    }
+
+    fn analytics_engine() -> StorageEngine {
+        let mut e = StorageEngine::new_in_memory();
+        e.set_node_role(NodeRole::Analytics);
+        e
+    }
+
+    #[test]
+    fn test_columnstore_insert_and_scan_via_engine() {
+        let engine = analytics_engine();
+        engine.create_table(cs_schema()).unwrap();
+
+        let row1 = OwnedRow::new(vec![Datum::Int64(1), Datum::Text("alpha".into())]);
+        let row2 = OwnedRow::new(vec![Datum::Int64(2), Datum::Text("beta".into())]);
+
+        engine.insert(TableId(500), row1, TxnId(1)).unwrap();
+        engine.insert(TableId(500), row2, TxnId(1)).unwrap();
+
+        // ColumnStore: read_ts is accepted but not used for versioning
+        let rows = engine.scan(TableId(500), TxnId(2), Timestamp(100)).unwrap();
+        assert_eq!(rows.len(), 2, "both rows must be visible after insert");
+    }
+
+    #[test]
+    fn test_columnstore_scan_returns_all_rows_regardless_of_read_ts() {
+        let engine = analytics_engine();
+        engine.create_table(cs_schema()).unwrap();
+
+        for i in 0..5i64 {
+            engine.insert(TableId(500), OwnedRow::new(vec![Datum::Int64(i), Datum::Text(format!("v{}", i))]), TxnId(1)).unwrap();
+        }
+
+        // ColumnStore has no MVCC — all rows visible at any read_ts
+        let rows_past = engine.scan(TableId(500), TxnId(2), Timestamp(0)).unwrap();
+        let rows_future = engine.scan(TableId(500), TxnId(2), Timestamp(u64::MAX)).unwrap();
+        assert_eq!(rows_past.len(), 5, "ColumnStore: all rows visible at ts=0");
+        assert_eq!(rows_future.len(), 5, "ColumnStore: all rows visible at ts=MAX");
+    }
+
+    #[test]
+    fn test_columnstore_update_not_supported() {
+        let engine = analytics_engine();
+        engine.create_table(cs_schema()).unwrap();
+
+        let row = OwnedRow::new(vec![Datum::Int64(1), Datum::Text("v1".into())]);
+        let pk = engine.insert(TableId(500), row.clone(), TxnId(1)).unwrap();
+
+        // UPDATE is not supported on COLUMNSTORE (analytics workload)
+        let result = engine.update(TableId(500), &pk, row, TxnId(2));
+        assert!(result.is_err(), "UPDATE on COLUMNSTORE must return an error");
+    }
+
+    #[test]
+    fn test_columnstore_delete_not_supported() {
+        let engine = analytics_engine();
+        engine.create_table(cs_schema()).unwrap();
+
+        let row = OwnedRow::new(vec![Datum::Int64(1), Datum::Text("v1".into())]);
+        let pk = engine.insert(TableId(500), row, TxnId(1)).unwrap();
+
+        // DELETE is not supported on COLUMNSTORE
+        let result = engine.delete(TableId(500), &pk, TxnId(2));
+        assert!(result.is_err(), "DELETE on COLUMNSTORE must return an error");
+    }
+
+    #[test]
+    fn test_columnstore_not_allowed_on_primary() {
+        let mut engine = StorageEngine::new_in_memory();
+        engine.set_node_role(NodeRole::Primary);
+
+        let result = engine.create_table(cs_schema());
+        assert!(result.is_err(), "COLUMNSTORE must be rejected on Primary nodes");
+    }
+
+    #[test]
+    fn test_columnstore_commit_does_not_affect_visibility() {
+        // ColumnStore rows are immediately visible — commit is a no-op for visibility
+        let engine = analytics_engine();
+        engine.create_table(cs_schema()).unwrap();
+
+        engine.insert(TableId(500), OwnedRow::new(vec![Datum::Int64(1), Datum::Text("x".into())]), TxnId(1)).unwrap();
+
+        // Visible before commit
+        let before = engine.scan(TableId(500), TxnId(99), Timestamp(100)).unwrap();
+        assert_eq!(before.len(), 1);
+
+        engine.commit_txn(TxnId(1), Timestamp(10), TxnType::Local).unwrap();
+
+        // Still visible after commit
+        let after = engine.scan(TableId(500), TxnId(99), Timestamp(100)).unwrap();
+        assert_eq!(after.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod disk_rowstore_integration_tests {
+    use crate::engine::StorageEngine;
+    use falcon_common::config::NodeRole;
+    use falcon_common::datum::{Datum, OwnedRow};
+    use falcon_common::schema::{ColumnDef, StorageType, TableSchema};
+    use falcon_common::types::{ColumnId, DataType, TableId, Timestamp, TxnId, TxnType};
+
+    fn disk_schema() -> TableSchema {
+        TableSchema {
+            id: TableId(600),
+            name: "disk_test".into(),
+            columns: vec![
+                ColumnDef {
+                    id: ColumnId(0),
+                    name: "id".into(),
+                    data_type: DataType::Int64,
+                    nullable: false,
+                    is_primary_key: true,
+                    default_value: None,
+                    is_serial: false,
+                },
+                ColumnDef {
+                    id: ColumnId(1),
+                    name: "val".into(),
+                    data_type: DataType::Text,
+                    nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                    is_serial: false,
+                },
+            ],
+            primary_key_columns: vec![0],
+            storage_type: StorageType::DiskRowstore,
+            ..Default::default()
+        }
+    }
+
+    fn analytics_engine() -> StorageEngine {
+        let mut e = StorageEngine::new_in_memory();
+        e.set_node_role(NodeRole::Analytics);
+        e
+    }
+
+    #[test]
+    fn test_disk_rowstore_insert_and_scan_via_engine() {
+        let engine = analytics_engine();
+        engine.create_table(disk_schema()).unwrap();
+
+        engine.insert(TableId(600), OwnedRow::new(vec![Datum::Int64(1), Datum::Text("a".into())]), TxnId(1)).unwrap();
+        engine.insert(TableId(600), OwnedRow::new(vec![Datum::Int64(2), Datum::Text("b".into())]), TxnId(1)).unwrap();
+
+        let rows = engine.scan(TableId(600), TxnId(2), Timestamp(100)).unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn test_disk_rowstore_update_via_engine() {
+        let engine = analytics_engine();
+        engine.create_table(disk_schema()).unwrap();
+
+        let pk = engine.insert(TableId(600), OwnedRow::new(vec![Datum::Int64(1), Datum::Text("old".into())]), TxnId(1)).unwrap();
+        engine.update(TableId(600), &pk, OwnedRow::new(vec![Datum::Int64(1), Datum::Text("new".into())]), TxnId(2)).unwrap();
+
+        let rows = engine.scan(TableId(600), TxnId(3), Timestamp(100)).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1.values[1], Datum::Text("new".into()));
+    }
+
+    #[test]
+    fn test_disk_rowstore_delete_via_engine() {
+        let engine = analytics_engine();
+        engine.create_table(disk_schema()).unwrap();
+
+        let pk = engine.insert(TableId(600), OwnedRow::new(vec![Datum::Int64(1), Datum::Text("gone".into())]), TxnId(1)).unwrap();
+        engine.delete(TableId(600), &pk, TxnId(2)).unwrap();
+
+        let rows = engine.scan(TableId(600), TxnId(3), Timestamp(100)).unwrap();
+        assert_eq!(rows.len(), 0, "deleted row must not appear in scan");
+    }
+
+    #[test]
+    fn test_disk_rowstore_scan_ignores_read_ts() {
+        // DiskRowstore has no MVCC — read_ts is accepted but not used for versioning
+        let engine = analytics_engine();
+        engine.create_table(disk_schema()).unwrap();
+
+        engine.insert(TableId(600), OwnedRow::new(vec![Datum::Int64(1), Datum::Text("x".into())]), TxnId(1)).unwrap();
+
+        let rows_ts0 = engine.scan(TableId(600), TxnId(2), Timestamp(0)).unwrap();
+        let rows_tsmax = engine.scan(TableId(600), TxnId(2), Timestamp(u64::MAX)).unwrap();
+        assert_eq!(rows_ts0.len(), 1, "DiskRowstore: row visible at ts=0");
+        assert_eq!(rows_tsmax.len(), 1, "DiskRowstore: row visible at ts=MAX");
+    }
+
+    #[test]
+    fn test_disk_rowstore_duplicate_key_rejected() {
+        let engine = analytics_engine();
+        engine.create_table(disk_schema()).unwrap();
+
+        let row = OwnedRow::new(vec![Datum::Int64(42), Datum::Text("dup".into())]);
+        engine.insert(TableId(600), row.clone(), TxnId(1)).unwrap();
+        let result = engine.insert(TableId(600), row, TxnId(2));
+        assert!(result.is_err(), "duplicate PK must be rejected by DiskRowstore");
+    }
+
+    #[test]
+    fn test_disk_rowstore_not_allowed_on_primary() {
+        let mut engine = StorageEngine::new_in_memory();
+        engine.set_node_role(NodeRole::Primary);
+
+        let result = engine.create_table(disk_schema());
+        assert!(result.is_err(), "DISK_ROWSTORE must be rejected on Primary nodes");
+    }
+
+    #[test]
+    fn test_disk_rowstore_commit_does_not_affect_visibility() {
+        // DiskRowstore rows are immediately visible — commit is a no-op for visibility
+        let engine = analytics_engine();
+        engine.create_table(disk_schema()).unwrap();
+
+        engine.insert(TableId(600), OwnedRow::new(vec![Datum::Int64(1), Datum::Text("y".into())]), TxnId(1)).unwrap();
+
+        let before = engine.scan(TableId(600), TxnId(99), Timestamp(100)).unwrap();
+        assert_eq!(before.len(), 1);
+
+        engine.commit_txn(TxnId(1), Timestamp(10), TxnType::Local).unwrap();
+
+        let after = engine.scan(TableId(600), TxnId(99), Timestamp(100)).unwrap();
+        assert_eq!(after.len(), 1);
     }
 }

@@ -274,6 +274,195 @@ pub fn record_sla_metrics(
     metrics::gauge!("falcon_sla_normal_violations").set(sla_normal_violations as f64);
 }
 
+// ---------------------------------------------------------------------------
+// Crash domain metrics
+// ---------------------------------------------------------------------------
+
+/// Record crash domain panic statistics for Prometheus.
+pub fn record_crash_domain_metrics(
+    panic_count: u64,
+    throttle_window_count: u64,
+    throttle_triggered_count: u64,
+    recent_panic_count: usize,
+) {
+    metrics::gauge!("falcon_crash_domain_panic_count").set(panic_count as f64);
+    metrics::gauge!("falcon_crash_domain_throttle_window_count").set(throttle_window_count as f64);
+    metrics::gauge!("falcon_crash_domain_throttle_triggered_count").set(throttle_triggered_count as f64);
+    metrics::gauge!("falcon_crash_domain_recent_panic_count").set(recent_panic_count as f64);
+}
+
+// ---------------------------------------------------------------------------
+// Priority scheduler metrics
+// ---------------------------------------------------------------------------
+
+/// Record priority scheduler lane metrics for Prometheus.
+pub fn record_priority_scheduler_metrics(
+    high_active: usize,
+    high_admitted: u64,
+    high_rejected: u64,
+    normal_active: usize,
+    normal_max: usize,
+    normal_admitted: u64,
+    normal_rejected: u64,
+    normal_wait_us: u64,
+    low_active: usize,
+    low_max: usize,
+    low_admitted: u64,
+    low_rejected: u64,
+    low_wait_us: u64,
+) {
+    metrics::gauge!("falcon_scheduler_high_active").set(high_active as f64);
+    metrics::gauge!("falcon_scheduler_high_admitted").set(high_admitted as f64);
+    metrics::gauge!("falcon_scheduler_high_rejected").set(high_rejected as f64);
+    metrics::gauge!("falcon_scheduler_normal_active").set(normal_active as f64);
+    metrics::gauge!("falcon_scheduler_normal_max").set(normal_max as f64);
+    metrics::gauge!("falcon_scheduler_normal_admitted").set(normal_admitted as f64);
+    metrics::gauge!("falcon_scheduler_normal_rejected").set(normal_rejected as f64);
+    metrics::gauge!("falcon_scheduler_normal_wait_us").set(normal_wait_us as f64);
+    metrics::gauge!("falcon_scheduler_low_active").set(low_active as f64);
+    metrics::gauge!("falcon_scheduler_low_max").set(low_max as f64);
+    metrics::gauge!("falcon_scheduler_low_admitted").set(low_admitted as f64);
+    metrics::gauge!("falcon_scheduler_low_rejected").set(low_rejected as f64);
+    metrics::gauge!("falcon_scheduler_low_wait_us").set(low_wait_us as f64);
+}
+
+// ---------------------------------------------------------------------------
+// Token bucket metrics
+// ---------------------------------------------------------------------------
+
+/// Record token bucket rate limiter metrics for Prometheus.
+pub fn record_token_bucket_metrics(
+    name: &str,
+    rate_per_sec: u64,
+    burst: u64,
+    available_tokens: u64,
+    paused: bool,
+    total_consumed: u64,
+    total_acquired: u64,
+    total_rejected: u64,
+    total_wait_us: u64,
+) {
+    let n = name.to_string();
+    metrics::gauge!("falcon_token_bucket_rate_per_sec", "bucket" => n.clone()).set(rate_per_sec as f64);
+    metrics::gauge!("falcon_token_bucket_burst", "bucket" => n.clone()).set(burst as f64);
+    metrics::gauge!("falcon_token_bucket_available", "bucket" => n.clone()).set(available_tokens as f64);
+    metrics::gauge!("falcon_token_bucket_paused", "bucket" => n.clone()).set(if paused { 1.0 } else { 0.0 });
+    metrics::gauge!("falcon_token_bucket_consumed", "bucket" => n.clone()).set(total_consumed as f64);
+    metrics::gauge!("falcon_token_bucket_acquired", "bucket" => n.clone()).set(total_acquired as f64);
+    metrics::gauge!("falcon_token_bucket_rejected", "bucket" => n.clone()).set(total_rejected as f64);
+    metrics::gauge!("falcon_token_bucket_wait_us", "bucket" => n).set(total_wait_us as f64);
+}
+
+// ---------------------------------------------------------------------------
+// Deterministic 2PC metrics
+// ---------------------------------------------------------------------------
+
+/// Record coordinator decision log metrics for Prometheus.
+pub fn record_decision_log_metrics(
+    total_logged: u64,
+    total_applied: u64,
+    current_entries: usize,
+    unapplied_count: usize,
+) {
+    metrics::gauge!("falcon_2pc_decision_log_total_logged").set(total_logged as f64);
+    metrics::gauge!("falcon_2pc_decision_log_total_applied").set(total_applied as f64);
+    metrics::gauge!("falcon_2pc_decision_log_entries").set(current_entries as f64);
+    metrics::gauge!("falcon_2pc_decision_log_unapplied").set(unapplied_count as f64);
+}
+
+/// Record layered timeout controller metrics for Prometheus.
+pub fn record_layered_timeout_metrics(
+    total_soft_timeouts: u64,
+    total_hard_timeouts: u64,
+    total_shard_timeouts: u64,
+) {
+    metrics::gauge!("falcon_2pc_soft_timeouts").set(total_soft_timeouts as f64);
+    metrics::gauge!("falcon_2pc_hard_timeouts").set(total_hard_timeouts as f64);
+    metrics::gauge!("falcon_2pc_shard_timeouts").set(total_shard_timeouts as f64);
+}
+
+/// Record slow-shard tracker metrics for Prometheus.
+pub fn record_slow_shard_metrics(
+    total_slow_detected: u64,
+    total_fast_aborts: u64,
+    total_hedged_sent: u64,
+    total_hedged_won: u64,
+    hedged_inflight: u64,
+) {
+    metrics::gauge!("falcon_2pc_slow_shard_detected").set(total_slow_detected as f64);
+    metrics::gauge!("falcon_2pc_slow_shard_fast_aborts").set(total_fast_aborts as f64);
+    metrics::gauge!("falcon_2pc_slow_shard_hedged_sent").set(total_hedged_sent as f64);
+    metrics::gauge!("falcon_2pc_slow_shard_hedged_won").set(total_hedged_won as f64);
+    metrics::gauge!("falcon_2pc_slow_shard_hedged_inflight").set(hedged_inflight as f64);
+}
+
+// ---------------------------------------------------------------------------
+// Fault injection / chaos metrics
+// ---------------------------------------------------------------------------
+
+/// Record fault injection metrics for Prometheus.
+pub fn record_fault_injection_metrics(
+    faults_fired: u64,
+    partition_active: bool,
+    partition_count: u64,
+    partition_heal_count: u64,
+    partition_events: u64,
+    jitter_enabled: bool,
+    jitter_events: u64,
+) {
+    metrics::gauge!("falcon_chaos_faults_fired").set(faults_fired as f64);
+    metrics::gauge!("falcon_chaos_partition_active").set(if partition_active { 1.0 } else { 0.0 });
+    metrics::gauge!("falcon_chaos_partition_count").set(partition_count as f64);
+    metrics::gauge!("falcon_chaos_partition_heal_count").set(partition_heal_count as f64);
+    metrics::gauge!("falcon_chaos_partition_events").set(partition_events as f64);
+    metrics::gauge!("falcon_chaos_jitter_enabled").set(if jitter_enabled { 1.0 } else { 0.0 });
+    metrics::gauge!("falcon_chaos_jitter_events").set(jitter_events as f64);
+}
+
+// ---------------------------------------------------------------------------
+// Security hardening metrics
+// ---------------------------------------------------------------------------
+
+/// Record security hardening metrics for Prometheus.
+pub fn record_security_hardening_metrics(
+    auth_total_checks: u64,
+    auth_total_lockouts: u64,
+    auth_total_failures: u64,
+    auth_active_lockouts: usize,
+    pw_total_checks: u64,
+    pw_total_rejections: u64,
+    fw_total_checks: u64,
+    fw_total_blocked: u64,
+    fw_injection_detected: u64,
+    fw_dangerous_blocked: u64,
+    fw_stacking_blocked: u64,
+) {
+    metrics::gauge!("falcon_security_auth_checks").set(auth_total_checks as f64);
+    metrics::gauge!("falcon_security_auth_lockouts").set(auth_total_lockouts as f64);
+    metrics::gauge!("falcon_security_auth_failures").set(auth_total_failures as f64);
+    metrics::gauge!("falcon_security_auth_active_lockouts").set(auth_active_lockouts as f64);
+    metrics::gauge!("falcon_security_password_checks").set(pw_total_checks as f64);
+    metrics::gauge!("falcon_security_password_rejections").set(pw_total_rejections as f64);
+    metrics::gauge!("falcon_security_firewall_checks").set(fw_total_checks as f64);
+    metrics::gauge!("falcon_security_firewall_blocked").set(fw_total_blocked as f64);
+    metrics::gauge!("falcon_security_firewall_injection").set(fw_injection_detected as f64);
+    metrics::gauge!("falcon_security_firewall_dangerous").set(fw_dangerous_blocked as f64);
+    metrics::gauge!("falcon_security_firewall_stacking").set(fw_stacking_blocked as f64);
+}
+
+// ---------------------------------------------------------------------------
+// Version / compatibility metrics
+// ---------------------------------------------------------------------------
+
+/// Record version and compatibility metrics for Prometheus.
+pub fn record_compat_metrics(
+    wal_format_version: u32,
+    snapshot_format_version: u32,
+) {
+    metrics::gauge!("falcon_compat_wal_format_version").set(wal_format_version as f64);
+    metrics::gauge!("falcon_compat_snapshot_format_version").set(snapshot_format_version as f64);
+}
+
 /// Record transaction fast-path / slow-path statistics from a TxnStatsSnapshot.
 pub fn record_txn_stats(
     total_committed: u64,

@@ -502,9 +502,9 @@ impl Executor {
                                     Ok(Datum::Boolean(true)) => {} // constraint satisfied
                                     Ok(Datum::Null) => {} // NULL is treated as satisfied (SQL semantics)
                                     _ => {
-                                        return Err(FalconError::Execution(ExecutionError::TypeError(
-                                            format!("CHECK constraint violated: {}", check_sql),
-                                        )));
+                                        return Err(FalconError::Execution(
+                                            ExecutionError::CheckConstraintViolation(check_sql.clone()),
+                                        ));
                                     }
                                 }
                             }

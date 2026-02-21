@@ -111,10 +111,15 @@ impl TenantRegistry {
         reg
     }
 
-    /// Register a new tenant. Returns false if tenant_id already exists.
+    /// Register a new tenant. Returns false if tenant_id or tenant name already exists.
     pub fn register_tenant(&self, config: TenantConfig) -> bool {
         let tenant_id = config.tenant_id;
         if self.tenants.contains_key(&tenant_id) {
+            return false;
+        }
+        // Also reject duplicate names (case-insensitive).
+        let name_lower = config.name.to_lowercase();
+        if self.tenants.iter().any(|e| e.value().config.name.to_lowercase() == name_lower) {
             return false;
         }
         self.tenants.insert(tenant_id, TenantEntry {

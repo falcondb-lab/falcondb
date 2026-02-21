@@ -64,6 +64,18 @@ struct Args {
     /// If set, run failover benchmark (before/after latency + data integrity).
     #[arg(long, default_value_t = false)]
     failover: bool,
+
+    /// If set, run TPC-B (pgbench) style benchmark.
+    #[arg(long, default_value_t = false)]
+    tpcb: bool,
+
+    /// If set, run LSM disk-backed KV benchmark.
+    #[arg(long, default_value_t = false)]
+    lsm: bool,
+
+    /// Concurrency level for multi-threaded benchmarks.
+    #[arg(long, default_value_t = 1)]
+    threads: u32,
 }
 
 fn bench_schema() -> TableSchema {
@@ -653,10 +665,310 @@ fn run_failover_bench(args: &Args) {
     }
 }
 
+// ── TPC-B (pgbench) workload ────────────────────────────────────────────
+
+fn tpcb_schema() -> Vec<TableSchema> {
+    vec![
+        TableSchema {
+            id: TableId(10),
+            name: "pgbench_accounts".into(),
+            columns: vec![
+                ColumnDef { id: ColumnId(0), name: "aid".into(), data_type: DataType::Int64, nullable: false, is_primary_key: true, default_value: None, is_serial: false },
+                ColumnDef { id: ColumnId(1), name: "bid".into(), data_type: DataType::Int64, nullable: false, is_primary_key: false, default_value: None, is_serial: false },
+                ColumnDef { id: ColumnId(2), name: "abalance".into(), data_type: DataType::Int64, nullable: false, is_primary_key: false, default_value: None, is_serial: false },
+            ],
+            primary_key_columns: vec![0],
+            ..Default::default()
+        },
+        TableSchema {
+            id: TableId(11),
+            name: "pgbench_tellers".into(),
+            columns: vec![
+                ColumnDef { id: ColumnId(0), name: "tid".into(), data_type: DataType::Int64, nullable: false, is_primary_key: true, default_value: None, is_serial: false },
+                ColumnDef { id: ColumnId(1), name: "bid".into(), data_type: DataType::Int64, nullable: false, is_primary_key: false, default_value: None, is_serial: false },
+                ColumnDef { id: ColumnId(2), name: "tbalance".into(), data_type: DataType::Int64, nullable: false, is_primary_key: false, default_value: None, is_serial: false },
+            ],
+            primary_key_columns: vec![0],
+            ..Default::default()
+        },
+        TableSchema {
+            id: TableId(12),
+            name: "pgbench_branches".into(),
+            columns: vec![
+                ColumnDef { id: ColumnId(0), name: "bid".into(), data_type: DataType::Int64, nullable: false, is_primary_key: true, default_value: None, is_serial: false },
+                ColumnDef { id: ColumnId(1), name: "bbalance".into(), data_type: DataType::Int64, nullable: false, is_primary_key: false, default_value: None, is_serial: false },
+            ],
+            primary_key_columns: vec![0],
+            ..Default::default()
+        },
+    ]
+}
+
+fn run_tpcb(args: &Args) {
+    let storage = Arc::new(StorageEngine::new_in_memory());
+    let schemas = tpcb_schema();
+    for s in &schemas {
+        storage.create_table(s.clone()).unwrap();
+    }
+    let mgr = Arc::new(TxnManager::new(storage.clone()));
+    let isolation = isolation_from_str(&args.isolation);
+
+    let scale = (args.record_count / 100).max(1);
+    let n_branches = scale;
+    let n_tellers = scale * 10;
+    let n_accounts = scale * 100;
+
+    // Load: branches
+    for i in 0..n_branches {
+        let txn = mgr.begin(isolation);
+        storage.insert(TableId(12), OwnedRow::new(vec![Datum::Int64(i as i64), Datum::Int64(0)]), txn.txn_id).unwrap();
+        mgr.commit(txn.txn_id).unwrap();
+    }
+    // Load: tellers
+    for i in 0..n_tellers {
+        let txn = mgr.begin(isolation);
+        storage.insert(TableId(11), OwnedRow::new(vec![Datum::Int64(i as i64), Datum::Int64((i % n_branches) as i64), Datum::Int64(0)]), txn.txn_id).unwrap();
+        mgr.commit(txn.txn_id).unwrap();
+    }
+    // Load: accounts
+    for i in 0..n_accounts {
+        let txn = mgr.begin(isolation);
+        storage.insert(TableId(10), OwnedRow::new(vec![Datum::Int64(i as i64), Datum::Int64((i % n_branches) as i64), Datum::Int64(0)]), txn.txn_id).unwrap();
+        mgr.commit(txn.txn_id).unwrap();
+    }
+
+    mgr.reset_latency();
+    let mut rng = Rng::new(42);
+    let mut latencies_us: Vec<u64> = Vec::with_capacity(args.ops as usize);
+
+    let start = Instant::now();
+    let mut committed = 0u64;
+    let mut aborted = 0u64;
+
+    for _ in 0..args.ops {
+        let aid = (rng.next_u64() % n_accounts) as i64;
+        let _tid = (rng.next_u64() % n_tellers) as i64;
+        let bid = (rng.next_u64() % n_branches) as i64;
+        let delta = ((rng.next_u64() % 10001) as i64) - 5000;
+
+        let op_start = Instant::now();
+        let txn = mgr.begin(isolation);
+        let read_ts = txn.read_ts(mgr.current_ts());
+
+        // UPDATE accounts SET abalance = abalance + delta WHERE aid = ?
+        let rows = storage.scan(TableId(10), txn.txn_id, read_ts).unwrap();
+        for (pk, row) in &rows {
+            if let Some(Datum::Int64(k)) = row.values.first() {
+                if *k == aid {
+                    let old_bal = match row.values.get(2) { Some(Datum::Int64(b)) => *b, _ => 0 };
+                    let new_row = OwnedRow::new(vec![Datum::Int64(aid), Datum::Int64(bid), Datum::Int64(old_bal + delta)]);
+                    let _ = storage.update(TableId(10), pk, new_row, txn.txn_id);
+                    break;
+                }
+            }
+        }
+
+        match mgr.commit(txn.txn_id) {
+            Ok(_) => committed += 1,
+            Err(_) => aborted += 1,
+        }
+        latencies_us.push(op_start.elapsed().as_micros() as u64);
+    }
+
+    let elapsed = start.elapsed();
+    let elapsed_ms = elapsed.as_millis() as u64;
+    let tps = if elapsed_ms > 0 { args.ops as f64 / (elapsed_ms as f64 / 1000.0) } else { 0.0 };
+
+    latencies_us.sort();
+    let len = latencies_us.len();
+    let p50 = if len > 0 { latencies_us[len * 50 / 100] } else { 0 };
+    let p95 = if len > 0 { latencies_us[len * 95 / 100] } else { 0 };
+    let p99 = if len > 0 { latencies_us[len.saturating_sub(1).min(len * 99 / 100)] } else { 0 };
+    let max = latencies_us.last().copied().unwrap_or(0);
+
+    let stats = mgr.stats_snapshot();
+
+    match args.export.as_str() {
+        "json" => {
+            let obj = serde_json::json!({
+                "workload": "tpcb",
+                "scale": scale,
+                "ops": args.ops,
+                "elapsed_ms": elapsed_ms,
+                "tps": tps,
+                "committed": committed,
+                "aborted": aborted,
+                "latency_us": { "p50": p50, "p95": p95, "p99": p99, "max": max },
+                "backpressure_rejections": stats.admission_rejections,
+            });
+            println!("{}", serde_json::to_string_pretty(&obj).unwrap());
+        }
+        "csv" => {
+            println!("workload,scale,ops,elapsed_ms,tps,committed,aborted,p50_us,p95_us,p99_us,max_us,backpressure");
+            println!("tpcb,{},{},{},{:.1},{},{},{},{},{},{},{}",
+                scale, args.ops, elapsed_ms, tps, committed, aborted, p50, p95, p99, max, stats.admission_rejections);
+        }
+        _ => {
+            println!("═══════════════════════════════════════════════");
+            println!("  TPC-B (pgbench) Benchmark");
+            println!("═══════════════════════════════════════════════");
+            println!("  Scale factor:      {}", scale);
+            println!("  Accounts:          {}", n_accounts);
+            println!("  Operations:        {}", args.ops);
+            println!("  Elapsed:           {} ms", elapsed_ms);
+            println!("  TPS:               {:.1}", tps);
+            println!("  Committed:         {}", committed);
+            println!("  Aborted:           {}", aborted);
+            println!("  ─── Latency (µs) ───");
+            println!("  P50:    {:>8}", p50);
+            println!("  P95:    {:>8}", p95);
+            println!("  P99:    {:>8}", p99);
+            println!("  Max:    {:>8}", max);
+            println!("  ─── Backpressure ───");
+            println!("  Rejections:        {}", stats.admission_rejections);
+            println!();
+        }
+    }
+}
+
+// ── LSM disk-backed KV benchmark ────────────────────────────────────────
+
+fn run_lsm_bench(args: &Args) {
+    use falcon_storage::lsm::{LsmEngine, LsmConfig};
+    use falcon_storage::lsm::compaction::CompactionConfig;
+
+    let dir = std::env::temp_dir().join(format!("falcon_lsm_bench_{}", std::process::id()));
+    let config = LsmConfig {
+        memtable_budget_bytes: 16 * 1024 * 1024,
+        block_cache_bytes: 64 * 1024 * 1024,
+        compaction: CompactionConfig {
+            l0_compaction_trigger: 4,
+            l0_stall_trigger: 20,
+            ..Default::default()
+        },
+        sync_writes: false,
+    };
+    let engine = LsmEngine::open(&dir, config).unwrap();
+
+    let n = args.record_count;
+    let ops = args.ops;
+    let read_pct = args.read_pct;
+    let mut rng = Rng::new(42);
+
+    // Load phase
+    for i in 0..n {
+        let key = format!("key_{:012}", i);
+        let val = format!("val_{:012}_{}", i, "x".repeat(100));
+        engine.put(key.as_bytes(), val.as_bytes()).unwrap();
+    }
+    engine.flush().unwrap();
+
+    // Benchmark phase
+    let mut latencies_us: Vec<u64> = Vec::with_capacity(ops as usize);
+    let mut reads = 0u64;
+    let mut writes = 0u64;
+    let mut stalls = 0u64;
+
+    let start = Instant::now();
+    for _ in 0..ops {
+        let is_read = rng.next_pct() < read_pct;
+        let key_id = rng.next_u64() % n;
+        let key = format!("key_{:012}", key_id);
+
+        let op_start = Instant::now();
+        if is_read {
+            let _ = engine.get(key.as_bytes());
+            reads += 1;
+        } else {
+            let val = format!("upd_{:012}_{}", rng.next_u64(), "y".repeat(100));
+            match engine.put(key.as_bytes(), val.as_bytes()) {
+                Ok(_) => writes += 1,
+                Err(_) => stalls += 1,
+            }
+        }
+        latencies_us.push(op_start.elapsed().as_micros() as u64);
+    }
+    let elapsed = start.elapsed();
+    let elapsed_ms = elapsed.as_millis() as u64;
+    let tps = if elapsed_ms > 0 { ops as f64 / (elapsed_ms as f64 / 1000.0) } else { 0.0 };
+
+    latencies_us.sort();
+    let len = latencies_us.len();
+    let p50 = if len > 0 { latencies_us[len * 50 / 100] } else { 0 };
+    let p95 = if len > 0 { latencies_us[len * 95 / 100] } else { 0 };
+    let p99 = if len > 0 { latencies_us[len.saturating_sub(1).min(len * 99 / 100)] } else { 0 };
+    let max = latencies_us.last().copied().unwrap_or(0);
+
+    let stats = engine.stats();
+
+    // Cleanup
+    let _ = std::fs::remove_dir_all(&dir);
+
+    match args.export.as_str() {
+        "json" => {
+            let obj = serde_json::json!({
+                "workload": "lsm_kv",
+                "record_count": n,
+                "ops": ops,
+                "elapsed_ms": elapsed_ms,
+                "tps": tps,
+                "reads": reads,
+                "writes": writes,
+                "stalls": stalls,
+                "latency_us": { "p50": p50, "p95": p95, "p99": p99, "max": max },
+                "lsm": {
+                    "flushes": stats.flushes_completed,
+                    "l0_files": stats.l0_file_count,
+                    "total_sst_files": stats.total_sst_files,
+                    "total_sst_bytes": stats.total_sst_bytes,
+                    "compaction_runs": stats.compaction.runs_completed,
+                    "block_cache_hit_rate": stats.block_cache.hit_rate,
+                },
+            });
+            println!("{}", serde_json::to_string_pretty(&obj).unwrap());
+        }
+        "csv" => {
+            println!("workload,records,ops,elapsed_ms,tps,reads,writes,stalls,p50_us,p95_us,p99_us,max_us,flushes,compactions,cache_hit_rate");
+            println!("lsm_kv,{},{},{},{:.1},{},{},{},{},{},{},{},{},{},{:.4}",
+                n, ops, elapsed_ms, tps, reads, writes, stalls, p50, p95, p99, max,
+                stats.flushes_completed, stats.compaction.runs_completed, stats.block_cache.hit_rate);
+        }
+        _ => {
+            println!("═══════════════════════════════════════════════");
+            println!("  LSM Disk-Backed KV Benchmark");
+            println!("═══════════════════════════════════════════════");
+            println!("  Records:           {}", n);
+            println!("  Operations:        {}", ops);
+            println!("  Elapsed:           {} ms", elapsed_ms);
+            println!("  TPS:               {:.1}", tps);
+            println!("  Reads:             {}", reads);
+            println!("  Writes:            {}", writes);
+            println!("  Write stalls:      {}", stalls);
+            println!("  ─── Latency (µs) ───");
+            println!("  P50:    {:>8}", p50);
+            println!("  P95:    {:>8}", p95);
+            println!("  P99:    {:>8}", p99);
+            println!("  Max:    {:>8}", max);
+            println!("  ─── LSM Stats ───");
+            println!("  Flushes:           {}", stats.flushes_completed);
+            println!("  L0 files:          {}", stats.l0_file_count);
+            println!("  Total SST files:   {}", stats.total_sst_files);
+            println!("  Total SST bytes:   {}", stats.total_sst_bytes);
+            println!("  Compaction runs:   {}", stats.compaction.runs_completed);
+            println!("  Block cache hit:   {:.2}%", stats.block_cache.hit_rate * 100.0);
+            println!();
+        }
+    }
+}
+
 fn main() {
     let args = Args::parse();
 
-    if args.failover {
+    if args.tpcb {
+        run_tpcb(&args);
+    } else if args.lsm {
+        run_lsm_bench(&args);
+    } else if args.failover {
         run_failover_bench(&args);
     } else if args.scaleout {
         run_scaleout(&args);

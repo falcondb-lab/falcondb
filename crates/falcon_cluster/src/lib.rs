@@ -4,19 +4,26 @@
 //! MVP: single-node, single-shard. All data lives on one node.
 //! P1: hash-based sharding with shard routing via gRPC (tonic).
 
+pub mod admission;
+pub mod circuit_breaker;
 pub mod cluster;
+pub mod cluster_ops;
+pub mod deterministic_2pc;
 pub mod distributed_exec;
 pub mod grpc_transport;
 pub mod ha;
+pub mod indoubt_resolver;
 pub mod query_engine;
 pub mod rebalancer;
 pub mod replication;
 pub mod routing;
 pub mod sharded_engine;
 pub mod sharding;
+pub mod token_bucket;
 pub mod two_phase;
 pub mod cross_shard;
 pub mod fault_injection;
+pub mod security_hardening;
 
 /// Protobuf types and tonic client/server for WAL replication.
 /// Re-exported from the `falcon_proto` crate (generated at build time).
@@ -56,3 +63,22 @@ pub use ha::{
     FailoverOrchestratorMetrics, SyncReplicationWaiter,
 };
 pub use two_phase::TwoPhaseCoordinator;
+pub use cluster_ops::{
+    ClusterEventLog, ClusterEvent, ClusterAdmin,
+    EventCategory, EventSeverity,
+    ScaleOutState, ScaleOutLifecycle,
+    ScaleInState, ScaleInLifecycle,
+};
+pub use token_bucket::{
+    TokenBucket, TokenBucketConfig, TokenBucketSnapshot, TokenBucketError,
+};
+pub use security_hardening::{
+    AuthRateLimiter, AuthRateLimiterConfig, AuthRateLimiterSnapshot, AuthRateResult,
+    PasswordPolicy, PasswordPolicyConfig, PasswordPolicySnapshot, PasswordValidation,
+    SqlFirewall, SqlFirewallConfig, SqlFirewallSnapshot, SqlFirewallResult,
+};
+pub use deterministic_2pc::{
+    CoordinatorDecisionLog, CoordinatorDecision, DecisionLogConfig, DecisionLogSnapshot, DecisionRecord,
+    LayeredTimeoutController, LayeredTimeoutConfig, LayeredTimeoutSnapshot, TimeoutResult,
+    SlowShardPolicy, SlowShardConfig, SlowShardTracker, SlowShardSnapshot, SlowShardAction, SlowShardEvent,
+};
