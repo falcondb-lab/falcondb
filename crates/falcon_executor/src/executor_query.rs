@@ -10,7 +10,7 @@ use falcon_txn::TxnHandle;
 
 use crate::expr_engine::ExprEngine;
 use crate::executor::{Executor, CteData, ExecutionResult};
-use crate::vectorized::{RecordBatch, vectorized_filter, vectorized_aggregate, is_vectorizable};
+use crate::vectorized::{RecordBatch, vectorized_filter, is_vectorizable};
 use crate::parallel::parallel_filter;
 
 impl Executor {

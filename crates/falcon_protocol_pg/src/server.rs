@@ -620,7 +620,7 @@ async fn handle_connection_with_timeout(
                         let client_key = hmac_sha256(&salted_password, b"Client Key");
                         let stored_key = {
                             let mut h = sha2::Sha256::new();
-                            h.update(&client_key);
+                            h.update(client_key);
                             let result: [u8; 32] = h.finalize().into();
                             result
                         };
@@ -1587,7 +1587,7 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
 /// Simple base64 encoder (standard alphabet, with padding).
 fn base64_encode(data: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };

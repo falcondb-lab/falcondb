@@ -186,7 +186,7 @@ impl TokenBucket {
             // Sleep for a short interval proportional to how many tokens we need
             let tokens_per_ms = self.config.rate_per_sec as f64 / 1000.0;
             let wait_ms = if tokens_per_ms > 0.0 {
-                ((n as f64 / tokens_per_ms) as u64).max(1).min(100)
+                ((n as f64 / tokens_per_ms) as u64).clamp(1, 100)
             } else {
                 10
             };

@@ -612,9 +612,10 @@ fn collect_expr_refs(expr: &BoundExpr, out: &mut HashSet<usize>) {
             if let Some(l) = lower { collect_expr_refs(l, out); }
             if let Some(u) = upper { collect_expr_refs(u, out); }
         }
-        BoundExpr::AggregateExpr { arg, .. } => {
-            if let Some(a) = arg { collect_expr_refs(a, out); }
+        BoundExpr::AggregateExpr { arg: Some(a), .. } => {
+            collect_expr_refs(a, out);
         }
+        BoundExpr::AggregateExpr { arg: None, .. } => {}
         _ => {}
     }
 }
@@ -802,6 +803,7 @@ fn rule_subquery_decorrelation(plan: LogicalPlan) -> LogicalPlan {
 /// Try to extract an EXISTS/NOT EXISTS correlated subquery into a semi-join.
 /// Returns (subquery_table_id, subquery_schema, correlation_pairs, negated).
 /// `correlation_pairs` is a list of (outer_col_idx, inner_col_idx) equalities.
+#[allow(clippy::type_complexity)]
 fn try_extract_exists_semijoin(
     expr: &BoundExpr,
 ) -> Option<(falcon_common::types::TableId, falcon_common::schema::TableSchema, Vec<(usize, usize)>, bool)> {

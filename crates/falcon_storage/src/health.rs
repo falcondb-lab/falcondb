@@ -201,7 +201,7 @@ impl HealthScorer {
     }
 
     fn score_wal(inputs: &HealthInputs, recs: &mut Vec<String>) -> u32 {
-        let backlog_mb = inputs.wal_backlog_bytes / (1024 * 1024).max(1);
+        let backlog_mb = inputs.wal_backlog_bytes / (1024 * 1024);
         let score = if backlog_mb < 10 {
             100
         } else if backlog_mb < 100 {

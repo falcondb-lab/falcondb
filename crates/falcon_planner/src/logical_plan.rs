@@ -14,6 +14,7 @@ use falcon_sql_frontend::types::*;
 /// A logical relational algebra tree. Each variant represents a logical
 /// operator that can be optimized independently of its physical implementation.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum LogicalPlan {
     // ── Leaf operators ──────────────────────────────────────────────
     /// Full table scan.

@@ -993,9 +993,9 @@ impl Binder {
                             let n = cols.len();
                             for mask in 0..(1u64 << n) {
                                 let mut set = Vec::new();
-                                for i in 0..n {
+                                for (i, &col) in cols.iter().enumerate() {
                                     if mask & (1u64 << i) != 0 {
-                                        set.push(cols[i]);
+                                        set.push(col);
                                     }
                                 }
                                 grouping_sets.push(set);

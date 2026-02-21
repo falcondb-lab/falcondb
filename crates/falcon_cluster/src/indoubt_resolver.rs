@@ -124,6 +124,11 @@ impl TxnOutcomeCache {
         self.entries.read().len()
     }
 
+    /// Returns true if the cache is empty.
+    pub fn is_empty(&self) -> bool {
+        self.entries.read().is_empty()
+    }
+
     /// Cache hit count since creation.
     pub fn hits(&self) -> u64 {
         self.hits.load(Ordering::Relaxed)

@@ -18,6 +18,7 @@ pub use manager::{
     TxnRecord,
     TxnStatsSnapshot,
     TxnState,
+    TxnExecSummary,
 };
 
 // Re-export from falcon_common for convenience

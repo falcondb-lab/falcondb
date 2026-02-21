@@ -358,12 +358,14 @@ pub struct PartitionSnapshot {
 
 /// Jitter injection mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum JitterMode {
     /// Jitter applied to CPU-bound operations (e.g. query execution).
     Cpu,
     /// Jitter applied to IO-bound operations (e.g. WAL write, disk read).
     Io,
     /// Jitter applied to both CPU and IO operations.
+    #[default]
     Both,
 }
 
@@ -377,11 +379,6 @@ impl std::fmt::Display for JitterMode {
     }
 }
 
-impl Default for JitterMode {
-    fn default() -> Self {
-        JitterMode::Both
-    }
-}
 
 /// Configuration for CPU/IO jitter injection.
 #[derive(Debug, Clone)]
@@ -571,7 +568,7 @@ impl ChaosRunner {
                 }
                 ChaosScenario::WalCorruption => {
                     self.injector.arm_wal_corruption();
-                    format!("WalCorruption")
+                    "WalCorruption".to_string()
                 }
                 ChaosScenario::DiskLatency { delay_us, duration_ms } => {
                     self.injector.set_disk_delay(*delay_us);

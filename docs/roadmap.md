@@ -183,7 +183,9 @@ cargo test --workspace
 | **v0.7.0** | ✅ Done | Deterministic Transactions — 2PC hardening, in-doubt resolver |
 | **v0.8.0** | ✅ Done | Chaos-Ready — chaos matrix, fault injection, chaos CI |
 | **v0.9.0** | ✅ Done | Production Candidate — semantic freeze, wire versioning, rolling upgrade |
-| **v1.0.0** | 📋 Planned | Production-Grade Database Kernel |
+| **v1.0 Phase 1** | ✅ Done | LSM kernel — 1,917 tests, disk-backed OLTP, MVCC encoding, idempotency |
+| **v1.0 Phase 2** | ✅ Done | SQL completeness — 1,976 tests, DECIMAL, composite indexes, RBAC, txn control |
+| **v1.0.0** | 📋 Planned | Production-Grade Database Kernel — all gates pass |
 
 ---
 
@@ -479,7 +481,7 @@ From v0.4.0 onward:
 
 ## v1.0 — Phase 1: Industrial/Financial-Grade OLTP Kernel
 
-**Status**: 🔧 In Progress  
+**Status**: ✅ Complete  
 **Goal**: Disk-backed OLTP, deterministic txn semantics, predictable P99, faster than PG
 
 ### P0: Storage & Transaction Kernel
@@ -533,6 +535,130 @@ From v0.4.0 onward:
 | G4 | In-doubt txn converges after crash | `TxnMetaStore` persistence tests |
 | G5 | TPC-B P95/P99 reported, backpressure counted | `falcon_bench --tpcb --export json` |
 | G6 | Error model 4-tier full coverage | `ci_phase1_gates.sh gate1` |
+
+---
+
+## v1.0 — Phase 2: SQL Completeness & Enterprise Kernel
+
+**Status**: ✅ Complete  
+**Goal**: Full SQL type coverage, constraint enforcement, transaction control, fine-grained access control, and operational robustness.
+
+### P0 v1.1: DECIMAL Type
+
+| Deliverable | Location | Status |
+|------------|----------|--------|
+| `Datum::Decimal(i128, u8)` — mantissa + scale | `falcon_common::datum` | ✅ |
+| `DataType::Decimal(u8, u8)` — precision + scale | `falcon_common::types` | ✅ |
+| Decimal encoding in secondary index keys | `falcon_storage::memtable` | ✅ |
+| Decimal in stats, sharding, gather, JSONB, COPY, PG wire | multiple | ✅ |
+| 11 tests | `falcon_common::datum` | ✅ |
+
+### P0 v1.2: Composite / Covering / Prefix Indexes
+
+| Deliverable | Location | Status |
+|------------|----------|--------|
+| `SecondaryIndex::column_indices: Vec<usize>` (multi-column) | `falcon_storage::memtable` | ✅ |
+| `encode_key()` — composite key encoding by column concatenation | `falcon_storage::memtable` | ✅ |
+| `new_composite()`, `new_covering()`, `new_prefix()` constructors | `falcon_storage::memtable` | ✅ |
+| `prefix_scan()` for prefix index range queries | `falcon_storage::memtable` | ✅ |
+| `create_composite_index`, `create_covering_index`, `create_prefix_index` | `falcon_storage::engine_ddl` | ✅ |
+| Backfill from existing table data on index creation | `falcon_storage::engine_ddl` | ✅ |
+| 10 tests (encoding, uniqueness, prefix truncation, insert/remove) | `falcon_storage::memtable` | ✅ |
+
+### P0 v1.2: CHECK Constraint Runtime Enforcement
+
+| Deliverable | Location | Status |
+|------------|----------|--------|
+| `ExecutionError::CheckConstraintViolation(String)` error variant | `falcon_common::error` | ✅ |
+| SQLSTATE `23514` (`CHECK_VIOLATION`) constant | `falcon_common::consistency` | ✅ |
+| CHECK constraint evaluation on INSERT / UPDATE | `falcon_executor::executor_subquery` | ✅ |
+| CHECK + NOT NULL enforcement in `exec_insert_select` | `falcon_executor::executor_dml` | ✅ |
+
+### P0 v1.2: Transaction READ ONLY / READ WRITE + Timeout + Exec Summary
+
+| Deliverable | Location | Status |
+|------------|----------|--------|
+| `TxnHandle::read_only: bool` — per-transaction access mode | `falcon_txn::manager` | ✅ |
+| `TxnHandle::timeout_ms: u64` — per-transaction timeout | `falcon_txn::manager` | ✅ |
+| `TxnHandle::exec_summary: TxnExecSummary` — statement/row counters | `falcon_txn::manager` | ✅ |
+| `TxnHandle::is_timed_out()`, `elapsed_ms()` helper methods | `falcon_txn::manager` | ✅ |
+| `TxnExecSummary` — `record_read/insert/update/delete/statement()` | `falcon_txn::manager` | ✅ |
+| `reject_if_txn_read_only()` guard in INSERT / UPDATE / DELETE | `falcon_executor::executor` | ✅ |
+| `check_txn_timeout()` guard in INSERT / UPDATE / DELETE | `falcon_executor::executor` | ✅ |
+| 8 tests | `falcon_txn::tests` | ✅ |
+
+### P1 v1.3: Query Governor v2 — Structured Abort Reasons
+
+| Deliverable | Location | Status |
+|------------|----------|--------|
+| `GovernorAbortReason` enum (RowLimit / ByteLimit / Timeout / Memory) | `falcon_executor::governor` | ✅ |
+| `QueryGovernor::check_all_v2()` — returns structured abort reason | `falcon_executor::governor` | ✅ |
+| `QueryGovernor::abort_reason()` — current abort reason or None | `falcon_executor::governor` | ✅ |
+| 6 tests | `falcon_executor::governor` | ✅ |
+
+### P1 v1.4: Fine-Grained Admission Control
+
+| Deliverable | Location | Status |
+|------------|----------|--------|
+| `OperationType` enum (Read / Write / Ddl) | `falcon_cluster::admission` | ✅ |
+| `DdlPermit` RAII guard — auto-releases DDL slot on drop | `falcon_cluster::admission` | ✅ |
+| `AdmissionControl::acquire_ddl()` — DDL concurrency limit | `falcon_cluster::admission` | ✅ |
+| `AdmissionConfig::max_inflight_ddl` (default: 4) | `falcon_cluster::admission` | ✅ |
+| `AdmissionMetrics::ddl_rejected` counter | `falcon_cluster::admission` | ✅ |
+| 2 tests | `falcon_cluster::admission` | ✅ |
+
+### P1 v1.5: Node Operational Mode (Drain / ReadOnly / Normal)
+
+| Deliverable | Location | Status |
+|------------|----------|--------|
+| `NodeOperationalMode` enum (Normal / ReadOnly / Drain) | `falcon_cluster::cluster_ops` | ✅ |
+| `NodeModeController` — thread-safe mode transitions with event logging | `falcon_cluster::cluster_ops` | ✅ |
+| `allows_reads()`, `allows_writes()`, `allows_ddl()` enforcement methods | `falcon_cluster::cluster_ops` | ✅ |
+| `drain()`, `set_read_only()`, `resume()` convenience methods | `falcon_cluster::cluster_ops` | ✅ |
+| All mode transitions logged to `ClusterEventLog` | `falcon_cluster::cluster_ops` | ✅ |
+| No-op detection (same-mode transitions not logged) | `falcon_cluster::cluster_ops` | ✅ |
+| 6 tests | `falcon_cluster::cluster_ops` | ✅ |
+
+### P1 v1.6: Role-Based Access Control + Schema Permissions
+
+| Deliverable | Location | Status |
+|------------|----------|--------|
+| `RoleCatalog` — in-memory role store with CRUD | `falcon_common::security` | ✅ |
+| Transitive role inheritance (`effective_roles()`) | `falcon_common::security` | ✅ |
+| Circular inheritance detection (rejected with error) | `falcon_common::security` | ✅ |
+| `grant_role()` / `revoke_role()` membership management | `falcon_common::security` | ✅ |
+| `PrivilegeManager` — GRANT / REVOKE on tables, schemas, functions | `falcon_common::security` | ✅ |
+| `check_privilege()` — checks effective role set against grants | `falcon_common::security` | ✅ |
+| `DefaultPrivilege` + `add_schema_default()` — ALTER DEFAULT PRIVILEGES | `falcon_common::security` | ✅ |
+| Duplicate grant deduplication | `falcon_common::security` | ✅ |
+| `revoke_all_on_object()` — used on DROP TABLE/SCHEMA | `falcon_common::security` | ✅ |
+| 17 tests (9 RoleCatalog + 8 PrivilegeManager) | `falcon_common::security` | ✅ |
+
+### Phase 2 Test Coverage Summary
+
+| Feature Area | New Tests |
+|-------------|-----------|
+| `Datum::Decimal` | 11 |
+| Composite / covering / prefix indexes | 10 |
+| Transaction READ ONLY + timeout + exec summary | 8 |
+| Query Governor v2 (abort reasons) | 6 |
+| Node operational mode | 6 |
+| Fine-grained admission (DDL permits) | 2 |
+| RoleCatalog (transitive inheritance) | 9 |
+| PrivilegeManager (GRANT/REVOKE) | 8 |
+| **Total new (Phase 2)** | **60** |
+
+### Verification
+
+```bash
+cargo test --workspace   # 1,976 pass, 0 failures
+cargo test -p falcon_common --lib -- security::tests
+cargo test -p falcon_txn --lib -- txn_manager_tests::test_txn_
+cargo test -p falcon_executor --lib -- governor::tests
+cargo test -p falcon_cluster --lib -- cluster_ops::tests
+cargo test -p falcon_cluster --lib -- admission::tests
+cargo test -p falcon_storage --lib -- memtable::index_tests
+```
 
 ---
 

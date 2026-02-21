@@ -175,13 +175,13 @@ impl WalWriter {
         let segment_id = latest_segment.unwrap_or(0);
         let seg_path = dir.join(segment_filename(segment_id));
 
-        let is_new_file;
+        
         let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&seg_path)?;
         let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
-        is_new_file = file_len == 0;
+        let is_new_file = file_len == 0;
         let mut current_segment_size = file_len;
 
         // Also handle legacy single-file WAL (falcon.wal)

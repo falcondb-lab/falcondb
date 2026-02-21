@@ -362,22 +362,19 @@ pub struct GcDeterminismStatus {
 
 /// Durability level for a transaction's commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum DurabilityLevel {
     /// Quorum ack from replicas (strong durability, higher latency).
     QuorumAck,
     /// Local WAL fsync + quorum ack (strongest).
     LocalFsyncPlusQuorum,
     /// Local WAL fsync only (no replica ack).
+    #[default]
     LocalFsyncOnly,
     /// Async durability — commit returns before any fsync/ack (lowest latency, weakest).
     AsyncDurability,
 }
 
-impl Default for DurabilityLevel {
-    fn default() -> Self {
-        Self::LocalFsyncOnly
-    }
-}
 
 impl fmt::Display for DurabilityLevel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

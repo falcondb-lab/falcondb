@@ -33,7 +33,7 @@ pub struct AuditLog {
     tx: mpsc::SyncSender<AuditEvent>,
     /// Ring buffer of drained events (written by background thread only).
     events: Arc<Mutex<VecDeque<AuditEvent>>>,
-    capacity: usize,
+    _capacity: usize,
     next_event_id: AtomicU64,
     /// Total events submitted (monotonic, includes dropped).
     total_events: AtomicU64,
@@ -74,7 +74,7 @@ impl AuditLog {
         Self {
             tx,
             events,
-            capacity,
+            _capacity: capacity,
             next_event_id: AtomicU64::new(1),
             total_events: AtomicU64::new(0),
             dropped_events: AtomicU64::new(0),

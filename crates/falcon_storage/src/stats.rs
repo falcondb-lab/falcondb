@@ -107,7 +107,7 @@ impl Histogram {
         let sel_high = self.selectivity_lt(high);
         let sel_low = self.selectivity_lt(low);
         let eq_high = self.selectivity_eq(high);
-        (sel_high - sel_low + eq_high).max(0.0).min(1.0)
+        (sel_high - sel_low + eq_high).clamp(0.0, 1.0)
     }
 }
 
@@ -422,7 +422,7 @@ const DEFAULT_MCV_SIZE: usize = 10;
 
 /// Build an equi-depth histogram from a column's non-null values.
 /// Sorts the values in-place, then picks evenly-spaced bucket boundaries.
-fn build_histogram(values: &mut Vec<Datum>, num_buckets: usize) -> Option<Histogram> {
+fn build_histogram(values: &mut [Datum], num_buckets: usize) -> Option<Histogram> {
     if values.len() < 2 * num_buckets {
         // Not enough data to build a meaningful histogram
         return None;

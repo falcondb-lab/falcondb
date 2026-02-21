@@ -4,11 +4,10 @@
 //! It enforces QPS limits, memory quotas, and concurrent transaction caps per tenant.
 
 use std::sync::atomic::{AtomicU64, AtomicU32, Ordering};
-use std::time::Instant;
 
 use dashmap::DashMap;
 
-use falcon_common::tenant::{TenantId, TenantConfig, TenantQuota, TenantStatus, SYSTEM_TENANT_ID};
+use falcon_common::tenant::{TenantId, TenantConfig, TenantQuota, TenantStatus};
 
 /// Per-tenant runtime resource counters (lock-free atomics).
 #[derive(Debug)]

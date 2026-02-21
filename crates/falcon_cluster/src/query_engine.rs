@@ -239,9 +239,9 @@ impl DistributedQueryEngine {
     /// Used for cross-region read routing: analytics/replica nodes that are
     /// caught up (lag_lsn == 0) are preferred; among lagging replicas the one
     /// with the smallest lag is chosen.
-    pub fn select_least_lagging_replica<'a>(
-        replicas: &'a [crate::replication::runner::ReplicaRunnerMetricsSnapshot],
-    ) -> Option<&'a crate::replication::runner::ReplicaRunnerMetricsSnapshot> {
+    pub fn select_least_lagging_replica(
+        replicas: &[crate::replication::runner::ReplicaRunnerMetricsSnapshot],
+    ) -> Option<&crate::replication::runner::ReplicaRunnerMetricsSnapshot> {
         replicas
             .iter()
             .filter(|r| r.connected)

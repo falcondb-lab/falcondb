@@ -696,8 +696,8 @@ impl QueryHandler {
             // In distributed mode, show per-shard health
             let rows: Vec<Vec<Option<String>>> = dist.engine().all_shards()
                 .iter()
-                .enumerate()
-                .map(|(_i, shard)| {
+                
+                .map(|shard| {
                     vec![
                         Some(shard.shard_id.0.to_string()),
                         Some("0".into()),

@@ -887,7 +887,7 @@ impl Executor {
                             .map(|t| t.row_count_approx() as f64)
                             .unwrap_or(1000.0)
                     });
-                let est_rows = if filter.is_some() { (base_rows * 0.01).max(1.0) } else { (base_rows * 0.01).max(1.0) };
+                let est_rows = (base_rows * 0.01).max(1.0);
                 let startup_cost = 0.0_f64;
                 let total_cost = est_rows * 0.01 + 1.0; // index lookup cost
                 let col_name = schema.columns.get(*index_col).map(|c| c.name.as_str()).unwrap_or("?");

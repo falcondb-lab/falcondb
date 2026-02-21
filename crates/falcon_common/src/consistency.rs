@@ -79,11 +79,13 @@ impl fmt::Display for CommitPoint {
 /// **Invariant POL-3**: Policy degradation MUST be observable via metrics
 ///   and the `DurabilityAnnotation` on the transaction record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum CommitPolicy {
     /// Local WAL fsync only. Crash-safe on the primary.
     /// - Client ACK after: local WAL fsync
     /// - Crash loss window: 0 (local)
     /// - Replica lag: unbounded
+    #[default]
     LocalWalSync,
 
     /// Primary WAL written (buffered, no fsync). Fastest, weakest.
@@ -106,11 +108,6 @@ pub enum CommitPolicy {
     RaftMajority,
 }
 
-impl Default for CommitPolicy {
-    fn default() -> Self {
-        Self::LocalWalSync
-    }
-}
 
 impl fmt::Display for CommitPolicy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -380,21 +377,17 @@ pub enum ReplicationUnit {
 
 /// What a replica ACK actually means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum ReplicaAckSemantics {
     /// WAL bytes received into memory buffer.
     Received,
     /// WAL bytes written to replica's local WAL (fsync'd).
     Persisted,
     /// WAL entries applied to replica's storage engine (visible to reads).
+    #[default]
     Applied,
 }
 
-impl Default for ReplicaAckSemantics {
-    fn default() -> Self {
-        // FalconDB's current implementation: ACK after apply.
-        Self::Applied
-    }
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // §7: Failover / Promote Invariants
@@ -490,19 +483,15 @@ pub mod cross_shard_invariants {
 
 /// Cross-shard transaction model in use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum CrossShardModel {
     /// Standard Two-Phase Commit (2PC) with coordinator WAL.
     TwoPhaseCommit,
     /// Hybrid: fast-path (single-shard) + slow-path (multi-shard 2PC).
+    #[default]
     HybridFastSlow,
 }
 
-impl Default for CrossShardModel {
-    fn default() -> Self {
-        // FalconDB uses hybrid fast/slow path.
-        Self::HybridFastSlow
-    }
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // §9: Read Consistency Semantics

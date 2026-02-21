@@ -7,7 +7,6 @@
 //! - Restore verification (integrity checksums)
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};

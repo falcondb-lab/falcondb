@@ -938,4 +938,82 @@ mod txn_manager_tests {
         assert_eq!(txn.tenant_id, falcon_common::tenant::SYSTEM_TENANT_ID);
         assert_eq!(txn.priority, falcon_common::security::TxnPriority::Normal);
     }
+
+    #[test]
+    fn test_txn_read_only_default() {
+        let (_storage, mgr) = setup();
+        let txn = mgr.begin(IsolationLevel::ReadCommitted);
+        assert!(!txn.read_only);
+    }
+
+    #[test]
+    fn test_txn_read_only_set() {
+        let (_storage, mgr) = setup();
+        let mut txn = mgr.begin(IsolationLevel::ReadCommitted);
+        txn.read_only = true;
+        assert!(txn.read_only);
+    }
+
+    #[test]
+    fn test_txn_timeout_default() {
+        let (_storage, mgr) = setup();
+        let txn = mgr.begin(IsolationLevel::ReadCommitted);
+        assert_eq!(txn.timeout_ms, 0);
+        assert!(!txn.is_timed_out());
+    }
+
+    #[test]
+    fn test_txn_timeout_not_expired() {
+        let (_storage, mgr) = setup();
+        let mut txn = mgr.begin(IsolationLevel::ReadCommitted);
+        txn.timeout_ms = 60_000; // 60 seconds
+        assert!(!txn.is_timed_out());
+    }
+
+    #[test]
+    fn test_txn_timeout_expired() {
+        let (_storage, mgr) = setup();
+        let mut txn = mgr.begin(IsolationLevel::ReadCommitted);
+        txn.timeout_ms = 1; // 1 ms
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(txn.is_timed_out());
+    }
+
+    #[test]
+    fn test_txn_elapsed_ms() {
+        let (_storage, mgr) = setup();
+        let txn = mgr.begin(IsolationLevel::ReadCommitted);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(txn.elapsed_ms() >= 4); // at least 4ms elapsed
+    }
+
+    #[test]
+    fn test_txn_exec_summary_default() {
+        let (_storage, mgr) = setup();
+        let txn = mgr.begin(IsolationLevel::ReadCommitted);
+        assert_eq!(txn.exec_summary.statement_count, 0);
+        assert_eq!(txn.exec_summary.rows_read, 0);
+        assert_eq!(txn.exec_summary.rows_written, 0);
+        assert_eq!(txn.exec_summary.rows_inserted, 0);
+        assert_eq!(txn.exec_summary.rows_updated, 0);
+        assert_eq!(txn.exec_summary.rows_deleted, 0);
+    }
+
+    #[test]
+    fn test_txn_exec_summary_record() {
+        use crate::manager::TxnExecSummary;
+        let mut summary = TxnExecSummary::default();
+        summary.record_statement();
+        summary.record_insert(5);
+        summary.record_update(3);
+        summary.record_delete(2);
+        summary.record_read(100);
+
+        assert_eq!(summary.statement_count, 1);
+        assert_eq!(summary.rows_inserted, 5);
+        assert_eq!(summary.rows_updated, 3);
+        assert_eq!(summary.rows_deleted, 2);
+        assert_eq!(summary.rows_written, 10); // 5 + 3 + 2
+        assert_eq!(summary.rows_read, 100);
+    }
 }

@@ -14,8 +14,7 @@ use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock};
 
-use super::block_cache::{BlockCache, BlockCacheSnapshot, BlockKey, CachedBlock};
-use super::bloom::BloomFilter;
+use super::block_cache::{BlockCache, BlockCacheSnapshot};
 use super::compaction::{CompactionConfig, CompactionStats, Compactor};
 use super::memtable::LsmMemTable;
 use super::sst::{SstMeta, SstReader, SstWriter};
@@ -154,7 +153,7 @@ impl LsmEngine {
 
         let memtable = self.active_memtable.read().clone();
         memtable.put(key.to_vec(), value.to_vec())
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "memtable frozen during write"))?;
+            .map_err(|_| io::Error::other("memtable frozen during write"))?;
 
         self.maybe_trigger_flush();
         Ok(())
@@ -166,7 +165,7 @@ impl LsmEngine {
 
         let memtable = self.active_memtable.read().clone();
         memtable.delete(key.to_vec())
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "memtable frozen during write"))?;
+            .map_err(|_| io::Error::other("memtable frozen during write"))?;
 
         self.maybe_trigger_flush();
         Ok(())
@@ -389,8 +388,7 @@ impl LsmEngine {
             self.writes_stalled.fetch_add(1, Ordering::Relaxed);
             // In production, this would block until compaction catches up.
             // For now, return a transient error.
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 format!("write stalled: L0 file count {} exceeds stall trigger", l0_count),
             ));
         }

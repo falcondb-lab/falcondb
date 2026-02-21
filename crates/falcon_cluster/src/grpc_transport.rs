@@ -537,7 +537,7 @@ impl crate::proto::wal_replication_server::WalReplication for WalReplicationServ
 
                     // Periodically trim the log: discard records that every
                     // known replica has already acked past.
-                    if chunks_sent % TRIM_INTERVAL == 0 {
+                    if chunks_sent.is_multiple_of(TRIM_INTERVAL) {
                         let min_acked = ack_lsns_ref
                             .iter()
                             .filter(|e| e.key().0 == shard_id)

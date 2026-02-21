@@ -37,6 +37,8 @@ pub struct AdmissionConfig {
     pub memory_hard_limit_ratio: f64,
     /// Default retry delay for backpressure rejections (ms).
     pub default_retry_after_ms: u64,
+    /// Maximum concurrent inflight DDL operations.
+    pub max_inflight_ddl: usize,
 }
 
 impl Default for AdmissionConfig {
@@ -51,6 +53,7 @@ impl Default for AdmissionConfig {
             memory_pressure_ratio: 0.80,
             memory_hard_limit_ratio: 0.95,
             default_retry_after_ms: 50,
+            max_inflight_ddl: 4,
         }
     }
 }
@@ -72,6 +75,8 @@ pub struct AdmissionMetrics {
     pub replication_rejected: u64,
     /// Total requests rejected due to memory pressure.
     pub memory_rejected: u64,
+    /// Total requests rejected due to DDL limit.
+    pub ddl_rejected: u64,
     /// Current inflight queries.
     pub inflight_queries: usize,
     /// Current inflight writes (sum across all shards).
@@ -140,6 +145,9 @@ pub struct AdmissionControl {
     wal_rejected: AtomicU64,
     replication_rejected: AtomicU64,
     memory_rejected: AtomicU64,
+    /// v1.4: Inflight DDL operations counter.
+    inflight_ddl: AtomicUsize,
+    ddl_rejected: AtomicU64,
 }
 
 impl std::fmt::Debug for AdmissionControl {
@@ -170,6 +178,8 @@ impl AdmissionControl {
             wal_rejected: AtomicU64::new(0),
             replication_rejected: AtomicU64::new(0),
             memory_rejected: AtomicU64::new(0),
+            inflight_ddl: AtomicUsize::new(0),
+            ddl_rejected: AtomicU64::new(0),
         })
     }
 
@@ -315,6 +325,7 @@ impl AdmissionControl {
             wal_rejected: self.wal_rejected.load(Ordering::Relaxed),
             replication_rejected: self.replication_rejected.load(Ordering::Relaxed),
             memory_rejected: self.memory_rejected.load(Ordering::Relaxed),
+            ddl_rejected: self.ddl_rejected.load(Ordering::Relaxed),
             inflight_queries: self.inflight_queries.load(Ordering::Relaxed),
             inflight_writes: self.total_inflight_writes.load(Ordering::Relaxed),
             active_connections: self.active_connections.load(Ordering::Relaxed),
@@ -339,6 +350,50 @@ impl AdmissionControl {
     /// Total requests rejected since startup.
     pub fn total_rejected(&self) -> u64 {
         self.total_rejected.load(Ordering::Relaxed)
+    }
+
+    /// Acquire a DDL permit. Returns RAII guard or `Transient` error.
+    pub fn acquire_ddl(self: &Arc<Self>) -> FalconResult<DdlPermit> {
+        let cfg = self.config.read();
+        let current = self.inflight_ddl.fetch_add(1, Ordering::Relaxed);
+        if current >= cfg.max_inflight_ddl {
+            self.inflight_ddl.fetch_sub(1, Ordering::Relaxed);
+            self.total_rejected.fetch_add(1, Ordering::Relaxed);
+            self.ddl_rejected.fetch_add(1, Ordering::Relaxed);
+            return Err(FalconError::transient(
+                format!("DDL concurrency limit reached ({}/{})", current, cfg.max_inflight_ddl),
+                cfg.default_retry_after_ms,
+            ));
+        }
+        Ok(DdlPermit { control: Arc::clone(self) })
+    }
+
+    /// Current inflight DDL count.
+    pub fn inflight_ddl(&self) -> usize {
+        self.inflight_ddl.load(Ordering::Relaxed)
+    }
+}
+
+/// Operation type for fine-grained admission control (v1.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationType {
+    /// Read-only query (SELECT, SHOW, EXPLAIN).
+    Read,
+    /// Write operation (INSERT, UPDATE, DELETE).
+    Write,
+    /// DDL operation (CREATE, ALTER, DROP, TRUNCATE).
+    Ddl,
+}
+
+/// RAII guard that releases a DDL permit when dropped.
+#[derive(Debug)]
+pub struct DdlPermit {
+    control: Arc<AdmissionControl>,
+}
+
+impl Drop for DdlPermit {
+    fn drop(&mut self) {
+        self.control.inflight_ddl.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -561,6 +616,34 @@ mod tests {
         let ctrl = make_control(0, 10);
         let err = ctrl.acquire_query().unwrap_err();
         assert!(err.retry_after_ms() > 0);
+    }
+
+    #[test]
+    fn test_ddl_permit_acquired_and_released() {
+        let ctrl = make_control(10, 10);
+        assert_eq!(ctrl.inflight_ddl(), 0);
+        {
+            let _permit = ctrl.acquire_ddl().unwrap();
+            assert_eq!(ctrl.inflight_ddl(), 1);
+        }
+        assert_eq!(ctrl.inflight_ddl(), 0);
+    }
+
+    #[test]
+    fn test_ddl_limit_enforced() {
+        let mut cfg = AdmissionConfig::default();
+        cfg.max_inflight_queries = 10;
+        cfg.max_inflight_writes_per_shard = 10;
+        cfg.max_connections = 10;
+        cfg.max_inflight_ddl = 2;
+        let ctrl = AdmissionControl::new(cfg, 4);
+        let _p1 = ctrl.acquire_ddl().unwrap();
+        let _p2 = ctrl.acquire_ddl().unwrap();
+        let result = ctrl.acquire_ddl();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().is_transient());
+        let m = ctrl.metrics();
+        assert_eq!(m.ddl_rejected, 1);
     }
 
     #[test]

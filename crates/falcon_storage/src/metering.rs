@@ -286,7 +286,7 @@ impl ResourceMeter {
 
     /// Reset counters for a new billing period.
     pub fn reset_period(&self, tenant_id: TenantId) {
-        if let Some(mut c) = self.counters.get_mut(&tenant_id) {
+        if let Some(c) = self.counters.get_mut(&tenant_id) {
             c.cpu_us.store(0, Ordering::Relaxed);
             c.query_count.store(0, Ordering::Relaxed);
             c.txn_committed.store(0, Ordering::Relaxed);

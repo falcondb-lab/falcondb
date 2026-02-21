@@ -58,6 +58,11 @@ impl ColumnEncoding {
         }
     }
 
+    /// Returns true if the column has no rows.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Retrieve a single value by row index.
     pub fn get(&self, row_idx: usize) -> Option<Datum> {
         match self {
@@ -238,9 +243,9 @@ impl Segment {
         let mut col_values: Vec<Vec<Datum>> = (0..num_cols).map(|_| Vec::with_capacity(row_count)).collect();
 
         for row in rows {
-            for col_idx in 0..num_cols {
+            for (col_idx, col_vec) in col_values.iter_mut().enumerate().take(num_cols) {
                 let val = row.values.get(col_idx).cloned().unwrap_or(Datum::Null);
-                col_values[col_idx].push(val);
+                col_vec.push(val);
             }
         }
 

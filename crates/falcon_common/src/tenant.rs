@@ -21,6 +21,7 @@ impl fmt::Display for TenantId {
 
 /// Per-tenant resource quota configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct TenantQuota {
     /// Maximum queries per second (0 = unlimited).
     pub max_qps: u64,
@@ -34,17 +35,6 @@ pub struct TenantQuota {
     pub max_storage_bytes: u64,
 }
 
-impl Default for TenantQuota {
-    fn default() -> Self {
-        Self {
-            max_qps: 0,
-            max_memory_bytes: 0,
-            max_concurrent_txns: 0,
-            max_tables: 0,
-            max_storage_bytes: 0,
-        }
-    }
-}
 
 impl TenantQuota {
     /// Returns true if all quotas are unlimited (no enforcement).

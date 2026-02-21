@@ -103,6 +103,7 @@ impl ClusterEventLog {
     }
 
     /// Append an event to the log.
+    #[allow(clippy::too_many_arguments)]
     pub fn log(
         &self,
         category: EventCategory,
@@ -616,6 +617,113 @@ impl ClusterAdmin {
     }
 }
 
+// ── Node Operational Mode (v1.5) ────────────────────────────────────────────
+
+/// Operational mode for a node, independent of replication role.
+/// Controls what types of operations the node accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeOperationalMode {
+    /// Normal operation: accepts reads, writes, and DDL.
+    Normal,
+    /// Read-only mode: accepts reads only. Writes and DDL are rejected.
+    ReadOnly,
+    /// Drain mode: rejects all new operations. Existing transactions
+    /// are allowed to complete. Used before scale-in or maintenance.
+    Drain,
+}
+
+impl std::fmt::Display for NodeOperationalMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NodeOperationalMode::Normal => write!(f, "normal"),
+            NodeOperationalMode::ReadOnly => write!(f, "read_only"),
+            NodeOperationalMode::Drain => write!(f, "drain"),
+        }
+    }
+}
+
+/// Controller for node operational mode transitions.
+/// All transitions are logged to the cluster event log.
+pub struct NodeModeController {
+    mode: parking_lot::RwLock<NodeOperationalMode>,
+    node_id: NodeId,
+    event_log: Arc<ClusterEventLog>,
+    /// Timestamp (Instant) of the last mode change.
+    last_change: parking_lot::RwLock<Instant>,
+}
+
+impl NodeModeController {
+    pub fn new(node_id: NodeId, event_log: Arc<ClusterEventLog>) -> Arc<Self> {
+        Arc::new(Self {
+            mode: parking_lot::RwLock::new(NodeOperationalMode::Normal),
+            node_id,
+            event_log,
+            last_change: parking_lot::RwLock::new(Instant::now()),
+        })
+    }
+
+    /// Current operational mode.
+    pub fn mode(&self) -> NodeOperationalMode {
+        *self.mode.read()
+    }
+
+    /// Transition to a new mode. Logs the transition.
+    pub fn set_mode(&self, new_mode: NodeOperationalMode) {
+        let mut mode = self.mode.write();
+        let old = *mode;
+        if old == new_mode {
+            return;
+        }
+        *mode = new_mode;
+        *self.last_change.write() = Instant::now();
+
+        self.event_log.log(
+            EventCategory::Membership,
+            EventSeverity::Info,
+            self.node_id.0,
+            u64::MAX,
+            old.to_string(),
+            new_mode.to_string(),
+            format!("Node {} mode change: {} → {}", self.node_id.0, old, new_mode),
+        );
+    }
+
+    /// Enter drain mode. Convenience method.
+    pub fn drain(&self) {
+        self.set_mode(NodeOperationalMode::Drain);
+    }
+
+    /// Enter read-only mode. Convenience method.
+    pub fn set_read_only(&self) {
+        self.set_mode(NodeOperationalMode::ReadOnly);
+    }
+
+    /// Return to normal mode. Convenience method.
+    pub fn resume(&self) {
+        self.set_mode(NodeOperationalMode::Normal);
+    }
+
+    /// Check if reads are allowed in the current mode.
+    pub fn allows_reads(&self) -> bool {
+        matches!(*self.mode.read(), NodeOperationalMode::Normal | NodeOperationalMode::ReadOnly)
+    }
+
+    /// Check if writes are allowed in the current mode.
+    pub fn allows_writes(&self) -> bool {
+        matches!(*self.mode.read(), NodeOperationalMode::Normal)
+    }
+
+    /// Check if DDL is allowed in the current mode.
+    pub fn allows_ddl(&self) -> bool {
+        matches!(*self.mode.read(), NodeOperationalMode::Normal)
+    }
+
+    /// Duration since the last mode change.
+    pub fn time_in_current_mode(&self) -> Duration {
+        self.last_change.read().elapsed()
+    }
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -803,5 +911,68 @@ mod tests {
     fn test_scale_in_state_display() {
         assert_eq!(ScaleInState::MovingLeadership.to_string(), "moving_leadership");
         assert_eq!(ScaleInState::Removed.to_string(), "removed");
+    }
+
+    #[test]
+    fn test_node_operational_mode_display() {
+        assert_eq!(NodeOperationalMode::Normal.to_string(), "normal");
+        assert_eq!(NodeOperationalMode::ReadOnly.to_string(), "read_only");
+        assert_eq!(NodeOperationalMode::Drain.to_string(), "drain");
+    }
+
+    #[test]
+    fn test_node_mode_controller_default_normal() {
+        let log = ClusterEventLog::new(100);
+        let ctrl = NodeModeController::new(NodeId(1), log);
+        assert_eq!(ctrl.mode(), NodeOperationalMode::Normal);
+        assert!(ctrl.allows_reads());
+        assert!(ctrl.allows_writes());
+        assert!(ctrl.allows_ddl());
+    }
+
+    #[test]
+    fn test_node_mode_controller_read_only() {
+        let log = ClusterEventLog::new(100);
+        let ctrl = NodeModeController::new(NodeId(1), log.clone());
+        ctrl.set_read_only();
+        assert_eq!(ctrl.mode(), NodeOperationalMode::ReadOnly);
+        assert!(ctrl.allows_reads());
+        assert!(!ctrl.allows_writes());
+        assert!(!ctrl.allows_ddl());
+        // Should have logged the transition
+        assert_eq!(log.len(), 1);
+    }
+
+    #[test]
+    fn test_node_mode_controller_drain() {
+        let log = ClusterEventLog::new(100);
+        let ctrl = NodeModeController::new(NodeId(1), log.clone());
+        ctrl.drain();
+        assert_eq!(ctrl.mode(), NodeOperationalMode::Drain);
+        assert!(!ctrl.allows_reads());
+        assert!(!ctrl.allows_writes());
+        assert!(!ctrl.allows_ddl());
+    }
+
+    #[test]
+    fn test_node_mode_controller_resume() {
+        let log = ClusterEventLog::new(100);
+        let ctrl = NodeModeController::new(NodeId(1), log.clone());
+        ctrl.drain();
+        ctrl.resume();
+        assert_eq!(ctrl.mode(), NodeOperationalMode::Normal);
+        assert!(ctrl.allows_reads());
+        assert!(ctrl.allows_writes());
+        // Two transitions logged: normal→drain, drain→normal
+        assert_eq!(log.len(), 2);
+    }
+
+    #[test]
+    fn test_node_mode_controller_noop_same_mode() {
+        let log = ClusterEventLog::new(100);
+        let ctrl = NodeModeController::new(NodeId(1), log.clone());
+        ctrl.set_mode(NodeOperationalMode::Normal); // same as current
+        // No event logged for no-op
+        assert_eq!(log.len(), 0);
     }
 }

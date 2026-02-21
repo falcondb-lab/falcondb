@@ -85,7 +85,7 @@ pub fn check_rolling_upgrade_compatibility(
     }
 
     // Check minimum compatible version
-    if remote.minor < MIN_COMPATIBLE_MINOR && remote.major <= MIN_COMPATIBLE_MAJOR {
+    if remote.minor < MIN_COMPATIBLE_MINOR && remote.major == MIN_COMPATIBLE_MAJOR {
         errors.push(format!(
             "Remote version {}.{}.{} is below minimum compatible {}.{}",
             remote.major, remote.minor, remote.patch,

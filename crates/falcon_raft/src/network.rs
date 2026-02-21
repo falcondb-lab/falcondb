@@ -97,6 +97,7 @@ pub struct RouterConnection {
 }
 
 impl RouterConnection {
+    #[allow(clippy::result_large_err)]
     fn get_target(&self) -> Result<Raft<TypeConfig>, RPCError<u64, BasicNode, RaftError<u64>>> {
         self.router.get_node(self.target).ok_or_else(|| {
             RPCError::Unreachable(Unreachable::new(&io::Error::new(

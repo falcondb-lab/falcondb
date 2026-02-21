@@ -2,7 +2,7 @@
 
 > Updated: 2026-02-21  
 > Scope: Full codebase audit across all 13 crates  
-> Status: 1,917 tests passing, 0 failures
+> Status: 1,976 tests passing, 0 failures
 
 ---
 
@@ -25,6 +25,11 @@ The following items from the original gap analysis have been implemented:
 | Cancel request not supported | ✅ Fixed — `CancellationRegistry` + `BackendKeyData` + cancel polling |
 | Describe type inference | ✅ Fixed — aggregate/expression OID inferred from type |
 | CREATE INDEX not WAL-logged | ✅ Fixed (2026-02-21) — `WalRecord::CreateIndex`/`DropIndex` emitted + replayed |
+| NUMERIC / DECIMAL type missing | ✅ Fixed (2026-02-21) — `Datum::Decimal(i128, u8)` + `DataType::Decimal(u8, u8)`, 11 tests |
+| CHECK constraint not enforced at runtime | ✅ Fixed (2026-02-21) — `CheckConstraintViolation` error + SQLSTATE `23514`, enforced in INSERT/UPDATE/INSERT SELECT |
+| No composite / covering / prefix indexes | ✅ Fixed (2026-02-21) — `SecondaryIndex::column_indices`, `new_composite/covering/prefix()`, `prefix_scan()`, 10 tests |
+| Transaction READ ONLY / timeout not enforced | ✅ Fixed (2026-02-21) — `TxnHandle::read_only`, `timeout_ms`, `exec_summary`; DML guards in executor |
+| No RBAC / schema-level privilege management | ✅ Fixed (2026-02-21) — `RoleCatalog` (transitive inheritance), `PrivilegeManager` (GRANT/REVOKE, schema defaults), 17 tests |
 
 ---
 
@@ -32,10 +37,9 @@ The following items from the original gap analysis have been implemented:
 
 **Location:** `falcon_common/src/types.rs` — `enum DataType`; `falcon_common/src/datum.rs` — `enum Datum`
 
-Currently supported: `Boolean, Int32, Int64, Float64, Text, Timestamp, Date, Array, Jsonb`
+Currently supported: `Boolean, Int32, Int64, Float64, Decimal, Text, Timestamp, Date, Array, Jsonb`
 
 **Missing types commonly expected by PG clients and ORMs:**
-- **NUMERIC / DECIMAL** — arbitrary-precision numeric, required by financial workloads
 - **TIME** — time-of-day without date
 - **INTERVAL** — duration/delta (used in date arithmetic)
 - **UUID** — native UUID type (currently returned as `Text` from `GEN_RANDOM_UUID()`)
@@ -95,5 +99,5 @@ Currently supported: `Boolean, Int32, Int64, Float64, Text, Timestamp, Date, Arr
 
 | Priority | Count | Items |
 |----------|-------|-------|
-| **MEDIUM** | 4 | Missing data types, No cursors, Raft network stub, Cluster membership placeholder |
+| **MEDIUM** | 3 | Missing data types (TIME/INTERVAL/UUID/BYTEA/SMALLINT/REAL), No cursors, Raft network stub, Cluster membership placeholder |
 | **LOW** | 2 | Memory budget enforcement, SSL/TLS runtime |

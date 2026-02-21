@@ -171,7 +171,7 @@ where
 
             Err(FalconError::internal_bug(
                 "E-CRASH-001",
-                &format!("panic in stage '{}': {}", stage, message),
+                format!("panic in stage '{}': {}", stage, message),
                 ctx,
             ))
         }
@@ -204,7 +204,7 @@ where
 
             Err(FalconError::internal_bug(
                 "E-CRASH-002",
-                &format!("panic in stage '{}': {}", stage, message),
+                format!("panic in stage '{}': {}", stage, message),
                 ctx,
             ))
         }

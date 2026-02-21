@@ -68,6 +68,7 @@ pub use cluster_ops::{
     EventCategory, EventSeverity,
     ScaleOutState, ScaleOutLifecycle,
     ScaleInState, ScaleInLifecycle,
+    NodeOperationalMode, NodeModeController,
 };
 pub use token_bucket::{
     TokenBucket, TokenBucketConfig, TokenBucketSnapshot, TokenBucketError,

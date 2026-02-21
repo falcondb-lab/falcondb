@@ -216,21 +216,91 @@ pub struct GovernorSnapshot {
     pub limits: QueryLimits,
 }
 
+/// Structured abort reason for governor-enforced query termination (v2).
+/// Provides machine-readable classification for client retry/escalation logic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GovernorAbortReason {
+    /// Query returned too many rows.
+    RowLimitExceeded { produced: u64, limit: u64 },
+    /// Query result set too large in bytes.
+    ByteLimitExceeded { produced: u64, limit: u64 },
+    /// Query execution time exceeded.
+    TimeoutExceeded { elapsed_ms: u64, limit_ms: u64 },
+    /// Query memory allocation exceeded.
+    MemoryLimitExceeded { used: u64, limit: u64 },
+}
+
+impl std::fmt::Display for GovernorAbortReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RowLimitExceeded { produced, limit } =>
+                write!(f, "row limit exceeded: {} rows (max {})", produced, limit),
+            Self::ByteLimitExceeded { produced, limit } =>
+                write!(f, "result size limit exceeded: {} bytes (max {})", produced, limit),
+            Self::TimeoutExceeded { elapsed_ms, limit_ms } =>
+                write!(f, "execution timeout: {}ms elapsed (max {}ms)", elapsed_ms, limit_ms),
+            Self::MemoryLimitExceeded { used, limit } =>
+                write!(f, "memory limit exceeded: {} bytes (max {})", used, limit),
+        }
+    }
+}
+
+impl QueryGovernor {
+    /// Check all limits and return a structured abort reason if any limit is exceeded.
+    /// Unlike `check_all`, this returns the specific reason for the abort.
+    pub fn check_all_v2(&self, rows: u64, bytes: u64) -> Result<(), GovernorAbortReason> {
+        // Check timeout first (most urgent)
+        if self.limits.max_execution_time_ms > 0 {
+            let elapsed_ms = self.started_at.elapsed().as_millis() as u64;
+            if elapsed_ms > self.limits.max_execution_time_ms {
+                return Err(GovernorAbortReason::TimeoutExceeded {
+                    elapsed_ms,
+                    limit_ms: self.limits.max_execution_time_ms,
+                });
+            }
+        }
+        // Check rows
+        if self.limits.max_rows > 0 && rows > self.limits.max_rows {
+            return Err(GovernorAbortReason::RowLimitExceeded {
+                produced: rows,
+                limit: self.limits.max_rows,
+            });
+        }
+        // Check bytes
+        if self.limits.max_result_bytes > 0 && bytes > self.limits.max_result_bytes {
+            return Err(GovernorAbortReason::ByteLimitExceeded {
+                produced: bytes,
+                limit: self.limits.max_result_bytes,
+            });
+        }
+        // Check memory
+        let mem = self.memory_used.load(Ordering::Relaxed);
+        if self.limits.max_memory_bytes > 0 && mem > self.limits.max_memory_bytes {
+            return Err(GovernorAbortReason::MemoryLimitExceeded {
+                used: mem,
+                limit: self.limits.max_memory_bytes,
+            });
+        }
+        Ok(())
+    }
+
+    /// Get the abort reason if any limit is currently exceeded, or None.
+    pub fn abort_reason(&self) -> Option<GovernorAbortReason> {
+        self.check_all_v2(
+            self.rows_checked.load(Ordering::Relaxed),
+            self.bytes_checked.load(Ordering::Relaxed),
+        ).err()
+    }
+}
+
 /// Global query governor configuration (shared across sessions).
+#[derive(Default)]
 pub struct QueryGovernorConfig {
     pub default_limits: QueryLimits,
     /// Whether to enforce limits on internal/system queries.
     pub enforce_on_internal: bool,
 }
 
-impl Default for QueryGovernorConfig {
-    fn default() -> Self {
-        Self {
-            default_limits: QueryLimits::default(),
-            enforce_on_internal: false,
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -377,5 +447,79 @@ mod tests {
         assert!(strict.max_rows <= default.max_rows);
         assert!(strict.max_result_bytes <= default.max_result_bytes);
         assert!(strict.max_execution_time_ms <= default.max_execution_time_ms);
+    }
+
+    #[test]
+    fn test_check_all_v2_ok() {
+        let g = QueryGovernor::new(QueryLimits {
+            max_rows: 1000,
+            max_result_bytes: 1024 * 1024,
+            max_execution_time_ms: 10_000,
+            max_memory_bytes: 0,
+        });
+        assert!(g.check_all_v2(500, 512 * 1024).is_ok());
+    }
+
+    #[test]
+    fn test_check_all_v2_row_limit() {
+        let g = QueryGovernor::new(QueryLimits {
+            max_rows: 100,
+            max_result_bytes: 0,
+            max_execution_time_ms: 0,
+            max_memory_bytes: 0,
+        });
+        let err = g.check_all_v2(200, 0).unwrap_err();
+        assert_eq!(err, GovernorAbortReason::RowLimitExceeded { produced: 200, limit: 100 });
+        assert!(err.to_string().contains("row limit"));
+    }
+
+    #[test]
+    fn test_check_all_v2_byte_limit() {
+        let g = QueryGovernor::new(QueryLimits {
+            max_rows: 0,
+            max_result_bytes: 1024,
+            max_execution_time_ms: 0,
+            max_memory_bytes: 0,
+        });
+        let err = g.check_all_v2(0, 2048).unwrap_err();
+        assert_eq!(err, GovernorAbortReason::ByteLimitExceeded { produced: 2048, limit: 1024 });
+    }
+
+    #[test]
+    fn test_check_all_v2_timeout() {
+        let g = QueryGovernor::new(QueryLimits {
+            max_rows: 0,
+            max_result_bytes: 0,
+            max_execution_time_ms: 1,
+            max_memory_bytes: 0,
+        });
+        thread::sleep(Duration::from_millis(5));
+        let err = g.check_all_v2(0, 0).unwrap_err();
+        match err {
+            GovernorAbortReason::TimeoutExceeded { limit_ms, .. } => assert_eq!(limit_ms, 1),
+            _ => panic!("expected TimeoutExceeded"),
+        }
+    }
+
+    #[test]
+    fn test_abort_reason_none() {
+        let g = QueryGovernor::unlimited();
+        g.check_rows(100).unwrap();
+        g.check_bytes(1024).unwrap();
+        assert!(g.abort_reason().is_none());
+    }
+
+    #[test]
+    fn test_abort_reason_some() {
+        let g = QueryGovernor::new(QueryLimits {
+            max_rows: 10,
+            max_result_bytes: 0,
+            max_execution_time_ms: 0,
+            max_memory_bytes: 0,
+        });
+        g.check_rows(20).unwrap_err(); // triggers row limit
+        let reason = g.abort_reason();
+        assert!(reason.is_some());
+        assert_eq!(reason.unwrap(), GovernorAbortReason::RowLimitExceeded { produced: 20, limit: 10 });
     }
 }

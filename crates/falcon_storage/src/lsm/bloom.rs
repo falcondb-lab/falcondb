@@ -19,7 +19,7 @@ impl BloomFilter {
     /// false-positive rate (e.g. 0.01 = 1%).
     pub fn new(expected_keys: usize, fp_rate: f64) -> Self {
         let expected_keys = expected_keys.max(1);
-        let fp_rate = fp_rate.max(1e-10).min(1.0);
+        let fp_rate = fp_rate.clamp(1e-10, 1.0);
 
         // Optimal number of bits: m = -n * ln(p) / (ln2)^2
         let num_bits = (-(expected_keys as f64) * fp_rate.ln() / (2.0_f64.ln().powi(2)))
@@ -29,9 +29,9 @@ impl BloomFilter {
         // Optimal number of hashes: k = (m/n) * ln2
         let num_hashes = ((num_bits as f64 / expected_keys as f64) * 2.0_f64.ln())
             .ceil() as u32;
-        let num_hashes = num_hashes.max(1).min(30);
+        let num_hashes = num_hashes.clamp(1, 30);
 
-        let words = (num_bits + 63) / 64;
+        let words = num_bits.div_ceil(64);
         Self {
             bits: vec![0u64; words],
             num_bits,

@@ -381,10 +381,12 @@ pub struct LayeredTimeoutSnapshot {
 
 /// Policy for handling slow shards during 2PC prepare.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum SlowShardPolicy {
     /// Abort the entire transaction immediately when any shard exceeds
     /// the per-shard timeout. Minimizes tail latency at the cost of
     /// higher abort rate.
+    #[default]
     FastAbort,
 
     /// Send a speculative retry (hedged request) to a replica of the
@@ -407,11 +409,6 @@ impl std::fmt::Display for SlowShardPolicy {
     }
 }
 
-impl Default for SlowShardPolicy {
-    fn default() -> Self {
-        SlowShardPolicy::FastAbort
-    }
-}
 
 /// Configuration for slow-shard handling.
 #[derive(Debug, Clone)]

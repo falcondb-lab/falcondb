@@ -10,8 +10,7 @@
 //! - **§7 Deadlock Detection**: Timeout-based deadlock breaker with explainable abort reason
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::{Mutex, RwLock};
@@ -146,19 +145,16 @@ impl Default for LayeredTimeouts {
 
 /// Timeout policy: what to do when a phase timeout is exceeded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum TimeoutPolicy {
     /// Abort immediately on any phase timeout (prefer stability).
+    #[default]
     FailFast,
     /// Allow overshooting phase timeouts as long as total timeout holds
     /// (prefer success rate).
     BestEffort,
 }
 
-impl Default for TimeoutPolicy {
-    fn default() -> Self {
-        Self::FailFast
-    }
-}
 
 /// Which phase timed out (for explainable errors).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -223,7 +219,7 @@ impl ConcurrencyLimiter {
     }
 
     /// Try to acquire a permit. Returns Ok(guard) or Err with reason.
-    pub fn try_acquire(&self) -> Result<ConcurrencyGuard, ConcurrencyReject> {
+    pub fn try_acquire(&self) -> Result<ConcurrencyGuard<'_>, ConcurrencyReject> {
         let current = self.in_flight.fetch_add(1, Ordering::AcqRel);
         if current >= self.hard_limit {
             self.in_flight.fetch_sub(1, Ordering::AcqRel);
@@ -555,6 +551,7 @@ pub struct ShardConflictTracker {
     /// Per-shard counters: (shard_id → ShardConflictCounters).
     shards: RwLock<HashMap<u64, ShardConflictCounters>>,
     /// Window size for rate calculation.
+    #[allow(dead_code)]
     window: Duration,
 }
 
@@ -562,8 +559,10 @@ struct ShardConflictCounters {
     total_txns: AtomicU64,
     conflict_aborts: AtomicU64,
     timeout_aborts: AtomicU64,
+    #[allow(dead_code)]
     other_aborts: AtomicU64,
     total_lock_wait_us: AtomicU64,
+    #[allow(dead_code)]
     window_start: Mutex<Instant>,
 }
 
@@ -864,23 +863,22 @@ impl DeadlockDetector {
 
 /// Queue ordering policy for the coordinator admission queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum QueuePolicy {
     /// First-in, first-out.
+    #[default]
     Fifo,
     /// Short transactions (fewer shards) get priority.
     ShortTxnPriority,
 }
 
-impl Default for QueuePolicy {
-    fn default() -> Self {
-        Self::Fifo
-    }
-}
 
 /// Action to take when the queue exceeds a configurable length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum QueueOverflowAction {
     /// Reject new requests.
+    #[default]
     Reject,
     /// Shed load: drop lowest-priority requests.
     ShedLoad,
@@ -888,11 +886,6 @@ pub enum QueueOverflowAction {
     Degrade,
 }
 
-impl Default for QueueOverflowAction {
-    fn default() -> Self {
-        Self::Reject
-    }
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Aggregated Cross-Shard Metrics

@@ -92,10 +92,10 @@ Future (M2+): disaggregate into dedicated compute / storage / meta roles.
 
 | Item | Detail |
 |------|--------|
-| **Responsibility** | Execute physical plan operators, produce result rows |
+| **Responsibility** | Execute physical plan operators, produce result rows; enforce per-txn READ ONLY and timeout guards; query governor with structured abort reasons |
 | **Input** | `PhysicalPlan` + txn handle |
 | **Output** | `RowStream` (iterator of `Row`) |
-| **Core types** | `Operator` trait, `SeqScan`, `IndexScan`, `Filter`, `Project`, `Sort`, `Agg`, `Insert`, `Update`, `Delete` |
+| **Core types** | `Operator` trait, `SeqScan`, `IndexScan`, `Filter`, `Project`, `Sort`, `Agg`, `Insert`, `Update`, `Delete`, `QueryGovernor`, `GovernorAbortReason` |
 | **Dependencies** | `storage` (via trait), `txn`, `common` |
 | **Replaceable** | Row-at-a-time ↔ vectorized; push ↔ pull model |
 
@@ -103,10 +103,10 @@ Future (M2+): disaggregate into dedicated compute / storage / meta roles.
 
 | Item | Detail |
 |------|--------|
-| **Responsibility** | Begin/commit/abort transactions; MVCC timestamp allocation; OCC validation (SI); fast-path (LocalTxn) and slow-path (GlobalTxn) commit; latency histograms; txn history ring buffer |
+| **Responsibility** | Begin/commit/abort transactions; MVCC timestamp allocation; OCC validation (SI); fast-path (LocalTxn) and slow-path (GlobalTxn) commit; latency histograms; txn history ring buffer; per-txn READ ONLY mode, timeout, and execution summary |
 | **Input** | Transaction operations from executor |
 | **Output** | Txn handles, commit/abort decisions, `TxnStatsSnapshot`, `TxnRecord` history |
-| **Core types** | `TxnManager`, `TxnHandle`, `TxnId`, `Timestamp`, `IsolationLevel`, `TxnType`, `TxnPath`, `TxnContext`, `TxnRecord`, `TxnOutcome`, `LatencyStats` |
+| **Core types** | `TxnManager`, `TxnHandle`, `TxnId`, `Timestamp`, `IsolationLevel`, `TxnType`, `TxnPath`, `TxnContext`, `TxnRecord`, `TxnOutcome`, `LatencyStats`, `TxnExecSummary` |
 | **Dependencies** | `storage` (version visibility, OCC read-set), `common` |
 | **Replaceable** | OCC vs 2PL vs hybrid; timestamp oracle (local vs distributed) |
 
@@ -114,10 +114,10 @@ Future (M2+): disaggregate into dedicated compute / storage / meta roles.
 
 | Item | Detail |
 |------|--------|
-| **Responsibility** | Store tuples in memory with MVCC versions; maintain indexes (hash PK + BTree secondary + unique); WAL write + recovery; MVCC garbage collection; replication stats |
+| **Responsibility** | Store tuples in memory with MVCC versions; maintain indexes (hash PK + BTree secondary + unique + composite/covering/prefix); WAL write + recovery; MVCC garbage collection; replication stats; LSM disk-backed engine |
 | **Input** | Get/Put/Delete/Scan with txn context |
 | **Output** | Tuples (visible version for given txn) |
-| **Core types** | `StorageEngine`, `MemTable`, `VersionChain`, `SecondaryIndex`, `WalWriter`, `WalRecord`, `GcConfig`, `GcStats`, `GcRunner`, `ReplicationStats` |
+| **Core types** | `StorageEngine`, `MemTable`, `VersionChain`, `SecondaryIndex`, `WalWriter`, `WalRecord`, `GcConfig`, `GcStats`, `GcRunner`, `ReplicationStats`, `LsmEngine` |
 | **Dependencies** | `common` |
 | **Replaceable** | Entire engine (RocksDB adapter, FoundationDB adapter); index impl (BTree, SkipList, ART) |
 
@@ -137,10 +137,10 @@ Future (M2+): disaggregate into dedicated compute / storage / meta roles.
 
 | Item | Detail |
 |------|--------|
-| **Responsibility** | Shard map; WAL-based primary–replica replication (`WalChunk`, `ReplicationTransport`); promote/failover with fencing; scatter/gather distributed execution; DDL coordination |
+| **Responsibility** | Shard map; WAL-based primary–replica replication (`WalChunk`, `ReplicationTransport`); promote/failover with fencing; scatter/gather distributed execution; DDL coordination; admission control (read/write/DDL permits); node operational mode (Normal/ReadOnly/Drain) |
 | **Input** | DDL requests, DML routing, WAL chunks, promote commands |
 | **Output** | Replicated state, shard-routed query results, failover metrics |
-| **Core types** | `ShardMap`, `ShardReplicaGroup`, `WalChunk`, `ReplicationTransport`, `InProcessTransport`, `ChannelTransport`, `ReplicationMetrics`, `DistributedQueryEngine`, `FailurePolicy`, `GatherLimits` |
+| **Core types** | `ShardMap`, `ShardReplicaGroup`, `WalChunk`, `ReplicationTransport`, `InProcessTransport`, `ChannelTransport`, `ReplicationMetrics`, `DistributedQueryEngine`, `FailurePolicy`, `GatherLimits`, `AdmissionControl`, `NodeModeController`, `NodeOperationalMode` |
 | **Dependencies** | `storage`, `txn`, `common` |
 | **Replaceable** | Transport (in-process → gRPC in M2); metadata store (embedded vs etcd) |
 
@@ -159,8 +159,8 @@ Future (M2+): disaggregate into dedicated compute / storage / meta roles.
 
 | Item | Detail |
 |------|--------|
-| **Responsibility** | Shared types, error hierarchy, config, codec, PG type system, datum representation |
-| **Core types** | `Datum`, `DataType`, `Row`, `OwnedRow`, `TableId`, `ShardId`, `NodeId`, `FalconError`, `Config` |
+| **Responsibility** | Shared types, error hierarchy, config, codec, PG type system, datum representation (incl. `Decimal`), RBAC (roles, privileges, audit) |
+| **Core types** | `Datum`, `DataType`, `Row`, `OwnedRow`, `TableId`, `ShardId`, `NodeId`, `FalconError`, `Config`, `RoleCatalog`, `PrivilegeManager`, `Role`, `Privilege` |
 | **Dependencies** | None (leaf crate) |
 
 ---
@@ -430,21 +430,21 @@ pub trait Executor: Send + Sync + 'static {
 | **Benchmark** | YCSB workloads, fast vs slow path, scale-out, failover impact | `falcon_bench` |
 | **Data integrity** | Crash-recovery, WAL replay, GC+promote combined correctness | Automated tests |
 
-### 8.2 Test Counts (1,081 tests)
+### 8.2 Test Counts (1,976 tests)
 
 | Crate | Tests | Coverage |
 |-------|-------|----------|
-| `falcon_cluster` | 247 | Replication, failover, scatter/gather, GC, serde, async transport, gRPC e2e, proto roundtrip, checkpoint streaming, backoff, config serde, failover integration |
+| `falcon_cluster` | 412 | Replication, failover, scatter/gather, GC, admission (DDL permits), cluster ops (node mode), circuit breaker, 2PC, token bucket, security hardening |
 | `falcon_server` (integration) | 208 | Full SQL end-to-end (sql_basic 21, sql_conflict 46, sql_coverage 15, sql_dml 33, sql_extensions 58, sql_functions 19, main 16) |
-| `falcon_storage` | 226 | MVCC, WAL, GC, indexes, OCC, 2PC recovery, WAL observer, snapshot checkpoint, table statistics |
+| `falcon_storage` | 226 | MVCC, WAL, GC, indexes (composite/covering/prefix), OCC, 2PC recovery, WAL observer, snapshot checkpoint, table statistics, LSM engine |
 | `falcon_sql_frontend` | 141 | Parsing, binding, analysis, view expansion, ALTER TABLE rename, predicate normalization, param inference |
 | `falcon_protocol_pg` | 147 | SHOW commands, error paths, txn lifecycle, statement timeout, PgServer config, idle timeout, information_schema, views, plan cache, prepared statements |
-| `falcon_executor` | 103 | Operator execution, expression evaluation, window functions, subqueries |
+| `falcon_executor` | 180 | Operator execution, expression evaluation, window functions, subqueries, governor v2 (abort reasons), priority scheduler |
 | `falcon_planner` | 89 | Plan generation, routing hints, distributed wrapping, view/DDL plans, cost model |
-| `falcon_common` | 76 | Config validation, node role, datum types, schema, error hierarchy |
-| `falcon_txn` | 53 | Txn lifecycle, OCC, stats, history, deadlock detection |
+| `falcon_common` | 203 | Config validation, node role, datum types (incl. Decimal), schema, error hierarchy, RBAC (RoleCatalog, PrivilegeManager), security, consistency |
+| `falcon_txn` | 61 | Txn lifecycle, OCC, stats, history, deadlock detection, READ ONLY mode, timeout, exec summary |
 | `falcon_raft` | 12 | Raft log store, state machine, propose/apply |
-| **Total** | **1,081** (passing) | `cargo clippy --workspace`: 0 warnings |
+| **Total** | **1,976** (passing) | `cargo clippy --workspace`: 0 warnings |
 
 ### 8.3 Acceptance Criteria (M1)
 

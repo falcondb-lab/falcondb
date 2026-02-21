@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::RwLock;
 
 use falcon_common::security::{
-    GrantEntry, ObjectRef, ObjectType, Privilege, PrivilegeCheckResult,
+    GrantEntry, ObjectRef, Privilege, PrivilegeCheckResult,
     Role, RoleId, SUPERUSER_ROLE_ID,
 };
 use falcon_common::tenant::{TenantId, SYSTEM_TENANT_ID};

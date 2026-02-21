@@ -49,8 +49,8 @@ See [docs/protocol_compatibility.md](docs/protocol_compatibility.md) for full te
 | **DML** | INSERT (incl. ON CONFLICT, RETURNING, SELECT), UPDATE (incl. FROM, RETURNING), DELETE (incl. USING, RETURNING), COPY |
 | **Queries** | WHERE, ORDER BY, LIMIT/OFFSET, DISTINCT, GROUP BY/HAVING, JOINs (INNER/LEFT/RIGHT/FULL/CROSS/NATURAL), subqueries (scalar/IN/EXISTS/correlated), CTEs (incl. RECURSIVE), UNION/INTERSECT/EXCEPT, window functions |
 | **Aggregates** | COUNT, SUM, AVG, MIN, MAX, STRING_AGG, BOOL_AND/OR, ARRAY_AGG |
-| **Types** | INT, BIGINT, FLOAT8, TEXT, BOOLEAN, TIMESTAMP, DATE, JSONB, ARRAY, SERIAL/BIGSERIAL |
-| **Transactions** | BEGIN/COMMIT/ROLLBACK, Read Committed, Snapshot Isolation |
+| **Types** | INT, BIGINT, FLOAT8, DECIMAL/NUMERIC, TEXT, BOOLEAN, TIMESTAMP, DATE, JSONB, ARRAY, SERIAL/BIGSERIAL |
+| **Transactions** | BEGIN/COMMIT/ROLLBACK, READ ONLY/READ WRITE, per-txn timeout, Read Committed, Snapshot Isolation |
 | **Functions** | 500+ scalar functions (string, math, date/time, crypto, JSON, array) |
 | **Observability** | SHOW falcon.*, EXPLAIN, EXPLAIN ANALYZE, CHECKPOINT, ANALYZE TABLE |
 
@@ -62,7 +62,7 @@ See [docs/protocol_compatibility.md](docs/protocol_compatibility.md) for full te
 - Foreign data wrappers (FDW)
 - Logical replication / CDC
 - Online schema change (concurrent index build)
-- Multi-tenancy / row-level security
+- Row-level security (column-level grants implemented; row-level not yet)
 - Automatic rebalancing (manual shard split only)
 - Custom types (beyond JSONB)
 - Full-text search (tsvector/tsquery)
@@ -81,7 +81,7 @@ cargo build --workspace
 # Build release
 cargo build --release --workspace
 
-# Run tests (1,917 tests across 13 crates + root integration)
+# Run tests (1,976 tests across 13 crates + root integration)
 cargo test --workspace
 
 # Lint
@@ -546,6 +546,7 @@ SHOW falcon.replication_stats;
 | `INT` / `INTEGER` | `integer` / `int4` |
 | `BIGINT` | `bigint` / `int8` |
 | `FLOAT8` / `DOUBLE PRECISION` | `double precision` |
+| `DECIMAL(p,s)` / `NUMERIC(p,s)` | `numeric` (i128 mantissa + u8 scale) |
 | `TEXT` / `VARCHAR` | `text` / `varchar` |
 | `BOOLEAN` | `boolean` |
 | `TIMESTAMP` | `timestamp without time zone` |
@@ -711,7 +712,9 @@ cargo run -p falcon_server -- --print-default-config > falcon.toml
 | **v0.7** ✅ | Deterministic 2PC: decision log, layered timeouts, slow-shard tracker | Released |
 | **v0.8** ✅ | Chaos-ready: fault injection, network partition, CPU/IO jitter, observability pass | Released |
 | **v0.9** ✅ | Production candidate: security hardening, WAL versioning, wire compat, config compat | Released |
-| **v1.0** 📋 | Production-grade database kernel | [docs/roadmap.md](docs/roadmap.md) |
+| **v1.0 Phase 1** ✅ | LSM kernel: disk-backed OLTP, MVCC encoding, idempotency, TPC-B benchmark | 1,917 tests |
+| **v1.0 Phase 2** ✅ | SQL completeness: DECIMAL, composite indexes, RBAC, txn READ ONLY, governor v2 | 1,976 tests |
+| **v1.0.0** 📋 | Production-grade database kernel — all gates pass | [docs/roadmap.md](docs/roadmap.md) |
 
 See [docs/roadmap.md](docs/roadmap.md) for detailed acceptance criteria per milestone.
 
@@ -749,19 +752,19 @@ See [docs/rpo_rto.md](docs/rpo_rto.md) for full RPO/RTO analysis and recommendat
 ## Testing
 
 ```bash
-# Run all tests
+# Run all tests (1,976 total)
 cargo test --workspace
 
 # By crate
-cargo test -p falcon_storage    # 291 tests (MVCC, WAL, GC, indexes, audit, backup, upgrade, security, LSM engine)
-cargo test -p falcon_cluster    # 404 tests (replication, failover, scatter/gather, 2PC, chaos, security, rebalance gates)
-cargo test -p falcon_server     # 131 tests (SQL end-to-end, error paths, SHOW commands)
-cargo test -p falcon_txn        # 53 tests (txn lifecycle, OCC, stats, GC safepoint)
-cargo test -p falcon_planner    # 42 tests (routing hints, distributed wrapping, shard key inference)
-cargo test -p falcon_executor   # 58 tests (governor, priority scheduler, vectorized)
-cargo test -p falcon_common     # 176 tests (error model, config, security, crash domain)
+cargo test -p falcon_storage    # 226 tests (MVCC, WAL, GC, indexes incl. composite/covering/prefix, LSM engine)
+cargo test -p falcon_cluster    # 412 tests (replication, failover, scatter/gather, 2PC, admission DDL permits, node mode)
+cargo test -p falcon_server     # 208 tests (SQL end-to-end, error paths, SHOW commands)
+cargo test -p falcon_txn        # 61 tests (txn lifecycle, OCC, stats, READ ONLY mode, timeout, exec summary)
+cargo test -p falcon_planner    # 89 tests (routing hints, distributed wrapping, shard key inference)
+cargo test -p falcon_executor   # 180 tests (governor v2 abort reasons, priority scheduler, vectorized)
+cargo test -p falcon_common     # 203 tests (error model, config, RBAC, RoleCatalog, PrivilegeManager, Decimal)
 cargo test -p falcon_sql_frontend # 141 tests (binder, predicate normalization, param inference)
-cargo test -p falcon_protocol_pg  # 180 tests (SHOW commands, error paths, txn lifecycle, handler, v0.5 gates)
+cargo test -p falcon_protocol_pg  # 147 tests (SHOW commands, error paths, txn lifecycle, handler)
 cargo test --test integration_test  # 12 tests (root integration: DDL, DML, RETURNING clause, transactions)
 
 # Lint

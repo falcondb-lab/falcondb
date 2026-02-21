@@ -40,12 +40,12 @@ impl Default for HotspotConfig {
 #[derive(Debug)]
 struct AccessCounter {
     count: AtomicU64,
-    window_start: Instant,
+    _window_start: Instant,
 }
 
 impl AccessCounter {
     fn new() -> Self {
-        Self { count: AtomicU64::new(0), window_start: Instant::now() }
+        Self { count: AtomicU64::new(0), _window_start: Instant::now() }
     }
 
     fn increment(&self) {

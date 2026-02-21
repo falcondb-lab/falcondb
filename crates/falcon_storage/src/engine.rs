@@ -186,6 +186,7 @@ impl WalStats {
     }
 
     /// Record an fsync operation with its latency.
+    #[allow(dead_code)]
     pub(crate) fn record_fsync(&self, latency_us: u64) {
         self.fsync_total_us.fetch_add(latency_us, AtomicOrdering::Relaxed);
         // Update max via CAS loop
@@ -201,6 +202,7 @@ impl WalStats {
     }
 
     /// Record a group commit batch.
+    #[allow(dead_code)]
     pub(crate) fn record_group_commit(&self, batch_size: u64) {
         self.group_commit_records.fetch_add(batch_size, AtomicOrdering::Relaxed);
         self.group_commit_batches.fetch_add(1, AtomicOrdering::Relaxed);

@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
-use falcon_common::error::{ClusterError, FalconError, FalconResult};
+use falcon_common::error::{FalconError, FalconResult};
 use falcon_common::types::ShardId;
 
 /// Circuit breaker state.

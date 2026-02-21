@@ -21,7 +21,7 @@ pub mod vectorized;
 mod tests;
 
 pub use executor::{ExecutionResult, Executor};
-pub use governor::{QueryGovernor, QueryLimits, GovernorSnapshot, QueryGovernorConfig};
+pub use governor::{QueryGovernor, QueryLimits, GovernorSnapshot, QueryGovernorConfig, GovernorAbortReason};
 pub use priority_scheduler::{
     PriorityScheduler, PrioritySchedulerConfig, PrioritySchedulerSnapshot,
     QueryPriority, SchedulerGuard,

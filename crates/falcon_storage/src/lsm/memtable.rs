@@ -35,6 +35,12 @@ pub struct LsmMemTable {
     next_seq: AtomicU64,
 }
 
+impl Default for LsmMemTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LsmMemTable {
     /// Create a new empty memtable.
     pub fn new() -> Self {

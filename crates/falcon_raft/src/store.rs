@@ -32,6 +32,7 @@ pub type ApplyFn = Arc<dyn Fn(&[u8]) -> Result<(), String> + Send + Sync>;
 struct LogStoreInner {
     vote: Option<Vote<u64>>,
     log: BTreeMap<u64, Entry<TypeConfig>>,
+    #[allow(dead_code)]
     committed: Option<LogId<u64>>,
     purged: Option<LogId<u64>>,
 }

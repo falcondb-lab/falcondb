@@ -154,7 +154,7 @@ impl AuthRateLimiter {
         let sources = self.sources.lock();
         let active_lockouts = sources
             .values()
-            .filter(|s| s.locked_until.map_or(false, |t| Instant::now() < t))
+            .filter(|s| s.locked_until.is_some_and(|t| Instant::now() < t))
             .count();
         let tracked_sources = sources.len();
         AuthRateLimiterSnapshot {

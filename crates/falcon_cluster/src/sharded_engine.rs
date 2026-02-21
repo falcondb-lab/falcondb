@@ -81,6 +81,7 @@ impl ShardedEngine {
     /// Shard-aware table creation:
     /// - Hash/None sharded tables: created on ALL shards (data distributed by shard key).
     /// - Reference tables: created on ALL shards (data replicated).
+    ///
     /// In both cases the schema metadata is identical on every shard.
     pub fn create_table_sharded(&self, schema: &TableSchema) -> Result<(), FalconError> {
         self.create_table_all(schema)

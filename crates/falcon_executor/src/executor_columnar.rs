@@ -25,6 +25,7 @@ impl Executor {
     /// `col_vecs`: one `Vec<Datum>` per column, returned by `scan_columnar`.
     /// Applies an optional filter (vectorized), then computes each aggregate
     /// projection over the surviving rows.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn exec_columnar_aggregate(
         &self,
         col_vecs: Vec<Vec<Datum>>,
