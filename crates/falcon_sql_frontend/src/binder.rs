@@ -9,6 +9,7 @@ use sqlparser::ast::{self, Expr, SetExpr, Statement, Value};
 
 use crate::param_env::ParamEnv;
 use crate::types::*;
+use crate::var_registry::VarRegistry;
 
 /// Alias map: maps alias/table name -> (real_table_name, column_offset_in_combined_schema).
 pub(crate) type AliasMap = HashMap<String, (String, usize)>;
@@ -30,6 +31,8 @@ pub struct Binder {
     /// Parameter type inference environment (populated during bind_with_params).
     /// Uses RefCell for interior mutability so bind_expr can stay &self.
     pub(crate) param_env: RefCell<Option<ParamEnv>>,
+    /// SHOW variable registry — decoupled from binder match logic.
+    var_registry: VarRegistry,
 }
 
 impl Binder {
@@ -39,6 +42,7 @@ impl Binder {
             catalog,
             next_table_id: next_id,
             param_env: RefCell::new(None),
+            var_registry: VarRegistry::with_defaults(),
         }
     }
 
@@ -55,7 +59,9 @@ impl Binder {
             None => ParamEnv::new(),
         });
         let bound = self.bind(stmt);
-        let env = self.param_env.borrow_mut().take().unwrap();
+        let env = self.param_env.borrow_mut().take().ok_or_else(|| {
+            SqlError::InternalInvariant("param_env was not set before bind_with_params".into())
+        })?;
         let bound = bound?;
         let param_types = env.finalize()?;
         let param_count = param_types.len();
@@ -79,7 +85,9 @@ impl Binder {
             None => ParamEnv::new(),
         });
         let bound = self.bind(stmt);
-        let env = self.param_env.borrow_mut().take().unwrap();
+        let env = self.param_env.borrow_mut().take().ok_or_else(|| {
+            SqlError::InternalInvariant("param_env was not set before bind_with_params_lenient".into())
+        })?;
         let bound = bound?;
         let types = env.types().to_vec();
         Ok((bound, types))
@@ -186,21 +194,9 @@ impl Binder {
                     .map(|id| id.value.to_lowercase())
                     .collect::<Vec<_>>()
                     .join("_");
-                match var_name.as_str() {
-                    "falcon_txn_stats" => Ok(BoundStatement::ShowTxnStats),
-                    "falcon_node_role" => Ok(BoundStatement::ShowNodeRole),
-                    "falcon_wal_stats" => Ok(BoundStatement::ShowWalStats),
-                    "falcon_connections" => Ok(BoundStatement::ShowConnections),
-                    "falcon_gc" => Ok(BoundStatement::RunGc),
-                    "falcon_table_stats" => Ok(BoundStatement::ShowTableStats { table_name: None }),
-                    v if v.starts_with("falcon_table_stats_") => {
-                        let tname = v.strip_prefix("falcon_table_stats_").unwrap().to_string();
-                        Ok(BoundStatement::ShowTableStats { table_name: Some(tname) })
-                    }
-                    "falcon_sequences" => Ok(BoundStatement::ShowSequences),
-                    "falcon_tenants" => Ok(BoundStatement::ShowTenants),
-                    "falcon_tenant_usage" => Ok(BoundStatement::ShowTenantUsage),
-                    _ => Err(SqlError::Unsupported(format!("SHOW {}", var_name))),
+                match self.var_registry.resolve(&var_name) {
+                    Some(stmt) => Ok(stmt),
+                    None => Err(SqlError::Unsupported(format!("SHOW {}", var_name))),
                 }
             }
             Statement::Analyze { table_name, .. } => {
@@ -548,6 +544,7 @@ impl Binder {
             match engine.name.to_lowercase().as_str() {
                 "columnstore" => falcon_common::schema::StorageType::Columnstore,
                 "disk" | "disk_rowstore" | "diskrowstore" => falcon_common::schema::StorageType::DiskRowstore,
+                "lsm" | "lsm_rowstore" | "lsmrowstore" => falcon_common::schema::StorageType::LsmRowstore,
                 "rowstore" | "memory" => falcon_common::schema::StorageType::Rowstore,
                 _ => falcon_common::schema::StorageType::Rowstore,
             }

@@ -115,7 +115,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 .or_else(|_| NaiveDate::parse_from_str(&text, "%d-%m-%Y"))
                 .or_else(|_| NaiveDate::parse_from_str(&text, "%Y%m%d"))
                 .map_err(|e| ExecutionError::TypeError(format!("TO_DATE parse error: {}", e)))?;
-            let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+            let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("unix epoch date is always valid");
             let days = (date - epoch).num_days() as i32;
             Ok(Datum::Date(days))
         }
@@ -191,7 +191,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             use chrono::NaiveDate;
             let date = NaiveDate::from_ymd_opt(year, month, day)
                 .ok_or_else(|| ExecutionError::TypeError(format!("Invalid date: {}-{}-{}", year, month, day)))?;
-            let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+            let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("unix epoch date is always valid");
             let days = (date - epoch).num_days() as i32;
             Ok(Datum::Date(days))
         }

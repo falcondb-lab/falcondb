@@ -352,6 +352,7 @@ impl PgServer {
 
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection_with_timeout(
     mut stream: TcpStream,
     session_id: i32,
@@ -671,55 +672,31 @@ async fn handle_connection_with_timeout(
                     }
                 }
 
-                // Send initial parameter statuses
-                send_message(
-                    &mut stream,
-                    &BackendMessage::ParameterStatus {
-                        name: "server_version".into(),
-                        value: "15.0.0 FalconDB".into(),
-                    },
-                )
-                .await?;
-                send_message(
-                    &mut stream,
-                    &BackendMessage::ParameterStatus {
-                        name: "server_encoding".into(),
-                        value: "UTF8".into(),
-                    },
-                )
-                .await?;
-                send_message(
-                    &mut stream,
-                    &BackendMessage::ParameterStatus {
-                        name: "client_encoding".into(),
-                        value: "UTF8".into(),
-                    },
-                )
-                .await?;
-                send_message(
-                    &mut stream,
-                    &BackendMessage::ParameterStatus {
-                        name: "DateStyle".into(),
-                        value: "ISO, MDY".into(),
-                    },
-                )
-                .await?;
-                send_message(
-                    &mut stream,
-                    &BackendMessage::ParameterStatus {
-                        name: "integer_datetimes".into(),
-                        value: "on".into(),
-                    },
-                )
-                .await?;
-                send_message(
-                    &mut stream,
-                    &BackendMessage::ParameterStatus {
-                        name: "standard_conforming_strings".into(),
-                        value: "on".into(),
-                    },
-                )
-                .await?;
+                // Send initial parameter statuses (must match session GUC defaults)
+                // pgjdbc parses server_version to determine feature support.
+                let startup_params: &[(&str, &str)] = &[
+                    ("server_version", "15.0.0"),
+                    ("server_encoding", "UTF8"),
+                    ("client_encoding", "UTF8"),
+                    ("DateStyle", "ISO, MDY"),
+                    ("integer_datetimes", "on"),
+                    ("standard_conforming_strings", "on"),
+                    ("TimeZone", "UTC"),
+                    ("is_superuser", "on"),
+                    ("session_authorization", &session.user),
+                    ("IntervalStyle", "postgres"),
+                    ("application_name", ""),
+                ];
+                for (name, value) in startup_params {
+                    send_message(
+                        &mut stream,
+                        &BackendMessage::ParameterStatus {
+                            name: name.to_string(),
+                            value: value.to_string(),
+                        },
+                    )
+                    .await?;
+                }
 
                 // Backend key data (used by client for cancel requests)
                 send_message(
@@ -1361,6 +1338,16 @@ fn decode_param_value(
         Some(DataType::Array(_)) => Datum::Text(s.to_string()), // arrays as text for now
         Some(DataType::Jsonb) => Datum::Text(s.to_string()),    // jsonb as text for now
         Some(DataType::Decimal(_, _)) => Datum::parse_decimal(s).unwrap_or(Datum::Text(s.to_string())),
+        Some(DataType::Time) | Some(DataType::Interval) | Some(DataType::Uuid) => Datum::Text(s.to_string()),
+        Some(DataType::Bytea) => {
+            // Accept PG hex format: \x<hex> or raw bytes as text
+            let hex_str = s.strip_prefix("\\x").unwrap_or(s);
+            let bytes = (0..hex_str.len())
+                .step_by(2)
+                .filter_map(|i| hex_str.get(i..i+2).and_then(|h| u8::from_str_radix(h, 16).ok()))
+                .collect();
+            Datum::Bytea(bytes)
+        }
         None => {
             // No type hint: try integer, then float, then text
             if let Ok(i) = s.parse::<i64>() {
@@ -1465,8 +1452,13 @@ fn decode_param_value_binary(
                 }
             }
         }
+        Some(DataType::Bytea) => {
+            // Binary format: raw bytes, no encoding needed
+            Datum::Bytea(bytes.to_vec())
+        }
         Some(DataType::Text) | Some(DataType::Timestamp) | Some(DataType::Date)
-        | Some(DataType::Jsonb) | Some(DataType::Array(_)) => {
+        | Some(DataType::Jsonb) | Some(DataType::Array(_))
+        | Some(DataType::Time) | Some(DataType::Interval) | Some(DataType::Uuid) => {
             Datum::Text(String::from_utf8_lossy(bytes).into_owned())
         }
         Some(DataType::Decimal(_, _)) => {
@@ -1717,12 +1709,13 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_decode_param_value_float64_hint() {
         use falcon_common::datum::Datum;
         use falcon_common::types::DataType;
         let raw = Some(b"3.14".to_vec());
         match decode_param_value(&raw, Some(&DataType::Float64)) {
-            Datum::Float64(v) => assert!((v - 3.14).abs() < 1e-10),
+            Datum::Float64(v) => assert!((v - 3.14_f64).abs() < 1e-10),
             other => panic!("expected Float64, got {:?}", other),
         }
     }
@@ -1761,11 +1754,12 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_decode_param_value_no_hint_float() {
         use falcon_common::datum::Datum;
         let raw = Some(b"3.14".to_vec());
         match decode_param_value(&raw, None) {
-            Datum::Float64(v) => assert!((v - 3.14).abs() < 1e-10),
+            Datum::Float64(v) => assert!((v - 3.14_f64).abs() < 1e-10),
             other => panic!("expected Float64, got {:?}", other),
         }
     }
@@ -1872,12 +1866,13 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_decode_binary_float64() {
         use falcon_common::datum::Datum;
         use falcon_common::types::DataType;
-        let raw = Some(3.14f64.to_be_bytes().to_vec());
+        let raw = Some(3.14_f64.to_be_bytes().to_vec());
         match decode_param_value_binary(&raw, Some(&DataType::Float64)) {
-            Datum::Float64(v) => assert!((v - 3.14).abs() < 1e-10),
+            Datum::Float64(v) => assert!((v - 3.14_f64).abs() < 1e-10),
             other => panic!("expected Float64, got {:?}", other),
         }
     }

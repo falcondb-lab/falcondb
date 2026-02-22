@@ -104,7 +104,13 @@ impl WaitForGraph {
                     }
                 } else if in_stack.contains(&holder) {
                     // Found a cycle — extract it from path
-                    let cycle_start = path.iter().position(|&t| t == holder).unwrap();
+                    let cycle_start = match path.iter().position(|&t| t == holder) {
+                        Some(pos) => pos,
+                        None => {
+                            tracing::error!("BUG: holder {:?} in in_stack but not in path", holder);
+                            return None;
+                        }
+                    };
                     return Some(path[cycle_start..].to_vec());
                 }
             }
@@ -118,7 +124,8 @@ impl WaitForGraph {
     /// Choose the victim transaction to abort from a deadlock cycle.
     /// Strategy: abort the transaction with the highest TxnId (youngest).
     pub fn choose_victim(cycle: &[TxnId]) -> TxnId {
-        *cycle.iter().max_by_key(|t| t.0).unwrap()
+        debug_assert!(!cycle.is_empty(), "choose_victim called with empty cycle");
+        cycle.iter().max_by_key(|t| t.0).copied().unwrap_or(TxnId(0))
     }
 
     /// Number of edges in the graph (for diagnostics).

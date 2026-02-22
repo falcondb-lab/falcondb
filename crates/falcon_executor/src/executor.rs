@@ -4,8 +4,9 @@ use std::time::Instant;
 
 use falcon_common::config::SpillConfig;
 use falcon_common::datum::{Datum, OwnedRow};
-use falcon_common::error::FalconError;
+use falcon_common::error::{FalconError, ExecutionError};
 use falcon_common::schema::TableSchema;
+use falcon_common::security::{RoleCatalog, RoleId, PrivilegeManager, Privilege, ObjectRef, ObjectType, PrivilegeCheckResult, SUPERUSER_ROLE_ID};
 use falcon_common::types::{DataType, TableId};
 use falcon_planner::PhysicalPlan;
 use falcon_sql_frontend::types::*;
@@ -50,16 +51,39 @@ pub struct Executor {
     pub(crate) external_sorter: Option<ExternalSorter>,
     /// Parallel execution configuration.
     pub(crate) parallel_config: ParallelConfig,
+    /// RBAC: role catalog for inheritance resolution.
+    role_catalog: Option<Arc<std::sync::RwLock<RoleCatalog>>>,
+    /// RBAC: privilege manager for GRANT/REVOKE checks.
+    privilege_manager: Option<Arc<std::sync::RwLock<PrivilegeManager>>>,
+    /// RBAC: current session role.
+    current_role: RoleId,
 }
 
 impl Executor {
     pub fn new(storage: Arc<StorageEngine>, txn_mgr: Arc<TxnManager>) -> Self {
-        Self { storage, txn_mgr, read_only: false, active_connections: None, max_connections: 0, external_sorter: None, parallel_config: ParallelConfig::default() }
+        Self { storage, txn_mgr, read_only: false, active_connections: None, max_connections: 0, external_sorter: None, parallel_config: ParallelConfig::default(), role_catalog: None, privilege_manager: None, current_role: SUPERUSER_ROLE_ID }
     }
 
     /// Create an executor in read-only mode (for replica nodes).
     pub fn new_read_only(storage: Arc<StorageEngine>, txn_mgr: Arc<TxnManager>) -> Self {
-        Self { storage, txn_mgr, read_only: true, active_connections: None, max_connections: 0, external_sorter: None, parallel_config: ParallelConfig::default() }
+        Self { storage, txn_mgr, read_only: true, active_connections: None, max_connections: 0, external_sorter: None, parallel_config: ParallelConfig::default(), role_catalog: None, privilege_manager: None, current_role: SUPERUSER_ROLE_ID }
+    }
+
+    /// Configure RBAC enforcement for this executor.
+    pub fn set_rbac(
+        &mut self,
+        role_catalog: Arc<std::sync::RwLock<RoleCatalog>>,
+        privilege_manager: Arc<std::sync::RwLock<PrivilegeManager>>,
+        current_role: RoleId,
+    ) {
+        self.role_catalog = Some(role_catalog);
+        self.privilege_manager = Some(privilege_manager);
+        self.current_role = current_role;
+    }
+
+    /// Set the current session role.
+    pub fn set_current_role(&mut self, role_id: RoleId) {
+        self.current_role = role_id;
     }
 
     /// Configure parallel execution.
@@ -96,6 +120,71 @@ impl Executor {
             )))
         } else {
             Ok(())
+        }
+    }
+
+    /// Public RBAC guard for integration testing.
+    /// Returns Ok(()) if the current role has the required privilege, Err otherwise.
+    pub fn check_privilege_public(&self, privilege: Privilege, object_type: ObjectType, object_name: &str) -> Result<(), FalconError> {
+        self.check_privilege(privilege, object_type, object_name)
+    }
+
+    /// RBAC guard: check if the current role has the required privilege on the object.
+    /// Superusers bypass all checks. If no RBAC is configured, all operations are allowed.
+    fn check_privilege(&self, privilege: Privilege, object_type: ObjectType, object_name: &str) -> Result<(), FalconError> {
+        let (catalog, manager) = match (&self.role_catalog, &self.privilege_manager) {
+            (Some(c), Some(m)) => (c, m),
+            _ => return Ok(()), // RBAC not configured — allow all
+        };
+        let catalog = catalog.read().unwrap_or_else(|p| p.into_inner());
+        // Superuser bypasses all privilege checks
+        if let Some(role) = catalog.get_role(self.current_role) {
+            if role.is_superuser {
+                return Ok(());
+            }
+        }
+        let effective_roles = catalog.effective_roles(self.current_role);
+        // Check if any effective role is superuser
+        for &rid in &effective_roles {
+            if let Some(r) = catalog.get_role(rid) {
+                if r.is_superuser {
+                    return Ok(());
+                }
+            }
+        }
+        // Use a simple hash of the object name as the object_id
+        let object_id = {
+            let mut h: u64 = 5381;
+            for b in object_name.bytes() {
+                h = h.wrapping_mul(33).wrapping_add(b as u64);
+            }
+            h
+        };
+        let object_ref = ObjectRef {
+            object_type,
+            object_id,
+            object_name: object_name.to_string(),
+        };
+        let manager = manager.read().unwrap_or_else(|p| p.into_inner());
+        match manager.check_privilege(&effective_roles, privilege, &object_ref) {
+            PrivilegeCheckResult::Allowed => Ok(()),
+            PrivilegeCheckResult::Denied { role, privilege, object } => {
+                let role_name = catalog.get_role(self.current_role)
+                    .map(|r| r.name.clone())
+                    .unwrap_or_else(|| format!("role_id_{}", self.current_role.0));
+                tracing::warn!(
+                    role_id = self.current_role.0,
+                    role_name = %role_name,
+                    privilege = ?privilege,
+                    object_type = %object_type,
+                    object_name = %object_name,
+                    denied_role = %role,
+                    "RBAC: permission denied"
+                );
+                Err(FalconError::Execution(ExecutionError::InsufficientPrivilege(
+                    format!("permission denied for {} on {}: role {} lacks {:?}", object_type, object, role, privilege)
+                )))
+            }
         }
     }
 
@@ -146,14 +235,17 @@ impl Executor {
         match plan {
             PhysicalPlan::CreateTable { schema, if_not_exists } => {
                 self.reject_if_read_only("CREATE TABLE")?;
+                self.check_privilege(Privilege::Create, ObjectType::Schema, "public")?;
                 self.exec_create_table(schema, *if_not_exists)
             }
             PhysicalPlan::DropTable { table_name, if_exists } => {
                 self.reject_if_read_only("DROP TABLE")?;
+                self.check_privilege(Privilege::All, ObjectType::Table, table_name)?;
                 self.exec_drop_table(table_name, *if_exists)
             }
             PhysicalPlan::AlterTable { table_name, ops } => {
                 self.reject_if_read_only("ALTER TABLE")?;
+                self.check_privilege(Privilege::All, ObjectType::Table, table_name)?;
                 self.exec_alter_table(table_name, ops)
             }
             PhysicalPlan::Insert {
@@ -166,6 +258,7 @@ impl Executor {
                 on_conflict,
             } => {
                 self.reject_if_read_only("INSERT")?;
+                self.check_privilege(Privilege::Insert, ObjectType::Table, &schema.name)?;
                 let txn = txn.ok_or(FalconError::Internal(
                     "INSERT requires active transaction".into(),
                 ))?;
@@ -186,6 +279,7 @@ impl Executor {
                 from_table,
             } => {
                 self.reject_if_read_only("UPDATE")?;
+                self.check_privilege(Privilege::Update, ObjectType::Table, &schema.name)?;
                 let txn = txn.ok_or(FalconError::Internal(
                     "UPDATE requires active transaction".into(),
                 ))?;
@@ -201,6 +295,7 @@ impl Executor {
                 using_table,
             } => {
                 self.reject_if_read_only("DELETE")?;
+                self.check_privilege(Privilege::Delete, ObjectType::Table, &schema.name)?;
                 let txn = txn.ok_or(FalconError::Internal(
                     "DELETE requires active transaction".into(),
                 ))?;
@@ -225,6 +320,7 @@ impl Executor {
                 unions,
                 virtual_rows,
             } => {
+                self.check_privilege(Privilege::Select, ObjectType::Table, &schema.name)?;
                 let txn = txn.ok_or(FalconError::Internal(
                     "SELECT requires active transaction".into(),
                 ))?;

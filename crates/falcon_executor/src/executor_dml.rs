@@ -840,5 +840,9 @@ fn datatype_to_cast_target(dt: &DataType) -> String {
         DataType::Jsonb => "jsonb".into(),
         DataType::Array(_) => "array".into(),
         DataType::Decimal(_, _) => "numeric".into(),
+        DataType::Time => "time".into(),
+        DataType::Interval => "interval".into(),
+        DataType::Uuid => "uuid".into(),
+        DataType::Bytea => "bytea".into(),
     }
 }

@@ -29,7 +29,7 @@ pub mod txn_audit;
 
 pub use engine::{LsmEngine, LsmConfig};
 pub use memtable::LsmMemTable;
-pub use sst::{SstWriter, SstReader, SstMeta};
+pub use sst::{SstWriter, SstReader, SstMeta, SstReadError};
 pub use block_cache::BlockCache;
 pub use bloom::BloomFilter;
 pub use compaction::Compactor;

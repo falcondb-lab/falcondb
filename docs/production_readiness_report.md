@@ -1,7 +1,7 @@
 # FalconDB Production Readiness Report
 
 **Generated**: 2026-02-21 (comprehensive re-audit)  
-**Version**: v1.0 Phase 2 complete  
+**Version**: 1.0.0-rc.1 (`workspace.version` aligned)  
 **Auditor**: Automated codebase analysis  
 **Verdict**: **9.2 / 10** — Production-ready for controlled deployments
 

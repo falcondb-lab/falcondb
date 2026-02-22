@@ -6,6 +6,7 @@ pub mod param_env;
 pub mod parser;
 pub mod resolve_function;
 pub mod types;
+pub mod var_registry;
 #[cfg(test)]
 mod tests;
 

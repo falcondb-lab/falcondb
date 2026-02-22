@@ -12,7 +12,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
         }
         ScalarFunc::CurrentDate => {
             let now = chrono::Utc::now();
-            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("unix epoch date is always valid");
             let days = (now.date_naive() - epoch).num_days() as i32;
             Ok(Datum::Date(days))
         }

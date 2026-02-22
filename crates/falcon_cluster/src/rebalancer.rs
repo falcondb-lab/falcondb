@@ -12,11 +12,12 @@
 //! ```
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
+use falcon_common::error::FalconError;
+use falcon_common::shutdown::ShutdownSignal;
 use falcon_common::types::ShardId;
 
 use crate::sharded_engine::ShardedEngine;
@@ -763,19 +764,19 @@ impl Default for RebalanceRunnerConfig {
 
 /// Handle returned by `RebalanceRunner::start()`. Dropping it stops the runner.
 pub struct RebalanceRunnerHandle {
-    stop_flag: Arc<AtomicBool>,
+    signal: ShutdownSignal,
     join_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl RebalanceRunnerHandle {
     /// Signal the runner to stop.
     pub fn stop(&self) {
-        self.stop_flag.store(true, Ordering::SeqCst);
+        self.signal.shutdown();
     }
 
     /// Signal the runner to stop and wait for it to finish.
     pub fn stop_and_join(mut self) {
-        self.stop_flag.store(true, Ordering::SeqCst);
+        self.signal.shutdown();
         if let Some(handle) = self.join_handle.take() {
             let _ = handle.join();
         }
@@ -783,13 +784,13 @@ impl RebalanceRunnerHandle {
 
     /// Check if the runner is still alive.
     pub fn is_running(&self) -> bool {
-        !self.stop_flag.load(Ordering::SeqCst)
+        !self.signal.is_shutdown()
     }
 }
 
 impl Drop for RebalanceRunnerHandle {
     fn drop(&mut self) {
-        self.stop_flag.store(true, Ordering::SeqCst);
+        self.signal.shutdown();
     }
 }
 
@@ -799,23 +800,24 @@ pub struct RebalanceRunner;
 
 impl RebalanceRunner {
     /// Start the background rebalance runner thread.
-    /// Returns a handle that can be used to stop the runner.
+    ///
+    /// Returns `Err` if the background thread cannot be spawned.
+    /// The caller must handle this as a degraded condition — **no panic**.
     pub fn start(
         config: RebalanceRunnerConfig,
         engine: std::sync::Arc<ShardedEngine>,
         rebalancer: std::sync::Arc<ShardRebalancer>,
-    ) -> RebalanceRunnerHandle {
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let stop_clone = stop_flag.clone();
+    ) -> Result<RebalanceRunnerHandle, FalconError> {
+        let signal = ShutdownSignal::new();
+        let signal_clone = signal.clone();
         let interval = std::time::Duration::from_millis(config.check_interval_ms);
 
         let join_handle = std::thread::Builder::new()
             .name("falcon-rebalancer".to_string())
             .spawn(move || {
                 tracing::info!("RebalanceRunner started (interval={}ms)", config.check_interval_ms);
-                while !stop_clone.load(Ordering::SeqCst) {
-                    std::thread::sleep(interval);
-                    if stop_clone.load(Ordering::SeqCst) {
+                while !signal_clone.is_shutdown() {
+                    if signal_clone.wait_timeout(interval) {
                         break;
                     }
                     let migrated = rebalancer.check_and_rebalance(&engine);
@@ -825,12 +827,21 @@ impl RebalanceRunner {
                 }
                 tracing::info!("RebalanceRunner stopped");
             })
-            .unwrap_or_else(|e| panic!("Failed to spawn rebalancer thread: {}", e));
+            .map_err(|e| {
+                tracing::error!(
+                    component = "rebalancer",
+                    error = %e,
+                    "failed to spawn background thread — node DEGRADED"
+                );
+                FalconError::Internal(format!(
+                    "failed to spawn rebalancer thread: {}", e
+                ))
+            })?;
 
-        RebalanceRunnerHandle {
-            stop_flag,
+        Ok(RebalanceRunnerHandle {
+            signal,
             join_handle: Some(join_handle),
-        }
+        })
     }
 }
 

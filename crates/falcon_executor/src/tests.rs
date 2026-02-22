@@ -1041,3 +1041,138 @@ mod param_tests {
         assert_eq!(result, Datum::Boolean(true));
     }
 }
+
+#[cfg(test)]
+mod rbac_enforcement_tests {
+    use std::sync::{Arc, RwLock};
+    use falcon_common::error::{FalconError, ExecutionError};
+    use falcon_common::security::{
+        ObjectRef, ObjectType, Privilege, PrivilegeManager, Role, RoleCatalog, RoleId,
+    };
+    use crate::Executor;
+
+    fn setup_rbac() -> (Arc<RwLock<RoleCatalog>>, Arc<RwLock<PrivilegeManager>>) {
+        let mut catalog = RoleCatalog::new();
+        let reader_role = Role::new_user(
+            RoleId(100),
+            "reader".into(),
+            falcon_common::tenant::TenantId(0),
+        );
+        catalog.add_role(reader_role);
+
+        let writer_role = Role::new_user(
+            RoleId(200),
+            "writer".into(),
+            falcon_common::tenant::TenantId(0),
+        );
+        catalog.add_role(writer_role);
+
+        let mut priv_mgr = PrivilegeManager::new();
+
+        let users_obj = ObjectRef {
+            object_type: ObjectType::Table,
+            object_id: obj_hash("users"),
+            object_name: "users".into(),
+        };
+        priv_mgr.grant(RoleId(100), Privilege::Select, users_obj.clone(), RoleId(0), false);
+        priv_mgr.grant(RoleId(200), Privilege::Insert, users_obj, RoleId(0), false);
+
+        let public_obj = ObjectRef {
+            object_type: ObjectType::Schema,
+            object_id: obj_hash("public"),
+            object_name: "public".into(),
+        };
+        priv_mgr.grant(RoleId(200), Privilege::Create, public_obj, RoleId(0), false);
+
+        (
+            Arc::new(RwLock::new(catalog)),
+            Arc::new(RwLock::new(priv_mgr)),
+        )
+    }
+
+    fn obj_hash(name: &str) -> u64 {
+        let mut h: u64 = 5381;
+        for b in name.bytes() {
+            h = h.wrapping_mul(33).wrapping_add(b as u64);
+        }
+        h
+    }
+
+    fn make_executor(role: RoleId) -> Executor {
+        let storage = Arc::new(falcon_storage::engine::StorageEngine::new_in_memory());
+        let txn_mgr = Arc::new(falcon_txn::TxnManager::new(storage.clone()));
+        let (catalog, priv_mgr) = setup_rbac();
+        let mut exec = Executor::new(storage, txn_mgr);
+        exec.set_rbac(catalog, priv_mgr, role);
+        exec
+    }
+
+    #[test]
+    fn test_reader_cannot_insert() {
+        let exec = make_executor(RoleId(100));
+        let result = exec.check_privilege_public(Privilege::Insert, ObjectType::Table, "users");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FalconError::Execution(ExecutionError::InsufficientPrivilege(msg)) => {
+                assert!(msg.contains("permission denied"), "msg={}", msg);
+                assert!(msg.contains("users"), "msg should mention table: {}", msg);
+            }
+            other => panic!("expected InsufficientPrivilege, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_reader_cannot_update() {
+        let exec = make_executor(RoleId(100));
+        let result = exec.check_privilege_public(Privilege::Update, ObjectType::Table, "users");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FalconError::Execution(ExecutionError::InsufficientPrivilege(_)) => {}
+            other => panic!("expected InsufficientPrivilege, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_reader_cannot_delete() {
+        let exec = make_executor(RoleId(100));
+        let result = exec.check_privilege_public(Privilege::Delete, ObjectType::Table, "users");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FalconError::Execution(ExecutionError::InsufficientPrivilege(_)) => {}
+            other => panic!("expected InsufficientPrivilege, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_reader_cannot_create_table() {
+        let exec = make_executor(RoleId(100));
+        let result = exec.check_privilege_public(Privilege::Create, ObjectType::Schema, "public");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FalconError::Execution(ExecutionError::InsufficientPrivilege(_)) => {}
+            other => panic!("expected InsufficientPrivilege, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_writer_can_insert_on_granted_table() {
+        let exec = make_executor(RoleId(200));
+        let result = exec.check_privilege_public(Privilege::Insert, ObjectType::Table, "users");
+        assert!(result.is_ok(), "writer should have INSERT on users");
+    }
+
+    #[test]
+    fn test_writer_cannot_select_without_grant() {
+        let exec = make_executor(RoleId(200));
+        let result = exec.check_privilege_public(Privilege::Select, ObjectType::Table, "users");
+        assert!(result.is_err(), "writer should NOT have SELECT on users");
+    }
+
+    #[test]
+    fn test_error_is_pg_compatible_sqlstate() {
+        let exec = make_executor(RoleId(100));
+        let err = exec.check_privilege_public(Privilege::Insert, ObjectType::Table, "users").unwrap_err();
+        let sqlstate = err.pg_sqlstate();
+        assert_eq!(sqlstate, "42501", "should return PG SQLSTATE 42501");
+    }
+}

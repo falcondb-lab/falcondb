@@ -39,6 +39,9 @@ pub enum StorageType {
     /// On-disk B-tree row store (like InnoDB / traditional disk engine).
     /// Handles larger-than-memory datasets with row-oriented access.
     DiskRowstore,
+    /// LSM-tree backed row store (like RocksDB / LevelDB).
+    /// Write-optimized with background compaction, suitable for write-heavy OLTP.
+    LsmRowstore,
 }
 
 

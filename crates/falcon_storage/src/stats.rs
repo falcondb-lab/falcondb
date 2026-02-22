@@ -271,6 +271,10 @@ impl Hash for DatumKey {
             }
             Datum::Jsonb(v) => v.to_string().hash(state),
             Datum::Decimal(m, s) => { m.hash(state); s.hash(state); }
+            Datum::Time(us) => us.hash(state),
+            Datum::Interval(mo, d, us) => { mo.hash(state); d.hash(state); us.hash(state); }
+            Datum::Uuid(v) => v.hash(state),
+            Datum::Bytea(bytes) => bytes.hash(state),
         }
     }
 }
@@ -325,6 +329,10 @@ fn datum_width(d: &Datum) -> usize {
         Datum::Array(arr) => arr.len() * 8, // rough estimate
         Datum::Jsonb(v) => v.to_string().len(),
         Datum::Decimal(_, _) => 16, // i128 = 16 bytes
+        Datum::Time(_) => 8,
+        Datum::Interval(_, _, _) => 16,
+        Datum::Uuid(_) => 16,
+        Datum::Bytea(bytes) => bytes.len(),
     }
 }
 

@@ -52,6 +52,14 @@ impl StorageEngine {
             return Ok(pk);
         }
 
+        // LSM rowstore
+        if let Some(lsm) = self.lsm_tables.get(&table_id) {
+            self.append_wal(&WalRecord::Insert { txn_id, table_id, row: row.clone() })?;
+            let pk = lsm.insert(&row, txn_id)?;
+            self.record_write(txn_id, table_id, pk.clone());
+            return Ok(pk);
+        }
+
         Err(StorageError::TableNotFound(table_id))
     }
 
@@ -77,6 +85,13 @@ impl StorageEngine {
             self.record_write_path_violation_disk()?;
             self.append_wal(&WalRecord::Update { txn_id, table_id, pk: pk.clone(), new_row: new_row.clone() })?;
             disk.update(pk, new_row, txn_id)?;
+            return Ok(());
+        }
+
+        // LSM rowstore
+        if let Some(lsm) = self.lsm_tables.get(&table_id) {
+            self.append_wal(&WalRecord::Update { txn_id, table_id, pk: pk.clone(), new_row: new_row.clone() })?;
+            lsm.update(pk, &new_row, txn_id)?;
             return Ok(());
         }
 
@@ -110,6 +125,14 @@ impl StorageEngine {
             self.record_write_path_violation_disk()?;
             self.append_wal(&WalRecord::Delete { txn_id, table_id, pk: pk.clone() })?;
             disk.delete(pk, txn_id)?;
+            return Ok(());
+        }
+
+        // LSM rowstore
+        if let Some(lsm) = self.lsm_tables.get(&table_id) {
+            self.append_wal(&WalRecord::Delete { txn_id, table_id, pk: pk.clone() })?;
+            lsm.delete(pk, txn_id)?;
+            self.record_write(txn_id, table_id, pk.clone());
             return Ok(());
         }
 
@@ -172,6 +195,12 @@ impl StorageEngine {
         // Disk rowstore
         if let Some(disk) = self.disk_tables.get(&table_id) {
             let results = disk.scan(txn_id, read_ts);
+            return Ok(results);
+        }
+
+        // LSM rowstore
+        if let Some(lsm) = self.lsm_tables.get(&table_id) {
+            let results = lsm.scan(txn_id, read_ts);
             return Ok(results);
         }
 

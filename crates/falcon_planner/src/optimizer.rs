@@ -10,6 +10,8 @@
 
 use std::collections::HashSet;
 
+use falcon_common::datum::Datum;
+
 use crate::cost::{IndexedColumns, TableRowCounts};
 use crate::logical_plan::LogicalPlan;
 use falcon_sql_frontend::types::*;
@@ -915,7 +917,9 @@ fn count_output_columns(plan: &LogicalPlan) -> usize {
 
 /// Build a join condition from correlation pairs.
 fn build_correlation_condition(pairs: &[(usize, usize)], right_offset: usize) -> BoundExpr {
-    assert!(!pairs.is_empty());
+    if pairs.is_empty() {
+        return BoundExpr::Literal(Datum::Boolean(true));
+    }
     let mut conditions: Vec<BoundExpr> = pairs.iter().map(|(outer, inner)| {
         BoundExpr::BinaryOp {
             left: Box::new(BoundExpr::ColumnRef(*outer)),
@@ -924,7 +928,10 @@ fn build_correlation_condition(pairs: &[(usize, usize)], right_offset: usize) ->
         }
     }).collect();
 
-    let mut result = conditions.pop().unwrap();
+    let mut result = match conditions.pop() {
+        Some(c) => c,
+        None => return BoundExpr::Literal(Datum::Boolean(true)),
+    };
     while let Some(cond) = conditions.pop() {
         result = BoundExpr::BinaryOp {
             left: Box::new(cond),
@@ -981,8 +988,13 @@ fn split_conjuncts(expr: BoundExpr) -> Vec<BoundExpr> {
 
 /// Combine a list of predicates into an AND-conjunction.
 fn combine_conjuncts(mut preds: Vec<BoundExpr>) -> BoundExpr {
-    assert!(!preds.is_empty());
-    let mut result = preds.pop().unwrap();
+    if preds.is_empty() {
+        return BoundExpr::Literal(Datum::Boolean(true));
+    }
+    let mut result = match preds.pop() {
+        Some(p) => p,
+        None => return BoundExpr::Literal(Datum::Boolean(true)),
+    };
     while let Some(pred) = preds.pop() {
         result = BoundExpr::BinaryOp {
             left: Box::new(pred),

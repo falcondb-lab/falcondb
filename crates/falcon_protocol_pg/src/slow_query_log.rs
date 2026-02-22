@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -26,7 +27,7 @@ struct Inner {
     /// Minimum duration for a query to be logged. `Duration::ZERO` means disabled.
     threshold: Duration,
     /// Ring buffer of recent slow queries.
-    entries: Vec<SlowQueryEntry>,
+    entries: VecDeque<SlowQueryEntry>,
     /// Maximum number of entries to keep.
     capacity: usize,
     /// Total number of slow queries observed (may exceed capacity).
@@ -41,7 +42,7 @@ impl SlowQueryLog {
         Self {
             inner: Mutex::new(Inner {
                 threshold,
-                entries: Vec::with_capacity(capacity.min(1024)),
+                entries: VecDeque::with_capacity(capacity.min(1024)),
                 capacity,
                 total_count: 0,
             }),
@@ -72,9 +73,9 @@ impl SlowQueryLog {
         };
         inner.total_count += 1;
         if inner.entries.len() >= inner.capacity {
-            inner.entries.remove(0);
+            inner.entries.pop_front();
         }
-        inner.entries.push(entry);
+        inner.entries.push_back(entry);
         true
     }
 
@@ -91,7 +92,7 @@ impl SlowQueryLog {
     /// Get a snapshot of all entries and the total count.
     pub fn snapshot(&self) -> (Vec<SlowQueryEntry>, u64) {
         let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        (inner.entries.clone(), inner.total_count)
+        (inner.entries.iter().cloned().collect(), inner.total_count)
     }
 
     /// Clear all entries and reset the counter.

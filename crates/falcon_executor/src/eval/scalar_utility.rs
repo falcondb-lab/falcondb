@@ -17,6 +17,10 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                 Some(Datum::Array(_)) => "array",
                 Some(Datum::Jsonb(_)) => "jsonb",
                 Some(Datum::Decimal(_, _)) => "numeric",
+                Some(Datum::Time(_)) => "time without time zone",
+                Some(Datum::Interval(_, _, _)) => "interval",
+                Some(Datum::Uuid(_)) => "uuid",
+                Some(Datum::Bytea(_)) => "bytea",
                 Some(Datum::Null) => "unknown",
                 None => "unknown",
             };

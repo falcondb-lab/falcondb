@@ -359,6 +359,22 @@ impl LsmEngine {
         &self.config
     }
 
+    /// Snapshot of all live entries (active + frozen memtables) for scan.
+    /// Returns (key, value_or_none_for_tombstone, seq) sorted by key.
+    pub fn active_memtable_snapshot(&self) -> Vec<(Vec<u8>, Option<Vec<u8>>, u64)> {
+        let active = self.active_memtable.read().clone();
+        let mut entries = active.iter_sorted();
+        // Include frozen memtables (older data)
+        let frozen = self.frozen_memtables.read();
+        for mt in frozen.iter() {
+            entries.extend(mt.iter_sorted());
+        }
+        // Deduplicate: keep highest-seq entry per key
+        entries.sort_by(|a, b| a.0.cmp(&b.0).then(b.2.cmp(&a.2)));
+        entries.dedup_by(|a, b| a.0 == b.0);
+        entries
+    }
+
     /// Shutdown the engine, flushing any pending data.
     pub fn shutdown(&self) -> io::Result<()> {
         self.shutdown.store(true, Ordering::SeqCst);

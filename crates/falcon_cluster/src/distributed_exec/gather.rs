@@ -265,6 +265,10 @@ pub(crate) fn encode_group_key(group_by_indices: &[usize], values: &[Datum]) -> 
             Datum::Array(arr) => { key.push(7); let s = format!("{:?}", arr); key.extend_from_slice(&(s.len() as u32).to_be_bytes()); key.extend_from_slice(s.as_bytes()); }
             Datum::Jsonb(v) => { key.push(8); let s = v.to_string(); key.extend_from_slice(&(s.len() as u32).to_be_bytes()); key.extend_from_slice(s.as_bytes()); }
             Datum::Decimal(m, s) => { key.push(10); key.push(*s); key.extend_from_slice(&m.to_be_bytes()); }
+            Datum::Time(us) => { key.push(11); key.extend_from_slice(&us.to_be_bytes()); }
+            Datum::Interval(mo, d, us) => { key.push(12); key.extend_from_slice(&mo.to_be_bytes()); key.extend_from_slice(&d.to_be_bytes()); key.extend_from_slice(&us.to_be_bytes()); }
+            Datum::Uuid(v) => { key.push(13); key.extend_from_slice(&v.to_be_bytes()); }
+            Datum::Bytea(bytes) => { key.push(14); key.extend_from_slice(&(bytes.len() as u32).to_be_bytes()); key.extend_from_slice(bytes); }
         }
     }
     key

@@ -324,7 +324,7 @@ mod tests {
         assert_eq!(completed.total_bytes, 1024 * 1024);
         assert_eq!(completed.table_count, 5);
         assert_eq!(completed.checksum, 0xABCD);
-        assert!(completed.duration_ms >= 0);
+        let _ = completed.duration_ms; // unsigned, always >= 0
         assert_eq!(mgr.total_backups_completed(), 1);
         assert_eq!(mgr.total_bytes_backed_up(), 1024 * 1024);
     }

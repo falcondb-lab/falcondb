@@ -18,13 +18,14 @@
 //!   in-doubt record.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
 
-use falcon_common::error::FalconResult;
+use falcon_common::error::{FalconError, FalconResult};
+use falcon_common::shutdown::ShutdownSignal;
 use falcon_common::types::TxnId;
 
 /// The final outcome of a 2PC transaction.
@@ -201,8 +202,8 @@ pub struct InDoubtResolver {
     max_per_sweep: usize,
     /// Metrics.
     metrics: RwLock<ResolverMetrics>,
-    /// Stop flag for background thread.
-    stop: AtomicBool,
+    /// Shutdown signal for background thread (interruptible wait).
+    signal: ShutdownSignal,
     /// Total resolved counter (atomic for fast reads).
     total_resolved: AtomicU64,
 }
@@ -217,7 +218,7 @@ impl InDoubtResolver {
             max_attempts: 10,
             max_per_sweep: 100,
             metrics: RwLock::new(ResolverMetrics::default()),
-            stop: AtomicBool::new(false),
+            signal: ShutdownSignal::new(),
             total_resolved: AtomicU64::new(0),
         })
     }
@@ -236,7 +237,7 @@ impl InDoubtResolver {
             max_attempts,
             max_per_sweep,
             metrics: RwLock::new(ResolverMetrics::default()),
-            stop: AtomicBool::new(false),
+            signal: ShutdownSignal::new(),
             total_resolved: AtomicU64::new(0),
         })
     }
@@ -407,30 +408,43 @@ impl InDoubtResolver {
     }
 
     /// Start the background resolver thread. Returns a handle to stop it.
-    pub fn start(self: &Arc<Self>) -> InDoubtResolverHandle {
+    ///
+    /// Returns `Err` if the background thread cannot be spawned.
+    /// The caller must handle this as a degraded condition — **no panic**.
+    pub fn start(self: &Arc<Self>) -> Result<InDoubtResolverHandle, FalconError> {
         let resolver = Arc::clone(self);
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let stop_flag_clone = Arc::clone(&stop_flag);
+        let signal = self.signal.clone();
 
         let thread = std::thread::Builder::new()
             .name("falcon-indoubt-resolver".into())
             .spawn(move || {
                 tracing::info!("in-doubt resolver started");
-                while !stop_flag_clone.load(Ordering::Relaxed) {
+                while !signal.is_shutdown() {
                     let resolved = resolver.sweep();
                     if resolved > 0 {
                         tracing::info!(resolved, "in-doubt resolver sweep completed");
                     }
-                    std::thread::sleep(resolver.sweep_interval);
+                    if signal.wait_timeout(resolver.sweep_interval) {
+                        break;
+                    }
                 }
                 tracing::info!("in-doubt resolver stopped");
             })
-            .unwrap_or_else(|e| panic!("failed to spawn in-doubt resolver thread: {}", e));
+            .map_err(|e| {
+                tracing::error!(
+                    component = "indoubt-resolver",
+                    error = %e,
+                    "failed to spawn background thread — node DEGRADED"
+                );
+                FalconError::Internal(format!(
+                    "failed to spawn in-doubt resolver thread: {}", e
+                ))
+            })?;
 
-        InDoubtResolverHandle {
-            stop: stop_flag,
+        Ok(InDoubtResolverHandle {
+            signal: self.signal.clone(),
             thread: Some(thread),
-        }
+        })
     }
 
     /// Current metrics snapshot.
@@ -457,20 +471,185 @@ impl InDoubtResolver {
 
     /// Stop the background resolver (if running).
     pub fn stop(&self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.signal.shutdown();
     }
+
+    // ── Admin Interface ──────────────────────────────────────────────────
+
+    /// Force-commit an in-doubt transaction (admin override).
+    /// Returns Ok(true) if the txn was found and resolved, Ok(false) if not found.
+    pub fn admin_force_commit(&self, txn_id: TxnId) -> FalconResult<bool> {
+        self.admin_force_resolve(txn_id, TxnOutcome::Committed)
+    }
+
+    /// Force-abort an in-doubt transaction (admin override).
+    /// Returns Ok(true) if the txn was found and resolved, Ok(false) if not found.
+    pub fn admin_force_abort(&self, txn_id: TxnId) -> FalconResult<bool> {
+        self.admin_force_resolve(txn_id, TxnOutcome::Aborted)
+    }
+
+    fn admin_force_resolve(&self, txn_id: TxnId, outcome: TxnOutcome) -> FalconResult<bool> {
+        let txn = {
+            let indoubt = self.indoubt.read();
+            indoubt.get(&txn_id).cloned()
+        };
+
+        let txn = match txn {
+            Some(t) => t,
+            None => return Ok(false),
+        };
+
+        tracing::warn!(
+            txn_id = txn_id.0,
+            outcome = ?outcome,
+            "admin force-resolving in-doubt transaction"
+        );
+
+        self.apply_decision(&txn, outcome)?;
+        self.outcome_cache.record(txn_id, outcome);
+
+        {
+            let mut indoubt = self.indoubt.write();
+            indoubt.remove(&txn_id);
+        }
+        {
+            let mut m = self.metrics.write();
+            m.total_resolved += 1;
+            match outcome {
+                TxnOutcome::Committed => m.resolved_committed += 1,
+                TxnOutcome::Aborted => m.resolved_aborted += 1,
+            }
+            m.currently_indoubt = self.indoubt.read().len();
+        }
+        self.total_resolved.fetch_add(1, Ordering::Relaxed);
+
+        Ok(true)
+    }
+
+    /// Inspect a specific in-doubt transaction.
+    pub fn admin_inspect(&self, txn_id: TxnId) -> Option<InDoubtTxnInfo> {
+        let indoubt = self.indoubt.read();
+        indoubt.get(&txn_id).map(|t| InDoubtTxnInfo {
+            global_txn_id: t.global_txn_id,
+            participant_count: t.participant_txn_ids.len(),
+            participants: t.participant_txn_ids.clone(),
+            age_ms: t.prepared_at.elapsed().as_millis() as u64,
+            attempts: t.attempts,
+            last_error: t.last_error.clone(),
+            cached_outcome: self.outcome_cache.lookup(t.global_txn_id),
+        })
+    }
+
+    /// Get convergence status: summary of all in-doubt txns with age and state.
+    pub fn convergence_status(&self) -> ConvergenceStatus {
+        let indoubt = self.indoubt.read();
+        let mut txns = Vec::with_capacity(indoubt.len());
+        let mut oldest_ms = 0u64;
+        let mut stuck_count = 0usize;
+
+        for t in indoubt.values() {
+            let age_ms = t.prepared_at.elapsed().as_millis() as u64;
+            if age_ms > oldest_ms {
+                oldest_ms = age_ms;
+            }
+            let is_stuck = t.attempts >= self.max_attempts;
+            if is_stuck {
+                stuck_count += 1;
+            }
+            txns.push(InDoubtTxnInfo {
+                global_txn_id: t.global_txn_id,
+                participant_count: t.participant_txn_ids.len(),
+                participants: t.participant_txn_ids.clone(),
+                age_ms,
+                attempts: t.attempts,
+                last_error: t.last_error.clone(),
+                cached_outcome: self.outcome_cache.lookup(t.global_txn_id),
+            });
+        }
+
+        let m = self.metrics.read().clone();
+        ConvergenceStatus {
+            total_indoubt: indoubt.len(),
+            stuck_count,
+            oldest_age_ms: oldest_ms,
+            total_resolved: m.total_resolved,
+            resolved_committed: m.resolved_committed,
+            resolved_aborted: m.resolved_aborted,
+            sweeps_run: m.sweeps_run,
+            last_sweep_us: m.last_sweep_us,
+            txns,
+            is_converged: indoubt.is_empty(),
+        }
+    }
+
+    /// Bulk force-abort all in-doubt transactions exceeding max attempts (stuck).
+    /// Returns the number of transactions force-aborted.
+    pub fn admin_abort_stuck(&self) -> usize {
+        let stuck_ids: Vec<TxnId> = {
+            let indoubt = self.indoubt.read();
+            indoubt.values()
+                .filter(|t| t.attempts >= self.max_attempts)
+                .map(|t| t.global_txn_id)
+                .collect()
+        };
+
+        let mut aborted = 0;
+        for txn_id in stuck_ids {
+            if let Ok(true) = self.admin_force_abort(txn_id) {
+                aborted += 1;
+            }
+        }
+        aborted
+    }
+}
+
+/// Detailed info about a single in-doubt transaction (for admin inspection).
+#[derive(Debug, Clone)]
+pub struct InDoubtTxnInfo {
+    pub global_txn_id: TxnId,
+    pub participant_count: usize,
+    pub participants: Vec<(falcon_common::types::ShardId, TxnId)>,
+    pub age_ms: u64,
+    pub attempts: u32,
+    pub last_error: Option<String>,
+    pub cached_outcome: Option<TxnOutcome>,
+}
+
+/// Convergence status summary for the admin interface.
+#[derive(Debug, Clone)]
+pub struct ConvergenceStatus {
+    /// Number of currently in-doubt transactions.
+    pub total_indoubt: usize,
+    /// Number of stuck transactions (exceeded max attempts).
+    pub stuck_count: usize,
+    /// Age of the oldest in-doubt transaction (ms).
+    pub oldest_age_ms: u64,
+    /// Total resolved lifetime count.
+    pub total_resolved: u64,
+    /// Resolved by commit.
+    pub resolved_committed: u64,
+    /// Resolved by abort.
+    pub resolved_aborted: u64,
+    /// Total sweeps run.
+    pub sweeps_run: u64,
+    /// Last sweep duration (µs).
+    pub last_sweep_us: u64,
+    /// Per-txn details.
+    pub txns: Vec<InDoubtTxnInfo>,
+    /// True if no in-doubt transactions remain.
+    pub is_converged: bool,
 }
 
 /// Handle to the background in-doubt resolver thread.
 pub struct InDoubtResolverHandle {
-    stop: Arc<AtomicBool>,
+    signal: ShutdownSignal,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl InDoubtResolverHandle {
     /// Stop the resolver and wait for the thread to finish.
     pub fn stop(mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.signal.shutdown();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -479,7 +658,7 @@ impl InDoubtResolverHandle {
 
 impl Drop for InDoubtResolverHandle {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.signal.shutdown();
     }
 }
 
@@ -649,10 +828,136 @@ mod tests {
     fn test_background_thread_starts_and_stops() {
         let resolver = make_resolver();
         resolver.register_indoubt(TxnId(99), vec![]);
-        let handle = resolver.start();
+        let handle = resolver.start().expect("spawn in test");
         std::thread::sleep(Duration::from_millis(50));
         handle.stop();
         // After stopping, in-doubt should be resolved
         assert_eq!(resolver.indoubt_count(), 0);
+    }
+
+    // ── Admin Interface tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_admin_force_commit() {
+        let cache = make_cache();
+        let resolver = InDoubtResolver::with_config(Arc::clone(&cache), Duration::from_secs(60), 5, 100);
+        resolver.register_indoubt(TxnId(70), vec![(ShardId(0), TxnId(700))]);
+        assert_eq!(resolver.indoubt_count(), 1);
+
+        let resolved = resolver.admin_force_commit(TxnId(70)).unwrap();
+        assert!(resolved);
+        assert_eq!(resolver.indoubt_count(), 0);
+
+        let m = resolver.metrics();
+        assert_eq!(m.resolved_committed, 1);
+        assert_eq!(m.resolved_aborted, 0);
+
+        // Outcome should be cached
+        assert_eq!(cache.lookup(TxnId(70)), Some(TxnOutcome::Committed));
+    }
+
+    #[test]
+    fn test_admin_force_abort() {
+        let cache = make_cache();
+        let resolver = InDoubtResolver::with_config(Arc::clone(&cache), Duration::from_secs(60), 5, 100);
+        resolver.register_indoubt(TxnId(80), vec![(ShardId(1), TxnId(800))]);
+
+        let resolved = resolver.admin_force_abort(TxnId(80)).unwrap();
+        assert!(resolved);
+        assert_eq!(resolver.indoubt_count(), 0);
+
+        let m = resolver.metrics();
+        assert_eq!(m.resolved_aborted, 1);
+        assert_eq!(cache.lookup(TxnId(80)), Some(TxnOutcome::Aborted));
+    }
+
+    #[test]
+    fn test_admin_force_resolve_not_found() {
+        let resolver = make_resolver();
+        let resolved = resolver.admin_force_commit(TxnId(999)).unwrap();
+        assert!(!resolved);
+    }
+
+    #[test]
+    fn test_admin_inspect() {
+        let resolver = make_resolver();
+        resolver.register_indoubt(TxnId(90), vec![
+            (ShardId(0), TxnId(900)),
+            (ShardId(1), TxnId(901)),
+        ]);
+
+        let info = resolver.admin_inspect(TxnId(90)).unwrap();
+        assert_eq!(info.global_txn_id, TxnId(90));
+        assert_eq!(info.participant_count, 2);
+        assert_eq!(info.attempts, 0);
+        assert!(info.last_error.is_none());
+        assert!(info.cached_outcome.is_none());
+    }
+
+    #[test]
+    fn test_admin_inspect_not_found() {
+        let resolver = make_resolver();
+        assert!(resolver.admin_inspect(TxnId(999)).is_none());
+    }
+
+    #[test]
+    fn test_convergence_status_empty() {
+        let resolver = make_resolver();
+        let status = resolver.convergence_status();
+        assert!(status.is_converged);
+        assert_eq!(status.total_indoubt, 0);
+        assert_eq!(status.stuck_count, 0);
+    }
+
+    #[test]
+    fn test_convergence_status_with_indoubt() {
+        let resolver = make_resolver();
+        resolver.register_indoubt(TxnId(1), vec![(ShardId(0), TxnId(100))]);
+        resolver.register_indoubt(TxnId(2), vec![(ShardId(1), TxnId(200))]);
+
+        let status = resolver.convergence_status();
+        assert!(!status.is_converged);
+        assert_eq!(status.total_indoubt, 2);
+        assert_eq!(status.stuck_count, 0);
+        assert_eq!(status.txns.len(), 2);
+    }
+
+    #[test]
+    fn test_convergence_after_sweep() {
+        let resolver = make_resolver();
+        resolver.register_indoubt(TxnId(1), vec![]);
+        resolver.register_indoubt(TxnId(2), vec![]);
+        resolver.sweep();
+
+        let status = resolver.convergence_status();
+        assert!(status.is_converged);
+        assert_eq!(status.total_resolved, 2);
+    }
+
+    #[test]
+    fn test_admin_abort_stuck() {
+        // Create resolver with max_attempts=1 so txns become stuck after 1 failed attempt
+        let cache = make_cache();
+        let resolver = InDoubtResolver::with_config(Arc::clone(&cache), Duration::from_secs(60), 1, 100);
+
+        resolver.register_indoubt(TxnId(1), vec![]);
+        resolver.register_indoubt(TxnId(2), vec![]);
+
+        // Sweep resolves them normally (apply_decision succeeds)
+        // To make them stuck, we need attempts >= max_attempts
+        // Since max_attempts=1 and apply_decision succeeds, they get resolved.
+        // Let's use max_attempts=0 which means all are immediately stuck.
+        let resolver2 = InDoubtResolver::with_config(Arc::clone(&cache), Duration::from_secs(60), 0, 100);
+        resolver2.register_indoubt(TxnId(10), vec![]);
+        resolver2.register_indoubt(TxnId(11), vec![]);
+
+        // Sweep won't resolve them because attempts(0) >= max_attempts(0)
+        resolver2.sweep();
+        assert_eq!(resolver2.indoubt_count(), 2);
+
+        // Admin force-abort stuck
+        let aborted = resolver2.admin_abort_stuck();
+        assert_eq!(aborted, 2);
+        assert_eq!(resolver2.indoubt_count(), 0);
     }
 }

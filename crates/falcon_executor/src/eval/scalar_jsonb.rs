@@ -245,7 +245,7 @@ fn datum_to_json_value(d: &Datum) -> JsonValue {
         Datum::Text(s) => JsonValue::String(s.clone()),
         Datum::Timestamp(us) => JsonValue::Number((*us).into()),
         Datum::Date(days) => {
-            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("unix epoch date is always valid");
             if let Some(d) = epoch.checked_add_signed(chrono::Duration::days(*days as i64)) {
                 JsonValue::String(d.format("%Y-%m-%d").to_string())
             } else {
@@ -259,6 +259,13 @@ fn datum_to_json_value(d: &Datum) -> JsonValue {
             serde_json::Number::from_f64(f)
                 .map(JsonValue::Number)
                 .unwrap_or(JsonValue::Null)
+        }
+        Datum::Time(_) | Datum::Interval(_, _, _) | Datum::Uuid(_) => {
+            JsonValue::String(format!("{}", d))
+        }
+        Datum::Bytea(bytes) => {
+            let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+            JsonValue::String(format!("\\x{}", hex))
         }
     }
 }

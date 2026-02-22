@@ -79,6 +79,14 @@ pub enum DataType {
     /// Fixed-point decimal: Decimal(precision, scale).
     /// precision = total significant digits (max 38), scale = digits after decimal point.
     Decimal(u8, u8),
+    /// TIME without time zone: microseconds since midnight (0..86_400_000_000).
+    Time,
+    /// INTERVAL: months + days + microseconds (PG-compatible triple).
+    Interval,
+    /// UUID: 128-bit universally unique identifier.
+    Uuid,
+    /// BYTEA: arbitrary binary data.
+    Bytea,
 }
 
 impl DataType {
@@ -95,6 +103,10 @@ impl DataType {
             DataType::Array(_) => 2277, // anyarray OID
             DataType::Jsonb => 3802, // jsonb OID
             DataType::Decimal(_, _) => 1700, // numeric OID
+            DataType::Time => 1083,
+            DataType::Interval => 1186,
+            DataType::Uuid => 2950,
+            DataType::Bytea => 17, // bytea OID
         }
     }
 
@@ -111,6 +123,10 @@ impl DataType {
             DataType::Array(_) => -1,
             DataType::Jsonb => -1,
             DataType::Decimal(_, _) => -1, // variable length
+            DataType::Time => 8,
+            DataType::Interval => 16,
+            DataType::Uuid => 16,
+            DataType::Bytea => -1, // variable length
         }
     }
 
@@ -134,6 +150,10 @@ impl DataType {
             },
             DataType::Jsonb => 3802,
             DataType::Decimal(_, _) => 1700, // numeric
+            DataType::Time => 1083,
+            DataType::Interval => 1186,
+            DataType::Uuid => 2950,
+            DataType::Bytea => 17,
         }
     }
 
@@ -157,6 +177,10 @@ impl DataType {
             },
             DataType::Jsonb => "jsonb",
             DataType::Decimal(_, _) => "numeric",
+            DataType::Time => "time",
+            DataType::Interval => "interval",
+            DataType::Uuid => "uuid",
+            DataType::Bytea => "bytea",
         }
     }
 
@@ -185,6 +209,8 @@ impl DataType {
         match self {
             DataType::Timestamp => Some(6),
             DataType::Date => Some(0),
+            DataType::Time => Some(6),
+            DataType::Interval => Some(6),
             _ => None,
         }
     }
@@ -202,6 +228,10 @@ impl DataType {
             DataType::Array(_) => "ARRAY",
             DataType::Jsonb => "jsonb",
             DataType::Decimal(_, _) => "numeric",
+            DataType::Time => "time without time zone",
+            DataType::Interval => "interval",
+            DataType::Uuid => "uuid",
+            DataType::Bytea => "bytea",
         }
     }
 }
@@ -219,6 +249,10 @@ impl fmt::Display for DataType {
             DataType::Array(inner) => write!(f, "{}[]", inner),
             DataType::Jsonb => write!(f, "JSONB"),
             DataType::Decimal(p, s) => write!(f, "DECIMAL({},{})", p, s),
+            DataType::Time => write!(f, "TIME"),
+            DataType::Interval => write!(f, "INTERVAL"),
+            DataType::Uuid => write!(f, "UUID"),
+            DataType::Bytea => write!(f, "BYTEA"),
         }
     }
 }

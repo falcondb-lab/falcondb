@@ -212,7 +212,10 @@ impl Executor {
                             }
                         }
                         WindowFunc::LastValue(col_idx) => {
-                            let last_row_idx = *indices.last().unwrap();
+                            let last_row_idx = match indices.last() {
+                                Some(idx) => *idx,
+                                None => continue, // empty partition — skip
+                            };
                             let val = source_rows[last_row_idx]
                                 .get(*col_idx)
                                 .cloned()

@@ -16,10 +16,17 @@ use crate::memory::{MemoryBudget, MemoryTracker};
 use crate::online_ddl::OnlineDdlManager;
 use crate::stats::TableStatistics;
 
+use crate::cdc::CdcManager;
 use crate::columnstore::ColumnStoreTable;
 use crate::disk_rowstore::DiskRowstoreTable;
+use crate::encryption::KeyManager;
+use crate::lsm_table::LsmTable;
 use crate::memtable::{MemTable, PrimaryKey};
+use crate::partition::PartitionManager;
+use crate::pitr::WalArchiver;
 use crate::wal::{CheckpointData, SyncMode, WalRecord, WalWriter};
+
+use falcon_common::rls::RlsPolicyManager;
 
 #[derive(Debug, Clone)]
 pub(crate) struct TxnWriteOp {
@@ -290,6 +297,8 @@ pub struct StorageEngine {
     pub(crate) columnstore_tables: DashMap<TableId, Arc<ColumnStoreTable>>,
     /// Disk-based rowstore tables (B-tree on disk).
     pub(crate) disk_tables: DashMap<TableId, Arc<DiskRowstoreTable>>,
+    /// LSM-tree backed rowstore tables.
+    pub(crate) lsm_tables: DashMap<TableId, Arc<LsmTable>>,
     /// Data directory for disk-based tables (None = in-memory only).
     pub(crate) data_dir: Option<PathBuf>,
     /// Schema catalog (protected by RwLock for DDL).
@@ -331,6 +340,17 @@ pub struct StorageEngine {
     pub(crate) write_path_disk_violations: AtomicU64,
     /// Enforcement level for write-path purity violations on Primary nodes.
     pub(crate) write_path_enforcement: WritePathEnforcement,
+    // ── Enterprise Features ──
+    /// Row-Level Security policy manager.
+    pub rls_manager: RwLock<RlsPolicyManager>,
+    /// Transparent Data Encryption key manager.
+    pub key_manager: RwLock<KeyManager>,
+    /// Table partitioning manager.
+    pub partition_manager: RwLock<PartitionManager>,
+    /// WAL archiver for Point-in-Time Recovery.
+    pub wal_archiver: RwLock<WalArchiver>,
+    /// Change Data Capture stream manager.
+    pub cdc_manager: RwLock<CdcManager>,
 }
 
 impl StorageEngine {
@@ -347,6 +367,7 @@ impl StorageEngine {
             tables: DashMap::new(),
             columnstore_tables: DashMap::new(),
             disk_tables: DashMap::new(),
+            lsm_tables: DashMap::new(),
             data_dir: wal_dir.map(|d| d.to_path_buf()),
             catalog: RwLock::new(Catalog::new()),
             wal,
@@ -367,6 +388,11 @@ impl StorageEngine {
             write_path_columnstore_violations: AtomicU64::new(0),
             write_path_disk_violations: AtomicU64::new(0),
             write_path_enforcement: WritePathEnforcement::Warn,
+            rls_manager: RwLock::new(RlsPolicyManager::new()),
+            key_manager: RwLock::new(KeyManager::disabled()),
+            partition_manager: RwLock::new(PartitionManager::new()),
+            wal_archiver: RwLock::new(WalArchiver::disabled()),
+            cdc_manager: RwLock::new(CdcManager::disabled()),
         })
     }
 
@@ -422,6 +448,7 @@ impl StorageEngine {
             tables: DashMap::new(),
             columnstore_tables: DashMap::new(),
             disk_tables: DashMap::new(),
+            lsm_tables: DashMap::new(),
             data_dir: Some(wal_dir.to_path_buf()),
             catalog: RwLock::new(Catalog::new()),
             wal,
@@ -442,6 +469,11 @@ impl StorageEngine {
             write_path_columnstore_violations: AtomicU64::new(0),
             write_path_disk_violations: AtomicU64::new(0),
             write_path_enforcement: WritePathEnforcement::Warn,
+            rls_manager: RwLock::new(RlsPolicyManager::new()),
+            key_manager: RwLock::new(KeyManager::disabled()),
+            partition_manager: RwLock::new(PartitionManager::new()),
+            wal_archiver: RwLock::new(WalArchiver::disabled()),
+            cdc_manager: RwLock::new(CdcManager::disabled()),
         })
     }
 
@@ -452,6 +484,7 @@ impl StorageEngine {
             tables: DashMap::new(),
             columnstore_tables: DashMap::new(),
             disk_tables: DashMap::new(),
+            lsm_tables: DashMap::new(),
             data_dir: None,
             catalog: RwLock::new(Catalog::new()),
             wal: None,
@@ -472,6 +505,11 @@ impl StorageEngine {
             write_path_columnstore_violations: AtomicU64::new(0),
             write_path_disk_violations: AtomicU64::new(0),
             write_path_enforcement: WritePathEnforcement::Warn,
+            rls_manager: RwLock::new(RlsPolicyManager::new()),
+            key_manager: RwLock::new(KeyManager::disabled()),
+            partition_manager: RwLock::new(PartitionManager::new()),
+            wal_archiver: RwLock::new(WalArchiver::disabled()),
+            cdc_manager: RwLock::new(CdcManager::disabled()),
         }
     }
 
@@ -482,6 +520,7 @@ impl StorageEngine {
             tables: DashMap::new(),
             columnstore_tables: DashMap::new(),
             disk_tables: DashMap::new(),
+            lsm_tables: DashMap::new(),
             data_dir: None,
             catalog: RwLock::new(Catalog::new()),
             wal: None,
@@ -502,6 +541,11 @@ impl StorageEngine {
             write_path_columnstore_violations: AtomicU64::new(0),
             write_path_disk_violations: AtomicU64::new(0),
             write_path_enforcement: WritePathEnforcement::Warn,
+            rls_manager: RwLock::new(RlsPolicyManager::new()),
+            key_manager: RwLock::new(KeyManager::disabled()),
+            partition_manager: RwLock::new(PartitionManager::new()),
+            wal_archiver: RwLock::new(WalArchiver::disabled()),
+            cdc_manager: RwLock::new(CdcManager::disabled()),
         }
     }
 
@@ -1474,6 +1518,10 @@ pub(crate) fn datatype_to_cast_target(dt: &falcon_common::types::DataType) -> St
         DataType::Jsonb => "jsonb".into(),
         DataType::Array(_) => "text".into(),
         DataType::Decimal(_, _) => "numeric".into(),
+        DataType::Time => "time".into(),
+        DataType::Interval => "interval".into(),
+        DataType::Uuid => "uuid".into(),
+        DataType::Bytea => "bytea".into(),
     }
 }
 

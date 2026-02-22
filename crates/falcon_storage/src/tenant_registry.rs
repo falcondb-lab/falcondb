@@ -96,6 +96,8 @@ pub struct TenantRegistry {
     tenants: DashMap<TenantId, TenantEntry>,
     /// QPS measurement window duration in milliseconds.
     qps_window_ms: u64,
+    /// Monotonic counter for generating unique tenant IDs.
+    next_id: AtomicU64,
 }
 
 impl TenantRegistry {
@@ -104,6 +106,7 @@ impl TenantRegistry {
         let reg = Self {
             tenants: DashMap::new(),
             qps_window_ms: 1000, // 1-second QPS windows
+            next_id: AtomicU64::new(2), // 1 is reserved for SYSTEM_TENANT_ID
         };
         // Always register the system tenant.
         reg.register_tenant(TenantConfig::system());
@@ -126,6 +129,11 @@ impl TenantRegistry {
             counters: TenantResourceCounters::new(),
         });
         true
+    }
+
+    /// Allocate a unique tenant ID. Thread-safe (atomic increment).
+    pub fn alloc_tenant_id(&self) -> TenantId {
+        TenantId(self.next_id.fetch_add(1, Ordering::SeqCst))
     }
 
     /// Remove a tenant from the registry. Returns the config if found.
@@ -320,7 +328,7 @@ impl Default for TenantRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use falcon_common::tenant::{TenantConfig, TenantQuota, TenantId};
+    use falcon_common::tenant::{TenantConfig, TenantQuota, TenantId, SYSTEM_TENANT_ID};
 
     #[test]
     fn test_system_tenant_pre_registered() {

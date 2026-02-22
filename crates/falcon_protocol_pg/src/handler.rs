@@ -726,791 +726,12 @@ impl QueryHandler {
         Ok(messages)
     }
 
-    /// Process COPY FROM STDIN data collected by the server connection loop.
-    /// Returns backend messages to send (CommandComplete or ErrorResponse).
-    ///
-    /// Wrapped in crash-domain guard — panics are caught and converted to ErrorResponse.
-    pub fn handle_copy_data(
-        &self,
-        data: &[u8],
-        session: &mut PgSession,
-    ) -> Vec<BackendMessage> {
-        let rctx = falcon_common::request_context::RequestContext::new(session.id as u64);
-        let ctx = format!("session_id={}", session.id);
-        let result = falcon_common::crash_domain::catch_request(
-            "handle_copy_data",
-            &ctx,
-            || self.handle_copy_data_inner(data, session),
-        );
-        match result {
-            Ok(msgs) => msgs,
-            Err(e) => vec![self.error_response(&e.with_request_context(&rctx))],
-        }
-    }
+    // handle_copy_data and handle_copy_data_inner are in handler_copy.rs
 
-    fn handle_copy_data_inner(
-        &self,
-        data: &[u8],
-        session: &mut PgSession,
-    ) -> Vec<BackendMessage> {
-        let copy_state = match session.copy_state.take() {
-            Some(cs) => cs,
-            None => {
-                return vec![BackendMessage::ErrorResponse {
-                    severity: "ERROR".into(),
-                    code: "08P01".into(),
-                    message: "No active COPY operation".into(),
-                }];
-            }
-        };
-
-        // Ensure a transaction
-        let auto_txn = if session.txn.is_none() {
-            let classification = TxnClassification::local(ShardId(0));
-            let txn = match self.txn_mgr
-                .try_begin_with_classification(session.default_isolation, classification) {
-                Ok(t) => t,
-                Err(e) => {
-                    let ce: FalconError = e.into();
-                    return vec![self.error_response(&ce)];
-                }
-            };
-            session.txn = Some(txn);
-            true
-        } else {
-            false
-        };
-
-        let result = self.executor.exec_copy_from_data(
-            copy_state.table_id,
-            &copy_state.schema,
-            &copy_state.columns,
-            data,
-            copy_state.format.csv,
-            copy_state.format.delimiter,
-            copy_state.format.header,
-            &copy_state.format.null_string,
-            copy_state.format.quote,
-            copy_state.format.escape,
-            match session.txn.as_ref() {
-                Some(t) => t,
-                None => return vec![BackendMessage::ErrorResponse {
-                    severity: "ERROR".into(),
-                    code: "25P01".into(),
-                    message: "no active transaction for COPY FROM".into(),
-                }],
-            },
-        );
-
-        let messages = match result {
-            Ok(ExecutionResult::Dml { rows_affected, .. }) => {
-                if auto_txn {
-                    if let Some(ref txn) = session.txn {
-                        let _ = self.txn_mgr.commit(txn.txn_id);
-                    }
-                    session.txn = None;
-                    self.flush_txn_stats();
-                }
-                vec![BackendMessage::CommandComplete {
-                    tag: format!("COPY {}", rows_affected),
-                }]
-            }
-            Err(e) => {
-                if auto_txn {
-                    if let Some(ref txn) = session.txn {
-                        let _ = self.txn_mgr.abort(txn.txn_id);
-                    }
-                    session.txn = None;
-                    self.flush_txn_stats();
-                }
-                vec![self.error_response(&e)]
-            }
-            _ => {
-                vec![BackendMessage::ErrorResponse {
-                    severity: "ERROR".into(),
-                    code: "XX000".into(),
-                    message: "Unexpected COPY FROM result".into(),
-                }]
-            }
-        };
-
-        messages
-    }
-
-    /// Intercept system queries that psql and PG drivers send.
-    /// Returns Some(messages) if handled, None to fall through to normal execution.
-    fn handle_system_query(&self, sql: &str, session: &mut PgSession) -> Option<Vec<BackendMessage>> {
-        let sql_lower = sql.to_lowercase();
-        let sql_lower = sql_lower.trim().trim_end_matches(';').trim();
-
-        // SELECT version()
-        if sql_lower == "select version()" || sql_lower.starts_with("select version()") {
-            return Some(self.single_row_result(
-                vec![("version", 25, -1)],
-                vec![vec![Some("PostgreSQL 15.0.0 on FalconDB (in-memory OLTP)".into())]],
-            ));
-        }
-
-        // SELECT current_schema() / current_database() / current_user
-        if sql_lower == "select current_schema()" || sql_lower.starts_with("select current_schema") {
-            return Some(self.single_row_result(
-                vec![("current_schema", 25, -1)],
-                vec![vec![Some("public".into())]],
-            ));
-        }
-        if sql_lower == "select current_database()" || sql_lower.starts_with("select current_database") {
-            return Some(self.single_row_result(
-                vec![("current_database", 25, -1)],
-                vec![vec![Some("falcon".into())]],
-            ));
-        }
-        if sql_lower == "select current_user" {
-            return Some(self.single_row_result(
-                vec![("current_user", 25, -1)],
-                vec![vec![Some("falcon".into())]],
-            ));
-        }
-
-        // SET log_min_duration_statement = <ms>
-        if let Some(threshold_ms) = parse_set_log_min_duration(sql_lower) {
-            self.slow_query_log.set_threshold(
-                std::time::Duration::from_millis(threshold_ms)
-            );
-            return Some(vec![BackendMessage::CommandComplete {
-                tag: "SET".into(),
-            }]);
-        }
-
-        // Cluster admin commands: SELECT falcon_add_node(id), falcon_remove_node(id),
-        // falcon_promote_leader(shard_id), falcon_rebalance_apply()
-        if sql_lower.starts_with("select falcon_") {
-            if let Some(result) = self.parse_and_dispatch_admin_command(sql_lower) {
-                return Some(result);
-            }
-        }
-
-        // CHECKPOINT — trigger a storage checkpoint (WAL compaction)
-        if sql_lower == "checkpoint" {
-            match self.storage.checkpoint() {
-                Ok((segment_id, row_count)) => {
-                    return Some(self.single_row_result(
-                        vec![("checkpoint", 25, -1)],
-                        vec![vec![Some(format!("OK segment={} rows={}", segment_id, row_count))]],
-                    ));
-                }
-                Err(e) => {
-                    return Some(vec![BackendMessage::ErrorResponse {
-                        severity: "ERROR".into(),
-                        code: "XX000".into(),
-                        message: format!("CHECKPOINT failed: {}", e),
-                    }]);
-                }
-            }
-        }
-
-        // RESET falcon.slow_queries — clear the slow query log
-        if sql_lower == "reset falcon.slow_queries" {
-            self.slow_query_log.clear();
-            return Some(vec![BackendMessage::CommandComplete {
-                tag: "RESET".into(),
-            }]);
-        }
-
-        // SET <var> = <value> / SET <var> TO <value> — store in session GUC
-        if sql_lower.starts_with("set ") {
-            if let Some((name, value)) = parse_set_command(sql_lower) {
-                session.set_guc(&name, &value);
-            }
-            return Some(vec![BackendMessage::CommandComplete {
-                tag: "SET".into(),
-            }]);
-        }
-
-        // SAVEPOINT <name>
-        if sql_lower.starts_with("savepoint ") {
-            let name = sql_lower.trim_start_matches("savepoint ").trim().to_string();
-            if !session.in_transaction() {
-                return Some(vec![BackendMessage::ErrorResponse {
-                    severity: "ERROR".into(),
-                    code: "25P01".into(),
-                    message: "SAVEPOINT can only be used in transaction blocks".into(),
-                }]);
-            }
-            let txn_id = match session.txn.as_ref() {
-                Some(t) => t.txn_id,
-                None => return Some(vec![BackendMessage::ErrorResponse {
-                    severity: "ERROR".into(),
-                    code: "25P01".into(),
-                    message: "SAVEPOINT requires an active transaction".into(),
-                }]),
-            };
-            let write_set_len = self.storage.write_set_snapshot(txn_id);
-            let read_set_len = self.storage.read_set_snapshot(txn_id);
-            session.savepoints.push(crate::session::SavepointEntry {
-                name,
-                write_set_len,
-                read_set_len,
-            });
-            return Some(vec![BackendMessage::CommandComplete {
-                tag: "SAVEPOINT".into(),
-            }]);
-        }
-
-        // ROLLBACK TO [SAVEPOINT] <name>
-        if sql_lower.starts_with("rollback to ") {
-            let rest = sql_lower.trim_start_matches("rollback to ").trim();
-            let name = rest.strip_prefix("savepoint ").unwrap_or(rest).trim();
-            if let Some(pos) = session.savepoints.iter().rposition(|sp| sp.name == name) {
-                let write_snap = session.savepoints[pos].write_set_len;
-                let read_snap = session.savepoints[pos].read_set_len;
-                if let Some(ref txn) = session.txn {
-                    self.storage.rollback_write_set_after(txn.txn_id, write_snap);
-                    self.storage.rollback_read_set_after(txn.txn_id, read_snap);
-                }
-                session.savepoints.truncate(pos + 1);
-                return Some(vec![BackendMessage::CommandComplete {
-                    tag: "ROLLBACK".into(),
-                }]);
-            } else {
-                return Some(vec![BackendMessage::ErrorResponse {
-                    severity: "ERROR".into(),
-                    code: "3B001".into(),
-                    message: format!("savepoint \"{}\" does not exist", name),
-                }]);
-            }
-        }
-
-        // RELEASE [SAVEPOINT] <name>
-        if sql_lower.starts_with("release ") {
-            let rest = sql_lower.trim_start_matches("release ").trim();
-            let name = rest.strip_prefix("savepoint ").unwrap_or(rest).trim();
-            if let Some(pos) = session.savepoints.iter().rposition(|sp| sp.name == name) {
-                session.savepoints.remove(pos);
-                return Some(vec![BackendMessage::CommandComplete {
-                    tag: "RELEASE".into(),
-                }]);
-            } else {
-                return Some(vec![BackendMessage::ErrorResponse {
-                    severity: "ERROR".into(),
-                    code: "3B001".into(),
-                    message: format!("savepoint \"{}\" does not exist", name),
-                }]);
-            }
-        }
-
-        // CREATE TENANT name [MAX_QPS n] [MAX_CONNECTIONS n] [MAX_STORAGE_BYTES n]
-        if sql_lower.starts_with("create tenant ") {
-            let rest = sql_lower.trim_start_matches("create tenant ").trim();
-            let parts: Vec<&str> = rest.split_whitespace().collect();
-            if parts.is_empty() {
-                return Some(vec![BackendMessage::ErrorResponse {
-                    severity: "ERROR".into(),
-                    code: "42601".into(),
-                    message: "CREATE TENANT requires a tenant name".into(),
-                }]);
-            }
-            let tenant_name = parts[0].to_string();
-            let mut max_qps = 0u64;
-            let mut max_storage_bytes = 0u64;
-            let mut i = 1;
-            while i + 1 < parts.len() {
-                match parts[i] {
-                    "max_qps" => { max_qps = parts[i+1].parse().unwrap_or(0); i += 2; }
-                    "max_storage_bytes" => { max_storage_bytes = parts[i+1].parse().unwrap_or(0); i += 2; }
-                    _ => { i += 1; }
-                }
-            }
-            let tenant_id = falcon_common::tenant::TenantId(
-                self.tenant_registry.tenant_count() as u64 + 1
-            );
-            let mut config = falcon_common::tenant::TenantConfig::new(tenant_id, tenant_name.clone());
-            config.quota.max_qps = max_qps;
-            config.quota.max_storage_bytes = max_storage_bytes;
-            if self.tenant_registry.register_tenant(config) {
-                return Some(vec![BackendMessage::CommandComplete {
-                    tag: format!("CREATE TENANT {}", tenant_name),
-                }]);
-            } else {
-                return Some(vec![BackendMessage::ErrorResponse {
-                    severity: "ERROR".into(),
-                    code: "42710".into(),
-                    message: format!("tenant \"{}\" already exists", tenant_name),
-                }]);
-            }
-        }
-
-        // DROP TENANT name
-        if sql_lower.starts_with("drop tenant ") {
-            let tenant_name = sql_lower.trim_start_matches("drop tenant ").trim().to_string();
-            let found = self.tenant_registry.tenant_ids().into_iter().find(|tid| {
-                self.tenant_registry.get_config(*tid).map(|c| c.name == tenant_name).unwrap_or(false)
-            });
-            if let Some(tid) = found {
-                self.tenant_registry.remove_tenant(tid);
-                return Some(vec![BackendMessage::CommandComplete {
-                    tag: format!("DROP TENANT {}", tenant_name),
-                }]);
-            } else {
-                return Some(vec![BackendMessage::ErrorResponse {
-                    severity: "ERROR".into(),
-                    code: "42704".into(),
-                    message: format!("tenant \"{}\" does not exist", tenant_name),
-                }]);
-            }
-        }
-
-        // SHOW ... queries
-        if sql_lower.starts_with("show ") {
-            let param = sql_lower.trim_start_matches("show ").trim();
-
-            // Delegate falcon.* SHOW commands to handler_show module
-            if param.starts_with("falcon.") {
-                if let Some(result) = self.handle_show_falcon(param, session) {
-                    return Some(result);
-                }
-            }
-
-            // Look up GUC variable from session, with hardcoded fallbacks
-            let value = if let Some(v) = session.get_guc(param) {
-                v.to_string()
-            } else {
-                match param {
-                    "transaction_isolation" => "read committed".into(),
-                    "max_identifier_length" => "63".into(),
-                    _ => "".into(),
-                }
-            };
-            return Some(self.single_row_result(
-                vec![(param, 25, -1)],
-                vec![vec![Some(value)]],
-            ));
-        }
-
-        // Delegate information_schema and pg_catalog queries to handler_catalog module
-        if let Some(result) = self.handle_catalog_query(sql_lower, session) {
-            return Some(result);
-        }
-
-        // PREPARE name [(type, ...)] AS query
-        if sql_lower.starts_with("prepare ") {
-            if let Some((name, query)) = parse_prepare_statement(sql) {
-                session.prepared_statements.insert(
-                    name,
-                    crate::session::PreparedStatement {
-                        query,
-                        param_types: vec![],
-                        plan: None,
-                        inferred_param_types: vec![],
-                        row_desc: vec![],
-                    },
-                );
-                falcon_observability::record_prepared_stmt_sql_cmd("prepare");
-                falcon_observability::record_prepared_stmt_active(session.prepared_statements.len());
-                return Some(vec![BackendMessage::CommandComplete {
-                    tag: "PREPARE".into(),
-                }]);
-            }
-            return Some(vec![BackendMessage::ErrorResponse {
-                severity: "ERROR".into(),
-                code: "42601".into(),
-                message: "invalid PREPARE syntax".into(),
-            }]);
-        }
-
-        // EXECUTE name [(param, ...)]
-        if sql_lower.starts_with("execute ") {
-            if let Some((name, params)) = parse_execute_statement(sql) {
-                let bound = if let Some(ps) = session.prepared_statements.get(&name) {
-                    bind_params(&ps.query, &params)
-                } else {
-                    return Some(vec![BackendMessage::ErrorResponse {
-                        severity: "ERROR".into(),
-                        code: "26000".into(),
-                        message: format!("prepared statement \"{}\" does not exist", name),
-                    }]);
-                };
-                // Execute the bound SQL through the normal query path
-                falcon_observability::record_prepared_stmt_sql_cmd("execute");
-                return Some(self.handle_query(&bound, session));
-            }
-        }
-
-        // DISCARD ALL (psql sends this on reconnect sometimes)
-        if sql_lower == "discard all" {
-            session.reset_all_gucs();
-            session.prepared_statements.clear();
-            session.portals.clear();
-            return Some(vec![BackendMessage::CommandComplete {
-                tag: "DISCARD ALL".into(),
-            }]);
-        }
-
-        // DEALLOCATE [ALL | name]
-        if sql_lower.starts_with("deallocate") {
-            let rest = sql_lower.trim_start_matches("deallocate").trim().trim_end_matches(';').trim();
-            if rest == "all" {
-                session.prepared_statements.clear();
-            } else if !rest.is_empty() {
-                session.prepared_statements.remove(rest);
-            }
-            falcon_observability::record_prepared_stmt_sql_cmd("deallocate");
-            falcon_observability::record_prepared_stmt_active(session.prepared_statements.len());
-            return Some(vec![BackendMessage::CommandComplete {
-                tag: "DEALLOCATE".into(),
-            }]);
-        }
-
-        // RESET [ALL | var]
-        if sql_lower.starts_with("reset ") {
-            let var = sql_lower.trim_start_matches("reset ").trim().trim_end_matches(';').trim();
-            if var == "all" {
-                session.reset_all_gucs();
-            } else {
-                session.reset_guc(var);
-            }
-            return Some(vec![BackendMessage::CommandComplete {
-                tag: "RESET".into(),
-            }]);
-        }
-
-        // ── LISTEN channel ──
-        if sql_lower.starts_with("listen ") {
-            let channel = sql_lower.trim_start_matches("listen ").trim().trim_end_matches(';').trim().to_string();
-            if !channel.is_empty() {
-                session.notifications.listen(&channel, &session.notification_hub);
-            }
-            return Some(vec![BackendMessage::CommandComplete {
-                tag: "LISTEN".into(),
-            }]);
-        }
-
-        // ── UNLISTEN channel | UNLISTEN * ──
-        if sql_lower.starts_with("unlisten ") {
-            let channel = sql_lower.trim_start_matches("unlisten ").trim().trim_end_matches(';').trim();
-            if channel == "*" {
-                session.notifications.unlisten_all(&session.notification_hub);
-            } else {
-                session.notifications.unlisten(channel, &session.notification_hub);
-            }
-            return Some(vec![BackendMessage::CommandComplete {
-                tag: "UNLISTEN".into(),
-            }]);
-        }
-
-        // ── NOTIFY channel [, 'payload'] ──
-        if sql_lower.starts_with("notify ") {
-            let rest = sql.trim_start_matches(|c: char| c.is_alphabetic() || c == ' ')
-                .trim_end_matches(';').trim();
-            // rest is now "channel" or "channel, 'payload'"
-            let (channel, payload) = if let Some(comma_pos) = rest.find(',') {
-                let ch = rest[..comma_pos].trim().to_lowercase();
-                let pl = rest[comma_pos + 1..].trim().trim_matches('\'').to_string();
-                (ch, pl)
-            } else {
-                (rest.trim().to_lowercase(), String::new())
-            };
-            if !channel.is_empty() {
-                session.notification_hub.notify(&channel, session.id, &payload);
-            }
-            return Some(vec![BackendMessage::CommandComplete {
-                tag: "NOTIFY".into(),
-            }]);
-        }
-
-        // ── DECLARE cursor_name [NO SCROLL] CURSOR [WITH HOLD] FOR query ──
-        if sql_lower.starts_with("declare ") {
-            return Some(self.handle_declare_cursor(sql, sql_lower, session));
-        }
-
-        // ── FETCH [count] FROM cursor_name ──
-        if sql_lower.starts_with("fetch ") {
-            return Some(self.handle_fetch_cursor(sql_lower, session));
-        }
-
-        // ── MOVE [count] FROM cursor_name ──
-        if sql_lower.starts_with("move ") {
-            let rest = sql_lower.trim_start_matches("move ").trim();
-            let (count, cursor_name, backward) = Self::parse_move_args(rest);
-            match session.cursors.get_mut(&cursor_name) {
-                Some(cursor) => {
-                    let moved = if backward {
-                        let actual = count.min(cursor.position);
-                        cursor.position -= actual;
-                        actual
-                    } else {
-                        let remaining = cursor.rows.len().saturating_sub(cursor.position);
-                        let actual = count.min(remaining);
-                        cursor.position += actual;
-                        actual
-                    };
-                    return Some(vec![BackendMessage::CommandComplete {
-                        tag: format!("MOVE {}", moved),
-                    }]);
-                }
-                None => {
-                    return Some(vec![BackendMessage::ErrorResponse {
-                        severity: "ERROR".into(),
-                        code: "34000".into(),
-                        message: format!("cursor \"{}\" does not exist", cursor_name),
-                    }]);
-                }
-            }
-        }
-
-        // ── CLOSE cursor_name | CLOSE ALL ──
-        if sql_lower.starts_with("close ") {
-            let rest = sql_lower.trim_start_matches("close ").trim();
-            if rest == "all" {
-                session.cursors.clear();
-            } else {
-                session.cursors.remove(rest);
-            }
-            return Some(vec![BackendMessage::CommandComplete {
-                tag: "CLOSE CURSOR".into(),
-            }]);
-        }
-
-        None
-    }
-
-    /// Handle DECLARE cursor_name [NO SCROLL] CURSOR [WITH HOLD] FOR query
-    fn handle_declare_cursor(
-        &self,
-        sql: &str,
-        sql_lower: &str,
-        session: &mut PgSession,
-    ) -> Vec<BackendMessage> {
-        // Parse: DECLARE name [NO SCROLL] CURSOR [WITH HOLD] FOR <query>
-        let rest = sql_lower.trim_start_matches("declare ").trim();
-        let parts: Vec<&str> = rest.splitn(2, " cursor").collect();
-        if parts.len() < 2 {
-            return vec![BackendMessage::ErrorResponse {
-                severity: "ERROR".into(),
-                code: "42601".into(),
-                message: "syntax error in DECLARE CURSOR".into(),
-            }];
-        }
-
-        let cursor_name = parts[0].trim_end_matches(" no scroll").trim().to_string();
-        let with_hold = parts[1].contains("with hold");
-
-        // Extract the FOR query
-        let for_pos = rest.find(" for ");
-        if for_pos.is_none() {
-            return vec![BackendMessage::ErrorResponse {
-                severity: "ERROR".into(),
-                code: "42601".into(),
-                message: "DECLARE CURSOR requires FOR <query>".into(),
-            }];
-        }
-        let for_idx = match for_pos {
-            Some(i) => i,
-            None => return vec![BackendMessage::ErrorResponse {
-                severity: "ERROR".into(),
-                code: "42601".into(),
-                message: "DECLARE CURSOR: FOR position not found".into(),
-            }],
-        };
-        // Get the original-case SQL for the query portion
-        let declare_prefix_len = "declare ".len();
-        let query_start = declare_prefix_len + for_idx + " for ".len();
-        let query = if query_start < sql.len() {
-            sql[query_start..].trim().trim_end_matches(';').to_string()
-        } else {
-            return vec![BackendMessage::ErrorResponse {
-                severity: "ERROR".into(),
-                code: "42601".into(),
-                message: "empty query in DECLARE CURSOR".into(),
-            }];
-        };
-
-        // Execute the query and store results in cursor
-        let txn = session.txn.as_ref();
-        match self.execute_sql_for_cursor(&query, txn) {
-            Ok((columns, rows)) => {
-                session.cursors.insert(cursor_name.clone(), crate::session::CursorState {
-                    name: cursor_name,
-                    rows,
-                    columns,
-                    position: 0,
-                    with_hold,
-                });
-                vec![BackendMessage::CommandComplete {
-                    tag: "DECLARE CURSOR".into(),
-                }]
-            }
-            Err(msg) => vec![BackendMessage::ErrorResponse {
-                severity: "ERROR".into(),
-                code: "42P03".into(),
-                message: msg,
-            }],
-        }
-    }
-
-    /// Execute a SQL query and return (columns, rows) for cursor materialization.
-    #[allow(clippy::type_complexity)]
-    fn execute_sql_for_cursor(
-        &self,
-        query: &str,
-        txn: Option<&falcon_txn::TxnHandle>,
-    ) -> Result<(Vec<(String, falcon_common::types::DataType)>, Vec<falcon_common::datum::OwnedRow>), String> {
-        let catalog = self.storage.get_catalog();
-        let mut binder = Binder::new(catalog);
-        let stmts = parse_sql(query).map_err(|e| format!("parse error: {}", e))?;
-        if stmts.is_empty() {
-            return Err("empty query".into());
-        }
-        let bound = binder.bind(&stmts[0]).map_err(|e| format!("bind error: {}", e))?;
-        let plan = Planner::plan(&bound).map_err(|e| format!("plan error: {}", e))?;
-        let result = self.executor.execute(&plan, txn).map_err(|e| format!("exec error: {}", e))?;
-        match result {
-            falcon_executor::ExecutionResult::Query { columns, rows } => Ok((columns, rows)),
-            _ => Err("DECLARE CURSOR requires a SELECT query".into()),
-        }
-    }
-
-    /// Handle FETCH [count] FROM cursor_name
-    fn handle_fetch_cursor(
-        &self,
-        sql_lower: &str,
-        session: &mut PgSession,
-    ) -> Vec<BackendMessage> {
-        let rest = sql_lower.trim_start_matches("fetch ").trim();
-
-        // Parse: FETCH [NEXT | FORWARD | count] [FROM | IN] cursor_name
-        let (count, cursor_name) = Self::parse_fetch_args(rest);
-
-        let cursor = match session.cursors.get_mut(&cursor_name) {
-            Some(c) => c,
-            None => return vec![BackendMessage::ErrorResponse {
-                severity: "ERROR".into(),
-                code: "34000".into(),
-                message: format!("cursor \"{}\" does not exist", cursor_name),
-            }],
-        };
-
-        // Build field descriptions
-        let fields: Vec<FieldDescription> = cursor.columns.iter().map(|(name, dt)| {
-            let (type_oid, type_len) = Self::data_type_to_pg_oid(dt);
-            FieldDescription {
-                name: name.clone(),
-                table_oid: 0, column_attr: 0,
-                type_oid, type_len,
-                type_modifier: -1, format_code: 0,
-            }
-        }).collect();
-
-        let mut msgs = vec![BackendMessage::RowDescription { fields }];
-
-        // Fetch up to `count` rows from current position
-        let end = (cursor.position + count).min(cursor.rows.len());
-        for i in cursor.position..end {
-            let row_vals: Vec<Option<String>> = cursor.rows[i].values.iter()
-                .map(|d| if d.is_null() { None } else { Some(format!("{}", d)) })
-                .collect();
-            msgs.push(BackendMessage::DataRow { values: row_vals });
-        }
-        let fetched = end - cursor.position;
-        cursor.position = end;
-
-        msgs.push(BackendMessage::CommandComplete {
-            tag: format!("FETCH {}", fetched),
-        });
-        msgs
-    }
-
-    /// Parse FETCH arguments: [NEXT | FORWARD | ALL | count] [FROM | IN] cursor_name
-    fn parse_fetch_args(rest: &str) -> (usize, String) {
-        let tokens: Vec<&str> = rest.split_whitespace().collect();
-        match tokens.len() {
-            1 => (1, tokens[0].to_string()),
-            2 => {
-                if tokens[0] == "from" || tokens[0] == "in"
-                    || tokens[0] == "next" || tokens[0] == "forward"
-                {
-                    (1, tokens[1].to_string())
-                } else if tokens[0] == "all" {
-                    (usize::MAX, tokens[1].to_string())
-                } else if let Ok(n) = tokens[0].parse::<usize>() {
-                    (n, tokens[1].to_string())
-                } else {
-                    (1, tokens[0].to_string())
-                }
-            }
-            3.. => {
-                // Try: count FROM name / FORWARD count FROM name / NEXT FROM name
-                let first = tokens[0];
-                let last_token = tokens.last().copied().unwrap_or("").to_string();
-                if first == "next" || first == "forward" {
-                    let count = tokens.get(1).and_then(|t| t.parse::<usize>().ok()).unwrap_or(1);
-                    (count, last_token)
-                } else if first == "all" {
-                    (usize::MAX, last_token)
-                } else if let Ok(n) = first.parse::<usize>() {
-                    (n, last_token)
-                } else {
-                    (1, last_token)
-                }
-            }
-            _ => (1, String::new()),
-        }
-    }
-
-    /// Parse MOVE arguments: [BACKWARD | FORWARD] [count | ALL] [FROM | IN] cursor_name
-    /// Returns (count, cursor_name, backward).
-    fn parse_move_args(rest: &str) -> (usize, String, bool) {
-        let tokens: Vec<&str> = rest.split_whitespace().collect();
-        let mut backward = false;
-        let mut count = 1usize;
-        let mut cursor_name = String::new();
-
-        let mut i = 0;
-        if i < tokens.len() && tokens[i] == "backward" {
-            backward = true;
-            i += 1;
-        } else if i < tokens.len() && tokens[i] == "forward" {
-            i += 1;
-        }
-
-        if i < tokens.len() {
-            if tokens[i] == "all" {
-                count = usize::MAX;
-                i += 1;
-            } else if let Ok(n) = tokens[i].parse::<usize>() {
-                count = n;
-                i += 1;
-            }
-        }
-
-        // Skip FROM/IN
-        if i < tokens.len() && (tokens[i] == "from" || tokens[i] == "in") {
-            i += 1;
-        }
-
-        if i < tokens.len() {
-            cursor_name = tokens[i].to_string();
-        }
-
-        (count, cursor_name, backward)
-    }
-
-    /// Map DataType to PG OID and type_len for cursor column descriptions.
-    fn data_type_to_pg_oid(dt: &falcon_common::types::DataType) -> (i32, i16) {
-        use falcon_common::types::DataType;
-        match dt {
-            DataType::Int32 => (23, 4),    // int4
-            DataType::Int64 => (20, 8),    // int8
-            DataType::Float64 => (701, 8), // float8
-            DataType::Text => (25, -1),    // text
-            DataType::Boolean => (16, 1),  // bool
-            DataType::Timestamp => (1114, 8), // timestamp
-            DataType::Date => (1082, 4),   // date
-            _ => (25, -1),                 // fallback to text
-        }
-    }
+    // handle_system_query, cursor helpers, savepoint/tenant handlers are in handler_session.rs
 
     /// Parse and dispatch cluster admin commands like `SELECT falcon_add_node(42)`.
-    fn parse_and_dispatch_admin_command(&self, sql_lower: &str) -> Option<Vec<BackendMessage>> {
+    pub(crate) fn parse_and_dispatch_admin_command(&self, sql_lower: &str) -> Option<Vec<BackendMessage>> {
         // Strip "select " prefix
         let rest = sql_lower.strip_prefix("select ")?;
 
@@ -1625,6 +846,7 @@ impl QueryHandler {
     /// Returns (PhysicalPlan, inferred_param_types, row_desc) on success.
     ///
     /// Wrapped in crash-domain guard — panics are caught and converted to FalconError.
+    #[allow(clippy::type_complexity)]
     pub fn prepare_statement(
         &self,
         sql: &str,
@@ -1636,6 +858,7 @@ impl QueryHandler {
         )
     }
 
+    #[allow(clippy::type_complexity)]
     fn prepare_statement_inner(
         &self,
         sql: &str,
@@ -1902,6 +1125,10 @@ impl QueryHandler {
             Some(DataType::Array(_)) => 2277, // ANYARRAY
             Some(DataType::Jsonb) => 3802,    // JSONB
             Some(DataType::Decimal(_, _)) => 1700, // NUMERIC
+            Some(DataType::Time) => 1083,     // TIME
+            Some(DataType::Interval) => 1186,  // INTERVAL
+            Some(DataType::Uuid) => 2950,      // UUID
+            Some(DataType::Bytea) => 17,       // BYTEA
             None => 0,                        // unspecified
         }
     }
@@ -2044,7 +1271,7 @@ impl QueryHandler {
                 // Date/time
                 ScalarFunc::Now => DataType::Timestamp,
                 ScalarFunc::CurrentDate => DataType::Date,
-                ScalarFunc::CurrentTime => DataType::Text, // TIME not yet a DataType
+                ScalarFunc::CurrentTime => DataType::Time,
                 ScalarFunc::DateTrunc => DataType::Timestamp,
                 // Bool
                 ScalarFunc::StartsWith | ScalarFunc::EndsWith
@@ -2101,15 +1328,26 @@ impl QueryHandler {
         fn projection_to_field(p: &BoundProjection, schema: &falcon_common::schema::TableSchema) -> FieldDescription {
             match p {
                 BoundProjection::Column(idx, alias) => {
-                    let col = &schema.columns[*idx];
-                    FieldDescription {
-                        name: alias.clone(),
-                        table_oid: 0,
-                        column_attr: 0,
-                        type_oid: col.data_type.pg_oid(),
-                        type_len: col.data_type.type_len(),
-                        type_modifier: -1,
-                        format_code: 0,
+                    if let Some(col) = schema.columns.get(*idx) {
+                        FieldDescription {
+                            name: alias.clone(),
+                            table_oid: 0,
+                            column_attr: 0,
+                            type_oid: col.data_type.pg_oid(),
+                            type_len: col.data_type.type_len(),
+                            type_modifier: -1,
+                            format_code: 0,
+                        }
+                    } else {
+                        FieldDescription {
+                            name: alias.clone(),
+                            table_oid: 0,
+                            column_attr: 0,
+                            type_oid: 25, // TEXT fallback
+                            type_len: -1,
+                            type_modifier: -1,
+                            format_code: 0,
+                        }
                     }
                 }
                 BoundProjection::Aggregate(func, arg, alias, _, _) => {
@@ -2179,7 +1417,7 @@ impl QueryHandler {
         }
     }
 
-    fn error_response(&self, err: &FalconError) -> BackendMessage {
+    pub(crate) fn error_response(&self, err: &FalconError) -> BackendMessage {
         let mut message = err.to_string();
         // Append routing hints for retryable errors so PG-aware proxies can act.
         if let FalconError::Retryable { leader_hint: Some(ref hint), retry_after_ms, .. } = err {
@@ -2193,7 +1431,7 @@ impl QueryHandler {
     }
 
     /// Push current txn stats to Prometheus gauges.
-    fn flush_txn_stats(&self) {
+    pub(crate) fn flush_txn_stats(&self) {
         let s = self.txn_mgr.stats_snapshot();
         falcon_observability::record_txn_stats(
             s.total_committed,
@@ -2240,7 +1478,7 @@ pub(crate) fn extract_where_eq(sql: &str, column: &str) -> Option<String> {
 /// Parse `SET log_min_duration_statement = <ms>` or `SET log_min_duration_statement TO <ms>`.
 /// Also accepts `-1` or `default` to disable (returns 0).
 /// Input `sql` must already be lowercased.
-fn parse_set_log_min_duration(sql: &str) -> Option<u64> {
+pub(crate) fn parse_set_log_min_duration(sql: &str) -> Option<u64> {
     let rest = sql.strip_prefix("set")?;
     let rest = rest.trim();
     let rest = rest.strip_prefix("log_min_duration_statement")?;
@@ -2262,7 +1500,7 @@ fn parse_set_log_min_duration(sql: &str) -> Option<u64> {
 /// Parse `SET <var> = <value>` or `SET <var> TO <value>`.
 /// Input `sql` must already be lowercased.
 /// Returns (var_name, value) if successfully parsed.
-fn parse_set_command(sql: &str) -> Option<(String, String)> {
+pub(crate) fn parse_set_command(sql: &str) -> Option<(String, String)> {
     let rest = sql.strip_prefix("set")?.trim();
     // Skip LOCAL/SESSION qualifiers
     let rest = rest.strip_prefix("local ").unwrap_or(rest);
@@ -2284,7 +1522,7 @@ fn parse_set_command(sql: &str) -> Option<(String, String)> {
 
 /// Parse `PREPARE name [(type, ...)] AS query`.
 /// Returns (name, query) if successfully parsed.
-fn parse_prepare_statement(sql: &str) -> Option<(String, String)> {
+pub(crate) fn parse_prepare_statement(sql: &str) -> Option<(String, String)> {
     let lower = sql.to_lowercase();
     let rest = lower.strip_prefix("prepare")?.trim();
     // Find AS keyword
@@ -2305,7 +1543,7 @@ fn parse_prepare_statement(sql: &str) -> Option<(String, String)> {
 
 /// Parse `EXECUTE name [(param, ...)]`.
 /// Returns (name, params) where params are converted to Option<Vec<u8>> for bind_params.
-fn parse_execute_statement(sql: &str) -> Option<(String, Vec<Option<Vec<u8>>>)> {
+pub(crate) fn parse_execute_statement(sql: &str) -> Option<(String, Vec<Option<Vec<u8>>>)> {
     let rest = sql.trim().strip_prefix("EXECUTE").or_else(|| sql.trim().strip_prefix("execute"))?.trim();
     let rest = rest.trim_end_matches(';').trim();
     // Split name from optional (params)
@@ -2366,7 +1604,7 @@ fn split_params(s: &str) -> Vec<String> {
 }
 
 /// Substitute `$1`, `$2`, ... placeholders with parameter values (for SQL-level EXECUTE).
-fn bind_params(sql: &str, param_values: &[Option<Vec<u8>>]) -> String {
+pub(crate) fn bind_params(sql: &str, param_values: &[Option<Vec<u8>>]) -> String {
     if param_values.is_empty() {
         return sql.to_string();
     }

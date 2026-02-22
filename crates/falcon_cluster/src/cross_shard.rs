@@ -945,6 +945,355 @@ pub struct CrossShardTxnResult {
     pub failure_class: Option<FailureClass>,
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// §8: Per-Shard Slow-Path Rate Limiter
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Per-shard inflight limiter for cross-shard (slow-path) transactions.
+///
+/// Each shard gets its own concurrency limit. When a shard's inflight count
+/// reaches the limit, new cross-shard transactions targeting that shard are
+/// rejected until inflight drops. This prevents a hot shard from starving others.
+pub struct PerShardSlowPathLimiter {
+    /// Per-shard inflight counters and limits.
+    shards: RwLock<HashMap<u64, ShardSlowPathState>>,
+    /// Default per-shard limit for newly seen shards.
+    default_limit: u64,
+    /// Lifetime stats.
+    total_admitted: AtomicU64,
+    total_rejected: AtomicU64,
+    total_throttled: AtomicU64,
+}
+
+struct ShardSlowPathState {
+    inflight: AtomicU64,
+    limit: AtomicU64,
+    total_txns: AtomicU64,
+    total_rejected: AtomicU64,
+}
+
+impl ShardSlowPathState {
+    fn new(limit: u64) -> Self {
+        Self {
+            inflight: AtomicU64::new(0),
+            limit: AtomicU64::new(limit),
+            total_txns: AtomicU64::new(0),
+            total_rejected: AtomicU64::new(0),
+        }
+    }
+}
+
+/// RAII guard for a per-shard slow-path permit.
+pub struct ShardSlowPathGuard<'a> {
+    limiter: &'a PerShardSlowPathLimiter,
+    shard_id: u64,
+}
+
+impl<'a> std::fmt::Debug for ShardSlowPathGuard<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShardSlowPathGuard")
+            .field("shard_id", &self.shard_id)
+            .finish()
+    }
+}
+
+impl<'a> Drop for ShardSlowPathGuard<'a> {
+    fn drop(&mut self) {
+        self.limiter.release(self.shard_id);
+    }
+}
+
+/// Per-shard slow-path stats snapshot.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ShardSlowPathSnapshot {
+    pub shard_id: u64,
+    pub inflight: u64,
+    pub limit: u64,
+    pub total_txns: u64,
+    pub total_rejected: u64,
+}
+
+/// Aggregate slow-path stats.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SlowPathStats {
+    pub total_admitted: u64,
+    pub total_rejected: u64,
+    pub total_throttled: u64,
+    pub per_shard: Vec<ShardSlowPathSnapshot>,
+}
+
+impl PerShardSlowPathLimiter {
+    pub fn new(default_limit: u64) -> Self {
+        Self {
+            shards: RwLock::new(HashMap::new()),
+            default_limit,
+            total_admitted: AtomicU64::new(0),
+            total_rejected: AtomicU64::new(0),
+            total_throttled: AtomicU64::new(0),
+        }
+    }
+
+    fn ensure_shard(&self, shard_id: u64) {
+        let read = self.shards.read();
+        if read.contains_key(&shard_id) {
+            return;
+        }
+        drop(read);
+        self.shards
+            .write()
+            .entry(shard_id)
+            .or_insert_with(|| ShardSlowPathState::new(self.default_limit));
+    }
+
+    /// Try to acquire a slow-path permit for a set of target shards.
+    /// Returns Ok(guards) if ALL shards admit, Err with the first rejected shard.
+    pub fn try_acquire_all<'a>(
+        &'a self,
+        shard_ids: &[u64],
+    ) -> Result<Vec<ShardSlowPathGuard<'a>>, SlowPathReject> {
+        let mut guards = Vec::with_capacity(shard_ids.len());
+
+        for &sid in shard_ids {
+            match self.try_acquire_one(sid) {
+                Ok(g) => guards.push(g),
+                Err(reject) => {
+                    // Release already acquired guards (they drop automatically)
+                    drop(guards);
+                    self.total_rejected.fetch_add(1, Ordering::Relaxed);
+                    return Err(reject);
+                }
+            }
+        }
+
+        self.total_admitted.fetch_add(1, Ordering::Relaxed);
+        Ok(guards)
+    }
+
+    fn try_acquire_one(&self, shard_id: u64) -> Result<ShardSlowPathGuard<'_>, SlowPathReject> {
+        self.ensure_shard(shard_id);
+        let read = self.shards.read();
+        if let Some(state) = read.get(&shard_id) {
+            let limit = state.limit.load(Ordering::Relaxed);
+            let current = state.inflight.fetch_add(1, Ordering::AcqRel);
+            if current >= limit {
+                state.inflight.fetch_sub(1, Ordering::AcqRel);
+                state.total_rejected.fetch_add(1, Ordering::Relaxed);
+                return Err(SlowPathReject {
+                    shard_id,
+                    inflight: current,
+                    limit,
+                });
+            }
+            state.total_txns.fetch_add(1, Ordering::Relaxed);
+            Ok(ShardSlowPathGuard {
+                limiter: self,
+                shard_id,
+            })
+        } else {
+            Err(SlowPathReject {
+                shard_id,
+                inflight: 0,
+                limit: 0,
+            })
+        }
+    }
+
+    fn release(&self, shard_id: u64) {
+        let read = self.shards.read();
+        if let Some(state) = read.get(&shard_id) {
+            state.inflight.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    /// Dynamically adjust a shard's limit (e.g. from adaptive concurrency controller).
+    pub fn set_shard_limit(&self, shard_id: u64, new_limit: u64) {
+        self.ensure_shard(shard_id);
+        let read = self.shards.read();
+        if let Some(state) = read.get(&shard_id) {
+            state.limit.store(new_limit, Ordering::Relaxed);
+        }
+    }
+
+    /// Snapshot for a single shard.
+    pub fn shard_snapshot(&self, shard_id: u64) -> ShardSlowPathSnapshot {
+        let read = self.shards.read();
+        match read.get(&shard_id) {
+            Some(state) => ShardSlowPathSnapshot {
+                shard_id,
+                inflight: state.inflight.load(Ordering::Relaxed),
+                limit: state.limit.load(Ordering::Relaxed),
+                total_txns: state.total_txns.load(Ordering::Relaxed),
+                total_rejected: state.total_rejected.load(Ordering::Relaxed),
+            },
+            None => ShardSlowPathSnapshot {
+                shard_id,
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Aggregate stats across all shards.
+    pub fn stats(&self) -> SlowPathStats {
+        let read = self.shards.read();
+        let per_shard: Vec<_> = read
+            .keys()
+            .map(|&sid| {
+                let state = &read[&sid];
+                ShardSlowPathSnapshot {
+                    shard_id: sid,
+                    inflight: state.inflight.load(Ordering::Relaxed),
+                    limit: state.limit.load(Ordering::Relaxed),
+                    total_txns: state.total_txns.load(Ordering::Relaxed),
+                    total_rejected: state.total_rejected.load(Ordering::Relaxed),
+                }
+            })
+            .collect();
+        SlowPathStats {
+            total_admitted: self.total_admitted.load(Ordering::Relaxed),
+            total_rejected: self.total_rejected.load(Ordering::Relaxed),
+            total_throttled: self.total_throttled.load(Ordering::Relaxed),
+            per_shard,
+        }
+    }
+}
+
+/// Rejection reason from the per-shard slow-path limiter.
+#[derive(Debug, Clone)]
+pub struct SlowPathReject {
+    pub shard_id: u64,
+    pub inflight: u64,
+    pub limit: u64,
+}
+
+impl std::fmt::Display for SlowPathReject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "shard {} slow-path limit reached ({}/{})",
+            self.shard_id, self.inflight, self.limit
+        )
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// §9: Latency Histogram (P50/P95/P99/P999 tracking)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Fixed-bucket latency histogram for fast percentile queries.
+///
+/// Buckets are in microseconds: [0, 100), [100, 200), ..., [9900, 10000),
+/// [10ms, 20ms), ..., [990ms, 1000ms), [1s+).
+/// Total: 100 fine-grained buckets (0-10ms) + 99 coarse buckets (10ms-1s) + 1 overflow.
+pub struct LatencyHistogram {
+    /// Fine-grained buckets: 0-10ms in 100µs steps (100 buckets).
+    fine: [AtomicU64; 100],
+    /// Coarse buckets: 10ms-1s in 10ms steps (99 buckets).
+    coarse: [AtomicU64; 99],
+    /// Overflow: ≥1s.
+    overflow: AtomicU64,
+    /// Total observations.
+    count: AtomicU64,
+    /// Sum of all observations (µs).
+    sum_us: AtomicU64,
+}
+
+impl LatencyHistogram {
+    pub fn new() -> Self {
+        Self {
+            fine: std::array::from_fn(|_| AtomicU64::new(0)),
+            coarse: std::array::from_fn(|_| AtomicU64::new(0)),
+            overflow: AtomicU64::new(0),
+            count: AtomicU64::new(0),
+            sum_us: AtomicU64::new(0),
+        }
+    }
+
+    /// Record a latency observation in microseconds.
+    pub fn observe(&self, latency_us: u64) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.sum_us.fetch_add(latency_us, Ordering::Relaxed);
+
+        if latency_us < 10_000 {
+            // Fine bucket: 0-10ms in 100µs steps
+            let bucket = (latency_us / 100) as usize;
+            let bucket = bucket.min(99);
+            self.fine[bucket].fetch_add(1, Ordering::Relaxed);
+        } else if latency_us < 1_000_000 {
+            // Coarse bucket: 10ms-1s in 10ms steps
+            let bucket = ((latency_us - 10_000) / 10_000) as usize;
+            let bucket = bucket.min(98);
+            self.coarse[bucket].fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.overflow.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Compute percentile (0.0-1.0) in microseconds.
+    pub fn percentile(&self, p: f64) -> u64 {
+        let total = self.count.load(Ordering::Relaxed);
+        if total == 0 {
+            return 0;
+        }
+        let target = (total as f64 * p).ceil() as u64;
+        let mut cumulative = 0u64;
+
+        // Scan fine buckets
+        for (i, bucket) in self.fine.iter().enumerate() {
+            cumulative += bucket.load(Ordering::Relaxed);
+            if cumulative >= target {
+                return (i as u64 + 1) * 100; // upper bound of bucket
+            }
+        }
+
+        // Scan coarse buckets
+        for (i, bucket) in self.coarse.iter().enumerate() {
+            cumulative += bucket.load(Ordering::Relaxed);
+            if cumulative >= target {
+                return 10_000 + (i as u64 + 1) * 10_000; // upper bound
+            }
+        }
+
+        // Overflow
+        1_000_000 // 1 second
+    }
+
+    /// Get P50/P95/P99/P999 in one call.
+    pub fn percentiles(&self) -> LatencyPercentiles {
+        LatencyPercentiles {
+            p50_us: self.percentile(0.50),
+            p95_us: self.percentile(0.95),
+            p99_us: self.percentile(0.99),
+            p999_us: self.percentile(0.999),
+            count: self.count.load(Ordering::Relaxed),
+            avg_us: {
+                let c = self.count.load(Ordering::Relaxed);
+                if c > 0 {
+                    self.sum_us.load(Ordering::Relaxed) / c
+                } else {
+                    0
+                }
+            },
+        }
+    }
+}
+
+impl Default for LatencyHistogram {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Percentile summary snapshot.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LatencyPercentiles {
+    pub p50_us: u64,
+    pub p95_us: u64,
+    pub p99_us: u64,
+    pub p999_us: u64,
+    pub count: u64,
+    pub avg_us: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1283,5 +1632,146 @@ mod tests {
         assert_eq!(WaitReason::CoordinatorQueue.to_string(), "coordinator_queue");
         assert_eq!(WaitReason::ShardLockWait(3).to_string(), "shard_lock_wait(shard_3)");
         assert_eq!(WaitReason::CommitBarrier.to_string(), "commit_barrier");
+    }
+
+    // ── Per-Shard Slow-Path Limiter ──
+
+    #[test]
+    fn test_slow_path_limiter_admit() {
+        let limiter = PerShardSlowPathLimiter::new(4);
+        let guards = limiter.try_acquire_all(&[0, 1, 2]).unwrap();
+        assert_eq!(guards.len(), 3);
+        let snap0 = limiter.shard_snapshot(0);
+        assert_eq!(snap0.inflight, 1);
+        assert_eq!(snap0.limit, 4);
+        assert_eq!(snap0.total_txns, 1);
+    }
+
+    #[test]
+    fn test_slow_path_limiter_reject_at_limit() {
+        let limiter = PerShardSlowPathLimiter::new(2);
+        let _g1 = limiter.try_acquire_all(&[0]).unwrap();
+        let _g2 = limiter.try_acquire_all(&[0]).unwrap();
+        // Shard 0 is now at limit (2 inflight)
+        let result = limiter.try_acquire_all(&[0]);
+        assert!(result.is_err());
+        let reject = result.unwrap_err();
+        assert_eq!(reject.shard_id, 0);
+        assert_eq!(reject.limit, 2);
+    }
+
+    #[test]
+    fn test_slow_path_limiter_release_on_drop() {
+        let limiter = PerShardSlowPathLimiter::new(1);
+        {
+            let _g = limiter.try_acquire_all(&[5]).unwrap();
+            assert_eq!(limiter.shard_snapshot(5).inflight, 1);
+        }
+        // Guard dropped — inflight should be 0
+        assert_eq!(limiter.shard_snapshot(5).inflight, 0);
+        // Can acquire again
+        let _g2 = limiter.try_acquire_all(&[5]).unwrap();
+    }
+
+    #[test]
+    fn test_slow_path_limiter_multi_shard_rollback() {
+        let limiter = PerShardSlowPathLimiter::new(1);
+        let _g1 = limiter.try_acquire_all(&[10]).unwrap();
+        // Shard 10 is full. Acquiring [20, 10] should fail on shard 10
+        // and release the guard for shard 20.
+        let result = limiter.try_acquire_all(&[20, 10]);
+        assert!(result.is_err());
+        // Shard 20 should have 0 inflight (guard was dropped on rollback)
+        assert_eq!(limiter.shard_snapshot(20).inflight, 0);
+    }
+
+    #[test]
+    fn test_slow_path_limiter_dynamic_limit() {
+        let limiter = PerShardSlowPathLimiter::new(1);
+        let _g = limiter.try_acquire_all(&[0]).unwrap();
+        // At limit, should reject
+        assert!(limiter.try_acquire_all(&[0]).is_err());
+        // Raise limit
+        limiter.set_shard_limit(0, 5);
+        let _g2 = limiter.try_acquire_all(&[0]).unwrap();
+        assert_eq!(limiter.shard_snapshot(0).inflight, 2);
+    }
+
+    #[test]
+    fn test_slow_path_limiter_stats() {
+        let limiter = PerShardSlowPathLimiter::new(2);
+        let _g = limiter.try_acquire_all(&[0, 1]).unwrap();
+        let _g2 = limiter.try_acquire_all(&[0]).unwrap();
+        let _ = limiter.try_acquire_all(&[0]); // rejected
+        let stats = limiter.stats();
+        assert_eq!(stats.total_admitted, 2);
+        assert_eq!(stats.total_rejected, 1);
+    }
+
+    // ── Latency Histogram ──
+
+    #[test]
+    fn test_histogram_empty() {
+        let h = LatencyHistogram::new();
+        let p = h.percentiles();
+        assert_eq!(p.count, 0);
+        assert_eq!(p.p50_us, 0);
+        assert_eq!(p.p99_us, 0);
+    }
+
+    #[test]
+    fn test_histogram_single_observation() {
+        let h = LatencyHistogram::new();
+        h.observe(500); // 500µs
+        let p = h.percentiles();
+        assert_eq!(p.count, 1);
+        assert_eq!(p.avg_us, 500);
+        // Single observation: all percentiles should be the same bucket
+        assert!(p.p50_us >= 500);
+        assert!(p.p99_us >= 500);
+    }
+
+    #[test]
+    fn test_histogram_percentiles_ordering() {
+        let h = LatencyHistogram::new();
+        // Uniform distribution from 100µs to 10000µs
+        for i in 1..=100 {
+            h.observe(i * 100);
+        }
+        let p = h.percentiles();
+        assert_eq!(p.count, 100);
+        assert!(p.p50_us <= p.p95_us, "p50 ({}) <= p95 ({})", p.p50_us, p.p95_us);
+        assert!(p.p95_us <= p.p99_us, "p95 ({}) <= p99 ({})", p.p95_us, p.p99_us);
+        assert!(p.p99_us <= p.p999_us, "p99 ({}) <= p999 ({})", p.p99_us, p.p999_us);
+    }
+
+    #[test]
+    fn test_histogram_coarse_buckets() {
+        let h = LatencyHistogram::new();
+        h.observe(50_000); // 50ms — coarse bucket
+        h.observe(500_000); // 500ms — coarse bucket
+        let p = h.percentiles();
+        assert_eq!(p.count, 2);
+        assert!(p.p50_us >= 50_000);
+    }
+
+    #[test]
+    fn test_histogram_overflow() {
+        let h = LatencyHistogram::new();
+        h.observe(2_000_000); // 2 seconds — overflow
+        let p = h.percentiles();
+        assert_eq!(p.count, 1);
+        assert_eq!(p.p50_us, 1_000_000); // overflow returns 1s
+    }
+
+    #[test]
+    fn test_slow_path_reject_display() {
+        let r = SlowPathReject {
+            shard_id: 3,
+            inflight: 10,
+            limit: 10,
+        };
+        assert!(r.to_string().contains("shard 3"));
+        assert!(r.to_string().contains("10/10"));
     }
 }

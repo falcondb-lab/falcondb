@@ -185,6 +185,7 @@ cargo test --workspace
 | **v0.9.0** | ✅ Done | Production Candidate — semantic freeze, wire versioning, rolling upgrade |
 | **v1.0 Phase 1** | ✅ Done | LSM kernel — 1,917 tests, disk-backed OLTP, MVCC encoding, idempotency |
 | **v1.0 Phase 2** | ✅ Done | SQL completeness — 1,976 tests, DECIMAL, composite indexes, RBAC, txn control |
+| **1.0.0-rc.1** | ✅ Done | Version aligned, code audit fixes, e2e evidence, RBAC enforcement matrix |
 | **v1.0.0** | 📋 Planned | Production-Grade Database Kernel — all gates pass |
 
 ---
@@ -658,6 +659,113 @@ cargo test -p falcon_executor --lib -- governor::tests
 cargo test -p falcon_cluster --lib -- cluster_ops::tests
 cargo test -p falcon_cluster --lib -- admission::tests
 cargo test -p falcon_storage --lib -- memtable::index_tests
+```
+
+---
+
+## v2.0 — Phase 3: Enterprise Edition Features ✅
+
+**Status**: Implemented
+
+**Positioning**: Enterprise-grade capabilities for production deployments — multi-tenant
+data isolation, compliance, disaster recovery, and real-time integration.
+
+### P0 v2.1: Row-Level Security (RLS)
+
+| Deliverable | Location | Status |
+|------------|----------|--------|
+| `RlsPolicy` — per-table policy with USING/WITH CHECK expressions | `falcon_common::rls` | ✅ |
+| `PolicyCommand` — ALL/SELECT/INSERT/UPDATE/DELETE targeting | `falcon_common::rls` | ✅ |
+| `PolicyPermissiveness` — PERMISSIVE (OR) / RESTRICTIVE (AND) | `falcon_common::rls` | ✅ |
+| `RlsPolicyManager` — create/drop policies, enable/disable/force RLS | `falcon_common::rls` | ✅ |
+| `combined_using_expr()` — PG-compatible OR+AND policy combination | `falcon_common::rls` | ✅ |
+| `combined_check_expr()` — write-side policy combination | `falcon_common::rls` | ✅ |
+| `should_bypass()` — superuser/owner bypass logic (respects FORCE) | `falcon_common::rls` | ✅ |
+| Role-scoped policies (PUBLIC or specific roles) | `falcon_common::rls` | ✅ |
+| `drop_all_policies()` — cleanup on DROP TABLE | `falcon_common::rls` | ✅ |
+| Wired into `StorageEngine.rls_manager` | `falcon_storage::engine` | ✅ |
+| 15 tests | `falcon_common::rls` | ✅ |
+
+### P0 v2.2: Transparent Data Encryption (TDE)
+
+| Deliverable | Location | Status |
+|------------|----------|--------|
+| `EncryptionKey` — AES-256 key with PBKDF2 derivation | `falcon_storage::encryption` | ✅ |
+| `KeyManager` — master key + DEK lifecycle management | `falcon_storage::encryption` | ✅ |
+| `DekId` / `WrappedDek` — encrypted DEK storage with nonce | `falcon_storage::encryption` | ✅ |
+| `EncryptionScope` — per-WAL/table/SST/backup key isolation | `falcon_storage::encryption` | ✅ |
+| `encrypt_block()` / `decrypt_block()` — data encryption primitives | `falcon_storage::encryption` | ✅ |
+| `rotate_master_key()` — re-wrap all DEKs with new passphrase | `falcon_storage::encryption` | ✅ |
+| Wired into `StorageEngine.key_manager` | `falcon_storage::engine` | ✅ |
+| 11 tests | `falcon_storage::encryption` | ✅ |
+
+### P0 v2.3: Table Partitioning (Range / Hash / List)
+
+| Deliverable | Location | Status |
+|------------|----------|--------|
+| `PartitionStrategy` — Range / Hash / List strategies | `falcon_storage::partition` | ✅ |
+| `RangeBound` — inclusive lower / exclusive upper with MINVALUE/MAXVALUE | `falcon_storage::partition` | ✅ |
+| `ListBound` — explicit value set matching | `falcon_storage::partition` | ✅ |
+| `PartitionManager` — create/drop/attach/detach partitions | `falcon_storage::partition` | ✅ |
+| `route()` — datum-based partition routing for INSERT | `falcon_storage::partition` | ✅ |
+| `prune_range()` — partition pruning for range scans | `falcon_storage::partition` | ✅ |
+| `prune_list()` — partition pruning for IN-list scans | `falcon_storage::partition` | ✅ |
+| Default partition (catches unrouted rows) | `falcon_storage::partition` | ✅ |
+| Wired into `StorageEngine.partition_manager` | `falcon_storage::engine` | ✅ |
+| 10 tests | `falcon_storage::partition` | ✅ |
+
+### P1 v2.4: Point-in-Time Recovery (PITR)
+
+| Deliverable | Location | Status |
+|------------|----------|--------|
+| `Lsn` — WAL position type with PG-compatible display format | `falcon_storage::pitr` | ✅ |
+| `RecoveryTarget` — Latest / Time / LSN / XID / RestorePoint | `falcon_storage::pitr` | ✅ |
+| `WalArchiver` — WAL segment archiving with retention policies | `falcon_storage::pitr` | ✅ |
+| `BaseBackup` — consistent snapshot metadata with LSN tracking | `falcon_storage::pitr` | ✅ |
+| `RestorePoint` — named recovery points (pg_create_restore_point) | `falcon_storage::pitr` | ✅ |
+| `RecoveryExecutor` — coordinated replay with target detection | `falcon_storage::pitr` | ✅ |
+| `find_base_backup()` — optimal backup selection for recovery target | `falcon_storage::pitr` | ✅ |
+| `segments_for_recovery()` — WAL segment range computation | `falcon_storage::pitr` | ✅ |
+| `apply_retention()` — time-based segment cleanup | `falcon_storage::pitr` | ✅ |
+| Wired into `StorageEngine.wal_archiver` | `falcon_storage::engine` | ✅ |
+| 10 tests | `falcon_storage::pitr` | ✅ |
+
+### P1 v2.5: Change Data Capture (CDC) / Logical Decoding
+
+| Deliverable | Location | Status |
+|------------|----------|--------|
+| `ReplicationSlot` — consumer position tracking with activate/deactivate | `falcon_storage::cdc` | ✅ |
+| `ChangeEvent` — structured INSERT/UPDATE/DELETE/DDL/COMMIT events | `falcon_storage::cdc` | ✅ |
+| `CdcManager` — slot management + bounded event ring buffer | `falcon_storage::cdc` | ✅ |
+| `emit_insert/update/delete/commit()` — convenience emitters | `falcon_storage::cdc` | ✅ |
+| `poll_changes()` — consumer polling with slot-scoped progress | `falcon_storage::cdc` | ✅ |
+| `advance_slot()` — consumer acknowledges processed LSN | `falcon_storage::cdc` | ✅ |
+| Table filtering per slot | `falcon_storage::cdc` | ✅ |
+| Old row values (REPLICA IDENTITY FULL support) | `falcon_storage::cdc` | ✅ |
+| Buffer eviction for bounded memory | `falcon_storage::cdc` | ✅ |
+| Wired into `StorageEngine.cdc_manager` | `falcon_storage::engine` | ✅ |
+| 9 tests | `falcon_storage::cdc` | ✅ |
+
+### Phase 3 Test Coverage Summary
+
+| Feature Area | New Tests |
+|-------------|-----------|
+| Row-Level Security (RLS) | 15 |
+| Transparent Data Encryption (TDE) | 11 |
+| Table Partitioning (Range/Hash/List) | 10 |
+| Point-in-Time Recovery (PITR) | 10 |
+| Change Data Capture (CDC) | 9 |
+| **Total new (Phase 3)** | **55** |
+
+### Verification
+
+```bash
+cargo test --workspace   # 2,056 pass, 0 failures
+cargo test -p falcon_common --lib -- rls::tests
+cargo test -p falcon_storage --lib -- encryption::tests
+cargo test -p falcon_storage --lib -- partition::tests
+cargo test -p falcon_storage --lib -- pitr::tests
+cargo test -p falcon_storage --lib -- cdc::tests
 ```
 
 ---

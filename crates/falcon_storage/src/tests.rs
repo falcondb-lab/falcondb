@@ -2953,7 +2953,7 @@ mod gc_tests {
             ..Default::default()
         };
 
-        let mut runner = GcRunner::start(engine.clone(), provider, config);
+        let mut runner = GcRunner::start(engine.clone(), provider, config).expect("spawn in test");
         assert!(runner.is_running());
 
         // Wait for at least one sweep
@@ -3410,7 +3410,7 @@ mod wal_observer_tests {
             ..Default::default()
         };
 
-        let mut runner = GcRunner::start(engine.clone(), provider.clone(), config.clone());
+        let mut runner = GcRunner::start(engine.clone(), provider.clone(), config.clone()).expect("spawn in test");
         std::thread::sleep(std::time::Duration::from_millis(50));
         runner.stop();
 
@@ -3422,7 +3422,7 @@ mod wal_observer_tests {
         // Now advance replica ack to ts=100
         engine.replica_ack_tracker().update_ack(0, 100);
 
-        let mut runner2 = GcRunner::start(engine.clone(), provider, config);
+        let mut runner2 = GcRunner::start(engine.clone(), provider, config).expect("spawn in test");
         std::thread::sleep(std::time::Duration::from_millis(50));
         runner2.stop();
 

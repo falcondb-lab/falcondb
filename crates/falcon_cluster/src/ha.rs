@@ -31,13 +31,14 @@
 //!       +-- SyncMode (Async / SemiSync / Sync)
 //! ```
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::{Mutex, RwLock};
 
 use falcon_common::error::FalconError;
+use falcon_common::shutdown::ShutdownSignal;
 use falcon_common::schema::TableSchema;
 use falcon_common::types::{NodeId, ShardId};
 use falcon_storage::engine::StorageEngine;
@@ -595,7 +596,7 @@ impl Default for FailoverOrchestratorConfig {
 
 /// Handle returned by `FailoverOrchestrator::start()`. Dropping stops the thread.
 pub struct FailoverOrchestratorHandle {
-    stop_flag: Arc<AtomicBool>,
+    signal: ShutdownSignal,
     join_handle: Option<std::thread::JoinHandle<()>>,
     /// Metrics exposed by the orchestrator.
     pub metrics: Arc<FailoverOrchestratorMetrics>,
@@ -604,25 +605,25 @@ pub struct FailoverOrchestratorHandle {
 impl FailoverOrchestratorHandle {
     /// Signal the orchestrator to stop.
     pub fn stop(&self) {
-        self.stop_flag.store(true, Ordering::SeqCst);
+        self.signal.shutdown();
     }
 
     /// Stop and wait for the thread to finish.
     pub fn stop_and_join(mut self) {
-        self.stop_flag.store(true, Ordering::SeqCst);
+        self.signal.shutdown();
         if let Some(h) = self.join_handle.take() {
             let _ = h.join();
         }
     }
 
     pub fn is_running(&self) -> bool {
-        !self.stop_flag.load(Ordering::SeqCst)
+        !self.signal.is_shutdown()
     }
 }
 
 impl Drop for FailoverOrchestratorHandle {
     fn drop(&mut self) {
-        self.stop_flag.store(true, Ordering::SeqCst);
+        self.signal.shutdown();
     }
 }
 
@@ -655,12 +656,16 @@ pub struct FailoverOrchestrator;
 
 impl FailoverOrchestrator {
     /// Start the failover orchestrator for a single HA replica group.
+    ///
+    /// Returns `Err` if the background thread cannot be spawned (OS resource
+    /// exhaustion). The caller must handle this as a startup-fatal or
+    /// runtime-degraded condition — the process must **not** panic.
     pub fn start(
         config: FailoverOrchestratorConfig,
         group: Arc<RwLock<HAReplicaGroup>>,
-    ) -> FailoverOrchestratorHandle {
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let stop_clone = stop_flag.clone();
+    ) -> Result<FailoverOrchestratorHandle, FalconError> {
+        let signal = ShutdownSignal::new();
+        let signal_clone = signal.clone();
         let interval = Duration::from_millis(config.check_interval_ms);
         let metrics = Arc::new(FailoverOrchestratorMetrics::default());
         let metrics_clone = metrics.clone();
@@ -669,9 +674,8 @@ impl FailoverOrchestrator {
             .name("falcon-failover-orchestrator".to_string())
             .spawn(move || {
                 tracing::info!("FailoverOrchestrator started (interval={}ms)", config.check_interval_ms);
-                while !stop_clone.load(Ordering::SeqCst) {
-                    std::thread::sleep(interval);
-                    if stop_clone.load(Ordering::SeqCst) {
+                while !signal_clone.is_shutdown() {
+                    if signal_clone.wait_timeout(interval) {
                         break;
                     }
 
@@ -719,13 +723,22 @@ impl FailoverOrchestrator {
                 }
                 tracing::info!("FailoverOrchestrator stopped");
             })
-            .unwrap_or_else(|e| panic!("Failed to spawn failover orchestrator thread: {}", e));
+            .map_err(|e| {
+                tracing::error!(
+                    component = "failover-orchestrator",
+                    error = %e,
+                    "failed to spawn background thread — node DEGRADED"
+                );
+                FalconError::Internal(format!(
+                    "failed to spawn failover orchestrator thread: {}", e
+                ))
+            })?;
 
-        FailoverOrchestratorHandle {
-            stop_flag,
+        Ok(FailoverOrchestratorHandle {
+            signal,
             join_handle: Some(join_handle),
             metrics,
-        }
+        })
     }
 }
 

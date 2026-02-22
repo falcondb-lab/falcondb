@@ -9,6 +9,7 @@ use falcon_common::types::TableId;
 
 use crate::columnstore::ColumnStoreTable;
 use crate::disk_rowstore::DiskRowstoreTable;
+use crate::lsm_table::LsmTable;
 use crate::memtable::MemTable;
 use crate::online_ddl::{DdlOpKind, BACKFILL_BATCH_SIZE};
 use crate::wal::WalRecord;
@@ -55,6 +56,16 @@ impl StorageEngine {
                 );
                 self.disk_tables.insert(table_id, table);
             }
+            StorageType::LsmRowstore => {
+                let data_dir = self.data_dir.as_deref().unwrap_or_else(|| std::path::Path::new("."));
+                let lsm_dir = data_dir.join(format!("lsm_table_{}", table_id.0));
+                let engine = Arc::new(
+                    crate::lsm::engine::LsmEngine::open(&lsm_dir, crate::lsm::engine::LsmConfig::default())
+                        .map_err(StorageError::Io)?
+                );
+                let table = Arc::new(LsmTable::new(schema.clone(), engine));
+                self.lsm_tables.insert(table_id, table);
+            }
         }
 
         // WAL + replication observer
@@ -76,6 +87,7 @@ impl StorageEngine {
         self.tables.remove(&table_id);
         self.columnstore_tables.remove(&table_id);
         self.disk_tables.remove(&table_id);
+        self.lsm_tables.remove(&table_id);
 
         self.append_and_flush_wal(&WalRecord::DropTable {
             table_name: name.to_string(),
@@ -107,6 +119,18 @@ impl StorageEngine {
                 let data_dir = self.data_dir.as_deref().unwrap_or_else(|| std::path::Path::new("."));
                 let table = Arc::new(DiskRowstoreTable::new(schema, data_dir)?);
                 self.disk_tables.insert(table_id, table);
+            }
+            StorageType::LsmRowstore => {
+                let data_dir = self.data_dir.as_deref().unwrap_or_else(|| std::path::Path::new("."));
+                let lsm_dir = data_dir.join(format!("lsm_table_{}", table_id.0));
+                // Remove old data directory to truncate
+                let _ = std::fs::remove_dir_all(&lsm_dir);
+                let engine = Arc::new(
+                    crate::lsm::engine::LsmEngine::open(&lsm_dir, crate::lsm::engine::LsmConfig::default())
+                        .map_err(StorageError::Io)?
+                );
+                let table = Arc::new(LsmTable::new(schema, engine));
+                self.lsm_tables.insert(table_id, table);
             }
         }
 

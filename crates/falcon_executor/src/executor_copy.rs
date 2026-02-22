@@ -341,7 +341,7 @@ fn parse_datum(field: &str, data_type: &DataType) -> Result<Datum, String> {
             use chrono::NaiveDate;
             let date = NaiveDate::parse_from_str(field, "%Y-%m-%d")
                 .map_err(|e| format!("Cannot parse '{}' as DATE: {}", field, e))?;
-            let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+            let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("unix epoch date is always valid");
             let days = (date - epoch).num_days() as i32;
             Ok(Datum::Date(days))
         }
@@ -371,6 +371,46 @@ fn parse_datum(field: &str, data_type: &DataType) -> Result<Datum, String> {
             Datum::parse_decimal(field)
                 .ok_or_else(|| format!("Cannot parse '{}' as DECIMAL", field))
         }
+        DataType::Time => {
+            // Parse HH:MM:SS or HH:MM:SS.ffffff
+            let parts: Vec<&str> = field.split(':').collect();
+            if parts.len() < 3 {
+                return Err(format!("Cannot parse '{}' as TIME", field));
+            }
+            let h: i64 = parts[0].parse().map_err(|_| format!("Cannot parse '{}' as TIME", field))?;
+            let m: i64 = parts[1].parse().map_err(|_| format!("Cannot parse '{}' as TIME", field))?;
+            let sec_parts: Vec<&str> = parts[2].split('.').collect();
+            let s: i64 = sec_parts[0].parse().map_err(|_| format!("Cannot parse '{}' as TIME", field))?;
+            let frac: i64 = if sec_parts.len() > 1 {
+                let f = sec_parts[1];
+                let padded = format!("{:0<6}", &f[..f.len().min(6)]);
+                padded.parse().unwrap_or(0)
+            } else { 0 };
+            Ok(Datum::Time(h * 3_600_000_000 + m * 60_000_000 + s * 1_000_000 + frac))
+        }
+        DataType::Interval => {
+            // Simplified: just store as text-parsed microseconds
+            Ok(Datum::Text(field.to_string()))
+        }
+        DataType::Uuid => {
+            let hex: String = field.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+            if hex.len() != 32 {
+                return Err(format!("Cannot parse '{}' as UUID", field));
+            }
+            let v = u128::from_str_radix(&hex, 16)
+                .map_err(|e| format!("Cannot parse '{}' as UUID: {}", field, e))?;
+            Ok(Datum::Uuid(v))
+        }
+        DataType::Bytea => {
+            // Accept PG hex format: \x<hex> or raw hex string
+            let hex_str = field.strip_prefix("\\x").unwrap_or(field);
+            let bytes = (0..hex_str.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex_str[i..i+2.min(hex_str.len())], 16))
+                .collect::<Result<Vec<u8>, _>>()
+                .map_err(|e| format!("Cannot parse '{}' as BYTEA: {}", field, e))?;
+            Ok(Datum::Bytea(bytes))
+        }
     }
 }
 
@@ -393,7 +433,7 @@ fn datum_to_text(datum: &Datum) -> String {
             }
         }
         Datum::Date(days) => {
-            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("unix epoch date is always valid");
             if let Some(date) = epoch.checked_add_signed(chrono::Duration::days(*days as i64)) {
                 date.format("%Y-%m-%d").to_string()
             } else {
@@ -406,5 +446,10 @@ fn datum_to_text(datum: &Datum) -> String {
             format!("{{{}}}", inner.join(","))
         }
         Datum::Decimal(m, s) => falcon_common::datum::decimal_to_string(*m, *s),
+        Datum::Time(_) | Datum::Interval(_, _, _) | Datum::Uuid(_) => format!("{}", datum),
+        Datum::Bytea(bytes) => {
+            let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+            format!("\\x{}", hex)
+        }
     }
 }

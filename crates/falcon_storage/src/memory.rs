@@ -388,6 +388,263 @@ pub struct NodeMemorySummary {
     pub shard_count: usize,
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Global Memory Governor — node-wide backpressure with 4-tier response
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 4-tier backpressure response level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum BackpressureLevel {
+    /// No restrictions.
+    None = 0,
+    /// Soft: delay new write transactions by a configurable amount.
+    Soft = 1,
+    /// Hard: reject new write transactions; reads still allowed.
+    Hard = 2,
+    /// Emergency: reject ALL new transactions; trigger urgent GC + flush.
+    Emergency = 3,
+}
+
+impl BackpressureLevel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Soft => "soft",
+            Self::Hard => "hard",
+            Self::Emergency => "emergency",
+        }
+    }
+}
+
+impl std::fmt::Display for BackpressureLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Action the governor recommends for an incoming request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackpressureAction {
+    /// Proceed normally.
+    Allow,
+    /// Delay the request by the given duration before proceeding.
+    Delay(std::time::Duration),
+    /// Reject the write; reads may still proceed.
+    RejectWrite { reason: String },
+    /// Reject everything; system is in emergency state.
+    RejectAll { reason: String },
+}
+
+/// Configuration for the global memory governor.
+#[derive(Debug, Clone)]
+pub struct GovernorConfig {
+    /// Total node memory budget in bytes.
+    pub node_budget_bytes: u64,
+    /// Fraction of budget at which Soft backpressure begins (e.g. 0.70).
+    pub soft_threshold: f64,
+    /// Fraction of budget at which Hard backpressure begins (e.g. 0.85).
+    pub hard_threshold: f64,
+    /// Fraction of budget at which Emergency backpressure begins (e.g. 0.95).
+    pub emergency_threshold: f64,
+    /// Base delay for Soft backpressure (microseconds).
+    pub soft_delay_base_us: u64,
+    /// Delay multiplier: actual delay = base * (usage_ratio - soft_threshold) / (hard - soft).
+    pub soft_delay_scale: f64,
+}
+
+impl Default for GovernorConfig {
+    fn default() -> Self {
+        Self {
+            node_budget_bytes: 1024 * 1024 * 1024, // 1 GB
+            soft_threshold: 0.70,
+            hard_threshold: 0.85,
+            emergency_threshold: 0.95,
+            soft_delay_base_us: 1000, // 1ms
+            soft_delay_scale: 10.0,
+        }
+    }
+}
+
+/// Global memory governor: aggregates shard-level usage and provides
+/// node-wide backpressure decisions.
+pub struct GlobalMemoryGovernor {
+    config: GovernorConfig,
+    /// Current total usage (updated by shards calling `report_usage`).
+    total_used: AtomicU64,
+    /// Current backpressure level.
+    level: AtomicU8,
+    /// Counters.
+    soft_delays: AtomicU64,
+    hard_rejects: AtomicU64,
+    emergency_rejects: AtomicU64,
+    gc_urgents: AtomicU64,
+}
+
+impl GlobalMemoryGovernor {
+    pub fn new(config: GovernorConfig) -> Self {
+        Self {
+            config,
+            total_used: AtomicU64::new(0),
+            level: AtomicU8::new(BackpressureLevel::None as u8),
+            soft_delays: AtomicU64::new(0),
+            hard_rejects: AtomicU64::new(0),
+            emergency_rejects: AtomicU64::new(0),
+            gc_urgents: AtomicU64::new(0),
+        }
+    }
+
+    /// Create a disabled governor (no backpressure).
+    pub fn disabled() -> Self {
+        Self::new(GovernorConfig {
+            node_budget_bytes: 0,
+            ..Default::default()
+        })
+    }
+
+    /// Report the current total node memory usage (called periodically or on alloc).
+    pub fn report_usage(&self, total_bytes: u64) {
+        self.total_used.store(total_bytes, Ordering::Relaxed);
+        let new_level = self.evaluate_level(total_bytes);
+        let old_level_u8 = self.level.swap(new_level as u8, Ordering::Relaxed);
+
+        if old_level_u8 != new_level as u8 {
+            let old_level = Self::level_from_u8(old_level_u8);
+            tracing::warn!(
+                from = %old_level,
+                to = %new_level,
+                used_bytes = total_bytes,
+                budget_bytes = self.config.node_budget_bytes,
+                "global memory governor: backpressure level changed"
+            );
+            if new_level == BackpressureLevel::Emergency {
+                self.gc_urgents.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Evaluate what action to take for a new request.
+    pub fn check(&self, is_write: bool) -> BackpressureAction {
+        let level = self.current_level();
+        match level {
+            BackpressureLevel::None => BackpressureAction::Allow,
+            BackpressureLevel::Soft => {
+                if is_write {
+                    let delay = self.compute_soft_delay();
+                    self.soft_delays.fetch_add(1, Ordering::Relaxed);
+                    BackpressureAction::Delay(delay)
+                } else {
+                    BackpressureAction::Allow
+                }
+            }
+            BackpressureLevel::Hard => {
+                if is_write {
+                    self.hard_rejects.fetch_add(1, Ordering::Relaxed);
+                    BackpressureAction::RejectWrite {
+                        reason: format!(
+                            "memory hard limit: {}/{}",
+                            self.total_used.load(Ordering::Relaxed),
+                            self.config.node_budget_bytes
+                        ),
+                    }
+                } else {
+                    BackpressureAction::Allow
+                }
+            }
+            BackpressureLevel::Emergency => {
+                self.emergency_rejects.fetch_add(1, Ordering::Relaxed);
+                BackpressureAction::RejectAll {
+                    reason: format!(
+                        "memory emergency: {}/{}",
+                        self.total_used.load(Ordering::Relaxed),
+                        self.config.node_budget_bytes
+                    ),
+                }
+            }
+        }
+    }
+
+    /// Current backpressure level.
+    pub fn current_level(&self) -> BackpressureLevel {
+        Self::level_from_u8(self.level.load(Ordering::Relaxed))
+    }
+
+    /// Current usage ratio (0.0 - 1.0+).
+    pub fn usage_ratio(&self) -> f64 {
+        if self.config.node_budget_bytes == 0 {
+            return 0.0;
+        }
+        self.total_used.load(Ordering::Relaxed) as f64 / self.config.node_budget_bytes as f64
+    }
+
+    /// Stats snapshot.
+    pub fn stats(&self) -> GovernorStats {
+        GovernorStats {
+            total_used_bytes: self.total_used.load(Ordering::Relaxed),
+            budget_bytes: self.config.node_budget_bytes,
+            usage_ratio: self.usage_ratio(),
+            level: self.current_level(),
+            soft_delays: self.soft_delays.load(Ordering::Relaxed),
+            hard_rejects: self.hard_rejects.load(Ordering::Relaxed),
+            emergency_rejects: self.emergency_rejects.load(Ordering::Relaxed),
+            gc_urgents: self.gc_urgents.load(Ordering::Relaxed),
+        }
+    }
+
+    fn evaluate_level(&self, used: u64) -> BackpressureLevel {
+        if self.config.node_budget_bytes == 0 {
+            return BackpressureLevel::None;
+        }
+        let ratio = used as f64 / self.config.node_budget_bytes as f64;
+        if ratio >= self.config.emergency_threshold {
+            BackpressureLevel::Emergency
+        } else if ratio >= self.config.hard_threshold {
+            BackpressureLevel::Hard
+        } else if ratio >= self.config.soft_threshold {
+            BackpressureLevel::Soft
+        } else {
+            BackpressureLevel::None
+        }
+    }
+
+    fn compute_soft_delay(&self) -> std::time::Duration {
+        let ratio = self.usage_ratio();
+        let soft = self.config.soft_threshold;
+        let hard = self.config.hard_threshold;
+        let range = hard - soft;
+        let progress = if range > 0.0 {
+            ((ratio - soft) / range).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let delay_us = self.config.soft_delay_base_us as f64
+            * (1.0 + progress * self.config.soft_delay_scale);
+        std::time::Duration::from_micros(delay_us as u64)
+    }
+
+    fn level_from_u8(v: u8) -> BackpressureLevel {
+        match v {
+            1 => BackpressureLevel::Soft,
+            2 => BackpressureLevel::Hard,
+            3 => BackpressureLevel::Emergency,
+            _ => BackpressureLevel::None,
+        }
+    }
+}
+
+/// Governor stats snapshot.
+#[derive(Debug, Clone)]
+pub struct GovernorStats {
+    pub total_used_bytes: u64,
+    pub budget_bytes: u64,
+    pub usage_ratio: f64,
+    pub level: BackpressureLevel,
+    pub soft_delays: u64,
+    pub hard_rejects: u64,
+    pub emergency_rejects: u64,
+    pub gc_urgents: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -596,5 +853,131 @@ mod tests {
         tracker.alloc_index(200);
         assert_eq!(tracker.total_bytes(), 400);
         assert_eq!(tracker.pressure_state(), PressureState::Pressure);
+    }
+
+    // ── GlobalMemoryGovernor tests ──
+
+    fn test_governor(budget: u64) -> GlobalMemoryGovernor {
+        GlobalMemoryGovernor::new(GovernorConfig {
+            node_budget_bytes: budget,
+            soft_threshold: 0.70,
+            hard_threshold: 0.85,
+            emergency_threshold: 0.95,
+            soft_delay_base_us: 1000,
+            soft_delay_scale: 10.0,
+        })
+    }
+
+    #[test]
+    fn test_governor_none_level() {
+        let gov = test_governor(1000);
+        gov.report_usage(500); // 50% — None
+        assert_eq!(gov.current_level(), BackpressureLevel::None);
+        assert_eq!(gov.check(true), BackpressureAction::Allow);
+        assert_eq!(gov.check(false), BackpressureAction::Allow);
+    }
+
+    #[test]
+    fn test_governor_soft_level() {
+        let gov = test_governor(1000);
+        gov.report_usage(750); // 75% — Soft
+        assert_eq!(gov.current_level(), BackpressureLevel::Soft);
+        // Reads still allowed
+        assert_eq!(gov.check(false), BackpressureAction::Allow);
+        // Writes get delayed
+        match gov.check(true) {
+            BackpressureAction::Delay(d) => assert!(d.as_micros() > 0),
+            other => panic!("expected Delay, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_governor_hard_level() {
+        let gov = test_governor(1000);
+        gov.report_usage(900); // 90% — Hard
+        assert_eq!(gov.current_level(), BackpressureLevel::Hard);
+        // Reads still allowed
+        assert_eq!(gov.check(false), BackpressureAction::Allow);
+        // Writes rejected
+        match gov.check(true) {
+            BackpressureAction::RejectWrite { .. } => {}
+            other => panic!("expected RejectWrite, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_governor_emergency_level() {
+        let gov = test_governor(1000);
+        gov.report_usage(960); // 96% — Emergency
+        assert_eq!(gov.current_level(), BackpressureLevel::Emergency);
+        // Everything rejected
+        match gov.check(false) {
+            BackpressureAction::RejectAll { .. } => {}
+            other => panic!("expected RejectAll for read, got {:?}", other),
+        }
+        match gov.check(true) {
+            BackpressureAction::RejectAll { .. } => {}
+            other => panic!("expected RejectAll for write, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_governor_level_transitions() {
+        let gov = test_governor(1000);
+        gov.report_usage(500);
+        assert_eq!(gov.current_level(), BackpressureLevel::None);
+        gov.report_usage(750);
+        assert_eq!(gov.current_level(), BackpressureLevel::Soft);
+        gov.report_usage(900);
+        assert_eq!(gov.current_level(), BackpressureLevel::Hard);
+        gov.report_usage(960);
+        assert_eq!(gov.current_level(), BackpressureLevel::Emergency);
+        // Back down
+        gov.report_usage(800);
+        assert_eq!(gov.current_level(), BackpressureLevel::Soft);
+        gov.report_usage(500);
+        assert_eq!(gov.current_level(), BackpressureLevel::None);
+    }
+
+    #[test]
+    fn test_governor_stats() {
+        let gov = test_governor(1000);
+        gov.report_usage(750); // Soft
+        let _ = gov.check(true); // soft delay
+        gov.report_usage(900); // Hard
+        let _ = gov.check(true); // hard reject
+        gov.report_usage(960); // Emergency
+        let _ = gov.check(true); // emergency reject
+
+        let stats = gov.stats();
+        assert_eq!(stats.soft_delays, 1);
+        assert_eq!(stats.hard_rejects, 1);
+        assert_eq!(stats.emergency_rejects, 1);
+        assert_eq!(stats.gc_urgents, 1);
+    }
+
+    #[test]
+    fn test_governor_disabled() {
+        let gov = GlobalMemoryGovernor::disabled();
+        gov.report_usage(u64::MAX);
+        assert_eq!(gov.current_level(), BackpressureLevel::None);
+        assert_eq!(gov.check(true), BackpressureAction::Allow);
+    }
+
+    #[test]
+    fn test_governor_usage_ratio() {
+        let gov = test_governor(1000);
+        gov.report_usage(500);
+        assert!((gov.usage_ratio() - 0.5).abs() < 0.001);
+        gov.report_usage(1000);
+        assert!((gov.usage_ratio() - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_backpressure_level_display() {
+        assert_eq!(BackpressureLevel::None.to_string(), "none");
+        assert_eq!(BackpressureLevel::Soft.to_string(), "soft");
+        assert_eq!(BackpressureLevel::Hard.to_string(), "hard");
+        assert_eq!(BackpressureLevel::Emergency.to_string(), "emergency");
     }
 }

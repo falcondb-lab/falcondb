@@ -163,8 +163,8 @@ impl PartialAggState {
         if let Some(v) = val {
             self.count += 1;
             self.sum += v;
-            if self.min.is_none() || v < self.min.unwrap() { self.min = Some(v); }
-            if self.max.is_none() || v > self.max.unwrap() { self.max = Some(v); }
+            if self.min.map_or(true, |m| v < m) { self.min = Some(v); }
+            if self.max.map_or(true, |m| v > m) { self.max = Some(v); }
             // Welford's online algorithm for variance
             let delta = v - self.mean;
             self.mean += delta / self.count as f64;

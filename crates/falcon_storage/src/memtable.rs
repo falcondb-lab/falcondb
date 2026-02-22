@@ -111,6 +111,29 @@ fn encode_datum_to_bytes(datum: &Datum, buf: &mut Vec<u8>) {
             let encoded = (*mantissa as u128) ^ (1u128 << 127);
             buf.extend_from_slice(&encoded.to_be_bytes());
         }
+        Datum::Time(us) => {
+            buf.push(0x0B);
+            let encoded = (*us as u64) ^ (1u64 << 63);
+            buf.extend_from_slice(&encoded.to_be_bytes());
+        }
+        Datum::Interval(months, days, us) => {
+            buf.push(0x0C);
+            let em = (*months as u32) ^ (1u32 << 31);
+            let ed = (*days as u32) ^ (1u32 << 31);
+            let eu = (*us as u64) ^ (1u64 << 63);
+            buf.extend_from_slice(&em.to_be_bytes());
+            buf.extend_from_slice(&ed.to_be_bytes());
+            buf.extend_from_slice(&eu.to_be_bytes());
+        }
+        Datum::Uuid(v) => {
+            buf.push(0x0D);
+            buf.extend_from_slice(&v.to_be_bytes());
+        }
+        Datum::Bytea(bytes) => {
+            buf.push(0x0E);
+            buf.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            buf.extend_from_slice(bytes);
+        }
     }
 }
 

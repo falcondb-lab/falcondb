@@ -24,6 +24,14 @@ pub enum Datum {
     /// e.g. Decimal(12345, 2) = 123.45
     /// Supports up to 38 significant digits (i128 range).
     Decimal(i128, u8),
+    /// TIME without time zone: microseconds since midnight (0..86_400_000_000).
+    Time(i64),
+    /// INTERVAL: (months, days, microseconds) — PG-compatible triple.
+    Interval(i32, i32, i64),
+    /// UUID: stored as 128-bit value.
+    Uuid(u128),
+    /// BYTEA: arbitrary binary data.
+    Bytea(Vec<u8>),
 }
 
 impl Datum {
@@ -46,6 +54,10 @@ impl Datum {
             }
             Datum::Jsonb(_) => Some(DataType::Jsonb),
             Datum::Decimal(_, scale) => Some(DataType::Decimal(38, *scale)),
+            Datum::Time(_) => Some(DataType::Time),
+            Datum::Interval(_, _, _) => Some(DataType::Interval),
+            Datum::Uuid(_) => Some(DataType::Uuid),
+            Datum::Bytea(_) => Some(DataType::Bytea),
         }
     }
 
@@ -125,6 +137,12 @@ impl Datum {
             }
             Datum::Jsonb(v) => Some(v.to_string()),
             Datum::Decimal(m, s) => Some(decimal_to_string(*m, *s)),
+            Datum::Time(_) | Datum::Interval(_, _, _) | Datum::Uuid(_) => Some(format!("{}", self)),
+            Datum::Bytea(bytes) => {
+                // PG hex format: \x followed by hex-encoded bytes
+                let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                Some(format!("\\x{}", hex))
+            }
         }
     }
 
@@ -198,6 +216,50 @@ impl fmt::Display for Datum {
             }
             Datum::Jsonb(v) => write!(f, "{}", v),
             Datum::Decimal(m, s) => write!(f, "{}", decimal_to_string(*m, *s)),
+            Datum::Time(us) => {
+                let total_secs = *us / 1_000_000;
+                let h = total_secs / 3600;
+                let m = (total_secs % 3600) / 60;
+                let s = total_secs % 60;
+                let frac = *us % 1_000_000;
+                if frac == 0 {
+                    write!(f, "{:02}:{:02}:{:02}", h, m, s)
+                } else {
+                    write!(f, "{:02}:{:02}:{:02}.{:06}", h, m, s, frac)
+                }
+            }
+            Datum::Interval(months, days, us) => {
+                let mut parts = Vec::new();
+                if *months != 0 {
+                    let y = *months / 12;
+                    let mo = *months % 12;
+                    if y != 0 { parts.push(format!("{} year{}", y, if y.abs() != 1 { "s" } else { "" })); }
+                    if mo != 0 { parts.push(format!("{} mon{}", mo, if mo.abs() != 1 { "s" } else { "" })); }
+                }
+                if *days != 0 { parts.push(format!("{} day{}", days, if days.abs() != 1 { "s" } else { "" })); }
+                if *us != 0 || parts.is_empty() {
+                    let total_secs = us.abs() / 1_000_000;
+                    let h = total_secs / 3600;
+                    let m = (total_secs % 3600) / 60;
+                    let s = total_secs % 60;
+                    let sign = if *us < 0 { "-" } else { "" };
+                    parts.push(format!("{}{:02}:{:02}:{:02}", sign, h, m, s));
+                }
+                write!(f, "{}", parts.join(" "))
+            }
+            Datum::Uuid(v) => {
+                let bytes = v.to_be_bytes();
+                write!(f, "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                    bytes[0], bytes[1], bytes[2], bytes[3],
+                    bytes[4], bytes[5], bytes[6], bytes[7],
+                    bytes[8], bytes[9], bytes[10], bytes[11],
+                    bytes[12], bytes[13], bytes[14], bytes[15])
+            }
+            Datum::Bytea(bytes) => {
+                write!(f, "\\x")?;
+                for b in bytes { write!(f, "{:02x}", b)?; }
+                Ok(())
+            }
         }
     }
 }
@@ -236,6 +298,9 @@ impl PartialEq for Datum {
                 let am = *a as i128 * 10i128.pow(*sb as u32);
                 am == *b
             }
+            (Datum::Time(a), Datum::Time(b)) => a == b,
+            (Datum::Interval(am, ad, aus), Datum::Interval(bm, bd, bus)) => am == bm && ad == bd && aus == bus,
+            (Datum::Uuid(a), Datum::Uuid(b)) => a == b,
             _ => false,
         }
     }
@@ -273,6 +338,10 @@ impl Hash for Datum {
                 nm.hash(state);
                 ns.hash(state);
             }
+            Datum::Time(us) => { 10u8.hash(state); us.hash(state); }
+            Datum::Interval(months, days, us) => { 11u8.hash(state); months.hash(state); days.hash(state); us.hash(state); }
+            Datum::Uuid(v) => { 12u8.hash(state); v.hash(state); }
+            Datum::Bytea(bytes) => { 13u8.hash(state); bytes.hash(state); }
         }
     }
 }
@@ -315,6 +384,18 @@ impl PartialOrd for Datum {
                 let bf = *b as f64 / 10f64.powi(*sb as i32);
                 a.partial_cmp(&bf)
             }
+            (Datum::Time(a), Datum::Time(b)) => a.partial_cmp(b),
+            (Datum::Interval(am, ad, aus), Datum::Interval(bm, bd, bus)) => {
+                // Compare by total: months first, then days, then microseconds
+                match am.cmp(bm) {
+                    Ordering::Equal => match ad.cmp(bd) {
+                        Ordering::Equal => aus.partial_cmp(bus),
+                        o => Some(o),
+                    },
+                    o => Some(o),
+                }
+            }
+            (Datum::Uuid(a), Datum::Uuid(b)) => a.partial_cmp(b),
             (Datum::Array(_), Datum::Array(_)) => None, // arrays not orderable
             _ => None,
         }

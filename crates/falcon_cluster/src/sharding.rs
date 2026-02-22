@@ -169,6 +169,25 @@ fn encode_datum_for_hash(buf: &mut Vec<u8>, datum: &Datum) {
             buf.push(*s);
             buf.extend_from_slice(&m.to_le_bytes());
         }
+        Datum::Time(us) => {
+            buf.push(0x0B);
+            buf.extend_from_slice(&us.to_le_bytes());
+        }
+        Datum::Interval(mo, d, us) => {
+            buf.push(0x0C);
+            buf.extend_from_slice(&mo.to_le_bytes());
+            buf.extend_from_slice(&d.to_le_bytes());
+            buf.extend_from_slice(&us.to_le_bytes());
+        }
+        Datum::Uuid(v) => {
+            buf.push(0x0D);
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        Datum::Bytea(bytes) => {
+            buf.push(0x0E);
+            buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(bytes);
+        }
     }
 }
 

@@ -14,10 +14,11 @@
 //! Any committed version with commit_ts <= gc_safepoint that is NOT the newest
 //! such version for its key can be safely reclaimed.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use falcon_common::shutdown::ShutdownSignal;
 use falcon_common::types::Timestamp;
 
 /// GC configuration.
@@ -284,19 +285,22 @@ pub trait SafepointProvider: Send + Sync {
 /// The runner does NOT hold any global lock. It is safe to run concurrently
 /// with all read/write operations.
 pub struct GcRunner {
-    stop: Arc<AtomicBool>,
+    signal: ShutdownSignal,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl GcRunner {
     /// Start the background GC runner.
+    ///
+    /// Returns `Err` if the background thread cannot be spawned.
+    /// The caller must handle this as a degraded condition — **no panic**.
     pub fn start(
         engine: Arc<crate::engine::StorageEngine>,
         provider: Arc<dyn SafepointProvider>,
         config: GcConfig,
-    ) -> Self {
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_clone = stop.clone();
+    ) -> Result<Self, std::io::Error> {
+        let signal = ShutdownSignal::new();
+        let signal_clone = signal.clone();
         let interval = Duration::from_millis(config.interval_ms);
 
         let handle = std::thread::Builder::new()
@@ -319,7 +323,7 @@ impl GcRunner {
                 };
                 let mut last_sweep = Instant::now() - interval; // allow first sweep immediately
 
-                while !stop_clone.load(Ordering::Relaxed) {
+                while !signal_clone.is_shutdown() {
                     // Adapt sleep interval based on memory pressure.
                     let pressure = engine.pressure_state();
                     let sleep_dur = match pressure {
@@ -327,8 +331,7 @@ impl GcRunner {
                         crate::memory::PressureState::Pressure => pressure_interval,
                         crate::memory::PressureState::Normal => interval,
                     };
-                    std::thread::sleep(sleep_dur);
-                    if stop_clone.load(Ordering::Relaxed) {
+                    if signal_clone.wait_timeout(sleep_dur) {
                         break;
                     }
 
@@ -394,17 +397,24 @@ impl GcRunner {
                 }
                 tracing::info!("GC runner stopped");
             })
-            .expect("failed to spawn GC thread");
+            .map_err(|e| {
+                tracing::error!(
+                    component = "gc-runner",
+                    error = %e,
+                    "failed to spawn GC background thread — node DEGRADED"
+                );
+                e
+            })?;
 
-        Self {
-            stop,
+        Ok(Self {
+            signal,
             handle: Some(handle),
-        }
+        })
     }
 
     /// Signal the GC runner to stop and wait for it to finish.
     pub fn stop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.signal.shutdown();
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
@@ -419,5 +429,379 @@ impl GcRunner {
 impl Drop for GcRunner {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Read View Manager — unified safepoint for MVCC visibility + GC
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A registered read view (snapshot) held by a long-running query or cursor.
+///
+/// As long as this view exists, GC cannot reclaim any version that is visible
+/// to the snapshot at `snapshot_ts`.
+#[derive(Debug, Clone)]
+pub struct ReadView {
+    pub view_id: u64,
+    pub snapshot_ts: Timestamp,
+    pub holder: ReadViewHolder,
+    pub created_at: Instant,
+}
+
+/// Who/what is holding the read view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadViewHolder {
+    /// A user transaction (txn_id).
+    Transaction(u64),
+    /// A cursor (cursor name / id).
+    Cursor(String),
+    /// A replication slot (slot name).
+    ReplicationSlot(String),
+    /// A backup / PITR snapshot.
+    Backup(String),
+    /// Internal (e.g. EXPLAIN ANALYZE, pg_dump).
+    Internal(String),
+}
+
+impl std::fmt::Display for ReadViewHolder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transaction(id) => write!(f, "txn:{}", id),
+            Self::Cursor(name) => write!(f, "cursor:{}", name),
+            Self::ReplicationSlot(name) => write!(f, "repl_slot:{}", name),
+            Self::Backup(name) => write!(f, "backup:{}", name),
+            Self::Internal(name) => write!(f, "internal:{}", name),
+        }
+    }
+}
+
+/// Manages active read views and computes a unified GC safepoint.
+///
+/// The safepoint is:
+///   `min(min_active_txn_ts, min_read_view_ts, replica_safe_ts) - 1`
+///
+/// This ensures that:
+/// 1. Active transactions can always read their snapshot.
+/// 2. Open cursors and replication slots pin versions they need.
+/// 3. Replicas can always catch up.
+pub struct ReadViewManager {
+    /// Active read views (view_id → ReadView).
+    views: parking_lot::RwLock<std::collections::HashMap<u64, ReadView>>,
+    /// Monotonic view ID counter.
+    next_id: AtomicU64,
+    /// Cached minimum read view timestamp (updated on register/unregister).
+    cached_min_ts: AtomicU64,
+    /// Lifetime counters.
+    total_registered: AtomicU64,
+    total_unregistered: AtomicU64,
+    /// Number of times GC was pinned (safepoint held back by a read view).
+    total_pins: AtomicU64,
+}
+
+/// RAII guard that automatically unregisters the read view on drop.
+pub struct ReadViewGuard {
+    manager: Arc<ReadViewManager>,
+    view_id: u64,
+}
+
+impl Drop for ReadViewGuard {
+    fn drop(&mut self) {
+        self.manager.unregister(self.view_id);
+    }
+}
+
+impl ReadViewGuard {
+    /// The view ID of this guard.
+    pub fn view_id(&self) -> u64 {
+        self.view_id
+    }
+}
+
+/// Snapshot of read view manager state.
+#[derive(Debug, Clone)]
+pub struct ReadViewManagerSnapshot {
+    pub active_views: usize,
+    pub min_pinned_ts: Option<Timestamp>,
+    pub oldest_view_age_us: u64,
+    pub total_registered: u64,
+    pub total_unregistered: u64,
+    pub total_pins: u64,
+    pub views: Vec<ReadViewInfo>,
+}
+
+/// Info about a single active read view.
+#[derive(Debug, Clone)]
+pub struct ReadViewInfo {
+    pub view_id: u64,
+    pub snapshot_ts: Timestamp,
+    pub holder: String,
+    pub age_us: u64,
+}
+
+impl ReadViewManager {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            views: parking_lot::RwLock::new(std::collections::HashMap::new()),
+            next_id: AtomicU64::new(1),
+            cached_min_ts: AtomicU64::new(u64::MAX),
+            total_registered: AtomicU64::new(0),
+            total_unregistered: AtomicU64::new(0),
+            total_pins: AtomicU64::new(0),
+        })
+    }
+
+    /// Register a read view. Returns a guard that auto-unregisters on drop.
+    pub fn register(
+        self: &Arc<Self>,
+        snapshot_ts: Timestamp,
+        holder: ReadViewHolder,
+    ) -> ReadViewGuard {
+        let view_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let view = ReadView {
+            view_id,
+            snapshot_ts,
+            holder: holder.clone(),
+            created_at: Instant::now(),
+        };
+
+        {
+            let mut views = self.views.write();
+            views.insert(view_id, view);
+        }
+        self.total_registered.fetch_add(1, Ordering::Relaxed);
+        self.update_cached_min();
+
+        tracing::debug!(
+            view_id,
+            snapshot_ts = snapshot_ts.0,
+            holder = %holder,
+            "read view registered"
+        );
+
+        ReadViewGuard {
+            manager: Arc::clone(self),
+            view_id,
+        }
+    }
+
+    /// Manually unregister a read view by ID.
+    pub fn unregister(&self, view_id: u64) {
+        let removed = {
+            let mut views = self.views.write();
+            views.remove(&view_id)
+        };
+        if removed.is_some() {
+            self.total_unregistered.fetch_add(1, Ordering::Relaxed);
+            self.update_cached_min();
+        }
+    }
+
+    /// Minimum snapshot timestamp across all active read views.
+    /// Returns `None` if no views are active.
+    pub fn min_pinned_ts(&self) -> Option<Timestamp> {
+        let cached = self.cached_min_ts.load(Ordering::Relaxed);
+        if cached == u64::MAX {
+            None
+        } else {
+            Some(Timestamp(cached))
+        }
+    }
+
+    /// Compute unified safepoint considering active read views.
+    ///
+    /// `min_active_txn_ts` — from TxnManager::min_active_ts()
+    /// `replica_safe_ts` — from ReplicaAckTracker
+    ///
+    /// Returns `min(min_active_txn_ts, min_read_view_ts, replica_safe_ts) - 1`
+    pub fn unified_safepoint(
+        &self,
+        min_active_txn_ts: Timestamp,
+        replica_safe_ts: Timestamp,
+    ) -> Timestamp {
+        let mut effective = std::cmp::min(min_active_txn_ts, replica_safe_ts);
+
+        if let Some(min_view_ts) = self.min_pinned_ts() {
+            if min_view_ts < effective {
+                effective = min_view_ts;
+                self.total_pins.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        Timestamp(effective.0.saturating_sub(1))
+    }
+
+    /// Number of active read views.
+    pub fn active_count(&self) -> usize {
+        self.views.read().len()
+    }
+
+    /// Snapshot for observability.
+    pub fn snapshot(&self) -> ReadViewManagerSnapshot {
+        let views = self.views.read();
+        let mut oldest_age_us = 0u64;
+        let infos: Vec<_> = views.values().map(|v| {
+            let age = v.created_at.elapsed().as_micros() as u64;
+            if age > oldest_age_us {
+                oldest_age_us = age;
+            }
+            ReadViewInfo {
+                view_id: v.view_id,
+                snapshot_ts: v.snapshot_ts,
+                holder: v.holder.to_string(),
+                age_us: age,
+            }
+        }).collect();
+
+        ReadViewManagerSnapshot {
+            active_views: views.len(),
+            min_pinned_ts: self.min_pinned_ts(),
+            oldest_view_age_us: oldest_age_us,
+            total_registered: self.total_registered.load(Ordering::Relaxed),
+            total_unregistered: self.total_unregistered.load(Ordering::Relaxed),
+            total_pins: self.total_pins.load(Ordering::Relaxed),
+            views: infos,
+        }
+    }
+
+    fn update_cached_min(&self) {
+        let views = self.views.read();
+        let min_ts = views.values()
+            .map(|v| v.snapshot_ts.0)
+            .min()
+            .unwrap_or(u64::MAX);
+        self.cached_min_ts.store(min_ts, Ordering::Relaxed);
+    }
+}
+
+impl Default for ReadViewManager {
+    fn default() -> Self {
+        Self {
+            views: parking_lot::RwLock::new(std::collections::HashMap::new()),
+            next_id: AtomicU64::new(1),
+            cached_min_ts: AtomicU64::new(u64::MAX),
+            total_registered: AtomicU64::new(0),
+            total_unregistered: AtomicU64::new(0),
+            total_pins: AtomicU64::new(0),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── compute_safepoint ──
+
+    #[test]
+    fn test_safepoint_basic() {
+        let sp = compute_safepoint(Timestamp(100), Timestamp(200));
+        assert_eq!(sp, Timestamp(99)); // min(100,200) - 1
+    }
+
+    #[test]
+    fn test_safepoint_replica_lower() {
+        let sp = compute_safepoint(Timestamp(200), Timestamp(50));
+        assert_eq!(sp, Timestamp(49)); // min(200,50) - 1
+    }
+
+    #[test]
+    fn test_safepoint_saturating() {
+        let sp = compute_safepoint(Timestamp(0), Timestamp(100));
+        assert_eq!(sp, Timestamp(0)); // saturating_sub(1) on 0
+    }
+
+    // ── ReadViewManager ──
+
+    #[test]
+    fn test_read_view_register_unregister() {
+        let mgr = ReadViewManager::new();
+        assert_eq!(mgr.active_count(), 0);
+        assert!(mgr.min_pinned_ts().is_none());
+
+        let guard = mgr.register(Timestamp(50), ReadViewHolder::Transaction(1));
+        assert_eq!(mgr.active_count(), 1);
+        assert_eq!(mgr.min_pinned_ts(), Some(Timestamp(50)));
+
+        drop(guard);
+        assert_eq!(mgr.active_count(), 0);
+        assert!(mgr.min_pinned_ts().is_none());
+    }
+
+    #[test]
+    fn test_read_view_min_pinned_ts() {
+        let mgr = ReadViewManager::new();
+        let _g1 = mgr.register(Timestamp(100), ReadViewHolder::Transaction(1));
+        let _g2 = mgr.register(Timestamp(50), ReadViewHolder::Cursor("c1".into()));
+        let _g3 = mgr.register(Timestamp(200), ReadViewHolder::Backup("b1".into()));
+
+        assert_eq!(mgr.min_pinned_ts(), Some(Timestamp(50)));
+        assert_eq!(mgr.active_count(), 3);
+    }
+
+    #[test]
+    fn test_read_view_unified_safepoint_no_views() {
+        let mgr = ReadViewManager::new();
+        let sp = mgr.unified_safepoint(Timestamp(100), Timestamp(200));
+        assert_eq!(sp, Timestamp(99)); // same as compute_safepoint
+    }
+
+    #[test]
+    fn test_read_view_unified_safepoint_pinned_by_view() {
+        let mgr = ReadViewManager::new();
+        let _g = mgr.register(Timestamp(30), ReadViewHolder::ReplicationSlot("slot1".into()));
+        let sp = mgr.unified_safepoint(Timestamp(100), Timestamp(200));
+        // min(100, 200, 30) - 1 = 29
+        assert_eq!(sp, Timestamp(29));
+    }
+
+    #[test]
+    fn test_read_view_unified_safepoint_not_pinned() {
+        let mgr = ReadViewManager::new();
+        let _g = mgr.register(Timestamp(500), ReadViewHolder::Transaction(1));
+        let sp = mgr.unified_safepoint(Timestamp(100), Timestamp(200));
+        // min(100, 200, 500) - 1 = 99 — view doesn't pin because its ts is higher
+        assert_eq!(sp, Timestamp(99));
+    }
+
+    #[test]
+    fn test_read_view_guard_auto_unregisters() {
+        let mgr = ReadViewManager::new();
+        {
+            let _g1 = mgr.register(Timestamp(10), ReadViewHolder::Internal("test".into()));
+            let _g2 = mgr.register(Timestamp(20), ReadViewHolder::Transaction(2));
+            assert_eq!(mgr.active_count(), 2);
+        }
+        assert_eq!(mgr.active_count(), 0);
+    }
+
+    #[test]
+    fn test_read_view_snapshot() {
+        let mgr = ReadViewManager::new();
+        let _g = mgr.register(Timestamp(42), ReadViewHolder::Cursor("cur1".into()));
+        let snap = mgr.snapshot();
+        assert_eq!(snap.active_views, 1);
+        assert_eq!(snap.min_pinned_ts, Some(Timestamp(42)));
+        assert_eq!(snap.total_registered, 1);
+        assert_eq!(snap.views.len(), 1);
+        assert!(snap.views[0].holder.contains("cursor:cur1"));
+    }
+
+    #[test]
+    fn test_read_view_holder_display() {
+        assert_eq!(ReadViewHolder::Transaction(42).to_string(), "txn:42");
+        assert_eq!(ReadViewHolder::Cursor("c1".into()).to_string(), "cursor:c1");
+        assert_eq!(ReadViewHolder::ReplicationSlot("s1".into()).to_string(), "repl_slot:s1");
+        assert_eq!(ReadViewHolder::Backup("b1".into()).to_string(), "backup:b1");
+        assert_eq!(ReadViewHolder::Internal("test".into()).to_string(), "internal:test");
+    }
+
+    #[test]
+    fn test_read_view_pins_counter() {
+        let mgr = ReadViewManager::new();
+        let _g = mgr.register(Timestamp(10), ReadViewHolder::Transaction(1));
+        // This should pin (view ts=10 < txn ts=100)
+        let _sp = mgr.unified_safepoint(Timestamp(100), Timestamp(200));
+        let snap = mgr.snapshot();
+        assert_eq!(snap.total_pins, 1);
     }
 }

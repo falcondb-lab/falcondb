@@ -9,27 +9,68 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added
+_(nothing yet — all recent work shipped in 1.0.0-rc.1)_
+
+---
+
+## [1.0.0-rc.1] — 2026-02-21
+
+### Added — v1.0 Phase 1: Industrial OLTP Kernel
+- LSM storage engine: WAL → MemTable → Flush → L0 → Leveled Compaction
+- SST file format with data blocks, index block, bloom filter, and footer
+- Per-SST bloom filter for negative-lookup elimination
+- LRU block cache with configurable budget and eviction metrics
+- MVCC value encoding (txn_id / status / commit_ts / data) with visibility rules
+- Persistent `TxnMetaStore` for 2PC crash recovery
+- Idempotency key store with TTL and background GC
+- Transaction-level audit log (txn_id, affected keys, outcome, epoch)
+- TPC-B (`--tpcb`) and LSM KV (`--lsm`) benchmark workloads with P50/P95/P99/Max latency
+- CI Phase 1 gates script (`scripts/ci_phase1_gates.sh`)
+
+### Added — v1.0 Phase 2: SQL Completeness & Enterprise Kernel
+- `Datum::Decimal(i128, u8)` / `DataType::Decimal(u8, u8)` with full arithmetic and PG wire support
+- Composite, covering, and prefix secondary indexes with backfill on creation
+- CHECK constraint runtime enforcement (INSERT / UPDATE, SQLSTATE `23514`)
+- Transaction `READ ONLY` / `READ WRITE` mode, per-txn timeout, execution summary counters
+- `GovernorAbortReason` enum for structured query abort reasons
+- Fine-grained admission control: `OperationType` enum, `DdlPermit` RAII guard
+- `NodeOperationalMode` (Normal / ReadOnly / Drain) with event-logged transitions
+- `RoleCatalog` with transitive role inheritance and circular-dependency detection
+- `PrivilegeManager` with GRANT / REVOKE, effective-role resolution, schema default privileges
+- Native `DataType::Time`, `DataType::Interval`, `DataType::Uuid` with PG OID mapping
+
+### Added — Release Engineering & Hardening
 - `--print-default-config` CLI flag for config schema discovery
 - E2E two-node failover scripts (Linux + Windows)
 - CI failover gate with P0/P1 tiered testing
-- Windows developer setup script (`scripts/setup_windows.ps1`)
-- Protocol compatibility matrix documentation
-- SHOW falcon.* stable output schema documentation
-- RPO/RTO analysis and durability policy documentation
-- Detailed roadmap with acceptance criteria per milestone
+- Performance regression CI gate (`scripts/ci_perf_regression_gate.sh`)
+- Per-crate code audit report (`docs/crate_audit_report.md`)
+- ARCHITECTURE.md split: extended scalar functions moved to `docs/extended_scalar_functions.md`
+- e2e chaos & failover `Makefile` targets with structured evidence output
+- Backpressure stability benchmark harness (`scripts/bench_backpressure.sh`)
+- 2PC fault-injection state-machine tests (`cross_shard_chaos` module)
+- RBAC full-path enforcement test matrix (protocol / SQL / internal paths)
 - CONTRIBUTING.md, CODEOWNERS, issue/PR templates
 - CI badge, MSRV badge, supported platforms table in README
-- SQL coverage and "Not Supported" sections in README
 
 ### Changed
+- `workspace.version` bumped from `0.1.0` → `1.0.0-rc.1` (aligned with roadmap narrative)
 - CI workflow: added `failover-gate` (P0/P1 split) and `windows` jobs
-- Roadmap: M3 status updated from "Planned" to "Complete"
-- Test count updated to 1,081 (from 837) in ARCHITECTURE.md
+- `slow_query_log.rs`: `Vec` → `VecDeque` for O(1) ring-buffer eviction
+- `TenantRegistry`: race-free atomic tenant ID generation (`alloc_tenant_id()`)
+- `handler.rs`: `projection_to_field` now bounds-checks column index (no panic on binder bug)
+- `deadlock.rs`: production-path `unwrap()` replaced with safe fallbacks + error logging
+- `manager.rs`: `TxnState::Committed` set only AFTER `storage.commit_txn()` confirms
+- `manager.rs`: `LatencyRecorder` capped at 100K samples per bucket (prevents unbounded growth)
+- `infer_func_type`: `CurrentTime` returns `DataType::Time` (was stale `DataType::Text`)
 
 ### Fixed
 - `.gitattributes` enforces LF for all text files (eliminates CRLF noise)
 - 18 files normalized from CRLF to LF
+- `SYSTEM_TENANT_ID` import missing in `tenant_registry.rs` test module
+
+### Test Count
+- **1,976 tests** passing, **0 failures** (was 1,081 at v0.1.0)
 
 ---
 

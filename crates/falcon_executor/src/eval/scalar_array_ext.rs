@@ -296,7 +296,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                         format!("[{}]", elems.join(","))
                     }
                     Datum::Date(days) => {
-                        let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+                        let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("unix epoch date is always valid");
                         if let Some(d) = epoch.checked_add_signed(chrono::Duration::days(*days as i64)) {
                             format!("\"{}\"", d.format("%Y-%m-%d"))
                         } else {
@@ -305,6 +305,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                     }
                     Datum::Jsonb(v) => v.to_string(),
                     Datum::Decimal(m, s) => falcon_common::datum::decimal_to_string(*m, *s),
+                    other => format!("\"{}\"", other),
                 }
             }
             match args.first() {

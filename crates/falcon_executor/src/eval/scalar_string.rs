@@ -429,7 +429,8 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             let s = match args.first() {
                 Some(Datum::Text(s)) => s.clone(),
                 Some(Datum::Null) => return Ok(Datum::Null),
-                other => format!("{}", other.unwrap()),
+                Some(other) => format!("{}", other),
+                None => return Ok(Datum::Null),
             };
             Ok(Datum::Text(format!("'{}'", s.replace('\'', "''"))))
         }

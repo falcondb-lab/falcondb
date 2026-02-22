@@ -156,7 +156,10 @@ impl Compactor {
             if let Some(last) = deduped.last() {
                 if last.key == entry.key {
                     // Replace with newer (L0 entries were added first)
-                    *deduped.last_mut().unwrap() = entry;
+                    // Safety: last() returned Some, so last_mut() is guaranteed Some
+                    if let Some(slot) = deduped.last_mut() {
+                        *slot = entry;
+                    }
                     continue;
                 }
             }

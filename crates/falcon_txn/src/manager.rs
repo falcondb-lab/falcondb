@@ -316,6 +316,10 @@ const SLA_TARGET_HIGH_US: u64 = 10_000;      // 10ms for high-priority
 const SLA_TARGET_NORMAL_US: u64 = 100_000;    // 100ms for normal
 const SLA_TARGET_BACKGROUND_US: u64 = 1_000_000; // 1s for background
 
+/// Maximum latency samples kept per bucket before eviction.
+/// When reached, the oldest half is dropped to amortize the cost.
+const LATENCY_SAMPLES_CAP: usize = 100_000;
+
 /// Sorted latency samples for percentile computation.
 struct LatencyRecorder {
     fast_path: Vec<u64>,
@@ -348,36 +352,45 @@ impl LatencyRecorder {
 
     fn record(&mut self, path: TxnPath, latency_us: u64) {
         match path {
-            TxnPath::Fast => self.fast_path.push(latency_us),
-            TxnPath::Slow => self.slow_path.push(latency_us),
+            TxnPath::Fast => Self::capped_push(&mut self.fast_path, latency_us),
+            TxnPath::Slow => Self::capped_push(&mut self.slow_path, latency_us),
         }
+    }
+
+    /// Push a sample, evicting the oldest half when the cap is reached.
+    fn capped_push(vec: &mut Vec<u64>, value: u64) {
+        if vec.len() >= LATENCY_SAMPLES_CAP {
+            let drain_count = LATENCY_SAMPLES_CAP / 2;
+            vec.drain(..drain_count);
+        }
+        vec.push(value);
     }
 
     /// P2-3: Record latency by priority and check SLA violations.
     fn record_priority(&mut self, priority: TxnPriority, latency_us: u64) {
         match priority {
             TxnPriority::Background => {
-                self.priority_background.push(latency_us);
+                Self::capped_push(&mut self.priority_background, latency_us);
                 if latency_us > SLA_TARGET_BACKGROUND_US {
                     self.sla_total_violations += 1;
                 }
             }
             TxnPriority::Normal => {
-                self.priority_normal.push(latency_us);
+                Self::capped_push(&mut self.priority_normal, latency_us);
                 if latency_us > SLA_TARGET_NORMAL_US {
                     self.sla_normal_violations += 1;
                     self.sla_total_violations += 1;
                 }
             }
             TxnPriority::High => {
-                self.priority_high.push(latency_us);
+                Self::capped_push(&mut self.priority_high, latency_us);
                 if latency_us > SLA_TARGET_HIGH_US {
                     self.sla_high_violations += 1;
                     self.sla_total_violations += 1;
                 }
             }
             TxnPriority::System => {
-                self.priority_system.push(latency_us);
+                Self::capped_push(&mut self.priority_system, latency_us);
             }
         }
     }
@@ -924,7 +937,7 @@ impl TxnManager {
             let local_seq = self.alloc_local_ts();
             let commit_ts = self.alloc_ts();
             entry.path = TxnPath::Fast;
-            entry.state = TxnState::Committed;
+            // Note: state is set to Committed only AFTER storage confirms.
             drop(entry);
 
             // Fast-path local commit: no prepare/global coordination.
@@ -944,6 +957,11 @@ impl TxnManager {
                 }
                 self.active_txns.remove(&txn_id);
                 return Err(Self::storage_err_to_txn_err(txn_id, e));
+            }
+
+            // Storage confirmed — now mark as Committed in the active map.
+            if let Some(mut e) = self.active_txns.get_mut(&txn_id) {
+                e.state = TxnState::Committed;
             }
 
             let latency_us = entry_begin_instant.map(|i| i.elapsed().as_micros() as u64).unwrap_or(0);

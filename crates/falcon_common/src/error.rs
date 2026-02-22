@@ -190,6 +190,9 @@ pub enum SqlError {
 
     #[error("Parameter ${index} type conflict: expected {expected}, got {got}")]
     ParamTypeConflict { index: usize, expected: String, got: String },
+
+    #[error("Internal invariant violation: {0}")]
+    InternalInvariant(String),
 }
 
 /// Protocol layer errors.
@@ -231,6 +234,12 @@ pub enum ExecutionError {
 
     #[error("CHECK constraint violated: {0}")]
     CheckConstraintViolation(String),
+
+    #[error("Insufficient privilege: {0}")]
+    InsufficientPrivilege(String),
+
+    #[error("Query governor abort: {0}")]
+    GovernorAbort(String),
 }
 
 /// Cluster / metadata errors.
@@ -264,6 +273,9 @@ impl FalconError {
             FalconError::Execution(ExecutionError::DivisionByZero) => ErrorKind::UserError,
             FalconError::Execution(ExecutionError::ParamMissing(_)) => ErrorKind::UserError,
             FalconError::Execution(ExecutionError::ParamTypeMismatch { .. }) => ErrorKind::UserError,
+            FalconError::Execution(ExecutionError::InsufficientPrivilege(_)) => ErrorKind::UserError,
+            FalconError::Execution(ExecutionError::GovernorAbort(_)) => ErrorKind::UserError,
+            FalconError::Execution(ExecutionError::CheckConstraintViolation(_)) => ErrorKind::UserError,
             FalconError::Storage(StorageError::TableNotFound(_)) => ErrorKind::UserError,
             FalconError::Storage(StorageError::TableAlreadyExists(_)) => ErrorKind::UserError,
             FalconError::Storage(StorageError::DuplicateKey) => ErrorKind::UserError,
@@ -360,6 +372,9 @@ impl FalconError {
             FalconError::Protocol(ProtocolError::ConnectionClosed) => "08006",   // connection_failure
             FalconError::Execution(ExecutionError::DivisionByZero) => "22012",   // division_by_zero
             FalconError::Execution(ExecutionError::TypeError(_)) => "22000",     // data_exception
+            FalconError::Execution(ExecutionError::InsufficientPrivilege(_)) => "42501", // insufficient_privilege
+            FalconError::Execution(ExecutionError::GovernorAbort(_)) => "57014",  // query_canceled
+            FalconError::Execution(ExecutionError::CheckConstraintViolation(_)) => "23514", // check_violation
             FalconError::Retryable { .. } => "40001",
             FalconError::Transient { .. } => "53000",                            // insufficient_resources
             FalconError::InternalBug { .. } => "XX000",                          // internal_error

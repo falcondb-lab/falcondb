@@ -811,6 +811,10 @@ fn hash_datum(d: &Datum) -> u64 {
         }
         Datum::Jsonb(v) => v.to_string().hash(&mut hasher),
         Datum::Decimal(m, s) => { m.hash(&mut hasher); s.hash(&mut hasher); }
+        Datum::Time(us) => us.hash(&mut hasher),
+        Datum::Interval(mo, d, us) => { mo.hash(&mut hasher); d.hash(&mut hasher); us.hash(&mut hasher); }
+        Datum::Uuid(v) => v.hash(&mut hasher),
+        Datum::Bytea(bytes) => bytes.hash(&mut hasher),
     }
     hasher.finish()
 }

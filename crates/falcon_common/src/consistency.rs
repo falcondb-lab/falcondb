@@ -692,6 +692,233 @@ pub fn validate_promote_commit_set(
     Ok(())
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// §10: Commit Point Tracker (CP-L / CP-D / CP-V observability)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Per-transaction commit point timestamps (microseconds since txn start).
+#[derive(Debug, Clone)]
+pub struct CommitPointEntry {
+    pub txn_id: TxnId,
+    /// Timestamp (µs) when LogicalCommit occurred.
+    pub logical_us: Option<u64>,
+    /// Timestamp (µs) when DurableCommit occurred.
+    pub durable_us: Option<u64>,
+    /// Timestamp (µs) when ClientVisibleCommit occurred.
+    pub visible_us: Option<u64>,
+}
+
+impl CommitPointEntry {
+    fn new(txn_id: TxnId) -> Self {
+        Self {
+            txn_id,
+            logical_us: None,
+            durable_us: None,
+            visible_us: None,
+        }
+    }
+
+    /// Lag between logical commit and durable commit (µs).
+    pub fn logical_to_durable_us(&self) -> Option<u64> {
+        match (self.logical_us, self.durable_us) {
+            (Some(l), Some(d)) => Some(d.saturating_sub(l)),
+            _ => None,
+        }
+    }
+
+    /// Lag between durable commit and client-visible commit (µs).
+    pub fn durable_to_visible_us(&self) -> Option<u64> {
+        match (self.durable_us, self.visible_us) {
+            (Some(d), Some(v)) => Some(v.saturating_sub(d)),
+            _ => None,
+        }
+    }
+
+    /// Total lag from logical to visible (µs).
+    pub fn total_us(&self) -> Option<u64> {
+        match (self.logical_us, self.visible_us) {
+            (Some(l), Some(v)) => Some(v.saturating_sub(l)),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for CommitPointEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "txn={} L={} D={} V={}",
+            self.txn_id.0,
+            self.logical_us.map_or("-".to_string(), |v| v.to_string()),
+            self.durable_us.map_or("-".to_string(), |v| v.to_string()),
+            self.visible_us.map_or("-".to_string(), |v| v.to_string()),
+        )
+    }
+}
+
+/// Aggregate lag statistics from the commit point tracker.
+#[derive(Debug, Clone, Default)]
+pub struct CommitPointLagStats {
+    pub sample_count: u64,
+    pub avg_logical_to_durable_us: u64,
+    pub avg_durable_to_visible_us: u64,
+    pub max_logical_to_durable_us: u64,
+    pub max_durable_to_visible_us: u64,
+    pub p99_logical_to_durable_us: u64,
+    pub p99_durable_to_visible_us: u64,
+}
+
+/// Tracks commit point timestamps for recent transactions.
+///
+/// Maintains a bounded ring buffer of `CommitPointEntry` records.
+/// Each record tracks when a transaction hit CP-L, CP-D, and CP-V.
+/// Used for observability dashboards and SLO monitoring.
+pub struct CommitPointTracker {
+    entries: std::sync::RwLock<std::collections::VecDeque<CommitPointEntry>>,
+    index: std::sync::RwLock<std::collections::HashMap<TxnId, usize>>,
+    max_entries: usize,
+}
+
+impl CommitPointTracker {
+    pub fn new(max_entries: usize) -> Self {
+        Self {
+            entries: std::sync::RwLock::new(std::collections::VecDeque::with_capacity(max_entries)),
+            index: std::sync::RwLock::new(std::collections::HashMap::new()),
+            max_entries,
+        }
+    }
+
+    /// Record the LogicalCommit timestamp for a transaction.
+    pub fn record_logical(&self, txn_id: TxnId, timestamp_us: u64) {
+        self.ensure_entry(txn_id);
+        let idx = self.index.read().unwrap();
+        if let Some(&pos) = idx.get(&txn_id) {
+            let mut entries = self.entries.write().unwrap();
+            if let Some(entry) = entries.get_mut(pos) {
+                entry.logical_us = Some(timestamp_us);
+            }
+        }
+    }
+
+    /// Record the DurableCommit timestamp for a transaction.
+    pub fn record_durable(&self, txn_id: TxnId, timestamp_us: u64) {
+        self.ensure_entry(txn_id);
+        let idx = self.index.read().unwrap();
+        if let Some(&pos) = idx.get(&txn_id) {
+            let mut entries = self.entries.write().unwrap();
+            if let Some(entry) = entries.get_mut(pos) {
+                entry.durable_us = Some(timestamp_us);
+            }
+        }
+    }
+
+    /// Record the ClientVisibleCommit timestamp for a transaction.
+    pub fn record_visible(&self, txn_id: TxnId, timestamp_us: u64) {
+        self.ensure_entry(txn_id);
+        let idx = self.index.read().unwrap();
+        if let Some(&pos) = idx.get(&txn_id) {
+            let mut entries = self.entries.write().unwrap();
+            if let Some(entry) = entries.get_mut(pos) {
+                entry.visible_us = Some(timestamp_us);
+            }
+        }
+    }
+
+    /// Get a commit point entry for a specific transaction.
+    pub fn get(&self, txn_id: TxnId) -> Option<CommitPointEntry> {
+        let idx = self.index.read().unwrap();
+        let pos = idx.get(&txn_id)?;
+        let entries = self.entries.read().unwrap();
+        entries.get(*pos).cloned()
+    }
+
+    /// Compute aggregate lag statistics from all tracked entries.
+    pub fn lag_stats(&self) -> CommitPointLagStats {
+        let entries = self.entries.read().unwrap();
+        if entries.is_empty() {
+            return CommitPointLagStats::default();
+        }
+
+        let mut l2d_samples = Vec::new();
+        let mut d2v_samples = Vec::new();
+
+        for entry in entries.iter() {
+            if let Some(lag) = entry.logical_to_durable_us() {
+                l2d_samples.push(lag);
+            }
+            if let Some(lag) = entry.durable_to_visible_us() {
+                d2v_samples.push(lag);
+            }
+        }
+
+        l2d_samples.sort_unstable();
+        d2v_samples.sort_unstable();
+
+        let count = entries.len() as u64;
+        let avg_l2d = if l2d_samples.is_empty() { 0 } else {
+            l2d_samples.iter().sum::<u64>() / l2d_samples.len() as u64
+        };
+        let avg_d2v = if d2v_samples.is_empty() { 0 } else {
+            d2v_samples.iter().sum::<u64>() / d2v_samples.len() as u64
+        };
+        let max_l2d = l2d_samples.last().copied().unwrap_or(0);
+        let max_d2v = d2v_samples.last().copied().unwrap_or(0);
+
+        let p99_l2d = if l2d_samples.is_empty() { 0 } else {
+            let idx = ((l2d_samples.len() as f64 * 0.99).ceil() as usize).min(l2d_samples.len()) - 1;
+            l2d_samples[idx]
+        };
+        let p99_d2v = if d2v_samples.is_empty() { 0 } else {
+            let idx = ((d2v_samples.len() as f64 * 0.99).ceil() as usize).min(d2v_samples.len()) - 1;
+            d2v_samples[idx]
+        };
+
+        CommitPointLagStats {
+            sample_count: count,
+            avg_logical_to_durable_us: avg_l2d,
+            avg_durable_to_visible_us: avg_d2v,
+            max_logical_to_durable_us: max_l2d,
+            max_durable_to_visible_us: max_d2v,
+            p99_logical_to_durable_us: p99_l2d,
+            p99_durable_to_visible_us: p99_d2v,
+        }
+    }
+
+    /// Number of tracked entries.
+    pub fn len(&self) -> usize {
+        self.entries.read().unwrap().len()
+    }
+
+    /// Whether the tracker is empty.
+    pub fn is_empty(&self) -> bool {
+        self.entries.read().unwrap().is_empty()
+    }
+
+    fn ensure_entry(&self, txn_id: TxnId) {
+        {
+            let idx = self.index.read().unwrap();
+            if idx.contains_key(&txn_id) {
+                return;
+            }
+        }
+        let mut entries = self.entries.write().unwrap();
+        let mut idx = self.index.write().unwrap();
+
+        // Evict oldest if at capacity
+        while entries.len() >= self.max_entries {
+            if let Some(old) = entries.pop_front() {
+                idx.remove(&old.txn_id);
+                // Reindex all remaining entries since positions shifted
+                for (i, e) in entries.iter().enumerate() {
+                    idx.insert(e.txn_id, i);
+                }
+            }
+        }
+
+        let pos = entries.len();
+        entries.push_back(CommitPointEntry::new(txn_id));
+        idx.insert(txn_id, pos);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -815,5 +1042,93 @@ mod tests {
         assert!(!CommitPolicy::PrimaryPlusReplicaAck { required_acks: 1 }
             .allows_duplicate_after_failover());
         assert!(!CommitPolicy::RaftMajority.allows_duplicate_after_failover());
+    }
+
+    // ── CommitPointTracker tests ──
+
+    #[test]
+    fn test_commit_point_tracker_record_and_query() {
+        let tracker = CommitPointTracker::new(100);
+        tracker.record_logical(TxnId(1), 1000);
+        tracker.record_durable(TxnId(1), 1200);
+        tracker.record_visible(TxnId(1), 1500);
+
+        let entry = tracker.get(TxnId(1)).unwrap();
+        assert_eq!(entry.logical_us, Some(1000));
+        assert_eq!(entry.durable_us, Some(1200));
+        assert_eq!(entry.visible_us, Some(1500));
+        assert_eq!(entry.logical_to_durable_us(), Some(200));
+        assert_eq!(entry.durable_to_visible_us(), Some(300));
+        assert_eq!(entry.total_us(), Some(500));
+    }
+
+    #[test]
+    fn test_commit_point_tracker_partial() {
+        let tracker = CommitPointTracker::new(100);
+        tracker.record_logical(TxnId(2), 500);
+
+        let entry = tracker.get(TxnId(2)).unwrap();
+        assert_eq!(entry.logical_us, Some(500));
+        assert!(entry.durable_us.is_none());
+        assert!(entry.logical_to_durable_us().is_none());
+        assert!(entry.total_us().is_none());
+    }
+
+    #[test]
+    fn test_commit_point_tracker_not_found() {
+        let tracker = CommitPointTracker::new(100);
+        assert!(tracker.get(TxnId(999)).is_none());
+    }
+
+    #[test]
+    fn test_commit_point_tracker_lag_stats() {
+        let tracker = CommitPointTracker::new(100);
+        for i in 0..10u64 {
+            tracker.record_logical(TxnId(i), i * 100);
+            tracker.record_durable(TxnId(i), i * 100 + 50);
+            tracker.record_visible(TxnId(i), i * 100 + 80);
+        }
+
+        let stats = tracker.lag_stats();
+        assert_eq!(stats.sample_count, 10);
+        assert_eq!(stats.avg_logical_to_durable_us, 50);
+        assert_eq!(stats.avg_durable_to_visible_us, 30);
+        assert_eq!(stats.max_logical_to_durable_us, 50);
+        assert_eq!(stats.max_durable_to_visible_us, 30);
+    }
+
+    #[test]
+    fn test_commit_point_tracker_lag_stats_empty() {
+        let tracker = CommitPointTracker::new(100);
+        let stats = tracker.lag_stats();
+        assert_eq!(stats.sample_count, 0);
+        assert_eq!(stats.avg_logical_to_durable_us, 0);
+    }
+
+    #[test]
+    fn test_commit_point_tracker_eviction() {
+        let tracker = CommitPointTracker::new(3);
+        tracker.record_logical(TxnId(1), 100);
+        tracker.record_logical(TxnId(2), 200);
+        tracker.record_logical(TxnId(3), 300);
+        tracker.record_logical(TxnId(4), 400); // should evict TxnId(1)
+
+        assert!(tracker.get(TxnId(1)).is_none());
+        assert!(tracker.get(TxnId(4)).is_some());
+    }
+
+    #[test]
+    fn test_commit_point_entry_display() {
+        let entry = CommitPointEntry {
+            txn_id: TxnId(42),
+            logical_us: Some(100),
+            durable_us: Some(200),
+            visible_us: Some(350),
+        };
+        let s = format!("{}", entry);
+        assert!(s.contains("txn=42"));
+        assert!(s.contains("L=100"));
+        assert!(s.contains("D=200"));
+        assert!(s.contains("V=350"));
     }
 }

@@ -59,7 +59,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                     }).collect();
                     if matches.is_empty() {
                         // No capture groups; return full match
-                        Ok(Datum::Array(vec![Datum::Text(caps.get(0).unwrap().as_str().to_string())]))
+                        Ok(Datum::Array(vec![Datum::Text(caps.get(0).expect("capture group 0 always exists").as_str().to_string())]))
                     } else {
                         Ok(Datum::Array(matches))
                     }

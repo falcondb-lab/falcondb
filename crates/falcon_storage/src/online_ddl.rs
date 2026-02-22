@@ -340,7 +340,7 @@ mod tests {
         let op = mgr.get(id).unwrap();
         assert_eq!(op.phase, DdlPhase::Completed);
         assert!(op.completed_at.is_some());
-        assert!(op.elapsed_ms().unwrap() >= 0);
+        let _ = op.elapsed_ms().unwrap(); // just verify it returns a value
     }
 
     #[test]

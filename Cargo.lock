@@ -590,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "falcon_bench"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "clap",
  "falcon_cluster",
@@ -603,7 +603,7 @@ dependencies = [
 
 [[package]]
 name = "falcon_cluster"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "async-trait",
  "dashmap",
@@ -627,7 +627,7 @@ dependencies = [
 
 [[package]]
 name = "falcon_common"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "bytes",
  "chrono",
@@ -642,7 +642,7 @@ dependencies = [
 
 [[package]]
 name = "falcon_executor"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "base64 0.22.1",
  "bincode",
@@ -662,7 +662,7 @@ dependencies = [
 
 [[package]]
 name = "falcon_observability"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
@@ -672,7 +672,7 @@ dependencies = [
 
 [[package]]
 name = "falcon_planner"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "falcon_common",
  "falcon_sql_frontend",
@@ -681,7 +681,7 @@ dependencies = [
 
 [[package]]
 name = "falcon_proto"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "prost",
  "protoc-bin-vendored",
@@ -692,7 +692,7 @@ dependencies = [
 
 [[package]]
 name = "falcon_protocol_pg"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "bytes",
  "dashmap",
@@ -713,7 +713,7 @@ dependencies = [
 
 [[package]]
 name = "falcon_raft"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "async-trait",
  "bincode",
@@ -729,7 +729,7 @@ dependencies = [
 
 [[package]]
 name = "falcon_server"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -753,7 +753,7 @@ dependencies = [
 
 [[package]]
 name = "falcon_sql_frontend"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "falcon_common",
  "sqlparser",
@@ -762,7 +762,7 @@ dependencies = [
 
 [[package]]
 name = "falcon_storage"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "async-trait",
  "bincode",
@@ -783,7 +783,7 @@ dependencies = [
 
 [[package]]
 name = "falcon_txn"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "dashmap",
  "falcon_common",

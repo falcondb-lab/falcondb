@@ -293,6 +293,14 @@ impl QueryGovernor {
     }
 }
 
+impl From<GovernorAbortReason> for FalconError {
+    fn from(reason: GovernorAbortReason) -> Self {
+        FalconError::Execution(falcon_common::error::ExecutionError::GovernorAbort(
+            reason.to_string(),
+        ))
+    }
+}
+
 /// Global query governor configuration (shared across sessions).
 #[derive(Default)]
 pub struct QueryGovernorConfig {

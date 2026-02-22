@@ -254,11 +254,7 @@ impl VersionChain {
         let header = mem::size_of::<Version>() as u64;
         let data_bytes = match &ver.data {
             Some(row) => {
-                row.values.iter().map(|d| match d {
-                    falcon_common::datum::Datum::Text(s) => s.len() as u64 + 24,
-                    falcon_common::datum::Datum::Array(a) => (a.len() * 16) as u64 + 24,
-                    _ => 8u64,
-                }).sum::<u64>() + 24 // Vec overhead
+                row.values.iter().map(|d| estimate_datum_bytes(d)).sum::<u64>() + 24 // Vec overhead
             }
             None => 0,
         };
@@ -377,14 +373,32 @@ impl Default for VersionChain {
     }
 }
 
+/// Estimate the heap memory footprint of a single Datum value.
+/// Fixed-size scalars (bool, i32, i64, f64, Date, Time, Uuid) cost 8-16 bytes in-enum.
+/// Variable-length types (Text, Bytea, Array, Jsonb, Decimal, Interval) add heap allocation overhead.
+fn estimate_datum_bytes(d: &falcon_common::datum::Datum) -> u64 {
+    use falcon_common::datum::Datum;
+    match d {
+        Datum::Null => 0,
+        Datum::Boolean(_) => 1,
+        Datum::Int32(_) => 4,
+        Datum::Int64(_) | Datum::Float64(_) => 8,
+        Datum::Date(_) | Datum::Time(_) => 8,
+        Datum::Timestamp(_) => 16,
+        Datum::Uuid(_) => 16,
+        Datum::Interval(_, _, _) => 24,
+        Datum::Text(s) => s.len() as u64 + 24, // String heap + ptr/len/cap
+        Datum::Bytea(b) => b.len() as u64 + 24, // Vec<u8> heap + ptr/len/cap
+        Datum::Jsonb(v) => v.to_string().len() as u64 + 24,
+        Datum::Decimal(_, _) => 24, // two i128-scale fields
+        Datum::Array(a) => (a.len() as u64) * 16 + 24, // Vec<Datum> overhead
+    }
+}
+
 /// Estimate the memory footprint of an OwnedRow (without Version header overhead).
 /// Used by memory accounting to track write-buffer and MVCC allocations.
 pub fn estimate_row_bytes(row: &OwnedRow) -> u64 {
     let version_header = mem::size_of::<Version>() as u64;
-    let data_bytes: u64 = row.values.iter().map(|d| match d {
-        falcon_common::datum::Datum::Text(s) => s.len() as u64 + 24,
-        falcon_common::datum::Datum::Array(a) => (a.len() * 16) as u64 + 24,
-        _ => 8u64,
-    }).sum::<u64>() + 24; // Vec overhead
+    let data_bytes: u64 = row.values.iter().map(|d| estimate_datum_bytes(d)).sum::<u64>() + 24; // Vec overhead
     version_header + data_bytes
 }

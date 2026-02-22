@@ -260,7 +260,13 @@ async fn main() -> Result<()> {
             "Background GC runner started (interval={}ms, batch_size={}, min_chain_length={})",
             gc_config.interval_ms, gc_config.batch_size, gc_config.min_chain_length,
         );
-        Some(GcRunner::start(storage.clone(), txn_mgr.clone(), gc_config))
+        match GcRunner::start(storage.clone(), txn_mgr.clone(), gc_config) {
+            Ok(runner) => Some(runner),
+            Err(e) => {
+                tracing::error!("Failed to start GC runner: {} — running without background GC", e);
+                None
+            }
+        }
     } else {
         tracing::info!("Background GC runner disabled (gc.enabled=false)");
         None
@@ -423,11 +429,18 @@ async fn wait_for_shutdown_signal() -> &'static str {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm = signal(SignalKind::terminate())
-            .unwrap_or_else(|e| panic!("Failed to register SIGTERM handler: {}", e));
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => "SIGINT (Ctrl+C) received",
-            _ = sigterm.recv() => "SIGTERM received",
+        match signal(SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => "SIGINT (Ctrl+C) received",
+                    _ = sigterm.recv() => "SIGTERM received",
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to register SIGTERM handler: {} — falling back to Ctrl+C only", e);
+                let _ = tokio::signal::ctrl_c().await;
+                "SIGINT (Ctrl+C) received (SIGTERM unavailable)"
+            }
         }
     }
     #[cfg(not(unix))]

@@ -1,5 +1,5 @@
 # FalconDB
-
+![FalconDB Logo](assets/falcondb-logo.png)
 [![CI](https://github.com/falcondb-lab/falcondb/actions/workflows/ci.yml/badge.svg)](https://github.com/falcondb-lab/falcondb/actions/workflows/ci.yml)
 ![MSRV](https://img.shields.io/badge/MSRV-1.75-blue)
 ![License](https://img.shields.io/badge/license-Apache--2.0-green)
