@@ -1101,8 +1101,9 @@ fn run_tpcb(args: &Args) {
     }
 }
 
-// ── LSM disk-backed KV benchmark ────────────────────────────────────────
+// ── LSM disk-backed KV benchmark (requires `lsm` feature) ──────────────
 
+#[cfg(feature = "lsm")]
 fn run_lsm_bench(args: &Args) {
     use falcon_storage::lsm::compaction::CompactionConfig;
     use falcon_storage::lsm::{LsmConfig, LsmEngine};
@@ -1626,7 +1627,13 @@ fn main() {
     } else if args.tpcb {
         run_tpcb(&args);
     } else if args.lsm {
+        #[cfg(feature = "lsm")]
         run_lsm_bench(&args);
+        #[cfg(not(feature = "lsm"))]
+        {
+            eprintln!("ERROR: LSM benchmark requires the `lsm` feature. Build with: cargo build -p falcon_bench --features lsm");
+            std::process::exit(1);
+        }
     } else if args.failover {
         run_failover_bench(&args);
     } else if args.scaleout {

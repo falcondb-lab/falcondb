@@ -1,3 +1,6 @@
+//! # Module Status: STUB — not on the production OLTP write path.
+//! Do NOT reference from planner/executor/txn for production workloads.
+//!
 //! Columnar storage engine — modeled after SingleStore COLUMNSTORE.
 //!
 //! Data is stored column-by-column in compressed "segments".  Each segment

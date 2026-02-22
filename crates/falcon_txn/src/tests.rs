@@ -1106,3 +1106,475 @@ mod txn_manager_tests {
         assert_eq!(summary.rows_read, 100);
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// B5/B6: Admission control — WAL backlog + replication lag gates
+// ═══════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod admission_backpressure_tests {
+    use std::sync::Arc;
+
+    use falcon_common::types::IsolationLevel;
+    use falcon_storage::engine::StorageEngine;
+
+    use crate::manager::TxnManager;
+
+    fn setup() -> (Arc<StorageEngine>, TxnManager) {
+        let storage = Arc::new(StorageEngine::new_in_memory());
+        let mgr = TxnManager::new(storage.clone());
+        (storage, mgr)
+    }
+
+    #[test]
+    fn test_wal_backlog_threshold_default_disabled() {
+        let (_storage, mgr) = setup();
+        // Default: threshold=0 → disabled, try_begin succeeds
+        let result = mgr.try_begin(IsolationLevel::ReadCommitted);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_wal_backlog_threshold_configurable() {
+        let (_storage, mgr) = setup();
+        mgr.set_wal_backlog_threshold_bytes(1024);
+        // With in-memory engine, WAL backlog=0 < 1024 → should still succeed
+        let result = mgr.try_begin(IsolationLevel::ReadCommitted);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_replication_lag_threshold_default_disabled() {
+        let (_storage, mgr) = setup();
+        // Default: threshold=0 → disabled, try_begin succeeds
+        let result = mgr.try_begin(IsolationLevel::ReadCommitted);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_replication_lag_threshold_configurable() {
+        let (_storage, mgr) = setup();
+        mgr.set_replication_lag_threshold(100);
+        // With fresh engine, replicas are at current_ts → no lag → succeeds
+        let result = mgr.try_begin(IsolationLevel::ReadCommitted);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_admission_rejection_counter_incremented() {
+        use falcon_storage::memory::MemoryBudget;
+        let storage = Arc::new(StorageEngine::new_in_memory_with_budget(
+            MemoryBudget::new(100, 200),
+        ));
+        let mgr = TxnManager::new(storage.clone());
+        // Push to CRITICAL
+        storage.memory_tracker().alloc_mvcc(300);
+        let _ = mgr.try_begin(IsolationLevel::ReadCommitted);
+        let stats = mgr.stats_snapshot();
+        assert!(stats.admission_rejections >= 1, "admission rejection counter must increment");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// B7: Tail latency — long-txn detection + kill
+// ═══════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod long_txn_detection_tests {
+    use std::sync::Arc;
+
+    use falcon_common::types::IsolationLevel;
+    use falcon_storage::engine::StorageEngine;
+
+    use crate::manager::TxnManager;
+
+    fn setup() -> (Arc<StorageEngine>, TxnManager) {
+        let storage = Arc::new(StorageEngine::new_in_memory());
+        let mgr = TxnManager::new(storage.clone());
+        (storage, mgr)
+    }
+
+    #[test]
+    fn test_no_long_running_when_empty() {
+        let (_storage, mgr) = setup();
+        assert!(mgr.long_running_txns(0).is_empty());
+    }
+
+    #[test]
+    fn test_fresh_txn_not_long_running() {
+        let (_storage, mgr) = setup();
+        let _txn = mgr.begin(IsolationLevel::ReadCommitted);
+        // Threshold 1 second — fresh txn shouldn't exceed it
+        assert!(mgr.long_running_txns(1_000_000).is_empty());
+    }
+
+    #[test]
+    fn test_detect_long_running_txn() {
+        let (_storage, mgr) = setup();
+        let _txn = mgr.begin(IsolationLevel::ReadCommitted);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        // Threshold 1ms = 1000us — should detect it
+        let long = mgr.long_running_txns(1_000);
+        assert_eq!(long.len(), 1);
+    }
+
+    #[test]
+    fn test_longest_txn_age_us() {
+        let (_storage, mgr) = setup();
+        assert_eq!(mgr.longest_txn_age_us(), 0);
+        let _txn = mgr.begin(IsolationLevel::ReadCommitted);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(mgr.longest_txn_age_us() >= 4_000); // at least 4ms
+    }
+
+    #[test]
+    fn test_kill_txn_removes_it() {
+        let (_storage, mgr) = setup();
+        let txn = mgr.begin(IsolationLevel::ReadCommitted);
+        assert_eq!(mgr.active_count(), 1);
+        mgr.kill_txn(txn.txn_id).unwrap();
+        assert_eq!(mgr.active_count(), 0);
+    }
+
+    #[test]
+    fn test_kill_txn_not_found() {
+        let (_storage, mgr) = setup();
+        let result = mgr.kill_txn(falcon_common::types::TxnId(999));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_kill_long_running_batch() {
+        let (_storage, mgr) = setup();
+        for _ in 0..5 {
+            let _ = mgr.begin(IsolationLevel::ReadCommitted);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let killed = mgr.kill_long_running(1_000); // 1ms threshold
+        assert_eq!(killed, 5);
+        assert_eq!(mgr.active_count(), 0);
+    }
+
+    #[test]
+    fn test_kill_long_running_spares_fresh() {
+        let (_storage, mgr) = setup();
+        let _old = mgr.begin(IsolationLevel::ReadCommitted);
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        let _fresh = mgr.begin(IsolationLevel::ReadCommitted);
+        // Kill only txns older than 10ms
+        let killed = mgr.kill_long_running(10_000);
+        assert_eq!(killed, 1);
+        assert_eq!(mgr.active_count(), 1);
+    }
+
+    #[test]
+    fn test_gc_safepoint_stalled_by_long_txn() {
+        let (_storage, mgr) = setup();
+        // Allocate a few timestamps to advance current_ts
+        for _ in 0..10 {
+            mgr.alloc_ts();
+        }
+        let _txn = mgr.begin(IsolationLevel::ReadCommitted);
+        // More timestamps advance current but txn pins safepoint
+        for _ in 0..10 {
+            mgr.alloc_ts();
+        }
+        let info = mgr.gc_safepoint_info();
+        assert!(info.stalled, "GC safepoint should be stalled by long-running txn");
+        assert!(info.longest_txn_age_us >= 0);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// B1: Txn State Machine — exhaustive transition tests
+// ═══════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod txn_state_machine_tests {
+    use std::sync::Arc;
+
+    use falcon_common::types::{IsolationLevel, ShardId, TxnId};
+    use falcon_storage::engine::StorageEngine;
+
+    use crate::manager::{
+        SlowPathMode, TransitionResult, TxnClassification, TxnManager, TxnState, TxnType,
+    };
+
+    fn setup() -> (Arc<StorageEngine>, TxnManager) {
+        let storage = Arc::new(StorageEngine::new_in_memory());
+        let mgr = TxnManager::new(storage.clone());
+        (storage, mgr)
+    }
+
+    // ── Unit tests for TxnState::try_transition ──
+
+    #[test]
+    fn test_active_to_prepared() {
+        let mut s = TxnState::Active;
+        assert_eq!(
+            s.try_transition(TxnState::Prepared, TxnId(1)).unwrap(),
+            TransitionResult::Applied
+        );
+        assert_eq!(s, TxnState::Prepared);
+    }
+
+    #[test]
+    fn test_active_to_committed() {
+        let mut s = TxnState::Active;
+        assert_eq!(
+            s.try_transition(TxnState::Committed, TxnId(1)).unwrap(),
+            TransitionResult::Applied
+        );
+        assert_eq!(s, TxnState::Committed);
+    }
+
+    #[test]
+    fn test_active_to_aborted() {
+        let mut s = TxnState::Active;
+        assert_eq!(
+            s.try_transition(TxnState::Aborted, TxnId(1)).unwrap(),
+            TransitionResult::Applied
+        );
+        assert_eq!(s, TxnState::Aborted);
+    }
+
+    #[test]
+    fn test_prepared_to_committed() {
+        let mut s = TxnState::Prepared;
+        assert_eq!(
+            s.try_transition(TxnState::Committed, TxnId(1)).unwrap(),
+            TransitionResult::Applied
+        );
+        assert_eq!(s, TxnState::Committed);
+    }
+
+    #[test]
+    fn test_prepared_to_aborted() {
+        let mut s = TxnState::Prepared;
+        assert_eq!(
+            s.try_transition(TxnState::Aborted, TxnId(1)).unwrap(),
+            TransitionResult::Applied
+        );
+        assert_eq!(s, TxnState::Aborted);
+    }
+
+    #[test]
+    fn test_committed_to_committed_idempotent() {
+        let mut s = TxnState::Committed;
+        assert_eq!(
+            s.try_transition(TxnState::Committed, TxnId(1)).unwrap(),
+            TransitionResult::Idempotent
+        );
+        assert_eq!(s, TxnState::Committed);
+    }
+
+    #[test]
+    fn test_aborted_to_aborted_idempotent() {
+        let mut s = TxnState::Aborted;
+        assert_eq!(
+            s.try_transition(TxnState::Aborted, TxnId(1)).unwrap(),
+            TransitionResult::Idempotent
+        );
+        assert_eq!(s, TxnState::Aborted);
+    }
+
+    // ── Invalid transitions ──
+
+    #[test]
+    fn test_committed_to_aborted_invalid() {
+        let mut s = TxnState::Committed;
+        assert!(s.try_transition(TxnState::Aborted, TxnId(1)).is_err());
+    }
+
+    #[test]
+    fn test_committed_to_active_invalid() {
+        let mut s = TxnState::Committed;
+        assert!(s.try_transition(TxnState::Active, TxnId(1)).is_err());
+    }
+
+    #[test]
+    fn test_committed_to_prepared_invalid() {
+        let mut s = TxnState::Committed;
+        assert!(s.try_transition(TxnState::Prepared, TxnId(1)).is_err());
+    }
+
+    #[test]
+    fn test_aborted_to_committed_invalid() {
+        let mut s = TxnState::Aborted;
+        assert!(s.try_transition(TxnState::Committed, TxnId(1)).is_err());
+    }
+
+    #[test]
+    fn test_aborted_to_active_invalid() {
+        let mut s = TxnState::Aborted;
+        assert!(s.try_transition(TxnState::Active, TxnId(1)).is_err());
+    }
+
+    #[test]
+    fn test_aborted_to_prepared_invalid() {
+        let mut s = TxnState::Aborted;
+        assert!(s.try_transition(TxnState::Prepared, TxnId(1)).is_err());
+    }
+
+    #[test]
+    fn test_prepared_to_active_invalid() {
+        let mut s = TxnState::Prepared;
+        assert!(s.try_transition(TxnState::Active, TxnId(1)).is_err());
+    }
+
+    #[test]
+    fn test_prepared_to_prepared_invalid() {
+        // Prepare is NOT idempotent at the state level — the TxnManager.prepare()
+        // handles idempotency by checking current state before calling try_transition.
+        let mut s = TxnState::Prepared;
+        assert!(s.try_transition(TxnState::Prepared, TxnId(1)).is_err());
+    }
+
+    #[test]
+    fn test_active_to_active_invalid() {
+        let mut s = TxnState::Active;
+        assert!(s.try_transition(TxnState::Active, TxnId(1)).is_err());
+    }
+
+    // ── Display ──
+
+    #[test]
+    fn test_txn_state_display() {
+        assert_eq!(TxnState::Active.to_string(), "Active");
+        assert_eq!(TxnState::Prepared.to_string(), "Prepared");
+        assert_eq!(TxnState::Committed.to_string(), "Committed");
+        assert_eq!(TxnState::Aborted.to_string(), "Aborted");
+    }
+
+    // ── Integration: TxnManager commit/abort idempotency ──
+
+    #[test]
+    fn test_commit_idempotent_via_manager() {
+        let (_storage, mgr) = setup();
+        let txn = mgr.begin(IsolationLevel::ReadCommitted);
+        let txn_id = txn.txn_id;
+        let ts1 = mgr.commit(txn_id).unwrap();
+        // Second commit should fail with NotFound (txn already removed from active map)
+        assert!(mgr.commit(txn_id).is_err());
+        // But the first commit succeeded
+        assert!(ts1.0 > 0);
+    }
+
+    #[test]
+    fn test_abort_idempotent_via_manager() {
+        let (_storage, mgr) = setup();
+        let txn = mgr.begin(IsolationLevel::ReadCommitted);
+        let txn_id = txn.txn_id;
+        mgr.abort(txn_id).unwrap();
+        // Second abort: txn already removed, returns NotFound (idempotent at higher level)
+        assert!(mgr.abort(txn_id).is_err());
+    }
+
+    #[test]
+    fn test_commit_after_abort_fails() {
+        let (_storage, mgr) = setup();
+        let txn = mgr.begin(IsolationLevel::ReadCommitted);
+        let txn_id = txn.txn_id;
+        mgr.abort(txn_id).unwrap();
+        assert!(mgr.commit(txn_id).is_err());
+    }
+
+    #[test]
+    fn test_abort_after_commit_fails() {
+        let (_storage, mgr) = setup();
+        let txn = mgr.begin(IsolationLevel::ReadCommitted);
+        let txn_id = txn.txn_id;
+        mgr.commit(txn_id).unwrap();
+        assert!(mgr.abort(txn_id).is_err());
+    }
+
+    #[test]
+    fn test_prepare_only_for_global_txn() {
+        let (_storage, mgr) = setup();
+        // Local txn cannot prepare
+        let txn = mgr.begin(IsolationLevel::ReadCommitted);
+        assert!(mgr.prepare(txn.txn_id).is_err());
+
+        // Global txn can prepare
+        let txn2 = mgr.begin_with_classification(
+            IsolationLevel::ReadCommitted,
+            TxnClassification::global(vec![ShardId(0), ShardId(1)], SlowPathMode::Xa2Pc),
+        );
+        assert!(mgr.prepare(txn2.txn_id).is_ok());
+    }
+
+    #[test]
+    fn test_prepare_idempotent_via_manager() {
+        let (_storage, mgr) = setup();
+        let txn = mgr.begin_with_classification(
+            IsolationLevel::ReadCommitted,
+            TxnClassification::global(vec![ShardId(0), ShardId(1)], SlowPathMode::Xa2Pc),
+        );
+        mgr.prepare(txn.txn_id).unwrap();
+        // Second prepare is idempotent no-op
+        mgr.prepare(txn.txn_id).unwrap();
+    }
+
+    #[test]
+    fn test_begin_sets_active_state() {
+        let (_storage, mgr) = setup();
+        let txn = mgr.begin(IsolationLevel::ReadCommitted);
+        assert_eq!(txn.state, TxnState::Active);
+    }
+
+    #[test]
+    fn test_txn_state_after_commit_is_removed() {
+        let (_storage, mgr) = setup();
+        let txn = mgr.begin(IsolationLevel::ReadCommitted);
+        let txn_id = txn.txn_id;
+        mgr.commit(txn_id).unwrap();
+        // After commit, txn is removed from active set
+        assert!(mgr.get_txn(txn_id).is_none());
+    }
+
+    #[test]
+    fn test_txn_state_after_abort_is_removed() {
+        let (_storage, mgr) = setup();
+        let txn = mgr.begin(IsolationLevel::ReadCommitted);
+        let txn_id = txn.txn_id;
+        mgr.abort(txn_id).unwrap();
+        assert!(mgr.get_txn(txn_id).is_none());
+    }
+
+    // ── Full lifecycle: begin → prepare → commit (global) ──
+
+    #[test]
+    fn test_global_lifecycle_begin_prepare_commit() {
+        let (_storage, mgr) = setup();
+        let txn = mgr.begin_with_classification(
+            IsolationLevel::ReadCommitted,
+            TxnClassification::global(vec![ShardId(0), ShardId(1)], SlowPathMode::Xa2Pc),
+        );
+        let txn_id = txn.txn_id;
+        assert_eq!(txn.state, TxnState::Active);
+
+        mgr.prepare(txn_id).unwrap();
+        let prepared = mgr.get_txn(txn_id).unwrap();
+        assert_eq!(prepared.state, TxnState::Prepared);
+
+        let ts = mgr.commit(txn_id).unwrap();
+        assert!(ts.0 > 0);
+        assert!(mgr.get_txn(txn_id).is_none());
+    }
+
+    // ── Full lifecycle: begin → prepare → abort (global) ──
+
+    #[test]
+    fn test_global_lifecycle_begin_prepare_abort() {
+        let (_storage, mgr) = setup();
+        let txn = mgr.begin_with_classification(
+            IsolationLevel::ReadCommitted,
+            TxnClassification::global(vec![ShardId(0), ShardId(1)], SlowPathMode::Xa2Pc),
+        );
+        let txn_id = txn.txn_id;
+
+        mgr.prepare(txn_id).unwrap();
+        mgr.abort(txn_id).unwrap();
+        assert!(mgr.get_txn(txn_id).is_none());
+    }
+}

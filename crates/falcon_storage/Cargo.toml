@@ -3,6 +3,20 @@ name = "falcon_storage"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+# Non-v1.0 storage engines (STUB / EXPERIMENTAL). Default OFF.
+columnstore = []
+disk_rowstore = []
+lsm = []
+# Enterprise features (STUB). Default OFF.
+encryption_tde = []
+pitr = []
+online_ddl_full = []
+resource_isolation = []
+tenant = []
+cdc_stream = []
+
 [dependencies]
 falcon_common = { path = "../falcon_common" }
 tokio.workspace = true

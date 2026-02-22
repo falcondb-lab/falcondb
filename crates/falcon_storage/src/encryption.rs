@@ -1,3 +1,6 @@
+//! # Module Status: STUB — not on the production OLTP write path.
+//! Do NOT reference from planner/executor/txn for production workloads.
+//!
 //! Transparent Data Encryption (TDE) — at-rest encryption for WAL and data files.
 //!
 //! Architecture:

@@ -1,3 +1,9 @@
+//! # Module Status: PRODUCTION
+//! StorageEngine — unified entry point for all storage operations.
+//! The production OLTP write path is: MemTable (in-memory row store) + MVCC + WAL.
+//! Non-production fields (columnstore, disk_rowstore, lsm) are retained for
+//! experimental builds but MUST NOT be used on the default write path.
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering as AtomicOrdering};
@@ -13,20 +19,29 @@ use falcon_common::schema::{Catalog, TableSchema};
 use falcon_common::types::{TableId, Timestamp, TxnId, TxnType};
 
 use crate::memory::{MemoryBudget, MemoryTracker};
-use crate::online_ddl::OnlineDdlManager;
 use crate::stats::TableStatistics;
-
-use crate::cdc::CdcManager;
-use crate::columnstore::ColumnStoreTable;
-use crate::disk_rowstore::DiskRowstoreTable;
-use crate::encryption::KeyManager;
-use crate::lsm_table::LsmTable;
 use crate::memtable::{MemTable, PrimaryKey};
 use crate::partition::PartitionManager;
-use crate::pitr::WalArchiver;
 use crate::wal::{CheckpointData, SyncMode, WalRecord, WalWriter};
 
 use falcon_common::rls::RlsPolicyManager;
+
+use crate::cdc::CdcManager;
+use crate::encryption::KeyManager;
+use crate::online_ddl::OnlineDdlManager;
+use crate::pitr::WalArchiver;
+
+// ── Feature-gated storage engine imports ──
+#[cfg(feature = "columnstore")]
+use crate::columnstore::ColumnStoreTable;
+#[cfg(not(feature = "columnstore"))]
+use crate::columnstore_stub::ColumnStoreTable;
+
+#[cfg(feature = "disk_rowstore")]
+use crate::disk_rowstore::DiskRowstoreTable;
+
+#[cfg(feature = "lsm")]
+use crate::lsm_table::LsmTable;
 
 #[derive(Debug, Clone)]
 pub(crate) struct TxnWriteOp {
@@ -313,11 +328,13 @@ pub struct StorageEngine {
     pub(crate) node_role: NodeRole,
     /// Rowstore tables (in-memory, default).
     pub(crate) tables: DashMap<TableId, Arc<MemTable>>,
-    /// Columnstore tables (columnar, analytics-optimised).
+    /// Columnstore tables (columnar, analytics-optimised). Feature-gated.
     pub(crate) columnstore_tables: DashMap<TableId, Arc<ColumnStoreTable>>,
-    /// Disk-based rowstore tables (B-tree on disk).
+    /// Disk-based rowstore tables (B-tree on disk). Feature-gated.
+    #[cfg(feature = "disk_rowstore")]
     pub(crate) disk_tables: DashMap<TableId, Arc<DiskRowstoreTable>>,
-    /// LSM-tree backed rowstore tables.
+    /// LSM-tree backed rowstore tables. Feature-gated.
+    #[cfg(feature = "lsm")]
     pub(crate) lsm_tables: DashMap<TableId, Arc<LsmTable>>,
     /// Data directory for disk-based tables (None = in-memory only).
     pub(crate) data_dir: Option<PathBuf>,
@@ -386,7 +403,9 @@ impl StorageEngine {
             node_role: NodeRole::Standalone,
             tables: DashMap::new(),
             columnstore_tables: DashMap::new(),
+            #[cfg(feature = "disk_rowstore")]
             disk_tables: DashMap::new(),
+            #[cfg(feature = "lsm")]
             lsm_tables: DashMap::new(),
             data_dir: wal_dir.map(|d| d.to_path_buf()),
             catalog: RwLock::new(Catalog::new()),
@@ -469,7 +488,9 @@ impl StorageEngine {
             node_role: NodeRole::Standalone,
             tables: DashMap::new(),
             columnstore_tables: DashMap::new(),
+            #[cfg(feature = "disk_rowstore")]
             disk_tables: DashMap::new(),
+            #[cfg(feature = "lsm")]
             lsm_tables: DashMap::new(),
             data_dir: Some(wal_dir.to_path_buf()),
             catalog: RwLock::new(Catalog::new()),
@@ -505,7 +526,9 @@ impl StorageEngine {
             node_role: NodeRole::Standalone,
             tables: DashMap::new(),
             columnstore_tables: DashMap::new(),
+            #[cfg(feature = "disk_rowstore")]
             disk_tables: DashMap::new(),
+            #[cfg(feature = "lsm")]
             lsm_tables: DashMap::new(),
             data_dir: None,
             catalog: RwLock::new(Catalog::new()),
@@ -541,7 +564,9 @@ impl StorageEngine {
             node_role: NodeRole::Standalone,
             tables: DashMap::new(),
             columnstore_tables: DashMap::new(),
+            #[cfg(feature = "disk_rowstore")]
             disk_tables: DashMap::new(),
+            #[cfg(feature = "lsm")]
             lsm_tables: DashMap::new(),
             data_dir: None,
             catalog: RwLock::new(Catalog::new()),

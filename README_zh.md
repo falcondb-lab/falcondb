@@ -45,9 +45,9 @@ FalconDB 提供稳定的 OLTP 能力、快/慢路径事务、基于 WAL 的主�
 | `psql` 12+ | ✅ | 完整测试 |
 | `pgbench` (初始化 + 运行) | ✅ | 内置脚本可用 |
 | JDBC (pgjdbc 42.x) | ✅ | 已测试 42.7+ |
-| 取消请求 | ⚠️ | 已接受，暂未执行 |
-| LISTEN/NOTIFY | ❌ | 未实现 |
-| 逻辑复制协议 | ❌ | 使用 gRPC 替代 |
+| 取消请求 | ✅ | AtomicBool 轮询，50ms 延迟，简单 + 扩展查询协议 |
+| LISTEN/NOTIFY | ✅ | 内存广播中心，LISTEN/UNLISTEN/NOTIFY |
+| 逻辑复制协议 | ✅ | IDENTIFY_SYSTEM, CREATE/DROP_REPLICATION_SLOT, START_REPLICATION |
 
 详见 [docs/protocol_compatibility.md](docs/protocol_compatibility.md)。
 
@@ -75,6 +75,20 @@ FalconDB 提供稳定的 OLTP 能力、快/慢路径事务、基于 WAL 的主�
 - 自定义类型 (JSONB 除外)
 - 全文搜索 (tsvector/tsquery)
 
+### 计划中 — 尚未实现 (P2 路线图，默认构建路径无相关代码)
+
+| 功能 | 模块状态 | 备注 |
+|------|:--------:|------|
+| Raft 一致性复制 | — | 未启动；当前复制为 WAL-shipping + gRPC |
+| 磁盘溢出 / 分层存储 | STUB | `disk_rowstore.rs`, `columnstore.rs` — 代码存在但不在生产路径 |
+| LSM-tree 存储引擎 | EXPERIMENTAL | `lsm/` — 编译隔离，非默认 |
+| 在线 DDL (非阻塞 ALTER) | STUB | `online_ddl.rs` — 仅状态机框架 |
+| HTAP / 列存分析 | STUB | `columnstore.rs` — 未接入查询规划器 |
+| 透明数据加密 | STUB | `encryption.rs` — 仅密钥管理框架 |
+| 时间点恢复 (PITR) | STUB | `pitr.rs` — 仅 WAL 归档框架 |
+| 自动分片再均衡 | — | 未启动 |
+| 多租户资源隔离 | STUB | `resource_isolation.rs`, `tenant_registry.rs` — 未强制执行 |
+
 ---
 
 ## 1. 构建
@@ -88,7 +102,7 @@ cargo build --workspace
 # 构建 release 版本
 cargo build --release --workspace
 
-# 运行测试 (15 个 crate + 根集成测试，共 2,239 个测试)
+# 运行测试 (15 个 crate + 根集成测试，共 2,262 个测试)
 cargo test --workspace
 
 # 代码检查
@@ -770,7 +784,7 @@ FalconDB 支持三种持久化策略: `local-fsync` (默认, RPO > 0 可能)、
 ## 测试
 
 ```bash
-# 运行所有测试 (共 2,239 个)
+# 运行所有测试 (共 2,262 个)
 cargo test --workspace
 
 # 按 crate 运行
@@ -780,7 +794,7 @@ cargo test -p falcon_server           # 372 测试 (SQL 端到端, 错误路径,
 cargo test -p falcon_common           # 246 测试 (错误模型, 配置, RBAC, RoleCatalog, PrivilegeManager, Decimal, RLS)
 cargo test -p falcon_executor         # 162 测试 (Governor v2, 优先级调度, 向量化, RBAC 执行)
 cargo test -p falcon_sql_frontend     # 148 测试 (绑定器, 谓词规范化, 参数推断)
-cargo test -p falcon_protocol_pg      # 180 测试 (SHOW 命令, 错误路径, 事务生命周期, Handler)
+cargo test -p falcon_protocol_pg      # 203 测试 (SHOW 命令, 错误路径, 事务生命周期, Handler, 逻辑复制)
 cargo test -p falcon_planner          # 89 测试 (路由提示, 分布式包装, 分片键推断)
 cargo test -p falcon_txn              # 61 测试 (事务生命周期, OCC, 统计, READ ONLY, 超时, 执行摘要)
 cargo test -p falcon_protocol_native  # 39 测试 (原生协议编解码, 压缩, 类型映射)

@@ -39,20 +39,21 @@ impl StorageEngine {
             return Ok(pk);
         }
 
-        // Columnstore
-        if let Some(cs) = self.columnstore_tables.get(&table_id) {
+        // Columnstore (feature-gated)
+        if let Some(_cs) = self.columnstore_tables.get(&table_id) {
             self.record_write_path_violation_columnstore()?;
             self.append_wal(&WalRecord::Insert {
                 txn_id,
                 table_id,
                 row: row.clone(),
             })?;
-            let pk = crate::memtable::encode_pk(&row, cs.schema.pk_indices());
-            cs.insert(row, txn_id)?;
+            let pk = crate::memtable::encode_pk(&row, _cs.schema.pk_indices());
+            _cs.insert(txn_id, row);
             return Ok(pk);
         }
 
-        // Disk rowstore
+        // Disk rowstore (feature-gated)
+        #[cfg(feature = "disk_rowstore")]
         if let Some(disk) = self.disk_tables.get(&table_id) {
             self.record_write_path_violation_disk()?;
             self.append_wal(&WalRecord::Insert {
@@ -64,7 +65,8 @@ impl StorageEngine {
             return Ok(pk);
         }
 
-        // LSM rowstore
+        // LSM rowstore (feature-gated)
+        #[cfg(feature = "lsm")]
         if let Some(lsm) = self.lsm_tables.get(&table_id) {
             self.append_wal(&WalRecord::Insert {
                 txn_id,
@@ -101,7 +103,8 @@ impl StorageEngine {
             return Ok(());
         }
 
-        // Disk rowstore
+        // Disk rowstore (feature-gated)
+        #[cfg(feature = "disk_rowstore")]
         if let Some(disk) = self.disk_tables.get(&table_id) {
             self.record_write_path_violation_disk()?;
             self.append_wal(&WalRecord::Update {
@@ -114,7 +117,8 @@ impl StorageEngine {
             return Ok(());
         }
 
-        // LSM rowstore
+        // LSM rowstore (feature-gated)
+        #[cfg(feature = "lsm")]
         if let Some(lsm) = self.lsm_tables.get(&table_id) {
             self.append_wal(&WalRecord::Update {
                 txn_id,
@@ -157,7 +161,8 @@ impl StorageEngine {
             return Ok(());
         }
 
-        // Disk rowstore
+        // Disk rowstore (feature-gated)
+        #[cfg(feature = "disk_rowstore")]
         if let Some(disk) = self.disk_tables.get(&table_id) {
             self.record_write_path_violation_disk()?;
             self.append_wal(&WalRecord::Delete {
@@ -169,7 +174,8 @@ impl StorageEngine {
             return Ok(());
         }
 
-        // LSM rowstore
+        // LSM rowstore (feature-gated)
+        #[cfg(feature = "lsm")]
         if let Some(lsm) = self.lsm_tables.get(&table_id) {
             self.append_wal(&WalRecord::Delete {
                 txn_id,
@@ -205,7 +211,8 @@ impl StorageEngine {
             return Ok(table.get(pk, txn_id, read_ts));
         }
 
-        // Disk rowstore
+        // Disk rowstore (feature-gated)
+        #[cfg(feature = "disk_rowstore")]
         if let Some(disk) = self.disk_tables.get(&table_id) {
             return Ok(disk.get(pk, txn_id, read_ts));
         }
@@ -233,19 +240,21 @@ impl StorageEngine {
             return Ok(results);
         }
 
-        // Columnstore
+        // Columnstore (feature-gated via stub)
         if let Some(cs) = self.columnstore_tables.get(&table_id) {
             let results = cs.scan(txn_id, read_ts);
             return Ok(results);
         }
 
-        // Disk rowstore
+        // Disk rowstore (feature-gated)
+        #[cfg(feature = "disk_rowstore")]
         if let Some(disk) = self.disk_tables.get(&table_id) {
             let results = disk.scan(txn_id, read_ts);
             return Ok(results);
         }
 
-        // LSM rowstore
+        // LSM rowstore (feature-gated)
+        #[cfg(feature = "lsm")]
         if let Some(lsm) = self.lsm_tables.get(&table_id) {
             let results = lsm.scan(txn_id, read_ts);
             return Ok(results);

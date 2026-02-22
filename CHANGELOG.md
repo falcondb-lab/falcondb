@@ -9,6 +9,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — v1.0 Commercial Release Gate (P1)
+- **README v1.0 positioning**: PG-compatible, distributed, memory-first, deterministic txn semantics OLTP
+- **ACID SQL-level tests**: atomicity (commit/rollback), consistency (PK/NOT NULL), isolation (snapshot), durability (6 tests)
+- **PG SQL whitelist tests**: INNER/LEFT JOIN, GROUP BY + aggregates, ORDER BY/LIMIT, UPSERT ON CONFLICT, UPDATE/DELETE RETURNING (7 tests)
+- **Unsupported feature errors**: CREATE TRIGGER, CREATE FUNCTION → `ErrorResponse` with SQLSTATE `0A000` (2 tests)
+- **Observability verification**: SHOW falcon.memory, falcon.nodes, falcon.replication_stats (3 tests)
+- **Fast-path metrics verification**: `fast_path_commits` / `slow_path_commits` exposed in txn_stats (1 test)
+- **v1.0 release CI gate**: `scripts/ci_v1_release_gate.sh` — unified Go/No-Go gate (20+ sub-gates)
+- **v1.0 scope documentation**: `docs/v1.0_scope.md` — full 7-section commercial checklist with verification matrix
+- **README "v1.0 Not Supported" table**: 9 features with SQLSTATE codes and error messages
+
+### Added — v1.0 Isolation Module (B1–B10, ~135 tests)
+- B1: Explicit `TxnState::try_transition()` state machine with `TransitionResult` and `InvalidTransition` error (28 tests)
+- B3: Snapshot Isolation litmus tests — MVCC visibility at VersionChain + StorageEngine levels (35 tests)
+- B4: WAL-first durability — multi-table interleaved recovery, 3x idempotent replay, WAL-first ordering invariant (3 new, 13 total)
+- B5/B6: Admission backpressure — WAL backlog threshold, replication lag threshold, rejection counter (5 tests)
+- B7: Long-txn detection + kill — `long_running_txns()`, `kill_txn()`, `kill_long_running()` (9 tests)
+- B8: PG protocol corner cases — empty query, semicolons-only, syntax error, txn lifecycle, nonexistent tables, duplicate DDL (12 tests)
+- B9: DDL concurrency safety — concurrent create (same/different), truncate, drop+DML, index lifecycle (8 tests)
+- B10: CI isolation gate script (`scripts/ci_isolation_gate.sh`)
+- Documentation: `docs/v1.0_scope.md` — full checklist with test counts and locations
+
 ### Added — v2.0 Phase 3: Enterprise Edition Features
 - Row-Level Security (RLS): `RlsPolicyManager` with permissive/restrictive policies, role-scoped targeting, superuser bypass (`falcon_common::rls`, 15 tests)
 - Transparent Data Encryption (TDE): `KeyManager` with PBKDF2 key derivation, DEK lifecycle, master key rotation (`falcon_storage::encryption`, 11 tests)
@@ -57,8 +79,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `scripts/ci_native_perf_gate.sh` — Release build + protocol performance regression
 - `scripts/ci_native_failover_under_load.sh` — Epoch fencing + failover bench
 
+### Added — Commercial-Grade Hardening (P0/P1)
+- **P0-1**: Module status headers on all storage modules (`PRODUCTION`, `EXPERIMENTAL`, `STUB`)
+- **P0-2**: Golden path documentation on core write path (`TxnManager`, `MemTable`, `WAL`, `StorageEngine`, `wal_stream.rs`)
+- **P0-2**: TODO/FIXME/HACK audit — zero hits in core paths (`falcon_txn`, `falcon_storage` core, `falcon_cluster`)
+- **P1-1**: Cross-shard invariant `XS-5` (Timeout Rollback — no hanging locks) added to `consistency.rs`
+- **P1-1**: `CrossShardInvariant` enum with `all()` + `description()` for programmatic validation
+- **P1-1**: Doc tests on all 5 cross-shard invariant constants (XS-1 through XS-5)
+- **P1-1**: `sql_distributed_txn.rs` — 11 deterministic tests covering atomicity, at-most-once, coordinator crash recovery, participant crash recovery, timeout rollback
+- **P1-5-2**: `ci_failover_gate.sh` updated with distributed txn invariant gate
+- **P2**: README "Planned — NOT Implemented" table explicitly marking 9 features as STUB/EXPERIMENTAL/not-started
+
+### Fixed — PG Protocol Completion
+- Cancel request now fully functional: `CancellationRegistry` with `AtomicBool` polling (50ms), `BackendKeyData` handshake, both simple and extended query (Execute) paths, SQLSTATE `57014` (5 new tests)
+- LISTEN/NOTIFY fully implemented: `NotificationHub` broadcast hub, per-session `SessionNotifications`, LISTEN/UNLISTEN/NOTIFY/UNLISTEN * commands, `NotificationResponse` delivery before `ReadyForQuery` (6 tests)
+- Logical replication protocol: `replication=database` startup detection, `IDENTIFY_SYSTEM`, `CREATE_REPLICATION_SLOT <name> LOGICAL <plugin>`, `DROP_REPLICATION_SLOT`, `START_REPLICATION SLOT <name> LOGICAL <lsn>`, CopyBoth streaming with XLogData/keepalive/StandbyStatusUpdate, backed by CDC infrastructure (18 new tests)
+
 ### Test Count
-- **2,239 tests** passing, **0 failures** (was 1,976 at 1.0.0-rc.1)
+- **2,262 tests** passing, **0 failures** (was 1,976 at 1.0.0-rc.1)
 
 ---
 

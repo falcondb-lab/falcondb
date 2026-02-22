@@ -16,6 +16,7 @@ use falcon_txn::TxnManager;
 use crate::codec::{self, BackendMessage, FrontendMessage};
 use crate::connection_pool::{ConnectionPool, PoolConfig};
 use crate::handler::QueryHandler;
+use crate::logical_replication;
 use crate::notify::NotificationHub;
 use crate::session::PgSession;
 
@@ -395,6 +396,8 @@ async fn handle_connection_with_timeout(
     let mut buf = BytesMut::with_capacity(8192);
     let mut session = PgSession::new_with_hub(session_id, notification_hub);
     session.statement_timeout_ms = default_statement_timeout_ms;
+    #[allow(unused_assignments)]
+    let mut is_replication = false;
 
     // Generate a random secret key for this session's cancel support
     let secret_key = {
@@ -458,6 +461,9 @@ async fn handle_connection_with_timeout(
                 if let Some(db) = params.get("database") {
                     session.database = db.clone();
                 }
+
+                // Detect replication connection
+                is_replication = logical_replication::is_replication_connection(&params);
 
                 // Copy well-known startup params into session GUC so
                 // pgjdbc's SET/SHOW round-trips work correctly.
@@ -828,6 +834,20 @@ async fn handle_connection_with_timeout(
             let _ = send_message(&mut stream, &msg).await;
             return Ok(());
         }
+    }
+
+    // Phase 2a: Replication-mode query loop (if replication=database)
+    if is_replication {
+        tracing::info!("Entering replication mode for session {}", session_id);
+        return handle_replication_session(
+            &mut stream,
+            &mut buf,
+            &mut session,
+            session_id,
+            &handler,
+            idle_timeout_ms,
+        )
+        .await;
     }
 
     // Phase 2: Query loop
@@ -1352,6 +1372,23 @@ async fn handle_connection_with_timeout(
                 }
                 FrontendMessage::Execute { portal, .. } => {
                     tracing::debug!("Execute (session {}): portal={}", session_id, portal);
+
+                    // Check for cancellation before starting execution
+                    if cancelled.swap(false, Ordering::SeqCst) {
+                        tracing::info!("Execute cancelled for session {}", session_id);
+                        send_message(
+                            &mut stream,
+                            &BackendMessage::ErrorResponse {
+                                severity: "ERROR".into(),
+                                code: "57014".into(),
+                                message: "canceling statement due to user request".into(),
+                            },
+                        )
+                        .await?;
+                        extended_error = true;
+                        continue;
+                    }
+
                     let exec_start = std::time::Instant::now();
                     let portal_data = session.portals.get(&portal).cloned();
                     if let Some(p) = portal_data {
@@ -1414,15 +1451,79 @@ async fn handle_connection_with_timeout(
                                     }]
                                 }
                             }
-                        } else if let Some(ref plan) = p.plan {
-                            falcon_observability::record_prepared_stmt_op("execute", "plan");
-                            handler.execute_plan(plan, &p.params, &mut session)
-                        } else if !p.bound_sql.is_empty() {
-                            falcon_observability::record_prepared_stmt_op("execute", "legacy");
-                            handler.handle_query(&p.bound_sql, &mut session)
                         } else {
-                            falcon_observability::record_prepared_stmt_op("execute", "empty");
-                            vec![BackendMessage::EmptyQueryResponse]
+                            // No statement_timeout: run in spawn_blocking so we can
+                            // poll the cancellation flag concurrently.
+                            let handler_ref = &handler;
+                            let query_future = tokio::task::spawn_blocking({
+                                let p = p.clone();
+                                let handler = handler_ref.clone();
+                                let mut sess = session.take_for_timeout();
+                                move || {
+                                    let responses = if let Some(ref plan) = p.plan {
+                                        falcon_observability::record_prepared_stmt_op(
+                                            "execute", "plan",
+                                        );
+                                        handler.execute_plan(plan, &p.params, &mut sess)
+                                    } else if !p.bound_sql.is_empty() {
+                                        falcon_observability::record_prepared_stmt_op(
+                                            "execute", "legacy",
+                                        );
+                                        handler.handle_query(&p.bound_sql, &mut sess)
+                                    } else {
+                                        falcon_observability::record_prepared_stmt_op(
+                                            "execute", "empty",
+                                        );
+                                        vec![BackendMessage::EmptyQueryResponse]
+                                    };
+                                    (responses, sess)
+                                }
+                            });
+
+                            let cancel_flag = cancelled.clone();
+                            let cancel_poll = async {
+                                loop {
+                                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                                    if cancel_flag.load(Ordering::SeqCst) {
+                                        break;
+                                    }
+                                }
+                            };
+
+                            tokio::select! {
+                                result = query_future => {
+                                    match result {
+                                        Ok((responses, returned_session)) => {
+                                            session.restore_from_timeout(returned_session);
+                                            if cancelled.swap(false, Ordering::SeqCst) {
+                                                vec![BackendMessage::ErrorResponse {
+                                                    severity: "ERROR".into(),
+                                                    code: "57014".into(),
+                                                    message: "canceling statement due to user request".into(),
+                                                }]
+                                            } else {
+                                                responses
+                                            }
+                                        }
+                                        Err(e) => {
+                                            vec![BackendMessage::ErrorResponse {
+                                                severity: "ERROR".into(),
+                                                code: "XX000".into(),
+                                                message: format!("Internal error: {}", e),
+                                            }]
+                                        }
+                                    }
+                                }
+                                _ = cancel_poll => {
+                                    cancelled.store(false, Ordering::SeqCst);
+                                    tracing::info!("Execute cancelled mid-execution for session {}", session_id);
+                                    vec![BackendMessage::ErrorResponse {
+                                        severity: "ERROR".into(),
+                                        code: "57014".into(),
+                                        message: "canceling statement due to user request".into(),
+                                    }]
+                                }
+                            }
                         };
 
                         let exec_dur = exec_start.elapsed().as_micros() as u64;
@@ -1479,6 +1580,307 @@ async fn handle_connection_with_timeout(
                 _ => {
                     tracing::warn!("Unexpected message in query phase (session {})", session_id);
                 }
+            }
+        }
+    }
+}
+
+/// Handle a replication-mode session (replication=database).
+///
+/// Replication commands arrive as simple Query messages. When START_REPLICATION
+/// is received, we enter CopyBoth streaming mode and send XLogData messages
+/// from the CDC buffer, with periodic keepalives.
+async fn handle_replication_session(
+    stream: &mut TcpStream,
+    buf: &mut BytesMut,
+    session: &mut PgSession,
+    session_id: i32,
+    handler: &QueryHandler,
+    idle_timeout_ms: u64,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    loop {
+        let n = if idle_timeout_ms > 0 {
+            let idle_dur = std::time::Duration::from_millis(idle_timeout_ms);
+            match tokio::time::timeout(idle_dur, stream.read_buf(buf)).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    let msg = BackendMessage::ErrorResponse {
+                        severity: "FATAL".into(),
+                        code: "57P01".into(),
+                        message: format!(
+                            "terminating replication connection due to idle timeout ({}ms)",
+                            idle_timeout_ms
+                        ),
+                    };
+                    let _ = send_message(stream, &msg).await;
+                    return Ok(());
+                }
+            }
+        } else {
+            stream.read_buf(buf).await?
+        };
+        if n == 0 {
+            return Ok(());
+        }
+
+        while let Some(msg) = codec::decode_message(buf)? {
+            match msg {
+                FrontendMessage::Query(sql) => {
+                    tracing::debug!(
+                        "Replication query (session {}): {}",
+                        session_id,
+                        sql
+                    );
+
+                    let result = logical_replication::handle_replication_command(
+                        &sql,
+                        &handler.storage,
+                    );
+
+                    match result {
+                        logical_replication::ReplicationResult::Messages(msgs) => {
+                            for m in &msgs {
+                                send_message(stream, m).await?;
+                            }
+                            send_message(
+                                stream,
+                                &BackendMessage::ReadyForQuery {
+                                    txn_status: session.txn_status_byte(),
+                                },
+                            )
+                            .await?;
+                        }
+                        logical_replication::ReplicationResult::StartStreaming {
+                            slot_name,
+                            start_lsn,
+                        } => {
+                            // Enter CopyBoth mode
+                            send_message(
+                                stream,
+                                &BackendMessage::CopyBothResponse {
+                                    format: 0,
+                                    column_formats: vec![],
+                                },
+                            )
+                            .await?;
+
+                            // Stream CDC events from the slot
+                            handle_replication_streaming(
+                                stream,
+                                buf,
+                                &handler.storage,
+                                &slot_name,
+                                start_lsn,
+                                session_id,
+                            )
+                            .await?;
+
+                            // After streaming ends, send CopyDone + ReadyForQuery
+                            send_message(stream, &BackendMessage::CopyDone).await?;
+                            send_message(
+                                stream,
+                                &BackendMessage::ReadyForQuery {
+                                    txn_status: session.txn_status_byte(),
+                                },
+                            )
+                            .await?;
+                        }
+                        logical_replication::ReplicationResult::Error(e) => {
+                            send_message(
+                                stream,
+                                &BackendMessage::ErrorResponse {
+                                    severity: "ERROR".into(),
+                                    code: "XX000".into(),
+                                    message: e,
+                                },
+                            )
+                            .await?;
+                            send_message(
+                                stream,
+                                &BackendMessage::ReadyForQuery {
+                                    txn_status: session.txn_status_byte(),
+                                },
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                FrontendMessage::Terminate => {
+                    tracing::debug!(
+                        "Replication client terminated (session {})",
+                        session_id
+                    );
+                    return Ok(());
+                }
+                _ => {
+                    tracing::warn!(
+                        "Unexpected message in replication mode (session {})",
+                        session_id
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Handle the streaming phase of START_REPLICATION.
+///
+/// Polls CDC events from the slot, sends them as XLogData CopyData messages,
+/// and sends periodic keepalives. Exits when the client sends CopyDone or
+/// the connection closes.
+async fn handle_replication_streaming(
+    stream: &mut TcpStream,
+    buf: &mut BytesMut,
+    storage: &Arc<StorageEngine>,
+    slot_name: &str,
+    _start_lsn: u64,
+    session_id: i32,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let keepalive_interval = std::time::Duration::from_secs(10);
+    let poll_interval = std::time::Duration::from_millis(100);
+    let mut last_keepalive = std::time::Instant::now();
+    let mut current_lsn: u64 = 0;
+
+    loop {
+        // Poll for new CDC events — collect into local vec to avoid holding
+        // the RwLockReadGuard across .await points.
+        let pending_messages: Vec<(u64, Vec<u8>)> = {
+            let cdc = storage.cdc_manager.read();
+            if let Some(slot) = cdc.get_slot_by_name(slot_name) {
+                let slot_id = slot.id;
+                cdc.poll_changes(slot_id, 100)
+                    .iter()
+                    .map(|event| {
+                        let text = logical_replication::encode_change_event_text(event);
+                        let xlog_data = logical_replication::build_xlog_data_message(
+                            event.lsn.0,
+                            text.as_bytes(),
+                        );
+                        (event.lsn.0, xlog_data)
+                    })
+                    .collect()
+            } else {
+                vec![]
+            }
+        }; // RwLockReadGuard dropped here
+
+        // Send collected messages (no lock held)
+        for (lsn, xlog_data) in &pending_messages {
+            send_message(stream, &BackendMessage::CopyData(xlog_data.clone())).await?;
+            current_lsn = *lsn;
+        }
+
+        // Advance the slot's confirmed flush position
+        if current_lsn > 0 && !pending_messages.is_empty() {
+            let cdc = storage.cdc_manager.read();
+            if let Some(slot) = cdc.get_slot_by_name(slot_name) {
+                let slot_id = slot.id;
+                drop(cdc);
+                let mut cdc_w = storage.cdc_manager.write();
+                let _ = cdc_w.advance_slot(
+                    slot_id,
+                    falcon_storage::cdc::CdcLsn(current_lsn),
+                );
+            }
+        }
+
+        // Send keepalive if interval elapsed
+        if last_keepalive.elapsed() >= keepalive_interval {
+            let keepalive =
+                logical_replication::build_keepalive_message(current_lsn, false);
+            send_message(stream, &BackendMessage::CopyData(keepalive)).await?;
+            last_keepalive = std::time::Instant::now();
+        }
+
+        // Check for client messages (CopyDone, StandbyStatusUpdate, or disconnect)
+        match tokio::time::timeout(poll_interval, stream.read_buf(buf)).await {
+            Ok(Ok(0)) => {
+                // Connection closed
+                tracing::debug!(
+                    "Replication client disconnected (session {})",
+                    session_id
+                );
+                // Deactivate slot
+                let mut cdc = storage.cdc_manager.write();
+                if let Some(slot) = cdc.get_slot_by_name(slot_name) {
+                    let sid = slot.id;
+                    cdc.deactivate_slot(sid);
+                }
+                return Ok(());
+            }
+            Ok(Ok(_)) => {
+                // Process client messages
+                while let Some(msg) = codec::decode_message(buf)? {
+                    match msg {
+                        FrontendMessage::CopyDone => {
+                            tracing::info!(
+                                "Replication streaming ended by client (session {})",
+                                session_id
+                            );
+                            let mut cdc = storage.cdc_manager.write();
+                            if let Some(slot) = cdc.get_slot_by_name(slot_name) {
+                                let sid = slot.id;
+                                cdc.deactivate_slot(sid);
+                            }
+                            return Ok(());
+                        }
+                        FrontendMessage::CopyData(data) => {
+                            // StandbyStatusUpdate from client
+                            let mut needs_reply = false;
+                            if let Some(status) =
+                                logical_replication::StandbyStatusUpdate::parse(&data)
+                            {
+                                let mut cdc = storage.cdc_manager.write();
+                                if let Some(slot) = cdc.get_slot_by_name(slot_name) {
+                                    let sid = slot.id;
+                                    let _ = cdc.advance_slot(
+                                        sid,
+                                        falcon_storage::cdc::CdcLsn(status.flush_lsn),
+                                    );
+                                }
+                                needs_reply = status.reply_requested;
+                            }
+                            // Send reply outside the lock
+                            if needs_reply {
+                                let keepalive =
+                                    logical_replication::build_keepalive_message(
+                                        current_lsn,
+                                        false,
+                                    );
+                                send_message(
+                                    stream,
+                                    &BackendMessage::CopyData(keepalive),
+                                )
+                                .await?;
+                            }
+                        }
+                        FrontendMessage::Terminate => {
+                            let mut cdc = storage.cdc_manager.write();
+                            if let Some(slot) = cdc.get_slot_by_name(slot_name) {
+                                let sid = slot.id;
+                                cdc.deactivate_slot(sid);
+                            }
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    "Replication stream read error (session {}): {}",
+                    session_id,
+                    e
+                );
+                let mut cdc = storage.cdc_manager.write();
+                if let Some(slot) = cdc.get_slot_by_name(slot_name) {
+                    let sid = slot.id;
+                    cdc.deactivate_slot(sid);
+                }
+                return Err(e.into());
+            }
+            Err(_) => {
+                // Timeout — no client data, continue polling CDC
             }
         }
     }
@@ -2505,5 +2907,92 @@ mod tests {
         assert_eq!(config.shutdown_drain_timeout_secs, 60);
         assert_eq!(config.statement_timeout_ms, 5000);
         assert_eq!(config.idle_timeout_ms, 60000);
+    }
+
+    // ── Cancel request registry tests ──
+
+    #[test]
+    fn test_cancel_registry_insert_and_lookup() {
+        let registry: CancellationRegistry = Arc::new(DashMap::new());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        registry.insert(
+            42,
+            CancelEntry {
+                secret_key: 12345,
+                cancelled: cancelled.clone(),
+            },
+        );
+
+        // Correct lookup
+        let entry = registry.get(&42).unwrap();
+        assert_eq!(entry.secret_key, 12345);
+        assert!(!entry.cancelled.load(Ordering::SeqCst));
+
+        // Signal cancellation
+        entry.cancelled.store(true, Ordering::SeqCst);
+        assert!(cancelled.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_cancel_registry_wrong_secret_key() {
+        let registry: CancellationRegistry = Arc::new(DashMap::new());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        registry.insert(
+            1,
+            CancelEntry {
+                secret_key: 99999,
+                cancelled: cancelled.clone(),
+            },
+        );
+
+        // Wrong secret key should not trigger cancellation
+        if let Some(entry) = registry.get(&1) {
+            if entry.secret_key == 11111 {
+                entry.cancelled.store(true, Ordering::SeqCst);
+            }
+        }
+        assert!(!cancelled.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_cancel_registry_missing_session() {
+        let registry: CancellationRegistry = Arc::new(DashMap::new());
+        // Looking up a non-existent session should return None
+        assert!(registry.get(&999).is_none());
+    }
+
+    #[test]
+    fn test_cancel_flag_swap_semantics() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+
+        // First swap returns false (was not cancelled)
+        assert!(!cancelled.swap(false, Ordering::SeqCst));
+
+        // Set to true (simulating cancel request arrival)
+        cancelled.store(true, Ordering::SeqCst);
+
+        // Swap should return true and reset to false
+        assert!(cancelled.swap(false, Ordering::SeqCst));
+
+        // After swap, flag is false again
+        assert!(!cancelled.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_cancel_registry_cleanup_on_disconnect() {
+        let registry: CancellationRegistry = Arc::new(DashMap::new());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        registry.insert(
+            10,
+            CancelEntry {
+                secret_key: 555,
+                cancelled: cancelled.clone(),
+            },
+        );
+        assert!(registry.get(&10).is_some());
+
+        // Simulate connection cleanup
+        registry.remove(&10);
+        assert!(registry.get(&10).is_none());
     }
 }

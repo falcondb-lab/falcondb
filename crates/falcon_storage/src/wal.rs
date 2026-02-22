@@ -1,3 +1,27 @@
+//! # Module Status: PRODUCTION
+//! Write-Ahead Log (WAL) — crash-safe durability for all committed transactions.
+//! Core production path: every commit appends to the WAL before client ACK.
+//!
+//! ## Golden Path (OLTP Write — WAL segment)
+//! ```text
+//! StorageEngine.commit_txn()
+//!   → WalWriter.append(WalRecord::InsertRow | UpdateRow | DeleteRow)
+//!   → WalWriter.append(WalRecord::CommitTxn { txn_id, commit_ts })
+//!   → fsync (per SyncMode / CommitPolicy)
+//!   → WAL observer callback → Replication stream
+//! ```
+//!
+//! ## Invariants (enforced, not advisory)
+//! - WAL-1: Monotonic LSN — every record gets a strictly increasing LSN
+//! - WAL-2: Idempotent replay — replaying a record twice = replaying once
+//! - WAL-5: Recovery completeness — committed visible, uncommitted invisible
+//! - WAL-6: CRC32 on every record — corruption detected, not skipped
+//!
+//! ## Prohibited Patterns
+//! - Writing to MemTable without WAL append → violates crash-safety
+//! - Client ACK before WAL fsync (under LocalWalSync policy) → data loss risk
+//! - Replication stream emitting records not yet WAL-durable → phantom commits
+
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};

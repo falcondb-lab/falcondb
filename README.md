@@ -1,9 +1,14 @@
 # FalconDB
+
 <p align="center">
   <img src="assets/falcondb-logo.png" alt="FalconDB Logo" width="220" />
 </p>
 
-<h1 align="center">FalconDB</h1>
+<h1 align="center">FalconDB v1.0</h1>
+
+<p align="center">
+  <strong>PG-Compatible · Distributed · Memory-First · Deterministic Transaction Semantics</strong>
+</p>
 
 <p align="center">
   <a href="https://github.com/falcondb-lab/falcondb/actions/workflows/ci.yml">
@@ -12,13 +17,19 @@
   <img src="https://img.shields.io/badge/MSRV-1.75-blue" alt="MSRV" />
   <img src="https://img.shields.io/badge/license-Apache--2.0-green" alt="License" />
 </p>
-[![CI](https://github.com/falcondb-lab/falcondb/actions/workflows/ci.yml/badge.svg)](https://github.com/falcondb-lab/falcondb/actions/workflows/ci.yml)
-![MSRV](https://img.shields.io/badge/MSRV-1.75-blue)
-![License](https://img.shields.io/badge/license-Apache--2.0-green)
-
-**PG-Compatible Distributed In-Memory OLTP Database** — written in Rust.
 
 > English | **[简体中文](README_zh.md)**
+
+> **v1.0 Positioning** — FalconDB is a **PG-compatible, distributed, memory-first
+> OLTP database** with deterministic transaction semantics. Benchmarked against
+> SingleStore (OLTP) and VoltDB.
+>
+> - ✅ **Low latency** — single-shard fast-path commits bypass 2PC entirely
+> - ✅ **Stability** — p99 bounded, abort rate < 1%, reproducible benchmarks
+> - ✅ **Provable consistency** — MVCC/OCC under Snapshot Isolation, CI-verified ACID
+> - ✅ **Operability** — 50+ SHOW commands, Prometheus metrics, failover CI gate
+> - ❌ Not HTAP — no analytical workloads
+> - ❌ Not full PG — [see unsupported list below](#v10-not-supported)
 
 FalconDB provides stable OLTP, fast/slow-path transactions, WAL-based
 primary–replica replication with gRPC streaming, promote/failover, MVCC
@@ -49,9 +60,9 @@ garbage collection, and reproducible benchmarks.
 | `psql` 12+ | ✅ | Fully tested |
 | `pgbench` (init + run) | ✅ | Built-in scripts work |
 | JDBC (pgjdbc 42.x) | ✅ | Tested with 42.7+ |
-| Cancel request | ⚠️ | Accepted, not acted upon |
-| LISTEN/NOTIFY | ❌ | Not implemented |
-| Logical replication protocol | ❌ | Uses gRPC instead |
+| Cancel request | ✅ | AtomicBool polling, 50ms latency, simple + extended query |
+| LISTEN/NOTIFY | ✅ | In-memory broadcast hub, LISTEN/UNLISTEN/NOTIFY |
+| Logical replication protocol | ✅ | IDENTIFY_SYSTEM, CREATE/DROP_REPLICATION_SLOT, START_REPLICATION |
 
 See [docs/protocol_compatibility.md](docs/protocol_compatibility.md) for full test procedures.
 
@@ -68,16 +79,40 @@ See [docs/protocol_compatibility.md](docs/protocol_compatibility.md) for full te
 | **Functions** | 500+ scalar functions (string, math, date/time, crypto, JSON, array) |
 | **Observability** | SHOW falcon.*, EXPLAIN, EXPLAIN ANALYZE, CHECKPOINT, ANALYZE TABLE |
 
-### Not Supported (current)
+### <a id="v10-not-supported"></a>v1.0 Not Supported
 
-- Stored procedures / PL/pgSQL
-- Triggers
-- Materialized views
-- Foreign data wrappers (FDW)
-- Online schema change (concurrent index build)
-- Automatic rebalancing (manual shard split only)
-- Custom types (beyond JSONB)
-- Full-text search (tsvector/tsquery)
+The following features are **explicitly out of scope** for v1.0.
+Attempting to use them returns a clear `ErrorResponse` with the appropriate SQLSTATE code.
+
+| Feature | Error Code | Error Message |
+|---------|-----------|---------------|
+| Stored procedures / PL/pgSQL | `0A000` | `stored procedures are not supported` |
+| Triggers | `0A000` | `triggers are not supported` |
+| Materialized views | `0A000` | `materialized views are not supported` |
+| Foreign data wrappers (FDW) | `0A000` | `foreign data wrappers are not supported` |
+| Full-text search (tsvector/tsquery) | `0A000` | `full-text search is not supported` |
+| Online DDL (concurrent index build) | `0A000` | `concurrent index operations are not supported` |
+| HTAP / ColumnStore analytics | — | Feature-gated off at compile time |
+| Automatic rebalancing | — | Manual shard split only |
+| Custom types (beyond JSONB) | `0A000` | `custom types are not supported` |
+
+> **v1.0 Scope Guard**: HTAP, ColumnStore, Raft strong-consistency replication,
+> disk tier/spill, and online DDL are all either `feature = "off"` or stub-only.
+> See [docs/v1.0_scope.md](docs/v1.0_scope.md) for the full isolation checklist.
+
+### Planned — NOT Implemented (P2 roadmap, no code on default build path)
+
+| Feature | Module Status | Notes |
+|---------|:------------:|-------|
+| Raft consensus replication | — | Not started; current replication is WAL-shipping + gRPC |
+| Disk spill / tiered storage | STUB | `disk_rowstore.rs`, `columnstore.rs` — code exists but not on production path |
+| LSM-tree storage engine | EXPERIMENTAL | `lsm/` — compile-gated, not default |
+| Online DDL (non-blocking ALTER) | STUB | `online_ddl.rs` — state machine scaffolding only |
+| HTAP / ColumnStore analytics | STUB | `columnstore.rs` — not wired to query planner |
+| Transparent Data Encryption | STUB | `encryption.rs` — key manager scaffolding only |
+| Point-in-Time Recovery | STUB | `pitr.rs` — WAL archiver scaffolding only |
+| Auto shard rebalancing | — | Not started |
+| Multi-tenant resource isolation | STUB | `resource_isolation.rs`, `tenant_registry.rs` — not enforced |
 
 ---
 
@@ -92,7 +127,7 @@ cargo build --workspace
 # Build release
 cargo build --release --workspace
 
-# Run tests (2,239 tests across 15 crates + root integration)
+# Run tests (2,262 tests across 15 crates + root integration)
 cargo test --workspace
 
 # Lint
@@ -780,7 +815,7 @@ See [docs/rpo_rto.md](docs/rpo_rto.md) for full RPO/RTO analysis and recommendat
 ## Testing
 
 ```bash
-# Run all tests (2,239 total)
+# Run all tests (2,262 total)
 cargo test --workspace
 
 # By crate
@@ -790,7 +825,7 @@ cargo test -p falcon_server           # 372 tests (SQL end-to-end, error paths, 
 cargo test -p falcon_common           # 246 tests (error model, config, RBAC, RoleCatalog, PrivilegeManager, Decimal, RLS)
 cargo test -p falcon_executor         # 162 tests (governor v2, priority scheduler, vectorized, RBAC enforcement)
 cargo test -p falcon_sql_frontend     # 148 tests (binder, predicate normalization, param inference)
-cargo test -p falcon_protocol_pg      # 180 tests (SHOW commands, error paths, txn lifecycle, handler)
+cargo test -p falcon_protocol_pg      # 203 tests (SHOW commands, error paths, txn lifecycle, handler, logical replication)
 cargo test -p falcon_planner          # 89 tests (routing hints, distributed wrapping, shard key inference)
 cargo test -p falcon_txn              # 61 tests (txn lifecycle, OCC, stats, READ ONLY mode, timeout, exec summary)
 cargo test -p falcon_protocol_native  # 39 tests (native protocol codec, compression, type mapping)

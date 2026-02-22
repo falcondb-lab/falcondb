@@ -1,3 +1,6 @@
+//! # Module Status: STUB — not on the production OLTP write path.
+//! Do NOT reference from planner/executor/txn for production workloads.
+//!
 //! P2-1b: Tenant registry — manages tenant lifecycle, resource tracking, and quota enforcement.
 //!
 //! The registry is the single source of truth for tenant metadata and runtime resource usage.

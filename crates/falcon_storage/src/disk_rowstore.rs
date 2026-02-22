@@ -1,3 +1,6 @@
+//! # Module Status: STUB — not on the production OLTP write path.
+//! Do NOT reference from planner/executor/txn for production workloads.
+//!
 //! On-disk B-tree row store — modeled after InnoDB / SingleStore disk tables.
 //!
 //! Provides a page-based storage engine with:

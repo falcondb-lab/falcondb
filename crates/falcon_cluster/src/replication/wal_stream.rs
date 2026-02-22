@@ -1,4 +1,28 @@
+//! # Module Status: PRODUCTION
 //! WAL chunk, replication log, and transport abstractions.
+//!
+//! ## Commit Visibility Boundary
+//! ```text
+//! Client commit → WAL fsync (primary) → client ACK ← visibility boundary
+//!                                      ↓
+//!               WAL chunk shipped → replica apply → replica ACK
+//! ```
+//!
+//! ## Policy-Driven Commit ACK (see HAConfig.sync_mode)
+//! - **Async**: client ACK after primary WAL fsync. Replica may lag. RPO > 0.
+//! - **SemiSync**: client ACK after primary WAL fsync + 1 replica ACK.
+//! - **Sync**: client ACK after primary WAL fsync + ALL replica ACKs.
+//!
+//! ## Invariants
+//! - REP-1: Replica committed set is always a prefix of primary's.
+//! - REP-2: No phantom commits — replica never commits what primary hasn't.
+//! - REP-3: WAL entries applied in primary's write order.
+//! - REP-4: Replica ACK means WAL entry has been applied (not just received).
+//!
+//! ## Prohibited Patterns
+//! - Replication emitting records not yet WAL-durable → phantom commits
+//! - Replica ACK before apply → violates REP-4
+//! - Out-of-order apply on replica → violates REP-3
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

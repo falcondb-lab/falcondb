@@ -94,6 +94,9 @@ run_gate P0 "Crash domain: panic isolation + InternalBug conversion" \
 run_gate P0 "Admission: connection/query/write limits enforced" \
   cargo test -p falcon_cluster -- admission --no-fail-fast
 
+run_gate P0 "Distributed txn invariants: XS-1..XS-5 deterministic tests" \
+  cargo test -p falcon_server --test sql_distributed_txn --no-fail-fast
+
 # ═══════════════════════════════════════════════════════════════════
 # P1 GATES — Warning only (non-blocking, creates issues)
 # ═══════════════════════════════════════════════════════════════════

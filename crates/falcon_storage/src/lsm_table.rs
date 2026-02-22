@@ -1,3 +1,5 @@
+//! # Module Status: EXPERIMENTAL — compile-gated, not on the production OLTP write path.
+//!
 //! LSM-backed row store table.
 //!
 //! Bridges the raw KV API of [`LsmEngine`] to the row-oriented table interface

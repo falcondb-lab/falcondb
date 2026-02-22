@@ -5,6 +5,7 @@ mod handler_catalog;
 mod handler_copy;
 mod handler_session;
 mod handler_show;
+pub mod logical_replication;
 pub mod notify;
 pub mod plan_cache;
 pub mod server;

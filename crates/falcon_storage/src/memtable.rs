@@ -1,3 +1,22 @@
+//! # Module Status: PRODUCTION
+//! In-memory row store — the primary storage engine for FalconDB OLTP.
+//! This is the **only** production write path for row data.
+//!
+//! ## Golden Path (OLTP Write)
+//! ```text
+//! TxnManager.begin() → Executor DML
+//!   → MemTable.insert / update / delete  [MVCC version chain]
+//!   → TxnManager.commit()
+//!     → OCC validation (read-set / write-set)
+//!     → WAL append (WalRecord::InsertRow / UpdateRow / DeleteRow)
+//!     → Version chain commit (set commit_ts on all written versions)
+//! ```
+//!
+//! ## Prohibited Patterns
+//! - Direct MemTable mutation without an active TxnId → violates MVCC
+//! - Bypassing WAL append on commit → violates crash-safety
+//! - Non-transactional reads that skip visibility checks → violates isolation
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 

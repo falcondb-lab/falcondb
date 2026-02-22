@@ -3,6 +3,10 @@ name = "falcon_bench"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+lsm = ["falcon_storage/lsm"]
+
 [dependencies]
 falcon_common = { path = "../falcon_common" }
 falcon_cluster = { path = "../falcon_cluster" }

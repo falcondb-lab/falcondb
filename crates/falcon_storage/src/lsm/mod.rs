@@ -1,3 +1,6 @@
+//! # Module Status: EXPERIMENTAL — compile-gated, not on the production OLTP write path.
+//! Do NOT reference from planner/executor/txn for production workloads.
+//!
 //! LSM-tree storage engine for disk-backed OLTP.
 //!
 //! Architecture:

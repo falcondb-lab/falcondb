@@ -150,6 +150,9 @@ pub enum TxnError {
 
     #[error("Transaction {0} rejected: replication lag exceeds admission threshold")]
     ReplicationLagExceeded(TxnId),
+
+    #[error("Transaction {0} invalid state transition: {1} → {2}")]
+    InvalidTransition(TxnId, String, String),
 }
 
 /// SQL frontend errors.

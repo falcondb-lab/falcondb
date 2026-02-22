@@ -447,13 +447,26 @@ pub struct PromoteResult {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Formal invariants for cross-shard (distributed) transactions.
+///
+/// Each invariant is a compile-time constant with a corresponding enum variant
+/// in [`CrossShardInvariant`] for programmatic validation.
 pub mod cross_shard_invariants {
     /// **XS-1 (Atomicity)**: A cross-shard transaction either commits on
     /// ALL participating shards or aborts on ALL. No partial commits.
+    ///
+    /// ```
+    /// use falcon_common::consistency::cross_shard_invariants::*;
+    /// assert!(!XS_1_ATOMICITY.is_empty());
+    /// ```
     pub const XS_1_ATOMICITY: &str = "Cross-shard txn commits on all shards or aborts on all";
 
     /// **XS-2 (At-Most-Once Commit)**: A cross-shard transaction MUST NOT
     /// be committed more than once, even under coordinator retries.
+    ///
+    /// ```
+    /// use falcon_common::consistency::cross_shard_invariants::*;
+    /// assert!(!XS_2_AT_MOST_ONCE.is_empty());
+    /// ```
     pub const XS_2_AT_MOST_ONCE: &str =
         "Cross-shard txn commits at most once (no duplicate commits)";
 
@@ -461,14 +474,79 @@ pub mod cross_shard_invariants {
     /// after writing `CoordinatorCommit` to its WAL, recovery MUST
     /// complete the commit on all participants. If only `CoordinatorPrepare`
     /// exists, recovery MUST abort all participants.
+    ///
+    /// ```
+    /// use falcon_common::consistency::cross_shard_invariants::*;
+    /// assert!(!XS_3_COORDINATOR_CRASH_RECOVERY.is_empty());
+    /// ```
     pub const XS_3_COORDINATOR_CRASH_RECOVERY: &str =
         "Coordinator crash recovery resolves in-doubt txns deterministically";
 
     /// **XS-4 (Participant Crash Recovery)**: A participant that crashes
     /// after PREPARE but before receiving the coordinator's decision MUST
     /// hold the transaction in PREPARED state until the coordinator resolves.
+    ///
+    /// ```
+    /// use falcon_common::consistency::cross_shard_invariants::*;
+    /// assert!(!XS_4_PARTICIPANT_CRASH_RECOVERY.is_empty());
+    /// ```
     pub const XS_4_PARTICIPANT_CRASH_RECOVERY: &str =
         "Participant holds PREPARED txn until coordinator resolves";
+
+    /// **XS-5 (Timeout Rollback — No Hanging Locks)**: If a cross-shard
+    /// transaction exceeds its hard timeout, it MUST be aborted on ALL
+    /// participants. No participant may hold locks or prepared state
+    /// indefinitely.
+    ///
+    /// ```
+    /// use falcon_common::consistency::cross_shard_invariants::*;
+    /// assert!(!XS_5_TIMEOUT_ROLLBACK.is_empty());
+    /// ```
+    pub const XS_5_TIMEOUT_ROLLBACK: &str =
+        "Timeout aborts on all participants — no hanging locks or indefinite prepared state";
+}
+
+/// Enum representation of cross-shard invariants for programmatic validation.
+///
+/// ```
+/// use falcon_common::consistency::CrossShardInvariant;
+/// let all = CrossShardInvariant::all();
+/// assert_eq!(all.len(), 5);
+/// for inv in &all {
+///     assert!(!inv.description().is_empty());
+/// }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CrossShardInvariant {
+    Atomicity,
+    AtMostOnceCommit,
+    CoordinatorCrashRecovery,
+    ParticipantCrashRecovery,
+    TimeoutRollback,
+}
+
+impl CrossShardInvariant {
+    /// Human-readable description of this invariant.
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::Atomicity => cross_shard_invariants::XS_1_ATOMICITY,
+            Self::AtMostOnceCommit => cross_shard_invariants::XS_2_AT_MOST_ONCE,
+            Self::CoordinatorCrashRecovery => cross_shard_invariants::XS_3_COORDINATOR_CRASH_RECOVERY,
+            Self::ParticipantCrashRecovery => cross_shard_invariants::XS_4_PARTICIPANT_CRASH_RECOVERY,
+            Self::TimeoutRollback => cross_shard_invariants::XS_5_TIMEOUT_ROLLBACK,
+        }
+    }
+
+    /// All invariants, for iteration in test harnesses.
+    pub fn all() -> Vec<Self> {
+        vec![
+            Self::Atomicity,
+            Self::AtMostOnceCommit,
+            Self::CoordinatorCrashRecovery,
+            Self::ParticipantCrashRecovery,
+            Self::TimeoutRollback,
+        ]
+    }
 }
 
 /// Cross-shard transaction model in use.

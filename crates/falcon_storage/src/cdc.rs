@@ -1,3 +1,6 @@
+//! # Module Status: STUB — not on the production OLTP write path.
+//! CDC events are emitted as a side-effect but do not gate the commit path.
+//!
 //! Change Data Capture (CDC) — logical decoding stream for external consumers.
 //!
 //! Enterprise feature for real-time data integration:

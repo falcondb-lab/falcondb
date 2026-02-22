@@ -1,3 +1,7 @@
+//! # Module Status: PRODUCTION
+//! Multi-Version Concurrency Control (MVCC) — version chain management for OCC.
+//! Core production path: every row mutation creates a new Version in the chain.
+
 use falcon_common::datum::OwnedRow;
 use falcon_common::types::{Timestamp, TxnId};
 use parking_lot::RwLock;

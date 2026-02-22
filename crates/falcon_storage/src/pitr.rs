@@ -1,3 +1,6 @@
+//! # Module Status: STUB — not on the production OLTP write path.
+//! Do NOT reference from planner/executor/txn for production workloads.
+//!
 //! Point-in-Time Recovery (PITR) — WAL-based recovery to any target timestamp.
 //!
 //! Enterprise feature for data protection and disaster recovery.

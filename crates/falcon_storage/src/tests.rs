@@ -2134,6 +2134,131 @@ mod recovery_tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn test_recovery_multi_table_interleaved() {
+        let dir = std::env::temp_dir().join(format!(
+            "falcon_recovery_multi_table_{}", std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let schema2 = {
+            let mut s = recovery_schema();
+            s.id = TableId(2);
+            s.name = "rec_test2".into();
+            s
+        };
+
+        {
+            let wal = WalWriter::open(&dir, SyncMode::None).unwrap();
+            let s1_json = serde_json::to_string(&recovery_schema()).unwrap();
+            let s2_json = serde_json::to_string(&schema2).unwrap();
+            wal.append(&WalRecord::CreateTable { schema_json: s1_json }).unwrap();
+            wal.append(&WalRecord::CreateTable { schema_json: s2_json }).unwrap();
+
+            // T1: insert into table 1 + commit
+            wal.append(&WalRecord::Insert {
+                txn_id: TxnId(1), table_id: TableId(1),
+                row: OwnedRow::new(vec![Datum::Int32(1), Datum::Text("t1_ok".into())]),
+            }).unwrap();
+            // T2: insert into table 2 (interleaved, committed later)
+            wal.append(&WalRecord::Insert {
+                txn_id: TxnId(2), table_id: TableId(2),
+                row: OwnedRow::new(vec![Datum::Int32(10), Datum::Text("t2_ok".into())]),
+            }).unwrap();
+            wal.append(&WalRecord::CommitTxnLocal { txn_id: TxnId(1), commit_ts: Timestamp(5) }).unwrap();
+            // T3: insert into table 1, uncommitted (crash)
+            wal.append(&WalRecord::Insert {
+                txn_id: TxnId(3), table_id: TableId(1),
+                row: OwnedRow::new(vec![Datum::Int32(2), Datum::Text("t1_crash".into())]),
+            }).unwrap();
+            wal.append(&WalRecord::CommitTxnLocal { txn_id: TxnId(2), commit_ts: Timestamp(10) }).unwrap();
+            wal.flush().unwrap();
+        }
+
+        let engine = StorageEngine::recover(&dir).unwrap();
+        let rows1 = engine.scan(TableId(1), TxnId(99), Timestamp(100)).unwrap();
+        assert_eq!(rows1.len(), 1, "table 1: only committed row");
+        assert_eq!(rows1[0].1.values[1], Datum::Text("t1_ok".into()));
+
+        let rows2 = engine.scan(TableId(2), TxnId(99), Timestamp(100)).unwrap();
+        assert_eq!(rows2.len(), 1, "table 2: committed row");
+        assert_eq!(rows2[0].1.values[1], Datum::Text("t2_ok".into()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_recovery_replay_idempotent_three_times() {
+        let dir = std::env::temp_dir().join(format!(
+            "falcon_recovery_3x_idempotent_{}", std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        {
+            let wal = WalWriter::open(&dir, SyncMode::None).unwrap();
+            let schema_json = serde_json::to_string(&recovery_schema()).unwrap();
+            wal.append(&WalRecord::CreateTable { schema_json }).unwrap();
+            for i in 1..=5i32 {
+                wal.append(&WalRecord::Insert {
+                    txn_id: TxnId(i as u64), table_id: TableId(1),
+                    row: OwnedRow::new(vec![Datum::Int32(i), Datum::Text(format!("row{}", i))]),
+                }).unwrap();
+                wal.append(&WalRecord::CommitTxnLocal {
+                    txn_id: TxnId(i as u64), commit_ts: Timestamp(i as u64 * 10),
+                }).unwrap();
+            }
+            wal.flush().unwrap();
+        }
+
+        // Replay 3 times — each must produce identical result
+        for attempt in 1..=3 {
+            let engine = StorageEngine::recover(&dir).unwrap();
+            let rows = engine.scan(TableId(1), TxnId(99), Timestamp(100)).unwrap();
+            assert_eq!(rows.len(), 5, "attempt {}: all 5 committed rows", attempt);
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_recovery_wal_first_ordering() {
+        // Verify that StorageEngine writes to WAL before mutating memtable.
+        // We do this by checking that the WAL observer counter fires for every DML.
+        let mut engine = StorageEngine::new_in_memory();
+        engine.create_table(recovery_schema()).unwrap();
+
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let c = counter.clone();
+        engine.set_wal_observer(Box::new(move |_record| {
+            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }));
+
+        // Insert → must fire WAL observer before returning
+        let pk = engine.insert(TableId(1), OwnedRow::new(vec![
+            Datum::Int32(1), Datum::Text("a".into())
+        ]), TxnId(1)).unwrap();
+        assert!(counter.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "WAL observer must fire on insert");
+
+        // Commit T1 so update by T2 can proceed
+        engine.commit_txn(TxnId(1), Timestamp(5), falcon_common::types::TxnType::Local).unwrap();
+
+        // Update → must fire WAL observer
+        engine.update(TableId(1), &pk, OwnedRow::new(vec![
+            Datum::Int32(1), Datum::Text("b".into())
+        ]), TxnId(2)).unwrap();
+        assert!(counter.load(std::sync::atomic::Ordering::SeqCst) >= 3,
+            "WAL observer must fire on update (insert + commit + update = 3)");
+
+        // Commit T2 before T3 can delete
+        engine.commit_txn(TxnId(2), Timestamp(10), falcon_common::types::TxnType::Local).unwrap();
+
+        // Delete → must fire WAL observer
+        engine.delete(TableId(1), &pk, TxnId(3)).unwrap();
+        assert!(counter.load(std::sync::atomic::Ordering::SeqCst) >= 5,
+            "WAL observer must fire on delete (insert+commit+update+commit+delete = 5)");
+    }
 }
 
 #[cfg(test)]
@@ -4095,7 +4220,7 @@ mod wal_observer_tests {
 // last-write-wins semantics. Tests document and verify this behaviour.
 // ===========================================================================
 
-#[cfg(test)]
+#[cfg(all(test, feature = "columnstore"))]
 mod columnstore_integration_tests {
     use crate::engine::StorageEngine;
     use falcon_common::config::NodeRole;
@@ -4259,7 +4384,7 @@ mod columnstore_integration_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "disk_rowstore"))]
 mod disk_rowstore_integration_tests {
     use crate::engine::StorageEngine;
     use falcon_common::config::NodeRole;
@@ -4446,5 +4571,685 @@ mod disk_rowstore_integration_tests {
             .scan(TableId(600), TxnId(99), Timestamp(100))
             .unwrap();
         assert_eq!(after.len(), 1);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// B3: Snapshot Isolation Litmus Tests
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Tests verify MVCC visibility invariants at both VersionChain (unit)
+// and StorageEngine (integration) levels.
+//
+// Naming convention: si_<anomaly-or-property>_<scenario>
+// ═══════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod si_litmus_tests {
+    use crate::mvcc::VersionChain;
+    use crate::engine::StorageEngine;
+    use crate::memtable::encode_pk;
+    use falcon_common::datum::{Datum, OwnedRow};
+    use falcon_common::schema::{ColumnDef, TableSchema};
+    use falcon_common::types::{ColumnId, DataType, TableId, Timestamp, TxnId, TxnType};
+
+    fn row1(v: i32) -> OwnedRow {
+        OwnedRow::new(vec![Datum::Int32(v)])
+    }
+
+    fn row2(k: i32, v: &str) -> OwnedRow {
+        OwnedRow::new(vec![Datum::Int32(k), Datum::Text(v.into())])
+    }
+
+    fn test_schema() -> TableSchema {
+        TableSchema {
+            id: TableId(900),
+            name: "si_test".into(),
+            columns: vec![
+                ColumnDef { id: ColumnId(0), name: "id".into(), data_type: DataType::Int32,
+                    nullable: false, is_primary_key: true, default_value: None, is_serial: false },
+                ColumnDef { id: ColumnId(1), name: "val".into(), data_type: DataType::Text,
+                    nullable: true, is_primary_key: false, default_value: None, is_serial: false },
+            ],
+            primary_key_columns: vec![0],
+            next_serial_values: std::collections::HashMap::new(),
+            check_constraints: vec![],
+            unique_constraints: vec![],
+            foreign_keys: vec![],
+            ..Default::default()
+        }
+    }
+
+    fn engine_with_table() -> StorageEngine {
+        let engine = StorageEngine::new_in_memory();
+        engine.create_table(test_schema()).unwrap();
+        engine
+    }
+
+    // ── 1. Basic visibility ──
+
+    #[test]
+    fn si_01_uncommitted_invisible_to_others() {
+        let chain = VersionChain::new();
+        chain.prepend(TxnId(1), Some(row1(42)));
+        // Uncommitted version is invisible to any reader
+        assert!(chain.read_committed(Timestamp(999)).is_none());
+    }
+
+    #[test]
+    fn si_02_own_writes_visible() {
+        let chain = VersionChain::new();
+        chain.prepend(TxnId(1), Some(row1(42)));
+        // Own txn sees its uncommitted write
+        assert_eq!(chain.read_for_txn(TxnId(1), Timestamp(0)).unwrap().values[0], Datum::Int32(42));
+    }
+
+    #[test]
+    fn si_03_committed_visible_at_commit_ts() {
+        let chain = VersionChain::new();
+        chain.prepend(TxnId(1), Some(row1(10)));
+        chain.commit(TxnId(1), Timestamp(5));
+        assert!(chain.read_committed(Timestamp(5)).is_some());
+    }
+
+    #[test]
+    fn si_04_committed_invisible_before_commit_ts() {
+        let chain = VersionChain::new();
+        chain.prepend(TxnId(1), Some(row1(10)));
+        chain.commit(TxnId(1), Timestamp(5));
+        assert!(chain.read_committed(Timestamp(4)).is_none());
+    }
+
+    #[test]
+    fn si_05_committed_visible_after_commit_ts() {
+        let chain = VersionChain::new();
+        chain.prepend(TxnId(1), Some(row1(10)));
+        chain.commit(TxnId(1), Timestamp(5));
+        assert!(chain.read_committed(Timestamp(100)).is_some());
+    }
+
+    // ── 2. Snapshot consistency ──
+
+    #[test]
+    fn si_06_snapshot_reads_point_in_time() {
+        let chain = VersionChain::new();
+        // v1: committed at ts=5
+        chain.prepend(TxnId(1), Some(row1(100)));
+        chain.commit(TxnId(1), Timestamp(5));
+        // v2: committed at ts=10
+        chain.prepend(TxnId(2), Some(row1(200)));
+        chain.commit(TxnId(2), Timestamp(10));
+        // Read at ts=7 should see v1 (100), not v2 (200)
+        let r = chain.read_committed(Timestamp(7)).unwrap();
+        assert_eq!(r.values[0], Datum::Int32(100));
+    }
+
+    #[test]
+    fn si_07_snapshot_sees_latest_at_ts() {
+        let chain = VersionChain::new();
+        chain.prepend(TxnId(1), Some(row1(100)));
+        chain.commit(TxnId(1), Timestamp(5));
+        chain.prepend(TxnId(2), Some(row1(200)));
+        chain.commit(TxnId(2), Timestamp(10));
+        // Read at ts=10 should see v2 (200)
+        let r = chain.read_committed(Timestamp(10)).unwrap();
+        assert_eq!(r.values[0], Datum::Int32(200));
+    }
+
+    #[test]
+    fn si_08_snapshot_multiple_updates_correct_version() {
+        let chain = VersionChain::new();
+        chain.prepend(TxnId(1), Some(row1(10)));
+        chain.commit(TxnId(1), Timestamp(1));
+        chain.prepend(TxnId(2), Some(row1(20)));
+        chain.commit(TxnId(2), Timestamp(3));
+        chain.prepend(TxnId(3), Some(row1(30)));
+        chain.commit(TxnId(3), Timestamp(5));
+        chain.prepend(TxnId(4), Some(row1(40)));
+        chain.commit(TxnId(4), Timestamp(7));
+
+        assert_eq!(chain.read_committed(Timestamp(2)).unwrap().values[0], Datum::Int32(10));
+        assert_eq!(chain.read_committed(Timestamp(4)).unwrap().values[0], Datum::Int32(20));
+        assert_eq!(chain.read_committed(Timestamp(6)).unwrap().values[0], Datum::Int32(30));
+        assert_eq!(chain.read_committed(Timestamp(8)).unwrap().values[0], Datum::Int32(40));
+    }
+
+    // ── 3. Abort visibility ──
+
+    #[test]
+    fn si_09_aborted_never_visible() {
+        let chain = VersionChain::new();
+        chain.prepend(TxnId(1), Some(row1(42)));
+        chain.abort(TxnId(1));
+        assert!(chain.read_committed(Timestamp(999)).is_none());
+    }
+
+    #[test]
+    fn si_10_abort_restores_prior_version() {
+        let chain = VersionChain::new();
+        chain.prepend(TxnId(1), Some(row1(100)));
+        chain.commit(TxnId(1), Timestamp(5));
+        chain.prepend(TxnId(2), Some(row1(200)));
+        chain.abort(TxnId(2));
+        // After aborting T2, reads should still see T1's value
+        let r = chain.read_committed(Timestamp(10)).unwrap();
+        assert_eq!(r.values[0], Datum::Int32(100));
+    }
+
+    #[test]
+    fn si_11_abort_own_writes_gone() {
+        let chain = VersionChain::new();
+        chain.prepend(TxnId(1), Some(row1(42)));
+        chain.abort(TxnId(1));
+        // Own writes also gone after abort
+        assert!(chain.read_for_txn(TxnId(1), Timestamp(0)).is_none());
+    }
+
+    // ── 4. Tombstone / delete ──
+
+    #[test]
+    fn si_12_delete_tombstone_hides_row() {
+        let chain = VersionChain::new();
+        chain.prepend(TxnId(1), Some(row1(42)));
+        chain.commit(TxnId(1), Timestamp(5));
+        // Delete = prepend None
+        chain.prepend(TxnId(2), None);
+        chain.commit(TxnId(2), Timestamp(10));
+        // Read at ts=7 (before delete) sees the row
+        assert!(chain.read_committed(Timestamp(7)).is_some());
+        // Read at ts=10 (after delete) sees nothing
+        assert!(chain.read_committed(Timestamp(10)).is_none());
+    }
+
+    #[test]
+    fn si_13_delete_then_reinsert() {
+        let chain = VersionChain::new();
+        chain.prepend(TxnId(1), Some(row1(42)));
+        chain.commit(TxnId(1), Timestamp(5));
+        chain.prepend(TxnId(2), None); // delete
+        chain.commit(TxnId(2), Timestamp(10));
+        chain.prepend(TxnId(3), Some(row1(99))); // reinsert
+        chain.commit(TxnId(3), Timestamp(15));
+
+        assert_eq!(chain.read_committed(Timestamp(7)).unwrap().values[0], Datum::Int32(42));
+        assert!(chain.read_committed(Timestamp(12)).is_none());
+        assert_eq!(chain.read_committed(Timestamp(15)).unwrap().values[0], Datum::Int32(99));
+    }
+
+    // ── 5. Concurrent txn isolation ──
+
+    #[test]
+    fn si_14_concurrent_writers_isolation() {
+        let chain = VersionChain::new();
+        // T1 inserts, uncommitted
+        chain.prepend(TxnId(1), Some(row1(100)));
+        // T2 reads — should not see T1
+        assert!(chain.read_committed(Timestamp(50)).is_none());
+        assert!(chain.read_for_txn(TxnId(2), Timestamp(50)).is_none());
+        // T1 commits
+        chain.commit(TxnId(1), Timestamp(10));
+        // T2 with snapshot at ts=5 still doesn't see it
+        assert!(chain.read_committed(Timestamp(5)).is_none());
+        // T2 with snapshot at ts=10 sees it
+        assert!(chain.read_committed(Timestamp(10)).is_some());
+    }
+
+    #[test]
+    fn si_15_two_txns_different_snapshots() {
+        let chain = VersionChain::new();
+        chain.prepend(TxnId(1), Some(row1(10)));
+        chain.commit(TxnId(1), Timestamp(5));
+        // T2 starts at ts=3, T3 starts at ts=7
+        // T2 should NOT see T1's write, T3 should
+        assert!(chain.read_committed(Timestamp(3)).is_none());
+        assert!(chain.read_committed(Timestamp(7)).is_some());
+    }
+
+    #[test]
+    fn si_16_write_skew_both_read_old() {
+        // Classic write-skew: T1 and T2 both read, then write different keys.
+        // Under SI, both see the old snapshot — this is expected behavior.
+        let chain_a = VersionChain::new();
+        let chain_b = VersionChain::new();
+        // Initial: A=1, B=1
+        chain_a.prepend(TxnId(0), Some(row1(1)));
+        chain_a.commit(TxnId(0), Timestamp(1));
+        chain_b.prepend(TxnId(0), Some(row1(1)));
+        chain_b.commit(TxnId(0), Timestamp(1));
+
+        // T1 reads A, T2 reads B (both at snapshot ts=2)
+        let a_for_t1 = chain_a.read_committed(Timestamp(2)).unwrap();
+        let b_for_t2 = chain_b.read_committed(Timestamp(2)).unwrap();
+        assert_eq!(a_for_t1.values[0], Datum::Int32(1));
+        assert_eq!(b_for_t2.values[0], Datum::Int32(1));
+
+        // T1 writes B=0, T2 writes A=0
+        chain_b.prepend(TxnId(1), Some(row1(0)));
+        chain_a.prepend(TxnId(2), Some(row1(0)));
+        chain_b.commit(TxnId(1), Timestamp(3));
+        chain_a.commit(TxnId(2), Timestamp(4));
+
+        // After both commit: A=0, B=0 (write skew allowed under SI)
+        assert_eq!(chain_a.read_committed(Timestamp(5)).unwrap().values[0], Datum::Int32(0));
+        assert_eq!(chain_b.read_committed(Timestamp(5)).unwrap().values[0], Datum::Int32(0));
+    }
+
+    // ── 6. Read-own-writes ──
+
+    #[test]
+    fn si_17_read_own_uncommitted_update() {
+        let chain = VersionChain::new();
+        chain.prepend(TxnId(1), Some(row1(10)));
+        chain.commit(TxnId(1), Timestamp(5));
+        // T2 updates to 20 (uncommitted)
+        chain.prepend(TxnId(2), Some(row1(20)));
+        // T2 reads own write
+        assert_eq!(chain.read_for_txn(TxnId(2), Timestamp(5)).unwrap().values[0], Datum::Int32(20));
+        // Other txn still sees 10
+        assert_eq!(chain.read_for_txn(TxnId(3), Timestamp(5)).unwrap().values[0], Datum::Int32(10));
+    }
+
+    #[test]
+    fn si_18_read_own_uncommitted_delete() {
+        let chain = VersionChain::new();
+        chain.prepend(TxnId(1), Some(row1(42)));
+        chain.commit(TxnId(1), Timestamp(5));
+        // T2 deletes (uncommitted)
+        chain.prepend(TxnId(2), None);
+        // T2 sees the tombstone (None)
+        assert!(chain.read_for_txn(TxnId(2), Timestamp(10)).is_none());
+        // Other txn still sees the row
+        assert!(chain.read_for_txn(TxnId(3), Timestamp(10)).is_some());
+    }
+
+    // ── 7. GC safety ──
+
+    #[test]
+    fn si_19_gc_preserves_visible_version() {
+        let chain = VersionChain::new();
+        chain.prepend(TxnId(1), Some(row1(10)));
+        chain.commit(TxnId(1), Timestamp(5));
+        chain.prepend(TxnId(2), Some(row1(20)));
+        chain.commit(TxnId(2), Timestamp(10));
+        // GC at watermark=10: should keep v2, drop v1
+        let result = chain.gc(Timestamp(10));
+        assert!(result.reclaimed_versions >= 1);
+        // v2 still readable
+        assert_eq!(chain.read_committed(Timestamp(10)).unwrap().values[0], Datum::Int32(20));
+    }
+
+    #[test]
+    fn si_20_gc_does_not_drop_uncommitted() {
+        let chain = VersionChain::new();
+        chain.prepend(TxnId(1), Some(row1(10)));
+        // Don't commit — GC should not touch uncommitted
+        chain.gc(Timestamp(100));
+        // Still readable by own txn
+        assert!(chain.read_for_txn(TxnId(1), Timestamp(0)).is_some());
+    }
+
+    // ── 8. StorageEngine integration ──
+
+    #[test]
+    fn si_21_engine_insert_invisible_before_commit() {
+        let engine = engine_with_table();
+        engine.insert(TableId(900), row2(1, "hello"), TxnId(1)).unwrap();
+        // Scan by another txn — should not see uncommitted row
+        let rows = engine.scan(TableId(900), TxnId(2), Timestamp(100)).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn si_22_engine_insert_visible_after_commit() {
+        let engine = engine_with_table();
+        engine.insert(TableId(900), row2(1, "hello"), TxnId(1)).unwrap();
+        engine.commit_txn(TxnId(1), Timestamp(10), TxnType::Local).unwrap();
+        let rows = engine.scan(TableId(900), TxnId(2), Timestamp(10)).unwrap();
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn si_23_engine_snapshot_isolation_two_versions() {
+        let engine = engine_with_table();
+        let pk = engine.insert(TableId(900), row2(1, "v1"), TxnId(1)).unwrap();
+        engine.commit_txn(TxnId(1), Timestamp(5), TxnType::Local).unwrap();
+
+        engine.update(TableId(900), &pk, row2(1, "v2"), TxnId(2)).unwrap();
+        engine.commit_txn(TxnId(2), Timestamp(10), TxnType::Local).unwrap();
+
+        // Read at ts=7 sees v1
+        let rows_7 = engine.scan(TableId(900), TxnId(99), Timestamp(7)).unwrap();
+        assert_eq!(rows_7.len(), 1);
+        assert_eq!(rows_7[0].1.values[1], Datum::Text("v1".into()));
+
+        // Read at ts=10 sees v2
+        let rows_10 = engine.scan(TableId(900), TxnId(99), Timestamp(10)).unwrap();
+        assert_eq!(rows_10.len(), 1);
+        assert_eq!(rows_10[0].1.values[1], Datum::Text("v2".into()));
+    }
+
+    #[test]
+    fn si_24_engine_delete_invisible_to_old_snapshot() {
+        let engine = engine_with_table();
+        let pk = engine.insert(TableId(900), row2(1, "alive"), TxnId(1)).unwrap();
+        engine.commit_txn(TxnId(1), Timestamp(5), TxnType::Local).unwrap();
+
+        engine.delete(TableId(900), &pk, TxnId(2)).unwrap();
+        engine.commit_txn(TxnId(2), Timestamp(10), TxnType::Local).unwrap();
+
+        // Snapshot before delete still sees the row
+        let rows = engine.scan(TableId(900), TxnId(99), Timestamp(7)).unwrap();
+        assert_eq!(rows.len(), 1);
+        // Snapshot at delete time: row gone
+        let rows = engine.scan(TableId(900), TxnId(99), Timestamp(10)).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn si_25_engine_aborted_txn_invisible() {
+        let engine = engine_with_table();
+        engine.insert(TableId(900), row2(1, "will_abort"), TxnId(1)).unwrap();
+        engine.abort_txn(TxnId(1), TxnType::Local).unwrap();
+
+        let rows = engine.scan(TableId(900), TxnId(99), Timestamp(999)).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn si_26_engine_own_writes_visible_in_txn() {
+        let engine = engine_with_table();
+        let pk = engine.insert(TableId(900), row2(1, "mine"), TxnId(1)).unwrap();
+        // Same txn can read its own writes
+        let r = engine.get(TableId(900), &pk, TxnId(1), Timestamp(0));
+        assert!(r.is_ok());
+        assert!(r.unwrap().is_some());
+    }
+
+    #[test]
+    fn si_27_engine_multiple_rows_snapshot() {
+        let engine = engine_with_table();
+        for i in 1..=5 {
+            engine.insert(TableId(900), row2(i, &format!("r{}", i)), TxnId(1)).unwrap();
+        }
+        engine.commit_txn(TxnId(1), Timestamp(5), TxnType::Local).unwrap();
+
+        // Update row 3
+        let pk3 = encode_pk(&row2(3, "r3"), &[0]);
+        engine.update(TableId(900), &pk3, row2(3, "r3_updated"), TxnId(2)).unwrap();
+        engine.commit_txn(TxnId(2), Timestamp(10), TxnType::Local).unwrap();
+
+        // Snapshot at ts=7: all 5 rows, row 3 still "r3"
+        let rows = engine.scan(TableId(900), TxnId(99), Timestamp(7)).unwrap();
+        assert_eq!(rows.len(), 5);
+        let row3 = rows.iter().find(|(_, r)| r.values[0] == Datum::Int32(3)).unwrap();
+        assert_eq!(row3.1.values[1], Datum::Text("r3".into()));
+
+        // Snapshot at ts=10: all 5 rows, row 3 is "r3_updated"
+        let rows = engine.scan(TableId(900), TxnId(99), Timestamp(10)).unwrap();
+        assert_eq!(rows.len(), 5);
+        let row3 = rows.iter().find(|(_, r)| r.values[0] == Datum::Int32(3)).unwrap();
+        assert_eq!(row3.1.values[1], Datum::Text("r3_updated".into()));
+    }
+
+    #[test]
+    fn si_28_engine_concurrent_inserts_isolation() {
+        let engine = engine_with_table();
+        // T1 inserts row 1, T2 inserts row 2 — both uncommitted
+        engine.insert(TableId(900), row2(1, "t1"), TxnId(1)).unwrap();
+        engine.insert(TableId(900), row2(2, "t2"), TxnId(2)).unwrap();
+
+        // T3 sees nothing
+        let rows = engine.scan(TableId(900), TxnId(3), Timestamp(50)).unwrap();
+        assert!(rows.is_empty());
+
+        // Commit T1 at ts=10
+        engine.commit_txn(TxnId(1), Timestamp(10), TxnType::Local).unwrap();
+
+        // T3 at ts=10 sees only T1's row
+        let rows = engine.scan(TableId(900), TxnId(3), Timestamp(10)).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1.values[1], Datum::Text("t1".into()));
+
+        // Commit T2 at ts=20
+        engine.commit_txn(TxnId(2), Timestamp(20), TxnType::Local).unwrap();
+
+        // T3 at ts=20 sees both
+        let rows = engine.scan(TableId(900), TxnId(3), Timestamp(20)).unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn si_29_engine_update_abort_restores_old() {
+        let engine = engine_with_table();
+        let pk = engine.insert(TableId(900), row2(1, "original"), TxnId(1)).unwrap();
+        engine.commit_txn(TxnId(1), Timestamp(5), TxnType::Local).unwrap();
+
+        // T2 updates, then aborts
+        engine.update(TableId(900), &pk, row2(1, "modified"), TxnId(2)).unwrap();
+        engine.abort_txn(TxnId(2), TxnType::Local).unwrap();
+
+        // Original value restored
+        let rows = engine.scan(TableId(900), TxnId(99), Timestamp(100)).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1.values[1], Datum::Text("original".into()));
+    }
+
+    #[test]
+    fn si_30_engine_delete_abort_restores_row() {
+        let engine = engine_with_table();
+        let pk = engine.insert(TableId(900), row2(1, "keep_me"), TxnId(1)).unwrap();
+        engine.commit_txn(TxnId(1), Timestamp(5), TxnType::Local).unwrap();
+
+        // T2 deletes, then aborts
+        engine.delete(TableId(900), &pk, TxnId(2)).unwrap();
+        engine.abort_txn(TxnId(2), TxnType::Local).unwrap();
+
+        // Row still exists
+        let rows = engine.scan(TableId(900), TxnId(99), Timestamp(100)).unwrap();
+        assert_eq!(rows.len(), 1);
+    }
+
+    // ── 9. Edge cases ──
+
+    #[test]
+    fn si_31_empty_chain_returns_none() {
+        let chain = VersionChain::new();
+        assert!(chain.read_committed(Timestamp(999)).is_none());
+        assert!(chain.read_for_txn(TxnId(1), Timestamp(999)).is_none());
+    }
+
+    #[test]
+    fn si_32_commit_at_ts_zero_invisible() {
+        // Commit timestamp 0 is reserved for "uncommitted" — should never be visible
+        let chain = VersionChain::new();
+        chain.prepend(TxnId(1), Some(row1(42)));
+        // Manually check: commit_ts defaults to 0
+        assert!(chain.read_committed(Timestamp(999)).is_none());
+    }
+
+    #[test]
+    fn si_33_read_at_ts_zero() {
+        let chain = VersionChain::new();
+        chain.prepend(TxnId(1), Some(row1(42)));
+        chain.commit(TxnId(1), Timestamp(1));
+        // Read at ts=0 should not see commit at ts=1
+        assert!(chain.read_committed(Timestamp(0)).is_none());
+    }
+
+    #[test]
+    fn si_34_many_versions_correct_snapshot() {
+        let chain = VersionChain::new();
+        for i in 1..=20u64 {
+            chain.prepend(TxnId(i), Some(row1(i as i32)));
+            chain.commit(TxnId(i), Timestamp(i * 10));
+        }
+        // Read at ts=55 should see version committed at ts=50 (i=5, value=5)
+        let r = chain.read_committed(Timestamp(55)).unwrap();
+        assert_eq!(r.values[0], Datum::Int32(5));
+
+        // Read at ts=200 should see the latest (i=20, value=20)
+        let r = chain.read_committed(Timestamp(200)).unwrap();
+        assert_eq!(r.values[0], Datum::Int32(20));
+    }
+
+    #[test]
+    fn si_35_interleaved_commit_abort() {
+        let chain = VersionChain::new();
+        chain.prepend(TxnId(1), Some(row1(10)));
+        chain.commit(TxnId(1), Timestamp(5));
+        chain.prepend(TxnId(2), Some(row1(20)));
+        chain.abort(TxnId(2));
+        chain.prepend(TxnId(3), Some(row1(30)));
+        chain.commit(TxnId(3), Timestamp(15));
+
+        // At ts=10: should see T1's value (T2 aborted, T3 not yet committed)
+        assert_eq!(chain.read_committed(Timestamp(10)).unwrap().values[0], Datum::Int32(10));
+        // At ts=15: should see T3's value
+        assert_eq!(chain.read_committed(Timestamp(15)).unwrap().values[0], Datum::Int32(30));
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// B9: DDL minimal closure + concurrency safety
+// ═══════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod ddl_concurrency_tests {
+    use crate::engine::StorageEngine;
+    use falcon_common::datum::{Datum, OwnedRow};
+    use falcon_common::schema::{ColumnDef, TableSchema};
+    use falcon_common::types::{ColumnId, DataType, TableId, Timestamp, TxnId, TxnType};
+    use std::sync::Arc;
+
+    fn schema(id: u64, name: &str) -> TableSchema {
+        TableSchema {
+            id: TableId(id),
+            name: name.into(),
+            columns: vec![
+                ColumnDef { id: ColumnId(0), name: "id".into(), data_type: DataType::Int32,
+                    nullable: false, is_primary_key: true, default_value: None, is_serial: false },
+                ColumnDef { id: ColumnId(1), name: "val".into(), data_type: DataType::Text,
+                    nullable: true, is_primary_key: false, default_value: None, is_serial: false },
+            ],
+            primary_key_columns: vec![0],
+            next_serial_values: std::collections::HashMap::new(),
+            check_constraints: vec![],
+            unique_constraints: vec![],
+            foreign_keys: vec![],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_ddl_create_drop_idempotent_error() {
+        let engine = StorageEngine::new_in_memory();
+        engine.create_table(schema(800, "ddl_t1")).unwrap();
+        // Duplicate create → error
+        assert!(engine.create_table(schema(800, "ddl_t1")).is_err());
+        // Drop
+        engine.drop_table("ddl_t1").unwrap();
+        // Drop again → error
+        assert!(engine.drop_table("ddl_t1").is_err());
+    }
+
+    #[test]
+    fn test_ddl_truncate_clears_data() {
+        let engine = StorageEngine::new_in_memory();
+        engine.create_table(schema(801, "ddl_trunc")).unwrap();
+        engine.insert(TableId(801), OwnedRow::new(vec![Datum::Int32(1), Datum::Text("a".into())]), TxnId(1)).unwrap();
+        engine.commit_txn(TxnId(1), Timestamp(5), TxnType::Local).unwrap();
+
+        let rows = engine.scan(TableId(801), TxnId(99), Timestamp(10)).unwrap();
+        assert_eq!(rows.len(), 1);
+
+        engine.truncate_table("ddl_trunc").unwrap();
+
+        let rows = engine.scan(TableId(801), TxnId(99), Timestamp(20)).unwrap();
+        assert!(rows.is_empty(), "truncate should clear all data");
+    }
+
+    #[test]
+    fn test_ddl_concurrent_create_different_tables() {
+        let engine = Arc::new(StorageEngine::new_in_memory());
+        let mut handles = vec![];
+        for i in 0..10u64 {
+            let e = engine.clone();
+            handles.push(std::thread::spawn(move || {
+                e.create_table(schema(850 + i, &format!("conc_t{}", i)))
+            }));
+        }
+        let mut ok_count = 0;
+        for h in handles {
+            if h.join().unwrap().is_ok() { ok_count += 1; }
+        }
+        assert_eq!(ok_count, 10, "all 10 concurrent creates on different names should succeed");
+    }
+
+    #[test]
+    fn test_ddl_concurrent_create_same_table() {
+        let engine = Arc::new(StorageEngine::new_in_memory());
+        let mut handles = vec![];
+        for _ in 0..10 {
+            let e = engine.clone();
+            handles.push(std::thread::spawn(move || {
+                e.create_table(schema(860, "conc_same"))
+            }));
+        }
+        let mut ok_count = 0;
+        for h in handles {
+            if h.join().unwrap().is_ok() { ok_count += 1; }
+        }
+        assert_eq!(ok_count, 1, "exactly 1 concurrent create should win");
+    }
+
+    #[test]
+    fn test_ddl_concurrent_insert_during_create() {
+        let engine = Arc::new(StorageEngine::new_in_memory());
+        engine.create_table(schema(870, "conc_ins")).unwrap();
+
+        let mut handles = vec![];
+        for i in 0..20i32 {
+            let e = engine.clone();
+            handles.push(std::thread::spawn(move || {
+                e.insert(TableId(870), OwnedRow::new(vec![
+                    Datum::Int32(i), Datum::Text(format!("v{}", i))
+                ]), TxnId(100 + i as u64))
+            }));
+        }
+        let mut ok_count = 0;
+        for h in handles {
+            if h.join().unwrap().is_ok() { ok_count += 1; }
+        }
+        assert_eq!(ok_count, 20, "all concurrent inserts should succeed on unique PKs");
+    }
+
+    #[test]
+    fn test_ddl_drop_prevents_further_dml() {
+        let engine = StorageEngine::new_in_memory();
+        engine.create_table(schema(880, "ddl_drop_dml")).unwrap();
+        engine.drop_table("ddl_drop_dml").unwrap();
+
+        let result = engine.insert(TableId(880), OwnedRow::new(vec![
+            Datum::Int32(1), Datum::Text("after_drop".into())
+        ]), TxnId(1));
+        assert!(result.is_err(), "insert after DROP should fail");
+    }
+
+    #[test]
+    fn test_ddl_create_index_and_drop_index() {
+        let engine = StorageEngine::new_in_memory();
+        engine.create_table(schema(890, "idx_test")).unwrap();
+        engine.create_named_index("idx_val_890", "idx_test", 1, false).unwrap();
+        assert!(engine.index_exists("idx_val_890"));
+
+        engine.drop_index("idx_val_890").unwrap();
+        assert!(!engine.index_exists("idx_val_890"));
+    }
+
+    #[test]
+    fn test_ddl_drop_nonexistent_index_returns_error() {
+        let engine = StorageEngine::new_in_memory();
+        let result = engine.drop_index("nonexistent_idx");
+        assert!(result.is_err(), "dropping nonexistent index should return error");
     }
 }

@@ -1,3 +1,26 @@
+//! # Module Status: PRODUCTION
+//! Transaction Manager — single source of truth for transaction lifecycle.
+//!
+//! ## Golden Path (OLTP Write)
+//! ```text
+//! SQL → Planner → Executor → TxnManager.begin()
+//!   → MVCC/OCC read/write on MemTable (in-memory row store)
+//!   → TxnManager.commit()
+//!     → StorageEngine.commit_txn()  [OCC validation + WAL append]
+//!     → WAL fsync (per CommitPolicy)
+//!     → Replication stream (if configured)
+//!     → Client ACK
+//! ```
+//!
+//! ## Path Classification (deterministic, no runtime guessing)
+//! - **Fast-Path**: single-shard → local OCC commit, no 2PC
+//! - **Slow-Path**: multi-shard → XA-style 2PC via CoordinatorDecisionLog
+//!
+//! ## Invariants
+//! - Every write MUST go through TxnManager (no direct MemTable mutation)
+//! - Every commit MUST append to WAL before client ACK
+//! - Path classification is fixed at `begin()` — no implicit upgrade
+
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -51,12 +74,75 @@ impl TxnClassification {
 }
 
 /// Transaction state.
+///
+/// ## Valid state transitions (B1 — explicit state machine)
+/// ```text
+///  Active ──► Prepared ──► Committed
+///    │            │
+///    │            └──► Aborted
+///    │
+///    ├──► Committed  (fast-path local)
+///    └──► Aborted
+/// ```
+///
+/// Idempotent re-entries: Committed→Committed, Aborted→Aborted (no-ops).
+/// All other transitions are invalid and return `TxnError::InvalidTransition`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxnState {
     Active,
     Prepared,
     Committed,
     Aborted,
+}
+
+impl std::fmt::Display for TxnState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Active => write!(f, "Active"),
+            Self::Prepared => write!(f, "Prepared"),
+            Self::Committed => write!(f, "Committed"),
+            Self::Aborted => write!(f, "Aborted"),
+        }
+    }
+}
+
+/// Result of a state transition attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransitionResult {
+    /// Transition applied successfully.
+    Applied,
+    /// No-op: target state was the same as current (idempotent).
+    Idempotent,
+}
+
+impl TxnState {
+    /// Validate and apply a state transition. Returns:
+    /// - `Ok(Applied)` if the transition is valid and was applied.
+    /// - `Ok(Idempotent)` if already in the target state (no-op).
+    /// - `Err(InvalidTransition)` if the transition is illegal.
+    pub fn try_transition(
+        &mut self,
+        target: TxnState,
+        txn_id: TxnId,
+    ) -> Result<TransitionResult, TxnError> {
+        use TxnState::*;
+        match (*self, target) {
+            // Idempotent re-entries
+            (Committed, Committed) | (Aborted, Aborted) => Ok(TransitionResult::Idempotent),
+            // Valid forward transitions
+            (Active, Prepared) | (Active, Committed) | (Active, Aborted)
+            | (Prepared, Committed) | (Prepared, Aborted) => {
+                *self = target;
+                Ok(TransitionResult::Applied)
+            }
+            // Everything else is invalid
+            _ => Err(TxnError::InvalidTransition(
+                txn_id,
+                self.to_string(),
+                target.to_string(),
+            )),
+        }
+    }
 }
 
 /// Handle to an active transaction. Held by the session.
@@ -1336,6 +1422,46 @@ impl TxnManager {
             self.slow_txn_log.lock().push(record.clone());
         }
         self.history.lock().push(record);
+    }
+
+    /// B7: List transactions running longer than `threshold_us` microseconds.
+    /// Returns (txn_id, age_us, state, txn_type) for each long-running txn.
+    pub fn long_running_txns(&self, threshold_us: u64) -> Vec<(TxnId, u64, TxnState, TxnType)> {
+        self.active_txns
+            .iter()
+            .filter_map(|e| {
+                let age = e.value().begin_instant
+                    .map(|i| i.elapsed().as_micros() as u64)
+                    .unwrap_or(0);
+                if age >= threshold_us {
+                    Some((e.value().txn_id, age, e.value().state, e.value().txn_type))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// B7: Kill (force-abort) a long-running transaction.
+    /// Returns Ok(()) if killed, Err if not found or already committed.
+    pub fn kill_txn(&self, txn_id: TxnId) -> Result<(), TxnError> {
+        self.abort_with_reason(txn_id, "killed: long-running")
+    }
+
+    /// B7: Kill all transactions running longer than `threshold_us`.
+    /// Returns the number of transactions killed.
+    pub fn kill_long_running(&self, threshold_us: u64) -> usize {
+        let victims: Vec<TxnId> = self.long_running_txns(threshold_us)
+            .into_iter()
+            .map(|(id, _, _, _)| id)
+            .collect();
+        let mut killed = 0;
+        for txn_id in victims {
+            if self.kill_txn(txn_id).is_ok() {
+                killed += 1;
+            }
+        }
+        killed
     }
 
     /// Access the underlying storage engine (for wiring GcRunner etc.).

@@ -7,12 +7,20 @@ use falcon_common::error::StorageError;
 use falcon_common::schema::{StorageType, TableSchema};
 use falcon_common::types::TableId;
 
-use crate::columnstore::ColumnStoreTable;
-use crate::disk_rowstore::DiskRowstoreTable;
-use crate::lsm_table::LsmTable;
 use crate::memtable::MemTable;
 use crate::online_ddl::{DdlOpKind, BACKFILL_BATCH_SIZE};
 use crate::wal::WalRecord;
+
+#[cfg(feature = "columnstore")]
+use crate::columnstore::ColumnStoreTable;
+#[cfg(not(feature = "columnstore"))]
+use crate::columnstore_stub::ColumnStoreTable;
+
+#[cfg(feature = "disk_rowstore")]
+use crate::disk_rowstore::DiskRowstoreTable;
+
+#[cfg(feature = "lsm")]
+use crate::lsm_table::LsmTable;
 
 use super::engine::{datatype_to_cast_target, IndexMeta, StorageEngine};
 
@@ -36,44 +44,71 @@ impl StorageEngine {
                 self.tables.insert(table_id, table);
             }
             StorageType::Columnstore => {
-                if !self.node_role.allows_columnstore() {
-                    return Err(StorageError::Io(std::io::Error::other(format!(
-                        "COLUMNSTORE tables are not allowed on {:?} nodes",
-                        self.node_role
-                    ))));
+                #[cfg(feature = "columnstore")]
+                {
+                    if !self.node_role.allows_columnstore() {
+                        return Err(StorageError::Io(std::io::Error::other(format!(
+                            "COLUMNSTORE tables are not allowed on {:?} nodes",
+                            self.node_role
+                        ))));
+                    }
+                    let table = Arc::new(ColumnStoreTable::new(schema.clone()));
+                    self.columnstore_tables.insert(table_id, table);
                 }
-                let table = Arc::new(ColumnStoreTable::new(schema.clone()));
-                self.columnstore_tables.insert(table_id, table);
+                #[cfg(not(feature = "columnstore"))]
+                {
+                    return Err(StorageError::Io(std::io::Error::other(
+                        "COLUMNSTORE storage engine is not available in this build (feature disabled)",
+                    )));
+                }
             }
             StorageType::DiskRowstore => {
-                if !self.node_role.allows_columnstore() {
-                    return Err(StorageError::Io(std::io::Error::other(format!(
-                        "DISK_ROWSTORE tables are not allowed on {:?} nodes",
-                        self.node_role
-                    ))));
+                #[cfg(feature = "disk_rowstore")]
+                {
+                    if !self.node_role.allows_columnstore() {
+                        return Err(StorageError::Io(std::io::Error::other(format!(
+                            "DISK_ROWSTORE tables are not allowed on {:?} nodes",
+                            self.node_role
+                        ))));
+                    }
+                    let data_dir = self
+                        .data_dir
+                        .as_deref()
+                        .unwrap_or_else(|| std::path::Path::new("."));
+                    let table = Arc::new(DiskRowstoreTable::new(schema.clone(), data_dir)?);
+                    self.disk_tables.insert(table_id, table);
                 }
-                let data_dir = self
-                    .data_dir
-                    .as_deref()
-                    .unwrap_or_else(|| std::path::Path::new("."));
-                let table = Arc::new(DiskRowstoreTable::new(schema.clone(), data_dir)?);
-                self.disk_tables.insert(table_id, table);
+                #[cfg(not(feature = "disk_rowstore"))]
+                {
+                    return Err(StorageError::Io(std::io::Error::other(
+                        "DISK_ROWSTORE storage engine is not available in this build (feature disabled)",
+                    )));
+                }
             }
             StorageType::LsmRowstore => {
-                let data_dir = self
-                    .data_dir
-                    .as_deref()
-                    .unwrap_or_else(|| std::path::Path::new("."));
-                let lsm_dir = data_dir.join(format!("lsm_table_{}", table_id.0));
-                let engine = Arc::new(
-                    crate::lsm::engine::LsmEngine::open(
-                        &lsm_dir,
-                        crate::lsm::engine::LsmConfig::default(),
-                    )
-                    .map_err(StorageError::Io)?,
-                );
-                let table = Arc::new(LsmTable::new(schema.clone(), engine));
-                self.lsm_tables.insert(table_id, table);
+                #[cfg(feature = "lsm")]
+                {
+                    let data_dir = self
+                        .data_dir
+                        .as_deref()
+                        .unwrap_or_else(|| std::path::Path::new("."));
+                    let lsm_dir = data_dir.join(format!("lsm_table_{}", table_id.0));
+                    let engine = Arc::new(
+                        crate::lsm::engine::LsmEngine::open(
+                            &lsm_dir,
+                            crate::lsm::engine::LsmConfig::default(),
+                        )
+                        .map_err(StorageError::Io)?,
+                    );
+                    let table = Arc::new(LsmTable::new(schema.clone(), engine));
+                    self.lsm_tables.insert(table_id, table);
+                }
+                #[cfg(not(feature = "lsm"))]
+                {
+                    return Err(StorageError::Io(std::io::Error::other(
+                        "LSM storage engine is not available in this build (feature disabled)",
+                    )));
+                }
             }
         }
 
@@ -95,7 +130,9 @@ impl StorageEngine {
         // Remove from whichever storage map holds it
         self.tables.remove(&table_id);
         self.columnstore_tables.remove(&table_id);
+        #[cfg(feature = "disk_rowstore")]
         self.disk_tables.remove(&table_id);
+        #[cfg(feature = "lsm")]
         self.lsm_tables.remove(&table_id);
 
         self.append_and_flush_wal(&WalRecord::DropTable {
@@ -123,34 +160,36 @@ impl StorageEngine {
                     .insert(table_id, Arc::new(MemTable::new(schema)));
             }
             StorageType::Columnstore => {
-                self.columnstore_tables
-                    .insert(table_id, Arc::new(ColumnStoreTable::new(schema)));
+                #[cfg(feature = "columnstore")]
+                { self.columnstore_tables.insert(table_id, Arc::new(ColumnStoreTable::new(schema))); }
+                #[cfg(not(feature = "columnstore"))]
+                { return Err(StorageError::Io(std::io::Error::other("COLUMNSTORE not available (feature disabled)"))); }
             }
             StorageType::DiskRowstore => {
-                let data_dir = self
-                    .data_dir
-                    .as_deref()
-                    .unwrap_or_else(|| std::path::Path::new("."));
-                let table = Arc::new(DiskRowstoreTable::new(schema, data_dir)?);
-                self.disk_tables.insert(table_id, table);
+                #[cfg(feature = "disk_rowstore")]
+                {
+                    let data_dir = self.data_dir.as_deref().unwrap_or_else(|| std::path::Path::new("."));
+                    let table = Arc::new(DiskRowstoreTable::new(schema, data_dir)?);
+                    self.disk_tables.insert(table_id, table);
+                }
+                #[cfg(not(feature = "disk_rowstore"))]
+                { return Err(StorageError::Io(std::io::Error::other("DISK_ROWSTORE not available (feature disabled)"))); }
             }
             StorageType::LsmRowstore => {
-                let data_dir = self
-                    .data_dir
-                    .as_deref()
-                    .unwrap_or_else(|| std::path::Path::new("."));
-                let lsm_dir = data_dir.join(format!("lsm_table_{}", table_id.0));
-                // Remove old data directory to truncate
-                let _ = std::fs::remove_dir_all(&lsm_dir);
-                let engine = Arc::new(
-                    crate::lsm::engine::LsmEngine::open(
-                        &lsm_dir,
-                        crate::lsm::engine::LsmConfig::default(),
-                    )
-                    .map_err(StorageError::Io)?,
-                );
-                let table = Arc::new(LsmTable::new(schema, engine));
-                self.lsm_tables.insert(table_id, table);
+                #[cfg(feature = "lsm")]
+                {
+                    let data_dir = self.data_dir.as_deref().unwrap_or_else(|| std::path::Path::new("."));
+                    let lsm_dir = data_dir.join(format!("lsm_table_{}", table_id.0));
+                    let _ = std::fs::remove_dir_all(&lsm_dir);
+                    let engine = Arc::new(
+                        crate::lsm::engine::LsmEngine::open(&lsm_dir, crate::lsm::engine::LsmConfig::default())
+                            .map_err(StorageError::Io)?,
+                    );
+                    let table = Arc::new(LsmTable::new(schema, engine));
+                    self.lsm_tables.insert(table_id, table);
+                }
+                #[cfg(not(feature = "lsm"))]
+                { return Err(StorageError::Io(std::io::Error::other("LSM not available (feature disabled)"))); }
             }
         }
 

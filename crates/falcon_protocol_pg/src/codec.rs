@@ -142,6 +142,11 @@ pub enum BackendMessage {
         format: u8,
         column_formats: Vec<i16>,
     },
+    /// CopyBothResponse ('W') — server enters bidirectional COPY mode (replication).
+    CopyBothResponse {
+        format: u8,
+        column_formats: Vec<i16>,
+    },
     /// CopyData ('d') — a row of COPY data.
     CopyData(Vec<u8>),
     /// CopyDone ('c') — end of COPY output.
@@ -561,6 +566,19 @@ pub fn encode_message(msg: &BackendMessage) -> BytesMut {
         } => {
             let len = 4 + 1 + 2 + column_formats.len() as i32 * 2;
             buf.put_u8(b'H');
+            buf.put_i32(len);
+            buf.put_u8(*format);
+            buf.put_i16(column_formats.len() as i16);
+            for cf in column_formats {
+                buf.put_i16(*cf);
+            }
+        }
+        BackendMessage::CopyBothResponse {
+            format,
+            column_formats,
+        } => {
+            let len = 4 + 1 + 2 + column_formats.len() as i32 * 2;
+            buf.put_u8(b'W');
             buf.put_i32(len);
             buf.put_u8(*format);
             buf.put_i16(column_formats.len() as i16);

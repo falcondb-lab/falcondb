@@ -1,3 +1,4 @@
+//! # Module Status: PRODUCTION
 //! MVCC Garbage Collection.
 //!
 //! Design principles:

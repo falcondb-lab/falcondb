@@ -1,9 +1,4 @@
-pub mod audit;
-pub mod backup;
-pub mod cdc;
-pub mod columnstore;
-pub mod disk_rowstore;
-pub mod encryption;
+// ── PRODUCTION modules (always compiled) ──
 pub mod engine;
 mod engine_ddl;
 mod engine_dml;
@@ -12,23 +7,41 @@ pub mod group_commit;
 pub mod health;
 pub mod hotspot;
 pub mod index;
-pub mod lsm;
-pub mod lsm_table;
 pub mod memory;
 pub mod memtable;
 pub mod metering;
 pub mod mvcc;
-pub mod online_ddl;
 pub mod partition;
-pub mod pitr;
-pub mod resource_isolation;
 pub mod role_catalog;
 pub mod security_manager;
 pub mod stats;
-pub mod tenant_registry;
 pub mod upgrade;
 pub mod verification;
 pub mod wal;
+pub mod audit;
+pub mod backup;
+
+// ── Enterprise stubs (always compiled for handler compat, disabled at runtime) ──
+pub mod cdc;
+pub mod encryption;
+pub mod online_ddl;
+pub mod pitr;
+pub mod resource_isolation;
+pub mod tenant_registry;
+
+// ── EXPERIMENTAL / non-v1.0 storage engines (feature-gated, default OFF) ──
+#[cfg(feature = "columnstore")]
+pub mod columnstore;
+#[cfg(feature = "disk_rowstore")]
+pub mod disk_rowstore;
+#[cfg(feature = "lsm")]
+pub mod lsm;
+#[cfg(feature = "lsm")]
+pub mod lsm_table;
+
+// ── Stub for columnstore so engine.rs compiles without the feature ──
+#[cfg(not(feature = "columnstore"))]
+pub mod columnstore_stub;
 
 #[cfg(test)]
 mod tests;
