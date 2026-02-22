@@ -1,5 +1,17 @@
 # FalconDB
-![FalconDB Logo](assets/falcondb-logo.png)
+<p align="center">
+  <img src="assets/falcondb-logo.png" alt="FalconDB Logo" width="220" />
+</p>
+
+<h1 align="center">FalconDB</h1>
+
+<p align="center">
+  <a href="https://github.com/falcondb-lab/falcondb/actions/workflows/ci.yml">
+    <img src="https://github.com/falcondb-lab/falcondb/actions/workflows/ci.yml/badge.svg" alt="CI" />
+  </a>
+  <img src="https://img.shields.io/badge/MSRV-1.75-blue" alt="MSRV" />
+  <img src="https://img.shields.io/badge/license-Apache--2.0-green" alt="License" />
+</p>
 [![CI](https://github.com/falcondb-lab/falcondb/actions/workflows/ci.yml/badge.svg)](https://github.com/falcondb-lab/falcondb/actions/workflows/ci.yml)
 ![MSRV](https://img.shields.io/badge/MSRV-1.75-blue)
 ![License](https://img.shields.io/badge/license-Apache--2.0-green)
