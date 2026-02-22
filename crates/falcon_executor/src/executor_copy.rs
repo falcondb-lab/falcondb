@@ -348,8 +348,8 @@ fn parse_datum(field: &str, data_type: &DataType) -> Result<Datum, String> {
             use chrono::NaiveDate;
             let date = NaiveDate::parse_from_str(field, "%Y-%m-%d")
                 .map_err(|e| format!("Cannot parse '{}' as DATE: {}", field, e))?;
-            let epoch =
-                NaiveDate::from_ymd_opt(1970, 1, 1).expect("unix epoch date is always valid");
+            let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)
+                .unwrap_or_else(|| NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or(NaiveDate::MIN));
             let days = (date - epoch).num_days() as i32;
             Ok(Datum::Date(days))
         }
@@ -450,7 +450,7 @@ fn datum_to_text(datum: &Datum) -> String {
         }
         Datum::Date(days) => {
             let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
-                .expect("unix epoch date is always valid");
+                .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or(chrono::NaiveDate::MIN));
             if let Some(date) = epoch.checked_add_signed(chrono::Duration::days(*days as i64)) {
                 date.format("%Y-%m-%d").to_string()
             } else {

@@ -402,8 +402,12 @@ fn encode_payload(msg: &Message) -> BytesMut {
                 None => out.put_u8(0),
             }
         }
-        Message::Ping | Message::Pong | Message::Disconnect | Message::DisconnectAck
-        | Message::StartTls | Message::StartTlsAck => {}
+        Message::Ping
+        | Message::Pong
+        | Message::Disconnect
+        | Message::DisconnectAck
+        | Message::StartTls
+        | Message::StartTlsAck => {}
     }
     out
 }
@@ -592,9 +596,7 @@ pub fn decode_message(input: &[u8]) -> Result<(Message, usize)> {
                 rows_affected,
             })
         }
-        MSG_ERROR_RESPONSE => {
-            Message::ErrorResponse(decode_error_payload(&mut buf)?)
-        }
+        MSG_ERROR_RESPONSE => Message::ErrorResponse(decode_error_payload(&mut buf)?),
         MSG_BATCH_REQUEST => {
             let request_id = read_u64(&mut buf)?;
             let epoch = read_u64(&mut buf)?;
@@ -696,9 +698,7 @@ pub fn encoded_to_datum(v: &EncodedValue) -> Datum {
         EncodedValue::Interval(months, days, us) => Datum::Interval(*months, *days, *us),
         EncodedValue::Uuid(u) => Datum::Uuid(*u),
         EncodedValue::Bytea(b) => Datum::Bytea(b.clone()),
-        EncodedValue::Array(_, elems) => {
-            Datum::Array(elems.iter().map(encoded_to_datum).collect())
-        }
+        EncodedValue::Array(_, elems) => Datum::Array(elems.iter().map(encoded_to_datum).collect()),
     }
 }
 
@@ -775,8 +775,14 @@ mod tests {
             user: "admin".into(),
             nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             params: vec![
-                Param { key: "app".into(), value: "myapp".into() },
-                Param { key: "timeout".into(), value: "30000".into() },
+                Param {
+                    key: "app".into(),
+                    value: "myapp".into(),
+                },
+                Param {
+                    key: "timeout".into(),
+                    value: "30000".into(),
+                },
             ],
         });
         assert_eq!(roundtrip(&msg), msg);
@@ -791,7 +797,10 @@ mod tests {
             server_epoch: 42,
             server_node_id: 7,
             server_nonce: [0xAA; 16],
-            params: vec![Param { key: "server_version".into(), value: "1.0.0-rc.1".into() }],
+            params: vec![Param {
+                key: "server_version".into(),
+                value: "1.0.0-rc.1".into(),
+            }],
         });
         assert_eq!(roundtrip(&msg), msg);
     }
@@ -832,10 +841,7 @@ mod tests {
             request_id: 99,
             epoch: 0,
             sql: "SELECT * FROM t WHERE id = ? AND name = ?".into(),
-            params: vec![
-                EncodedValue::Int64(42),
-                EncodedValue::Text("hello".into()),
-            ],
+            params: vec![EncodedValue::Int64(42), EncodedValue::Text("hello".into())],
             session_flags: 0,
         });
         assert_eq!(roundtrip(&msg), msg);
@@ -845,9 +851,13 @@ mod tests {
     fn test_query_response_empty() {
         let msg = Message::QueryResponse(QueryResponse {
             request_id: 1,
-            columns: vec![
-                ColumnMeta { name: "id".into(), type_id: TYPE_INT64, nullable: false, precision: 0, scale: 0 },
-            ],
+            columns: vec![ColumnMeta {
+                name: "id".into(),
+                type_id: TYPE_INT64,
+                nullable: false,
+                precision: 0,
+                scale: 0,
+            }],
             rows: vec![],
             rows_affected: 0,
         });
@@ -859,13 +869,43 @@ mod tests {
         let msg = Message::QueryResponse(QueryResponse {
             request_id: 5,
             columns: vec![
-                ColumnMeta { name: "id".into(), type_id: TYPE_INT64, nullable: false, precision: 0, scale: 0 },
-                ColumnMeta { name: "name".into(), type_id: TYPE_TEXT, nullable: true, precision: 0, scale: 0 },
-                ColumnMeta { name: "active".into(), type_id: TYPE_BOOLEAN, nullable: false, precision: 0, scale: 0 },
+                ColumnMeta {
+                    name: "id".into(),
+                    type_id: TYPE_INT64,
+                    nullable: false,
+                    precision: 0,
+                    scale: 0,
+                },
+                ColumnMeta {
+                    name: "name".into(),
+                    type_id: TYPE_TEXT,
+                    nullable: true,
+                    precision: 0,
+                    scale: 0,
+                },
+                ColumnMeta {
+                    name: "active".into(),
+                    type_id: TYPE_BOOLEAN,
+                    nullable: false,
+                    precision: 0,
+                    scale: 0,
+                },
             ],
             rows: vec![
-                EncodedRow { values: vec![EncodedValue::Int64(1), EncodedValue::Text("alice".into()), EncodedValue::Boolean(true)] },
-                EncodedRow { values: vec![EncodedValue::Int64(2), EncodedValue::Null, EncodedValue::Boolean(false)] },
+                EncodedRow {
+                    values: vec![
+                        EncodedValue::Int64(1),
+                        EncodedValue::Text("alice".into()),
+                        EncodedValue::Boolean(true),
+                    ],
+                },
+                EncodedRow {
+                    values: vec![
+                        EncodedValue::Int64(2),
+                        EncodedValue::Null,
+                        EncodedValue::Boolean(false),
+                    ],
+                },
             ],
             rows_affected: 0,
         });
@@ -893,9 +933,15 @@ mod tests {
             sql: "INSERT INTO t (id, name) VALUES (?, ?)".into(),
             column_types: vec![TYPE_INT64, TYPE_TEXT],
             rows: vec![
-                EncodedRow { values: vec![EncodedValue::Int64(1), EncodedValue::Text("a".into())] },
-                EncodedRow { values: vec![EncodedValue::Int64(2), EncodedValue::Text("b".into())] },
-                EncodedRow { values: vec![EncodedValue::Int64(3), EncodedValue::Null] },
+                EncodedRow {
+                    values: vec![EncodedValue::Int64(1), EncodedValue::Text("a".into())],
+                },
+                EncodedRow {
+                    values: vec![EncodedValue::Int64(2), EncodedValue::Text("b".into())],
+                },
+                EncodedRow {
+                    values: vec![EncodedValue::Int64(3), EncodedValue::Null],
+                },
             ],
             options: 0,
         });
@@ -934,19 +980,97 @@ mod tests {
         let msg = Message::QueryResponse(QueryResponse {
             request_id: 42,
             columns: vec![
-                ColumnMeta { name: "c_bool".into(), type_id: TYPE_BOOLEAN, nullable: false, precision: 0, scale: 0 },
-                ColumnMeta { name: "c_i32".into(), type_id: TYPE_INT32, nullable: false, precision: 0, scale: 0 },
-                ColumnMeta { name: "c_i64".into(), type_id: TYPE_INT64, nullable: false, precision: 0, scale: 0 },
-                ColumnMeta { name: "c_f64".into(), type_id: TYPE_FLOAT64, nullable: false, precision: 0, scale: 0 },
-                ColumnMeta { name: "c_text".into(), type_id: TYPE_TEXT, nullable: true, precision: 0, scale: 0 },
-                ColumnMeta { name: "c_ts".into(), type_id: TYPE_TIMESTAMP, nullable: false, precision: 0, scale: 0 },
-                ColumnMeta { name: "c_date".into(), type_id: TYPE_DATE, nullable: false, precision: 0, scale: 0 },
-                ColumnMeta { name: "c_jsonb".into(), type_id: TYPE_JSONB, nullable: true, precision: 0, scale: 0 },
-                ColumnMeta { name: "c_dec".into(), type_id: TYPE_DECIMAL, nullable: false, precision: 10, scale: 2 },
-                ColumnMeta { name: "c_time".into(), type_id: TYPE_TIME, nullable: false, precision: 0, scale: 0 },
-                ColumnMeta { name: "c_interval".into(), type_id: TYPE_INTERVAL, nullable: false, precision: 0, scale: 0 },
-                ColumnMeta { name: "c_uuid".into(), type_id: TYPE_UUID, nullable: false, precision: 0, scale: 0 },
-                ColumnMeta { name: "c_bytea".into(), type_id: TYPE_BYTEA, nullable: true, precision: 0, scale: 0 },
+                ColumnMeta {
+                    name: "c_bool".into(),
+                    type_id: TYPE_BOOLEAN,
+                    nullable: false,
+                    precision: 0,
+                    scale: 0,
+                },
+                ColumnMeta {
+                    name: "c_i32".into(),
+                    type_id: TYPE_INT32,
+                    nullable: false,
+                    precision: 0,
+                    scale: 0,
+                },
+                ColumnMeta {
+                    name: "c_i64".into(),
+                    type_id: TYPE_INT64,
+                    nullable: false,
+                    precision: 0,
+                    scale: 0,
+                },
+                ColumnMeta {
+                    name: "c_f64".into(),
+                    type_id: TYPE_FLOAT64,
+                    nullable: false,
+                    precision: 0,
+                    scale: 0,
+                },
+                ColumnMeta {
+                    name: "c_text".into(),
+                    type_id: TYPE_TEXT,
+                    nullable: true,
+                    precision: 0,
+                    scale: 0,
+                },
+                ColumnMeta {
+                    name: "c_ts".into(),
+                    type_id: TYPE_TIMESTAMP,
+                    nullable: false,
+                    precision: 0,
+                    scale: 0,
+                },
+                ColumnMeta {
+                    name: "c_date".into(),
+                    type_id: TYPE_DATE,
+                    nullable: false,
+                    precision: 0,
+                    scale: 0,
+                },
+                ColumnMeta {
+                    name: "c_jsonb".into(),
+                    type_id: TYPE_JSONB,
+                    nullable: true,
+                    precision: 0,
+                    scale: 0,
+                },
+                ColumnMeta {
+                    name: "c_dec".into(),
+                    type_id: TYPE_DECIMAL,
+                    nullable: false,
+                    precision: 10,
+                    scale: 2,
+                },
+                ColumnMeta {
+                    name: "c_time".into(),
+                    type_id: TYPE_TIME,
+                    nullable: false,
+                    precision: 0,
+                    scale: 0,
+                },
+                ColumnMeta {
+                    name: "c_interval".into(),
+                    type_id: TYPE_INTERVAL,
+                    nullable: false,
+                    precision: 0,
+                    scale: 0,
+                },
+                ColumnMeta {
+                    name: "c_uuid".into(),
+                    type_id: TYPE_UUID,
+                    nullable: false,
+                    precision: 0,
+                    scale: 0,
+                },
+                ColumnMeta {
+                    name: "c_bytea".into(),
+                    type_id: TYPE_BYTEA,
+                    nullable: true,
+                    precision: 0,
+                    scale: 0,
+                },
             ],
             rows: vec![EncodedRow {
                 values: vec![

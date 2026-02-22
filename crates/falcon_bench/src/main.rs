@@ -285,8 +285,16 @@ fn run_workload(args: &Args, force_all_global: bool, label: &str) -> BenchResult
 
 fn print_result_text(r: &BenchResult) {
     let total_txn = r.local_txn_count + r.global_txn_count;
-    let local_pct = if total_txn > 0 { r.local_txn_count as f64 / total_txn as f64 * 100.0 } else { 0.0 };
-    let global_pct = if total_txn > 0 { r.global_txn_count as f64 / total_txn as f64 * 100.0 } else { 0.0 };
+    let local_pct = if total_txn > 0 {
+        r.local_txn_count as f64 / total_txn as f64 * 100.0
+    } else {
+        0.0
+    };
+    let global_pct = if total_txn > 0 {
+        r.global_txn_count as f64 / total_txn as f64 * 100.0
+    } else {
+        0.0
+    };
 
     println!("═══════════════════════════════════════════════");
     println!("  {} ", r.label);
@@ -296,8 +304,14 @@ fn print_result_text(r: &BenchResult) {
     println!("  Elapsed:           {} ms", r.elapsed_ms);
     println!("  TPS:               {:.1}", r.tps);
     println!("  ─── Txn Mix ───");
-    println!("  Local (single-shard):  {} ({:.1}%)", r.local_txn_count, local_pct);
-    println!("  Global (cross-shard):  {} ({:.1}%)", r.global_txn_count, global_pct);
+    println!(
+        "  Local (single-shard):  {} ({:.1}%)",
+        r.local_txn_count, local_pct
+    );
+    println!(
+        "  Global (cross-shard):  {} ({:.1}%)",
+        r.global_txn_count, global_pct
+    );
     println!("  ─── Commits ───");
     println!("  Total committed:   {}", r.stats.total_committed);
     println!("  Fast-path commits: {}", r.stats.fast_path_commits);
@@ -1304,10 +1318,13 @@ struct PerfBaseline {
 fn save_baseline(r: &BenchResult, args: &Args) {
     let baseline = PerfBaseline {
         version: env!("CARGO_PKG_VERSION").to_string(),
-        timestamp: format!("{:?}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()),
+        timestamp: format!(
+            "{:?}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        ),
         seed: args.seed,
         ops: args.ops,
         record_count: args.record_count,
@@ -1331,7 +1348,10 @@ fn check_baseline(r: &BenchResult, args: &Args) -> bool {
     let data = match std::fs::read_to_string(&args.baseline_path) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("ERROR: Cannot read baseline file '{}': {}", args.baseline_path, e);
+            eprintln!(
+                "ERROR: Cannot read baseline file '{}': {}",
+                args.baseline_path, e
+            );
             return false;
         }
     };
@@ -1386,7 +1406,10 @@ fn check_baseline(r: &BenchResult, args: &Args) -> bool {
         );
         passed = false;
     } else if fp99 > 0 && sp99 > 0 {
-        println!("INVARIANT OK: fast-path P99 ({}µs) <= slow-path P99 ({}µs)", fp99, sp99);
+        println!(
+            "INVARIANT OK: fast-path P99 ({}µs) <= slow-path P99 ({}µs)",
+            fp99, sp99
+        );
     }
 
     if passed {
@@ -1524,9 +1547,15 @@ fn run_long_run(args: &Args) {
             let cumulative_tps = total_ops as f64 / global_start.elapsed().as_secs_f64();
             let stats = mgr.stats_snapshot();
 
-            if interval_tps < min_tps { min_tps = interval_tps; }
-            if interval_tps > max_tps { max_tps = interval_tps; }
-            if stats.latency.all.p99_us > max_p99 { max_p99 = stats.latency.all.p99_us; }
+            if interval_tps < min_tps {
+                min_tps = interval_tps;
+            }
+            if interval_tps > max_tps {
+                max_tps = interval_tps;
+            }
+            if stats.latency.all.p99_us > max_p99 {
+                max_p99 = stats.latency.all.p99_us;
+            }
 
             let sample = LongRunSample {
                 elapsed_secs: global_start.elapsed().as_secs(),
@@ -1544,8 +1573,10 @@ fn run_long_run(args: &Args) {
             if args.export != "json" {
                 println!(
                     "  [{:>6}s] ops={:<8} tps={:<10.1} cum_tps={:<10.1} p99={}µs",
-                    sample.elapsed_secs, sample.interval_ops,
-                    sample.interval_tps, sample.cumulative_tps,
+                    sample.elapsed_secs,
+                    sample.interval_ops,
+                    sample.interval_tps,
+                    sample.cumulative_tps,
                     sample.all_p99_us,
                 );
             }
@@ -1579,16 +1610,24 @@ fn run_long_run(args: &Args) {
 
     match args.export.as_str() {
         "json" => {
-            println!("{}", serde_json::to_string_pretty(&report).expect("serialize report"));
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).expect("serialize report")
+            );
         }
         "csv" => {
             println!("elapsed_secs,interval_ops,interval_tps,cumulative_ops,cumulative_tps,all_p99_us,committed,aborted");
             for s in &report.samples {
                 println!(
                     "{},{},{:.1},{},{:.1},{},{},{}",
-                    s.elapsed_secs, s.interval_ops, s.interval_tps,
-                    s.cumulative_ops, s.cumulative_tps, s.all_p99_us,
-                    s.committed, s.aborted,
+                    s.elapsed_secs,
+                    s.interval_ops,
+                    s.interval_tps,
+                    s.cumulative_ops,
+                    s.cumulative_tps,
+                    s.all_p99_us,
+                    s.committed,
+                    s.aborted,
                 );
             }
         }
@@ -1606,7 +1645,14 @@ fn run_long_run(args: &Args) {
             println!("  Max P99:           {} µs", report.max_p99_us);
             println!("  Total committed:   {}", report.total_committed);
             println!("  Total aborted:     {}", report.total_aborted);
-            println!("  Stable:            {}", if report.stable { "YES" } else { "NO — TPS dropped >50% from peak" });
+            println!(
+                "  Stable:            {}",
+                if report.stable {
+                    "YES"
+                } else {
+                    "NO — TPS dropped >50% from peak"
+                }
+            );
             println!();
         }
     }

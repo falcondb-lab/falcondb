@@ -11,7 +11,10 @@ pub enum NativeServerError {
     AuthFailed(String),
 
     #[error("Epoch mismatch: client={client_epoch}, server={server_epoch}")]
-    EpochMismatch { client_epoch: u64, server_epoch: u64 },
+    EpochMismatch {
+        client_epoch: u64,
+        server_epoch: u64,
+    },
 
     #[error("Session not authenticated")]
     NotAuthenticated,

@@ -95,7 +95,10 @@ pub(crate) fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionErro
                 {
                     Ok(Datum::Timestamp(dt.and_utc().timestamp_micros()))
                 } else if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-                    let dt = d.and_hms_opt(0, 0, 0).expect("midnight is always valid");
+                    let dt = match d.and_hms_opt(0, 0, 0) {
+                        Some(dt) => dt,
+                        None => return Err(ExecutionError::TypeError(format!("Cannot cast '{}' to timestamp", s))),
+                    };
                     Ok(Datum::Timestamp(dt.and_utc().timestamp_micros()))
                 } else {
                     Err(ExecutionError::TypeError(format!(
@@ -124,8 +127,8 @@ pub(crate) fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionErro
                     .map_err(|e| {
                         ExecutionError::TypeError(format!("Cannot cast '{}' to date: {}", s, e))
                     })?;
-                let epoch =
-                    NaiveDate::from_ymd_opt(1970, 1, 1).expect("unix epoch date is always valid");
+                let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)
+                    .unwrap_or_else(|| NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or(NaiveDate::MIN));
                 let days = (date - epoch).num_days() as i32;
                 Ok(Datum::Date(days))
             }

@@ -262,11 +262,7 @@ impl VersionChain {
         let header = mem::size_of::<Version>() as u64;
         let data_bytes = match &ver.data {
             Some(row) => {
-                row.values
-                    .iter()
-                    .map(estimate_datum_bytes)
-                    .sum::<u64>()
-                    + 24 // Vec overhead
+                row.values.iter().map(estimate_datum_bytes).sum::<u64>() + 24 // Vec overhead
             }
             None => 0,
         };
@@ -408,11 +404,6 @@ fn estimate_datum_bytes(d: &falcon_common::datum::Datum) -> u64 {
 /// Used by memory accounting to track write-buffer and MVCC allocations.
 pub fn estimate_row_bytes(row: &OwnedRow) -> u64 {
     let version_header = mem::size_of::<Version>() as u64;
-    let data_bytes: u64 = row
-        .values
-        .iter()
-        .map(estimate_datum_bytes)
-        .sum::<u64>()
-        + 24; // Vec overhead
+    let data_bytes: u64 = row.values.iter().map(estimate_datum_bytes).sum::<u64>() + 24; // Vec overhead
     version_header + data_bytes
 }

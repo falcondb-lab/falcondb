@@ -2068,7 +2068,8 @@ impl DistributedQueryEngine {
                                     let pair = std::sync::Mutex::new(false);
                                     let cvar = std::sync::Condvar::new();
                                     let guard = pair.lock().unwrap_or_else(|e| e.into_inner());
-                                    let _ = cvar.wait_timeout(guard, std::time::Duration::from_millis(5));
+                                    let _ = cvar
+                                        .wait_timeout(guard, std::time::Duration::from_millis(5));
                                 }
                                 if cancelled_ref.load(Ordering::Relaxed) {
                                     break;

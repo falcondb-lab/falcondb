@@ -3,7 +3,7 @@
   <img src="assets/falcondb-logo.png" alt="FalconDB Logo" width="220" />
 </p>
 
-<h1 align="center">FalconDB</h1>
+<h1 align="center">FalconDB v1.0.3</h1>
 
 <p align="center">
   <a href="https://github.com/falcondb-lab/falcondb/actions/workflows/ci.yml">
@@ -17,6 +17,9 @@
 
 FalconDB 提供稳定的 OLTP 能力、快/慢路径事务、基于 WAL 的主从复制（gRPC 流式传输）、
 主从切换/故障转移、MVCC 垃圾回收，以及可复现的基准测试。
+
+> **v1.0.3** — 稳定性加固版本：事务状态机加固、重试安全、In-doubt 有界收敛、确定性错误分类。
+> 无新功能、无新 API、无协议变更。2,599 个测试全部通过。
 
 > **[English README](README.md)** | 简体中文
 
@@ -102,7 +105,7 @@ cargo build --workspace
 # 构建 release 版本
 cargo build --release --workspace
 
-# 运行测试 (15 个 crate + 根集成测试，共 2,262 个测试)
+# 运行测试 (15 个 crate + 根集成测试，共 2,599 个测试)
 cargo test --workspace
 
 # 代码检查
@@ -611,7 +614,7 @@ SHOW falcon.replication_stats;
 | `falcon_protocol_native` | FalconDB 原生二进制协议 — 编解码、压缩、类型映射 |
 | `falcon_native_server` | 原生协议服务器 — 会话管理、执行器桥接、Nonce 防重放 |
 | `falcon_raft` | 共识 trait + 单节点桩实现 |
-| `falcon_cluster` | 分片映射、复制、故障转移、Scatter/Gather、Epoch、迁移、Supervisor |
+| `falcon_cluster` | 分片映射、复制、故障转移、Scatter/Gather、Epoch、迁移、Supervisor、稳定性加固、故障转移×事务测试矩阵 |
 | `falcon_observability` | 指标 (Prometheus)、结构化日志、链路追踪 |
 | `falcon_server` | 主二进制文件，组装所有组件 |
 | `falcon_bench` | YCSB 风格基准测试工具 |
@@ -743,7 +746,10 @@ cargo run -p falcon_server -- --print-default-config > falcon.toml
 | **存储加固** ✅ | WAL 恢复、压缩调度、内存预算、GC 安全点、故障注入 | 2,261 测试 |
 | **分布式加固** ✅ | Epoch 隔离、Leader 租约、分片迁移、跨分片限流、Supervisor | +62 测试 |
 | **原生协议** ✅ | FalconDB 原生二进制协议、Java JDBC 驱动、压缩、HA 故障转移 | 2,239 测试 |
-| **v1.0.0** 📋 | 生产级数据库内核 — 所有门控通过 | [docs/roadmap.md](docs/roadmap.md) |
+| **v1.0.0** ✅ | 生产级数据库内核 — 所有门控通过 | 2,499 测试 |
+| **v1.0.1** ✅ | 零 panic 策略、崩溃安全、统一错误模型 | 2,499 测试 |
+| **v1.0.2** ✅ | 故障转移×事务加固: 20 项测试矩阵 (SS/XS/CH/ID) | 2,554 测试 |
+| **v1.0.3** ✅ | 稳定性、确定性与信任加固: 状态机、重试安全、In-doubt 有界收敛 | 2,599 测试 |
 
 详见 [docs/roadmap.md](docs/roadmap.md) 了解每个里程碑的详细验收标准。
 
@@ -777,30 +783,30 @@ FalconDB 支持三种持久化策略: `local-fsync` (默认, RPO > 0 可能)、
 | [docs/native_protocol.md](docs/native_protocol.md) | FalconDB 原生二进制协议规范 |
 | [docs/native_protocol_compat.md](docs/native_protocol_compat.md) | 原生协议版本协商和特性标志 |
 | [docs/perf_testing.md](docs/perf_testing.md) | 性能测试方法论和 CI 门控 |
-| [CHANGELOG.md](CHANGELOG.md) | 语义化版本变更日志 (v0.1–v1.0) |
+| [CHANGELOG.md](CHANGELOG.md) | 语义化版本变更日志 (v0.1–v1.0.3) |
 
 ---
 
 ## 测试
 
 ```bash
-# 运行所有测试 (共 2,262 个)
+# 运行所有测试 (共 2,599 个)
 cargo test --workspace
 
 # 按 crate 运行
-cargo test -p falcon_storage          # 417 测试 (MVCC, WAL, GC, LSM, 索引, TDE, 分区, PITR, CDC, 恢复, 压缩调度)
-cargo test -p falcon_cluster          # 485 测试 (复制, 故障转移, Scatter/Gather, 2PC, Epoch, 迁移, Supervisor, 限流)
-cargo test -p falcon_server           # 372 测试 (SQL 端到端, 错误路径, SHOW 命令)
-cargo test -p falcon_common           # 246 测试 (错误模型, 配置, RBAC, RoleCatalog, PrivilegeManager, Decimal, RLS)
+cargo test -p falcon_cluster          # 585 测试 (复制, 故障转移, Scatter/Gather, 2PC, Epoch, 迁移, Supervisor, 限流, 故障转移×事务矩阵, 稳定性加固, 压力测试)
+cargo test -p falcon_server           # 383 测试 (SQL 端到端, 错误路径, SHOW 命令)
+cargo test -p falcon_storage          # 364 测试 (MVCC, WAL, GC, LSM, 索引, TDE, 分区, PITR, CDC, 恢复, 压缩调度)
+cargo test -p falcon_common           # 252 测试 (错误模型, 配置, RBAC, RoleCatalog, PrivilegeManager, Decimal, RLS)
+cargo test -p falcon_protocol_pg      # 232 测试 (SHOW 命令, 错误路径, 事务生命周期, Handler, 逻辑复制)
+cargo test -p falcon_cli              # 201 测试 (CLI 解析, 配置生成)
 cargo test -p falcon_executor         # 162 测试 (Governor v2, 优先级调度, 向量化, RBAC 执行)
 cargo test -p falcon_sql_frontend     # 148 测试 (绑定器, 谓词规范化, 参数推断)
-cargo test -p falcon_protocol_pg      # 203 测试 (SHOW 命令, 错误路径, 事务生命周期, Handler, 逻辑复制)
+cargo test -p falcon_txn              # 103 测试 (事务生命周期, OCC, 统计, READ ONLY, 超时, 执行摘要, 状态机)
 cargo test -p falcon_planner          # 89 测试 (路由提示, 分布式包装, 分片键推断)
-cargo test -p falcon_txn              # 61 测试 (事务生命周期, OCC, 统计, READ ONLY, 超时, 执行摘要)
 cargo test -p falcon_protocol_native  # 39 测试 (原生协议编解码, 压缩, 类型映射)
 cargo test -p falcon_native_server    # 28 测试 (服务器, 会话, 执行器桥接, Nonce 防重放)
 cargo test -p falcon_raft             # 12 测试 (共识 trait, 单节点桩)
-cargo test --test integration_test    # 12 测试 (根集成: DDL, DML, RETURNING, 事务)
 
 # 代码检查
 cargo clippy --workspace       # 必须 0 警告

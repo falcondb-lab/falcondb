@@ -370,7 +370,7 @@ fn test_window_rank() {
     .unwrap();
     match result {
         ExecutionResult::Query { rows, .. } => {
-            // Frank(80) → , Dave(90) → , Alice(100) → , Carol(100) → , Eve(110) → , Bob(120) → 
+            // Frank(80) → , Dave(90) → , Alice(100) → , Carol(100) → , Eve(110) → , Bob(120) →
             let ranks: Vec<i64> = rows
                 .iter()
                 .map(|r| match &r.values[1] {
@@ -398,7 +398,7 @@ fn test_window_dense_rank() {
     .unwrap();
     match result {
         ExecutionResult::Query { rows, .. } => {
-            // Frank(80) → , Dave(90) → , Alice(100) → , Carol(100) → , Eve(110) → , Bob(120) → 
+            // Frank(80) → , Dave(90) → , Alice(100) → , Carol(100) → , Eve(110) → , Bob(120) →
             let ranks: Vec<i64> = rows
                 .iter()
                 .map(|r| match &r.values[1] {
@@ -422,9 +422,9 @@ fn test_window_partition_by() {
     match result {
         ExecutionResult::Query { rows, .. } => {
             assert_eq!(rows.len(), 6);
-            // eng: Alice(100) → , Carol(100) → , Bob(120) → 
-            // hr: Frank(80) → 
-            // sales: Dave(90) → , Eve(110) → 
+            // eng: Alice(100) → , Carol(100) → , Bob(120) →
+            // hr: Frank(80) →
+            // sales: Dave(90) → , Eve(110) →
             let vals: Vec<(String, i64)> = rows
                 .iter()
                 .map(|r| {

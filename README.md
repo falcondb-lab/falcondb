@@ -4,7 +4,7 @@
   <img src="assets/falcondb-logo.png" alt="FalconDB Logo" width="220" />
 </p>
 
-<h1 align="center">FalconDB v1.0</h1>
+<h1 align="center">FalconDB v1.0.3</h1>
 
 <p align="center">
   <strong>PG-Compatible · Distributed · Memory-First · Deterministic Transaction Semantics</strong>
@@ -20,7 +20,7 @@
 
 > English | **[简体中文](README_zh.md)**
 
-> **v1.0 Positioning** — FalconDB is a **PG-compatible, distributed, memory-first
+> **v1.0.3 Positioning** — FalconDB is a **PG-compatible, distributed, memory-first
 > OLTP database** with deterministic transaction semantics. Benchmarked against
 > SingleStore (OLTP) and VoltDB.
 >
@@ -28,6 +28,7 @@
 > - ✅ **Stability** — p99 bounded, abort rate < 1%, reproducible benchmarks
 > - ✅ **Provable consistency** — MVCC/OCC under Snapshot Isolation, CI-verified ACID
 > - ✅ **Operability** — 50+ SHOW commands, Prometheus metrics, failover CI gate
+> - ✅ **Determinism** — hardened state machine, bounded in-doubt, idempotent retry (v1.0.3)
 > - ❌ Not HTAP — no analytical workloads
 > - ❌ Not full PG — [see unsupported list below](#v10-not-supported)
 
@@ -127,7 +128,7 @@ cargo build --workspace
 # Build release
 cargo build --release --workspace
 
-# Run tests (2,262 tests across 15 crates + root integration)
+# Run tests (2,599 tests across 15 crates + root integration)
 cargo test --workspace
 
 # Lint
@@ -640,7 +641,7 @@ Core PG-compatible functions including: `UPPER`, `LOWER`, `LENGTH`, `SUBSTRING`,
 | `falcon_protocol_native` | FalconDB native binary protocol — encode/decode, compression, type mapping |
 | `falcon_native_server` | Native protocol server — session management, executor bridge, nonce anti-replay |
 | `falcon_raft` | Consensus trait + single-node stub |
-| `falcon_cluster` | Shard map, replication, failover, scatter/gather, epoch, migration, supervisor |
+| `falcon_cluster` | Shard map, replication, failover, scatter/gather, epoch, migration, supervisor, stability hardening, failover×txn test matrix |
 | `falcon_observability` | Metrics (Prometheus), structured logging, tracing |
 | `falcon_server` | Main binary, wires all components |
 | `falcon_bench` | YCSB-style benchmark harness |
@@ -774,7 +775,10 @@ cargo run -p falcon_server -- --print-default-config > falcon.toml
 | **Storage Hardening** ✅ | WAL recovery, compaction scheduler, memory budget, GC safepoint, fault injection | 2,261 tests |
 | **Distributed Hardening** ✅ | Epoch fencing, leader lease, shard migration, cross-shard throttle, supervisor | +62 tests |
 | **Native Protocol** ✅ | FalconDB native binary protocol, Java JDBC driver, compression, HA failover | 2,239 tests |
-| **v1.0.0** 📋 | Production-grade database kernel — all gates pass | [docs/roadmap.md](docs/roadmap.md) |
+| **v1.0.0** ✅ | Production-grade database kernel — all gates pass | 2,499 tests |
+| **v1.0.1** ✅ | Zero-panic policy, crash safety, unified error model | 2,499 tests |
+| **v1.0.2** ✅ | Failover × transaction hardening: 20-test matrix (SS/XS/CH/ID) | 2,554 tests |
+| **v1.0.3** ✅ | Stability, determinism & trust hardening: state machine, retry safety, in-doubt bounding | 2,599 tests |
 
 See [docs/roadmap.md](docs/roadmap.md) for detailed acceptance criteria per milestone.
 
@@ -808,30 +812,30 @@ See [docs/rpo_rto.md](docs/rpo_rto.md) for full RPO/RTO analysis and recommendat
 | [docs/native_protocol.md](docs/native_protocol.md) | FalconDB native binary protocol specification |
 | [docs/native_protocol_compat.md](docs/native_protocol_compat.md) | Native protocol version negotiation and feature flags |
 | [docs/perf_testing.md](docs/perf_testing.md) | Performance testing methodology and CI gates |
-| [CHANGELOG.md](CHANGELOG.md) | Semantic versioning changelog (v0.1–v1.0) |
+| [CHANGELOG.md](CHANGELOG.md) | Semantic versioning changelog (v0.1–v1.0.3) |
 
 ---
 
 ## Testing
 
 ```bash
-# Run all tests (2,262 total)
+# Run all tests (2,599 total)
 cargo test --workspace
 
 # By crate
-cargo test -p falcon_storage          # 417 tests (MVCC, WAL, GC, LSM, indexes, TDE, partitioning, PITR, CDC, recovery, compaction scheduler)
-cargo test -p falcon_cluster          # 485 tests (replication, failover, scatter/gather, 2PC, epoch, migration, supervisor, throttle)
-cargo test -p falcon_server           # 372 tests (SQL end-to-end, error paths, SHOW commands)
-cargo test -p falcon_common           # 246 tests (error model, config, RBAC, RoleCatalog, PrivilegeManager, Decimal, RLS)
+cargo test -p falcon_cluster          # 585 tests (replication, failover, scatter/gather, 2PC, epoch, migration, supervisor, throttle, failover×txn matrix, stability hardening, stress tests)
+cargo test -p falcon_server           # 383 tests (SQL end-to-end, error paths, SHOW commands)
+cargo test -p falcon_storage          # 364 tests (MVCC, WAL, GC, LSM, indexes, TDE, partitioning, PITR, CDC, recovery, compaction scheduler)
+cargo test -p falcon_common           # 252 tests (error model, config, RBAC, RoleCatalog, PrivilegeManager, Decimal, RLS)
+cargo test -p falcon_protocol_pg      # 232 tests (SHOW commands, error paths, txn lifecycle, handler, logical replication)
+cargo test -p falcon_cli              # 201 tests (CLI parsing, config generation)
 cargo test -p falcon_executor         # 162 tests (governor v2, priority scheduler, vectorized, RBAC enforcement)
 cargo test -p falcon_sql_frontend     # 148 tests (binder, predicate normalization, param inference)
-cargo test -p falcon_protocol_pg      # 203 tests (SHOW commands, error paths, txn lifecycle, handler, logical replication)
+cargo test -p falcon_txn              # 103 tests (txn lifecycle, OCC, stats, READ ONLY mode, timeout, exec summary, state machine)
 cargo test -p falcon_planner          # 89 tests (routing hints, distributed wrapping, shard key inference)
-cargo test -p falcon_txn              # 61 tests (txn lifecycle, OCC, stats, READ ONLY mode, timeout, exec summary)
 cargo test -p falcon_protocol_native  # 39 tests (native protocol codec, compression, type mapping)
 cargo test -p falcon_native_server    # 28 tests (server, session, executor bridge, nonce anti-replay)
 cargo test -p falcon_raft             # 12 tests (consensus trait, single-node stub)
-cargo test --test integration_test    # 12 tests (root integration: DDL, DML, RETURNING clause, transactions)
 
 # Lint
 cargo clippy --workspace       # must be 0 warnings

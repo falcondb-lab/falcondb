@@ -37,10 +37,7 @@ pub enum ReplicationResult {
     /// Normal query result (RowDescription + DataRow + CommandComplete).
     Messages(Vec<BackendMessage>),
     /// Enter streaming mode: send CopyBothResponse, then stream XLogData.
-    StartStreaming {
-        slot_name: String,
-        start_lsn: u64,
-    },
+    StartStreaming { slot_name: String, start_lsn: u64 },
     /// Error response.
     Error(String),
 }
@@ -77,10 +74,7 @@ fn pg_timestamp_us() -> i64 {
 ///
 /// Called when the connection was started with `replication=database` in the
 /// startup parameters. Replication commands arrive as plain Query messages.
-pub fn handle_replication_command(
-    sql: &str,
-    storage: &Arc<StorageEngine>,
-) -> ReplicationResult {
+pub fn handle_replication_command(sql: &str, storage: &Arc<StorageEngine>) -> ReplicationResult {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let upper = trimmed.to_uppercase();
 
@@ -157,10 +151,10 @@ fn handle_identify_system(storage: &Arc<StorageEngine>) -> ReplicationResult {
     ];
 
     let row = vec![
-        Some("falcondb".to_string()),       // systemid
-        Some("1".to_string()),              // timeline
-        Some(format_lsn(current_lsn)),      // xlogpos
-        Some("falcon".to_string()),         // dbname
+        Some("falcondb".to_string()),  // systemid
+        Some("1".to_string()),         // timeline
+        Some(format_lsn(current_lsn)), // xlogpos
+        Some("falcon".to_string()),    // dbname
     ];
 
     ReplicationResult::Messages(vec![
@@ -173,10 +167,7 @@ fn handle_identify_system(storage: &Arc<StorageEngine>) -> ReplicationResult {
 }
 
 /// CREATE_REPLICATION_SLOT <name> LOGICAL <plugin> [NOEXPORT_SNAPSHOT]
-fn handle_create_replication_slot(
-    sql: &str,
-    storage: &Arc<StorageEngine>,
-) -> ReplicationResult {
+fn handle_create_replication_slot(sql: &str, storage: &Arc<StorageEngine>) -> ReplicationResult {
     // Parse: CREATE_REPLICATION_SLOT slot_name LOGICAL plugin_name
     let tokens: Vec<&str> = sql.split_whitespace().collect();
     if tokens.len() < 4 {
@@ -188,9 +179,7 @@ fn handle_create_replication_slot(
     let slot_name = tokens[1];
     // tokens[2] should be "LOGICAL"
     if !tokens[2].eq_ignore_ascii_case("LOGICAL") {
-        return ReplicationResult::Error(
-            "only LOGICAL replication slots are supported".into(),
-        );
+        return ReplicationResult::Error("only LOGICAL replication slots are supported".into());
     }
     let _plugin = tokens[3]; // accepted but we use our own decoder
 
@@ -198,9 +187,7 @@ fn handle_create_replication_slot(
     match cdc.create_slot(slot_name) {
         Ok(slot_id) => {
             let slot = cdc.list_slots().into_iter().find(|s| s.id == slot_id);
-            let consistent_point = slot
-                .map(|s| s.confirmed_flush_lsn.0)
-                .unwrap_or(0);
+            let consistent_point = slot.map(|s| s.confirmed_flush_lsn.0).unwrap_or(0);
             drop(cdc);
 
             let fields = vec![
@@ -262,15 +249,10 @@ fn handle_create_replication_slot(
 }
 
 /// DROP_REPLICATION_SLOT <name> [WAIT]
-fn handle_drop_replication_slot(
-    sql: &str,
-    storage: &Arc<StorageEngine>,
-) -> ReplicationResult {
+fn handle_drop_replication_slot(sql: &str, storage: &Arc<StorageEngine>) -> ReplicationResult {
     let tokens: Vec<&str> = sql.split_whitespace().collect();
     if tokens.len() < 2 {
-        return ReplicationResult::Error(
-            "syntax: DROP_REPLICATION_SLOT <name>".into(),
-        );
+        return ReplicationResult::Error("syntax: DROP_REPLICATION_SLOT <name>".into());
     }
 
     let slot_name = tokens[1];
@@ -287,10 +269,7 @@ fn handle_drop_replication_slot(
 }
 
 /// START_REPLICATION SLOT <name> LOGICAL <lsn> [(<option> '<value>', ...)]
-fn handle_start_replication(
-    sql: &str,
-    storage: &Arc<StorageEngine>,
-) -> ReplicationResult {
+fn handle_start_replication(sql: &str, storage: &Arc<StorageEngine>) -> ReplicationResult {
     let tokens: Vec<&str> = sql.split_whitespace().collect();
     // START_REPLICATION SLOT slot_name LOGICAL 0/0
     if tokens.len() < 5 {
@@ -308,9 +287,7 @@ fn handle_start_replication(
     let slot_name = tokens[2];
     // tokens[3] should be "LOGICAL"
     if !tokens[3].eq_ignore_ascii_case("LOGICAL") {
-        return ReplicationResult::Error(
-            "only LOGICAL replication is supported".into(),
-        );
+        return ReplicationResult::Error("only LOGICAL replication is supported".into());
     }
 
     let start_lsn = parse_lsn(tokens[4]).unwrap_or(0);
@@ -354,10 +331,7 @@ pub fn encode_change_event_text(event: &ChangeEvent) -> String {
         ChangeOp::Commit => format!("COMMIT {}", event.txn_id.0),
         ChangeOp::Rollback => format!("ROLLBACK {}", event.txn_id.0),
         ChangeOp::Insert => {
-            let table = event
-                .table_name
-                .as_deref()
-                .unwrap_or("unknown");
+            let table = event.table_name.as_deref().unwrap_or("unknown");
             let row_str = event
                 .new_row
                 .as_ref()
@@ -366,10 +340,7 @@ pub fn encode_change_event_text(event: &ChangeEvent) -> String {
             format!("table public.{}: INSERT: {}", table, row_str)
         }
         ChangeOp::Update => {
-            let table = event
-                .table_name
-                .as_deref()
-                .unwrap_or("unknown");
+            let table = event.table_name.as_deref().unwrap_or("unknown");
             let row_str = event
                 .new_row
                 .as_ref()
@@ -378,21 +349,12 @@ pub fn encode_change_event_text(event: &ChangeEvent) -> String {
             format!("table public.{}: UPDATE: {}", table, row_str)
         }
         ChangeOp::Delete => {
-            let table = event
-                .table_name
-                .as_deref()
-                .unwrap_or("unknown");
-            let pk_str = event
-                .pk_values
-                .as_deref()
-                .unwrap_or("(unknown pk)");
+            let table = event.table_name.as_deref().unwrap_or("unknown");
+            let pk_str = event.pk_values.as_deref().unwrap_or("(unknown pk)");
             format!("table public.{}: DELETE: {}", table, pk_str)
         }
         ChangeOp::Ddl => {
-            let ddl = event
-                .ddl_text
-                .as_deref()
-                .unwrap_or("(unknown DDL)");
+            let ddl = event.ddl_text.as_deref().unwrap_or("(unknown DDL)");
             format!("DDL: {}", ddl)
         }
     }
@@ -610,10 +572,7 @@ mod tests {
         assert!(matches!(result, ReplicationResult::Error(_)));
 
         // Drop
-        let result = handle_replication_command(
-            "DROP_REPLICATION_SLOT test_slot",
-            &storage,
-        );
+        let result = handle_replication_command("DROP_REPLICATION_SLOT test_slot", &storage);
         match result {
             ReplicationResult::Messages(msgs) => {
                 assert_eq!(msgs.len(), 1);
@@ -626,10 +585,7 @@ mod tests {
         }
 
         // Drop non-existent should fail
-        let result = handle_replication_command(
-            "DROP_REPLICATION_SLOT nonexistent",
-            &storage,
-        );
+        let result = handle_replication_command("DROP_REPLICATION_SLOT nonexistent", &storage);
         assert!(matches!(result, ReplicationResult::Error(_)));
     }
 
@@ -644,10 +600,8 @@ mod tests {
         );
 
         // Start replication
-        let result = handle_replication_command(
-            "START_REPLICATION SLOT my_slot LOGICAL 0/0",
-            &storage,
-        );
+        let result =
+            handle_replication_command("START_REPLICATION SLOT my_slot LOGICAL 0/0", &storage);
         match result {
             ReplicationResult::StartStreaming {
                 slot_name,
@@ -669,10 +623,8 @@ mod tests {
     #[test]
     fn test_start_replication_missing_slot() {
         let storage = Arc::new(StorageEngine::new_in_memory());
-        let result = handle_replication_command(
-            "START_REPLICATION SLOT nonexistent LOGICAL 0/0",
-            &storage,
-        );
+        let result =
+            handle_replication_command("START_REPLICATION SLOT nonexistent LOGICAL 0/0", &storage);
         assert!(matches!(result, ReplicationResult::Error(_)));
     }
 
@@ -687,7 +639,10 @@ mod tests {
             table_id: None,
             table_name: Some("users".into()),
             timestamp_ms: 0,
-            new_row: Some(OwnedRow::new(vec![Datum::Int32(1), Datum::Text("Alice".into())])),
+            new_row: Some(OwnedRow::new(vec![
+                Datum::Int32(1),
+                Datum::Text("Alice".into()),
+            ])),
             old_row: None,
             pk_values: None,
             ddl_text: None,
@@ -756,9 +711,9 @@ mod tests {
     fn test_standby_status_update_parse() {
         let mut data = vec![b'r'];
         data.extend_from_slice(&100u64.to_be_bytes()); // write_lsn
-        data.extend_from_slice(&90u64.to_be_bytes());  // flush_lsn
-        data.extend_from_slice(&80u64.to_be_bytes());  // apply_lsn
-        data.extend_from_slice(&0i64.to_be_bytes());   // sendTime
+        data.extend_from_slice(&90u64.to_be_bytes()); // flush_lsn
+        data.extend_from_slice(&80u64.to_be_bytes()); // apply_lsn
+        data.extend_from_slice(&0i64.to_be_bytes()); // sendTime
         data.push(1); // reply requested
 
         let status = StandbyStatusUpdate::parse(&data).unwrap();
@@ -804,10 +759,7 @@ mod tests {
         assert!(matches!(result, ReplicationResult::Error(_)));
 
         // Wrong type (PHYSICAL instead of LOGICAL)
-        let result = handle_replication_command(
-            "CREATE_REPLICATION_SLOT s1 PHYSICAL",
-            &storage,
-        );
+        let result = handle_replication_command("CREATE_REPLICATION_SLOT s1 PHYSICAL", &storage);
         assert!(matches!(result, ReplicationResult::Error(_)));
     }
 
@@ -816,10 +768,7 @@ mod tests {
         let storage = Arc::new(StorageEngine::new_in_memory());
 
         // Missing SLOT keyword
-        let result = handle_replication_command(
-            "START_REPLICATION my_slot LOGICAL 0/0",
-            &storage,
-        );
+        let result = handle_replication_command("START_REPLICATION my_slot LOGICAL 0/0", &storage);
         assert!(matches!(result, ReplicationResult::Error(_)));
 
         // Too few args

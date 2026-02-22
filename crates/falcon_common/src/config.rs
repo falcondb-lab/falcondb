@@ -575,7 +575,10 @@ impl DeprecatedFieldChecker {
             patterns.push(format!("{}=", parts[0]));
         } else {
             // Nested field: replication.master_endpoint
-            let key = parts.last().unwrap();
+            let key = match parts.last() {
+                Some(k) => k,
+                None => return patterns,
+            };
             patterns.push(format!("{} =", key));
             patterns.push(format!("{}=", key));
         }

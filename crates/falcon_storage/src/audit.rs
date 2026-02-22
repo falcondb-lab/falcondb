@@ -69,7 +69,11 @@ impl AuditLog {
                     drained_clone.fetch_add(1, Ordering::Release);
                 }
             })
-            .expect("failed to spawn audit drain thread");
+            .unwrap_or_else(|e| {
+                tracing::error!("failed to spawn audit drain thread: {}", e);
+                // Spawn a no-op thread — audit will be non-functional but server won't crash
+                std::thread::spawn(|| {})
+            });
 
         Self {
             tx,

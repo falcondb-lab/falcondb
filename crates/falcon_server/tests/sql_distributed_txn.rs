@@ -13,12 +13,12 @@
 
 mod common;
 
-use falcon_common::consistency::CrossShardInvariant;
-use falcon_common::types::{ShardId, TxnId};
 use falcon_cluster::deterministic_2pc::{
     CoordinatorDecision, CoordinatorDecisionLog, DecisionLogConfig,
 };
 use falcon_cluster::indoubt_resolver::{InDoubtResolver, TxnOutcomeCache};
+use falcon_common::consistency::CrossShardInvariant;
+use falcon_common::types::{ShardId, TxnId};
 use std::time::Duration;
 
 // ─── XS-1: Atomicity ────────────────────────────────────────────────────────
@@ -91,12 +91,7 @@ fn xs3_coordinator_crash_unapplied_decisions_survive() {
     let log = CoordinatorDecisionLog::new(DecisionLogConfig::default());
 
     // Three transactions: one applied, two unapplied (simulating crash)
-    log.log_decision(
-        TxnId(3001),
-        CoordinatorDecision::Commit,
-        &[ShardId(0)],
-        100,
-    );
+    log.log_decision(TxnId(3001), CoordinatorDecision::Commit, &[ShardId(0)], 100);
     log.mark_applied(TxnId(3001)); // This one completed before crash
 
     log.log_decision(
@@ -105,12 +100,7 @@ fn xs3_coordinator_crash_unapplied_decisions_survive() {
         &[ShardId(0), ShardId(1)],
         200,
     );
-    log.log_decision(
-        TxnId(3003),
-        CoordinatorDecision::Abort,
-        &[ShardId(1)],
-        50,
-    );
+    log.log_decision(TxnId(3003), CoordinatorDecision::Abort, &[ShardId(1)], 50);
 
     // Recovery: enumerate unapplied
     let unapplied = log.unapplied_decisions();
@@ -214,7 +204,11 @@ fn all_cross_shard_invariants_have_descriptions() {
     assert_eq!(invariants.len(), 5, "expected 5 cross-shard invariants");
     for inv in &invariants {
         let desc = inv.description();
-        assert!(!desc.is_empty(), "invariant {:?} has empty description", inv);
+        assert!(
+            !desc.is_empty(),
+            "invariant {:?} has empty description",
+            inv
+        );
     }
 }
 

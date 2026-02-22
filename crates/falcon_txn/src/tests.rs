@@ -1163,15 +1163,18 @@ mod admission_backpressure_tests {
     #[test]
     fn test_admission_rejection_counter_incremented() {
         use falcon_storage::memory::MemoryBudget;
-        let storage = Arc::new(StorageEngine::new_in_memory_with_budget(
-            MemoryBudget::new(100, 200),
-        ));
+        let storage = Arc::new(StorageEngine::new_in_memory_with_budget(MemoryBudget::new(
+            100, 200,
+        )));
         let mgr = TxnManager::new(storage.clone());
         // Push to CRITICAL
         storage.memory_tracker().alloc_mvcc(300);
         let _ = mgr.try_begin(IsolationLevel::ReadCommitted);
         let stats = mgr.stats_snapshot();
-        assert!(stats.admission_rejections >= 1, "admission rejection counter must increment");
+        assert!(
+            stats.admission_rejections >= 1,
+            "admission rejection counter must increment"
+        );
     }
 }
 
@@ -1280,7 +1283,10 @@ mod long_txn_detection_tests {
             mgr.alloc_ts();
         }
         let info = mgr.gc_safepoint_info();
-        assert!(info.stalled, "GC safepoint should be stalled by long-running txn");
+        assert!(
+            info.stalled,
+            "GC safepoint should be stalled by long-running txn"
+        );
         assert!(info.longest_txn_age_us >= 0);
     }
 }

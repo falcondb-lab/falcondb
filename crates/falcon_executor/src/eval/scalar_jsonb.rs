@@ -270,7 +270,7 @@ fn datum_to_json_value(d: &Datum) -> JsonValue {
         Datum::Timestamp(us) => JsonValue::Number((*us).into()),
         Datum::Date(days) => {
             let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
-                .expect("unix epoch date is always valid");
+                .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or(chrono::NaiveDate::MIN));
             if let Some(d) = epoch.checked_add_signed(chrono::Duration::days(*days as i64)) {
                 JsonValue::String(d.format("%Y-%m-%d").to_string())
             } else {

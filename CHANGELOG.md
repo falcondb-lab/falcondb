@@ -7,6 +7,157 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.0.3] — 2026-02-22 — Stability, Determinism & Trust Hardening (LTS Patch)
+
+This is a **stability-only hardening release**. No new features, no new SQL syntax,
+no new APIs, no protocol changes. Safe rolling upgrade from v1.0.2.
+Eliminates undefined behavior under stress, retries, partial failure, and malformed client behavior.
+
+### Added — Stability Hardening Module (`stability_hardening.rs`)
+- **`TxnStateGuard`** (§1) — runtime forward-only state transition enforcement
+  - Per-txn high-water-mark tracking to detect state regression after failover
+  - Bounded audit trail of all transitions for post-mortem analysis
+  - Structured error on regression: `TxnError::InvalidTransition` with HWM context
+- **`CommitPhaseTracker`** (§2) — explicit commit phase tracking (CP-L → CP-D → CP-V → CP-A)
+  - Forward-only phase progression enforced
+  - Once CP-V reached, outcome is irreversible
+  - Duplicate commit signals are idempotent no-ops
+- **`RetryGuard`** (§3) — duplicate txn_id and reordered retry detection
+  - Conflicting payload rejection (different fingerprint on same txn_id)
+  - Protocol phase regression rejection (e.g., Begin after Commit)
+  - Configurable max retry count per txn_id
+- **`InDoubtEscalator`** (§4) — periodic escalation of stale in-doubt transactions
+  - Configurable escalation threshold (forced abort after timeout)
+  - Bounded history of escalation records
+  - Ensures no in-doubt transaction blocks unrelated transactions
+- **`FailoverOutcomeGuard`** (§5) — at-most-once commit enforcement under leader change
+  - Stale epoch rejection
+  - Duplicate commit detection and rejection
+  - Epoch advancement on failover
+- **`ErrorClassStabilizer`** (§6) — deterministic error classification validation
+  - Caches (error_description → ErrorKind) mappings
+  - Detects classification instability across invocations
+- **`DefensiveValidator`** (§7) — early rejection of malformed inputs
+  - Sentinel txn_id rejection (0, MAX)
+  - Unknown state name rejection
+  - Invalid protocol message ordering rejection
+- **`TxnOutcomeJournal`** (§8) — observability journal for transaction outcomes
+  - Records final state, in-doubt reason, resolution method, resolution latency
+  - Bounded capacity with automatic eviction
+  - Queryable by txn_id or recent history
+
+### Added — CI Gate
+- `scripts/ci_v103_stability_gate.sh` — 7-gate verification: §1-§8 unit tests, §9 stress tests, v1.0.2 failover×txn tests, v1.0.2 test matrix, txn state machine, full suite, zero-panic baseline
+
+### Test Coverage (45 new tests)
+- §1 TxnStateGuard: forward transitions, idempotent terminal, regression rejection, unknown state, audit trail (5)
+- §2 CommitPhaseTracker: forward progression, idempotent, irreversibility, metrics (4)
+- §3 RetryGuard: first attempt, same fingerprint, conflicting payload, reordered phase, excessive retries (5)
+- §4 InDoubtEscalator: no escalation before threshold, forced abort after, remove resolved, metrics (4)
+- §5 FailoverOutcomeGuard: first commit, duplicate rejection, stale epoch, advance epoch, was_committed (5)
+- §6 ErrorClassStabilizer: stable class, instability detection, FalconError classification (3)
+- §7 DefensiveValidator: valid/invalid txn_ids, state names, message ordering, metrics (6)
+- §8 TxnOutcomeJournal: record/lookup, in-doubt entry, recent, bounded capacity, counters (5)
+- §9 Stress: high retry rate, concurrent duplicate txn_id, rapid leader churn, in-doubt escalation, crash+restart loops, error classification stability, defensive malformed input, full lifecycle integration (8)
+
+### Verification Results
+- **New tests**: 45 pass, 0 failures
+- **Full workspace**: 2,599 pass, 0 failures
+- **v1.0.2 failover×txn tests**: all pass (no regression)
+- **v1.0.1 zero-panic baseline**: maintained
+
+---
+
+## [1.0.2] — 2026-02-22 — Transaction & Failover Hardening (LTS Patch)
+
+This is a **transaction and failover hardening patch**. No changes to transaction
+semantics, SQL behavior, or commit point definitions. Safe rolling upgrade from v1.0.1.
+Improves determinism under failure scenarios.
+
+### Added — Failover × Transaction Coordinator (`failover_txn_hardening.rs`)
+- **`FailoverTxnCoordinator`** — atomic failover×txn interaction with 3-phase lifecycle (Normal → Draining → Converging → Normal)
+  - Blocks new writes during failover drain phase
+  - Deterministically drains active transactions (abort, complete, or move to in-doubt)
+  - No partial commits visible to clients during failover
+  - Bounded drain timeout with configurable deadline (default 5s)
+  - Convergence tracking after failover completes (default 30s window)
+  - Per-failover affected-txn records (bounded memory)
+- **`InDoubtTtlEnforcer`** — bounded in-doubt transaction lifetime
+  - Hard maximum lifetime for in-doubt transactions (default 60s)
+  - Forced abort after TTL expiry — no infinite persistence
+  - Warning at 80% TTL threshold
+  - Structured logging for every TTL expiration
+- **`FailoverDamper`** — churn suppression for rapid failover oscillation
+  - Minimum interval between consecutive failovers (default 30s)
+  - Rate-limit: max 3 failovers per 5-minute observation window
+  - Structured logging for suppressed failover attempts
+  - History tracking for observability
+- **`FailoverBlockedTxnGuard`** — tail-latency protection
+  - Bounded timeout for transactions blocked by in-progress failover (default 10s)
+  - Deterministic fail-fast (`TxnError::Timeout`) when timeout exceeded
+  - p50/p99/max latency percentile tracking for convergence monitoring
+  - `is_converged()` check: p99 ≤ 2× p50 after failover
+
+### Added — CI Gate
+- `scripts/ci_v102_failover_gate.sh` — 7-gate verification: failover×txn tests, txn state machine, in-doubt resolver, cross-shard retry, HA/failover, full suite, zero-panic baseline
+
+### Test Coverage (35 new tests)
+- Failover during single-shard transaction
+- Failover during cross-shard prepare phase
+- Failover during commit barrier
+- Duplicate commit/abort idempotency
+- Coordinator crash → in-doubt resolution with TTL
+- Rapid repeated failovers (churn damping)
+- Blocked txn timeout enforcement
+- Drain timeout enforcement
+- Convergence tracking
+- Full failover lifecycle integration test
+
+### Verification Results
+- **New tests**: 35 pass, 0 failures
+- **Full workspace**: all tests pass, 0 failures
+- **v1.0.1 zero-panic baseline**: maintained (0 unwrap/expect/panic in production)
+
+---
+
+## [1.0.1] — 2026-02-22 — Crash & Error Baseline (LTS Patch)
+
+This is a **stability-only patch**. No behavior changes, no feature additions.
+Safe for rolling upgrade from v1.0.0. No rollback required for clients.
+
+### Fixed — Zero Panic Policy (Production Path)
+- **falcon_common/consistency.rs**: 14 `RwLock::unwrap()` → poison-recovery `unwrap_or_else(|p| p.into_inner())`
+- **falcon_common/config.rs**: 1 `parts.last().unwrap()` → safe `match` with early return
+- **falcon_protocol_pg/handler_show.rs**: 2 `dist_engine.unwrap()` → explicit `match` with structured error return
+- **falcon_sql_frontend/binder_select.rs**: 1 `find_column().unwrap()` → `match`/`continue`; 1 `over.unwrap()` → `ok_or_else` with `SqlError`
+- **falcon_executor/eval/cast.rs**: 1 `and_hms_opt().expect()` → `match` with `TypeError`; 1 chrono epoch `expect()` → `unwrap_or_else`
+- **falcon_executor/eval/scalar_time.rs**: 1 chrono epoch `expect()` → `unwrap_or_else`
+- **falcon_executor/eval/scalar_time_ext.rs**: 2 chrono epoch `expect()` → `unwrap_or_else`
+- **falcon_executor/eval/scalar_array_ext.rs**: 1 chrono epoch `expect()` → `unwrap_or_else`
+- **falcon_executor/eval/scalar_jsonb.rs**: 1 chrono epoch `expect()` → `unwrap_or_else`
+- **falcon_executor/eval/scalar_regex.rs**: 1 `caps.get(0).expect()` → safe `match`
+- **falcon_executor/executor_copy.rs**: 2 chrono epoch `expect()` → `unwrap_or_else`
+- **falcon_storage/audit.rs**: 1 thread spawn `expect()` → `unwrap_or_else` with graceful degradation
+
+### Added — Unified Error Model (Stable)
+- `FalconError::log_if_fatal()` — structured log emission for every Fatal/InternalBug error
+- `FalconError::affected_component()` — deterministic component identification (storage/txn/sql/protocol/executor/cluster/resource/internal)
+- Stable log format: `error_code`, `error_category=Fatal`, `component`, `sqlstate`, `debug_context`
+- Every Fatal error emits structured log entry before client response
+
+### Added — CI Gate
+- `scripts/ci_v101_crash_gate.sh` — 6-gate verification: zero unwrap/expect/panic in production code, full test suite, error model tests, clippy clean
+
+### Verification Results
+- **Production-path `unwrap()`**: 0 (was 19)
+- **Production-path `expect()`**: 0 (was 11, excluding build.rs)
+- **Production-path `panic!()`**: 0 (unchanged)
+- **Full workspace test suite**: all pass, 0 failures
+- **Error categories**: UserError, Retryable, Transient, InternalBug (Fatal) — deterministic, stable
+- **SQLSTATE mappings**: 30+ stable codes covering all error variants
+
+---
+
 ## [Unreleased]
 
 ### Added — v1.0 Commercial Release Gate (P1)

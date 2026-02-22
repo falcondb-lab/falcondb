@@ -19,9 +19,9 @@ use falcon_common::schema::{Catalog, TableSchema};
 use falcon_common::types::{TableId, Timestamp, TxnId, TxnType};
 
 use crate::memory::{MemoryBudget, MemoryTracker};
-use crate::stats::TableStatistics;
 use crate::memtable::{MemTable, PrimaryKey};
 use crate::partition::PartitionManager;
+use crate::stats::TableStatistics;
 use crate::wal::{CheckpointData, SyncMode, WalRecord, WalWriter};
 
 use falcon_common::rls::RlsPolicyManager;

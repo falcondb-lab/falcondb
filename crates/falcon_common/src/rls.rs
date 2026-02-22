@@ -195,9 +195,7 @@ impl RlsPolicyManager {
 
     /// Check if RLS is enabled on a table.
     pub fn is_rls_enabled(&self, table_id: TableId) -> bool {
-        self.table_config
-            .get(&table_id)
-            .is_some_and(|c| c.enabled)
+        self.table_config.get(&table_id).is_some_and(|c| c.enabled)
     }
 
     /// Check if RLS is forced for table owner.

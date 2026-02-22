@@ -959,8 +959,10 @@ impl Binder {
                                 if let Some(left_idx) =
                                     left_col_names.iter().position(|n| *n == rname)
                                 {
-                                    let right_idx =
-                                        right_schema.find_column(&right_col.name).unwrap();
+                                    let right_idx = match right_schema.find_column(&right_col.name) {
+                                        Some(idx) => idx,
+                                        None => continue,
+                                    };
                                     let eq_expr = BoundExpr::BinaryOp {
                                         left: Box::new(BoundExpr::ColumnRef(left_idx)),
                                         op: BinOp::Eq,
@@ -1517,7 +1519,7 @@ impl Binder {
                 };
 
                 // Parse OVER clause — resolve named window references
-                let window_spec = match func.over.as_ref().unwrap() {
+                let window_spec = match func.over.as_ref().ok_or_else(|| SqlError::Unsupported("window function missing OVER clause".into()))? {
                     ast::WindowType::WindowSpec(spec) => std::borrow::Cow::Borrowed(spec),
                     ast::WindowType::NamedWindow(ident) => {
                         let name = ident.value.to_lowercase();

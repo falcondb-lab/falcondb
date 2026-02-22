@@ -149,7 +149,11 @@ impl BgTaskSupervisor {
                 reason = reason,
                 critical = is_critical,
                 "bg task FAILED{}",
-                if is_critical { " — node DEGRADED" } else { "" }
+                if is_critical {
+                    " — node DEGRADED"
+                } else {
+                    ""
+                }
             );
         }
     }
@@ -168,8 +172,7 @@ impl BgTaskSupervisor {
     pub fn node_health(&self) -> NodeHealth {
         let tasks = self.tasks.read();
         for task in tasks.values() {
-            if task.criticality == BgTaskCriticality::Critical
-                && task.state == BgTaskState::Failed
+            if task.criticality == BgTaskCriticality::Critical && task.state == BgTaskState::Failed
             {
                 return NodeHealth::Degraded;
             }

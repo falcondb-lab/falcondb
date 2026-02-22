@@ -531,8 +531,12 @@ impl CrossShardInvariant {
         match self {
             Self::Atomicity => cross_shard_invariants::XS_1_ATOMICITY,
             Self::AtMostOnceCommit => cross_shard_invariants::XS_2_AT_MOST_ONCE,
-            Self::CoordinatorCrashRecovery => cross_shard_invariants::XS_3_COORDINATOR_CRASH_RECOVERY,
-            Self::ParticipantCrashRecovery => cross_shard_invariants::XS_4_PARTICIPANT_CRASH_RECOVERY,
+            Self::CoordinatorCrashRecovery => {
+                cross_shard_invariants::XS_3_COORDINATOR_CRASH_RECOVERY
+            }
+            Self::ParticipantCrashRecovery => {
+                cross_shard_invariants::XS_4_PARTICIPANT_CRASH_RECOVERY
+            }
             Self::TimeoutRollback => cross_shard_invariants::XS_5_TIMEOUT_ROLLBACK,
         }
     }
@@ -857,9 +861,9 @@ impl CommitPointTracker {
     /// Record the LogicalCommit timestamp for a transaction.
     pub fn record_logical(&self, txn_id: TxnId, timestamp_us: u64) {
         self.ensure_entry(txn_id);
-        let idx = self.index.read().unwrap();
+        let idx = self.index.read().unwrap_or_else(|p| p.into_inner());
         if let Some(&pos) = idx.get(&txn_id) {
-            let mut entries = self.entries.write().unwrap();
+            let mut entries = self.entries.write().unwrap_or_else(|p| p.into_inner());
             if let Some(entry) = entries.get_mut(pos) {
                 entry.logical_us = Some(timestamp_us);
             }
@@ -869,9 +873,9 @@ impl CommitPointTracker {
     /// Record the DurableCommit timestamp for a transaction.
     pub fn record_durable(&self, txn_id: TxnId, timestamp_us: u64) {
         self.ensure_entry(txn_id);
-        let idx = self.index.read().unwrap();
+        let idx = self.index.read().unwrap_or_else(|p| p.into_inner());
         if let Some(&pos) = idx.get(&txn_id) {
-            let mut entries = self.entries.write().unwrap();
+            let mut entries = self.entries.write().unwrap_or_else(|p| p.into_inner());
             if let Some(entry) = entries.get_mut(pos) {
                 entry.durable_us = Some(timestamp_us);
             }
@@ -881,9 +885,9 @@ impl CommitPointTracker {
     /// Record the ClientVisibleCommit timestamp for a transaction.
     pub fn record_visible(&self, txn_id: TxnId, timestamp_us: u64) {
         self.ensure_entry(txn_id);
-        let idx = self.index.read().unwrap();
+        let idx = self.index.read().unwrap_or_else(|p| p.into_inner());
         if let Some(&pos) = idx.get(&txn_id) {
-            let mut entries = self.entries.write().unwrap();
+            let mut entries = self.entries.write().unwrap_or_else(|p| p.into_inner());
             if let Some(entry) = entries.get_mut(pos) {
                 entry.visible_us = Some(timestamp_us);
             }
@@ -892,15 +896,15 @@ impl CommitPointTracker {
 
     /// Get a commit point entry for a specific transaction.
     pub fn get(&self, txn_id: TxnId) -> Option<CommitPointEntry> {
-        let idx = self.index.read().unwrap();
+        let idx = self.index.read().unwrap_or_else(|p| p.into_inner());
         let pos = idx.get(&txn_id)?;
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read().unwrap_or_else(|p| p.into_inner());
         entries.get(*pos).cloned()
     }
 
     /// Compute aggregate lag statistics from all tracked entries.
     pub fn lag_stats(&self) -> CommitPointLagStats {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read().unwrap_or_else(|p| p.into_inner());
         if entries.is_empty() {
             return CommitPointLagStats::default();
         }
@@ -962,23 +966,23 @@ impl CommitPointTracker {
 
     /// Number of tracked entries.
     pub fn len(&self) -> usize {
-        self.entries.read().unwrap().len()
+        self.entries.read().unwrap_or_else(|p| p.into_inner()).len()
     }
 
     /// Whether the tracker is empty.
     pub fn is_empty(&self) -> bool {
-        self.entries.read().unwrap().is_empty()
+        self.entries.read().unwrap_or_else(|p| p.into_inner()).is_empty()
     }
 
     fn ensure_entry(&self, txn_id: TxnId) {
         {
-            let idx = self.index.read().unwrap();
+            let idx = self.index.read().unwrap_or_else(|p| p.into_inner());
             if idx.contains_key(&txn_id) {
                 return;
             }
         }
-        let mut entries = self.entries.write().unwrap();
-        let mut idx = self.index.write().unwrap();
+        let mut entries = self.entries.write().unwrap_or_else(|p| p.into_inner());
+        let mut idx = self.index.write().unwrap_or_else(|p| p.into_inner());
 
         // Evict oldest if at capacity
         while entries.len() >= self.max_entries {

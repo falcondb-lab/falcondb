@@ -130,8 +130,11 @@ impl TxnState {
             // Idempotent re-entries
             (Committed, Committed) | (Aborted, Aborted) => Ok(TransitionResult::Idempotent),
             // Valid forward transitions
-            (Active, Prepared) | (Active, Committed) | (Active, Aborted)
-            | (Prepared, Committed) | (Prepared, Aborted) => {
+            (Active, Prepared)
+            | (Active, Committed)
+            | (Active, Aborted)
+            | (Prepared, Committed)
+            | (Prepared, Aborted) => {
                 *self = target;
                 Ok(TransitionResult::Applied)
             }
@@ -1430,7 +1433,9 @@ impl TxnManager {
         self.active_txns
             .iter()
             .filter_map(|e| {
-                let age = e.value().begin_instant
+                let age = e
+                    .value()
+                    .begin_instant
                     .map(|i| i.elapsed().as_micros() as u64)
                     .unwrap_or(0);
                 if age >= threshold_us {
@@ -1451,7 +1456,8 @@ impl TxnManager {
     /// B7: Kill all transactions running longer than `threshold_us`.
     /// Returns the number of transactions killed.
     pub fn kill_long_running(&self, threshold_us: u64) -> usize {
-        let victims: Vec<TxnId> = self.long_running_txns(threshold_us)
+        let victims: Vec<TxnId> = self
+            .long_running_txns(threshold_us)
             .into_iter()
             .map(|(id, _, _, _)| id)
             .collect();

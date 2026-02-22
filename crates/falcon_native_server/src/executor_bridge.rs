@@ -60,7 +60,13 @@ impl ExecutorBridge {
         let stmts = match parse_sql(&req.sql) {
             Ok(s) => s,
             Err(e) => {
-                return Err(self.make_error(req.request_id, ERR_SYNTAX_ERROR, *b"42601", false, &format!("{}", e)));
+                return Err(self.make_error(
+                    req.request_id,
+                    ERR_SYNTAX_ERROR,
+                    *b"42601",
+                    false,
+                    &format!("{}", e),
+                ));
             }
         };
 
@@ -79,7 +85,13 @@ impl ExecutorBridge {
         let bound = match binder.bind(&stmts[0]) {
             Ok(b) => b,
             Err(e) => {
-                return Err(self.make_error(req.request_id, ERR_SYNTAX_ERROR, *b"42000", false, &format!("{}", e)));
+                return Err(self.make_error(
+                    req.request_id,
+                    ERR_SYNTAX_ERROR,
+                    *b"42000",
+                    false,
+                    &format!("{}", e),
+                ));
             }
         };
 
@@ -87,20 +99,23 @@ impl ExecutorBridge {
         let plan = match Planner::plan(&bound) {
             Ok(p) => p,
             Err(e) => {
-                return Err(self.make_error(req.request_id, ERR_INTERNAL_ERROR, *b"XX000", false, &format!("{}", e)));
+                return Err(self.make_error(
+                    req.request_id,
+                    ERR_INTERNAL_ERROR,
+                    *b"XX000",
+                    false,
+                    &format!("{}", e),
+                ));
             }
         };
 
         // Auto-transaction for the query
         let is_autocommit = req.session_flags & SESSION_AUTOCOMMIT != 0;
         let txn = if is_autocommit {
-            Some(
-                self.txn_mgr
-                    .begin_with_classification(
-                        IsolationLevel::ReadCommitted,
-                        TxnClassification::local(ShardId(0)),
-                    ),
-            )
+            Some(self.txn_mgr.begin_with_classification(
+                IsolationLevel::ReadCommitted,
+                TxnClassification::local(ShardId(0)),
+            ))
         } else {
             None
         };
@@ -235,7 +250,9 @@ impl ExecutorBridge {
                 Ok(exec_result) => {
                     let _ = self.txn_mgr.commit(txn.txn_id);
                     match exec_result {
-                        ExecutionResult::Dml { rows_affected, .. } => counts.push(rows_affected as i64),
+                        ExecutionResult::Dml { rows_affected, .. } => {
+                            counts.push(rows_affected as i64)
+                        }
                         _ => counts.push(1),
                     }
                 }

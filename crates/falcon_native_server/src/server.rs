@@ -33,18 +33,10 @@ impl NativeServer {
 
     /// Process a single message from a connected client.
     /// Returns the response message(s) to send back.
-    pub fn handle_message(
-        &self,
-        msg: &Message,
-        session: &mut NativeSession,
-    ) -> Vec<Message> {
+    pub fn handle_message(&self, msg: &Message, session: &mut NativeSession) -> Vec<Message> {
         match msg {
-            Message::ClientHello(hello) => {
-                self.handle_client_hello(hello, session)
-            }
-            Message::AuthResponse(auth) => {
-                self.handle_auth_response(auth, session)
-            }
+            Message::ClientHello(hello) => self.handle_client_hello(hello, session),
+            Message::AuthResponse(auth) => self.handle_auth_response(auth, session),
             Message::QueryRequest(req) => {
                 if !session.is_ready() {
                     return vec![Message::ErrorResponse(ErrorResponse {
@@ -97,7 +89,11 @@ impl NativeServer {
                     sqlstate: *b"XX000",
                     retryable: false,
                     server_epoch: self.config.epoch,
-                    message: format!("unexpected message type 0x{:02x} in state {:?}", msg.msg_type(), session.state),
+                    message: format!(
+                        "unexpected message type 0x{:02x} in state {:?}",
+                        msg.msg_type(),
+                        session.state
+                    ),
                 })]
             }
         }
@@ -118,8 +114,10 @@ impl NativeServer {
                 server_epoch: self.config.epoch,
                 message: format!(
                     "unsupported protocol version: {}.{} (server supports {}.{})",
-                    hello.version_major, hello.version_minor,
-                    PROTOCOL_VERSION_MAJOR, PROTOCOL_VERSION_MINOR,
+                    hello.version_major,
+                    hello.version_minor,
+                    PROTOCOL_VERSION_MAJOR,
+                    PROTOCOL_VERSION_MINOR,
                 ),
             })];
         }
@@ -139,10 +137,8 @@ impl NativeServer {
         session.on_client_hello(hello);
 
         // Negotiate features: intersection of client and server capabilities
-        let server_features = FEATURE_BATCH_INGEST
-            | FEATURE_PIPELINE
-            | FEATURE_EPOCH_FENCING
-            | FEATURE_BINARY_PARAMS;
+        let server_features =
+            FEATURE_BATCH_INGEST | FEATURE_PIPELINE | FEATURE_EPOCH_FENCING | FEATURE_BINARY_PARAMS;
         let negotiated = hello.feature_flags & server_features;
 
         // Build server hello
@@ -154,8 +150,14 @@ impl NativeServer {
             server_node_id: self.config.node_id,
             server_nonce: rand_nonce(),
             params: vec![
-                Param { key: "server_version".into(), value: env!("CARGO_PKG_VERSION").to_string() },
-                Param { key: "node_id".into(), value: self.config.node_id.to_string() },
+                Param {
+                    key: "server_version".into(),
+                    value: env!("CARGO_PKG_VERSION").to_string(),
+                },
+                Param {
+                    key: "node_id".into(),
+                    value: self.config.node_id.to_string(),
+                },
             ],
         });
 
@@ -184,7 +186,10 @@ impl NativeServer {
             session.set_ready();
             vec![Message::AuthOk]
         } else {
-            vec![Message::AuthFail(format!("authentication failed for user '{}'", session.user))]
+            vec![Message::AuthFail(format!(
+                "authentication failed for user '{}'",
+                session.user
+            ))]
         }
     }
 }
@@ -197,7 +202,8 @@ fn rand_nonce() -> [u8; 16] {
         .unwrap_or_default();
     let seed = now.as_nanos() as u64;
     nonce[..8].copy_from_slice(&seed.to_le_bytes());
-    nonce[8..16].copy_from_slice(&(seed.wrapping_mul(6364136223846793005).wrapping_add(1)).to_le_bytes());
+    nonce[8..16]
+        .copy_from_slice(&(seed.wrapping_mul(6364136223846793005).wrapping_add(1)).to_le_bytes());
     nonce
 }
 

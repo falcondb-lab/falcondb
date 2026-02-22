@@ -104,11 +104,7 @@ pub fn decompress_payload(
 
 /// Encode a message with optional compression.
 /// Returns the full frame bytes including the compression tag.
-pub fn encode_compressed_frame(
-    msg_type: u8,
-    payload: &[u8],
-    algo: CompressionAlgo,
-) -> BytesMut {
+pub fn encode_compressed_frame(msg_type: u8, payload: &[u8], algo: CompressionAlgo) -> BytesMut {
     let (compressed, actual_algo) = compress_payload(payload, algo);
     let frame_len = 1 + compressed.len(); // 1 byte tag + compressed payload
     let mut frame = BytesMut::with_capacity(FRAME_HEADER_SIZE + frame_len);
@@ -122,9 +118,7 @@ pub fn encode_compressed_frame(
 /// Decode a compressed frame. Input must start at the compression tag byte
 /// (i.e., after the standard 5-byte frame header has been consumed).
 /// Returns the decompressed payload.
-pub fn decode_compressed_payload(
-    tag_and_payload: &[u8],
-) -> Result<Vec<u8>, NativeProtocolError> {
+pub fn decode_compressed_payload(tag_and_payload: &[u8]) -> Result<Vec<u8>, NativeProtocolError> {
     if tag_and_payload.is_empty() {
         return Err(NativeProtocolError::Truncated {
             expected: 1,
@@ -306,7 +300,10 @@ mod tests {
 
     #[test]
     fn test_algo_from_byte() {
-        assert_eq!(CompressionAlgo::from_byte(0x00), Some(CompressionAlgo::None));
+        assert_eq!(
+            CompressionAlgo::from_byte(0x00),
+            Some(CompressionAlgo::None)
+        );
         assert_eq!(CompressionAlgo::from_byte(0x01), Some(CompressionAlgo::Lz4));
         assert_eq!(CompressionAlgo::from_byte(0x99), None);
     }

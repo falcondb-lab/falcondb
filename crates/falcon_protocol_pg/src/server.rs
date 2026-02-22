@@ -470,8 +470,8 @@ async fn handle_connection_with_timeout(
                 for (key, value) in &params {
                     match key.as_str() {
                         "user" | "database" => {} // already handled above
-                        "client_encoding" | "application_name" | "DateStyle"
-                        | "TimeZone" | "extra_float_digits" | "options" => {
+                        "client_encoding" | "application_name" | "DateStyle" | "TimeZone"
+                        | "extra_float_digits" | "options" => {
                             session.set_guc(key, value);
                         }
                         _ => {
@@ -755,9 +755,18 @@ async fn handle_connection_with_timeout(
                 // Send initial parameter statuses (must match session GUC values).
                 // pgjdbc parses server_version to determine feature support.
                 // Use session GUC values so client-supplied startup params are reflected.
-                let app_name = session.get_guc("application_name").unwrap_or("").to_string();
-                let client_enc = session.get_guc("client_encoding").unwrap_or("UTF8").to_string();
-                let datestyle = session.get_guc("datestyle").unwrap_or("ISO, MDY").to_string();
+                let app_name = session
+                    .get_guc("application_name")
+                    .unwrap_or("")
+                    .to_string();
+                let client_enc = session
+                    .get_guc("client_encoding")
+                    .unwrap_or("UTF8")
+                    .to_string();
+                let datestyle = session
+                    .get_guc("datestyle")
+                    .unwrap_or("ISO, MDY")
+                    .to_string();
                 let timezone = session.get_guc("timezone").unwrap_or("UTC").to_string();
                 let startup_params: Vec<(&str, String)> = vec![
                     ("server_version", "15.0.0".into()),
@@ -1626,16 +1635,10 @@ async fn handle_replication_session(
         while let Some(msg) = codec::decode_message(buf)? {
             match msg {
                 FrontendMessage::Query(sql) => {
-                    tracing::debug!(
-                        "Replication query (session {}): {}",
-                        session_id,
-                        sql
-                    );
+                    tracing::debug!("Replication query (session {}): {}", session_id, sql);
 
-                    let result = logical_replication::handle_replication_command(
-                        &sql,
-                        &handler.storage,
-                    );
+                    let result =
+                        logical_replication::handle_replication_command(&sql, &handler.storage);
 
                     match result {
                         logical_replication::ReplicationResult::Messages(msgs) => {
@@ -1706,10 +1709,7 @@ async fn handle_replication_session(
                     }
                 }
                 FrontendMessage::Terminate => {
-                    tracing::debug!(
-                        "Replication client terminated (session {})",
-                        session_id
-                    );
+                    tracing::debug!("Replication client terminated (session {})", session_id);
                     return Ok(());
                 }
                 _ => {
@@ -1777,17 +1777,13 @@ async fn handle_replication_streaming(
                 let slot_id = slot.id;
                 drop(cdc);
                 let mut cdc_w = storage.cdc_manager.write();
-                let _ = cdc_w.advance_slot(
-                    slot_id,
-                    falcon_storage::cdc::CdcLsn(current_lsn),
-                );
+                let _ = cdc_w.advance_slot(slot_id, falcon_storage::cdc::CdcLsn(current_lsn));
             }
         }
 
         // Send keepalive if interval elapsed
         if last_keepalive.elapsed() >= keepalive_interval {
-            let keepalive =
-                logical_replication::build_keepalive_message(current_lsn, false);
+            let keepalive = logical_replication::build_keepalive_message(current_lsn, false);
             send_message(stream, &BackendMessage::CopyData(keepalive)).await?;
             last_keepalive = std::time::Instant::now();
         }
@@ -1796,10 +1792,7 @@ async fn handle_replication_streaming(
         match tokio::time::timeout(poll_interval, stream.read_buf(buf)).await {
             Ok(Ok(0)) => {
                 // Connection closed
-                tracing::debug!(
-                    "Replication client disconnected (session {})",
-                    session_id
-                );
+                tracing::debug!("Replication client disconnected (session {})", session_id);
                 // Deactivate slot
                 let mut cdc = storage.cdc_manager.write();
                 if let Some(slot) = cdc.get_slot_by_name(slot_name) {
@@ -1842,16 +1835,11 @@ async fn handle_replication_streaming(
                             }
                             // Send reply outside the lock
                             if needs_reply {
-                                let keepalive =
-                                    logical_replication::build_keepalive_message(
-                                        current_lsn,
-                                        false,
-                                    );
-                                send_message(
-                                    stream,
-                                    &BackendMessage::CopyData(keepalive),
-                                )
-                                .await?;
+                                let keepalive = logical_replication::build_keepalive_message(
+                                    current_lsn,
+                                    false,
+                                );
+                                send_message(stream, &BackendMessage::CopyData(keepalive)).await?;
                             }
                         }
                         FrontendMessage::Terminate => {

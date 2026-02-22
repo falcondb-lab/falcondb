@@ -532,9 +532,7 @@ pub fn eval_expr_with_params(
                     idx
                 )));
             }
-            let i = idx
-                .checked_sub(1)
-                .ok_or(ExecutionError::ParamMissing(0))?;
+            let i = idx.checked_sub(1).ok_or(ExecutionError::ParamMissing(0))?;
             params
                 .get(i)
                 .cloned()

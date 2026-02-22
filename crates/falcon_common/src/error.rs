@@ -554,6 +554,47 @@ impl FalconError {
         }
     }
 
+    /// Emit a structured log entry for Fatal/InternalBug errors.
+    /// Must be called for every Fatal error before returning to the client.
+    /// Log format is stable across patch versions.
+    pub fn log_if_fatal(&self) {
+        if let FalconError::InternalBug {
+            error_code,
+            message,
+            debug_context,
+        } = self
+        {
+            tracing::error!(
+                error_code = error_code,
+                error_category = "Fatal",
+                component = Self::affected_component(self),
+                sqlstate = self.pg_sqlstate(),
+                debug_context = debug_context.as_str(),
+                "FATAL [{}]: {} | context: {}",
+                error_code,
+                message,
+                debug_context
+            );
+        }
+    }
+
+    /// Identify the affected component for structured logging.
+    fn affected_component(&self) -> &'static str {
+        match self {
+            FalconError::Storage(_) => "storage",
+            FalconError::Txn(_) => "txn",
+            FalconError::Sql(_) => "sql",
+            FalconError::Protocol(_) => "protocol",
+            FalconError::Execution(_) => "executor",
+            FalconError::Cluster(_) => "cluster",
+            FalconError::Retryable { .. } => "cluster",
+            FalconError::Transient { .. } => "resource",
+            FalconError::InternalBug { .. } => "internal",
+            FalconError::Internal(_) => "internal",
+            FalconError::ReadOnly(_) => "txn",
+        }
+    }
+
     /// Set `debug_context` on an `InternalBug` error. No-op for other variants.
     pub fn with_debug_context(self, ctx: impl Into<String>) -> Self {
         match self {

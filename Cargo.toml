@@ -16,6 +16,7 @@ members = [
     "crates/falcon_observability",
     "crates/falcon_server",
     "crates/falcon_bench",
+    "crates/falcon_cli",
 ]
 
 [workspace.package]

@@ -1968,7 +1968,13 @@ impl QueryHandler {
                 let planner = falcon_cluster::rebalancer::RebalancePlanner::new(
                     falcon_cluster::rebalancer::RebalancerConfig::default(),
                 );
-                let plan = self.dist_engine.as_ref().unwrap().rebalance_plan(&planner);
+                let plan = match self.dist_engine.as_ref() {
+                    Some(de) => de.rebalance_plan(&planner),
+                    None => return Some(self.single_row_result(
+                        vec![("result", 25, -1)],
+                        vec![vec![Some("ERROR: distributed engine unavailable".into())]],
+                    )),
+                };
                 let num_tasks = plan.tasks.len();
                 let total_rows = plan.total_rows_to_move();
 
@@ -1987,7 +1993,13 @@ impl QueryHandler {
 
                 let start = std::time::Instant::now();
                 let (completed, failed, rows_migrated) =
-                    self.dist_engine.as_ref().unwrap().rebalance_execute(&plan);
+                    match self.dist_engine.as_ref() {
+                        Some(de) => de.rebalance_execute(&plan),
+                        None => return Some(self.single_row_result(
+                            vec![("result", 25, -1)],
+                            vec![vec![Some("ERROR: distributed engine unavailable".into())]],
+                        )),
+                    };
 
                 self.cluster_admin.log_rebalance_complete(
                     completed,

@@ -1,4 +1,6 @@
 // ── PRODUCTION modules (always compiled) ──
+pub mod audit;
+pub mod backup;
 pub mod engine;
 mod engine_ddl;
 mod engine_dml;
@@ -18,8 +20,6 @@ pub mod stats;
 pub mod upgrade;
 pub mod verification;
 pub mod wal;
-pub mod audit;
-pub mod backup;
 
 // ── Enterprise stubs (always compiled for handler compat, disabled at runtime) ──
 pub mod cdc;

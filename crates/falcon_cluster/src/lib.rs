@@ -12,6 +12,7 @@ pub mod cluster_ops;
 pub mod cross_shard;
 pub mod deterministic_2pc;
 pub mod distributed_exec;
+pub mod failover_txn_hardening;
 pub mod fault_injection;
 pub mod grpc_transport;
 pub mod ha;
@@ -22,6 +23,7 @@ pub mod replication;
 pub mod routing;
 pub mod security_hardening;
 pub mod sharded_engine;
+pub mod stability_hardening;
 pub mod sharding;
 pub mod token_bucket;
 pub mod two_phase;
@@ -31,8 +33,15 @@ pub mod two_phase;
 pub use falcon_proto::falcon_replication as proto;
 
 #[cfg(test)]
+mod failover_txn_tests;
+#[cfg(test)]
+mod stability_stress_tests;
+#[cfg(test)]
 mod tests;
 
+pub use bg_supervisor::{
+    BgTaskCriticality, BgTaskInfo, BgTaskSnapshot, BgTaskState, BgTaskSupervisor, NodeHealth,
+};
 pub use cluster::{NodeInfo, NodeStatus};
 pub use cluster_ops::{
     ClusterAdmin, ClusterEvent, ClusterEventLog, EventCategory, EventSeverity, NodeModeController,
@@ -72,13 +81,23 @@ pub use security_hardening::{
     PasswordPolicy, PasswordPolicyConfig, PasswordPolicySnapshot, PasswordValidation, SqlFirewall,
     SqlFirewallConfig, SqlFirewallResult, SqlFirewallSnapshot,
 };
+pub use failover_txn_hardening::{
+    FailoverBlockedTxnConfig, FailoverBlockedTxnGuard, FailoverBlockedTxnMetrics,
+    FailoverDamper, FailoverDamperConfig, FailoverDamperMetrics, FailoverEvent,
+    FailoverTxnCoordinator, FailoverTxnConfig, FailoverTxnMetrics, FailoverTxnPhase,
+    FailoverTxnResolution, InDoubtTtlConfig, InDoubtTtlEnforcer, InDoubtTtlMetrics,
+};
+pub use stability_hardening::{
+    CommitPhase, CommitPhaseMetrics, CommitPhaseTracker, DefensiveValidator,
+    DefensiveValidatorMetrics, ErrorClassStabilizer, EscalationOutcome, EscalationRecord,
+    FailoverOutcomeGuard, FailoverOutcomeGuardMetrics, InDoubtEscalator, InDoubtEscalatorMetrics,
+    InDoubtReason, ProtocolPhase, ResolutionMethod, RetryGuard, RetryGuardMetrics,
+    StateOrdinal, TxnOutcomeEntry, TxnOutcomeJournal, TxnStateGuard, TxnStateGuardMetrics,
+};
 pub use sharded_engine::ShardedEngine;
 pub use sharding::{
     all_shards_for_table, compute_shard_hash, compute_shard_hash_from_datums, target_shard_for_row,
     target_shard_from_datums,
-};
-pub use bg_supervisor::{
-    BgTaskCriticality, BgTaskInfo, BgTaskSnapshot, BgTaskState, BgTaskSupervisor, NodeHealth,
 };
 pub use token_bucket::{TokenBucket, TokenBucketConfig, TokenBucketError, TokenBucketSnapshot};
 pub use two_phase::TwoPhaseCoordinator;

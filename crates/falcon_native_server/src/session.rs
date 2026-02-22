@@ -125,7 +125,10 @@ impl SessionRegistry {
     }
 
     /// Register a new session. Returns None if at capacity.
-    pub fn register(&self, session: NativeSession) -> Option<Arc<parking_lot::Mutex<NativeSession>>> {
+    pub fn register(
+        &self,
+        session: NativeSession,
+    ) -> Option<Arc<parking_lot::Mutex<NativeSession>>> {
         if self.sessions.len() >= self.max_sessions {
             return None;
         }

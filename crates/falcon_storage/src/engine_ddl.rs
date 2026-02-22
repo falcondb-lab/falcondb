@@ -161,35 +161,59 @@ impl StorageEngine {
             }
             StorageType::Columnstore => {
                 #[cfg(feature = "columnstore")]
-                { self.columnstore_tables.insert(table_id, Arc::new(ColumnStoreTable::new(schema))); }
+                {
+                    self.columnstore_tables
+                        .insert(table_id, Arc::new(ColumnStoreTable::new(schema)));
+                }
                 #[cfg(not(feature = "columnstore"))]
-                { return Err(StorageError::Io(std::io::Error::other("COLUMNSTORE not available (feature disabled)"))); }
+                {
+                    return Err(StorageError::Io(std::io::Error::other(
+                        "COLUMNSTORE not available (feature disabled)",
+                    )));
+                }
             }
             StorageType::DiskRowstore => {
                 #[cfg(feature = "disk_rowstore")]
                 {
-                    let data_dir = self.data_dir.as_deref().unwrap_or_else(|| std::path::Path::new("."));
+                    let data_dir = self
+                        .data_dir
+                        .as_deref()
+                        .unwrap_or_else(|| std::path::Path::new("."));
                     let table = Arc::new(DiskRowstoreTable::new(schema, data_dir)?);
                     self.disk_tables.insert(table_id, table);
                 }
                 #[cfg(not(feature = "disk_rowstore"))]
-                { return Err(StorageError::Io(std::io::Error::other("DISK_ROWSTORE not available (feature disabled)"))); }
+                {
+                    return Err(StorageError::Io(std::io::Error::other(
+                        "DISK_ROWSTORE not available (feature disabled)",
+                    )));
+                }
             }
             StorageType::LsmRowstore => {
                 #[cfg(feature = "lsm")]
                 {
-                    let data_dir = self.data_dir.as_deref().unwrap_or_else(|| std::path::Path::new("."));
+                    let data_dir = self
+                        .data_dir
+                        .as_deref()
+                        .unwrap_or_else(|| std::path::Path::new("."));
                     let lsm_dir = data_dir.join(format!("lsm_table_{}", table_id.0));
                     let _ = std::fs::remove_dir_all(&lsm_dir);
                     let engine = Arc::new(
-                        crate::lsm::engine::LsmEngine::open(&lsm_dir, crate::lsm::engine::LsmConfig::default())
-                            .map_err(StorageError::Io)?,
+                        crate::lsm::engine::LsmEngine::open(
+                            &lsm_dir,
+                            crate::lsm::engine::LsmConfig::default(),
+                        )
+                        .map_err(StorageError::Io)?,
                     );
                     let table = Arc::new(LsmTable::new(schema, engine));
                     self.lsm_tables.insert(table_id, table);
                 }
                 #[cfg(not(feature = "lsm"))]
-                { return Err(StorageError::Io(std::io::Error::other("LSM not available (feature disabled)"))); }
+                {
+                    return Err(StorageError::Io(std::io::Error::other(
+                        "LSM not available (feature disabled)",
+                    )));
+                }
             }
         }
 

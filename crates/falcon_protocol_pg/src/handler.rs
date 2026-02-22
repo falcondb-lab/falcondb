@@ -3897,9 +3897,16 @@ mod tests {
         let (handler, mut session) = setup_handler();
         let msgs = handler.handle_query("", &mut session);
         // Should return EmptyQueryResponse or at least not panic
-        let has_empty = msgs.iter().any(|m| matches!(m, BackendMessage::EmptyQueryResponse));
-        let has_error = msgs.iter().any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
-        assert!(has_empty || has_error, "empty query should return EmptyQueryResponse or ErrorResponse");
+        let has_empty = msgs
+            .iter()
+            .any(|m| matches!(m, BackendMessage::EmptyQueryResponse));
+        let has_error = msgs
+            .iter()
+            .any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
+        assert!(
+            has_empty || has_error,
+            "empty query should return EmptyQueryResponse or ErrorResponse"
+        );
     }
 
     #[test]
@@ -3914,7 +3921,9 @@ mod tests {
     fn test_syntax_error_returns_error_response() {
         let (handler, mut session) = setup_handler();
         let msgs = handler.handle_query("SELECTTTT 1", &mut session);
-        let has_error = msgs.iter().any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
+        let has_error = msgs
+            .iter()
+            .any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
         assert!(has_error, "syntax error should return ErrorResponse");
     }
 
@@ -3922,7 +3931,10 @@ mod tests {
     fn test_select_1_returns_data() {
         let (handler, mut session) = setup_handler();
         let msgs = handler.handle_query("SELECT 1", &mut session);
-        assert!(has_row_description(&msgs), "SELECT 1 should return RowDescription");
+        assert!(
+            has_row_description(&msgs),
+            "SELECT 1 should return RowDescription"
+        );
         let rows = extract_data_rows(&msgs);
         assert_eq!(rows.len(), 1, "SELECT 1 should return 1 row");
     }
@@ -3931,11 +3943,15 @@ mod tests {
     fn test_begin_commit_lifecycle() {
         let (handler, mut session) = setup_handler();
         let msgs = handler.handle_query("BEGIN", &mut session);
-        let has_begin = msgs.iter().any(|m| matches!(m, BackendMessage::CommandComplete { .. }));
+        let has_begin = msgs
+            .iter()
+            .any(|m| matches!(m, BackendMessage::CommandComplete { .. }));
         assert!(has_begin, "BEGIN should return CommandComplete");
 
         let msgs = handler.handle_query("COMMIT", &mut session);
-        let has_commit = msgs.iter().any(|m| matches!(m, BackendMessage::CommandComplete { .. }));
+        let has_commit = msgs
+            .iter()
+            .any(|m| matches!(m, BackendMessage::CommandComplete { .. }));
         assert!(has_commit, "COMMIT should return CommandComplete");
     }
 
@@ -3944,43 +3960,64 @@ mod tests {
         let (handler, mut session) = setup_handler();
         // COMMIT without BEGIN — should not panic
         let msgs = handler.handle_query("COMMIT", &mut session);
-        assert!(!msgs.is_empty(), "COMMIT outside txn should return something");
+        assert!(
+            !msgs.is_empty(),
+            "COMMIT outside txn should return something"
+        );
     }
 
     #[test]
     fn test_rollback_outside_txn_does_not_crash() {
         let (handler, mut session) = setup_handler();
         let msgs = handler.handle_query("ROLLBACK", &mut session);
-        assert!(!msgs.is_empty(), "ROLLBACK outside txn should return something");
+        assert!(
+            !msgs.is_empty(),
+            "ROLLBACK outside txn should return something"
+        );
     }
 
     #[test]
     fn test_drop_nonexistent_table_returns_error() {
         let (handler, mut session) = setup_handler();
         let msgs = handler.handle_query("DROP TABLE nonexistent_table_xyz", &mut session);
-        let has_error = msgs.iter().any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
-        assert!(has_error, "DROP nonexistent table should return ErrorResponse");
+        let has_error = msgs
+            .iter()
+            .any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
+        assert!(
+            has_error,
+            "DROP nonexistent table should return ErrorResponse"
+        );
     }
 
     #[test]
     fn test_select_from_nonexistent_table_returns_error() {
         let (handler, mut session) = setup_handler();
         let msgs = handler.handle_query("SELECT * FROM nonexistent_table_xyz", &mut session);
-        let has_error = msgs.iter().any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
-        assert!(has_error, "SELECT from nonexistent table should return ErrorResponse");
+        let has_error = msgs
+            .iter()
+            .any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
+        assert!(
+            has_error,
+            "SELECT from nonexistent table should return ErrorResponse"
+        );
     }
 
     #[test]
     fn test_create_table_and_insert_lifecycle() {
         let (handler, mut session) = setup_handler();
         let msgs = handler.handle_query(
-            "CREATE TABLE b8_test (id INT PRIMARY KEY, val TEXT)", &mut session);
-        let has_ok = msgs.iter().any(|m| matches!(m, BackendMessage::CommandComplete { .. }));
+            "CREATE TABLE b8_test (id INT PRIMARY KEY, val TEXT)",
+            &mut session,
+        );
+        let has_ok = msgs
+            .iter()
+            .any(|m| matches!(m, BackendMessage::CommandComplete { .. }));
         assert!(has_ok, "CREATE TABLE should succeed");
 
-        let msgs = handler.handle_query(
-            "INSERT INTO b8_test VALUES (1, 'hello')", &mut session);
-        let has_ok = msgs.iter().any(|m| matches!(m, BackendMessage::CommandComplete { .. }));
+        let msgs = handler.handle_query("INSERT INTO b8_test VALUES (1, 'hello')", &mut session);
+        let has_ok = msgs
+            .iter()
+            .any(|m| matches!(m, BackendMessage::CommandComplete { .. }));
         assert!(has_ok, "INSERT should succeed");
 
         let msgs = handler.handle_query("SELECT * FROM b8_test", &mut session);
@@ -3993,15 +4030,22 @@ mod tests {
         let (handler, mut session) = setup_handler();
         handler.handle_query("CREATE TABLE b8_dup (id INT PRIMARY KEY)", &mut session);
         let msgs = handler.handle_query("CREATE TABLE b8_dup (id INT PRIMARY KEY)", &mut session);
-        let has_error = msgs.iter().any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
-        assert!(has_error, "duplicate CREATE TABLE should return ErrorResponse");
+        let has_error = msgs
+            .iter()
+            .any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
+        assert!(
+            has_error,
+            "duplicate CREATE TABLE should return ErrorResponse"
+        );
     }
 
     #[test]
     fn test_set_and_show_client_encoding() {
         let (handler, mut session) = setup_handler();
         let msgs = handler.handle_query("SET client_encoding TO 'UTF8'", &mut session);
-        let has_ok = msgs.iter().any(|m| matches!(m, BackendMessage::CommandComplete { .. }));
+        let has_ok = msgs
+            .iter()
+            .any(|m| matches!(m, BackendMessage::CommandComplete { .. }));
         assert!(has_ok, "SET client_encoding should succeed");
 
         let msgs = handler.handle_query("SHOW client_encoding", &mut session);
@@ -4014,7 +4058,10 @@ mod tests {
     #[test]
     fn test_acid_atomicity_commit_visible() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE acid_a (id INT PRIMARY KEY, v TEXT)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE acid_a (id INT PRIMARY KEY, v TEXT)",
+            &mut session,
+        );
         handler.handle_query("BEGIN", &mut session);
         handler.handle_query("INSERT INTO acid_a VALUES (1, 'a')", &mut session);
         handler.handle_query("INSERT INTO acid_a VALUES (2, 'b')", &mut session);
@@ -4028,7 +4075,10 @@ mod tests {
     #[test]
     fn test_acid_atomicity_rollback_invisible() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE acid_r (id INT PRIMARY KEY, v TEXT)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE acid_r (id INT PRIMARY KEY, v TEXT)",
+            &mut session,
+        );
         handler.handle_query("BEGIN", &mut session);
         handler.handle_query("INSERT INTO acid_r VALUES (1, 'a')", &mut session);
         handler.handle_query("INSERT INTO acid_r VALUES (2, 'b')", &mut session);
@@ -4045,16 +4095,23 @@ mod tests {
         handler.handle_query("CREATE TABLE acid_pk (id INT PRIMARY KEY)", &mut session);
         handler.handle_query("INSERT INTO acid_pk VALUES (1)", &mut session);
         let msgs = handler.handle_query("INSERT INTO acid_pk VALUES (1)", &mut session);
-        let has_error = msgs.iter().any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
+        let has_error = msgs
+            .iter()
+            .any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
         assert!(has_error, "duplicate PK must return error");
     }
 
     #[test]
     fn test_acid_consistency_not_null_enforced() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE acid_nn (id INT PRIMARY KEY, v TEXT NOT NULL)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE acid_nn (id INT PRIMARY KEY, v TEXT NOT NULL)",
+            &mut session,
+        );
         let msgs = handler.handle_query("INSERT INTO acid_nn VALUES (1, NULL)", &mut session);
-        let has_error = msgs.iter().any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
+        let has_error = msgs
+            .iter()
+            .any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
         assert!(has_error, "NOT NULL violation must return error");
     }
 
@@ -4064,7 +4121,10 @@ mod tests {
         // that within a single session, auto-commit semantics hold:
         // insert in txn1, commit, insert in txn2, rollback → only txn1 visible
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE acid_si (id INT PRIMARY KEY, v TEXT)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE acid_si (id INT PRIMARY KEY, v TEXT)",
+            &mut session,
+        );
 
         // txn1: commit
         handler.handle_query("BEGIN", &mut session);
@@ -4073,7 +4133,10 @@ mod tests {
 
         // txn2: rollback
         handler.handle_query("BEGIN", &mut session);
-        handler.handle_query("INSERT INTO acid_si VALUES (2, 'rolled_back')", &mut session);
+        handler.handle_query(
+            "INSERT INTO acid_si VALUES (2, 'rolled_back')",
+            &mut session,
+        );
         handler.handle_query("ROLLBACK", &mut session);
 
         let msgs = handler.handle_query("SELECT * FROM acid_si", &mut session);
@@ -4086,7 +4149,10 @@ mod tests {
     fn test_acid_durability_wal_observer() {
         // Verify that committed data survives (using in-memory WAL observer as proxy)
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE acid_d (id INT PRIMARY KEY, v TEXT)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE acid_d (id INT PRIMARY KEY, v TEXT)",
+            &mut session,
+        );
         handler.handle_query("INSERT INTO acid_d VALUES (1, 'durable')", &mut session);
 
         // Read back immediately — must be visible (WAL applied synchronously)
@@ -4107,13 +4173,18 @@ mod tests {
 
         let msgs = handler.handle_query("SHOW falcon.txn_stats", &mut session);
         let rows = extract_data_rows(&msgs);
-        let metric_names: Vec<_> = rows.iter()
+        let metric_names: Vec<_> = rows
+            .iter()
             .filter_map(|r| r.first().cloned().flatten())
             .collect();
-        assert!(metric_names.contains(&"fast_path_commits".to_string()),
-            "txn_stats must expose fast_path_commits");
-        assert!(metric_names.contains(&"slow_path_commits".to_string()),
-            "txn_stats must expose slow_path_commits");
+        assert!(
+            metric_names.contains(&"fast_path_commits".to_string()),
+            "txn_stats must expose fast_path_commits"
+        );
+        assert!(
+            metric_names.contains(&"slow_path_commits".to_string()),
+            "txn_stats must expose slow_path_commits"
+        );
     }
 
     // ── 3.1 PG SQL whitelist verification ────────────────────────────────
@@ -4121,14 +4192,19 @@ mod tests {
     #[test]
     fn test_sql_join_inner() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE j_a (id INT PRIMARY KEY, name TEXT)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE j_a (id INT PRIMARY KEY, name TEXT)",
+            &mut session,
+        );
         handler.handle_query("CREATE TABLE j_b (aid INT, val TEXT)", &mut session);
         handler.handle_query("INSERT INTO j_a VALUES (1, 'alice')", &mut session);
         handler.handle_query("INSERT INTO j_b VALUES (1, 'x')", &mut session);
         handler.handle_query("INSERT INTO j_b VALUES (2, 'y')", &mut session);
 
         let msgs = handler.handle_query(
-            "SELECT j_a.name, j_b.val FROM j_a JOIN j_b ON j_a.id = j_b.aid", &mut session);
+            "SELECT j_a.name, j_b.val FROM j_a JOIN j_b ON j_a.id = j_b.aid",
+            &mut session,
+        );
         let rows = extract_data_rows(&msgs);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0][0], Some("alice".into()));
@@ -4153,14 +4229,18 @@ mod tests {
     #[test]
     fn test_sql_group_by_aggregate() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE agg (id INT PRIMARY KEY, dept TEXT, salary INT)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE agg (id INT PRIMARY KEY, dept TEXT, salary INT)",
+            &mut session,
+        );
         handler.handle_query("INSERT INTO agg VALUES (1, 'eng', 100)", &mut session);
         handler.handle_query("INSERT INTO agg VALUES (2, 'eng', 200)", &mut session);
         handler.handle_query("INSERT INTO agg VALUES (3, 'sales', 150)", &mut session);
 
         let msgs = handler.handle_query(
             "SELECT dept, COUNT(*), SUM(salary) FROM agg GROUP BY dept ORDER BY dept",
-            &mut session);
+            &mut session,
+        );
         let rows = extract_data_rows(&msgs);
         assert_eq!(rows.len(), 2);
     }
@@ -4168,9 +4248,15 @@ mod tests {
     #[test]
     fn test_sql_order_by_limit() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE obl (id INT PRIMARY KEY, v TEXT)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE obl (id INT PRIMARY KEY, v TEXT)",
+            &mut session,
+        );
         for i in 1..=5 {
-            handler.handle_query(&format!("INSERT INTO obl VALUES ({}, 'r{}')", i, i), &mut session);
+            handler.handle_query(
+                &format!("INSERT INTO obl VALUES ({}, 'r{}')", i, i),
+                &mut session,
+            );
         }
         let msgs = handler.handle_query("SELECT * FROM obl ORDER BY id DESC LIMIT 3", &mut session);
         let rows = extract_data_rows(&msgs);
@@ -4181,11 +4267,15 @@ mod tests {
     #[test]
     fn test_sql_upsert_on_conflict() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE ups (id INT PRIMARY KEY, v TEXT)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE ups (id INT PRIMARY KEY, v TEXT)",
+            &mut session,
+        );
         handler.handle_query("INSERT INTO ups VALUES (1, 'original')", &mut session);
         handler.handle_query(
             "INSERT INTO ups VALUES (1, 'updated') ON CONFLICT (id) DO UPDATE SET v = excluded.v",
-            &mut session);
+            &mut session,
+        );
 
         let msgs = handler.handle_query("SELECT v FROM ups WHERE id = 1", &mut session);
         let rows = extract_data_rows(&msgs);
@@ -4199,7 +4289,10 @@ mod tests {
         handler.handle_query("CREATE TABLE ur (id INT PRIMARY KEY, v INT)", &mut session);
         handler.handle_query("INSERT INTO ur VALUES (1, 10)", &mut session);
 
-        let msgs = handler.handle_query("UPDATE ur SET v = 20 WHERE id = 1 RETURNING id, v", &mut session);
+        let msgs = handler.handle_query(
+            "UPDATE ur SET v = 20 WHERE id = 1 RETURNING id, v",
+            &mut session,
+        );
         let rows = extract_data_rows(&msgs);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0][1], Some("20".into()));
@@ -4229,8 +4322,11 @@ mod tests {
         handler.handle_query("CREATE TABLE trig_t (id INT PRIMARY KEY)", &mut session);
         let msgs = handler.handle_query(
             "CREATE TRIGGER my_trig AFTER INSERT ON trig_t FOR EACH ROW EXECUTE FUNCTION noop()",
-            &mut session);
-        let has_error = msgs.iter().any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
+            &mut session,
+        );
+        let has_error = msgs
+            .iter()
+            .any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
         assert!(has_error, "CREATE TRIGGER must return error in v1.0");
     }
 
@@ -4239,8 +4335,11 @@ mod tests {
         let (handler, mut session) = setup_handler();
         let msgs = handler.handle_query(
             "CREATE FUNCTION add(a int, b int) RETURNS int AS $$ SELECT a + b; $$ LANGUAGE SQL",
-            &mut session);
-        let has_error = msgs.iter().any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
+            &mut session,
+        );
+        let has_error = msgs
+            .iter()
+            .any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
         assert!(has_error, "CREATE FUNCTION must return error in v1.0");
     }
 
@@ -4250,7 +4349,10 @@ mod tests {
     fn test_show_memory_stats() {
         let (handler, mut session) = setup_handler();
         let msgs = handler.handle_query("SHOW falcon.memory", &mut session);
-        assert!(has_row_description(&msgs), "SHOW falcon.memory should return data");
+        assert!(
+            has_row_description(&msgs),
+            "SHOW falcon.memory should return data"
+        );
         let rows = extract_data_rows(&msgs);
         assert!(!rows.is_empty());
     }
