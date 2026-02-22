@@ -1,8 +1,8 @@
 # FalconDB Feature Gap Analysis
 
 > Updated: 2026-02-22  
-> Scope: Full codebase audit across all 13 crates  
-> Status: 2,056 tests passing, 0 failures
+> Scope: Full codebase audit across all 15 crates + Java JDBC driver  
+> Status: 2,239 tests passing, 0 failures
 
 ---
 
@@ -30,6 +30,11 @@ The following items from the original gap analysis have been implemented:
 | No composite / covering / prefix indexes | ✅ Fixed (2026-02-21) — `SecondaryIndex::column_indices`, `new_composite/covering/prefix()`, `prefix_scan()`, 10 tests |
 | Transaction READ ONLY / timeout not enforced | ✅ Fixed (2026-02-21) — `TxnHandle::read_only`, `timeout_ms`, `exec_summary`; DML guards in executor |
 | No RBAC / schema-level privilege management | ✅ Fixed (2026-02-21) — `RoleCatalog` (transitive inheritance), `PrivilegeManager` (GRANT/REVOKE, schema defaults), 17 tests |
+| Logical replication / CDC | ✅ Fixed (2026-02-22) — `CdcManager` with replication slots, INSERT/UPDATE/DELETE/COMMIT events, bounded ring buffer, 9 tests |
+| Row-level security | ✅ Fixed (2026-02-22) — `RlsPolicyManager` with permissive/restrictive policies, role-scoped targeting, 15 tests |
+| Partitioned tables | ✅ Fixed (2026-02-22) — `PartitionManager` with Range/Hash/List strategies, routing, pruning, 10 tests |
+| No memory budget enforcement | ✅ Fixed (2026-02-22) — `UnifiedMemoryBudget` with 5 categories, 3 escalation levels, 10 tests |
+| No native protocol / JDBC driver | ✅ Fixed (2026-02-22) — `falcon_protocol_native` + `falcon_native_server` (67 tests) + Java JDBC driver with HA failover |
 
 ---
 
@@ -79,15 +84,7 @@ Currently supported: `Boolean, Int32, Int64, Float64, Decimal, Text, Timestamp, 
 
 ---
 
-## 5. No Memory Budget Enforcement (Severity: LOW)
-
-**Location:** `falcon_common/src/config.rs` — `memory_limit_bytes: u64`
-
-**Problem:** The config accepts `memory_limit_bytes` but it is never enforced. The storage engine, executor, and join operators will grow unbounded until OOM.
-
----
-
-## 6. SSL/TLS — Config Supported, Runtime Partial (Severity: LOW)
+## 5. SSL/TLS — Config Supported, Runtime Partial (Severity: LOW)
 
 **Location:** `falcon_protocol_pg/src/server.rs` — SSLRequest handling
 
@@ -99,5 +96,5 @@ Currently supported: `Boolean, Int32, Int64, Float64, Decimal, Text, Timestamp, 
 
 | Priority | Count | Items |
 |----------|-------|-------|
-| **MEDIUM** | 3 | Missing data types (TIME/INTERVAL/UUID/BYTEA/SMALLINT/REAL), No cursors, Raft network stub, Cluster membership placeholder |
-| **LOW** | 2 | Memory budget enforcement, SSL/TLS runtime |
+| **MEDIUM** | 3 | Missing data types (SMALLINT/REAL), No cursors, Raft network stub |
+| **LOW** | 1 | SSL/TLS runtime partial |

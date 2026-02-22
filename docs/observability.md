@@ -505,3 +505,60 @@ query [session_id, query_id]
       ├── wal_flush
       └── replication_ack
 ```
+
+---
+
+## Native Protocol Observability
+
+The FalconDB native binary protocol (`falcon_protocol_native` + `falcon_native_server`) provides additional observability for non-PG clients (e.g. the Java JDBC driver).
+
+### Session Tracking
+
+Each native protocol session tracks:
+
+| Field | Description |
+|-------|-------------|
+| `session_id` | Unique session identifier |
+| `client_name` | Client-reported driver name (e.g. `falcondb-jdbc/0.1`) |
+| `database` | Target database |
+| `user` | Authenticated user |
+| `feature_flags` | Negotiated feature flags (bitmask) |
+| `request_count` | Total requests processed in this session |
+| `state` | Session state (Connected → Handshake → Authenticated → Ready → Disconnected) |
+
+### Nonce Anti-Replay
+
+The server tracks handshake nonces to prevent replay attacks:
+
+| Metric | Description |
+|--------|-------------|
+| `nonce_tracker.len()` | Number of nonces currently tracked |
+| Replay detection | Duplicate nonces within the 5-minute window are rejected with `ERR_AUTH_FAILED` |
+| Zero-nonce bypass | `[0; 16]` nonces are always allowed (test/dev mode) |
+
+### Error Code Classification
+
+Native protocol errors carry structured metadata for client-side retry logic:
+
+| Error Code | Name | Retryable | Client Action |
+|-----------|------|:---------:|---------------|
+| 1000 | `SYNTAX_ERROR` | ❌ | Report to user |
+| 1001 | `INVALID_PARAM` | ❌ | Report to user |
+| 2000 | `NOT_LEADER` | ✅ | Failover to new primary |
+| 2001 | `FENCED_EPOCH` | ✅ | Refresh topology, reconnect |
+| 2002 | `READ_ONLY` | ✅ | Route to primary |
+| 2003 | `SERIALIZATION_CONFLICT` | ✅ | Retry transaction |
+| 3000 | `INTERNAL_ERROR` | ❌ | Log and report |
+| 3001 | `TIMEOUT` | ✅ | Retry with backoff |
+| 3002 | `OVERLOADED` | ✅ | Retry with backoff |
+| 4000 | `AUTH_FAILED` | ❌ | Check credentials |
+| 4001 | `PERMISSION_DENIED` | ❌ | Check grants |
+
+### Compression
+
+When LZ4 compression is negotiated (via `FEATURE_COMPRESSION_LZ4` flag), payloads larger than 256 bytes are compressed. The compression tag byte in the frame header indicates whether the payload is compressed:
+
+- `0x00` — uncompressed
+- `0x01` — LZ4-compressed (first 4 bytes = uncompressed size LE)
+
+See [native_protocol.md](native_protocol.md) and [native_protocol_compat.md](native_protocol_compat.md) for full protocol specification.

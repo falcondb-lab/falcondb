@@ -18,6 +18,8 @@
 
 **PG-Compatible Distributed In-Memory OLTP Database** — written in Rust.
 
+> English | **[简体中文](README_zh.md)**
+
 FalconDB provides stable OLTP, fast/slow-path transactions, WAL-based
 primary–replica replication with gRPC streaming, promote/failover, MVCC
 garbage collection, and reproducible benchmarks.
@@ -72,13 +74,10 @@ See [docs/protocol_compatibility.md](docs/protocol_compatibility.md) for full te
 - Triggers
 - Materialized views
 - Foreign data wrappers (FDW)
-- Logical replication / CDC
 - Online schema change (concurrent index build)
-- Row-level security (column-level grants implemented; row-level not yet)
 - Automatic rebalancing (manual shard split only)
 - Custom types (beyond JSONB)
 - Full-text search (tsvector/tsquery)
-- Partitioned tables (PARTITION BY)
 
 ---
 
@@ -93,7 +92,7 @@ cargo build --workspace
 # Build release
 cargo build --release --workspace
 
-# Run tests (1,976 tests across 13 crates + root integration)
+# Run tests (2,239 tests across 15 crates + root integration)
 cargo test --workspace
 
 # Lint
@@ -576,38 +575,48 @@ Core PG-compatible functions including: `UPPER`, `LOWER`, `LENGTH`, `SUBSTRING`,
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│           PG Wire Protocol (TCP)            │
-├─────────────────────────────────────────────┤
-│   SQL Frontend (sqlparser-rs → Binder)      │
-├─────────────────────────────────────────────┤
-│   Planner / Router                          │
-├─────────────────────────────────────────────┤
-│   Executor (row-at-a-time, expressions)     │
-├──────────────────┬──────────────────────────┤
-│   Txn Manager    │   Storage Engine         │
-│   (MVCC, OCC)    │   (MemTable + WAL + GC)  │
-├──────────────────┴──────────────────────────┤
-│  Cluster (ShardMap, Replication, Failover)  │
-└─────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│  PG Wire Protocol (TCP)  │  Native Protocol (TCP/TLS)  │
+├──────────────────────────┴─────────────────────────────┤
+│         SQL Frontend (sqlparser-rs → Binder)            │
+├────────────────────────────────────────────────────────┤
+│         Planner / Router                               │
+├────────────────────────────────────────────────────────┤
+│         Executor (row-at-a-time, expressions)          │
+├──────────────────┬─────────────────────────────────────┤
+│   Txn Manager    │   Storage Engine                    │
+│   (MVCC, OCC)    │   (MemTable + LSM + WAL + GC)      │
+├──────────────────┴─────────────────────────────────────┤
+│  Cluster (ShardMap, Replication, Failover, Epoch)      │
+└────────────────────────────────────────────────────────┘
 ```
 
 ### Crate Structure
 
 | Crate | Responsibility |
 |-------|---------------|
-| `falcon_common` | Shared types, errors, config, datum, schema |
-| `falcon_storage` | In-memory tables, MVCC version chains, indexes, WAL, GC |
+| `falcon_common` | Shared types, errors, config, datum, schema, RLS, RBAC |
+| `falcon_storage` | In-memory tables, LSM engine, MVCC, indexes, WAL, GC, TDE, partitioning, PITR, CDC |
 | `falcon_txn` | Transaction lifecycle, OCC validation, timestamp allocation |
 | `falcon_sql_frontend` | SQL parsing (sqlparser-rs) + binding/analysis |
 | `falcon_planner` | Logical → physical plan, routing hints |
-| `falcon_executor` | Operator execution, expression evaluation |
+| `falcon_executor` | Operator execution, expression evaluation, governor |
 | `falcon_protocol_pg` | PostgreSQL wire protocol codec + TCP server |
+| `falcon_protocol_native` | FalconDB native binary protocol — encode/decode, compression, type mapping |
+| `falcon_native_server` | Native protocol server — session management, executor bridge, nonce anti-replay |
 | `falcon_raft` | Consensus trait + single-node stub |
-| `falcon_cluster` | Shard map, replication, failover, scatter/gather |
+| `falcon_cluster` | Shard map, replication, failover, scatter/gather, epoch, migration, supervisor |
 | `falcon_observability` | Metrics (Prometheus), structured logging, tracing |
 | `falcon_server` | Main binary, wires all components |
 | `falcon_bench` | YCSB-style benchmark harness |
+
+### Java JDBC Driver (`clients/falcondb-jdbc/`)
+
+| Module | Responsibility |
+|--------|---------------|
+| `io.falcondb.jdbc` | JDBC Driver, Connection, Statement, PreparedStatement, ResultSet, DataSource |
+| `io.falcondb.jdbc.protocol` | Native protocol wire format, TCP connection, handshake, auth |
+| `io.falcondb.jdbc.ha` | HA-aware failover: ClusterTopologyProvider, PrimaryResolver, FailoverRetryPolicy |
 
 ---
 
@@ -726,6 +735,10 @@ cargo run -p falcon_server -- --print-default-config > falcon.toml
 | **v0.9** ✅ | Production candidate: security hardening, WAL versioning, wire compat, config compat | Released |
 | **v1.0 Phase 1** ✅ | LSM kernel: disk-backed OLTP, MVCC encoding, idempotency, TPC-B benchmark | 1,917 tests |
 | **v1.0 Phase 2** ✅ | SQL completeness: DECIMAL, composite indexes, RBAC, txn READ ONLY, governor v2 | 1,976 tests |
+| **v2.0 Phase 3** ✅ | Enterprise: RLS, TDE, partitioning, PITR, CDC | 2,056 tests |
+| **Storage Hardening** ✅ | WAL recovery, compaction scheduler, memory budget, GC safepoint, fault injection | 2,261 tests |
+| **Distributed Hardening** ✅ | Epoch fencing, leader lease, shard migration, cross-shard throttle, supervisor | +62 tests |
+| **Native Protocol** ✅ | FalconDB native binary protocol, Java JDBC driver, compression, HA failover | 2,239 tests |
 | **v1.0.0** 📋 | Production-grade database kernel — all gates pass | [docs/roadmap.md](docs/roadmap.md) |
 
 See [docs/roadmap.md](docs/roadmap.md) for detailed acceptance criteria per milestone.
@@ -757,27 +770,33 @@ See [docs/rpo_rto.md](docs/rpo_rto.md) for full RPO/RTO analysis and recommendat
 | [docs/security.md](docs/security.md) | Security features, RBAC, SQL firewall, audit |
 | [docs/wire_compatibility.md](docs/wire_compatibility.md) | WAL/snapshot/wire/config compatibility policy |
 | [docs/performance_baseline.md](docs/performance_baseline.md) | P99 latency targets and benchmark methodology |
-| [CHANGELOG.md](CHANGELOG.md) | Semantic versioning changelog (v0.1–v0.9) |
+| [docs/native_protocol.md](docs/native_protocol.md) | FalconDB native binary protocol specification |
+| [docs/native_protocol_compat.md](docs/native_protocol_compat.md) | Native protocol version negotiation and feature flags |
+| [docs/perf_testing.md](docs/perf_testing.md) | Performance testing methodology and CI gates |
+| [CHANGELOG.md](CHANGELOG.md) | Semantic versioning changelog (v0.1–v1.0) |
 
 ---
 
 ## Testing
 
 ```bash
-# Run all tests (1,976 total)
+# Run all tests (2,239 total)
 cargo test --workspace
 
 # By crate
-cargo test -p falcon_storage    # 226 tests (MVCC, WAL, GC, indexes incl. composite/covering/prefix, LSM engine)
-cargo test -p falcon_cluster    # 412 tests (replication, failover, scatter/gather, 2PC, admission DDL permits, node mode)
-cargo test -p falcon_server     # 208 tests (SQL end-to-end, error paths, SHOW commands)
-cargo test -p falcon_txn        # 61 tests (txn lifecycle, OCC, stats, READ ONLY mode, timeout, exec summary)
-cargo test -p falcon_planner    # 89 tests (routing hints, distributed wrapping, shard key inference)
-cargo test -p falcon_executor   # 180 tests (governor v2 abort reasons, priority scheduler, vectorized)
-cargo test -p falcon_common     # 203 tests (error model, config, RBAC, RoleCatalog, PrivilegeManager, Decimal)
-cargo test -p falcon_sql_frontend # 141 tests (binder, predicate normalization, param inference)
-cargo test -p falcon_protocol_pg  # 147 tests (SHOW commands, error paths, txn lifecycle, handler)
-cargo test --test integration_test  # 12 tests (root integration: DDL, DML, RETURNING clause, transactions)
+cargo test -p falcon_storage          # 417 tests (MVCC, WAL, GC, LSM, indexes, TDE, partitioning, PITR, CDC, recovery, compaction scheduler)
+cargo test -p falcon_cluster          # 485 tests (replication, failover, scatter/gather, 2PC, epoch, migration, supervisor, throttle)
+cargo test -p falcon_server           # 372 tests (SQL end-to-end, error paths, SHOW commands)
+cargo test -p falcon_common           # 246 tests (error model, config, RBAC, RoleCatalog, PrivilegeManager, Decimal, RLS)
+cargo test -p falcon_executor         # 162 tests (governor v2, priority scheduler, vectorized, RBAC enforcement)
+cargo test -p falcon_sql_frontend     # 148 tests (binder, predicate normalization, param inference)
+cargo test -p falcon_protocol_pg      # 180 tests (SHOW commands, error paths, txn lifecycle, handler)
+cargo test -p falcon_planner          # 89 tests (routing hints, distributed wrapping, shard key inference)
+cargo test -p falcon_txn              # 61 tests (txn lifecycle, OCC, stats, READ ONLY mode, timeout, exec summary)
+cargo test -p falcon_protocol_native  # 39 tests (native protocol codec, compression, type mapping)
+cargo test -p falcon_native_server    # 28 tests (server, session, executor bridge, nonce anti-replay)
+cargo test -p falcon_raft             # 12 tests (consensus trait, single-node stub)
+cargo test --test integration_test    # 12 tests (root integration: DDL, DML, RETURNING clause, transactions)
 
 # Lint
 cargo clippy --workspace       # must be 0 warnings

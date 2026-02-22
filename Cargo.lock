@@ -661,6 +661,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "falcon_native_server"
+version = "1.0.0-rc.1"
+dependencies = [
+ "bytes",
+ "dashmap",
+ "falcon_cluster",
+ "falcon_common",
+ "falcon_executor",
+ "falcon_observability",
+ "falcon_planner",
+ "falcon_protocol_native",
+ "falcon_sql_frontend",
+ "falcon_storage",
+ "falcon_txn",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "falcon_observability"
 version = "1.0.0-rc.1"
 dependencies = [
@@ -688,6 +711,18 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tonic-build",
+]
+
+[[package]]
+name = "falcon_protocol_native"
+version = "1.0.0-rc.1"
+dependencies = [
+ "bytes",
+ "falcon_common",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]

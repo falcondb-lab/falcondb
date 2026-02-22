@@ -9,7 +9,56 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-_(nothing yet — all recent work shipped in 1.0.0-rc.1)_
+### Added — v2.0 Phase 3: Enterprise Edition Features
+- Row-Level Security (RLS): `RlsPolicyManager` with permissive/restrictive policies, role-scoped targeting, superuser bypass (`falcon_common::rls`, 15 tests)
+- Transparent Data Encryption (TDE): `KeyManager` with PBKDF2 key derivation, DEK lifecycle, master key rotation (`falcon_storage::encryption`, 11 tests)
+- Table Partitioning: Range/Hash/List strategies with routing, pruning, attach/detach (`falcon_storage::partition`, 10 tests)
+- Point-in-Time Recovery (PITR): WAL archiving, base backups, restore points, coordinated replay (`falcon_storage::pitr`, 10 tests)
+- Change Data Capture (CDC): Replication slots, INSERT/UPDATE/DELETE/COMMIT events, bounded ring buffer (`falcon_storage::cdc`, 9 tests)
+
+### Added — Storage Hardening (7 modules, 61 tests)
+- Graded WAL error types with `WalReadError` and `CorruptionLog` (`falcon_storage::storage_error`, 6 tests)
+- Phased WAL recovery: Scan→Apply→Validate with `RecoveryModeGuard` (`falcon_storage::recovery`, 10 tests)
+- Resource-isolated compaction scheduling with `IoRateLimiter` and priority queue (`falcon_storage::compaction_scheduler`, 11 tests)
+- Unified memory budget: 5 categories, 3 escalation levels (Soft/Hard/Emergency) (`falcon_storage::memory_budget`, 10 tests)
+- GC safepoint unification with long-txn diagnostics and `LongTxnPolicy` (`falcon_storage::gc_safepoint`, 10 tests)
+- Offline diagnostic tools: `sst_verify`, `sst_dump`, `wal_inspect`, `wal_replay_dry_run` (`falcon_storage::storage_tools`, 6 tests)
+- Storage fault injection: 6 fault types with probabilistic triggering (`falcon_storage::storage_fault_injection`, 8 tests)
+- CI storage gate script (`scripts/ci_storage_gate.sh`)
+
+### Added — Distributed Hardening (6 modules, 62 tests)
+- Global epoch/fencing token with `EpochGuard` and `WriteToken` RAII proof (`falcon_cluster::epoch`, 13 tests)
+- Raft-managed cluster state machine with `ConsistentClusterState` (`falcon_cluster::consistent_state`, 8 tests)
+- Quorum/lease-driven leader authority with `LeaderLease` (`falcon_cluster::leader_lease`, 10 tests)
+- Shard migration state machine: Preparing→Copying→CatchingUp→Cutover→Completed (`falcon_cluster::migration`, 10 tests)
+- Cross-shard txn throttling with Queue/Reject policy (`falcon_cluster::cross_shard_throttle`, 7 tests)
+- Unified control-plane supervisor with `DistributedSupervisor` (`falcon_cluster::supervisor`, 9 tests)
+- 8 new Prometheus metric functions for distributed observability
+- CI distributed chaos script (`scripts/ci_distributed_chaos.sh`)
+
+### Added — FalconDB Native Protocol
+- `falcon_protocol_native` crate: binary protocol encode/decode for 17 message types, LZ4-style compression, type mapping (39 tests)
+- `falcon_native_server` crate: TCP server, session state machine, executor bridge, nonce anti-replay tracker (28 tests)
+- Protocol specification: `docs/native_protocol.md` (framing, handshake, auth, query, batch, error codes)
+- Protocol compatibility matrix: `docs/native_protocol_compat.md` (version negotiation, feature flags)
+- Golden test vectors: `tools/native-proto-spec/vectors/golden_vectors.json` (23 vectors)
+
+### Added — Java JDBC Driver (`clients/falcondb-jdbc/`)
+- JDBC interfaces: `FalconDriver`, `FalconConnection`, `FalconStatement`, `FalconPreparedStatement`, `FalconResultSet`, `FalconResultSetMetaData`, `FalconDataSource`
+- Native protocol client: `WireFormat`, `NativeConnection`, `FalconSQLException`
+- HA-aware failover: `ClusterTopologyProvider`, `PrimaryResolver`, `FailoverRetryPolicy`, `FailoverConnection`
+- HikariCP compatibility: `isValid(ping)`, `getNetworkTimeout`/`setNetworkTimeout`, `DataSource` properties
+- SPI registration: `META-INF/services/java.sql.Driver`
+- JDBC URL format: `jdbc:falcondb://host:port/database`
+- Driver compatibility matrix: `clients/falcondb-jdbc/COMPAT_MATRIX.md`
+
+### Added — CI Gate Scripts
+- `scripts/ci_native_jdbc_smoke.sh` — Rust + Java compile, clippy, test
+- `scripts/ci_native_perf_gate.sh` — Release build + protocol performance regression
+- `scripts/ci_native_failover_under_load.sh` — Epoch fencing + failover bench
+
+### Test Count
+- **2,239 tests** passing, **0 failures** (was 1,976 at 1.0.0-rc.1)
 
 ---
 

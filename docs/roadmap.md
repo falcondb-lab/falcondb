@@ -186,6 +186,10 @@ cargo test --workspace
 | **v1.0 Phase 1** | ✅ Done | LSM kernel — 1,917 tests, disk-backed OLTP, MVCC encoding, idempotency |
 | **v1.0 Phase 2** | ✅ Done | SQL completeness — 1,976 tests, DECIMAL, composite indexes, RBAC, txn control |
 | **1.0.0-rc.1** | ✅ Done | Version aligned, code audit fixes, e2e evidence, RBAC enforcement matrix |
+| **v2.0 Phase 3** | ✅ Done | Enterprise — 2,056 tests, RLS, TDE, partitioning, PITR, CDC |
+| **Storage Hardening** | ✅ Done | 7 modules, 61 tests — WAL recovery, compaction, memory budget, GC safepoint, fault injection |
+| **Distributed Hardening** | ✅ Done | 6 modules, 62 tests — epoch fencing, leader lease, migration, throttle, supervisor |
+| **Native Protocol** | ✅ Done | 2,239 tests — binary protocol, JDBC driver, compression, HA failover |
 | **v1.0.0** | 📋 Planned | Production-Grade Database Kernel — all gates pass |
 
 ---
@@ -652,7 +656,7 @@ From v0.4.0 onward:
 ### Verification
 
 ```bash
-cargo test --workspace   # 1,976 pass, 0 failures
+cargo test --workspace   # 2,239 pass, 0 failures
 cargo test -p falcon_common --lib -- security::tests
 cargo test -p falcon_txn --lib -- txn_manager_tests::test_txn_
 cargo test -p falcon_executor --lib -- governor::tests
@@ -760,12 +764,126 @@ data isolation, compliance, disaster recovery, and real-time integration.
 ### Verification
 
 ```bash
-cargo test --workspace   # 2,056 pass, 0 failures
+cargo test --workspace   # 2,239 pass, 0 failures
 cargo test -p falcon_common --lib -- rls::tests
 cargo test -p falcon_storage --lib -- encryption::tests
 cargo test -p falcon_storage --lib -- partition::tests
 cargo test -p falcon_storage --lib -- pitr::tests
 cargo test -p falcon_storage --lib -- cdc::tests
+```
+
+---
+
+## Storage Hardening ✅
+
+**Status**: Complete  
+**Goal**: Production-grade storage reliability — WAL recovery, compaction scheduling, memory budget, GC safepoint, fault injection, offline diagnostics.
+
+### Deliverables (7 modules, 61 tests)
+
+| Module | Location | Tests | Status |
+|--------|----------|------:|--------|
+| Graded WAL error types + `CorruptionLog` | `falcon_storage::storage_error` | 6 | ✅ |
+| Phased WAL recovery (Scan→Apply→Validate) | `falcon_storage::recovery` | 10 | ✅ |
+| Resource-isolated compaction scheduling | `falcon_storage::compaction_scheduler` | 11 | ✅ |
+| Unified memory budget (5 categories, 3 levels) | `falcon_storage::memory_budget` | 10 | ✅ |
+| GC safepoint unification + long-txn diagnostics | `falcon_storage::gc_safepoint` | 10 | ✅ |
+| Offline diagnostic tools (sst_verify, wal_inspect) | `falcon_storage::storage_tools` | 6 | ✅ |
+| Storage fault injection (6 fault types) | `falcon_storage::storage_fault_injection` | 8 | ✅ |
+
+### CI Gate
+
+`scripts/ci_storage_gate.sh` — 6 gates: hardening tests, full suite, SST verify, WAL corruption resilience, memory budget, clippy
+
+---
+
+## Distributed Hardening ✅
+
+**Status**: Complete  
+**Goal**: Production-grade distributed coordination — epoch fencing, leader leases, shard migration, cross-shard throttling, unified supervisor.
+
+### Deliverables (6 modules, 62 tests)
+
+| Module | Location | Tests | Status |
+|--------|----------|------:|--------|
+| Global epoch/fencing token (`EpochGuard`, `WriteToken`) | `falcon_cluster::epoch` | 13 | ✅ |
+| Raft-managed cluster state machine | `falcon_cluster::consistent_state` | 8 | ✅ |
+| Quorum/lease-driven leader authority | `falcon_cluster::leader_lease` | 10 | ✅ |
+| Shard migration state machine (5-phase) | `falcon_cluster::migration` | 10 | ✅ |
+| Cross-shard txn throttling (Queue/Reject) | `falcon_cluster::cross_shard_throttle` | 7 | ✅ |
+| Unified control-plane supervisor | `falcon_cluster::supervisor` | 9 | ✅ |
+
+### Observability
+
+8 new Prometheus metric functions: `record_distributed_metrics`, `record_shard_replication_lag`, `record_epoch_fence_event`, `record_lease_metrics`, `record_migration_metrics`, `record_cross_shard_throttle_metrics`, `record_supervisor_metrics`
+
+### CI Gate
+
+`scripts/ci_distributed_chaos.sh` — leader kill, epoch fencing, consistent state recovery, migration interrupt, supervisor degradation
+
+---
+
+## FalconDB Native Protocol ✅
+
+**Status**: Complete  
+**Goal**: High-performance binary protocol for Java/JVM clients — replacing PG wire protocol overhead with a purpose-built framing, handshake, compression, and HA-aware failover.
+
+### Rust Crates
+
+| Crate | Modules | Tests | Status |
+|-------|---------|------:|--------|
+| `falcon_protocol_native` | `types`, `codec`, `compress`, `error` | 39 | ✅ |
+| `falcon_native_server` | `server`, `session`, `executor_bridge`, `config`, `error`, `nonce` | 28 | ✅ |
+
+### Protocol Features
+
+| Feature | Status |
+|---------|--------|
+| Binary framing (LE, 5-byte header, 64 MiB max) | ✅ |
+| Handshake + version negotiation (major.minor) | ✅ |
+| Feature flags (7 flags: compression, batch, pipeline, epoch, TLS, binary params) | ✅ |
+| Password authentication with nonce anti-replay | ✅ |
+| Query/Response with binary row encoding + null bitmap | ✅ |
+| Batch ingest (columnar rows + per-row error reporting) | ✅ |
+| Ping/Pong keepalive | ✅ |
+| Graceful disconnect | ✅ |
+| LZ4-style compression (negotiated via feature flags) | ✅ |
+| Epoch fencing (per-request epoch check) | ✅ |
+| StartTLS upgrade (message types defined) | ✅ |
+
+### Java JDBC Driver (`clients/falcondb-jdbc/`)
+
+| Component | Status |
+|-----------|--------|
+| `FalconDriver` — URL parsing, SPI registration, pgjdbc fallback | ✅ |
+| `FalconConnection` — session management, auto-commit, isValid(ping) | ✅ |
+| `FalconStatement` / `FalconPreparedStatement` — client-side bind, batch | ✅ |
+| `FalconResultSet` / `FalconResultSetMetaData` — forward-only, all getter types | ✅ |
+| `FalconDataSource` — HikariCP-compatible properties | ✅ |
+| `ClusterTopologyProvider` — seed nodes, primary tracking, stale detection | ✅ |
+| `PrimaryResolver` — TTL-cached primary resolution | ✅ |
+| `FailoverRetryPolicy` — configurable retries, exponential backoff | ✅ |
+| `FailoverConnection` — auto-reconnect on FENCED_EPOCH / NOT_LEADER | ✅ |
+
+### Documentation & Artifacts
+
+- `docs/native_protocol.md` — Full protocol specification
+- `docs/native_protocol_compat.md` — Version negotiation and feature flags
+- `clients/falcondb-jdbc/COMPAT_MATRIX.md` — JDBC driver compatibility matrix
+- `tools/native-proto-spec/vectors/golden_vectors.json` — 23 cross-language test vectors
+
+### CI Gate Scripts
+
+- `scripts/ci_native_jdbc_smoke.sh` — Rust + Java compile, clippy, test
+- `scripts/ci_native_perf_gate.sh` — Release build + protocol performance regression
+- `scripts/ci_native_failover_under_load.sh` — Epoch fencing + failover bench
+
+### Verification
+
+```bash
+cargo test -p falcon_protocol_native  # 39 tests
+cargo test -p falcon_native_server    # 28 tests
+cargo test --workspace                # 2,239 pass, 0 failures
 ```
 
 ---

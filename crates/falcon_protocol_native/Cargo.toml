@@ -1,0 +1,12 @@
+[package]
+name = "falcon_protocol_native"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+falcon_common = { path = "../falcon_common" }
+bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true

@@ -311,21 +311,27 @@ falcon/
 ├── .gitattributes              (LF enforcement, CRLF for .ps1/.bat)
 ├── .github/workflows/ci.yml    (CI: check, test, clippy, fmt, failover-gate, windows)
 ├── crates/
-│   ├── falcon_common/           (shared types, errors, config, datum, schema)
-│   ├── falcon_storage/          (in-memory tables, indexes, WAL, GC)
+│   ├── falcon_common/           (shared types, errors, config, datum, schema, RLS, RBAC)
+│   ├── falcon_storage/          (tables, LSM engine, indexes, WAL, GC, TDE, partitioning, PITR, CDC)
 │   ├── falcon_txn/              (transaction management, MVCC, OCC, stats)
 │   ├── falcon_sql_frontend/     (parser, binder, analyzer)
 │   ├── falcon_planner/          (logical + physical planning, routing hints)
-│   ├── falcon_executor/         (operator execution, expression evaluation)
+│   ├── falcon_executor/         (operator execution, expression evaluation, governor)
 │   ├── falcon_protocol_pg/      (PG wire protocol, SHOW command handling)
+│   ├── falcon_protocol_native/  (native binary protocol codec, compression, type mapping)
+│   ├── falcon_native_server/    (native protocol server, session, executor bridge, nonce)
 │   ├── falcon_raft/             (Raft consensus stub via openraft)
 │   ├── falcon_proto/            (protobuf definitions + tonic codegen)
-│   ├── falcon_cluster/          (replication, failover, scatter/gather, shard map)
+│   ├── falcon_cluster/          (replication, failover, scatter/gather, epoch, migration, supervisor)
 │   ├── falcon_observability/    (metrics, tracing, logging setup)
 │   ├── falcon_server/           (main binary + integration tests)
 │   └── falcon_bench/            (YCSB benchmark harness)
+├── clients/
+│   └── falcondb-jdbc/           (Java JDBC driver — Maven project, HA failover)
+├── tools/
+│   └── native-proto-spec/       (golden test vectors for cross-language validation)
 ├── bench_configs/              (frozen M1 benchmark configurations)
-├── docs/                       (roadmap, RPO/RTO, protocol compat, SHOW schema)
+├── docs/                       (roadmap, RPO/RTO, protocol compat, native protocol spec)
 ├── examples/                   (primary.toml, replica.toml)
 └── scripts/                    (demo, failover, benchmark, CI gate, Windows setup)
 ```
@@ -430,21 +436,23 @@ pub trait Executor: Send + Sync + 'static {
 | **Benchmark** | YCSB workloads, fast vs slow path, scale-out, failover impact | `falcon_bench` |
 | **Data integrity** | Crash-recovery, WAL replay, GC+promote combined correctness | Automated tests |
 
-### 8.2 Test Counts (1,976 tests)
+### 8.2 Test Counts (2,239 tests)
 
 | Crate | Tests | Coverage |
 |-------|-------|----------|
-| `falcon_cluster` | 412 | Replication, failover, scatter/gather, GC, admission (DDL permits), cluster ops (node mode), circuit breaker, 2PC, token bucket, security hardening |
-| `falcon_server` (integration) | 208 | Full SQL end-to-end (sql_basic 21, sql_conflict 46, sql_coverage 15, sql_dml 33, sql_extensions 58, sql_functions 19, main 16) |
-| `falcon_storage` | 226 | MVCC, WAL, GC, indexes (composite/covering/prefix), OCC, 2PC recovery, WAL observer, snapshot checkpoint, table statistics, LSM engine |
-| `falcon_sql_frontend` | 141 | Parsing, binding, analysis, view expansion, ALTER TABLE rename, predicate normalization, param inference |
-| `falcon_protocol_pg` | 147 | SHOW commands, error paths, txn lifecycle, statement timeout, PgServer config, idle timeout, information_schema, views, plan cache, prepared statements |
-| `falcon_executor` | 180 | Operator execution, expression evaluation, window functions, subqueries, governor v2 (abort reasons), priority scheduler |
+| `falcon_cluster` | 485 | Replication, failover, scatter/gather, GC, admission, cluster ops, circuit breaker, 2PC, token bucket, epoch, leader lease, migration, throttle, supervisor |
+| `falcon_storage` | 417 | MVCC, WAL, GC, indexes, OCC, 2PC recovery, LSM engine, TDE, partitioning, PITR, CDC, recovery, compaction scheduler, memory budget, GC safepoint, fault injection |
+| `falcon_server` (integration) | 372 | Full SQL end-to-end (sql_basic 21, sql_conflict 46, sql_coverage 15, sql_dml 33, sql_extensions 58, sql_functions 19, sql_generated 131, txn_local 33, main 16) |
+| `falcon_common` | 246 | Config validation, node role, datum types (incl. Decimal), schema, error hierarchy, RBAC, RLS, security, consistency |
+| `falcon_protocol_pg` | 180 | SHOW commands, error paths, txn lifecycle, statement timeout, PgServer config, idle timeout, information_schema, views, plan cache |
+| `falcon_executor` | 162 | Operator execution, expression evaluation, window functions, subqueries, governor v2, priority scheduler, RBAC enforcement |
+| `falcon_sql_frontend` | 148 | Parsing, binding, analysis, view expansion, ALTER TABLE rename, predicate normalization, param inference |
 | `falcon_planner` | 89 | Plan generation, routing hints, distributed wrapping, view/DDL plans, cost model |
-| `falcon_common` | 203 | Config validation, node role, datum types (incl. Decimal), schema, error hierarchy, RBAC (RoleCatalog, PrivilegeManager), security, consistency |
 | `falcon_txn` | 61 | Txn lifecycle, OCC, stats, history, deadlock detection, READ ONLY mode, timeout, exec summary |
+| `falcon_protocol_native` | 39 | Native binary protocol codec, compression (LZ4), type mapping, golden vectors |
+| `falcon_native_server` | 28 | Native protocol server, session state machine, executor bridge, nonce anti-replay |
 | `falcon_raft` | 12 | Raft log store, state machine, propose/apply |
-| **Total** | **1,976** (passing) | `cargo clippy --workspace`: 0 warnings |
+| **Total** | **2,239** (passing) | `cargo clippy --workspace`: 0 warnings |
 
 ### 8.3 Acceptance Criteria (M1)
 

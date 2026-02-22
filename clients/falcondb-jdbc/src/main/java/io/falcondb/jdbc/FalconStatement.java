@@ -1,0 +1,243 @@
+package io.falcondb.jdbc;
+
+import io.falcondb.jdbc.protocol.NativeConnection;
+import io.falcondb.jdbc.protocol.WireFormat;
+
+import java.sql.*;
+
+/**
+ * JDBC Statement implementation over the FalconDB native protocol.
+ */
+public class FalconStatement implements Statement {
+
+    protected final FalconConnection conn;
+    protected FalconResultSet currentResultSet;
+    protected long updateCount = -1;
+    protected boolean closed = false;
+    protected int maxRows = 0;
+    protected int queryTimeout = 0;
+    protected int fetchSize = 0;
+
+    FalconStatement(FalconConnection conn) {
+        this.conn = conn;
+    }
+
+    @Override
+    public ResultSet executeQuery(String sql) throws SQLException {
+        checkClosed();
+        try {
+            NativeConnection.QueryResult result =
+                conn.getNativeConnection().executeQuery(sql, conn.getSessionFlags());
+            currentResultSet = new FalconResultSet(result);
+            updateCount = -1;
+            return currentResultSet;
+        } catch (Exception e) {
+            throw wrapException(e);
+        }
+    }
+
+    @Override
+    public int executeUpdate(String sql) throws SQLException {
+        checkClosed();
+        try {
+            NativeConnection.QueryResult result =
+                conn.getNativeConnection().executeQuery(sql, conn.getSessionFlags());
+            currentResultSet = null;
+            updateCount = result.rowsAffected;
+            return (int) updateCount;
+        } catch (Exception e) {
+            throw wrapException(e);
+        }
+    }
+
+    @Override
+    public boolean execute(String sql) throws SQLException {
+        checkClosed();
+        try {
+            NativeConnection.QueryResult result =
+                conn.getNativeConnection().executeQuery(sql, conn.getSessionFlags());
+            if (result.columns.length > 0 && !result.rows.isEmpty()) {
+                currentResultSet = new FalconResultSet(result);
+                updateCount = -1;
+                return true;
+            } else {
+                currentResultSet = null;
+                updateCount = result.rowsAffected;
+                return false;
+            }
+        } catch (Exception e) {
+            throw wrapException(e);
+        }
+    }
+
+    @Override
+    public void close() throws SQLException {
+        closed = true;
+        if (currentResultSet != null) {
+            currentResultSet.close();
+            currentResultSet = null;
+        }
+    }
+
+    @Override
+    public int getMaxFieldSize() { return 0; }
+
+    @Override
+    public void setMaxFieldSize(int max) {}
+
+    @Override
+    public int getMaxRows() { return maxRows; }
+
+    @Override
+    public void setMaxRows(int max) { this.maxRows = max; }
+
+    @Override
+    public void setEscapeProcessing(boolean enable) {}
+
+    @Override
+    public int getQueryTimeout() { return queryTimeout; }
+
+    @Override
+    public void setQueryTimeout(int seconds) { this.queryTimeout = seconds; }
+
+    @Override
+    public void cancel() throws SQLException {
+        // Not supported yet
+    }
+
+    @Override
+    public SQLWarning getWarnings() { return null; }
+
+    @Override
+    public void clearWarnings() {}
+
+    @Override
+    public void setCursorName(String name) throws SQLException {
+        throw new SQLFeatureNotSupportedException();
+    }
+
+    @Override
+    public ResultSet getResultSet() { return currentResultSet; }
+
+    @Override
+    public int getUpdateCount() { return (int) updateCount; }
+
+    @Override
+    public boolean getMoreResults() {
+        currentResultSet = null;
+        updateCount = -1;
+        return false;
+    }
+
+    @Override
+    public void setFetchDirection(int direction) {}
+
+    @Override
+    public int getFetchDirection() { return ResultSet.FETCH_FORWARD; }
+
+    @Override
+    public void setFetchSize(int rows) { this.fetchSize = rows; }
+
+    @Override
+    public int getFetchSize() { return fetchSize; }
+
+    @Override
+    public int getResultSetConcurrency() { return ResultSet.CONCUR_READ_ONLY; }
+
+    @Override
+    public int getResultSetType() { return ResultSet.TYPE_FORWARD_ONLY; }
+
+    @Override
+    public void addBatch(String sql) throws SQLException {
+        throw new SQLFeatureNotSupportedException("Use PreparedStatement for batch operations");
+    }
+
+    @Override
+    public void clearBatch() throws SQLException {
+        throw new SQLFeatureNotSupportedException("Use PreparedStatement for batch operations");
+    }
+
+    @Override
+    public int[] executeBatch() throws SQLException {
+        throw new SQLFeatureNotSupportedException("Use PreparedStatement for batch operations");
+    }
+
+    @Override
+    public Connection getConnection() { return conn; }
+
+    @Override
+    public boolean getMoreResults(int current) { return false; }
+
+    @Override
+    public ResultSet getGeneratedKeys() throws SQLException {
+        throw new SQLFeatureNotSupportedException();
+    }
+
+    @Override
+    public int executeUpdate(String sql, int autoGeneratedKeys) throws SQLException {
+        return executeUpdate(sql);
+    }
+
+    @Override
+    public int executeUpdate(String sql, int[] columnIndexes) throws SQLException {
+        return executeUpdate(sql);
+    }
+
+    @Override
+    public int executeUpdate(String sql, String[] columnNames) throws SQLException {
+        return executeUpdate(sql);
+    }
+
+    @Override
+    public boolean execute(String sql, int autoGeneratedKeys) throws SQLException {
+        return execute(sql);
+    }
+
+    @Override
+    public boolean execute(String sql, int[] columnIndexes) throws SQLException {
+        return execute(sql);
+    }
+
+    @Override
+    public boolean execute(String sql, String[] columnNames) throws SQLException {
+        return execute(sql);
+    }
+
+    @Override
+    public int getResultSetHoldability() { return ResultSet.HOLD_CURSORS_OVER_COMMIT; }
+
+    @Override
+    public boolean isClosed() { return closed; }
+
+    @Override
+    public void setPoolable(boolean poolable) {}
+
+    @Override
+    public boolean isPoolable() { return false; }
+
+    @Override
+    public void closeOnCompletion() {}
+
+    @Override
+    public boolean isCloseOnCompletion() { return false; }
+
+    @Override
+    public <T> T unwrap(Class<T> iface) throws SQLException {
+        if (iface.isAssignableFrom(getClass())) return iface.cast(this);
+        throw new SQLException("Cannot unwrap to " + iface.getName());
+    }
+
+    @Override
+    public boolean isWrapperFor(Class<?> iface) {
+        return iface.isAssignableFrom(getClass());
+    }
+
+    protected void checkClosed() throws SQLException {
+        if (closed) throw new SQLException("Statement is closed");
+    }
+
+    protected static SQLException wrapException(Exception e) {
+        if (e instanceof SQLException) return (SQLException) e;
+        return new SQLException(e.getMessage(), e);
+    }
+}

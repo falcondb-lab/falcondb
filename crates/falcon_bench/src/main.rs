@@ -76,6 +76,42 @@ struct Args {
     /// Concurrency level for multi-threaded benchmarks.
     #[arg(long, default_value_t = 1)]
     threads: u32,
+
+    /// Deterministic random seed for reproducibility.
+    #[arg(long, default_value_t = 42)]
+    seed: u64,
+
+    /// Run long-run stress test mode.
+    #[arg(long, default_value_t = false)]
+    long_run: bool,
+
+    /// Duration for long-run mode (e.g. "60s", "10m", "1h", "24h").
+    #[arg(long, default_value = "60s")]
+    duration: String,
+
+    /// Save current results as the performance baseline.
+    #[arg(long, default_value_t = false)]
+    baseline_save: bool,
+
+    /// Check current results against saved baseline (fail on regression).
+    #[arg(long, default_value_t = false)]
+    baseline_check: bool,
+
+    /// Path to baseline file.
+    #[arg(long, default_value = "perf_baseline.json")]
+    baseline_path: String,
+
+    /// TPS regression threshold percentage (fail if TPS drops more than this).
+    #[arg(long, default_value_t = 10)]
+    tps_threshold_pct: u32,
+
+    /// P99 regression threshold percentage (fail if P99 rises more than this).
+    #[arg(long, default_value_t = 20)]
+    p99_threshold_pct: u32,
+
+    /// Sampling interval in seconds for long-run metrics collection.
+    #[arg(long, default_value_t = 5)]
+    sample_interval_secs: u64,
 }
 
 fn bench_schema() -> TableSchema {
@@ -142,6 +178,9 @@ struct BenchResult {
     elapsed_ms: u64,
     tps: f64,
     stats: falcon_txn::TxnStatsSnapshot,
+    local_txn_count: u64,
+    global_txn_count: u64,
+    seed: u64,
 }
 
 fn run_workload(args: &Args, force_all_global: bool, label: &str) -> BenchResult {
@@ -166,7 +205,9 @@ fn run_workload(args: &Args, force_all_global: bool, label: &str) -> BenchResult
     // Reset latency after load phase
     mgr.reset_latency();
 
-    let mut rng = Rng::new(42);
+    let mut rng = Rng::new(args.seed);
+    let mut local_txn_count = 0u64;
+    let mut global_txn_count = 0u64;
 
     // Phase 2: Run workload
     let start = Instant::now();
@@ -176,9 +217,11 @@ fn run_workload(args: &Args, force_all_global: bool, label: &str) -> BenchResult
         let is_local = !force_all_global && rng.next_pct() < args.local_pct;
 
         let classification = if is_local {
+            local_txn_count += 1;
             let shard = ShardId(rng.next_u64() % args.shards);
             TxnClassification::local(shard)
         } else {
+            global_txn_count += 1;
             let s1 = ShardId(0);
             let s2 = ShardId(1u64.min(args.shards - 1));
             TxnClassification::global(vec![s1, s2], SlowPathMode::Xa2Pc)
@@ -234,16 +277,27 @@ fn run_workload(args: &Args, force_all_global: bool, label: &str) -> BenchResult
         elapsed_ms,
         tps,
         stats,
+        local_txn_count,
+        global_txn_count,
+        seed: args.seed,
     }
 }
 
 fn print_result_text(r: &BenchResult) {
+    let total_txn = r.local_txn_count + r.global_txn_count;
+    let local_pct = if total_txn > 0 { r.local_txn_count as f64 / total_txn as f64 * 100.0 } else { 0.0 };
+    let global_pct = if total_txn > 0 { r.global_txn_count as f64 / total_txn as f64 * 100.0 } else { 0.0 };
+
     println!("═══════════════════════════════════════════════");
     println!("  {} ", r.label);
     println!("═══════════════════════════════════════════════");
+    println!("  Seed:              {}", r.seed);
     println!("  Operations:        {}", r.ops);
     println!("  Elapsed:           {} ms", r.elapsed_ms);
     println!("  TPS:               {:.1}", r.tps);
+    println!("  ─── Txn Mix ───");
+    println!("  Local (single-shard):  {} ({:.1}%)", r.local_txn_count, local_pct);
+    println!("  Global (cross-shard):  {} ({:.1}%)", r.global_txn_count, global_pct);
     println!("  ─── Commits ───");
     println!("  Total committed:   {}", r.stats.total_committed);
     println!("  Fast-path commits: {}", r.stats.fast_path_commits);
@@ -304,11 +358,19 @@ fn print_result_csv(r: &BenchResult) {
 }
 
 fn print_result_json(r: &BenchResult) {
+    let total_txn = r.local_txn_count + r.global_txn_count;
     let obj = serde_json::json!({
         "label": r.label,
+        "seed": r.seed,
         "ops": r.ops,
         "elapsed_ms": r.elapsed_ms,
         "tps": r.tps,
+        "txn_mix": {
+            "local_count": r.local_txn_count,
+            "global_count": r.global_txn_count,
+            "local_pct": if total_txn > 0 { r.local_txn_count as f64 / total_txn as f64 * 100.0 } else { 0.0 },
+            "global_pct": if total_txn > 0 { r.global_txn_count as f64 / total_txn as f64 * 100.0 } else { 0.0 },
+        },
         "committed": r.stats.total_committed,
         "fast_path_commits": r.stats.fast_path_commits,
         "slow_path_commits": r.stats.slow_path_commits,
@@ -364,13 +426,14 @@ fn run_scaleout(args: &Args) {
     }
 
     let mut results: Vec<serde_json::Value> = Vec::new();
+    let mut tps_by_shards: Vec<(u64, f64)> = Vec::new();
 
     for &n_shards in &shard_counts {
         let engine = Arc::new(ShardedEngine::new(n_shards));
         engine.create_table_all(&bench_schema()).unwrap();
 
         // Load data round-robin across shards
-        let mut rng = Rng::new(42);
+        let mut rng = Rng::new(args.seed);
         for i in 0..record_count {
             let shard_idx = i % n_shards;
             let shard = engine.shard(ShardId(shard_idx)).unwrap();
@@ -515,6 +578,7 @@ fn run_scaleout(args: &Args) {
         } else {
             0.0
         };
+        tps_by_shards.push((n_shards, tps));
 
         match args.export.as_str() {
             "csv" => {
@@ -556,6 +620,28 @@ fn run_scaleout(args: &Args) {
         println!("{}", serde_json::to_string_pretty(&results).unwrap());
     } else if args.export != "csv" {
         println!();
+    }
+
+    // P3-1: TPS monotonicity assertion — TPS must not decrease as shards increase
+    if tps_by_shards.len() >= 2 {
+        let mut monotonic = true;
+        for i in 1..tps_by_shards.len() {
+            let (prev_shards, prev_tps) = tps_by_shards[i - 1];
+            let (cur_shards, cur_tps) = tps_by_shards[i];
+            if cur_tps < prev_tps * 0.95 {
+                // Allow 5% tolerance for noise
+                eprintln!(
+                    "SCALE-OUT WARNING: TPS dropped from {:.1} ({} shards) to {:.1} ({} shards)",
+                    prev_tps, prev_shards, cur_tps, cur_shards
+                );
+                monotonic = false;
+            }
+        }
+        if monotonic {
+            println!("SCALE-OUT OK: TPS monotonically non-decreasing across shard counts");
+        } else {
+            eprintln!("SCALE-OUT INVARIANT: TPS decreased with more shards (sub-linear OK, regression NOT OK)");
+        }
     }
 }
 
@@ -1178,10 +1264,366 @@ fn run_lsm_bench(args: &Args) {
     }
 }
 
+// ── Duration parser ──────────────────────────────────────────────────────
+
+fn parse_duration(s: &str) -> Duration {
+    let s = s.trim();
+    if let Some(rest) = s.strip_suffix('h') {
+        Duration::from_secs(rest.parse::<u64>().unwrap_or(1) * 3600)
+    } else if let Some(rest) = s.strip_suffix('m') {
+        Duration::from_secs(rest.parse::<u64>().unwrap_or(1) * 60)
+    } else if let Some(rest) = s.strip_suffix('s') {
+        Duration::from_secs(rest.parse::<u64>().unwrap_or(60))
+    } else {
+        Duration::from_secs(s.parse::<u64>().unwrap_or(60))
+    }
+}
+
+// ── P0-1 / P6-1: Performance Baseline Save & Check ─────────────────────
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+struct PerfBaseline {
+    version: String,
+    timestamp: String,
+    seed: u64,
+    ops: u64,
+    record_count: u64,
+    shards: u64,
+    read_pct: u8,
+    local_pct: u8,
+    tps: f64,
+    fast_path_p99_us: u64,
+    slow_path_p99_us: u64,
+    all_p99_us: u64,
+    fast_path_p50_us: u64,
+    slow_path_p50_us: u64,
+    all_p50_us: u64,
+}
+
+fn save_baseline(r: &BenchResult, args: &Args) {
+    let baseline = PerfBaseline {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        timestamp: format!("{:?}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()),
+        seed: args.seed,
+        ops: args.ops,
+        record_count: args.record_count,
+        shards: args.shards,
+        read_pct: args.read_pct,
+        local_pct: args.local_pct,
+        tps: r.tps,
+        fast_path_p99_us: r.stats.latency.fast_path.p99_us,
+        slow_path_p99_us: r.stats.latency.slow_path.p99_us,
+        all_p99_us: r.stats.latency.all.p99_us,
+        fast_path_p50_us: r.stats.latency.fast_path.p50_us,
+        slow_path_p50_us: r.stats.latency.slow_path.p50_us,
+        all_p50_us: r.stats.latency.all.p50_us,
+    };
+    let json = serde_json::to_string_pretty(&baseline).expect("serialize baseline");
+    std::fs::write(&args.baseline_path, json).expect("write baseline file");
+    println!("Baseline saved to {}", args.baseline_path);
+}
+
+fn check_baseline(r: &BenchResult, args: &Args) -> bool {
+    let data = match std::fs::read_to_string(&args.baseline_path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("ERROR: Cannot read baseline file '{}': {}", args.baseline_path, e);
+            return false;
+        }
+    };
+    let baseline: PerfBaseline = match serde_json::from_str(&data) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("ERROR: Cannot parse baseline file: {}", e);
+            return false;
+        }
+    };
+
+    let mut passed = true;
+
+    // TPS regression check
+    let tps_floor = baseline.tps * (1.0 - args.tps_threshold_pct as f64 / 100.0);
+    if r.tps < tps_floor {
+        eprintln!(
+            "PERF REGRESSION: TPS {:.1} < baseline floor {:.1} (baseline={:.1}, threshold=-{}%)",
+            r.tps, tps_floor, baseline.tps, args.tps_threshold_pct
+        );
+        passed = false;
+    } else {
+        println!(
+            "TPS OK: {:.1} >= {:.1} (baseline={:.1})",
+            r.tps, tps_floor, baseline.tps
+        );
+    }
+
+    // P99 regression check
+    let p99_ceiling = baseline.all_p99_us as f64 * (1.0 + args.p99_threshold_pct as f64 / 100.0);
+    let current_p99 = r.stats.latency.all.p99_us;
+    if current_p99 as f64 > p99_ceiling {
+        eprintln!(
+            "PERF REGRESSION: P99 {}µs > baseline ceiling {:.0}µs (baseline={}µs, threshold=+{}%)",
+            current_p99, p99_ceiling, baseline.all_p99_us, args.p99_threshold_pct
+        );
+        passed = false;
+    } else {
+        println!(
+            "P99 OK: {}µs <= {:.0}µs (baseline={}µs)",
+            current_p99, p99_ceiling, baseline.all_p99_us
+        );
+    }
+
+    // Fast-path must be better than slow-path (invariant)
+    let fp99 = r.stats.latency.fast_path.p99_us;
+    let sp99 = r.stats.latency.slow_path.p99_us;
+    if fp99 > 0 && sp99 > 0 && fp99 > sp99 {
+        eprintln!(
+            "INVARIANT VIOLATION: fast-path P99 ({}µs) > slow-path P99 ({}µs)",
+            fp99, sp99
+        );
+        passed = false;
+    } else if fp99 > 0 && sp99 > 0 {
+        println!("INVARIANT OK: fast-path P99 ({}µs) <= slow-path P99 ({}µs)", fp99, sp99);
+    }
+
+    if passed {
+        println!("\n✓ All performance invariants passed");
+    } else {
+        eprintln!("\n✗ Performance regression detected — FAIL");
+    }
+    passed
+}
+
+// ── P4-1: Long-Run Stress Test ──────────────────────────────────────────
+
+#[derive(serde::Serialize, Debug, Clone)]
+struct LongRunSample {
+    elapsed_secs: u64,
+    interval_ops: u64,
+    interval_tps: f64,
+    cumulative_ops: u64,
+    cumulative_tps: f64,
+    fast_path_p99_us: u64,
+    slow_path_p99_us: u64,
+    all_p99_us: u64,
+    committed: u64,
+    aborted: u64,
+}
+
+#[derive(serde::Serialize, Debug)]
+struct LongRunReport {
+    duration_secs: u64,
+    total_ops: u64,
+    avg_tps: f64,
+    min_interval_tps: f64,
+    max_interval_tps: f64,
+    final_p99_us: u64,
+    max_p99_us: u64,
+    total_committed: u64,
+    total_aborted: u64,
+    samples: Vec<LongRunSample>,
+    stable: bool,
+}
+
+fn run_long_run(args: &Args) {
+    let target_duration = parse_duration(&args.duration);
+    let sample_interval = Duration::from_secs(args.sample_interval_secs);
+
+    println!("═══════════════════════════════════════════════");
+    println!("  LONG-RUN STRESS TEST");
+    println!("═══════════════════════════════════════════════");
+    println!("  Target duration:   {:?}", target_duration);
+    println!("  Sample interval:   {:?}", sample_interval);
+    println!("  Seed:              {}", args.seed);
+    println!("  Shards:            {}", args.shards);
+    println!("  Record count:      {}", args.record_count);
+    println!();
+
+    let storage = Arc::new(StorageEngine::new_in_memory());
+    storage.create_table(bench_schema()).unwrap();
+    let mgr = Arc::new(TxnManager::new(storage.clone()));
+    let isolation = isolation_from_str(&args.isolation);
+    let table_id = TableId(1);
+
+    // Load initial data
+    for i in 0..args.record_count {
+        let txn = mgr.begin(isolation);
+        let row = OwnedRow::new(vec![
+            Datum::Int64(i as i64),
+            Datum::Text(format!("value_{}", i)),
+        ]);
+        storage.insert(table_id, row, txn.txn_id).unwrap();
+        mgr.commit(txn.txn_id).unwrap();
+    }
+    mgr.reset_latency();
+
+    let mut rng = Rng::new(args.seed);
+    let mut samples: Vec<LongRunSample> = Vec::new();
+    let mut total_ops = 0u64;
+    let mut interval_ops = 0u64;
+    let mut min_tps = f64::MAX;
+    let mut max_tps = 0.0f64;
+    let mut max_p99 = 0u64;
+
+    let global_start = Instant::now();
+    let mut interval_start = Instant::now();
+
+    loop {
+        if global_start.elapsed() >= target_duration {
+            break;
+        }
+
+        // Execute one operation
+        let is_read = rng.next_pct() < args.read_pct;
+        let is_local = rng.next_pct() < args.local_pct;
+
+        let classification = if is_local {
+            let shard = ShardId(rng.next_u64() % args.shards);
+            TxnClassification::local(shard)
+        } else {
+            let s1 = ShardId(0);
+            let s2 = ShardId(1u64.min(args.shards - 1));
+            TxnClassification::global(vec![s1, s2], SlowPathMode::Xa2Pc)
+        };
+
+        let txn = mgr.begin_with_classification(isolation, classification);
+        let key = (rng.next_u64() % args.record_count) as i64;
+
+        if is_read {
+            let read_ts = txn.read_ts(mgr.current_ts());
+            let _ = storage.scan(table_id, txn.txn_id, read_ts);
+            let _ = mgr.commit(txn.txn_id);
+        } else {
+            let read_ts = txn.read_ts(mgr.current_ts());
+            let rows = storage.scan(table_id, txn.txn_id, read_ts).unwrap();
+            for (pk, row) in &rows {
+                if let Some(Datum::Int64(k)) = row.values.first() {
+                    if *k == key {
+                        let new_row = OwnedRow::new(vec![
+                            Datum::Int64(key),
+                            Datum::Text(format!("updated_{}", rng.next_u64())),
+                        ]);
+                        let _ = storage.update(table_id, pk, new_row, txn.txn_id);
+                        break;
+                    }
+                }
+            }
+            let _ = mgr.commit(txn.txn_id);
+        }
+
+        total_ops += 1;
+        interval_ops += 1;
+
+        // Sample at interval
+        if interval_start.elapsed() >= sample_interval {
+            let interval_elapsed = interval_start.elapsed();
+            let interval_tps = interval_ops as f64 / interval_elapsed.as_secs_f64();
+            let cumulative_tps = total_ops as f64 / global_start.elapsed().as_secs_f64();
+            let stats = mgr.stats_snapshot();
+
+            if interval_tps < min_tps { min_tps = interval_tps; }
+            if interval_tps > max_tps { max_tps = interval_tps; }
+            if stats.latency.all.p99_us > max_p99 { max_p99 = stats.latency.all.p99_us; }
+
+            let sample = LongRunSample {
+                elapsed_secs: global_start.elapsed().as_secs(),
+                interval_ops,
+                interval_tps,
+                cumulative_ops: total_ops,
+                cumulative_tps,
+                fast_path_p99_us: stats.latency.fast_path.p99_us,
+                slow_path_p99_us: stats.latency.slow_path.p99_us,
+                all_p99_us: stats.latency.all.p99_us,
+                committed: stats.total_committed,
+                aborted: stats.total_aborted,
+            };
+
+            if args.export != "json" {
+                println!(
+                    "  [{:>6}s] ops={:<8} tps={:<10.1} cum_tps={:<10.1} p99={}µs",
+                    sample.elapsed_secs, sample.interval_ops,
+                    sample.interval_tps, sample.cumulative_tps,
+                    sample.all_p99_us,
+                );
+            }
+
+            samples.push(sample);
+            interval_ops = 0;
+            interval_start = Instant::now();
+        }
+    }
+
+    let total_elapsed = global_start.elapsed();
+    let avg_tps = total_ops as f64 / total_elapsed.as_secs_f64();
+    let final_stats = mgr.stats_snapshot();
+
+    // Stability check: TPS should not drop more than 50% from peak
+    let stable = min_tps >= max_tps * 0.5 || samples.len() < 3;
+
+    let report = LongRunReport {
+        duration_secs: total_elapsed.as_secs(),
+        total_ops,
+        avg_tps,
+        min_interval_tps: if min_tps == f64::MAX { 0.0 } else { min_tps },
+        max_interval_tps: max_tps,
+        final_p99_us: final_stats.latency.all.p99_us,
+        max_p99_us: max_p99,
+        total_committed: final_stats.total_committed,
+        total_aborted: final_stats.total_aborted,
+        samples,
+        stable,
+    };
+
+    match args.export.as_str() {
+        "json" => {
+            println!("{}", serde_json::to_string_pretty(&report).expect("serialize report"));
+        }
+        "csv" => {
+            println!("elapsed_secs,interval_ops,interval_tps,cumulative_ops,cumulative_tps,all_p99_us,committed,aborted");
+            for s in &report.samples {
+                println!(
+                    "{},{},{:.1},{},{:.1},{},{},{}",
+                    s.elapsed_secs, s.interval_ops, s.interval_tps,
+                    s.cumulative_ops, s.cumulative_tps, s.all_p99_us,
+                    s.committed, s.aborted,
+                );
+            }
+        }
+        _ => {
+            println!();
+            println!("═══════════════════════════════════════════════");
+            println!("  LONG-RUN SUMMARY");
+            println!("═══════════════════════════════════════════════");
+            println!("  Duration:          {} s", report.duration_secs);
+            println!("  Total ops:         {}", report.total_ops);
+            println!("  Avg TPS:           {:.1}", report.avg_tps);
+            println!("  Min interval TPS:  {:.1}", report.min_interval_tps);
+            println!("  Max interval TPS:  {:.1}", report.max_interval_tps);
+            println!("  Final P99:         {} µs", report.final_p99_us);
+            println!("  Max P99:           {} µs", report.max_p99_us);
+            println!("  Total committed:   {}", report.total_committed);
+            println!("  Total aborted:     {}", report.total_aborted);
+            println!("  Stable:            {}", if report.stable { "YES" } else { "NO — TPS dropped >50% from peak" });
+            println!();
+        }
+    }
+
+    if !report.stable {
+        eprintln!("WARNING: Long-run stability check FAILED — TPS variance too high");
+        std::process::exit(1);
+    }
+}
+
+// ── Main ─────────────────────────────────────────────────────────────────
+
 fn main() {
     let args = Args::parse();
 
-    if args.tpcb {
+    if args.long_run {
+        run_long_run(&args);
+    } else if args.tpcb {
         run_tpcb(&args);
     } else if args.lsm {
         run_lsm_bench(&args);
@@ -1214,8 +1656,28 @@ fn main() {
             println!("  Fast-path commits (ON): {}", on.stats.fast_path_commits);
             println!("  Slow-path commits (ON): {}", on.stats.slow_path_commits);
         }
+
+        // P2-1: Assert fast-path P99 < slow-path P99
+        if on.stats.latency.fast_path.p99_us > 0
+            && on.stats.latency.slow_path.p99_us > 0
+            && on.stats.latency.fast_path.p99_us > on.stats.latency.slow_path.p99_us
+        {
+            eprintln!(
+                "INVARIANT VIOLATION: fast-path P99 ({}µs) > slow-path P99 ({}µs)",
+                on.stats.latency.fast_path.p99_us, on.stats.latency.slow_path.p99_us
+            );
+            std::process::exit(1);
+        }
     } else {
         let result = run_workload(&args, false, "YCSB Workload A");
         print_result(&result, &args.export);
+
+        // Baseline save/check
+        if args.baseline_save {
+            save_baseline(&result, &args);
+        }
+        if args.baseline_check && !check_baseline(&result, &args) {
+            std::process::exit(1);
+        }
     }
 }

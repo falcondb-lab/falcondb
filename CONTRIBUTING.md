@@ -57,6 +57,10 @@ cargo test --workspace
 
 # Quick check (faster iteration)
 cargo check --workspace
+
+# Java JDBC driver (requires JDK 11+ and Maven)
+cd clients/falcondb-jdbc
+mvn clean test
 ```
 
 ### 4. Commit
@@ -100,6 +104,10 @@ Open a PR against `main`. Fill out the PR template (auto-populated).
 | `crates/<name>/src/*.rs` | Implementation modules |
 | `crates/falcon_server/tests/*.rs` | SQL integration tests |
 | `crates/falcon_cluster/src/tests.rs` | Cluster/replication tests |
+| `crates/falcon_protocol_native/` | Native binary protocol codec + compression |
+| `crates/falcon_native_server/` | Native protocol server + session + executor bridge |
+| `clients/falcondb-jdbc/` | Java JDBC driver (Maven project) |
+| `tools/native-proto-spec/vectors/` | Golden test vectors for cross-language validation |
 | `scripts/` | Demo, CI, and setup scripts |
 | `docs/` | Architecture decisions, design docs |
 
@@ -118,6 +126,8 @@ All PRs must pass these gates before merge:
 | **Failover Gate (P0)** | Replication + promote + lifecycle tests | ✅ |
 | **Failover Gate (P1)** | Checkpoint, fault injection, SHOW commands | ⚠️ Warning |
 | **Windows** | Build + test on Windows | ✅ |
+| **Native Protocol** | `cargo test -p falcon_protocol_native -p falcon_native_server` | ✅ |
+| **JDBC Smoke** | `scripts/ci_native_jdbc_smoke.sh` (Rust + Java) | ✅ |
 
 ---
 

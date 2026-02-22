@@ -5,6 +5,8 @@ members = [
     "crates/falcon_storage",
     "crates/falcon_txn",
     "crates/falcon_protocol_pg",
+    "crates/falcon_protocol_native",
+    "crates/falcon_native_server",
     "crates/falcon_sql_frontend",
     "crates/falcon_planner",
     "crates/falcon_executor",
