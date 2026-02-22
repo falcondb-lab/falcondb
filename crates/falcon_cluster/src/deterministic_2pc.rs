@@ -183,7 +183,9 @@ impl CoordinatorDecisionLog {
     /// Get the decision for a transaction (used by in-doubt resolver).
     pub fn get_decision(&self, txn_id: TxnId) -> Option<CoordinatorDecision> {
         let records = self.records.read();
-        records.iter().rev()
+        records
+            .iter()
+            .rev()
             .find(|r| r.txn_id == txn_id)
             .map(|r| r.decision)
     }
@@ -191,10 +193,7 @@ impl CoordinatorDecisionLog {
     /// Get all unapplied decisions (for crash recovery).
     pub fn unapplied_decisions(&self) -> Vec<DecisionRecord> {
         let records = self.records.read();
-        records.iter()
-            .filter(|r| !r.applied)
-            .cloned()
-            .collect()
+        records.iter().filter(|r| !r.applied).cloned().collect()
     }
 
     /// Snapshot of recent decisions for observability.
@@ -267,19 +266,34 @@ pub enum TimeoutResult {
     /// Hard timeout exceeded — abort + enqueue for resolver.
     HardTimeout { elapsed_ms: u64, budget_ms: u64 },
     /// Per-shard timeout exceeded.
-    ShardTimeout { shard_id: ShardId, elapsed_us: u64, budget_us: u64 },
+    ShardTimeout {
+        shard_id: ShardId,
+        elapsed_us: u64,
+        budget_us: u64,
+    },
 }
 
 impl std::fmt::Display for TimeoutResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TimeoutResult::Ok => write!(f, "ok"),
-            TimeoutResult::SoftTimeout { elapsed_ms, budget_ms } =>
-                write!(f, "soft_timeout({}ms/{}ms)", elapsed_ms, budget_ms),
-            TimeoutResult::HardTimeout { elapsed_ms, budget_ms } =>
-                write!(f, "hard_timeout({}ms/{}ms)", elapsed_ms, budget_ms),
-            TimeoutResult::ShardTimeout { shard_id, elapsed_us, budget_us } =>
-                write!(f, "shard_timeout(shard_{}, {}us/{}us)", shard_id.0, elapsed_us, budget_us),
+            TimeoutResult::SoftTimeout {
+                elapsed_ms,
+                budget_ms,
+            } => write!(f, "soft_timeout({}ms/{}ms)", elapsed_ms, budget_ms),
+            TimeoutResult::HardTimeout {
+                elapsed_ms,
+                budget_ms,
+            } => write!(f, "hard_timeout({}ms/{}ms)", elapsed_ms, budget_ms),
+            TimeoutResult::ShardTimeout {
+                shard_id,
+                elapsed_us,
+                budget_us,
+            } => write!(
+                f,
+                "shard_timeout(shard_{}, {}us/{}us)",
+                shard_id.0, elapsed_us, budget_us
+            ),
         }
     }
 }
@@ -380,8 +394,7 @@ pub struct LayeredTimeoutSnapshot {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Policy for handling slow shards during 2PC prepare.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SlowShardPolicy {
     /// Abort the entire transaction immediately when any shard exceeds
     /// the per-shard timeout. Minimizes tail latency at the cost of
@@ -408,7 +421,6 @@ impl std::fmt::Display for SlowShardPolicy {
         }
     }
 }
-
 
 /// Configuration for slow-shard handling.
 #[derive(Debug, Clone)]
@@ -660,7 +672,12 @@ mod tests {
 
         log.log_decision(TxnId(1), CoordinatorDecision::Commit, &[ShardId(0)], 100);
         log.log_decision(TxnId(2), CoordinatorDecision::Abort, &[ShardId(1)], 200);
-        log.log_decision(TxnId(3), CoordinatorDecision::Commit, &[ShardId(0), ShardId(1)], 300);
+        log.log_decision(
+            TxnId(3),
+            CoordinatorDecision::Commit,
+            &[ShardId(0), ShardId(1)],
+            300,
+        );
 
         log.mark_applied(TxnId(2));
 
@@ -778,9 +795,15 @@ mod tests {
     #[test]
     fn test_timeout_result_display() {
         assert_eq!(TimeoutResult::Ok.to_string(), "ok");
-        let soft = TimeoutResult::SoftTimeout { elapsed_ms: 600, budget_ms: 500 };
+        let soft = TimeoutResult::SoftTimeout {
+            elapsed_ms: 600,
+            budget_ms: 500,
+        };
         assert!(soft.to_string().contains("soft_timeout"));
-        let hard = TimeoutResult::HardTimeout { elapsed_ms: 6000, budget_ms: 5000 };
+        let hard = TimeoutResult::HardTimeout {
+            elapsed_ms: 6000,
+            budget_ms: 5000,
+        };
         assert!(hard.to_string().contains("hard_timeout"));
     }
 

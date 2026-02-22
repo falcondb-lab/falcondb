@@ -59,10 +59,7 @@ pub enum FalconError {
 
     /// Transient resource/backpressure error.
     #[error("Transient: {reason} (retry after {retry_after_ms}ms)")]
-    Transient {
-        reason: String,
-        retry_after_ms: u64,
-    },
+    Transient { reason: String, retry_after_ms: u64 },
 
     /// Internal bug — should never occur in production.
     /// Always carries a unique `error_code` and `debug_context` for post-mortem.
@@ -109,16 +106,10 @@ pub enum StorageError {
     Serialization(String),
 
     #[error("Memory pressure: shard under pressure, write rejected ({used_bytes} / {limit_bytes} bytes)")]
-    MemoryPressure {
-        used_bytes: u64,
-        limit_bytes: u64,
-    },
+    MemoryPressure { used_bytes: u64, limit_bytes: u64 },
 
     #[error("Memory limit exceeded: shard at hard limit, all transactions rejected ({used_bytes} / {limit_bytes} bytes)")]
-    MemoryLimitExceeded {
-        used_bytes: u64,
-        limit_bytes: u64,
-    },
+    MemoryLimitExceeded { used_bytes: u64, limit_bytes: u64 },
 }
 
 /// Transaction layer errors.
@@ -189,7 +180,11 @@ pub enum SqlError {
     ParamTypeRequired(usize),
 
     #[error("Parameter ${index} type conflict: expected {expected}, got {got}")]
-    ParamTypeConflict { index: usize, expected: String, got: String },
+    ParamTypeConflict {
+        index: usize,
+        expected: String,
+        got: String,
+    },
 
     #[error("Internal invariant violation: {0}")]
     InternalInvariant(String),
@@ -230,7 +225,11 @@ pub enum ExecutionError {
     ParamMissing(usize),
 
     #[error("Parameter ${index} type mismatch: expected {expected}, got {got}")]
-    ParamTypeMismatch { index: usize, expected: String, got: String },
+    ParamTypeMismatch {
+        index: usize,
+        expected: String,
+        got: String,
+    },
 
     #[error("CHECK constraint violated: {0}")]
     CheckConstraintViolation(String),
@@ -272,10 +271,16 @@ impl FalconError {
             FalconError::Execution(ExecutionError::TypeError(_)) => ErrorKind::UserError,
             FalconError::Execution(ExecutionError::DivisionByZero) => ErrorKind::UserError,
             FalconError::Execution(ExecutionError::ParamMissing(_)) => ErrorKind::UserError,
-            FalconError::Execution(ExecutionError::ParamTypeMismatch { .. }) => ErrorKind::UserError,
-            FalconError::Execution(ExecutionError::InsufficientPrivilege(_)) => ErrorKind::UserError,
+            FalconError::Execution(ExecutionError::ParamTypeMismatch { .. }) => {
+                ErrorKind::UserError
+            }
+            FalconError::Execution(ExecutionError::InsufficientPrivilege(_)) => {
+                ErrorKind::UserError
+            }
             FalconError::Execution(ExecutionError::GovernorAbort(_)) => ErrorKind::UserError,
-            FalconError::Execution(ExecutionError::CheckConstraintViolation(_)) => ErrorKind::UserError,
+            FalconError::Execution(ExecutionError::CheckConstraintViolation(_)) => {
+                ErrorKind::UserError
+            }
             FalconError::Storage(StorageError::TableNotFound(_)) => ErrorKind::UserError,
             FalconError::Storage(StorageError::TableAlreadyExists(_)) => ErrorKind::UserError,
             FalconError::Storage(StorageError::DuplicateKey) => ErrorKind::UserError,
@@ -344,40 +349,40 @@ impl FalconError {
     /// Map to a PostgreSQL SQLSTATE code.
     pub fn pg_sqlstate(&self) -> &'static str {
         match self {
-            FalconError::Sql(SqlError::Parse(_)) => "42601",           // syntax_error
-            FalconError::Sql(SqlError::UnknownTable(_)) => "42P01",    // undefined_table
-            FalconError::Sql(SqlError::UnknownColumn(_)) => "42703",   // undefined_column
+            FalconError::Sql(SqlError::Parse(_)) => "42601", // syntax_error
+            FalconError::Sql(SqlError::UnknownTable(_)) => "42P01", // undefined_table
+            FalconError::Sql(SqlError::UnknownColumn(_)) => "42703", // undefined_column
             FalconError::Sql(SqlError::TypeMismatch { .. }) => "42804", // datatype_mismatch
-            FalconError::Sql(SqlError::Unsupported(_)) => "0A000",     // feature_not_supported
+            FalconError::Sql(SqlError::Unsupported(_)) => "0A000", // feature_not_supported
             FalconError::Sql(SqlError::AmbiguousColumn(_)) => "42702", // ambiguous_column
-            FalconError::Sql(_) => "42000",                            // syntax_error_or_access_rule_violation
+            FalconError::Sql(_) => "42000", // syntax_error_or_access_rule_violation
             FalconError::Storage(StorageError::TableNotFound(_)) => "42P01",
             FalconError::Storage(StorageError::TableAlreadyExists(_)) => "42P07", // duplicate_table
-            FalconError::Storage(StorageError::DuplicateKey) => "23505",          // unique_violation
+            FalconError::Storage(StorageError::DuplicateKey) => "23505", // unique_violation
             FalconError::Storage(StorageError::UniqueViolation { .. }) => "23505",
-            FalconError::Storage(StorageError::SerializationFailure) => "40001",  // serialization_failure
+            FalconError::Storage(StorageError::SerializationFailure) => "40001", // serialization_failure
             FalconError::Storage(StorageError::MemoryPressure { .. }) => "53200", // out_of_memory
             FalconError::Storage(StorageError::MemoryLimitExceeded { .. }) => "53200",
             FalconError::Txn(TxnError::WriteConflict(_)) => "40001",
             FalconError::Txn(TxnError::SerializationConflict(_)) => "40001",
-            FalconError::Txn(TxnError::ConstraintViolation(_, _)) => "23000",    // integrity_constraint_violation
-            FalconError::Txn(TxnError::Timeout) => "57014",                      // query_canceled
+            FalconError::Txn(TxnError::ConstraintViolation(_, _)) => "23000", // integrity_constraint_violation
+            FalconError::Txn(TxnError::Timeout) => "57014",                   // query_canceled
             FalconError::Txn(TxnError::MemoryPressure(_)) => "53200",
             FalconError::Txn(TxnError::MemoryLimitExceeded(_)) => "53200",
-            FalconError::Txn(TxnError::WalBacklogExceeded(_)) => "53300",        // too_many_connections (reuse)
-            FalconError::Txn(TxnError::ReplicationLagExceeded(_)) => "57P03",    // cannot_connect_now
-            FalconError::ReadOnly(_) => "25006",                                  // read_only_sql_transaction
-            FalconError::Protocol(ProtocolError::AuthFailed) => "28P01",         // invalid_password
-            FalconError::Protocol(ProtocolError::InvalidMessage(_)) => "08P01",  // protocol_violation
-            FalconError::Protocol(ProtocolError::ConnectionClosed) => "08006",   // connection_failure
-            FalconError::Execution(ExecutionError::DivisionByZero) => "22012",   // division_by_zero
-            FalconError::Execution(ExecutionError::TypeError(_)) => "22000",     // data_exception
+            FalconError::Txn(TxnError::WalBacklogExceeded(_)) => "53300", // too_many_connections (reuse)
+            FalconError::Txn(TxnError::ReplicationLagExceeded(_)) => "57P03", // cannot_connect_now
+            FalconError::ReadOnly(_) => "25006", // read_only_sql_transaction
+            FalconError::Protocol(ProtocolError::AuthFailed) => "28P01", // invalid_password
+            FalconError::Protocol(ProtocolError::InvalidMessage(_)) => "08P01", // protocol_violation
+            FalconError::Protocol(ProtocolError::ConnectionClosed) => "08006", // connection_failure
+            FalconError::Execution(ExecutionError::DivisionByZero) => "22012", // division_by_zero
+            FalconError::Execution(ExecutionError::TypeError(_)) => "22000",   // data_exception
             FalconError::Execution(ExecutionError::InsufficientPrivilege(_)) => "42501", // insufficient_privilege
-            FalconError::Execution(ExecutionError::GovernorAbort(_)) => "57014",  // query_canceled
+            FalconError::Execution(ExecutionError::GovernorAbort(_)) => "57014", // query_canceled
             FalconError::Execution(ExecutionError::CheckConstraintViolation(_)) => "23514", // check_violation
             FalconError::Retryable { .. } => "40001",
-            FalconError::Transient { .. } => "53000",                            // insufficient_resources
-            FalconError::InternalBug { .. } => "XX000",                          // internal_error
+            FalconError::Transient { .. } => "53000", // insufficient_resources
+            FalconError::InternalBug { .. } => "XX000", // internal_error
             FalconError::Internal(_) => "XX000",
             _ => "XX000",
         }
@@ -441,25 +446,35 @@ impl FalconError {
         let ctx = ctx.into();
         match self {
             FalconError::Internal(msg) => FalconError::Internal(format!("{ctx}: {msg}")),
-            FalconError::Retryable { reason, shard_id, epoch, leader_hint, retry_after_ms } => {
-                FalconError::Retryable {
-                    reason: format!("{ctx}: {reason}"),
-                    shard_id, epoch, leader_hint, retry_after_ms,
-                }
-            }
-            FalconError::Transient { reason, retry_after_ms } => {
-                FalconError::Transient {
-                    reason: format!("{ctx}: {reason}"),
-                    retry_after_ms,
-                }
-            }
-            FalconError::InternalBug { error_code, message, debug_context } => {
-                FalconError::InternalBug {
-                    error_code,
-                    message: format!("{ctx}: {message}"),
-                    debug_context,
-                }
-            }
+            FalconError::Retryable {
+                reason,
+                shard_id,
+                epoch,
+                leader_hint,
+                retry_after_ms,
+            } => FalconError::Retryable {
+                reason: format!("{ctx}: {reason}"),
+                shard_id,
+                epoch,
+                leader_hint,
+                retry_after_ms,
+            },
+            FalconError::Transient {
+                reason,
+                retry_after_ms,
+            } => FalconError::Transient {
+                reason: format!("{ctx}: {reason}"),
+                retry_after_ms,
+            },
+            FalconError::InternalBug {
+                error_code,
+                message,
+                debug_context,
+            } => FalconError::InternalBug {
+                error_code,
+                message: format!("{ctx}: {message}"),
+                debug_context,
+            },
             other => FalconError::Internal(format!("{ctx}: {other}")),
         }
     }
@@ -475,22 +490,42 @@ impl FalconError {
             rctx.request_id, rctx.session_id, rctx.query_id, rctx.txn_id, rctx.shard_id
         );
         match self {
-            FalconError::InternalBug { error_code, message, debug_context } => {
-                let dc = if debug_context.is_empty() { tag } else { format!("{debug_context} | {tag}") };
-                FalconError::InternalBug { error_code, message, debug_context: dc }
-            }
-            FalconError::Retryable { reason, shard_id, epoch, leader_hint, retry_after_ms } => {
-                FalconError::Retryable {
-                    reason: format!("{reason} [{tag}]"),
-                    shard_id, epoch, leader_hint, retry_after_ms,
+            FalconError::InternalBug {
+                error_code,
+                message,
+                debug_context,
+            } => {
+                let dc = if debug_context.is_empty() {
+                    tag
+                } else {
+                    format!("{debug_context} | {tag}")
+                };
+                FalconError::InternalBug {
+                    error_code,
+                    message,
+                    debug_context: dc,
                 }
             }
-            FalconError::Transient { reason, retry_after_ms } => {
-                FalconError::Transient {
-                    reason: format!("{reason} [{tag}]"),
-                    retry_after_ms,
-                }
-            }
+            FalconError::Retryable {
+                reason,
+                shard_id,
+                epoch,
+                leader_hint,
+                retry_after_ms,
+            } => FalconError::Retryable {
+                reason: format!("{reason} [{tag}]"),
+                shard_id,
+                epoch,
+                leader_hint,
+                retry_after_ms,
+            },
+            FalconError::Transient {
+                reason,
+                retry_after_ms,
+            } => FalconError::Transient {
+                reason: format!("{reason} [{tag}]"),
+                retry_after_ms,
+            },
             FalconError::Internal(msg) => FalconError::Internal(format!("{msg} [{tag}]")),
             other => other.with_context(tag),
         }
@@ -499,13 +534,19 @@ impl FalconError {
     /// Set `leader_hint` on a `Retryable` error. No-op for other variants.
     pub fn with_leader_hint(self, hint: impl Into<String>) -> Self {
         match self {
-            FalconError::Retryable { reason, shard_id, epoch, retry_after_ms, .. } => {
-                FalconError::Retryable {
-                    reason, shard_id, epoch,
-                    leader_hint: Some(hint.into()),
-                    retry_after_ms,
-                }
-            }
+            FalconError::Retryable {
+                reason,
+                shard_id,
+                epoch,
+                retry_after_ms,
+                ..
+            } => FalconError::Retryable {
+                reason,
+                shard_id,
+                epoch,
+                leader_hint: Some(hint.into()),
+                retry_after_ms,
+            },
             other => other,
         }
     }
@@ -513,10 +554,22 @@ impl FalconError {
     /// Set `debug_context` on an `InternalBug` error. No-op for other variants.
     pub fn with_debug_context(self, ctx: impl Into<String>) -> Self {
         match self {
-            FalconError::InternalBug { error_code, message, debug_context } => {
+            FalconError::InternalBug {
+                error_code,
+                message,
+                debug_context,
+            } => {
                 let dc = ctx.into();
-                let dc = if debug_context.is_empty() { dc } else { format!("{debug_context} | {dc}") };
-                FalconError::InternalBug { error_code, message, debug_context: dc }
+                let dc = if debug_context.is_empty() {
+                    dc
+                } else {
+                    format!("{debug_context} | {dc}")
+                };
+                FalconError::InternalBug {
+                    error_code,
+                    message,
+                    debug_context: dc,
+                }
             }
             other => other,
         }
@@ -811,7 +864,13 @@ mod error_classification {
     fn test_retryable_constructor() {
         let e = FalconError::retryable("epoch mismatch", 3, 7, None, 100);
         match e {
-            FalconError::Retryable { reason, shard_id, epoch, leader_hint, retry_after_ms } => {
+            FalconError::Retryable {
+                reason,
+                shard_id,
+                epoch,
+                leader_hint,
+                retry_after_ms,
+            } => {
                 assert_eq!(reason, "epoch mismatch");
                 assert_eq!(shard_id, 3);
                 assert_eq!(epoch, 7);
@@ -826,7 +885,10 @@ mod error_classification {
     fn test_transient_constructor() {
         let e = FalconError::transient("memory pressure", 50);
         match e {
-            FalconError::Transient { reason, retry_after_ms } => {
+            FalconError::Transient {
+                reason,
+                retry_after_ms,
+            } => {
                 assert_eq!(reason, "memory pressure");
                 assert_eq!(retry_after_ms, 50);
             }
@@ -838,7 +900,11 @@ mod error_classification {
     fn test_internal_bug_constructor() {
         let e = FalconError::internal_bug("E001", "null shard", "shard=3");
         match e {
-            FalconError::InternalBug { error_code, message, debug_context } => {
+            FalconError::InternalBug {
+                error_code,
+                message,
+                debug_context,
+            } => {
                 assert_eq!(error_code, "E001");
                 assert_eq!(message, "null shard");
                 assert_eq!(debug_context, "shard=3");

@@ -53,9 +53,9 @@ impl Default for K8sDeployConfig {
             image: "falcondb/falcondb:latest".into(),
             cpu_request_milli: 2000,
             cpu_limit_milli: 4000,
-            memory_request_bytes: 4 * 1024 * 1024 * 1024,  // 4 GiB
-            memory_limit_bytes: 8 * 1024 * 1024 * 1024,    // 8 GiB
-            storage_size_bytes: 100 * 1024 * 1024 * 1024,   // 100 GiB
+            memory_request_bytes: 4 * 1024 * 1024 * 1024, // 4 GiB
+            memory_limit_bytes: 8 * 1024 * 1024 * 1024,   // 8 GiB
+            storage_size_bytes: 100 * 1024 * 1024 * 1024, // 100 GiB
             storage_class: "standard".into(),
             anti_affinity: true,
             labels: HashMap::new(),

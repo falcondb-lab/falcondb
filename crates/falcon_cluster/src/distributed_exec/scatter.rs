@@ -12,8 +12,8 @@ use crate::sharded_engine::ShardedEngine;
 
 use super::gather::{compare_datums, merge_two_phase_agg};
 use super::{
-    compare_rows_by_columns, FailurePolicy, GatherLimits, GatherStrategy,
-    ScatterGatherMetrics, ShardResult, SubPlan, SubPlanResult,
+    compare_rows_by_columns, FailurePolicy, GatherLimits, GatherStrategy, ScatterGatherMetrics,
+    ShardResult, SubPlan, SubPlanResult,
 };
 
 /// The distributed executor.
@@ -71,79 +71,96 @@ impl DistributedExecutor {
             }
         }
 
-        let shard_results: Vec<Result<ShardResult, FalconError>> =
-            std::thread::scope(|s| {
-                let handles: Vec<_> = target_shards
-                    .iter()
-                    .map(|&shard_id| {
-                        let engine = &self.engine;
-                        let subplan_ref = &subplan;
-                        s.spawn(move || {
-                            let shard = engine.shard(shard_id).ok_or_else(|| {
-                                FalconError::internal_bug(
-                                    "E-SCATTER-002",
-                                    format!("Shard {:?} disappeared during execution", shard_id),
-                                    "shard was validated before spawn but missing at execution time",
-                                )
-                            })?;
+        let shard_results: Vec<Result<ShardResult, FalconError>> = std::thread::scope(|s| {
+            let handles: Vec<_> = target_shards
+                .iter()
+                .map(|&shard_id| {
+                    let engine = &self.engine;
+                    let subplan_ref = &subplan;
+                    s.spawn(move || {
+                        let shard = engine.shard(shard_id).ok_or_else(|| {
+                            FalconError::internal_bug(
+                                "E-SCATTER-002",
+                                format!("Shard {:?} disappeared during execution", shard_id),
+                                "shard was validated before spawn but missing at execution time",
+                            )
+                        })?;
 
-                            // Retry once on transient failure.
-                            let max_attempts = 2u8;
-                            let mut last_err = None;
-                            for attempt in 0..max_attempts {
-                                if attempt > 0 {
-                                    std::thread::sleep(Duration::from_millis(5));
-                                }
-
-                                let start = Instant::now();
-                                let result = subplan_ref.execute(&shard.storage, &shard.txn_mgr);
-                                let latency_us = start.elapsed().as_micros() as u64;
-
-                                // Check timeout
-                                if total_start.elapsed() > timeout {
-                                    return Err(FalconError::Transient {
-                                        reason: format!(
-                                            "Scatter/gather timeout after {}ms (shard {:?})",
-                                            timeout.as_millis(), shard_id,
-                                        ),
-                                        retry_after_ms: 100,
-                                    });
-                                }
-
-                                match result {
-                                    Ok((columns, rows)) => {
-                                        return Ok(ShardResult {
-                                            shard_id,
-                                            columns,
-                                            rows,
-                                            latency_us,
-                                        });
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "Shard {:?} attempt {}/{} failed: {}",
-                                            shard_id, attempt + 1, max_attempts, e,
-                                        );
-                                        last_err = Some(e);
-                                    }
+                        // Retry once on transient failure.
+                        let max_attempts = 2u8;
+                        let mut last_err = None;
+                        for attempt in 0..max_attempts {
+                            if attempt > 0 {
+                                // Interruptible retry delay (condvar instead of bare sleep)
+                                {
+                                    let pair = std::sync::Mutex::new(false);
+                                    let cvar = std::sync::Condvar::new();
+                                    let guard = pair.lock().unwrap_or_else(|e| e.into_inner());
+                                    let _ = cvar.wait_timeout(guard, Duration::from_millis(5));
                                 }
                             }
 
-                            Err(last_err.unwrap_or_else(|| FalconError::Internal(
-                                format!("Shard {:?} failed after {} attempts", shard_id, max_attempts),
-                            )))
-                        })
-                    })
-                    .collect();
+                            let start = Instant::now();
+                            let result = subplan_ref.execute(&shard.storage, &shard.txn_mgr);
+                            let latency_us = start.elapsed().as_micros() as u64;
 
-                handles.into_iter().map(|h| {
-                    h.join().unwrap_or_else(|_| Err(FalconError::internal_bug(
+                            // Check timeout
+                            if total_start.elapsed() > timeout {
+                                return Err(FalconError::Transient {
+                                    reason: format!(
+                                        "Scatter/gather timeout after {}ms (shard {:?})",
+                                        timeout.as_millis(),
+                                        shard_id,
+                                    ),
+                                    retry_after_ms: 100,
+                                });
+                            }
+
+                            match result {
+                                Ok((columns, rows)) => {
+                                    return Ok(ShardResult {
+                                        shard_id,
+                                        columns,
+                                        rows,
+                                        latency_us,
+                                    });
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Shard {:?} attempt {}/{} failed: {}",
+                                        shard_id,
+                                        attempt + 1,
+                                        max_attempts,
+                                        e,
+                                    );
+                                    last_err = Some(e);
+                                }
+                            }
+                        }
+
+                        Err(last_err.unwrap_or_else(|| {
+                            FalconError::Internal(format!(
+                                "Shard {:?} failed after {} attempts",
+                                shard_id, max_attempts
+                            ))
+                        }))
+                    })
+                })
+                .collect();
+
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join().unwrap_or_else(|_| {
+                        Err(FalconError::internal_bug(
                         "E-SCATTER-003",
                         "Shard thread panicked during scatter execution",
                         "std::thread::JoinHandle returned Err — indicates panic in spawned thread",
-                    )))
-                }).collect()
-            });
+                    ))
+                    })
+                })
+                .collect()
+        });
 
         // Collect results — apply failure policy.
         let mut collected: Vec<ShardResult> = Vec::with_capacity(target_shards.len());
@@ -167,13 +184,16 @@ impl DistributedExecutor {
 
         // Strict policy: any shard failure → fail the whole query.
         if self.failure_policy == FailurePolicy::Strict && !failed_shards.is_empty() {
-            let msgs: Vec<String> = failed_shards.iter()
+            let msgs: Vec<String> = failed_shards
+                .iter()
                 .map(|(sid, msg)| format!("shard_{}: {}", sid.0, msg))
                 .collect();
             return Err(FalconError::Transient {
                 reason: format!(
                     "Scatter failed ({} of {} shards): {}",
-                    failed_shards.len(), target_shards.len(), msgs.join("; "),
+                    failed_shards.len(),
+                    target_shards.len(),
+                    msgs.join("; "),
                 ),
                 retry_after_ms: 100,
             });
@@ -181,12 +201,15 @@ impl DistributedExecutor {
 
         // BestEffort: at least one shard must succeed.
         if collected.is_empty() {
-            let msgs: Vec<String> = failed_shards.iter()
+            let msgs: Vec<String> = failed_shards
+                .iter()
                 .map(|(sid, msg)| format!("shard_{}: {}", sid.0, msg))
                 .collect();
             return Err(FalconError::Transient {
                 reason: format!(
-                    "All {} shards failed: {}", target_shards.len(), msgs.join("; "),
+                    "All {} shards failed: {}",
+                    target_shards.len(),
+                    msgs.join("; "),
                 ),
                 retry_after_ms: 200,
             });
@@ -216,7 +239,11 @@ impl DistributedExecutor {
         }
 
         let merged_rows = match strategy {
-            GatherStrategy::Union { distinct, limit, offset } => {
+            GatherStrategy::Union {
+                distinct,
+                limit,
+                offset,
+            } => {
                 let mut all_rows = Vec::with_capacity(total_rows_gathered);
                 for sr in &shard_results {
                     all_rows.extend(sr.rows.iter().cloned());
@@ -238,7 +265,11 @@ impl DistributedExecutor {
                 }
                 all_rows
             }
-            GatherStrategy::OrderByLimit { sort_columns, limit, offset } => {
+            GatherStrategy::OrderByLimit {
+                sort_columns,
+                limit,
+                offset,
+            } => {
                 // Fast path: if each shard output is already sorted by `sort_columns`,
                 // do k-way merge (O(N log k)) with early stop at OFFSET+LIMIT.
                 let is_pre_sorted = shard_results.iter().all(|sr| {
@@ -284,10 +315,8 @@ impl DistributedExecutor {
                         }
                     }
 
-                    let shard_rows: Vec<&[OwnedRow]> = shard_results
-                        .iter()
-                        .map(|sr| sr.rows.as_slice())
-                        .collect();
+                    let shard_rows: Vec<&[OwnedRow]> =
+                        shard_results.iter().map(|sr| sr.rows.as_slice()).collect();
                     let sort_cols = Arc::new(sort_columns.clone());
                     let mut heap: BinaryHeap<Reverse<MergeEntry>> = BinaryHeap::new();
 
@@ -352,7 +381,16 @@ impl DistributedExecutor {
                     all_rows
                 }
             }
-            GatherStrategy::TwoPhaseAgg { group_by_indices, agg_merges, avg_fixups, visible_columns, having, order_by, limit, offset } => {
+            GatherStrategy::TwoPhaseAgg {
+                group_by_indices,
+                agg_merges,
+                avg_fixups,
+                visible_columns,
+                having,
+                order_by,
+                limit,
+                offset,
+            } => {
                 let mut merged = merge_two_phase_agg(&shard_results, group_by_indices, agg_merges);
                 // Apply AVG fixups: row[sum_idx] = row[sum_idx] / row[count_idx]
                 for row in &mut merged {
@@ -361,8 +399,12 @@ impl DistributedExecutor {
                         let count_val = row.values.get(count_idx).cloned().unwrap_or(Datum::Null);
                         let avg = match (&sum_val, &count_val) {
                             (_, Datum::Int64(0)) | (_, Datum::Null) => Datum::Null,
-                            (Datum::Int64(s), Datum::Int64(c)) => Datum::Float64(*s as f64 / *c as f64),
-                            (Datum::Int32(s), Datum::Int64(c)) => Datum::Float64(*s as f64 / *c as f64),
+                            (Datum::Int64(s), Datum::Int64(c)) => {
+                                Datum::Float64(*s as f64 / *c as f64)
+                            }
+                            (Datum::Int32(s), Datum::Int64(c)) => {
+                                Datum::Float64(*s as f64 / *c as f64)
+                            }
                             (Datum::Float64(s), Datum::Int64(c)) => Datum::Float64(s / *c as f64),
                             _ => Datum::Null,
                         };

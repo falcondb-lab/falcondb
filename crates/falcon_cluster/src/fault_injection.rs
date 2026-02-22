@@ -257,7 +257,11 @@ impl FaultInjector {
         // (avoids requiring `rand` crate dependency)
         let counter = self.jitter_events.fetch_add(1, Ordering::Relaxed);
         let jitter_us = if config.amplitude_us > 0 {
-            config.base_us + (counter.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407) % config.amplitude_us)
+            config.base_us
+                + (counter
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407)
+                    % config.amplitude_us)
         } else {
             config.base_us
         };
@@ -357,8 +361,7 @@ pub struct PartitionSnapshot {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Jitter injection mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum JitterMode {
     /// Jitter applied to CPU-bound operations (e.g. query execution).
     Cpu,
@@ -378,7 +381,6 @@ impl std::fmt::Display for JitterMode {
         }
     }
 }
-
 
 /// Configuration for CPU/IO jitter injection.
 #[derive(Debug, Clone)]
@@ -481,9 +483,16 @@ pub enum ChaosScenario {
     /// Inject disk latency for the given duration.
     DiskLatency { delay_us: u64, duration_ms: u64 },
     /// Simulate a network partition (split-brain) for the given duration.
-    NetworkPartition { group_a: Vec<u64>, group_b: Vec<u64>, duration_ms: u64 },
+    NetworkPartition {
+        group_a: Vec<u64>,
+        group_b: Vec<u64>,
+        duration_ms: u64,
+    },
     /// Inject CPU/IO jitter for the given duration.
-    CpuIoJitter { config: JitterConfig, duration_ms: u64 },
+    CpuIoJitter {
+        config: JitterConfig,
+        duration_ms: u64,
+    },
 }
 
 /// Result of a single chaos scenario run.
@@ -518,8 +527,11 @@ impl StabilityReport {
     pub fn summary(&self) -> String {
         format!(
             "ChaosRun: total={} passed={} failed={} consistent={} duration={}ms",
-            self.total_scenarios, self.passed, self.failed,
-            self.all_consistent, self.total_duration_ms,
+            self.total_scenarios,
+            self.passed,
+            self.failed,
+            self.all_consistent,
+            self.total_duration_ms,
         )
     }
 }
@@ -560,7 +572,10 @@ impl ChaosRunner {
                     self.injector.revive_leader();
                     format!("KillLeader({}ms)", duration_ms)
                 }
-                ChaosScenario::ReplicaDelay { delay_us, duration_ms } => {
+                ChaosScenario::ReplicaDelay {
+                    delay_us,
+                    duration_ms,
+                } => {
                     self.injector.set_replica_delay(*delay_us);
                     std::thread::sleep(Duration::from_millis(*duration_ms));
                     self.injector.set_replica_delay(0);
@@ -570,19 +585,33 @@ impl ChaosRunner {
                     self.injector.arm_wal_corruption();
                     "WalCorruption".to_string()
                 }
-                ChaosScenario::DiskLatency { delay_us, duration_ms } => {
+                ChaosScenario::DiskLatency {
+                    delay_us,
+                    duration_ms,
+                } => {
                     self.injector.set_disk_delay(*delay_us);
                     std::thread::sleep(Duration::from_millis(*duration_ms));
                     self.injector.set_disk_delay(0);
                     format!("DiskLatency({}us, {}ms)", delay_us, duration_ms)
                 }
-                ChaosScenario::NetworkPartition { group_a, group_b, duration_ms } => {
-                    self.injector.partition_nodes(group_a.clone(), group_b.clone());
+                ChaosScenario::NetworkPartition {
+                    group_a,
+                    group_b,
+                    duration_ms,
+                } => {
+                    self.injector
+                        .partition_nodes(group_a.clone(), group_b.clone());
                     std::thread::sleep(Duration::from_millis(*duration_ms));
                     self.injector.heal_partition();
-                    format!("NetworkPartition(a={:?}, b={:?}, {}ms)", group_a, group_b, duration_ms)
+                    format!(
+                        "NetworkPartition(a={:?}, b={:?}, {}ms)",
+                        group_a, group_b, duration_ms
+                    )
                 }
-                ChaosScenario::CpuIoJitter { config, duration_ms } => {
+                ChaosScenario::CpuIoJitter {
+                    config,
+                    duration_ms,
+                } => {
                     let mode = config.mode;
                     self.injector.set_jitter(config.clone());
                     std::thread::sleep(Duration::from_millis(*duration_ms));
@@ -647,7 +676,10 @@ mod tests {
         let runner = ChaosRunner::new(injector);
         let scenarios = vec![
             ChaosScenario::KillLeader { duration_ms: 1 },
-            ChaosScenario::ReplicaDelay { delay_us: 100, duration_ms: 1 },
+            ChaosScenario::ReplicaDelay {
+                delay_us: 100,
+                duration_ms: 1,
+            },
         ];
         let mut call_count = 0u32;
         let report = runner.run(scenarios, move || {
@@ -669,9 +701,10 @@ mod tests {
     fn test_chaos_runner_disk_latency() {
         let injector = new_injector();
         let runner = ChaosRunner::new(injector);
-        let scenarios = vec![
-            ChaosScenario::DiskLatency { delay_us: 100, duration_ms: 1 },
-        ];
+        let scenarios = vec![ChaosScenario::DiskLatency {
+            delay_us: 100,
+            duration_ms: 1,
+        }];
         let report = runner.run(scenarios, || Ok(()));
         assert!(report.all_consistent);
         assert_eq!(report.total_scenarios, 1);
@@ -842,13 +875,11 @@ mod tests {
     fn test_chaos_runner_network_partition() {
         let injector = new_injector();
         let runner = ChaosRunner::new(injector);
-        let scenarios = vec![
-            ChaosScenario::NetworkPartition {
-                group_a: vec![1, 2],
-                group_b: vec![3],
-                duration_ms: 1,
-            },
-        ];
+        let scenarios = vec![ChaosScenario::NetworkPartition {
+            group_a: vec![1, 2],
+            group_b: vec![3],
+            duration_ms: 1,
+        }];
         let report = runner.run(scenarios, || Ok(()));
         assert!(report.all_consistent);
         assert!(report.results[0].scenario.contains("NetworkPartition"));
@@ -936,12 +967,10 @@ mod tests {
     fn test_chaos_runner_jitter() {
         let injector = new_injector();
         let runner = ChaosRunner::new(injector);
-        let scenarios = vec![
-            ChaosScenario::CpuIoJitter {
-                config: JitterConfig::light(),
-                duration_ms: 1,
-            },
-        ];
+        let scenarios = vec![ChaosScenario::CpuIoJitter {
+            config: JitterConfig::light(),
+            duration_ms: 1,
+        }];
         let report = runner.run(scenarios, || Ok(()));
         assert!(report.all_consistent);
         assert!(report.results[0].scenario.contains("CpuIoJitter"));

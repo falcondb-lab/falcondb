@@ -54,7 +54,7 @@ pub struct IoSchedulerConfig {
 impl Default for IoSchedulerConfig {
     fn default() -> Self {
         Self {
-            capacity_bytes: 64 * 1024 * 1024,    // 64 MB burst
+            capacity_bytes: 64 * 1024 * 1024,      // 64 MB burst
             rate_bytes_per_sec: 128 * 1024 * 1024, // 128 MB/s sustained
         }
     }
@@ -117,7 +117,8 @@ impl IoScheduler {
             };
             let wait = Duration::from_micros(wait_us.min(1_000_000) as u64);
             self.total_throttles.fetch_add(1, Ordering::Relaxed);
-            self.total_throttle_us.fetch_add(wait.as_micros() as u64, Ordering::Relaxed);
+            self.total_throttle_us
+                .fetch_add(wait.as_micros() as u64, Ordering::Relaxed);
             Err(wait)
         }
     }
@@ -147,7 +148,8 @@ impl IoScheduler {
     fn refill(&self, state: &mut IoState) {
         let now = Instant::now();
         let elapsed = now.duration_since(state.last_refill);
-        let new_tokens = (elapsed.as_micros() as u128 * self.refill_rate as u128 / 1_000_000) as u64;
+        let new_tokens =
+            (elapsed.as_micros() * self.refill_rate as u128 / 1_000_000) as u64;
         if new_tokens > 0 {
             state.tokens = (state.tokens + new_tokens).min(self.capacity);
             state.last_refill = now;

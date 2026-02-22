@@ -13,9 +13,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use falcon_common::consistency::{
-    validate_prefix_property, validate_promote_commit_set,
-};
+use falcon_common::consistency::{validate_prefix_property, validate_promote_commit_set};
 use falcon_common::datum::{Datum, OwnedRow};
 use falcon_common::schema::{ColumnDef, TableSchema};
 use falcon_common::types::*;

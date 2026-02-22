@@ -1,3 +1,4 @@
+pub mod bg_supervisor;
 pub mod cloud;
 pub mod compat;
 pub mod config;
@@ -8,10 +9,9 @@ pub mod diag_bundle;
 pub mod edition;
 pub mod error;
 pub mod kernel;
+pub mod lock_metrics;
 pub mod request_context;
 pub mod rls;
-pub mod bg_supervisor;
-pub mod lock_metrics;
 pub mod schema;
 pub mod security;
 pub mod shutdown;

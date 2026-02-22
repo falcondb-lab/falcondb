@@ -36,9 +36,9 @@ pub struct VerifierConfig {
 impl Default for VerifierConfig {
     fn default() -> Self {
         Self {
-            state_hash_interval_secs: 300,  // 5 minutes
-            wal_replay_interval_secs: 600,  // 10 minutes
-            range_hash_sample_ratio: 0.1,   // 10%
+            state_hash_interval_secs: 300, // 5 minutes
+            wal_replay_interval_secs: 600, // 10 minutes
+            range_hash_sample_ratio: 0.1,  // 10%
             max_results_history: 100,
             txn_replay_enabled: false,
             txn_replay_sample_ratio: 0.001, // 0.1%
@@ -97,7 +97,11 @@ impl ConsistencyVerifier {
             computed_hash: format!("{:016x}", computed),
             expected_hash: Some(format!("{:016x}", expected_hash)),
             checked_at: now_unix,
-            error: if passed { None } else { Some("state hash mismatch".into()) },
+            error: if passed {
+                None
+            } else {
+                Some("state hash mismatch".into())
+            },
         };
         self.record_result(result.clone());
         result
@@ -119,7 +123,11 @@ impl ConsistencyVerifier {
             computed_hash: format!("{:016x}", computed_checksum),
             expected_hash: Some(format!("{:016x}", expected_checksum)),
             checked_at: now_unix,
-            error: if passed { None } else { Some("WAL checksum mismatch".into()) },
+            error: if passed {
+                None
+            } else {
+                Some("WAL checksum mismatch".into())
+            },
         };
         self.record_result(result.clone());
         result
@@ -141,7 +149,11 @@ impl ConsistencyVerifier {
             computed_hash: format!("{:016x}", local_hash),
             expected_hash: Some(format!("{:016x}", replica_hash)),
             checked_at: now_unix,
-            error: if passed { None } else { Some("range hash mismatch".into()) },
+            error: if passed {
+                None
+            } else {
+                Some("range hash mismatch".into())
+            },
         };
         self.record_result(result.clone());
         result
@@ -161,7 +173,11 @@ impl ConsistencyVerifier {
             computed_hash: String::new(),
             expected_hash: None,
             checked_at: now_unix,
-            error: if replay_matches { None } else { Some("txn replay mismatch".into()) },
+            error: if replay_matches {
+                None
+            } else {
+                Some("txn replay mismatch".into())
+            },
         };
         self.record_result(result.clone());
         result

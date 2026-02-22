@@ -4,7 +4,7 @@ pub use std::sync::Arc;
 
 pub use falcon_common::datum::Datum;
 pub use falcon_common::types::IsolationLevel;
-pub use falcon_executor::{Executor, ExecutionResult};
+pub use falcon_executor::{ExecutionResult, Executor};
 pub use falcon_planner::Planner;
 pub use falcon_sql_frontend::binder::Binder;
 pub use falcon_sql_frontend::parser::parse_sql;

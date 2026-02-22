@@ -155,7 +155,9 @@ impl ResourceMeter {
 
     /// Ensure a tenant has counters initialized.
     pub fn register_tenant(&self, tenant_id: TenantId) {
-        self.counters.entry(tenant_id).or_insert_with(TenantMeteringCounters::new);
+        self.counters
+            .entry(tenant_id)
+            .or_insert_with(TenantMeteringCounters::new);
     }
 
     /// Set quota for a tenant.
@@ -231,26 +233,36 @@ impl ResourceMeter {
         };
 
         // Check hard limits
-        if quota.max_queries > 0 && counters.query_count.load(Ordering::Relaxed) >= quota.max_queries {
+        if quota.max_queries > 0
+            && counters.query_count.load(Ordering::Relaxed) >= quota.max_queries
+        {
             self.throttled_count.fetch_add(1, Ordering::Relaxed);
             self.overage_alerts.fetch_add(1, Ordering::Relaxed);
             return ThrottleAction::Reject;
         }
-        if quota.max_memory_bytes > 0 && counters.memory_bytes.load(Ordering::Relaxed) >= quota.max_memory_bytes {
+        if quota.max_memory_bytes > 0
+            && counters.memory_bytes.load(Ordering::Relaxed) >= quota.max_memory_bytes
+        {
             self.throttled_count.fetch_add(1, Ordering::Relaxed);
             return ThrottleAction::Reject;
         }
-        if quota.max_storage_bytes > 0 && counters.storage_bytes.load(Ordering::Relaxed) >= quota.max_storage_bytes {
+        if quota.max_storage_bytes > 0
+            && counters.storage_bytes.load(Ordering::Relaxed) >= quota.max_storage_bytes
+        {
             self.throttled_count.fetch_add(1, Ordering::Relaxed);
             return ThrottleAction::Reject;
         }
 
         // Check soft limits (delay)
         if quota.max_queries > 0 {
-            let ratio = counters.query_count.load(Ordering::Relaxed) as f64 / quota.max_queries as f64;
+            let ratio =
+                counters.query_count.load(Ordering::Relaxed) as f64 / quota.max_queries as f64;
             if ratio >= quota.soft_limit_ratio {
-                let delay_ms = ((ratio - quota.soft_limit_ratio) / (1.0 - quota.soft_limit_ratio) * 100.0) as u64;
-                return ThrottleAction::Delay { delay_ms: delay_ms.min(1000) };
+                let delay_ms = ((ratio - quota.soft_limit_ratio) / (1.0 - quota.soft_limit_ratio)
+                    * 100.0) as u64;
+                return ThrottleAction::Delay {
+                    delay_ms: delay_ms.min(1000),
+                };
             }
         }
 
@@ -279,7 +291,8 @@ impl ResourceMeter {
 
     /// Get usage snapshots for all tenants.
     pub fn all_usage_snapshots(&self) -> Vec<TenantUsageSnapshot> {
-        self.counters.iter()
+        self.counters
+            .iter()
             .filter_map(|entry| self.usage_snapshot(*entry.key()))
             .collect()
     }
@@ -362,10 +375,13 @@ mod tests {
         let meter = ResourceMeter::new();
         let tid = TenantId(1);
         meter.register_tenant(tid);
-        meter.set_quota(tid, MeteringQuota {
-            max_queries: 10,
-            ..MeteringQuota::default()
-        });
+        meter.set_quota(
+            tid,
+            MeteringQuota {
+                max_queries: 10,
+                ..MeteringQuota::default()
+            },
+        );
 
         for _ in 0..10 {
             meter.record_query(tid);
@@ -380,11 +396,14 @@ mod tests {
         let meter = ResourceMeter::new();
         let tid = TenantId(1);
         meter.register_tenant(tid);
-        meter.set_quota(tid, MeteringQuota {
-            max_queries: 100,
-            soft_limit_ratio: 0.8,
-            ..MeteringQuota::default()
-        });
+        meter.set_quota(
+            tid,
+            MeteringQuota {
+                max_queries: 100,
+                soft_limit_ratio: 0.8,
+                ..MeteringQuota::default()
+            },
+        );
 
         // Record 85 queries (85% > 80% soft limit)
         for _ in 0..85 {
@@ -402,10 +421,13 @@ mod tests {
         let meter = ResourceMeter::new();
         let tid = TenantId(1);
         meter.register_tenant(tid);
-        meter.set_quota(tid, MeteringQuota {
-            max_memory_bytes: 1024,
-            ..MeteringQuota::default()
-        });
+        meter.set_quota(
+            tid,
+            MeteringQuota {
+                max_memory_bytes: 1024,
+                ..MeteringQuota::default()
+            },
+        );
 
         meter.set_memory(tid, 2048);
         assert_eq!(meter.check_throttle(tid), ThrottleAction::Reject);

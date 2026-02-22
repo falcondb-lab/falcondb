@@ -11,8 +11,13 @@ pub(crate) fn expect_text_arg(
     match args.get(idx) {
         Some(Datum::Text(s)) => Ok(Some(s.clone())),
         Some(Datum::Null) => Ok(None),
-        None => Err(ExecutionError::TypeError(format!("{} requires text", func_name))),
-        _ => Err(ExecutionError::TypeError(format!("{} requires text", func_name))),
+        None => Err(ExecutionError::TypeError(format!(
+            "{} requires text",
+            func_name
+        ))),
+        _ => Err(ExecutionError::TypeError(format!(
+            "{} requires text",
+            func_name
+        ))),
     }
 }
-

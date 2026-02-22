@@ -5,13 +5,19 @@ use falcon_sql_frontend::parser::parse_sql;
 use crate::codec::{BackendMessage, FieldDescription};
 use crate::session::PgSession;
 
-use super::handler::{QueryHandler, parse_set_log_min_duration, parse_set_command,
-    parse_prepare_statement, parse_execute_statement, bind_params};
+use super::handler::{
+    bind_params, parse_execute_statement, parse_prepare_statement, parse_set_command,
+    parse_set_log_min_duration, QueryHandler,
+};
 
 impl QueryHandler {
     /// Intercept system queries that psql and PG drivers send.
     /// Returns Some(messages) if handled, None to fall through to normal execution.
-    pub(crate) fn handle_system_query(&self, sql: &str, session: &mut PgSession) -> Option<Vec<BackendMessage>> {
+    pub(crate) fn handle_system_query(
+        &self,
+        sql: &str,
+        session: &mut PgSession,
+    ) -> Option<Vec<BackendMessage>> {
         let sql_lower = sql.to_lowercase();
         let sql_lower = sql_lower.trim().trim_end_matches(';').trim();
 
@@ -19,18 +25,23 @@ impl QueryHandler {
         if sql_lower == "select version()" || sql_lower.starts_with("select version()") {
             return Some(self.single_row_result(
                 vec![("version", 25, -1)],
-                vec![vec![Some("PostgreSQL 15.0.0 on FalconDB (in-memory OLTP)".into())]],
+                vec![vec![Some(
+                    "PostgreSQL 15.0.0 on FalconDB (in-memory OLTP)".into(),
+                )]],
             ));
         }
 
         // SELECT current_schema() / current_database() / current_user
-        if sql_lower == "select current_schema()" || sql_lower.starts_with("select current_schema") {
+        if sql_lower == "select current_schema()" || sql_lower.starts_with("select current_schema")
+        {
             return Some(self.single_row_result(
                 vec![("current_schema", 25, -1)],
                 vec![vec![Some("public".into())]],
             ));
         }
-        if sql_lower == "select current_database()" || sql_lower.starts_with("select current_database") {
+        if sql_lower == "select current_database()"
+            || sql_lower.starts_with("select current_database")
+        {
             return Some(self.single_row_result(
                 vec![("current_database", 25, -1)],
                 vec![vec![Some("falcon".into())]],
@@ -45,12 +56,9 @@ impl QueryHandler {
 
         // SET log_min_duration_statement = <ms>
         if let Some(threshold_ms) = parse_set_log_min_duration(sql_lower) {
-            self.slow_query_log.set_threshold(
-                std::time::Duration::from_millis(threshold_ms)
-            );
-            return Some(vec![BackendMessage::CommandComplete {
-                tag: "SET".into(),
-            }]);
+            self.slow_query_log
+                .set_threshold(std::time::Duration::from_millis(threshold_ms));
+            return Some(vec![BackendMessage::CommandComplete { tag: "SET".into() }]);
         }
 
         // Cluster admin commands: SELECT falcon_add_node(id), falcon_remove_node(id),
@@ -67,7 +75,10 @@ impl QueryHandler {
                 Ok((segment_id, row_count)) => {
                     return Some(self.single_row_result(
                         vec![("checkpoint", 25, -1)],
-                        vec![vec![Some(format!("OK segment={} rows={}", segment_id, row_count))]],
+                        vec![vec![Some(format!(
+                            "OK segment={} rows={}",
+                            segment_id, row_count
+                        ))]],
                     ));
                 }
                 Err(e) => {
@@ -88,18 +99,30 @@ impl QueryHandler {
             }]);
         }
 
-        // SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY/WRITE (pgjdbc setReadOnly)
-        if sql_lower.contains("session characteristics as transaction") ||
-           (sql_lower.starts_with("set transaction") && !sql_lower.contains("isolation")) {
-            // Accept silently — store as GUC for SHOW compatibility
+        // SET SESSION CHARACTERISTICS AS TRANSACTION ... (pgjdbc setReadOnly / setTransactionIsolation)
+        // Also handles: SET TRANSACTION READ ONLY/WRITE, SET TRANSACTION ISOLATION LEVEL ...
+        if sql_lower.contains("session characteristics as transaction")
+            || sql_lower.starts_with("set transaction")
+        {
             if sql_lower.contains("read only") {
                 session.set_guc("default_transaction_read_only", "on");
-            } else {
+            } else if sql_lower.contains("read write") {
                 session.set_guc("default_transaction_read_only", "off");
             }
-            return Some(vec![BackendMessage::CommandComplete {
-                tag: "SET".into(),
-            }]);
+            if sql_lower.contains("isolation level") {
+                let level = if sql_lower.contains("serializable") {
+                    "serializable"
+                } else if sql_lower.contains("repeatable read") {
+                    "repeatable read"
+                } else if sql_lower.contains("read uncommitted") {
+                    "read uncommitted"
+                } else {
+                    "read committed"
+                };
+                session.set_guc("default_transaction_isolation", level);
+                session.set_guc("transaction_isolation", level);
+            }
+            return Some(vec![BackendMessage::CommandComplete { tag: "SET".into() }]);
         }
 
         // SET <var> = <value> / SET <var> TO <value> — store in session GUC
@@ -107,9 +130,7 @@ impl QueryHandler {
             if let Some((name, value)) = parse_set_command(sql_lower) {
                 session.set_guc(&name, &value);
             }
-            return Some(vec![BackendMessage::CommandComplete {
-                tag: "SET".into(),
-            }]);
+            return Some(vec![BackendMessage::CommandComplete { tag: "SET".into() }]);
         }
 
         // SAVEPOINT <name>
@@ -158,10 +179,7 @@ impl QueryHandler {
                     _ => "".into(),
                 }
             };
-            return Some(self.single_row_result(
-                vec![(param, 25, -1)],
-                vec![vec![Some(value)]],
-            ));
+            return Some(self.single_row_result(vec![(param, 25, -1)], vec![vec![Some(value)]]));
         }
 
         // Delegate information_schema and pg_catalog queries to handler_catalog module
@@ -183,7 +201,9 @@ impl QueryHandler {
                     },
                 );
                 falcon_observability::record_prepared_stmt_sql_cmd("prepare");
-                falcon_observability::record_prepared_stmt_active(session.prepared_statements.len());
+                falcon_observability::record_prepared_stmt_active(
+                    session.prepared_statements.len(),
+                );
                 return Some(vec![BackendMessage::CommandComplete {
                     tag: "PREPARE".into(),
                 }]);
@@ -225,7 +245,11 @@ impl QueryHandler {
 
         // DEALLOCATE [ALL | name]
         if sql_lower.starts_with("deallocate") {
-            let rest = sql_lower.trim_start_matches("deallocate").trim().trim_end_matches(';').trim();
+            let rest = sql_lower
+                .trim_start_matches("deallocate")
+                .trim()
+                .trim_end_matches(';')
+                .trim();
             if rest == "all" {
                 session.prepared_statements.clear();
             } else if !rest.is_empty() {
@@ -240,7 +264,11 @@ impl QueryHandler {
 
         // RESET [ALL | var]
         if sql_lower.starts_with("reset ") {
-            let var = sql_lower.trim_start_matches("reset ").trim().trim_end_matches(';').trim();
+            let var = sql_lower
+                .trim_start_matches("reset ")
+                .trim()
+                .trim_end_matches(';')
+                .trim();
             if var == "all" {
                 session.reset_all_gucs();
             } else {
@@ -253,9 +281,16 @@ impl QueryHandler {
 
         // ── LISTEN channel ──
         if sql_lower.starts_with("listen ") {
-            let channel = sql_lower.trim_start_matches("listen ").trim().trim_end_matches(';').trim().to_string();
+            let channel = sql_lower
+                .trim_start_matches("listen ")
+                .trim()
+                .trim_end_matches(';')
+                .trim()
+                .to_string();
             if !channel.is_empty() {
-                session.notifications.listen(&channel, &session.notification_hub);
+                session
+                    .notifications
+                    .listen(&channel, &session.notification_hub);
             }
             return Some(vec![BackendMessage::CommandComplete {
                 tag: "LISTEN".into(),
@@ -264,11 +299,19 @@ impl QueryHandler {
 
         // ── UNLISTEN channel | UNLISTEN * ──
         if sql_lower.starts_with("unlisten ") {
-            let channel = sql_lower.trim_start_matches("unlisten ").trim().trim_end_matches(';').trim();
+            let channel = sql_lower
+                .trim_start_matches("unlisten ")
+                .trim()
+                .trim_end_matches(';')
+                .trim();
             if channel == "*" {
-                session.notifications.unlisten_all(&session.notification_hub);
+                session
+                    .notifications
+                    .unlisten_all(&session.notification_hub);
             } else {
-                session.notifications.unlisten(channel, &session.notification_hub);
+                session
+                    .notifications
+                    .unlisten(channel, &session.notification_hub);
             }
             return Some(vec![BackendMessage::CommandComplete {
                 tag: "UNLISTEN".into(),
@@ -277,8 +320,10 @@ impl QueryHandler {
 
         // ── NOTIFY channel [, 'payload'] ──
         if sql_lower.starts_with("notify ") {
-            let rest = sql.trim_start_matches(|c: char| c.is_alphabetic() || c == ' ')
-                .trim_end_matches(';').trim();
+            let rest = sql
+                .trim_start_matches(|c: char| c.is_alphabetic() || c == ' ')
+                .trim_end_matches(';')
+                .trim();
             // rest is now "channel" or "channel, 'payload'"
             let (channel, payload) = if let Some(comma_pos) = rest.find(',') {
                 let ch = rest[..comma_pos].trim().to_lowercase();
@@ -288,7 +333,9 @@ impl QueryHandler {
                 (rest.trim().to_lowercase(), String::new())
             };
             if !channel.is_empty() {
-                session.notification_hub.notify(&channel, session.id, &payload);
+                session
+                    .notification_hub
+                    .notify(&channel, session.id, &payload);
             }
             return Some(vec![BackendMessage::CommandComplete {
                 tag: "NOTIFY".into(),
@@ -329,7 +376,10 @@ impl QueryHandler {
     // ── Savepoint helpers ──
 
     fn handle_savepoint(&self, sql_lower: &str, session: &mut PgSession) -> Vec<BackendMessage> {
-        let name = sql_lower.trim_start_matches("savepoint ").trim().to_string();
+        let name = sql_lower
+            .trim_start_matches("savepoint ")
+            .trim()
+            .to_string();
         if !session.in_transaction() {
             return vec![BackendMessage::ErrorResponse {
                 severity: "ERROR".into(),
@@ -339,11 +389,13 @@ impl QueryHandler {
         }
         let txn_id = match session.txn.as_ref() {
             Some(t) => t.txn_id,
-            None => return vec![BackendMessage::ErrorResponse {
-                severity: "ERROR".into(),
-                code: "25P01".into(),
-                message: "SAVEPOINT requires an active transaction".into(),
-            }],
+            None => {
+                return vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "25P01".into(),
+                    message: "SAVEPOINT requires an active transaction".into(),
+                }]
+            }
         };
         let write_set_len = self.storage.write_set_snapshot(txn_id);
         let read_set_len = self.storage.read_set_snapshot(txn_id);
@@ -364,7 +416,8 @@ impl QueryHandler {
             let write_snap = session.savepoints[pos].write_set_len;
             let read_snap = session.savepoints[pos].read_set_len;
             if let Some(ref txn) = session.txn {
-                self.storage.rollback_write_set_after(txn.txn_id, write_snap);
+                self.storage
+                    .rollback_write_set_after(txn.txn_id, write_snap);
                 self.storage.rollback_read_set_after(txn.txn_id, read_snap);
             }
             session.savepoints.truncate(pos + 1);
@@ -380,7 +433,11 @@ impl QueryHandler {
         }
     }
 
-    fn handle_release_savepoint(&self, sql_lower: &str, session: &mut PgSession) -> Vec<BackendMessage> {
+    fn handle_release_savepoint(
+        &self,
+        sql_lower: &str,
+        session: &mut PgSession,
+    ) -> Vec<BackendMessage> {
         let rest = sql_lower.trim_start_matches("release ").trim();
         let name = rest.strip_prefix("savepoint ").unwrap_or(rest).trim();
         if let Some(pos) = session.savepoints.iter().rposition(|sp| sp.name == name) {
@@ -415,9 +472,17 @@ impl QueryHandler {
         let mut i = 1;
         while i + 1 < parts.len() {
             match parts[i] {
-                "max_qps" => { max_qps = parts[i+1].parse().unwrap_or(0); i += 2; }
-                "max_storage_bytes" => { max_storage_bytes = parts[i+1].parse().unwrap_or(0); i += 2; }
-                _ => { i += 1; }
+                "max_qps" => {
+                    max_qps = parts[i + 1].parse().unwrap_or(0);
+                    i += 2;
+                }
+                "max_storage_bytes" => {
+                    max_storage_bytes = parts[i + 1].parse().unwrap_or(0);
+                    i += 2;
+                }
+                _ => {
+                    i += 1;
+                }
             }
         }
         let tenant_id = self.tenant_registry.alloc_tenant_id();
@@ -438,9 +503,15 @@ impl QueryHandler {
     }
 
     fn handle_drop_tenant(&self, sql_lower: &str) -> Vec<BackendMessage> {
-        let tenant_name = sql_lower.trim_start_matches("drop tenant ").trim().to_string();
+        let tenant_name = sql_lower
+            .trim_start_matches("drop tenant ")
+            .trim()
+            .to_string();
         let found = self.tenant_registry.tenant_ids().into_iter().find(|tid| {
-            self.tenant_registry.get_config(*tid).map(|c| c.name == tenant_name).unwrap_or(false)
+            self.tenant_registry
+                .get_config(*tid)
+                .map(|c| c.name == tenant_name)
+                .unwrap_or(false)
         });
         if let Some(tid) = found {
             self.tenant_registry.remove_tenant(tid);
@@ -490,11 +561,13 @@ impl QueryHandler {
         }
         let for_idx = match for_pos {
             Some(i) => i,
-            None => return vec![BackendMessage::ErrorResponse {
-                severity: "ERROR".into(),
-                code: "42601".into(),
-                message: "DECLARE CURSOR: FOR position not found".into(),
-            }],
+            None => {
+                return vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "42601".into(),
+                    message: "DECLARE CURSOR: FOR position not found".into(),
+                }]
+            }
         };
         // Get the original-case SQL for the query portion
         let declare_prefix_len = "declare ".len();
@@ -513,13 +586,16 @@ impl QueryHandler {
         let txn = session.txn.as_ref();
         match self.execute_sql_for_cursor(&query, txn) {
             Ok((columns, rows)) => {
-                session.cursors.insert(cursor_name.clone(), crate::session::CursorState {
-                    name: cursor_name,
-                    rows,
-                    columns,
-                    position: 0,
-                    with_hold,
-                });
+                session.cursors.insert(
+                    cursor_name.clone(),
+                    crate::session::CursorState {
+                        name: cursor_name,
+                        rows,
+                        columns,
+                        position: 0,
+                        with_hold,
+                    },
+                );
                 vec![BackendMessage::CommandComplete {
                     tag: "DECLARE CURSOR".into(),
                 }]
@@ -538,16 +614,27 @@ impl QueryHandler {
         &self,
         query: &str,
         txn: Option<&falcon_txn::TxnHandle>,
-    ) -> Result<(Vec<(String, falcon_common::types::DataType)>, Vec<falcon_common::datum::OwnedRow>), String> {
+    ) -> Result<
+        (
+            Vec<(String, falcon_common::types::DataType)>,
+            Vec<falcon_common::datum::OwnedRow>,
+        ),
+        String,
+    > {
         let catalog = self.storage.get_catalog();
         let mut binder = Binder::new(catalog);
         let stmts = parse_sql(query).map_err(|e| format!("parse error: {}", e))?;
         if stmts.is_empty() {
             return Err("empty query".into());
         }
-        let bound = binder.bind(&stmts[0]).map_err(|e| format!("bind error: {}", e))?;
+        let bound = binder
+            .bind(&stmts[0])
+            .map_err(|e| format!("bind error: {}", e))?;
         let plan = Planner::plan(&bound).map_err(|e| format!("plan error: {}", e))?;
-        let result = self.executor.execute(&plan, txn).map_err(|e| format!("exec error: {}", e))?;
+        let result = self
+            .executor
+            .execute(&plan, txn)
+            .map_err(|e| format!("exec error: {}", e))?;
         match result {
             falcon_executor::ExecutionResult::Query { columns, rows } => Ok((columns, rows)),
             _ => Err("DECLARE CURSOR requires a SELECT query".into()),
@@ -555,11 +642,7 @@ impl QueryHandler {
     }
 
     /// Handle FETCH [count] FROM cursor_name
-    fn handle_fetch_cursor(
-        &self,
-        sql_lower: &str,
-        session: &mut PgSession,
-    ) -> Vec<BackendMessage> {
+    fn handle_fetch_cursor(&self, sql_lower: &str, session: &mut PgSession) -> Vec<BackendMessage> {
         let rest = sql_lower.trim_start_matches("fetch ").trim();
 
         // Parse: FETCH [NEXT | FORWARD | count] [FROM | IN] cursor_name
@@ -567,31 +650,48 @@ impl QueryHandler {
 
         let cursor = match session.cursors.get_mut(&cursor_name) {
             Some(c) => c,
-            None => return vec![BackendMessage::ErrorResponse {
-                severity: "ERROR".into(),
-                code: "34000".into(),
-                message: format!("cursor \"{}\" does not exist", cursor_name),
-            }],
+            None => {
+                return vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "34000".into(),
+                    message: format!("cursor \"{}\" does not exist", cursor_name),
+                }]
+            }
         };
 
         // Build field descriptions
-        let fields: Vec<FieldDescription> = cursor.columns.iter().map(|(name, dt)| {
-            let (type_oid, type_len) = Self::data_type_to_pg_oid(dt);
-            FieldDescription {
-                name: name.clone(),
-                table_oid: 0, column_attr: 0,
-                type_oid, type_len,
-                type_modifier: -1, format_code: 0,
-            }
-        }).collect();
+        let fields: Vec<FieldDescription> = cursor
+            .columns
+            .iter()
+            .map(|(name, dt)| {
+                let (type_oid, type_len) = Self::data_type_to_pg_oid(dt);
+                FieldDescription {
+                    name: name.clone(),
+                    table_oid: 0,
+                    column_attr: 0,
+                    type_oid,
+                    type_len,
+                    type_modifier: -1,
+                    format_code: 0,
+                }
+            })
+            .collect();
 
         let mut msgs = vec![BackendMessage::RowDescription { fields }];
 
         // Fetch up to `count` rows from current position
         let end = (cursor.position + count).min(cursor.rows.len());
         for i in cursor.position..end {
-            let row_vals: Vec<Option<String>> = cursor.rows[i].values.iter()
-                .map(|d| if d.is_null() { None } else { Some(format!("{}", d)) })
+            let row_vals: Vec<Option<String>> = cursor.rows[i]
+                .values
+                .iter()
+                .map(|d| {
+                    if d.is_null() {
+                        None
+                    } else {
+                        Some(format!("{}", d))
+                    }
+                })
                 .collect();
             msgs.push(BackendMessage::DataRow { values: row_vals });
         }
@@ -610,8 +710,10 @@ impl QueryHandler {
         match tokens.len() {
             1 => (1, tokens[0].to_string()),
             2 => {
-                if tokens[0] == "from" || tokens[0] == "in"
-                    || tokens[0] == "next" || tokens[0] == "forward"
+                if tokens[0] == "from"
+                    || tokens[0] == "in"
+                    || tokens[0] == "next"
+                    || tokens[0] == "forward"
                 {
                     (1, tokens[1].to_string())
                 } else if tokens[0] == "all" {
@@ -627,7 +729,10 @@ impl QueryHandler {
                 let first = tokens[0];
                 let last_token = tokens.last().copied().unwrap_or("").to_string();
                 if first == "next" || first == "forward" {
-                    let count = tokens.get(1).and_then(|t| t.parse::<usize>().ok()).unwrap_or(1);
+                    let count = tokens
+                        .get(1)
+                        .and_then(|t| t.parse::<usize>().ok())
+                        .unwrap_or(1);
                     (count, last_token)
                 } else if first == "all" {
                     (usize::MAX, last_token)
@@ -683,20 +788,20 @@ impl QueryHandler {
     fn data_type_to_pg_oid(dt: &falcon_common::types::DataType) -> (i32, i16) {
         use falcon_common::types::DataType;
         match dt {
-            DataType::Int32 => (23, 4),    // int4
-            DataType::Int64 => (20, 8),    // int8
-            DataType::Float64 => (701, 8), // float8
-            DataType::Text => (25, -1),    // text
-            DataType::Boolean => (16, 1),  // bool
-            DataType::Timestamp => (1114, 8), // timestamp
-            DataType::Date => (1082, 4),   // date
+            DataType::Int32 => (23, 4),            // int4
+            DataType::Int64 => (20, 8),            // int8
+            DataType::Float64 => (701, 8),         // float8
+            DataType::Text => (25, -1),            // text
+            DataType::Boolean => (16, 1),          // bool
+            DataType::Timestamp => (1114, 8),      // timestamp
+            DataType::Date => (1082, 4),           // date
             DataType::Decimal(_, _) => (1700, -1), // numeric
-            DataType::Time => (1083, 8),   // time
-            DataType::Interval => (1186, 16), // interval
-            DataType::Uuid => (2950, 16),  // uuid
-            DataType::Bytea => (17, -1),   // bytea
-            DataType::Jsonb => (3802, -1), // jsonb
-            _ => (25, -1),                 // fallback to text
+            DataType::Time => (1083, 8),           // time
+            DataType::Interval => (1186, 16),      // interval
+            DataType::Uuid => (2950, 16),          // uuid
+            DataType::Bytea => (17, -1),           // bytea
+            DataType::Jsonb => (3802, -1),         // jsonb
+            _ => (25, -1),                         // fallback to text
         }
     }
 

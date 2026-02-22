@@ -202,7 +202,9 @@ pub fn resolve_scalar_func(name: &str) -> Option<ScalarFunc> {
         "JSONB_DELETE_PATH" => ScalarFunc::JsonbDeletePath,
         "JSONB_POPULATE_RECORD" => ScalarFunc::JsonbPopulateRecord,
         "JSONB_ARRAY_ELEMENTS" | "JSON_ARRAY_ELEMENTS" => ScalarFunc::JsonbArrayElements,
-        "JSONB_ARRAY_ELEMENTS_TEXT" | "JSON_ARRAY_ELEMENTS_TEXT" => ScalarFunc::JsonbArrayElementsText,
+        "JSONB_ARRAY_ELEMENTS_TEXT" | "JSON_ARRAY_ELEMENTS_TEXT" => {
+            ScalarFunc::JsonbArrayElementsText
+        }
         "JSONB_EACH" | "JSON_EACH" => ScalarFunc::JsonbEach,
         "JSONB_EACH_TEXT" | "JSON_EACH_TEXT" => ScalarFunc::JsonbEachText,
         "ROW_TO_JSON" => ScalarFunc::RowToJson,

@@ -254,7 +254,8 @@ impl ShardCircuitBreaker {
             total_successes: self.total_successes.load(Ordering::Relaxed),
             total_rejected: self.total_rejected.load(Ordering::Relaxed),
             state_changes: inner.state_changes,
-            last_failure_ms_ago: inner.last_failure_at
+            last_failure_ms_ago: inner
+                .last_failure_at
                 .map(|t| t.elapsed().as_millis() as u64),
         }
     }
@@ -359,7 +360,9 @@ mod tests {
     #[test]
     fn test_open_rejects_requests() {
         let b = make_breaker();
-        for _ in 0..3 { b.record_failure(); }
+        for _ in 0..3 {
+            b.record_failure();
+        }
         let err = b.check().unwrap_err();
         assert!(err.is_retryable());
         assert!(err.to_string().contains("circuit breaker is open"));
@@ -369,7 +372,9 @@ mod tests {
     #[test]
     fn test_open_to_halfopen_after_timeout() {
         let b = make_breaker();
-        for _ in 0..3 { b.record_failure(); }
+        for _ in 0..3 {
+            b.record_failure();
+        }
         assert_eq!(b.state(), BreakerState::Open);
         thread::sleep(Duration::from_millis(60));
         assert!(b.check().is_ok()); // probe allowed
@@ -379,7 +384,9 @@ mod tests {
     #[test]
     fn test_halfopen_success_closes() {
         let b = make_breaker();
-        for _ in 0..3 { b.record_failure(); }
+        for _ in 0..3 {
+            b.record_failure();
+        }
         thread::sleep(Duration::from_millis(60));
         b.check().unwrap(); // probe
         b.record_success();
@@ -390,7 +397,9 @@ mod tests {
     #[test]
     fn test_halfopen_failure_reopens() {
         let b = make_breaker();
-        for _ in 0..3 { b.record_failure(); }
+        for _ in 0..3 {
+            b.record_failure();
+        }
         thread::sleep(Duration::from_millis(60));
         b.check().unwrap(); // probe
         b.record_failure();
@@ -412,7 +421,9 @@ mod tests {
     #[test]
     fn test_force_close() {
         let b = make_breaker();
-        for _ in 0..3 { b.record_failure(); }
+        for _ in 0..3 {
+            b.record_failure();
+        }
         assert_eq!(b.state(), BreakerState::Open);
         b.force_close();
         assert_eq!(b.state(), BreakerState::Closed);
@@ -440,7 +451,9 @@ mod tests {
         assert!(cluster.check(s0).is_ok());
         assert!(cluster.check(s1).is_ok());
         // Fail shard 0 to threshold
-        for _ in 0..5 { cluster.record_failure(s0); }
+        for _ in 0..5 {
+            cluster.record_failure(s0);
+        }
         assert!(cluster.check(s0).is_err());
         assert!(cluster.check(s1).is_ok()); // shard 1 unaffected
         assert_eq!(cluster.open_shard_count(), 1);
@@ -459,7 +472,9 @@ mod tests {
     #[test]
     fn test_state_changes_counted() {
         let b = make_breaker();
-        for _ in 0..3 { b.record_failure(); } // Closed → Open
+        for _ in 0..3 {
+            b.record_failure();
+        } // Closed → Open
         thread::sleep(Duration::from_millis(60));
         b.check().unwrap(); // Open → HalfOpen
         b.record_success();

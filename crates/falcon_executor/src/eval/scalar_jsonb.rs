@@ -102,14 +102,12 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             let json = require_jsonb(args, 0, "jsonb_strip_nulls")?;
             Ok(Datum::Jsonb(strip_nulls(&json)))
         }
-        ScalarFunc::ToJsonb => {
-            match args.first() {
-                Some(Datum::Jsonb(_)) => Ok(args[0].clone()),
-                Some(Datum::Null) => Ok(Datum::Jsonb(JsonValue::Null)),
-                Some(d) => Ok(Datum::Jsonb(datum_to_json_value(d))),
-                None => Ok(Datum::Null),
-            }
-        }
+        ScalarFunc::ToJsonb => match args.first() {
+            Some(Datum::Jsonb(_)) => Ok(args[0].clone()),
+            Some(Datum::Null) => Ok(Datum::Jsonb(JsonValue::Null)),
+            Some(d) => Ok(Datum::Jsonb(datum_to_json_value(d))),
+            None => Ok(Datum::Null),
+        },
         ScalarFunc::JsonbConcat => {
             let a = require_jsonb(args, 0, "jsonb_concat")?;
             let b = require_jsonb(args, 1, "jsonb_concat")?;
@@ -138,7 +136,9 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                 None => return Ok(Datum::Jsonb(json)),
             };
             match &mut json {
-                JsonValue::Object(map) => { map.remove(&key); }
+                JsonValue::Object(map) => {
+                    map.remove(&key);
+                }
                 JsonValue::Array(arr) => {
                     arr.retain(|v| v.as_str() != Some(&key));
                 }
@@ -149,10 +149,13 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
         ScalarFunc::JsonbDeletePath => {
             let json = require_jsonb(args, 0, "jsonb_delete_path")?;
             let path = match args.get(1) {
-                Some(Datum::Array(arr)) => arr.iter().map(|d| match d {
-                    Datum::Text(s) => s.clone(),
-                    other => format!("{}", other),
-                }).collect::<Vec<_>>(),
+                Some(Datum::Array(arr)) => arr
+                    .iter()
+                    .map(|d| match d {
+                        Datum::Text(s) => s.clone(),
+                        other => format!("{}", other),
+                    })
+                    .collect::<Vec<_>>(),
                 _ => return Ok(Datum::Jsonb(json)),
             };
             Ok(Datum::Jsonb(delete_path(json, &path)))
@@ -160,15 +163,20 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
         ScalarFunc::JsonbSetPath => {
             let mut json = require_jsonb(args, 0, "jsonb_set")?;
             let path = match args.get(1) {
-                Some(Datum::Array(arr)) => arr.iter().map(|d| match d {
-                    Datum::Text(s) => s.clone(),
-                    other => format!("{}", other),
-                }).collect::<Vec<_>>(),
+                Some(Datum::Array(arr)) => arr
+                    .iter()
+                    .map(|d| match d {
+                        Datum::Text(s) => s.clone(),
+                        other => format!("{}", other),
+                    })
+                    .collect::<Vec<_>>(),
                 _ => return Ok(Datum::Jsonb(json)),
             };
             let new_val = match args.get(2) {
                 Some(Datum::Jsonb(v)) => v.clone(),
-                Some(Datum::Text(s)) => serde_json::from_str(s).unwrap_or(JsonValue::String(s.clone())),
+                Some(Datum::Text(s)) => {
+                    serde_json::from_str(s).unwrap_or(JsonValue::String(s.clone()))
+                }
                 Some(d) => datum_to_json_value(d),
                 None => JsonValue::Null,
             };
@@ -180,9 +188,16 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             let json = require_jsonb(args, 0, "jsonb_array_elements")?;
             match json {
                 JsonValue::Array(arr) => {
-                    let elems: Vec<Datum> = arr.iter().map(|v| {
-                        if as_text { json_to_text(v) } else { Datum::Jsonb(v.clone()) }
-                    }).collect();
+                    let elems: Vec<Datum> = arr
+                        .iter()
+                        .map(|v| {
+                            if as_text {
+                                json_to_text(v)
+                            } else {
+                                Datum::Jsonb(v.clone())
+                            }
+                        })
+                        .collect();
                     Ok(Datum::Array(elems))
                 }
                 _ => Err(ExecutionError::TypeError(
@@ -195,10 +210,17 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             let json = require_jsonb(args, 0, "jsonb_each")?;
             match json {
                 JsonValue::Object(map) => {
-                    let pairs: Vec<Datum> = map.iter().flat_map(|(k, v)| {
-                        let val = if as_text { json_to_text(v) } else { Datum::Jsonb(v.clone()) };
-                        vec![Datum::Text(k.clone()), val]
-                    }).collect();
+                    let pairs: Vec<Datum> = map
+                        .iter()
+                        .flat_map(|(k, v)| {
+                            let val = if as_text {
+                                json_to_text(v)
+                            } else {
+                                Datum::Jsonb(v.clone())
+                            };
+                            vec![Datum::Text(k.clone()), val]
+                        })
+                        .collect();
                     Ok(Datum::Array(pairs))
                 }
                 _ => Err(ExecutionError::TypeError(
@@ -214,7 +236,8 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             }
         }
         _ => Err(ExecutionError::TypeError(format!(
-            "Unknown JSONB function: {:?}", func
+            "Unknown JSONB function: {:?}",
+            func
         ))),
     }
 }
@@ -228,7 +251,8 @@ fn require_jsonb(args: &[Datum], idx: usize, func_name: &str) -> Result<JsonValu
             .map_err(|e| ExecutionError::TypeError(format!("{}: invalid JSON: {}", func_name, e))),
         Some(Datum::Null) => Ok(JsonValue::Null),
         _ => Err(ExecutionError::TypeError(format!(
-            "{} requires JSONB argument at position {}", func_name, idx
+            "{} requires JSONB argument at position {}",
+            func_name, idx
         ))),
     }
 }
@@ -245,7 +269,8 @@ fn datum_to_json_value(d: &Datum) -> JsonValue {
         Datum::Text(s) => JsonValue::String(s.clone()),
         Datum::Timestamp(us) => JsonValue::Number((*us).into()),
         Datum::Date(days) => {
-            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("unix epoch date is always valid");
+            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+                .expect("unix epoch date is always valid");
             if let Some(d) = epoch.checked_add_signed(chrono::Duration::days(*days as i64)) {
                 JsonValue::String(d.format("%Y-%m-%d").to_string())
             } else {
@@ -289,9 +314,7 @@ fn strip_nulls(v: &JsonValue) -> JsonValue {
             }
             JsonValue::Object(new_map)
         }
-        JsonValue::Array(arr) => {
-            JsonValue::Array(arr.iter().map(strip_nulls).collect())
-        }
+        JsonValue::Array(arr) => JsonValue::Array(arr.iter().map(strip_nulls).collect()),
         other => other.clone(),
     }
 }
@@ -302,7 +325,9 @@ fn delete_path(mut json: JsonValue, path: &[String]) -> JsonValue {
     }
     if path.len() == 1 {
         match &mut json {
-            JsonValue::Object(map) => { map.remove(&path[0]); }
+            JsonValue::Object(map) => {
+                map.remove(&path[0]);
+            }
             JsonValue::Array(arr) => {
                 if let Ok(idx) = path[0].parse::<usize>() {
                     if idx < arr.len() {
@@ -342,7 +367,9 @@ fn set_path(json: &mut JsonValue, path: &[String], val: JsonValue) {
     }
     if path.len() == 1 {
         match json {
-            JsonValue::Object(map) => { map.insert(path[0].clone(), val); }
+            JsonValue::Object(map) => {
+                map.insert(path[0].clone(), val);
+            }
             JsonValue::Array(arr) => {
                 if let Ok(idx) = path[0].parse::<usize>() {
                     if idx < arr.len() {
@@ -356,7 +383,9 @@ fn set_path(json: &mut JsonValue, path: &[String], val: JsonValue) {
     }
     match json {
         JsonValue::Object(map) => {
-            let entry = map.entry(path[0].clone()).or_insert(JsonValue::Object(serde_json::Map::new()));
+            let entry = map
+                .entry(path[0].clone())
+                .or_insert(JsonValue::Object(serde_json::Map::new()));
             set_path(entry, &path[1..], val);
         }
         JsonValue::Array(arr) => {

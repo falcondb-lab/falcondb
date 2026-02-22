@@ -23,9 +23,7 @@ use parking_lot::Mutex;
 use falcon_common::error::FalconError;
 use falcon_common::types::ShardId;
 
-use crate::replication::{
-    AsyncReplicationTransport, LsnWalRecord, ReplicationLog, WalChunk,
-};
+use crate::replication::{AsyncReplicationTransport, LsnWalRecord, ReplicationLog, WalChunk};
 
 // ---------------------------------------------------------------------------
 // Wire ↔ Domain conversion helpers
@@ -54,7 +52,9 @@ pub fn decode_wal_chunk(payload: &[u8]) -> Result<WalChunk, FalconError> {
     let chunk: WalChunk = serde_json::from_slice(payload)
         .map_err(|e| FalconError::Internal(format!("WalChunk deserialization error: {}", e)))?;
     if !chunk.verify_checksum() {
-        return Err(FalconError::Internal("WalChunk checksum mismatch after deserialization".into()));
+        return Err(FalconError::Internal(
+            "WalChunk checksum mismatch after deserialization".into(),
+        ));
     }
     Ok(chunk)
 }
@@ -95,7 +95,11 @@ impl GrpcTransport {
         Self::with_timeout(endpoint, shard_id, std::time::Duration::from_secs(5))
     }
 
-    pub fn with_timeout(endpoint: String, shard_id: ShardId, connect_timeout: std::time::Duration) -> Self {
+    pub fn with_timeout(
+        endpoint: String,
+        shard_id: ShardId,
+        connect_timeout: std::time::Duration,
+    ) -> Self {
         Self {
             endpoint,
             shard_id,
@@ -157,7 +161,10 @@ impl GrpcTransport {
             Ok(r) => r,
             Err(e) => {
                 self.invalidate_channel().await;
-                return Err(FalconError::Internal(format!("gRPC get_checkpoint error: {}", e)));
+                return Err(FalconError::Internal(format!(
+                    "gRPC get_checkpoint error: {}",
+                    e
+                )));
             }
         };
 
@@ -184,15 +191,15 @@ impl GrpcTransport {
                 Err(e) => {
                     self.invalidate_channel().await;
                     return Err(FalconError::Internal(format!(
-                        "gRPC checkpoint stream error: {}", e
+                        "gRPC checkpoint stream error: {}",
+                        e
                     )));
                 }
             }
         }
 
-        let asm = assembler.ok_or_else(|| {
-            FalconError::Internal("Checkpoint stream returned no chunks".into())
-        })?;
+        let asm = assembler
+            .ok_or_else(|| FalconError::Internal("Checkpoint stream returned no chunks".into()))?;
         let lsn = asm.checkpoint_lsn();
         let data = asm.assemble_checkpoint()?;
         Ok((data, lsn))
@@ -223,7 +230,10 @@ impl GrpcTransport {
             Ok(r) => r,
             Err(e) => {
                 self.invalidate_channel().await;
-                return Err(FalconError::Internal(format!("gRPC subscribe_wal error: {}", e)));
+                return Err(FalconError::Internal(format!(
+                    "gRPC subscribe_wal error: {}",
+                    e
+                )));
             }
         };
 
@@ -247,9 +257,12 @@ impl GrpcTransport {
                         }
                     }
                     Some(Err(e)) => {
-                        let _ = tx.send(Err(FalconError::Internal(
-                            format!("gRPC stream error: {}", e),
-                        ))).await;
+                        let _ = tx
+                            .send(Err(FalconError::Internal(format!(
+                                "gRPC stream error: {}",
+                                e
+                            ))))
+                            .await;
                         break;
                     }
                     None => break, // stream ended
@@ -285,7 +298,10 @@ impl AsyncReplicationTransport for GrpcTransport {
             Ok(r) => r,
             Err(e) => {
                 self.invalidate_channel().await;
-                return Err(FalconError::Internal(format!("gRPC subscribe_wal error: {}", e)));
+                return Err(FalconError::Internal(format!(
+                    "gRPC subscribe_wal error: {}",
+                    e
+                )));
             }
         };
 
@@ -387,12 +403,7 @@ impl WalReplicationService {
     /// and the `StorageEngine.replica_ack_tracker` (for GC safepoint computation).
     /// Without the latter, GC safepoint never advances on the primary when using
     /// gRPC replication.
-    pub fn handle_ack(
-        &self,
-        shard_id: ShardId,
-        replica_id: usize,
-        applied_lsn: u64,
-    ) {
+    pub fn handle_ack(&self, shard_id: ShardId, replica_id: usize, applied_lsn: u64) {
         self.ack_lsns.insert((shard_id, replica_id), applied_lsn);
 
         // Forward the ack to the storage engine's replica tracker so that the
@@ -408,7 +419,10 @@ impl WalReplicationService {
 
     /// Get the acked LSN for a specific (shard, replica).
     pub fn get_ack_lsn(&self, shard_id: ShardId, replica_id: usize) -> u64 {
-        self.ack_lsns.get(&(shard_id, replica_id)).map(|v| *v).unwrap_or(0)
+        self.ack_lsns
+            .get(&(shard_id, replica_id))
+            .map(|v| *v)
+            .unwrap_or(0)
     }
 
     /// Get replication lag for all replicas of a shard.
@@ -559,10 +573,9 @@ impl crate::proto::wal_replication_server::WalReplication for WalReplicationServ
                 } else {
                     // No new records — wait for notification or timeout.
                     // Timeout ensures the stream stays alive (heartbeat-like).
-                    let _ = tokio::time::timeout(
-                        std::time::Duration::from_secs(30),
-                        log.notified(),
-                    ).await;
+                    let _ =
+                        tokio::time::timeout(std::time::Duration::from_secs(30), log.notified())
+                            .await;
                     // Check if client is still connected
                     if tx.is_closed() {
                         break;
@@ -689,7 +702,11 @@ impl CheckpointStreamer {
     ) -> Result<Self, FalconError> {
         let bytes = serde_json::to_vec(ckpt)
             .map_err(|e| FalconError::Internal(format!("Checkpoint serialization error: {}", e)))?;
-        Ok(Self::from_bytes(bytes, ckpt.wal_lsn, DEFAULT_CHECKPOINT_CHUNK_SIZE))
+        Ok(Self::from_bytes(
+            bytes,
+            ckpt.wal_lsn,
+            DEFAULT_CHECKPOINT_CHUNK_SIZE,
+        ))
     }
 
     /// Get all chunks for iteration / streaming.
@@ -730,7 +747,8 @@ impl CheckpointAssembler {
         let idx = chunk.chunk_index as usize;
         if idx >= self.total_chunks as usize {
             return Err(FalconError::Internal(format!(
-                "Chunk index {} out of range (total {})", idx, self.total_chunks
+                "Chunk index {} out of range (total {})",
+                idx, self.total_chunks
             )));
         }
         self.received[idx] = Some(chunk.data.clone());
@@ -745,12 +763,16 @@ impl CheckpointAssembler {
     /// Reassemble the full checkpoint bytes. Fails if incomplete.
     pub fn assemble(&self) -> Result<Vec<u8>, FalconError> {
         if !self.is_complete() {
-            let missing: Vec<usize> = self.received.iter().enumerate()
+            let missing: Vec<usize> = self
+                .received
+                .iter()
+                .enumerate()
                 .filter(|(_, c)| c.is_none())
                 .map(|(i, _)| i)
                 .collect();
             return Err(FalconError::Internal(format!(
-                "Checkpoint incomplete: missing chunks {:?}", missing
+                "Checkpoint incomplete: missing chunks {:?}",
+                missing
             )));
         }
         let mut data = Vec::new();

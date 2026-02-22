@@ -118,7 +118,9 @@ pub struct AuthConfig {
     pub username: String,
 }
 
-fn default_shutdown_drain_timeout_secs() -> u64 { 30 }
+fn default_shutdown_drain_timeout_secs() -> u64 {
+    30
+}
 
 impl Default for AuthConfig {
     fn default() -> Self {
@@ -288,7 +290,9 @@ impl ReplicationConfig {
         }
 
         // Replica/Analytics must have a valid primary endpoint
-        if matches!(self.role, NodeRole::Replica | NodeRole::Analytics) && self.primary_endpoint.is_empty() {
+        if matches!(self.role, NodeRole::Replica | NodeRole::Analytics)
+            && self.primary_endpoint.is_empty()
+        {
             return Err("primary_endpoint must be set for replica/analytics nodes".into());
         }
 
@@ -596,9 +600,18 @@ impl DeprecatedFieldChecker {
     pub fn snapshot(&self) -> DeprecatedFieldCheckerSnapshot {
         DeprecatedFieldCheckerSnapshot {
             total_registered: self.fields.len(),
-            fields: self.fields.iter().map(|f| {
-                (f.old_path.clone(), f.new_path.clone(), f.deprecated_since.clone(), f.removed_in.clone())
-            }).collect(),
+            fields: self
+                .fields
+                .iter()
+                .map(|f| {
+                    (
+                        f.old_path.clone(),
+                        f.new_path.clone(),
+                        f.deprecated_since.clone(),
+                        f.removed_in.clone(),
+                    )
+                })
+                .collect(),
         }
     }
 }

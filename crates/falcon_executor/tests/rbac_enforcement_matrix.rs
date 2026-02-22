@@ -28,15 +28,15 @@
 
 use std::sync::Arc;
 
+use falcon_common::datum::{Datum, OwnedRow};
+use falcon_common::schema::{ColumnDef, TableSchema};
 use falcon_common::security::*;
 use falcon_common::tenant::{TenantId, SYSTEM_TENANT_ID};
 use falcon_common::types::*;
-use falcon_common::schema::{ColumnDef, TableSchema};
-use falcon_common::datum::{Datum, OwnedRow};
 
+use falcon_executor::Executor;
 use falcon_storage::engine::StorageEngine;
 use falcon_txn::manager::TxnManager;
-use falcon_executor::Executor;
 
 fn test_schema() -> TableSchema {
     TableSchema {
@@ -127,14 +127,16 @@ fn rbac_e1_select_denied_without_privilege() {
     }
 
     // Alice has no grants — check_privilege should deny SELECT
-    let result = executor.check_privilege_public(
-        Privilege::Select,
-        ObjectType::Table,
-        "rbac_test",
+    let result = executor.check_privilege_public(Privilege::Select, ObjectType::Table, "rbac_test");
+    assert!(
+        result.is_err(),
+        "RBAC-E1: SELECT should be denied without privilege"
     );
-    assert!(result.is_err(), "RBAC-E1: SELECT should be denied without privilege");
     let err_msg = format!("{}", result.unwrap_err());
-    assert!(err_msg.contains("permission denied"), "RBAC-E1: error should mention permission denied");
+    assert!(
+        err_msg.contains("permission denied"),
+        "RBAC-E1: error should mention permission denied"
+    );
 }
 
 #[test]
@@ -147,11 +149,7 @@ fn rbac_e2_insert_denied_without_privilege() {
         catalog.add_role(Role::new_user(alice_id, "alice".into(), SYSTEM_TENANT_ID));
     }
 
-    let result = executor.check_privilege_public(
-        Privilege::Insert,
-        ObjectType::Table,
-        "rbac_test",
-    );
+    let result = executor.check_privilege_public(Privilege::Insert, ObjectType::Table, "rbac_test");
     assert!(result.is_err(), "RBAC-E2: INSERT should be denied");
 }
 
@@ -165,11 +163,7 @@ fn rbac_e3_update_denied_without_privilege() {
         catalog.add_role(Role::new_user(alice_id, "alice".into(), SYSTEM_TENANT_ID));
     }
 
-    let result = executor.check_privilege_public(
-        Privilege::Update,
-        ObjectType::Table,
-        "rbac_test",
-    );
+    let result = executor.check_privilege_public(Privilege::Update, ObjectType::Table, "rbac_test");
     assert!(result.is_err(), "RBAC-E3: UPDATE should be denied");
 }
 
@@ -183,11 +177,7 @@ fn rbac_e4_delete_denied_without_privilege() {
         catalog.add_role(Role::new_user(alice_id, "alice".into(), SYSTEM_TENANT_ID));
     }
 
-    let result = executor.check_privilege_public(
-        Privilege::Delete,
-        ObjectType::Table,
-        "rbac_test",
-    );
+    let result = executor.check_privilege_public(Privilege::Delete, ObjectType::Table, "rbac_test");
     assert!(result.is_err(), "RBAC-E4: DELETE should be denied");
 }
 
@@ -197,9 +187,18 @@ fn rbac_e5_superuser_bypasses_all() {
         setup_executor_with_rbac(SUPERUSER_ROLE_ID);
 
     // Superuser should pass all privilege checks without any grants
-    for privilege in &[Privilege::Select, Privilege::Insert, Privilege::Update, Privilege::Delete] {
+    for privilege in &[
+        Privilege::Select,
+        Privilege::Insert,
+        Privilege::Update,
+        Privilege::Delete,
+    ] {
         let result = executor.check_privilege_public(*privilege, ObjectType::Table, "rbac_test");
-        assert!(result.is_ok(), "RBAC-E5: superuser should bypass {:?} check", privilege);
+        assert!(
+            result.is_ok(),
+            "RBAC-E5: superuser should bypass {:?} check",
+            privilege
+        );
     }
 }
 
@@ -207,7 +206,8 @@ fn rbac_e5_superuser_bypasses_all() {
 fn rbac_e6_inherited_role_grants_access() {
     let alice_id = RoleId(110);
     let editor_id = RoleId(111);
-    let (executor, role_catalog, privilege_mgr, _storage, _txn_mgr) = setup_executor_with_rbac(alice_id);
+    let (executor, role_catalog, privilege_mgr, _storage, _txn_mgr) =
+        setup_executor_with_rbac(alice_id);
 
     {
         let mut catalog = role_catalog.write().unwrap();
@@ -230,13 +230,17 @@ fn rbac_e6_inherited_role_grants_access() {
 
     // Alice should have SELECT via inherited editor role
     let result = executor.check_privilege_public(Privilege::Select, ObjectType::Table, "rbac_test");
-    assert!(result.is_ok(), "RBAC-E6: alice should have SELECT via editor inheritance");
+    assert!(
+        result.is_ok(),
+        "RBAC-E6: alice should have SELECT via editor inheritance"
+    );
 }
 
 #[test]
 fn rbac_e7_revoked_privilege_immediately_denies() {
     let bob_id = RoleId(120);
-    let (executor, role_catalog, privilege_mgr, _storage, _txn_mgr) = setup_executor_with_rbac(bob_id);
+    let (executor, role_catalog, privilege_mgr, _storage, _txn_mgr) =
+        setup_executor_with_rbac(bob_id);
 
     {
         let mut catalog = role_catalog.write().unwrap();
@@ -248,10 +252,18 @@ fn rbac_e7_revoked_privilege_immediately_denies() {
     // Grant SELECT
     {
         let mut pm = privilege_mgr.write().unwrap();
-        pm.grant(bob_id, Privilege::Select, obj.clone(), SUPERUSER_ROLE_ID, false);
+        pm.grant(
+            bob_id,
+            Privilege::Select,
+            obj.clone(),
+            SUPERUSER_ROLE_ID,
+            false,
+        );
     }
     assert!(
-        executor.check_privilege_public(Privilege::Select, ObjectType::Table, "rbac_test").is_ok(),
+        executor
+            .check_privilege_public(Privilege::Select, ObjectType::Table, "rbac_test")
+            .is_ok(),
         "RBAC-E7: should be allowed after grant"
     );
 
@@ -261,7 +273,9 @@ fn rbac_e7_revoked_privilege_immediately_denies() {
         pm.revoke(bob_id, Privilege::Select, &obj);
     }
     assert!(
-        executor.check_privilege_public(Privilege::Select, ObjectType::Table, "rbac_test").is_err(),
+        executor
+            .check_privilege_public(Privilege::Select, ObjectType::Table, "rbac_test")
+            .is_err(),
         "RBAC-E7: should be denied after revoke"
     );
 }
@@ -269,7 +283,8 @@ fn rbac_e7_revoked_privilege_immediately_denies() {
 #[test]
 fn rbac_e8_grant_all_covers_everything() {
     let admin_id = RoleId(130);
-    let (executor, role_catalog, privilege_mgr, _storage, _txn_mgr) = setup_executor_with_rbac(admin_id);
+    let (executor, role_catalog, privilege_mgr, _storage, _txn_mgr) =
+        setup_executor_with_rbac(admin_id);
 
     {
         let mut catalog = role_catalog.write().unwrap();
@@ -287,7 +302,12 @@ fn rbac_e8_grant_all_covers_everything() {
         );
     }
 
-    for privilege in &[Privilege::Select, Privilege::Insert, Privilege::Update, Privilege::Delete] {
+    for privilege in &[
+        Privilege::Select,
+        Privilege::Insert,
+        Privilege::Update,
+        Privilege::Delete,
+    ] {
         let result = executor.check_privilege_public(*privilege, ObjectType::Table, "rbac_test");
         assert!(result.is_ok(), "RBAC-E8: ALL should cover {:?}", privilege);
     }
@@ -296,11 +316,16 @@ fn rbac_e8_grant_all_covers_everything() {
 #[test]
 fn rbac_e9_cross_object_isolation() {
     let charlie_id = RoleId(140);
-    let (executor, role_catalog, privilege_mgr, _storage, _txn_mgr) = setup_executor_with_rbac(charlie_id);
+    let (executor, role_catalog, privilege_mgr, _storage, _txn_mgr) =
+        setup_executor_with_rbac(charlie_id);
 
     {
         let mut catalog = role_catalog.write().unwrap();
-        catalog.add_role(Role::new_user(charlie_id, "charlie".into(), SYSTEM_TENANT_ID));
+        catalog.add_role(Role::new_user(
+            charlie_id,
+            "charlie".into(),
+            SYSTEM_TENANT_ID,
+        ));
     }
 
     // Grant SELECT on table_a, but NOT on rbac_test
@@ -317,7 +342,9 @@ fn rbac_e9_cross_object_isolation() {
 
     // Should be denied on rbac_test
     assert!(
-        executor.check_privilege_public(Privilege::Select, ObjectType::Table, "rbac_test").is_err(),
+        executor
+            .check_privilege_public(Privilege::Select, ObjectType::Table, "rbac_test")
+            .is_err(),
         "RBAC-E9: grant on table_a should not allow access to rbac_test"
     );
 }
@@ -331,9 +358,18 @@ fn rbac_e10_no_rbac_configured_allows_all() {
     // Executor without RBAC configured
     let executor = Executor::new(storage, txn_mgr);
 
-    for privilege in &[Privilege::Select, Privilege::Insert, Privilege::Update, Privilege::Delete] {
+    for privilege in &[
+        Privilege::Select,
+        Privilege::Insert,
+        Privilege::Update,
+        Privilege::Delete,
+    ] {
         let result = executor.check_privilege_public(*privilege, ObjectType::Table, "rbac_test");
-        assert!(result.is_ok(), "RBAC-E10: no RBAC configured should allow {:?}", privilege);
+        assert!(
+            result.is_ok(),
+            "RBAC-E10: no RBAC configured should allow {:?}",
+            privilege
+        );
     }
 }
 
@@ -351,7 +387,10 @@ fn rbac_s1_superuser_bypass_at_catalog_level() {
     };
     // No grants at all — superuser should still be allowed
     let result = cat.check_privilege(SUPERUSER_ROLE_ID, Privilege::Delete, &obj);
-    assert!(result.is_allowed(), "RBAC-S1: superuser should bypass at catalog level");
+    assert!(
+        result.is_allowed(),
+        "RBAC-S1: superuser should bypass at catalog level"
+    );
 }
 
 #[test]
@@ -386,10 +425,15 @@ fn rbac_s2_transitive_inheritance_resolves() {
 
     // alice -> editor -> reader (has SELECT)
     let result = cat.check_privilege(alice_id, Privilege::Select, &obj);
-    assert!(result.is_allowed(), "RBAC-S2: transitive inheritance should grant SELECT");
+    assert!(
+        result.is_allowed(),
+        "RBAC-S2: transitive inheritance should grant SELECT"
+    );
 
     // DELETE still denied
-    assert!(!cat.check_privilege(alice_id, Privilege::Delete, &obj).is_allowed());
+    assert!(!cat
+        .check_privilege(alice_id, Privilege::Delete, &obj)
+        .is_allowed());
 }
 
 #[test]
@@ -416,11 +460,16 @@ fn rbac_s3_revoke_membership_removes_access() {
     });
 
     cat.grant_role(alice_id, reader_id);
-    assert!(cat.check_privilege(alice_id, Privilege::Select, &obj).is_allowed());
+    assert!(cat
+        .check_privilege(alice_id, Privilege::Select, &obj)
+        .is_allowed());
 
     cat.revoke_role(alice_id, reader_id);
-    assert!(!cat.check_privilege(alice_id, Privilege::Select, &obj).is_allowed(),
-        "RBAC-S3: revoked membership should immediately deny");
+    assert!(
+        !cat.check_privilege(alice_id, Privilege::Select, &obj)
+            .is_allowed(),
+        "RBAC-S3: revoked membership should immediately deny"
+    );
 }
 
 #[test]
@@ -444,7 +493,11 @@ fn rbac_s4_drop_role_removes_grants() {
     assert_eq!(cat.grant_count(), 1);
 
     cat.drop_role(bob_id);
-    assert_eq!(cat.grant_count(), 0, "RBAC-S4: dropping role should remove all grants");
+    assert_eq!(
+        cat.grant_count(),
+        0,
+        "RBAC-S4: dropping role should remove all grants"
+    );
 }
 
 #[test]
@@ -453,8 +506,10 @@ fn rbac_s5_duplicate_role_name_rejected() {
     let id1 = cat.alloc_role_id();
     let id2 = cat.alloc_role_id();
     assert!(cat.create_role(Role::new_user(id1, "alice".into(), TenantId(1))));
-    assert!(!cat.create_role(Role::new_user(id2, "alice".into(), TenantId(1))),
-        "RBAC-S5: duplicate role name should be rejected");
+    assert!(
+        !cat.create_role(Role::new_user(id2, "alice".into(), TenantId(1))),
+        "RBAC-S5: duplicate role name should be rejected"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -473,16 +528,27 @@ fn rbac_c1_privilege_manager_with_effective_roles() {
         object_name: "users".into(),
     };
 
-    pm.grant(editor_id, Privilege::Select, obj.clone(), SUPERUSER_ROLE_ID, false);
+    pm.grant(
+        editor_id,
+        Privilege::Select,
+        obj.clone(),
+        SUPERUSER_ROLE_ID,
+        false,
+    );
 
     // Alice's effective roles include editor
-    let effective: std::collections::HashSet<RoleId> =
-        [alice_id, editor_id].into_iter().collect();
+    let effective: std::collections::HashSet<RoleId> = [alice_id, editor_id].into_iter().collect();
 
-    assert!(pm.check_privilege(&effective, Privilege::Select, &obj).is_allowed(),
-        "RBAC-C1: effective roles should include inherited grants");
-    assert!(!pm.check_privilege(&effective, Privilege::Delete, &obj).is_allowed(),
-        "RBAC-C1: non-granted privilege should be denied");
+    assert!(
+        pm.check_privilege(&effective, Privilege::Select, &obj)
+            .is_allowed(),
+        "RBAC-C1: effective roles should include inherited grants"
+    );
+    assert!(
+        !pm.check_privilege(&effective, Privilege::Delete, &obj)
+            .is_allowed(),
+        "RBAC-C1: non-granted privilege should be denied"
+    );
 }
 
 #[test]
@@ -497,31 +563,49 @@ fn rbac_c2_circular_inheritance_detected() {
 
     // Creating 3 -> 1 would form a cycle
     let result = catalog.grant_role(RoleId(3), RoleId(1));
-    assert!(result.is_err(), "RBAC-C2: circular inheritance should be detected and rejected");
+    assert!(
+        result.is_err(),
+        "RBAC-C2: circular inheritance should be detected and rejected"
+    );
 }
 
 #[test]
 fn rbac_c3_schema_default_privileges() {
     let mut pm = PrivilegeManager::new();
 
-    pm.add_schema_default(SUPERUSER_ROLE_ID, "public", DefaultPrivilege {
-        grantee: RoleId(300),
-        object_type: ObjectType::Table,
-        privilege: Privilege::Select,
-    });
+    pm.add_schema_default(
+        SUPERUSER_ROLE_ID,
+        "public",
+        DefaultPrivilege {
+            grantee: RoleId(300),
+            object_type: ObjectType::Table,
+            privilege: Privilege::Select,
+        },
+    );
 
-    pm.add_schema_default(SUPERUSER_ROLE_ID, "public", DefaultPrivilege {
-        grantee: RoleId(300),
-        object_type: ObjectType::Table,
-        privilege: Privilege::Insert,
-    });
+    pm.add_schema_default(
+        SUPERUSER_ROLE_ID,
+        "public",
+        DefaultPrivilege {
+            grantee: RoleId(300),
+            object_type: ObjectType::Table,
+            privilege: Privilege::Insert,
+        },
+    );
 
     let defaults = pm.schema_defaults(SUPERUSER_ROLE_ID, "public");
-    assert_eq!(defaults.len(), 2, "RBAC-C3: should have 2 default privileges");
+    assert_eq!(
+        defaults.len(),
+        2,
+        "RBAC-C3: should have 2 default privileges"
+    );
     assert_eq!(defaults[0].privilege, Privilege::Select);
     assert_eq!(defaults[1].privilege, Privilege::Insert);
 
     // Different schema should be empty
     let other = pm.schema_defaults(SUPERUSER_ROLE_ID, "private");
-    assert!(other.is_empty(), "RBAC-C3: different schema should have no defaults");
+    assert!(
+        other.is_empty(),
+        "RBAC-C3: different schema should have no defaults"
+    );
 }

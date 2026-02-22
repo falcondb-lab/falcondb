@@ -52,8 +52,7 @@ pub struct PanicEvent {
 }
 
 /// Global ring buffer of recent panics for diagnostic bundles.
-static RECENT_PANICS: std::sync::OnceLock<Arc<Mutex<Vec<PanicEvent>>>> =
-    std::sync::OnceLock::new();
+static RECENT_PANICS: std::sync::OnceLock<Arc<Mutex<Vec<PanicEvent>>>> = std::sync::OnceLock::new();
 
 fn recent_panics() -> &'static Arc<Mutex<Vec<PanicEvent>>> {
     RECENT_PANICS.get_or_init(|| Arc::new(Mutex::new(Vec::with_capacity(MAX_RECENT_PANICS))))
@@ -218,7 +217,10 @@ pub fn panic_count() -> u64 {
 
 /// Snapshot of recent panics (up to `MAX_RECENT_PANICS`).
 pub fn recent_panic_events() -> Vec<PanicEvent> {
-    recent_panics().lock().unwrap_or_else(|p| p.into_inner()).clone()
+    recent_panics()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
 }
 
 /// Total times the panic throttle was triggered (panic storm detected).
@@ -377,7 +379,7 @@ mod tests {
     fn test_install_panic_hook_idempotent() {
         install_panic_hook();
         install_panic_hook(); // second call is a no-op
-        // No panic
+                              // No panic
     }
 
     #[test]
@@ -416,7 +418,11 @@ mod tests {
             panic!("result panic");
         });
         match result.unwrap_err() {
-            FalconError::InternalBug { error_code, debug_context, .. } => {
+            FalconError::InternalBug {
+                error_code,
+                debug_context,
+                ..
+            } => {
                 assert_eq!(error_code, "E-CRASH-002");
                 assert!(debug_context.contains("txn=7"));
             }

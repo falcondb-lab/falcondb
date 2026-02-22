@@ -7,9 +7,7 @@ mod scatter_gather_tests {
     use falcon_common::schema::{ColumnDef, TableSchema};
     use falcon_common::types::{ColumnId, DataType, IsolationLevel, ShardId, TableId};
 
-    use crate::distributed_exec::{
-        AggMerge, DistributedExecutor, GatherStrategy, SubPlan,
-    };
+    use crate::distributed_exec::{AggMerge, DistributedExecutor, GatherStrategy, SubPlan};
     use crate::sharded_engine::ShardedEngine;
 
     fn test_schema() -> TableSchema {
@@ -50,7 +48,7 @@ mod scatter_gather_tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         }
     }
 
@@ -98,7 +96,15 @@ mod scatter_gather_tests {
 
         let all_shards = engine.shard_ids();
         let ((cols, rows), metrics) = exec
-            .scatter_gather(&subplan, &all_shards, &GatherStrategy::Union { distinct: false, limit: None, offset: None })
+            .scatter_gather(
+                &subplan,
+                &all_shards,
+                &GatherStrategy::Union {
+                    distinct: false,
+                    limit: None,
+                    offset: None,
+                },
+            )
             .unwrap();
 
         assert_eq!(cols.len(), 3);
@@ -123,7 +129,11 @@ mod scatter_gather_tests {
                 .into_iter()
                 .filter_map(|(_, r)| {
                     if let Some(Datum::Int32(age)) = r.values.get(2) {
-                        if *age > 40 { Some(r) } else { None }
+                        if *age > 40 {
+                            Some(r)
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     }
@@ -142,7 +152,15 @@ mod scatter_gather_tests {
 
         let all_shards = engine.shard_ids();
         let ((_, rows), _) = exec
-            .scatter_gather(&subplan, &all_shards, &GatherStrategy::Union { distinct: false, limit: None, offset: None })
+            .scatter_gather(
+                &subplan,
+                &all_shards,
+                &GatherStrategy::Union {
+                    distinct: false,
+                    limit: None,
+                    offset: None,
+                },
+            )
             .unwrap();
 
         // Verify all returned rows have age > 40
@@ -265,8 +283,12 @@ mod scatter_gather_tests {
             let mut max_id = i32::MIN;
             for (_, r) in &rows {
                 if let Some(Datum::Int32(id)) = r.values.get(0) {
-                    if *id < min_id { min_id = *id; }
-                    if *id > max_id { max_id = *id; }
+                    if *id < min_id {
+                        min_id = *id;
+                    }
+                    if *id > max_id {
+                        max_id = *id;
+                    }
                 }
             }
             Ok((
@@ -274,7 +296,10 @@ mod scatter_gather_tests {
                     ("min_id".into(), DataType::Int32),
                     ("max_id".into(), DataType::Int32),
                 ],
-                vec![OwnedRow::new(vec![Datum::Int32(min_id), Datum::Int32(max_id)])],
+                vec![OwnedRow::new(vec![
+                    Datum::Int32(min_id),
+                    Datum::Int32(max_id),
+                ])],
             ))
         });
 
@@ -303,7 +328,7 @@ mod scatter_gather_tests {
 
     #[test]
     fn test_scatter_gather_two_phase_avg_fixups() {
-        // Test AVG decomposition via closure API: SUM + hidden COUNT 鈫?AVG fixup
+        // Test AVG decomposition via closure API: SUM + hidden COUNT  → AVG fixup
         let engine = setup_sharded(4, 100);
         let exec = DistributedExecutor::new(engine.clone(), Duration::from_secs(5));
 
@@ -323,7 +348,10 @@ mod scatter_gather_tests {
                 }
             }
             Ok((
-                vec![("sum_id".into(), DataType::Int64), ("count_id".into(), DataType::Int64)],
+                vec![
+                    ("sum_id".into(), DataType::Int64),
+                    ("count_id".into(), DataType::Int64),
+                ],
                 vec![OwnedRow::new(vec![Datum::Int64(sum), Datum::Int64(count)])],
             ))
         });
@@ -349,7 +377,11 @@ mod scatter_gather_tests {
         assert_eq!(rows.len(), 1);
         // ids 0..99, sum=4950, count=100, avg=49.5
         assert_eq!(rows[0].values[0], Datum::Float64(49.5));
-        assert_eq!(rows[0].values.len(), 1, "hidden COUNT column should be truncated");
+        assert_eq!(
+            rows[0].values.len(),
+            1,
+            "hidden COUNT column should be truncated"
+        );
     }
 
     #[test]
@@ -371,20 +403,23 @@ mod scatter_gather_tests {
                     *groups.entry(id / 10).or_default() += 1;
                 }
             }
-            let result_rows: Vec<OwnedRow> = groups.into_iter()
+            let result_rows: Vec<OwnedRow> = groups
+                .into_iter()
                 .map(|(g, c)| OwnedRow::new(vec![Datum::Int32(g), Datum::Int64(c)]))
                 .collect();
             Ok((
-                vec![("age_group".into(), DataType::Int32), ("cnt".into(), DataType::Int64)],
+                vec![
+                    ("age_group".into(), DataType::Int32),
+                    ("cnt".into(), DataType::Int64),
+                ],
                 result_rows,
             ))
         });
 
         let all_shards = engine.shard_ids();
         // HAVING: only keep groups where merged count > 5
-        let having_fn: Arc<dyn Fn(&OwnedRow) -> bool + Send + Sync> = Arc::new(|row| {
-            matches!(row.values.get(1), Some(Datum::Int64(c)) if *c > 5)
-        });
+        let having_fn: Arc<dyn Fn(&OwnedRow) -> bool + Send + Sync> =
+            Arc::new(|row| matches!(row.values.get(1), Some(Datum::Int64(c)) if *c > 5));
         let ((_, rows), _) = exec
             .scatter_gather(
                 &subplan,
@@ -402,8 +437,8 @@ mod scatter_gather_tests {
             )
             .unwrap();
 
-        // 100 ids 鈫?groups 0..9, each with 10 ids 鈫?merged count = 10 per group.
-        // HAVING count > 5 鈫?all 10 groups pass.
+        // 100 ids  → groups 0..9, each with 10 ids  → merged count = 10 per group.
+        // HAVING count > 5  → all 10 groups pass.
         assert_eq!(rows.len(), 10, "all 10 groups should pass HAVING count > 5");
         for row in &rows {
             match row.values.get(1) {
@@ -432,11 +467,15 @@ mod scatter_gather_tests {
                     *groups.entry(id / 10).or_default() += 1;
                 }
             }
-            let result_rows: Vec<OwnedRow> = groups.into_iter()
+            let result_rows: Vec<OwnedRow> = groups
+                .into_iter()
                 .map(|(g, c)| OwnedRow::new(vec![Datum::Int32(g), Datum::Int64(c)]))
                 .collect();
             Ok((
-                vec![("age_group".into(), DataType::Int32), ("cnt".into(), DataType::Int64)],
+                vec![
+                    ("age_group".into(), DataType::Int32),
+                    ("cnt".into(), DataType::Int64),
+                ],
                 result_rows,
             ))
         });
@@ -459,7 +498,7 @@ mod scatter_gather_tests {
             )
             .unwrap();
 
-        // 10 groups (0..9), sorted ASC, OFFSET 2 LIMIT 3 鈫?groups 2, 3, 4
+        // 10 groups (0..9), sorted ASC, OFFSET 2 LIMIT 3  → groups 2, 3, 4
         assert_eq!(rows.len(), 3, "LIMIT 3 after OFFSET 2");
         assert_eq!(rows[0].values[0], Datum::Int32(2));
         assert_eq!(rows[1].values[0], Datum::Int32(3));
@@ -562,11 +601,23 @@ mod scatter_gather_tests {
         });
 
         let all_shards = engine.shard_ids();
-        let result = exec.scatter_gather(&subplan, &all_shards, &GatherStrategy::Union { distinct: false, limit: None, offset: None });
+        let result = exec.scatter_gather(
+            &subplan,
+            &all_shards,
+            &GatherStrategy::Union {
+                distinct: false,
+                limit: None,
+                offset: None,
+            },
+        );
 
         assert!(result.is_err(), "should timeout");
         let err_msg = format!("{}", result.unwrap_err());
-        assert!(err_msg.contains("timeout"), "error should mention timeout: {}", err_msg);
+        assert!(
+            err_msg.contains("timeout"),
+            "error should mention timeout: {}",
+            err_msg
+        );
     }
 
     #[test]
@@ -584,7 +635,15 @@ mod scatter_gather_tests {
 
         let all_shards = engine.shard_ids();
         let (_, metrics) = exec
-            .scatter_gather(&subplan, &all_shards, &GatherStrategy::Union { distinct: false, limit: None, offset: None })
+            .scatter_gather(
+                &subplan,
+                &all_shards,
+                &GatherStrategy::Union {
+                    distinct: false,
+                    limit: None,
+                    offset: None,
+                },
+            )
             .unwrap();
 
         assert_eq!(metrics.shards_participated, 4);
@@ -611,7 +670,15 @@ mod scatter_gather_tests {
         // Only query 2 of 4 shards
         let target = vec![ShardId(0), ShardId(1)];
         let ((_, rows), metrics) = exec
-            .scatter_gather(&subplan, &target, &GatherStrategy::Union { distinct: false, limit: None, offset: None })
+            .scatter_gather(
+                &subplan,
+                &target,
+                &GatherStrategy::Union {
+                    distinct: false,
+                    limit: None,
+                    offset: None,
+                },
+            )
             .unwrap();
 
         assert_eq!(metrics.shards_participated, 2);
@@ -657,7 +724,7 @@ mod replication_tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         }
     }
 
@@ -702,15 +769,24 @@ mod replication_tests {
 
         // Replica should have 0 rows before catch-up
         let replica = &group.replicas[0];
-        let rows = replica.storage.scan(TableId(1), TxnId(999), Timestamp(100)).unwrap();
+        let rows = replica
+            .storage
+            .scan(TableId(1), TxnId(999), Timestamp(100))
+            .unwrap();
         assert_eq!(rows.len(), 0, "replica should be empty before catch-up");
 
         // Catch up
         let applied = group.catch_up_replica(0).unwrap();
-        assert_eq!(applied, 4, "should apply 4 WAL records (2 insert + 2 commit)");
+        assert_eq!(
+            applied, 4,
+            "should apply 4 WAL records (2 insert + 2 commit)"
+        );
 
         // Replica should now have 2 rows
-        let rows = replica.storage.scan(TableId(1), TxnId(999), Timestamp(100)).unwrap();
+        let rows = replica
+            .storage
+            .scan(TableId(1), TxnId(999), Timestamp(100))
+            .unwrap();
         assert_eq!(rows.len(), 2, "replica should have 2 rows after catch-up");
     }
 
@@ -804,7 +880,7 @@ mod replication_tests {
         insert_on_primary(&group, TxnId(3), Timestamp(3), 3, "c");
         group.catch_up_replica(0).unwrap();
 
-        // Phase 2: "disconnect" 鈥?insert more rows without catching up
+        // Phase 2: "disconnect"  — insert more rows without catching up
         insert_on_primary(&group, TxnId(4), Timestamp(4), 4, "d");
         insert_on_primary(&group, TxnId(5), Timestamp(5), 5, "e");
 
@@ -812,15 +888,22 @@ mod replication_tests {
         let lag = group.replication_lag();
         assert!(lag[0].1 > 0, "should have lag after disconnect");
 
-        // Phase 3: "reconnect" 鈥?catch up from last applied LSN
+        // Phase 3: "reconnect"  — catch up from last applied LSN
         let applied = group.catch_up_replica(0).unwrap();
-        assert_eq!(applied, 4, "should catch up 4 records (2 insert + 2 commit)");
+        assert_eq!(
+            applied, 4,
+            "should catch up 4 records (2 insert + 2 commit)"
+        );
 
         let rows = group.replicas[0]
             .storage
             .scan(TableId(1), TxnId(999), Timestamp(100))
             .unwrap();
-        assert_eq!(rows.len(), 5, "replica should have all 5 rows after catch-up");
+        assert_eq!(
+            rows.len(),
+            5,
+            "replica should have all 5 rows after catch-up"
+        );
 
         let lag = group.replication_lag();
         assert_eq!(lag[0].1, 0, "should be caught up");
@@ -860,7 +943,11 @@ mod replication_tests {
         group
             .primary
             .storage
-            .commit_txn(TxnId(10), Timestamp(10), falcon_common::types::TxnType::Local)
+            .commit_txn(
+                TxnId(10),
+                Timestamp(10),
+                falcon_common::types::TxnType::Local,
+            )
             .unwrap();
 
         let rows = group
@@ -873,8 +960,8 @@ mod replication_tests {
 
     #[test]
     fn test_promote_with_routing_updates_shard_map() {
-        use falcon_common::types::NodeId;
         use crate::routing::shard_map::ShardMap;
+        use falcon_common::types::NodeId;
 
         let mut group = ShardReplicaGroup::new(ShardId(0), &[test_schema()]).unwrap();
         let mut shard_map = ShardMap::uniform(2, NodeId(1));
@@ -910,7 +997,7 @@ mod replication_tests {
     #[test]
     fn test_replication_lag_timeline() {
         // Simulates replication lag over time with a burst of writes,
-        // gradual catch-up, and a second burst 鈥?produces data suitable
+        // gradual catch-up, and a second burst  — produces data suitable
         // for a "replication lag over time" graph.
         let group = ShardReplicaGroup::new(ShardId(0), &[test_schema()]).unwrap();
 
@@ -928,12 +1015,19 @@ mod replication_tests {
             let lag = group.replication_lag()[0].1;
             lag_timeline.push((i, lag));
         }
-        assert!(lag_timeline.last().unwrap().1 > 0, "lag should be > 0 after burst");
+        assert!(
+            lag_timeline.last().unwrap().1 > 0,
+            "lag should be > 0 after burst"
+        );
 
         // Phase 2: catch up
         group.catch_up_replica(0).unwrap();
         lag_timeline.push((11, group.replication_lag()[0].1));
-        assert_eq!(lag_timeline.last().unwrap().1, 0, "lag should be 0 after catch-up");
+        assert_eq!(
+            lag_timeline.last().unwrap().1,
+            0,
+            "lag should be 0 after catch-up"
+        );
 
         // Phase 3: second burst of 5 writes
         for i in 11..=15u32 {
@@ -955,7 +1049,10 @@ mod replication_tests {
         assert_eq!(lag_timeline.last().unwrap().1, 0);
 
         // Verify timeline shape: lag increases during bursts, drops to 0 on catch-up
-        assert!(lag_timeline.len() >= 16, "timeline should have enough data points");
+        assert!(
+            lag_timeline.len() >= 16,
+            "timeline should have enough data points"
+        );
     }
 }
 
@@ -973,23 +1070,21 @@ mod execute_subplan_tests {
         TableSchema {
             id: TableId(1),
             name: "sub".into(),
-            columns: vec![
-                ColumnDef {
-                    id: ColumnId(0),
-                    name: "id".into(),
-                    data_type: DataType::Int32,
-                    nullable: false,
-                    is_primary_key: true,
-                    default_value: None,
-                    is_serial: false,
-                },
-            ],
+            columns: vec![ColumnDef {
+                id: ColumnId(0),
+                name: "id".into(),
+                data_type: DataType::Int32,
+                nullable: false,
+                is_primary_key: true,
+                default_value: None,
+                is_serial: false,
+            }],
             primary_key_columns: vec![0],
             next_serial_values: std::collections::HashMap::new(),
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         }
     }
 
@@ -1003,7 +1098,11 @@ mod execute_subplan_tests {
         let txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
         shard
             .storage
-            .insert(TableId(1), OwnedRow::new(vec![Datum::Int32(42)]), txn.txn_id)
+            .insert(
+                TableId(1),
+                OwnedRow::new(vec![Datum::Int32(42)]),
+                txn.txn_id,
+            )
             .unwrap();
         shard.txn_mgr.commit(txn.txn_id).unwrap();
 
@@ -1030,9 +1129,7 @@ mod execute_subplan_tests {
     fn test_execute_subplan_invalid_shard() {
         let engine = Arc::new(ShardedEngine::new(2));
 
-        let result = engine.execute_subplan(ShardId(99), |_, _| {
-            Ok((vec![], vec![]))
-        });
+        let result = engine.execute_subplan(ShardId(99), |_, _| Ok((vec![], vec![])));
 
         assert!(result.is_err(), "should error for invalid shard ID");
     }
@@ -1082,7 +1179,7 @@ mod dist_query_engine_tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         }
     }
 
@@ -1095,7 +1192,8 @@ mod dist_query_engine_tests {
             for i in 0..rows_per_shard {
                 let global_id = (s as i32) * rows_per_shard + i;
                 let txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
-                let row = OwnedRow::new(vec![Datum::Int32(global_id), Datum::Int32(global_id * 10)]);
+                let row =
+                    OwnedRow::new(vec![Datum::Int32(global_id), Datum::Int32(global_id * 10)]);
                 shard.storage.insert(TableId(1), row, txn.txn_id).unwrap();
                 shard.txn_mgr.commit(txn.txn_id).unwrap();
             }
@@ -1134,7 +1232,11 @@ mod dist_query_engine_tests {
         let plan = PhysicalPlan::DistPlan {
             subplan: Box::new(subplan),
             target_shards: vec![ShardId(0), ShardId(1), ShardId(2), ShardId(3)],
-            gather: DistGather::Union { distinct: false, limit: None, offset: None },
+            gather: DistGather::Union {
+                distinct: false,
+                limit: None,
+                offset: None,
+            },
         };
 
         let result = qe.execute(&plan, None).unwrap();
@@ -1152,16 +1254,17 @@ mod dist_query_engine_tests {
         let engine = setup_engine_with_data(4, 25);
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
 
-        // Each shard does a COUNT 鈥?returns 1 row with count as Int64.
+        // Each shard does a COUNT  — returns 1 row with count as Int64.
         // We use a SeqScan with a group_by trick, but since the executor
         // does the aggregation, we need to use the actual planner types.
         // For simplicity, test with Union and check total row count.
         let subplan = PhysicalPlan::SeqScan {
             table_id: TableId(1),
             schema: test_schema(),
-            projections: vec![
-                falcon_sql_frontend::types::BoundProjection::Column(0, "id".into()),
-            ],
+            projections: vec![falcon_sql_frontend::types::BoundProjection::Column(
+                0,
+                "id".into(),
+            )],
             visible_projection_count: 1,
             filter: None,
             group_by: vec![],
@@ -1179,7 +1282,11 @@ mod dist_query_engine_tests {
         let plan = PhysicalPlan::DistPlan {
             subplan: Box::new(subplan),
             target_shards: vec![ShardId(0), ShardId(1), ShardId(2), ShardId(3)],
-            gather: DistGather::Union { distinct: false, limit: None, offset: None },
+            gather: DistGather::Union {
+                distinct: false,
+                limit: None,
+                offset: None,
+            },
         };
 
         let result = qe.execute(&plan, None).unwrap();
@@ -1208,7 +1315,10 @@ mod dist_query_engine_tests {
             group_by: vec![],
             grouping_sets: vec![],
             having: None,
-            order_by: vec![falcon_sql_frontend::types::BoundOrderBy { column_idx: 0, asc: true }],
+            order_by: vec![falcon_sql_frontend::types::BoundOrderBy {
+                column_idx: 0,
+                asc: true,
+            }],
             limit: Some(10), // pushed-down limit
             offset: None,
             distinct: DistinctMode::None,
@@ -1258,9 +1368,10 @@ mod dist_query_engine_tests {
         let plan = PhysicalPlan::SeqScan {
             table_id: TableId(1),
             schema: test_schema(),
-            projections: vec![
-                falcon_sql_frontend::types::BoundProjection::Column(0, "id".into()),
-            ],
+            projections: vec![falcon_sql_frontend::types::BoundProjection::Column(
+                0,
+                "id".into(),
+            )],
             visible_projection_count: 1,
             filter: None,
             group_by: vec![],
@@ -1292,7 +1403,9 @@ mod two_phase_tests {
 
     use falcon_common::datum::{Datum, OwnedRow};
     use falcon_common::schema::{ColumnDef, TableSchema};
-    use falcon_common::types::{ColumnId, DataType, IsolationLevel, ShardId, TableId, Timestamp, TxnId};
+    use falcon_common::types::{
+        ColumnId, DataType, IsolationLevel, ShardId, TableId, Timestamp, TxnId,
+    };
 
     use crate::sharded_engine::ShardedEngine;
     use crate::two_phase::TwoPhaseCoordinator;
@@ -1301,23 +1414,21 @@ mod two_phase_tests {
         TableSchema {
             id: TableId(1),
             name: "tpc_test".into(),
-            columns: vec![
-                ColumnDef {
-                    id: ColumnId(0),
-                    name: "id".into(),
-                    data_type: DataType::Int32,
-                    nullable: false,
-                    is_primary_key: true,
-                    default_value: None,
-                    is_serial: false,
-                },
-            ],
+            columns: vec![ColumnDef {
+                id: ColumnId(0),
+                name: "id".into(),
+                data_type: DataType::Int32,
+                nullable: false,
+                is_primary_key: true,
+                default_value: None,
+                is_serial: false,
+            }],
             primary_key_columns: vec![0],
             next_serial_values: std::collections::HashMap::new(),
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         }
     }
 
@@ -1330,11 +1441,15 @@ mod two_phase_tests {
         let target = vec![ShardId(0), ShardId(1), ShardId(2)];
 
         let result = coord
-            .execute(&target, IsolationLevel::ReadCommitted, |storage, _txn_mgr, txn_id| {
-                let row = OwnedRow::new(vec![Datum::Int32(42)]);
-                storage.insert(TableId(1), row, txn_id)?;
-                Ok(())
-            })
+            .execute(
+                &target,
+                IsolationLevel::ReadCommitted,
+                |storage, _txn_mgr, txn_id| {
+                    let row = OwnedRow::new(vec![Datum::Int32(42)]);
+                    storage.insert(TableId(1), row, txn_id)?;
+                    Ok(())
+                },
+            )
             .unwrap();
 
         assert!(result.committed, "all shards should commit");
@@ -1361,15 +1476,19 @@ mod two_phase_tests {
         let target = vec![ShardId(0), ShardId(1), ShardId(2)];
 
         let result = coord
-            .execute(&target, IsolationLevel::ReadCommitted, |storage, _txn_mgr, txn_id| {
-                // Insert on all shards 鈥?but shard 2 (3rd) gets a duplicate PK
-                // which we simulate by inserting the same key twice.
-                let row = OwnedRow::new(vec![Datum::Int32(1)]);
-                storage.insert(TableId(1), row.clone(), txn_id)?;
-                // Insert duplicate 鈥?this will fail on the storage layer
-                storage.insert(TableId(1), row, txn_id)?;
-                Ok(())
-            })
+            .execute(
+                &target,
+                IsolationLevel::ReadCommitted,
+                |storage, _txn_mgr, txn_id| {
+                    // Insert on all shards  — but shard 2 (3rd) gets a duplicate PK
+                    // which we simulate by inserting the same key twice.
+                    let row = OwnedRow::new(vec![Datum::Int32(1)]);
+                    storage.insert(TableId(1), row.clone(), txn_id)?;
+                    // Insert duplicate  — this will fail on the storage layer
+                    storage.insert(TableId(1), row, txn_id)?;
+                    Ok(())
+                },
+            )
             .unwrap();
 
         // Should abort because the write_fn fails (duplicate PK insert).
@@ -1385,11 +1504,15 @@ mod two_phase_tests {
         let target = vec![ShardId(0), ShardId(1)];
 
         let result = coord
-            .execute(&target, IsolationLevel::ReadCommitted, |storage, _txn_mgr, txn_id| {
-                let row = OwnedRow::new(vec![Datum::Int32(1)]);
-                storage.insert(TableId(1), row, txn_id)?;
-                Ok(())
-            })
+            .execute(
+                &target,
+                IsolationLevel::ReadCommitted,
+                |storage, _txn_mgr, txn_id| {
+                    let row = OwnedRow::new(vec![Datum::Int32(1)]);
+                    storage.insert(TableId(1), row, txn_id)?;
+                    Ok(())
+                },
+            )
             .unwrap();
 
         assert!(result.committed);
@@ -1400,10 +1523,13 @@ mod two_phase_tests {
     #[test]
     fn test_merge_bool_and_across_shards() {
         use crate::distributed_exec::{merge_two_phase_agg, AggMerge, ShardResult};
-        // BoolAnd merge: all true 鈫?true; one false 鈫?false.
+        // BoolAnd merge: all true  → true; one false  → false.
         let sr1 = ShardResult {
             shard_id: ShardId(0),
-            columns: vec![("grp".into(), DataType::Int32), ("ba".into(), DataType::Boolean)],
+            columns: vec![
+                ("grp".into(), DataType::Int32),
+                ("ba".into(), DataType::Boolean),
+            ],
             rows: vec![OwnedRow::new(vec![Datum::Int32(1), Datum::Boolean(true)])],
             latency_us: 0,
         };
@@ -1413,22 +1539,25 @@ mod two_phase_tests {
             rows: vec![OwnedRow::new(vec![Datum::Int32(1), Datum::Boolean(false)])],
             latency_us: 0,
         };
-        let merged = merge_two_phase_agg(
-            &[sr1, sr2],
-            &[0],
-            &[AggMerge::BoolAnd(1)],
-        );
+        let merged = merge_two_phase_agg(&[sr1, sr2], &[0], &[AggMerge::BoolAnd(1)]);
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].values[1], Datum::Boolean(false), "true AND false = false");
+        assert_eq!(
+            merged[0].values[1],
+            Datum::Boolean(false),
+            "true AND false = false"
+        );
     }
 
     #[test]
     fn test_merge_bool_or_across_shards() {
         use crate::distributed_exec::{merge_two_phase_agg, AggMerge, ShardResult};
-        // BoolOr merge: all false 鈫?false; one true 鈫?true.
+        // BoolOr merge: all false  → false; one true  → true.
         let sr1 = ShardResult {
             shard_id: ShardId(0),
-            columns: vec![("grp".into(), DataType::Int32), ("bo".into(), DataType::Boolean)],
+            columns: vec![
+                ("grp".into(), DataType::Int32),
+                ("bo".into(), DataType::Boolean),
+            ],
             rows: vec![OwnedRow::new(vec![Datum::Int32(1), Datum::Boolean(false)])],
             latency_us: 0,
         };
@@ -1438,13 +1567,13 @@ mod two_phase_tests {
             rows: vec![OwnedRow::new(vec![Datum::Int32(1), Datum::Boolean(true)])],
             latency_us: 0,
         };
-        let merged = merge_two_phase_agg(
-            &[sr1, sr2],
-            &[0],
-            &[AggMerge::BoolOr(1)],
-        );
+        let merged = merge_two_phase_agg(&[sr1, sr2], &[0], &[AggMerge::BoolOr(1)]);
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].values[1], Datum::Boolean(true), "false OR true = true");
+        assert_eq!(
+            merged[0].values[1],
+            Datum::Boolean(true),
+            "false OR true = true"
+        );
     }
 
     #[test]
@@ -1453,21 +1582,26 @@ mod two_phase_tests {
         // STRING_AGG merge: concatenate partial strings with separator.
         let sr1 = ShardResult {
             shard_id: ShardId(0),
-            columns: vec![("grp".into(), DataType::Int32), ("sa".into(), DataType::Text)],
-            rows: vec![OwnedRow::new(vec![Datum::Int32(1), Datum::Text("a,b".into())])],
+            columns: vec![
+                ("grp".into(), DataType::Int32),
+                ("sa".into(), DataType::Text),
+            ],
+            rows: vec![OwnedRow::new(vec![
+                Datum::Int32(1),
+                Datum::Text("a,b".into()),
+            ])],
             latency_us: 0,
         };
         let sr2 = ShardResult {
             shard_id: ShardId(1),
             columns: sr1.columns.clone(),
-            rows: vec![OwnedRow::new(vec![Datum::Int32(1), Datum::Text("c,d".into())])],
+            rows: vec![OwnedRow::new(vec![
+                Datum::Int32(1),
+                Datum::Text("c,d".into()),
+            ])],
             latency_us: 0,
         };
-        let merged = merge_two_phase_agg(
-            &[sr1, sr2],
-            &[0],
-            &[AggMerge::StringAgg(1, ",".into())],
-        );
+        let merged = merge_two_phase_agg(&[sr1, sr2], &[0], &[AggMerge::StringAgg(1, ",".into())]);
         assert_eq!(merged.len(), 1);
         match &merged[0].values[1] {
             Datum::Text(s) => {
@@ -1483,23 +1617,29 @@ mod two_phase_tests {
         // STRING_AGG with NULL: NULL should be skipped.
         let sr1 = ShardResult {
             shard_id: ShardId(0),
-            columns: vec![("grp".into(), DataType::Int32), ("sa".into(), DataType::Text)],
+            columns: vec![
+                ("grp".into(), DataType::Int32),
+                ("sa".into(), DataType::Text),
+            ],
             rows: vec![OwnedRow::new(vec![Datum::Int32(1), Datum::Null])],
             latency_us: 0,
         };
         let sr2 = ShardResult {
             shard_id: ShardId(1),
             columns: sr1.columns.clone(),
-            rows: vec![OwnedRow::new(vec![Datum::Int32(1), Datum::Text("x".into())])],
+            rows: vec![OwnedRow::new(vec![
+                Datum::Int32(1),
+                Datum::Text("x".into()),
+            ])],
             latency_us: 0,
         };
-        let merged = merge_two_phase_agg(
-            &[sr1, sr2],
-            &[0],
-            &[AggMerge::StringAgg(1, ",".into())],
-        );
+        let merged = merge_two_phase_agg(&[sr1, sr2], &[0], &[AggMerge::StringAgg(1, ",".into())]);
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].values[1], Datum::Text("x".into()), "NULL should be skipped");
+        assert_eq!(
+            merged[0].values[1],
+            Datum::Text("x".into()),
+            "NULL should be skipped"
+        );
     }
 
     #[test]
@@ -1507,21 +1647,26 @@ mod two_phase_tests {
         use crate::distributed_exec::{merge_two_phase_agg, AggMerge, ShardResult};
         let sr1 = ShardResult {
             shard_id: ShardId(0),
-            columns: vec![("grp".into(), DataType::Int32), ("aa".into(), DataType::Array(Box::new(DataType::Int32)))],
-            rows: vec![OwnedRow::new(vec![Datum::Int32(1), Datum::Array(vec![Datum::Int32(10), Datum::Int32(20)])])],
+            columns: vec![
+                ("grp".into(), DataType::Int32),
+                ("aa".into(), DataType::Array(Box::new(DataType::Int32))),
+            ],
+            rows: vec![OwnedRow::new(vec![
+                Datum::Int32(1),
+                Datum::Array(vec![Datum::Int32(10), Datum::Int32(20)]),
+            ])],
             latency_us: 0,
         };
         let sr2 = ShardResult {
             shard_id: ShardId(1),
             columns: sr1.columns.clone(),
-            rows: vec![OwnedRow::new(vec![Datum::Int32(1), Datum::Array(vec![Datum::Int32(30)])])],
+            rows: vec![OwnedRow::new(vec![
+                Datum::Int32(1),
+                Datum::Array(vec![Datum::Int32(30)]),
+            ])],
             latency_us: 0,
         };
-        let merged = merge_two_phase_agg(
-            &[sr1, sr2],
-            &[0],
-            &[AggMerge::ArrayAgg(1)],
-        );
+        let merged = merge_two_phase_agg(&[sr1, sr2], &[0], &[AggMerge::ArrayAgg(1)]);
         assert_eq!(merged.len(), 1);
         match &merged[0].values[1] {
             Datum::Array(arr) => {
@@ -1539,23 +1684,29 @@ mod two_phase_tests {
         use crate::distributed_exec::{merge_two_phase_agg, AggMerge, ShardResult};
         let sr1 = ShardResult {
             shard_id: ShardId(0),
-            columns: vec![("grp".into(), DataType::Int32), ("aa".into(), DataType::Array(Box::new(DataType::Int32)))],
+            columns: vec![
+                ("grp".into(), DataType::Int32),
+                ("aa".into(), DataType::Array(Box::new(DataType::Int32))),
+            ],
             rows: vec![OwnedRow::new(vec![Datum::Int32(1), Datum::Null])],
             latency_us: 0,
         };
         let sr2 = ShardResult {
             shard_id: ShardId(1),
             columns: sr1.columns.clone(),
-            rows: vec![OwnedRow::new(vec![Datum::Int32(1), Datum::Array(vec![Datum::Int32(5)])])],
+            rows: vec![OwnedRow::new(vec![
+                Datum::Int32(1),
+                Datum::Array(vec![Datum::Int32(5)]),
+            ])],
             latency_us: 0,
         };
-        let merged = merge_two_phase_agg(
-            &[sr1, sr2],
-            &[0],
-            &[AggMerge::ArrayAgg(1)],
-        );
+        let merged = merge_two_phase_agg(&[sr1, sr2], &[0], &[AggMerge::ArrayAgg(1)]);
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].values[1], Datum::Array(vec![Datum::Int32(5)]), "NULL shard should be skipped");
+        assert_eq!(
+            merged[0].values[1],
+            Datum::Array(vec![Datum::Int32(5)]),
+            "NULL shard should be skipped"
+        );
     }
 
     #[test]
@@ -1583,7 +1734,10 @@ mod two_phase_tests {
         );
         // Text comparison
         assert_eq!(
-            compare_datums(Some(&Datum::Text("apple".into())), Some(&Datum::Text("banana".into()))),
+            compare_datums(
+                Some(&Datum::Text("apple".into())),
+                Some(&Datum::Text("banana".into()))
+            ),
             std::cmp::Ordering::Less
         );
     }
@@ -1594,7 +1748,10 @@ mod two_phase_tests {
         // SUM merge with Int32 + Int64 (cross-type)
         let sr1 = ShardResult {
             shard_id: ShardId(0),
-            columns: vec![("grp".into(), DataType::Int32), ("s".into(), DataType::Int64)],
+            columns: vec![
+                ("grp".into(), DataType::Int32),
+                ("s".into(), DataType::Int64),
+            ],
             rows: vec![OwnedRow::new(vec![Datum::Int32(1), Datum::Int32(10)])],
             latency_us: 0,
         };
@@ -1615,10 +1772,13 @@ mod two_phase_tests {
         use crate::distributed_exec::{merge_two_phase_agg, AggMerge, ShardResult};
         // Shard 0: group "a" has distinct values [1, 2, 3]
         // Shard 1: group "a" has distinct values [2, 3, 4]
-        // After merge: deduplicated = {1, 2, 3, 4} 鈫?count = 4
+        // After merge: deduplicated = {1, 2, 3, 4}  → count = 4
         let sr1 = ShardResult {
             shard_id: ShardId(0),
-            columns: vec![("grp".into(), DataType::Text), ("cd".into(), DataType::Int64)],
+            columns: vec![
+                ("grp".into(), DataType::Text),
+                ("cd".into(), DataType::Int64),
+            ],
             rows: vec![OwnedRow::new(vec![
                 Datum::Text("a".into()),
                 Datum::Array(vec![Datum::Int32(1), Datum::Int32(2), Datum::Int32(3)]),
@@ -1634,13 +1794,9 @@ mod two_phase_tests {
             ])],
             latency_us: 0,
         };
-        let merged = merge_two_phase_agg(
-            &[sr1, sr2],
-            &[0],
-            &[AggMerge::CountDistinct(1)],
-        );
+        let merged = merge_two_phase_agg(&[sr1, sr2], &[0], &[AggMerge::CountDistinct(1)]);
         assert_eq!(merged.len(), 1);
-        // Deduplicated {1,2,3,4} 鈫?count = 4
+        // Deduplicated {1,2,3,4}  → count = 4
         assert_eq!(merged[0].values[1], Datum::Int64(4));
     }
 
@@ -1651,7 +1807,10 @@ mod two_phase_tests {
         // Shard 1: group "x" has NULL (no rows matched)
         let sr1 = ShardResult {
             shard_id: ShardId(0),
-            columns: vec![("grp".into(), DataType::Text), ("cd".into(), DataType::Int64)],
+            columns: vec![
+                ("grp".into(), DataType::Text),
+                ("cd".into(), DataType::Int64),
+            ],
             rows: vec![OwnedRow::new(vec![
                 Datum::Text("x".into()),
                 Datum::Array(vec![Datum::Int32(10), Datum::Int32(20)]),
@@ -1661,19 +1820,16 @@ mod two_phase_tests {
         let sr2 = ShardResult {
             shard_id: ShardId(1),
             columns: sr1.columns.clone(),
-            rows: vec![OwnedRow::new(vec![
-                Datum::Text("x".into()),
-                Datum::Null,
-            ])],
+            rows: vec![OwnedRow::new(vec![Datum::Text("x".into()), Datum::Null])],
             latency_us: 0,
         };
-        let merged = merge_two_phase_agg(
-            &[sr1, sr2],
-            &[0],
-            &[AggMerge::CountDistinct(1)],
-        );
+        let merged = merge_two_phase_agg(&[sr1, sr2], &[0], &[AggMerge::CountDistinct(1)]);
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].values[1], Datum::Int64(2), "NULL shard should be skipped, count=2");
+        assert_eq!(
+            merged[0].values[1],
+            Datum::Int64(2),
+            "NULL shard should be skipped, count=2"
+        );
     }
 
     #[test]
@@ -1681,10 +1837,13 @@ mod two_phase_tests {
         use crate::distributed_exec::{merge_two_phase_agg, AggMerge, ShardResult};
         // Shard 0: group "a" has distinct values [10, 20, 30]
         // Shard 1: group "a" has distinct values [20, 30, 40]
-        // After merge: unique = {10, 20, 30, 40} 鈫?sum = 100
+        // After merge: unique = {10, 20, 30, 40}  → sum = 100
         let sr1 = ShardResult {
             shard_id: ShardId(0),
-            columns: vec![("grp".into(), DataType::Text), ("sd".into(), DataType::Int64)],
+            columns: vec![
+                ("grp".into(), DataType::Text),
+                ("sd".into(), DataType::Int64),
+            ],
             rows: vec![OwnedRow::new(vec![
                 Datum::Text("a".into()),
                 Datum::Array(vec![Datum::Int32(10), Datum::Int32(20), Datum::Int32(30)]),
@@ -1700,11 +1859,7 @@ mod two_phase_tests {
             ])],
             latency_us: 0,
         };
-        let merged = merge_two_phase_agg(
-            &[sr1, sr2],
-            &[0],
-            &[AggMerge::SumDistinct(1)],
-        );
+        let merged = merge_two_phase_agg(&[sr1, sr2], &[0], &[AggMerge::SumDistinct(1)]);
         assert_eq!(merged.len(), 1);
         // Unique {10,20,30,40}: Int32 values get promoted to Int64 via datum_add
         assert_eq!(merged[0].values[1], Datum::Int64(100));
@@ -1715,10 +1870,13 @@ mod two_phase_tests {
         use crate::distributed_exec::{merge_two_phase_agg, AggMerge, ShardResult};
         // Shard 0: group "a" has distinct values [10, 20, 30]
         // Shard 1: group "a" has distinct values [20, 30, 40]
-        // After merge: unique = {10, 20, 30, 40} 鈫?avg = 100/4 = 25.0
+        // After merge: unique = {10, 20, 30, 40}  → avg = 100/4 = 25.0
         let sr1 = ShardResult {
             shard_id: ShardId(0),
-            columns: vec![("grp".into(), DataType::Text), ("ad".into(), DataType::Float64)],
+            columns: vec![
+                ("grp".into(), DataType::Text),
+                ("ad".into(), DataType::Float64),
+            ],
             rows: vec![OwnedRow::new(vec![
                 Datum::Text("a".into()),
                 Datum::Array(vec![Datum::Int32(10), Datum::Int32(20), Datum::Int32(30)]),
@@ -1734,11 +1892,7 @@ mod two_phase_tests {
             ])],
             latency_us: 0,
         };
-        let merged = merge_two_phase_agg(
-            &[sr1, sr2],
-            &[0],
-            &[AggMerge::AvgDistinct(1)],
-        );
+        let merged = merge_two_phase_agg(&[sr1, sr2], &[0], &[AggMerge::AvgDistinct(1)]);
         assert_eq!(merged.len(), 1);
         // Unique {10,20,30,40}: avg = 100/4 = 25.0
         assert_eq!(merged[0].values[1], Datum::Float64(25.0));
@@ -1749,13 +1903,19 @@ mod two_phase_tests {
         use crate::distributed_exec::{merge_two_phase_agg, AggMerge, ShardResult};
         // Shard 0: group "a" has distinct values ["hello", "world"]
         // Shard 1: group "a" has distinct values ["world", "foo"]
-        // After merge: unique = {"hello", "world", "foo"} 鈫?joined with ","
+        // After merge: unique = {"hello", "world", "foo"}  → joined with ","
         let sr1 = ShardResult {
             shard_id: ShardId(0),
-            columns: vec![("grp".into(), DataType::Text), ("sa".into(), DataType::Text)],
+            columns: vec![
+                ("grp".into(), DataType::Text),
+                ("sa".into(), DataType::Text),
+            ],
             rows: vec![OwnedRow::new(vec![
                 Datum::Text("a".into()),
-                Datum::Array(vec![Datum::Text("hello".into()), Datum::Text("world".into())]),
+                Datum::Array(vec![
+                    Datum::Text("hello".into()),
+                    Datum::Text("world".into()),
+                ]),
             ])],
             latency_us: 0,
         };
@@ -1792,10 +1952,13 @@ mod two_phase_tests {
         use crate::distributed_exec::{merge_two_phase_agg, AggMerge, ShardResult};
         // Shard 0: group "a" has distinct values [1, 2, 3]
         // Shard 1: group "a" has distinct values [2, 3, 4]
-        // After merge: unique = {1, 2, 3, 4} 鈫?returned as array
+        // After merge: unique = {1, 2, 3, 4}  → returned as array
         let sr1 = ShardResult {
             shard_id: ShardId(0),
-            columns: vec![("grp".into(), DataType::Text), ("aa".into(), DataType::Int32)],
+            columns: vec![
+                ("grp".into(), DataType::Text),
+                ("aa".into(), DataType::Int32),
+            ],
             rows: vec![OwnedRow::new(vec![
                 Datum::Text("a".into()),
                 Datum::Array(vec![Datum::Int32(1), Datum::Int32(2), Datum::Int32(3)]),
@@ -1811,11 +1974,7 @@ mod two_phase_tests {
             ])],
             latency_us: 0,
         };
-        let merged = merge_two_phase_agg(
-            &[sr1, sr2],
-            &[0],
-            &[AggMerge::ArrayAggDistinct(1)],
-        );
+        let merged = merge_two_phase_agg(&[sr1, sr2], &[0], &[AggMerge::ArrayAggDistinct(1)]);
         assert_eq!(merged.len(), 1);
         match &merged[0].values[1] {
             Datum::Array(arr) => {
@@ -1835,7 +1994,10 @@ mod two_phase_tests {
         // CountDistinct should count all unique including Null = 4
         let sr1 = ShardResult {
             shard_id: ShardId(0),
-            columns: vec![("grp".into(), DataType::Text), ("cd".into(), DataType::Int64)],
+            columns: vec![
+                ("grp".into(), DataType::Text),
+                ("cd".into(), DataType::Int64),
+            ],
             rows: vec![OwnedRow::new(vec![
                 Datum::Text("a".into()),
                 Datum::Array(vec![Datum::Int32(10), Datum::Null, Datum::Int32(20)]),
@@ -1851,11 +2013,7 @@ mod two_phase_tests {
             ])],
             latency_us: 0,
         };
-        let merged = merge_two_phase_agg(
-            &[sr1, sr2],
-            &[0],
-            &[AggMerge::CountDistinct(1)],
-        );
+        let merged = merge_two_phase_agg(&[sr1, sr2], &[0], &[AggMerge::CountDistinct(1)]);
         assert_eq!(merged.len(), 1);
         // Unique values: {10, Null, 20, 30} = 4
         assert_eq!(merged[0].values[1], Datum::Int64(4));
@@ -1867,40 +2025,53 @@ mod two_phase_tests {
         // Edge case: both shards return Null (no data for the group).
         let sr1 = ShardResult {
             shard_id: ShardId(0),
-            columns: vec![("grp".into(), DataType::Text), ("cd".into(), DataType::Int64)],
-            rows: vec![OwnedRow::new(vec![
-                Datum::Text("a".into()),
-                Datum::Null,
-            ])],
+            columns: vec![
+                ("grp".into(), DataType::Text),
+                ("cd".into(), DataType::Int64),
+            ],
+            rows: vec![OwnedRow::new(vec![Datum::Text("a".into()), Datum::Null])],
             latency_us: 0,
         };
         let sr2 = ShardResult {
             shard_id: ShardId(1),
             columns: sr1.columns.clone(),
-            rows: vec![OwnedRow::new(vec![
-                Datum::Text("a".into()),
-                Datum::Null,
-            ])],
+            rows: vec![OwnedRow::new(vec![Datum::Text("a".into()), Datum::Null])],
             latency_us: 0,
         };
 
-        // CountDistinct: all Null 鈫?0
-        let merged = merge_two_phase_agg(&[sr1.clone(), sr2.clone()], &[0], &[AggMerge::CountDistinct(1)]);
+        // CountDistinct: all Null  → 0
+        let merged = merge_two_phase_agg(
+            &[sr1.clone(), sr2.clone()],
+            &[0],
+            &[AggMerge::CountDistinct(1)],
+        );
         assert_eq!(merged[0].values[1], Datum::Int64(0));
 
-        // SumDistinct: all Null 鈫?Null
-        let merged = merge_two_phase_agg(&[sr1.clone(), sr2.clone()], &[0], &[AggMerge::SumDistinct(1)]);
+        // SumDistinct: all Null  → Null
+        let merged = merge_two_phase_agg(
+            &[sr1.clone(), sr2.clone()],
+            &[0],
+            &[AggMerge::SumDistinct(1)],
+        );
         assert!(matches!(merged[0].values[1], Datum::Null));
 
-        // AvgDistinct: all Null 鈫?Null
-        let merged = merge_two_phase_agg(&[sr1.clone(), sr2.clone()], &[0], &[AggMerge::AvgDistinct(1)]);
+        // AvgDistinct: all Null  → Null
+        let merged = merge_two_phase_agg(
+            &[sr1.clone(), sr2.clone()],
+            &[0],
+            &[AggMerge::AvgDistinct(1)],
+        );
         assert!(matches!(merged[0].values[1], Datum::Null));
 
-        // StringAggDistinct: all Null 鈫?Null
-        let merged = merge_two_phase_agg(&[sr1.clone(), sr2.clone()], &[0], &[AggMerge::StringAggDistinct(1, ",".into())]);
+        // StringAggDistinct: all Null  → Null
+        let merged = merge_two_phase_agg(
+            &[sr1.clone(), sr2.clone()],
+            &[0],
+            &[AggMerge::StringAggDistinct(1, ",".into())],
+        );
         assert!(matches!(merged[0].values[1], Datum::Null));
 
-        // ArrayAggDistinct: all Null 鈫?Null
+        // ArrayAggDistinct: all Null  → Null
         let merged = merge_two_phase_agg(&[sr1, sr2], &[0], &[AggMerge::ArrayAggDistinct(1)]);
         assert!(matches!(merged[0].values[1], Datum::Null));
     }
@@ -1911,7 +2082,10 @@ mod two_phase_tests {
         // Edge case: shards return empty arrays (group exists but no matching values).
         let sr1 = ShardResult {
             shard_id: ShardId(0),
-            columns: vec![("grp".into(), DataType::Text), ("cd".into(), DataType::Int64)],
+            columns: vec![
+                ("grp".into(), DataType::Text),
+                ("cd".into(), DataType::Int64),
+            ],
             rows: vec![OwnedRow::new(vec![
                 Datum::Text("a".into()),
                 Datum::Array(vec![]),
@@ -1928,17 +2102,29 @@ mod two_phase_tests {
             latency_us: 0,
         };
 
-        // CountDistinct: empty + [42] 鈫?1
-        let merged = merge_two_phase_agg(&[sr1.clone(), sr2.clone()], &[0], &[AggMerge::CountDistinct(1)]);
+        // CountDistinct: empty + [42]  → 1
+        let merged = merge_two_phase_agg(
+            &[sr1.clone(), sr2.clone()],
+            &[0],
+            &[AggMerge::CountDistinct(1)],
+        );
         assert_eq!(merged[0].values[1], Datum::Int64(1));
 
-        // SumDistinct: empty + [42] 鈫?42
-        let merged = merge_two_phase_agg(&[sr1.clone(), sr2.clone()], &[0], &[AggMerge::SumDistinct(1)]);
+        // SumDistinct: empty + [42]  → 42
+        let merged = merge_two_phase_agg(
+            &[sr1.clone(), sr2.clone()],
+            &[0],
+            &[AggMerge::SumDistinct(1)],
+        );
         // Int32(42) gets promoted to Int64 via datum_add
         assert_eq!(merged[0].values[1], Datum::Int64(42));
 
-        // AvgDistinct: empty + [42] 鈫?42.0
-        let merged = merge_two_phase_agg(&[sr1.clone(), sr2.clone()], &[0], &[AggMerge::AvgDistinct(1)]);
+        // AvgDistinct: empty + [42]  → 42.0
+        let merged = merge_two_phase_agg(
+            &[sr1.clone(), sr2.clone()],
+            &[0],
+            &[AggMerge::AvgDistinct(1)],
+        );
         assert_eq!(merged[0].values[1], Datum::Float64(42.0));
     }
 
@@ -1948,10 +2134,19 @@ mod two_phase_tests {
         // Multiple groups: group "a" and "b" across 2 shards.
         let sr1 = ShardResult {
             shard_id: ShardId(0),
-            columns: vec![("grp".into(), DataType::Text), ("cd".into(), DataType::Int64)],
+            columns: vec![
+                ("grp".into(), DataType::Text),
+                ("cd".into(), DataType::Int64),
+            ],
             rows: vec![
-                OwnedRow::new(vec![Datum::Text("a".into()), Datum::Array(vec![Datum::Int32(1), Datum::Int32(2)])]),
-                OwnedRow::new(vec![Datum::Text("b".into()), Datum::Array(vec![Datum::Int32(10)])]),
+                OwnedRow::new(vec![
+                    Datum::Text("a".into()),
+                    Datum::Array(vec![Datum::Int32(1), Datum::Int32(2)]),
+                ]),
+                OwnedRow::new(vec![
+                    Datum::Text("b".into()),
+                    Datum::Array(vec![Datum::Int32(10)]),
+                ]),
             ],
             latency_us: 0,
         };
@@ -1959,8 +2154,14 @@ mod two_phase_tests {
             shard_id: ShardId(1),
             columns: sr1.columns.clone(),
             rows: vec![
-                OwnedRow::new(vec![Datum::Text("a".into()), Datum::Array(vec![Datum::Int32(2), Datum::Int32(3)])]),
-                OwnedRow::new(vec![Datum::Text("b".into()), Datum::Array(vec![Datum::Int32(10), Datum::Int32(20)])]),
+                OwnedRow::new(vec![
+                    Datum::Text("a".into()),
+                    Datum::Array(vec![Datum::Int32(2), Datum::Int32(3)]),
+                ]),
+                OwnedRow::new(vec![
+                    Datum::Text("b".into()),
+                    Datum::Array(vec![Datum::Int32(10), Datum::Int32(20)]),
+                ]),
             ],
             latency_us: 0,
         };
@@ -1969,16 +2170,16 @@ mod two_phase_tests {
         // Sort by group name for deterministic assertion
         let mut rows = merged;
         rows.sort_by(|a, b| format!("{:?}", a.values[0]).cmp(&format!("{:?}", b.values[0])));
-        // Group "a": unique {1,2,3} 鈫?3
+        // Group "a": unique {1,2,3}  → 3
         assert_eq!(rows[0].values[0], Datum::Text("a".into()));
         assert_eq!(rows[0].values[1], Datum::Int64(3));
-        // Group "b": unique {10,20} 鈫?2
+        // Group "b": unique {10,20}  → 2
         assert_eq!(rows[1].values[0], Datum::Text("b".into()));
         assert_eq!(rows[1].values[1], Datum::Int64(2));
     }
 }
 
-/// End-to-end integration: SQL 鈫?Parse 鈫?Bind 鈫?Plan 鈫?wrap_distributed 鈫?DistributedQueryEngine
+/// End-to-end integration: SQL  → Parse  → Bind  → Plan  → wrap_distributed  → DistributedQueryEngine
 #[cfg(test)]
 mod end_to_end_tests {
     use std::sync::Arc;
@@ -2038,7 +2239,7 @@ mod end_to_end_tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         };
 
         engine.create_table_all(&schema).unwrap();
@@ -2064,7 +2265,11 @@ mod end_to_end_tests {
         (engine, catalog)
     }
 
-    fn plan_and_wrap(sql: &str, catalog: &Catalog, shards: &[ShardId]) -> falcon_planner::PhysicalPlan {
+    fn plan_and_wrap(
+        sql: &str,
+        catalog: &Catalog,
+        shards: &[ShardId],
+    ) -> falcon_planner::PhysicalPlan {
         let stmts = parse_sql(sql).unwrap();
         let mut binder = Binder::new(catalog.clone());
         let bound = binder.bind(&stmts[0]).unwrap();
@@ -2081,7 +2286,10 @@ mod end_to_end_tests {
         let plan = plan_and_wrap("SELECT id, name, age FROM users", &catalog, &shards);
 
         // Should be a DistPlan wrapping a SeqScan
-        assert!(matches!(plan, falcon_planner::PhysicalPlan::DistPlan { .. }));
+        assert!(matches!(
+            plan,
+            falcon_planner::PhysicalPlan::DistPlan { .. }
+        ));
 
         let result = qe.execute(&plan, None).unwrap();
         match result {
@@ -2099,15 +2307,19 @@ mod end_to_end_tests {
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
         let shards: Vec<ShardId> = (0..4).map(ShardId).collect();
 
-        let plan = plan_and_wrap("SELECT id, name FROM users WHERE age > 50", &catalog, &shards);
+        let plan = plan_and_wrap(
+            "SELECT id, name FROM users WHERE age > 50",
+            &catalog,
+            &shards,
+        );
 
         let result = qe.execute(&plan, None).unwrap();
         match result {
             ExecutionResult::Query { columns, rows } => {
                 assert_eq!(columns.len(), 2);
                 // age ranges from 20..59 across 4 shards.
-                // age > 50 means ids 31..39 鈫?9 rows.
-                assert_eq!(rows.len(), 9, "ages 51-59 鈫?9 rows");
+                // age > 50 means ids 31..39  → 9 rows.
+                assert_eq!(rows.len(), 9, "ages 51-59  → 9 rows");
             }
             other => panic!("Expected Query, got {:?}", other),
         }
@@ -2118,7 +2330,7 @@ mod end_to_end_tests {
         let (engine, catalog) = setup();
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
 
-        // Single shard 鈫?wrap_distributed should NOT wrap.
+        // Single shard  → wrap_distributed should NOT wrap.
         let plan = plan_and_wrap("SELECT id FROM users", &catalog, &[ShardId(0)]);
         assert!(matches!(plan, falcon_planner::PhysicalPlan::SeqScan { .. }));
 
@@ -2141,19 +2353,22 @@ mod end_to_end_tests {
         let shards: Vec<ShardId> = (0..4).map(ShardId).collect();
 
         // Use TwoPhaseCoordinator to insert a row on all shards.
-        let result = qe.two_phase_coordinator().execute(
-            &shards,
-            IsolationLevel::ReadCommitted,
-            |storage, _txn_mgr, txn_id| {
-                let row = OwnedRow::new(vec![
-                    Datum::Int32(999),
-                    Datum::Text("two_phase_user".into()),
-                    Datum::Int32(99),
-                ]);
-                storage.insert(TableId(1), row, txn_id)?;
-                Ok(())
-            },
-        ).unwrap();
+        let result = qe
+            .two_phase_coordinator()
+            .execute(
+                &shards,
+                IsolationLevel::ReadCommitted,
+                |storage, _txn_mgr, txn_id| {
+                    let row = OwnedRow::new(vec![
+                        Datum::Int32(999),
+                        Datum::Text("two_phase_user".into()),
+                        Datum::Int32(99),
+                    ]);
+                    storage.insert(TableId(1), row, txn_id)?;
+                    Ok(())
+                },
+            )
+            .unwrap();
 
         assert!(result.committed, "2PC should commit");
         assert_eq!(result.participants.len(), 4);
@@ -2162,10 +2377,17 @@ mod end_to_end_tests {
         for s in 0..4u64 {
             let shard = engine.shard(ShardId(s)).unwrap();
             let txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
-            let rows = shard.storage
-                .scan(TableId(1), txn.txn_id, falcon_common::types::Timestamp(u64::MAX))
+            let rows = shard
+                .storage
+                .scan(
+                    TableId(1),
+                    txn.txn_id,
+                    falcon_common::types::Timestamp(u64::MAX),
+                )
                 .unwrap();
-            let found = rows.iter().any(|r| r.1.values.first() == Some(&Datum::Int32(999)));
+            let found = rows
+                .iter()
+                .any(|r| r.1.values.first() == Some(&Datum::Int32(999)));
             shard.txn_mgr.commit(txn.txn_id).unwrap();
             assert!(found, "Row 999 should exist on shard {}", s);
         }
@@ -2180,23 +2402,21 @@ mod end_to_end_tests {
         let schema = falcon_common::schema::TableSchema {
             id: TableId(2),
             name: "products".into(),
-            columns: vec![
-                falcon_common::schema::ColumnDef {
-                    id: falcon_common::types::ColumnId(0),
-                    name: "pid".into(),
-                    data_type: falcon_common::types::DataType::Int32,
-                    nullable: false,
-                    is_primary_key: true,
-                    default_value: None,
-                    is_serial: false,
-                },
-            ],
+            columns: vec![falcon_common::schema::ColumnDef {
+                id: falcon_common::types::ColumnId(0),
+                name: "pid".into(),
+                data_type: falcon_common::types::DataType::Int32,
+                nullable: false,
+                is_primary_key: true,
+                default_value: None,
+                is_serial: false,
+            }],
             primary_key_columns: vec![0],
             next_serial_values: Default::default(),
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         };
 
         let plan = falcon_planner::PhysicalPlan::CreateTable {
@@ -2224,7 +2444,7 @@ mod end_to_end_tests {
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
         let shards: Vec<ShardId> = (0..4).map(ShardId).collect();
 
-        // INSERT via DistributedQueryEngine 鈥?should route to a specific shard.
+        // INSERT via DistributedQueryEngine  — should route to a specific shard.
         let plan = plan_and_wrap(
             "INSERT INTO users (id, name, age) VALUES (12345, 'routed_user', 42)",
             &catalog,
@@ -2247,11 +2467,15 @@ mod end_to_end_tests {
         let txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
         let rows = shard
             .storage
-            .scan(TableId(1), txn.txn_id, falcon_common::types::Timestamp(u64::MAX))
+            .scan(
+                TableId(1),
+                txn.txn_id,
+                falcon_common::types::Timestamp(u64::MAX),
+            )
             .unwrap();
-        let found = rows.iter().any(|r| {
-            r.1.values.first() == Some(&Datum::Int32(12345))
-        });
+        let found = rows
+            .iter()
+            .any(|r| r.1.values.first() == Some(&Datum::Int32(12345)));
         assert!(found, "Row 12345 should be on shard {:?}", expected_shard);
     }
 
@@ -2294,7 +2518,12 @@ mod end_to_end_tests {
                         Datum::Int32(v) => *v,
                         _ => panic!("expected Int32"),
                     };
-                    assert!(prev_age >= curr_age, "not sorted DESC: {} < {}", prev_age, curr_age);
+                    assert!(
+                        prev_age >= curr_age,
+                        "not sorted DESC: {} < {}",
+                        prev_age,
+                        curr_age
+                    );
                 }
             }
             other => panic!("Expected Query, got {:?}", other),
@@ -2325,7 +2554,7 @@ mod end_to_end_tests {
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
         let shards: Vec<ShardId> = (0..4).map(ShardId).collect();
 
-        // UPDATE without PK filter 鈫?broadcasts to all shards.
+        // UPDATE without PK filter  → broadcasts to all shards.
         let plan = plan_and_wrap(
             "UPDATE users SET age = 99 WHERE age > 20",
             &catalog,
@@ -2337,7 +2566,7 @@ mod end_to_end_tests {
         let result = qe.execute(&plan, None).unwrap();
         match result {
             ExecutionResult::Dml { rows_affected, .. } => {
-                // All 20 rows across 4 shards have age 20..39 鈫?all match age > 20
+                // All 20 rows across 4 shards have age 20..39  → all match age > 20
                 // (ages 21..39 match, 20 does not; that's 19 rows across shards)
                 assert!(rows_affected > 0, "Should have updated some rows");
             }
@@ -2357,14 +2586,13 @@ mod end_to_end_tests {
             ExecutionResult::Query { rows, .. } => rows.len(),
             _ => panic!("Expected Query"),
         };
-        assert_eq!(before_count, 40, "Should have 40 rows before delete (10 per shard 脳 4)");
-
-        // DELETE without PK filter 鈫?broadcasts to all shards.
-        let del_plan = plan_and_wrap(
-            "DELETE FROM users WHERE age < 25",
-            &catalog,
-            &shards,
+        assert_eq!(
+            before_count, 40,
+            "Should have 40 rows before delete (10 per shard × 4)"
         );
+
+        // DELETE without PK filter  → broadcasts to all shards.
+        let del_plan = plan_and_wrap("DELETE FROM users WHERE age < 25", &catalog, &shards);
         let result = qe.execute(&del_plan, None).unwrap();
         match result {
             ExecutionResult::Dml { rows_affected, .. } => {
@@ -2379,7 +2607,10 @@ mod end_to_end_tests {
             ExecutionResult::Query { rows, .. } => rows.len(),
             _ => panic!("Expected Query"),
         };
-        assert!(after_count < before_count, "Should have fewer rows after delete");
+        assert!(
+            after_count < before_count,
+            "Should have fewer rows after delete"
+        );
     }
 
     #[test]
@@ -2388,7 +2619,7 @@ mod end_to_end_tests {
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
         let shards: Vec<ShardId> = (0..4).map(ShardId).collect();
 
-        // Multi-row INSERT with different PK values 鈥?rows should be split across shards.
+        // Multi-row INSERT with different PK values  — rows should be split across shards.
         let plan = plan_and_wrap(
             "INSERT INTO users (id, name, age) VALUES (1000, 'a', 10), (2000, 'b', 20), (3000, 'c', 30)",
             &catalog,
@@ -2407,10 +2638,17 @@ mod end_to_end_tests {
             let expected_shard = engine.shard_for_key(pk);
             let shard = engine.shard(expected_shard).unwrap();
             let txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
-            let rows = shard.storage
-                .scan(TableId(1), txn.txn_id, falcon_common::types::Timestamp(u64::MAX))
+            let rows = shard
+                .storage
+                .scan(
+                    TableId(1),
+                    txn.txn_id,
+                    falcon_common::types::Timestamp(u64::MAX),
+                )
                 .unwrap();
-            let found = rows.iter().any(|r| r.1.values.first() == Some(&Datum::Int32(pk as i32)));
+            let found = rows
+                .iter()
+                .any(|r| r.1.values.first() == Some(&Datum::Int32(pk as i32)));
             shard.txn_mgr.commit(txn.txn_id).unwrap();
             assert!(found, "Row {} should be on shard {:?}", pk, expected_shard);
         }
@@ -2428,7 +2666,8 @@ mod end_to_end_tests {
             falcon_planner::PhysicalPlan::DistPlan { gather, .. } => {
                 assert!(
                     matches!(gather, falcon_planner::DistGather::TwoPhaseAgg { .. }),
-                    "Expected TwoPhaseAgg gather for COUNT(*), got {:?}", gather
+                    "Expected TwoPhaseAgg gather for COUNT(*), got {:?}",
+                    gather
                 );
             }
             other => panic!("Expected DistPlan, got {:?}", other),
@@ -2455,7 +2694,7 @@ mod end_to_end_tests {
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
         let shards: Vec<ShardId> = (0..4).map(ShardId).collect();
 
-        // SELECT SUM(age), MIN(age), MAX(age) 鈥?all supported for TwoPhaseAgg
+        // SELECT SUM(age), MIN(age), MAX(age)  — all supported for TwoPhaseAgg
         let plan = plan_and_wrap(
             "SELECT SUM(age), MIN(age), MAX(age) FROM users",
             &catalog,
@@ -2463,7 +2702,10 @@ mod end_to_end_tests {
         );
         match &plan {
             falcon_planner::PhysicalPlan::DistPlan { gather, .. } => {
-                assert!(matches!(gather, falcon_planner::DistGather::TwoPhaseAgg { .. }));
+                assert!(matches!(
+                    gather,
+                    falcon_planner::DistGather::TwoPhaseAgg { .. }
+                ));
             }
             other => panic!("Expected DistPlan, got {:?}", other),
         }
@@ -2496,14 +2738,19 @@ mod end_to_end_tests {
         match result {
             ExecutionResult::Query { rows, .. } => {
                 assert!(!rows.is_empty(), "EXPLAIN should produce output");
-                let plan_text: Vec<String> = rows.iter()
+                let plan_text: Vec<String> = rows
+                    .iter()
                     .filter_map(|r| match &r.values[0] {
                         Datum::Text(s) => Some(s.clone()),
                         _ => None,
                     })
                     .collect();
                 let joined = plan_text.join("\n");
-                assert!(joined.contains("DistPlan"), "EXPLAIN should mention DistPlan: {}", joined);
+                assert!(
+                    joined.contains("DistPlan"),
+                    "EXPLAIN should mention DistPlan: {}",
+                    joined
+                );
             }
             other => panic!("Expected Query, got {:?}", other),
         }
@@ -2532,7 +2779,7 @@ mod end_to_end_tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         };
         let create_plan = falcon_planner::PhysicalPlan::CreateTable {
             schema: schema.clone(),
@@ -2609,9 +2856,9 @@ mod end_to_end_tests {
             ExecutionResult::Query { rows, .. } => {
                 // Should have watermark_ts, chains_processed, shards_processed
                 assert!(rows.len() >= 3, "Expected at least 3 GC result rows");
-                let shards_row = rows.iter().find(|r| {
-                    matches!(&r.values[0], Datum::Text(s) if s == "shards_processed")
-                });
+                let shards_row = rows
+                    .iter()
+                    .find(|r| matches!(&r.values[0], Datum::Text(s) if s == "shards_processed"));
                 assert!(shards_row.is_some(), "Should have shards_processed metric");
                 if let Some(row) = shards_row {
                     assert_eq!(row.values[1], Datum::Int64(4), "Should process 4 shards");
@@ -2629,15 +2876,17 @@ mod end_to_end_tests {
         // ALTER TABLE ADD COLUMN should propagate to all shards.
         let alter_plan = falcon_planner::PhysicalPlan::AlterTable {
             table_name: "users".into(),
-            ops: vec![falcon_sql_frontend::types::AlterTableOp::AddColumn(falcon_common::schema::ColumnDef {
-                id: falcon_common::types::ColumnId(3),
-                name: "email".into(),
-                data_type: falcon_common::types::DataType::Text,
-                nullable: true,
-                is_primary_key: false,
-                default_value: None,
-                is_serial: false,
-            })],
+            ops: vec![falcon_sql_frontend::types::AlterTableOp::AddColumn(
+                falcon_common::schema::ColumnDef {
+                    id: falcon_common::types::ColumnId(3),
+                    name: "email".into(),
+                    data_type: falcon_common::types::DataType::Text,
+                    nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                    is_serial: false,
+                },
+            )],
         };
         let result = qe.execute(&alter_plan, None).unwrap();
         assert!(matches!(result, ExecutionResult::Ddl { .. }));
@@ -2675,7 +2924,9 @@ mod end_to_end_tests {
             let has_age_idx = indexed.iter().any(|(col, _)| *col == 2);
             assert!(
                 has_age_idx, // age is column index 2
-                "Shard {} should have index on age (col 2), found: {:?}", s, indexed
+                "Shard {} should have index on age (col 2), found: {:?}",
+                s,
+                indexed
             );
         }
     }
@@ -2692,9 +2943,13 @@ mod end_to_end_tests {
 
         // Aggregate txn stats should reflect activity across shards.
         let stats = qe.aggregate_txn_stats();
-        // The setup() already committed 40 transactions (10 per shard 脳 4 shards),
+        // The setup() already committed 40 transactions (10 per shard × 4 shards),
         // plus the distributed SELECT reads from each shard.
-        assert!(stats.total_committed >= 40, "Expected at least 40 committed, got {}", stats.total_committed);
+        assert!(
+            stats.total_committed >= 40,
+            "Expected at least 40 committed, got {}",
+            stats.total_committed
+        );
     }
 
     #[test]
@@ -2714,7 +2969,11 @@ mod end_to_end_tests {
 
         // SELECT with WHERE id = 7777 should shortcut to a single shard
         // via try_single_shard_scan, not scatter to all 4 shards.
-        let plan = plan_and_wrap("SELECT id, name FROM users WHERE id = 7777", &catalog, &shards);
+        let plan = plan_and_wrap(
+            "SELECT id, name FROM users WHERE id = 7777",
+            &catalog,
+            &shards,
+        );
         let result = qe.execute(&plan, None).unwrap();
         match result {
             ExecutionResult::Query { rows, .. } => {
@@ -2730,7 +2989,7 @@ mod end_to_end_tests {
         let (engine, _catalog) = setup();
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
 
-        // Insert 100 rows that hash to different shards 鈥?parallel execution.
+        // Insert 100 rows that hash to different shards  — parallel execution.
         let mut row_exprs = Vec::new();
         for i in 5000..5100 {
             row_exprs.push(vec![
@@ -2740,8 +2999,12 @@ mod end_to_end_tests {
             ]);
         }
 
-        let schema = engine.shard(ShardId(0)).unwrap()
-            .storage.get_table_schema("users").unwrap();
+        let schema = engine
+            .shard(ShardId(0))
+            .unwrap()
+            .storage
+            .get_table_schema("users")
+            .unwrap();
         let plan = falcon_planner::PhysicalPlan::Insert {
             table_id: schema.id,
             schema: schema.clone(),
@@ -2764,8 +3027,13 @@ mod end_to_end_tests {
         for s in 0..4u64 {
             let shard = engine.shard(ShardId(s)).unwrap();
             let txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
-            let rows = shard.storage
-                .scan(TableId(1), txn.txn_id, falcon_common::types::Timestamp(u64::MAX))
+            let rows = shard
+                .storage
+                .scan(
+                    TableId(1),
+                    txn.txn_id,
+                    falcon_common::types::Timestamp(u64::MAX),
+                )
                 .unwrap();
             total += rows.len();
             shard.txn_mgr.commit(txn.txn_id).unwrap();
@@ -2792,7 +3060,11 @@ mod end_to_end_tests {
         assert_eq!(stats.total_rows_gathered, 40, "Should gather 40 rows");
         assert_eq!(stats.gather_strategy, "Union");
         assert!(stats.total_latency_us > 0, "Should have non-zero latency");
-        assert_eq!(stats.per_shard_latency_us.len(), 4, "Should have 4 shard latencies");
+        assert_eq!(
+            stats.per_shard_latency_us.len(),
+            4,
+            "Should have 4 shard latencies"
+        );
     }
 
     #[test]
@@ -2831,17 +3103,38 @@ mod end_to_end_tests {
         let result = qe.execute(&explain_plan, None).unwrap();
         match result {
             ExecutionResult::Query { rows, .. } => {
-                let text: Vec<String> = rows.iter().map(|r| {
-                    match &r.values[0] { Datum::Text(s) => s.clone(), _ => String::new() }
-                }).collect();
+                let text: Vec<String> = rows
+                    .iter()
+                    .map(|r| match &r.values[0] {
+                        Datum::Text(s) => s.clone(),
+                        _ => String::new(),
+                    })
+                    .collect();
                 let joined = text.join("\n");
-                assert!(joined.contains("DistPlan"), "Should show DistPlan in output");
-                assert!(joined.contains("Shards participated: 4"), "Should show 4 shards");
-                assert!(joined.contains("Total rows gathered: 40"), "Should show 40 rows");
-                assert!(joined.contains("Gather strategy: Union"), "Should show Union strategy");
-                assert!(joined.contains("Total latency:"), "Should show total latency");
-                assert!(joined.contains("Shard 0 latency:") || joined.contains("Shard 1 latency:"),
-                    "Should show per-shard latency");
+                assert!(
+                    joined.contains("DistPlan"),
+                    "Should show DistPlan in output"
+                );
+                assert!(
+                    joined.contains("Shards participated: 4"),
+                    "Should show 4 shards"
+                );
+                assert!(
+                    joined.contains("Total rows gathered: 40"),
+                    "Should show 40 rows"
+                );
+                assert!(
+                    joined.contains("Gather strategy: Union"),
+                    "Should show Union strategy"
+                );
+                assert!(
+                    joined.contains("Total latency:"),
+                    "Should show total latency"
+                );
+                assert!(
+                    joined.contains("Shard 0 latency:") || joined.contains("Shard 1 latency:"),
+                    "Should show per-shard latency"
+                );
             }
             other => panic!("Expected Query, got {:?}", other),
         }
@@ -2856,13 +3149,20 @@ mod end_to_end_tests {
         // GROUP BY age with COUNT should use TwoPhaseAgg.
         // Each shard has ages 20..29 (shard 0), 30..39 (shard 1), etc.
         // Since ages are unique across shards, each group has count=1.
-        let plan = plan_and_wrap("SELECT age, COUNT(id) FROM users GROUP BY age", &catalog, &shards);
+        let plan = plan_and_wrap(
+            "SELECT age, COUNT(id) FROM users GROUP BY age",
+            &catalog,
+            &shards,
+        );
 
         // Verify the plan uses TwoPhaseAgg
         match &plan {
             falcon_planner::PhysicalPlan::DistPlan { gather, .. } => {
-                assert!(matches!(gather, falcon_planner::plan::DistGather::TwoPhaseAgg { .. }),
-                    "GROUP BY + COUNT should use TwoPhaseAgg, got {:?}", gather);
+                assert!(
+                    matches!(gather, falcon_planner::plan::DistGather::TwoPhaseAgg { .. }),
+                    "GROUP BY + COUNT should use TwoPhaseAgg, got {:?}",
+                    gather
+                );
             }
             _ => panic!("Expected DistPlan"),
         }
@@ -2870,7 +3170,7 @@ mod end_to_end_tests {
         let result = qe.execute(&plan, None).unwrap();
         match result {
             ExecutionResult::Query { rows, .. } => {
-                // 40 unique ages 鈫?40 groups, each with count=1
+                // 40 unique ages  → 40 groups, each with count=1
                 assert_eq!(rows.len(), 40, "Should have 40 groups (40 unique ages)");
                 for row in &rows {
                     // Each row: [age, count]
@@ -2893,7 +3193,11 @@ mod end_to_end_tests {
         // Insert rows with age=99 on each shard via distributed engine.
         for i in 0..4 {
             let insert_plan = plan_and_wrap(
-                &format!("INSERT INTO users (id, name, age) VALUES ({}, 'dup_{}', 99)", 5000 + i, i),
+                &format!(
+                    "INSERT INTO users (id, name, age) VALUES ({}, 'dup_{}', 99)",
+                    5000 + i,
+                    i
+                ),
                 &catalog,
                 &shards,
             );
@@ -2913,8 +3217,11 @@ mod end_to_end_tests {
                 assert_eq!(rows[0].values[0], Datum::Int32(99));
                 // All 4 inserted rows have age=99, but they hash-route to specific shards.
                 // The total count should be 4.
-                assert_eq!(rows[0].values[1], Datum::Int64(4),
-                    "Should count 4 rows with age=99 across shards");
+                assert_eq!(
+                    rows[0].values[1],
+                    Datum::Int64(4),
+                    "Should count 4 rows with age=99 across shards"
+                );
             }
             other => panic!("Expected Query, got {:?}", other),
         }
@@ -2950,15 +3257,18 @@ mod end_to_end_tests {
         for i in 0..4 {
             let sql = format!(
                 "INSERT INTO users (id, name, age) VALUES ({}, 'sum_test_{}', 88)",
-                6000 + i, i
+                6000 + i,
+                i
             );
-            qe.execute(&plan_and_wrap(&sql, &catalog, &shards), None).unwrap();
+            qe.execute(&plan_and_wrap(&sql, &catalog, &shards), None)
+                .unwrap();
         }
 
         // SUM(id) = 6000+6001+6002+6003 = 24006
         let plan = plan_and_wrap(
             "SELECT age, SUM(id), MIN(id), MAX(id) FROM users WHERE age = 88 GROUP BY age",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         let result = qe.execute(&plan, None).unwrap();
         match result {
@@ -2984,35 +3294,48 @@ mod end_to_end_tests {
         // exist on multiple shards.
         let two_pc = qe.two_phase_coordinator();
         for i in 0..4 {
-            two_pc.execute(
-                &shards,
-                IsolationLevel::ReadCommitted,
-                |storage, _txn_mgr, txn_id| {
-                    let row = OwnedRow::new(vec![
-                        Datum::Int32(7000 + i),
-                        Datum::Text("duplicate_name".into()),
-                        Datum::Int32(77),
-                    ]);
-                    storage.insert(TableId(1), row, txn_id)
-                        .map(|_| ())
-                        .map_err(|e| falcon_common::error::FalconError::Internal(format!("{:?}", e)))
-                },
-            ).unwrap();
+            two_pc
+                .execute(
+                    &shards,
+                    IsolationLevel::ReadCommitted,
+                    |storage, _txn_mgr, txn_id| {
+                        let row = OwnedRow::new(vec![
+                            Datum::Int32(7000 + i),
+                            Datum::Text("duplicate_name".into()),
+                            Datum::Int32(77),
+                        ]);
+                        storage
+                            .insert(TableId(1), row, txn_id)
+                            .map(|_| ())
+                            .map_err(|e| {
+                                falcon_common::error::FalconError::Internal(format!("{:?}", e))
+                            })
+                    },
+                )
+                .unwrap();
         }
 
-        // Without DISTINCT: each shard has all 4 rows 鈫?4 shards * 4 rows = 16 name values
+        // Without DISTINCT: each shard has all 4 rows  → 4 shards * 4 rows = 16 name values
         // (plus the 40 original rows with unique names)
-        let plan_no_distinct = plan_and_wrap("SELECT name FROM users WHERE age = 77", &catalog, &shards);
+        let plan_no_distinct =
+            plan_and_wrap("SELECT name FROM users WHERE age = 77", &catalog, &shards);
         let result = qe.execute(&plan_no_distinct, None).unwrap();
         let no_distinct_count = match result {
             ExecutionResult::Query { rows, .. } => rows.len(),
             _ => panic!("Expected Query"),
         };
         // 4 rows * 4 shards = 16 (2PC replicates to all shards)
-        assert_eq!(no_distinct_count, 16, "Without DISTINCT: 4 rows on each of 4 shards");
+        assert_eq!(
+            no_distinct_count, 16,
+            "Without DISTINCT: 4 rows on each of 4 shards"
+        );
 
         // With DISTINCT: should deduplicate "duplicate_name" to 1 row
-        let plan_distinct = plan_and_wrap("SELECT DISTINCT name FROM users WHERE age = 77", &catalog, &shards);
+        let plan_distinct = plan_and_wrap(
+            "SELECT DISTINCT name FROM users WHERE age = 77",
+            &catalog,
+            &shards,
+        );
         let result = qe.execute(&plan_distinct, None).unwrap();
         match result {
             ExecutionResult::Query { rows, .. } => {
@@ -3036,20 +3359,25 @@ mod end_to_end_tests {
         // Insert 1 row with age=95 on each shard via 2PC (replicates to all shards).
         let two_pc = qe.two_phase_coordinator();
         for i in 0..4 {
-            two_pc.execute(
-                &shards,
-                IsolationLevel::ReadCommitted,
-                |storage, _txn_mgr, txn_id| {
-                    let row = OwnedRow::new(vec![
-                        Datum::Int32(8000 + i),
-                        Datum::Text(format!("having_test_{}", i)),
-                        Datum::Int32(95),
-                    ]);
-                    storage.insert(TableId(1), row, txn_id)
-                        .map(|_| ())
-                        .map_err(|e| falcon_common::error::FalconError::Internal(format!("{:?}", e)))
-                },
-            ).unwrap();
+            two_pc
+                .execute(
+                    &shards,
+                    IsolationLevel::ReadCommitted,
+                    |storage, _txn_mgr, txn_id| {
+                        let row = OwnedRow::new(vec![
+                            Datum::Int32(8000 + i),
+                            Datum::Text(format!("having_test_{}", i)),
+                            Datum::Int32(95),
+                        ]);
+                        storage
+                            .insert(TableId(1), row, txn_id)
+                            .map(|_| ())
+                            .map_err(|e| {
+                                falcon_common::error::FalconError::Internal(format!("{:?}", e))
+                            })
+                    },
+                )
+                .unwrap();
         }
 
         // Each shard has 4 rows with age=95 (2PC replicates to all shards).
@@ -3064,14 +3392,12 @@ mod end_to_end_tests {
 
         // Verify the gather is TwoPhaseAgg with having
         match &plan {
-            falcon_planner::PhysicalPlan::DistPlan { gather, .. } => {
-                match gather {
-                    falcon_planner::plan::DistGather::TwoPhaseAgg { having, .. } => {
-                        assert!(having.is_some(), "TwoPhaseAgg should carry HAVING expr");
-                    }
-                    other => panic!("Expected TwoPhaseAgg, got {:?}", other),
+            falcon_planner::PhysicalPlan::DistPlan { gather, .. } => match gather {
+                falcon_planner::plan::DistGather::TwoPhaseAgg { having, .. } => {
+                    assert!(having.is_some(), "TwoPhaseAgg should carry HAVING expr");
                 }
-            }
+                other => panic!("Expected TwoPhaseAgg, got {:?}", other),
+            },
             _ => panic!("Expected DistPlan"),
         }
 
@@ -3079,9 +3405,17 @@ mod end_to_end_tests {
         match result {
             ExecutionResult::Query { rows, .. } => {
                 // Merged COUNT=16 > 10, so the group should pass HAVING.
-                assert_eq!(rows.len(), 1, "HAVING COUNT > 10 should pass after merge (count=16)");
+                assert_eq!(
+                    rows.len(),
+                    1,
+                    "HAVING COUNT > 10 should pass after merge (count=16)"
+                );
                 assert_eq!(rows[0].values[0], Datum::Int32(95));
-                assert_eq!(rows[0].values[1], Datum::Int64(16), "4 rows * 4 shards = 16");
+                assert_eq!(
+                    rows[0].values[1],
+                    Datum::Int64(16),
+                    "4 rows * 4 shards = 16"
+                );
             }
             other => panic!("Expected Query, got {:?}", other),
         }
@@ -3095,7 +3429,11 @@ mod end_to_end_tests {
         let result2 = qe.execute(&plan2, None).unwrap();
         match result2 {
             ExecutionResult::Query { rows, .. } => {
-                assert_eq!(rows.len(), 0, "HAVING COUNT > 100 should filter out (count=16)");
+                assert_eq!(
+                    rows.len(),
+                    0,
+                    "HAVING COUNT > 100 should filter out (count=16)"
+                );
             }
             other => panic!("Expected Query, got {:?}", other),
         }
@@ -3108,10 +3446,11 @@ mod end_to_end_tests {
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
         let shards: Vec<ShardId> = (0..4).map(ShardId).collect();
 
-        // 40 rows total (ids 0..39). ORDER BY id LIMIT 3 OFFSET 5 鈫?ids 5,6,7
+        // 40 rows total (ids 0..39). ORDER BY id LIMIT 3 OFFSET 5  → ids 5,6,7
         let plan = plan_and_wrap(
             "SELECT id FROM users ORDER BY id LIMIT 3 OFFSET 5",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         let result = qe.execute(&plan, None).unwrap();
         match result {
@@ -3127,14 +3466,15 @@ mod end_to_end_tests {
 
     #[test]
     fn test_e2e_order_by_desc_limit() {
-        // ORDER BY id DESC LIMIT 5 鈫?ids 39,38,37,36,35
+        // ORDER BY id DESC LIMIT 5  → ids 39,38,37,36,35
         let (engine, catalog) = setup();
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
         let shards: Vec<ShardId> = (0..4).map(ShardId).collect();
 
         let plan = plan_and_wrap(
             "SELECT id FROM users ORDER BY id DESC LIMIT 5",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         let result = qe.execute(&plan, None).unwrap();
         match result {
@@ -3159,7 +3499,11 @@ mod end_to_end_tests {
         match result {
             ExecutionResult::Query { rows, .. } => {
                 assert_eq!(rows.len(), 1, "Single aggregate row");
-                assert_eq!(rows[0].values[0], Datum::Int64(40), "40 total rows across 4 shards");
+                assert_eq!(
+                    rows[0].values[0],
+                    Datum::Int64(40),
+                    "40 total rows across 4 shards"
+                );
             }
             other => panic!("Expected Query, got {:?}", other),
         }
@@ -3178,14 +3522,12 @@ mod end_to_end_tests {
         let plan = plan_and_wrap("SELECT AVG(age) FROM users", &catalog, &shards);
         // Verify it uses TwoPhaseAgg with avg_fixups
         match &plan {
-            falcon_planner::PhysicalPlan::DistPlan { gather, .. } => {
-                match gather {
-                    falcon_planner::plan::DistGather::TwoPhaseAgg { avg_fixups, .. } => {
-                        assert!(!avg_fixups.is_empty(), "AVG should produce avg_fixups");
-                    }
-                    other => panic!("Expected TwoPhaseAgg, got {:?}", other),
+            falcon_planner::PhysicalPlan::DistPlan { gather, .. } => match gather {
+                falcon_planner::plan::DistGather::TwoPhaseAgg { avg_fixups, .. } => {
+                    assert!(!avg_fixups.is_empty(), "AVG should produce avg_fixups");
                 }
-            }
+                other => panic!("Expected TwoPhaseAgg, got {:?}", other),
+            },
             _ => panic!("Expected DistPlan"),
         }
         let result = qe.execute(&plan, None).unwrap();
@@ -3194,12 +3536,20 @@ mod end_to_end_tests {
                 assert_eq!(rows.len(), 1, "Single aggregate row");
                 match &rows[0].values[0] {
                     Datum::Float64(v) => {
-                        assert!((v - 39.5).abs() < 0.001, "AVG(age) should be 39.5, got {}", v);
+                        assert!(
+                            (v - 39.5).abs() < 0.001,
+                            "AVG(age) should be 39.5, got {}",
+                            v
+                        );
                     }
                     other => panic!("Expected Float64 for AVG, got {:?}", other),
                 }
                 // Should have only 1 visible column (AVG), no hidden COUNT
-                assert_eq!(rows[0].values.len(), 1, "Hidden COUNT column should be truncated");
+                assert_eq!(
+                    rows[0].values.len(),
+                    1,
+                    "Hidden COUNT column should be truncated"
+                );
             }
             other => panic!("Expected Query, got {:?}", other),
         }
@@ -3216,15 +3566,18 @@ mod end_to_end_tests {
         for i in 0..4 {
             let sql = format!(
                 "INSERT INTO users (id, name, age) VALUES ({}, 'avg_test_{}', 99)",
-                9000 + i, i
+                9000 + i,
+                i
             );
-            qe.execute(&plan_and_wrap(&sql, &catalog, &shards), None).unwrap();
+            qe.execute(&plan_and_wrap(&sql, &catalog, &shards), None)
+                .unwrap();
         }
 
         // AVG(id) for age=99 group: (9000+9001+9002+9003)/4 = 9001.5
         let plan = plan_and_wrap(
             "SELECT age, AVG(id) FROM users WHERE age = 99 GROUP BY age",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         let result = qe.execute(&plan, None).unwrap();
         match result {
@@ -3233,12 +3586,20 @@ mod end_to_end_tests {
                 assert_eq!(rows[0].values[0], Datum::Int32(99));
                 match &rows[0].values[1] {
                     Datum::Float64(v) => {
-                        assert!((v - 9001.5).abs() < 0.001, "AVG(id) should be 9001.5, got {}", v);
+                        assert!(
+                            (v - 9001.5).abs() < 0.001,
+                            "AVG(id) should be 9001.5, got {}",
+                            v
+                        );
                     }
                     other => panic!("Expected Float64 for AVG, got {:?}", other),
                 }
                 // Should have only 2 visible columns (age, AVG), no hidden COUNT
-                assert_eq!(rows[0].values.len(), 2, "Hidden COUNT column should be truncated");
+                assert_eq!(
+                    rows[0].values.len(),
+                    2,
+                    "Hidden COUNT column should be truncated"
+                );
             }
             other => panic!("Expected Query, got {:?}", other),
         }
@@ -3268,23 +3629,28 @@ mod end_to_end_tests {
         // Use age=70 (outside setup range 20-59) to avoid overlap.
         let two_pc = qe.two_phase_coordinator();
         for i in 0..4 {
-            two_pc.execute(
-                &shards,
-                IsolationLevel::ReadCommitted,
-                |storage, _txn_mgr, txn_id| {
-                    let row = OwnedRow::new(vec![
-                        Datum::Int32(9500 + i),
-                        Datum::Text(format!("avg_having_{}", i)),
-                        Datum::Int32(70),
-                    ]);
-                    storage.insert(TableId(1), row, txn_id)
-                        .map(|_| ())
-                        .map_err(|e| falcon_common::error::FalconError::Internal(format!("{:?}", e)))
-                },
-            ).unwrap();
+            two_pc
+                .execute(
+                    &shards,
+                    IsolationLevel::ReadCommitted,
+                    |storage, _txn_mgr, txn_id| {
+                        let row = OwnedRow::new(vec![
+                            Datum::Int32(9500 + i),
+                            Datum::Text(format!("avg_having_{}", i)),
+                            Datum::Int32(70),
+                        ]);
+                        storage
+                            .insert(TableId(1), row, txn_id)
+                            .map(|_| ())
+                            .map_err(|e| {
+                                falcon_common::error::FalconError::Internal(format!("{:?}", e))
+                            })
+                    },
+                )
+                .unwrap();
         }
 
-        // age=70 group: 4 inserts 脳 4 shards (2PC) = 16 rows, all with ids 9500..9503.
+        // age=70 group: 4 inserts × 4 shards (2PC) = 16 rows, all with ids 9500..9503.
         // AVG(id) = (9500+9501+9502+9503)*4 / 16 = 9501.5
         // HAVING AVG(id) > 9000 should keep this group.
         let plan = plan_and_wrap(
@@ -3295,11 +3661,19 @@ mod end_to_end_tests {
         let result = qe.execute(&plan, None).unwrap();
         match result {
             ExecutionResult::Query { rows, .. } => {
-                assert_eq!(rows.len(), 1, "HAVING AVG(id) > 9000 should keep age=70 group");
+                assert_eq!(
+                    rows.len(),
+                    1,
+                    "HAVING AVG(id) > 9000 should keep age=70 group"
+                );
                 assert_eq!(rows[0].values[0], Datum::Int32(70));
                 match &rows[0].values[1] {
                     Datum::Float64(v) => {
-                        assert!((v - 9501.5).abs() < 0.001, "AVG(id) should be 9501.5, got {}", v);
+                        assert!(
+                            (v - 9501.5).abs() < 0.001,
+                            "AVG(id) should be 9501.5, got {}",
+                            v
+                        );
                     }
                     other => panic!("Expected Float64 for AVG, got {:?}", other),
                 }
@@ -3332,22 +3706,37 @@ mod end_to_end_tests {
         // Wrap an AVG query in EXPLAIN
         let inner = plan_and_wrap(
             "SELECT age, AVG(id) FROM users GROUP BY age",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         let explain_plan = falcon_planner::PhysicalPlan::Explain(Box::new(inner));
 
         let result = qe.execute(&explain_plan, None).unwrap();
         match result {
             ExecutionResult::Query { rows, .. } => {
-                let text: Vec<String> = rows.iter()
+                let text: Vec<String> = rows
+                    .iter()
                     .filter_map(|r| {
-                        if let Datum::Text(s) = &r.values[0] { Some(s.clone()) } else { None }
+                        if let Datum::Text(s) = &r.values[0] {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
                     })
                     .collect();
                 let joined = text.join("\n");
-                assert!(joined.contains("TwoPhaseAgg"), "EXPLAIN should show TwoPhaseAgg");
-                assert!(joined.contains("AVG decomposition"), "EXPLAIN should show AVG decomposition");
-                assert!(joined.contains("Execution Stats"), "EXPLAIN should show execution stats");
+                assert!(
+                    joined.contains("TwoPhaseAgg"),
+                    "EXPLAIN should show TwoPhaseAgg"
+                );
+                assert!(
+                    joined.contains("AVG decomposition"),
+                    "EXPLAIN should show AVG decomposition"
+                );
+                assert!(
+                    joined.contains("Execution Stats"),
+                    "EXPLAIN should show execution stats"
+                );
             }
             other => panic!("Expected Query, got {:?}", other),
         }
@@ -3362,20 +3751,29 @@ mod end_to_end_tests {
 
         let inner = plan_and_wrap(
             "SELECT id FROM users ORDER BY id LIMIT 5",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         let explain_plan = falcon_planner::PhysicalPlan::Explain(Box::new(inner));
 
         let result = qe.execute(&explain_plan, None).unwrap();
         match result {
             ExecutionResult::Query { rows, .. } => {
-                let text: Vec<String> = rows.iter()
+                let text: Vec<String> = rows
+                    .iter()
                     .filter_map(|r| {
-                        if let Datum::Text(s) = &r.values[0] { Some(s.clone()) } else { None }
+                        if let Datum::Text(s) = &r.values[0] {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
                     })
                     .collect();
                 let joined = text.join("\n");
-                assert!(joined.contains("MergeSortLimit"), "EXPLAIN should show MergeSortLimit");
+                assert!(
+                    joined.contains("MergeSortLimit"),
+                    "EXPLAIN should show MergeSortLimit"
+                );
                 assert!(joined.contains("ASC"), "EXPLAIN should show sort direction");
             }
             other => panic!("Expected Query, got {:?}", other),
@@ -3394,7 +3792,10 @@ mod end_to_end_tests {
         let stats = qe.last_scatter_stats();
         assert_eq!(stats.shards_participated, 4);
         assert!(stats.failed_shards.is_empty(), "No shards should time out");
-        assert!(stats.total_latency_us < 5_000_000, "Should complete within 5s");
+        assert!(
+            stats.total_latency_us < 5_000_000,
+            "Should complete within 5s"
+        );
     }
 
     #[test]
@@ -3413,12 +3814,13 @@ mod end_to_end_tests {
                 let msg = format!("{:?}", e);
                 assert!(
                     msg.contains("timeout") || msg.contains("cancelled"),
-                    "Error should mention timeout or cancelled, got: {}", msg,
+                    "Error should mention timeout or cancelled, got: {}",
+                    msg,
                 );
             }
             Ok(_) => {
                 // If the machine is extremely fast, the query might succeed.
-                // That's acceptable 鈥?the important thing is no panic.
+                // That's acceptable  — the important thing is no panic.
             }
         }
     }
@@ -3436,20 +3838,21 @@ mod end_to_end_tests {
         // ORDER BY age ASC LIMIT 3 should return ages 20, 21, 22.
         let plan = plan_and_wrap(
             "SELECT age, COUNT(id) FROM users GROUP BY age ORDER BY age LIMIT 3",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
 
         // Verify the plan uses TwoPhaseAgg (not MergeSortLimit)
         match &plan {
-            falcon_planner::PhysicalPlan::DistPlan { gather, .. } => {
-                match gather {
-                    falcon_planner::plan::DistGather::TwoPhaseAgg { order_by, limit, .. } => {
-                        assert!(!order_by.is_empty(), "Should have post-merge ORDER BY");
-                        assert_eq!(*limit, Some(3), "Should have post-merge LIMIT 3");
-                    }
-                    other => panic!("Expected TwoPhaseAgg, got {:?}", other),
+            falcon_planner::PhysicalPlan::DistPlan { gather, .. } => match gather {
+                falcon_planner::plan::DistGather::TwoPhaseAgg {
+                    order_by, limit, ..
+                } => {
+                    assert!(!order_by.is_empty(), "Should have post-merge ORDER BY");
+                    assert_eq!(*limit, Some(3), "Should have post-merge LIMIT 3");
                 }
-            }
+                other => panic!("Expected TwoPhaseAgg, got {:?}", other),
+            },
             _ => panic!("Expected DistPlan"),
         }
 
@@ -3475,7 +3878,8 @@ mod end_to_end_tests {
 
         let plan = plan_and_wrap(
             "SELECT age, COUNT(id) FROM users GROUP BY age ORDER BY age DESC LIMIT 3",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         let result = qe.execute(&plan, None).unwrap();
         match result {
@@ -3497,23 +3901,22 @@ mod end_to_end_tests {
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
         let shards: Vec<ShardId> = (0..4).map(ShardId).collect();
 
-        // 40 groups (age 20..59). ORDER BY age ASC, OFFSET 2, LIMIT 3 鈫?ages 22, 23, 24.
+        // 40 groups (age 20..59). ORDER BY age ASC, OFFSET 2, LIMIT 3  → ages 22, 23, 24.
         let plan = plan_and_wrap(
             "SELECT age, COUNT(id) FROM users GROUP BY age ORDER BY age LIMIT 3 OFFSET 2",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
 
         // Verify plan shape
         match &plan {
-            falcon_planner::PhysicalPlan::DistPlan { gather, .. } => {
-                match gather {
-                    falcon_planner::plan::DistGather::TwoPhaseAgg { offset, limit, .. } => {
-                        assert_eq!(*offset, Some(2));
-                        assert_eq!(*limit, Some(3));
-                    }
-                    other => panic!("Expected TwoPhaseAgg, got {:?}", other),
+            falcon_planner::PhysicalPlan::DistPlan { gather, .. } => match gather {
+                falcon_planner::plan::DistGather::TwoPhaseAgg { offset, limit, .. } => {
+                    assert_eq!(*offset, Some(2));
+                    assert_eq!(*limit, Some(3));
                 }
-            }
+                other => panic!("Expected TwoPhaseAgg, got {:?}", other),
+            },
             _ => panic!("Expected DistPlan"),
         }
 
@@ -3538,12 +3941,17 @@ mod end_to_end_tests {
 
         let plan = plan_and_wrap(
             "SELECT age, COUNT(id) FROM users GROUP BY age ORDER BY age LIMIT 10 OFFSET 100",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         let result = qe.execute(&plan, None).unwrap();
         match result {
             ExecutionResult::Query { rows, .. } => {
-                assert_eq!(rows.len(), 0, "OFFSET 100 on 40 groups should return 0 rows");
+                assert_eq!(
+                    rows.len(),
+                    0,
+                    "OFFSET 100 on 40 groups should return 0 rows"
+                );
             }
             other => panic!("Expected Query, got {:?}", other),
         }
@@ -3552,7 +3960,7 @@ mod end_to_end_tests {
     #[test]
     fn test_e2e_distributed_array_agg() {
         // ARRAY_AGG across shards: each shard collects partial arrays, gather concatenates.
-        // Setup: 40 rows, id 0..39, age = 20 + id. Each age is unique 鈫?40 groups.
+        // Setup: 40 rows, id 0..39, age = 20 + id. Each age is unique  → 40 groups.
         // ARRAY_AGG(id) for a single-row group just returns [id].
         // We verify a GROUP BY with COUNT + ARRAY_AGG works end-to-end.
         let (engine, catalog) = setup();
@@ -3561,20 +3969,23 @@ mod end_to_end_tests {
 
         let plan = plan_and_wrap(
             "SELECT age, ARRAY_AGG(id) FROM users GROUP BY age ORDER BY age LIMIT 3",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
 
         // Verify plan uses TwoPhaseAgg
         match &plan {
-            falcon_planner::PhysicalPlan::DistPlan { gather, .. } => {
-                match gather {
-                    falcon_planner::plan::DistGather::TwoPhaseAgg { agg_merges, .. } => {
-                        assert!(agg_merges.iter().any(|m| matches!(m, falcon_planner::plan::DistAggMerge::ArrayAgg(_))),
-                            "Should have ArrayAgg merge");
-                    }
-                    other => panic!("Expected TwoPhaseAgg, got {:?}", other),
+            falcon_planner::PhysicalPlan::DistPlan { gather, .. } => match gather {
+                falcon_planner::plan::DistGather::TwoPhaseAgg { agg_merges, .. } => {
+                    assert!(
+                        agg_merges
+                            .iter()
+                            .any(|m| matches!(m, falcon_planner::plan::DistAggMerge::ArrayAgg(_))),
+                        "Should have ArrayAgg merge"
+                    );
                 }
-            }
+                other => panic!("Expected TwoPhaseAgg, got {:?}", other),
+            },
             _ => panic!("Expected DistPlan"),
         }
 
@@ -3586,7 +3997,7 @@ mod end_to_end_tests {
                 assert_eq!(rows[0].values[0], Datum::Int32(20));
                 match &rows[0].values[1] {
                     Datum::Array(arr) => {
-                        assert_eq!(arr.len(), 1, "age=20 has exactly 1 row 鈫?1 element");
+                        assert_eq!(arr.len(), 1, "age=20 has exactly 1 row  → 1 element");
                     }
                     other => panic!("Expected Array for ARRAY_AGG, got {:?}", other),
                 }
@@ -3598,9 +4009,9 @@ mod end_to_end_tests {
     #[test]
     fn test_e2e_having_order_by_offset_limit_combined() {
         // Combined: GROUP BY + HAVING + ORDER BY + OFFSET + LIMIT.
-        // 40 rows: id 0..39, age = 20 + id 鈫?ages 20..59, each unique.
+        // 40 rows: id 0..39, age = 20 + id  → ages 20..59, each unique.
         // COUNT(id) = 1 for every group. HAVING COUNT(id) >= 1 keeps all 40.
-        // ORDER BY age ASC, OFFSET 5, LIMIT 3 鈫?ages 25, 26, 27.
+        // ORDER BY age ASC, OFFSET 5, LIMIT 3  → ages 25, 26, 27.
         let (engine, catalog) = setup();
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
         let shards: Vec<ShardId> = (0..4).map(ShardId).collect();
@@ -3612,19 +4023,21 @@ mod end_to_end_tests {
 
         // Verify plan shape
         match &plan {
-            falcon_planner::PhysicalPlan::DistPlan { gather, .. } => {
-                match gather {
-                    falcon_planner::plan::DistGather::TwoPhaseAgg {
-                        having, order_by, limit, offset, ..
-                    } => {
-                        assert!(having.is_some(), "Should have HAVING filter");
-                        assert!(!order_by.is_empty(), "Should have ORDER BY");
-                        assert_eq!(*limit, Some(3));
-                        assert_eq!(*offset, Some(5));
-                    }
-                    other => panic!("Expected TwoPhaseAgg, got {:?}", other),
+            falcon_planner::PhysicalPlan::DistPlan { gather, .. } => match gather {
+                falcon_planner::plan::DistGather::TwoPhaseAgg {
+                    having,
+                    order_by,
+                    limit,
+                    offset,
+                    ..
+                } => {
+                    assert!(having.is_some(), "Should have HAVING filter");
+                    assert!(!order_by.is_empty(), "Should have ORDER BY");
+                    assert_eq!(*limit, Some(3));
+                    assert_eq!(*offset, Some(5));
                 }
-            }
+                other => panic!("Expected TwoPhaseAgg, got {:?}", other),
+            },
             _ => panic!("Expected DistPlan"),
         }
 
@@ -3650,7 +4063,11 @@ mod end_to_end_tests {
         let plan = plan_and_wrap("SELECT id FROM users", &catalog, &shards);
         let _result = qe.execute(&plan, None).unwrap();
         let stats = qe.last_scatter_stats();
-        assert_eq!(stats.per_shard_row_count.len(), 4, "Should have row counts for 4 shards");
+        assert_eq!(
+            stats.per_shard_row_count.len(),
+            4,
+            "Should have row counts for 4 shards"
+        );
         let total_rows: usize = stats.per_shard_row_count.iter().map(|(_, c)| c).sum();
         assert_eq!(total_rows, 40, "Total rows across all shards should be 40");
     }
@@ -3662,11 +4079,8 @@ mod end_to_end_tests {
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
         let shards: Vec<ShardId> = (0..4).map(ShardId).collect();
 
-        // 40 rows total. LIMIT 5 OFFSET 10 鈫?skip 10, take 5.
-        let plan = plan_and_wrap(
-            "SELECT id FROM users LIMIT 5 OFFSET 10",
-            &catalog, &shards,
-        );
+        // 40 rows total. LIMIT 5 OFFSET 10  → skip 10, take 5.
+        let plan = plan_and_wrap("SELECT id FROM users LIMIT 5 OFFSET 10", &catalog, &shards);
 
         // Verify plan shape: should be Union with offset
         match &plan {
@@ -3705,23 +4119,43 @@ mod end_to_end_tests {
 
         let inner = plan_and_wrap(
             "SELECT age, COUNT(id) FROM users GROUP BY age ORDER BY age LIMIT 3",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         // Wrap in Explain to trigger exec_explain_dist
         let plan = falcon_planner::PhysicalPlan::Explain(Box::new(inner));
         let result = qe.execute(&plan, None);
         match result {
             Ok(ExecutionResult::Query { rows, .. }) => {
-                let text: Vec<String> = rows.iter()
-                    .filter_map(|r| match &r.values[0] { Datum::Text(s) => Some(s.clone()), _ => None })
+                let text: Vec<String> = rows
+                    .iter()
+                    .filter_map(|r| match &r.values[0] {
+                        Datum::Text(s) => Some(s.clone()),
+                        _ => None,
+                    })
                     .collect();
                 let joined = text.join("\n");
-                assert!(joined.contains("Distributed Plan"), "Should contain Distributed Plan header");
-                assert!(joined.contains("TwoPhaseAgg"), "Should contain TwoPhaseAgg gather strategy");
-                assert!(joined.contains("merge: COUNT(col"), "Should contain human-readable merge labels");
-                assert!(joined.contains("Execution Stats"), "Should contain Execution Stats");
+                assert!(
+                    joined.contains("Distributed Plan"),
+                    "Should contain Distributed Plan header"
+                );
+                assert!(
+                    joined.contains("TwoPhaseAgg"),
+                    "Should contain TwoPhaseAgg gather strategy"
+                );
+                assert!(
+                    joined.contains("merge: COUNT(col"),
+                    "Should contain human-readable merge labels"
+                );
+                assert!(
+                    joined.contains("Execution Stats"),
+                    "Should contain Execution Stats"
+                );
                 assert!(joined.contains("Shard"), "Should contain per-shard details");
-                assert!(joined.contains("rows:"), "Should contain per-shard row counts");
+                assert!(
+                    joined.contains("rows:"),
+                    "Should contain per-shard row counts"
+                );
             }
             other => panic!("Expected OK Query from explain_analyze, got {:?}", other),
         }
@@ -3730,39 +4164,46 @@ mod end_to_end_tests {
     #[test]
     fn test_e2e_distributed_count_distinct() {
         // COUNT(DISTINCT age) across 4 shards.
-        // Setup: 40 rows, id 0..39, age = 20 + id 鈫?40 distinct ages.
+        // Setup: 40 rows, id 0..39, age = 20 + id  → 40 distinct ages.
         // Each shard has 10 rows with unique ages.
         // COUNT(DISTINCT age) should be 40.
         let (engine, catalog) = setup();
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
         let shards: Vec<ShardId> = (0..4).map(ShardId).collect();
 
-        let plan = plan_and_wrap(
-            "SELECT COUNT(DISTINCT age) FROM users",
-            &catalog, &shards,
-        );
+        let plan = plan_and_wrap("SELECT COUNT(DISTINCT age) FROM users", &catalog, &shards);
 
         // Verify plan uses TwoPhaseAgg with CountDistinct
         match &plan {
-            falcon_planner::PhysicalPlan::DistPlan { gather, .. } => {
-                match gather {
-                    falcon_planner::plan::DistGather::TwoPhaseAgg { agg_merges, .. } => {
-                        assert!(agg_merges.iter().any(|m| matches!(m, falcon_planner::plan::DistAggMerge::CountDistinct(_))),
-                            "Should have CountDistinct merge");
-                    }
-                    other => panic!("Expected TwoPhaseAgg, got {:?}", other),
+            falcon_planner::PhysicalPlan::DistPlan { gather, .. } => match gather {
+                falcon_planner::plan::DistGather::TwoPhaseAgg { agg_merges, .. } => {
+                    assert!(
+                        agg_merges.iter().any(|m| matches!(
+                            m,
+                            falcon_planner::plan::DistAggMerge::CountDistinct(_)
+                        )),
+                        "Should have CountDistinct merge"
+                    );
                 }
-            }
+                other => panic!("Expected TwoPhaseAgg, got {:?}", other),
+            },
             _ => panic!("Expected DistPlan"),
         }
 
         let result = qe.execute(&plan, None).unwrap();
         match result {
             ExecutionResult::Query { rows, .. } => {
-                assert_eq!(rows.len(), 1, "COUNT(DISTINCT) without GROUP BY returns 1 row");
-                // All 40 ages are distinct 鈫?COUNT(DISTINCT age) = 40
-                assert_eq!(rows[0].values[0], Datum::Int64(40),
-                    "40 unique ages across 4 shards");
+                assert_eq!(
+                    rows.len(),
+                    1,
+                    "COUNT(DISTINCT) without GROUP BY returns 1 row"
+                );
+                // All 40 ages are distinct  → COUNT(DISTINCT age) = 40
+                assert_eq!(
+                    rows[0].values[0],
+                    Datum::Int64(40),
+                    "40 unique ages across 4 shards"
+                );
             }
             other => panic!("Expected Query, got {:?}", other),
         }
@@ -3772,7 +4213,7 @@ mod end_to_end_tests {
     fn test_e2e_distributed_count_distinct_with_group_by() {
         // COUNT(DISTINCT id) GROUP BY age with duplicates across shards.
         // Setup: 40 rows, id 0..39, age = 20 + id.
-        // Each age is unique 鈫?COUNT(DISTINCT id) per group = 1.
+        // Each age is unique  → COUNT(DISTINCT id) per group = 1.
         // Also test: we can combine COUNT(DISTINCT) with regular COUNT in same query.
         let (engine, catalog) = setup();
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
@@ -3780,7 +4221,8 @@ mod end_to_end_tests {
 
         let plan = plan_and_wrap(
             "SELECT age, COUNT(DISTINCT id) FROM users GROUP BY age ORDER BY age LIMIT 5",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
 
         let result = qe.execute(&plan, None).unwrap();
@@ -3789,8 +4231,11 @@ mod end_to_end_tests {
                 assert_eq!(rows.len(), 5, "LIMIT 5");
                 // First group: age=20, COUNT(DISTINCT id) = 1 (only id=0 has age=20)
                 assert_eq!(rows[0].values[0], Datum::Int32(20));
-                assert_eq!(rows[0].values[1], Datum::Int64(1),
-                    "Each age has exactly 1 distinct id");
+                assert_eq!(
+                    rows[0].values[1],
+                    Datum::Int64(1),
+                    "Each age has exactly 1 distinct id"
+                );
                 // Same for all 5 rows
                 for row in &rows {
                     assert_eq!(row.values[1], Datum::Int64(1));
@@ -3803,38 +4248,45 @@ mod end_to_end_tests {
     #[test]
     fn test_e2e_distributed_sum_distinct() {
         // SUM(DISTINCT age) across 4 shards.
-        // Setup: 40 rows, id 0..39, age = 20 + id 鈫?ages 20..59, all distinct.
+        // Setup: 40 rows, id 0..39, age = 20 + id  → ages 20..59, all distinct.
         // SUM(DISTINCT age) = sum(20..59) = 40 * (20+59)/2 = 40 * 39.5 = 1580
         let (engine, catalog) = setup();
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
         let shards: Vec<ShardId> = (0..4).map(ShardId).collect();
 
-        let plan = plan_and_wrap(
-            "SELECT SUM(DISTINCT age) FROM users",
-            &catalog, &shards,
-        );
+        let plan = plan_and_wrap("SELECT SUM(DISTINCT age) FROM users", &catalog, &shards);
 
         // Verify plan uses TwoPhaseAgg with SumDistinct
         match &plan {
-            falcon_planner::PhysicalPlan::DistPlan { gather, .. } => {
-                match gather {
-                    falcon_planner::plan::DistGather::TwoPhaseAgg { agg_merges, .. } => {
-                        assert!(agg_merges.iter().any(|m| matches!(m, falcon_planner::plan::DistAggMerge::SumDistinct(_))),
-                            "Should have SumDistinct merge");
-                    }
-                    other => panic!("Expected TwoPhaseAgg, got {:?}", other),
+            falcon_planner::PhysicalPlan::DistPlan { gather, .. } => match gather {
+                falcon_planner::plan::DistGather::TwoPhaseAgg { agg_merges, .. } => {
+                    assert!(
+                        agg_merges.iter().any(|m| matches!(
+                            m,
+                            falcon_planner::plan::DistAggMerge::SumDistinct(_)
+                        )),
+                        "Should have SumDistinct merge"
+                    );
                 }
-            }
+                other => panic!("Expected TwoPhaseAgg, got {:?}", other),
+            },
             _ => panic!("Expected DistPlan"),
         }
 
         let result = qe.execute(&plan, None).unwrap();
         match result {
             ExecutionResult::Query { rows, .. } => {
-                assert_eq!(rows.len(), 1, "SUM(DISTINCT) without GROUP BY returns 1 row");
+                assert_eq!(
+                    rows.len(),
+                    1,
+                    "SUM(DISTINCT) without GROUP BY returns 1 row"
+                );
                 // All 40 ages are distinct (20..59), SUM = 20+21+...+59 = 1580
-                assert_eq!(rows[0].values[0], Datum::Int64(1580),
-                    "SUM(DISTINCT age) should be 1580");
+                assert_eq!(
+                    rows[0].values[0],
+                    Datum::Int64(1580),
+                    "SUM(DISTINCT age) should be 1580"
+                );
             }
             other => panic!("Expected Query, got {:?}", other),
         }
@@ -3843,23 +4295,27 @@ mod end_to_end_tests {
     #[test]
     fn test_e2e_distributed_avg_distinct() {
         // AVG(DISTINCT age) across 4 shards.
-        // Setup: 40 rows, id 0..39, age = 20 + id 鈫?ages 20..59, all distinct.
+        // Setup: 40 rows, id 0..39, age = 20 + id  → ages 20..59, all distinct.
         // AVG(DISTINCT age) = (20+21+...+59)/40 = 1580/40 = 39.5
         let (engine, catalog) = setup();
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
         let shards: Vec<ShardId> = (0..4).map(ShardId).collect();
 
-        let plan = plan_and_wrap(
-            "SELECT AVG(DISTINCT age) FROM users",
-            &catalog, &shards,
-        );
+        let plan = plan_and_wrap("SELECT AVG(DISTINCT age) FROM users", &catalog, &shards);
 
         let result = qe.execute(&plan, None).unwrap();
         match result {
             ExecutionResult::Query { rows, .. } => {
-                assert_eq!(rows.len(), 1, "AVG(DISTINCT) without GROUP BY returns 1 row");
-                assert_eq!(rows[0].values[0], Datum::Float64(39.5),
-                    "AVG(DISTINCT age) should be 39.5");
+                assert_eq!(
+                    rows.len(),
+                    1,
+                    "AVG(DISTINCT) without GROUP BY returns 1 row"
+                );
+                assert_eq!(
+                    rows[0].values[0],
+                    Datum::Float64(39.5),
+                    "AVG(DISTINCT age) should be 39.5"
+                );
             }
             other => panic!("Expected Query, got {:?}", other),
         }
@@ -3868,7 +4324,7 @@ mod end_to_end_tests {
     #[test]
     fn test_e2e_mixed_distinct_and_non_distinct() {
         // Mixed: COUNT(*), COUNT(DISTINCT age), SUM(age) in the same query.
-        // Setup: 40 rows, id 0..39, age = 20 + id 鈫?40 distinct ages.
+        // Setup: 40 rows, id 0..39, age = 20 + id  → 40 distinct ages.
         // COUNT(*) = 40, COUNT(DISTINCT age) = 40, SUM(age) = 1580
         let (engine, catalog) = setup();
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
@@ -3876,24 +4332,36 @@ mod end_to_end_tests {
 
         let plan = plan_and_wrap(
             "SELECT COUNT(*), COUNT(DISTINCT age), SUM(age) FROM users",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
 
         // Verify plan uses TwoPhaseAgg with both Count and CountDistinct
         match &plan {
-            falcon_planner::PhysicalPlan::DistPlan { gather, .. } => {
-                match gather {
-                    falcon_planner::plan::DistGather::TwoPhaseAgg { agg_merges, .. } => {
-                        assert!(agg_merges.iter().any(|m| matches!(m, falcon_planner::plan::DistAggMerge::Count(_))),
-                            "Should have regular Count merge");
-                        assert!(agg_merges.iter().any(|m| matches!(m, falcon_planner::plan::DistAggMerge::CountDistinct(_))),
-                            "Should have CountDistinct merge");
-                        assert!(agg_merges.iter().any(|m| matches!(m, falcon_planner::plan::DistAggMerge::Sum(_))),
-                            "Should have Sum merge");
-                    }
-                    other => panic!("Expected TwoPhaseAgg, got {:?}", other),
+            falcon_planner::PhysicalPlan::DistPlan { gather, .. } => match gather {
+                falcon_planner::plan::DistGather::TwoPhaseAgg { agg_merges, .. } => {
+                    assert!(
+                        agg_merges
+                            .iter()
+                            .any(|m| matches!(m, falcon_planner::plan::DistAggMerge::Count(_))),
+                        "Should have regular Count merge"
+                    );
+                    assert!(
+                        agg_merges.iter().any(|m| matches!(
+                            m,
+                            falcon_planner::plan::DistAggMerge::CountDistinct(_)
+                        )),
+                        "Should have CountDistinct merge"
+                    );
+                    assert!(
+                        agg_merges
+                            .iter()
+                            .any(|m| matches!(m, falcon_planner::plan::DistAggMerge::Sum(_))),
+                        "Should have Sum merge"
+                    );
                 }
-            }
+                other => panic!("Expected TwoPhaseAgg, got {:?}", other),
+            },
             _ => panic!("Expected DistPlan"),
         }
 
@@ -3902,7 +4370,11 @@ mod end_to_end_tests {
             ExecutionResult::Query { rows, .. } => {
                 assert_eq!(rows.len(), 1);
                 assert_eq!(rows[0].values[0], Datum::Int64(40), "COUNT(*) = 40");
-                assert_eq!(rows[0].values[1], Datum::Int64(40), "COUNT(DISTINCT age) = 40");
+                assert_eq!(
+                    rows[0].values[1],
+                    Datum::Int64(40),
+                    "COUNT(DISTINCT age) = 40"
+                );
                 assert_eq!(rows[0].values[2], Datum::Int64(1580), "SUM(age) = 1580");
             }
             other => panic!("Expected Query, got {:?}", other),
@@ -3916,20 +4388,27 @@ mod end_to_end_tests {
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
         let shards: Vec<ShardId> = (0..4).map(ShardId).collect();
 
-        let inner = plan_and_wrap(
-            "SELECT COUNT(DISTINCT age) FROM users",
-            &catalog, &shards,
-        );
+        let inner = plan_and_wrap("SELECT COUNT(DISTINCT age) FROM users", &catalog, &shards);
         let plan = falcon_planner::PhysicalPlan::Explain(Box::new(inner));
         let result = qe.execute(&plan, None);
         match result {
             Ok(ExecutionResult::Query { rows, .. }) => {
-                let text: Vec<String> = rows.iter()
-                    .filter_map(|r| match &r.values[0] { Datum::Text(s) => Some(s.clone()), _ => None })
+                let text: Vec<String> = rows
+                    .iter()
+                    .filter_map(|r| match &r.values[0] {
+                        Datum::Text(s) => Some(s.clone()),
+                        _ => None,
+                    })
                     .collect();
                 let joined = text.join("\n");
-                assert!(joined.contains("COUNT(DISTINCT col"), "Should show COUNT(DISTINCT)");
-                assert!(joined.contains("[collect-dedup]"), "Should annotate with [collect-dedup]");
+                assert!(
+                    joined.contains("COUNT(DISTINCT col"),
+                    "Should show COUNT(DISTINCT)"
+                );
+                assert!(
+                    joined.contains("[collect-dedup]"),
+                    "Should annotate with [collect-dedup]"
+                );
             }
             other => panic!("Expected OK Query, got {:?}", other),
         }
@@ -3945,20 +4424,25 @@ mod end_to_end_tests {
 
         let two_pc = qe.two_phase_coordinator();
         for i in 0..4 {
-            two_pc.execute(
-                &shards,
-                IsolationLevel::ReadCommitted,
-                |storage, _txn_mgr, txn_id| {
-                    let row = OwnedRow::new(vec![
-                        Datum::Int32(8500 + i),
-                        Datum::Text(format!("cd_having_{}", i)),
-                        Datum::Int32(88),
-                    ]);
-                    storage.insert(TableId(1), row, txn_id)
-                        .map(|_| ())
-                        .map_err(|e| falcon_common::error::FalconError::Internal(format!("{:?}", e)))
-                },
-            ).unwrap();
+            two_pc
+                .execute(
+                    &shards,
+                    IsolationLevel::ReadCommitted,
+                    |storage, _txn_mgr, txn_id| {
+                        let row = OwnedRow::new(vec![
+                            Datum::Int32(8500 + i),
+                            Datum::Text(format!("cd_having_{}", i)),
+                            Datum::Int32(88),
+                        ]);
+                        storage
+                            .insert(TableId(1), row, txn_id)
+                            .map(|_| ())
+                            .map_err(|e| {
+                                falcon_common::error::FalconError::Internal(format!("{:?}", e))
+                            })
+                    },
+                )
+                .unwrap();
         }
 
         // age=88: 4 inserts * 4 shards (2PC) = 16 rows.
@@ -3972,7 +4456,11 @@ mod end_to_end_tests {
         let result = qe.execute(&plan, None).unwrap();
         match result {
             ExecutionResult::Query { rows, .. } => {
-                assert_eq!(rows.len(), 1, "HAVING COUNT(DISTINCT id) > 2 should pass (4 unique IDs)");
+                assert_eq!(
+                    rows.len(),
+                    1,
+                    "HAVING COUNT(DISTINCT id) > 2 should pass (4 unique IDs)"
+                );
                 assert_eq!(rows[0].values[0], Datum::Int32(88));
                 assert_eq!(rows[0].values[1], Datum::Int64(4), "4 distinct IDs");
             }
@@ -3987,7 +4475,11 @@ mod end_to_end_tests {
         let result2 = qe.execute(&plan2, None).unwrap();
         match result2 {
             ExecutionResult::Query { rows, .. } => {
-                assert_eq!(rows.len(), 0, "HAVING COUNT(DISTINCT id) > 10 should filter out");
+                assert_eq!(
+                    rows.len(),
+                    0,
+                    "HAVING COUNT(DISTINCT id) > 10 should filter out"
+                );
             }
             other => panic!("Expected Query, got {:?}", other),
         }
@@ -4004,27 +4496,33 @@ mod end_to_end_tests {
         let two_pc = qe.two_phase_coordinator();
         // Insert 3 names, each replicated to all 4 shards via 2PC
         for (i, name) in ["alpha", "beta", "gamma"].iter().enumerate() {
-            two_pc.execute(
-                &shards,
-                IsolationLevel::ReadCommitted,
-                |storage, _txn_mgr, txn_id| {
-                    let row = OwnedRow::new(vec![
-                        Datum::Int32(9000 + i as i32),
-                        Datum::Text(name.to_string()),
-                        Datum::Int32(77),
-                    ]);
-                    storage.insert(TableId(1), row, txn_id)
-                        .map(|_| ())
-                        .map_err(|e| falcon_common::error::FalconError::Internal(format!("{:?}", e)))
-                },
-            ).unwrap();
+            two_pc
+                .execute(
+                    &shards,
+                    IsolationLevel::ReadCommitted,
+                    |storage, _txn_mgr, txn_id| {
+                        let row = OwnedRow::new(vec![
+                            Datum::Int32(9000 + i as i32),
+                            Datum::Text(name.to_string()),
+                            Datum::Int32(77),
+                        ]);
+                        storage
+                            .insert(TableId(1), row, txn_id)
+                            .map(|_| ())
+                            .map_err(|e| {
+                                falcon_common::error::FalconError::Internal(format!("{:?}", e))
+                            })
+                    },
+                )
+                .unwrap();
         }
 
         // STRING_AGG(DISTINCT name, ',') WHERE age = 77:
         // Each name appears 4 times (1 per shard). After dedup: 3 unique names joined with ','
         let plan = plan_and_wrap(
             "SELECT STRING_AGG(DISTINCT name, ',') FROM users WHERE age = 77",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         let result = qe.execute(&plan, None).unwrap();
         match result {
@@ -4056,7 +4554,8 @@ mod end_to_end_tests {
 
         let plan = plan_and_wrap(
             "SELECT ARRAY_AGG(DISTINCT age) FROM users",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         let result = qe.execute(&plan, None).unwrap();
         match result {
@@ -4082,17 +4581,30 @@ mod end_to_end_tests {
 
         let plan = plan_and_wrap(
             "SELECT COUNT(*), SUM(DISTINCT age) FROM users",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         qe.execute(&plan, None).unwrap();
 
         let stats = qe.last_scatter_stats();
         assert_eq!(stats.gather_strategy, "TwoPhaseAgg");
-        assert!(!stats.merge_labels.is_empty(), "merge_labels should be populated");
-        assert!(stats.merge_labels.iter().any(|l| l.contains("COUNT")),
-            "Should have COUNT label: {:?}", stats.merge_labels);
-        assert!(stats.merge_labels.iter().any(|l| l.contains("SUM(DISTINCT") && l.contains("[collect-dedup]")),
-            "Should have SUM(DISTINCT) [collect-dedup] label: {:?}", stats.merge_labels);
+        assert!(
+            !stats.merge_labels.is_empty(),
+            "merge_labels should be populated"
+        );
+        assert!(
+            stats.merge_labels.iter().any(|l| l.contains("COUNT")),
+            "Should have COUNT label: {:?}",
+            stats.merge_labels
+        );
+        assert!(
+            stats
+                .merge_labels
+                .iter()
+                .any(|l| l.contains("SUM(DISTINCT") && l.contains("[collect-dedup]")),
+            "Should have SUM(DISTINCT) [collect-dedup] label: {:?}",
+            stats.merge_labels
+        );
     }
 
     /// Setup with two tables: "users" (TableId 1) and "orders" (TableId 2).
@@ -4108,30 +4620,70 @@ mod end_to_end_tests {
             id: TableId(1),
             name: "users".into(),
             columns: vec![
-                ColumnDef { id: ColumnId(0), name: "id".into(), data_type: DataType::Int32, nullable: false, is_primary_key: true, default_value: None, is_serial: false },
-                ColumnDef { id: ColumnId(1), name: "name".into(), data_type: DataType::Text, nullable: true, is_primary_key: false, default_value: None, is_serial: false },
+                ColumnDef {
+                    id: ColumnId(0),
+                    name: "id".into(),
+                    data_type: DataType::Int32,
+                    nullable: false,
+                    is_primary_key: true,
+                    default_value: None,
+                    is_serial: false,
+                },
+                ColumnDef {
+                    id: ColumnId(1),
+                    name: "name".into(),
+                    data_type: DataType::Text,
+                    nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                    is_serial: false,
+                },
             ],
             primary_key_columns: vec![0],
             next_serial_values: Default::default(),
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         };
         let orders_schema = TableSchema {
             id: TableId(2),
             name: "orders".into(),
             columns: vec![
-                ColumnDef { id: ColumnId(0), name: "oid".into(), data_type: DataType::Int32, nullable: false, is_primary_key: true, default_value: None, is_serial: false },
-                ColumnDef { id: ColumnId(1), name: "user_id".into(), data_type: DataType::Int32, nullable: false, is_primary_key: false, default_value: None, is_serial: false },
-                ColumnDef { id: ColumnId(2), name: "amount".into(), data_type: DataType::Int32, nullable: true, is_primary_key: false, default_value: None, is_serial: false },
+                ColumnDef {
+                    id: ColumnId(0),
+                    name: "oid".into(),
+                    data_type: DataType::Int32,
+                    nullable: false,
+                    is_primary_key: true,
+                    default_value: None,
+                    is_serial: false,
+                },
+                ColumnDef {
+                    id: ColumnId(1),
+                    name: "user_id".into(),
+                    data_type: DataType::Int32,
+                    nullable: false,
+                    is_primary_key: false,
+                    default_value: None,
+                    is_serial: false,
+                },
+                ColumnDef {
+                    id: ColumnId(2),
+                    name: "amount".into(),
+                    data_type: DataType::Int32,
+                    nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                    is_serial: false,
+                },
             ],
             primary_key_columns: vec![0],
             next_serial_values: Default::default(),
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         };
 
         engine.create_table_all(&users_schema).unwrap();
@@ -4141,17 +4693,27 @@ mod end_to_end_tests {
         for i in 0..5 {
             let shard = engine.shard(ShardId(0)).unwrap();
             let txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
-            shard.storage.insert(TableId(1), OwnedRow::new(vec![
-                Datum::Int32(i), Datum::Text(format!("user_{}", i)),
-            ]), txn.txn_id).unwrap();
+            shard
+                .storage
+                .insert(
+                    TableId(1),
+                    OwnedRow::new(vec![Datum::Int32(i), Datum::Text(format!("user_{}", i))]),
+                    txn.txn_id,
+                )
+                .unwrap();
             shard.txn_mgr.commit(txn.txn_id).unwrap();
         }
         for i in 5..10 {
             let shard = engine.shard(ShardId(1)).unwrap();
             let txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
-            shard.storage.insert(TableId(1), OwnedRow::new(vec![
-                Datum::Int32(i), Datum::Text(format!("user_{}", i)),
-            ]), txn.txn_id).unwrap();
+            shard
+                .storage
+                .insert(
+                    TableId(1),
+                    OwnedRow::new(vec![Datum::Int32(i), Datum::Text(format!("user_{}", i))]),
+                    txn.txn_id,
+                )
+                .unwrap();
             shard.txn_mgr.commit(txn.txn_id).unwrap();
         }
 
@@ -4169,9 +4731,18 @@ mod end_to_end_tests {
         for (sid, oid, uid, amt) in cross_shard_orders {
             let shard = engine.shard(sid).unwrap();
             let txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
-            shard.storage.insert(TableId(2), OwnedRow::new(vec![
-                Datum::Int32(oid), Datum::Int32(uid), Datum::Int32(amt),
-            ]), txn.txn_id).unwrap();
+            shard
+                .storage
+                .insert(
+                    TableId(2),
+                    OwnedRow::new(vec![
+                        Datum::Int32(oid),
+                        Datum::Int32(uid),
+                        Datum::Int32(amt),
+                    ]),
+                    txn.txn_id,
+                )
+                .unwrap();
             shard.txn_mgr.commit(txn.txn_id).unwrap();
         }
 
@@ -4183,7 +4754,7 @@ mod end_to_end_tests {
 
     #[test]
     fn test_e2e_cross_shard_join_correctness() {
-        // Cross-shard INNER JOIN: users 脳 orders ON users.id = orders.user_id
+        // Cross-shard INNER JOIN: users × orders ON users.id = orders.user_id
         // Users on shards 0,1; orders on shards 2,3 (mostly).
         // A per-shard local join would miss cross-shard matches.
         // Coordinator-side join should find all 4 matches.
@@ -4197,14 +4768,24 @@ mod end_to_end_tests {
         );
 
         // The plan should be a join (NOT wrapped in DistPlan)
-        assert!(matches!(plan, falcon_planner::PhysicalPlan::NestedLoopJoin { .. } | falcon_planner::PhysicalPlan::HashJoin { .. }),
-            "Join should NOT be wrapped in DistPlan");
+        assert!(
+            matches!(
+                plan,
+                falcon_planner::PhysicalPlan::NestedLoopJoin { .. }
+                    | falcon_planner::PhysicalPlan::HashJoin { .. }
+            ),
+            "Join should NOT be wrapped in DistPlan"
+        );
 
         let result = qe.execute(&plan, None).unwrap();
         match result {
             ExecutionResult::Query { columns, rows } => {
                 assert_eq!(columns.len(), 4, "u.id, u.name, o.oid, o.amount");
-                assert_eq!(rows.len(), 4, "4 orders match 3 users: user 0 has 2 orders, user 3 has 1, user 5 has 1");
+                assert_eq!(
+                    rows.len(),
+                    4,
+                    "4 orders match 3 users: user 0 has 2 orders, user 3 has 1, user 5 has 1"
+                );
 
                 // Verify specific matches (ORDER BY o.oid)
                 // oid=100: user_id=0
@@ -4240,15 +4821,20 @@ mod end_to_end_tests {
 
         let plan = plan_and_wrap(
             "SELECT u.id, o.oid FROM users u LEFT JOIN orders o ON u.id = o.user_id ORDER BY u.id",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
-        assert!(matches!(plan, falcon_planner::PhysicalPlan::NestedLoopJoin { .. } | falcon_planner::PhysicalPlan::HashJoin { .. }));
+        assert!(matches!(
+            plan,
+            falcon_planner::PhysicalPlan::NestedLoopJoin { .. }
+                | falcon_planner::PhysicalPlan::HashJoin { .. }
+        ));
 
         let result = qe.execute(&plan, None).unwrap();
         match result {
             ExecutionResult::Query { rows, .. } => {
                 // 10 users: user 0 has 2 orders, user 3 has 1, user 5 has 1,
-                // users 1,2,4,6,7,8,9 have 0 orders 鈫?7 NULL rows
+                // users 1,2,4,6,7,8,9 have 0 orders  → 7 NULL rows
                 // Total: 4 matched + 7 unmatched = 11 rows
                 assert_eq!(rows.len(), 11, "LEFT JOIN: 4 matched + 7 unmatched = 11");
 
@@ -4258,12 +4844,15 @@ mod end_to_end_tests {
 
                 // Check that unmatched users have NULL oid
                 // User 1 has no orders
-                let user1_rows: Vec<_> = rows.iter()
+                let user1_rows: Vec<_> = rows
+                    .iter()
                     .filter(|r| r.values[0] == Datum::Int32(1))
                     .collect();
                 assert_eq!(user1_rows.len(), 1);
-                assert!(matches!(user1_rows[0].values[1], Datum::Null),
-                    "User 1 should have NULL oid in LEFT JOIN");
+                assert!(
+                    matches!(user1_rows[0].values[1], Datum::Null),
+                    "User 1 should have NULL oid in LEFT JOIN"
+                );
             }
             other => panic!("Expected Query, got {:?}", other),
         }
@@ -4277,19 +4866,30 @@ mod end_to_end_tests {
 
         let inner = plan_and_wrap(
             "SELECT u.id, o.oid FROM users u JOIN orders o ON u.id = o.user_id",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         let plan = falcon_planner::PhysicalPlan::Explain(Box::new(inner));
         let result = qe.execute(&plan, None).unwrap();
         match result {
             ExecutionResult::Query { rows, .. } => {
-                let text: Vec<String> = rows.iter()
-                    .filter_map(|r| match &r.values[0] { Datum::Text(s) => Some(s.clone()), _ => None })
+                let text: Vec<String> = rows
+                    .iter()
+                    .filter_map(|r| match &r.values[0] {
+                        Datum::Text(s) => Some(s.clone()),
+                        _ => None,
+                    })
                     .collect();
                 let joined = text.join("\n");
-                assert!(joined.contains("CoordinatorJoin"), "Should show CoordinatorJoin strategy");
+                assert!(
+                    joined.contains("CoordinatorJoin"),
+                    "Should show CoordinatorJoin strategy"
+                );
                 assert!(joined.contains("Tables:"), "Should list tables involved");
-                assert!(joined.contains("Result rows: 4"), "Should show 4 result rows");
+                assert!(
+                    joined.contains("Result rows: 4"),
+                    "Should show 4 result rows"
+                );
             }
             other => panic!("Expected Query, got {:?}", other),
         }
@@ -4328,17 +4928,20 @@ mod end_to_end_tests {
 
         let plan = plan_and_wrap(
             "SELECT id, name FROM users WHERE id IN (SELECT user_id FROM orders) ORDER BY id",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
 
         // Plan should NOT be wrapped in DistPlan (subquery detected)
-        assert!(matches!(plan, falcon_planner::PhysicalPlan::SeqScan { .. }),
-            "Subquery query should NOT be wrapped in DistPlan");
+        assert!(
+            matches!(plan, falcon_planner::PhysicalPlan::SeqScan { .. }),
+            "Subquery query should NOT be wrapped in DistPlan"
+        );
 
         let result = qe.execute(&plan, None).unwrap();
         match result {
             ExecutionResult::Query { rows, .. } => {
-                // Orders reference user_ids: 0, 5, 3 鈫?3 distinct users
+                // Orders reference user_ids: 0, 5, 3  → 3 distinct users
                 assert_eq!(rows.len(), 3, "3 users have orders: 0, 3, 5");
                 assert_eq!(rows[0].values[0], Datum::Int32(0));
                 assert_eq!(rows[1].values[0], Datum::Int32(3));
@@ -4357,17 +4960,20 @@ mod end_to_end_tests {
 
         let plan = plan_and_wrap(
             "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM orders) ORDER BY id",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
 
-        assert!(matches!(plan, falcon_planner::PhysicalPlan::SeqScan { .. }),
-            "EXISTS subquery should NOT be wrapped in DistPlan");
+        assert!(
+            matches!(plan, falcon_planner::PhysicalPlan::SeqScan { .. }),
+            "EXISTS subquery should NOT be wrapped in DistPlan"
+        );
 
         let result = qe.execute(&plan, None).unwrap();
         match result {
             ExecutionResult::Query { rows, .. } => {
                 // Orders exist, so all 10 users should be returned
-                assert_eq!(rows.len(), 10, "EXISTS is true 鈫?all 10 users returned");
+                assert_eq!(rows.len(), 10, "EXISTS is true  → all 10 users returned");
                 assert_eq!(rows[0].values[0], Datum::Int32(0));
             }
             other => panic!("Expected Query, got {:?}", other),
@@ -4383,7 +4989,8 @@ mod end_to_end_tests {
 
         let plan = plan_and_wrap(
             "SELECT id FROM users WHERE id NOT IN (SELECT user_id FROM orders) ORDER BY id",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
 
         let result = qe.execute(&plan, None).unwrap();
@@ -4409,12 +5016,15 @@ mod end_to_end_tests {
 
         let plan = plan_and_wrap(
             "SELECT id FROM users UNION ALL SELECT oid FROM orders ORDER BY id",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
 
         // UNIONs should NOT be wrapped in DistPlan
-        assert!(matches!(plan, falcon_planner::PhysicalPlan::SeqScan { .. }),
-            "UNION should NOT be wrapped in DistPlan");
+        assert!(
+            matches!(plan, falcon_planner::PhysicalPlan::SeqScan { .. }),
+            "UNION should NOT be wrapped in DistPlan"
+        );
 
         let result = qe.execute(&plan, None).unwrap();
         match result {
@@ -4434,19 +5044,30 @@ mod end_to_end_tests {
 
         let inner = plan_and_wrap(
             "SELECT id FROM users WHERE id IN (SELECT user_id FROM orders)",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         let plan = falcon_planner::PhysicalPlan::Explain(Box::new(inner));
         let result = qe.execute(&plan, None).unwrap();
         match result {
             ExecutionResult::Query { rows, .. } => {
-                let text: Vec<String> = rows.iter()
-                    .filter_map(|r| match &r.values[0] { Datum::Text(s) => Some(s.clone()), _ => None })
+                let text: Vec<String> = rows
+                    .iter()
+                    .filter_map(|r| match &r.values[0] {
+                        Datum::Text(s) => Some(s.clone()),
+                        _ => None,
+                    })
                     .collect();
                 let joined = text.join("\n");
-                assert!(joined.contains("CoordinatorSubquery"), "Should show CoordinatorSubquery strategy");
+                assert!(
+                    joined.contains("CoordinatorSubquery"),
+                    "Should show CoordinatorSubquery strategy"
+                );
                 assert!(joined.contains("Tables:"), "Should list tables involved");
-                assert!(joined.contains("Result rows: 3"), "Should show 3 result rows");
+                assert!(
+                    joined.contains("Result rows: 3"),
+                    "Should show 3 result rows"
+                );
             }
             other => panic!("Expected Query, got {:?}", other),
         }
@@ -4455,23 +5076,26 @@ mod end_to_end_tests {
     #[test]
     fn test_e2e_cross_shard_scalar_subquery_in_filter() {
         // Scalar subquery in filter: users whose id < (SELECT COUNT(*) FROM orders)
-        // Total orders = 4 across all shards, so users with id < 4 鈫?ids 0,1,2,3
+        // Total orders = 4 across all shards, so users with id < 4  → ids 0,1,2,3
         let (engine, catalog) = setup_join();
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
         let shards: Vec<ShardId> = (0..4).map(ShardId).collect();
 
         let plan = plan_and_wrap(
             "SELECT id FROM users WHERE id < (SELECT COUNT(*) FROM orders) ORDER BY id",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
 
-        assert!(matches!(plan, falcon_planner::PhysicalPlan::SeqScan { .. }),
-            "Scalar subquery should NOT be wrapped in DistPlan");
+        assert!(
+            matches!(plan, falcon_planner::PhysicalPlan::SeqScan { .. }),
+            "Scalar subquery should NOT be wrapped in DistPlan"
+        );
 
         let result = qe.execute(&plan, None).unwrap();
         match result {
             ExecutionResult::Query { rows, .. } => {
-                // COUNT(*) from orders = 4 (all shards), so id < 4 鈫?0,1,2,3
+                // COUNT(*) from orders = 4 (all shards), so id < 4  → 0,1,2,3
                 assert_eq!(rows.len(), 4, "4 users with id < 4");
                 assert_eq!(rows[0].values[0], Datum::Int32(0));
                 assert_eq!(rows[1].values[0], Datum::Int32(1));
@@ -4494,12 +5118,13 @@ mod end_to_end_tests {
 
         let plan = plan_and_wrap(
             "UPDATE users SET name = 'updated' WHERE id IN (SELECT user_id FROM orders)",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         let result = qe.execute(&plan, None).unwrap();
         match result {
             ExecutionResult::Dml { rows_affected, .. } => {
-                // user_ids in orders: 0, 5, 3, 0 鈫?distinct: 0, 3, 5 鈫?3 users updated
+                // user_ids in orders: 0, 5, 3, 0  → distinct: 0, 3, 5  → 3 users updated
                 assert_eq!(rows_affected, 3, "Should update 3 users who have orders");
             }
             other => panic!("Expected Dml, got {:?}", other),
@@ -4508,7 +5133,8 @@ mod end_to_end_tests {
         // Verify the updates took effect by reading back
         let select_plan = plan_and_wrap(
             "SELECT id FROM users WHERE name = 'updated' ORDER BY id",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         let result = qe.execute(&select_plan, None).unwrap();
         match result {
@@ -4532,7 +5158,8 @@ mod end_to_end_tests {
 
         let plan = plan_and_wrap(
             "DELETE FROM users WHERE id IN (SELECT user_id FROM orders)",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         let result = qe.execute(&plan, None).unwrap();
         match result {
@@ -4543,14 +5170,11 @@ mod end_to_end_tests {
         }
 
         // Verify remaining users
-        let select_plan = plan_and_wrap(
-            "SELECT COUNT(*) FROM users",
-            &catalog, &shards,
-        );
+        let select_plan = plan_and_wrap("SELECT COUNT(*) FROM users", &catalog, &shards);
         let result = qe.execute(&select_plan, None).unwrap();
         match result {
             ExecutionResult::Query { rows, .. } => {
-                // Started with 10 users, deleted 3 鈫?7 remaining
+                // Started with 10 users, deleted 3  → 7 remaining
                 assert_eq!(rows[0].values[0], Datum::Int64(7));
             }
             other => panic!("Expected Query, got {:?}", other),
@@ -4561,14 +5185,15 @@ mod end_to_end_tests {
     fn test_e2e_cross_shard_update_with_scalar_subquery() {
         // UPDATE users SET name = 'big' WHERE id > (SELECT COUNT(*) FROM orders)
         // COUNT(*) from orders = 4 (across all shards).
-        // Users with id > 4: ids 5,6,7,8,9 鈫?5 users.
+        // Users with id > 4: ids 5,6,7,8,9  → 5 users.
         let (engine, catalog) = setup_join();
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
         let shards: Vec<ShardId> = (0..4).map(ShardId).collect();
 
         let plan = plan_and_wrap(
             "UPDATE users SET name = 'big' WHERE id > (SELECT COUNT(*) FROM orders)",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         let result = qe.execute(&plan, None).unwrap();
         match result {
@@ -4583,7 +5208,7 @@ mod end_to_end_tests {
     #[test]
     fn test_e2e_cross_shard_delete_with_exists_subquery() {
         // DELETE FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = 3)
-        // Since orders has user_id=3, EXISTS is true 鈫?delete ALL users.
+        // Since orders has user_id=3, EXISTS is true  → delete ALL users.
         // This is an uncorrelated EXISTS: it's either true or false for all rows.
         let (engine, catalog) = setup_join();
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
@@ -4591,7 +5216,8 @@ mod end_to_end_tests {
 
         let plan = plan_and_wrap(
             "DELETE FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = 3)",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         let result = qe.execute(&plan, None).unwrap();
         match result {
@@ -4614,15 +5240,31 @@ mod end_to_end_tests {
             id: TableId(1),
             name: "items".into(),
             columns: vec![
-                ColumnDef { id: ColumnId(0), name: "id".into(), data_type: DataType::Int32, nullable: false, is_primary_key: true, default_value: None, is_serial: false },
-                ColumnDef { id: ColumnId(1), name: "val".into(), data_type: DataType::Int32, nullable: true, is_primary_key: false, default_value: None, is_serial: false },
+                ColumnDef {
+                    id: ColumnId(0),
+                    name: "id".into(),
+                    data_type: DataType::Int32,
+                    nullable: false,
+                    is_primary_key: true,
+                    default_value: None,
+                    is_serial: false,
+                },
+                ColumnDef {
+                    id: ColumnId(1),
+                    name: "val".into(),
+                    data_type: DataType::Int32,
+                    nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                    is_serial: false,
+                },
             ],
             primary_key_columns: vec![0],
             next_serial_values: Default::default(),
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         };
         engine.create_table_all(&schema).unwrap();
 
@@ -4636,7 +5278,8 @@ mod end_to_end_tests {
         for i in 0..20 {
             let plan = plan_and_wrap(
                 &format!("INSERT INTO items VALUES ({}, {})", i, i * 10),
-                &catalog, &shards,
+                &catalog,
+                &shards,
             );
             qe.execute(&plan, None).unwrap();
         }
@@ -4652,10 +5295,7 @@ mod end_to_end_tests {
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
         let shards: Vec<ShardId> = (0..4).map(ShardId).collect();
 
-        let plan = plan_and_wrap(
-            "SELECT id, val FROM items WHERE id = 7",
-            &catalog, &shards,
-        );
+        let plan = plan_and_wrap("SELECT id, val FROM items WHERE id = 7", &catalog, &shards);
         let result = qe.execute(&plan, None).unwrap();
         match &result {
             ExecutionResult::Query { rows, .. } => {
@@ -4670,7 +5310,10 @@ mod end_to_end_tests {
         let stats = qe.last_scatter_stats();
         assert_eq!(stats.shards_participated, 1, "Should prune to 1 shard");
         assert_eq!(stats.gather_strategy, "ShardPruned");
-        assert!(stats.pruned_to_shard.is_some(), "pruned_to_shard should be set");
+        assert!(
+            stats.pruned_to_shard.is_some(),
+            "pruned_to_shard should be set"
+        );
     }
 
     #[test]
@@ -4680,10 +5323,7 @@ mod end_to_end_tests {
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
         let shards: Vec<ShardId> = (0..4).map(ShardId).collect();
 
-        let plan = plan_and_wrap(
-            "SELECT id, val FROM items",
-            &catalog, &shards,
-        );
+        let plan = plan_and_wrap("SELECT id, val FROM items", &catalog, &shards);
         let result = qe.execute(&plan, None).unwrap();
         match &result {
             ExecutionResult::Query { rows, .. } => {
@@ -4693,8 +5333,14 @@ mod end_to_end_tests {
         }
 
         let stats = qe.last_scatter_stats();
-        assert_eq!(stats.shards_participated, 4, "Should scatter to all 4 shards");
-        assert!(stats.pruned_to_shard.is_none(), "No shard pruning for full scan");
+        assert_eq!(
+            stats.shards_participated, 4,
+            "Should scatter to all 4 shards"
+        );
+        assert!(
+            stats.pruned_to_shard.is_none(),
+            "No shard pruning for full scan"
+        );
     }
 
     #[test]
@@ -4706,21 +5352,35 @@ mod end_to_end_tests {
 
         let plan = plan_and_wrap(
             "EXPLAIN SELECT id, val FROM items WHERE id = 7",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         let result = qe.execute(&plan, None).unwrap();
         match &result {
             ExecutionResult::Query { rows, .. } => {
-                let text: Vec<String> = rows.iter()
+                let text: Vec<String> = rows
+                    .iter()
                     .filter_map(|r| match &r.values[0] {
                         Datum::Text(s) => Some(s.clone()),
                         _ => None,
                     })
                     .collect();
                 let joined = text.join("\n");
-                assert!(joined.contains("ShardPruned"), "EXPLAIN should show ShardPruned strategy: {}", joined);
-                assert!(joined.contains("Shard pruning:"), "EXPLAIN should show pruning detail: {}", joined);
-                assert!(joined.contains("Shards participated: 1"), "Should show 1 shard: {}", joined);
+                assert!(
+                    joined.contains("ShardPruned"),
+                    "EXPLAIN should show ShardPruned strategy: {}",
+                    joined
+                );
+                assert!(
+                    joined.contains("Shard pruning:"),
+                    "EXPLAIN should show pruning detail: {}",
+                    joined
+                );
+                assert!(
+                    joined.contains("Shards participated: 1"),
+                    "Should show 1 shard: {}",
+                    joined
+                );
             }
             other => panic!("Expected Query, got {:?}", other),
         }
@@ -4741,29 +5401,61 @@ mod end_to_end_tests {
             id: TableId(1),
             name: "src".into(),
             columns: vec![
-                ColumnDef { id: ColumnId(0), name: "id".into(), data_type: DataType::Int32, nullable: false, is_primary_key: true, default_value: None, is_serial: false },
-                ColumnDef { id: ColumnId(1), name: "val".into(), data_type: DataType::Int32, nullable: true, is_primary_key: false, default_value: None, is_serial: false },
+                ColumnDef {
+                    id: ColumnId(0),
+                    name: "id".into(),
+                    data_type: DataType::Int32,
+                    nullable: false,
+                    is_primary_key: true,
+                    default_value: None,
+                    is_serial: false,
+                },
+                ColumnDef {
+                    id: ColumnId(1),
+                    name: "val".into(),
+                    data_type: DataType::Int32,
+                    nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                    is_serial: false,
+                },
             ],
             primary_key_columns: vec![0],
             next_serial_values: Default::default(),
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         };
         let dst_schema = TableSchema {
             id: TableId(2),
             name: "dst".into(),
             columns: vec![
-                ColumnDef { id: ColumnId(0), name: "id".into(), data_type: DataType::Int32, nullable: false, is_primary_key: true, default_value: None, is_serial: false },
-                ColumnDef { id: ColumnId(1), name: "val".into(), data_type: DataType::Int32, nullable: true, is_primary_key: false, default_value: None, is_serial: false },
+                ColumnDef {
+                    id: ColumnId(0),
+                    name: "id".into(),
+                    data_type: DataType::Int32,
+                    nullable: false,
+                    is_primary_key: true,
+                    default_value: None,
+                    is_serial: false,
+                },
+                ColumnDef {
+                    id: ColumnId(1),
+                    name: "val".into(),
+                    data_type: DataType::Int32,
+                    nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                    is_serial: false,
+                },
             ],
             primary_key_columns: vec![0],
             next_serial_values: Default::default(),
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         };
 
         engine.create_table_all(&src_schema).unwrap();
@@ -4773,17 +5465,27 @@ mod end_to_end_tests {
         for i in 0..5 {
             let shard = engine.shard(ShardId(0)).unwrap();
             let txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
-            shard.storage.insert(TableId(1), OwnedRow::new(vec![
-                Datum::Int32(i), Datum::Int32(i * 10),
-            ]), txn.txn_id).unwrap();
+            shard
+                .storage
+                .insert(
+                    TableId(1),
+                    OwnedRow::new(vec![Datum::Int32(i), Datum::Int32(i * 10)]),
+                    txn.txn_id,
+                )
+                .unwrap();
             shard.txn_mgr.commit(txn.txn_id).unwrap();
         }
         for i in 5..10 {
             let shard = engine.shard(ShardId(1)).unwrap();
             let txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
-            shard.storage.insert(TableId(1), OwnedRow::new(vec![
-                Datum::Int32(i), Datum::Int32(i * 10),
-            ]), txn.txn_id).unwrap();
+            shard
+                .storage
+                .insert(
+                    TableId(1),
+                    OwnedRow::new(vec![Datum::Int32(i), Datum::Int32(i * 10)]),
+                    txn.txn_id,
+                )
+                .unwrap();
             shard.txn_mgr.commit(txn.txn_id).unwrap();
         }
 
@@ -4795,10 +5497,7 @@ mod end_to_end_tests {
         let shards: Vec<ShardId> = (0..4).map(ShardId).collect();
 
         // INSERT INTO dst SELECT id, val FROM src
-        let plan = plan_and_wrap(
-            "INSERT INTO dst SELECT id, val FROM src",
-            &catalog, &shards,
-        );
+        let plan = plan_and_wrap("INSERT INTO dst SELECT id, val FROM src", &catalog, &shards);
         let result = qe.execute(&plan, None).unwrap();
         match result {
             ExecutionResult::Dml { rows_affected, .. } => {
@@ -4808,14 +5507,15 @@ mod end_to_end_tests {
         }
 
         // Verify all 10 rows are in dst across all shards
-        let select_plan = plan_and_wrap(
-            "SELECT COUNT(*) FROM dst",
-            &catalog, &shards,
-        );
+        let select_plan = plan_and_wrap("SELECT COUNT(*) FROM dst", &catalog, &shards);
         let result = qe.execute(&select_plan, None).unwrap();
         match result {
             ExecutionResult::Query { rows, .. } => {
-                assert_eq!(rows[0].values[0], Datum::Int64(10), "dst should have 10 rows");
+                assert_eq!(
+                    rows[0].values[0],
+                    Datum::Int64(10),
+                    "dst should have 10 rows"
+                );
             }
             other => panic!("Expected Query, got {:?}", other),
         }
@@ -4831,7 +5531,8 @@ mod end_to_end_tests {
 
         let plan = plan_and_wrap(
             "SELECT id, val FROM items WHERE id = 7 AND val > 0",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         let result = qe.execute(&plan, None).unwrap();
         match &result {
@@ -4843,7 +5544,10 @@ mod end_to_end_tests {
         }
 
         let stats = qe.last_scatter_stats();
-        assert_eq!(stats.shards_participated, 1, "Should prune to 1 shard via AND chain");
+        assert_eq!(
+            stats.shards_participated, 1,
+            "Should prune to 1 shard via AND chain"
+        );
         assert_eq!(stats.gather_strategy, "ShardPruned");
     }
 
@@ -4857,14 +5561,19 @@ mod end_to_end_tests {
 
         let plan = plan_and_wrap(
             "SELECT id, val FROM items WHERE id IN (1, 3)",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         let result = qe.execute(&plan, None).unwrap();
         match &result {
             ExecutionResult::Query { rows, .. } => {
                 assert_eq!(rows.len(), 2, "IN-list should return 2 rows");
-                let mut ids: Vec<i32> = rows.iter()
-                    .map(|r| match &r.values[0] { Datum::Int32(v) => *v, _ => panic!() })
+                let mut ids: Vec<i32> = rows
+                    .iter()
+                    .map(|r| match &r.values[0] {
+                        Datum::Int32(v) => *v,
+                        _ => panic!(),
+                    })
                     .collect();
                 ids.sort();
                 assert_eq!(ids, vec![1, 3]);
@@ -4874,8 +5583,11 @@ mod end_to_end_tests {
 
         let stats = qe.last_scatter_stats();
         // IN (1, 3) touches at most 2 shards; verify pruning happened
-        assert!(stats.shards_participated <= 2,
-            "IN-list should prune to <= 2 shards, got {}", stats.shards_participated);
+        assert!(
+            stats.shards_participated <= 2,
+            "IN-list should prune to <= 2 shards, got {}",
+            stats.shards_participated
+        );
     }
 
     #[test]
@@ -4888,7 +5600,8 @@ mod end_to_end_tests {
 
         let plan = plan_and_wrap(
             "UPDATE items SET val = 999 WHERE id = 7 AND val > 0",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         let result = qe.execute(&plan, None).unwrap();
         match result {
@@ -4916,10 +5629,7 @@ mod end_to_end_tests {
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
         let shards: Vec<ShardId> = (0..4).map(ShardId).collect();
 
-        let plan = plan_and_wrap(
-            "DELETE FROM items WHERE id IN (1, 3)",
-            &catalog, &shards,
-        );
+        let plan = plan_and_wrap("DELETE FROM items WHERE id IN (1, 3)", &catalog, &shards);
         let result = qe.execute(&plan, None).unwrap();
         match result {
             ExecutionResult::Dml { rows_affected, .. } => {
@@ -4948,15 +5658,20 @@ mod end_to_end_tests {
 
         let plan = plan_and_wrap(
             "DELETE FROM items WHERE id IN (1, 3, 5) RETURNING id, val",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         let result = qe.execute(&plan, None).unwrap();
         match &result {
             ExecutionResult::Query { columns, rows } => {
                 assert_eq!(columns.len(), 2, "RETURNING id, val");
                 assert_eq!(rows.len(), 3, "Should return 3 deleted rows");
-                let mut ids: Vec<i32> = rows.iter()
-                    .map(|r| match &r.values[0] { Datum::Int32(v) => *v, _ => panic!() })
+                let mut ids: Vec<i32> = rows
+                    .iter()
+                    .map(|r| match &r.values[0] {
+                        Datum::Int32(v) => *v,
+                        _ => panic!(),
+                    })
                     .collect();
                 ids.sort();
                 assert_eq!(ids, vec![1, 3, 5], "Should return ids 1, 3, 5");
@@ -4975,7 +5690,8 @@ mod end_to_end_tests {
 
         let plan = plan_and_wrap(
             "UPDATE items SET val = val + 1000 RETURNING id, val",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         let result = qe.execute(&plan, None).unwrap();
         match &result {
@@ -4997,14 +5713,19 @@ mod end_to_end_tests {
 
         let plan = plan_and_wrap(
             "SELECT id, val FROM items ORDER BY id LIMIT 5",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         let result = qe.execute(&plan, None).unwrap();
         match result {
             ExecutionResult::Query { rows, .. } => {
                 assert_eq!(rows.len(), 5, "LIMIT 5 should return 5 rows");
-                let ids: Vec<i32> = rows.iter()
-                    .map(|r| match &r.values[0] { Datum::Int32(v) => *v, _ => panic!() })
+                let ids: Vec<i32> = rows
+                    .iter()
+                    .map(|r| match &r.values[0] {
+                        Datum::Int32(v) => *v,
+                        _ => panic!(),
+                    })
                     .collect();
                 assert_eq!(ids, vec![0, 1, 2, 3, 4], "Should be sorted ascending");
             }
@@ -5021,14 +5742,19 @@ mod end_to_end_tests {
 
         let plan = plan_and_wrap(
             "SELECT id, val FROM items ORDER BY id DESC LIMIT 3",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         let result = qe.execute(&plan, None).unwrap();
         match result {
             ExecutionResult::Query { rows, .. } => {
                 assert_eq!(rows.len(), 3);
-                let ids: Vec<i32> = rows.iter()
-                    .map(|r| match &r.values[0] { Datum::Int32(v) => *v, _ => panic!() })
+                let ids: Vec<i32> = rows
+                    .iter()
+                    .map(|r| match &r.values[0] {
+                        Datum::Int32(v) => *v,
+                        _ => panic!(),
+                    })
                     .collect();
                 assert_eq!(ids, vec![19, 18, 17], "Should be sorted descending");
             }
@@ -5046,16 +5772,25 @@ mod end_to_end_tests {
 
         let plan = plan_and_wrap(
             "SELECT id, val FROM items ORDER BY id LIMIT 3 OFFSET 5",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         let result = qe.execute(&plan, None).unwrap();
         match result {
             ExecutionResult::Query { rows, .. } => {
                 assert_eq!(rows.len(), 3);
-                let ids: Vec<i32> = rows.iter()
-                    .map(|r| match &r.values[0] { Datum::Int32(v) => *v, _ => panic!() })
+                let ids: Vec<i32> = rows
+                    .iter()
+                    .map(|r| match &r.values[0] {
+                        Datum::Int32(v) => *v,
+                        _ => panic!(),
+                    })
                     .collect();
-                assert_eq!(ids, vec![5, 6, 7], "OFFSET 5 + LIMIT 3 should give ids 5,6,7");
+                assert_eq!(
+                    ids,
+                    vec![5, 6, 7],
+                    "OFFSET 5 + LIMIT 3 should give ids 5,6,7"
+                );
             }
             other => panic!("Expected Query, got {:?}", other),
         }
@@ -5116,14 +5851,15 @@ mod end_to_end_tests {
     fn test_e2e_hash_distributed_group_by_count() {
         // GROUP BY name, COUNT(*) across 4 shards using users table.
         // setup() creates 40 users (10 per shard), each with unique name.
-        // GROUP BY name 鈫?40 groups, each with count=1.
+        // GROUP BY name  → 40 groups, each with count=1.
         let (engine, catalog) = setup();
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
         let shards: Vec<ShardId> = (0..4).map(ShardId).collect();
 
         let plan = plan_and_wrap(
             "SELECT name, COUNT(*) FROM users GROUP BY name ORDER BY name LIMIT 5",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         match qe.execute(&plan, None).unwrap() {
             ExecutionResult::Query { rows, .. } => {
@@ -5141,14 +5877,15 @@ mod end_to_end_tests {
     fn test_e2e_hash_distributed_group_by_sum_having() {
         // GROUP BY name, SUM(age) HAVING SUM(age) > 50 across 4 shards.
         // setup() creates 40 users with age = 20+id (ages 20..59).
-        // Each name is unique 鈫?40 groups. HAVING SUM(age) > 50 filters to ages 51..59 = 9 rows.
+        // Each name is unique  → 40 groups. HAVING SUM(age) > 50 filters to ages 51..59 = 9 rows.
         let (engine, catalog) = setup();
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
         let shards: Vec<ShardId> = (0..4).map(ShardId).collect();
 
         let plan = plan_and_wrap(
             "SELECT name, SUM(age) FROM users GROUP BY name HAVING SUM(age) > 50 ORDER BY name",
-            &catalog, &shards,
+            &catalog,
+            &shards,
         );
         match qe.execute(&plan, None).unwrap() {
             ExecutionResult::Query { rows, .. } => {
@@ -5197,8 +5934,8 @@ mod wal_chunk_transport_tests {
     use falcon_storage::wal::WalRecord;
 
     use crate::replication::{
-        ChannelTransport, InProcessTransport, LsnWalRecord, ReplicationLog,
-        ReplicationTransport, ShardReplicaGroup, WalChunk,
+        ChannelTransport, InProcessTransport, LsnWalRecord, ReplicationLog, ReplicationTransport,
+        ShardReplicaGroup, WalChunk,
     };
     use std::sync::Arc;
 
@@ -5231,15 +5968,21 @@ mod wal_chunk_transport_tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         }
     }
 
     #[test]
     fn test_wal_chunk_checksum() {
         let records = vec![
-            LsnWalRecord { lsn: 1, record: WalRecord::BeginTxn { txn_id: TxnId(1) } },
-            LsnWalRecord { lsn: 2, record: WalRecord::BeginTxn { txn_id: TxnId(2) } },
+            LsnWalRecord {
+                lsn: 1,
+                record: WalRecord::BeginTxn { txn_id: TxnId(1) },
+            },
+            LsnWalRecord {
+                lsn: 2,
+                record: WalRecord::BeginTxn { txn_id: TxnId(2) },
+            },
         ];
         let chunk = WalChunk::from_records(ShardId(0), records);
         assert!(chunk.verify_checksum(), "checksum should be valid");
@@ -5291,20 +6034,33 @@ mod wal_chunk_transport_tests {
         assert_eq!(decoded.start_lsn, chunk.start_lsn);
         assert_eq!(decoded.end_lsn, chunk.end_lsn);
         assert_eq!(decoded.checksum, chunk.checksum);
-        assert!(decoded.verify_checksum(), "deserialized chunk checksum should be valid");
+        assert!(
+            decoded.verify_checksum(),
+            "deserialized chunk checksum should be valid"
+        );
         assert_eq!(decoded.len(), 2);
     }
 
     #[test]
     fn test_wal_chunk_json_roundtrip_global_txn() {
         let records = vec![
-            LsnWalRecord { lsn: 1, record: WalRecord::BeginTxn { txn_id: TxnId(1) } },
-            LsnWalRecord { lsn: 2, record: WalRecord::CommitTxnGlobal { txn_id: TxnId(1), commit_ts: Timestamp(5) } },
+            LsnWalRecord {
+                lsn: 1,
+                record: WalRecord::BeginTxn { txn_id: TxnId(1) },
+            },
+            LsnWalRecord {
+                lsn: 2,
+                record: WalRecord::CommitTxnGlobal {
+                    txn_id: TxnId(1),
+                    commit_ts: Timestamp(5),
+                },
+            },
         ];
         let chunk = WalChunk::from_records(ShardId(3), records);
 
         let json = serde_json::to_string(&chunk).expect("WalChunk should serialize to JSON");
-        let decoded: WalChunk = serde_json::from_str(&json).expect("WalChunk should deserialize from JSON");
+        let decoded: WalChunk =
+            serde_json::from_str(&json).expect("WalChunk should deserialize from JSON");
 
         assert_eq!(decoded.shard_id, ShardId(3));
         assert_eq!(decoded.len(), 2);
@@ -5321,12 +6077,12 @@ mod wal_chunk_transport_tests {
         log.append(WalRecord::BeginTxn { txn_id: TxnId(2) });
         log.append(WalRecord::BeginTxn { txn_id: TxnId(3) });
 
-        // Pull from LSN 0 鈥?should get all 3
+        // Pull from LSN 0  — should get all 3
         let chunk = transport.pull_wal_chunk(ShardId(0), 0, 100).unwrap();
         assert_eq!(chunk.len(), 3);
         assert!(chunk.verify_checksum());
 
-        // Pull from LSN 2 鈥?should get only LSN 3
+        // Pull from LSN 2  — should get only LSN 3
         let chunk2 = transport.pull_wal_chunk(ShardId(0), 2, 100).unwrap();
         assert_eq!(chunk2.len(), 1);
         assert_eq!(chunk2.start_lsn, 3);
@@ -5349,18 +6105,24 @@ mod wal_chunk_transport_tests {
         let transport = ChannelTransport::new(ShardId(0));
 
         let records = vec![
-            LsnWalRecord { lsn: 1, record: WalRecord::BeginTxn { txn_id: TxnId(1) } },
-            LsnWalRecord { lsn: 2, record: WalRecord::BeginTxn { txn_id: TxnId(2) } },
+            LsnWalRecord {
+                lsn: 1,
+                record: WalRecord::BeginTxn { txn_id: TxnId(1) },
+            },
+            LsnWalRecord {
+                lsn: 2,
+                record: WalRecord::BeginTxn { txn_id: TxnId(2) },
+            },
         ];
         let chunk = WalChunk::from_records(ShardId(0), records);
         transport.push_chunk(chunk).unwrap();
 
-        // Pull 鈥?should get the chunk
+        // Pull  — should get the chunk
         let pulled = transport.pull_wal_chunk(ShardId(0), 0, 100).unwrap();
         assert_eq!(pulled.len(), 2);
         assert!(pulled.verify_checksum());
 
-        // Pull again 鈥?nothing pending
+        // Pull again  — nothing pending
         let empty = transport.pull_wal_chunk(ShardId(0), 0, 100).unwrap();
         assert!(empty.is_empty());
     }
@@ -5445,7 +6207,7 @@ mod wal_chunk_transport_tests {
 
         // Apply once
         group.apply_chunk_to_replica(0, &chunk).unwrap();
-        // Apply again (should be idempotent 鈥?skip already-applied LSNs)
+        // Apply again (should be idempotent  — skip already-applied LSNs)
         let applied2 = group.apply_chunk_to_replica(0, &chunk).unwrap();
         assert_eq!(applied2, 2); // returns chunk size but skips internally
 
@@ -5486,8 +6248,8 @@ mod async_transport_tests {
     use falcon_storage::wal::WalRecord;
 
     use crate::replication::{
-        AsyncReplicationTransport, InProcessTransport, ChannelTransport,
-        LsnWalRecord, ReplicationLog, WalChunk,
+        AsyncReplicationTransport, ChannelTransport, InProcessTransport, LsnWalRecord,
+        ReplicationLog, WalChunk,
     };
 
     #[tokio::test]
@@ -5499,9 +6261,9 @@ mod async_transport_tests {
         log.append(WalRecord::BeginTxn { txn_id: TxnId(2) });
 
         // Use the async trait method (blanket impl delegates to sync)
-        let chunk = AsyncReplicationTransport::pull_wal_chunk(
-            &transport, ShardId(0), 0, 100,
-        ).await.unwrap();
+        let chunk = AsyncReplicationTransport::pull_wal_chunk(&transport, ShardId(0), 0, 100)
+            .await
+            .unwrap();
         assert_eq!(chunk.len(), 2);
         assert!(chunk.verify_checksum());
     }
@@ -5511,9 +6273,9 @@ mod async_transport_tests {
         let log = Arc::new(ReplicationLog::new());
         let transport = InProcessTransport::new(ShardId(0), log);
 
-        AsyncReplicationTransport::ack_wal(
-            &transport, ShardId(0), 0, 5,
-        ).await.unwrap();
+        AsyncReplicationTransport::ack_wal(&transport, ShardId(0), 0, 5)
+            .await
+            .unwrap();
         assert_eq!(transport.get_ack_lsn(0), 5);
     }
 
@@ -5521,15 +6283,16 @@ mod async_transport_tests {
     async fn test_async_pull_via_channel_transport() {
         let transport = ChannelTransport::new(ShardId(0));
 
-        let records = vec![
-            LsnWalRecord { lsn: 1, record: WalRecord::BeginTxn { txn_id: TxnId(1) } },
-        ];
+        let records = vec![LsnWalRecord {
+            lsn: 1,
+            record: WalRecord::BeginTxn { txn_id: TxnId(1) },
+        }];
         let chunk = WalChunk::from_records(ShardId(0), records);
         transport.push_chunk(chunk).unwrap();
 
-        let pulled = AsyncReplicationTransport::pull_wal_chunk(
-            &transport, ShardId(0), 0, 100,
-        ).await.unwrap();
+        let pulled = AsyncReplicationTransport::pull_wal_chunk(&transport, ShardId(0), 0, 100)
+            .await
+            .unwrap();
         assert_eq!(pulled.len(), 1);
         assert!(pulled.verify_checksum());
     }
@@ -5544,16 +6307,14 @@ mod grpc_transport_tests {
     use std::sync::Arc;
 
     use falcon_common::datum::{Datum, OwnedRow};
-    use falcon_common::types::{ShardId, TableId, TxnId, Timestamp};
+    use falcon_common::types::{ShardId, TableId, Timestamp, TxnId};
     use falcon_storage::wal::WalRecord;
 
     use crate::grpc_transport::{
-        encode_wal_record, decode_wal_record, encode_wal_chunk, decode_wal_chunk,
-        GrpcTransport, WalReplicationService,
+        decode_wal_chunk, decode_wal_record, encode_wal_chunk, encode_wal_record, GrpcTransport,
+        WalReplicationService,
     };
-    use crate::replication::{
-        AsyncReplicationTransport, LsnWalRecord, ReplicationLog, WalChunk,
-    };
+    use crate::replication::{AsyncReplicationTransport, LsnWalRecord, ReplicationLog, WalChunk};
 
     #[test]
     fn test_wal_record_encode_decode_roundtrip() {
@@ -5573,8 +6334,17 @@ mod grpc_transport_tests {
     #[test]
     fn test_wal_chunk_encode_decode_roundtrip() {
         let records = vec![
-            LsnWalRecord { lsn: 1, record: WalRecord::BeginTxn { txn_id: TxnId(1) } },
-            LsnWalRecord { lsn: 2, record: WalRecord::CommitTxnLocal { txn_id: TxnId(1), commit_ts: Timestamp(10) } },
+            LsnWalRecord {
+                lsn: 1,
+                record: WalRecord::BeginTxn { txn_id: TxnId(1) },
+            },
+            LsnWalRecord {
+                lsn: 2,
+                record: WalRecord::CommitTxnLocal {
+                    txn_id: TxnId(1),
+                    commit_ts: Timestamp(10),
+                },
+            },
         ];
         let chunk = WalChunk::from_records(ShardId(0), records);
         let bytes = encode_wal_chunk(&chunk).unwrap();
@@ -5599,7 +6369,7 @@ mod grpc_transport_tests {
         let chunk = svc.handle_pull(ShardId(0), 0, 100).unwrap();
         assert_eq!(chunk.len(), 3);
 
-        // Pull from LSN 2 鈥?should get only LSN 3
+        // Pull from LSN 2  — should get only LSN 3
         let chunk2 = svc.handle_pull(ShardId(0), 2, 100).unwrap();
         assert_eq!(chunk2.len(), 1);
         assert_eq!(chunk2.start_lsn, 3);
@@ -5632,7 +6402,7 @@ mod grpc_transport_tests {
         svc.handle_ack(ShardId(0), 0, 1);
         assert_eq!(svc.get_ack_lsn(ShardId(0), 0), 1);
 
-        // Lag: primary at LSN 2, replica at LSN 1 鈫?lag = 1
+        // Lag: primary at LSN 2, replica at LSN 1  → lag = 1
         let lags = svc.replication_lag(ShardId(0));
         assert_eq!(lags.len(), 1);
         assert_eq!(lags[0], (0, 1));
@@ -5640,23 +6410,24 @@ mod grpc_transport_tests {
 
     #[tokio::test]
     async fn test_grpc_transport_pull_connection_refused() {
-        // GrpcTransport now actually connects via gRPC 鈥?connecting to a
+        // GrpcTransport now actually connects via gRPC  — connecting to a
         // non-existent server should return a connection error.
         let transport = GrpcTransport::new("http://127.0.0.1:19999".into(), ShardId(0));
-        let result = AsyncReplicationTransport::pull_wal_chunk(
-            &transport, ShardId(0), 0, 100,
-        ).await;
+        let result =
+            AsyncReplicationTransport::pull_wal_chunk(&transport, ShardId(0), 0, 100).await;
         assert!(result.is_err(), "pull to non-existent server should fail");
         let err_msg = format!("{}", result.unwrap_err());
-        assert!(err_msg.contains("gRPC connect error"), "Expected connect error, got: {}", err_msg);
+        assert!(
+            err_msg.contains("gRPC connect error"),
+            "Expected connect error, got: {}",
+            err_msg
+        );
     }
 
     #[tokio::test]
     async fn test_grpc_transport_ack_connection_refused() {
         let transport = GrpcTransport::new("http://127.0.0.1:19999".into(), ShardId(0));
-        let result = AsyncReplicationTransport::ack_wal(
-            &transport, ShardId(0), 0, 10,
-        ).await;
+        let result = AsyncReplicationTransport::ack_wal(&transport, ShardId(0), 0, 10).await;
         assert!(result.is_err(), "ack to non-existent server should fail");
     }
 
@@ -5696,9 +6467,9 @@ mod grpc_transport_tests {
         let endpoint = format!("http://127.0.0.1:{}", addr.port());
         let transport = GrpcTransport::new(endpoint, ShardId(0));
 
-        let chunk = AsyncReplicationTransport::pull_wal_chunk(
-            &transport, ShardId(0), 0, 100,
-        ).await.unwrap();
+        let chunk = AsyncReplicationTransport::pull_wal_chunk(&transport, ShardId(0), 0, 100)
+            .await
+            .unwrap();
 
         assert_eq!(chunk.len(), 3, "Should get all 3 WAL records");
         assert!(chunk.verify_checksum());
@@ -5706,16 +6477,16 @@ mod grpc_transport_tests {
         assert_eq!(chunk.end_lsn, 3);
 
         // --- Client: pull from LSN 2 (should get records 3 only) ---
-        let chunk2 = AsyncReplicationTransport::pull_wal_chunk(
-            &transport, ShardId(0), 2, 100,
-        ).await.unwrap();
+        let chunk2 = AsyncReplicationTransport::pull_wal_chunk(&transport, ShardId(0), 2, 100)
+            .await
+            .unwrap();
         assert_eq!(chunk2.len(), 1);
         assert_eq!(chunk2.start_lsn, 3);
 
         // --- Client: ack WAL ---
-        AsyncReplicationTransport::ack_wal(
-            &transport, ShardId(0), 0, 3,
-        ).await.unwrap();
+        AsyncReplicationTransport::ack_wal(&transport, ShardId(0), 0, 3)
+            .await
+            .unwrap();
         assert_eq!(transport.get_ack_lsn(0), 3);
 
         // Clean up
@@ -5726,7 +6497,7 @@ mod grpc_transport_tests {
 
     #[test]
     fn test_proto_wal_chunk_roundtrip() {
-        use crate::grpc_transport::{wal_chunk_to_proto, proto_to_wal_chunk};
+        use crate::grpc_transport::{proto_to_wal_chunk, wal_chunk_to_proto};
 
         let records = vec![
             LsnWalRecord {
@@ -5758,7 +6529,7 @@ mod grpc_transport_tests {
         assert_eq!(chunk.shard_id, ShardId(7));
         assert!(chunk.verify_checksum());
 
-        // Domain 鈫?Proto
+        // Domain  → Proto
         let proto_msg = wal_chunk_to_proto(&chunk).unwrap();
         assert_eq!(proto_msg.shard_id, 7);
         assert_eq!(proto_msg.start_lsn, 1);
@@ -5766,7 +6537,7 @@ mod grpc_transport_tests {
         assert_eq!(proto_msg.records.len(), 3);
         assert_eq!(proto_msg.checksum, chunk.checksum);
 
-        // Proto 鈫?Domain
+        // Proto  → Domain
         let roundtripped = proto_to_wal_chunk(&proto_msg).unwrap();
         assert_eq!(roundtripped.shard_id, ShardId(7));
         assert_eq!(roundtripped.start_lsn, 1);
@@ -5782,7 +6553,7 @@ mod grpc_transport_tests {
 
     #[test]
     fn test_proto_empty_chunk_roundtrip() {
-        use crate::grpc_transport::{wal_chunk_to_proto, proto_to_wal_chunk};
+        use crate::grpc_transport::{proto_to_wal_chunk, wal_chunk_to_proto};
 
         let chunk = WalChunk::empty(ShardId(0));
         let proto_msg = wal_chunk_to_proto(&chunk).unwrap();
@@ -5793,7 +6564,7 @@ mod grpc_transport_tests {
 
     // --- Checkpoint streaming tests ---
 
-    use crate::grpc_transport::{CheckpointStreamer, CheckpointAssembler};
+    use crate::grpc_transport::{CheckpointAssembler, CheckpointStreamer};
 
     #[test]
     fn test_checkpoint_streamer_single_chunk() {
@@ -5924,15 +6695,21 @@ mod grpc_transport_tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         };
 
         let mut catalog = Catalog::default();
         catalog.add_table(schema);
 
         let rows = vec![
-            (vec![0, 0, 0, 1], OwnedRow::new(vec![Datum::Int32(1), Datum::Text("alice".into())])),
-            (vec![0, 0, 0, 2], OwnedRow::new(vec![Datum::Int32(2), Datum::Text("bob".into())])),
+            (
+                vec![0, 0, 0, 1],
+                OwnedRow::new(vec![Datum::Int32(1), Datum::Text("alice".into())]),
+            ),
+            (
+                vec![0, 0, 0, 2],
+                OwnedRow::new(vec![Datum::Int32(2), Datum::Text("bob".into())]),
+            ),
         ];
 
         let ckpt = CheckpointData {
@@ -5942,7 +6719,7 @@ mod grpc_transport_tests {
             wal_lsn: 42,
         };
 
-        // Stream 鈫?assemble roundtrip with small chunk size to force multi-chunk
+        // Stream  → assemble roundtrip with small chunk size to force multi-chunk
         let streamer = CheckpointStreamer::from_checkpoint_data(&ckpt).unwrap();
         assert!(streamer.num_chunks() >= 1);
 
@@ -5960,8 +6737,14 @@ mod grpc_transport_tests {
         assert!(restored.catalog.find_table("users").is_some());
         assert_eq!(restored.table_data.len(), 1);
         assert_eq!(restored.table_data[0].1.len(), 2);
-        assert_eq!(restored.table_data[0].1[0].1.values[1], Datum::Text("alice".into()));
-        assert_eq!(restored.table_data[0].1[1].1.values[1], Datum::Text("bob".into()));
+        assert_eq!(
+            restored.table_data[0].1[0].1.values[1],
+            Datum::Text("alice".into())
+        );
+        assert_eq!(
+            restored.table_data[0].1[1].1.values[1],
+            Datum::Text("bob".into())
+        );
     }
 }
 
@@ -6007,7 +6790,7 @@ mod promote_fencing_tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         }
     }
 
@@ -6076,15 +6859,17 @@ mod promote_fencing_tests {
 
     #[test]
     fn test_promote_with_routing_records_metrics() {
-        use falcon_common::types::NodeId;
         use crate::routing::shard_map::ShardMap;
+        use falcon_common::types::NodeId;
 
         let mut group = ShardReplicaGroup::new(ShardId(0), &[test_schema()]).unwrap();
         let mut shard_map = ShardMap::uniform(2, NodeId(1));
 
         insert_on_primary(&group, TxnId(1), Timestamp(1), 1, "v");
         group.catch_up_replica(0).unwrap();
-        group.promote_with_routing(0, &mut shard_map, NodeId(2)).unwrap();
+        group
+            .promote_with_routing(0, &mut shard_map, NodeId(2))
+            .unwrap();
 
         let snap = group.metrics.snapshot();
         assert_eq!(snap.promote_count, 1);
@@ -6110,7 +6895,11 @@ mod promote_fencing_tests {
         group
             .primary
             .storage
-            .commit_txn(TxnId(10), Timestamp(10), falcon_common::types::TxnType::Local)
+            .commit_txn(
+                TxnId(10),
+                Timestamp(10),
+                falcon_common::types::TxnType::Local,
+            )
             .unwrap();
 
         let rows = group
@@ -6151,17 +6940,32 @@ mod promote_fencing_tests {
         let schemas = vec![test_schema()];
         let mut group = ShardReplicaGroup::new(ShardId(0), &schemas).unwrap();
 
-        // First promote: primary(A) 鈫?replica(B) promotes to primary
+        // First promote: primary(A)  → replica(B) promotes to primary
         insert_on_primary(&group, TxnId(1), Timestamp(1), 1, "v1");
         group.catch_up_replica(0).unwrap();
         group.promote(0).unwrap();
 
-        // Second promote: primary(B) 鈫?replica(A) promotes back
+        // Second promote: primary(B)  → replica(A) promotes back
         let row = OwnedRow::new(vec![Datum::Int32(2), Datum::Text("v2".into())]);
-        group.primary.storage.insert(TableId(1), row.clone(), TxnId(2)).unwrap();
-        group.primary.storage.commit_txn(TxnId(2), Timestamp(2), falcon_common::types::TxnType::Local).unwrap();
-        group.ship_wal_record(WalRecord::Insert { txn_id: TxnId(2), table_id: TableId(1), row });
-        group.ship_wal_record(WalRecord::CommitTxnLocal { txn_id: TxnId(2), commit_ts: Timestamp(2) });
+        group
+            .primary
+            .storage
+            .insert(TableId(1), row.clone(), TxnId(2))
+            .unwrap();
+        group
+            .primary
+            .storage
+            .commit_txn(TxnId(2), Timestamp(2), falcon_common::types::TxnType::Local)
+            .unwrap();
+        group.ship_wal_record(WalRecord::Insert {
+            txn_id: TxnId(2),
+            table_id: TableId(1),
+            row,
+        });
+        group.ship_wal_record(WalRecord::CommitTxnLocal {
+            txn_id: TxnId(2),
+            commit_ts: Timestamp(2),
+        });
         group.catch_up_replica(0).unwrap();
         group.promote(0).unwrap();
 
@@ -6192,11 +6996,7 @@ mod txn_context_tests {
 
     #[test]
     fn test_global_txn_context_valid() {
-        let ctx = TxnContext::global(
-            TxnId(1),
-            vec![ShardId(0), ShardId(1)],
-            Timestamp(1),
-        );
+        let ctx = TxnContext::global(TxnId(1), vec![ShardId(0), ShardId(1)], Timestamp(1));
         assert!(ctx.validate_commit_invariants().is_ok());
     }
 
@@ -6335,7 +7135,7 @@ mod replication_gc_tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         }
     }
 
@@ -6374,27 +7174,86 @@ mod replication_gc_tests {
         let pk = falcon_storage::memtable::encode_pk(&base_row, &[0]);
 
         // Insert v1
-        group.primary.storage.insert(TableId(1), base_row.clone(), TxnId(1)).unwrap();
-        group.primary.storage.commit_txn(TxnId(1), Timestamp(10), falcon_common::types::TxnType::Local).unwrap();
-        group.ship_wal_record(WalRecord::Insert { txn_id: TxnId(1), table_id: TableId(1), row: base_row });
+        group
+            .primary
+            .storage
+            .insert(TableId(1), base_row.clone(), TxnId(1))
+            .unwrap();
+        group
+            .primary
+            .storage
+            .commit_txn(
+                TxnId(1),
+                Timestamp(10),
+                falcon_common::types::TxnType::Local,
+            )
+            .unwrap();
+        group.ship_wal_record(WalRecord::Insert {
+            txn_id: TxnId(1),
+            table_id: TableId(1),
+            row: base_row,
+        });
 
-        group.ship_wal_record(WalRecord::CommitTxnLocal { txn_id: TxnId(1), commit_ts: Timestamp(10) });
+        group.ship_wal_record(WalRecord::CommitTxnLocal {
+            txn_id: TxnId(1),
+            commit_ts: Timestamp(10),
+        });
 
         // Update to v2
         let row2 = OwnedRow::new(vec![Datum::Int32(1), Datum::Text("v2".into())]);
-        group.primary.storage.update(TableId(1), &pk, row2.clone(), TxnId(2)).unwrap();
-        group.primary.storage.commit_txn(TxnId(2), Timestamp(20), falcon_common::types::TxnType::Local).unwrap();
-        group.ship_wal_record(WalRecord::Update { txn_id: TxnId(2), table_id: TableId(1), pk: pk.clone(), new_row: row2 });
-        group.ship_wal_record(WalRecord::CommitTxnLocal { txn_id: TxnId(2), commit_ts: Timestamp(20) });
+        group
+            .primary
+            .storage
+            .update(TableId(1), &pk, row2.clone(), TxnId(2))
+            .unwrap();
+        group
+            .primary
+            .storage
+            .commit_txn(
+                TxnId(2),
+                Timestamp(20),
+                falcon_common::types::TxnType::Local,
+            )
+            .unwrap();
+        group.ship_wal_record(WalRecord::Update {
+            txn_id: TxnId(2),
+            table_id: TableId(1),
+            pk: pk.clone(),
+            new_row: row2,
+        });
+        group.ship_wal_record(WalRecord::CommitTxnLocal {
+            txn_id: TxnId(2),
+            commit_ts: Timestamp(20),
+        });
 
         // Update to v3
         let row3 = OwnedRow::new(vec![Datum::Int32(1), Datum::Text("v3".into())]);
-        group.primary.storage.update(TableId(1), &pk, row3.clone(), TxnId(3)).unwrap();
-        group.primary.storage.commit_txn(TxnId(3), Timestamp(30), falcon_common::types::TxnType::Local).unwrap();
-        group.ship_wal_record(WalRecord::Update { txn_id: TxnId(3), table_id: TableId(1), pk: pk.clone(), new_row: row3 });
-        group.ship_wal_record(WalRecord::CommitTxnLocal { txn_id: TxnId(3), commit_ts: Timestamp(30) });
+        group
+            .primary
+            .storage
+            .update(TableId(1), &pk, row3.clone(), TxnId(3))
+            .unwrap();
+        group
+            .primary
+            .storage
+            .commit_txn(
+                TxnId(3),
+                Timestamp(30),
+                falcon_common::types::TxnType::Local,
+            )
+            .unwrap();
+        group.ship_wal_record(WalRecord::Update {
+            txn_id: TxnId(3),
+            table_id: TableId(1),
+            pk: pk.clone(),
+            new_row: row3,
+        });
+        group.ship_wal_record(WalRecord::CommitTxnLocal {
+            txn_id: TxnId(3),
+            commit_ts: Timestamp(30),
+        });
 
-        // GC on primary at watermark 25 鈥?reclaims ts=10
+        // GC on primary at watermark 25  — reclaims ts=10
         let result = group.primary.storage.gc_sweep(Timestamp(25));
         assert_eq!(result.reclaimed_versions, 1);
 
@@ -6438,9 +7297,15 @@ mod replication_gc_tests {
         // GC with replica-aware safepoint: should NOT reclaim anything
         // because all commits are at ts=10, 20, 30 and safepoint=14
         // means only ts=10 is eligible, but each key has a single version.
-        let config = GcConfig { min_chain_length: 0, ..Default::default() };
+        let config = GcConfig {
+            min_chain_length: 0,
+            ..Default::default()
+        };
         let stats = GcStats::new();
-        let result = group.primary.storage.run_gc_with_config(safepoint, &config, &stats);
+        let result = group
+            .primary
+            .storage
+            .run_gc_with_config(safepoint, &config, &stats);
         // No versions to reclaim (each key has exactly 1 version)
         assert_eq!(result.reclaimed_versions, 0);
 
@@ -6450,8 +7315,11 @@ mod replication_gc_tests {
         let safepoint2 = compute_safepoint(min_active_ts, Timestamp(100));
         assert_eq!(safepoint2, Timestamp(99));
 
-        // Still 0 reclaimed 鈥?each key has 1 version (no multi-version chains)
-        let result2 = group.primary.storage.run_gc_with_config(safepoint2, &config, &stats);
+        // Still 0 reclaimed  — each key has 1 version (no multi-version chains)
+        let result2 = group
+            .primary
+            .storage
+            .run_gc_with_config(safepoint2, &config, &stats);
         assert_eq!(result2.reclaimed_versions, 0);
     }
 
@@ -6471,20 +7339,33 @@ mod replication_gc_tests {
         group.promote(0).unwrap();
 
         // New primary should have both rows
-        let rows = group.primary.storage
+        let rows = group
+            .primary
+            .storage
             .scan(TableId(1), TxnId(999), Timestamp(100))
             .unwrap();
         assert_eq!(rows.len(), 2);
 
         // New primary should be writable
         let row = OwnedRow::new(vec![Datum::Int32(3), Datum::Text("after".into())]);
-        group.primary.storage.insert(TableId(1), row, TxnId(10)).unwrap();
-        group.primary.storage.commit_txn(
-            TxnId(10), Timestamp(30),
-            falcon_common::types::TxnType::Local,
-        ).unwrap();
+        group
+            .primary
+            .storage
+            .insert(TableId(1), row, TxnId(10))
+            .unwrap();
+        group
+            .primary
+            .storage
+            .commit_txn(
+                TxnId(10),
+                Timestamp(30),
+                falcon_common::types::TxnType::Local,
+            )
+            .unwrap();
 
-        let rows2 = group.primary.storage
+        let rows2 = group
+            .primary
+            .storage
             .scan(TableId(1), TxnId(999), Timestamp(100))
             .unwrap();
         assert_eq!(rows2.len(), 3);
@@ -6504,7 +7385,7 @@ mod replication_gc_tests {
     fn test_m1_full_lifecycle_acceptance() {
         let mut group = ShardReplicaGroup::new(ShardId(0), &[test_schema()]).unwrap();
 
-        // 鈹€鈹€ Phase 1: Write data with multi-version chains 鈹€鈹€
+        // ── Phase 1: Write data with multi-version chains ──
         // Insert 5 rows
         for i in 1..=5 {
             insert_on_primary(
@@ -6518,56 +7399,130 @@ mod replication_gc_tests {
 
         // Update rows 1-3 to create multi-version chains
         let pk1 = falcon_storage::memtable::encode_pk(
-            &OwnedRow::new(vec![Datum::Int32(1), Datum::Text("x".into())]), &[0]);
+            &OwnedRow::new(vec![Datum::Int32(1), Datum::Text("x".into())]),
+            &[0],
+        );
         let pk2 = falcon_storage::memtable::encode_pk(
-            &OwnedRow::new(vec![Datum::Int32(2), Datum::Text("x".into())]), &[0]);
+            &OwnedRow::new(vec![Datum::Int32(2), Datum::Text("x".into())]),
+            &[0],
+        );
         let pk3 = falcon_storage::memtable::encode_pk(
-            &OwnedRow::new(vec![Datum::Int32(3), Datum::Text("x".into())]), &[0]);
+            &OwnedRow::new(vec![Datum::Int32(3), Datum::Text("x".into())]),
+            &[0],
+        );
 
         let upd1 = OwnedRow::new(vec![Datum::Int32(1), Datum::Text("updated_1".into())]);
-        group.primary.storage.update(TableId(1), &pk1, upd1.clone(), TxnId(10)).unwrap();
-        group.primary.storage.commit_txn(TxnId(10), Timestamp(60), falcon_common::types::TxnType::Local).unwrap();
-        group.ship_wal_record(WalRecord::Update { txn_id: TxnId(10), table_id: TableId(1), pk: pk1.clone(), new_row: upd1 });
-        group.ship_wal_record(WalRecord::CommitTxnLocal { txn_id: TxnId(10), commit_ts: Timestamp(60) });
+        group
+            .primary
+            .storage
+            .update(TableId(1), &pk1, upd1.clone(), TxnId(10))
+            .unwrap();
+        group
+            .primary
+            .storage
+            .commit_txn(
+                TxnId(10),
+                Timestamp(60),
+                falcon_common::types::TxnType::Local,
+            )
+            .unwrap();
+        group.ship_wal_record(WalRecord::Update {
+            txn_id: TxnId(10),
+            table_id: TableId(1),
+            pk: pk1.clone(),
+            new_row: upd1,
+        });
+        group.ship_wal_record(WalRecord::CommitTxnLocal {
+            txn_id: TxnId(10),
+            commit_ts: Timestamp(60),
+        });
 
         let upd2 = OwnedRow::new(vec![Datum::Int32(2), Datum::Text("updated_2".into())]);
-        group.primary.storage.update(TableId(1), &pk2, upd2.clone(), TxnId(11)).unwrap();
-        group.primary.storage.commit_txn(TxnId(11), Timestamp(70), falcon_common::types::TxnType::Local).unwrap();
-        group.ship_wal_record(WalRecord::Update { txn_id: TxnId(11), table_id: TableId(1), pk: pk2.clone(), new_row: upd2 });
-        group.ship_wal_record(WalRecord::CommitTxnLocal { txn_id: TxnId(11), commit_ts: Timestamp(70) });
+        group
+            .primary
+            .storage
+            .update(TableId(1), &pk2, upd2.clone(), TxnId(11))
+            .unwrap();
+        group
+            .primary
+            .storage
+            .commit_txn(
+                TxnId(11),
+                Timestamp(70),
+                falcon_common::types::TxnType::Local,
+            )
+            .unwrap();
+        group.ship_wal_record(WalRecord::Update {
+            txn_id: TxnId(11),
+            table_id: TableId(1),
+            pk: pk2.clone(),
+            new_row: upd2,
+        });
+        group.ship_wal_record(WalRecord::CommitTxnLocal {
+            txn_id: TxnId(11),
+            commit_ts: Timestamp(70),
+        });
 
         let upd3 = OwnedRow::new(vec![Datum::Int32(3), Datum::Text("updated_3".into())]);
-        group.primary.storage.update(TableId(1), &pk3, upd3.clone(), TxnId(12)).unwrap();
-        group.primary.storage.commit_txn(TxnId(12), Timestamp(80), falcon_common::types::TxnType::Local).unwrap();
-        group.ship_wal_record(WalRecord::Update { txn_id: TxnId(12), table_id: TableId(1), pk: pk3.clone(), new_row: upd3 });
-        group.ship_wal_record(WalRecord::CommitTxnLocal { txn_id: TxnId(12), commit_ts: Timestamp(80) });
+        group
+            .primary
+            .storage
+            .update(TableId(1), &pk3, upd3.clone(), TxnId(12))
+            .unwrap();
+        group
+            .primary
+            .storage
+            .commit_txn(
+                TxnId(12),
+                Timestamp(80),
+                falcon_common::types::TxnType::Local,
+            )
+            .unwrap();
+        group.ship_wal_record(WalRecord::Update {
+            txn_id: TxnId(12),
+            table_id: TableId(1),
+            pk: pk3.clone(),
+            new_row: upd3,
+        });
+        group.ship_wal_record(WalRecord::CommitTxnLocal {
+            txn_id: TxnId(12),
+            commit_ts: Timestamp(80),
+        });
 
-        // 鈹€鈹€ Phase 2: GC on primary 鈹€鈹€
+        // ── Phase 2: GC on primary ──
         // Watermark must be >= max update ts (80) so updated versions become
         // the "latest visible at watermark", making the original versions
         // (ts=10,20,30) obsolete and reclaimable in chains of length 2.
         let gc_result = group.primary.storage.gc_sweep(Timestamp(85));
-        assert!(gc_result.reclaimed_versions >= 3,
-            "GC should reclaim at least 3 old versions, got {}", gc_result.reclaimed_versions);
+        assert!(
+            gc_result.reclaimed_versions >= 3,
+            "GC should reclaim at least 3 old versions, got {}",
+            gc_result.reclaimed_versions
+        );
 
         // Verify GC stats on primary
         let gc_snap = group.primary.storage.gc_stats_snapshot();
         assert!(gc_snap.total_sweeps >= 1);
         assert!(gc_snap.total_reclaimed_versions >= 3);
 
-        // 鈹€鈹€ Phase 3: Replicate and promote 鈹€鈹€
+        // ── Phase 3: Replicate and promote ──
         group.catch_up_replica(0).unwrap();
 
         // Verify replica has all 5 rows before promote
-        let replica_rows = group.replicas[0].storage
+        let replica_rows = group.replicas[0]
+            .storage
             .scan(TableId(1), TxnId(999), Timestamp(200))
             .unwrap();
-        assert_eq!(replica_rows.len(), 5, "replica should have all 5 rows before promote");
+        assert_eq!(
+            replica_rows.len(),
+            5,
+            "replica should have all 5 rows before promote"
+        );
 
         // Promote
         group.promote(0).unwrap();
 
-        // 鈹€鈹€ Phase 4: Verify on new primary 鈹€鈹€
+        // ── Phase 4: Verify on new primary ──
         // Check replication stats
         let repl_snap = group.primary.storage.replication_stats_snapshot();
         assert_eq!(repl_snap.promote_count, 1, "promote_count should be 1");
@@ -6580,38 +7535,73 @@ mod replication_gc_tests {
         assert!(!group.primary.is_read_only());
 
         // All 5 rows should be intact with updated values for rows 1-3
-        let rows = group.primary.storage
+        let rows = group
+            .primary
+            .storage
             .scan(TableId(1), TxnId(999), Timestamp(200))
             .unwrap();
         assert_eq!(rows.len(), 5, "new primary should have all 5 rows");
 
         // Verify updated values
-        let row1 = rows.iter().find(|(_, r)| r.values[0] == Datum::Int32(1)).unwrap();
+        let row1 = rows
+            .iter()
+            .find(|(_, r)| r.values[0] == Datum::Int32(1))
+            .unwrap();
         assert_eq!(row1.1.values[1], Datum::Text("updated_1".into()));
-        let row2 = rows.iter().find(|(_, r)| r.values[0] == Datum::Int32(2)).unwrap();
+        let row2 = rows
+            .iter()
+            .find(|(_, r)| r.values[0] == Datum::Int32(2))
+            .unwrap();
         assert_eq!(row2.1.values[1], Datum::Text("updated_2".into()));
-        let row3 = rows.iter().find(|(_, r)| r.values[0] == Datum::Int32(3)).unwrap();
+        let row3 = rows
+            .iter()
+            .find(|(_, r)| r.values[0] == Datum::Int32(3))
+            .unwrap();
         assert_eq!(row3.1.values[1], Datum::Text("updated_3".into()));
         // Rows 4-5 should still have original values
-        let row4 = rows.iter().find(|(_, r)| r.values[0] == Datum::Int32(4)).unwrap();
+        let row4 = rows
+            .iter()
+            .find(|(_, r)| r.values[0] == Datum::Int32(4))
+            .unwrap();
         assert_eq!(row4.1.values[1], Datum::Text("original_4".into()));
-        let row5 = rows.iter().find(|(_, r)| r.values[0] == Datum::Int32(5)).unwrap();
+        let row5 = rows
+            .iter()
+            .find(|(_, r)| r.values[0] == Datum::Int32(5))
+            .unwrap();
         assert_eq!(row5.1.values[1], Datum::Text("original_5".into()));
 
-        // 鈹€鈹€ Phase 5: Write on promoted primary 鈹€鈹€
+        // ── Phase 5: Write on promoted primary ──
         let new_row = OwnedRow::new(vec![Datum::Int32(6), Datum::Text("post_promote".into())]);
-        group.primary.storage.insert(TableId(1), new_row, TxnId(100)).unwrap();
-        group.primary.storage.commit_txn(
-            TxnId(100), Timestamp(200),
-            falcon_common::types::TxnType::Local,
-        ).unwrap();
+        group
+            .primary
+            .storage
+            .insert(TableId(1), new_row, TxnId(100))
+            .unwrap();
+        group
+            .primary
+            .storage
+            .commit_txn(
+                TxnId(100),
+                Timestamp(200),
+                falcon_common::types::TxnType::Local,
+            )
+            .unwrap();
 
-        let final_rows = group.primary.storage
+        let final_rows = group
+            .primary
+            .storage
             .scan(TableId(1), TxnId(999), Timestamp(300))
             .unwrap();
-        assert_eq!(final_rows.len(), 6, "post-promote write should succeed, total 6 rows");
+        assert_eq!(
+            final_rows.len(),
+            6,
+            "post-promote write should succeed, total 6 rows"
+        );
 
-        let row6 = final_rows.iter().find(|(_, r)| r.values[0] == Datum::Int32(6)).unwrap();
+        let row6 = final_rows
+            .iter()
+            .find(|(_, r)| r.values[0] == Datum::Int32(6))
+            .unwrap();
         assert_eq!(row6.1.values[1], Datum::Text("post_promote".into()));
     }
 
@@ -6649,8 +7639,7 @@ mod replication_gc_tests {
             shard_count: 2,
         };
         let json = serde_json::to_string(&config).unwrap();
-        let deser: falcon_common::config::ReplicationConfig =
-            serde_json::from_str(&json).unwrap();
+        let deser: falcon_common::config::ReplicationConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(deser.role, falcon_common::config::NodeRole::Replica);
         assert_eq!(deser.max_records_per_chunk, 500);
         assert_eq!(deser.poll_interval_ms, 50);
@@ -6669,39 +7658,35 @@ mod replication_gc_tests {
             std::cmp::min(poll_ms * 2u64.saturating_pow(errors), max_backoff_ms)
         };
 
-        assert_eq!(backoff(1), 200);    // 100 * 2^1
-        assert_eq!(backoff(2), 400);    // 100 * 2^2
-        assert_eq!(backoff(3), 800);    // 100 * 2^3
-        assert_eq!(backoff(5), 3200);   // 100 * 2^5
-        assert_eq!(backoff(8), 25600);  // 100 * 2^8
+        assert_eq!(backoff(1), 200); // 100 * 2^1
+        assert_eq!(backoff(2), 400); // 100 * 2^2
+        assert_eq!(backoff(3), 800); // 100 * 2^3
+        assert_eq!(backoff(5), 3200); // 100 * 2^5
+        assert_eq!(backoff(8), 25600); // 100 * 2^8
         assert_eq!(backoff(9), 30_000); // capped at max
         assert_eq!(backoff(20), 30_000); // still capped
-        assert_eq!(backoff(0), 100);    // 100 * 2^0 = 100 (no error)
+        assert_eq!(backoff(0), 100); // 100 * 2^0 = 100 (no error)
     }
 }
 
 // ===========================================================================
-// ReplicaRunner E2E tests 鈥?real gRPC server + client replication
+// ReplicaRunner E2E tests  — real gRPC server + client replication
 // ===========================================================================
 
 #[cfg(test)]
 mod replica_runner_tests {
-    use std::sync::Arc;
     use std::sync::atomic::Ordering;
+    use std::sync::Arc;
 
     use falcon_common::datum::{Datum, OwnedRow};
     use falcon_common::schema::{ColumnDef, TableSchema};
-    use falcon_common::types::{
-        ColumnId, DataType, ShardId, TableId, Timestamp, TxnId, TxnType,
-    };
+    use falcon_common::types::{ColumnId, DataType, ShardId, TableId, Timestamp, TxnId, TxnType};
     use falcon_storage::engine::StorageEngine;
     use falcon_storage::wal::WalRecord;
 
     use crate::grpc_transport::WalReplicationService;
     use crate::proto::wal_replication_server::WalReplicationServer;
-    use crate::replication::{
-        ReplicaRunner, ReplicaRunnerConfig, ReplicationLog,
-    };
+    use crate::replication::{ReplicaRunner, ReplicaRunnerConfig, ReplicationLog};
 
     fn test_schema() -> TableSchema {
         TableSchema {
@@ -6732,7 +7717,7 @@ mod replica_runner_tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         }
     }
 
@@ -6749,12 +7734,20 @@ mod replica_runner_tests {
         // Write initial data on primary BEFORE starting the server so the
         // checkpoint will contain this data.
         let row1 = OwnedRow::new(vec![Datum::Int32(1), Datum::Int64(1000)]);
-        primary_storage.insert(TableId(1), row1.clone(), TxnId(1)).unwrap();
-        primary_storage.commit_txn(TxnId(1), Timestamp(10), TxnType::Local).unwrap();
+        primary_storage
+            .insert(TableId(1), row1.clone(), TxnId(1))
+            .unwrap();
+        primary_storage
+            .commit_txn(TxnId(1), Timestamp(10), TxnType::Local)
+            .unwrap();
 
         let row2 = OwnedRow::new(vec![Datum::Int32(2), Datum::Int64(2500)]);
-        primary_storage.insert(TableId(1), row2.clone(), TxnId(2)).unwrap();
-        primary_storage.commit_txn(TxnId(2), Timestamp(20), TxnType::Local).unwrap();
+        primary_storage
+            .insert(TableId(1), row2.clone(), TxnId(2))
+            .unwrap();
+        primary_storage
+            .commit_txn(TxnId(2), Timestamp(20), TxnType::Local)
+            .unwrap();
 
         let log = Arc::new(ReplicationLog::new());
         // Ship the initial WAL records so the replica can replay them after checkpoint.
@@ -6819,8 +7812,10 @@ mod replica_runner_tests {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             if tokio::time::Instant::now() > deadline {
-                panic!("Replica did not catch up within timeout (applied_lsn={})",
-                    handle.metrics().applied_lsn.load(Ordering::Relaxed));
+                panic!(
+                    "Replica did not catch up within timeout (applied_lsn={})",
+                    handle.metrics().applied_lsn.load(Ordering::Relaxed)
+                );
             }
             // Check if replica has the table (schema bootstrapped from checkpoint)
             if replica_storage.get_table_schema("accounts").is_some() {
@@ -6838,15 +7833,22 @@ mod replica_runner_tests {
         let rows = replica_storage
             .scan(TableId(1), TxnId(999), Timestamp(100))
             .unwrap();
-        assert!(rows.len() >= 2, "Replica should have at least 2 rows after bootstrap");
+        assert!(
+            rows.len() >= 2,
+            "Replica should have at least 2 rows after bootstrap"
+        );
 
         let snap = handle.metrics().snapshot();
         assert!(snap.connected);
 
         // --- Write MORE data on primary ---
         let row3 = OwnedRow::new(vec![Datum::Int32(3), Datum::Int64(500)]);
-        primary_storage.insert(TableId(1), row3.clone(), TxnId(3)).unwrap();
-        primary_storage.commit_txn(TxnId(3), Timestamp(30), TxnType::Local).unwrap();
+        primary_storage
+            .insert(TableId(1), row3.clone(), TxnId(3))
+            .unwrap();
+        primary_storage
+            .commit_txn(TxnId(3), Timestamp(30), TxnType::Local)
+            .unwrap();
 
         log.append(WalRecord::Insert {
             txn_id: TxnId(3),
@@ -6876,7 +7878,10 @@ mod replica_runner_tests {
         let rows = replica_storage
             .scan(TableId(1), TxnId(999), Timestamp(100))
             .unwrap();
-        assert!(rows.len() >= 3, "Replica should have 3 rows after incremental catch-up");
+        assert!(
+            rows.len() >= 3,
+            "Replica should have 3 rows after incremental catch-up"
+        );
 
         // --- Clean shutdown ---
         handle.stop().await;
@@ -6890,7 +7895,7 @@ mod replica_runner_tests {
         let replica_storage = Arc::new(StorageEngine::new_in_memory());
 
         let config = ReplicaRunnerConfig {
-            primary_endpoint: "http://127.0.0.1:1".into(), // port 1 鈥?refused
+            primary_endpoint: "http://127.0.0.1:1".into(), // port 1  — refused
             shard_id: ShardId(0),
             replica_id: 0,
             max_records_per_chunk: 100,
@@ -6907,12 +7912,21 @@ mod replica_runner_tests {
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
 
         // Runner should still be alive, retrying
-        assert!(handle.is_running(), "Runner should still be alive while retrying");
+        assert!(
+            handle.is_running(),
+            "Runner should still be alive while retrying"
+        );
 
         let snap = handle.metrics().snapshot();
-        assert!(snap.reconnect_count >= 2,
-            "Expected at least 2 reconnect attempts, got {}", snap.reconnect_count);
-        assert!(!snap.connected, "Should not be connected to unreachable endpoint");
+        assert!(
+            snap.reconnect_count >= 2,
+            "Expected at least 2 reconnect attempts, got {}",
+            snap.reconnect_count
+        );
+        assert!(
+            !snap.connected,
+            "Should not be connected to unreachable endpoint"
+        );
         assert_eq!(snap.applied_lsn, 0, "No data should have been applied");
 
         handle.stop().await;
@@ -6921,7 +7935,7 @@ mod replica_runner_tests {
     /// Test that ReplicaRunner stops cleanly when signaled.
     #[tokio::test]
     async fn test_replica_runner_clean_stop() {
-        // Point at a non-existent server 鈥?runner will keep retrying
+        // Point at a non-existent server  — runner will keep retrying
         let replica_storage = Arc::new(StorageEngine::new_in_memory());
         let config = ReplicaRunnerConfig {
             primary_endpoint: "http://127.0.0.1:1".into(), // unlikely to be open
@@ -6943,7 +7957,10 @@ mod replica_runner_tests {
         // Stop should complete within a reasonable time
         let stop_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
         handle.stop().await;
-        assert!(tokio::time::Instant::now() < stop_deadline, "Stop took too long");
+        assert!(
+            tokio::time::Instant::now() < stop_deadline,
+            "Stop took too long"
+        );
     }
 
     /// Test ReplicationLog::trim_before removes records at or below the safe LSN.
@@ -7110,8 +8127,14 @@ mod replica_runner_tests {
             table_data: vec![(
                 TableId(1),
                 vec![
-                    (pk1, OwnedRow::new(vec![Datum::Int32(1), Datum::Int64(1000)])),
-                    (pk2, OwnedRow::new(vec![Datum::Int32(2), Datum::Int64(2500)])),
+                    (
+                        pk1,
+                        OwnedRow::new(vec![Datum::Int32(1), Datum::Int64(1000)]),
+                    ),
+                    (
+                        pk2,
+                        OwnedRow::new(vec![Datum::Int32(2), Datum::Int64(2500)]),
+                    ),
                 ],
             )],
             wal_segment_id: 0,
@@ -7126,12 +8149,24 @@ mod replica_runner_tests {
         assert!(engine.get_table_schema("accounts").is_some());
 
         // Verify rows were restored
-        let rows = engine.scan(TableId(1), TxnId(999), Timestamp(u64::MAX - 1)).unwrap();
-        assert_eq!(rows.len(), 2, "Both rows should be present after checkpoint apply");
+        let rows = engine
+            .scan(TableId(1), TxnId(999), Timestamp(u64::MAX - 1))
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "Both rows should be present after checkpoint apply"
+        );
 
         // Apply again (idempotent: clears and re-applies)
         engine.apply_checkpoint_data(&ckpt).unwrap();
-        let rows2 = engine.scan(TableId(1), TxnId(999), Timestamp(u64::MAX - 1)).unwrap();
-        assert_eq!(rows2.len(), 2, "Idempotent re-apply should still have 2 rows");
+        let rows2 = engine
+            .scan(TableId(1), TxnId(999), Timestamp(u64::MAX - 1))
+            .unwrap();
+        assert_eq!(
+            rows2.len(),
+            2,
+            "Idempotent re-apply should still have 2 rows"
+        );
     }
 }

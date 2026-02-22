@@ -1,4 +1,4 @@
-//! Falcon M1 Failover Exercise 鈥?integration test.
+//! Falcon M1 Failover Exercise —integration test.
 //!
 //! Exercises the full failover lifecycle:
 //! 1. Start a cluster (1 primary + 1 replica per shard)
@@ -55,7 +55,7 @@ fn test_schema() -> TableSchema {
         check_constraints: vec![],
         unique_constraints: vec![],
         foreign_keys: vec![],
-    ..Default::default()
+        ..Default::default()
     }
 }
 
@@ -86,10 +86,14 @@ fn failover_exercise() {
         let txn_id = TxnId(*id as u64);
         let commit_ts = Timestamp(*id as u64 * 10);
 
-        group.primary.storage
+        group
+            .primary
+            .storage
             .insert(TableId(1), row.clone(), txn_id)
             .expect("insert failed");
-        group.primary.storage
+        group
+            .primary
+            .storage
             .commit_txn(txn_id, commit_ts, TxnType::Local)
             .expect("commit failed");
 
@@ -101,22 +105,35 @@ fn failover_exercise() {
         group.ship_wal_record(WalRecord::CommitTxnLocal { txn_id, commit_ts });
     }
 
-    let primary_rows = group.primary.storage
+    let primary_rows = group
+        .primary
+        .storage
         .scan(TableId(1), TxnId(999), Timestamp(100))
         .expect("scan failed");
     assert_eq!(primary_rows.len(), accounts.len());
 
     // Step 3: Replicate to replica
     group.catch_up_replica(0).expect("catch_up failed");
-    let replica_rows = group.replicas[0].storage
+    let replica_rows = group.replicas[0]
+        .storage
         .scan(TableId(1), TxnId(999), Timestamp(100))
         .expect("scan failed");
-    assert_eq!(replica_rows.len(), accounts.len(), "replica row count mismatch");
+    assert_eq!(
+        replica_rows.len(),
+        accounts.len(),
+        "replica row count mismatch"
+    );
 
     // Step 5: Promote replica
     group.promote(0).expect("promote failed");
-    assert!(!group.primary.is_read_only(), "new primary should not be read_only");
-    assert!(group.replicas[0].is_read_only(), "old primary should be read_only");
+    assert!(
+        !group.primary.is_read_only(),
+        "new primary should not be read_only"
+    );
+    assert!(
+        group.replicas[0].is_read_only(),
+        "old primary should be read_only"
+    );
 
     let metrics = group.metrics.snapshot();
     assert_eq!(metrics.promote_count, 1);
@@ -127,15 +144,21 @@ fn failover_exercise() {
         Datum::Int64(3000),
         Datum::Text("Frank".into()),
     ]);
-    group.primary.storage
+    group
+        .primary
+        .storage
         .insert(TableId(1), new_row, TxnId(100))
         .expect("post-promote insert failed");
-    group.primary.storage
+    group
+        .primary
+        .storage
         .commit_txn(TxnId(100), Timestamp(200), TxnType::Local)
         .expect("post-promote commit failed");
 
     // Step 7: Verify data integrity
-    let final_rows = group.primary.storage
+    let final_rows = group
+        .primary
+        .storage
         .scan(TableId(1), TxnId(999), Timestamp(300))
         .expect("final scan failed");
     assert_eq!(final_rows.len(), 6, "expected 6 accounts after failover");

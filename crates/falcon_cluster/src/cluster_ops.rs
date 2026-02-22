@@ -434,7 +434,10 @@ impl ClusterAdmin {
         let mut ops = self.scale_out_ops.lock();
         // Check for duplicate
         if ops.iter().any(|o| o.node_id == node_id && !o.is_terminal()) {
-            return Err(format!("Scale-out already in progress for node {}", node_id.0));
+            return Err(format!(
+                "Scale-out already in progress for node {}",
+                node_id.0
+            ));
         }
 
         let lifecycle = ScaleOutLifecycle::new(node_id);
@@ -452,11 +455,7 @@ impl ClusterAdmin {
     }
 
     /// Advance a scale-out operation to the next state.
-    pub fn advance_scale_out(
-        &self,
-        node_id: NodeId,
-        to: ScaleOutState,
-    ) -> Result<(), String> {
+    pub fn advance_scale_out(&self, node_id: NodeId, to: ScaleOutState) -> Result<(), String> {
         let mut ops = self.scale_out_ops.lock();
         let op = ops
             .iter_mut()
@@ -468,7 +467,10 @@ impl ClusterAdmin {
     /// Fail a scale-out operation.
     pub fn fail_scale_out(&self, node_id: NodeId, reason: &str) {
         let mut ops = self.scale_out_ops.lock();
-        if let Some(op) = ops.iter_mut().find(|o| o.node_id == node_id && !o.is_terminal()) {
+        if let Some(op) = ops
+            .iter_mut()
+            .find(|o| o.node_id == node_id && !o.is_terminal())
+        {
             op.fail(reason, &self.event_log);
         }
     }
@@ -484,7 +486,10 @@ impl ClusterAdmin {
     pub fn begin_scale_in(&self, node_id: NodeId) -> Result<(), String> {
         let mut ops = self.scale_in_ops.lock();
         if ops.iter().any(|o| o.node_id == node_id && !o.is_terminal()) {
-            return Err(format!("Scale-in already in progress for node {}", node_id.0));
+            return Err(format!(
+                "Scale-in already in progress for node {}",
+                node_id.0
+            ));
         }
 
         let lifecycle = ScaleInLifecycle::new(node_id);
@@ -502,11 +507,7 @@ impl ClusterAdmin {
     }
 
     /// Advance a scale-in operation.
-    pub fn advance_scale_in(
-        &self,
-        node_id: NodeId,
-        to: ScaleInState,
-    ) -> Result<(), String> {
+    pub fn advance_scale_in(&self, node_id: NodeId, to: ScaleInState) -> Result<(), String> {
         let mut ops = self.scale_in_ops.lock();
         let op = ops
             .iter_mut()
@@ -518,7 +519,10 @@ impl ClusterAdmin {
     /// Fail a scale-in operation.
     pub fn fail_scale_in(&self, node_id: NodeId, reason: &str) {
         let mut ops = self.scale_in_ops.lock();
-        if let Some(op) = ops.iter_mut().find(|o| o.node_id == node_id && !o.is_terminal()) {
+        if let Some(op) = ops
+            .iter_mut()
+            .find(|o| o.node_id == node_id && !o.is_terminal())
+        {
             op.fail(reason, &self.event_log);
         }
     }
@@ -531,12 +535,7 @@ impl ClusterAdmin {
     // ── Leader Transfer ─────────────────────────────────────────────────
 
     /// Log a leader transfer event (promote a specific replica for a shard).
-    pub fn log_leader_transfer(
-        &self,
-        shard_id: ShardId,
-        from_node: NodeId,
-        to_node: NodeId,
-    ) {
+    pub fn log_leader_transfer(&self, shard_id: ShardId, from_node: NodeId, to_node: NodeId) {
         self.event_log.log(
             EventCategory::LeaderTransfer,
             EventSeverity::Info,
@@ -554,11 +553,7 @@ impl ClusterAdmin {
     // ── Rebalance ───────────────────────────────────────────────────────
 
     /// Log a rebalance plan event (dry-run).
-    pub fn log_rebalance_plan(
-        &self,
-        num_tasks: usize,
-        total_rows: u64,
-    ) {
+    pub fn log_rebalance_plan(&self, num_tasks: usize, total_rows: u64) {
         self.event_log.log(
             EventCategory::Rebalance,
             EventSeverity::Info,
@@ -684,7 +679,10 @@ impl NodeModeController {
             u64::MAX,
             old.to_string(),
             new_mode.to_string(),
-            format!("Node {} mode change: {} → {}", self.node_id.0, old, new_mode),
+            format!(
+                "Node {} mode change: {} → {}",
+                self.node_id.0, old, new_mode
+            ),
         );
     }
 
@@ -705,7 +703,10 @@ impl NodeModeController {
 
     /// Check if reads are allowed in the current mode.
     pub fn allows_reads(&self) -> bool {
-        matches!(*self.mode.read(), NodeOperationalMode::Normal | NodeOperationalMode::ReadOnly)
+        matches!(
+            *self.mode.read(),
+            NodeOperationalMode::Normal | NodeOperationalMode::ReadOnly
+        )
     }
 
     /// Check if writes are allowed in the current mode.
@@ -738,8 +739,10 @@ mod tests {
         log.log(
             EventCategory::Membership,
             EventSeverity::Info,
-            1, u64::MAX,
-            "", "active",
+            1,
+            u64::MAX,
+            "",
+            "active",
             "Node 1 joined",
         );
         assert_eq!(log.len(), 1);
@@ -757,8 +760,10 @@ mod tests {
             log.log(
                 EventCategory::Membership,
                 EventSeverity::Info,
-                i, u64::MAX,
-                "", "",
+                i,
+                u64::MAX,
+                "",
+                "",
                 format!("event {}", i),
             );
         }
@@ -844,8 +849,12 @@ mod tests {
         assert!(result.is_err());
 
         // Advance through states
-        admin.advance_scale_out(NodeId(10), ScaleOutState::CatchingUp).unwrap();
-        admin.advance_scale_out(NodeId(10), ScaleOutState::ServingReads).unwrap();
+        admin
+            .advance_scale_out(NodeId(10), ScaleOutState::CatchingUp)
+            .unwrap();
+        admin
+            .advance_scale_out(NodeId(10), ScaleOutState::ServingReads)
+            .unwrap();
 
         let ops = admin.scale_out_snapshot();
         assert_eq!(ops.len(), 1);
@@ -858,9 +867,15 @@ mod tests {
         let admin = ClusterAdmin::new(log);
 
         admin.begin_scale_in(NodeId(5)).unwrap();
-        admin.advance_scale_in(NodeId(5), ScaleInState::MovingLeadership).unwrap();
-        admin.advance_scale_in(NodeId(5), ScaleInState::MovingData).unwrap();
-        admin.advance_scale_in(NodeId(5), ScaleInState::Removed).unwrap();
+        admin
+            .advance_scale_in(NodeId(5), ScaleInState::MovingLeadership)
+            .unwrap();
+        admin
+            .advance_scale_in(NodeId(5), ScaleInState::MovingData)
+            .unwrap();
+        admin
+            .advance_scale_in(NodeId(5), ScaleInState::Removed)
+            .unwrap();
 
         let ops = admin.scale_in_snapshot();
         assert_eq!(ops.len(), 1);
@@ -909,7 +924,10 @@ mod tests {
 
     #[test]
     fn test_scale_in_state_display() {
-        assert_eq!(ScaleInState::MovingLeadership.to_string(), "moving_leadership");
+        assert_eq!(
+            ScaleInState::MovingLeadership.to_string(),
+            "moving_leadership"
+        );
         assert_eq!(ScaleInState::Removed.to_string(), "removed");
     }
 
@@ -972,7 +990,7 @@ mod tests {
         let log = ClusterEventLog::new(100);
         let ctrl = NodeModeController::new(NodeId(1), log.clone());
         ctrl.set_mode(NodeOperationalMode::Normal); // same as current
-        // No event logged for no-op
+                                                    // No event logged for no-op
         assert_eq!(log.len(), 0);
     }
 }

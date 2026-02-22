@@ -17,8 +17,7 @@ use std::sync::Arc;
 use openraft::error::{RPCError, RaftError, ReplicationClosed, StreamingError, Unreachable};
 use openraft::network::{RPCOption, RaftNetwork, RaftNetworkFactory};
 use openraft::raft::{
-    AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse,
-    VoteRequest, VoteResponse,
+    AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, VoteRequest, VoteResponse,
 };
 use openraft::storage::Snapshot;
 use openraft::{BasicNode, Raft, Vote};
@@ -156,11 +155,14 @@ impl RaftNetwork<TypeConfig> for RouterConnection {
         _snapshot: Snapshot<TypeConfig>,
         _cancel: impl std::future::Future<Output = ReplicationClosed> + Send + 'static,
         _option: RPCOption,
-    ) -> Result<SnapshotResponse<u64>, StreamingError<TypeConfig, openraft::error::Fatal<u64>>> {
-        Err(StreamingError::Unreachable(Unreachable::new(&io::Error::new(
-            io::ErrorKind::Unsupported,
-            "full_snapshot not supported in in-process mode; use install_snapshot",
-        ))))
+    ) -> Result<SnapshotResponse<u64>, StreamingError<TypeConfig, openraft::error::Fatal<u64>>>
+    {
+        Err(StreamingError::Unreachable(Unreachable::new(
+            &io::Error::new(
+                io::ErrorKind::Unsupported,
+                "full_snapshot not supported in in-process mode; use install_snapshot",
+            ),
+        )))
     }
 }
 
@@ -226,10 +228,10 @@ impl RaftNetwork<TypeConfig> for NetworkConnection {
         _snapshot: Snapshot<TypeConfig>,
         _cancel: impl std::future::Future<Output = ReplicationClosed> + Send + 'static,
         _option: RPCOption,
-    ) -> Result<SnapshotResponse<u64>, StreamingError<TypeConfig, openraft::error::Fatal<u64>>> {
-        Err(StreamingError::Unreachable(Unreachable::new(&io::Error::new(
-            io::ErrorKind::NotConnected,
-            "single-node mode",
-        ))))
+    ) -> Result<SnapshotResponse<u64>, StreamingError<TypeConfig, openraft::error::Fatal<u64>>>
+    {
+        Err(StreamingError::Unreachable(Unreachable::new(
+            &io::Error::new(io::ErrorKind::NotConnected, "single-node mode"),
+        )))
     }
 }

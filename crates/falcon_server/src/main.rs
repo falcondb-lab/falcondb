@@ -106,7 +106,10 @@ async fn main() -> Result<()> {
     tracing::info!("Config: {:?}", config);
 
     // Expose node role to SHOW falcon.node_role via env var
-    std::env::set_var("FALCON_NODE_ROLE", format!("{:?}", config.replication.role).to_lowercase());
+    std::env::set_var(
+        "FALCON_NODE_ROLE",
+        format!("{:?}", config.replication.role).to_lowercase(),
+    );
 
     // Initialize metrics
     if let Err(e) = falcon_observability::init_metrics(&cli.metrics_addr) {
@@ -188,7 +191,10 @@ async fn main() -> Result<()> {
     let txn_mgr = Arc::new(TxnManager::new(storage.clone()));
 
     // Initialize executor (read-only on replicas/analytics to reject writes at SQL level)
-    let mut executor = if matches!(config.replication.role, NodeRole::Replica | NodeRole::Analytics) {
+    let mut executor = if matches!(
+        config.replication.role,
+        NodeRole::Replica | NodeRole::Analytics
+    ) {
         Executor::new_read_only(storage.clone(), txn_mgr.clone())
     } else {
         Executor::new(storage.clone(), txn_mgr.clone())
@@ -239,11 +245,17 @@ async fn main() -> Result<()> {
     }
     if config.server.statement_timeout_ms > 0 {
         pg_server.set_default_statement_timeout_ms(config.server.statement_timeout_ms);
-        tracing::info!("Default statement timeout: {}ms", config.server.statement_timeout_ms);
+        tracing::info!(
+            "Default statement timeout: {}ms",
+            config.server.statement_timeout_ms
+        );
     }
     if config.server.idle_timeout_ms > 0 {
         pg_server.set_idle_timeout_ms(config.server.idle_timeout_ms);
-        tracing::info!("Connection idle timeout: {}ms", config.server.idle_timeout_ms);
+        tracing::info!(
+            "Connection idle timeout: {}ms",
+            config.server.idle_timeout_ms
+        );
     }
 
     // Start background GC runner (if enabled in config)
@@ -258,12 +270,17 @@ async fn main() -> Result<()> {
         };
         tracing::info!(
             "Background GC runner started (interval={}ms, batch_size={}, min_chain_length={})",
-            gc_config.interval_ms, gc_config.batch_size, gc_config.min_chain_length,
+            gc_config.interval_ms,
+            gc_config.batch_size,
+            gc_config.min_chain_length,
         );
         match GcRunner::start(storage.clone(), txn_mgr.clone(), gc_config) {
             Ok(runner) => Some(runner),
             Err(e) => {
-                tracing::error!("Failed to start GC runner: {} — running without background GC", e);
+                tracing::error!(
+                    "Failed to start GC runner: {} — running without background GC",
+                    e
+                );
                 None
             }
         }
@@ -280,9 +297,9 @@ async fn main() -> Result<()> {
             tracing::info!("Role: PRIMARY — gRPC replication service on {}", grpc_addr);
 
             // Use the replication_log that is already wired to the WAL observer
-            let log = replication_log.clone().ok_or_else(|| {
-                anyhow::anyhow!("replication_log must exist for Primary role")
-            })?;
+            let log = replication_log
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("replication_log must exist for Primary role"))?;
             let svc = falcon_cluster::grpc_transport::WalReplicationService::new();
             svc.set_storage(storage.clone());
             for i in 0..num_shards {
@@ -312,9 +329,13 @@ async fn main() -> Result<()> {
                 replica_id: 0,
                 max_records_per_chunk: config.replication.max_records_per_chunk,
                 ack_interval_chunks: 10,
-                initial_backoff: std::time::Duration::from_millis(config.replication.poll_interval_ms),
+                initial_backoff: std::time::Duration::from_millis(
+                    config.replication.poll_interval_ms,
+                ),
                 max_backoff: std::time::Duration::from_millis(config.replication.max_backoff_ms),
-                connect_timeout: std::time::Duration::from_millis(config.replication.connect_timeout_ms),
+                connect_timeout: std::time::Duration::from_millis(
+                    config.replication.connect_timeout_ms,
+                ),
             };
             tracing::info!(
                 "Role: REPLICA — connecting to primary at {} via ReplicaRunner",
@@ -337,9 +358,13 @@ async fn main() -> Result<()> {
                 replica_id: 0,
                 max_records_per_chunk: config.replication.max_records_per_chunk,
                 ack_interval_chunks: 10,
-                initial_backoff: std::time::Duration::from_millis(config.replication.poll_interval_ms),
+                initial_backoff: std::time::Duration::from_millis(
+                    config.replication.poll_interval_ms,
+                ),
                 max_backoff: std::time::Duration::from_millis(config.replication.max_backoff_ms),
-                connect_timeout: std::time::Duration::from_millis(config.replication.connect_timeout_ms),
+                connect_timeout: std::time::Duration::from_millis(
+                    config.replication.connect_timeout_ms,
+                ),
             };
             tracing::info!(
                 "Role: ANALYTICS — connecting to primary at {} (read-only, columnstore enabled)",
@@ -384,20 +409,18 @@ async fn main() -> Result<()> {
     let mut health_rx = shutdown_tx.subscribe();
     let health_state_for_server = health_state.clone();
     tokio::spawn(async move {
-        health::run_health_server(
-            &health_addr,
-            health_state_for_server,
-            async move { let _ = health_rx.changed().await; },
-        ).await;
+        health::run_health_server(&health_addr, health_state_for_server, async move {
+            let _ = health_rx.changed().await;
+        })
+        .await;
     });
 
     // Run PG server with graceful shutdown on SIGINT (Ctrl+C) or SIGTERM.
     // Mark health state as not-ready immediately so load balancers stop
     // routing traffic before the drain begins.
     let health_state_for_shutdown = health_state.clone();
-    let drain_timeout = std::time::Duration::from_secs(
-        config.server.shutdown_drain_timeout_secs.max(1),
-    );
+    let drain_timeout =
+        std::time::Duration::from_secs(config.server.shutdown_drain_timeout_secs.max(1));
     pg_server
         .run_with_shutdown(
             async move {
@@ -437,7 +460,10 @@ async fn wait_for_shutdown_signal() -> &'static str {
                 }
             }
             Err(e) => {
-                tracing::warn!("Failed to register SIGTERM handler: {} — falling back to Ctrl+C only", e);
+                tracing::warn!(
+                    "Failed to register SIGTERM handler: {} — falling back to Ctrl+C only",
+                    e
+                );
                 let _ = tokio::signal::ctrl_c().await;
                 "SIGINT (Ctrl+C) received (SIGTERM unavailable)"
             }
@@ -456,7 +482,10 @@ fn parse_node_role(s: &str) -> Result<NodeRole, String> {
         "primary" => Ok(NodeRole::Primary),
         "replica" => Ok(NodeRole::Replica),
         "analytics" => Ok(NodeRole::Analytics),
-        _ => Err(format!("Invalid role '{}': expected standalone, primary, replica, or analytics", s)),
+        _ => Err(format!(
+            "Invalid role '{}': expected standalone, primary, replica, or analytics",
+            s
+        )),
     }
 }
 

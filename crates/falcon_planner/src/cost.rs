@@ -7,7 +7,7 @@ use falcon_sql_frontend::types::*;
 /// Populated from `StorageEngine::get_table_stats()` / `row_count_approx()`.
 pub type TableRowCounts = HashMap<TableId, u64>;
 
-/// Planner-level index metadata: maps table_id 鈫?list of indexed column indices.
+/// Planner-level index metadata: maps table_id → list of indexed column indices.
 /// Populated from `StorageEngine::get_indexed_columns()`.
 pub type IndexedColumns = HashMap<TableId, Vec<usize>>;
 
@@ -35,7 +35,7 @@ pub fn reorder_joins(
 
     let left_cols = left_table_col_count;
 
-    // 鈹€鈹€ 1. Classify each join as reorderable or fixed 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // ── 1. Classify each join as reorderable or fixed ───────────────
     // A join is reorderable iff:
     //   (a) it is INNER, and
     //   (b) its condition only references columns in [0, left_cols)
@@ -57,7 +57,7 @@ pub fn reorder_joins(
         return joins.to_vec();
     }
 
-    // 鈹€鈹€ 2. Sort reorderable joins by right-table row count 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // ── 2. Sort reorderable joins by right-table row count ──────────
     reorderable.sort_by_key(|&i| {
         stats
             .get(&joins[i].right_table_id)
@@ -65,7 +65,7 @@ pub fn reorder_joins(
             .unwrap_or(u64::MAX)
     });
 
-    // 鈹€鈹€ 3. Build the new join order 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // ── 3. Build the new join order ─────────────────────────────────
     // Interleave: reorderable joins come first, then fixed joins in
     // their original relative order. This is correct because:
     //   - reorderable joins are INNER (commutative + associative)
@@ -74,7 +74,7 @@ pub fn reorder_joins(
     new_order.extend_from_slice(&reorderable);
     new_order.extend_from_slice(&fixed);
 
-    // 鈹€鈹€ 4. Remap offsets and condition column references 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // ── 4. Remap offsets and condition column references ─────────────
     let mut result: Vec<BoundJoin> = Vec::with_capacity(joins.len());
     let mut current_offset = left_cols;
 
@@ -85,9 +85,9 @@ pub fn reorder_joins(
         let new_offset = current_offset;
 
         let new_condition = if orig_offset != new_offset {
-            orig.condition.as_ref().map(|c| {
-                remap_column_refs(c, orig_offset, right_cols, new_offset)
-            })
+            orig.condition
+                .as_ref()
+                .map(|c| remap_column_refs(c, orig_offset, right_cols, new_offset))
         } else {
             orig.condition.clone()
         };
@@ -130,9 +130,7 @@ fn all_refs_in_ranges(
     right_end: usize,
 ) -> bool {
     match expr {
-        BoundExpr::ColumnRef(idx) => {
-            *idx < left_cols || (*idx >= right_start && *idx < right_end)
-        }
+        BoundExpr::ColumnRef(idx) => *idx < left_cols || (*idx >= right_start && *idx < right_end),
         BoundExpr::BinaryOp { left, right, .. } => {
             all_refs_in_ranges(left, left_cols, right_start, right_end)
                 && all_refs_in_ranges(right, left_cols, right_start, right_end)
@@ -144,18 +142,25 @@ fn all_refs_in_ranges(
             all_refs_in_ranges(inner, left_cols, right_start, right_end)
         }
         BoundExpr::Literal(_) => true,
-        BoundExpr::Function { args, .. } => {
-            args.iter().all(|a| all_refs_in_ranges(a, left_cols, right_start, right_end))
-        }
-        BoundExpr::AnyOp { left, right, .. }
-        | BoundExpr::AllOp { left, right, .. } => {
+        BoundExpr::Function { args, .. } => args
+            .iter()
+            .all(|a| all_refs_in_ranges(a, left_cols, right_start, right_end)),
+        BoundExpr::AnyOp { left, right, .. } | BoundExpr::AllOp { left, right, .. } => {
             all_refs_in_ranges(left, left_cols, right_start, right_end)
                 && all_refs_in_ranges(right, left_cols, right_start, right_end)
         }
-        BoundExpr::ArraySlice { array, lower, upper } => {
+        BoundExpr::ArraySlice {
+            array,
+            lower,
+            upper,
+        } => {
             all_refs_in_ranges(array, left_cols, right_start, right_end)
-                && lower.as_ref().is_none_or(|l| all_refs_in_ranges(l, left_cols, right_start, right_end))
-                && upper.as_ref().is_none_or(|u| all_refs_in_ranges(u, left_cols, right_start, right_end))
+                && lower
+                    .as_ref()
+                    .is_none_or(|l| all_refs_in_ranges(l, left_cols, right_start, right_end))
+                && upper
+                    .as_ref()
+                    .is_none_or(|u| all_refs_in_ranges(u, left_cols, right_start, right_end))
         }
         _ => {
             // Conservative: treat complex expressions as non-self-contained
@@ -188,24 +193,18 @@ fn remap_column_refs(
             right: Box::new(remap_column_refs(right, old_offset, right_cols, new_offset)),
         },
         BoundExpr::Not(inner) => BoundExpr::Not(Box::new(remap_column_refs(
-            inner,
-            old_offset,
-            right_cols,
-            new_offset,
+            inner, old_offset, right_cols, new_offset,
         ))),
         BoundExpr::IsNull(inner) => BoundExpr::IsNull(Box::new(remap_column_refs(
-            inner,
-            old_offset,
-            right_cols,
-            new_offset,
+            inner, old_offset, right_cols, new_offset,
         ))),
         BoundExpr::IsNotNull(inner) => BoundExpr::IsNotNull(Box::new(remap_column_refs(
-            inner,
-            old_offset,
-            right_cols,
-            new_offset,
+            inner, old_offset, right_cols, new_offset,
         ))),
-        BoundExpr::Cast { expr: inner, target_type } => BoundExpr::Cast {
+        BoundExpr::Cast {
+            expr: inner,
+            target_type,
+        } => BoundExpr::Cast {
             expr: Box::new(remap_column_refs(inner, old_offset, right_cols, new_offset)),
             target_type: target_type.clone(),
         },
@@ -216,22 +215,38 @@ fn remap_column_refs(
                 .map(|a| remap_column_refs(a, old_offset, right_cols, new_offset))
                 .collect(),
         },
-        BoundExpr::AnyOp { left, compare_op, right } => BoundExpr::AnyOp {
+        BoundExpr::AnyOp {
+            left,
+            compare_op,
+            right,
+        } => BoundExpr::AnyOp {
             left: Box::new(remap_column_refs(left, old_offset, right_cols, new_offset)),
             compare_op: *compare_op,
             right: Box::new(remap_column_refs(right, old_offset, right_cols, new_offset)),
         },
-        BoundExpr::AllOp { left, compare_op, right } => BoundExpr::AllOp {
+        BoundExpr::AllOp {
+            left,
+            compare_op,
+            right,
+        } => BoundExpr::AllOp {
             left: Box::new(remap_column_refs(left, old_offset, right_cols, new_offset)),
             compare_op: *compare_op,
             right: Box::new(remap_column_refs(right, old_offset, right_cols, new_offset)),
         },
-        BoundExpr::ArraySlice { array, lower, upper } => BoundExpr::ArraySlice {
+        BoundExpr::ArraySlice {
+            array,
+            lower,
+            upper,
+        } => BoundExpr::ArraySlice {
             array: Box::new(remap_column_refs(array, old_offset, right_cols, new_offset)),
-            lower: lower.as_ref().map(|l| Box::new(remap_column_refs(l, old_offset, right_cols, new_offset))),
-            upper: upper.as_ref().map(|u| Box::new(remap_column_refs(u, old_offset, right_cols, new_offset))),
+            lower: lower
+                .as_ref()
+                .map(|l| Box::new(remap_column_refs(l, old_offset, right_cols, new_offset))),
+            upper: upper
+                .as_ref()
+                .map(|u| Box::new(remap_column_refs(u, old_offset, right_cols, new_offset))),
         },
-        // Leaf / complex nodes 鈥?clone unchanged
+        // Leaf / complex nodes — clone unchanged
         _ => expr.clone(),
     }
 }
@@ -273,7 +288,7 @@ mod tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         }
     }
 
@@ -325,8 +340,7 @@ mod tests {
                 condition: Some(eq_cond(1, 5)),
             },
         ];
-        let stats: TableRowCounts =
-            [(TableId(2), 1000), (TableId(3), 10)].into();
+        let stats: TableRowCounts = [(TableId(2), 1000), (TableId(3), 10)].into();
         let result = reorder_joins(3, &joins, &stats);
 
         // C should come first (10 rows), B second (1000 rows)
@@ -373,8 +387,7 @@ mod tests {
                 condition: Some(eq_cond(1, 5)),
             },
         ];
-        let stats: TableRowCounts =
-            [(TableId(2), 1000), (TableId(3), 10)].into();
+        let stats: TableRowCounts = [(TableId(2), 1000), (TableId(3), 10)].into();
         let result = reorder_joins(3, &joins, &stats);
 
         // Only 1 reorderable (the INNER), so no reorder happens
@@ -402,7 +415,7 @@ mod tests {
                 condition: Some(eq_cond(1, 5)),
             },
         ];
-        // No stats 鈥?both get u64::MAX, order preserved
+        // No stats — both get u64::MAX, order preserved
         let stats: TableRowCounts = HashMap::new();
         let result = reorder_joins(3, &joins, &stats);
         assert_eq!(result[0].right_table_id, TableId(2));
@@ -438,11 +451,10 @@ mod tests {
                 condition: Some(eq_cond(2, 7)),
             },
         ];
-        let stats: TableRowCounts =
-            [(TableId(2), 500), (TableId(3), 5), (TableId(4), 50)].into();
+        let stats: TableRowCounts = [(TableId(2), 500), (TableId(3), 5), (TableId(4), 50)].into();
         let result = reorder_joins(3, &joins, &stats);
 
-        // Expected order: C(5) 鈫?D(50) 鈫?B(500)
+        // Expected order: C(5) → D(50) → B(500)
         assert_eq!(result[0].right_table_id, TableId(3));
         assert_eq!(result[1].right_table_id, TableId(4));
         assert_eq!(result[2].right_table_id, TableId(2));

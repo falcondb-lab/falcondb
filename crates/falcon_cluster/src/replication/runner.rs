@@ -220,10 +220,7 @@ impl ReplicaRunner {
                 self.config.connect_timeout,
             );
 
-            match self
-                .run_stream(&transport, &stop, &metrics)
-                .await
-            {
+            match self.run_stream(&transport, &stop, &metrics).await {
                 Ok(()) => {
                     // Clean shutdown (stop signaled while streaming).
                     tracing::info!(
@@ -272,9 +269,7 @@ impl ReplicaRunner {
             "Bootstrapping replica from primary checkpoint",
         );
 
-        let (ckpt_data, ckpt_lsn) = transport
-            .download_checkpoint(self.config.shard_id)
-            .await?;
+        let (ckpt_data, ckpt_lsn) = transport.download_checkpoint(self.config.shard_id).await?;
 
         self.storage
             .apply_checkpoint_data(&ckpt_data)
@@ -329,11 +324,7 @@ impl ReplicaRunner {
             }
 
             // Wait for next chunk with a timeout so we can check stop flag.
-            let chunk_result = tokio::time::timeout(
-                Duration::from_secs(5),
-                rx.recv(),
-            )
-            .await;
+            let chunk_result = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
 
             match chunk_result {
                 Ok(Some(Ok(chunk))) => {
@@ -365,17 +356,15 @@ impl ReplicaRunner {
                         metrics.primary_lsn.store(chunk.end_lsn, Ordering::Relaxed);
                     }
                     metrics.chunks_applied.fetch_add(1, Ordering::Relaxed);
-                    metrics.records_applied.fetch_add(applied, Ordering::Relaxed);
+                    metrics
+                        .records_applied
+                        .fetch_add(applied, Ordering::Relaxed);
                     chunks_since_ack += 1;
 
                     // Periodic ack.
                     if chunks_since_ack >= self.config.ack_interval_chunks {
                         if let Err(e) = transport
-                            .ack_wal(
-                                self.config.shard_id,
-                                self.config.replica_id,
-                                max_lsn,
-                            )
+                            .ack_wal(self.config.shard_id, self.config.replica_id, max_lsn)
                             .await
                         {
                             tracing::warn!(

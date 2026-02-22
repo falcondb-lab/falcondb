@@ -86,7 +86,9 @@ impl BenchReport {
         latencies.sort();
         let len = latencies.len();
         let p = |pct: f64| -> u64 {
-            if len == 0 { return 0; }
+            if len == 0 {
+                return 0;
+            }
             let idx = ((pct / 100.0) * len as f64).ceil() as usize;
             latencies[idx.min(len - 1)]
         };
@@ -178,10 +180,7 @@ fn run_batch(
                 &targets,
                 IsolationLevel::ReadCommitted,
                 |storage, _tm, txn_id| {
-                    let row = OwnedRow::new(vec![
-                        Datum::Int32(unique_key),
-                        Datum::Int32(key),
-                    ]);
+                    let row = OwnedRow::new(vec![Datum::Int32(unique_key), Datum::Int32(key)]);
                     storage.insert(TableId(1), row, txn_id)?;
                     Ok(())
                 },
@@ -238,7 +237,8 @@ fn bench_uniform_low_contention() {
     assert!(
         report.committed >= num_txns * 90 / 100,
         "BENCH-1: commit rate should be ≥90%, got {}/{}",
-        report.committed, num_txns
+        report.committed,
+        num_txns
     );
     assert!(
         report.p99_us < 50_000_000, // 50s generous ceiling for CI
@@ -309,7 +309,8 @@ fn bench_mixed_workload() {
     assert!(
         report.committed >= num_txns * 85 / 100,
         "BENCH-3: commit rate should be ≥85%, got {}/{}",
-        report.committed, num_txns
+        report.committed,
+        num_txns
     );
 }
 
@@ -335,7 +336,8 @@ fn bench_pure_cross_shard() {
     assert!(
         report.committed >= num_txns * 80 / 100,
         "BENCH-4: commit rate should be ≥80%, got {}/{}",
-        report.committed, num_txns
+        report.committed,
+        num_txns
     );
 }
 
@@ -372,7 +374,8 @@ fn bench_fault_injection() {
                 |storage, _tm, txn_id| {
                     if i % 10 == 0 {
                         // Force collision every 10th txn
-                        let row = OwnedRow::new(vec![Datum::Int32(999_999), Datum::Int32(i as i32)]);
+                        let row =
+                            OwnedRow::new(vec![Datum::Int32(999_999), Datum::Int32(i as i32)]);
                         storage.insert(TableId(1), row, txn_id)?;
                     } else {
                         let k = key_ctr.fetch_add(1, Ordering::Relaxed);
@@ -405,7 +408,10 @@ fn bench_fault_injection() {
     eprintln!("{}", report.summary());
 
     // Some txns should abort (the collision ones), but system stays stable
-    assert!(aborted > 0, "BENCH-5: should have some aborts from collisions");
+    assert!(
+        aborted > 0,
+        "BENCH-5: should have some aborts from collisions"
+    );
     assert!(
         committed > num_txns / 2,
         "BENCH-5: majority should still commit, got {}",
@@ -435,20 +441,15 @@ fn bench_high_concurrency() {
             let aborted = aborted.clone();
             s.spawn(move || {
                 for i in 0..txns_per_thread {
-                    let targets = vec![
-                        ShardId((t * 2) % 4),
-                        ShardId((t * 2 + 1) % 4),
-                    ];
+                    let targets = vec![ShardId((t * 2) % 4), ShardId((t * 2 + 1) % 4)];
                     let key = (t as i32 * 10000) + (i as i32) + 5_000_000;
                     let result = coord
                         .execute(
                             &targets,
                             IsolationLevel::ReadCommitted,
                             |storage, _tm, txn_id| {
-                                let row = OwnedRow::new(vec![
-                                    Datum::Int32(key),
-                                    Datum::Int32(t as i32),
-                                ]);
+                                let row =
+                                    OwnedRow::new(vec![Datum::Int32(key), Datum::Int32(t as i32)]);
                                 storage.insert(TableId(1), row, txn_id)?;
                                 Ok(())
                             },
@@ -482,6 +483,7 @@ fn bench_high_concurrency() {
     assert!(
         total_committed >= (num_threads * txns_per_thread) as u64 * 80 / 100,
         "BENCH-6: ≥80% commit rate under concurrency, got {}/{}",
-        total_committed, total
+        total_committed,
+        total
     );
 }

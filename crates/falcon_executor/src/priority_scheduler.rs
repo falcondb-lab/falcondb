@@ -178,7 +178,10 @@ impl PriorityScheduler {
         if priority == QueryPriority::High {
             lane.active.fetch_add(1, Ordering::Relaxed);
             lane.total_admitted.fetch_add(1, Ordering::Relaxed);
-            return Ok(SchedulerGuard { scheduler: self, priority });
+            return Ok(SchedulerGuard {
+                scheduler: self,
+                priority,
+            });
         }
 
         // Track high waiters for backpressure
@@ -210,7 +213,9 @@ impl PriorityScheduler {
                             retry_after_ms: 100,
                         });
                     }
-                    let (g, _) = self.slot_cond.wait_timeout(guard, Duration::from_millis(50))
+                    let (g, _) = self
+                        .slot_cond
+                        .wait_timeout(guard, Duration::from_millis(50))
                         .unwrap_or_else(|p| p.into_inner());
                     guard = g;
                     continue;
@@ -223,7 +228,10 @@ impl PriorityScheduler {
                 lane.total_admitted.fetch_add(1, Ordering::Relaxed);
                 let wait_us = start.elapsed().as_micros() as u64;
                 lane.total_wait_us.fetch_add(wait_us, Ordering::Relaxed);
-                return Ok(SchedulerGuard { scheduler: self, priority });
+                return Ok(SchedulerGuard {
+                    scheduler: self,
+                    priority,
+                });
             }
 
             // Wait for a slot
@@ -242,7 +250,9 @@ impl PriorityScheduler {
                 });
             }
 
-            let (g, _) = self.slot_cond.wait_timeout(guard, remaining.min(Duration::from_millis(50)))
+            let (g, _) = self
+                .slot_cond
+                .wait_timeout(guard, remaining.min(Duration::from_millis(50)))
                 .unwrap_or_else(|p| p.into_inner());
             guard = g;
         }
@@ -415,23 +425,50 @@ mod tests {
 
     #[test]
     fn test_priority_classify_oltp() {
-        assert_eq!(QueryPriority::classify("SELECT * FROM t WHERE id = 1", false, false), QueryPriority::High);
-        assert_eq!(QueryPriority::classify("INSERT INTO t VALUES (1)", false, false), QueryPriority::High);
-        assert_eq!(QueryPriority::classify("UPDATE t SET x = 1 WHERE id = 1", false, false), QueryPriority::High);
+        assert_eq!(
+            QueryPriority::classify("SELECT * FROM t WHERE id = 1", false, false),
+            QueryPriority::High
+        );
+        assert_eq!(
+            QueryPriority::classify("INSERT INTO t VALUES (1)", false, false),
+            QueryPriority::High
+        );
+        assert_eq!(
+            QueryPriority::classify("UPDATE t SET x = 1 WHERE id = 1", false, false),
+            QueryPriority::High
+        );
     }
 
     #[test]
     fn test_priority_classify_normal() {
-        assert_eq!(QueryPriority::classify("SELECT * FROM a JOIN b ON a.id = b.id", false, false), QueryPriority::Normal);
-        assert_eq!(QueryPriority::classify("SELECT x, COUNT(*) FROM t GROUP BY x", false, false), QueryPriority::Normal);
-        assert_eq!(QueryPriority::classify("SELECT * FROM t ORDER BY x", false, false), QueryPriority::Normal);
+        assert_eq!(
+            QueryPriority::classify("SELECT * FROM a JOIN b ON a.id = b.id", false, false),
+            QueryPriority::Normal
+        );
+        assert_eq!(
+            QueryPriority::classify("SELECT x, COUNT(*) FROM t GROUP BY x", false, false),
+            QueryPriority::Normal
+        );
+        assert_eq!(
+            QueryPriority::classify("SELECT * FROM t ORDER BY x", false, false),
+            QueryPriority::Normal
+        );
     }
 
     #[test]
     fn test_priority_classify_low() {
-        assert_eq!(QueryPriority::classify("CREATE TABLE t (id INT)", true, false), QueryPriority::Low);
-        assert_eq!(QueryPriority::classify("COPY t FROM STDIN", false, false), QueryPriority::Low);
-        assert_eq!(QueryPriority::classify("SELECT * FROM t", false, true), QueryPriority::Low);
+        assert_eq!(
+            QueryPriority::classify("CREATE TABLE t (id INT)", true, false),
+            QueryPriority::Low
+        );
+        assert_eq!(
+            QueryPriority::classify("COPY t FROM STDIN", false, false),
+            QueryPriority::Low
+        );
+        assert_eq!(
+            QueryPriority::classify("SELECT * FROM t", false, true),
+            QueryPriority::Low
+        );
     }
 
     #[test]

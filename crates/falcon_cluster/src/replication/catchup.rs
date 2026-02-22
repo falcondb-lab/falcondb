@@ -38,28 +38,44 @@ pub fn apply_wal_record_to_engine(
         WalRecord::DropTable { table_name } => {
             engine.drop_table(table_name)?;
         }
-        WalRecord::Insert { txn_id, table_id, row } => {
+        WalRecord::Insert {
+            txn_id,
+            table_id,
+            row,
+        } => {
             if let Ok(pk) = engine.insert(*table_id, row.clone(), *txn_id) {
-                write_sets
-                    .entry(*txn_id)
-                    .or_default()
-                    .push(WriteOp { table_id: *table_id, pk });
+                write_sets.entry(*txn_id).or_default().push(WriteOp {
+                    table_id: *table_id,
+                    pk,
+                });
             }
         }
-        WalRecord::Update { txn_id, table_id, pk, new_row } => {
-            if engine.update(*table_id, pk, new_row.clone(), *txn_id).is_ok() {
-                write_sets
-                    .entry(*txn_id)
-                    .or_default()
-                    .push(WriteOp { table_id: *table_id, pk: pk.clone() });
+        WalRecord::Update {
+            txn_id,
+            table_id,
+            pk,
+            new_row,
+        } => {
+            if engine
+                .update(*table_id, pk, new_row.clone(), *txn_id)
+                .is_ok()
+            {
+                write_sets.entry(*txn_id).or_default().push(WriteOp {
+                    table_id: *table_id,
+                    pk: pk.clone(),
+                });
             }
         }
-        WalRecord::Delete { txn_id, table_id, pk } => {
+        WalRecord::Delete {
+            txn_id,
+            table_id,
+            pk,
+        } => {
             if engine.delete(*table_id, pk, *txn_id).is_ok() {
-                write_sets
-                    .entry(*txn_id)
-                    .or_default()
-                    .push(WriteOp { table_id: *table_id, pk: pk.clone() });
+                write_sets.entry(*txn_id).or_default().push(WriteOp {
+                    table_id: *table_id,
+                    pk: pk.clone(),
+                });
             }
         }
         WalRecord::CommitTxn { txn_id, commit_ts }
@@ -82,14 +98,20 @@ pub fn apply_wal_record_to_engine(
         WalRecord::DropView { name } => {
             let _ = engine.drop_view(name, true);
         }
-        WalRecord::AlterTable { table_name, operation_json } => {
+        WalRecord::AlterTable {
+            table_name,
+            operation_json,
+        } => {
             // Replay ALTER TABLE by parsing the operation JSON
             if let Ok(op) = serde_json::from_str::<serde_json::Value>(operation_json) {
                 let op_type = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
                 match op_type {
                     "add_column" => {
                         if let Some(col_val) = op.get("column") {
-                            if let Ok(col) = serde_json::from_value::<falcon_common::schema::ColumnDef>(col_val.clone()) {
+                            if let Ok(col) = serde_json::from_value::<
+                                falcon_common::schema::ColumnDef,
+                            >(col_val.clone())
+                            {
                                 let _ = engine.alter_table_add_column(table_name, col);
                             }
                         }
@@ -103,7 +125,8 @@ pub fn apply_wal_record_to_engine(
                         let old_name = op.get("old_name").and_then(|v| v.as_str()).unwrap_or("");
                         let new_name = op.get("new_name").and_then(|v| v.as_str()).unwrap_or("");
                         if !old_name.is_empty() && !new_name.is_empty() {
-                            let _ = engine.alter_table_rename_column(table_name, old_name, new_name);
+                            let _ =
+                                engine.alter_table_rename_column(table_name, old_name, new_name);
                         }
                     }
                     "rename_table" => {
@@ -127,7 +150,12 @@ pub fn apply_wal_record_to_engine(
         WalRecord::TruncateTable { table_name } => {
             let _ = engine.truncate_table(table_name);
         }
-        WalRecord::CreateIndex { index_name, table_name, column_idx, unique } => {
+        WalRecord::CreateIndex {
+            index_name,
+            table_name,
+            column_idx,
+            unique,
+        } => {
             if !engine.index_exists(index_name) {
                 let _ = engine.create_named_index(index_name, table_name, *column_idx, *unique);
             }

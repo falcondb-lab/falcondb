@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod eval_tests {
+    use crate::expr_engine::ExprEngine;
     use falcon_common::datum::{Datum, OwnedRow};
     use falcon_common::error::ExecutionError;
     use falcon_sql_frontend::types::{BinOp, BoundExpr};
-    use crate::expr_engine::ExprEngine;
 
     fn row(values: Vec<Datum>) -> OwnedRow {
         OwnedRow::new(values)
@@ -20,8 +20,14 @@ mod eval_tests {
     #[test]
     fn test_literal() {
         let r = row(vec![]);
-        assert_eq!(eval_expr(&BoundExpr::Literal(Datum::Int32(42)), &r).unwrap(), Datum::Int32(42));
-        assert!(matches!(eval_expr(&BoundExpr::Literal(Datum::Null), &r).unwrap(), Datum::Null));
+        assert_eq!(
+            eval_expr(&BoundExpr::Literal(Datum::Int32(42)), &r).unwrap(),
+            Datum::Int32(42)
+        );
+        assert!(matches!(
+            eval_expr(&BoundExpr::Literal(Datum::Null), &r).unwrap(),
+            Datum::Null
+        ));
         assert_eq!(
             eval_expr(&BoundExpr::Literal(Datum::Text("hello".into())), &r).unwrap(),
             Datum::Text("hello".into())
@@ -30,10 +36,23 @@ mod eval_tests {
 
     #[test]
     fn test_column_ref() {
-        let r = row(vec![Datum::Int32(10), Datum::Text("abc".into()), Datum::Boolean(true)]);
-        assert_eq!(eval_expr(&BoundExpr::ColumnRef(0), &r).unwrap(), Datum::Int32(10));
-        assert_eq!(eval_expr(&BoundExpr::ColumnRef(1), &r).unwrap(), Datum::Text("abc".into()));
-        assert_eq!(eval_expr(&BoundExpr::ColumnRef(2), &r).unwrap(), Datum::Boolean(true));
+        let r = row(vec![
+            Datum::Int32(10),
+            Datum::Text("abc".into()),
+            Datum::Boolean(true),
+        ]);
+        assert_eq!(
+            eval_expr(&BoundExpr::ColumnRef(0), &r).unwrap(),
+            Datum::Int32(10)
+        );
+        assert_eq!(
+            eval_expr(&BoundExpr::ColumnRef(1), &r).unwrap(),
+            Datum::Text("abc".into())
+        );
+        assert_eq!(
+            eval_expr(&BoundExpr::ColumnRef(2), &r).unwrap(),
+            Datum::Boolean(true)
+        );
     }
 
     #[test]
@@ -48,19 +67,39 @@ mod eval_tests {
         let col0 = BoundExpr::ColumnRef(0);
         let col1 = BoundExpr::ColumnRef(1);
 
-        let eq = BoundExpr::BinaryOp { left: Box::new(col0.clone()), op: BinOp::Eq, right: Box::new(col1.clone()) };
+        let eq = BoundExpr::BinaryOp {
+            left: Box::new(col0.clone()),
+            op: BinOp::Eq,
+            right: Box::new(col1.clone()),
+        };
         assert_eq!(eval_expr(&eq, &r).unwrap(), Datum::Boolean(false));
 
-        let lt = BoundExpr::BinaryOp { left: Box::new(col0.clone()), op: BinOp::Lt, right: Box::new(col1.clone()) };
+        let lt = BoundExpr::BinaryOp {
+            left: Box::new(col0.clone()),
+            op: BinOp::Lt,
+            right: Box::new(col1.clone()),
+        };
         assert_eq!(eval_expr(&lt, &r).unwrap(), Datum::Boolean(true));
 
-        let gt = BoundExpr::BinaryOp { left: Box::new(col0.clone()), op: BinOp::Gt, right: Box::new(col1.clone()) };
+        let gt = BoundExpr::BinaryOp {
+            left: Box::new(col0.clone()),
+            op: BinOp::Gt,
+            right: Box::new(col1.clone()),
+        };
         assert_eq!(eval_expr(&gt, &r).unwrap(), Datum::Boolean(false));
 
-        let lte = BoundExpr::BinaryOp { left: Box::new(col0.clone()), op: BinOp::LtEq, right: Box::new(col0.clone()) };
+        let lte = BoundExpr::BinaryOp {
+            left: Box::new(col0.clone()),
+            op: BinOp::LtEq,
+            right: Box::new(col0.clone()),
+        };
         assert_eq!(eval_expr(&lte, &r).unwrap(), Datum::Boolean(true));
 
-        let neq = BoundExpr::BinaryOp { left: Box::new(col0.clone()), op: BinOp::NotEq, right: Box::new(col1.clone()) };
+        let neq = BoundExpr::BinaryOp {
+            left: Box::new(col0.clone()),
+            op: BinOp::NotEq,
+            right: Box::new(col1.clone()),
+        };
         assert_eq!(eval_expr(&neq, &r).unwrap(), Datum::Boolean(true));
     }
 
@@ -70,16 +109,32 @@ mod eval_tests {
         let col0 = BoundExpr::ColumnRef(0);
         let col1 = BoundExpr::ColumnRef(1);
 
-        let plus = BoundExpr::BinaryOp { left: Box::new(col0.clone()), op: BinOp::Plus, right: Box::new(col1.clone()) };
+        let plus = BoundExpr::BinaryOp {
+            left: Box::new(col0.clone()),
+            op: BinOp::Plus,
+            right: Box::new(col1.clone()),
+        };
         assert_eq!(eval_expr(&plus, &r).unwrap(), Datum::Int64(13));
 
-        let minus = BoundExpr::BinaryOp { left: Box::new(col0.clone()), op: BinOp::Minus, right: Box::new(col1.clone()) };
+        let minus = BoundExpr::BinaryOp {
+            left: Box::new(col0.clone()),
+            op: BinOp::Minus,
+            right: Box::new(col1.clone()),
+        };
         assert_eq!(eval_expr(&minus, &r).unwrap(), Datum::Int64(7));
 
-        let mul = BoundExpr::BinaryOp { left: Box::new(col0.clone()), op: BinOp::Multiply, right: Box::new(col1.clone()) };
+        let mul = BoundExpr::BinaryOp {
+            left: Box::new(col0.clone()),
+            op: BinOp::Multiply,
+            right: Box::new(col1.clone()),
+        };
         assert_eq!(eval_expr(&mul, &r).unwrap(), Datum::Int64(30));
 
-        let div = BoundExpr::BinaryOp { left: Box::new(col0.clone()), op: BinOp::Divide, right: Box::new(col1.clone()) };
+        let div = BoundExpr::BinaryOp {
+            left: Box::new(col0.clone()),
+            op: BinOp::Divide,
+            right: Box::new(col1.clone()),
+        };
         assert_eq!(eval_expr(&div, &r).unwrap(), Datum::Int64(3));
     }
 
@@ -157,7 +212,10 @@ mod eval_tests {
         assert_eq!(eval_expr(&is_null_1, &r).unwrap(), Datum::Boolean(false));
 
         let is_not_null_0 = BoundExpr::IsNotNull(Box::new(BoundExpr::ColumnRef(0)));
-        assert_eq!(eval_expr(&is_not_null_0, &r).unwrap(), Datum::Boolean(false));
+        assert_eq!(
+            eval_expr(&is_not_null_0, &r).unwrap(),
+            Datum::Boolean(false)
+        );
 
         let is_not_null_1 = BoundExpr::IsNotNull(Box::new(BoundExpr::ColumnRef(1)));
         assert_eq!(eval_expr(&is_not_null_1, &r).unwrap(), Datum::Boolean(true));
@@ -268,7 +326,10 @@ mod eval_tests {
 
     #[test]
     fn test_string_comparison() {
-        let r = row(vec![Datum::Text("apple".into()), Datum::Text("banana".into())]);
+        let r = row(vec![
+            Datum::Text("apple".into()),
+            Datum::Text("banana".into()),
+        ]);
         let lt = BoundExpr::BinaryOp {
             left: Box::new(BoundExpr::ColumnRef(0)),
             op: BinOp::Lt,
@@ -661,7 +722,9 @@ mod eval_tests {
             left: Box::new(BoundExpr::Literal(Datum::Int32(2))),
             compare_op: BinOp::Eq,
             right: Box::new(BoundExpr::Literal(Datum::Array(vec![
-                Datum::Int32(1), Datum::Int32(2), Datum::Int32(3),
+                Datum::Int32(1),
+                Datum::Int32(2),
+                Datum::Int32(3),
             ]))),
         };
         assert_eq!(eval_expr(&expr, &r).unwrap(), Datum::Boolean(true));
@@ -675,7 +738,9 @@ mod eval_tests {
             left: Box::new(BoundExpr::Literal(Datum::Int32(5))),
             compare_op: BinOp::Eq,
             right: Box::new(BoundExpr::Literal(Datum::Array(vec![
-                Datum::Int32(1), Datum::Int32(2), Datum::Int32(3),
+                Datum::Int32(1),
+                Datum::Int32(2),
+                Datum::Int32(3),
             ]))),
         };
         assert_eq!(eval_expr(&expr, &r).unwrap(), Datum::Boolean(false));
@@ -689,7 +754,9 @@ mod eval_tests {
             left: Box::new(BoundExpr::Literal(Datum::Int32(2))),
             compare_op: BinOp::Gt,
             right: Box::new(BoundExpr::Literal(Datum::Array(vec![
-                Datum::Int32(1), Datum::Int32(3), Datum::Int32(5),
+                Datum::Int32(1),
+                Datum::Int32(3),
+                Datum::Int32(5),
             ]))),
         };
         assert_eq!(eval_expr(&expr, &r).unwrap(), Datum::Boolean(true));
@@ -703,7 +770,9 @@ mod eval_tests {
             left: Box::new(BoundExpr::Literal(Datum::Int32(5))),
             compare_op: BinOp::Eq,
             right: Box::new(BoundExpr::Literal(Datum::Array(vec![
-                Datum::Int32(1), Datum::Null, Datum::Int32(3),
+                Datum::Int32(1),
+                Datum::Null,
+                Datum::Int32(3),
             ]))),
         };
         assert!(matches!(eval_expr(&expr, &r).unwrap(), Datum::Null));
@@ -729,7 +798,9 @@ mod eval_tests {
             left: Box::new(BoundExpr::Literal(Datum::Int32(1))),
             compare_op: BinOp::Eq,
             right: Box::new(BoundExpr::Literal(Datum::Array(vec![
-                Datum::Int32(1), Datum::Int32(1), Datum::Int32(1),
+                Datum::Int32(1),
+                Datum::Int32(1),
+                Datum::Int32(1),
             ]))),
         };
         assert_eq!(eval_expr(&expr, &r).unwrap(), Datum::Boolean(true));
@@ -743,7 +814,9 @@ mod eval_tests {
             left: Box::new(BoundExpr::Literal(Datum::Int32(1))),
             compare_op: BinOp::Eq,
             right: Box::new(BoundExpr::Literal(Datum::Array(vec![
-                Datum::Int32(1), Datum::Int32(2), Datum::Int32(1),
+                Datum::Int32(1),
+                Datum::Int32(2),
+                Datum::Int32(1),
             ]))),
         };
         assert_eq!(eval_expr(&expr, &r).unwrap(), Datum::Boolean(false));
@@ -757,7 +830,9 @@ mod eval_tests {
             left: Box::new(BoundExpr::Literal(Datum::Int32(10))),
             compare_op: BinOp::Gt,
             right: Box::new(BoundExpr::Literal(Datum::Array(vec![
-                Datum::Int32(1), Datum::Int32(2), Datum::Int32(3),
+                Datum::Int32(1),
+                Datum::Int32(2),
+                Datum::Int32(3),
             ]))),
         };
         assert_eq!(eval_expr(&expr, &r).unwrap(), Datum::Boolean(true));
@@ -783,8 +858,11 @@ mod eval_tests {
         let r = row(vec![]);
         let expr = BoundExpr::ArraySlice {
             array: Box::new(BoundExpr::Literal(Datum::Array(vec![
-                Datum::Int32(10), Datum::Int32(20), Datum::Int32(30),
-                Datum::Int32(40), Datum::Int32(50),
+                Datum::Int32(10),
+                Datum::Int32(20),
+                Datum::Int32(30),
+                Datum::Int32(40),
+                Datum::Int32(50),
             ]))),
             lower: Some(Box::new(BoundExpr::Literal(Datum::Int32(2)))),
             upper: Some(Box::new(BoundExpr::Literal(Datum::Int32(4)))),
@@ -801,7 +879,9 @@ mod eval_tests {
         let r = row(vec![]);
         let expr = BoundExpr::ArraySlice {
             array: Box::new(BoundExpr::Literal(Datum::Array(vec![
-                Datum::Int32(10), Datum::Int32(20), Datum::Int32(30),
+                Datum::Int32(10),
+                Datum::Int32(20),
+                Datum::Int32(30),
             ]))),
             lower: None,
             upper: Some(Box::new(BoundExpr::Literal(Datum::Int32(2)))),
@@ -818,7 +898,9 @@ mod eval_tests {
         let r = row(vec![]);
         let expr = BoundExpr::ArraySlice {
             array: Box::new(BoundExpr::Literal(Datum::Array(vec![
-                Datum::Int32(10), Datum::Int32(20), Datum::Int32(30),
+                Datum::Int32(10),
+                Datum::Int32(20),
+                Datum::Int32(30),
             ]))),
             lower: Some(Box::new(BoundExpr::Literal(Datum::Int32(2)))),
             upper: None,
@@ -846,7 +928,8 @@ mod eval_tests {
         let r = row(vec![]);
         let expr = BoundExpr::ArraySlice {
             array: Box::new(BoundExpr::Literal(Datum::Array(vec![
-                Datum::Int32(10), Datum::Int32(20),
+                Datum::Int32(10),
+                Datum::Int32(20),
             ]))),
             lower: Some(Box::new(BoundExpr::Literal(Datum::Int32(5)))),
             upper: Some(Box::new(BoundExpr::Literal(Datum::Int32(10)))),
@@ -858,12 +941,14 @@ mod eval_tests {
 // ── Parameterized SQL kernel tests ──────────────────────────────────
 #[cfg(test)]
 mod param_tests {
+    use crate::eval::{eval_expr_with_params, substitute_params_expr};
     use falcon_common::datum::{Datum, OwnedRow};
     use falcon_common::error::ExecutionError;
     use falcon_sql_frontend::types::{BinOp, BoundExpr};
-    use crate::eval::{eval_expr_with_params, substitute_params_expr};
 
-    fn empty_row() -> OwnedRow { OwnedRow::new(vec![]) }
+    fn empty_row() -> OwnedRow {
+        OwnedRow::new(vec![])
+    }
 
     // ── eval_expr_with_params ──
 
@@ -925,7 +1010,10 @@ mod param_tests {
         let expr = BoundExpr::Parameter(2);
         let result = eval_expr_with_params(&expr, &empty_row(), &params);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ExecutionError::ParamMissing(2)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ExecutionError::ParamMissing(2)
+        ));
     }
 
     #[test]
@@ -1011,10 +1099,7 @@ mod param_tests {
     fn subst_in_coalesce() {
         // COALESCE($1, $2)
         let params = vec![Datum::Null, Datum::Text("fallback".into())];
-        let expr = BoundExpr::Coalesce(vec![
-            BoundExpr::Parameter(1),
-            BoundExpr::Parameter(2),
-        ]);
+        let expr = BoundExpr::Coalesce(vec![BoundExpr::Parameter(1), BoundExpr::Parameter(2)]);
         let result = substitute_params_expr(&expr, &params).unwrap();
         match result {
             BoundExpr::Coalesce(args) => {
@@ -1044,12 +1129,12 @@ mod param_tests {
 
 #[cfg(test)]
 mod rbac_enforcement_tests {
-    use std::sync::{Arc, RwLock};
-    use falcon_common::error::{FalconError, ExecutionError};
+    use crate::Executor;
+    use falcon_common::error::{ExecutionError, FalconError};
     use falcon_common::security::{
         ObjectRef, ObjectType, Privilege, PrivilegeManager, Role, RoleCatalog, RoleId,
     };
-    use crate::Executor;
+    use std::sync::{Arc, RwLock};
 
     fn setup_rbac() -> (Arc<RwLock<RoleCatalog>>, Arc<RwLock<PrivilegeManager>>) {
         let mut catalog = RoleCatalog::new();
@@ -1074,7 +1159,13 @@ mod rbac_enforcement_tests {
             object_id: obj_hash("users"),
             object_name: "users".into(),
         };
-        priv_mgr.grant(RoleId(100), Privilege::Select, users_obj.clone(), RoleId(0), false);
+        priv_mgr.grant(
+            RoleId(100),
+            Privilege::Select,
+            users_obj.clone(),
+            RoleId(0),
+            false,
+        );
         priv_mgr.grant(RoleId(200), Privilege::Insert, users_obj, RoleId(0), false);
 
         let public_obj = ObjectRef {
@@ -1171,7 +1262,9 @@ mod rbac_enforcement_tests {
     #[test]
     fn test_error_is_pg_compatible_sqlstate() {
         let exec = make_executor(RoleId(100));
-        let err = exec.check_privilege_public(Privilege::Insert, ObjectType::Table, "users").unwrap_err();
+        let err = exec
+            .check_privilege_public(Privilege::Insert, ObjectType::Table, "users")
+            .unwrap_err();
         let sqlstate = err.pg_sqlstate();
         assert_eq!(sqlstate, "42501", "should return PG SQLSTATE 42501");
     }

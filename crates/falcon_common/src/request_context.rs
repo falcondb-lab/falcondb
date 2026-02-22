@@ -326,7 +326,9 @@ mod tests {
 
     #[test]
     fn test_as_context_str_format() {
-        let ctx = RequestContext::with_ids(1, 2, 3).with_txn_id(4).with_shard_id(5);
+        let ctx = RequestContext::with_ids(1, 2, 3)
+            .with_txn_id(4)
+            .with_shard_id(5);
         let s = ctx.as_context_str();
         assert!(s.contains("request_id=1"));
         assert!(s.contains("session_id=2"));

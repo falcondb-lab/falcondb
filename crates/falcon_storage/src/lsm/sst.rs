@@ -59,24 +59,41 @@ pub enum SstReadError {
         detail: String,
     },
     /// Codec / format error (bad magic, unknown version, malformed encoding).
-    Codec {
-        sst_path: String,
-        detail: String,
-    },
+    Codec { sst_path: String, detail: String },
 }
 
 impl fmt::Display for SstReadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Corruption { sst_path, block_offset, block_size, expected_crc, actual_crc, detail } => {
+            Self::Corruption {
+                sst_path,
+                block_offset,
+                block_size,
+                expected_crc,
+                actual_crc,
+                detail,
+            } => {
                 write!(f, "SST corruption [{}]: block_offset={} block_size={} expected_crc={:#010x} actual_crc={:#010x}: {}",
                     sst_path, block_offset, block_size, expected_crc, actual_crc, detail)
             }
-            Self::Truncated { sst_path, block_offset, expected_len, actual_len, detail } => {
-                write!(f, "SST truncated [{}]: block_offset={} expected_len={} actual_len={}: {}",
-                    sst_path, block_offset, expected_len, actual_len, detail)
+            Self::Truncated {
+                sst_path,
+                block_offset,
+                expected_len,
+                actual_len,
+                detail,
+            } => {
+                write!(
+                    f,
+                    "SST truncated [{}]: block_offset={} expected_len={} actual_len={}: {}",
+                    sst_path, block_offset, expected_len, actual_len, detail
+                )
             }
-            Self::Io { sst_path, source, detail } => {
+            Self::Io {
+                sst_path,
+                source,
+                detail,
+            } => {
                 write!(f, "SST I/O error [{}]: {}: {}", sst_path, detail, source)
             }
             Self::Codec { sst_path, detail } => {
@@ -103,9 +120,9 @@ impl From<SstReadError> for io::Error {
 
 /// Helper: convert a byte slice to a fixed-size array, returning an io::Error on failure.
 fn slice_to_array<const N: usize>(slice: &[u8]) -> io::Result<[u8; N]> {
-    slice.try_into().map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidData, "SST: unexpected end of data")
-    })
+    slice
+        .try_into()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "SST: unexpected end of data"))
 }
 
 /// Compute CRC32 checksum for a data block.
@@ -228,8 +245,10 @@ impl SstWriter {
         self.bloom.insert(key);
 
         // Encode entry into block buffer
-        self.block_buf.extend_from_slice(&(key.len() as u32).to_le_bytes());
-        self.block_buf.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        self.block_buf
+            .extend_from_slice(&(key.len() as u32).to_le_bytes());
+        self.block_buf
+            .extend_from_slice(&(value.len() as u32).to_le_bytes());
         self.block_buf.extend_from_slice(key);
         self.block_buf.extend_from_slice(value);
         self.block_entry_count += 1;
@@ -369,31 +388,43 @@ impl SstReader {
     pub fn open(path: &Path, sst_id: u64) -> io::Result<Self> {
         let sst_path = path.display().to_string();
         let file_len = fs::metadata(path).map_err(|e| SstReadError::Io {
-            sst_path: sst_path.clone(), source: e, detail: "stat file".into(),
+            sst_path: sst_path.clone(),
+            source: e,
+            detail: "stat file".into(),
         })?;
         let file_len = file_len.len();
 
         // Accept both v2 (52-byte) and legacy v1 (48-byte) footers
         if file_len < FOOTER_SIZE_V1 as u64 {
             return Err(SstReadError::Truncated {
-                sst_path: sst_path.clone(), block_offset: 0,
-                expected_len: FOOTER_SIZE_V1, actual_len: file_len as usize,
+                sst_path: sst_path.clone(),
+                block_offset: 0,
+                expected_len: FOOTER_SIZE_V1,
+                actual_len: file_len as usize,
                 detail: "file too small for footer".into(),
-            }.into());
+            }
+            .into());
         }
 
         let mut file = BufReader::new(File::open(path).map_err(|e| SstReadError::Io {
-            sst_path: sst_path.clone(), source: e, detail: "open file".into(),
+            sst_path: sst_path.clone(),
+            source: e,
+            detail: "open file".into(),
         })?);
 
         // Try v2 footer first (52 bytes), fall back to v1 (48 bytes)
         let (footer_bytes, footer_version) = if file_len >= FOOTER_SIZE as u64 {
-            file.seek(SeekFrom::End(-(FOOTER_SIZE as i64))).map_err(|e| SstReadError::Io {
-                sst_path: sst_path.clone(), source: e, detail: "seek to v2 footer".into(),
-            })?;
+            file.seek(SeekFrom::End(-(FOOTER_SIZE as i64)))
+                .map_err(|e| SstReadError::Io {
+                    sst_path: sst_path.clone(),
+                    source: e,
+                    detail: "seek to v2 footer".into(),
+                })?;
             let mut buf = [0u8; FOOTER_SIZE];
             file.read_exact(&mut buf).map_err(|e| SstReadError::Io {
-                sst_path: sst_path.clone(), source: e, detail: "read v2 footer".into(),
+                sst_path: sst_path.clone(),
+                source: e,
+                detail: "read v2 footer".into(),
             })?;
             // Check if this is a valid v2 footer (magic at expected offset)
             if &buf[0..4] == SST_MAGIC {
@@ -402,48 +433,70 @@ impl SstReader {
                 let computed_crc = block_crc32(&buf[0..48]);
                 if stored_crc != computed_crc {
                     return Err(SstReadError::Corruption {
-                        sst_path, block_offset: file_len - FOOTER_SIZE as u64,
+                        sst_path,
+                        block_offset: file_len - FOOTER_SIZE as u64,
                         block_size: FOOTER_SIZE as u32,
-                        expected_crc: stored_crc, actual_crc: computed_crc,
+                        expected_crc: stored_crc,
+                        actual_crc: computed_crc,
                         detail: "footer checksum mismatch".into(),
-                    }.into());
+                    }
+                    .into());
                 }
                 (buf, 2u8)
             } else {
                 // Try v1 (48-byte footer at end)
-                file.seek(SeekFrom::End(-(FOOTER_SIZE_V1 as i64))).map_err(|e| SstReadError::Io {
-                    sst_path: sst_path.clone(), source: e, detail: "seek to v1 footer".into(),
-                })?;
+                file.seek(SeekFrom::End(-(FOOTER_SIZE_V1 as i64)))
+                    .map_err(|e| SstReadError::Io {
+                        sst_path: sst_path.clone(),
+                        source: e,
+                        detail: "seek to v1 footer".into(),
+                    })?;
                 let mut v1buf = [0u8; FOOTER_SIZE];
-                file.read_exact(&mut v1buf[..FOOTER_SIZE_V1]).map_err(|e| SstReadError::Io {
-                    sst_path: sst_path.clone(), source: e, detail: "read v1 footer".into(),
-                })?;
+                file.read_exact(&mut v1buf[..FOOTER_SIZE_V1])
+                    .map_err(|e| SstReadError::Io {
+                        sst_path: sst_path.clone(),
+                        source: e,
+                        detail: "read v1 footer".into(),
+                    })?;
                 (v1buf, 1u8)
             }
         } else {
             // Only v1 footer fits
-            file.seek(SeekFrom::End(-(FOOTER_SIZE_V1 as i64))).map_err(|e| SstReadError::Io {
-                sst_path: sst_path.clone(), source: e, detail: "seek to v1 footer".into(),
-            })?;
+            file.seek(SeekFrom::End(-(FOOTER_SIZE_V1 as i64)))
+                .map_err(|e| SstReadError::Io {
+                    sst_path: sst_path.clone(),
+                    source: e,
+                    detail: "seek to v1 footer".into(),
+                })?;
             let mut buf = [0u8; FOOTER_SIZE];
-            file.read_exact(&mut buf[..FOOTER_SIZE_V1]).map_err(|e| SstReadError::Io {
-                sst_path: sst_path.clone(), source: e, detail: "read v1 footer".into(),
-            })?;
+            file.read_exact(&mut buf[..FOOTER_SIZE_V1])
+                .map_err(|e| SstReadError::Io {
+                    sst_path: sst_path.clone(),
+                    source: e,
+                    detail: "read v1 footer".into(),
+                })?;
             (buf, 1u8)
         };
 
         // Validate magic
         if &footer_bytes[0..4] != SST_MAGIC {
             return Err(SstReadError::Codec {
-                sst_path, detail: format!("invalid magic: {:?}", &footer_bytes[0..4]),
-            }.into());
+                sst_path,
+                detail: format!("invalid magic: {:?}", &footer_bytes[0..4]),
+            }
+            .into());
         }
 
         let version = u32::from_le_bytes(slice_to_array(&footer_bytes[4..8])?);
         if version > SST_FORMAT_VERSION {
             return Err(SstReadError::Codec {
-                sst_path, detail: format!("unsupported SST version: {} (max: {})", version, SST_FORMAT_VERSION),
-            }.into());
+                sst_path,
+                detail: format!(
+                    "unsupported SST version: {} (max: {})",
+                    version, SST_FORMAT_VERSION
+                ),
+            }
+            .into());
         }
 
         let index_offset = u64::from_le_bytes(slice_to_array(&footer_bytes[8..16])?);
@@ -453,46 +506,69 @@ impl SstReader {
         let entry_count = u64::from_le_bytes(slice_to_array(&footer_bytes[40..48])?);
 
         // Validate offsets are within file bounds
-        let data_end = if footer_version == 2 { file_len - FOOTER_SIZE as u64 } else { file_len - FOOTER_SIZE_V1 as u64 };
+        let data_end = if footer_version == 2 {
+            file_len - FOOTER_SIZE as u64
+        } else {
+            file_len - FOOTER_SIZE_V1 as u64
+        };
         if index_offset + index_len > data_end {
             return Err(SstReadError::Truncated {
-                sst_path: sst_path.clone(), block_offset: index_offset,
-                expected_len: index_len as usize, actual_len: (data_end.saturating_sub(index_offset)) as usize,
+                sst_path: sst_path.clone(),
+                block_offset: index_offset,
+                expected_len: index_len as usize,
+                actual_len: (data_end.saturating_sub(index_offset)) as usize,
                 detail: "index block extends beyond file".into(),
-            }.into());
+            }
+            .into());
         }
         if bloom_offset + bloom_len > data_end {
             return Err(SstReadError::Truncated {
-                sst_path: sst_path.clone(), block_offset: bloom_offset,
-                expected_len: bloom_len as usize, actual_len: (data_end.saturating_sub(bloom_offset)) as usize,
+                sst_path: sst_path.clone(),
+                block_offset: bloom_offset,
+                expected_len: bloom_len as usize,
+                actual_len: (data_end.saturating_sub(bloom_offset)) as usize,
                 detail: "bloom block extends beyond file".into(),
-            }.into());
+            }
+            .into());
         }
 
         // Read index block
-        file.seek(SeekFrom::Start(index_offset)).map_err(|e| SstReadError::Io {
-            sst_path: sst_path.clone(), source: e, detail: "seek to index".into(),
-        })?;
+        file.seek(SeekFrom::Start(index_offset))
+            .map_err(|e| SstReadError::Io {
+                sst_path: sst_path.clone(),
+                source: e,
+                detail: "seek to index".into(),
+            })?;
         let mut index_buf = vec![0u8; index_len as usize];
-        file.read_exact(&mut index_buf).map_err(|e| SstReadError::Io {
-            sst_path: sst_path.clone(), source: e, detail: "read index block".into(),
-        })?;
+        file.read_exact(&mut index_buf)
+            .map_err(|e| SstReadError::Io {
+                sst_path: sst_path.clone(),
+                source: e,
+                detail: "read index block".into(),
+            })?;
         let index = Self::parse_index(&index_buf).map_err(|e| SstReadError::Codec {
-            sst_path: sst_path.clone(), detail: format!("index parse: {}", e),
+            sst_path: sst_path.clone(),
+            detail: format!("index parse: {}", e),
         })?;
 
         // Read bloom filter
-        file.seek(SeekFrom::Start(bloom_offset)).map_err(|e| SstReadError::Io {
-            sst_path: sst_path.clone(), source: e, detail: "seek to bloom".into(),
-        })?;
-        let mut bloom_buf = vec![0u8; bloom_len as usize];
-        file.read_exact(&mut bloom_buf).map_err(|e| SstReadError::Io {
-            sst_path: sst_path.clone(), source: e, detail: "read bloom filter".into(),
-        })?;
-        let bloom = BloomFilter::from_bytes(&bloom_buf)
-            .ok_or_else(|| SstReadError::Codec {
-                sst_path: sst_path.clone(), detail: "invalid bloom filter encoding".into(),
+        file.seek(SeekFrom::Start(bloom_offset))
+            .map_err(|e| SstReadError::Io {
+                sst_path: sst_path.clone(),
+                source: e,
+                detail: "seek to bloom".into(),
             })?;
+        let mut bloom_buf = vec![0u8; bloom_len as usize];
+        file.read_exact(&mut bloom_buf)
+            .map_err(|e| SstReadError::Io {
+                sst_path: sst_path.clone(),
+                source: e,
+                detail: "read bloom filter".into(),
+            })?;
+        let bloom = BloomFilter::from_bytes(&bloom_buf).ok_or_else(|| SstReadError::Codec {
+            sst_path: sst_path.clone(),
+            detail: "invalid bloom filter encoding".into(),
+        })?;
 
         // Derive min/max key from index
         let min_key = if let Some(first_block) = index.first() {
@@ -513,7 +589,12 @@ impl SstReader {
             seq: 0,
         };
 
-        Ok(Self { path: path.to_path_buf(), meta, index, bloom })
+        Ok(Self {
+            path: path.to_path_buf(),
+            meta,
+            index,
+            bloom,
+        })
     }
 
     /// Point lookup: returns the value for the given key, or None.
@@ -553,35 +634,44 @@ impl SstReader {
     fn read_block(&self, offset: u64, len: u32) -> io::Result<Vec<u8>> {
         let sst_path = self.path.display().to_string();
         let mut file = BufReader::new(File::open(&self.path).map_err(|e| SstReadError::Io {
-            sst_path: sst_path.clone(), source: e, detail: "open for block read".into(),
+            sst_path: sst_path.clone(),
+            source: e,
+            detail: "open for block read".into(),
         })?);
-        file.seek(SeekFrom::Start(offset)).map_err(|e| SstReadError::Io {
-            sst_path: sst_path.clone(), source: e,
-            detail: format!("seek to block offset={}", offset),
-        })?;
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|e| SstReadError::Io {
+                sst_path: sst_path.clone(),
+                source: e,
+                detail: format!("seek to block offset={}", offset),
+            })?;
         let mut buf = vec![0u8; len as usize];
-        file.read_exact(&mut buf).map_err(|e| SstReadError::Truncated {
-            sst_path: sst_path.clone(), block_offset: offset,
-            expected_len: len as usize, actual_len: 0,
-            detail: format!("block read_exact: {}", e),
-        })?;
+        file.read_exact(&mut buf)
+            .map_err(|e| SstReadError::Truncated {
+                sst_path: sst_path.clone(),
+                block_offset: offset,
+                expected_len: len as usize,
+                actual_len: 0,
+                detail: format!("block read_exact: {}", e),
+            })?;
 
         // Verify block CRC if present (v2 format: last 4 bytes are CRC)
         if len >= 8 {
             let data_len = (len - 4) as usize;
-            let stored_crc = u32::from_le_bytes(
-                slice_to_array(&buf[data_len..data_len + 4])?,
-            );
+            let stored_crc = u32::from_le_bytes(slice_to_array(&buf[data_len..data_len + 4])?);
             let computed_crc = block_crc32(&buf[..data_len]);
             if stored_crc != computed_crc {
                 // Could be a v1 block (no CRC) — only error if the CRC looks intentional.
                 // Heuristic: if stored_crc is 0, it's likely v1 (no CRC appended).
                 if stored_crc != 0 {
                     return Err(SstReadError::Corruption {
-                        sst_path, block_offset: offset, block_size: len,
-                        expected_crc: stored_crc, actual_crc: computed_crc,
+                        sst_path,
+                        block_offset: offset,
+                        block_size: len,
+                        expected_crc: stored_crc,
+                        actual_crc: computed_crc,
                         detail: "block checksum mismatch".into(),
-                    }.into());
+                    }
+                    .into());
                 }
             }
         }
@@ -591,25 +681,45 @@ impl SstReader {
 
     fn search_block(block_data: &[u8], target_key: &[u8]) -> io::Result<Option<Vec<u8>>> {
         if block_data.len() < 4 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData,
-                format!("SST block too short for header: {} bytes", block_data.len())));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("SST block too short for header: {} bytes", block_data.len()),
+            ));
         }
         let num_entries = u32::from_le_bytes(slice_to_array(&block_data[0..4])?) as usize;
         let mut pos = 4;
 
         for i in 0..num_entries {
             if pos + 8 > block_data.len() {
-                return Err(io::Error::new(io::ErrorKind::InvalidData,
-                    format!("SST block truncated at entry {}/{}: pos={} len={}", i, num_entries, pos, block_data.len())));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "SST block truncated at entry {}/{}: pos={} len={}",
+                        i,
+                        num_entries,
+                        pos,
+                        block_data.len()
+                    ),
+                ));
             }
             let key_len = u32::from_le_bytes(slice_to_array(&block_data[pos..pos + 4])?) as usize;
-            let val_len = u32::from_le_bytes(slice_to_array(&block_data[pos + 4..pos + 8])?) as usize;
+            let val_len =
+                u32::from_le_bytes(slice_to_array(&block_data[pos + 4..pos + 8])?) as usize;
             pos += 8;
 
             if pos + key_len + val_len > block_data.len() {
-                return Err(io::Error::new(io::ErrorKind::InvalidData,
-                    format!("SST block entry {}/{} overflow: key_len={} val_len={} pos={} block_len={}",
-                        i, num_entries, key_len, val_len, pos, block_data.len())));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "SST block entry {}/{} overflow: key_len={} val_len={} pos={} block_len={}",
+                        i,
+                        num_entries,
+                        key_len,
+                        val_len,
+                        pos,
+                        block_data.len()
+                    ),
+                ));
             }
             let key = &block_data[pos..pos + key_len];
             let value = &block_data[pos + key_len..pos + key_len + val_len];
@@ -628,19 +738,30 @@ impl SstReader {
     fn decode_block(block_data: &[u8]) -> io::Result<Vec<SstEntry>> {
         let mut entries = Vec::new();
         if block_data.len() < 4 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData,
-                format!("SST block too short for header: {} bytes", block_data.len())));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("SST block too short for header: {} bytes", block_data.len()),
+            ));
         }
         let num_entries = u32::from_le_bytes(slice_to_array(&block_data[0..4])?) as usize;
         let mut pos = 4;
 
         for i in 0..num_entries {
             if pos + 8 > block_data.len() {
-                return Err(io::Error::new(io::ErrorKind::InvalidData,
-                    format!("SST decode_block truncated at entry {}/{}: pos={} len={}", i, num_entries, pos, block_data.len())));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "SST decode_block truncated at entry {}/{}: pos={} len={}",
+                        i,
+                        num_entries,
+                        pos,
+                        block_data.len()
+                    ),
+                ));
             }
             let key_len = u32::from_le_bytes(slice_to_array(&block_data[pos..pos + 4])?) as usize;
-            let val_len = u32::from_le_bytes(slice_to_array(&block_data[pos + 4..pos + 8])?) as usize;
+            let val_len =
+                u32::from_le_bytes(slice_to_array(&block_data[pos + 4..pos + 8])?) as usize;
             pos += 8;
 
             if pos + key_len + val_len > block_data.len() {
@@ -659,8 +780,10 @@ impl SstReader {
 
     fn parse_index(data: &[u8]) -> io::Result<Vec<IndexEntry>> {
         if data.len() < 4 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData,
-                format!("SST index too short: {} bytes", data.len())));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("SST index too short: {} bytes", data.len()),
+            ));
         }
         let count = u32::from_le_bytes(slice_to_array(&data[0..4])?) as usize;
         let mut pos = 4;
@@ -668,8 +791,16 @@ impl SstReader {
 
         for i in 0..count {
             if pos + 16 > data.len() {
-                return Err(io::Error::new(io::ErrorKind::InvalidData,
-                    format!("SST index truncated at entry {}/{}: pos={} len={}", i, count, pos, data.len())));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "SST index truncated at entry {}/{}: pos={} len={}",
+                        i,
+                        count,
+                        pos,
+                        data.len()
+                    ),
+                ));
             }
             let block_offset = u64::from_le_bytes(slice_to_array(&data[pos..pos + 8])?);
             let block_len = u32::from_le_bytes(slice_to_array(&data[pos + 8..pos + 12])?);
@@ -677,13 +808,26 @@ impl SstReader {
             pos += 16;
 
             if pos + key_len > data.len() {
-                return Err(io::Error::new(io::ErrorKind::InvalidData,
-                    format!("SST index entry {}/{} key overflow: key_len={} pos={} len={}", i, count, key_len, pos, data.len())));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "SST index entry {}/{} key overflow: key_len={} pos={} len={}",
+                        i,
+                        count,
+                        key_len,
+                        pos,
+                        data.len()
+                    ),
+                ));
             }
             let last_key = data[pos..pos + key_len].to_vec();
             pos += key_len;
 
-            entries.push(IndexEntry { last_key, block_offset, block_len });
+            entries.push(IndexEntry {
+                last_key,
+                block_offset,
+                block_len,
+            });
         }
         Ok(entries)
     }
@@ -726,11 +870,8 @@ mod tests {
     #[test]
     fn test_sst_write_read_basic() {
         let dir = TempDir::new().unwrap();
-        let entries: Vec<(&[u8], &[u8])> = vec![
-            (b"aaa", b"val_a"),
-            (b"bbb", b"val_b"),
-            (b"ccc", b"val_c"),
-        ];
+        let entries: Vec<(&[u8], &[u8])> =
+            vec![(b"aaa", b"val_a"), (b"bbb", b"val_b"), (b"ccc", b"val_c")];
         let meta = write_test_sst(dir.path(), &entries);
 
         assert_eq!(meta.entry_count, 3);
@@ -749,11 +890,7 @@ mod tests {
     #[test]
     fn test_sst_scan() {
         let dir = TempDir::new().unwrap();
-        let entries: Vec<(&[u8], &[u8])> = vec![
-            (b"k1", b"v1"),
-            (b"k2", b"v2"),
-            (b"k3", b"v3"),
-        ];
+        let entries: Vec<(&[u8], &[u8])> = vec![(b"k1", b"v1"), (b"k2", b"v2"), (b"k3", b"v3")];
         let meta = write_test_sst(dir.path(), &entries);
         let reader = SstReader::open(&meta.path, meta.id).unwrap();
         let scanned = reader.scan().unwrap();
@@ -798,10 +935,7 @@ mod tests {
     #[test]
     fn test_sst_bloom_filter_rejects() {
         let dir = TempDir::new().unwrap();
-        let entries: Vec<(&[u8], &[u8])> = vec![
-            (b"alpha", b"1"),
-            (b"beta", b"2"),
-        ];
+        let entries: Vec<(&[u8], &[u8])> = vec![(b"alpha", b"1"), (b"beta", b"2")];
         let meta = write_test_sst(dir.path(), &entries);
         let reader = SstReader::open(&meta.path, meta.id).unwrap();
 
@@ -838,8 +972,11 @@ mod tests {
         let result = SstReader::open(&meta.path, meta.id);
         assert!(result.is_err(), "should detect footer corruption");
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("checksum") || msg.contains("corruption") || msg.contains("Corruption"),
-            "error should mention checksum: {}", msg);
+        assert!(
+            msg.contains("checksum") || msg.contains("corruption") || msg.contains("Corruption"),
+            "error should mention checksum: {}",
+            msg
+        );
     }
 
     #[test]
@@ -852,8 +989,11 @@ mod tests {
         let result = SstReader::open(&path, 99);
         assert!(result.is_err(), "should detect truncated file");
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("truncated") || msg.contains("Truncated") || msg.contains("too small"),
-            "error should mention truncation: {}", msg);
+        assert!(
+            msg.contains("truncated") || msg.contains("Truncated") || msg.contains("too small"),
+            "error should mention truncation: {}",
+            msg
+        );
     }
 
     #[test]
@@ -877,10 +1017,7 @@ mod tests {
     #[test]
     fn test_sst_corrupt_data_block_detected() {
         let dir = TempDir::new().unwrap();
-        let entries: Vec<(&[u8], &[u8])> = vec![
-            (b"aaa", b"val_a"),
-            (b"bbb", b"val_b"),
-        ];
+        let entries: Vec<(&[u8], &[u8])> = vec![(b"aaa", b"val_a"), (b"bbb", b"val_b")];
         let meta = write_test_sst(dir.path(), &entries);
 
         // Corrupt a byte in the middle of the data block area (offset 10)
@@ -896,8 +1033,10 @@ mod tests {
             let result = r.get(b"aaa");
             // Corrupted block should either return error or wrong data
             // (we can't guarantee which byte was corrupted)
-            assert!(result.is_err() || result.unwrap() != Some(b"val_a".to_vec()),
-                "corrupted block should be detected or data should differ");
+            assert!(
+                result.is_err() || result.unwrap() != Some(b"val_a".to_vec()),
+                "corrupted block should be detected or data should differ"
+            );
         }
     }
 

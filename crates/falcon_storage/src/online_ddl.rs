@@ -66,22 +66,35 @@ pub enum DdlOpKind {
         new_type: String,
     },
     /// Metadata-only ops that complete instantly.
-    MetadataOnly {
-        description: String,
-    },
+    MetadataOnly { description: String },
 }
 
 impl std::fmt::Display for DdlOpKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DdlOpKind::AddColumn { table_name, column_name, .. } => {
+            DdlOpKind::AddColumn {
+                table_name,
+                column_name,
+                ..
+            } => {
                 write!(f, "ADD COLUMN {}.{}", table_name, column_name)
             }
-            DdlOpKind::DropColumn { table_name, column_name } => {
+            DdlOpKind::DropColumn {
+                table_name,
+                column_name,
+            } => {
                 write!(f, "DROP COLUMN {}.{}", table_name, column_name)
             }
-            DdlOpKind::ChangeColumnType { table_name, column_name, new_type } => {
-                write!(f, "ALTER COLUMN {}.{} TYPE {}", table_name, column_name, new_type)
+            DdlOpKind::ChangeColumnType {
+                table_name,
+                column_name,
+                new_type,
+            } => {
+                write!(
+                    f,
+                    "ALTER COLUMN {}.{} TYPE {}",
+                    table_name, column_name, new_type
+                )
             }
             DdlOpKind::MetadataOnly { description } => {
                 write!(f, "{}", description)
@@ -157,8 +170,10 @@ impl DdlOperation {
     pub fn needs_backfill(&self) -> bool {
         matches!(
             self.kind,
-            DdlOpKind::AddColumn { has_default: true, .. }
-                | DdlOpKind::ChangeColumnType { .. }
+            DdlOpKind::AddColumn {
+                has_default: true,
+                ..
+            } | DdlOpKind::ChangeColumnType { .. }
         )
     }
 
@@ -205,28 +220,48 @@ impl OnlineDdlManager {
 
     /// Transition an operation to Running.
     pub fn start(&self, id: u64) {
-        if let Some(op) = self.operations.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&id) {
+        if let Some(op) = self
+            .operations
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_mut(&id)
+        {
             op.start();
         }
     }
 
     /// Transition an operation to Backfilling.
     pub fn begin_backfill(&self, id: u64, total_rows: u64) {
-        if let Some(op) = self.operations.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&id) {
+        if let Some(op) = self
+            .operations
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_mut(&id)
+        {
             op.begin_backfill(total_rows);
         }
     }
 
     /// Record backfill progress.
     pub fn record_progress(&self, id: u64, rows: u64) {
-        if let Some(op) = self.operations.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&id) {
+        if let Some(op) = self
+            .operations
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_mut(&id)
+        {
             op.record_progress(rows);
         }
     }
 
     /// Transition an operation to Completed.
     pub fn complete(&self, id: u64) {
-        if let Some(op) = self.operations.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&id) {
+        if let Some(op) = self
+            .operations
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_mut(&id)
+        {
             op.complete();
             tracing::info!(
                 "Online DDL #{} completed: {} ({}ms)",
@@ -239,7 +274,12 @@ impl OnlineDdlManager {
 
     /// Transition an operation to Failed.
     pub fn fail(&self, id: u64, error: String) {
-        if let Some(op) = self.operations.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&id) {
+        if let Some(op) = self
+            .operations
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_mut(&id)
+        {
             op.fail(error.clone());
             tracing::warn!("Online DDL #{} failed: {} — {}", id, op.kind, error);
         }
@@ -247,7 +287,11 @@ impl OnlineDdlManager {
 
     /// Get a snapshot of a specific operation.
     pub fn get(&self, id: u64) -> Option<DdlOperation> {
-        self.operations.lock().unwrap_or_else(|p| p.into_inner()).get(&id).cloned()
+        self.operations
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&id)
+            .cloned()
     }
 
     /// List all active (non-completed, non-failed) operations.
@@ -263,7 +307,12 @@ impl OnlineDdlManager {
 
     /// List all operations (including completed).
     pub fn list_all(&self) -> Vec<DdlOperation> {
-        self.operations.lock().unwrap_or_else(|p| p.into_inner()).values().cloned().collect()
+        self.operations
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .values()
+            .cloned()
+            .collect()
     }
 
     /// Garbage-collect old completed operations beyond max_history.
@@ -379,11 +428,15 @@ mod tests {
         let mgr = OnlineDdlManager::new();
         let id1 = mgr.register(
             TableId(1),
-            DdlOpKind::MetadataOnly { description: "op1".into() },
+            DdlOpKind::MetadataOnly {
+                description: "op1".into(),
+            },
         );
         let id2 = mgr.register(
             TableId(1),
-            DdlOpKind::MetadataOnly { description: "op2".into() },
+            DdlOpKind::MetadataOnly {
+                description: "op2".into(),
+            },
         );
         mgr.start(id1);
         mgr.complete(id1);
@@ -405,7 +458,9 @@ mod tests {
         for _ in 0..5 {
             let id = mgr.register(
                 TableId(1),
-                DdlOpKind::MetadataOnly { description: "op".into() },
+                DdlOpKind::MetadataOnly {
+                    description: "op".into(),
+                },
             );
             mgr.start(id);
             mgr.complete(id);

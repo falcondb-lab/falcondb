@@ -3,8 +3,8 @@
 use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
-use falcon_common::schema::{StorageType, TableSchema};
 use falcon_common::error::StorageError;
+use falcon_common::schema::{StorageType, TableSchema};
 use falcon_common::types::TableId;
 
 use crate::columnstore::ColumnStoreTable;
@@ -14,7 +14,7 @@ use crate::memtable::MemTable;
 use crate::online_ddl::{DdlOpKind, BACKFILL_BATCH_SIZE};
 use crate::wal::WalRecord;
 
-use super::engine::{IndexMeta, StorageEngine, datatype_to_cast_target};
+use super::engine::{datatype_to_cast_target, IndexMeta, StorageEngine};
 
 impl StorageEngine {
     // ── Table DDL ────────────────────────────────────────────────────
@@ -37,31 +37,40 @@ impl StorageEngine {
             }
             StorageType::Columnstore => {
                 if !self.node_role.allows_columnstore() {
-                    return Err(StorageError::Io(std::io::Error::other(
-                        format!("COLUMNSTORE tables are not allowed on {:?} nodes", self.node_role),
-                    )));
+                    return Err(StorageError::Io(std::io::Error::other(format!(
+                        "COLUMNSTORE tables are not allowed on {:?} nodes",
+                        self.node_role
+                    ))));
                 }
                 let table = Arc::new(ColumnStoreTable::new(schema.clone()));
                 self.columnstore_tables.insert(table_id, table);
             }
             StorageType::DiskRowstore => {
                 if !self.node_role.allows_columnstore() {
-                    return Err(StorageError::Io(std::io::Error::other(
-                        format!("DISK_ROWSTORE tables are not allowed on {:?} nodes", self.node_role),
-                    )));
+                    return Err(StorageError::Io(std::io::Error::other(format!(
+                        "DISK_ROWSTORE tables are not allowed on {:?} nodes",
+                        self.node_role
+                    ))));
                 }
-                let data_dir = self.data_dir.as_deref().unwrap_or_else(|| std::path::Path::new("."));
-                let table = Arc::new(
-                    DiskRowstoreTable::new(schema.clone(), data_dir)?
-                );
+                let data_dir = self
+                    .data_dir
+                    .as_deref()
+                    .unwrap_or_else(|| std::path::Path::new("."));
+                let table = Arc::new(DiskRowstoreTable::new(schema.clone(), data_dir)?);
                 self.disk_tables.insert(table_id, table);
             }
             StorageType::LsmRowstore => {
-                let data_dir = self.data_dir.as_deref().unwrap_or_else(|| std::path::Path::new("."));
+                let data_dir = self
+                    .data_dir
+                    .as_deref()
+                    .unwrap_or_else(|| std::path::Path::new("."));
                 let lsm_dir = data_dir.join(format!("lsm_table_{}", table_id.0));
                 let engine = Arc::new(
-                    crate::lsm::engine::LsmEngine::open(&lsm_dir, crate::lsm::engine::LsmConfig::default())
-                        .map_err(StorageError::Io)?
+                    crate::lsm::engine::LsmEngine::open(
+                        &lsm_dir,
+                        crate::lsm::engine::LsmConfig::default(),
+                    )
+                    .map_err(StorageError::Io)?,
                 );
                 let table = Arc::new(LsmTable::new(schema.clone(), engine));
                 self.lsm_tables.insert(table_id, table);
@@ -110,24 +119,35 @@ impl StorageEngine {
         // Replace with an empty table of the appropriate storage type
         match schema.storage_type {
             StorageType::Rowstore => {
-                self.tables.insert(table_id, Arc::new(MemTable::new(schema)));
+                self.tables
+                    .insert(table_id, Arc::new(MemTable::new(schema)));
             }
             StorageType::Columnstore => {
-                self.columnstore_tables.insert(table_id, Arc::new(ColumnStoreTable::new(schema)));
+                self.columnstore_tables
+                    .insert(table_id, Arc::new(ColumnStoreTable::new(schema)));
             }
             StorageType::DiskRowstore => {
-                let data_dir = self.data_dir.as_deref().unwrap_or_else(|| std::path::Path::new("."));
+                let data_dir = self
+                    .data_dir
+                    .as_deref()
+                    .unwrap_or_else(|| std::path::Path::new("."));
                 let table = Arc::new(DiskRowstoreTable::new(schema, data_dir)?);
                 self.disk_tables.insert(table_id, table);
             }
             StorageType::LsmRowstore => {
-                let data_dir = self.data_dir.as_deref().unwrap_or_else(|| std::path::Path::new("."));
+                let data_dir = self
+                    .data_dir
+                    .as_deref()
+                    .unwrap_or_else(|| std::path::Path::new("."));
                 let lsm_dir = data_dir.join(format!("lsm_table_{}", table_id.0));
                 // Remove old data directory to truncate
                 let _ = std::fs::remove_dir_all(&lsm_dir);
                 let engine = Arc::new(
-                    crate::lsm::engine::LsmEngine::open(&lsm_dir, crate::lsm::engine::LsmConfig::default())
-                        .map_err(StorageError::Io)?
+                    crate::lsm::engine::LsmEngine::open(
+                        &lsm_dir,
+                        crate::lsm::engine::LsmConfig::default(),
+                    )
+                    .map_err(StorageError::Io)?,
                 );
                 let table = Arc::new(LsmTable::new(schema, engine));
                 self.lsm_tables.insert(table_id, table);
@@ -142,7 +162,12 @@ impl StorageEngine {
 
     // ── View DDL ─────────────────────────────────────────────────────
 
-    pub fn create_view(&self, name: &str, query_sql: &str, or_replace: bool) -> Result<(), StorageError> {
+    pub fn create_view(
+        &self,
+        name: &str,
+        query_sql: &str,
+        or_replace: bool,
+    ) -> Result<(), StorageError> {
         let mut catalog = self.catalog.write();
         if let Some(_existing) = catalog.find_view(name) {
             if or_replace {
@@ -154,7 +179,8 @@ impl StorageEngine {
         // Also reject if a table with the same name exists
         if catalog.find_table(name).is_some() {
             return Err(StorageError::TableAlreadyExists(format!(
-                "relation '{}' already exists as a table", name
+                "relation '{}' already exists as a table",
+                name
             )));
         }
         catalog.add_view(falcon_common::schema::ViewDef {
@@ -208,15 +234,18 @@ impl StorageEngine {
         schema.columns.push(new_col);
         drop(catalog);
 
-        let ddl_id = self.online_ddl.register(table_id, DdlOpKind::AddColumn {
-            table_name: table_name.to_string(),
-            column_name: col.name.clone(),
-            has_default,
-        });
+        let ddl_id = self.online_ddl.register(
+            table_id,
+            DdlOpKind::AddColumn {
+                table_name: table_name.to_string(),
+                column_name: col.name.clone(),
+                has_default,
+            },
+        );
         self.online_ddl.start(ddl_id);
 
-        let col_json = serde_json::to_string(&col)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let col_json =
+            serde_json::to_string(&col).map_err(|e| StorageError::Serialization(e.to_string()))?;
         self.append_and_flush_wal(&WalRecord::AlterTable {
             table_name: table_name.to_string(),
             operation_json: format!(r#"{{"op":"add_column","column":{}}}"#, col_json),
@@ -225,7 +254,10 @@ impl StorageEngine {
         // Backfill existing rows with default value if needed
         if has_default {
             if let Some(table_ref) = self.tables.get(&table_id) {
-                let default_val = col.default_value.clone().unwrap_or(falcon_common::datum::Datum::Null);
+                let default_val = col
+                    .default_value
+                    .clone()
+                    .unwrap_or(falcon_common::datum::Datum::Null);
                 let memtable = table_ref.value();
                 let total = memtable.data.len() as u64;
                 self.online_ddl.begin_backfill(ddl_id, total);
@@ -243,7 +275,8 @@ impl StorageEngine {
                     }
                     batch_count += 1;
                     if batch_count.is_multiple_of(BACKFILL_BATCH_SIZE as u64) {
-                        self.online_ddl.record_progress(ddl_id, BACKFILL_BATCH_SIZE as u64);
+                        self.online_ddl
+                            .record_progress(ddl_id, BACKFILL_BATCH_SIZE as u64);
                         std::thread::yield_now();
                     }
                 }
@@ -270,27 +303,43 @@ impl StorageEngine {
             .ok_or(StorageError::TableNotFound(TableId(0)))?;
         let table_id = schema.id;
         let lower = col_name.to_lowercase();
-        let idx = schema.columns.iter().position(|c| c.name.to_lowercase() == lower)
-            .ok_or_else(|| StorageError::Serialization(format!("Column not found: {}", col_name)))?;
+        let idx = schema
+            .columns
+            .iter()
+            .position(|c| c.name.to_lowercase() == lower)
+            .ok_or_else(|| {
+                StorageError::Serialization(format!("Column not found: {}", col_name))
+            })?;
         // Don't allow dropping PK columns
         if schema.primary_key_columns.contains(&idx) {
-            return Err(StorageError::Serialization("Cannot drop primary key column".into()));
+            return Err(StorageError::Serialization(
+                "Cannot drop primary key column".into(),
+            ));
         }
         schema.columns.remove(idx);
         // Update PK indices
-        schema.primary_key_columns = schema.primary_key_columns.iter()
+        schema.primary_key_columns = schema
+            .primary_key_columns
+            .iter()
             .filter_map(|&pk| {
-                if pk == idx { None }
-                else if pk > idx { Some(pk - 1) }
-                else { Some(pk) }
+                if pk == idx {
+                    None
+                } else if pk > idx {
+                    Some(pk - 1)
+                } else {
+                    Some(pk)
+                }
             })
             .collect();
         drop(catalog);
 
-        let ddl_id = self.online_ddl.register(table_id, DdlOpKind::DropColumn {
-            table_name: table_name.to_string(),
-            column_name: col_name.to_string(),
-        });
+        let ddl_id = self.online_ddl.register(
+            table_id,
+            DdlOpKind::DropColumn {
+                table_name: table_name.to_string(),
+                column_name: col_name.to_string(),
+            },
+        );
         self.online_ddl.start(ddl_id);
 
         self.append_and_flush_wal(&WalRecord::AlterTable {
@@ -314,30 +363,37 @@ impl StorageEngine {
             .ok_or(StorageError::TableNotFound(TableId(0)))?;
         let table_id = schema.id;
         let lower = old_name.to_lowercase();
-        let col = schema.columns.iter_mut().find(|c| c.name.to_lowercase() == lower)
-            .ok_or_else(|| StorageError::Serialization(format!("Column not found: {}", old_name)))?;
+        let col = schema
+            .columns
+            .iter_mut()
+            .find(|c| c.name.to_lowercase() == lower)
+            .ok_or_else(|| {
+                StorageError::Serialization(format!("Column not found: {}", old_name))
+            })?;
         col.name = new_name.to_string();
         drop(catalog);
 
-        let ddl_id = self.online_ddl.register(table_id, DdlOpKind::MetadataOnly {
-            description: format!("RENAME COLUMN {} TO {}", old_name, new_name),
-        });
+        let ddl_id = self.online_ddl.register(
+            table_id,
+            DdlOpKind::MetadataOnly {
+                description: format!("RENAME COLUMN {} TO {}", old_name, new_name),
+            },
+        );
         self.online_ddl.start(ddl_id);
 
         self.append_and_flush_wal(&WalRecord::AlterTable {
             table_name: table_name.to_string(),
-            operation_json: format!(r#"{{"op":"rename_column","old_name":"{}","new_name":"{}"}}"#, old_name, new_name),
+            operation_json: format!(
+                r#"{{"op":"rename_column","old_name":"{}","new_name":"{}"}}"#,
+                old_name, new_name
+            ),
         })?;
 
         self.online_ddl.complete(ddl_id);
         Ok(ddl_id)
     }
 
-    pub fn alter_table_rename(
-        &self,
-        old_name: &str,
-        new_name: &str,
-    ) -> Result<u64, StorageError> {
+    pub fn alter_table_rename(&self, old_name: &str, new_name: &str) -> Result<u64, StorageError> {
         let mut catalog = self.catalog.write();
         // Check new name doesn't already exist
         if catalog.find_table(new_name).is_some() {
@@ -350,9 +406,12 @@ impl StorageEngine {
         catalog.rename_table(old_name, new_name);
         drop(catalog);
 
-        let ddl_id = self.online_ddl.register(table_id, DdlOpKind::MetadataOnly {
-            description: format!("RENAME TABLE {} TO {}", old_name, new_name),
-        });
+        let ddl_id = self.online_ddl.register(
+            table_id,
+            DdlOpKind::MetadataOnly {
+                description: format!("RENAME TABLE {} TO {}", old_name, new_name),
+            },
+        );
         self.online_ddl.start(ddl_id);
 
         self.append_and_flush_wal(&WalRecord::AlterTable {
@@ -381,17 +440,22 @@ impl StorageEngine {
             .columns
             .iter()
             .position(|c| c.name.to_lowercase() == lower)
-            .ok_or_else(|| StorageError::Serialization(format!("Column not found: {}", col_name)))?;
+            .ok_or_else(|| {
+                StorageError::Serialization(format!("Column not found: {}", col_name))
+            })?;
         let table_id = schema.id;
         let cast_target = datatype_to_cast_target(&new_type);
         schema.columns[col_idx].data_type = new_type.clone();
         drop(catalog);
 
-        let ddl_id = self.online_ddl.register(table_id, DdlOpKind::ChangeColumnType {
-            table_name: table_name.to_string(),
-            column_name: col_name.to_string(),
-            new_type: format!("{}", new_type),
-        });
+        let ddl_id = self.online_ddl.register(
+            table_id,
+            DdlOpKind::ChangeColumnType {
+                table_name: table_name.to_string(),
+                column_name: col_name.to_string(),
+                new_type: format!("{}", new_type),
+            },
+        );
         self.online_ddl.start(ddl_id);
 
         // Convert existing row data in batches
@@ -418,7 +482,8 @@ impl StorageEngine {
                 }
                 batch_count += 1;
                 if batch_count.is_multiple_of(BACKFILL_BATCH_SIZE as u64) {
-                    self.online_ddl.record_progress(ddl_id, BACKFILL_BATCH_SIZE as u64);
+                    self.online_ddl
+                        .record_progress(ddl_id, BACKFILL_BATCH_SIZE as u64);
                     std::thread::yield_now();
                 }
             }
@@ -448,13 +513,18 @@ impl StorageEngine {
             .columns
             .iter_mut()
             .find(|c| c.name.to_lowercase() == lower)
-            .ok_or_else(|| StorageError::Serialization(format!("Column not found: {}", col_name)))?;
+            .ok_or_else(|| {
+                StorageError::Serialization(format!("Column not found: {}", col_name))
+            })?;
         col.nullable = false;
         drop(catalog);
 
-        let ddl_id = self.online_ddl.register(table_id, DdlOpKind::MetadataOnly {
-            description: format!("SET NOT NULL {}.{}", table_name, col_name),
-        });
+        let ddl_id = self.online_ddl.register(
+            table_id,
+            DdlOpKind::MetadataOnly {
+                description: format!("SET NOT NULL {}.{}", table_name, col_name),
+            },
+        );
         self.online_ddl.start(ddl_id);
         self.online_ddl.complete(ddl_id);
         Ok(ddl_id)
@@ -476,13 +546,18 @@ impl StorageEngine {
             .columns
             .iter_mut()
             .find(|c| c.name.to_lowercase() == lower)
-            .ok_or_else(|| StorageError::Serialization(format!("Column not found: {}", col_name)))?;
+            .ok_or_else(|| {
+                StorageError::Serialization(format!("Column not found: {}", col_name))
+            })?;
         col.nullable = true;
         drop(catalog);
 
-        let ddl_id = self.online_ddl.register(table_id, DdlOpKind::MetadataOnly {
-            description: format!("DROP NOT NULL {}.{}", table_name, col_name),
-        });
+        let ddl_id = self.online_ddl.register(
+            table_id,
+            DdlOpKind::MetadataOnly {
+                description: format!("DROP NOT NULL {}.{}", table_name, col_name),
+            },
+        );
         self.online_ddl.start(ddl_id);
         self.online_ddl.complete(ddl_id);
         Ok(ddl_id)
@@ -505,13 +580,18 @@ impl StorageEngine {
             .columns
             .iter_mut()
             .find(|c| c.name.to_lowercase() == lower)
-            .ok_or_else(|| StorageError::Serialization(format!("Column not found: {}", col_name)))?;
+            .ok_or_else(|| {
+                StorageError::Serialization(format!("Column not found: {}", col_name))
+            })?;
         col.default_value = Some(default_val);
         drop(catalog);
 
-        let ddl_id = self.online_ddl.register(table_id, DdlOpKind::MetadataOnly {
-            description: format!("SET DEFAULT {}.{}", table_name, col_name),
-        });
+        let ddl_id = self.online_ddl.register(
+            table_id,
+            DdlOpKind::MetadataOnly {
+                description: format!("SET DEFAULT {}.{}", table_name, col_name),
+            },
+        );
         self.online_ddl.start(ddl_id);
         self.online_ddl.complete(ddl_id);
         Ok(ddl_id)
@@ -533,13 +613,18 @@ impl StorageEngine {
             .columns
             .iter_mut()
             .find(|c| c.name.to_lowercase() == lower)
-            .ok_or_else(|| StorageError::Serialization(format!("Column not found: {}", col_name)))?;
+            .ok_or_else(|| {
+                StorageError::Serialization(format!("Column not found: {}", col_name))
+            })?;
         col.default_value = None;
         drop(catalog);
 
-        let ddl_id = self.online_ddl.register(table_id, DdlOpKind::MetadataOnly {
-            description: format!("DROP DEFAULT {}.{}", table_name, col_name),
-        });
+        let ddl_id = self.online_ddl.register(
+            table_id,
+            DdlOpKind::MetadataOnly {
+                description: format!("DROP DEFAULT {}.{}", table_name, col_name),
+            },
+        );
         self.online_ddl.start(ddl_id);
         self.online_ddl.complete(ddl_id);
         Ok(ddl_id)
@@ -553,7 +638,11 @@ impl StorageEngine {
     }
 
     /// Create a unique secondary index on a table column.
-    pub fn create_unique_index(&self, table_name: &str, column_idx: usize) -> Result<(), StorageError> {
+    pub fn create_unique_index(
+        &self,
+        table_name: &str,
+        column_idx: usize,
+    ) -> Result<(), StorageError> {
         self.create_index_impl(table_name, column_idx, true)
     }
 
@@ -596,10 +685,9 @@ impl StorageEngine {
     /// Drop a named index. Removes the secondary index from the table and the registry.
     pub fn drop_index(&self, index_name: &str) -> Result<(), StorageError> {
         let key = index_name.to_lowercase();
-        let (_, meta) = self.index_registry.remove(&key)
-            .ok_or_else(|| StorageError::Serialization(
-                format!("index \"{}\" does not exist", index_name)
-            ))?;
+        let (_, meta) = self.index_registry.remove(&key).ok_or_else(|| {
+            StorageError::Serialization(format!("index \"{}\" does not exist", index_name))
+        })?;
 
         if let Some(table_ref) = self.tables.get(&meta.table_id) {
             let memtable = table_ref.value();
@@ -620,7 +708,12 @@ impl StorageEngine {
         self.index_registry.contains_key(&index_name.to_lowercase())
     }
 
-    pub(crate) fn create_index_impl(&self, table_name: &str, column_idx: usize, unique: bool) -> Result<(), StorageError> {
+    pub(crate) fn create_index_impl(
+        &self,
+        table_name: &str,
+        column_idx: usize,
+        unique: bool,
+    ) -> Result<(), StorageError> {
         let catalog = self.catalog.read();
         let table = catalog
             .find_table(table_name)
@@ -632,7 +725,10 @@ impl StorageEngine {
             let memtable = table_ref.value();
             {
                 let indexes = memtable.secondary_indexes.read();
-                if indexes.iter().any(|idx| idx.column_idx == column_idx && idx.column_indices.is_empty()) {
+                if indexes
+                    .iter()
+                    .any(|idx| idx.column_idx == column_idx && idx.column_indices.is_empty())
+                {
                     return Ok(()); // Already indexed
                 }
             }
@@ -666,7 +762,8 @@ impl StorageEngine {
 
         if let Some(table_ref) = self.tables.get(&table_id) {
             let memtable = table_ref.value();
-            let new_index = crate::memtable::SecondaryIndex::new_composite(column_indices.clone(), unique);
+            let new_index =
+                crate::memtable::SecondaryIndex::new_composite(column_indices.clone(), unique);
             self.backfill_index(&new_index, memtable, unique)?;
             let mut indexes = memtable.secondary_indexes.write();
             indexes.push(new_index);
@@ -703,7 +800,9 @@ impl StorageEngine {
         if let Some(table_ref) = self.tables.get(&table_id) {
             let memtable = table_ref.value();
             let new_index = crate::memtable::SecondaryIndex::new_covering(
-                column_indices.clone(), covering_columns, unique,
+                column_indices.clone(),
+                covering_columns,
+                unique,
             );
             self.backfill_index(&new_index, memtable, unique)?;
             let mut indexes = memtable.secondary_indexes.write();
@@ -797,7 +896,8 @@ impl StorageEngine {
         if self.sequences.contains_key(name) {
             return Err(StorageError::TableAlreadyExists(name.to_string()));
         }
-        self.sequences.insert(name.to_string(), AtomicI64::new(start - 1));
+        self.sequences
+            .insert(name.to_string(), AtomicI64::new(start - 1));
 
         self.append_and_flush_wal(&WalRecord::CreateSequence {
             name: name.to_string(),
@@ -807,7 +907,8 @@ impl StorageEngine {
     }
 
     pub fn drop_sequence(&self, name: &str) -> Result<(), StorageError> {
-        self.sequences.remove(name)
+        self.sequences
+            .remove(name)
             .ok_or(StorageError::TableNotFound(TableId(0)))?;
 
         self.append_and_flush_wal(&WalRecord::DropSequence {
@@ -821,19 +922,25 @@ impl StorageEngine {
     }
 
     pub fn sequence_nextval(&self, name: &str) -> Result<i64, StorageError> {
-        let entry = self.sequences.get(name)
+        let entry = self
+            .sequences
+            .get(name)
             .ok_or(StorageError::TableNotFound(TableId(0)))?;
         Ok(entry.value().fetch_add(1, AtomicOrdering::SeqCst) + 1)
     }
 
     pub fn sequence_currval(&self, name: &str) -> Result<i64, StorageError> {
-        let entry = self.sequences.get(name)
+        let entry = self
+            .sequences
+            .get(name)
             .ok_or(StorageError::TableNotFound(TableId(0)))?;
         Ok(entry.value().load(AtomicOrdering::SeqCst))
     }
 
     pub fn sequence_setval(&self, name: &str, value: i64) -> Result<i64, StorageError> {
-        let entry = self.sequences.get(name)
+        let entry = self
+            .sequences
+            .get(name)
             .ok_or(StorageError::TableNotFound(TableId(0)))?;
         entry.value().store(value, AtomicOrdering::SeqCst);
 
@@ -845,7 +952,8 @@ impl StorageEngine {
     }
 
     pub fn list_sequences(&self) -> Vec<(String, i64)> {
-        self.sequences.iter()
+        self.sequences
+            .iter()
             .map(|e| (e.key().clone(), e.value().load(AtomicOrdering::SeqCst)))
             .collect()
     }

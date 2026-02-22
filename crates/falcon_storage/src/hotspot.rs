@@ -45,7 +45,10 @@ struct AccessCounter {
 
 impl AccessCounter {
     fn new() -> Self {
-        Self { count: AtomicU64::new(0), _window_start: Instant::now() }
+        Self {
+            count: AtomicU64::new(0),
+            _window_start: Instant::now(),
+        }
     }
 
     fn increment(&self) {
@@ -103,7 +106,9 @@ impl HotspotDetector {
         let mut alerts = Vec::new();
 
         // Find the max shard count for severity normalization
-        let max_shard_count = self.shard_counters.iter()
+        let max_shard_count = self
+            .shard_counters
+            .iter()
             .map(|e| e.value().get())
             .max()
             .unwrap_or(0);
@@ -133,7 +138,9 @@ impl HotspotDetector {
         }
 
         // Table hotspots
-        let max_table_count = self.table_counters.iter()
+        let max_table_count = self
+            .table_counters
+            .iter()
             .map(|e| e.value().get())
             .max()
             .unwrap_or(0);
@@ -163,7 +170,8 @@ impl HotspotDetector {
             }
         }
 
-        self.total_alerts.fetch_add(alerts.len() as u64, Ordering::Relaxed);
+        self.total_alerts
+            .fetch_add(alerts.len() as u64, Ordering::Relaxed);
         alerts
     }
 

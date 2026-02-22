@@ -1,6 +1,5 @@
 #[path = "eval/mod.rs"]
 pub mod eval;
-pub mod expr_engine;
 pub mod executor;
 mod executor_aggregate;
 mod executor_columnar;
@@ -11,18 +10,21 @@ mod executor_query;
 mod executor_setops;
 mod executor_subquery;
 mod executor_window;
+pub mod expr_engine;
 pub mod external_sort;
 pub mod governor;
 pub mod parallel;
 pub mod param_subst;
 pub mod priority_scheduler;
-pub mod vectorized;
 #[cfg(test)]
 mod tests;
+pub mod vectorized;
 
 pub use executor::{ExecutionResult, Executor};
-pub use governor::{QueryGovernor, QueryLimits, GovernorSnapshot, QueryGovernorConfig, GovernorAbortReason};
+pub use governor::{
+    GovernorAbortReason, GovernorSnapshot, QueryGovernor, QueryGovernorConfig, QueryLimits,
+};
 pub use priority_scheduler::{
-    PriorityScheduler, PrioritySchedulerConfig, PrioritySchedulerSnapshot,
-    QueryPriority, SchedulerGuard,
+    PriorityScheduler, PrioritySchedulerConfig, PrioritySchedulerSnapshot, QueryPriority,
+    SchedulerGuard,
 };

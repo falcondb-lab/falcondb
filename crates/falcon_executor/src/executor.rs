@@ -4,9 +4,12 @@ use std::time::Instant;
 
 use falcon_common::config::SpillConfig;
 use falcon_common::datum::{Datum, OwnedRow};
-use falcon_common::error::{FalconError, ExecutionError};
+use falcon_common::error::{ExecutionError, FalconError};
 use falcon_common::schema::TableSchema;
-use falcon_common::security::{RoleCatalog, RoleId, PrivilegeManager, Privilege, ObjectRef, ObjectType, PrivilegeCheckResult, SUPERUSER_ROLE_ID};
+use falcon_common::security::{
+    ObjectRef, ObjectType, Privilege, PrivilegeCheckResult, PrivilegeManager, RoleCatalog, RoleId,
+    SUPERUSER_ROLE_ID,
+};
 use falcon_common::types::{DataType, TableId};
 use falcon_planner::PhysicalPlan;
 use falcon_sql_frontend::types::*;
@@ -18,7 +21,6 @@ use crate::parallel::ParallelConfig;
 
 /// Materialized CTE data: table_id -> rows
 pub(crate) type CteData = HashMap<TableId, Vec<OwnedRow>>;
-
 
 /// Result of executing a physical plan.
 #[derive(Debug)]
@@ -61,12 +63,34 @@ pub struct Executor {
 
 impl Executor {
     pub fn new(storage: Arc<StorageEngine>, txn_mgr: Arc<TxnManager>) -> Self {
-        Self { storage, txn_mgr, read_only: false, active_connections: None, max_connections: 0, external_sorter: None, parallel_config: ParallelConfig::default(), role_catalog: None, privilege_manager: None, current_role: SUPERUSER_ROLE_ID }
+        Self {
+            storage,
+            txn_mgr,
+            read_only: false,
+            active_connections: None,
+            max_connections: 0,
+            external_sorter: None,
+            parallel_config: ParallelConfig::default(),
+            role_catalog: None,
+            privilege_manager: None,
+            current_role: SUPERUSER_ROLE_ID,
+        }
     }
 
     /// Create an executor in read-only mode (for replica nodes).
     pub fn new_read_only(storage: Arc<StorageEngine>, txn_mgr: Arc<TxnManager>) -> Self {
-        Self { storage, txn_mgr, read_only: true, active_connections: None, max_connections: 0, external_sorter: None, parallel_config: ParallelConfig::default(), role_catalog: None, privilege_manager: None, current_role: SUPERUSER_ROLE_ID }
+        Self {
+            storage,
+            txn_mgr,
+            read_only: true,
+            active_connections: None,
+            max_connections: 0,
+            external_sorter: None,
+            parallel_config: ParallelConfig::default(),
+            role_catalog: None,
+            privilege_manager: None,
+            current_role: SUPERUSER_ROLE_ID,
+        }
     }
 
     /// Configure RBAC enforcement for this executor.
@@ -116,7 +140,8 @@ impl Executor {
     fn reject_if_read_only(&self, op: &str) -> Result<(), FalconError> {
         if self.read_only {
             Err(FalconError::ReadOnly(format!(
-                "cannot execute {} on a read-only replica", op
+                "cannot execute {} on a read-only replica",
+                op
             )))
         } else {
             Ok(())
@@ -125,13 +150,23 @@ impl Executor {
 
     /// Public RBAC guard for integration testing.
     /// Returns Ok(()) if the current role has the required privilege, Err otherwise.
-    pub fn check_privilege_public(&self, privilege: Privilege, object_type: ObjectType, object_name: &str) -> Result<(), FalconError> {
+    pub fn check_privilege_public(
+        &self,
+        privilege: Privilege,
+        object_type: ObjectType,
+        object_name: &str,
+    ) -> Result<(), FalconError> {
         self.check_privilege(privilege, object_type, object_name)
     }
 
     /// RBAC guard: check if the current role has the required privilege on the object.
     /// Superusers bypass all checks. If no RBAC is configured, all operations are allowed.
-    fn check_privilege(&self, privilege: Privilege, object_type: ObjectType, object_name: &str) -> Result<(), FalconError> {
+    fn check_privilege(
+        &self,
+        privilege: Privilege,
+        object_type: ObjectType,
+        object_name: &str,
+    ) -> Result<(), FalconError> {
         let (catalog, manager) = match (&self.role_catalog, &self.privilege_manager) {
             (Some(c), Some(m)) => (c, m),
             _ => return Ok(()), // RBAC not configured — allow all
@@ -168,8 +203,13 @@ impl Executor {
         let manager = manager.read().unwrap_or_else(|p| p.into_inner());
         match manager.check_privilege(&effective_roles, privilege, &object_ref) {
             PrivilegeCheckResult::Allowed => Ok(()),
-            PrivilegeCheckResult::Denied { role, privilege, object } => {
-                let role_name = catalog.get_role(self.current_role)
+            PrivilegeCheckResult::Denied {
+                role,
+                privilege,
+                object,
+            } => {
+                let role_name = catalog
+                    .get_role(self.current_role)
                     .map(|r| r.name.clone())
                     .unwrap_or_else(|| format!("role_id_{}", self.current_role.0));
                 tracing::warn!(
@@ -181,9 +221,12 @@ impl Executor {
                     denied_role = %role,
                     "RBAC: permission denied"
                 );
-                Err(FalconError::Execution(ExecutionError::InsufficientPrivilege(
-                    format!("permission denied for {} on {}: role {} lacks {:?}", object_type, object, role, privilege)
-                )))
+                Err(FalconError::Execution(
+                    ExecutionError::InsufficientPrivilege(format!(
+                        "permission denied for {} on {}: role {} lacks {:?}",
+                        object_type, object, role, privilege
+                    )),
+                ))
             }
         }
     }
@@ -192,7 +235,8 @@ impl Executor {
     fn reject_if_txn_read_only(txn: &falcon_txn::TxnHandle, op: &str) -> Result<(), FalconError> {
         if txn.read_only {
             Err(FalconError::ReadOnly(format!(
-                "cannot execute {} in a read-only transaction", op
+                "cannot execute {} in a read-only transaction",
+                op
             )))
         } else {
             Ok(())
@@ -233,12 +277,18 @@ impl Executor {
         txn: Option<&TxnHandle>,
     ) -> Result<ExecutionResult, FalconError> {
         match plan {
-            PhysicalPlan::CreateTable { schema, if_not_exists } => {
+            PhysicalPlan::CreateTable {
+                schema,
+                if_not_exists,
+            } => {
                 self.reject_if_read_only("CREATE TABLE")?;
                 self.check_privilege(Privilege::Create, ObjectType::Schema, "public")?;
                 self.exec_create_table(schema, *if_not_exists)
             }
-            PhysicalPlan::DropTable { table_name, if_exists } => {
+            PhysicalPlan::DropTable {
+                table_name,
+                if_exists,
+            } => {
                 self.reject_if_read_only("DROP TABLE")?;
                 self.check_privilege(Privilege::All, ObjectType::Table, table_name)?;
                 self.exec_drop_table(table_name, *if_exists)
@@ -267,7 +317,15 @@ impl Executor {
                 if let Some(sel) = source_select {
                     self.exec_insert_select(*table_id, schema, columns, sel, txn)
                 } else {
-                    self.exec_insert(*table_id, schema, columns, rows, returning, on_conflict, txn)
+                    self.exec_insert(
+                        *table_id,
+                        schema,
+                        columns,
+                        rows,
+                        returning,
+                        on_conflict,
+                        txn,
+                    )
                 }
             }
             PhysicalPlan::Update {
@@ -285,7 +343,15 @@ impl Executor {
                 ))?;
                 Self::reject_if_txn_read_only(txn, "UPDATE")?;
                 Self::check_txn_timeout(txn)?;
-                self.exec_update(*table_id, schema, assignments, filter.as_ref(), returning, from_table.as_ref(), txn)
+                self.exec_update(
+                    *table_id,
+                    schema,
+                    assignments,
+                    filter.as_ref(),
+                    returning,
+                    from_table.as_ref(),
+                    txn,
+                )
             }
             PhysicalPlan::Delete {
                 table_id,
@@ -301,7 +367,14 @@ impl Executor {
                 ))?;
                 Self::reject_if_txn_read_only(txn, "DELETE")?;
                 Self::check_txn_timeout(txn)?;
-                self.exec_delete(*table_id, schema, filter.as_ref(), returning, using_table.as_ref(), txn)
+                self.exec_delete(
+                    *table_id,
+                    schema,
+                    filter.as_ref(),
+                    returning,
+                    using_table.as_ref(),
+                    txn,
+                )
             }
             PhysicalPlan::SeqScan {
                 table_id,
@@ -522,7 +595,8 @@ impl Executor {
             }
             PhysicalPlan::Explain(inner) => {
                 let plan_text = self.format_plan(inner, 0);
-                let rows = plan_text.into_iter()
+                let rows = plan_text
+                    .into_iter()
                     .map(|line| OwnedRow::new(vec![Datum::Text(line)]))
                     .collect();
                 Ok(ExecutionResult::Query {
@@ -546,7 +620,8 @@ impl Executor {
                 }
                 rows.push(OwnedRow::new(vec![Datum::Text(format!(
                     "Actual: rows={}, cols={}, time={:.3}ms",
-                    actual_rows, actual_cols,
+                    actual_rows,
+                    actual_cols,
                     elapsed.as_secs_f64() * 1000.0
                 ))]));
                 Ok(ExecutionResult::Query {
@@ -554,16 +629,26 @@ impl Executor {
                     rows,
                 })
             }
-            PhysicalPlan::CreateIndex { index_name, table_name, column_indices, unique } => {
+            PhysicalPlan::CreateIndex {
+                index_name,
+                table_name,
+                column_indices,
+                unique,
+            } => {
                 self.reject_if_read_only("CREATE INDEX")?;
                 for &col_idx in column_indices {
-                    self.storage.create_named_index(index_name, table_name, col_idx, *unique)?;
+                    self.storage
+                        .create_named_index(index_name, table_name, col_idx, *unique)?;
                 }
                 Ok(ExecutionResult::Ddl {
                     message: format!("CREATE INDEX {}", index_name),
                 })
             }
-            PhysicalPlan::CreateView { name, query_sql, or_replace } => {
+            PhysicalPlan::CreateView {
+                name,
+                query_sql,
+                or_replace,
+            } => {
                 self.reject_if_read_only("CREATE VIEW")?;
                 self.storage.create_view(name, query_sql, *or_replace)?;
                 Ok(ExecutionResult::Ddl {
@@ -602,25 +687,48 @@ impl Executor {
                     ("value".into(), DataType::Int64),
                 ];
                 let rows = vec![
-                    OwnedRow::new(vec![Datum::Text("total_committed".into()), Datum::Int64(stats.total_committed as i64)]),
-                    OwnedRow::new(vec![Datum::Text("fast_path_commits".into()), Datum::Int64(stats.fast_path_commits as i64)]),
-                    OwnedRow::new(vec![Datum::Text("slow_path_commits".into()), Datum::Int64(stats.slow_path_commits as i64)]),
-                    OwnedRow::new(vec![Datum::Text("total_aborted".into()), Datum::Int64(stats.total_aborted as i64)]),
-                    OwnedRow::new(vec![Datum::Text("occ_conflicts".into()), Datum::Int64(stats.occ_conflicts as i64)]),
-                    OwnedRow::new(vec![Datum::Text("degraded_to_global".into()), Datum::Int64(stats.degraded_to_global as i64)]),
-                    OwnedRow::new(vec![Datum::Text("active_count".into()), Datum::Int64(stats.active_count as i64)]),
+                    OwnedRow::new(vec![
+                        Datum::Text("total_committed".into()),
+                        Datum::Int64(stats.total_committed as i64),
+                    ]),
+                    OwnedRow::new(vec![
+                        Datum::Text("fast_path_commits".into()),
+                        Datum::Int64(stats.fast_path_commits as i64),
+                    ]),
+                    OwnedRow::new(vec![
+                        Datum::Text("slow_path_commits".into()),
+                        Datum::Int64(stats.slow_path_commits as i64),
+                    ]),
+                    OwnedRow::new(vec![
+                        Datum::Text("total_aborted".into()),
+                        Datum::Int64(stats.total_aborted as i64),
+                    ]),
+                    OwnedRow::new(vec![
+                        Datum::Text("occ_conflicts".into()),
+                        Datum::Int64(stats.occ_conflicts as i64),
+                    ]),
+                    OwnedRow::new(vec![
+                        Datum::Text("degraded_to_global".into()),
+                        Datum::Int64(stats.degraded_to_global as i64),
+                    ]),
+                    OwnedRow::new(vec![
+                        Datum::Text("active_count".into()),
+                        Datum::Int64(stats.active_count as i64),
+                    ]),
                 ];
                 Ok(ExecutionResult::Query { columns, rows })
             }
             PhysicalPlan::ShowNodeRole => {
-                let role = std::env::var("FALCON_NODE_ROLE").unwrap_or_else(|_| "standalone".into());
+                let role =
+                    std::env::var("FALCON_NODE_ROLE").unwrap_or_else(|_| "standalone".into());
                 let columns = vec![
                     ("metric".into(), DataType::Text),
                     ("value".into(), DataType::Text),
                 ];
-                let rows = vec![
-                    OwnedRow::new(vec![Datum::Text("role".into()), Datum::Text(role)]),
-                ];
+                let rows = vec![OwnedRow::new(vec![
+                    Datum::Text("role".into()),
+                    Datum::Text(role),
+                ])];
                 Ok(ExecutionResult::Query { columns, rows })
             }
             PhysicalPlan::ShowWalStats => {
@@ -631,15 +739,29 @@ impl Executor {
                     ("value".into(), DataType::Text),
                 ];
                 let rows = vec![
-                    OwnedRow::new(vec![Datum::Text("wal_enabled".into()), Datum::Text(wal_enabled.to_string())]),
-                    OwnedRow::new(vec![Datum::Text("records_written".into()), Datum::Text(ws.records_written.to_string())]),
-                    OwnedRow::new(vec![Datum::Text("observer_notifications".into()), Datum::Text(ws.observer_notifications.to_string())]),
-                    OwnedRow::new(vec![Datum::Text("flushes".into()), Datum::Text(ws.flushes.to_string())]),
+                    OwnedRow::new(vec![
+                        Datum::Text("wal_enabled".into()),
+                        Datum::Text(wal_enabled.to_string()),
+                    ]),
+                    OwnedRow::new(vec![
+                        Datum::Text("records_written".into()),
+                        Datum::Text(ws.records_written.to_string()),
+                    ]),
+                    OwnedRow::new(vec![
+                        Datum::Text("observer_notifications".into()),
+                        Datum::Text(ws.observer_notifications.to_string()),
+                    ]),
+                    OwnedRow::new(vec![
+                        Datum::Text("flushes".into()),
+                        Datum::Text(ws.flushes.to_string()),
+                    ]),
                 ];
                 Ok(ExecutionResult::Query { columns, rows })
             }
             PhysicalPlan::ShowConnections => {
-                let active = self.active_connections.as_ref()
+                let active = self
+                    .active_connections
+                    .as_ref()
                     .map(|a| a.load(std::sync::atomic::Ordering::Relaxed))
                     .unwrap_or(0);
                 let columns = vec![
@@ -647,8 +769,14 @@ impl Executor {
                     ("value".into(), DataType::Text),
                 ];
                 let rows = vec![
-                    OwnedRow::new(vec![Datum::Text("active_connections".into()), Datum::Text(active.to_string())]),
-                    OwnedRow::new(vec![Datum::Text("max_connections".into()), Datum::Text(self.max_connections.to_string())]),
+                    OwnedRow::new(vec![
+                        Datum::Text("active_connections".into()),
+                        Datum::Text(active.to_string()),
+                    ]),
+                    OwnedRow::new(vec![
+                        Datum::Text("max_connections".into()),
+                        Datum::Text(self.max_connections.to_string()),
+                    ]),
                 ];
                 Ok(ExecutionResult::Query { columns, rows })
             }
@@ -660,8 +788,14 @@ impl Executor {
                     ("value".into(), DataType::Int64),
                 ];
                 let rows = vec![
-                    OwnedRow::new(vec![Datum::Text("watermark_ts".into()), Datum::Int64(watermark.0 as i64)]),
-                    OwnedRow::new(vec![Datum::Text("chains_processed".into()), Datum::Int64(chains_processed as i64)]),
+                    OwnedRow::new(vec![
+                        Datum::Text("watermark_ts".into()),
+                        Datum::Int64(watermark.0 as i64),
+                    ]),
+                    OwnedRow::new(vec![
+                        Datum::Text("chains_processed".into()),
+                        Datum::Int64(chains_processed as i64),
+                    ]),
                 ];
                 Ok(ExecutionResult::Query { columns, rows })
             }
@@ -709,8 +843,18 @@ impl Executor {
                             Datum::Int64(ts.row_count as i64),
                             Datum::Int64(cs.distinct_count as i64),
                             Datum::Int64(cs.null_count as i64),
-                            Datum::Text(cs.min_value.as_ref().map(|d| format!("{}", d)).unwrap_or_default()),
-                            Datum::Text(cs.max_value.as_ref().map(|d| format!("{}", d)).unwrap_or_default()),
+                            Datum::Text(
+                                cs.min_value
+                                    .as_ref()
+                                    .map(|d| format!("{}", d))
+                                    .unwrap_or_default(),
+                            ),
+                            Datum::Text(
+                                cs.max_value
+                                    .as_ref()
+                                    .map(|d| format!("{}", d))
+                                    .unwrap_or_default(),
+                            ),
                             Datum::Int64(cs.avg_width as i64),
                         ]));
                     }
@@ -719,7 +863,8 @@ impl Executor {
             }
             PhysicalPlan::CreateSequence { name, start } => {
                 self.reject_if_read_only("CREATE SEQUENCE")?;
-                self.storage.create_sequence(name, *start)
+                self.storage
+                    .create_sequence(name, *start)
                     .map_err(FalconError::Storage)?;
                 Ok(ExecutionResult::Ddl {
                     message: format!("CREATE SEQUENCE {}", name),
@@ -743,42 +888,42 @@ impl Executor {
                     ("sequence_name".into(), DataType::Text),
                     ("current_value".into(), DataType::Int64),
                 ];
-                let rows: Vec<OwnedRow> = seqs.into_iter()
-                    .map(|(name, val)| OwnedRow::new(vec![
-                        Datum::Text(name),
-                        Datum::Int64(val),
-                    ]))
+                let rows: Vec<OwnedRow> = seqs
+                    .into_iter()
+                    .map(|(name, val)| OwnedRow::new(vec![Datum::Text(name), Datum::Int64(val)]))
                     .collect();
                 Ok(ExecutionResult::Query { columns, rows })
             }
-            PhysicalPlan::ShowTenants => {
-                Ok(ExecutionResult::Query {
-                    columns: vec![("metric".into(), DataType::Text), ("value".into(), DataType::Text)],
-                    rows: vec![OwnedRow::new(vec![
-                        Datum::Text("tenant_count".into()),
-                        Datum::Text("0".into()),
-                    ])],
-                })
-            }
-            PhysicalPlan::ShowTenantUsage => {
-                Ok(ExecutionResult::Query {
-                    columns: vec![("metric".into(), DataType::Text), ("value".into(), DataType::Text)],
-                    rows: vec![OwnedRow::new(vec![
-                        Datum::Text("tenant_count".into()),
-                        Datum::Text("0".into()),
-                    ])],
-                })
-            }
-            PhysicalPlan::CreateTenant { name, max_qps: _, max_storage_bytes: _ } => {
-                Ok(ExecutionResult::Ddl {
-                    message: format!("CREATE TENANT {}", name),
-                })
-            }
-            PhysicalPlan::DropTenant { name } => {
-                Ok(ExecutionResult::Ddl {
-                    message: format!("DROP TENANT {}", name),
-                })
-            }
+            PhysicalPlan::ShowTenants => Ok(ExecutionResult::Query {
+                columns: vec![
+                    ("metric".into(), DataType::Text),
+                    ("value".into(), DataType::Text),
+                ],
+                rows: vec![OwnedRow::new(vec![
+                    Datum::Text("tenant_count".into()),
+                    Datum::Text("0".into()),
+                ])],
+            }),
+            PhysicalPlan::ShowTenantUsage => Ok(ExecutionResult::Query {
+                columns: vec![
+                    ("metric".into(), DataType::Text),
+                    ("value".into(), DataType::Text),
+                ],
+                rows: vec![OwnedRow::new(vec![
+                    Datum::Text("tenant_count".into()),
+                    Datum::Text("0".into()),
+                ])],
+            }),
+            PhysicalPlan::CreateTenant {
+                name,
+                max_qps: _,
+                max_storage_bytes: _,
+            } => Ok(ExecutionResult::Ddl {
+                message: format!("CREATE TENANT {}", name),
+            }),
+            PhysicalPlan::DropTenant { name } => Ok(ExecutionResult::Ddl {
+                message: format!("DROP TENANT {}", name),
+            }),
             PhysicalPlan::CopyFrom { .. } => {
                 // CopyFrom is handled specially by the protocol layer.
                 // The executor processes the received data via exec_copy_from_data.
@@ -787,36 +932,67 @@ impl Executor {
                 ))
             }
             PhysicalPlan::CopyTo {
-                table_id, schema, columns,
-                csv, delimiter, header, null_string, quote, escape,
+                table_id,
+                schema,
+                columns,
+                csv,
+                delimiter,
+                header,
+                null_string,
+                quote,
+                escape,
             } => {
                 let txn = txn.ok_or(FalconError::Internal(
                     "COPY TO requires active transaction".into(),
                 ))?;
                 self.exec_copy_to(
-                    *table_id, schema, columns,
-                    *csv, *delimiter, *header, null_string, *quote, *escape, txn,
+                    *table_id,
+                    schema,
+                    columns,
+                    *csv,
+                    *delimiter,
+                    *header,
+                    null_string,
+                    *quote,
+                    *escape,
+                    txn,
                 )
             }
             PhysicalPlan::CopyQueryTo {
-                query, csv, delimiter, header, null_string, quote, escape,
+                query,
+                csv,
+                delimiter,
+                header,
+                null_string,
+                quote,
+                escape,
             } => {
                 let txn = txn.ok_or(FalconError::Internal(
                     "COPY TO requires active transaction".into(),
                 ))?;
                 self.exec_copy_query_to(
-                    query, *csv, *delimiter, *header, null_string, *quote, *escape, txn,
+                    query,
+                    *csv,
+                    *delimiter,
+                    *header,
+                    null_string,
+                    *quote,
+                    *escape,
+                    txn,
                 )
             }
-            PhysicalPlan::DistPlan { .. } => {
-                Err(FalconError::Internal(
-                    "DistPlan must be executed via DistributedQueryEngine, not the local Executor".into(),
-                ))
-            }
+            PhysicalPlan::DistPlan { .. } => Err(FalconError::Internal(
+                "DistPlan must be executed via DistributedQueryEngine, not the local Executor"
+                    .into(),
+            )),
         }
     }
 
-    fn exec_create_table(&self, schema: &TableSchema, if_not_exists: bool) -> Result<ExecutionResult, FalconError> {
+    fn exec_create_table(
+        &self,
+        schema: &TableSchema,
+        if_not_exists: bool,
+    ) -> Result<ExecutionResult, FalconError> {
         match self.storage.create_table(schema.clone()) {
             Ok(_) => Ok(ExecutionResult::Ddl {
                 message: format!("CREATE TABLE {}", schema.name),
@@ -824,14 +1000,21 @@ impl Executor {
             Err(e) if if_not_exists => {
                 // IF NOT EXISTS — silently succeed
                 Ok(ExecutionResult::Ddl {
-                    message: format!("CREATE TABLE IF NOT EXISTS {} (already exists)", schema.name),
+                    message: format!(
+                        "CREATE TABLE IF NOT EXISTS {} (already exists)",
+                        schema.name
+                    ),
                 })
             }
             Err(e) => Err(e.into()),
         }
     }
 
-    fn exec_drop_table(&self, table_name: &str, if_exists: bool) -> Result<ExecutionResult, FalconError> {
+    fn exec_drop_table(
+        &self,
+        table_name: &str,
+        if_exists: bool,
+    ) -> Result<ExecutionResult, FalconError> {
         match self.storage.drop_table(table_name) {
             Ok(_) => Ok(ExecutionResult::Ddl {
                 message: format!("DROP TABLE {}", table_name),
@@ -856,7 +1039,9 @@ impl Executor {
         for op in ops {
             let (ddl_id, msg) = match op {
                 AlterTableOp::AddColumn(col) => {
-                    let id = self.storage.alter_table_add_column(table_name, col.clone())?;
+                    let id = self
+                        .storage
+                        .alter_table_add_column(table_name, col.clone())?;
                     (id, format!("ADD COLUMN {}", col.name))
                 }
                 AlterTableOp::DropColumn(col_name) => {
@@ -864,42 +1049,79 @@ impl Executor {
                     (id, format!("DROP COLUMN {}", col_name))
                 }
                 AlterTableOp::RenameColumn { old_name, new_name } => {
-                    let id = self.storage.alter_table_rename_column(table_name, old_name, new_name)?;
+                    let id = self
+                        .storage
+                        .alter_table_rename_column(table_name, old_name, new_name)?;
                     (id, format!("RENAME COLUMN {} TO {}", old_name, new_name))
                 }
                 AlterTableOp::RenameTable { new_name } => {
                     let id = self.storage.alter_table_rename(table_name, new_name)?;
                     (id, format!("RENAME TO {}", new_name))
                 }
-                AlterTableOp::AlterColumnType { column_name, new_type } => {
-                    let id = self.storage.alter_table_change_column_type(table_name, column_name, new_type.clone())?;
-                    (id, format!("ALTER COLUMN {} TYPE {}", column_name, new_type))
+                AlterTableOp::AlterColumnType {
+                    column_name,
+                    new_type,
+                } => {
+                    let id = self.storage.alter_table_change_column_type(
+                        table_name,
+                        column_name,
+                        new_type.clone(),
+                    )?;
+                    (
+                        id,
+                        format!("ALTER COLUMN {} TYPE {}", column_name, new_type),
+                    )
                 }
                 AlterTableOp::AlterColumnSetNotNull { column_name } => {
-                    let id = self.storage.alter_table_set_not_null(table_name, column_name)?;
+                    let id = self
+                        .storage
+                        .alter_table_set_not_null(table_name, column_name)?;
                     (id, format!("ALTER COLUMN {} SET NOT NULL", column_name))
                 }
                 AlterTableOp::AlterColumnDropNotNull { column_name } => {
-                    let id = self.storage.alter_table_drop_not_null(table_name, column_name)?;
+                    let id = self
+                        .storage
+                        .alter_table_drop_not_null(table_name, column_name)?;
                     (id, format!("ALTER COLUMN {} DROP NOT NULL", column_name))
                 }
-                AlterTableOp::AlterColumnSetDefault { column_name, default_expr } => {
-                    let default_val = crate::eval::eval_expr(default_expr, &falcon_common::datum::OwnedRow::new(vec![]))
-                        .map_err(FalconError::Execution)?;
-                    let id = self.storage.alter_table_set_default(table_name, column_name, default_val)?;
+                AlterTableOp::AlterColumnSetDefault {
+                    column_name,
+                    default_expr,
+                } => {
+                    let default_val = crate::eval::eval_expr(
+                        default_expr,
+                        &falcon_common::datum::OwnedRow::new(vec![]),
+                    )
+                    .map_err(FalconError::Execution)?;
+                    let id = self.storage.alter_table_set_default(
+                        table_name,
+                        column_name,
+                        default_val,
+                    )?;
                     (id, format!("ALTER COLUMN {} SET DEFAULT", column_name))
                 }
                 AlterTableOp::AlterColumnDropDefault { column_name } => {
-                    let id = self.storage.alter_table_drop_default(table_name, column_name)?;
+                    let id = self
+                        .storage
+                        .alter_table_drop_default(table_name, column_name)?;
                     (id, format!("ALTER COLUMN {} DROP DEFAULT", column_name))
                 }
             };
             ddl_ids.push(ddl_id);
             messages.push(msg);
         }
-        let ids_str = ddl_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
+        let ids_str = ddl_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         Ok(ExecutionResult::Ddl {
-            message: format!("ALTER TABLE {} {} [ddl_ids={}]", table_name, messages.join(", "), ids_str),
+            message: format!(
+                "ALTER TABLE {} {} [ddl_ids={}]",
+                table_name,
+                messages.join(", "),
+                ids_str
+            ),
         })
     }
 
@@ -920,9 +1142,7 @@ impl Executor {
                 BoundProjection::Expr(_, alias) => {
                     (alias.clone(), DataType::Text) // simplification
                 }
-                BoundProjection::Window(wf) => {
-                    (wf.alias.clone(), DataType::Int64)
-                }
+                BoundProjection::Window(wf) => (wf.alias.clone(), DataType::Int64),
             })
             .collect()
     }
@@ -931,12 +1151,27 @@ impl Executor {
     pub fn format_plan(&self, plan: &PhysicalPlan, indent: usize) -> Vec<String> {
         let pad = "  ".repeat(indent);
         match plan {
-            PhysicalPlan::SeqScan { table_id, schema, projections, filter, group_by, order_by, limit, offset, distinct, unions, .. } => {
+            PhysicalPlan::SeqScan {
+                table_id,
+                schema,
+                projections,
+                filter,
+                group_by,
+                order_by,
+                limit,
+                offset,
+                distinct,
+                unions,
+                ..
+            } => {
                 // Row estimate from table stats or memtable
-                let base_rows = self.storage.get_table_stats(*table_id)
+                let base_rows = self
+                    .storage
+                    .get_table_stats(*table_id)
                     .map(|s| s.row_count as f64)
                     .unwrap_or_else(|| {
-                        self.storage.get_table(*table_id)
+                        self.storage
+                            .get_table(*table_id)
                             .map(|t| t.row_count_approx() as f64)
                             .unwrap_or(1000.0)
                     });
@@ -956,77 +1191,200 @@ impl Executor {
                 let total_cost = base_rows * 1.0 + base_rows * 0.01; // seq_page_cost + cpu_tuple_cost
                 let mut lines = vec![format!(
                     "{}Seq Scan on {}  (cost={:.2}..{:.2} rows={} width={})",
-                    pad, schema.name, startup_cost, total_cost,
-                    est_rows as u64, schema.columns.len() * 8
+                    pad,
+                    schema.name,
+                    startup_cost,
+                    total_cost,
+                    est_rows as u64,
+                    schema.columns.len() * 8
                 )];
-                let cols: Vec<String> = projections.iter().map(|p| match p {
-                    BoundProjection::Column(_, a) => a.clone(),
-                    BoundProjection::Aggregate(_, _, a, _, _) => a.clone(),
-                    BoundProjection::Expr(_, a) => a.clone(),
-                    BoundProjection::Window(wf) => wf.alias.clone(),
-                }).collect();
+                let cols: Vec<String> = projections
+                    .iter()
+                    .map(|p| match p {
+                        BoundProjection::Column(_, a) => a.clone(),
+                        BoundProjection::Aggregate(_, _, a, _, _) => a.clone(),
+                        BoundProjection::Expr(_, a) => a.clone(),
+                        BoundProjection::Window(wf) => wf.alias.clone(),
+                    })
+                    .collect();
                 lines.push(format!("{}  Output: {}", pad, cols.join(", ")));
-                if let Some(f) = filter { lines.push(format!("{}  Filter: {:?}", pad, f)); }
-                if !group_by.is_empty() { lines.push(format!("{}  Group By: {:?}", pad, group_by)); }
-                if !order_by.is_empty() { lines.push(format!("{}  Sort Key: {} column(s)", pad, order_by.len())); }
-                if let Some(l) = limit { lines.push(format!("{}  Limit: {}", pad, l)); }
-                if let Some(o) = offset { lines.push(format!("{}  Offset: {}", pad, o)); }
-                if !matches!(distinct, DistinctMode::None) { lines.push(format!("{}  Distinct: {:?}", pad, distinct)); }
-                if !unions.is_empty() { lines.push(format!("{}  Set Ops: {} additional query(ies)", pad, unions.len())); }
+                if let Some(f) = filter {
+                    lines.push(format!("{}  Filter: {:?}", pad, f));
+                }
+                if !group_by.is_empty() {
+                    lines.push(format!("{}  Group By: {:?}", pad, group_by));
+                }
+                if !order_by.is_empty() {
+                    lines.push(format!("{}  Sort Key: {} column(s)", pad, order_by.len()));
+                }
+                if let Some(l) = limit {
+                    lines.push(format!("{}  Limit: {}", pad, l));
+                }
+                if let Some(o) = offset {
+                    lines.push(format!("{}  Offset: {}", pad, o));
+                }
+                if !matches!(distinct, DistinctMode::None) {
+                    lines.push(format!("{}  Distinct: {:?}", pad, distinct));
+                }
+                if !unions.is_empty() {
+                    lines.push(format!(
+                        "{}  Set Ops: {} additional query(ies)",
+                        pad,
+                        unions.len()
+                    ));
+                }
                 lines
             }
-            PhysicalPlan::IndexScan { table_id, schema, index_col, index_value, projections, filter, order_by, limit, offset, distinct, unions, .. } => {
-                let base_rows = self.storage.get_table_stats(*table_id)
+            PhysicalPlan::IndexScan {
+                table_id,
+                schema,
+                index_col,
+                index_value,
+                projections,
+                filter,
+                order_by,
+                limit,
+                offset,
+                distinct,
+                unions,
+                ..
+            } => {
+                let base_rows = self
+                    .storage
+                    .get_table_stats(*table_id)
                     .map(|s| s.row_count as f64)
                     .unwrap_or_else(|| {
-                        self.storage.get_table(*table_id)
+                        self.storage
+                            .get_table(*table_id)
                             .map(|t| t.row_count_approx() as f64)
                             .unwrap_or(1000.0)
                     });
                 let est_rows = (base_rows * 0.01).max(1.0);
                 let startup_cost = 0.0_f64;
                 let total_cost = est_rows * 0.01 + 1.0; // index lookup cost
-                let col_name = schema.columns.get(*index_col).map(|c| c.name.as_str()).unwrap_or("?");
+                let col_name = schema
+                    .columns
+                    .get(*index_col)
+                    .map(|c| c.name.as_str())
+                    .unwrap_or("?");
                 let mut lines = vec![format!(
                     "{}Index Scan using {} on {}  (cost={:.2}..{:.2} rows={} width={})",
-                    pad, col_name, schema.name, startup_cost, total_cost,
-                    est_rows as u64, schema.columns.len() * 8
+                    pad,
+                    col_name,
+                    schema.name,
+                    startup_cost,
+                    total_cost,
+                    est_rows as u64,
+                    schema.columns.len() * 8
                 )];
-                lines.push(format!("{}  Index Cond: ({} = {:?})", pad, col_name, index_value));
-                let cols: Vec<String> = projections.iter().map(|p| match p {
-                    BoundProjection::Column(_, a) => a.clone(),
-                    BoundProjection::Aggregate(_, _, a, _, _) => a.clone(),
-                    BoundProjection::Expr(_, a) => a.clone(),
-                    BoundProjection::Window(wf) => wf.alias.clone(),
-                }).collect();
+                lines.push(format!(
+                    "{}  Index Cond: ({} = {:?})",
+                    pad, col_name, index_value
+                ));
+                let cols: Vec<String> = projections
+                    .iter()
+                    .map(|p| match p {
+                        BoundProjection::Column(_, a) => a.clone(),
+                        BoundProjection::Aggregate(_, _, a, _, _) => a.clone(),
+                        BoundProjection::Expr(_, a) => a.clone(),
+                        BoundProjection::Window(wf) => wf.alias.clone(),
+                    })
+                    .collect();
                 lines.push(format!("{}  Output: {}", pad, cols.join(", ")));
-                if let Some(f) = filter { lines.push(format!("{}  Filter: {:?}", pad, f)); }
-                if !order_by.is_empty() { lines.push(format!("{}  Sort Key: {} column(s)", pad, order_by.len())); }
-                if let Some(l) = limit { lines.push(format!("{}  Limit: {}", pad, l)); }
-                if let Some(o) = offset { lines.push(format!("{}  Offset: {}", pad, o)); }
-                if !matches!(distinct, DistinctMode::None) { lines.push(format!("{}  Distinct: {:?}", pad, distinct)); }
-                if !unions.is_empty() { lines.push(format!("{}  Set Ops: {} additional query(ies)", pad, unions.len())); }
+                if let Some(f) = filter {
+                    lines.push(format!("{}  Filter: {:?}", pad, f));
+                }
+                if !order_by.is_empty() {
+                    lines.push(format!("{}  Sort Key: {} column(s)", pad, order_by.len()));
+                }
+                if let Some(l) = limit {
+                    lines.push(format!("{}  Limit: {}", pad, l));
+                }
+                if let Some(o) = offset {
+                    lines.push(format!("{}  Offset: {}", pad, o));
+                }
+                if !matches!(distinct, DistinctMode::None) {
+                    lines.push(format!("{}  Distinct: {:?}", pad, distinct));
+                }
+                if !unions.is_empty() {
+                    lines.push(format!(
+                        "{}  Set Ops: {} additional query(ies)",
+                        pad,
+                        unions.len()
+                    ));
+                }
                 lines
             }
-            PhysicalPlan::NestedLoopJoin { left_table_id, left_schema, joins, projections, filter, order_by, limit, offset, distinct, unions, .. }
-            | PhysicalPlan::HashJoin { left_table_id, left_schema, joins, projections, filter, order_by, limit, offset, distinct, unions, .. }
-            | PhysicalPlan::MergeSortJoin { left_table_id, left_schema, joins, projections, filter, order_by, limit, offset, distinct, unions, .. } => {
+            PhysicalPlan::NestedLoopJoin {
+                left_table_id,
+                left_schema,
+                joins,
+                projections,
+                filter,
+                order_by,
+                limit,
+                offset,
+                distinct,
+                unions,
+                ..
+            }
+            | PhysicalPlan::HashJoin {
+                left_table_id,
+                left_schema,
+                joins,
+                projections,
+                filter,
+                order_by,
+                limit,
+                offset,
+                distinct,
+                unions,
+                ..
+            }
+            | PhysicalPlan::MergeSortJoin {
+                left_table_id,
+                left_schema,
+                joins,
+                projections,
+                filter,
+                order_by,
+                limit,
+                offset,
+                distinct,
+                unions,
+                ..
+            } => {
                 let is_hash = matches!(plan, PhysicalPlan::HashJoin { .. });
                 let is_merge = matches!(plan, PhysicalPlan::MergeSortJoin { .. });
-                let strategy = if is_merge { "Merge Sort Join" } else if is_hash { "Hash Join" } else { "Nested Loop" };
+                let strategy = if is_merge {
+                    "Merge Sort Join"
+                } else if is_hash {
+                    "Hash Join"
+                } else {
+                    "Nested Loop"
+                };
                 // Estimate left table rows
-                let left_rows = self.storage.get_table_stats(*left_table_id)
+                let left_rows = self
+                    .storage
+                    .get_table_stats(*left_table_id)
                     .map(|s| s.row_count as f64)
                     .unwrap_or_else(|| {
-                        self.storage.get_table(*left_table_id)
+                        self.storage
+                            .get_table(*left_table_id)
                             .map(|t| t.row_count_approx() as f64)
                             .unwrap_or(1000.0)
                     });
                 // Estimate join output rows
                 let mut est_rows = left_rows;
                 for j in joins {
-                    let right_rows = self.storage.get_table_schema(&j.right_table_name)
-                        .and_then(|s| self.storage.get_table(s.id).map(|t| t.row_count_approx() as f64))
+                    let right_rows = self
+                        .storage
+                        .get_table_schema(&j.right_table_name)
+                        .and_then(|s| {
+                            self.storage
+                                .get_table(s.id)
+                                .map(|t| t.row_count_approx() as f64)
+                        })
                         .unwrap_or(1000.0);
                     est_rows = if is_hash {
                         // Hash join: roughly min(left, right) for equi-join
@@ -1035,8 +1393,12 @@ impl Executor {
                         left_rows * right_rows * 0.1
                     };
                 }
-                if filter.is_some() { est_rows *= 0.33; }
-                if let Some(l) = limit { est_rows = est_rows.min(*l as f64); }
+                if filter.is_some() {
+                    est_rows *= 0.33;
+                }
+                if let Some(l) = limit {
+                    est_rows = est_rows.min(*l as f64);
+                }
                 // Cost model
                 let startup_cost = if is_hash { left_rows * 0.01 } else { 0.0 };
                 let total_cost = if is_hash {
@@ -1047,51 +1409,132 @@ impl Executor {
                 let width = left_schema.columns.len() * 8 + joins.iter().map(|_| 64).sum::<usize>();
                 let mut lines = vec![format!(
                     "{}{} on {}  (cost={:.2}..{:.2} rows={} width={})",
-                    pad, strategy, left_schema.name, startup_cost, total_cost,
-                    est_rows as u64, width
+                    pad,
+                    strategy,
+                    left_schema.name,
+                    startup_cost,
+                    total_cost,
+                    est_rows as u64,
+                    width
                 )];
                 for j in joins {
-                    lines.push(format!("{}  -> {:?} JOIN {}", pad, j.join_type, j.right_table_name));
+                    lines.push(format!(
+                        "{}  -> {:?} JOIN {}",
+                        pad, j.join_type, j.right_table_name
+                    ));
                 }
-                let cols: Vec<String> = projections.iter().map(|p| match p {
-                    BoundProjection::Column(_, a) => a.clone(),
-                    BoundProjection::Aggregate(_, _, a, _, _) => a.clone(),
-                    BoundProjection::Expr(_, a) => a.clone(),
-                    BoundProjection::Window(wf) => wf.alias.clone(),
-                }).collect();
+                let cols: Vec<String> = projections
+                    .iter()
+                    .map(|p| match p {
+                        BoundProjection::Column(_, a) => a.clone(),
+                        BoundProjection::Aggregate(_, _, a, _, _) => a.clone(),
+                        BoundProjection::Expr(_, a) => a.clone(),
+                        BoundProjection::Window(wf) => wf.alias.clone(),
+                    })
+                    .collect();
                 lines.push(format!("{}  Output: {}", pad, cols.join(", ")));
-                if let Some(f) = filter { lines.push(format!("{}  Filter: {:?}", pad, f)); }
-                if !order_by.is_empty() { lines.push(format!("{}  Sort Key: {} column(s)", pad, order_by.len())); }
-                if let Some(l) = limit { lines.push(format!("{}  Limit: {}", pad, l)); }
-                if let Some(o) = offset { lines.push(format!("{}  Offset: {}", pad, o)); }
-                if !matches!(distinct, DistinctMode::None) { lines.push(format!("{}  Distinct: {:?}", pad, distinct)); }
-                if !unions.is_empty() { lines.push(format!("{}  Set Ops: {} additional query(ies)", pad, unions.len())); }
+                if let Some(f) = filter {
+                    lines.push(format!("{}  Filter: {:?}", pad, f));
+                }
+                if !order_by.is_empty() {
+                    lines.push(format!("{}  Sort Key: {} column(s)", pad, order_by.len()));
+                }
+                if let Some(l) = limit {
+                    lines.push(format!("{}  Limit: {}", pad, l));
+                }
+                if let Some(o) = offset {
+                    lines.push(format!("{}  Offset: {}", pad, o));
+                }
+                if !matches!(distinct, DistinctMode::None) {
+                    lines.push(format!("{}  Distinct: {:?}", pad, distinct));
+                }
+                if !unions.is_empty() {
+                    lines.push(format!(
+                        "{}  Set Ops: {} additional query(ies)",
+                        pad,
+                        unions.len()
+                    ));
+                }
                 lines
             }
-            PhysicalPlan::Insert { schema, columns, returning, .. } => {
-                let col_names: Vec<String> = columns.iter().map(|&i| schema.columns[i].name.clone()).collect();
-                let mut lines = vec![format!("{}Insert on {} ({})", pad, schema.name, col_names.join(", "))];
-                if !returning.is_empty() { lines.push(format!("{}  Returning: {} column(s)", pad, returning.len())); }
+            PhysicalPlan::Insert {
+                schema,
+                columns,
+                returning,
+                ..
+            } => {
+                let col_names: Vec<String> = columns
+                    .iter()
+                    .map(|&i| schema.columns[i].name.clone())
+                    .collect();
+                let mut lines = vec![format!(
+                    "{}Insert on {} ({})",
+                    pad,
+                    schema.name,
+                    col_names.join(", ")
+                )];
+                if !returning.is_empty() {
+                    lines.push(format!("{}  Returning: {} column(s)", pad, returning.len()));
+                }
                 lines
             }
-            PhysicalPlan::Update { schema, assignments, filter, returning, .. } => {
-                let cols: Vec<String> = assignments.iter().map(|(i, _)| schema.columns[*i].name.clone()).collect();
-                let mut lines = vec![format!("{}Update on {} SET {}", pad, schema.name, cols.join(", "))];
-                if let Some(f) = filter { lines.push(format!("{}  Filter: {:?}", pad, f)); }
-                if !returning.is_empty() { lines.push(format!("{}  Returning: {} column(s)", pad, returning.len())); }
+            PhysicalPlan::Update {
+                schema,
+                assignments,
+                filter,
+                returning,
+                ..
+            } => {
+                let cols: Vec<String> = assignments
+                    .iter()
+                    .map(|(i, _)| schema.columns[*i].name.clone())
+                    .collect();
+                let mut lines = vec![format!(
+                    "{}Update on {} SET {}",
+                    pad,
+                    schema.name,
+                    cols.join(", ")
+                )];
+                if let Some(f) = filter {
+                    lines.push(format!("{}  Filter: {:?}", pad, f));
+                }
+                if !returning.is_empty() {
+                    lines.push(format!("{}  Returning: {} column(s)", pad, returning.len()));
+                }
                 lines
             }
-            PhysicalPlan::Delete { schema, filter, returning, .. } => {
+            PhysicalPlan::Delete {
+                schema,
+                filter,
+                returning,
+                ..
+            } => {
                 let mut lines = vec![format!("{}Delete on {}", pad, schema.name)];
-                if let Some(f) = filter { lines.push(format!("{}  Filter: {:?}", pad, f)); }
-                if !returning.is_empty() { lines.push(format!("{}  Returning: {} column(s)", pad, returning.len())); }
+                if let Some(f) = filter {
+                    lines.push(format!("{}  Filter: {:?}", pad, f));
+                }
+                if !returning.is_empty() {
+                    lines.push(format!("{}  Returning: {} column(s)", pad, returning.len()));
+                }
                 lines
             }
-            PhysicalPlan::CreateTable { schema, if_not_exists } => {
-                vec![format!("{}CreateTable {} (if_not_exists={})", pad, schema.name, if_not_exists)]
+            PhysicalPlan::CreateTable {
+                schema,
+                if_not_exists,
+            } => {
+                vec![format!(
+                    "{}CreateTable {} (if_not_exists={})",
+                    pad, schema.name, if_not_exists
+                )]
             }
-            PhysicalPlan::DropTable { table_name, if_exists } => {
-                vec![format!("{}DropTable {} (if_exists={})", pad, table_name, if_exists)]
+            PhysicalPlan::DropTable {
+                table_name,
+                if_exists,
+            } => {
+                vec![format!(
+                    "{}DropTable {} (if_exists={})",
+                    pad, table_name, if_exists
+                )]
             }
             PhysicalPlan::AlterTable { table_name, ops } => {
                 vec![format!("{}AlterTable {} {:?}", pad, table_name, ops)]
@@ -1104,8 +1547,15 @@ impl Executor {
             PhysicalPlan::Truncate { table_name } => {
                 vec![format!("{}Truncate {}", pad, table_name)]
             }
-            PhysicalPlan::CreateIndex { index_name, table_name, .. } => {
-                vec![format!("{}CreateIndex {} on {}", pad, index_name, table_name)]
+            PhysicalPlan::CreateIndex {
+                index_name,
+                table_name,
+                ..
+            } => {
+                vec![format!(
+                    "{}CreateIndex {} on {}",
+                    pad, index_name, table_name
+                )]
             }
             PhysicalPlan::DropIndex { index_name } => {
                 vec![format!("{}DropIndex {}", pad, index_name)]
@@ -1137,7 +1587,9 @@ impl Executor {
             PhysicalPlan::ShowSequences => vec![format!("{}ShowSequences", pad)],
             PhysicalPlan::ShowTenants => vec![format!("{}ShowTenants", pad)],
             PhysicalPlan::ShowTenantUsage => vec![format!("{}ShowTenantUsage", pad)],
-            PhysicalPlan::CreateTenant { name, .. } => vec![format!("{}CreateTenant {}", pad, name)],
+            PhysicalPlan::CreateTenant { name, .. } => {
+                vec![format!("{}CreateTenant {}", pad, name)]
+            }
             PhysicalPlan::DropTenant { name } => vec![format!("{}DropTenant {}", pad, name)],
             PhysicalPlan::CopyFrom { schema, .. } => {
                 vec![format!("{}CopyFrom STDIN into {}", pad, schema.name)]
@@ -1150,16 +1602,21 @@ impl Executor {
                 lines.extend(self.format_plan(query, indent + 2));
                 lines
             }
-            PhysicalPlan::DistPlan { subplan, target_shards, gather, .. } => {
+            PhysicalPlan::DistPlan {
+                subplan,
+                target_shards,
+                gather,
+                ..
+            } => {
                 let mut lines = vec![format!(
                     "{}DistPlan (scatter to {} shards, gather={:?})",
-                    pad, target_shards.len(), gather
+                    pad,
+                    target_shards.len(),
+                    gather
                 )];
                 lines.extend(self.format_plan(subplan, indent + 1));
                 lines
             }
         }
     }
-
 }
-

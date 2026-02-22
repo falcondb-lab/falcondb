@@ -7,8 +7,10 @@
 //! # Architecture
 //!
 //! ```text
-//!   ShardLoadSnapshot 鈹€鈹€鈻?RebalancePlanner 鈹€鈹€鈻?MigrationPlan
-//!                                                   鈹?//!                               ShardMigrator 鈼勨攢鈹€鈹€鈹€鈹€鈹?//!                           (batched row moves)
+//!   ShardLoadSnapshot ──▶ RebalancePlanner ──▶ MigrationPlan
+//!                                                   │
+//!                               ShardMigrator ◀─────┘
+//!                           (batched row moves)
 //! ```
 
 use std::collections::HashMap;
@@ -22,7 +24,7 @@ use falcon_common::types::ShardId;
 
 use crate::sharded_engine::ShardedEngine;
 
-// 鈹€鈹€ Configuration 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// ── Configuration ────────────────────────────────────────────────────
 
 /// Configuration knobs for the rebalancer.
 #[derive(Debug, Clone)]
@@ -52,7 +54,7 @@ impl Default for RebalancerConfig {
     }
 }
 
-// 鈹€鈹€ Per-shard load snapshot 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// ── Per-shard load snapshot ──────────────────────────────────────────
 
 /// A point-in-time snapshot of a single shard's load.
 #[derive(Debug, Clone)]
@@ -125,7 +127,7 @@ impl ShardLoadSnapshot {
     }
 }
 
-// 鈹€鈹€ Migration plan 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// ── Migration plan ───────────────────────────────────────────────────
 
 /// Estimated rows-per-second throughput for migration time estimation.
 /// Based on in-memory row copy + delete (conservative estimate).
@@ -179,7 +181,7 @@ impl MigrationPlan {
     }
 }
 
-// 鈹€鈹€ Rebalance planner 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// ── Rebalance planner ────────────────────────────────────────────────
 
 /// Computes a `MigrationPlan` from a `ShardLoadSnapshot`.
 pub struct RebalancePlanner {
@@ -200,12 +202,18 @@ impl RebalancePlanner {
         let mut tasks = Vec::new();
 
         if snapshot.loads.len() < 2 {
-            return MigrationPlan { tasks, created_at: Instant::now() };
+            return MigrationPlan {
+                tasks,
+                created_at: Instant::now(),
+            };
         }
 
         let avg = snapshot.avg_rows();
         if avg <= 0.0 {
-            return MigrationPlan { tasks, created_at: Instant::now() };
+            return MigrationPlan {
+                tasks,
+                created_at: Instant::now(),
+            };
         }
 
         // Build mutable load map
@@ -278,7 +286,8 @@ impl RebalancePlanner {
                 break;
             }
 
-            let estimated_time_ms = (rows_to_move as f64 / ESTIMATED_ROWS_PER_SEC as f64 * 1000.0).ceil() as u64;
+            let estimated_time_ms =
+                (rows_to_move as f64 / ESTIMATED_ROWS_PER_SEC as f64 * 1000.0).ceil() as u64;
             tasks.push(MigrationTask {
                 source_shard: donor_id,
                 target_shard: receiver_id,
@@ -288,8 +297,12 @@ impl RebalancePlanner {
             });
 
             // Update simulated loads
-            if let Some(v) = load_map.get_mut(&donor_id) { *v -= rows_to_move; }
-            if let Some(v) = load_map.get_mut(&receiver_id) { *v += rows_to_move; }
+            if let Some(v) = load_map.get_mut(&donor_id) {
+                *v -= rows_to_move;
+            }
+            if let Some(v) = load_map.get_mut(&receiver_id) {
+                *v += rows_to_move;
+            }
         }
 
         MigrationPlan {
@@ -299,7 +312,7 @@ impl RebalancePlanner {
     }
 }
 
-// 鈹€鈹€ Migration execution 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// ── Migration execution ──────────────────────────────────────────────
 
 /// Phase of a migration task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -361,11 +374,7 @@ impl ShardMigrator {
     }
 
     /// Execute a single migration task.  Returns the final status.
-    pub fn execute_task(
-        &self,
-        task: &MigrationTask,
-        engine: &ShardedEngine,
-    ) -> MigrationStatus {
+    pub fn execute_task(&self, task: &MigrationTask, engine: &ShardedEngine) -> MigrationStatus {
         let mut status = MigrationStatus::new(task.clone());
         status.phase = MigrationPhase::CopyingRows;
         status.started_at = Some(Instant::now());
@@ -414,7 +423,10 @@ impl ShardMigrator {
         // is being repartitioned.
         let pk_col_idx = table_schema.primary_key_columns.first().copied();
         let mut migrated_rows = 0u64;
-        let mut batch_keys: Vec<(falcon_storage::memtable::PrimaryKey, falcon_common::datum::OwnedRow)> = Vec::new();
+        let mut batch_keys: Vec<(
+            falcon_storage::memtable::PrimaryKey,
+            falcon_common::datum::OwnedRow,
+        )> = Vec::new();
 
         for entry in source_table.data.iter() {
             if migrated_rows >= task.rows_to_move {
@@ -436,12 +448,8 @@ impl ShardMigrator {
                     migrated_rows += 1;
 
                     if batch_keys.len() >= self.config.batch_size {
-                        if let Err(e) = self.flush_batch(
-                            &batch_keys,
-                            &table_schema,
-                            source,
-                            target,
-                        ) {
+                        if let Err(e) = self.flush_batch(&batch_keys, &table_schema, source, target)
+                        {
                             status.phase = MigrationPhase::Failed;
                             status.error = Some(e);
                             return status;
@@ -469,7 +477,7 @@ impl ShardMigrator {
         status.completed_at = Some(Instant::now());
 
         tracing::info!(
-            "Migration completed: {} rows from {:?} 鈫?{:?} (table '{}')",
+            "Migration completed: {} rows from {:?}  → {:?} (table '{}')",
             status.rows_migrated,
             task.source_shard,
             task.target_shard,
@@ -482,7 +490,10 @@ impl ShardMigrator {
     /// Insert rows into the target shard and delete them from the source.
     fn flush_batch(
         &self,
-        batch: &[(falcon_storage::memtable::PrimaryKey, falcon_common::datum::OwnedRow)],
+        batch: &[(
+            falcon_storage::memtable::PrimaryKey,
+            falcon_common::datum::OwnedRow,
+        )],
         schema: &falcon_common::schema::TableSchema,
         source: &crate::sharded_engine::ShardInstance,
         target: &crate::sharded_engine::ShardInstance,
@@ -520,7 +531,7 @@ impl ShardMigrator {
     }
 }
 
-// 鈹€鈹€ Top-level rebalancer 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// ── Top-level rebalancer ─────────────────────────────────────────────
 
 /// Overall status of the rebalancer.
 #[derive(Debug, Clone)]
@@ -560,7 +571,9 @@ impl RebalancerStatus {
         if duration_ms == 0 {
             return 0.0;
         }
-        let rows: u64 = self.migration_statuses.iter()
+        let rows: u64 = self
+            .migration_statuses
+            .iter()
             .filter(|s| s.phase == MigrationPhase::Completed)
             .map(|s| s.rows_migrated)
             .sum();
@@ -569,14 +582,16 @@ impl RebalancerStatus {
 
     /// P2-5a: Number of completed migration tasks in the last run.
     pub fn completed_tasks(&self) -> usize {
-        self.migration_statuses.iter()
+        self.migration_statuses
+            .iter()
             .filter(|s| s.phase == MigrationPhase::Completed)
             .count()
     }
 
     /// P2-5a: Number of failed migration tasks in the last run.
     pub fn failed_tasks(&self) -> usize {
-        self.migration_statuses.iter()
+        self.migration_statuses
+            .iter()
             .filter(|s| s.phase == MigrationPhase::Failed)
             .count()
     }
@@ -675,7 +690,8 @@ impl ShardRebalancer {
             0
         };
 
-        self.total_rows_migrated.fetch_add(rows_migrated, Ordering::Relaxed);
+        self.total_rows_migrated
+            .fetch_add(rows_migrated, Ordering::Relaxed);
         self.runs_completed.fetch_add(1, Ordering::Relaxed);
         self.running.store(false, Ordering::SeqCst);
 
@@ -683,11 +699,7 @@ impl ShardRebalancer {
     }
 
     /// Execute all tasks in a migration plan, returning statuses.
-    fn execute_plan(
-        &self,
-        plan: &MigrationPlan,
-        engine: &ShardedEngine,
-    ) -> Vec<MigrationStatus> {
+    fn execute_plan(&self, plan: &MigrationPlan, engine: &ShardedEngine) -> Vec<MigrationStatus> {
         plan.tasks
             .iter()
             .map(|task| self.migrator.execute_task(task, engine))
@@ -720,7 +732,10 @@ impl ShardRebalancer {
 
     /// Get the current rebalancer status.
     pub fn status(&self) -> RebalancerStatus {
-        self.status.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        self.status
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// Get the total number of rows migrated across all runs.
@@ -815,7 +830,10 @@ impl RebalanceRunner {
         let join_handle = std::thread::Builder::new()
             .name("falcon-rebalancer".to_string())
             .spawn(move || {
-                tracing::info!("RebalanceRunner started (interval={}ms)", config.check_interval_ms);
+                tracing::info!(
+                    "RebalanceRunner started (interval={}ms)",
+                    config.check_interval_ms
+                );
                 while !signal_clone.is_shutdown() {
                     if signal_clone.wait_timeout(interval) {
                         break;
@@ -833,9 +851,7 @@ impl RebalanceRunner {
                     error = %e,
                     "failed to spawn background thread — node DEGRADED"
                 );
-                FalconError::Internal(format!(
-                    "failed to spawn rebalancer thread: {}", e
-                ))
+                FalconError::Internal(format!("failed to spawn rebalancer thread: {}", e))
             })?;
 
         Ok(RebalanceRunnerHandle {
@@ -866,24 +882,33 @@ pub struct ShardLoadDetailed {
 impl ShardLoadDetailed {
     /// Collect detailed load from a ShardedEngine.
     pub fn collect_all(engine: &ShardedEngine) -> Vec<ShardLoadDetailed> {
-        engine.all_shards().iter().map(|shard| {
-            let catalog = shard.storage.catalog_snapshot();
-            let mut tables = Vec::new();
-            let mut total = 0u64;
-            for ts in catalog.list_tables() {
-                let rc = shard.storage.get_table(ts.id)
-                    .map(|t| t.row_count_approx() as u64)
-                    .unwrap_or(0);
-                total += rc;
-                tables.push(TableLoad { table_name: ts.name.clone(), row_count: rc });
-            }
-            ShardLoadDetailed {
-                shard_id: shard.shard_id,
-                total_row_count: total,
-                table_count: tables.len() as u64,
-                tables,
-            }
-        }).collect()
+        engine
+            .all_shards()
+            .iter()
+            .map(|shard| {
+                let catalog = shard.storage.catalog_snapshot();
+                let mut tables = Vec::new();
+                let mut total = 0u64;
+                for ts in catalog.list_tables() {
+                    let rc = shard
+                        .storage
+                        .get_table(ts.id)
+                        .map(|t| t.row_count_approx() as u64)
+                        .unwrap_or(0);
+                    total += rc;
+                    tables.push(TableLoad {
+                        table_name: ts.name.clone(),
+                        row_count: rc,
+                    });
+                }
+                ShardLoadDetailed {
+                    shard_id: shard.shard_id,
+                    total_row_count: total,
+                    table_count: tables.len() as u64,
+                    tables,
+                }
+            })
+            .collect()
     }
 }
 
@@ -899,14 +924,14 @@ fn datum_to_i64(d: &falcon_common::datum::Datum) -> Option<i64> {
     }
 }
 
-// 鈹€鈹€ Tests 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// ── Tests ────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use falcon_common::datum::{Datum, OwnedRow};
     use falcon_common::schema::{ColumnDef, TableSchema};
     use falcon_common::types::{ColumnId, DataType, TableId};
-    use falcon_common::datum::{Datum, OwnedRow};
     use falcon_storage::memtable::encode_pk_from_datums;
 
     fn make_test_schema() -> TableSchema {
@@ -938,7 +963,7 @@ mod tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         }
     }
 
@@ -975,7 +1000,10 @@ mod tests {
         // Insert many rows into shard 0 only
         let shard0 = engine.shard(ShardId(0)).unwrap();
         for i in 0..200 {
-            let row = OwnedRow::new(vec![Datum::Int64(i as i64), Datum::Text(format!("user_{}", i))]);
+            let row = OwnedRow::new(vec![
+                Datum::Int64(i as i64),
+                Datum::Text(format!("user_{}", i)),
+            ]);
             let pk = encode_pk_from_datums(&[&Datum::Int64(i as i64)]);
             shard0.storage.insert_row(TableId(1), pk, row).unwrap();
         }
@@ -1085,8 +1113,16 @@ mod tests {
     fn test_imbalance_ratio_calculation() {
         let snapshot = ShardLoadSnapshot {
             loads: vec![
-                ShardLoad { shard_id: ShardId(0), row_count: 1000, table_count: 1 },
-                ShardLoad { shard_id: ShardId(1), row_count: 100, table_count: 1 },
+                ShardLoad {
+                    shard_id: ShardId(0),
+                    row_count: 1000,
+                    table_count: 1,
+                },
+                ShardLoad {
+                    shard_id: ShardId(1),
+                    row_count: 100,
+                    table_count: 1,
+                },
             ],
             taken_at: Instant::now(),
         };
@@ -1121,15 +1157,30 @@ mod tests {
 
         assert!(!plan.is_empty(), "G5: plan must have tasks");
         for task in &plan.tasks {
-            assert!(task.rows_to_move > 0, "G5: shard move must have data volume");
-            assert!(task.estimated_time_ms > 0, "G5: shard move must have estimated time");
-            assert!(!task.table_name.is_empty(), "G5: shard move must name the table");
+            assert!(
+                task.rows_to_move > 0,
+                "G5: shard move must have data volume"
+            );
+            assert!(
+                task.estimated_time_ms > 0,
+                "G5: shard move must have estimated time"
+            );
+            assert!(
+                !task.table_name.is_empty(),
+                "G5: shard move must name the table"
+            );
             assert_ne!(task.source_shard, task.target_shard, "G5: source != target");
         }
         assert!(plan.total_rows_to_move() > 0, "G5: total data volume > 0");
-        assert!(plan.estimated_duration_ms() > 0, "G5: total estimated time > 0");
+        assert!(
+            plan.estimated_duration_ms() > 0,
+            "G5: total estimated time > 0"
+        );
         let display = plan.estimated_duration_display();
-        assert!(!display.is_empty(), "G5: estimated duration display non-empty");
+        assert!(
+            !display.is_empty(),
+            "G5: estimated duration display non-empty"
+        );
     }
 
     #[test]
@@ -1147,7 +1198,9 @@ mod tests {
 
         let before = ShardLoadSnapshot::collect(&engine);
         assert_eq!(before.total_rows(), 200);
-        let shard1_before = before.loads.iter()
+        let shard1_before = before
+            .loads
+            .iter()
             .find(|l| l.shard_id == ShardId(1))
             .map(|l| l.row_count)
             .unwrap_or(0);
@@ -1161,17 +1214,28 @@ mod tests {
         };
         let rebalancer = ShardRebalancer::new(config);
         let migrated = rebalancer.check_and_rebalance(&engine);
-        assert!(migrated > 0, "G1: rebalance should migrate rows to new shard");
+        assert!(
+            migrated > 0,
+            "G1: rebalance should migrate rows to new shard"
+        );
 
         let after = ShardLoadSnapshot::collect(&engine);
         // Note: total_rows may be > 200 due to MVCC tombstones on source shard.
         // The key invariant is that target shard received data.
-        let shard1_after = after.loads.iter()
+        let shard1_after = after
+            .loads
+            .iter()
             .find(|l| l.shard_id == ShardId(1))
             .map(|l| l.row_count)
             .unwrap_or(0);
-        assert!(shard1_after > 0, "G1: data verified on target shard after rebalance");
-        assert!(shard1_after >= migrated, "G1: target shard has at least migrated row count");
+        assert!(
+            shard1_after > 0,
+            "G1: data verified on target shard after rebalance"
+        );
+        assert!(
+            shard1_after >= migrated,
+            "G1: target shard has at least migrated row count"
+        );
     }
 
     #[test]
@@ -1195,7 +1259,9 @@ mod tests {
 
         let before = ShardLoadSnapshot::collect(&engine);
         assert_eq!(before.total_rows(), 200);
-        let shard0_before = before.loads.iter()
+        let shard0_before = before
+            .loads
+            .iter()
             .find(|l| l.shard_id == ShardId(0))
             .map(|l| l.row_count)
             .unwrap_or(0);
@@ -1213,63 +1279,64 @@ mod tests {
             estimated_time_ms: 2,
         };
         let status = migrator.execute_task(&task, &engine);
-        assert_eq!(status.phase, MigrationPhase::Completed, "G2: migration should complete");
+        assert_eq!(
+            status.phase,
+            MigrationPhase::Completed,
+            "G2: migration should complete"
+        );
         assert!(status.rows_migrated > 0, "G2: should have migrated rows");
 
         let after = ShardLoadSnapshot::collect(&engine);
         // Note: total_rows may increase due to MVCC tombstones on source.
         // The key invariant: target shard (shard 0) received the migrated rows.
-        let shard0_after = after.loads.iter()
+        let shard0_after = after
+            .loads
+            .iter()
             .find(|l| l.shard_id == ShardId(0))
             .map(|l| l.row_count)
             .unwrap_or(0);
         assert!(
             shard0_after > shard0_before,
             "G2: surviving shard row count increased ({} → {})",
-            shard0_before, shard0_after,
+            shard0_before,
+            shard0_after,
         );
     }
 
     #[test]
     fn test_estimated_duration_display_formats() {
         let plan = MigrationPlan {
-            tasks: vec![
-                MigrationTask {
-                    source_shard: ShardId(0),
-                    target_shard: ShardId(1),
-                    table_name: "t".into(),
-                    rows_to_move: 100,
-                    estimated_time_ms: 500,
-                },
-            ],
+            tasks: vec![MigrationTask {
+                source_shard: ShardId(0),
+                target_shard: ShardId(1),
+                table_name: "t".into(),
+                rows_to_move: 100,
+                estimated_time_ms: 500,
+            }],
             created_at: Instant::now(),
         };
         assert_eq!(plan.estimated_duration_display(), "500ms");
 
         let plan2 = MigrationPlan {
-            tasks: vec![
-                MigrationTask {
-                    source_shard: ShardId(0),
-                    target_shard: ShardId(1),
-                    table_name: "t".into(),
-                    rows_to_move: 50000,
-                    estimated_time_ms: 3500,
-                },
-            ],
+            tasks: vec![MigrationTask {
+                source_shard: ShardId(0),
+                target_shard: ShardId(1),
+                table_name: "t".into(),
+                rows_to_move: 50000,
+                estimated_time_ms: 3500,
+            }],
             created_at: Instant::now(),
         };
         assert_eq!(plan2.estimated_duration_display(), "3.5s");
 
         let plan3 = MigrationPlan {
-            tasks: vec![
-                MigrationTask {
-                    source_shard: ShardId(0),
-                    target_shard: ShardId(1),
-                    table_name: "t".into(),
-                    rows_to_move: 5000000,
-                    estimated_time_ms: 120_000,
-                },
-            ],
+            tasks: vec![MigrationTask {
+                source_shard: ShardId(0),
+                target_shard: ShardId(1),
+                table_name: "t".into(),
+                rows_to_move: 5000000,
+                estimated_time_ms: 120_000,
+            }],
             created_at: Instant::now(),
         };
         assert_eq!(plan3.estimated_duration_display(), "2.0m");

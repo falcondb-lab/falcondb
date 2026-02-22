@@ -72,7 +72,11 @@ impl CrossShardLatencyBreakdown {
 
     /// Max per-shard RPC latency (critical path for parallel scatter).
     pub fn max_shard_rpc_us(&self) -> u64 {
-        self.shard_rpc_us.iter().map(|(_, us)| *us).max().unwrap_or(0)
+        self.shard_rpc_us
+            .iter()
+            .map(|(_, us)| *us)
+            .max()
+            .unwrap_or(0)
     }
 
     /// Dominant phase name (largest contributor).
@@ -89,7 +93,11 @@ impl CrossShardLatencyBreakdown {
             ("replication_ack", self.replication_ack_us),
             ("retry_backoff", self.retry_backoff_us),
         ];
-        phases.iter().max_by_key(|p| p.1).map(|p| p.0).unwrap_or("unknown")
+        phases
+            .iter()
+            .max_by_key(|p| p.1)
+            .map(|p| p.0)
+            .unwrap_or("unknown")
     }
 
     /// Compact waterfall string for tracing.
@@ -144,8 +152,7 @@ impl Default for LayeredTimeouts {
 }
 
 /// Timeout policy: what to do when a phase timeout is exceeded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum TimeoutPolicy {
     /// Abort immediately on any phase timeout (prefer stability).
     #[default]
@@ -154,7 +161,6 @@ pub enum TimeoutPolicy {
     /// (prefer success rate).
     BestEffort,
 }
-
 
 /// Which phase timed out (for explainable errors).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -393,8 +399,7 @@ impl Default for RetryConfig {
 impl RetryConfig {
     /// Compute the backoff duration for the nth retry attempt (0-indexed).
     pub fn backoff_for_attempt(&self, attempt: u32) -> Duration {
-        let base = self.initial_backoff.as_micros() as f64
-            * self.multiplier.powi(attempt as i32);
+        let base = self.initial_backoff.as_micros() as f64 * self.multiplier.powi(attempt as i32);
         let base_us = base.min(self.max_backoff.as_micros() as f64) as u64;
 
         // Add jitter: uniform random in [0, jitter_ratio * base_us]
@@ -593,7 +598,10 @@ impl ShardConflictTracker {
             return;
         }
         drop(read);
-        self.shards.write().entry(shard_id).or_insert_with(ShardConflictCounters::new);
+        self.shards
+            .write()
+            .entry(shard_id)
+            .or_insert_with(ShardConflictCounters::new);
     }
 
     /// Record a completed transaction on a shard.
@@ -645,7 +653,11 @@ impl ShardConflictTracker {
                     total_txns: total,
                     conflict_aborts: conflicts,
                     timeout_aborts: timeouts,
-                    conflict_rate: if total > 0 { conflicts as f64 / total as f64 } else { 0.0 },
+                    conflict_rate: if total > 0 {
+                        conflicts as f64 / total as f64
+                    } else {
+                        0.0
+                    },
                     abort_rate: if total > 0 {
                         (conflicts + timeouts) as f64 / total as f64
                     } else {
@@ -668,7 +680,10 @@ impl ShardConflictTracker {
     /// Get snapshots for all tracked shards.
     pub fn all_snapshots(&self) -> Vec<ShardConflictSnapshot> {
         let shard_ids: Vec<u64> = self.shards.read().keys().copied().collect();
-        shard_ids.iter().map(|&sid| self.shard_snapshot(sid)).collect()
+        shard_ids
+            .iter()
+            .map(|&sid| self.shard_snapshot(sid))
+            .collect()
     }
 }
 
@@ -727,7 +742,9 @@ impl AdaptiveConcurrencyConfig {
     pub fn adjust(&self, current_limit: u64, conflict_rate: f64) -> u64 {
         if conflict_rate > self.scale_down_threshold {
             // Scale down
-            current_limit.saturating_sub(self.step_size).max(self.min_concurrency)
+            current_limit
+                .saturating_sub(self.step_size)
+                .max(self.min_concurrency)
         } else if conflict_rate < self.scale_up_threshold {
             // Scale up
             (current_limit + self.step_size).min(self.max_concurrency)
@@ -818,12 +835,15 @@ impl DeadlockDetector {
     /// Register a transaction as waiting on a resource.
     pub fn register_wait(&self, txn_id: u64, involved_shards: Vec<u64>, reason: WaitReason) {
         let mut active = self.active.lock();
-        active.insert(txn_id, ActiveTxnEntry {
+        active.insert(
             txn_id,
-            involved_shards,
-            wait_reason: reason,
-            started_waiting: Instant::now(),
-        });
+            ActiveTxnEntry {
+                txn_id,
+                involved_shards,
+                wait_reason: reason,
+                started_waiting: Instant::now(),
+            },
+        );
     }
 
     /// Unregister a transaction (it is no longer waiting).
@@ -862,8 +882,7 @@ impl DeadlockDetector {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Queue ordering policy for the coordinator admission queue.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum QueuePolicy {
     /// First-in, first-out.
     #[default]
@@ -872,10 +891,8 @@ pub enum QueuePolicy {
     ShortTxnPriority,
 }
 
-
 /// Action to take when the queue exceeds a configurable length.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum QueueOverflowAction {
     /// Reject new requests.
     #[default]
@@ -885,7 +902,6 @@ pub enum QueueOverflowAction {
     /// Degrade: allow but with reduced guarantees (e.g. skip replication ack).
     Degrade,
 }
-
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Aggregated Cross-Shard Metrics
@@ -1338,9 +1354,18 @@ mod tests {
 
     #[test]
     fn test_timeout_phase_display() {
-        assert_eq!(TimeoutPhase::CoordinatorQueue.to_string(), "coordinator_queue");
-        assert_eq!(TimeoutPhase::ShardRpc(ShardId(3)).to_string(), "shard_rpc(3)");
-        assert_eq!(TimeoutPhase::Prepare(ShardId(1)).to_string(), "prepare(shard_1)");
+        assert_eq!(
+            TimeoutPhase::CoordinatorQueue.to_string(),
+            "coordinator_queue"
+        );
+        assert_eq!(
+            TimeoutPhase::ShardRpc(ShardId(3)).to_string(),
+            "shard_rpc(3)"
+        );
+        assert_eq!(
+            TimeoutPhase::Prepare(ShardId(1)).to_string(),
+            "prepare(shard_1)"
+        );
         assert_eq!(TimeoutPhase::Total.to_string(), "total");
     }
 
@@ -1629,8 +1654,14 @@ mod tests {
 
     #[test]
     fn test_wait_reason_display() {
-        assert_eq!(WaitReason::CoordinatorQueue.to_string(), "coordinator_queue");
-        assert_eq!(WaitReason::ShardLockWait(3).to_string(), "shard_lock_wait(shard_3)");
+        assert_eq!(
+            WaitReason::CoordinatorQueue.to_string(),
+            "coordinator_queue"
+        );
+        assert_eq!(
+            WaitReason::ShardLockWait(3).to_string(),
+            "shard_lock_wait(shard_3)"
+        );
         assert_eq!(WaitReason::CommitBarrier.to_string(), "commit_barrier");
     }
 
@@ -1740,9 +1771,24 @@ mod tests {
         }
         let p = h.percentiles();
         assert_eq!(p.count, 100);
-        assert!(p.p50_us <= p.p95_us, "p50 ({}) <= p95 ({})", p.p50_us, p.p95_us);
-        assert!(p.p95_us <= p.p99_us, "p95 ({}) <= p99 ({})", p.p95_us, p.p99_us);
-        assert!(p.p99_us <= p.p999_us, "p99 ({}) <= p999 ({})", p.p99_us, p.p999_us);
+        assert!(
+            p.p50_us <= p.p95_us,
+            "p50 ({}) <= p95 ({})",
+            p.p50_us,
+            p.p95_us
+        );
+        assert!(
+            p.p95_us <= p.p99_us,
+            "p95 ({}) <= p99 ({})",
+            p.p95_us,
+            p.p99_us
+        );
+        assert!(
+            p.p99_us <= p.p999_us,
+            "p99 ({}) <= p999 ({})",
+            p.p99_us,
+            p.p999_us
+        );
     }
 
     #[test]

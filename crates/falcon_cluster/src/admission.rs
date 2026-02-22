@@ -46,10 +46,10 @@ impl Default for AdmissionConfig {
         Self {
             max_inflight_queries: 1000,
             max_inflight_writes_per_shard: 500,
-            max_wal_flush_queue_bytes: 64 * 1024 * 1024,       // 64MB
+            max_wal_flush_queue_bytes: 64 * 1024 * 1024, // 64MB
             max_replication_apply_lag_bytes: 256 * 1024 * 1024, // 256MB
             max_connections: 10_000,
-            memory_budget_bytes: 4 * 1024 * 1024 * 1024,       // 4GB
+            memory_budget_bytes: 4 * 1024 * 1024 * 1024, // 4GB
             memory_pressure_ratio: 0.80,
             memory_hard_limit_ratio: 0.95,
             default_retry_after_ms: 50,
@@ -93,7 +93,9 @@ pub struct QueryPermit {
 
 impl Drop for QueryPermit {
     fn drop(&mut self) {
-        self.control.inflight_queries.fetch_sub(1, Ordering::Relaxed);
+        self.control
+            .inflight_queries
+            .fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -109,7 +111,9 @@ impl Drop for WritePermit {
         if let Some(counter) = self.control.inflight_writes_per_shard.get(self.shard_idx) {
             counter.fetch_sub(1, Ordering::Relaxed);
         }
-        self.control.total_inflight_writes.fetch_sub(1, Ordering::Relaxed);
+        self.control
+            .total_inflight_writes
+            .fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -121,7 +125,9 @@ pub struct ConnectionPermit {
 
 impl Drop for ConnectionPermit {
     fn drop(&mut self) {
-        self.control.active_connections.fetch_sub(1, Ordering::Relaxed);
+        self.control
+            .active_connections
+            .fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -153,10 +159,22 @@ pub struct AdmissionControl {
 impl std::fmt::Debug for AdmissionControl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AdmissionControl")
-            .field("inflight_queries", &self.inflight_queries.load(Ordering::Relaxed))
-            .field("inflight_writes", &self.total_inflight_writes.load(Ordering::Relaxed))
-            .field("active_connections", &self.active_connections.load(Ordering::Relaxed))
-            .field("total_rejected", &self.total_rejected.load(Ordering::Relaxed))
+            .field(
+                "inflight_queries",
+                &self.inflight_queries.load(Ordering::Relaxed),
+            )
+            .field(
+                "inflight_writes",
+                &self.total_inflight_writes.load(Ordering::Relaxed),
+            )
+            .field(
+                "active_connections",
+                &self.active_connections.load(Ordering::Relaxed),
+            )
+            .field(
+                "total_rejected",
+                &self.total_rejected.load(Ordering::Relaxed),
+            )
             .finish()
     }
 }
@@ -202,11 +220,16 @@ impl AdmissionControl {
             self.total_rejected.fetch_add(1, Ordering::Relaxed);
             self.connection_rejected.fetch_add(1, Ordering::Relaxed);
             return Err(FalconError::transient(
-                format!("connection limit reached ({}/{})", current, cfg.max_connections),
+                format!(
+                    "connection limit reached ({}/{})",
+                    current, cfg.max_connections
+                ),
                 cfg.default_retry_after_ms,
             ));
         }
-        Ok(ConnectionPermit { control: Arc::clone(self) })
+        Ok(ConnectionPermit {
+            control: Arc::clone(self),
+        })
     }
 
     /// Acquire a query permit. Returns RAII guard or `Transient` error.
@@ -218,11 +241,16 @@ impl AdmissionControl {
             self.total_rejected.fetch_add(1, Ordering::Relaxed);
             self.query_rejected.fetch_add(1, Ordering::Relaxed);
             return Err(FalconError::transient(
-                format!("query concurrency limit reached ({}/{})", current, cfg.max_inflight_queries),
+                format!(
+                    "query concurrency limit reached ({}/{})",
+                    current, cfg.max_inflight_queries
+                ),
                 cfg.default_retry_after_ms,
             ));
         }
-        Ok(QueryPermit { control: Arc::clone(self) })
+        Ok(QueryPermit {
+            control: Arc::clone(self),
+        })
     }
 
     /// Acquire a write permit for a specific shard. Returns RAII guard or `Transient` error.
@@ -246,7 +274,10 @@ impl AdmissionControl {
             }
         }
         self.total_inflight_writes.fetch_add(1, Ordering::Relaxed);
-        Ok(WritePermit { control: Arc::clone(self), shard_idx })
+        Ok(WritePermit {
+            control: Arc::clone(self),
+            shard_idx,
+        })
     }
 
     /// Check WAL flush queue size. Returns `Transient` if backlog exceeds threshold.
@@ -296,7 +327,8 @@ impl AdmissionControl {
             return Err(FalconError::transient(
                 format!(
                     "memory hard limit reached ({:.1}% of {} bytes)",
-                    ratio * 100.0, budget
+                    ratio * 100.0,
+                    budget
                 ),
                 500,
             ));
@@ -307,7 +339,9 @@ impl AdmissionControl {
             return Err(FalconError::transient(
                 format!(
                     "memory pressure: {:.1}% of budget used ({} / {} bytes)",
-                    ratio * 100.0, used_bytes, budget
+                    ratio * 100.0,
+                    used_bytes,
+                    budget
                 ),
                 50,
             ));
@@ -361,11 +395,16 @@ impl AdmissionControl {
             self.total_rejected.fetch_add(1, Ordering::Relaxed);
             self.ddl_rejected.fetch_add(1, Ordering::Relaxed);
             return Err(FalconError::transient(
-                format!("DDL concurrency limit reached ({}/{})", current, cfg.max_inflight_ddl),
+                format!(
+                    "DDL concurrency limit reached ({}/{})",
+                    current, cfg.max_inflight_ddl
+                ),
                 cfg.default_retry_after_ms,
             ));
         }
-        Ok(DdlPermit { control: Arc::clone(self) })
+        Ok(DdlPermit {
+            control: Arc::clone(self),
+        })
     }
 
     /// Current inflight DDL count.
@@ -436,7 +475,8 @@ impl MemoryBudget {
             return Err(FalconError::transient(
                 format!(
                     "memory hard limit: {:.1}% of {} bytes used",
-                    ratio * 100.0, self.budget_bytes
+                    ratio * 100.0,
+                    self.budget_bytes
                 ),
                 500,
             ));
@@ -447,7 +487,9 @@ impl MemoryBudget {
             return Err(FalconError::transient(
                 format!(
                     "memory pressure: {:.1}% of budget ({} / {} bytes)",
-                    ratio * 100.0, new_total, self.budget_bytes
+                    ratio * 100.0,
+                    new_total,
+                    self.budget_bytes
                 ),
                 50,
             ));
@@ -457,7 +499,10 @@ impl MemoryBudget {
 
     /// Release previously allocated memory.
     pub fn release(&self, bytes: u64) {
-        self.used_bytes.fetch_sub(bytes.min(self.used_bytes.load(Ordering::Relaxed)), Ordering::Relaxed);
+        self.used_bytes.fetch_sub(
+            bytes.min(self.used_bytes.load(Ordering::Relaxed)),
+            Ordering::Relaxed,
+        );
     }
 
     /// Current usage in bytes.

@@ -63,7 +63,9 @@ impl Histogram {
                     pos = i;
                     break;
                 }
-                _ => { pos = i + 1; }
+                _ => {
+                    pos = i + 1;
+                }
             }
         }
         // Linear interpolation
@@ -87,14 +89,18 @@ impl Histogram {
         // Find the bucket containing the value
         let mut bucket_idx = num_buckets - 1;
         for (i, bound) in self.bounds.iter().enumerate() {
-            if let Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal) = datum_cmp(value, bound) {
+            if let Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal) =
+                datum_cmp(value, bound)
+            {
                 bucket_idx = i;
                 break;
             }
         }
         // Selectivity ≈ (rows_per_bucket / total_rows) * (1 / distinct_in_bucket)
         let rows_per_bucket = self.total_rows as f64 / num_buckets as f64;
-        let distinct = if bucket_idx < self.distinct_per_bucket.len() && self.distinct_per_bucket[bucket_idx] > 0 {
+        let distinct = if bucket_idx < self.distinct_per_bucket.len()
+            && self.distinct_per_bucket[bucket_idx] > 0
+        {
             self.distinct_per_bucket[bucket_idx] as f64
         } else {
             rows_per_bucket.max(1.0)
@@ -270,9 +276,16 @@ impl Hash for DatumKey {
                 // Shallow hash — just use length for arrays
             }
             Datum::Jsonb(v) => v.to_string().hash(state),
-            Datum::Decimal(m, s) => { m.hash(state); s.hash(state); }
+            Datum::Decimal(m, s) => {
+                m.hash(state);
+                s.hash(state);
+            }
             Datum::Time(us) => us.hash(state),
-            Datum::Interval(mo, d, us) => { mo.hash(state); d.hash(state); us.hash(state); }
+            Datum::Interval(mo, d, us) => {
+                mo.hash(state);
+                d.hash(state);
+                us.hash(state);
+            }
             Datum::Uuid(v) => v.hash(state),
             Datum::Bytea(bytes) => bytes.hash(state),
         }
@@ -291,7 +304,9 @@ fn datum_cmp(a: &Datum, b: &Datum) -> Option<std::cmp::Ordering> {
         (Datum::Date(x), Datum::Date(y)) => Some(x.cmp(y)),
         (Datum::Boolean(x), Datum::Boolean(y)) => Some(x.cmp(y)),
         (Datum::Decimal(a, sa), Datum::Decimal(b, sb)) => {
-            let (na, nb) = if sa == sb { (*a, *b) } else if sa > sb {
+            let (na, nb) = if sa == sb {
+                (*a, *b)
+            } else if sa > sb {
                 (*a, *b * 10i128.pow((*sa - *sb) as u32))
             } else {
                 (*a * 10i128.pow((*sb - *sa) as u32), *b)
@@ -459,7 +474,11 @@ fn build_histogram(values: &mut [Datum], num_buckets: usize) -> Option<Histogram
         // Count distinct values in this bucket
         let start_idx = b * bucket_size;
         let mut distinct = HashSet::new();
-        let actual_end = if b == num_buckets - 1 { n } else { (b + 1) * bucket_size };
+        let actual_end = if b == num_buckets - 1 {
+            n
+        } else {
+            (b + 1) * bucket_size
+        };
         for v in &values[start_idx..actual_end] {
             distinct.insert(DatumKey(v.clone()));
         }
@@ -619,14 +638,22 @@ mod tests {
     fn test_mcv_build_and_lookup() {
         // Build MCV from skewed data
         let mut values = Vec::new();
-        for _ in 0..100 { values.push(Datum::Int32(1)); } // 50%
-        for _ in 0..60 { values.push(Datum::Int32(2)); } // 30%
-        for _ in 0..40 { values.push(Datum::Int32(3)); } // 20%
+        for _ in 0..100 {
+            values.push(Datum::Int32(1));
+        } // 50%
+        for _ in 0..60 {
+            values.push(Datum::Int32(2));
+        } // 30%
+        for _ in 0..40 {
+            values.push(Datum::Int32(3));
+        } // 20%
         let mcv = build_mcv(&values, 200, 10).expect("should build MCV");
         assert!(!mcv.entries.is_empty());
 
         // Value 1 should have highest frequency
-        let freq_1 = mcv.frequency(&Datum::Int32(1)).expect("should find value 1");
+        let freq_1 = mcv
+            .frequency(&Datum::Int32(1))
+            .expect("should find value 1");
         assert!(freq_1 > 0.4, "freq(1) = {}", freq_1);
 
         // Value 999 should not be in MCV
@@ -641,7 +668,10 @@ mod tests {
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0].distinct_count, 500);
         // Should have histogram (500 >= 2*100)
-        assert!(stats[0].histogram.is_some(), "should have histogram for 500 rows");
+        assert!(
+            stats[0].histogram.is_some(),
+            "should have histogram for 500 rows"
+        );
     }
 
     #[test]

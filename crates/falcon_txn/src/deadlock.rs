@@ -5,9 +5,9 @@
 //! A cycle in the WFG means deadlock. We detect cycles via iterative DFS
 //! and abort the youngest transaction in the cycle (smallest commit impact).
 
-use std::collections::{HashMap, HashSet};
-use parking_lot::Mutex;
 use falcon_common::types::TxnId;
+use parking_lot::Mutex;
+use std::collections::{HashMap, HashSet};
 
 /// A single edge in the wait-for graph: `waiter` is blocked by `holder`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,9 +75,7 @@ impl WaitForGraph {
             if visited.contains(&start) {
                 continue;
             }
-            if let Some(cycle) = Self::dfs(
-                start, &edges, &mut visited, &mut in_stack, &mut path,
-            ) {
+            if let Some(cycle) = Self::dfs(start, &edges, &mut visited, &mut in_stack, &mut path) {
                 return Some(cycle);
             }
         }
@@ -125,7 +123,11 @@ impl WaitForGraph {
     /// Strategy: abort the transaction with the highest TxnId (youngest).
     pub fn choose_victim(cycle: &[TxnId]) -> TxnId {
         debug_assert!(!cycle.is_empty(), "choose_victim called with empty cycle");
-        cycle.iter().max_by_key(|t| t.0).copied().unwrap_or(TxnId(0))
+        cycle
+            .iter()
+            .max_by_key(|t| t.0)
+            .copied()
+            .unwrap_or(TxnId(0))
     }
 
     /// Number of edges in the graph (for diagnostics).
@@ -186,12 +188,20 @@ impl SsiLockManager {
 
     /// Record a read predicate for a transaction.
     pub fn add_predicate(&self, txn_id: TxnId, predicate: SsiPredicate) {
-        self.predicates.lock().entry(txn_id).or_default().push(predicate);
+        self.predicates
+            .lock()
+            .entry(txn_id)
+            .or_default()
+            .push(predicate);
     }
 
     /// Record a write intent for a transaction.
     pub fn add_write_intent(&self, txn_id: TxnId, intent: SsiWriteIntent) {
-        self.write_intents.lock().entry(txn_id).or_default().push(intent);
+        self.write_intents
+            .lock()
+            .entry(txn_id)
+            .or_default()
+            .push(intent);
     }
 
     /// Check if a transaction's writes conflict with any other transaction's
@@ -209,7 +219,9 @@ impl SsiLockManager {
 
         let mut conflicting = Vec::new();
         for (&other_txn, preds) in predicates.iter() {
-            if other_txn == txn_id { continue; }
+            if other_txn == txn_id {
+                continue;
+            }
             for write in my_writes {
                 for pred in preds {
                     if pred.table_id == write.table_id && Self::key_in_range(&write.key, pred) {
@@ -231,10 +243,14 @@ impl SsiLockManager {
     /// Check if a key falls within a predicate's range.
     fn key_in_range(key: &[u8], pred: &SsiPredicate) -> bool {
         if let Some(ref start) = pred.range_start {
-            if key < start.as_slice() { return false; }
+            if key < start.as_slice() {
+                return false;
+            }
         }
         if let Some(ref end) = pred.range_end {
-            if key > end.as_slice() { return false; }
+            if key > end.as_slice() {
+                return false;
+            }
         }
         true
     }
@@ -291,15 +307,21 @@ mod tests {
     #[test]
     fn test_ssi_no_conflict() {
         let mgr = SsiLockManager::new();
-        mgr.add_predicate(TxnId(1), SsiPredicate {
-            table_id: 1,
-            range_start: Some(vec![0]),
-            range_end: Some(vec![100]),
-        });
-        mgr.add_write_intent(TxnId(2), SsiWriteIntent {
-            table_id: 2, // different table
-            key: vec![50],
-        });
+        mgr.add_predicate(
+            TxnId(1),
+            SsiPredicate {
+                table_id: 1,
+                range_start: Some(vec![0]),
+                range_end: Some(vec![100]),
+            },
+        );
+        mgr.add_write_intent(
+            TxnId(2),
+            SsiWriteIntent {
+                table_id: 2, // different table
+                key: vec![50],
+            },
+        );
         let conflicts = mgr.check_rw_conflicts(TxnId(2));
         assert!(conflicts.is_empty());
     }
@@ -307,15 +329,21 @@ mod tests {
     #[test]
     fn test_ssi_conflict_detected() {
         let mgr = SsiLockManager::new();
-        mgr.add_predicate(TxnId(1), SsiPredicate {
-            table_id: 1,
-            range_start: Some(vec![0]),
-            range_end: Some(vec![100]),
-        });
-        mgr.add_write_intent(TxnId(2), SsiWriteIntent {
-            table_id: 1,
-            key: vec![50], // within predicate range
-        });
+        mgr.add_predicate(
+            TxnId(1),
+            SsiPredicate {
+                table_id: 1,
+                range_start: Some(vec![0]),
+                range_end: Some(vec![100]),
+            },
+        );
+        mgr.add_write_intent(
+            TxnId(2),
+            SsiWriteIntent {
+                table_id: 1,
+                key: vec![50], // within predicate range
+            },
+        );
         let conflicts = mgr.check_rw_conflicts(TxnId(2));
         assert!(conflicts.contains(&TxnId(1)));
     }
@@ -323,12 +351,21 @@ mod tests {
     #[test]
     fn test_ssi_cleanup() {
         let mgr = SsiLockManager::new();
-        mgr.add_predicate(TxnId(1), SsiPredicate {
-            table_id: 1, range_start: None, range_end: None,
-        });
-        mgr.add_write_intent(TxnId(1), SsiWriteIntent {
-            table_id: 1, key: vec![1],
-        });
+        mgr.add_predicate(
+            TxnId(1),
+            SsiPredicate {
+                table_id: 1,
+                range_start: None,
+                range_end: None,
+            },
+        );
+        mgr.add_write_intent(
+            TxnId(1),
+            SsiWriteIntent {
+                table_id: 1,
+                key: vec![1],
+            },
+        );
         mgr.remove_txn(TxnId(1));
         let conflicts = mgr.check_rw_conflicts(TxnId(2));
         assert!(conflicts.is_empty());

@@ -20,8 +20,8 @@ use falcon_storage::engine::StorageEngine;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     fn make_state(role: NodeRole) -> Arc<HealthState> {
         let storage = Arc::new(StorageEngine::new_in_memory());
@@ -45,7 +45,10 @@ mod tests {
         let state = make_state(NodeRole::Primary);
         assert!(state.is_ready());
         state.set_ready(false);
-        assert!(!state.is_ready(), "Should be not-ready after set_ready(false)");
+        assert!(
+            !state.is_ready(),
+            "Should be not-ready after set_ready(false)"
+        );
         // Restore
         state.set_ready(true);
         assert!(state.is_ready());
@@ -77,7 +80,10 @@ mod tests {
     fn test_uptime_secs_non_negative() {
         let state = make_state(NodeRole::Standalone);
         // Uptime should be 0 or very small immediately after creation
-        assert!(state.uptime_secs() < 5, "Uptime should be < 5s just after creation");
+        assert!(
+            state.uptime_secs() < 5,
+            "Uptime should be < 5s just after creation"
+        );
     }
 
     // ── set_max_connections ──
@@ -96,7 +102,11 @@ mod tests {
     fn test_active_connections_reflected() {
         let storage = Arc::new(StorageEngine::new_in_memory());
         let active = Arc::new(AtomicUsize::new(0));
-        let state = Arc::new(HealthState::new(NodeRole::Standalone, active.clone(), storage));
+        let state = Arc::new(HealthState::new(
+            NodeRole::Standalone,
+            active.clone(),
+            storage,
+        ));
 
         assert_eq!(state.active_connections.load(Ordering::Relaxed), 0);
         active.store(42, Ordering::Relaxed);
@@ -108,8 +118,13 @@ mod tests {
     #[tokio::test]
     async fn test_http_live_endpoint_returns_200_when_live() {
         let state = make_state(NodeRole::Standalone);
-        let response = make_http_request(&state, "GET /live HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
-        assert!(response.starts_with("HTTP/1.1 200 OK"), "Expected 200, got: {}", &response[..50.min(response.len())]);
+        let response =
+            make_http_request(&state, "GET /live HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "Expected 200, got: {}",
+            &response[..50.min(response.len())]
+        );
         assert!(response.contains("\"live\":true"));
     }
 
@@ -117,15 +132,21 @@ mod tests {
     async fn test_http_live_endpoint_returns_503_when_not_live() {
         let state = make_state(NodeRole::Standalone);
         state.set_live(false);
-        let response = make_http_request(&state, "GET /live HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
-        assert!(response.starts_with("HTTP/1.1 503"), "Expected 503, got: {}", &response[..50.min(response.len())]);
+        let response =
+            make_http_request(&state, "GET /live HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
+        assert!(
+            response.starts_with("HTTP/1.1 503"),
+            "Expected 503, got: {}",
+            &response[..50.min(response.len())]
+        );
         assert!(response.contains("\"live\":false"));
     }
 
     #[tokio::test]
     async fn test_http_healthz_alias_works() {
         let state = make_state(NodeRole::Standalone);
-        let response = make_http_request(&state, "GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
+        let response =
+            make_http_request(&state, "GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains("\"live\":true"));
     }
@@ -133,7 +154,8 @@ mod tests {
     #[tokio::test]
     async fn test_http_health_legacy_returns_200_when_live() {
         let state = make_state(NodeRole::Replica);
-        let response = make_http_request(&state, "GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
+        let response =
+            make_http_request(&state, "GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains("\"role\":\"replica\""));
     }
@@ -141,8 +163,13 @@ mod tests {
     #[tokio::test]
     async fn test_http_ready_returns_200_when_ready() {
         let state = make_state(NodeRole::Primary);
-        let response = make_http_request(&state, "GET /ready HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
-        assert!(response.starts_with("HTTP/1.1 200 OK"), "Expected 200, got: {}", &response[..50.min(response.len())]);
+        let response =
+            make_http_request(&state, "GET /ready HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "Expected 200, got: {}",
+            &response[..50.min(response.len())]
+        );
         assert!(response.contains("\"ready\":true"));
         assert!(response.contains("\"role\":\"primary\""));
     }
@@ -152,8 +179,13 @@ mod tests {
         let state = make_state(NodeRole::Primary);
         // Simulate graceful shutdown: mark not-ready
         state.set_ready(false);
-        let response = make_http_request(&state, "GET /ready HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
-        assert!(response.starts_with("HTTP/1.1 503"), "Expected 503 during shutdown, got: {}", &response[..50.min(response.len())]);
+        let response =
+            make_http_request(&state, "GET /ready HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
+        assert!(
+            response.starts_with("HTTP/1.1 503"),
+            "Expected 503 during shutdown, got: {}",
+            &response[..50.min(response.len())]
+        );
         assert!(response.contains("\"ready\":false"));
         assert!(response.contains("shutting down"));
     }
@@ -161,7 +193,8 @@ mod tests {
     #[tokio::test]
     async fn test_http_readyz_alias_works() {
         let state = make_state(NodeRole::Standalone);
-        let response = make_http_request(&state, "GET /readyz HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
+        let response =
+            make_http_request(&state, "GET /readyz HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains("\"ready\":true"));
     }
@@ -170,7 +203,8 @@ mod tests {
     async fn test_http_status_returns_full_metrics() {
         let state = make_state(NodeRole::Standalone);
         state.set_max_connections(512);
-        let response = make_http_request(&state, "GET /status HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
+        let response =
+            make_http_request(&state, "GET /status HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains("\"status\":\"ok\""));
         assert!(response.contains("\"max_connections\":512"));
@@ -181,8 +215,13 @@ mod tests {
     #[tokio::test]
     async fn test_http_unknown_path_returns_404() {
         let state = make_state(NodeRole::Standalone);
-        let response = make_http_request(&state, "GET /unknown HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
-        assert!(response.starts_with("HTTP/1.1 404"), "Expected 404, got: {}", &response[..50.min(response.len())]);
+        let response =
+            make_http_request(&state, "GET /unknown HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
+        assert!(
+            response.starts_with("HTTP/1.1 404"),
+            "Expected 404, got: {}",
+            &response[..50.min(response.len())]
+        );
         assert!(response.contains("\"error\":\"not found\""));
     }
 
@@ -378,7 +417,11 @@ async fn handle_health_request(
                 state.uptime_secs(),
                 state.role_str()
             );
-            if state.is_live() { ("200 OK", body) } else { ("503 Service Unavailable", body) }
+            if state.is_live() {
+                ("200 OK", body)
+            } else {
+                ("503 Service Unavailable", body)
+            }
         }
         // Readiness probe: 200 when ready to serve, 503 during shutdown/bootstrap.
         // Load balancers stop routing traffic on 503.

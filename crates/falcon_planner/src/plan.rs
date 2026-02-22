@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use falcon_common::schema::TableSchema;
 use falcon_common::types::{ShardId, TableId};
-use falcon_sql_frontend::types::*;
 use falcon_sql_frontend::types::SetOpKind;
+use falcon_sql_frontend::types::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlannedTxnType {
@@ -36,11 +36,20 @@ impl TxnRoutingHint {
 #[allow(clippy::large_enum_variant)]
 pub enum PhysicalPlan {
     /// DDL: create table
-    CreateTable { schema: TableSchema, if_not_exists: bool },
+    CreateTable {
+        schema: TableSchema,
+        if_not_exists: bool,
+    },
     /// DDL: drop table
-    DropTable { table_name: String, if_exists: bool },
+    DropTable {
+        table_name: String,
+        if_exists: bool,
+    },
     /// DDL: alter table
-    AlterTable { table_name: String, ops: Vec<AlterTableOp> },
+    AlterTable {
+        table_name: String,
+        ops: Vec<AlterTableOp>,
+    },
     /// DML: insert rows (VALUES or SELECT source)
     Insert {
         table_id: TableId,
@@ -166,7 +175,9 @@ pub enum PhysicalPlan {
     /// EXPLAIN ANALYZE: executes the inner plan and shows actual metrics
     ExplainAnalyze(Box<PhysicalPlan>),
     /// TRUNCATE TABLE
-    Truncate { table_name: String },
+    Truncate {
+        table_name: String,
+    },
     /// CREATE INDEX
     CreateIndex {
         index_name: String,
@@ -204,13 +215,23 @@ pub enum PhysicalPlan {
     /// GC: SHOW falcon_gc
     RunGc,
     /// ANALYZE table_name — collect table statistics
-    Analyze { table_name: String },
+    Analyze {
+        table_name: String,
+    },
     /// SHOW falcon.table_stats [table_name]
-    ShowTableStats { table_name: Option<String> },
+    ShowTableStats {
+        table_name: Option<String>,
+    },
     /// CREATE SEQUENCE
-    CreateSequence { name: String, start: i64 },
+    CreateSequence {
+        name: String,
+        start: i64,
+    },
     /// DROP SEQUENCE
-    DropSequence { name: String, if_exists: bool },
+    DropSequence {
+        name: String,
+        if_exists: bool,
+    },
     /// SHOW falcon.sequences
     ShowSequences,
     /// Multi-tenancy: SHOW falcon.tenants
@@ -218,9 +239,15 @@ pub enum PhysicalPlan {
     /// Multi-tenancy: SHOW falcon.tenant_usage
     ShowTenantUsage,
     /// Multi-tenancy: CREATE TENANT name
-    CreateTenant { name: String, max_qps: u64, max_storage_bytes: u64 },
+    CreateTenant {
+        name: String,
+        max_qps: u64,
+        max_storage_bytes: u64,
+    },
     /// Multi-tenancy: DROP TENANT name
-    DropTenant { name: String },
+    DropTenant {
+        name: String,
+    },
     /// COPY table FROM STDIN — bulk import
     CopyFrom {
         table_id: TableId,
@@ -272,7 +299,11 @@ pub enum PhysicalPlan {
 #[derive(Debug, Clone)]
 pub enum DistGather {
     /// Simple union of all shard results. Optional post-gather dedup, offset, and limit.
-    Union { distinct: bool, limit: Option<usize>, offset: Option<usize> },
+    Union {
+        distinct: bool,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    },
     /// Merge-sort by columns, then apply optional offset + limit.
     MergeSortLimit {
         sort_columns: Vec<(usize, bool)>,
@@ -342,8 +373,14 @@ impl std::fmt::Display for DistAggMerge {
             DistAggMerge::CountDistinct(i) => write!(f, "COUNT(DISTINCT col{}) [collect-dedup]", i),
             DistAggMerge::SumDistinct(i) => write!(f, "SUM(DISTINCT col{}) [collect-dedup]", i),
             DistAggMerge::AvgDistinct(i) => write!(f, "AVG(DISTINCT col{}) [collect-dedup]", i),
-            DistAggMerge::StringAggDistinct(i, sep) => write!(f, "STRING_AGG(DISTINCT col{}, '{}') [collect-dedup]", i, sep),
-            DistAggMerge::ArrayAggDistinct(i) => write!(f, "ARRAY_AGG(DISTINCT col{}) [collect-dedup]", i),
+            DistAggMerge::StringAggDistinct(i, sep) => write!(
+                f,
+                "STRING_AGG(DISTINCT col{}, '{}') [collect-dedup]",
+                i, sep
+            ),
+            DistAggMerge::ArrayAggDistinct(i) => {
+                write!(f, "ARRAY_AGG(DISTINCT col{}) [collect-dedup]", i)
+            }
         }
     }
 }
@@ -447,7 +484,10 @@ impl PhysicalPlan {
                 return TxnRoutingHint {
                     involved_shards: target_shards.clone(),
                     single_shard_proven: target_shards.len() <= 1,
-                    inference_reason: format!("DistPlan with {} target shards", target_shards.len()),
+                    inference_reason: format!(
+                        "DistPlan with {} target shards",
+                        target_shards.len()
+                    ),
                 };
             }
             _ => {

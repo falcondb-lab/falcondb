@@ -124,7 +124,10 @@ impl FeatureGate {
             features.insert(Feature::AutoFailover);
         }
 
-        Self { edition, enabled_features: features }
+        Self {
+            edition,
+            enabled_features: features,
+        }
     }
 
     /// Check if a specific feature is enabled.
@@ -222,7 +225,13 @@ impl LicenseInfo {
     }
 
     /// Create an enterprise license.
-    pub fn enterprise(org: String, key: String, expires_at: u64, max_nodes: u32, max_tenants: u32) -> Self {
+    pub fn enterprise(
+        org: String,
+        key: String,
+        expires_at: u64,
+        max_nodes: u32,
+        max_tenants: u32,
+    ) -> Self {
         Self {
             edition: EditionTier::Enterprise,
             organization: org,
@@ -304,16 +313,31 @@ mod tests {
 
     #[test]
     fn test_minimum_edition() {
-        assert_eq!(FeatureGate::minimum_edition(Feature::BasicSQL), EditionTier::Community);
-        assert_eq!(FeatureGate::minimum_edition(Feature::AuditLog), EditionTier::Enterprise);
-        assert_eq!(FeatureGate::minimum_edition(Feature::ControlPlane), EditionTier::Cloud);
+        assert_eq!(
+            FeatureGate::minimum_edition(Feature::BasicSQL),
+            EditionTier::Community
+        );
+        assert_eq!(
+            FeatureGate::minimum_edition(Feature::AuditLog),
+            EditionTier::Enterprise
+        );
+        assert_eq!(
+            FeatureGate::minimum_edition(Feature::ControlPlane),
+            EditionTier::Cloud
+        );
     }
 
     #[test]
     fn test_edition_display_and_parse() {
         assert_eq!(EditionTier::Community.to_string(), "community");
-        assert_eq!(EditionTier::from_str_loose("EE"), Some(EditionTier::Enterprise));
-        assert_eq!(EditionTier::from_str_loose("cloud"), Some(EditionTier::Cloud));
+        assert_eq!(
+            EditionTier::from_str_loose("EE"),
+            Some(EditionTier::Enterprise)
+        );
+        assert_eq!(
+            EditionTier::from_str_loose("cloud"),
+            Some(EditionTier::Cloud)
+        );
         assert_eq!(EditionTier::from_str_loose("invalid"), None);
     }
 
@@ -329,9 +353,7 @@ mod tests {
 
     #[test]
     fn test_license_enterprise_expiry() {
-        let lic = LicenseInfo::enterprise(
-            "AcmeCorp".into(), "key-123".into(), 1000, 10, 50,
-        );
+        let lic = LicenseInfo::enterprise("AcmeCorp".into(), "key-123".into(), 1000, 10, 50);
         assert!(!lic.is_expired(500));
         assert!(lic.is_expired(1500));
         assert!(lic.can_add_node(9));

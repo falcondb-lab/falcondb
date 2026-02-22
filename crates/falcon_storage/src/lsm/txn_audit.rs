@@ -15,8 +15,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use falcon_common::types::{Timestamp, TxnId};
 
-use super::engine::{LsmConfig, LsmEngine};
 use super::compaction::CompactionConfig;
+use super::engine::{LsmConfig, LsmEngine};
 
 /// Outcome of a transaction for audit purposes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,13 +111,13 @@ impl TxnAuditRecord {
         let user_bytes = self.user_id.as_bytes();
         let mut buf = Vec::with_capacity(128);
 
-        buf.extend_from_slice(&self.txn_id.0.to_le_bytes());       // 8
-        buf.push(self.outcome as u8);                                // 1
-        buf.extend_from_slice(&self.commit_ts.0.to_le_bytes());     // 8
-        buf.extend_from_slice(&self.timestamp_ms.to_le_bytes());    // 8
+        buf.extend_from_slice(&self.txn_id.0.to_le_bytes()); // 8
+        buf.push(self.outcome as u8); // 1
+        buf.extend_from_slice(&self.commit_ts.0.to_le_bytes()); // 8
+        buf.extend_from_slice(&self.timestamp_ms.to_le_bytes()); // 8
         buf.extend_from_slice(&self.affected_key_count.to_le_bytes()); // 4
-        buf.extend_from_slice(&self.epoch.to_le_bytes());           // 8
-        buf.extend_from_slice(&self.duration_us.to_le_bytes());     // 8
+        buf.extend_from_slice(&self.epoch.to_le_bytes()); // 8
+        buf.extend_from_slice(&self.duration_us.to_le_bytes()); // 8
 
         // User ID
         buf.extend_from_slice(&(user_bytes.len() as u32).to_le_bytes());
@@ -136,7 +136,8 @@ impl TxnAuditRecord {
 
     /// Decode from bytes.
     pub fn decode(raw: &[u8]) -> Option<Self> {
-        if raw.len() < 45 { // minimum header size
+        if raw.len() < 45 {
+            // minimum header size
             return None;
         }
         let mut pos = 0;
@@ -157,24 +158,34 @@ impl TxnAuditRecord {
         pos += 8;
 
         // User ID
-        if pos + 4 > raw.len() { return None; }
+        if pos + 4 > raw.len() {
+            return None;
+        }
         let user_len = u32::from_le_bytes(raw[pos..pos + 4].try_into().ok()?) as usize;
         pos += 4;
-        if pos + user_len > raw.len() { return None; }
+        if pos + user_len > raw.len() {
+            return None;
+        }
         let user_id = String::from_utf8(raw[pos..pos + user_len].to_vec()).ok()?;
         pos += user_len;
 
         // Affected keys
-        if pos + 4 > raw.len() { return None; }
+        if pos + 4 > raw.len() {
+            return None;
+        }
         let stored_keys = u32::from_le_bytes(raw[pos..pos + 4].try_into().ok()?) as usize;
         pos += 4;
 
         let mut affected_keys = Vec::with_capacity(stored_keys);
         for _ in 0..stored_keys {
-            if pos + 4 > raw.len() { break; }
+            if pos + 4 > raw.len() {
+                break;
+            }
             let key_len = u32::from_le_bytes(raw[pos..pos + 4].try_into().ok()?) as usize;
             pos += 4;
-            if pos + key_len > raw.len() { break; }
+            if pos + key_len > raw.len() {
+                break;
+            }
             affected_keys.push(raw[pos..pos + key_len].to_vec());
             pos += key_len;
         }
@@ -285,7 +296,11 @@ mod tests {
         TxnAuditRecord::new(
             TxnId(txn_id),
             outcome,
-            Timestamp(if outcome == AuditOutcome::Committed { 100 } else { 0 }),
+            Timestamp(if outcome == AuditOutcome::Committed {
+                100
+            } else {
+                0
+            }),
             vec![b"pk_1".to_vec(), b"pk_2".to_vec()],
             "test_user".to_string(),
             1,
@@ -407,10 +422,17 @@ mod tests {
 
     #[test]
     fn test_audit_record_many_keys_capped() {
-        let keys: Vec<Vec<u8>> = (0..200).map(|i| format!("key_{}", i).into_bytes()).collect();
+        let keys: Vec<Vec<u8>> = (0..200)
+            .map(|i| format!("key_{}", i).into_bytes())
+            .collect();
         let record = TxnAuditRecord::new(
-            TxnId(1), AuditOutcome::Committed, Timestamp(1),
-            keys, "user".to_string(), 0, 0,
+            TxnId(1),
+            AuditOutcome::Committed,
+            Timestamp(1),
+            keys,
+            "user".to_string(),
+            0,
+            0,
         );
         // Should be capped at MAX_AUDIT_KEYS
         assert_eq!(record.affected_keys.len(), MAX_AUDIT_KEYS);

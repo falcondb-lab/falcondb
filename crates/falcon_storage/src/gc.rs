@@ -49,10 +49,10 @@ impl Default for GcConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            interval_ms: 1000,       // 1 second
-            batch_size: 0,           // unlimited
-            min_chain_length: 2,     // only GC chains with >= 2 versions
-            max_chain_length: 0,     // no cap
+            interval_ms: 1000,        // 1 second
+            batch_size: 0,            // unlimited
+            min_chain_length: 2,      // only GC chains with >= 2 versions
+            max_chain_length: 0,      // no cap
             min_sweep_interval_ms: 0, // no rate limit
         }
     }
@@ -141,7 +141,10 @@ impl GcStats {
         let mut current = self.max_chain_length_observed.load(Ordering::Relaxed);
         while len > current {
             match self.max_chain_length_observed.compare_exchange_weak(
-                current, len, Ordering::Relaxed, Ordering::Relaxed,
+                current,
+                len,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
             ) {
                 Ok(_) => break,
                 Err(actual) => current = actual,
@@ -198,10 +201,7 @@ pub struct GcStatsSnapshot {
 ///
 /// `replica_safe_ts` is the minimum applied timestamp across all replicas.
 /// If no replicas exist, it is Timestamp::MAX (no constraint).
-pub fn compute_safepoint(
-    min_active_ts: Timestamp,
-    replica_safe_ts: Timestamp,
-) -> Timestamp {
+pub fn compute_safepoint(min_active_ts: Timestamp, replica_safe_ts: Timestamp) -> Timestamp {
     let effective = std::cmp::min(min_active_ts, replica_safe_ts);
     // safepoint = effective - 1, so that versions at exactly effective are preserved
     Timestamp(effective.0.saturating_sub(1))
@@ -639,18 +639,21 @@ impl ReadViewManager {
     pub fn snapshot(&self) -> ReadViewManagerSnapshot {
         let views = self.views.read();
         let mut oldest_age_us = 0u64;
-        let infos: Vec<_> = views.values().map(|v| {
-            let age = v.created_at.elapsed().as_micros() as u64;
-            if age > oldest_age_us {
-                oldest_age_us = age;
-            }
-            ReadViewInfo {
-                view_id: v.view_id,
-                snapshot_ts: v.snapshot_ts,
-                holder: v.holder.to_string(),
-                age_us: age,
-            }
-        }).collect();
+        let infos: Vec<_> = views
+            .values()
+            .map(|v| {
+                let age = v.created_at.elapsed().as_micros() as u64;
+                if age > oldest_age_us {
+                    oldest_age_us = age;
+                }
+                ReadViewInfo {
+                    view_id: v.view_id,
+                    snapshot_ts: v.snapshot_ts,
+                    holder: v.holder.to_string(),
+                    age_us: age,
+                }
+            })
+            .collect();
 
         ReadViewManagerSnapshot {
             active_views: views.len(),
@@ -665,7 +668,8 @@ impl ReadViewManager {
 
     fn update_cached_min(&self) {
         let views = self.views.read();
-        let min_ts = views.values()
+        let min_ts = views
+            .values()
             .map(|v| v.snapshot_ts.0)
             .min()
             .unwrap_or(u64::MAX);
@@ -748,7 +752,10 @@ mod tests {
     #[test]
     fn test_read_view_unified_safepoint_pinned_by_view() {
         let mgr = ReadViewManager::new();
-        let _g = mgr.register(Timestamp(30), ReadViewHolder::ReplicationSlot("slot1".into()));
+        let _g = mgr.register(
+            Timestamp(30),
+            ReadViewHolder::ReplicationSlot("slot1".into()),
+        );
         let sp = mgr.unified_safepoint(Timestamp(100), Timestamp(200));
         // min(100, 200, 30) - 1 = 29
         assert_eq!(sp, Timestamp(29));
@@ -790,9 +797,15 @@ mod tests {
     fn test_read_view_holder_display() {
         assert_eq!(ReadViewHolder::Transaction(42).to_string(), "txn:42");
         assert_eq!(ReadViewHolder::Cursor("c1".into()).to_string(), "cursor:c1");
-        assert_eq!(ReadViewHolder::ReplicationSlot("s1".into()).to_string(), "repl_slot:s1");
+        assert_eq!(
+            ReadViewHolder::ReplicationSlot("s1".into()).to_string(),
+            "repl_slot:s1"
+        );
         assert_eq!(ReadViewHolder::Backup("b1".into()).to_string(), "backup:b1");
-        assert_eq!(ReadViewHolder::Internal("test".into()).to_string(), "internal:test");
+        assert_eq!(
+            ReadViewHolder::Internal("test".into()).to_string(),
+            "internal:test"
+        );
     }
 
     #[test]

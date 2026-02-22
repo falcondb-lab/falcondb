@@ -35,9 +35,9 @@ pub struct TokenBucketConfig {
 impl Default for TokenBucketConfig {
     fn default() -> Self {
         Self {
-            rate_per_sec: 10_000,   // 10k tokens/sec (e.g. rows or KB)
-            burst: 50_000,          // burst up to 50k
-            max_wait_ms: 5_000,     // wait up to 5s
+            rate_per_sec: 10_000, // 10k tokens/sec (e.g. rows or KB)
+            burst: 50_000,        // burst up to 50k
+            max_wait_ms: 5_000,   // wait up to 5s
         }
     }
 }
@@ -170,7 +170,8 @@ impl TokenBucket {
 
             if self.try_consume(n) {
                 let wait = start.elapsed();
-                self.total_wait_us.fetch_add(wait.as_micros() as u64, Ordering::Relaxed);
+                self.total_wait_us
+                    .fetch_add(wait.as_micros() as u64, Ordering::Relaxed);
                 return Ok(wait);
             }
 
@@ -190,7 +191,13 @@ impl TokenBucket {
             } else {
                 10
             };
-            std::thread::sleep(Duration::from_millis(wait_ms));
+            // Interruptible wait (condvar instead of bare sleep)
+            {
+                let pair = std::sync::Mutex::new(false);
+                let cvar = std::sync::Condvar::new();
+                let guard = pair.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = cvar.wait_timeout(guard, Duration::from_millis(wait_ms));
+            }
         }
     }
 
@@ -251,8 +258,15 @@ pub enum TokenBucketError {
 impl std::fmt::Display for TokenBucketError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TokenBucketError::Timeout { waited_ms, tokens_needed } => {
-                write!(f, "token bucket timeout: waited {}ms for {} tokens", waited_ms, tokens_needed)
+            TokenBucketError::Timeout {
+                waited_ms,
+                tokens_needed,
+            } => {
+                write!(
+                    f,
+                    "token bucket timeout: waited {}ms for {} tokens",
+                    waited_ms, tokens_needed
+                )
             }
             TokenBucketError::Paused => write!(f, "token bucket paused by operator"),
         }
@@ -445,7 +459,10 @@ mod tests {
 
     #[test]
     fn test_error_display() {
-        let err = TokenBucketError::Timeout { waited_ms: 100, tokens_needed: 50 };
+        let err = TokenBucketError::Timeout {
+            waited_ms: 100,
+            tokens_needed: 50,
+        };
         assert!(err.to_string().contains("100ms"));
         assert!(err.to_string().contains("50 tokens"));
 

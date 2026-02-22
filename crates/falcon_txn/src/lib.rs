@@ -5,20 +5,9 @@ pub mod manager;
 mod tests;
 
 pub use manager::{
-    GcSafepointInfo,
-    LatencyStats,
-    PercentileSet,
-    PriorityLatencyStats,
-    SlaViolationStats,
-    SlowPathMode,
-    TxnClassification,
-    TxnHandle,
-    TxnManager,
-    TxnOutcome,
-    TxnRecord,
-    TxnStatsSnapshot,
-    TxnState,
-    TxnExecSummary,
+    GcSafepointInfo, LatencyStats, PercentileSet, PriorityLatencyStats, SlaViolationStats,
+    SlowPathMode, TxnClassification, TxnExecSummary, TxnHandle, TxnManager, TxnOutcome, TxnRecord,
+    TxnState, TxnStatsSnapshot,
 };
 
 // Re-export from falcon_common for convenience

@@ -89,10 +89,13 @@ impl TxnOutcomeCache {
                 }
             }
         }
-        entries.insert(txn_id, OutcomeEntry {
-            outcome,
-            decided_at: Instant::now(),
-        });
+        entries.insert(
+            txn_id,
+            OutcomeEntry {
+                outcome,
+                decided_at: Instant::now(),
+            },
+        );
     }
 
     /// Look up a transaction outcome. Returns `None` if not cached or expired.
@@ -249,13 +252,16 @@ impl InDoubtResolver {
         participant_txn_ids: Vec<(falcon_common::types::ShardId, TxnId)>,
     ) {
         let mut indoubt = self.indoubt.write();
-        indoubt.insert(global_txn_id, InDoubtTxn {
+        indoubt.insert(
             global_txn_id,
-            participant_txn_ids,
-            prepared_at: Instant::now(),
-            attempts: 0,
-            last_error: None,
-        });
+            InDoubtTxn {
+                global_txn_id,
+                participant_txn_ids,
+                prepared_at: Instant::now(),
+                attempts: 0,
+                last_error: None,
+            },
+        );
         tracing::warn!(
             txn_id = global_txn_id.0,
             "registered in-doubt transaction for resolution"
@@ -285,7 +291,8 @@ impl InDoubtResolver {
         // Collect candidates (up to max_per_sweep)
         let candidates: Vec<InDoubtTxn> = {
             let indoubt = self.indoubt.read();
-            indoubt.values()
+            indoubt
+                .values()
                 .filter(|t| t.attempts < self.max_attempts)
                 .take(self.max_per_sweep)
                 .cloned()
@@ -297,7 +304,8 @@ impl InDoubtResolver {
 
         for txn in &candidates {
             // Determine outcome: cached decision or default to abort
-            let outcome = self.outcome_cache
+            let outcome = self
+                .outcome_cache
                 .lookup(txn.global_txn_id)
                 .unwrap_or(TxnOutcome::Aborted);
 
@@ -368,7 +376,8 @@ impl InDoubtResolver {
             m.last_sweep_us = elapsed_us;
             m.currently_indoubt = self.indoubt.read().len();
         }
-        self.total_resolved.fetch_add(resolved as u64, Ordering::Relaxed);
+        self.total_resolved
+            .fetch_add(resolved as u64, Ordering::Relaxed);
 
         // Evict expired outcome cache entries
         self.outcome_cache.evict_expired();
@@ -436,9 +445,7 @@ impl InDoubtResolver {
                     error = %e,
                     "failed to spawn background thread — node DEGRADED"
                 );
-                FalconError::Internal(format!(
-                    "failed to spawn in-doubt resolver thread: {}", e
-                ))
+                FalconError::Internal(format!("failed to spawn in-doubt resolver thread: {}", e))
             })?;
 
         Ok(InDoubtResolverHandle {
@@ -587,7 +594,8 @@ impl InDoubtResolver {
     pub fn admin_abort_stuck(&self) -> usize {
         let stuck_ids: Vec<TxnId> = {
             let indoubt = self.indoubt.read();
-            indoubt.values()
+            indoubt
+                .values()
                 .filter(|t| t.attempts >= self.max_attempts)
                 .map(|t| t.global_txn_id)
                 .collect()
@@ -743,7 +751,10 @@ mod tests {
     #[test]
     fn test_register_and_list_indoubt() {
         let resolver = make_resolver();
-        resolver.register_indoubt(TxnId(10), vec![(ShardId(0), TxnId(100)), (ShardId(1), TxnId(101))]);
+        resolver.register_indoubt(
+            TxnId(10),
+            vec![(ShardId(0), TxnId(100)), (ShardId(1), TxnId(101))],
+        );
         assert_eq!(resolver.indoubt_count(), 1);
         let list = resolver.list_indoubt();
         assert_eq!(list.len(), 1);
@@ -753,7 +764,8 @@ mod tests {
     #[test]
     fn test_sweep_resolves_with_cached_commit() {
         let cache = make_cache();
-        let resolver = InDoubtResolver::with_config(Arc::clone(&cache), Duration::from_millis(10), 5, 100);
+        let resolver =
+            InDoubtResolver::with_config(Arc::clone(&cache), Duration::from_millis(10), 5, 100);
         resolver.register_indoubt(TxnId(20), vec![(ShardId(0), TxnId(200))]);
         cache.record(TxnId(20), TxnOutcome::Committed);
         let resolved = resolver.sweep();
@@ -840,7 +852,8 @@ mod tests {
     #[test]
     fn test_admin_force_commit() {
         let cache = make_cache();
-        let resolver = InDoubtResolver::with_config(Arc::clone(&cache), Duration::from_secs(60), 5, 100);
+        let resolver =
+            InDoubtResolver::with_config(Arc::clone(&cache), Duration::from_secs(60), 5, 100);
         resolver.register_indoubt(TxnId(70), vec![(ShardId(0), TxnId(700))]);
         assert_eq!(resolver.indoubt_count(), 1);
 
@@ -859,7 +872,8 @@ mod tests {
     #[test]
     fn test_admin_force_abort() {
         let cache = make_cache();
-        let resolver = InDoubtResolver::with_config(Arc::clone(&cache), Duration::from_secs(60), 5, 100);
+        let resolver =
+            InDoubtResolver::with_config(Arc::clone(&cache), Duration::from_secs(60), 5, 100);
         resolver.register_indoubt(TxnId(80), vec![(ShardId(1), TxnId(800))]);
 
         let resolved = resolver.admin_force_abort(TxnId(80)).unwrap();
@@ -881,10 +895,10 @@ mod tests {
     #[test]
     fn test_admin_inspect() {
         let resolver = make_resolver();
-        resolver.register_indoubt(TxnId(90), vec![
-            (ShardId(0), TxnId(900)),
-            (ShardId(1), TxnId(901)),
-        ]);
+        resolver.register_indoubt(
+            TxnId(90),
+            vec![(ShardId(0), TxnId(900)), (ShardId(1), TxnId(901))],
+        );
 
         let info = resolver.admin_inspect(TxnId(90)).unwrap();
         assert_eq!(info.global_txn_id, TxnId(90));
@@ -938,7 +952,8 @@ mod tests {
     fn test_admin_abort_stuck() {
         // Create resolver with max_attempts=1 so txns become stuck after 1 failed attempt
         let cache = make_cache();
-        let resolver = InDoubtResolver::with_config(Arc::clone(&cache), Duration::from_secs(60), 1, 100);
+        let resolver =
+            InDoubtResolver::with_config(Arc::clone(&cache), Duration::from_secs(60), 1, 100);
 
         resolver.register_indoubt(TxnId(1), vec![]);
         resolver.register_indoubt(TxnId(2), vec![]);
@@ -947,7 +962,8 @@ mod tests {
         // To make them stuck, we need attempts >= max_attempts
         // Since max_attempts=1 and apply_decision succeeds, they get resolved.
         // Let's use max_attempts=0 which means all are immediately stuck.
-        let resolver2 = InDoubtResolver::with_config(Arc::clone(&cache), Duration::from_secs(60), 0, 100);
+        let resolver2 =
+            InDoubtResolver::with_config(Arc::clone(&cache), Duration::from_secs(60), 0, 100);
         resolver2.register_indoubt(TxnId(10), vec![]);
         resolver2.register_indoubt(TxnId(11), vec![]);
 

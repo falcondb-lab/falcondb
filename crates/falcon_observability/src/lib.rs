@@ -8,8 +8,8 @@ use tracing_subscriber::EnvFilter;
 
 /// Initialize the global tracing subscriber with structured logging.
 pub fn init_tracing() {
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,falcon=debug"));
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,falcon=debug"));
 
     let fmt_layer = fmt::layer()
         .with_target(true)
@@ -37,7 +37,8 @@ pub fn init_metrics(listen_addr: &str) -> Result<(), Box<dyn std::error::Error>>
 /// Record common database metrics.
 pub fn record_query_metrics(duration_us: u64, query_type: &str, success: bool) {
     metrics::counter!("falcon_queries_total", "type" => query_type.to_string(), "success" => success.to_string()).increment(1);
-    metrics::histogram!("falcon_query_duration_us", "type" => query_type.to_string()).record(duration_us as f64);
+    metrics::histogram!("falcon_query_duration_us", "type" => query_type.to_string())
+        .record(duration_us as f64);
 }
 
 pub fn record_txn_metrics(action: &str) {
@@ -197,11 +198,7 @@ pub fn record_replication_metrics(
 }
 
 /// Record backup metrics (P2-4 / P2-6).
-pub fn record_backup_metrics(
-    total_completed: u64,
-    total_failed: u64,
-    total_bytes: u64,
-) {
+pub fn record_backup_metrics(total_completed: u64, total_failed: u64, total_bytes: u64) {
     metrics::gauge!("falcon_backup_completed_total").set(total_completed as f64);
     metrics::gauge!("falcon_backup_failed_total").set(total_failed as f64);
     metrics::gauge!("falcon_backup_bytes_total").set(total_bytes as f64);
@@ -229,11 +226,18 @@ pub fn record_metering_metrics(
 ) {
     let tid = tenant_id.to_string();
     metrics::gauge!("falcon_metering_cpu_us", "tenant_id" => tid.clone()).set(cpu_us as f64);
-    metrics::gauge!("falcon_metering_memory_bytes", "tenant_id" => tid.clone()).set(memory_bytes as f64);
-    metrics::gauge!("falcon_metering_storage_bytes", "tenant_id" => tid.clone()).set(storage_bytes as f64);
-    metrics::gauge!("falcon_metering_query_count", "tenant_id" => tid.clone()).set(query_count as f64);
+    metrics::gauge!("falcon_metering_memory_bytes", "tenant_id" => tid.clone())
+        .set(memory_bytes as f64);
+    metrics::gauge!("falcon_metering_storage_bytes", "tenant_id" => tid.clone())
+        .set(storage_bytes as f64);
+    metrics::gauge!("falcon_metering_query_count", "tenant_id" => tid.clone())
+        .set(query_count as f64);
     metrics::gauge!("falcon_metering_qps", "tenant_id" => tid.clone()).set(qps);
-    metrics::gauge!("falcon_metering_throttled", "tenant_id" => tid).set(if throttled { 1.0 } else { 0.0 });
+    metrics::gauge!("falcon_metering_throttled", "tenant_id" => tid).set(if throttled {
+        1.0
+    } else {
+        0.0
+    });
 }
 
 /// Record security posture metrics (P3-6).
@@ -244,15 +248,27 @@ pub fn record_security_metrics(
     blocked_by_ip: u64,
     total_connection_attempts: u64,
 ) {
-    metrics::gauge!("falcon_security_encryption_enabled").set(if encryption_enabled { 1.0 } else { 0.0 });
+    metrics::gauge!("falcon_security_encryption_enabled").set(if encryption_enabled {
+        1.0
+    } else {
+        0.0
+    });
     metrics::gauge!("falcon_security_tls_enabled").set(if tls_enabled { 1.0 } else { 0.0 });
-    metrics::gauge!("falcon_security_ip_allowlist_enabled").set(if ip_allowlist_enabled { 1.0 } else { 0.0 });
+    metrics::gauge!("falcon_security_ip_allowlist_enabled").set(if ip_allowlist_enabled {
+        1.0
+    } else {
+        0.0
+    });
     metrics::gauge!("falcon_security_blocked_by_ip").set(blocked_by_ip as f64);
     metrics::gauge!("falcon_security_connection_attempts").set(total_connection_attempts as f64);
 }
 
 /// Record health score metrics (P3-7).
-pub fn record_health_metrics(overall_score: u32, component_count: usize, recommendation_count: usize) {
+pub fn record_health_metrics(
+    overall_score: u32,
+    component_count: usize,
+    recommendation_count: usize,
+) {
     metrics::gauge!("falcon_health_overall_score").set(overall_score as f64);
     metrics::gauge!("falcon_health_component_count").set(component_count as f64);
     metrics::gauge!("falcon_health_recommendation_count").set(recommendation_count as f64);
@@ -288,7 +304,8 @@ pub fn record_crash_domain_metrics(
 ) {
     metrics::gauge!("falcon_crash_domain_panic_count").set(panic_count as f64);
     metrics::gauge!("falcon_crash_domain_throttle_window_count").set(throttle_window_count as f64);
-    metrics::gauge!("falcon_crash_domain_throttle_triggered_count").set(throttle_triggered_count as f64);
+    metrics::gauge!("falcon_crash_domain_throttle_triggered_count")
+        .set(throttle_triggered_count as f64);
     metrics::gauge!("falcon_crash_domain_recent_panic_count").set(recent_panic_count as f64);
 }
 
@@ -344,13 +361,22 @@ pub fn record_token_bucket_metrics(
     total_wait_us: u64,
 ) {
     let n = name.to_string();
-    metrics::gauge!("falcon_token_bucket_rate_per_sec", "bucket" => n.clone()).set(rate_per_sec as f64);
+    metrics::gauge!("falcon_token_bucket_rate_per_sec", "bucket" => n.clone())
+        .set(rate_per_sec as f64);
     metrics::gauge!("falcon_token_bucket_burst", "bucket" => n.clone()).set(burst as f64);
-    metrics::gauge!("falcon_token_bucket_available", "bucket" => n.clone()).set(available_tokens as f64);
-    metrics::gauge!("falcon_token_bucket_paused", "bucket" => n.clone()).set(if paused { 1.0 } else { 0.0 });
-    metrics::gauge!("falcon_token_bucket_consumed", "bucket" => n.clone()).set(total_consumed as f64);
-    metrics::gauge!("falcon_token_bucket_acquired", "bucket" => n.clone()).set(total_acquired as f64);
-    metrics::gauge!("falcon_token_bucket_rejected", "bucket" => n.clone()).set(total_rejected as f64);
+    metrics::gauge!("falcon_token_bucket_available", "bucket" => n.clone())
+        .set(available_tokens as f64);
+    metrics::gauge!("falcon_token_bucket_paused", "bucket" => n.clone()).set(if paused {
+        1.0
+    } else {
+        0.0
+    });
+    metrics::gauge!("falcon_token_bucket_consumed", "bucket" => n.clone())
+        .set(total_consumed as f64);
+    metrics::gauge!("falcon_token_bucket_acquired", "bucket" => n.clone())
+        .set(total_acquired as f64);
+    metrics::gauge!("falcon_token_bucket_rejected", "bucket" => n.clone())
+        .set(total_rejected as f64);
     metrics::gauge!("falcon_token_bucket_wait_us", "bucket" => n).set(total_wait_us as f64);
 }
 
@@ -456,10 +482,7 @@ pub fn record_security_hardening_metrics(
 // ---------------------------------------------------------------------------
 
 /// Record version and compatibility metrics for Prometheus.
-pub fn record_compat_metrics(
-    wal_format_version: u32,
-    snapshot_format_version: u32,
-) {
+pub fn record_compat_metrics(wal_format_version: u32, snapshot_format_version: u32) {
     metrics::gauge!("falcon_compat_wal_format_version").set(wal_format_version as f64);
     metrics::gauge!("falcon_compat_snapshot_format_version").set(snapshot_format_version as f64);
 }
@@ -481,4 +504,48 @@ pub fn record_txn_stats(
     metrics::gauge!("falcon_txn_occ_conflicts").set(occ_conflicts as f64);
     metrics::gauge!("falcon_txn_degraded_to_global").set(degraded_to_global as f64);
     metrics::gauge!("falcon_txn_active_count").set(active_count as f64);
+}
+
+// ---------------------------------------------------------------------------
+// Background task supervisor metrics (D4-1)
+// ---------------------------------------------------------------------------
+
+/// Record a background task failure event for Prometheus.
+pub fn record_bg_task_failed(task_name: &str) {
+    metrics::counter!(
+        "falcon_bg_task_failed_total",
+        "task" => task_name.to_string()
+    )
+    .increment(1);
+}
+
+/// Record background task supervisor summary metrics.
+pub fn record_bg_supervisor_metrics(
+    total_tasks: usize,
+    running: usize,
+    failed: usize,
+    node_health_degraded: bool,
+) {
+    metrics::gauge!("falcon_bg_tasks_total").set(total_tasks as f64);
+    metrics::gauge!("falcon_bg_tasks_running").set(running as f64);
+    metrics::gauge!("falcon_bg_tasks_failed").set(failed as f64);
+    metrics::gauge!("falcon_bg_node_degraded").set(if node_health_degraded { 1.0 } else { 0.0 });
+}
+
+// ---------------------------------------------------------------------------
+// Lock contention metrics (D6-1)
+// ---------------------------------------------------------------------------
+
+/// Record lock contention event for a named lock/structure.
+pub fn record_lock_contention(lock_name: &str, wait_us: u64) {
+    metrics::counter!(
+        "falcon_lock_contention_total",
+        "lock" => lock_name.to_string()
+    )
+    .increment(1);
+    metrics::histogram!(
+        "falcon_lock_wait_us",
+        "lock" => lock_name.to_string()
+    )
+    .record(wait_us as f64);
 }

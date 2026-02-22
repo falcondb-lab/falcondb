@@ -26,10 +26,12 @@ impl Executor {
         escape: char,
         txn: &TxnHandle,
     ) -> Result<ExecutionResult, FalconError> {
-        let text = String::from_utf8(data.to_vec())
-            .map_err(|e| FalconError::Execution(ExecutionError::TypeError(
-                format!("Invalid UTF-8 in COPY data: {}", e),
-            )))?;
+        let text = String::from_utf8(data.to_vec()).map_err(|e| {
+            FalconError::Execution(ExecutionError::TypeError(format!(
+                "Invalid UTF-8 in COPY data: {}",
+                e
+            )))
+        })?;
 
         let mut rows_inserted: u64 = 0;
 
@@ -52,14 +54,12 @@ impl Executor {
             };
 
             if fields.len() != columns.len() {
-                return Err(FalconError::Execution(ExecutionError::TypeError(
-                    format!(
-                        "COPY line {}: expected {} columns but got {}",
-                        line_idx + 1,
-                        columns.len(),
-                        fields.len()
-                    ),
-                )));
+                return Err(FalconError::Execution(ExecutionError::TypeError(format!(
+                    "COPY line {}: expected {} columns but got {}",
+                    line_idx + 1,
+                    columns.len(),
+                    fields.len()
+                ))));
             }
 
             // Build row with default values
@@ -77,22 +77,24 @@ impl Executor {
                 if field == null_string {
                     values[col_idx] = Datum::Null;
                 } else {
-                    values[col_idx] = parse_datum(field, col_type)
-                        .map_err(|e| FalconError::Execution(ExecutionError::TypeError(
-                            format!("COPY line {}, column {}: {}", line_idx + 1, col_idx, e),
-                        )))?;
+                    values[col_idx] = parse_datum(field, col_type).map_err(|e| {
+                        FalconError::Execution(ExecutionError::TypeError(format!(
+                            "COPY line {}, column {}: {}",
+                            line_idx + 1,
+                            col_idx,
+                            e
+                        )))
+                    })?;
                 }
             }
 
             // NOT NULL constraint check
             for (col_idx, col) in schema.columns.iter().enumerate() {
                 if !col.nullable && values[col_idx].is_null() {
-                    return Err(FalconError::Execution(ExecutionError::TypeError(
-                        format!(
-                            "COPY: NOT NULL constraint violated for column '{}'",
-                            col.name,
-                        ),
-                    )));
+                    return Err(FalconError::Execution(ExecutionError::TypeError(format!(
+                        "COPY: NOT NULL constraint violated for column '{}'",
+                        col.name,
+                    ))));
                 }
             }
 
@@ -126,7 +128,11 @@ impl Executor {
         let inner_result = self.execute(query_plan, Some(txn))?;
         let (columns, rows) = match inner_result {
             ExecutionResult::Query { columns, rows } => (columns, rows),
-            _ => return Err(FalconError::Internal("COPY (query) inner plan did not return Query result".into())),
+            _ => {
+                return Err(FalconError::Internal(
+                    "COPY (query) inner plan did not return Query result".into(),
+                ))
+            }
         };
 
         let mut output_lines: Vec<Vec<u8>> = Vec::new();
@@ -143,7 +149,9 @@ impl Executor {
         }
 
         for row in &rows {
-            let fields: Vec<String> = row.values.iter()
+            let fields: Vec<String> = row
+                .values
+                .iter()
                 .map(|datum| {
                     if datum.is_null() {
                         null_string.to_string()
@@ -192,7 +200,8 @@ impl Executor {
         escape: char,
         txn: &TxnHandle,
     ) -> Result<ExecutionResult, FalconError> {
-        let rows = self.storage
+        let rows = self
+            .storage
             .scan(table_id, txn.txn_id, txn.start_ts)
             .map_err(FalconError::Storage)?;
 
@@ -320,13 +329,11 @@ fn parse_datum(field: &str, data_type: &DataType) -> Result<Datum, String> {
             .parse::<f64>()
             .map(Datum::Float64)
             .map_err(|e| format!("Cannot parse '{}' as FLOAT: {}", field, e)),
-        DataType::Boolean => {
-            match field.to_lowercase().as_str() {
-                "t" | "true" | "1" | "yes" | "on" => Ok(Datum::Boolean(true)),
-                "f" | "false" | "0" | "no" | "off" => Ok(Datum::Boolean(false)),
-                _ => Err(format!("Cannot parse '{}' as BOOLEAN", field)),
-            }
-        }
+        DataType::Boolean => match field.to_lowercase().as_str() {
+            "t" | "true" | "1" | "yes" | "on" => Ok(Datum::Boolean(true)),
+            "f" | "false" | "0" | "no" | "off" => Ok(Datum::Boolean(false)),
+            _ => Err(format!("Cannot parse '{}' as BOOLEAN", field)),
+        },
         DataType::Text => Ok(Datum::Text(field.to_string())),
         DataType::Timestamp => {
             use chrono::NaiveDateTime;
@@ -341,7 +348,8 @@ fn parse_datum(field: &str, data_type: &DataType) -> Result<Datum, String> {
             use chrono::NaiveDate;
             let date = NaiveDate::parse_from_str(field, "%Y-%m-%d")
                 .map_err(|e| format!("Cannot parse '{}' as DATE: {}", field, e))?;
-            let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("unix epoch date is always valid");
+            let epoch =
+                NaiveDate::from_ymd_opt(1970, 1, 1).expect("unix epoch date is always valid");
             let days = (date - epoch).num_days() as i32;
             Ok(Datum::Date(days))
         }
@@ -367,26 +375,34 @@ fn parse_datum(field: &str, data_type: &DataType) -> Result<Datum, String> {
                 Err(format!("Cannot parse '{}' as ARRAY", field))
             }
         }
-        DataType::Decimal(_, _) => {
-            Datum::parse_decimal(field)
-                .ok_or_else(|| format!("Cannot parse '{}' as DECIMAL", field))
-        }
+        DataType::Decimal(_, _) => Datum::parse_decimal(field)
+            .ok_or_else(|| format!("Cannot parse '{}' as DECIMAL", field)),
         DataType::Time => {
             // Parse HH:MM:SS or HH:MM:SS.ffffff
             let parts: Vec<&str> = field.split(':').collect();
             if parts.len() < 3 {
                 return Err(format!("Cannot parse '{}' as TIME", field));
             }
-            let h: i64 = parts[0].parse().map_err(|_| format!("Cannot parse '{}' as TIME", field))?;
-            let m: i64 = parts[1].parse().map_err(|_| format!("Cannot parse '{}' as TIME", field))?;
+            let h: i64 = parts[0]
+                .parse()
+                .map_err(|_| format!("Cannot parse '{}' as TIME", field))?;
+            let m: i64 = parts[1]
+                .parse()
+                .map_err(|_| format!("Cannot parse '{}' as TIME", field))?;
             let sec_parts: Vec<&str> = parts[2].split('.').collect();
-            let s: i64 = sec_parts[0].parse().map_err(|_| format!("Cannot parse '{}' as TIME", field))?;
+            let s: i64 = sec_parts[0]
+                .parse()
+                .map_err(|_| format!("Cannot parse '{}' as TIME", field))?;
             let frac: i64 = if sec_parts.len() > 1 {
                 let f = sec_parts[1];
                 let padded = format!("{:0<6}", &f[..f.len().min(6)]);
                 padded.parse().unwrap_or(0)
-            } else { 0 };
-            Ok(Datum::Time(h * 3_600_000_000 + m * 60_000_000 + s * 1_000_000 + frac))
+            } else {
+                0
+            };
+            Ok(Datum::Time(
+                h * 3_600_000_000 + m * 60_000_000 + s * 1_000_000 + frac,
+            ))
         }
         DataType::Interval => {
             // Simplified: just store as text-parsed microseconds
@@ -406,7 +422,7 @@ fn parse_datum(field: &str, data_type: &DataType) -> Result<Datum, String> {
             let hex_str = field.strip_prefix("\\x").unwrap_or(field);
             let bytes = (0..hex_str.len())
                 .step_by(2)
-                .map(|i| u8::from_str_radix(&hex_str[i..i+2.min(hex_str.len())], 16))
+                .map(|i| u8::from_str_radix(&hex_str[i..i + 2.min(hex_str.len())], 16))
                 .collect::<Result<Vec<u8>, _>>()
                 .map_err(|e| format!("Cannot parse '{}' as BYTEA: {}", field, e))?;
             Ok(Datum::Bytea(bytes))
@@ -433,7 +449,8 @@ fn datum_to_text(datum: &Datum) -> String {
             }
         }
         Datum::Date(days) => {
-            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("unix epoch date is always valid");
+            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+                .expect("unix epoch date is always valid");
             if let Some(date) = epoch.checked_add_signed(chrono::Duration::days(*days as i64)) {
                 date.format("%Y-%m-%d").to_string()
             } else {

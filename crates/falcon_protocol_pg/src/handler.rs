@@ -1,25 +1,28 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use falcon_cluster::fault_injection::FaultInjector;
+use falcon_cluster::security_hardening::{
+    AuthRateLimiter, AuthRateLimiterConfig, PasswordPolicy, PasswordPolicyConfig, SqlFirewall,
+    SqlFirewallConfig,
+};
 use falcon_cluster::{
     ClusterAdmin, ClusterEventLog, CoordinatorDecisionLog, DecisionLogConfig,
-    DistributedQueryEngine, HAReplicaGroup, LayeredTimeoutController, LayeredTimeoutConfig,
-    ReplicaRunnerMetrics, SlowShardConfig, SlowShardTracker, SyncReplicationWaiter,
-    TokenBucket, TokenBucketConfig,
+    DistributedQueryEngine, HAReplicaGroup, LayeredTimeoutConfig, LayeredTimeoutController,
+    ReplicaRunnerMetrics, SlowShardConfig, SlowShardTracker, SyncReplicationWaiter, TokenBucket,
+    TokenBucketConfig,
 };
-use falcon_cluster::fault_injection::FaultInjector;
-use falcon_cluster::security_hardening::{AuthRateLimiter, AuthRateLimiterConfig, PasswordPolicy, PasswordPolicyConfig, SqlFirewall, SqlFirewallConfig};
 use falcon_common::consistency::CommitPolicy;
-use parking_lot::RwLock;
 use falcon_common::datum::Datum;
-use falcon_common::types::ShardId;
 use falcon_common::error::FalconError;
+use falcon_common::types::ShardId;
 use falcon_executor::{ExecutionResult, Executor, PriorityScheduler, PrioritySchedulerConfig};
 use falcon_planner::{IndexedColumns, PhysicalPlan, PlannedTxnType, Planner, TableRowCounts};
 use falcon_sql_frontend::binder::Binder;
 use falcon_sql_frontend::parser::parse_sql;
 use falcon_storage::engine::StorageEngine;
 use falcon_txn::{SlowPathMode, TxnClassification, TxnManager};
+use parking_lot::RwLock;
 
 use crate::codec::{BackendMessage, FieldDescription};
 use crate::plan_cache::PlanCache;
@@ -106,11 +109,15 @@ impl QueryHandler {
             tenant_registry: Arc::new(falcon_storage::tenant_registry::TenantRegistry::new()),
             audit_log: Arc::new(falcon_storage::audit::AuditLog::new()),
             license_info: Arc::new(falcon_common::edition::LicenseInfo::community()),
-            feature_gate: Arc::new(falcon_common::edition::FeatureGate::for_edition(falcon_common::edition::EditionTier::Community)),
+            feature_gate: Arc::new(falcon_common::edition::FeatureGate::for_edition(
+                falcon_common::edition::EditionTier::Community,
+            )),
             resource_meter: Arc::new(falcon_storage::metering::ResourceMeter::new()),
             security_manager: Arc::new(falcon_storage::security_manager::SecurityManager::new()),
             hotspot_detector: Arc::new(falcon_storage::hotspot::HotspotDetector::default()),
-            consistency_verifier: Arc::new(falcon_storage::verification::ConsistencyVerifier::default()),
+            consistency_verifier: Arc::new(
+                falcon_storage::verification::ConsistencyVerifier::default(),
+            ),
             commit_policy: CommitPolicy::default(),
             sync_waiter: None,
             ha_group: None,
@@ -151,11 +158,15 @@ impl QueryHandler {
             tenant_registry: Arc::new(falcon_storage::tenant_registry::TenantRegistry::new()),
             audit_log: Arc::new(falcon_storage::audit::AuditLog::new()),
             license_info: Arc::new(falcon_common::edition::LicenseInfo::community()),
-            feature_gate: Arc::new(falcon_common::edition::FeatureGate::for_edition(falcon_common::edition::EditionTier::Community)),
+            feature_gate: Arc::new(falcon_common::edition::FeatureGate::for_edition(
+                falcon_common::edition::EditionTier::Community,
+            )),
             resource_meter: Arc::new(falcon_storage::metering::ResourceMeter::new()),
             security_manager: Arc::new(falcon_storage::security_manager::SecurityManager::new()),
             hotspot_detector: Arc::new(falcon_storage::hotspot::HotspotDetector::default()),
-            consistency_verifier: Arc::new(falcon_storage::verification::ConsistencyVerifier::default()),
+            consistency_verifier: Arc::new(
+                falcon_storage::verification::ConsistencyVerifier::default(),
+            ),
             commit_policy: CommitPolicy::default(),
             sync_waiter: None,
             ha_group: None,
@@ -213,11 +224,7 @@ impl QueryHandler {
     /// The entire request is wrapped in `catch_request` so that any panic in
     /// parse/bind/plan/execute is converted to an ErrorResponse rather than
     /// crashing the process.
-    pub fn handle_query(
-        &self,
-        sql: &str,
-        session: &mut PgSession,
-    ) -> Vec<BackendMessage> {
+    pub fn handle_query(&self, sql: &str, session: &mut PgSession) -> Vec<BackendMessage> {
         let sql = sql.trim();
         if sql.is_empty() {
             return vec![BackendMessage::EmptyQueryResponse];
@@ -235,11 +242,10 @@ impl QueryHandler {
         // If any code below panics, the panic is caught and converted to an
         // InternalBug error response — the connection stays alive.
         let ctx = format!("session_id={}", session.id);
-        let result = falcon_common::crash_domain::catch_request_result(
-            "handle_query",
-            &ctx,
-            || self.handle_query_inner(sql, session),
-        );
+        let result =
+            falcon_common::crash_domain::catch_request_result("handle_query", &ctx, || {
+                self.handle_query_inner(sql, session)
+            });
         match result {
             Ok(msgs) => msgs,
             Err(e) => vec![self.error_response(&e.with_request_context(&rctx))],
@@ -308,12 +314,10 @@ impl QueryHandler {
                             message: "there is already a transaction in progress".into(),
                         });
                     }
-                    let txn = match self
-                        .txn_mgr
-                        .try_begin_with_classification(
-                            session.default_isolation,
-                            TxnClassification::local(ShardId(0)),
-                        ) {
+                    let txn = match self.txn_mgr.try_begin_with_classification(
+                        session.default_isolation,
+                        TxnClassification::local(ShardId(0)),
+                    ) {
                         Ok(t) => t,
                         Err(e) => {
                             let ce: FalconError = e.into();
@@ -333,11 +337,18 @@ impl QueryHandler {
                         match self.txn_mgr.commit(txn.txn_id) {
                             Ok(commit_ts) => {
                                 // Sync replication: wait for replicas to ack before responding
-                                if let (Some(ref waiter), Some(ref group)) = (&self.sync_waiter, &self.ha_group) {
+                                if let (Some(ref waiter), Some(ref group)) =
+                                    (&self.sync_waiter, &self.ha_group)
+                                {
                                     let timeout = std::time::Duration::from_secs(5);
                                     let group_read = group.read();
-                                    if let Err(e) = waiter.wait_for_commit(commit_ts.0, &group_read, timeout) {
-                                        tracing::warn!("Sync replication wait failed after COMMIT: {}", e);
+                                    if let Err(e) =
+                                        waiter.wait_for_commit(commit_ts.0, &group_read, timeout)
+                                    {
+                                        tracing::warn!(
+                                            "Sync replication wait failed after COMMIT: {}",
+                                            e
+                                        );
                                         // Commit succeeded locally but replication timed out —
                                         // report as warning, not error (data is durable on primary).
                                         messages.push(BackendMessage::NoticeResponse {
@@ -356,9 +367,7 @@ impl QueryHandler {
                                 session.txn = None;
                                 session.autocommit = true;
                                 self.flush_txn_stats();
-                                messages.push(self.error_response(
-                                    &FalconError::Txn(e),
-                                ));
+                                messages.push(self.error_response(&FalconError::Txn(e)));
                             }
                         }
                     } else {
@@ -391,17 +400,23 @@ impl QueryHandler {
                     .txn_mgr
                     .observe_involved_shards(txn.txn_id, &routing_hint.involved_shards);
                 if matches!(routing_hint.planned_txn_type(), PlannedTxnType::Global) {
-                    let _ = self
-                        .txn_mgr
-                        .force_global(txn.txn_id, SlowPathMode::Xa2Pc);
+                    let _ = self.txn_mgr.force_global(txn.txn_id, SlowPathMode::Xa2Pc);
                 }
             }
 
             // Handle COPY FROM STDIN — store state in session, return CopyInResponse
             if let PhysicalPlan::CopyFrom {
-                table_id, schema, columns,
-                csv, delimiter, header, null_string, quote, escape,
-            } = &plan {
+                table_id,
+                schema,
+                columns,
+                csv,
+                delimiter,
+                header,
+                null_string,
+                quote,
+                escape,
+            } = &plan
+            {
                 use crate::session::{CopyFormat, CopyState};
                 session.copy_state = Some(CopyState {
                     table_name: schema.name.clone(),
@@ -427,14 +442,24 @@ impl QueryHandler {
 
             // Handle COPY TO STDOUT — execute scan and stream data
             if let PhysicalPlan::CopyTo {
-                table_id, schema, columns,
-                csv, delimiter, header, null_string, quote, escape,
-            } = &plan {
+                table_id,
+                schema,
+                columns,
+                csv,
+                delimiter,
+                header,
+                null_string,
+                quote,
+                escape,
+            } = &plan
+            {
                 // Ensure a transaction exists
                 let auto_txn = if session.txn.is_none() {
                     let classification = classification_from_routing_hint(&routing_hint);
-                    let txn = match self.txn_mgr
-                        .try_begin_with_classification(session.default_isolation, classification) {
+                    let txn = match self
+                        .txn_mgr
+                        .try_begin_with_classification(session.default_isolation, classification)
+                    {
                         Ok(t) => t,
                         Err(e) => {
                             let ce: FalconError = e.into();
@@ -460,8 +485,15 @@ impl QueryHandler {
                     }
                 };
                 let result = self.executor.exec_copy_to(
-                    *table_id, schema, columns,
-                    *csv, *delimiter, *header, null_string, *quote, *escape,
+                    *table_id,
+                    schema,
+                    columns,
+                    *csv,
+                    *delimiter,
+                    *header,
+                    null_string,
+                    *quote,
+                    *escape,
                     txn_ref,
                 );
 
@@ -501,12 +533,21 @@ impl QueryHandler {
 
             // Handle COPY (query) TO STDOUT
             if let PhysicalPlan::CopyQueryTo {
-                query, csv, delimiter, header, null_string, quote, escape,
-            } = &plan {
+                query,
+                csv,
+                delimiter,
+                header,
+                null_string,
+                quote,
+                escape,
+            } = &plan
+            {
                 let auto_txn = if session.txn.is_none() {
                     let classification = classification_from_routing_hint(&routing_hint);
-                    let txn = match self.txn_mgr
-                        .try_begin_with_classification(session.default_isolation, classification) {
+                    let txn = match self
+                        .txn_mgr
+                        .try_begin_with_classification(session.default_isolation, classification)
+                    {
                         Ok(t) => t,
                         Err(e) => {
                             let ce: FalconError = e.into();
@@ -532,7 +573,13 @@ impl QueryHandler {
                     }
                 };
                 let result = self.executor.exec_copy_query_to(
-                    query, *csv, *delimiter, *header, null_string, *quote, *escape,
+                    query,
+                    *csv,
+                    *delimiter,
+                    *header,
+                    null_string,
+                    *quote,
+                    *escape,
                     txn_ref,
                 );
 
@@ -571,7 +618,13 @@ impl QueryHandler {
             }
 
             // For DDL and metadata commands, execute without txn
-            if matches!(plan, PhysicalPlan::CreateTable { .. } | PhysicalPlan::DropTable { .. } | PhysicalPlan::ShowTxnStats | PhysicalPlan::RunGc) {
+            if matches!(
+                plan,
+                PhysicalPlan::CreateTable { .. }
+                    | PhysicalPlan::DropTable { .. }
+                    | PhysicalPlan::ShowTxnStats
+                    | PhysicalPlan::RunGc
+            ) {
                 match self.executor.execute(&plan, None) {
                     Ok(ExecutionResult::Ddl { message }) => {
                         self.plan_cache.invalidate();
@@ -592,11 +645,8 @@ impl QueryHandler {
                             .collect();
                         messages.push(BackendMessage::RowDescription { fields });
                         for row in &rows {
-                            let values: Vec<Option<String>> = row
-                                .values
-                                .iter()
-                                .map(|d| Some(d.to_string()))
-                                .collect();
+                            let values: Vec<Option<String>> =
+                                row.values.iter().map(|d| Some(d.to_string())).collect();
                             messages.push(BackendMessage::DataRow { values });
                         }
                         messages.push(BackendMessage::CommandComplete {
@@ -617,7 +667,8 @@ impl QueryHandler {
                 let classification = classification_from_routing_hint(&routing_hint);
                 let txn = match self
                     .txn_mgr
-                    .try_begin_with_classification(session.default_isolation, classification) {
+                    .try_begin_with_classification(session.default_isolation, classification)
+                {
                     Ok(t) => t,
                     Err(e) => {
                         let ce: FalconError = e.into();
@@ -663,11 +714,8 @@ impl QueryHandler {
                             // DataRows
                             let row_count = rows.len();
                             for row in rows {
-                                let values: Vec<Option<String>> = row
-                                    .values
-                                    .iter()
-                                    .map(|d| d.to_pg_text())
-                                    .collect();
+                                let values: Vec<Option<String>> =
+                                    row.values.iter().map(|d| d.to_pg_text()).collect();
                                 messages.push(BackendMessage::DataRow { values });
                             }
 
@@ -731,7 +779,10 @@ impl QueryHandler {
     // handle_system_query, cursor helpers, savepoint/tenant handlers are in handler_session.rs
 
     /// Parse and dispatch cluster admin commands like `SELECT falcon_add_node(42)`.
-    pub(crate) fn parse_and_dispatch_admin_command(&self, sql_lower: &str) -> Option<Vec<BackendMessage>> {
+    pub(crate) fn parse_and_dispatch_admin_command(
+        &self,
+        sql_lower: &str,
+    ) -> Option<Vec<BackendMessage>> {
         // Strip "select " prefix
         let rest = sql_lower.strip_prefix("select ")?;
 
@@ -812,11 +863,9 @@ impl QueryHandler {
     ///
     /// Wrapped in crash-domain guard — panics are caught and converted to FalconError.
     pub fn describe_query(&self, sql: &str) -> Result<Vec<FieldDescription>, FalconError> {
-        falcon_common::crash_domain::catch_request_result(
-            "describe_query",
-            sql,
-            || self.describe_query_inner(sql),
-        )
+        falcon_common::crash_domain::catch_request_result("describe_query", sql, || {
+            self.describe_query_inner(sql)
+        })
     }
 
     fn describe_query_inner(&self, sql: &str) -> Result<Vec<FieldDescription>, FalconError> {
@@ -836,7 +885,8 @@ impl QueryHandler {
 
         let row_counts = self.build_row_counts();
         let indexed_cols = self.build_indexed_columns();
-        let plan = Planner::plan_with_indexes(&bound, &row_counts, &indexed_cols).map_err(FalconError::Sql)?;
+        let plan = Planner::plan_with_indexes(&bound, &row_counts, &indexed_cols)
+            .map_err(FalconError::Sql)?;
 
         // Extract column info from the plan
         Ok(self.plan_output_fields(&plan))
@@ -850,19 +900,31 @@ impl QueryHandler {
     pub fn prepare_statement(
         &self,
         sql: &str,
-    ) -> Result<(PhysicalPlan, Vec<Option<falcon_common::types::DataType>>, Vec<crate::session::FieldDescriptionCompact>), FalconError> {
-        falcon_common::crash_domain::catch_request_result(
-            "prepare_statement",
-            sql,
-            || self.prepare_statement_inner(sql),
-        )
+    ) -> Result<
+        (
+            PhysicalPlan,
+            Vec<Option<falcon_common::types::DataType>>,
+            Vec<crate::session::FieldDescriptionCompact>,
+        ),
+        FalconError,
+    > {
+        falcon_common::crash_domain::catch_request_result("prepare_statement", sql, || {
+            self.prepare_statement_inner(sql)
+        })
     }
 
     #[allow(clippy::type_complexity)]
     fn prepare_statement_inner(
         &self,
         sql: &str,
-    ) -> Result<(PhysicalPlan, Vec<Option<falcon_common::types::DataType>>, Vec<crate::session::FieldDescriptionCompact>), FalconError> {
+    ) -> Result<
+        (
+            PhysicalPlan,
+            Vec<Option<falcon_common::types::DataType>>,
+            Vec<crate::session::FieldDescriptionCompact>,
+        ),
+        FalconError,
+    > {
         let sql = sql.trim();
         if sql.is_empty() {
             return Err(FalconError::Sql(falcon_common::error::SqlError::Parse(
@@ -917,11 +979,9 @@ impl QueryHandler {
     ) -> Vec<BackendMessage> {
         let rctx = falcon_common::request_context::RequestContext::new(session.id as u64);
         let ctx = format!("session_id={}", session.id);
-        let result = falcon_common::crash_domain::catch_request(
-            "execute_plan",
-            &ctx,
-            || self.execute_plan_inner(plan, params, session),
-        );
+        let result = falcon_common::crash_domain::catch_request("execute_plan", &ctx, || {
+            self.execute_plan_inner(plan, params, session)
+        });
         match result {
             Ok(msgs) => msgs,
             Err(e) => vec![self.error_response(&e.with_request_context(&rctx))],
@@ -959,14 +1019,18 @@ impl QueryHandler {
                 .txn_mgr
                 .observe_involved_shards(txn.txn_id, &routing_hint.involved_shards);
             if matches!(routing_hint.planned_txn_type(), PlannedTxnType::Global) {
-                let _ = self
-                    .txn_mgr
-                    .force_global(txn.txn_id, SlowPathMode::Xa2Pc);
+                let _ = self.txn_mgr.force_global(txn.txn_id, SlowPathMode::Xa2Pc);
             }
         }
 
         // For DDL/metadata, execute without params
-        if matches!(plan, PhysicalPlan::CreateTable { .. } | PhysicalPlan::DropTable { .. } | PhysicalPlan::ShowTxnStats | PhysicalPlan::RunGc) {
+        if matches!(
+            plan,
+            PhysicalPlan::CreateTable { .. }
+                | PhysicalPlan::DropTable { .. }
+                | PhysicalPlan::ShowTxnStats
+                | PhysicalPlan::RunGc
+        ) {
             match self.executor.execute(plan, None) {
                 Ok(ExecutionResult::Ddl { message }) => {
                     self.plan_cache.invalidate();
@@ -987,11 +1051,8 @@ impl QueryHandler {
                         .collect();
                     messages.push(BackendMessage::RowDescription { fields });
                     for row in &rows {
-                        let values: Vec<Option<String>> = row
-                            .values
-                            .iter()
-                            .map(|d| Some(d.to_string()))
-                            .collect();
+                        let values: Vec<Option<String>> =
+                            row.values.iter().map(|d| Some(d.to_string())).collect();
                         messages.push(BackendMessage::DataRow { values });
                     }
                     messages.push(BackendMessage::CommandComplete {
@@ -1059,11 +1120,8 @@ impl QueryHandler {
                         messages.push(BackendMessage::RowDescription { fields });
                         let row_count = rows.len();
                         for row in rows {
-                            let values: Vec<Option<String>> = row
-                                .values
-                                .iter()
-                                .map(|d| d.to_pg_text())
-                                .collect();
+                            let values: Vec<Option<String>> =
+                                row.values.iter().map(|d| d.to_pg_text()).collect();
                             messages.push(BackendMessage::DataRow { values });
                         }
                         messages.push(BackendMessage::CommandComplete {
@@ -1115,28 +1173,28 @@ impl QueryHandler {
     pub fn datatype_to_oid(&self, dt: Option<&falcon_common::types::DataType>) -> i32 {
         use falcon_common::types::DataType;
         match dt {
-            Some(DataType::Int32) => 23,      // INT4
-            Some(DataType::Int64) => 20,      // INT8
-            Some(DataType::Float64) => 701,   // FLOAT8
-            Some(DataType::Boolean) => 16,    // BOOL
-            Some(DataType::Text) => 25,       // TEXT
-            Some(DataType::Timestamp) => 1114, // TIMESTAMP
-            Some(DataType::Date) => 1082,     // DATE
-            Some(DataType::Array(_)) => 2277, // ANYARRAY
-            Some(DataType::Jsonb) => 3802,    // JSONB
+            Some(DataType::Int32) => 23,           // INT4
+            Some(DataType::Int64) => 20,           // INT8
+            Some(DataType::Float64) => 701,        // FLOAT8
+            Some(DataType::Boolean) => 16,         // BOOL
+            Some(DataType::Text) => 25,            // TEXT
+            Some(DataType::Timestamp) => 1114,     // TIMESTAMP
+            Some(DataType::Date) => 1082,          // DATE
+            Some(DataType::Array(_)) => 2277,      // ANYARRAY
+            Some(DataType::Jsonb) => 3802,         // JSONB
             Some(DataType::Decimal(_, _)) => 1700, // NUMERIC
-            Some(DataType::Time) => 1083,     // TIME
-            Some(DataType::Interval) => 1186,  // INTERVAL
-            Some(DataType::Uuid) => 2950,      // UUID
-            Some(DataType::Bytea) => 17,       // BYTEA
-            None => 0,                        // unspecified
+            Some(DataType::Time) => 1083,          // TIME
+            Some(DataType::Interval) => 1186,      // INTERVAL
+            Some(DataType::Uuid) => 2950,          // UUID
+            Some(DataType::Bytea) => 17,           // BYTEA
+            None => 0,                             // unspecified
         }
     }
 
     /// Extract output column FieldDescriptions from a physical plan.
     fn plan_output_fields(&self, plan: &PhysicalPlan) -> Vec<FieldDescription> {
         use falcon_common::types::DataType;
-        use falcon_sql_frontend::types::{AggFunc, BoundExpr, BoundProjection, ScalarFunc, BinOp};
+        use falcon_sql_frontend::types::{AggFunc, BinOp, BoundExpr, BoundProjection, ScalarFunc};
 
         /// Infer the DataType of a BoundExpr given the source table schema columns.
         fn infer_expr_type(
@@ -1145,16 +1203,27 @@ impl QueryHandler {
         ) -> DataType {
             match expr {
                 BoundExpr::Literal(d) => d.data_type().unwrap_or(DataType::Text),
-                BoundExpr::ColumnRef(idx) => {
-                    cols.get(*idx).map(|c| c.data_type.clone()).unwrap_or(DataType::Text)
-                }
+                BoundExpr::ColumnRef(idx) => cols
+                    .get(*idx)
+                    .map(|c| c.data_type.clone())
+                    .unwrap_or(DataType::Text),
                 BoundExpr::BinaryOp { left, op, right } => {
                     match op {
                         // Comparison / logical → Boolean
-                        BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq
-                        | BinOp::Gt | BinOp::GtEq | BinOp::And | BinOp::Or => DataType::Boolean,
+                        BinOp::Eq
+                        | BinOp::NotEq
+                        | BinOp::Lt
+                        | BinOp::LtEq
+                        | BinOp::Gt
+                        | BinOp::GtEq
+                        | BinOp::And
+                        | BinOp::Or => DataType::Boolean,
                         // Arithmetic → promote operand types
-                        BinOp::Plus | BinOp::Minus | BinOp::Multiply | BinOp::Divide | BinOp::Modulo => {
+                        BinOp::Plus
+                        | BinOp::Minus
+                        | BinOp::Multiply
+                        | BinOp::Divide
+                        | BinOp::Modulo => {
                             let lt = infer_expr_type(left, cols);
                             let rt = infer_expr_type(right, cols);
                             promote_numeric(lt, rt)
@@ -1162,18 +1231,29 @@ impl QueryHandler {
                         // String concat
                         BinOp::StringConcat => DataType::Text,
                         // JSONB operators → Jsonb (or Text for ->>/#>>)
-                        BinOp::JsonArrow | BinOp::JsonHashArrow
-                        | BinOp::JsonContains | BinOp::JsonContainedBy
+                        BinOp::JsonArrow
+                        | BinOp::JsonHashArrow
+                        | BinOp::JsonContains
+                        | BinOp::JsonContainedBy
                         | BinOp::JsonExists => DataType::Jsonb,
                         BinOp::JsonArrowText | BinOp::JsonHashArrowText => DataType::Text,
                     }
                 }
-                BoundExpr::Not(_) | BoundExpr::IsNull(_) | BoundExpr::IsNotNull(_)
-                | BoundExpr::IsNotDistinctFrom { .. } | BoundExpr::Like { .. }
-                | BoundExpr::Between { .. } | BoundExpr::InList { .. }
-                | BoundExpr::Exists { .. } | BoundExpr::InSubquery { .. } => DataType::Boolean,
+                BoundExpr::Not(_)
+                | BoundExpr::IsNull(_)
+                | BoundExpr::IsNotNull(_)
+                | BoundExpr::IsNotDistinctFrom { .. }
+                | BoundExpr::Like { .. }
+                | BoundExpr::Between { .. }
+                | BoundExpr::InList { .. }
+                | BoundExpr::Exists { .. }
+                | BoundExpr::InSubquery { .. } => DataType::Boolean,
                 BoundExpr::Cast { target_type, .. } => parse_cast_type(target_type),
-                BoundExpr::Case { results, else_result, .. } => {
+                BoundExpr::Case {
+                    results,
+                    else_result,
+                    ..
+                } => {
                     // Infer from first THEN branch
                     if let Some(first) = results.first() {
                         infer_expr_type(first, cols)
@@ -1183,9 +1263,10 @@ impl QueryHandler {
                         DataType::Text
                     }
                 }
-                BoundExpr::Coalesce(exprs) => {
-                    exprs.first().map(|e| infer_expr_type(e, cols)).unwrap_or(DataType::Text)
-                }
+                BoundExpr::Coalesce(exprs) => exprs
+                    .first()
+                    .map(|e| infer_expr_type(e, cols))
+                    .unwrap_or(DataType::Text),
                 BoundExpr::Function { func, args } => infer_func_type(func, args, cols),
                 BoundExpr::ScalarSubquery(_) => DataType::Text, // best-effort
                 BoundExpr::AggregateExpr { func, arg, .. } => {
@@ -1200,10 +1281,12 @@ impl QueryHandler {
                         _ => DataType::Text,
                     }
                 }
-                BoundExpr::OuterColumnRef(idx) => {
-                    cols.get(*idx).map(|c| c.data_type.clone()).unwrap_or(DataType::Text)
-                }
-                BoundExpr::SequenceNextval(_) | BoundExpr::SequenceCurrval(_)
+                BoundExpr::OuterColumnRef(idx) => cols
+                    .get(*idx)
+                    .map(|c| c.data_type.clone())
+                    .unwrap_or(DataType::Text),
+                BoundExpr::SequenceNextval(_)
+                | BoundExpr::SequenceCurrval(_)
                 | BoundExpr::SequenceSetval(_, _) => DataType::Int64,
                 BoundExpr::Grouping(_) => DataType::Int32,
                 _ => DataType::Text,
@@ -1240,60 +1323,125 @@ impl QueryHandler {
         ) -> DataType {
             match func {
                 // String → Text
-                ScalarFunc::Upper | ScalarFunc::Lower | ScalarFunc::Trim
-                | ScalarFunc::Replace | ScalarFunc::Lpad | ScalarFunc::Rpad
-                | ScalarFunc::Left | ScalarFunc::Right | ScalarFunc::Repeat
-                | ScalarFunc::Reverse | ScalarFunc::Initcap | ScalarFunc::Chr
-                | ScalarFunc::ToChar | ScalarFunc::Concat | ScalarFunc::ConcatWs
-                | ScalarFunc::Substring | ScalarFunc::Btrim | ScalarFunc::Ltrim
-                | ScalarFunc::Rtrim | ScalarFunc::Overlay | ScalarFunc::RegexpReplace
-                | ScalarFunc::RegexpSubstr | ScalarFunc::Translate
-                | ScalarFunc::QuoteLiteral | ScalarFunc::QuoteIdent | ScalarFunc::QuoteNullable
-                | ScalarFunc::Md5 | ScalarFunc::Encode | ScalarFunc::Decode
-                | ScalarFunc::ToHex | ScalarFunc::PgTypeof | ScalarFunc::GenRandomUuid
-                | ScalarFunc::ArrayDims | ScalarFunc::ArrayToString => DataType::Text,
+                ScalarFunc::Upper
+                | ScalarFunc::Lower
+                | ScalarFunc::Trim
+                | ScalarFunc::Replace
+                | ScalarFunc::Lpad
+                | ScalarFunc::Rpad
+                | ScalarFunc::Left
+                | ScalarFunc::Right
+                | ScalarFunc::Repeat
+                | ScalarFunc::Reverse
+                | ScalarFunc::Initcap
+                | ScalarFunc::Chr
+                | ScalarFunc::ToChar
+                | ScalarFunc::Concat
+                | ScalarFunc::ConcatWs
+                | ScalarFunc::Substring
+                | ScalarFunc::Btrim
+                | ScalarFunc::Ltrim
+                | ScalarFunc::Rtrim
+                | ScalarFunc::Overlay
+                | ScalarFunc::RegexpReplace
+                | ScalarFunc::RegexpSubstr
+                | ScalarFunc::Translate
+                | ScalarFunc::QuoteLiteral
+                | ScalarFunc::QuoteIdent
+                | ScalarFunc::QuoteNullable
+                | ScalarFunc::Md5
+                | ScalarFunc::Encode
+                | ScalarFunc::Decode
+                | ScalarFunc::ToHex
+                | ScalarFunc::PgTypeof
+                | ScalarFunc::GenRandomUuid
+                | ScalarFunc::ArrayDims
+                | ScalarFunc::ArrayToString => DataType::Text,
                 // Integer results
-                ScalarFunc::Length | ScalarFunc::Position | ScalarFunc::Ascii
-                | ScalarFunc::RegexpCount | ScalarFunc::ArrayLength | ScalarFunc::ArrayPosition
-                | ScalarFunc::Cardinality | ScalarFunc::ArrayUpper | ScalarFunc::ArrayLower
-                | ScalarFunc::WidthBucket | ScalarFunc::Factorial | ScalarFunc::Gcd
+                ScalarFunc::Length
+                | ScalarFunc::Position
+                | ScalarFunc::Ascii
+                | ScalarFunc::RegexpCount
+                | ScalarFunc::ArrayLength
+                | ScalarFunc::ArrayPosition
+                | ScalarFunc::Cardinality
+                | ScalarFunc::ArrayUpper
+                | ScalarFunc::ArrayLower
+                | ScalarFunc::WidthBucket
+                | ScalarFunc::Factorial
+                | ScalarFunc::Gcd
                 | ScalarFunc::Lcm => DataType::Int64,
                 // Float results
-                ScalarFunc::Abs | ScalarFunc::Round | ScalarFunc::Ceil | ScalarFunc::Floor
-                | ScalarFunc::Power | ScalarFunc::Sqrt | ScalarFunc::Sign | ScalarFunc::Trunc
-                | ScalarFunc::Ln | ScalarFunc::Log | ScalarFunc::Exp | ScalarFunc::Pi
-                | ScalarFunc::Mod | ScalarFunc::Degrees | ScalarFunc::Radians
-                | ScalarFunc::Cbrt | ScalarFunc::Extract | ScalarFunc::ToNumber
-                | ScalarFunc::Random | ScalarFunc::Log10 | ScalarFunc::Log2
-                | ScalarFunc::Sin | ScalarFunc::Cos | ScalarFunc::Tan
-                | ScalarFunc::Asin | ScalarFunc::Acos | ScalarFunc::Atan | ScalarFunc::Atan2
-                | ScalarFunc::Cot | ScalarFunc::Sinh | ScalarFunc::Cosh | ScalarFunc::Tanh => DataType::Float64,
+                ScalarFunc::Abs
+                | ScalarFunc::Round
+                | ScalarFunc::Ceil
+                | ScalarFunc::Floor
+                | ScalarFunc::Power
+                | ScalarFunc::Sqrt
+                | ScalarFunc::Sign
+                | ScalarFunc::Trunc
+                | ScalarFunc::Ln
+                | ScalarFunc::Log
+                | ScalarFunc::Exp
+                | ScalarFunc::Pi
+                | ScalarFunc::Mod
+                | ScalarFunc::Degrees
+                | ScalarFunc::Radians
+                | ScalarFunc::Cbrt
+                | ScalarFunc::Extract
+                | ScalarFunc::ToNumber
+                | ScalarFunc::Random
+                | ScalarFunc::Log10
+                | ScalarFunc::Log2
+                | ScalarFunc::Sin
+                | ScalarFunc::Cos
+                | ScalarFunc::Tan
+                | ScalarFunc::Asin
+                | ScalarFunc::Acos
+                | ScalarFunc::Atan
+                | ScalarFunc::Atan2
+                | ScalarFunc::Cot
+                | ScalarFunc::Sinh
+                | ScalarFunc::Cosh
+                | ScalarFunc::Tanh => DataType::Float64,
                 // Date/time
                 ScalarFunc::Now => DataType::Timestamp,
                 ScalarFunc::CurrentDate => DataType::Date,
                 ScalarFunc::CurrentTime => DataType::Time,
                 ScalarFunc::DateTrunc => DataType::Timestamp,
                 // Bool
-                ScalarFunc::StartsWith | ScalarFunc::EndsWith
-                | ScalarFunc::ArrayContains | ScalarFunc::ArrayOverlap => DataType::Boolean,
+                ScalarFunc::StartsWith
+                | ScalarFunc::EndsWith
+                | ScalarFunc::ArrayContains
+                | ScalarFunc::ArrayOverlap => DataType::Boolean,
                 // Array-returning
-                ScalarFunc::Split | ScalarFunc::RegexpMatch | ScalarFunc::RegexpSplitToArray
-                | ScalarFunc::StringToArray | ScalarFunc::ArrayFill
-                | ScalarFunc::ArrayReverse | ScalarFunc::ArrayDistinct | ScalarFunc::ArraySort
-                | ScalarFunc::ArrayIntersect | ScalarFunc::ArrayExcept | ScalarFunc::ArrayCompact
-                | ScalarFunc::ArrayFlatten | ScalarFunc::ArraySlice => {
-                    DataType::Array(Box::new(DataType::Text))
-                }
+                ScalarFunc::Split
+                | ScalarFunc::RegexpMatch
+                | ScalarFunc::RegexpSplitToArray
+                | ScalarFunc::StringToArray
+                | ScalarFunc::ArrayFill
+                | ScalarFunc::ArrayReverse
+                | ScalarFunc::ArrayDistinct
+                | ScalarFunc::ArraySort
+                | ScalarFunc::ArrayIntersect
+                | ScalarFunc::ArrayExcept
+                | ScalarFunc::ArrayCompact
+                | ScalarFunc::ArrayFlatten
+                | ScalarFunc::ArraySlice => DataType::Array(Box::new(DataType::Text)),
                 // Pass-through: Greatest/Least inherit from first arg
-                ScalarFunc::Greatest | ScalarFunc::Least => {
-                    args.first().map(|a| infer_expr_type(a, cols)).unwrap_or(DataType::Text)
-                }
+                ScalarFunc::Greatest | ScalarFunc::Least => args
+                    .first()
+                    .map(|a| infer_expr_type(a, cols))
+                    .unwrap_or(DataType::Text),
                 // Array mutation returns array
-                ScalarFunc::ArrayAppend | ScalarFunc::ArrayPrepend
-                | ScalarFunc::ArrayRemove | ScalarFunc::ArrayReplace
-                | ScalarFunc::ArrayCat => {
-                    args.first().map(|a| infer_expr_type(a, cols)).unwrap_or(DataType::Array(Box::new(DataType::Text)))
-                }
+                ScalarFunc::ArrayAppend
+                | ScalarFunc::ArrayPrepend
+                | ScalarFunc::ArrayRemove
+                | ScalarFunc::ArrayReplace
+                | ScalarFunc::ArrayCat => args
+                    .first()
+                    .map(|a| infer_expr_type(a, cols))
+                    .unwrap_or(DataType::Array(Box::new(DataType::Text))),
                 // Catch-all for remaining scalar functions — default to Text
                 _ => DataType::Text,
             }
@@ -1312,20 +1460,33 @@ impl QueryHandler {
                 AggFunc::BoolAnd | AggFunc::BoolOr => DataType::Boolean,
                 AggFunc::ArrayAgg => DataType::Array(Box::new(input_ty.unwrap_or(DataType::Text))),
                 // Statistical aggregates always return Float64
-                AggFunc::StddevPop | AggFunc::StddevSamp |
-                AggFunc::VarPop | AggFunc::VarSamp |
-                AggFunc::Corr | AggFunc::CovarPop | AggFunc::CovarSamp |
-                AggFunc::RegrSlope | AggFunc::RegrIntercept | AggFunc::RegrR2 |
-                AggFunc::RegrAvgX | AggFunc::RegrAvgY |
-                AggFunc::RegrSXX | AggFunc::RegrSYY | AggFunc::RegrSXY |
-                AggFunc::PercentileCont(_) | AggFunc::PercentileDisc(_) => DataType::Float64,
+                AggFunc::StddevPop
+                | AggFunc::StddevSamp
+                | AggFunc::VarPop
+                | AggFunc::VarSamp
+                | AggFunc::Corr
+                | AggFunc::CovarPop
+                | AggFunc::CovarSamp
+                | AggFunc::RegrSlope
+                | AggFunc::RegrIntercept
+                | AggFunc::RegrR2
+                | AggFunc::RegrAvgX
+                | AggFunc::RegrAvgY
+                | AggFunc::RegrSXX
+                | AggFunc::RegrSYY
+                | AggFunc::RegrSXY
+                | AggFunc::PercentileCont(_)
+                | AggFunc::PercentileDisc(_) => DataType::Float64,
                 AggFunc::RegrCount => DataType::Int64,
                 AggFunc::Mode => input_ty.unwrap_or(DataType::Text),
                 AggFunc::BitAndAgg | AggFunc::BitOrAgg | AggFunc::BitXorAgg => DataType::Int64,
             }
         }
 
-        fn projection_to_field(p: &BoundProjection, schema: &falcon_common::schema::TableSchema) -> FieldDescription {
+        fn projection_to_field(
+            p: &BoundProjection,
+            schema: &falcon_common::schema::TableSchema,
+        ) -> FieldDescription {
             match p {
                 BoundProjection::Column(idx, alias) => {
                     if let Some(col) = schema.columns.get(*idx) {
@@ -1390,14 +1551,32 @@ impl QueryHandler {
         }
 
         match plan {
-            PhysicalPlan::SeqScan { projections, schema, .. }
-            | PhysicalPlan::IndexScan { projections, schema, .. } => {
-                projections.iter().map(|p| projection_to_field(p, schema)).collect()
+            PhysicalPlan::SeqScan {
+                projections,
+                schema,
+                ..
             }
-            PhysicalPlan::NestedLoopJoin { projections, combined_schema, .. }
-            | PhysicalPlan::HashJoin { projections, combined_schema, .. } => {
-                projections.iter().map(|p| projection_to_field(p, combined_schema)).collect()
+            | PhysicalPlan::IndexScan {
+                projections,
+                schema,
+                ..
+            } => projections
+                .iter()
+                .map(|p| projection_to_field(p, schema))
+                .collect(),
+            PhysicalPlan::NestedLoopJoin {
+                projections,
+                combined_schema,
+                ..
             }
+            | PhysicalPlan::HashJoin {
+                projections,
+                combined_schema,
+                ..
+            } => projections
+                .iter()
+                .map(|p| projection_to_field(p, combined_schema))
+                .collect(),
             PhysicalPlan::Explain(_) | PhysicalPlan::ExplainAnalyze(_) => {
                 vec![FieldDescription {
                     name: "QUERY PLAN".into(),
@@ -1409,9 +1588,7 @@ impl QueryHandler {
                     format_code: 0,
                 }]
             }
-            PhysicalPlan::DistPlan { subplan, .. } => {
-                self.plan_output_fields(subplan)
-            }
+            PhysicalPlan::DistPlan { subplan, .. } => self.plan_output_fields(subplan),
             // DML/DDL/txn control — no result columns
             _ => vec![],
         }
@@ -1420,8 +1597,16 @@ impl QueryHandler {
     pub(crate) fn error_response(&self, err: &FalconError) -> BackendMessage {
         let mut message = err.to_string();
         // Append routing hints for retryable errors so PG-aware proxies can act.
-        if let FalconError::Retryable { leader_hint: Some(ref hint), retry_after_ms, .. } = err {
-            message = format!("{} HINT: leader={}, retry_after={}ms", message, hint, retry_after_ms);
+        if let FalconError::Retryable {
+            leader_hint: Some(ref hint),
+            retry_after_ms,
+            ..
+        } = err
+        {
+            message = format!(
+                "{} HINT: leader={}, retry_after={}ms",
+                message, hint, retry_after_ms
+            );
         }
         BackendMessage::ErrorResponse {
             severity: err.pg_severity().into(),
@@ -1468,7 +1653,9 @@ pub(crate) fn extract_where_eq(sql: &str, column: &str) -> Option<String> {
     // Look for patterns like: column = 'value' or column='value'
     let pattern = format!("{} = '", column);
     let pattern2 = format!("{}='", column);
-    let start = sql.find(&pattern).map(|i| i + pattern.len())
+    let start = sql
+        .find(&pattern)
+        .map(|i| i + pattern.len())
         .or_else(|| sql.find(&pattern2).map(|i| i + pattern2.len()))?;
     let rest = &sql[start..];
     let end = rest.find('\'')?;
@@ -1490,7 +1677,11 @@ pub(crate) fn parse_set_log_min_duration(sql: &str) -> Option<u64> {
     } else {
         return None;
     };
-    let value = rest.trim_end_matches(';').trim().trim_matches('\'').trim_matches('"');
+    let value = rest
+        .trim_end_matches(';')
+        .trim()
+        .trim_matches('\'')
+        .trim_matches('"');
     if value == "default" || value == "-1" || value == "0" {
         return Some(0);
     }
@@ -1516,7 +1707,11 @@ pub(crate) fn parse_set_command(sql: &str) -> Option<(String, String)> {
     if name.is_empty() {
         return None;
     }
-    let value = rest.trim_end_matches(';').trim().trim_matches('\'').trim_matches('"');
+    let value = rest
+        .trim_end_matches(';')
+        .trim()
+        .trim_matches('\'')
+        .trim_matches('"');
     Some((name.to_string(), value.to_string()))
 }
 
@@ -1528,7 +1723,10 @@ pub(crate) fn parse_prepare_statement(sql: &str) -> Option<(String, String)> {
     // Find AS keyword
     let as_pos = rest.find(" as ")?;
     let before_as = rest[..as_pos].trim();
-    let query = sql[sql.to_lowercase().find(" as ")? + 4..].trim().trim_end_matches(';').trim();
+    let query = sql[sql.to_lowercase().find(" as ")? + 4..]
+        .trim()
+        .trim_end_matches(';')
+        .trim();
     // before_as is "name" or "name(type, ...)"
     let name = if let Some(paren) = before_as.find('(') {
         before_as[..paren].trim()
@@ -1544,7 +1742,11 @@ pub(crate) fn parse_prepare_statement(sql: &str) -> Option<(String, String)> {
 /// Parse `EXECUTE name [(param, ...)]`.
 /// Returns (name, params) where params are converted to Option<Vec<u8>> for bind_params.
 pub(crate) fn parse_execute_statement(sql: &str) -> Option<(String, Vec<Option<Vec<u8>>>)> {
-    let rest = sql.trim().strip_prefix("EXECUTE").or_else(|| sql.trim().strip_prefix("execute"))?.trim();
+    let rest = sql
+        .trim()
+        .strip_prefix("EXECUTE")
+        .or_else(|| sql.trim().strip_prefix("execute"))?
+        .trim();
     let rest = rest.trim_end_matches(';').trim();
     // Split name from optional (params)
     let (name, params_str) = if let Some(paren_pos) = rest.find('(') {
@@ -1562,15 +1764,18 @@ pub(crate) fn parse_execute_statement(sql: &str) -> Option<(String, Vec<Option<V
             vec![]
         } else {
             // Simple CSV split, respecting single-quoted strings
-            split_params(ps).into_iter().map(|p| {
-                let trimmed = p.trim();
-                if trimmed.eq_ignore_ascii_case("null") {
-                    None
-                } else {
-                    let unquoted = trimmed.trim_matches('\'');
-                    Some(unquoted.as_bytes().to_vec())
-                }
-            }).collect()
+            split_params(ps)
+                .into_iter()
+                .map(|p| {
+                    let trimmed = p.trim();
+                    if trimmed.eq_ignore_ascii_case("null") {
+                        None
+                    } else {
+                        let unquoted = trimmed.trim_matches('\'');
+                        Some(unquoted.as_bytes().to_vec())
+                    }
+                })
+                .collect()
         }
     } else {
         vec![]
@@ -1626,7 +1831,9 @@ pub(crate) fn bind_params(sql: &str, param_values: &[Option<Vec<u8>>]) -> String
                                 let s = String::from_utf8_lossy(val);
                                 result.push('\'');
                                 for ch in s.chars() {
-                                    if ch == '\'' { result.push('\''); }
+                                    if ch == '\'' {
+                                        result.push('\'');
+                                    }
                                     result.push(ch);
                                 }
                                 result.push('\'');
@@ -1672,7 +1879,8 @@ mod tests {
     }
 
     fn has_row_description(msgs: &[BackendMessage]) -> bool {
-        msgs.iter().any(|m| matches!(m, BackendMessage::RowDescription { .. }))
+        msgs.iter()
+            .any(|m| matches!(m, BackendMessage::RowDescription { .. }))
     }
 
     #[test]
@@ -1683,7 +1891,8 @@ mod tests {
         let rows = extract_data_rows(&msgs);
         assert!(!rows.is_empty(), "should have data rows");
         // Verify expected metric names
-        let metric_names: Vec<_> = rows.iter()
+        let metric_names: Vec<_> = rows
+            .iter()
             .filter_map(|r| r.first().cloned().flatten())
             .collect();
         assert!(metric_names.contains(&"gc_safepoint_ts".to_string()));
@@ -1700,7 +1909,8 @@ mod tests {
         assert!(has_row_description(&msgs), "should have RowDescription");
         let rows = extract_data_rows(&msgs);
         assert_eq!(rows.len(), 6, "gc_safepoint should have 6 rows");
-        let metric_names: Vec<_> = rows.iter()
+        let metric_names: Vec<_> = rows
+            .iter()
             .filter_map(|r| r.first().cloned().flatten())
             .collect();
         assert!(metric_names.contains(&"min_active_start_ts".to_string()));
@@ -1718,7 +1928,8 @@ mod tests {
         assert!(has_row_description(&msgs), "should have RowDescription");
         let rows = extract_data_rows(&msgs);
         assert_eq!(rows.len(), 9);
-        let metric_names: Vec<_> = rows.iter()
+        let metric_names: Vec<_> = rows
+            .iter()
             .filter_map(|r| r.first().cloned().flatten())
             .collect();
         assert!(metric_names.contains(&"wal_enabled".to_string()));
@@ -1777,7 +1988,11 @@ mod tests {
         let msgs = handler.handle_query("SHOW falcon.replication_stats", &mut session);
         let rows = extract_data_rows(&msgs);
         assert_eq!(rows[0][1], Some("1".into()), "promote_count should be 1");
-        assert_eq!(rows[1][1], Some("42".into()), "last_failover_time_ms should be 42");
+        assert_eq!(
+            rows[1][1],
+            Some("42".into()),
+            "last_failover_time_ms should be 42"
+        );
     }
 
     #[test]
@@ -1787,7 +2002,8 @@ mod tests {
         assert!(has_row_description(&msgs));
         let rows = extract_data_rows(&msgs);
         assert!(!rows.is_empty());
-        let metric_names: Vec<_> = rows.iter()
+        let metric_names: Vec<_> = rows
+            .iter()
             .filter_map(|r| r.first().cloned().flatten())
             .collect();
         assert!(metric_names.contains(&"total_committed".to_string()));
@@ -1824,9 +2040,13 @@ mod tests {
     fn test_create_table_via_handler() {
         let (handler, mut session) = setup_handler();
         let msgs = handler.handle_query(
-            "CREATE TABLE t1 (id INT PRIMARY KEY, name TEXT)", &mut session);
+            "CREATE TABLE t1 (id INT PRIMARY KEY, name TEXT)",
+            &mut session,
+        );
         // Should contain CommandComplete, not an error
-        let has_complete = msgs.iter().any(|m| matches!(m, BackendMessage::CommandComplete { .. }));
+        let has_complete = msgs
+            .iter()
+            .any(|m| matches!(m, BackendMessage::CommandComplete { .. }));
         assert!(has_complete, "CREATE TABLE should produce CommandComplete");
     }
 
@@ -1844,7 +2064,11 @@ mod tests {
         let msgs = handler.handle_query("SHOW falcon.replication_stats", &mut session);
         let rows = extract_data_rows(&msgs);
         assert_eq!(rows[0][1], Some("3".into()), "promote_count should be 3");
-        assert_eq!(rows[1][1], Some("30".into()), "last_failover_time_ms should be 30 (last recorded)");
+        assert_eq!(
+            rows[1][1],
+            Some("30".into()),
+            "last_failover_time_ms should be 30 (last recorded)"
+        );
     }
 
     #[test]
@@ -1867,7 +2091,9 @@ mod tests {
         let sweeps_row = rows.iter().find(|r| r[0] == Some("total_sweeps".into()));
         assert_eq!(sweeps_row.unwrap()[1], Some("0".into()));
         // reclaimed_version_count should be "0"
-        let reclaimed_row = rows.iter().find(|r| r[0] == Some("reclaimed_version_count".into()));
+        let reclaimed_row = rows
+            .iter()
+            .find(|r| r[0] == Some("reclaimed_version_count".into()));
         assert_eq!(reclaimed_row.unwrap()[1], Some("0".into()));
     }
 
@@ -1877,7 +2103,9 @@ mod tests {
 
         // Create table + commit a transaction via handler
         handler.handle_query(
-            "CREATE TABLE th (id INT PRIMARY KEY, val TEXT)", &mut session);
+            "CREATE TABLE th (id INT PRIMARY KEY, val TEXT)",
+            &mut session,
+        );
         handler.handle_query("BEGIN", &mut session);
         handler.handle_query("INSERT INTO th VALUES (1, 'a')", &mut session);
         handler.handle_query("COMMIT", &mut session);
@@ -1886,23 +2114,24 @@ mod tests {
         assert!(has_row_description(&msgs));
         let rows = extract_data_rows(&msgs);
         // Should have at least 1 completed transaction record
-        assert!(!rows.is_empty(), "txn_history should have records after commits");
+        assert!(
+            !rows.is_empty(),
+            "txn_history should have records after commits"
+        );
     }
 
     #[test]
     fn test_show_txn_stats_after_commits() {
         let (handler, mut session) = setup_handler();
 
-        handler.handle_query(
-            "CREATE TABLE ts (id INT PRIMARY KEY)", &mut session);
+        handler.handle_query("CREATE TABLE ts (id INT PRIMARY KEY)", &mut session);
         handler.handle_query("BEGIN", &mut session);
         handler.handle_query("INSERT INTO ts VALUES (1)", &mut session);
         handler.handle_query("COMMIT", &mut session);
 
         let msgs = handler.handle_query("SHOW falcon.txn_stats", &mut session);
         let rows = extract_data_rows(&msgs);
-        let committed_row = rows.iter()
-            .find(|r| r[0] == Some("total_committed".into()));
+        let committed_row = rows.iter().find(|r| r[0] == Some("total_committed".into()));
         let count: u64 = committed_row.unwrap()[1].as_ref().unwrap().parse().unwrap();
         assert!(count >= 1, "total_committed should be >= 1 after a commit");
     }
@@ -1910,33 +2139,43 @@ mod tests {
     // ── Error path tests ──
 
     fn has_error_response(msgs: &[BackendMessage]) -> bool {
-        msgs.iter().any(|m| matches!(m, BackendMessage::ErrorResponse { .. }))
+        msgs.iter()
+            .any(|m| matches!(m, BackendMessage::ErrorResponse { .. }))
     }
 
     fn has_notice_response(msgs: &[BackendMessage]) -> bool {
-        msgs.iter().any(|m| matches!(m, BackendMessage::NoticeResponse { .. }))
+        msgs.iter()
+            .any(|m| matches!(m, BackendMessage::NoticeResponse { .. }))
     }
 
     #[test]
     fn test_invalid_sql_returns_error() {
         let (handler, mut session) = setup_handler();
         let msgs = handler.handle_query("SELECTT * FROMM nothing", &mut session);
-        assert!(has_error_response(&msgs), "Invalid SQL should produce ErrorResponse");
+        assert!(
+            has_error_response(&msgs),
+            "Invalid SQL should produce ErrorResponse"
+        );
     }
 
     #[test]
     fn test_unknown_table_returns_error() {
         let (handler, mut session) = setup_handler();
         let msgs = handler.handle_query("SELECT * FROM nonexistent_table", &mut session);
-        assert!(has_error_response(&msgs), "Unknown table should produce ErrorResponse");
+        assert!(
+            has_error_response(&msgs),
+            "Unknown table should produce ErrorResponse"
+        );
     }
 
     #[test]
     fn test_commit_without_transaction_returns_notice() {
         let (handler, mut session) = setup_handler();
         let msgs = handler.handle_query("COMMIT", &mut session);
-        assert!(has_notice_response(&msgs),
-            "COMMIT without active txn should produce NoticeResponse");
+        assert!(
+            has_notice_response(&msgs),
+            "COMMIT without active txn should produce NoticeResponse"
+        );
     }
 
     #[test]
@@ -1944,8 +2183,10 @@ mod tests {
         let (handler, mut session) = setup_handler();
         handler.handle_query("BEGIN", &mut session);
         let msgs = handler.handle_query("BEGIN", &mut session);
-        assert!(has_notice_response(&msgs),
-            "BEGIN while already in txn should produce NoticeResponse");
+        assert!(
+            has_notice_response(&msgs),
+            "BEGIN while already in txn should produce NoticeResponse"
+        );
         // Clean up
         handler.handle_query("ROLLBACK", &mut session);
     }
@@ -1954,9 +2195,17 @@ mod tests {
     fn test_rollback_without_transaction_succeeds() {
         let (handler, mut session) = setup_handler();
         let msgs = handler.handle_query("ROLLBACK", &mut session);
-        let has_complete = msgs.iter().any(|m| matches!(m, BackendMessage::CommandComplete { .. }));
-        assert!(has_complete, "ROLLBACK without txn should still return CommandComplete");
-        assert!(!has_error_response(&msgs), "ROLLBACK without txn should not be an error");
+        let has_complete = msgs
+            .iter()
+            .any(|m| matches!(m, BackendMessage::CommandComplete { .. }));
+        assert!(
+            has_complete,
+            "ROLLBACK without txn should still return CommandComplete"
+        );
+        assert!(
+            !has_error_response(&msgs),
+            "ROLLBACK without txn should not be an error"
+        );
     }
 
     #[test]
@@ -1994,28 +2243,55 @@ mod tests {
 
     #[test]
     fn test_parse_log_min_duration_equals() {
-        assert_eq!(parse_set_log_min_duration("set log_min_duration_statement = 500"), Some(500));
-        assert_eq!(parse_set_log_min_duration("set log_min_duration_statement = 0"), Some(0));
-        assert_eq!(parse_set_log_min_duration("set log_min_duration_statement = 100;"), Some(100));
+        assert_eq!(
+            parse_set_log_min_duration("set log_min_duration_statement = 500"),
+            Some(500)
+        );
+        assert_eq!(
+            parse_set_log_min_duration("set log_min_duration_statement = 0"),
+            Some(0)
+        );
+        assert_eq!(
+            parse_set_log_min_duration("set log_min_duration_statement = 100;"),
+            Some(100)
+        );
     }
 
     #[test]
     fn test_parse_log_min_duration_to() {
-        assert_eq!(parse_set_log_min_duration("set log_min_duration_statement to 3000"), Some(3000));
-        assert_eq!(parse_set_log_min_duration("set log_min_duration_statement to '5000'"), Some(5000));
+        assert_eq!(
+            parse_set_log_min_duration("set log_min_duration_statement to 3000"),
+            Some(3000)
+        );
+        assert_eq!(
+            parse_set_log_min_duration("set log_min_duration_statement to '5000'"),
+            Some(5000)
+        );
     }
 
     #[test]
     fn test_parse_log_min_duration_disable() {
-        assert_eq!(parse_set_log_min_duration("set log_min_duration_statement = default"), Some(0));
-        assert_eq!(parse_set_log_min_duration("set log_min_duration_statement = -1"), Some(0));
+        assert_eq!(
+            parse_set_log_min_duration("set log_min_duration_statement = default"),
+            Some(0)
+        );
+        assert_eq!(
+            parse_set_log_min_duration("set log_min_duration_statement = -1"),
+            Some(0)
+        );
     }
 
     #[test]
     fn test_parse_log_min_duration_not_matching() {
         assert_eq!(parse_set_log_min_duration("select 1"), None);
-        assert_eq!(parse_set_log_min_duration("set statement_timeout = 100"), None);
-        assert_eq!(parse_set_log_min_duration("set log_min_duration_statement"), None);
+        assert_eq!(
+            parse_set_log_min_duration("set statement_timeout = 100"),
+            None
+        );
+        assert_eq!(
+            parse_set_log_min_duration("set log_min_duration_statement"),
+            None
+        );
     }
 
     // ── Slow query log handler tests ──
@@ -2057,8 +2333,7 @@ mod tests {
         let storage = Arc::new(StorageEngine::new_in_memory());
         let txn_mgr = Arc::new(TxnManager::new(storage.clone()));
         let executor = Arc::new(Executor::new(storage.clone(), txn_mgr.clone()));
-        let handler = QueryHandler::new(storage, txn_mgr, executor)
-            .with_slow_query_log(log);
+        let handler = QueryHandler::new(storage, txn_mgr, executor).with_slow_query_log(log);
         let mut session = PgSession::new(1);
 
         // Verify there's 1 entry
@@ -2082,7 +2357,10 @@ mod tests {
         // In-memory engine has no WAL, so CHECKPOINT should fail
         let (handler, mut session) = setup_handler();
         let msgs = handler.handle_query("CHECKPOINT", &mut session);
-        assert!(has_error_response(&msgs), "CHECKPOINT without WAL should return error");
+        assert!(
+            has_error_response(&msgs),
+            "CHECKPOINT without WAL should return error"
+        );
     }
 
     #[test]
@@ -2109,11 +2387,18 @@ mod tests {
         handler.handle_query("INSERT INTO ckpt_h VALUES (1)", &mut session);
 
         let msgs = handler.handle_query("CHECKPOINT", &mut session);
-        assert!(!has_error_response(&msgs), "CHECKPOINT with WAL should succeed");
+        assert!(
+            !has_error_response(&msgs),
+            "CHECKPOINT with WAL should succeed"
+        );
         let rows = extract_data_rows(&msgs);
         assert!(!rows.is_empty());
         let val = rows[0][0].as_ref().unwrap();
-        assert!(val.starts_with("OK"), "Checkpoint result should start with OK: {}", val);
+        assert!(
+            val.starts_with("OK"),
+            "Checkpoint result should start with OK: {}",
+            val
+        );
 
         // Verify checkpoint_stats shows WAL enabled
         let msgs2 = handler.handle_query("SHOW falcon.checkpoint_stats", &mut session);
@@ -2128,7 +2413,10 @@ mod tests {
     #[test]
     fn test_describe_select_returns_columns() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE desc_t (id INT PRIMARY KEY, name TEXT, active BOOLEAN)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE desc_t (id INT PRIMARY KEY, name TEXT, active BOOLEAN)",
+            &mut session,
+        );
 
         let fields = handler.describe_query("SELECT * FROM desc_t").unwrap();
         assert_eq!(fields.len(), 3);
@@ -2145,7 +2433,9 @@ mod tests {
         let (handler, mut session) = setup_handler();
         handler.handle_query("CREATE TABLE desc_dml (id INT PRIMARY KEY)", &mut session);
 
-        let fields = handler.describe_query("INSERT INTO desc_dml VALUES (1)").unwrap();
+        let fields = handler
+            .describe_query("INSERT INTO desc_dml VALUES (1)")
+            .unwrap();
         assert!(fields.is_empty(), "DML should have no result columns");
     }
 
@@ -2154,7 +2444,9 @@ mod tests {
         let (handler, mut session) = setup_handler();
         handler.handle_query("CREATE TABLE desc_ex (id INT PRIMARY KEY)", &mut session);
 
-        let fields = handler.describe_query("EXPLAIN SELECT * FROM desc_ex").unwrap();
+        let fields = handler
+            .describe_query("EXPLAIN SELECT * FROM desc_ex")
+            .unwrap();
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].name, "QUERY PLAN");
         assert_eq!(fields[0].type_oid, 25); // TEXT
@@ -2182,14 +2474,11 @@ mod tests {
         handler.handle_query("CREATE TABLE is_t1 (id INT PRIMARY KEY)", &mut session);
         handler.handle_query("CREATE TABLE is_t2 (name TEXT)", &mut session);
 
-        let msgs = handler.handle_query(
-            "SELECT * FROM information_schema.tables", &mut session);
+        let msgs = handler.handle_query("SELECT * FROM information_schema.tables", &mut session);
         let rows = extract_data_rows(&msgs);
         assert!(rows.len() >= 2, "should list at least 2 tables");
         // Check that our tables appear
-        let names: Vec<&str> = rows.iter()
-            .filter_map(|r| r[2].as_deref())
-            .collect();
+        let names: Vec<&str> = rows.iter().filter_map(|r| r[2].as_deref()).collect();
         assert!(names.contains(&"is_t1"));
         assert!(names.contains(&"is_t2"));
         // Check columns: table_catalog=falcon, table_schema=public, table_type=BASE TABLE
@@ -2206,7 +2495,9 @@ mod tests {
         handler.handle_query("CREATE TABLE filt_b (id INT PRIMARY KEY)", &mut session);
 
         let msgs = handler.handle_query(
-            "SELECT * FROM information_schema.tables WHERE table_name = 'filt_a'", &mut session);
+            "SELECT * FROM information_schema.tables WHERE table_name = 'filt_a'",
+            &mut session,
+        );
         let rows = extract_data_rows(&msgs);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0][2], Some("filt_a".into()));
@@ -2215,37 +2506,48 @@ mod tests {
     #[test]
     fn test_information_schema_columns() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE is_cols (id INT PRIMARY KEY, name TEXT, active BOOLEAN)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE is_cols (id INT PRIMARY KEY, name TEXT, active BOOLEAN)",
+            &mut session,
+        );
 
         let msgs = handler.handle_query(
-            "SELECT * FROM information_schema.columns WHERE table_name = 'is_cols'", &mut session);
+            "SELECT * FROM information_schema.columns WHERE table_name = 'is_cols'",
+            &mut session,
+        );
         let rows = extract_data_rows(&msgs);
         assert_eq!(rows.len(), 3);
         // Check column details
-        assert_eq!(rows[0][3], Some("id".into()));        // column_name
-        assert_eq!(rows[0][4], Some("1".into()));          // ordinal_position
-        assert_eq!(rows[0][6], Some("NO".into()));         // is_nullable (PK)
-        assert_eq!(rows[0][7], Some("integer".into()));    // data_type
-        assert_eq!(rows[0][12], Some("int4".into()));      // udt_name
+        assert_eq!(rows[0][3], Some("id".into())); // column_name
+        assert_eq!(rows[0][4], Some("1".into())); // ordinal_position
+        assert_eq!(rows[0][6], Some("NO".into())); // is_nullable (PK)
+        assert_eq!(rows[0][7], Some("integer".into())); // data_type
+        assert_eq!(rows[0][12], Some("int4".into())); // udt_name
 
         assert_eq!(rows[1][3], Some("name".into()));
         assert_eq!(rows[1][7], Some("text".into()));
-        assert_eq!(rows[1][12], Some("text".into()));      // udt_name
+        assert_eq!(rows[1][12], Some("text".into())); // udt_name
 
         assert_eq!(rows[2][3], Some("active".into()));
         assert_eq!(rows[2][7], Some("boolean".into()));
-        assert_eq!(rows[2][12], Some("bool".into()));      // udt_name
+        assert_eq!(rows[2][12], Some("bool".into())); // udt_name
     }
 
     #[test]
     fn test_information_schema_table_constraints() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE is_con (id INT PRIMARY KEY, val TEXT UNIQUE)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE is_con (id INT PRIMARY KEY, val TEXT UNIQUE)",
+            &mut session,
+        );
 
         let msgs = handler.handle_query(
-            "SELECT * FROM information_schema.table_constraints", &mut session);
+            "SELECT * FROM information_schema.table_constraints",
+            &mut session,
+        );
         let rows = extract_data_rows(&msgs);
-        let con_names: Vec<&str> = rows.iter()
+        let con_names: Vec<&str> = rows
+            .iter()
             .filter(|r| r[3] == Some("is_con".into()))
             .filter_map(|r| r[4].as_deref())
             .collect();
@@ -2256,12 +2558,18 @@ mod tests {
     #[test]
     fn test_information_schema_key_column_usage() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE is_kcu (id INT PRIMARY KEY, name TEXT)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE is_kcu (id INT PRIMARY KEY, name TEXT)",
+            &mut session,
+        );
 
         let msgs = handler.handle_query(
-            "SELECT * FROM information_schema.key_column_usage", &mut session);
+            "SELECT * FROM information_schema.key_column_usage",
+            &mut session,
+        );
         let rows = extract_data_rows(&msgs);
-        let pk_rows: Vec<_> = rows.iter()
+        let pk_rows: Vec<_> = rows
+            .iter()
             .filter(|r| r[1] == Some("is_kcu".into()))
             .collect();
         assert!(!pk_rows.is_empty());
@@ -2271,13 +2579,10 @@ mod tests {
     #[test]
     fn test_information_schema_schemata() {
         let (handler, mut session) = setup_handler();
-        let msgs = handler.handle_query(
-            "SELECT * FROM information_schema.schemata", &mut session);
+        let msgs = handler.handle_query("SELECT * FROM information_schema.schemata", &mut session);
         let rows = extract_data_rows(&msgs);
         assert_eq!(rows.len(), 2); // public + information_schema
-        let schema_names: Vec<&str> = rows.iter()
-            .filter_map(|r| r[1].as_deref())
-            .collect();
+        let schema_names: Vec<&str> = rows.iter().filter_map(|r| r[1].as_deref()).collect();
         assert!(schema_names.contains(&"public"));
         assert!(schema_names.contains(&"information_schema"));
     }
@@ -2287,17 +2592,27 @@ mod tests {
     #[test]
     fn test_create_view_and_select() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE v_base (id INT PRIMARY KEY, name TEXT, active BOOLEAN)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE v_base (id INT PRIMARY KEY, name TEXT, active BOOLEAN)",
+            &mut session,
+        );
         handler.handle_query("INSERT INTO v_base VALUES (1, 'alice', true)", &mut session);
         handler.handle_query("INSERT INTO v_base VALUES (2, 'bob', false)", &mut session);
 
         // Create view
-        let msgs = handler.handle_query("CREATE VIEW v_active AS SELECT id, name FROM v_base WHERE active = true", &mut session);
+        let msgs = handler.handle_query(
+            "CREATE VIEW v_active AS SELECT id, name FROM v_base WHERE active = true",
+            &mut session,
+        );
         assert!(!has_error_response(&msgs), "CREATE VIEW should succeed");
 
         // Select from view
         let msgs2 = handler.handle_query("SELECT * FROM v_active", &mut session);
-        assert!(!has_error_response(&msgs2), "SELECT from view should succeed: {:?}", msgs2);
+        assert!(
+            !has_error_response(&msgs2),
+            "SELECT from view should succeed: {:?}",
+            msgs2
+        );
         let rows = extract_data_rows(&msgs2);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0][0], Some("1".into()));
@@ -2308,33 +2623,54 @@ mod tests {
     fn test_drop_view() {
         let (handler, mut session) = setup_handler();
         handler.handle_query("CREATE TABLE dv_base (id INT PRIMARY KEY)", &mut session);
-        handler.handle_query("CREATE VIEW dv_view AS SELECT id FROM dv_base", &mut session);
+        handler.handle_query(
+            "CREATE VIEW dv_view AS SELECT id FROM dv_base",
+            &mut session,
+        );
 
         let msgs = handler.handle_query("DROP VIEW dv_view", &mut session);
         assert!(!has_error_response(&msgs), "DROP VIEW should succeed");
 
         // Selecting from dropped view should fail
         let msgs2 = handler.handle_query("SELECT * FROM dv_view", &mut session);
-        assert!(has_error_response(&msgs2), "SELECT from dropped view should fail");
+        assert!(
+            has_error_response(&msgs2),
+            "SELECT from dropped view should fail"
+        );
     }
 
     #[test]
     fn test_drop_view_if_exists() {
         let (handler, mut session) = setup_handler();
         let msgs = handler.handle_query("DROP VIEW IF EXISTS nonexistent_view", &mut session);
-        assert!(!has_error_response(&msgs), "DROP VIEW IF EXISTS should not error");
+        assert!(
+            !has_error_response(&msgs),
+            "DROP VIEW IF EXISTS should not error"
+        );
     }
 
     #[test]
     fn test_create_or_replace_view() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE cr_base (id INT PRIMARY KEY, val TEXT)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE cr_base (id INT PRIMARY KEY, val TEXT)",
+            &mut session,
+        );
         handler.handle_query("INSERT INTO cr_base VALUES (1, 'a')", &mut session);
 
-        handler.handle_query("CREATE VIEW cr_view AS SELECT id FROM cr_base", &mut session);
+        handler.handle_query(
+            "CREATE VIEW cr_view AS SELECT id FROM cr_base",
+            &mut session,
+        );
         // Replace with different query
-        let msgs = handler.handle_query("CREATE OR REPLACE VIEW cr_view AS SELECT id, val FROM cr_base", &mut session);
-        assert!(!has_error_response(&msgs), "CREATE OR REPLACE VIEW should succeed");
+        let msgs = handler.handle_query(
+            "CREATE OR REPLACE VIEW cr_view AS SELECT id, val FROM cr_base",
+            &mut session,
+        );
+        assert!(
+            !has_error_response(&msgs),
+            "CREATE OR REPLACE VIEW should succeed"
+        );
 
         let msgs2 = handler.handle_query("SELECT * FROM cr_view", &mut session);
         let rows = extract_data_rows(&msgs2);
@@ -2347,7 +2683,10 @@ mod tests {
     fn test_view_in_information_schema() {
         let (handler, mut session) = setup_handler();
         handler.handle_query("CREATE TABLE vis_base (id INT PRIMARY KEY)", &mut session);
-        handler.handle_query("CREATE VIEW vis_view AS SELECT id FROM vis_base", &mut session);
+        handler.handle_query(
+            "CREATE VIEW vis_view AS SELECT id FROM vis_base",
+            &mut session,
+        );
 
         // Views should appear in information_schema.tables with type VIEW
         let msgs = handler.handle_query("SELECT * FROM information_schema.tables", &mut session);
@@ -2364,15 +2703,23 @@ mod tests {
     #[test]
     fn test_alter_table_rename_column() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE ren_col (id INT PRIMARY KEY, old_name TEXT)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE ren_col (id INT PRIMARY KEY, old_name TEXT)",
+            &mut session,
+        );
         handler.handle_query("INSERT INTO ren_col VALUES (1, 'hello')", &mut session);
 
-        let msgs = handler.handle_query("ALTER TABLE ren_col RENAME COLUMN old_name TO new_name", &mut session);
+        let msgs = handler.handle_query(
+            "ALTER TABLE ren_col RENAME COLUMN old_name TO new_name",
+            &mut session,
+        );
         assert!(!has_error_response(&msgs), "RENAME COLUMN should succeed");
 
         // Verify column was renamed by querying information_schema
         let msgs2 = handler.handle_query(
-            "SELECT * FROM information_schema.columns WHERE table_name = 'ren_col'", &mut session);
+            "SELECT * FROM information_schema.columns WHERE table_name = 'ren_col'",
+            &mut session,
+        );
         let rows = extract_data_rows(&msgs2);
         let col_names: Vec<&str> = rows.iter().filter_map(|r| r[3].as_deref()).collect();
         assert!(col_names.contains(&"new_name"), "Column should be renamed");
@@ -2388,7 +2735,10 @@ mod tests {
     #[test]
     fn test_alter_table_rename_to() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE old_tbl (id INT PRIMARY KEY, val TEXT)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE old_tbl (id INT PRIMARY KEY, val TEXT)",
+            &mut session,
+        );
         handler.handle_query("INSERT INTO old_tbl VALUES (1, 'data')", &mut session);
 
         let msgs = handler.handle_query("ALTER TABLE old_tbl RENAME TO new_tbl", &mut session);
@@ -2411,15 +2761,13 @@ mod tests {
     #[test]
     fn test_pg_type() {
         let (handler, mut session) = setup_handler();
-        let msgs = handler.handle_query(
-            "SELECT * FROM pg_catalog.pg_type",
-            &mut session,
-        );
+        let msgs = handler.handle_query("SELECT * FROM pg_catalog.pg_type", &mut session);
         assert!(has_row_description(&msgs));
         let rows = extract_data_rows(&msgs);
         assert!(rows.len() >= 10, "should have builtin types");
         // Check that int4 is present
-        let type_names: Vec<_> = rows.iter()
+        let type_names: Vec<_> = rows
+            .iter()
             .filter_map(|r| r.get(1).cloned().flatten())
             .collect();
         assert!(type_names.contains(&"int4".to_string()));
@@ -2442,14 +2790,12 @@ mod tests {
     #[test]
     fn test_pg_namespace() {
         let (handler, mut session) = setup_handler();
-        let msgs = handler.handle_query(
-            "SELECT * FROM pg_catalog.pg_namespace",
-            &mut session,
-        );
+        let msgs = handler.handle_query("SELECT * FROM pg_catalog.pg_namespace", &mut session);
         assert!(has_row_description(&msgs));
         let rows = extract_data_rows(&msgs);
         assert_eq!(rows.len(), 3);
-        let ns_names: Vec<_> = rows.iter()
+        let ns_names: Vec<_> = rows
+            .iter()
             .filter_map(|r| r.get(1).cloned().flatten())
             .collect();
         assert!(ns_names.contains(&"pg_catalog".to_string()));
@@ -2460,10 +2806,7 @@ mod tests {
     #[test]
     fn test_pg_database() {
         let (handler, mut session) = setup_handler();
-        let msgs = handler.handle_query(
-            "SELECT * FROM pg_catalog.pg_database",
-            &mut session,
-        );
+        let msgs = handler.handle_query("SELECT * FROM pg_catalog.pg_database", &mut session);
         assert!(has_row_description(&msgs));
         let rows = extract_data_rows(&msgs);
         assert_eq!(rows.len(), 1);
@@ -2473,14 +2816,12 @@ mod tests {
     #[test]
     fn test_pg_settings() {
         let (handler, mut session) = setup_handler();
-        let msgs = handler.handle_query(
-            "SELECT * FROM pg_catalog.pg_settings",
-            &mut session,
-        );
+        let msgs = handler.handle_query("SELECT * FROM pg_catalog.pg_settings", &mut session);
         assert!(has_row_description(&msgs));
         let rows = extract_data_rows(&msgs);
         assert!(rows.len() >= 10);
-        let setting_names: Vec<_> = rows.iter()
+        let setting_names: Vec<_> = rows
+            .iter()
             .filter_map(|r| r.get(0).cloned().flatten())
             .collect();
         assert!(setting_names.contains(&"server_version".to_string()));
@@ -2495,15 +2836,13 @@ mod tests {
             "CREATE TABLE idx_test (id INT PRIMARY KEY, val TEXT)",
             &mut session,
         );
-        let msgs = handler.handle_query(
-            "SELECT * FROM pg_catalog.pg_index",
-            &mut session,
-        );
+        let msgs = handler.handle_query("SELECT * FROM pg_catalog.pg_index", &mut session);
         assert!(has_row_description(&msgs));
         let rows = extract_data_rows(&msgs);
         assert!(rows.len() >= 1, "should have at least PK index");
         // Check indisprimary is 't' for the PK
-        let pk_rows: Vec<_> = rows.iter()
+        let pk_rows: Vec<_> = rows
+            .iter()
             .filter(|r| r.get(4).cloned().flatten() == Some("t".into()))
             .collect();
         assert!(!pk_rows.is_empty(), "should have a primary key index");
@@ -2516,21 +2855,22 @@ mod tests {
             "CREATE TABLE con_test (id INT PRIMARY KEY, val TEXT)",
             &mut session,
         );
-        let msgs = handler.handle_query(
-            "SELECT * FROM pg_catalog.pg_constraint",
-            &mut session,
-        );
+        let msgs = handler.handle_query("SELECT * FROM pg_catalog.pg_constraint", &mut session);
         assert!(has_row_description(&msgs));
         let rows = extract_data_rows(&msgs);
         assert!(rows.len() >= 1);
         // contype 'p' = PK
-        let pk_rows: Vec<_> = rows.iter()
+        let pk_rows: Vec<_> = rows
+            .iter()
             .filter(|r| r.get(3).cloned().flatten() == Some("p".into()))
             .collect();
         assert!(!pk_rows.is_empty(), "should have PK constraint");
         // conname should contain table name
         let conname = pk_rows[0].get(1).cloned().flatten().unwrap();
-        assert!(conname.contains("con_test"), "PK constraint name should reference table");
+        assert!(
+            conname.contains("con_test"),
+            "PK constraint name should reference table"
+        );
     }
 
     // ── extract_where_eq tests ──
@@ -2545,10 +2885,7 @@ mod tests {
             extract_where_eq("select * from t where table_name='bar'", "table_name"),
             Some("bar".into())
         );
-        assert_eq!(
-            extract_where_eq("select * from t", "table_name"),
-            None
-        );
+        assert_eq!(extract_where_eq("select * from t", "table_name"), None);
     }
 
     // ── Phase 2: Prepared Statement / Parameterized SQL tests ──
@@ -2556,10 +2893,17 @@ mod tests {
     #[test]
     fn test_prepare_statement_select_with_param() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE ps_t1 (id INT PRIMARY KEY, name TEXT)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE ps_t1 (id INT PRIMARY KEY, name TEXT)",
+            &mut session,
+        );
 
         let result = handler.prepare_statement("SELECT * FROM ps_t1 WHERE id = $1");
-        assert!(result.is_ok(), "prepare_statement should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "prepare_statement should succeed: {:?}",
+            result.err()
+        );
         let (plan, inferred_types, row_desc) = result.unwrap();
         // Should have 1 inferred parameter
         assert_eq!(inferred_types.len(), 1, "should infer 1 param type");
@@ -2574,10 +2918,17 @@ mod tests {
     #[test]
     fn test_prepare_statement_insert_with_params() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE ps_t2 (id INT PRIMARY KEY, val TEXT)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE ps_t2 (id INT PRIMARY KEY, val TEXT)",
+            &mut session,
+        );
 
         let result = handler.prepare_statement("INSERT INTO ps_t2 VALUES ($1, $2)");
-        assert!(result.is_ok(), "prepare INSERT should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "prepare INSERT should succeed: {:?}",
+            result.err()
+        );
         let (_plan, inferred_types, row_desc) = result.unwrap();
         assert_eq!(inferred_types.len(), 2, "should infer 2 param types");
         // INSERT has no output columns
@@ -2601,7 +2952,10 @@ mod tests {
     #[test]
     fn test_execute_plan_select_no_params() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE ep_t1 (id INT PRIMARY KEY, name TEXT)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE ep_t1 (id INT PRIMARY KEY, name TEXT)",
+            &mut session,
+        );
         handler.handle_query("INSERT INTO ep_t1 VALUES (1, 'alice')", &mut session);
         handler.handle_query("INSERT INTO ep_t1 VALUES (2, 'bob')", &mut session);
 
@@ -2615,11 +2969,16 @@ mod tests {
     #[test]
     fn test_execute_plan_select_with_int_param() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE ep_t2 (id INT PRIMARY KEY, name TEXT)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE ep_t2 (id INT PRIMARY KEY, name TEXT)",
+            &mut session,
+        );
         handler.handle_query("INSERT INTO ep_t2 VALUES (1, 'alice')", &mut session);
         handler.handle_query("INSERT INTO ep_t2 VALUES (2, 'bob')", &mut session);
 
-        let (plan, _types, _desc) = handler.prepare_statement("SELECT * FROM ep_t2 WHERE id = $1").unwrap();
+        let (plan, _types, _desc) = handler
+            .prepare_statement("SELECT * FROM ep_t2 WHERE id = $1")
+            .unwrap();
         let params = vec![Datum::Int32(1)];
         let msgs = handler.execute_plan(&plan, &params, &mut session);
         assert!(has_row_description(&msgs), "should have RowDescription");
@@ -2631,11 +2990,16 @@ mod tests {
     #[test]
     fn test_execute_plan_select_with_text_param() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE ep_t3 (id INT PRIMARY KEY, name TEXT)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE ep_t3 (id INT PRIMARY KEY, name TEXT)",
+            &mut session,
+        );
         handler.handle_query("INSERT INTO ep_t3 VALUES (1, 'alice')", &mut session);
         handler.handle_query("INSERT INTO ep_t3 VALUES (2, 'bob')", &mut session);
 
-        let (plan, _types, _desc) = handler.prepare_statement("SELECT * FROM ep_t3 WHERE name = $1").unwrap();
+        let (plan, _types, _desc) = handler
+            .prepare_statement("SELECT * FROM ep_t3 WHERE name = $1")
+            .unwrap();
         let params = vec![Datum::Text("bob".into())];
         let msgs = handler.execute_plan(&plan, &params, &mut session);
         let rows = extract_data_rows(&msgs);
@@ -2646,12 +3010,21 @@ mod tests {
     #[test]
     fn test_execute_plan_insert_with_params() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE ep_t4 (id INT PRIMARY KEY, val TEXT)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE ep_t4 (id INT PRIMARY KEY, val TEXT)",
+            &mut session,
+        );
 
-        let (plan, _types, _desc) = handler.prepare_statement("INSERT INTO ep_t4 VALUES ($1, $2)").unwrap();
+        let (plan, _types, _desc) = handler
+            .prepare_statement("INSERT INTO ep_t4 VALUES ($1, $2)")
+            .unwrap();
         let params = vec![Datum::Int32(42), Datum::Text("hello".into())];
         let msgs = handler.execute_plan(&plan, &params, &mut session);
-        assert!(!has_error_response(&msgs), "INSERT with params should succeed: {:?}", msgs);
+        assert!(
+            !has_error_response(&msgs),
+            "INSERT with params should succeed: {:?}",
+            msgs
+        );
 
         // Verify the data was inserted
         let msgs2 = handler.handle_query("SELECT * FROM ep_t4", &mut session);
@@ -2664,13 +3037,22 @@ mod tests {
     #[test]
     fn test_execute_plan_update_with_params() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE ep_t5 (id INT PRIMARY KEY, val TEXT)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE ep_t5 (id INT PRIMARY KEY, val TEXT)",
+            &mut session,
+        );
         handler.handle_query("INSERT INTO ep_t5 VALUES (1, 'old')", &mut session);
 
-        let (plan, _types, _desc) = handler.prepare_statement("UPDATE ep_t5 SET val = $1 WHERE id = $2").unwrap();
+        let (plan, _types, _desc) = handler
+            .prepare_statement("UPDATE ep_t5 SET val = $1 WHERE id = $2")
+            .unwrap();
         let params = vec![Datum::Text("new".into()), Datum::Int32(1)];
         let msgs = handler.execute_plan(&plan, &params, &mut session);
-        assert!(!has_error_response(&msgs), "UPDATE with params should succeed: {:?}", msgs);
+        assert!(
+            !has_error_response(&msgs),
+            "UPDATE with params should succeed: {:?}",
+            msgs
+        );
 
         let msgs2 = handler.handle_query("SELECT * FROM ep_t5", &mut session);
         let rows = extract_data_rows(&msgs2);
@@ -2681,14 +3063,23 @@ mod tests {
     #[test]
     fn test_execute_plan_delete_with_params() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE ep_t6 (id INT PRIMARY KEY, val TEXT)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE ep_t6 (id INT PRIMARY KEY, val TEXT)",
+            &mut session,
+        );
         handler.handle_query("INSERT INTO ep_t6 VALUES (1, 'a')", &mut session);
         handler.handle_query("INSERT INTO ep_t6 VALUES (2, 'b')", &mut session);
 
-        let (plan, _types, _desc) = handler.prepare_statement("DELETE FROM ep_t6 WHERE id = $1").unwrap();
+        let (plan, _types, _desc) = handler
+            .prepare_statement("DELETE FROM ep_t6 WHERE id = $1")
+            .unwrap();
         let params = vec![Datum::Int32(1)];
         let msgs = handler.execute_plan(&plan, &params, &mut session);
-        assert!(!has_error_response(&msgs), "DELETE with params should succeed: {:?}", msgs);
+        assert!(
+            !has_error_response(&msgs),
+            "DELETE with params should succeed: {:?}",
+            msgs
+        );
 
         let msgs2 = handler.handle_query("SELECT * FROM ep_t6", &mut session);
         let rows = extract_data_rows(&msgs2);
@@ -2699,12 +3090,21 @@ mod tests {
     #[test]
     fn test_execute_plan_with_null_param() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE ep_t7 (id INT PRIMARY KEY, val TEXT)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE ep_t7 (id INT PRIMARY KEY, val TEXT)",
+            &mut session,
+        );
 
-        let (plan, _types, _desc) = handler.prepare_statement("INSERT INTO ep_t7 VALUES ($1, $2)").unwrap();
+        let (plan, _types, _desc) = handler
+            .prepare_statement("INSERT INTO ep_t7 VALUES ($1, $2)")
+            .unwrap();
         let params = vec![Datum::Int32(1), Datum::Null];
         let msgs = handler.execute_plan(&plan, &params, &mut session);
-        assert!(!has_error_response(&msgs), "INSERT with NULL param should succeed: {:?}", msgs);
+        assert!(
+            !has_error_response(&msgs),
+            "INSERT with NULL param should succeed: {:?}",
+            msgs
+        );
 
         let msgs2 = handler.handle_query("SELECT * FROM ep_t7", &mut session);
         let rows = extract_data_rows(&msgs2);
@@ -2715,12 +3115,17 @@ mod tests {
     #[test]
     fn test_execute_plan_reuse_with_different_params() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE ep_t8 (id INT PRIMARY KEY, name TEXT)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE ep_t8 (id INT PRIMARY KEY, name TEXT)",
+            &mut session,
+        );
         handler.handle_query("INSERT INTO ep_t8 VALUES (1, 'alice')", &mut session);
         handler.handle_query("INSERT INTO ep_t8 VALUES (2, 'bob')", &mut session);
         handler.handle_query("INSERT INTO ep_t8 VALUES (3, 'carol')", &mut session);
 
-        let (plan, _types, _desc) = handler.prepare_statement("SELECT * FROM ep_t8 WHERE id = $1").unwrap();
+        let (plan, _types, _desc) = handler
+            .prepare_statement("SELECT * FROM ep_t8 WHERE id = $1")
+            .unwrap();
 
         // Execute with param=1
         let msgs1 = handler.execute_plan(&plan, &[Datum::Int32(1)], &mut session);
@@ -2760,7 +3165,10 @@ mod tests {
     #[test]
     fn test_plan_output_fields_for_select() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE pof_t (id INT PRIMARY KEY, name TEXT, active BOOLEAN)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE pof_t (id INT PRIMARY KEY, name TEXT, active BOOLEAN)",
+            &mut session,
+        );
 
         let (plan, _types, _desc) = handler.prepare_statement("SELECT * FROM pof_t").unwrap();
         let fields = handler.plan_output_fields(&plan);
@@ -2776,7 +3184,10 @@ mod tests {
     #[test]
     fn test_full_prepared_stmt_lifecycle() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE ps_life (id INT PRIMARY KEY, val TEXT)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE ps_life (id INT PRIMARY KEY, val TEXT)",
+            &mut session,
+        );
         handler.handle_query("INSERT INTO ps_life VALUES (1, 'one')", &mut session);
         handler.handle_query("INSERT INTO ps_life VALUES (2, 'two')", &mut session);
 
@@ -2821,12 +3232,13 @@ mod tests {
 
         // 4. Execute: run portal
         let portal = session.portals.get("portal1").unwrap().clone();
-        let msgs = handler.execute_plan(
-            portal.plan.as_ref().unwrap(),
-            &portal.params,
-            &mut session,
+        let msgs =
+            handler.execute_plan(portal.plan.as_ref().unwrap(), &portal.params, &mut session);
+        assert!(
+            !has_error_response(&msgs),
+            "Execute should succeed: {:?}",
+            msgs
         );
-        assert!(!has_error_response(&msgs), "Execute should succeed: {:?}", msgs);
         let rows = extract_data_rows(&msgs);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0][1], Some("two".into()));
@@ -2841,7 +3253,10 @@ mod tests {
     #[test]
     fn test_multiple_portals_same_statement() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query("CREATE TABLE ps_mp (id INT PRIMARY KEY, val TEXT)", &mut session);
+        handler.handle_query(
+            "CREATE TABLE ps_mp (id INT PRIMARY KEY, val TEXT)",
+            &mut session,
+        );
         handler.handle_query("INSERT INTO ps_mp VALUES (1, 'a')", &mut session);
         handler.handle_query("INSERT INTO ps_mp VALUES (2, 'b')", &mut session);
         handler.handle_query("INSERT INTO ps_mp VALUES (3, 'c')", &mut session);
@@ -2863,16 +3278,22 @@ mod tests {
 
         // Bind two portals from the same statement with different params
         let ps = session.prepared_statements.get("s").unwrap();
-        session.portals.insert("p1".into(), crate::session::Portal {
-            plan: ps.plan.clone(),
-            params: vec![Datum::Int32(1)],
-            bound_sql: String::new(),
-        });
-        session.portals.insert("p2".into(), crate::session::Portal {
-            plan: ps.plan.clone(),
-            params: vec![Datum::Int32(3)],
-            bound_sql: String::new(),
-        });
+        session.portals.insert(
+            "p1".into(),
+            crate::session::Portal {
+                plan: ps.plan.clone(),
+                params: vec![Datum::Int32(1)],
+                bound_sql: String::new(),
+            },
+        );
+        session.portals.insert(
+            "p2".into(),
+            crate::session::Portal {
+                plan: ps.plan.clone(),
+                params: vec![Datum::Int32(3)],
+                bound_sql: String::new(),
+            },
+        );
 
         // Execute portal 1
         let p1 = session.portals.get("p1").unwrap().clone();
@@ -2895,9 +3316,11 @@ mod tests {
     fn test_create_tenant_basic() {
         let (handler, mut session) = setup_handler();
         let msgs = handler.handle_query("CREATE TENANT acme", &mut session);
-        let has_complete = msgs.iter().any(|m| matches!(m,
-            BackendMessage::CommandComplete { tag } if tag.contains("acme")
-        ));
+        let has_complete = msgs.iter().any(|m| {
+            matches!(m,
+                BackendMessage::CommandComplete { tag } if tag.contains("acme")
+            )
+        });
         assert!(has_complete, "CREATE TENANT should return CommandComplete");
     }
 
@@ -2908,9 +3331,11 @@ mod tests {
             "CREATE TENANT bigcorp MAX_QPS 1000 MAX_STORAGE_BYTES 1073741824",
             &mut session,
         );
-        let has_complete = msgs.iter().any(|m| matches!(m,
-            BackendMessage::CommandComplete { tag } if tag.contains("bigcorp")
-        ));
+        let has_complete = msgs.iter().any(|m| {
+            matches!(m,
+                BackendMessage::CommandComplete { tag } if tag.contains("bigcorp")
+            )
+        });
         assert!(has_complete, "CREATE TENANT with quotas should succeed");
     }
 
@@ -2919,7 +3344,9 @@ mod tests {
         let (handler, mut session) = setup_handler();
         handler.handle_query("CREATE TENANT dup", &mut session);
         let msgs = handler.handle_query("CREATE TENANT dup", &mut session);
-        let has_error = msgs.iter().any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
+        let has_error = msgs
+            .iter()
+            .any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
         assert!(has_error, "Duplicate CREATE TENANT should return error");
     }
 
@@ -2928,9 +3355,11 @@ mod tests {
         let (handler, mut session) = setup_handler();
         handler.handle_query("CREATE TENANT todelete", &mut session);
         let msgs = handler.handle_query("DROP TENANT todelete", &mut session);
-        let has_complete = msgs.iter().any(|m| matches!(m,
-            BackendMessage::CommandComplete { tag } if tag.contains("todelete")
-        ));
+        let has_complete = msgs.iter().any(|m| {
+            matches!(m,
+                BackendMessage::CommandComplete { tag } if tag.contains("todelete")
+            )
+        });
         assert!(has_complete, "DROP TENANT should return CommandComplete");
     }
 
@@ -2938,7 +3367,9 @@ mod tests {
     fn test_drop_tenant_nonexistent_fails() {
         let (handler, mut session) = setup_handler();
         let msgs = handler.handle_query("DROP TENANT ghost", &mut session);
-        let has_error = msgs.iter().any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
+        let has_error = msgs
+            .iter()
+            .any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
         assert!(has_error, "DROP TENANT on nonexistent tenant should error");
     }
 
@@ -2948,18 +3379,25 @@ mod tests {
         handler.handle_query("CREATE TENANT t1", &mut session);
         handler.handle_query("CREATE TENANT t2", &mut session);
         let msgs = handler.handle_query("SHOW falcon.tenants", &mut session);
-        assert!(has_row_description(&msgs), "SHOW falcon.tenants should have RowDescription");
+        assert!(
+            has_row_description(&msgs),
+            "SHOW falcon.tenants should have RowDescription"
+        );
         let rows = extract_data_rows(&msgs);
         assert!(!rows.is_empty(), "SHOW falcon.tenants should return rows");
         // Should include system tenant + t1 + t2
-        let all_text: String = rows.iter()
+        let all_text: String = rows
+            .iter()
             .flat_map(|r| r.iter())
             .filter_map(|v| v.as_ref())
             .cloned()
             .collect::<Vec<_>>()
             .join(" ");
-        assert!(all_text.contains("3") || all_text.contains("t1") || all_text.contains("t2"),
-            "tenants output should mention created tenants: {}", all_text);
+        assert!(
+            all_text.contains("3") || all_text.contains("t1") || all_text.contains("t2"),
+            "tenants output should mention created tenants: {}",
+            all_text
+        );
     }
 
     #[test]
@@ -2967,9 +3405,15 @@ mod tests {
         let (handler, mut session) = setup_handler();
         handler.handle_query("CREATE TENANT usage_test", &mut session);
         let msgs = handler.handle_query("SHOW falcon.tenant_usage", &mut session);
-        assert!(has_row_description(&msgs), "SHOW falcon.tenant_usage should have RowDescription");
+        assert!(
+            has_row_description(&msgs),
+            "SHOW falcon.tenant_usage should have RowDescription"
+        );
         let rows = extract_data_rows(&msgs);
-        assert!(!rows.is_empty(), "SHOW falcon.tenant_usage should return rows");
+        assert!(
+            !rows.is_empty(),
+            "SHOW falcon.tenant_usage should return rows"
+        );
     }
 
     // ── M4: Vectorized columnar aggregate path ────────────────────────────────
@@ -2993,7 +3437,11 @@ mod tests {
         let rows = extract_data_rows(&msgs);
         assert_eq!(rows.len(), 1, "COUNT(*) should return 1 row");
         let count_val = rows[0][0].as_deref().unwrap_or("0");
-        assert_eq!(count_val, "100", "COUNT(*) should return 100, got {}", count_val);
+        assert_eq!(
+            count_val, "100",
+            "COUNT(*) should return 100, got {}",
+            count_val
+        );
     }
 
     #[test]
@@ -3050,7 +3498,11 @@ mod tests {
 
         let best = DistributedQueryEngine::select_least_lagging_replica(&replicas);
         assert!(best.is_some(), "should select a replica");
-        assert_eq!(best.unwrap().lag_lsn, 0, "should prefer fully caught-up replica");
+        assert_eq!(
+            best.unwrap().lag_lsn,
+            0,
+            "should prefer fully caught-up replica"
+        );
     }
 
     #[test]
@@ -3083,8 +3535,15 @@ mod tests {
 
         let best = DistributedQueryEngine::select_least_lagging_replica(&replicas);
         assert!(best.is_some(), "should select connected replica");
-        assert!(best.unwrap().connected, "selected replica must be connected");
-        assert_eq!(best.unwrap().lag_lsn, 10, "should select the connected replica");
+        assert!(
+            best.unwrap().connected,
+            "selected replica must be connected"
+        );
+        assert_eq!(
+            best.unwrap().lag_lsn,
+            10,
+            "should select the connected replica"
+        );
     }
 
     #[test]
@@ -3165,7 +3624,10 @@ mod tests {
         let msgs = handler.handle_query("SELECT falcon_promote_leader(0)", &mut session);
         assert!(has_row_description(&msgs));
         let rows = extract_data_rows(&msgs);
-        assert!(rows[0][0].as_ref().unwrap().contains("Leader promotion requested"));
+        assert!(rows[0][0]
+            .as_ref()
+            .unwrap()
+            .contains("Leader promotion requested"));
     }
 
     #[test]
@@ -3194,7 +3656,11 @@ mod tests {
         let msgs = handler.handle_query("SHOW falcon.cluster_events", &mut session);
         let rows = extract_data_rows(&msgs);
         // Should have events for: add_node(joining), remove_node(draining), promote_leader
-        assert!(rows.len() >= 3, "expected at least 3 events, got {}", rows.len());
+        assert!(
+            rows.len() >= 3,
+            "expected at least 3 events, got {}",
+            rows.len()
+        );
     }
 
     #[test]
@@ -3228,9 +3694,11 @@ mod tests {
         let msgs = handler.handle_query("SHOW falcon.cluster_events", &mut session);
         let rows = extract_data_rows(&msgs);
         assert!(rows.len() >= 1);
-        assert!(rows.iter().any(|r| {
-            r[2].as_deref() == Some("scale_out")
-        }), "cluster_events should contain scale_out event");
+        assert!(
+            rows.iter()
+                .any(|r| { r[2].as_deref() == Some("scale_out") }),
+            "cluster_events should contain scale_out event"
+        );
 
         // 4. Rebalance plan should work (single-shard mode returns not applicable)
         let msgs = handler.handle_query("SHOW falcon.rebalance_plan", &mut session);
@@ -3254,9 +3722,10 @@ mod tests {
         // 3. Verify cluster_events logged the scale-in
         let msgs = handler.handle_query("SHOW falcon.cluster_events", &mut session);
         let rows = extract_data_rows(&msgs);
-        assert!(rows.iter().any(|r| {
-            r[2].as_deref() == Some("scale_in")
-        }), "cluster_events should contain scale_in event");
+        assert!(
+            rows.iter().any(|r| { r[2].as_deref() == Some("scale_in") }),
+            "cluster_events should contain scale_in event"
+        );
     }
 
     #[test]
@@ -3315,7 +3784,11 @@ mod tests {
         assert!(has_row_description(&msgs), "should have RowDescription");
         let rows = extract_data_rows(&msgs);
         // Should have decision_log + timeout + slow_shard sections (20 rows)
-        assert!(rows.len() >= 15, "expected at least 15 rows, got {}", rows.len());
+        assert!(
+            rows.len() >= 15,
+            "expected at least 15 rows, got {}",
+            rows.len()
+        );
         assert_eq!(rows[0][0], Some("decision_log.total_logged".into()));
         assert_eq!(rows[0][1], Some("0".into()));
         // Check timeout defaults
@@ -3335,7 +3808,11 @@ mod tests {
         assert!(has_row_description(&msgs), "should have RowDescription");
         let rows = extract_data_rows(&msgs);
         // 5 base + 6 partition + 5 jitter = 16 rows
-        assert!(rows.len() >= 16, "expected at least 16 rows, got {}", rows.len());
+        assert!(
+            rows.len() >= 16,
+            "expected at least 16 rows, got {}",
+            rows.len()
+        );
         assert_eq!(rows[0][0], Some("leader_killed".into()));
         assert_eq!(rows[0][1], Some("false".into()));
         assert_eq!(rows[5][0], Some("partition.active".into()));
@@ -3353,7 +3830,11 @@ mod tests {
         assert!(has_row_description(&msgs), "should have RowDescription");
         let rows = extract_data_rows(&msgs);
         // Should have 50 commands listed
-        assert!(rows.len() >= 50, "expected at least 50 catalog entries, got {}", rows.len());
+        assert!(
+            rows.len() >= 50,
+            "expected at least 50 catalog entries, got {}",
+            rows.len()
+        );
         // First entry
         assert_eq!(rows[0][0], Some("SHOW falcon.version".into()));
         // Last entry should be the catalog itself
@@ -3373,7 +3854,11 @@ mod tests {
         assert!(has_row_description(&msgs), "should have RowDescription");
         let rows = extract_data_rows(&msgs);
         // 8 auth + 8 password + 11 firewall = 27 rows
-        assert!(rows.len() >= 27, "expected at least 27 rows, got {}", rows.len());
+        assert!(
+            rows.len() >= 27,
+            "expected at least 27 rows, got {}",
+            rows.len()
+        );
         assert_eq!(rows[0][0], Some("auth.max_failures".into()));
         assert_eq!(rows[0][1], Some("5".into()));
         assert_eq!(rows[8][0], Some("password.min_length".into()));
@@ -3391,7 +3876,11 @@ mod tests {
         assert!(has_row_description(&msgs), "should have RowDescription");
         let rows = extract_data_rows(&msgs);
         // 10 rows: server_version, wal_format_version, snapshot_format_version, etc.
-        assert!(rows.len() >= 10, "expected at least 10 rows, got {}", rows.len());
+        assert!(
+            rows.len() >= 10,
+            "expected at least 10 rows, got {}",
+            rows.len()
+        );
         assert_eq!(rows[0][0], Some("server_version".into()));
         assert_eq!(rows[1][0], Some("wal_format_version".into()));
         assert_eq!(rows[1][1], Some("3".into()));

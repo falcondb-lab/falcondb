@@ -13,18 +13,12 @@ impl QueryHandler {
     /// Returns backend messages to send (CommandComplete or ErrorResponse).
     ///
     /// Wrapped in crash-domain guard — panics are caught and converted to ErrorResponse.
-    pub fn handle_copy_data(
-        &self,
-        data: &[u8],
-        session: &mut PgSession,
-    ) -> Vec<BackendMessage> {
+    pub fn handle_copy_data(&self, data: &[u8], session: &mut PgSession) -> Vec<BackendMessage> {
         let rctx = falcon_common::request_context::RequestContext::new(session.id as u64);
         let ctx = format!("session_id={}", session.id);
-        let result = falcon_common::crash_domain::catch_request(
-            "handle_copy_data",
-            &ctx,
-            || self.handle_copy_data_inner(data, session),
-        );
+        let result = falcon_common::crash_domain::catch_request("handle_copy_data", &ctx, || {
+            self.handle_copy_data_inner(data, session)
+        });
         match result {
             Ok(msgs) => msgs,
             Err(e) => vec![self.error_response(&e.with_request_context(&rctx))],
@@ -50,8 +44,10 @@ impl QueryHandler {
         // Ensure a transaction
         let auto_txn = if session.txn.is_none() {
             let classification = TxnClassification::local(ShardId(0));
-            let txn = match self.txn_mgr
-                .try_begin_with_classification(session.default_isolation, classification) {
+            let txn = match self
+                .txn_mgr
+                .try_begin_with_classification(session.default_isolation, classification)
+            {
                 Ok(t) => t,
                 Err(e) => {
                     let ce: FalconError = e.into();
@@ -77,11 +73,13 @@ impl QueryHandler {
             copy_state.format.escape,
             match session.txn.as_ref() {
                 Some(t) => t,
-                None => return vec![BackendMessage::ErrorResponse {
-                    severity: "ERROR".into(),
-                    code: "25P01".into(),
-                    message: "no active transaction for COPY FROM".into(),
-                }],
+                None => {
+                    return vec![BackendMessage::ErrorResponse {
+                        severity: "ERROR".into(),
+                        code: "25P01".into(),
+                        message: "no active transaction for COPY FROM".into(),
+                    }]
+                }
             },
         );
 

@@ -90,7 +90,12 @@ pub struct BackupMetadata {
 }
 
 impl BackupMetadata {
-    fn new(backup_id: u64, backup_type: BackupType, snapshot_ts: Timestamp, start_lsn: u64) -> Self {
+    fn new(
+        backup_id: u64,
+        backup_type: BackupType,
+        snapshot_ts: Timestamp,
+        start_lsn: u64,
+    ) -> Self {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -184,7 +189,11 @@ impl BackupManager {
     }
 
     /// Start an incremental backup from a given LSN.
-    pub fn start_incremental_backup(&self, snapshot_ts: Timestamp, start_lsn: u64) -> BackupMetadata {
+    pub fn start_incremental_backup(
+        &self,
+        snapshot_ts: Timestamp,
+        start_lsn: u64,
+    ) -> BackupMetadata {
         let id = self.next_backup_id.fetch_add(1, Ordering::Relaxed);
         let meta = BackupMetadata::new(id, BackupType::Incremental, snapshot_ts, start_lsn);
         self.history.lock().push(meta.clone());
@@ -192,7 +201,14 @@ impl BackupManager {
     }
 
     /// Mark a backup as completed with final statistics.
-    pub fn complete_backup(&self, backup_id: u64, end_lsn: u64, total_bytes: u64, table_count: u32, checksum: u32) -> bool {
+    pub fn complete_backup(
+        &self,
+        backup_id: u64,
+        end_lsn: u64,
+        total_bytes: u64,
+        table_count: u32,
+        checksum: u32,
+    ) -> bool {
         let mut history = self.history.lock();
         if let Some(meta) = history.iter_mut().find(|m| m.backup_id == backup_id) {
             let now_ms = std::time::SystemTime::now()
@@ -206,7 +222,8 @@ impl BackupManager {
             meta.total_bytes = total_bytes;
             meta.table_count = table_count;
             meta.checksum = checksum;
-            self.total_bytes_backed_up.fetch_add(total_bytes, Ordering::Relaxed);
+            self.total_bytes_backed_up
+                .fetch_add(total_bytes, Ordering::Relaxed);
             self.total_backups_completed.fetch_add(1, Ordering::Relaxed);
 
             // Trim history if over capacity
@@ -240,7 +257,8 @@ impl BackupManager {
 
     /// Get the latest completed full backup (for incremental base).
     pub fn latest_full_backup(&self) -> Option<BackupMetadata> {
-        self.history.lock()
+        self.history
+            .lock()
             .iter()
             .rev()
             .find(|m| m.backup_type == BackupType::Full && m.status == BackupStatus::Completed)
@@ -255,7 +273,11 @@ impl BackupManager {
 
     /// Get a specific backup by ID.
     pub fn get_backup(&self, backup_id: u64) -> Option<BackupMetadata> {
-        self.history.lock().iter().find(|m| m.backup_id == backup_id).cloned()
+        self.history
+            .lock()
+            .iter()
+            .find(|m| m.backup_id == backup_id)
+            .cloned()
     }
 
     /// Verify a backup's integrity (stub — in production would read and checksum the data).
@@ -267,7 +289,10 @@ impl BackupManager {
             tables_verified: meta.table_count,
             rows_verified: 0, // would be populated by actual verification
             warnings: if meta.status == BackupStatus::Failed {
-                vec![format!("Backup failed: {}", meta.error.as_deref().unwrap_or("unknown"))]
+                vec![format!(
+                    "Backup failed: {}",
+                    meta.error.as_deref().unwrap_or("unknown")
+                )]
             } else {
                 vec![]
             },

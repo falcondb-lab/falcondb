@@ -228,7 +228,11 @@ impl PgServer {
         // Drain active connections
         let active = self.active_connections.load(Ordering::Relaxed);
         if active > 0 {
-            tracing::info!("Draining {} active connection(s) (timeout: {:?})", active, drain_timeout);
+            tracing::info!(
+                "Draining {} active connection(s) (timeout: {:?})",
+                active,
+                drain_timeout
+            );
             let deadline = tokio::time::Instant::now() + drain_timeout;
             loop {
                 let remaining = self.active_connections.load(Ordering::Relaxed);
@@ -237,7 +241,10 @@ impl PgServer {
                     break;
                 }
                 if tokio::time::Instant::now() >= deadline {
-                    tracing::warn!("Drain timeout reached with {} connection(s) still active", remaining);
+                    tracing::warn!(
+                        "Drain timeout reached with {} connection(s) still active",
+                        remaining
+                    );
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -287,17 +294,29 @@ impl PgServer {
                             handler.set_replica_metrics(rm.clone());
                         }
                         if let Err(e) = handle_connection_with_timeout(
-                            stream, session_id, handler, timeout_ms, idle_ms,
-                            max_connections, active.clone(),
-                            auth_config, cancel_reg.clone(), notification_hub.clone(),
-                        ).await {
+                            stream,
+                            session_id,
+                            handler,
+                            timeout_ms,
+                            idle_ms,
+                            max_connections,
+                            active.clone(),
+                            auth_config,
+                            cancel_reg.clone(),
+                            notification_hub.clone(),
+                        )
+                        .await
+                        {
                             tracing::error!("Connection error (session {}): {}", session_id, e);
                         }
                         // pooled guard dropped here → permit returned to pool
                         drop(pooled);
                     }
                     None => {
-                        tracing::warn!("Connection pool exhausted, rejecting session {}", session_id);
+                        tracing::warn!(
+                            "Connection pool exhausted, rejecting session {}",
+                            session_id
+                        );
                         let msg = BackendMessage::ErrorResponse {
                             severity: "FATAL".into(),
                             code: "53300".into(),
@@ -336,10 +355,19 @@ impl PgServer {
 
             tokio::spawn(async move {
                 if let Err(e) = handle_connection_with_timeout(
-                    stream, session_id, handler, timeout_ms, idle_ms,
-                    max_connections, active.clone(),
-                    auth_config, cancel_reg.clone(), notification_hub,
-                ).await {
+                    stream,
+                    session_id,
+                    handler,
+                    timeout_ms,
+                    idle_ms,
+                    max_connections,
+                    active.clone(),
+                    auth_config,
+                    cancel_reg.clone(),
+                    notification_hub,
+                )
+                .await
+                {
                     tracing::error!("Connection error (session {}): {}", session_id, e);
                 }
                 cancel_reg.remove(&session_id);
@@ -349,7 +377,6 @@ impl PgServer {
         }
         true
     }
-
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -377,10 +404,13 @@ async fn handle_connection_with_timeout(
         s.build_hasher().finish() as i32
     };
     let cancelled = Arc::new(AtomicBool::new(false));
-    cancel_registry.insert(session_id, CancelEntry {
-        secret_key,
-        cancelled: cancelled.clone(),
-    });
+    cancel_registry.insert(
+        session_id,
+        CancelEntry {
+            secret_key,
+            cancelled: cancelled.clone(),
+        },
+    );
 
     // Phase 1: Startup handshake
     loop {
@@ -399,7 +429,10 @@ async fn handle_connection_with_timeout(
                 stream.write_all(b"N").await?;
                 continue;
             }
-            Some(FrontendMessage::CancelRequest { process_id, secret_key: sk }) => {
+            Some(FrontendMessage::CancelRequest {
+                process_id,
+                secret_key: sk,
+            }) => {
                 // Cancel request arrives on a separate connection.
                 // Look up the target session and signal cancellation.
                 if let Some(entry) = cancel_registry.get(&process_id) {
@@ -407,18 +440,17 @@ async fn handle_connection_with_timeout(
                         entry.cancelled.store(true, Ordering::SeqCst);
                         tracing::info!("Cancel request accepted for session {}", process_id);
                     } else {
-                        tracing::warn!("Cancel request rejected for session {}: wrong secret key", process_id);
+                        tracing::warn!(
+                            "Cancel request rejected for session {}: wrong secret key",
+                            process_id
+                        );
                     }
                 }
                 // Per PG protocol, the cancel connection is closed immediately
                 return Ok(());
             }
             Some(FrontendMessage::Startup { version, params }) => {
-                tracing::debug!(
-                    "Startup: version={}, params={:?}",
-                    version,
-                    params
-                );
+                tracing::debug!("Startup: version={}, params={:?}", version, params);
 
                 if let Some(user) = params.get("user") {
                     session.user = user.clone();
@@ -427,10 +459,24 @@ async fn handle_connection_with_timeout(
                     session.database = db.clone();
                 }
 
+                // Copy well-known startup params into session GUC so
+                // pgjdbc's SET/SHOW round-trips work correctly.
+                for (key, value) in &params {
+                    match key.as_str() {
+                        "user" | "database" => {} // already handled above
+                        "client_encoding" | "application_name" | "DateStyle"
+                        | "TimeZone" | "extra_float_digits" | "options" => {
+                            session.set_guc(key, value);
+                        }
+                        _ => {
+                            // Store any other driver-supplied params
+                            session.set_guc(key, value);
+                        }
+                    }
+                }
+
                 // Username check (if configured)
-                if !auth_config.username.is_empty()
-                    && session.user != auth_config.username
-                {
+                if !auth_config.username.is_empty() && session.user != auth_config.username {
                     let msg = BackendMessage::ErrorResponse {
                         severity: "FATAL".into(),
                         code: "28P01".into(),
@@ -450,7 +496,11 @@ async fn handle_connection_with_timeout(
                     }
                     AuthMethod::Password => {
                         // Request cleartext password
-                        send_message(&mut stream, &BackendMessage::AuthenticationCleartextPassword).await?;
+                        send_message(
+                            &mut stream,
+                            &BackendMessage::AuthenticationCleartextPassword,
+                        )
+                        .await?;
                         stream.flush().await?;
 
                         // Read password response
@@ -459,7 +509,9 @@ async fn handle_connection_with_timeout(
                             if pn == 0 {
                                 return Ok(());
                             }
-                            if let Some(FrontendMessage::PasswordMessage(pw)) = codec::decode_message(&mut buf)? {
+                            if let Some(FrontendMessage::PasswordMessage(pw)) =
+                                codec::decode_message(&mut buf)?
+                            {
                                 break pw;
                             }
                         };
@@ -487,7 +539,11 @@ async fn handle_connection_with_timeout(
                             let h = s.build_hasher().finish();
                             (h as u32).to_le_bytes()
                         };
-                        send_message(&mut stream, &BackendMessage::AuthenticationMd5Password { salt }).await?;
+                        send_message(
+                            &mut stream,
+                            &BackendMessage::AuthenticationMd5Password { salt },
+                        )
+                        .await?;
                         stream.flush().await?;
 
                         // Read password response
@@ -496,7 +552,9 @@ async fn handle_connection_with_timeout(
                             if pn == 0 {
                                 return Ok(());
                             }
-                            if let Some(FrontendMessage::PasswordMessage(pw)) = codec::decode_message(&mut buf)? {
+                            if let Some(FrontendMessage::PasswordMessage(pw)) =
+                                codec::decode_message(&mut buf)?
+                            {
                                 break pw;
                             }
                         };
@@ -533,26 +591,35 @@ async fn handle_connection_with_timeout(
                     AuthMethod::ScramSha256 => {
                         // ── SCRAM-SHA-256 SASL authentication ──
                         // Step 1: Send AuthenticationSASL with mechanism list
-                        send_message(&mut stream, &BackendMessage::AuthenticationSASL {
-                            mechanisms: vec!["SCRAM-SHA-256".into()],
-                        }).await?;
+                        send_message(
+                            &mut stream,
+                            &BackendMessage::AuthenticationSASL {
+                                mechanisms: vec!["SCRAM-SHA-256".into()],
+                            },
+                        )
+                        .await?;
                         stream.flush().await?;
 
                         // Step 2: Receive SASLInitialResponse (client-first-message)
                         let client_first_msg = loop {
                             let pn = stream.read_buf(&mut buf).await?;
-                            if pn == 0 { return Ok(()); }
-                            if let Some(FrontendMessage::PasswordMessage(pw)) = codec::decode_message(&mut buf)? {
+                            if pn == 0 {
+                                return Ok(());
+                            }
+                            if let Some(FrontendMessage::PasswordMessage(pw)) =
+                                codec::decode_message(&mut buf)?
+                            {
                                 break pw;
                             }
                         };
 
                         // Parse client-first-message: n,,n=<user>,r=<client-nonce>
-                        let client_first_bare = if let Some(stripped) = client_first_msg.strip_prefix("n,,") {
-                            stripped.to_string()
-                        } else {
-                            client_first_msg.clone()
-                        };
+                        let client_first_bare =
+                            if let Some(stripped) = client_first_msg.strip_prefix("n,,") {
+                                stripped.to_string()
+                            } else {
+                                client_first_msg.clone()
+                            };
 
                         let client_nonce = client_first_bare
                             .split(',')
@@ -586,20 +653,26 @@ async fn handle_connection_with_timeout(
                         let salt_b64 = base64_encode(&salt_bytes);
 
                         // Step 3: Send AuthenticationSASLContinue (server-first-message)
-                        let server_first_msg = format!(
-                            "r={},s={},i={}",
-                            combined_nonce, salt_b64, iterations
-                        );
-                        send_message(&mut stream, &BackendMessage::AuthenticationSASLContinue {
-                            data: server_first_msg.as_bytes().to_vec(),
-                        }).await?;
+                        let server_first_msg =
+                            format!("r={},s={},i={}", combined_nonce, salt_b64, iterations);
+                        send_message(
+                            &mut stream,
+                            &BackendMessage::AuthenticationSASLContinue {
+                                data: server_first_msg.as_bytes().to_vec(),
+                            },
+                        )
+                        .await?;
                         stream.flush().await?;
 
                         // Step 4: Receive SASLResponse (client-final-message)
                         let client_final_msg = loop {
                             let pn = stream.read_buf(&mut buf).await?;
-                            if pn == 0 { return Ok(()); }
-                            if let Some(FrontendMessage::PasswordMessage(pw)) = codec::decode_message(&mut buf)? {
+                            if pn == 0 {
+                                return Ok(());
+                            }
+                            if let Some(FrontendMessage::PasswordMessage(pw)) =
+                                codec::decode_message(&mut buf)?
+                            {
                                 break pw;
                             }
                         };
@@ -612,11 +685,8 @@ async fn handle_connection_with_timeout(
                             .unwrap_or("");
 
                         // Derive keys using PBKDF2-HMAC-SHA256
-                        let salted_password = pbkdf2_sha256(
-                            auth_config.password.as_bytes(),
-                            &salt_bytes,
-                            iterations,
-                        );
+                        let salted_password =
+                            pbkdf2_sha256(auth_config.password.as_bytes(), &salt_bytes, iterations);
 
                         let client_key = hmac_sha256(&salted_password, b"Client Key");
                         let stored_key = {
@@ -665,34 +735,43 @@ async fn handle_connection_with_timeout(
                         // Step 5: Send AuthenticationSASLFinal (server signature)
                         let server_sig_b64 = base64_encode(&server_signature);
                         let server_final_msg = format!("v={}", server_sig_b64);
-                        send_message(&mut stream, &BackendMessage::AuthenticationSASLFinal {
-                            data: server_final_msg.as_bytes().to_vec(),
-                        }).await?;
+                        send_message(
+                            &mut stream,
+                            &BackendMessage::AuthenticationSASLFinal {
+                                data: server_final_msg.as_bytes().to_vec(),
+                            },
+                        )
+                        .await?;
                         send_message(&mut stream, &BackendMessage::AuthenticationOk).await?;
                     }
                 }
 
-                // Send initial parameter statuses (must match session GUC defaults)
+                // Send initial parameter statuses (must match session GUC values).
                 // pgjdbc parses server_version to determine feature support.
-                let startup_params: &[(&str, &str)] = &[
-                    ("server_version", "15.0.0"),
-                    ("server_encoding", "UTF8"),
-                    ("client_encoding", "UTF8"),
-                    ("DateStyle", "ISO, MDY"),
-                    ("integer_datetimes", "on"),
-                    ("standard_conforming_strings", "on"),
-                    ("TimeZone", "UTC"),
-                    ("is_superuser", "on"),
-                    ("session_authorization", &session.user),
-                    ("IntervalStyle", "postgres"),
-                    ("application_name", ""),
+                // Use session GUC values so client-supplied startup params are reflected.
+                let app_name = session.get_guc("application_name").unwrap_or("").to_string();
+                let client_enc = session.get_guc("client_encoding").unwrap_or("UTF8").to_string();
+                let datestyle = session.get_guc("datestyle").unwrap_or("ISO, MDY").to_string();
+                let timezone = session.get_guc("timezone").unwrap_or("UTC").to_string();
+                let startup_params: Vec<(&str, String)> = vec![
+                    ("server_version", "15.0.0".into()),
+                    ("server_encoding", "UTF8".into()),
+                    ("client_encoding", client_enc),
+                    ("DateStyle", datestyle),
+                    ("integer_datetimes", "on".into()),
+                    ("standard_conforming_strings", "on".into()),
+                    ("TimeZone", timezone),
+                    ("is_superuser", "on".into()),
+                    ("session_authorization", session.user.clone()),
+                    ("IntervalStyle", "postgres".into()),
+                    ("application_name", app_name),
                 ];
-                for (name, value) in startup_params {
+                for (name, value) in &startup_params {
                     send_message(
                         &mut stream,
                         &BackendMessage::ParameterStatus {
                             name: name.to_string(),
-                            value: value.to_string(),
+                            value: value.clone(),
                         },
                     )
                     .await?;
@@ -734,7 +813,9 @@ async fn handle_connection_with_timeout(
         if current > max_connections {
             tracing::warn!(
                 "Connection rejected post-startup: {} active (max {}), session {}",
-                current, max_connections, session_id
+                current,
+                max_connections,
+                session_id
             );
             let msg = BackendMessage::ErrorResponse {
                 severity: "FATAL".into(),
@@ -756,11 +837,18 @@ async fn handle_connection_with_timeout(
             match tokio::time::timeout(idle_dur, stream.read_buf(&mut buf)).await {
                 Ok(result) => result?,
                 Err(_) => {
-                    tracing::info!("Idle timeout ({}ms) for session {}", idle_timeout_ms, session_id);
+                    tracing::info!(
+                        "Idle timeout ({}ms) for session {}",
+                        idle_timeout_ms,
+                        session_id
+                    );
                     let msg = BackendMessage::ErrorResponse {
                         severity: "FATAL".into(),
                         code: "57P01".into(),
-                        message: format!("terminating connection due to idle timeout ({}ms)", idle_timeout_ms),
+                        message: format!(
+                            "terminating connection due to idle timeout ({}ms)",
+                            idle_timeout_ms
+                        ),
                     };
                     let _ = send_message(&mut stream, &msg).await;
                     return Ok(());
@@ -778,7 +866,27 @@ async fn handle_connection_with_timeout(
             return Ok(());
         }
 
+        // When true, discard all extended-query messages until Sync
+        // (per PG protocol: error during extended query → skip to Sync).
+        let mut extended_error = false;
+
         while let Some(msg) = codec::decode_message(&mut buf)? {
+            // If in error state, discard everything except Sync
+            if extended_error {
+                if matches!(msg, FrontendMessage::Sync) {
+                    extended_error = false;
+                    send_message(
+                        &mut stream,
+                        &BackendMessage::ReadyForQuery {
+                            txn_status: session.txn_status_byte(),
+                        },
+                    )
+                    .await?;
+                }
+                // Discard Bind/Describe/Execute/Close/Flush until Sync
+                continue;
+            }
+
             match msg {
                 FrontendMessage::Query(sql) => {
                     tracing::debug!("Query (session {}): {}", session_id, sql);
@@ -786,37 +894,46 @@ async fn handle_connection_with_timeout(
                     // Check for cancellation
                     if cancelled.swap(false, Ordering::SeqCst) {
                         tracing::info!("Query cancelled for session {}", session_id);
-                        send_message(&mut stream, &BackendMessage::ErrorResponse {
-                            severity: "ERROR".into(),
-                            code: "57014".into(),
-                            message: "canceling statement due to user request".into(),
-                        }).await?;
+                        send_message(
+                            &mut stream,
+                            &BackendMessage::ErrorResponse {
+                                severity: "ERROR".into(),
+                                code: "57014".into(),
+                                message: "canceling statement due to user request".into(),
+                            },
+                        )
+                        .await?;
                         send_message(
                             &mut stream,
                             &BackendMessage::ReadyForQuery {
                                 txn_status: session.txn_status_byte(),
                             },
-                        ).await?;
+                        )
+                        .await?;
                         continue;
                     }
 
                     // Check for SET statement_timeout
                     if let Some(timeout_ms) = parse_set_statement_timeout(&sql) {
                         session.statement_timeout_ms = timeout_ms;
-                        send_message(&mut stream, &BackendMessage::CommandComplete {
-                            tag: "SET".into(),
-                        }).await?;
+                        send_message(
+                            &mut stream,
+                            &BackendMessage::CommandComplete { tag: "SET".into() },
+                        )
+                        .await?;
                         send_message(
                             &mut stream,
                             &BackendMessage::ReadyForQuery {
                                 txn_status: session.txn_status_byte(),
                             },
-                        ).await?;
+                        )
+                        .await?;
                         continue;
                     }
 
                     let responses = if session.statement_timeout_ms > 0 {
-                        let timeout_dur = std::time::Duration::from_millis(session.statement_timeout_ms);
+                        let timeout_dur =
+                            std::time::Duration::from_millis(session.statement_timeout_ms);
                         let handler_ref = &handler;
                         match tokio::time::timeout(
                             timeout_dur,
@@ -829,7 +946,9 @@ async fn handle_connection_with_timeout(
                                     (responses, sess)
                                 }
                             }),
-                        ).await {
+                        )
+                        .await
+                        {
                             Ok(Ok((responses, returned_session))) => {
                                 session.restore_from_timeout(returned_session);
                                 responses
@@ -842,11 +961,18 @@ async fn handle_connection_with_timeout(
                                 }]
                             }
                             Err(_) => {
-                                tracing::warn!("Statement timeout ({}ms) for session {}", session.statement_timeout_ms, session_id);
+                                tracing::warn!(
+                                    "Statement timeout ({}ms) for session {}",
+                                    session.statement_timeout_ms,
+                                    session_id
+                                );
                                 vec![BackendMessage::ErrorResponse {
                                     severity: "ERROR".into(),
                                     code: "57014".into(),
-                                    message: format!("canceling statement due to statement timeout ({}ms)", session.statement_timeout_ms),
+                                    message: format!(
+                                        "canceling statement due to statement timeout ({}ms)",
+                                        session.statement_timeout_ms
+                                    ),
                                 }]
                             }
                         }
@@ -933,7 +1059,8 @@ async fn handle_connection_with_timeout(
                                     }
                                     FrontendMessage::CopyDone => {
                                         // Process all collected data
-                                        let result_msgs = handler.handle_copy_data(&copy_buf, &mut session);
+                                        let result_msgs =
+                                            handler.handle_copy_data(&copy_buf, &mut session);
                                         for msg in &result_msgs {
                                             send_message(&mut stream, msg).await?;
                                         }
@@ -943,31 +1070,47 @@ async fn handle_connection_with_timeout(
                                             &BackendMessage::ReadyForQuery {
                                                 txn_status: session.txn_status_byte(),
                                             },
-                                        ).await?;
+                                        )
+                                        .await?;
                                         // Break out of COPY receive loop
                                         copy_buf.clear();
                                         // Use a flag to break the outer read loop too
                                         break;
                                     }
                                     FrontendMessage::CopyFail(reason) => {
-                                        tracing::warn!("COPY FROM STDIN failed (session {}): {}", session_id, reason);
+                                        tracing::warn!(
+                                            "COPY FROM STDIN failed (session {}): {}",
+                                            session_id,
+                                            reason
+                                        );
                                         session.copy_state = None;
-                                        send_message(&mut stream, &BackendMessage::ErrorResponse {
-                                            severity: "ERROR".into(),
-                                            code: "57014".into(),
-                                            message: format!("COPY FROM STDIN failed: {}", reason),
-                                        }).await?;
+                                        send_message(
+                                            &mut stream,
+                                            &BackendMessage::ErrorResponse {
+                                                severity: "ERROR".into(),
+                                                code: "57014".into(),
+                                                message: format!(
+                                                    "COPY FROM STDIN failed: {}",
+                                                    reason
+                                                ),
+                                            },
+                                        )
+                                        .await?;
                                         send_message(
                                             &mut stream,
                                             &BackendMessage::ReadyForQuery {
                                                 txn_status: session.txn_status_byte(),
                                             },
-                                        ).await?;
+                                        )
+                                        .await?;
                                         break;
                                     }
                                     _ => {
                                         // Unexpected message during COPY — abort
-                                        tracing::warn!("Unexpected message during COPY (session {})", session_id);
+                                        tracing::warn!(
+                                            "Unexpected message during COPY (session {})",
+                                            session_id
+                                        );
                                         session.copy_state = None;
                                         break;
                                     }
@@ -983,11 +1126,15 @@ async fn handle_connection_with_timeout(
 
                     // Deliver pending LISTEN notifications before ReadyForQuery
                     for notif in session.notifications.drain_pending() {
-                        send_message(&mut stream, &BackendMessage::NotificationResponse {
-                            process_id: notif.sender_pid,
-                            channel: notif.channel,
-                            payload: notif.payload,
-                        }).await?;
+                        send_message(
+                            &mut stream,
+                            &BackendMessage::NotificationResponse {
+                                process_id: notif.sender_pid,
+                                channel: notif.channel,
+                                payload: notif.payload,
+                            },
+                        )
+                        .await?;
                     }
 
                     // Always send ReadyForQuery after query processing
@@ -999,11 +1146,23 @@ async fn handle_connection_with_timeout(
                     )
                     .await?;
                 }
-                FrontendMessage::Parse { name, query, param_types } => {
-                    tracing::debug!("Parse (session {}): name={}, query={}, params={}", session_id, name, query, param_types.len());
+                FrontendMessage::Parse {
+                    name,
+                    query,
+                    param_types,
+                } => {
+                    tracing::debug!(
+                        "Parse (session {}): name={}, query={}, params={}",
+                        session_id,
+                        name,
+                        query,
+                        param_types.len()
+                    );
                     // Try to parse+bind+plan the query for the plan-based path.
                     let parse_start = std::time::Instant::now();
-                    let (plan, inferred_param_types, row_desc) = match handler.prepare_statement(&query) {
+                    let (plan, inferred_param_types, row_desc) = match handler
+                        .prepare_statement(&query)
+                    {
                         Ok((p, ipt, rd)) => {
                             let dur = parse_start.elapsed().as_micros() as u64;
                             falcon_observability::record_prepared_stmt_parse_duration_us(dur, true);
@@ -1012,7 +1171,9 @@ async fn handle_connection_with_timeout(
                         }
                         Err(_e) => {
                             let dur = parse_start.elapsed().as_micros() as u64;
-                            falcon_observability::record_prepared_stmt_parse_duration_us(dur, false);
+                            falcon_observability::record_prepared_stmt_parse_duration_us(
+                                dur, false,
+                            );
                             falcon_observability::record_prepared_stmt_op("parse", "legacy");
                             // Fall back to legacy text-substitution path
                             (None, vec![], vec![])
@@ -1023,7 +1184,10 @@ async fn handle_connection_with_timeout(
                     let effective_param_oids = if !param_types.is_empty() {
                         param_types.clone()
                     } else {
-                        inferred_param_types.iter().map(|t| handler.datatype_to_oid(t.as_ref())).collect()
+                        inferred_param_types
+                            .iter()
+                            .map(|t| handler.datatype_to_oid(t.as_ref()))
+                            .collect()
                     };
                     session.prepared_statements.insert(
                         name.clone(),
@@ -1035,68 +1199,117 @@ async fn handle_connection_with_timeout(
                             row_desc,
                         },
                     );
-                    falcon_observability::record_prepared_stmt_active(session.prepared_statements.len());
+                    falcon_observability::record_prepared_stmt_active(
+                        session.prepared_statements.len(),
+                    );
                     send_message(&mut stream, &BackendMessage::ParseComplete).await?;
                 }
-                FrontendMessage::Bind { portal, statement, param_formats, param_values, .. } => {
-                    tracing::debug!("Bind (session {}): portal={}, stmt={}, params={}, formats={}", session_id, portal, statement, param_values.len(), param_formats.len());
+                FrontendMessage::Bind {
+                    portal,
+                    statement,
+                    param_formats,
+                    param_values,
+                    ..
+                } => {
+                    tracing::debug!(
+                        "Bind (session {}): portal={}, stmt={}, params={}, formats={}",
+                        session_id,
+                        portal,
+                        statement,
+                        param_values.len(),
+                        param_formats.len()
+                    );
                     let bind_start = std::time::Instant::now();
                     falcon_observability::record_prepared_stmt_param_count(param_values.len());
                     let ps = session.prepared_statements.get(&statement);
                     let (plan, params_datum, bound_sql) = if let Some(ps) = ps {
-                        let datum_params: Vec<falcon_common::datum::Datum> = param_values.iter().enumerate().map(|(i, pv)| {
-                            let fmt = resolve_param_format(&param_formats, i);
-                            let type_hint = ps.inferred_param_types.get(i).and_then(|t| t.as_ref());
-                            if fmt == 1 {
-                                decode_param_value_binary(pv, type_hint)
-                            } else {
-                                decode_param_value(pv, type_hint)
-                            }
-                        }).collect();
+                        let datum_params: Vec<falcon_common::datum::Datum> = param_values
+                            .iter()
+                            .enumerate()
+                            .map(|(i, pv)| {
+                                let fmt = resolve_param_format(&param_formats, i);
+                                let type_hint =
+                                    ps.inferred_param_types.get(i).and_then(|t| t.as_ref());
+                                if fmt == 1 {
+                                    decode_param_value_binary(pv, type_hint)
+                                } else {
+                                    decode_param_value(pv, type_hint)
+                                }
+                            })
+                            .collect();
                         let bound_sql = bind_params(&ps.query, &param_values);
                         (ps.plan.clone(), datum_params, bound_sql)
                     } else {
                         (None, vec![], String::new())
                     };
                     let path = if plan.is_some() { "plan" } else { "legacy" };
-                    session.portals.insert(portal.clone(), crate::session::Portal {
-                        plan,
-                        params: params_datum,
-                        bound_sql,
-                    });
+                    session.portals.insert(
+                        portal.clone(),
+                        crate::session::Portal {
+                            plan,
+                            params: params_datum,
+                            bound_sql,
+                        },
+                    );
                     let bind_dur = bind_start.elapsed().as_micros() as u64;
                     falcon_observability::record_prepared_stmt_bind_duration_us(bind_dur);
                     falcon_observability::record_prepared_stmt_op("bind", path);
-                    falcon_observability::record_prepared_stmt_portals_active(session.portals.len());
+                    falcon_observability::record_prepared_stmt_portals_active(
+                        session.portals.len(),
+                    );
                     send_message(&mut stream, &BackendMessage::BindComplete).await?;
                 }
                 FrontendMessage::Describe { kind, name } => {
-                    tracing::debug!("Describe (session {}): kind={}, name={}", session_id, kind as char, name);
-                    falcon_observability::record_prepared_stmt_op("describe", if kind == b'S' { "statement" } else { "portal" });
+                    tracing::debug!(
+                        "Describe (session {}): kind={}, name={}",
+                        session_id,
+                        kind as char,
+                        name
+                    );
+                    falcon_observability::record_prepared_stmt_op(
+                        "describe",
+                        if kind == b'S' { "statement" } else { "portal" },
+                    );
 
                     if kind == b'S' {
                         // Statement describe: ParameterDescription + RowDescription/NoData
                         if let Some(ps) = session.prepared_statements.get(&name) {
-                            send_message(&mut stream, &BackendMessage::ParameterDescription {
-                                type_oids: ps.param_types.clone(),
-                            }).await?;
+                            send_message(
+                                &mut stream,
+                                &BackendMessage::ParameterDescription {
+                                    type_oids: ps.param_types.clone(),
+                                },
+                            )
+                            .await?;
                             // Use stored row_desc if available
                             if !ps.row_desc.is_empty() {
-                                let fields = ps.row_desc.iter().map(|fd| crate::codec::FieldDescription {
-                                    name: fd.name.clone(),
-                                    table_oid: 0,
-                                    column_attr: 0,
-                                    type_oid: fd.type_oid,
-                                    type_len: fd.type_len,
-                                    type_modifier: -1,
-                                    format_code: 0,
-                                }).collect::<Vec<_>>();
-                                send_message(&mut stream, &BackendMessage::RowDescription { fields }).await?;
+                                let fields = ps
+                                    .row_desc
+                                    .iter()
+                                    .map(|fd| crate::codec::FieldDescription {
+                                        name: fd.name.clone(),
+                                        table_oid: 0,
+                                        column_attr: 0,
+                                        type_oid: fd.type_oid,
+                                        type_len: fd.type_len,
+                                        type_modifier: -1,
+                                        format_code: 0,
+                                    })
+                                    .collect::<Vec<_>>();
+                                send_message(
+                                    &mut stream,
+                                    &BackendMessage::RowDescription { fields },
+                                )
+                                .await?;
                             } else {
                                 // Fallback: describe by re-parsing
                                 match handler.describe_query(&ps.query) {
                                     Ok(fields) if !fields.is_empty() => {
-                                        send_message(&mut stream, &BackendMessage::RowDescription { fields }).await?;
+                                        send_message(
+                                            &mut stream,
+                                            &BackendMessage::RowDescription { fields },
+                                        )
+                                        .await?;
                                     }
                                     _ => {
                                         send_message(&mut stream, &BackendMessage::NoData).await?;
@@ -1104,17 +1317,26 @@ async fn handle_connection_with_timeout(
                                 }
                             }
                         } else {
-                            send_message(&mut stream, &BackendMessage::ParameterDescription { type_oids: vec![] }).await?;
+                            send_message(
+                                &mut stream,
+                                &BackendMessage::ParameterDescription { type_oids: vec![] },
+                            )
+                            .await?;
                             send_message(&mut stream, &BackendMessage::NoData).await?;
                         }
                     } else {
                         // Portal describe
-                        let sql_for_describe = session.portals.get(&name).map(|p| p.bound_sql.clone());
+                        let sql_for_describe =
+                            session.portals.get(&name).map(|p| p.bound_sql.clone());
                         if let Some(ref sql) = sql_for_describe {
                             if !sql.is_empty() {
                                 match handler.describe_query(sql) {
                                     Ok(fields) if !fields.is_empty() => {
-                                        send_message(&mut stream, &BackendMessage::RowDescription { fields }).await?;
+                                        send_message(
+                                            &mut stream,
+                                            &BackendMessage::RowDescription { fields },
+                                        )
+                                        .await?;
                                     }
                                     _ => {
                                         send_message(&mut stream, &BackendMessage::NoData).await?;
@@ -1135,7 +1357,8 @@ async fn handle_connection_with_timeout(
                     if let Some(p) = portal_data {
                         // Helper: run the execution with optional statement timeout.
                         let responses: Vec<BackendMessage> = if session.statement_timeout_ms > 0 {
-                            let timeout_dur = std::time::Duration::from_millis(session.statement_timeout_ms);
+                            let timeout_dur =
+                                std::time::Duration::from_millis(session.statement_timeout_ms);
                             let handler_ref = &handler;
                             match tokio::time::timeout(
                                 timeout_dur,
@@ -1145,19 +1368,27 @@ async fn handle_connection_with_timeout(
                                     let mut sess = session.take_for_timeout();
                                     move || {
                                         let responses = if let Some(ref plan) = p.plan {
-                                            falcon_observability::record_prepared_stmt_op("execute", "plan");
+                                            falcon_observability::record_prepared_stmt_op(
+                                                "execute", "plan",
+                                            );
                                             handler.execute_plan(plan, &p.params, &mut sess)
                                         } else if !p.bound_sql.is_empty() {
-                                            falcon_observability::record_prepared_stmt_op("execute", "legacy");
+                                            falcon_observability::record_prepared_stmt_op(
+                                                "execute", "legacy",
+                                            );
                                             handler.handle_query(&p.bound_sql, &mut sess)
                                         } else {
-                                            falcon_observability::record_prepared_stmt_op("execute", "empty");
+                                            falcon_observability::record_prepared_stmt_op(
+                                                "execute", "empty",
+                                            );
                                             vec![BackendMessage::EmptyQueryResponse]
                                         };
                                         (responses, sess)
                                     }
                                 }),
-                            ).await {
+                            )
+                            .await
+                            {
                                 Ok(Ok((responses, returned_session))) => {
                                     session.restore_from_timeout(returned_session);
                                     responses
@@ -1170,7 +1401,8 @@ async fn handle_connection_with_timeout(
                                 Err(_) => {
                                     tracing::warn!(
                                         "Execute timeout ({}ms) for session {}",
-                                        session.statement_timeout_ms, session_id
+                                        session.statement_timeout_ms,
+                                        session_id
                                     );
                                     vec![BackendMessage::ErrorResponse {
                                         severity: "ERROR".into(),
@@ -1194,10 +1426,18 @@ async fn handle_connection_with_timeout(
                         };
 
                         let exec_dur = exec_start.elapsed().as_micros() as u64;
-                        let success = !responses.iter().any(|r| matches!(r, BackendMessage::ErrorResponse { .. }));
-                        falcon_observability::record_prepared_stmt_execute_duration_us(exec_dur, success);
+                        let has_error = responses
+                            .iter()
+                            .any(|r| matches!(r, BackendMessage::ErrorResponse { .. }));
+                        falcon_observability::record_prepared_stmt_execute_duration_us(
+                            exec_dur, !has_error,
+                        );
                         for response in &responses {
                             send_message(&mut stream, response).await?;
+                        }
+                        if has_error {
+                            // Per PG protocol: error during extended query → discard until Sync
+                            extended_error = true;
                         }
                     } else {
                         falcon_observability::record_prepared_stmt_op("execute", "empty");
@@ -1217,11 +1457,15 @@ async fn handle_connection_with_timeout(
                     if kind == b'S' {
                         session.prepared_statements.remove(&name);
                         falcon_observability::record_prepared_stmt_op("close", "statement");
-                        falcon_observability::record_prepared_stmt_active(session.prepared_statements.len());
+                        falcon_observability::record_prepared_stmt_active(
+                            session.prepared_statements.len(),
+                        );
                     } else {
                         session.portals.remove(&name);
                         falcon_observability::record_prepared_stmt_op("close", "portal");
-                        falcon_observability::record_prepared_stmt_portals_active(session.portals.len());
+                        falcon_observability::record_prepared_stmt_portals_active(
+                            session.portals.len(),
+                        );
                     }
                     send_message(&mut stream, &BackendMessage::CloseComplete).await?;
                 }
@@ -1233,10 +1477,7 @@ async fn handle_connection_with_timeout(
                     return Ok(());
                 }
                 _ => {
-                    tracing::warn!(
-                        "Unexpected message in query phase (session {})",
-                        session_id
-                    );
+                    tracing::warn!("Unexpected message in query phase (session {})", session_id);
                 }
             }
         }
@@ -1322,29 +1563,44 @@ fn decode_param_value(
     let s = text.as_ref();
 
     match type_hint {
-        Some(DataType::Int32) => s.parse::<i32>().map(Datum::Int32).unwrap_or(Datum::Text(s.to_string())),
-        Some(DataType::Int64) => s.parse::<i64>().map(Datum::Int64).unwrap_or(Datum::Text(s.to_string())),
-        Some(DataType::Float64) => s.parse::<f64>().map(Datum::Float64).unwrap_or(Datum::Text(s.to_string())),
-        Some(DataType::Boolean) => {
-            match s.to_lowercase().as_str() {
-                "t" | "true" | "1" | "yes" | "on" => Datum::Boolean(true),
-                "f" | "false" | "0" | "no" | "off" => Datum::Boolean(false),
-                _ => Datum::Text(s.to_string()),
-            }
-        }
+        Some(DataType::Int32) => s
+            .parse::<i32>()
+            .map(Datum::Int32)
+            .unwrap_or(Datum::Text(s.to_string())),
+        Some(DataType::Int64) => s
+            .parse::<i64>()
+            .map(Datum::Int64)
+            .unwrap_or(Datum::Text(s.to_string())),
+        Some(DataType::Float64) => s
+            .parse::<f64>()
+            .map(Datum::Float64)
+            .unwrap_or(Datum::Text(s.to_string())),
+        Some(DataType::Boolean) => match s.to_lowercase().as_str() {
+            "t" | "true" | "1" | "yes" | "on" => Datum::Boolean(true),
+            "f" | "false" | "0" | "no" | "off" => Datum::Boolean(false),
+            _ => Datum::Text(s.to_string()),
+        },
         Some(DataType::Text) => Datum::Text(s.to_string()),
         Some(DataType::Timestamp) => Datum::Text(s.to_string()), // timestamp stored as text for now
         Some(DataType::Date) => Datum::Text(s.to_string()),
         Some(DataType::Array(_)) => Datum::Text(s.to_string()), // arrays as text for now
         Some(DataType::Jsonb) => Datum::Text(s.to_string()),    // jsonb as text for now
-        Some(DataType::Decimal(_, _)) => Datum::parse_decimal(s).unwrap_or(Datum::Text(s.to_string())),
-        Some(DataType::Time) | Some(DataType::Interval) | Some(DataType::Uuid) => Datum::Text(s.to_string()),
+        Some(DataType::Decimal(_, _)) => {
+            Datum::parse_decimal(s).unwrap_or(Datum::Text(s.to_string()))
+        }
+        Some(DataType::Time) | Some(DataType::Interval) | Some(DataType::Uuid) => {
+            Datum::Text(s.to_string())
+        }
         Some(DataType::Bytea) => {
             // Accept PG hex format: \x<hex> or raw bytes as text
             let hex_str = s.strip_prefix("\\x").unwrap_or(s);
             let bytes = (0..hex_str.len())
                 .step_by(2)
-                .filter_map(|i| hex_str.get(i..i+2).and_then(|h| u8::from_str_radix(h, 16).ok()))
+                .filter_map(|i| {
+                    hex_str
+                        .get(i..i + 2)
+                        .and_then(|h| u8::from_str_radix(h, 16).ok())
+                })
                 .collect();
             Datum::Bytea(bytes)
         }
@@ -1406,14 +1662,15 @@ fn decode_param_value_binary(
             } else {
                 // Fallback: try text parse
                 let s = String::from_utf8_lossy(bytes);
-                s.parse::<i32>().map(Datum::Int32).unwrap_or(Datum::Text(s.into_owned()))
+                s.parse::<i32>()
+                    .map(Datum::Int32)
+                    .unwrap_or(Datum::Text(s.into_owned()))
             }
         }
         Some(DataType::Int64) => {
             if bytes.len() == 8 {
                 let v = i64::from_be_bytes([
-                    bytes[0], bytes[1], bytes[2], bytes[3],
-                    bytes[4], bytes[5], bytes[6], bytes[7],
+                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
                 ]);
                 Datum::Int64(v)
             } else if bytes.len() == 4 {
@@ -1422,14 +1679,15 @@ fn decode_param_value_binary(
                 Datum::Int64(v as i64)
             } else {
                 let s = String::from_utf8_lossy(bytes);
-                s.parse::<i64>().map(Datum::Int64).unwrap_or(Datum::Text(s.into_owned()))
+                s.parse::<i64>()
+                    .map(Datum::Int64)
+                    .unwrap_or(Datum::Text(s.into_owned()))
             }
         }
         Some(DataType::Float64) => {
             if bytes.len() == 8 {
                 let v = f64::from_be_bytes([
-                    bytes[0], bytes[1], bytes[2], bytes[3],
-                    bytes[4], bytes[5], bytes[6], bytes[7],
+                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
                 ]);
                 Datum::Float64(v)
             } else if bytes.len() == 4 {
@@ -1438,7 +1696,9 @@ fn decode_param_value_binary(
                 Datum::Float64(v as f64)
             } else {
                 let s = String::from_utf8_lossy(bytes);
-                s.parse::<f64>().map(Datum::Float64).unwrap_or(Datum::Text(s.into_owned()))
+                s.parse::<f64>()
+                    .map(Datum::Float64)
+                    .unwrap_or(Datum::Text(s.into_owned()))
             }
         }
         Some(DataType::Boolean) => {
@@ -1456,11 +1716,14 @@ fn decode_param_value_binary(
             // Binary format: raw bytes, no encoding needed
             Datum::Bytea(bytes.to_vec())
         }
-        Some(DataType::Text) | Some(DataType::Timestamp) | Some(DataType::Date)
-        | Some(DataType::Jsonb) | Some(DataType::Array(_))
-        | Some(DataType::Time) | Some(DataType::Interval) | Some(DataType::Uuid) => {
-            Datum::Text(String::from_utf8_lossy(bytes).into_owned())
-        }
+        Some(DataType::Text)
+        | Some(DataType::Timestamp)
+        | Some(DataType::Date)
+        | Some(DataType::Jsonb)
+        | Some(DataType::Array(_))
+        | Some(DataType::Time)
+        | Some(DataType::Interval)
+        | Some(DataType::Uuid) => Datum::Text(String::from_utf8_lossy(bytes).into_owned()),
         Some(DataType::Decimal(_, _)) => {
             let s = String::from_utf8_lossy(bytes);
             Datum::parse_decimal(&s).unwrap_or(Datum::Text(s.into_owned()))
@@ -1474,8 +1737,8 @@ fn decode_param_value_binary(
                 }
                 8 => {
                     let v = i64::from_be_bytes([
-                        bytes[0], bytes[1], bytes[2], bytes[3],
-                        bytes[4], bytes[5], bytes[6], bytes[7],
+                        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
+                        bytes[7],
                     ]);
                     Datum::Int64(v)
                 }
@@ -1503,7 +1766,11 @@ fn parse_set_statement_timeout(sql: &str) -> Option<u64> {
         return None;
     };
     // Strip optional quotes and trailing semicolons
-    let value = rest.trim_end_matches(';').trim().trim_matches('\'').trim_matches('"');
+    let value = rest
+        .trim_end_matches(';')
+        .trim()
+        .trim_matches('\'')
+        .trim_matches('"');
     // "0" or "default" means no timeout
     if value == "default" || value == "0" {
         return Some(0);
@@ -1607,27 +1874,51 @@ mod tests {
 
     #[test]
     fn test_parse_set_statement_timeout_equals() {
-        assert_eq!(parse_set_statement_timeout("SET statement_timeout = 5000"), Some(5000));
-        assert_eq!(parse_set_statement_timeout("SET statement_timeout = 0"), Some(0));
-        assert_eq!(parse_set_statement_timeout("set statement_timeout = 100;"), Some(100));
+        assert_eq!(
+            parse_set_statement_timeout("SET statement_timeout = 5000"),
+            Some(5000)
+        );
+        assert_eq!(
+            parse_set_statement_timeout("SET statement_timeout = 0"),
+            Some(0)
+        );
+        assert_eq!(
+            parse_set_statement_timeout("set statement_timeout = 100;"),
+            Some(100)
+        );
     }
 
     #[test]
     fn test_parse_set_statement_timeout_to() {
-        assert_eq!(parse_set_statement_timeout("SET statement_timeout TO 3000"), Some(3000));
-        assert_eq!(parse_set_statement_timeout("SET statement_timeout TO '5000'"), Some(5000));
+        assert_eq!(
+            parse_set_statement_timeout("SET statement_timeout TO 3000"),
+            Some(3000)
+        );
+        assert_eq!(
+            parse_set_statement_timeout("SET statement_timeout TO '5000'"),
+            Some(5000)
+        );
     }
 
     #[test]
     fn test_parse_set_statement_timeout_default() {
-        assert_eq!(parse_set_statement_timeout("SET statement_timeout = default"), Some(0));
-        assert_eq!(parse_set_statement_timeout("SET statement_timeout TO default"), Some(0));
+        assert_eq!(
+            parse_set_statement_timeout("SET statement_timeout = default"),
+            Some(0)
+        );
+        assert_eq!(
+            parse_set_statement_timeout("SET statement_timeout TO default"),
+            Some(0)
+        );
     }
 
     #[test]
     fn test_parse_set_statement_timeout_not_matching() {
         assert_eq!(parse_set_statement_timeout("SELECT 1"), None);
-        assert_eq!(parse_set_statement_timeout("SET search_path = public"), None);
+        assert_eq!(
+            parse_set_statement_timeout("SET search_path = public"),
+            None
+        );
         assert_eq!(parse_set_statement_timeout("SET statement_timeout"), None);
     }
 
@@ -1724,12 +2015,30 @@ mod tests {
     fn test_decode_param_value_boolean_hint() {
         use falcon_common::datum::Datum;
         use falcon_common::types::DataType;
-        assert!(matches!(decode_param_value(&Some(b"true".to_vec()), Some(&DataType::Boolean)), Datum::Boolean(true)));
-        assert!(matches!(decode_param_value(&Some(b"t".to_vec()), Some(&DataType::Boolean)), Datum::Boolean(true)));
-        assert!(matches!(decode_param_value(&Some(b"false".to_vec()), Some(&DataType::Boolean)), Datum::Boolean(false)));
-        assert!(matches!(decode_param_value(&Some(b"f".to_vec()), Some(&DataType::Boolean)), Datum::Boolean(false)));
-        assert!(matches!(decode_param_value(&Some(b"0".to_vec()), Some(&DataType::Boolean)), Datum::Boolean(false)));
-        assert!(matches!(decode_param_value(&Some(b"1".to_vec()), Some(&DataType::Boolean)), Datum::Boolean(true)));
+        assert!(matches!(
+            decode_param_value(&Some(b"true".to_vec()), Some(&DataType::Boolean)),
+            Datum::Boolean(true)
+        ));
+        assert!(matches!(
+            decode_param_value(&Some(b"t".to_vec()), Some(&DataType::Boolean)),
+            Datum::Boolean(true)
+        ));
+        assert!(matches!(
+            decode_param_value(&Some(b"false".to_vec()), Some(&DataType::Boolean)),
+            Datum::Boolean(false)
+        ));
+        assert!(matches!(
+            decode_param_value(&Some(b"f".to_vec()), Some(&DataType::Boolean)),
+            Datum::Boolean(false)
+        ));
+        assert!(matches!(
+            decode_param_value(&Some(b"0".to_vec()), Some(&DataType::Boolean)),
+            Datum::Boolean(false)
+        ));
+        assert!(matches!(
+            decode_param_value(&Some(b"1".to_vec()), Some(&DataType::Boolean)),
+            Datum::Boolean(true)
+        ));
     }
 
     #[test]
@@ -1948,8 +2257,14 @@ mod tests {
     fn test_hmac_sha256_basic() {
         // RFC 4231 Test Case 2: "what do ya want for nothing?" with key "Jefe"
         let result = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
-        let hex = result.iter().map(|b| format!("{:02x}", b)).collect::<String>();
-        assert_eq!(hex, "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+        let hex = result
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>();
+        assert_eq!(
+            hex,
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
     }
 
     #[test]
@@ -2035,14 +2350,17 @@ mod tests {
     #[test]
     fn test_read_only_executor_rejects_dml() {
         use falcon_executor::Executor;
-        use falcon_txn::TxnManager;
         use falcon_storage::engine::StorageEngine;
+        use falcon_txn::TxnManager;
 
         let storage = Arc::new(StorageEngine::new_in_memory());
         let txn_mgr = Arc::new(TxnManager::new(storage.clone()));
         let executor = Executor::new_read_only(storage.clone(), txn_mgr.clone());
 
-        assert!(executor.is_read_only(), "Executor should be in read-only mode");
+        assert!(
+            executor.is_read_only(),
+            "Executor should be in read-only mode"
+        );
 
         // Writable executor should not be read-only
         let rw_executor = Executor::new(storage.clone(), txn_mgr.clone());
@@ -2108,7 +2426,10 @@ mod tests {
         let executor = Arc::new(Executor::new(storage.clone(), txn_mgr.clone()));
         let mut server = PgServer::new("127.0.0.1:0".into(), storage, txn_mgr, executor);
 
-        assert_eq!(server.default_statement_timeout_ms, 0, "Default should be no timeout");
+        assert_eq!(
+            server.default_statement_timeout_ms, 0,
+            "Default should be no timeout"
+        );
         server.set_default_statement_timeout_ms(30_000);
         assert_eq!(server.default_statement_timeout_ms, 30_000);
         // Reset to 0 disables timeout
@@ -2124,7 +2445,10 @@ mod tests {
         let executor = Arc::new(Executor::new(storage.clone(), txn_mgr.clone()));
         let mut server = PgServer::new("127.0.0.1:0".into(), storage, txn_mgr, executor);
 
-        assert_eq!(server.idle_timeout_ms, 0, "Default should be no idle timeout");
+        assert_eq!(
+            server.idle_timeout_ms, 0,
+            "Default should be no idle timeout"
+        );
         server.set_idle_timeout_ms(60_000);
         assert_eq!(server.idle_timeout_ms, 60_000);
     }
@@ -2132,11 +2456,23 @@ mod tests {
     /// parse_set_statement_timeout handles quoted values and semicolons.
     #[test]
     fn test_parse_set_statement_timeout_edge_cases() {
-        assert_eq!(parse_set_statement_timeout("SET statement_timeout = '5000';"), Some(5000));
-        assert_eq!(parse_set_statement_timeout("SET statement_timeout = \"5000\""), Some(5000));
-        assert_eq!(parse_set_statement_timeout("  SET  statement_timeout  =  1000  "), Some(1000));
+        assert_eq!(
+            parse_set_statement_timeout("SET statement_timeout = '5000';"),
+            Some(5000)
+        );
+        assert_eq!(
+            parse_set_statement_timeout("SET statement_timeout = \"5000\""),
+            Some(5000)
+        );
+        assert_eq!(
+            parse_set_statement_timeout("  SET  statement_timeout  =  1000  "),
+            Some(1000)
+        );
         // Non-numeric value that isn't "default" → None
-        assert_eq!(parse_set_statement_timeout("SET statement_timeout = 'abc'"), None);
+        assert_eq!(
+            parse_set_statement_timeout("SET statement_timeout = 'abc'"),
+            None
+        );
     }
 
     /// shutdown_drain_timeout_secs config field has correct default.
@@ -2144,8 +2480,10 @@ mod tests {
     fn test_shutdown_drain_timeout_default() {
         use falcon_common::config::FalconConfig;
         let config = FalconConfig::default();
-        assert_eq!(config.server.shutdown_drain_timeout_secs, 30,
-            "Default drain timeout should be 30 seconds");
+        assert_eq!(
+            config.server.shutdown_drain_timeout_secs, 30,
+            "Default drain timeout should be 30 seconds"
+        );
     }
 
     /// shutdown_drain_timeout_secs can be set to 0 (min 1 enforced in main.rs).

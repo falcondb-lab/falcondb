@@ -119,18 +119,34 @@ fn orders_schema() -> TableSchema {
 
 /// Insert a row on the primary and ship WAL records.
 fn insert_and_ship(group: &ShardReplicaGroup, table_id: TableId, row: OwnedRow, txn: u64, ts: u64) {
-    group.primary.storage
+    group
+        .primary
+        .storage
         .insert(table_id, row.clone(), TxnId(txn))
         .expect("insert failed");
-    group.primary.storage
+    group
+        .primary
+        .storage
         .commit_txn(TxnId(txn), Timestamp(ts), TxnType::Local)
         .expect("commit failed");
-    group.ship_wal_record(WalRecord::Insert { txn_id: TxnId(txn), table_id, row });
-    group.ship_wal_record(WalRecord::CommitTxnLocal { txn_id: TxnId(txn), commit_ts: Timestamp(ts) });
+    group.ship_wal_record(WalRecord::Insert {
+        txn_id: TxnId(txn),
+        table_id,
+        row,
+    });
+    group.ship_wal_record(WalRecord::CommitTxnLocal {
+        txn_id: TxnId(txn),
+        commit_ts: Timestamp(ts),
+    });
 }
 
-fn scan_count(storage: &falcon_storage::engine::StorageEngine, table_id: TableId, ts: u64) -> usize {
-    storage.scan(table_id, TxnId(u64::MAX), Timestamp(ts))
+fn scan_count(
+    storage: &falcon_storage::engine::StorageEngine,
+    table_id: TableId,
+    ts: u64,
+) -> usize {
+    storage
+        .scan(table_id, TxnId(u64::MAX), Timestamp(ts))
         .unwrap_or_default()
         .len()
 }
@@ -140,8 +156,8 @@ fn scan_count(storage: &falcon_storage::engine::StorageEngine, table_id: TableId
 #[test]
 fn scenario_a_basic_wal_replication() {
     let schema = accounts_schema();
-    let group = ShardReplicaGroup::new(ShardId(0), &[schema])
-        .expect("failed to create ShardReplicaGroup");
+    let group =
+        ShardReplicaGroup::new(ShardId(0), &[schema]).expect("failed to create ShardReplicaGroup");
 
     // Write 5 rows on primary
     let rows = vec![
@@ -161,19 +177,28 @@ fn scenario_a_basic_wal_replication() {
     }
 
     // Primary has all rows
-    assert_eq!(scan_count(&group.primary.storage, TableId(1), 1000), 5,
-        "primary should have 5 rows");
+    assert_eq!(
+        scan_count(&group.primary.storage, TableId(1), 1000),
+        5,
+        "primary should have 5 rows"
+    );
 
     // Replica has 0 before catch-up
-    assert_eq!(scan_count(&group.replicas[0].storage, TableId(1), 1000), 0,
-        "replica should have 0 rows before catch-up");
+    assert_eq!(
+        scan_count(&group.replicas[0].storage, TableId(1), 1000),
+        0,
+        "replica should have 0 rows before catch-up"
+    );
 
     // Catch up replica
     group.catch_up_replica(0).expect("catch_up failed");
 
     // Replica now has all rows
-    assert_eq!(scan_count(&group.replicas[0].storage, TableId(1), 1000), 5,
-        "replica should have 5 rows after catch-up");
+    assert_eq!(
+        scan_count(&group.replicas[0].storage, TableId(1), 1000),
+        5,
+        "replica should have 5 rows after catch-up"
+    );
 }
 
 // ── Scenario B: Quorum-ack commit path ───────────────────────────────────────
@@ -194,21 +219,37 @@ fn scenario_b_quorum_ack_commit_path() {
         Datum::Int64(500),
         Datum::Text("Quorum".into()),
     ]);
-    group.inner.primary.storage
+    group
+        .inner
+        .primary
+        .storage
         .insert(TableId(1), row.clone(), TxnId(1))
         .unwrap();
-    group.inner.primary.storage
+    group
+        .inner
+        .primary
+        .storage
         .commit_txn(TxnId(1), Timestamp(10), TxnType::Local)
         .unwrap();
-    group.inner.ship_wal_record(WalRecord::Insert { txn_id: TxnId(1), table_id: TableId(1), row });
-    group.inner.ship_wal_record(WalRecord::CommitTxnLocal { txn_id: TxnId(1), commit_ts: Timestamp(10) });
+    group.inner.ship_wal_record(WalRecord::Insert {
+        txn_id: TxnId(1),
+        table_id: TableId(1),
+        row,
+    });
+    group.inner.ship_wal_record(WalRecord::CommitTxnLocal {
+        txn_id: TxnId(1),
+        commit_ts: Timestamp(10),
+    });
 
     // Catch up replica so it acks LSN
     group.inner.catch_up_replica(0).expect("catch_up failed");
 
     // commit_lsn = the highest LSN the replica has applied (set by catch_up_replica)
     let commit_lsn = group.inner.replicas[0].current_lsn();
-    assert!(commit_lsn > 0, "replica should have applied at least one WAL record");
+    assert!(
+        commit_lsn > 0,
+        "replica should have applied at least one WAL record"
+    );
 
     // SyncReplicationWaiter checks replica.current_lsn() >= commit_lsn — already satisfied
     let waiter = SyncReplicationWaiter::new(ha_config);
@@ -221,8 +262,8 @@ fn scenario_b_quorum_ack_commit_path() {
 #[test]
 fn scenario_c_replica_read_isolation() {
     let schema = accounts_schema();
-    let group = ShardReplicaGroup::new(ShardId(0), &[schema])
-        .expect("failed to create ShardReplicaGroup");
+    let group =
+        ShardReplicaGroup::new(ShardId(0), &[schema]).expect("failed to create ShardReplicaGroup");
 
     // Write rows on primary, do NOT replicate yet
     for i in 1..=3u64 {
@@ -231,17 +272,24 @@ fn scenario_c_replica_read_isolation() {
             Datum::Int64(i as i64 * 100),
             Datum::Text(format!("user_{}", i)),
         ]);
-        group.primary.storage
+        group
+            .primary
+            .storage
             .insert(TableId(1), row, TxnId(i))
             .unwrap();
-        group.primary.storage
+        group
+            .primary
+            .storage
             .commit_txn(TxnId(i), Timestamp(i * 10), TxnType::Local)
             .unwrap();
     }
 
     // Replica sees 0 rows (WAL not shipped yet)
-    assert_eq!(scan_count(&group.replicas[0].storage, TableId(1), 1000), 0,
-        "replica must be isolated before WAL ship");
+    assert_eq!(
+        scan_count(&group.replicas[0].storage, TableId(1), 1000),
+        0,
+        "replica must be isolated before WAL ship"
+    );
 
     // Now ship WAL and catch up
     for i in 1..=3u64 {
@@ -250,13 +298,23 @@ fn scenario_c_replica_read_isolation() {
             Datum::Int64(i as i64 * 100),
             Datum::Text(format!("user_{}", i)),
         ]);
-        group.ship_wal_record(WalRecord::Insert { txn_id: TxnId(i), table_id: TableId(1), row });
-        group.ship_wal_record(WalRecord::CommitTxnLocal { txn_id: TxnId(i), commit_ts: Timestamp(i * 10) });
+        group.ship_wal_record(WalRecord::Insert {
+            txn_id: TxnId(i),
+            table_id: TableId(1),
+            row,
+        });
+        group.ship_wal_record(WalRecord::CommitTxnLocal {
+            txn_id: TxnId(i),
+            commit_ts: Timestamp(i * 10),
+        });
     }
     group.catch_up_replica(0).expect("catch_up failed");
 
-    assert_eq!(scan_count(&group.replicas[0].storage, TableId(1), 1000), 3,
-        "replica should see 3 rows after replication");
+    assert_eq!(
+        scan_count(&group.replicas[0].storage, TableId(1), 1000),
+        3,
+        "replica should see 3 rows after replication"
+    );
 }
 
 // ── Scenario D: Failover + post-promote write ────────────────────────────────
@@ -264,8 +322,8 @@ fn scenario_c_replica_read_isolation() {
 #[test]
 fn scenario_d_failover_and_post_promote_write() {
     let schema = accounts_schema();
-    let mut group = ShardReplicaGroup::new(ShardId(0), &[schema])
-        .expect("failed to create ShardReplicaGroup");
+    let mut group =
+        ShardReplicaGroup::new(ShardId(0), &[schema]).expect("failed to create ShardReplicaGroup");
 
     // Write 3 rows and replicate
     for i in 1..=3u64 {
@@ -280,7 +338,10 @@ fn scenario_d_failover_and_post_promote_write() {
 
     // Promote replica
     group.promote(0).expect("promote failed");
-    assert!(!group.primary.is_read_only(), "promoted primary must be writable");
+    assert!(
+        !group.primary.is_read_only(),
+        "promoted primary must be writable"
+    );
 
     // Write 2 more rows on promoted primary
     for i in 4..=5u64 {
@@ -289,17 +350,24 @@ fn scenario_d_failover_and_post_promote_write() {
             Datum::Int64(i as i64 * 1000),
             Datum::Text(format!("post_{}", i)),
         ]);
-        group.primary.storage
+        group
+            .primary
+            .storage
             .insert(TableId(1), row, TxnId(i + 100))
             .unwrap();
-        group.primary.storage
+        group
+            .primary
+            .storage
             .commit_txn(TxnId(i + 100), Timestamp(i * 10 + 100), TxnType::Local)
             .unwrap();
     }
 
     // All 5 rows visible on promoted primary
-    assert_eq!(scan_count(&group.primary.storage, TableId(1), 10000), 5,
-        "promoted primary should have 5 rows total");
+    assert_eq!(
+        scan_count(&group.primary.storage, TableId(1), 10000),
+        5,
+        "promoted primary should have 5 rows total"
+    );
 
     // Metrics
     let metrics = group.metrics.snapshot();
@@ -316,8 +384,12 @@ fn scenario_e_multi_shard_two_phase_commit() {
     let acct_schema = accounts_schema();
     let ord_schema = orders_schema();
     // Create tables on all shards (both schemas available on every shard)
-    sharded.create_table_all(&acct_schema).expect("create accounts");
-    sharded.create_table_all(&ord_schema).expect("create orders");
+    sharded
+        .create_table_all(&acct_schema)
+        .expect("create accounts");
+    sharded
+        .create_table_all(&ord_schema)
+        .expect("create orders");
 
     let coordinator = TwoPhaseCoordinator::new(sharded.clone(), Duration::from_secs(5));
 
@@ -333,10 +405,7 @@ fn scenario_e_multi_shard_two_phase_commit() {
                 Datum::Text("CrossShard".into()),
             ]);
             engine.insert(TableId(1), acct_row, txn_id)?;
-            let ord_row = OwnedRow::new(vec![
-                Datum::Int32(101),
-                Datum::Int64(500),
-            ]);
+            let ord_row = OwnedRow::new(vec![Datum::Int32(101), Datum::Int64(500)]);
             engine.insert(TableId(2), ord_row, txn_id)?;
             Ok(())
         },
@@ -347,12 +416,21 @@ fn scenario_e_multi_shard_two_phase_commit() {
     // Verify data is present on both shards via shard().storage.scan()
     let shard0 = sharded.shard(ShardId(0)).expect("shard 0 not found");
     let shard1 = sharded.shard(ShardId(1)).expect("shard 1 not found");
-    let acct_count = shard0.storage.scan(TableId(1), TxnId(u64::MAX), Timestamp(u64::MAX))
-        .unwrap_or_default().len();
-    let ord_count = shard1.storage.scan(TableId(2), TxnId(u64::MAX), Timestamp(u64::MAX))
-        .unwrap_or_default().len();
+    let acct_count = shard0
+        .storage
+        .scan(TableId(1), TxnId(u64::MAX), Timestamp(u64::MAX))
+        .unwrap_or_default()
+        .len();
+    let ord_count = shard1
+        .storage
+        .scan(TableId(2), TxnId(u64::MAX), Timestamp(u64::MAX))
+        .unwrap_or_default()
+        .len();
 
-    assert!(acct_count >= 1, "shard 0 should have at least 1 account row");
+    assert!(
+        acct_count >= 1,
+        "shard 0 should have at least 1 account row"
+    );
     assert!(ord_count >= 1, "shard 1 should have at least 1 order row");
 }
 
@@ -361,8 +439,8 @@ fn scenario_e_multi_shard_two_phase_commit() {
 #[test]
 fn scenario_f_gc_safepoint_respects_replica_lsn() {
     let schema = accounts_schema();
-    let group = ShardReplicaGroup::new(ShardId(0), &[schema])
-        .expect("failed to create ShardReplicaGroup");
+    let group =
+        ShardReplicaGroup::new(ShardId(0), &[schema]).expect("failed to create ShardReplicaGroup");
 
     // Write row v1 at ts=10, then update (overwrite) at ts=20
     let row_v1 = OwnedRow::new(vec![
@@ -376,34 +454,68 @@ fn scenario_f_gc_safepoint_respects_replica_lsn() {
         Datum::Text("v2".into()),
     ]);
 
-    group.primary.storage.insert(TableId(1), row_v1.clone(), TxnId(1)).unwrap();
-    group.primary.storage.commit_txn(TxnId(1), Timestamp(10), TxnType::Local).unwrap();
-    group.ship_wal_record(WalRecord::Insert { txn_id: TxnId(1), table_id: TableId(1), row: row_v1.clone() });
-    group.ship_wal_record(WalRecord::CommitTxnLocal { txn_id: TxnId(1), commit_ts: Timestamp(10) });
+    group
+        .primary
+        .storage
+        .insert(TableId(1), row_v1.clone(), TxnId(1))
+        .unwrap();
+    group
+        .primary
+        .storage
+        .commit_txn(TxnId(1), Timestamp(10), TxnType::Local)
+        .unwrap();
+    group.ship_wal_record(WalRecord::Insert {
+        txn_id: TxnId(1),
+        table_id: TableId(1),
+        row: row_v1.clone(),
+    });
+    group.ship_wal_record(WalRecord::CommitTxnLocal {
+        txn_id: TxnId(1),
+        commit_ts: Timestamp(10),
+    });
 
     // Update: overwrite v1 with v2 using update() to avoid DuplicateKey
     let pk_v1 = falcon_storage::memtable::encode_pk(
         &row_v1,
         &[0usize], // column 0 is the PK
     );
-    group.primary.storage.update(TableId(1), &pk_v1, row_v2.clone(), TxnId(2)).unwrap();
-    group.primary.storage.commit_txn(TxnId(2), Timestamp(20), TxnType::Local).unwrap();
+    group
+        .primary
+        .storage
+        .update(TableId(1), &pk_v1, row_v2.clone(), TxnId(2))
+        .unwrap();
+    group
+        .primary
+        .storage
+        .commit_txn(TxnId(2), Timestamp(20), TxnType::Local)
+        .unwrap();
     group.ship_wal_record(WalRecord::Update {
         txn_id: TxnId(2),
         table_id: TableId(1),
         pk: pk_v1,
         new_row: row_v2,
     });
-    group.ship_wal_record(WalRecord::CommitTxnLocal { txn_id: TxnId(2), commit_ts: Timestamp(20) });
+    group.ship_wal_record(WalRecord::CommitTxnLocal {
+        txn_id: TxnId(2),
+        commit_ts: Timestamp(20),
+    });
 
     // Catch up replica
     group.catch_up_replica(0).expect("catch_up failed");
 
     // Advance replica ack to ts=20
-    group.primary.storage.replica_ack_tracker().update_ack(0, 20);
+    group
+        .primary
+        .storage
+        .replica_ack_tracker()
+        .update_ack(0, 20);
 
     // Compute safepoint: min(no active txns → MAX, replica_safe_ts=20) - 1 = 19
-    let replica_safe_ts = group.primary.storage.replica_ack_tracker().min_replica_safe_ts();
+    let replica_safe_ts = group
+        .primary
+        .storage
+        .replica_ack_tracker()
+        .min_replica_safe_ts();
     let safepoint = Timestamp(replica_safe_ts.0.saturating_sub(1));
     assert_eq!(safepoint.0, 19, "safepoint should be 19");
 
@@ -422,7 +534,9 @@ fn scenario_f_gc_safepoint_respects_replica_lsn() {
 
     // v1 (ts=10 <= 19) should be reclaimed since v2 (ts=20) is the newest.
     // v2 (ts=20 > 19) is preserved. Verify the current row is still readable.
-    let rows = group.primary.storage
+    let rows = group
+        .primary
+        .storage
         .scan(TableId(1), TxnId(u64::MAX), Timestamp(1000))
         .unwrap_or_default();
     assert_eq!(rows.len(), 1, "should still have 1 row after GC");
@@ -435,8 +549,8 @@ fn scenario_f_gc_safepoint_respects_replica_lsn() {
 #[test]
 fn scenario_g_concurrent_writes_replication_ordering() {
     let schema = accounts_schema();
-    let group = ShardReplicaGroup::new(ShardId(0), &[schema])
-        .expect("failed to create ShardReplicaGroup");
+    let group =
+        ShardReplicaGroup::new(ShardId(0), &[schema]).expect("failed to create ShardReplicaGroup");
 
     // Write 20 rows in order
     for i in 1..=20u64 {
@@ -456,7 +570,10 @@ fn scenario_g_concurrent_writes_replication_ordering() {
     let replica_count = scan_count(&group.replicas[0].storage, TableId(1), 10000);
     assert_eq!(primary_count, 20, "primary should have 20 rows");
     assert_eq!(replica_count, 20, "replica should have 20 rows");
-    assert_eq!(primary_count, replica_count, "primary and replica must be in sync");
+    assert_eq!(
+        primary_count, replica_count,
+        "primary and replica must be in sync"
+    );
 }
 
 // ── Scenario H: SyncMode::Async returns immediately ──────────────────────────
@@ -483,9 +600,12 @@ fn scenario_h_async_mode_returns_immediately() {
 #[test]
 fn scenario_i_replica_is_read_only() {
     let schema = accounts_schema();
-    let group = ShardReplicaGroup::new(ShardId(0), &[schema])
-        .expect("failed to create ShardReplicaGroup");
+    let group =
+        ShardReplicaGroup::new(ShardId(0), &[schema]).expect("failed to create ShardReplicaGroup");
 
     assert!(!group.primary.is_read_only(), "primary must be writable");
-    assert!(group.replicas[0].is_read_only(), "replica must be read-only");
+    assert!(
+        group.replicas[0].is_read_only(),
+        "replica must be read-only"
+    );
 }

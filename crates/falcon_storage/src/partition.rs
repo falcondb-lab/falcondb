@@ -96,7 +96,9 @@ impl ListBound {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PartitionBound {
     Range(RangeBound),
-    Hash { remainder: u32 },
+    Hash {
+        remainder: u32,
+    },
     List(ListBound),
     /// Default partition catches all rows not matching any other partition.
     Default,
@@ -194,9 +196,16 @@ impl PartitionManager {
     }
 
     /// Detach a partition (keeps data, removes from routing).
-    pub fn detach_partition(&mut self, parent_id: TableId, partition_name: &str) -> Option<PartitionDef> {
+    pub fn detach_partition(
+        &mut self,
+        parent_id: TableId,
+        partition_name: &str,
+    ) -> Option<PartitionDef> {
         let def = self.defs.get_mut(&parent_id)?;
-        let idx = def.partitions.iter().position(|p| p.name.eq_ignore_ascii_case(partition_name))?;
+        let idx = def
+            .partitions
+            .iter()
+            .position(|p| p.name.eq_ignore_ascii_case(partition_name))?;
         let mut part = def.partitions.remove(idx);
         part.attached = false;
         if matches!(part.bound, PartitionBound::Default) {
@@ -304,7 +313,8 @@ impl PartitionManager {
 
     /// List all partitions for a table.
     pub fn list_partitions(&self, parent_id: TableId) -> Vec<&PartitionDef> {
-        self.defs.get(&parent_id)
+        self.defs
+            .get(&parent_id)
             .map(|def| def.partitions.iter().collect())
             .unwrap_or_default()
     }
@@ -341,37 +351,60 @@ mod tests {
             has_default: false,
         });
         // Add partitions: 2024, 2025, default
-        pm.add_partition(parent, "orders_2024".into(), TableId(101),
+        pm.add_partition(
+            parent,
+            "orders_2024".into(),
+            TableId(101),
             PartitionBound::Range(RangeBound::new(
                 Some(Datum::Int32(20240101)),
                 Some(Datum::Int32(20250101)),
-            )));
-        pm.add_partition(parent, "orders_2025".into(), TableId(102),
+            )),
+        );
+        pm.add_partition(
+            parent,
+            "orders_2025".into(),
+            TableId(102),
             PartitionBound::Range(RangeBound::new(
                 Some(Datum::Int32(20250101)),
                 Some(Datum::Int32(20260101)),
-            )));
-        pm.add_partition(parent, "orders_default".into(), TableId(199),
-            PartitionBound::Default);
+            )),
+        );
+        pm.add_partition(
+            parent,
+            "orders_default".into(),
+            TableId(199),
+            PartitionBound::Default,
+        );
         (pm, parent)
     }
 
     #[test]
     fn test_range_routing() {
         let (pm, parent) = make_partitioned_range_table();
-        assert_eq!(pm.route(parent, &Datum::Int32(20240615)), Some(TableId(101)));
-        assert_eq!(pm.route(parent, &Datum::Int32(20250301)), Some(TableId(102)));
+        assert_eq!(
+            pm.route(parent, &Datum::Int32(20240615)),
+            Some(TableId(101))
+        );
+        assert_eq!(
+            pm.route(parent, &Datum::Int32(20250301)),
+            Some(TableId(102))
+        );
         // Out of range → default
-        assert_eq!(pm.route(parent, &Datum::Int32(20230101)), Some(TableId(199)));
+        assert_eq!(
+            pm.route(parent, &Datum::Int32(20230101)),
+            Some(TableId(199))
+        );
     }
 
     #[test]
     fn test_range_pruning() {
         let (pm, parent) = make_partitioned_range_table();
         // Scan for 2024 only
-        let pruned = pm.prune_range(parent,
+        let pruned = pm.prune_range(
+            parent,
             Some(&Datum::Int32(20240101)),
-            Some(&Datum::Int32(20250101)));
+            Some(&Datum::Int32(20250101)),
+        );
         assert!(pruned.contains(&TableId(101)));
         assert!(!pruned.contains(&TableId(102)));
         assert!(pruned.contains(&TableId(199))); // default always included
@@ -391,8 +424,12 @@ mod tests {
             has_default: false,
         });
         for i in 0..4 {
-            pm.add_partition(parent, format!("users_p{}", i), TableId(201 + i as u64),
-                PartitionBound::Hash { remainder: i });
+            pm.add_partition(
+                parent,
+                format!("users_p{}", i),
+                TableId(201 + i as u64),
+                PartitionBound::Hash { remainder: i },
+            );
         }
 
         // Route various IDs — each should land in exactly one partition
@@ -415,23 +452,44 @@ mod tests {
             partitions: vec![],
             has_default: false,
         });
-        pm.add_partition(parent, "sales_us".into(), TableId(301),
+        pm.add_partition(
+            parent,
+            "sales_us".into(),
+            TableId(301),
             PartitionBound::List(ListBound::new(vec![
                 Datum::Text("US".into()),
                 Datum::Text("CA".into()),
-            ])));
-        pm.add_partition(parent, "sales_eu".into(), TableId(302),
+            ])),
+        );
+        pm.add_partition(
+            parent,
+            "sales_eu".into(),
+            TableId(302),
             PartitionBound::List(ListBound::new(vec![
                 Datum::Text("DE".into()),
                 Datum::Text("FR".into()),
                 Datum::Text("UK".into()),
-            ])));
-        pm.add_partition(parent, "sales_default".into(), TableId(399),
-            PartitionBound::Default);
+            ])),
+        );
+        pm.add_partition(
+            parent,
+            "sales_default".into(),
+            TableId(399),
+            PartitionBound::Default,
+        );
 
-        assert_eq!(pm.route(parent, &Datum::Text("US".into())), Some(TableId(301)));
-        assert_eq!(pm.route(parent, &Datum::Text("FR".into())), Some(TableId(302)));
-        assert_eq!(pm.route(parent, &Datum::Text("JP".into())), Some(TableId(399)));
+        assert_eq!(
+            pm.route(parent, &Datum::Text("US".into())),
+            Some(TableId(301))
+        );
+        assert_eq!(
+            pm.route(parent, &Datum::Text("FR".into())),
+            Some(TableId(302))
+        );
+        assert_eq!(
+            pm.route(parent, &Datum::Text("JP".into())),
+            Some(TableId(399))
+        );
     }
 
     #[test]
@@ -445,7 +503,10 @@ mod tests {
         assert_eq!(pm.list_partitions(parent).len(), 2);
 
         // Routing for 2024 dates should now go to default
-        assert_eq!(pm.route(parent, &Datum::Int32(20240615)), Some(TableId(199)));
+        assert_eq!(
+            pm.route(parent, &Datum::Int32(20240615)),
+            Some(TableId(199))
+        );
     }
 
     #[test]
@@ -461,10 +522,18 @@ mod tests {
             partitions: vec![],
             has_default: false,
         });
-        pm.add_partition(parent, "sales_us".into(), TableId(301),
-            PartitionBound::List(ListBound::new(vec![Datum::Text("US".into())])));
-        pm.add_partition(parent, "sales_eu".into(), TableId(302),
-            PartitionBound::List(ListBound::new(vec![Datum::Text("DE".into())])));
+        pm.add_partition(
+            parent,
+            "sales_us".into(),
+            TableId(301),
+            PartitionBound::List(ListBound::new(vec![Datum::Text("US".into())])),
+        );
+        pm.add_partition(
+            parent,
+            "sales_eu".into(),
+            TableId(302),
+            PartitionBound::List(ListBound::new(vec![Datum::Text("DE".into())])),
+        );
 
         let pruned = pm.prune_list(parent, &[Datum::Text("US".into())]);
         assert_eq!(pruned, vec![TableId(301)]);
@@ -489,7 +558,7 @@ mod tests {
     #[test]
     fn test_range_bound_contains() {
         let bound = RangeBound::new(Some(Datum::Int32(10)), Some(Datum::Int32(20)));
-        assert!(bound.contains(&Datum::Int32(10)));  // inclusive lower
+        assert!(bound.contains(&Datum::Int32(10))); // inclusive lower
         assert!(bound.contains(&Datum::Int32(15)));
         assert!(!bound.contains(&Datum::Int32(20))); // exclusive upper
         assert!(!bound.contains(&Datum::Int32(5)));

@@ -75,21 +75,33 @@ impl LsmMemTable {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
 
         let mut map = self.map.write();
-        let old_size = map.get(&key).map(|v| {
-            key.len() + v.data.as_ref().map(|d| d.len()).unwrap_or(0)
-                + std::mem::size_of::<MemTableValue>()
-        }).unwrap_or(0);
+        let old_size = map
+            .get(&key)
+            .map(|v| {
+                key.len()
+                    + v.data.as_ref().map(|d| d.len()).unwrap_or(0)
+                    + std::mem::size_of::<MemTableValue>()
+            })
+            .unwrap_or(0);
 
-        map.insert(key, MemTableValue { data: Some(value), seq });
+        map.insert(
+            key,
+            MemTableValue {
+                data: Some(value),
+                seq,
+            },
+        );
 
         // Update approximate size
         if old_size > 0 {
             // Replacement: subtract old, add new
-            self.approx_bytes.fetch_sub(old_size as u64, Ordering::Relaxed);
+            self.approx_bytes
+                .fetch_sub(old_size as u64, Ordering::Relaxed);
         } else {
             self.entry_count.fetch_add(1, Ordering::Relaxed);
         }
-        self.approx_bytes.fetch_add(entry_size as u64, Ordering::Relaxed);
+        self.approx_bytes
+            .fetch_add(entry_size as u64, Ordering::Relaxed);
 
         Ok(())
     }
@@ -105,19 +117,25 @@ impl LsmMemTable {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
 
         let mut map = self.map.write();
-        let old_size = map.get(&key).map(|v| {
-            key.len() + v.data.as_ref().map(|d| d.len()).unwrap_or(0)
-                + std::mem::size_of::<MemTableValue>()
-        }).unwrap_or(0);
+        let old_size = map
+            .get(&key)
+            .map(|v| {
+                key.len()
+                    + v.data.as_ref().map(|d| d.len()).unwrap_or(0)
+                    + std::mem::size_of::<MemTableValue>()
+            })
+            .unwrap_or(0);
 
         map.insert(key, MemTableValue { data: None, seq });
 
         if old_size > 0 {
-            self.approx_bytes.fetch_sub(old_size as u64, Ordering::Relaxed);
+            self.approx_bytes
+                .fetch_sub(old_size as u64, Ordering::Relaxed);
         } else {
             self.entry_count.fetch_add(1, Ordering::Relaxed);
         }
-        self.approx_bytes.fetch_add(entry_size as u64, Ordering::Relaxed);
+        self.approx_bytes
+            .fetch_add(entry_size as u64, Ordering::Relaxed);
 
         Ok(())
     }

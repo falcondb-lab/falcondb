@@ -1,34 +1,34 @@
+pub mod audit;
+pub mod backup;
+pub mod cdc;
+pub mod columnstore;
+pub mod disk_rowstore;
+pub mod encryption;
 pub mod engine;
 mod engine_ddl;
 mod engine_dml;
 pub mod gc;
-pub mod index;
-pub mod lsm;
-pub mod memtable;
-pub mod memory;
-pub mod mvcc;
-pub mod online_ddl;
-pub mod stats;
-pub mod wal;
-pub mod columnstore;
-pub mod disk_rowstore;
-pub mod lsm_table;
-pub mod encryption;
-pub mod partition;
-pub mod pitr;
-pub mod cdc;
 pub mod group_commit;
-pub mod resource_isolation;
-pub mod tenant_registry;
-pub mod audit;
-pub mod backup;
-pub mod role_catalog;
-pub mod upgrade;
-pub mod metering;
-pub mod security_manager;
 pub mod health;
 pub mod hotspot;
+pub mod index;
+pub mod lsm;
+pub mod lsm_table;
+pub mod memory;
+pub mod memtable;
+pub mod metering;
+pub mod mvcc;
+pub mod online_ddl;
+pub mod partition;
+pub mod pitr;
+pub mod resource_isolation;
+pub mod role_catalog;
+pub mod security_manager;
+pub mod stats;
+pub mod tenant_registry;
+pub mod upgrade;
 pub mod verification;
+pub mod wal;
 
 #[cfg(test)]
 mod tests;
@@ -42,7 +42,11 @@ fn date_to_days_since_epoch(year: i32, month: u32, day: u32) -> Option<i32> {
     // Days in each month (non-leap)
     let days_in_month = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
-    let max_day = if month == 2 && is_leap { 29 } else { days_in_month[month as usize] };
+    let max_day = if month == 2 && is_leap {
+        29
+    } else {
+        days_in_month[month as usize]
+    };
     if day > max_day {
         return None;
     }
@@ -54,7 +58,7 @@ fn date_to_days_since_epoch(year: i32, month: u32, day: u32) -> Option<i32> {
     // Epoch (1970-01-01) in the same formula
     let epoch_days = {
         let ey = 1969i64; // month 1 <= 2, so y = year - 1 = 1969
-        let em = 10i64;   // month 1 => m = 1 + 9 = 10
+        let em = 10i64; // month 1 => m = 1 + 9 = 10
         365 * ey + ey / 4 - ey / 100 + ey / 400 + (153 * em + 2) / 5 + 1 - 1
     };
     Some((era_days - epoch_days) as i32)
@@ -75,7 +79,10 @@ pub(crate) fn eval_cast_datum(
             Datum::Int32(_) => Ok(val),
             Datum::Int64(v) => Ok(Datum::Int32(*v as i32)),
             Datum::Float64(v) => Ok(Datum::Int32(*v as i32)),
-            Datum::Text(s) => s.parse::<i32>().map(Datum::Int32).map_err(|e| e.to_string()),
+            Datum::Text(s) => s
+                .parse::<i32>()
+                .map(Datum::Int32)
+                .map_err(|e| e.to_string()),
             Datum::Boolean(b) => Ok(Datum::Int32(if *b { 1 } else { 0 })),
             _ => Err(format!("Cannot cast {:?} to int", val)),
         },
@@ -83,14 +90,20 @@ pub(crate) fn eval_cast_datum(
             Datum::Int64(_) => Ok(val),
             Datum::Int32(v) => Ok(Datum::Int64(*v as i64)),
             Datum::Float64(v) => Ok(Datum::Int64(*v as i64)),
-            Datum::Text(s) => s.parse::<i64>().map(Datum::Int64).map_err(|e| e.to_string()),
+            Datum::Text(s) => s
+                .parse::<i64>()
+                .map(Datum::Int64)
+                .map_err(|e| e.to_string()),
             _ => Err(format!("Cannot cast {:?} to bigint", val)),
         },
         "float8" => match &val {
             Datum::Float64(_) => Ok(val),
             Datum::Int32(v) => Ok(Datum::Float64(*v as f64)),
             Datum::Int64(v) => Ok(Datum::Float64(*v as f64)),
-            Datum::Text(s) => s.parse::<f64>().map(Datum::Float64).map_err(|e| e.to_string()),
+            Datum::Text(s) => s
+                .parse::<f64>()
+                .map(Datum::Float64)
+                .map_err(|e| e.to_string()),
             _ => Err(format!("Cannot cast {:?} to float8", val)),
         },
         "text" => Ok(Datum::Text(format!("{}", val))),
@@ -125,9 +138,15 @@ pub(crate) fn eval_cast_datum(
                 // Parse YYYY-MM-DD manually without chrono
                 let parts: Vec<&str> = s.split('-').collect();
                 if parts.len() == 3 {
-                    let y: i32 = parts[0].parse().map_err(|_| format!("Cannot cast '{}' to date", s))?;
-                    let m: u32 = parts[1].parse().map_err(|_| format!("Cannot cast '{}' to date", s))?;
-                    let d: u32 = parts[2].parse().map_err(|_| format!("Cannot cast '{}' to date", s))?;
+                    let y: i32 = parts[0]
+                        .parse()
+                        .map_err(|_| format!("Cannot cast '{}' to date", s))?;
+                    let m: u32 = parts[1]
+                        .parse()
+                        .map_err(|_| format!("Cannot cast '{}' to date", s))?;
+                    let d: u32 = parts[2]
+                        .parse()
+                        .map_err(|_| format!("Cannot cast '{}' to date", s))?;
                     let days = date_to_days_since_epoch(y, m, d)
                         .ok_or_else(|| format!("Cannot cast '{}' to date: invalid date", s))?;
                     Ok(Datum::Date(days))

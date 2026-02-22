@@ -7,11 +7,11 @@ use dashmap::DashMap;
 use parking_lot::Mutex;
 
 use falcon_common::error::{StorageError, TxnError};
-pub use falcon_common::types::{TxnPath, TxnType};
-use falcon_common::types::{IsolationLevel, ShardId, Timestamp, TxnContext, TxnId};
-use falcon_common::tenant::{TenantId, SYSTEM_TENANT_ID};
-use falcon_common::security::TxnPriority;
 use falcon_common::kernel::TxnLatencyBreakdown;
+use falcon_common::security::TxnPriority;
+use falcon_common::tenant::{TenantId, SYSTEM_TENANT_ID};
+use falcon_common::types::{IsolationLevel, ShardId, Timestamp, TxnContext, TxnId};
+pub use falcon_common::types::{TxnPath, TxnType};
 use falcon_storage::engine::StorageEngine;
 
 /// Slow-path mode for cross-shard transactions.
@@ -312,8 +312,8 @@ impl TxnHistory {
 }
 
 /// SLA latency targets per priority (microseconds). Transactions exceeding these are violations.
-const SLA_TARGET_HIGH_US: u64 = 10_000;      // 10ms for high-priority
-const SLA_TARGET_NORMAL_US: u64 = 100_000;    // 100ms for normal
+const SLA_TARGET_HIGH_US: u64 = 10_000; // 10ms for high-priority
+const SLA_TARGET_NORMAL_US: u64 = 100_000; // 100ms for normal
 const SLA_TARGET_BACKGROUND_US: u64 = 1_000_000; // 1s for background
 
 /// Maximum latency samples kept per bucket before eviction.
@@ -396,7 +396,12 @@ impl LatencyRecorder {
     }
 
     fn compute_stats(&self) -> LatencyStats {
-        let mut all: Vec<u64> = self.fast_path.iter().chain(self.slow_path.iter()).copied().collect();
+        let mut all: Vec<u64> = self
+            .fast_path
+            .iter()
+            .chain(self.slow_path.iter())
+            .copied()
+            .collect();
         LatencyStats {
             fast_path: percentile_set(&self.fast_path),
             slow_path: percentile_set(&self.slow_path),
@@ -517,13 +522,18 @@ impl TxnStatsCollector {
     }
 
     fn record_implicit_upgrade_blocked(&self) {
-        self.implicit_upgrade_blocked.fetch_add(1, Ordering::Relaxed);
+        self.implicit_upgrade_blocked
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     fn base_snapshot(&self, active_count: usize) -> TxnStatsSnapshot {
         let fast = self.fast_path_commits.load(Ordering::Relaxed);
         let total = self.total_committed.load(Ordering::Relaxed);
-        let ratio = if total > 0 { fast as f64 / total as f64 } else { f64::NAN };
+        let ratio = if total > 0 {
+            fast as f64 / total as f64
+        } else {
+            f64::NAN
+        };
         TxnStatsSnapshot {
             total_committed: total,
             fast_path_commits: fast,
@@ -685,7 +695,8 @@ impl TxnManager {
                 self.stats.record_admission_rejection();
                 tracing::warn!(
                     "Admission control: rejecting txn (WAL backlog {}B >= threshold {}B)",
-                    wal_snap.backlog_bytes, wal_threshold,
+                    wal_snap.backlog_bytes,
+                    wal_threshold,
                 );
                 return Err(TxnError::WalBacklogExceeded(dummy_txn_id));
             }
@@ -703,7 +714,8 @@ impl TxnManager {
                     self.stats.record_admission_rejection();
                     tracing::warn!(
                         "Admission control: rejecting txn (replication lag {} >= threshold {})",
-                        lag, lag_threshold_ms,
+                        lag,
+                        lag_threshold_ms,
                     );
                     return Err(TxnError::ReplicationLagExceeded(dummy_txn_id));
                 }
@@ -715,12 +727,14 @@ impl TxnManager {
 
     /// Set the WAL backlog admission threshold in bytes (0 = disabled).
     pub fn set_wal_backlog_threshold_bytes(&self, bytes: u64) {
-        self.wal_backlog_threshold_bytes.store(bytes, Ordering::Relaxed);
+        self.wal_backlog_threshold_bytes
+            .store(bytes, Ordering::Relaxed);
     }
 
     /// Set the replication lag admission threshold (0 = disabled).
     pub fn set_replication_lag_threshold(&self, lag: u64) {
-        self.replication_lag_threshold_ms.store(lag, Ordering::Relaxed);
+        self.replication_lag_threshold_ms
+            .store(lag, Ordering::Relaxed);
     }
 
     pub fn begin_with_classification(
@@ -767,7 +781,11 @@ impl TxnManager {
         handle
     }
 
-    pub fn observe_involved_shards(&self, txn_id: TxnId, shards: &[ShardId]) -> Result<(), TxnError> {
+    pub fn observe_involved_shards(
+        &self,
+        txn_id: TxnId,
+        shards: &[ShardId],
+    ) -> Result<(), TxnError> {
         let mut entry = self
             .active_txns
             .get_mut(&txn_id)
@@ -794,7 +812,8 @@ impl TxnManager {
             self.stats.record_implicit_upgrade_blocked();
             tracing::warn!(
                 "TXN {} implicitly upgraded from fast-path to slow-path (shards: {:?})",
-                txn_id, entry.involved_shards
+                txn_id,
+                entry.involved_shards
             );
         }
 
@@ -819,7 +838,9 @@ impl TxnManager {
     }
 
     pub fn get_txn(&self, txn_id: TxnId) -> Option<TxnHandle> {
-        self.active_txns.get(&txn_id).map(|entry| entry.value().clone())
+        self.active_txns
+            .get(&txn_id)
+            .map(|entry| entry.value().clone())
     }
 
     /// Explicitly prepare a transaction for 2PC.
@@ -918,7 +939,10 @@ impl TxnManager {
 
             // ── OCC validation under SI / Serializable ──
             // Must validate BEFORE allocating commit_ts to avoid phantom commits.
-            if matches!(isolation, IsolationLevel::SnapshotIsolation | IsolationLevel::Serializable) {
+            if matches!(
+                isolation,
+                IsolationLevel::SnapshotIsolation | IsolationLevel::Serializable
+            ) {
                 // Drop the DashMap ref before calling into storage to avoid deadlocks.
                 drop(entry);
                 if self.storage.validate_read_set(txn_id, start_ts).is_err() {
@@ -941,15 +965,32 @@ impl TxnManager {
             drop(entry);
 
             // Fast-path local commit: no prepare/global coordination.
+            // CP-L: WAL record appended inside commit_txn; CP-D: fsync completes.
+            tracing::debug!(
+                txn_id = txn_id.0,
+                commit_ts = commit_ts.0,
+                cp = "CP-L",
+                path = "fast",
+                "consistency commit point: WAL record logged"
+            );
             if let Err(e) = self.storage.commit_txn(txn_id, commit_ts, TxnType::Local) {
-                let latency_us = entry_begin_instant.map(|i| i.elapsed().as_micros() as u64).unwrap_or(0);
+                let latency_us = entry_begin_instant
+                    .map(|i| i.elapsed().as_micros() as u64)
+                    .unwrap_or(0);
                 self.record_completed(TxnRecord {
-                    txn_id, txn_type: TxnType::Local, txn_path: TxnPath::Fast,
-                    shard_count, start_ts,
-                    commit_ts: None, commit_latency_us: latency_us,
+                    txn_id,
+                    txn_type: TxnType::Local,
+                    txn_path: TxnPath::Fast,
+                    shard_count,
+                    start_ts,
+                    commit_ts: None,
+                    commit_latency_us: latency_us,
                     outcome: TxnOutcome::Aborted(format!("{}", e)),
                     degraded: was_degraded,
-                    trace_id, occ_retry_count, tenant_id, priority,
+                    trace_id,
+                    occ_retry_count,
+                    tenant_id,
+                    priority,
                     latency_breakdown: latency_breakdown.clone(),
                 });
                 if matches!(e, StorageError::UniqueViolation { .. }) {
@@ -959,19 +1000,44 @@ impl TxnManager {
                 return Err(Self::storage_err_to_txn_err(txn_id, e));
             }
 
-            // Storage confirmed — now mark as Committed in the active map.
+            // CP-D: storage confirmed — WAL durable.
+            tracing::debug!(
+                txn_id = txn_id.0,
+                commit_ts = commit_ts.0,
+                cp = "CP-D",
+                path = "fast",
+                "consistency commit point: WAL durable"
+            );
+
+            // CP-V: mark as Committed — visible to readers.
             if let Some(mut e) = self.active_txns.get_mut(&txn_id) {
                 e.state = TxnState::Committed;
             }
+            tracing::debug!(
+                txn_id = txn_id.0,
+                commit_ts = commit_ts.0,
+                cp = "CP-V",
+                path = "fast",
+                "consistency commit point: visible to readers"
+            );
 
-            let latency_us = entry_begin_instant.map(|i| i.elapsed().as_micros() as u64).unwrap_or(0);
+            let latency_us = entry_begin_instant
+                .map(|i| i.elapsed().as_micros() as u64)
+                .unwrap_or(0);
             self.record_completed(TxnRecord {
-                txn_id, txn_type: TxnType::Local, txn_path: TxnPath::Fast,
-                shard_count, start_ts,
-                commit_ts: Some(commit_ts), commit_latency_us: latency_us,
+                txn_id,
+                txn_type: TxnType::Local,
+                txn_path: TxnPath::Fast,
+                shard_count,
+                start_ts,
+                commit_ts: Some(commit_ts),
+                commit_latency_us: latency_us,
                 outcome: TxnOutcome::Committed,
                 degraded: was_degraded,
-                trace_id, occ_retry_count, tenant_id, priority,
+                trace_id,
+                occ_retry_count,
+                tenant_id,
+                priority,
                 latency_breakdown: latency_breakdown.clone(),
             });
             self.active_txns.remove(&txn_id);
@@ -998,10 +1064,19 @@ impl TxnManager {
                 .prepare_txn(txn_id)
                 .map_err(|_| TxnError::Aborted(txn_id))?;
         }
+        // CP-L: prepare WAL record logged for global txn.
+        tracing::debug!(
+            txn_id = txn_id.0,
+            cp = "CP-L",
+            path = "slow",
+            "consistency commit point: prepare WAL logged"
+        );
 
         // OCC validation for global path under SI/Serializable.
-        if matches!(isolation, IsolationLevel::SnapshotIsolation | IsolationLevel::Serializable)
-            && self.storage.validate_read_set(txn_id, start_ts).is_err()
+        if matches!(
+            isolation,
+            IsolationLevel::SnapshotIsolation | IsolationLevel::Serializable
+        ) && self.storage.validate_read_set(txn_id, start_ts).is_err()
         {
             self.stats.record_occ_conflict();
             self.abort(txn_id)?;
@@ -1009,19 +1084,25 @@ impl TxnManager {
         }
 
         let commit_ts = self.alloc_ts();
-        if let Some(mut prepared) = self.active_txns.get_mut(&txn_id) {
-            prepared.state = TxnState::Committed;
-        }
 
         if let Err(e) = self.storage.commit_txn(txn_id, commit_ts, TxnType::Global) {
-            let latency_us = entry_begin_instant.map(|i| i.elapsed().as_micros() as u64).unwrap_or(0);
+            let latency_us = entry_begin_instant
+                .map(|i| i.elapsed().as_micros() as u64)
+                .unwrap_or(0);
             self.record_completed(TxnRecord {
-                txn_id, txn_type: TxnType::Global, txn_path: TxnPath::Slow,
-                shard_count, start_ts,
-                commit_ts: None, commit_latency_us: latency_us,
+                txn_id,
+                txn_type: TxnType::Global,
+                txn_path: TxnPath::Slow,
+                shard_count,
+                start_ts,
+                commit_ts: None,
+                commit_latency_us: latency_us,
                 outcome: TxnOutcome::Aborted(format!("{}", e)),
                 degraded: was_degraded,
-                trace_id, occ_retry_count, tenant_id, priority,
+                trace_id,
+                occ_retry_count,
+                tenant_id,
+                priority,
                 latency_breakdown: latency_breakdown.clone(),
             });
             if matches!(e, StorageError::UniqueViolation { .. }) {
@@ -1031,19 +1112,54 @@ impl TxnManager {
             return Err(Self::storage_err_to_txn_err(txn_id, e));
         }
 
-        let latency_us = entry_begin_instant.map(|i| i.elapsed().as_micros() as u64).unwrap_or(0);
+        let latency_us = entry_begin_instant
+            .map(|i| i.elapsed().as_micros() as u64)
+            .unwrap_or(0);
         self.record_completed(TxnRecord {
-            txn_id, txn_type: TxnType::Global, txn_path: TxnPath::Slow,
-            shard_count, start_ts,
-            commit_ts: Some(commit_ts), commit_latency_us: latency_us,
+            txn_id,
+            txn_type: TxnType::Global,
+            txn_path: TxnPath::Slow,
+            shard_count,
+            start_ts,
+            commit_ts: Some(commit_ts),
+            commit_latency_us: latency_us,
             outcome: TxnOutcome::Committed,
             degraded: was_degraded,
-            trace_id, occ_retry_count, tenant_id, priority,
+            trace_id,
+            occ_retry_count,
+            tenant_id,
+            priority,
             latency_breakdown: latency_breakdown.clone(),
         });
+        // CP-D: storage confirmed — WAL durable for global txn.
+        tracing::debug!(
+            txn_id = txn_id.0,
+            commit_ts = commit_ts.0,
+            cp = "CP-D",
+            path = "slow",
+            "consistency commit point: WAL durable"
+        );
+
+        // CP-V: mark as Committed — visible to readers.
+        if let Some(mut prepared) = self.active_txns.get_mut(&txn_id) {
+            prepared.state = TxnState::Committed;
+        }
+        tracing::debug!(
+            txn_id = txn_id.0,
+            commit_ts = commit_ts.0,
+            cp = "CP-V",
+            path = "slow",
+            "consistency commit point: visible to readers"
+        );
+
         self.active_txns.remove(&txn_id);
         self.stats.record_slow_commit();
-        tracing::debug!("TXN slow-commit(global): {} at {} latency={}us", txn_id, commit_ts, latency_us);
+        tracing::debug!(
+            "TXN slow-commit(global): {} at {} latency={}us",
+            txn_id,
+            commit_ts,
+            latency_us
+        );
         Ok(commit_ts)
     }
 
@@ -1084,17 +1200,30 @@ impl TxnManager {
         drop(entry);
 
         // Propagate abort to storage via unified API
-        let txn_type = if was_global { TxnType::Global } else { TxnType::Local };
+        let txn_type = if was_global {
+            TxnType::Global
+        } else {
+            TxnType::Local
+        };
         let _ = self.storage.abort_txn(txn_id, txn_type);
 
-        let latency_us = begin_instant.map(|i| i.elapsed().as_micros() as u64).unwrap_or(0);
+        let latency_us = begin_instant
+            .map(|i| i.elapsed().as_micros() as u64)
+            .unwrap_or(0);
         self.record_completed(TxnRecord {
-            txn_id, txn_type: txn_type_snap, txn_path: path_snap,
-            shard_count, start_ts,
-            commit_ts: None, commit_latency_us: latency_us,
+            txn_id,
+            txn_type: txn_type_snap,
+            txn_path: path_snap,
+            shard_count,
+            start_ts,
+            commit_ts: None,
+            commit_latency_us: latency_us,
             outcome: TxnOutcome::Aborted(reason.to_string()),
             degraded,
-            trace_id, occ_retry_count, tenant_id, priority,
+            trace_id,
+            occ_retry_count,
+            tenant_id,
+            priority,
             latency_breakdown,
         });
 
@@ -1123,7 +1252,11 @@ impl TxnManager {
     pub fn longest_txn_age_us(&self) -> u64 {
         self.active_txns
             .iter()
-            .filter_map(|e| e.value().begin_instant.map(|i| i.elapsed().as_micros() as u64))
+            .filter_map(|e| {
+                e.value()
+                    .begin_instant
+                    .map(|i| i.elapsed().as_micros() as u64)
+            })
             .max()
             .unwrap_or(0)
     }
@@ -1131,7 +1264,10 @@ impl TxnManager {
     /// Number of currently Prepared (in-doubt) transactions.
     /// P0-3: These MUST NOT be GC'd — their resources are held until resolved.
     pub fn prepared_count(&self) -> usize {
-        self.active_txns.iter().filter(|e| e.value().state == TxnState::Prepared).count()
+        self.active_txns
+            .iter()
+            .filter(|e| e.value().state == TxnState::Prepared)
+            .count()
     }
 
     /// GC safepoint diagnostic info.
@@ -1212,10 +1348,15 @@ impl TxnManager {
     /// Everything else → Aborted (generic).
     fn storage_err_to_txn_err(txn_id: TxnId, err: StorageError) -> TxnError {
         match err {
-            StorageError::UniqueViolation { column_idx, ref index_key_hex } => {
+            StorageError::UniqueViolation {
+                column_idx,
+                ref index_key_hex,
+            } => {
                 tracing::warn!(
                     "TXN {} constraint violation: unique index on column {} key={}",
-                    txn_id, column_idx, index_key_hex,
+                    txn_id,
+                    column_idx,
+                    index_key_hex,
                 );
                 TxnError::ConstraintViolation(
                     txn_id,

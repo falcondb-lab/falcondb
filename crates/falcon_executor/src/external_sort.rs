@@ -124,7 +124,8 @@ impl ExternalSorter {
                 if group.len() == 1 {
                     next_paths.push(group[0].clone());
                 } else {
-                    let merged_path = run_dir.join(format!("merge_g{}_i{}.bin", merge_gen, group_idx));
+                    let merged_path =
+                        run_dir.join(format!("merge_g{}_i{}.bin", merge_gen, group_idx));
                     merge_runs(group, &merged_path, order_by)?;
                     // Remove consumed input runs
                     for p in group {
@@ -169,12 +170,13 @@ fn write_run(path: &Path, rows: &[OwnedRow]) -> Result<(), FalconError> {
     })?;
     let mut w = BufWriter::new(file);
 
-    w.write_all(&(rows.len() as u64).to_le_bytes()).map_err(io_err)?;
+    w.write_all(&(rows.len() as u64).to_le_bytes())
+        .map_err(io_err)?;
     for row in rows {
-        let bytes = bincode::serialize(row).map_err(|e| {
-            FalconError::Internal(format!("Spill serialization error: {}", e))
-        })?;
-        w.write_all(&(bytes.len() as u32).to_le_bytes()).map_err(io_err)?;
+        let bytes = bincode::serialize(row)
+            .map_err(|e| FalconError::Internal(format!("Spill serialization error: {}", e)))?;
+        w.write_all(&(bytes.len() as u32).to_le_bytes())
+            .map_err(io_err)?;
         w.write_all(&bytes).map_err(io_err)?;
     }
     w.flush().map_err(io_err)?;
@@ -251,17 +253,20 @@ fn merge_runs(
 
     // Open output
     let file = File::create(output_path).map_err(|e| {
-        FalconError::Internal(format!("Failed to create merge file {:?}: {}", output_path, e))
+        FalconError::Internal(format!(
+            "Failed to create merge file {:?}: {}",
+            output_path, e
+        ))
     })?;
     let mut w = BufWriter::new(file);
     w.write_all(&total.to_le_bytes()).map_err(io_err)?;
 
     while let Some(entry) = heap.pop() {
         // Write the smallest row
-        let bytes = bincode::serialize(&entry.row).map_err(|e| {
-            FalconError::Internal(format!("Spill serialization error: {}", e))
-        })?;
-        w.write_all(&(bytes.len() as u32).to_le_bytes()).map_err(io_err)?;
+        let bytes = bincode::serialize(&entry.row)
+            .map_err(|e| FalconError::Internal(format!("Spill serialization error: {}", e)))?;
+        w.write_all(&(bytes.len() as u32).to_le_bytes())
+            .map_err(io_err)?;
         w.write_all(&bytes).map_err(io_err)?;
 
         // Advance that reader
@@ -327,9 +332,8 @@ fn read_one_row(r: &mut impl Read) -> Result<OwnedRow, FalconError> {
     let len = u32::from_le_bytes(len_buf) as usize;
     let mut data = vec![0u8; len];
     r.read_exact(&mut data).map_err(io_err)?;
-    bincode::deserialize(&data).map_err(|e| {
-        FalconError::Internal(format!("Spill deserialization error: {}", e))
-    })
+    bincode::deserialize(&data)
+        .map_err(|e| FalconError::Internal(format!("Spill deserialization error: {}", e)))
 }
 
 fn io_err(e: std::io::Error) -> FalconError {
@@ -374,11 +378,17 @@ mod tests {
     }
 
     fn asc_order() -> Vec<BoundOrderBy> {
-        vec![BoundOrderBy { column_idx: 0, asc: true }]
+        vec![BoundOrderBy {
+            column_idx: 0,
+            asc: true,
+        }]
     }
 
     fn desc_order() -> Vec<BoundOrderBy> {
-        vec![BoundOrderBy { column_idx: 0, asc: false }]
+        vec![BoundOrderBy {
+            column_idx: 0,
+            asc: false,
+        }]
     }
 
     fn extract_vals(rows: &[OwnedRow]) -> Vec<i32> {
@@ -488,8 +498,14 @@ mod tests {
             OwnedRow::new(vec![Datum::Int32(2), Datum::Text("a".into())]),
         ];
         let order = vec![
-            BoundOrderBy { column_idx: 0, asc: true },
-            BoundOrderBy { column_idx: 1, asc: true },
+            BoundOrderBy {
+                column_idx: 0,
+                asc: true,
+            },
+            BoundOrderBy {
+                column_idx: 1,
+                asc: true,
+            },
         ];
         sort_rows(&mut rows, &order, None).unwrap();
         assert_eq!(rows[0].values[1], Datum::Text("a".into()));

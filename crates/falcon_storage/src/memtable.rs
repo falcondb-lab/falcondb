@@ -261,7 +261,11 @@ impl SecondaryIndex {
 
     /// Check uniqueness: if this index is unique and the key already maps to
     /// a different PK, return Err(DuplicateKey).
-    pub fn check_unique(&self, key_bytes: &[u8], pk: &PrimaryKey) -> Result<(), falcon_common::error::StorageError> {
+    pub fn check_unique(
+        &self,
+        key_bytes: &[u8],
+        pk: &PrimaryKey,
+    ) -> Result<(), falcon_common::error::StorageError> {
         if !self.unique {
             return Ok(());
         }
@@ -404,23 +408,14 @@ impl MemTable {
     }
 
     /// Point read by PK for a specific transaction.
-    pub fn get(
-        &self,
-        pk: &PrimaryKey,
-        txn_id: TxnId,
-        read_ts: Timestamp,
-    ) -> Option<OwnedRow> {
+    pub fn get(&self, pk: &PrimaryKey, txn_id: TxnId, read_ts: Timestamp) -> Option<OwnedRow> {
         self.data
             .get(pk)
             .and_then(|chain| chain.read_for_txn(txn_id, read_ts))
     }
 
     /// Full table scan visible to a transaction.
-    pub fn scan(
-        &self,
-        txn_id: TxnId,
-        read_ts: Timestamp,
-    ) -> Vec<(PrimaryKey, OwnedRow)> {
+    pub fn scan(&self, txn_id: TxnId, read_ts: Timestamp) -> Vec<(PrimaryKey, OwnedRow)> {
         let mut results = Vec::new();
         for entry in self.data.iter() {
             if let Some(row) = entry.value().read_for_txn(txn_id, read_ts) {
@@ -488,7 +483,12 @@ impl MemTable {
 
     /// Check if a key has a version committed after `after_ts` by another transaction.
     /// Used for OCC read-set validation.
-    pub fn has_committed_write_after(&self, pk: &PrimaryKey, exclude_txn: TxnId, after_ts: Timestamp) -> bool {
+    pub fn has_committed_write_after(
+        &self,
+        pk: &PrimaryKey,
+        exclude_txn: TxnId,
+        after_ts: Timestamp,
+    ) -> bool {
         if let Some(chain) = self.data.get(pk) {
             chain.has_committed_write_after(exclude_txn, after_ts)
         } else {
@@ -554,7 +554,11 @@ impl MemTable {
 
     /// Check unique index constraints against the committed index (read-only).
     /// Used at DML time to eagerly detect violations under 方案A.
-    fn check_unique_indexes(&self, pk: &PrimaryKey, row: &OwnedRow) -> Result<(), falcon_common::error::StorageError> {
+    fn check_unique_indexes(
+        &self,
+        pk: &PrimaryKey,
+        row: &OwnedRow,
+    ) -> Result<(), falcon_common::error::StorageError> {
         let indexes = self.secondary_indexes.read();
         for idx in indexes.iter() {
             if idx.unique {
@@ -598,7 +602,11 @@ impl MemTable {
     /// Returns Err(DuplicateKey) if a unique index is violated.
     /// Used by backfill (create_index) and rebuild.
     #[allow(dead_code)]
-    pub(crate) fn index_insert_row(&self, pk: &PrimaryKey, row: &OwnedRow) -> Result<(), falcon_common::error::StorageError> {
+    pub(crate) fn index_insert_row(
+        &self,
+        pk: &PrimaryKey,
+        row: &OwnedRow,
+    ) -> Result<(), falcon_common::error::StorageError> {
         let indexes = self.secondary_indexes.read();
         // Check unique constraints first (before mutating any index)
         for idx in indexes.iter() {
@@ -807,10 +815,16 @@ mod index_tests {
 
         let key = idx.encode_key(&row);
         idx.insert(key.clone(), pk.clone());
-        { let tree = idx.tree.read(); assert!(tree.get(&key).is_some()); }
+        {
+            let tree = idx.tree.read();
+            assert!(tree.get(&key).is_some());
+        }
 
         idx.remove(&key, &pk);
-        { let tree = idx.tree.read(); assert!(tree.get(&key).is_none()); }
+        {
+            let tree = idx.tree.read();
+            assert!(tree.get(&key).is_none());
+        }
     }
 
     #[test]
@@ -841,7 +855,8 @@ mod index_tests {
         let row = make_row(1, 10, "hello", 20);
 
         let pk = mt.insert(row.clone(), txn).unwrap();
-        mt.commit_keys(txn, falcon_common::types::Timestamp(200), &[pk.clone()]).unwrap();
+        mt.commit_keys(txn, falcon_common::types::Timestamp(200), &[pk.clone()])
+            .unwrap();
 
         let indexes = mt.secondary_indexes.read();
         let idx = &indexes[0];

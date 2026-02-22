@@ -38,8 +38,8 @@ use std::time::{Duration, Instant};
 use parking_lot::{Mutex, RwLock};
 
 use falcon_common::error::FalconError;
-use falcon_common::shutdown::ShutdownSignal;
 use falcon_common::schema::TableSchema;
+use falcon_common::shutdown::ShutdownSignal;
 use falcon_common::types::{NodeId, ShardId};
 use falcon_storage::engine::StorageEngine;
 
@@ -54,8 +54,7 @@ use crate::routing::shard_map::ShardMap;
 // ---------------------------------------------------------------------------
 
 /// Replication synchronization mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SyncMode {
     /// Fire-and-forget: commit returns as soon as primary WAL is durable.
     /// Fastest, but may lose committed data if primary crashes before
@@ -69,7 +68,6 @@ pub enum SyncMode {
     /// Strongest durability guarantee but highest latency.
     Sync,
 }
-
 
 /// High-availability configuration.
 #[derive(Debug, Clone)]
@@ -265,7 +263,9 @@ impl FailureDetector {
 
     /// Count healthy replicas.
     pub fn healthy_replica_count(&self) -> usize {
-        self.health.lock().iter()
+        self.health
+            .lock()
+            .iter()
             .filter(|h| h.status == ReplicaHealthStatus::Healthy)
             .count()
     }
@@ -364,11 +364,14 @@ impl HAReplicaGroup {
     /// Record a heartbeat from a replica.
     pub fn heartbeat_replica(&self, replica_idx: usize) {
         let primary_lsn = self.inner.log.current_lsn();
-        let applied_lsn = self.inner.replicas
+        let applied_lsn = self
+            .inner
+            .replicas
             .get(replica_idx)
             .map(|r| r.current_lsn())
             .unwrap_or(0);
-        self.detector.record_replica_heartbeat(replica_idx, applied_lsn, primary_lsn);
+        self.detector
+            .record_replica_heartbeat(replica_idx, applied_lsn, primary_lsn);
     }
 
     /// Record a heartbeat from the primary.
@@ -404,14 +407,14 @@ impl HAReplicaGroup {
         // Update health data from actual LSNs
         let primary_lsn = self.inner.log.current_lsn();
         for (i, replica) in self.inner.replicas.iter().enumerate() {
-            self.detector.record_replica_heartbeat(i, replica.current_lsn(), primary_lsn);
+            self.detector
+                .record_replica_heartbeat(i, replica.current_lsn(), primary_lsn);
         }
 
         // Find best replica
-        let best_idx = self.detector.best_replica_for_promotion()
-            .ok_or_else(|| FalconError::Internal(
-                "No healthy replica available for promotion".into()
-            ))?;
+        let best_idx = self.detector.best_replica_for_promotion().ok_or_else(|| {
+            FalconError::Internal("No healthy replica available for promotion".into())
+        })?;
 
         // Bump epoch before promotion
         let new_epoch = self.bump_epoch();
@@ -507,7 +510,9 @@ impl HAReplicaGroup {
     /// Get a snapshot of HA status for observability.
     pub fn ha_status(&self) -> HAStatus {
         let primary_lsn = self.inner.log.current_lsn();
-        let replica_statuses: Vec<HAReplicaStatus> = self.inner.replicas
+        let replica_statuses: Vec<HAReplicaStatus> = self
+            .inner
+            .replicas
             .iter()
             .enumerate()
             .map(|(i, r)| {
@@ -673,7 +678,10 @@ impl FailoverOrchestrator {
         let join_handle = std::thread::Builder::new()
             .name("falcon-failover-orchestrator".to_string())
             .spawn(move || {
-                tracing::info!("FailoverOrchestrator started (interval={}ms)", config.check_interval_ms);
+                tracing::info!(
+                    "FailoverOrchestrator started (interval={}ms)",
+                    config.check_interval_ms
+                );
                 while !signal_clone.is_shutdown() {
                     if signal_clone.wait_timeout(interval) {
                         break;
@@ -699,24 +707,29 @@ impl FailoverOrchestrator {
                     };
 
                     if should_failover {
-                        metrics_clone.failovers_triggered.fetch_add(1, Ordering::Relaxed);
-                        tracing::warn!("FailoverOrchestrator: primary failure detected, triggering failover");
+                        metrics_clone
+                            .failovers_triggered
+                            .fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(
+                            "FailoverOrchestrator: primary failure detected, triggering failover"
+                        );
 
                         let mut group_write = group.write();
                         match group_write.promote_best() {
                             Ok(idx) => {
-                                metrics_clone.failovers_succeeded.fetch_add(1, Ordering::Relaxed);
+                                metrics_clone
+                                    .failovers_succeeded
+                                    .fetch_add(1, Ordering::Relaxed);
                                 tracing::info!(
                                     "FailoverOrchestrator: failover succeeded, promoted replica {}",
                                     idx
                                 );
                             }
                             Err(e) => {
-                                metrics_clone.failovers_failed.fetch_add(1, Ordering::Relaxed);
-                                tracing::error!(
-                                    "FailoverOrchestrator: failover failed: {}",
-                                    e
-                                );
+                                metrics_clone
+                                    .failovers_failed
+                                    .fetch_add(1, Ordering::Relaxed);
+                                tracing::error!("FailoverOrchestrator: failover failed: {}", e);
                             }
                         }
                     }
@@ -730,7 +743,8 @@ impl FailoverOrchestrator {
                     "failed to spawn background thread — node DEGRADED"
                 );
                 FalconError::Internal(format!(
-                    "failed to spawn failover orchestrator thread: {}", e
+                    "failed to spawn failover orchestrator thread: {}",
+                    e
                 ))
             })?;
 
@@ -769,9 +783,7 @@ impl SyncReplicationWaiter {
     ) -> Result<(), FalconError> {
         match self.config.sync_mode {
             SyncMode::Async => Ok(()),
-            SyncMode::SemiSync => {
-                self.wait_for_n_replicas(commit_lsn, group, 1, timeout)
-            }
+            SyncMode::SemiSync => self.wait_for_n_replicas(commit_lsn, group, 1, timeout),
             SyncMode::Sync => {
                 let n = group.inner.replicas.len();
                 self.wait_for_n_replicas(commit_lsn, group, n, timeout)
@@ -788,10 +800,17 @@ impl SyncReplicationWaiter {
     ) -> Result<(), FalconError> {
         let start = Instant::now();
         let poll_interval = Duration::from_millis(1);
+        // Use a local condvar so this poll is interruptible by timeout
+        // without blocking the calling thread with a bare sleep.
+        let pair = std::sync::Mutex::new(false);
+        let cvar = std::sync::Condvar::new();
 
         loop {
             // Count how many replicas have applied at least commit_lsn
-            let acked = group.inner.replicas.iter()
+            let acked = group
+                .inner
+                .replicas
+                .iter()
                 .filter(|r| r.current_lsn() >= commit_lsn)
                 .count();
 
@@ -806,7 +825,12 @@ impl SyncReplicationWaiter {
                 )));
             }
 
-            std::thread::sleep(poll_interval);
+            // Interruptible wait: uses condvar timeout instead of bare sleep.
+            // The condvar is never notified, so this always times out after
+            // poll_interval — but it yields the thread properly and is
+            // interruptible by the OS scheduler (unlike a busy-spin).
+            let guard = pair.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = cvar.wait_timeout(guard, poll_interval);
         }
     }
 }
@@ -829,14 +853,22 @@ mod tests {
             name: "t".into(),
             columns: vec![
                 ColumnDef {
-                    id: ColumnId(0), name: "id".into(),
-                    data_type: DataType::Int32, nullable: false,
-                    is_primary_key: true, default_value: None, is_serial: false,
+                    id: ColumnId(0),
+                    name: "id".into(),
+                    data_type: DataType::Int32,
+                    nullable: false,
+                    is_primary_key: true,
+                    default_value: None,
+                    is_serial: false,
                 },
                 ColumnDef {
-                    id: ColumnId(1), name: "val".into(),
-                    data_type: DataType::Text, nullable: true,
-                    is_primary_key: false, default_value: None, is_serial: false,
+                    id: ColumnId(1),
+                    name: "val".into(),
+                    data_type: DataType::Text,
+                    nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                    is_serial: false,
                 },
             ],
             primary_key_columns: vec![0],
@@ -846,10 +878,16 @@ mod tests {
 
     fn insert_and_replicate(group: &HAReplicaGroup, id: i32, val: &str, txn: u64) {
         let row = OwnedRow::new(vec![Datum::Int32(id), Datum::Text(val.into())]);
-        group.inner.primary.storage
+        group
+            .inner
+            .primary
+            .storage
             .insert(TableId(1), row.clone(), TxnId(txn))
             .unwrap();
-        group.inner.primary.storage
+        group
+            .inner
+            .primary
+            .storage
             .commit_txn(TxnId(txn), Timestamp(txn), TxnType::Local)
             .unwrap();
         group.inner.ship_wal_record(WalRecord::Insert {
@@ -897,7 +935,10 @@ mod tests {
 
     #[test]
     fn test_validate_epoch() {
-        let config = HAConfig { replica_count: 1, ..Default::default() };
+        let config = HAConfig {
+            replica_count: 1,
+            ..Default::default()
+        };
         let group = HAReplicaGroup::new(ShardId(0), &[test_schema()], config).unwrap();
         assert!(group.validate_epoch(1));
         assert!(group.validate_epoch(2));
@@ -951,7 +992,10 @@ mod tests {
 
     #[test]
     fn test_add_replica() {
-        let config = HAConfig { replica_count: 1, ..Default::default() };
+        let config = HAConfig {
+            replica_count: 1,
+            ..Default::default()
+        };
         let mut group = HAReplicaGroup::new(ShardId(0), &[test_schema()], config).unwrap();
         assert_eq!(group.inner.replicas.len(), 1);
 
@@ -992,7 +1036,10 @@ mod tests {
 
     #[test]
     fn test_ha_status_snapshot() {
-        let config = HAConfig { replica_count: 2, ..Default::default() };
+        let config = HAConfig {
+            replica_count: 2,
+            ..Default::default()
+        };
         let group = HAReplicaGroup::new(ShardId(0), &[test_schema()], config).unwrap();
 
         let status = group.ha_status();
@@ -1046,7 +1093,9 @@ mod tests {
         };
         let group = HAReplicaGroup::new(ShardId(0), &[test_schema()], config.clone()).unwrap();
         let waiter = SyncReplicationWaiter::new(config);
-        assert!(waiter.wait_for_commit(100, &group, Duration::from_millis(10)).is_ok());
+        assert!(waiter
+            .wait_for_commit(100, &group, Duration::from_millis(10))
+            .is_ok());
     }
 
     #[test]
@@ -1065,7 +1114,9 @@ mod tests {
         let waiter = SyncReplicationWaiter::new(config);
         let commit_lsn = group.inner.replicas[0].current_lsn();
         // At least 1 replica has acked, so semi-sync should succeed
-        assert!(waiter.wait_for_commit(commit_lsn, &group, Duration::from_millis(100)).is_ok());
+        assert!(waiter
+            .wait_for_commit(commit_lsn, &group, Duration::from_millis(100))
+            .is_ok());
     }
 
     #[test]
@@ -1079,7 +1130,10 @@ mod tests {
         let waiter = SyncReplicationWaiter::new(config);
         // Replica hasn't caught up to LSN 999, so sync should timeout
         let result = waiter.wait_for_commit(999, &group, Duration::from_millis(50));
-        assert!(result.is_err(), "should timeout when replicas haven't caught up");
+        assert!(
+            result.is_err(),
+            "should timeout when replicas haven't caught up"
+        );
     }
 
     #[test]
@@ -1125,7 +1179,10 @@ mod tests {
         group.promote_best().unwrap();
 
         // Verify data on new primary
-        let rows = group.inner.primary.storage
+        let rows = group
+            .inner
+            .primary
+            .storage
             .scan(TableId(1), TxnId(999), Timestamp(100))
             .unwrap();
         assert_eq!(rows.len(), 5, "all data should survive failover");

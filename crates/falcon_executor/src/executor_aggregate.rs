@@ -1,13 +1,13 @@
 #![allow(clippy::too_many_arguments)]
 
 use falcon_common::datum::{Datum, OwnedRow};
-use falcon_common::error::{FalconError, ExecutionError};
+use falcon_common::error::{ExecutionError, FalconError};
 use falcon_common::schema::TableSchema;
 use falcon_common::types::DataType;
 use falcon_sql_frontend::types::*;
 
-use crate::expr_engine::ExprEngine;
 use crate::executor::{ExecutionResult, Executor};
+use crate::expr_engine::ExprEngine;
 
 impl Executor {
     pub(crate) fn exec_aggregate(
@@ -44,11 +44,22 @@ impl Executor {
             // so we know which columns are "nulled out" per set.
             for gset in grouping_sets {
                 let set_rows = self.aggregate_one_grouping_set(
-                    projections, &filtered, gset, group_by, having,
+                    projections,
+                    &filtered,
+                    gset,
+                    group_by,
+                    having,
                 )?;
                 result_rows.extend(set_rows);
             }
-            return self.finalize_aggregate(result_rows, order_by, distinct, offset, limit, columns);
+            return self.finalize_aggregate(
+                result_rows,
+                order_by,
+                distinct,
+                offset,
+                limit,
+                columns,
+            );
         }
 
         if group_by.is_empty() {
@@ -89,7 +100,9 @@ impl Executor {
 
             // Apply HAVING filter — evaluates aggregate expressions over the group
             if let Some(h) = having {
-                if !ExprEngine::eval_having_filter(h, &group_rows).map_err(FalconError::Execution)? {
+                if !ExprEngine::eval_having_filter(h, &group_rows)
+                    .map_err(FalconError::Execution)?
+                {
                     continue;
                 }
             }
@@ -160,7 +173,10 @@ impl Executor {
         if active_set.is_empty() {
             // Grand total: single group over all rows
             let row_values = self.compute_group_row_with_nulls(
-                projections, filtered, active_set, all_group_cols,
+                projections,
+                filtered,
+                active_set,
+                all_group_cols,
             )?;
             if let Some(h) = having {
                 if !ExprEngine::eval_having_filter(h, filtered).map_err(FalconError::Execution)? {
@@ -194,11 +210,16 @@ impl Executor {
         for (_key, indices) in &groups {
             let group_rows: Vec<&OwnedRow> = indices.iter().map(|&i| filtered[i]).collect();
             let row_values = self.compute_group_row_with_nulls(
-                projections, &group_rows, active_set, all_group_cols,
+                projections,
+                &group_rows,
+                active_set,
+                all_group_cols,
             )?;
 
             if let Some(h) = having {
-                if !ExprEngine::eval_having_filter(h, &group_rows).map_err(FalconError::Execution)? {
+                if !ExprEngine::eval_having_filter(h, &group_rows)
+                    .map_err(FalconError::Execution)?
+                {
                     continue;
                 }
             }
@@ -220,8 +241,18 @@ impl Executor {
         for proj in projections {
             match proj {
                 BoundProjection::Aggregate(func, agg_expr, _, agg_distinct, agg_filter) => {
-                    let filtered_rows = Self::apply_agg_filter(group_rows, agg_filter.as_deref(), active_set, all_group_cols);
-                    let val = self.compute_aggregate(func, agg_expr.as_ref(), *agg_distinct, &filtered_rows)?;
+                    let filtered_rows = Self::apply_agg_filter(
+                        group_rows,
+                        agg_filter.as_deref(),
+                        active_set,
+                        all_group_cols,
+                    );
+                    let val = self.compute_aggregate(
+                        func,
+                        agg_expr.as_ref(),
+                        *agg_distinct,
+                        &filtered_rows,
+                    )?;
                     values.push(val);
                 }
                 BoundProjection::Column(idx, _) => {
@@ -241,7 +272,8 @@ impl Executor {
                     let substituted = Self::substitute_grouping(expr, active_set, all_group_cols);
                     let empty = OwnedRow::new(vec![]);
                     let dummy = group_rows.first().copied().unwrap_or(&empty);
-                    let val = ExprEngine::eval_row(&substituted, dummy).map_err(FalconError::Execution)?;
+                    let val = ExprEngine::eval_row(&substituted, dummy)
+                        .map_err(FalconError::Execution)?;
                     values.push(val);
                 }
                 BoundProjection::Window(..) => {
@@ -275,25 +307,50 @@ impl Executor {
                 op: *op,
                 right: Box::new(Self::substitute_grouping(right, active_set, all_group_cols)),
             },
-            BoundExpr::Not(inner) => BoundExpr::Not(
-                Box::new(Self::substitute_grouping(inner, active_set, all_group_cols)),
-            ),
-            BoundExpr::Case { operand, conditions, results, else_result } => BoundExpr::Case {
-                operand: operand.as_ref().map(|e| Box::new(Self::substitute_grouping(e, active_set, all_group_cols))),
-                conditions: conditions.iter().map(|c| Self::substitute_grouping(c, active_set, all_group_cols)).collect(),
-                results: results.iter().map(|r| Self::substitute_grouping(r, active_set, all_group_cols)).collect(),
-                else_result: else_result.as_ref().map(|e| Box::new(Self::substitute_grouping(e, active_set, all_group_cols))),
+            BoundExpr::Not(inner) => BoundExpr::Not(Box::new(Self::substitute_grouping(
+                inner,
+                active_set,
+                all_group_cols,
+            ))),
+            BoundExpr::Case {
+                operand,
+                conditions,
+                results,
+                else_result,
+            } => BoundExpr::Case {
+                operand: operand
+                    .as_ref()
+                    .map(|e| Box::new(Self::substitute_grouping(e, active_set, all_group_cols))),
+                conditions: conditions
+                    .iter()
+                    .map(|c| Self::substitute_grouping(c, active_set, all_group_cols))
+                    .collect(),
+                results: results
+                    .iter()
+                    .map(|r| Self::substitute_grouping(r, active_set, all_group_cols))
+                    .collect(),
+                else_result: else_result
+                    .as_ref()
+                    .map(|e| Box::new(Self::substitute_grouping(e, active_set, all_group_cols))),
             },
-            BoundExpr::Cast { expr: inner, target_type } => BoundExpr::Cast {
+            BoundExpr::Cast {
+                expr: inner,
+                target_type,
+            } => BoundExpr::Cast {
                 expr: Box::new(Self::substitute_grouping(inner, active_set, all_group_cols)),
                 target_type: target_type.clone(),
             },
             BoundExpr::Coalesce(args) => BoundExpr::Coalesce(
-                args.iter().map(|a| Self::substitute_grouping(a, active_set, all_group_cols)).collect(),
+                args.iter()
+                    .map(|a| Self::substitute_grouping(a, active_set, all_group_cols))
+                    .collect(),
             ),
             BoundExpr::Function { func, args } => BoundExpr::Function {
                 func: func.clone(),
-                args: args.iter().map(|a| Self::substitute_grouping(a, active_set, all_group_cols)).collect(),
+                args: args
+                    .iter()
+                    .map(|a| Self::substitute_grouping(a, active_set, all_group_cols))
+                    .collect(),
             },
             // Leaf nodes and others: return as-is
             other => other.clone(),
@@ -321,7 +378,10 @@ impl Executor {
                 rows.iter()
                     .copied()
                     .filter(|row| {
-                        matches!(ExprEngine::eval_row(&substituted, row), Ok(Datum::Boolean(true)))
+                        matches!(
+                            ExprEngine::eval_row(&substituted, row),
+                            Ok(Datum::Boolean(true))
+                        )
                     })
                     .collect()
             }
@@ -338,8 +398,14 @@ impl Executor {
         for proj in projections {
             match proj {
                 BoundProjection::Aggregate(func, agg_expr, _, agg_distinct, agg_filter) => {
-                    let filtered_rows = Self::apply_agg_filter(group_rows, agg_filter.as_deref(), &[], &[]);
-                    let val = self.compute_aggregate(func, agg_expr.as_ref(), *agg_distinct, &filtered_rows)?;
+                    let filtered_rows =
+                        Self::apply_agg_filter(group_rows, agg_filter.as_deref(), &[], &[]);
+                    let val = self.compute_aggregate(
+                        func,
+                        agg_expr.as_ref(),
+                        *agg_distinct,
+                        &filtered_rows,
+                    )?;
                     values.push(val);
                 }
                 BoundProjection::Column(idx, _) => {
@@ -415,7 +481,11 @@ impl Executor {
                 let expr = agg_expr.ok_or(FalconError::Execution(ExecutionError::TypeError(
                     "SUM requires an argument".into(),
                 )))?;
-                let vals = if distinct { distinct_vals(expr)? } else { eval_all(expr)? };
+                let vals = if distinct {
+                    distinct_vals(expr)?
+                } else {
+                    eval_all(expr)?
+                };
                 let mut acc = Datum::Null;
                 for val in vals {
                     acc = if acc.is_null() {
@@ -430,7 +500,11 @@ impl Executor {
                 let expr = agg_expr.ok_or(FalconError::Execution(ExecutionError::TypeError(
                     "AVG requires an argument".into(),
                 )))?;
-                let vals = if distinct { distinct_vals(expr)? } else { eval_all(expr)? };
+                let vals = if distinct {
+                    distinct_vals(expr)?
+                } else {
+                    eval_all(expr)?
+                };
                 let mut sum = 0.0f64;
                 let mut count = 0i64;
                 for val in &vals {
@@ -547,7 +621,11 @@ impl Executor {
                 let expr = agg_expr.ok_or(FalconError::Execution(ExecutionError::TypeError(
                     "ARRAY_AGG requires an argument".into(),
                 )))?;
-                let vals = if distinct { distinct_vals(expr)? } else { eval_all(expr)? };
+                let vals = if distinct {
+                    distinct_vals(expr)?
+                } else {
+                    eval_all(expr)?
+                };
                 if vals.is_empty() {
                     Ok(Datum::Null)
                 } else {
@@ -559,7 +637,11 @@ impl Executor {
                 let expr = agg_expr.ok_or(FalconError::Execution(ExecutionError::TypeError(
                     "Statistical aggregate requires an argument".into(),
                 )))?;
-                let vals = if distinct { distinct_vals(expr)? } else { eval_all(expr)? };
+                let vals = if distinct {
+                    distinct_vals(expr)?
+                } else {
+                    eval_all(expr)?
+                };
                 let floats: Vec<f64> = vals.iter().filter_map(|v| v.as_f64()).collect();
                 let n = floats.len();
                 if n == 0 {
@@ -570,7 +652,9 @@ impl Executor {
                 let variance = match func {
                     AggFunc::VarPop | AggFunc::StddevPop => sum_sq / n as f64,
                     _ => {
-                        if n < 2 { return Ok(Datum::Null); }
+                        if n < 2 {
+                            return Ok(Datum::Null);
+                        }
                         sum_sq / (n - 1) as f64
                     }
                 };
@@ -580,10 +664,18 @@ impl Executor {
                 }
             }
             // ── Two-argument statistical aggregates ──
-            AggFunc::Corr | AggFunc::CovarPop | AggFunc::CovarSamp |
-            AggFunc::RegrSlope | AggFunc::RegrIntercept | AggFunc::RegrR2 |
-            AggFunc::RegrCount | AggFunc::RegrAvgX | AggFunc::RegrAvgY |
-            AggFunc::RegrSXX | AggFunc::RegrSYY | AggFunc::RegrSXY => {
+            AggFunc::Corr
+            | AggFunc::CovarPop
+            | AggFunc::CovarSamp
+            | AggFunc::RegrSlope
+            | AggFunc::RegrIntercept
+            | AggFunc::RegrR2
+            | AggFunc::RegrCount
+            | AggFunc::RegrAvgX
+            | AggFunc::RegrAvgY
+            | AggFunc::RegrSXX
+            | AggFunc::RegrSYY
+            | AggFunc::RegrSXY => {
                 // Two-argument aggregates: we use the first expression argument.
                 // The second argument is expected as a second column in the row.
                 // For simplicity, we evaluate the expression and treat pairs:
@@ -597,19 +689,26 @@ impl Executor {
                 let mut pairs: Vec<(f64, f64)> = Vec::new();
                 for row in rows {
                     let val = ExprEngine::eval_row(expr, row).map_err(FalconError::Execution)?;
-                    if val.is_null() { continue; }
+                    if val.is_null() {
+                        continue;
+                    }
                     // Try to get y from expr, x from next column
                     let y = val.as_f64();
                     // For two-arg aggregates, the second arg is typically the next column
                     // We use columns 0=y, 1=x as a reasonable default
-                    let x = row.values.get(1).and_then(|d| d.as_f64())
+                    let x = row
+                        .values
+                        .get(1)
+                        .and_then(|d| d.as_f64())
                         .or_else(|| row.values.first().and_then(|d| d.as_f64()));
                     if let (Some(yv), Some(xv)) = (y, x) {
                         pairs.push((yv, xv));
                     }
                 }
                 let n = pairs.len();
-                if n == 0 { return Ok(Datum::Null); }
+                if n == 0 {
+                    return Ok(Datum::Null);
+                }
 
                 match func {
                     AggFunc::RegrCount => Ok(Datum::Int64(n as i64)),
@@ -634,21 +733,39 @@ impl Executor {
                             AggFunc::RegrSXY => Ok(Datum::Float64(sxy)),
                             AggFunc::CovarPop => Ok(Datum::Float64(sxy / n as f64)),
                             AggFunc::CovarSamp => {
-                                if n < 2 { return Ok(Datum::Null); }
+                                if n < 2 {
+                                    return Ok(Datum::Null);
+                                }
                                 Ok(Datum::Float64(sxy / (n - 1) as f64))
                             }
                             AggFunc::Corr => {
                                 let denom = (sxx * syy).sqrt();
-                                if denom == 0.0 { Ok(Datum::Null) } else { Ok(Datum::Float64(sxy / denom)) }
+                                if denom == 0.0 {
+                                    Ok(Datum::Null)
+                                } else {
+                                    Ok(Datum::Float64(sxy / denom))
+                                }
                             }
                             AggFunc::RegrSlope => {
-                                if sxx == 0.0 { Ok(Datum::Null) } else { Ok(Datum::Float64(sxy / sxx)) }
+                                if sxx == 0.0 {
+                                    Ok(Datum::Null)
+                                } else {
+                                    Ok(Datum::Float64(sxy / sxx))
+                                }
                             }
                             AggFunc::RegrIntercept => {
-                                if sxx == 0.0 { Ok(Datum::Null) } else { Ok(Datum::Float64(avg_y - (sxy / sxx) * avg_x)) }
+                                if sxx == 0.0 {
+                                    Ok(Datum::Null)
+                                } else {
+                                    Ok(Datum::Float64(avg_y - (sxy / sxx) * avg_x))
+                                }
                             }
                             AggFunc::RegrR2 => {
-                                if syy == 0.0 { Ok(Datum::Null) } else { Ok(Datum::Float64((sxy * sxy) / (sxx * syy))) }
+                                if syy == 0.0 {
+                                    Ok(Datum::Null)
+                                } else {
+                                    Ok(Datum::Float64((sxy * sxy) / (sxx * syy)))
+                                }
                             }
                             _ => Ok(Datum::Null),
                         }
@@ -661,7 +778,9 @@ impl Executor {
                     "MODE requires an argument".into(),
                 )))?;
                 let vals = eval_all(expr)?;
-                if vals.is_empty() { return Ok(Datum::Null); }
+                if vals.is_empty() {
+                    return Ok(Datum::Null);
+                }
                 let mut freq: Vec<(String, usize, Datum)> = Vec::new();
                 for v in vals {
                     let key = format!("{}", v);
@@ -672,7 +791,11 @@ impl Executor {
                     }
                 }
                 freq.sort_by(|a, b| b.1.cmp(&a.1));
-                Ok(freq.into_iter().next().map(|(_, _, v)| v).unwrap_or(Datum::Null))
+                Ok(freq
+                    .into_iter()
+                    .next()
+                    .map(|(_, _, v)| v)
+                    .unwrap_or(Datum::Null))
             }
             AggFunc::PercentileCont(frac) => {
                 let expr = agg_expr.ok_or(FalconError::Execution(ExecutionError::TypeError(
@@ -680,7 +803,9 @@ impl Executor {
                 )))?;
                 let vals = eval_all(expr)?;
                 let mut floats: Vec<f64> = vals.iter().filter_map(|v| v.as_f64()).collect();
-                if floats.is_empty() { return Ok(Datum::Null); }
+                if floats.is_empty() {
+                    return Ok(Datum::Null);
+                }
                 floats.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 let n = floats.len();
                 let idx = frac * (n - 1) as f64;
@@ -699,7 +824,9 @@ impl Executor {
                 )))?;
                 let vals = eval_all(expr)?;
                 let mut floats: Vec<f64> = vals.iter().filter_map(|v| v.as_f64()).collect();
-                if floats.is_empty() { return Ok(Datum::Null); }
+                if floats.is_empty() {
+                    return Ok(Datum::Null);
+                }
                 floats.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 let idx = (frac * floats.len() as f64).ceil() as usize;
                 let idx = idx.min(floats.len()).saturating_sub(1);
@@ -711,7 +838,9 @@ impl Executor {
                     "BIT_AND requires an argument".into(),
                 )))?;
                 let vals = eval_all(expr)?;
-                if vals.is_empty() { return Ok(Datum::Null); }
+                if vals.is_empty() {
+                    return Ok(Datum::Null);
+                }
                 let mut result: Option<i64> = None;
                 for v in &vals {
                     if let Some(i) = v.as_i64() {
@@ -725,7 +854,9 @@ impl Executor {
                     "BIT_OR requires an argument".into(),
                 )))?;
                 let vals = eval_all(expr)?;
-                if vals.is_empty() { return Ok(Datum::Null); }
+                if vals.is_empty() {
+                    return Ok(Datum::Null);
+                }
                 let mut result: i64 = 0;
                 for v in &vals {
                     if let Some(i) = v.as_i64() {
@@ -739,7 +870,9 @@ impl Executor {
                     "BIT_XOR requires an argument".into(),
                 )))?;
                 let vals = eval_all(expr)?;
-                if vals.is_empty() { return Ok(Datum::Null); }
+                if vals.is_empty() {
+                    return Ok(Datum::Null);
+                }
                 let mut result: i64 = 0;
                 for v in &vals {
                     if let Some(i) = v.as_i64() {

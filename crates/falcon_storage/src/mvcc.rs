@@ -132,7 +132,11 @@ impl VersionChain {
     /// - `old_data`: the row data from the prior committed version (None = was insert, no prior).
     ///
     /// Used by MemTable to update secondary indexes at commit time (方案A).
-    pub fn commit_and_report(&self, txn_id: TxnId, commit_ts: Timestamp) -> (Option<OwnedRow>, Option<OwnedRow>) {
+    pub fn commit_and_report(
+        &self,
+        txn_id: TxnId,
+        commit_ts: Timestamp,
+    ) -> (Option<OwnedRow>, Option<OwnedRow>) {
         let head = self.head.read();
         let mut new_data: Option<OwnedRow> = None;
         let mut found = false;
@@ -254,7 +258,11 @@ impl VersionChain {
         let header = mem::size_of::<Version>() as u64;
         let data_bytes = match &ver.data {
             Some(row) => {
-                row.values.iter().map(|d| estimate_datum_bytes(d)).sum::<u64>() + 24 // Vec overhead
+                row.values
+                    .iter()
+                    .map(estimate_datum_bytes)
+                    .sum::<u64>()
+                    + 24 // Vec overhead
             }
             None => 0,
         };
@@ -336,10 +344,7 @@ impl VersionChain {
         let mut current = head.clone();
         while let Some(ver) = current {
             let cts = ver.get_commit_ts();
-            if ver.created_by != exclude_txn
-                && cts.0 > 0
-                && cts != Timestamp::MAX
-                && cts > after_ts
+            if ver.created_by != exclude_txn && cts.0 > 0 && cts != Timestamp::MAX && cts > after_ts
             {
                 return true;
             }
@@ -399,6 +404,11 @@ fn estimate_datum_bytes(d: &falcon_common::datum::Datum) -> u64 {
 /// Used by memory accounting to track write-buffer and MVCC allocations.
 pub fn estimate_row_bytes(row: &OwnedRow) -> u64 {
     let version_header = mem::size_of::<Version>() as u64;
-    let data_bytes: u64 = row.values.iter().map(|d| estimate_datum_bytes(d)).sum::<u64>() + 24; // Vec overhead
+    let data_bytes: u64 = row
+        .values
+        .iter()
+        .map(estimate_datum_bytes)
+        .sum::<u64>()
+        + 24; // Vec overhead
     version_header + data_bytes
 }

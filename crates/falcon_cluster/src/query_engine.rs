@@ -5,8 +5,8 @@
 //! runs its own Executor with its own transaction.
 //! For multi-shard writes, uses TwoPhaseCoordinator for atomic commits.
 
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use std::collections::{HashMap, HashSet};
@@ -20,9 +20,7 @@ use falcon_sql_frontend::types::BoundExpr;
 use falcon_storage::engine::StorageEngine;
 use falcon_txn::{TxnHandle, TxnManager};
 
-use crate::distributed_exec::{
-    AggMerge, DistributedExecutor, ShardResult,
-};
+use crate::distributed_exec::{AggMerge, DistributedExecutor, ShardResult};
 use crate::sharded_engine::ShardedEngine;
 use crate::two_phase::TwoPhaseCoordinator;
 
@@ -70,7 +68,8 @@ impl DistributedQueryEngine {
 
     /// Get the last scatter/gather stats for observability.
     pub fn last_scatter_stats(&self) -> ScatterStats {
-        self.last_scatter_stats.lock()
+        self.last_scatter_stats
+            .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone()
     }
@@ -78,7 +77,12 @@ impl DistributedQueryEngine {
     /// Health check: probe each shard with a trivial read transaction.
     /// Returns per-shard status: (shard_id, healthy, latency_us).
     pub fn shard_health_check(&self) -> Vec<(ShardId, bool, u64)> {
-        let shard_ids: Vec<ShardId> = self.engine.all_shards().iter().map(|s| s.shard_id).collect();
+        let shard_ids: Vec<ShardId> = self
+            .engine
+            .all_shards()
+            .iter()
+            .map(|s| s.shard_id)
+            .collect();
         std::thread::scope(|s| {
             let handles: Vec<_> = shard_ids
                 .iter()
@@ -121,19 +125,31 @@ impl DistributedQueryEngine {
             }
 
             // EXPLAIN wrapping a NestedLoopJoin/HashJoin: show coordinator-side join plan
-            PhysicalPlan::Explain(inner) if matches!(**inner, PhysicalPlan::NestedLoopJoin { .. } | PhysicalPlan::HashJoin { .. }) => {
+            PhysicalPlan::Explain(inner)
+                if matches!(
+                    **inner,
+                    PhysicalPlan::NestedLoopJoin { .. } | PhysicalPlan::HashJoin { .. }
+                ) =>
+            {
                 self.exec_explain_coordinator_join(inner)
             }
 
             // EXPLAIN wrapping a bare SeqScan (subquery/CTE/UNION): show coordinator-side plan
-            PhysicalPlan::Explain(inner) if matches!(**inner, PhysicalPlan::SeqScan { .. }) && self.engine.shard_ids().len() > 1 => {
+            PhysicalPlan::Explain(inner)
+                if matches!(**inner, PhysicalPlan::SeqScan { .. })
+                    && self.engine.shard_ids().len() > 1 =>
+            {
                 self.exec_explain_coordinator_subquery(inner)
             }
 
             // EXPLAIN ANALYZE: execute on shard 0 (local executor handles timing)
             PhysicalPlan::ExplainAnalyze(_) => {
                 let shard = self.engine.shard(ShardId(0)).ok_or_else(|| {
-                    FalconError::internal_bug("E-QE-001", "No shard 0 available", "ExplainAnalyze dispatch")
+                    FalconError::internal_bug(
+                        "E-QE-001",
+                        "No shard 0 available",
+                        "ExplainAnalyze dispatch",
+                    )
                 })?;
                 let local_exec = Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
                 local_exec.execute(plan, txn)
@@ -161,7 +177,14 @@ impl DistributedQueryEngine {
             // UPDATE: try to route by PK filter, otherwise broadcast to all shards.
             // If the filter contains subqueries, materialize them at coordinator level
             // first so each shard sees correct cross-shard subquery results.
-            PhysicalPlan::Update { table_id, schema, assignments, filter, returning, from_table } => {
+            PhysicalPlan::Update {
+                table_id,
+                schema,
+                assignments,
+                filter,
+                returning,
+                from_table,
+            } => {
                 if let Some(target_shard) = self.resolve_filter_shard(schema, filter.as_ref()) {
                     self.execute_on_shard_auto_txn(target_shard, plan)
                 } else if let Some(f) = filter.as_ref().filter(|f| Self::expr_has_subquery(f)) {
@@ -185,7 +208,13 @@ impl DistributedQueryEngine {
             // DELETE: try to route by PK filter, otherwise broadcast to all shards.
             // If the filter contains subqueries, materialize them at coordinator level
             // first so each shard sees correct cross-shard subquery results.
-            PhysicalPlan::Delete { table_id, schema, filter, returning, using_table } => {
+            PhysicalPlan::Delete {
+                table_id,
+                schema,
+                filter,
+                returning,
+                using_table,
+            } => {
                 if let Some(target_shard) = self.resolve_filter_shard(schema, filter.as_ref()) {
                     self.execute_on_shard_auto_txn(target_shard, plan)
                 } else if let Some(f) = filter.as_ref().filter(|f| Self::expr_has_subquery(f)) {
@@ -208,7 +237,9 @@ impl DistributedQueryEngine {
             // NestedLoopJoin: coordinator-side join — gather all table data
             // from all shards into a temp engine, then execute the join locally.
             // This ensures cross-shard correctness (no missing matches).
-            PhysicalPlan::NestedLoopJoin { .. } | PhysicalPlan::HashJoin { .. } => self.exec_coordinator_join(plan, txn),
+            PhysicalPlan::NestedLoopJoin { .. } | PhysicalPlan::HashJoin { .. } => {
+                self.exec_coordinator_join(plan, txn)
+            }
 
             // SeqScan that wasn't wrapped in DistPlan (has subqueries/CTEs/UNIONs):
             // needs coordinator-side execution to gather all referenced table data.
@@ -222,7 +253,11 @@ impl DistributedQueryEngine {
             // Everything else: execute on shard 0
             other => {
                 let shard = self.engine.shard(ShardId(0)).ok_or_else(|| {
-                    FalconError::internal_bug("E-QE-002", "No shard 0 available", "default plan dispatch")
+                    FalconError::internal_bug(
+                        "E-QE-002",
+                        "No shard 0 available",
+                        "default plan dispatch",
+                    )
                 })?;
                 let local_exec = Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
                 local_exec.execute(other, txn)
@@ -258,7 +293,10 @@ impl DistributedQueryEngine {
         &self,
         plan: &PhysicalPlan,
         txn: Option<&TxnHandle>,
-        replica_metrics: &[(ShardId, crate::replication::runner::ReplicaRunnerMetricsSnapshot)],
+        replica_metrics: &[(
+            ShardId,
+            crate::replication::runner::ReplicaRunnerMetricsSnapshot,
+        )],
         max_lag_lsn: u64,
     ) -> Result<ExecutionResult, FalconError> {
         // Find the shard whose replica has the lowest lag within the threshold.
@@ -324,7 +362,13 @@ impl DistributedQueryEngine {
             .map(|(i, shard)| {
                 let snap = shard.txn_mgr.stats_snapshot();
                 let table_count = shard.storage.get_catalog().table_count();
-                (i as u64, table_count, snap.total_committed, snap.total_aborted, snap.active_count)
+                (
+                    i as u64,
+                    table_count,
+                    snap.total_committed,
+                    snap.total_aborted,
+                    snap.active_count,
+                )
             })
             .collect()
     }
@@ -369,9 +413,8 @@ impl DistributedQueryEngine {
         &self,
         plan: &crate::rebalancer::MigrationPlan,
     ) -> (usize, usize, u64) {
-        let migrator = crate::rebalancer::ShardMigrator::new(
-            crate::rebalancer::RebalancerConfig::default(),
-        );
+        let migrator =
+            crate::rebalancer::ShardMigrator::new(crate::rebalancer::RebalancerConfig::default());
         let mut completed = 0usize;
         let mut failed = 0usize;
         let mut rows_migrated = 0u64;
@@ -388,7 +431,10 @@ impl DistributedQueryEngine {
                     if let Some(ref err) = status.error {
                         tracing::warn!(
                             "Rebalance task failed: {:?} → {:?} ({}): {}",
-                            task.source_shard, task.target_shard, task.table_name, err
+                            task.source_shard,
+                            task.target_shard,
+                            task.table_name,
+                            err
                         );
                     }
                 }
@@ -422,15 +468,41 @@ impl DistributedQueryEngine {
 
         let mut lines: Vec<OwnedRow> = Vec::new();
         let is_hash = matches!(plan, PhysicalPlan::HashJoin { .. });
-        let strategy = if is_hash { "HashJoin" } else { "NestedLoopJoin" };
-        lines.push(OwnedRow::new(vec![Datum::Text(
-            format!("CoordinatorJoin ({}, gather-all-then-join)", strategy),
-        )]));
+        let strategy = if is_hash {
+            "HashJoin"
+        } else {
+            "NestedLoopJoin"
+        };
+        lines.push(OwnedRow::new(vec![Datum::Text(format!(
+            "CoordinatorJoin ({}, gather-all-then-join)",
+            strategy
+        ))]));
         let (left_table_id, joins, filter, order_by, limit, offset) = match plan {
-            PhysicalPlan::NestedLoopJoin { left_table_id, joins, filter, order_by, limit, offset, .. }
-            | PhysicalPlan::HashJoin { left_table_id, joins, filter, order_by, limit, offset, .. }
-                => (left_table_id, joins, filter, order_by, limit, offset),
-            _ => return Err(FalconError::internal_bug("E-QE-006", "exec_explain_coordinator_join: not a join plan", "plan type mismatch")),
+            PhysicalPlan::NestedLoopJoin {
+                left_table_id,
+                joins,
+                filter,
+                order_by,
+                limit,
+                offset,
+                ..
+            }
+            | PhysicalPlan::HashJoin {
+                left_table_id,
+                joins,
+                filter,
+                order_by,
+                limit,
+                offset,
+                ..
+            } => (left_table_id, joins, filter, order_by, limit, offset),
+            _ => {
+                return Err(FalconError::internal_bug(
+                    "E-QE-006",
+                    "exec_explain_coordinator_join: not a join plan",
+                    "plan type mismatch",
+                ))
+            }
         };
         {
             // Show tables involved
@@ -438,24 +510,28 @@ impl DistributedQueryEngine {
             for join in joins {
                 table_ids.push(join.right_table_id);
             }
-            lines.push(OwnedRow::new(vec![Datum::Text(
-                format!("  Tables: {:?} (gathered from {} shards each)", table_ids, self.engine.shard_ids().len()),
-            )]));
+            lines.push(OwnedRow::new(vec![Datum::Text(format!(
+                "  Tables: {:?} (gathered from {} shards each)",
+                table_ids,
+                self.engine.shard_ids().len()
+            ))]));
 
             // Show join types
             for (i, join) in joins.iter().enumerate() {
-                lines.push(OwnedRow::new(vec![Datum::Text(
-                    format!("  Join {}: {:?} on table {:?}", i, join.join_type, join.right_table_id),
-                )]));
+                lines.push(OwnedRow::new(vec![Datum::Text(format!(
+                    "  Join {}: {:?} on table {:?}",
+                    i, join.join_type, join.right_table_id
+                ))]));
             }
 
             if filter.is_some() {
                 lines.push(OwnedRow::new(vec![Datum::Text("  Filter: yes".into())]));
             }
             if !order_by.is_empty() {
-                lines.push(OwnedRow::new(vec![Datum::Text(
-                    format!("  Order by: {} columns", order_by.len()),
-                )]));
+                lines.push(OwnedRow::new(vec![Datum::Text(format!(
+                    "  Order by: {} columns",
+                    order_by.len()
+                ))]));
             }
             if let Some(l) = limit {
                 lines.push(OwnedRow::new(vec![Datum::Text(format!("  Limit: {}", l))]));
@@ -468,15 +544,14 @@ impl DistributedQueryEngine {
             let result = self.exec_coordinator_join(plan, None);
             match &result {
                 Ok(ExecutionResult::Query { rows, .. }) => {
-                    lines.push(OwnedRow::new(vec![Datum::Text(
-                        format!("  Result rows: {}", rows.len()),
-                    )]));
+                    lines.push(OwnedRow::new(vec![Datum::Text(format!(
+                        "  Result rows: {}",
+                        rows.len()
+                    ))]));
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    lines.push(OwnedRow::new(vec![Datum::Text(
-                        format!("  Error: {}", e),
-                    )]));
+                    lines.push(OwnedRow::new(vec![Datum::Text(format!("  Error: {}", e))]));
                 }
             }
         }
@@ -500,23 +575,24 @@ impl DistributedQueryEngine {
         )]));
 
         let table_ids = Self::extract_table_ids(plan);
-        lines.push(OwnedRow::new(vec![Datum::Text(
-            format!("  Tables: {:?} (gathered from {} shards each)", table_ids, self.engine.shard_ids().len()),
-        )]));
+        lines.push(OwnedRow::new(vec![Datum::Text(format!(
+            "  Tables: {:?} (gathered from {} shards each)",
+            table_ids,
+            self.engine.shard_ids().len()
+        ))]));
 
         // Execute and show row counts
         let result = self.exec_coordinator_subquery(plan, None);
         match &result {
             Ok(ExecutionResult::Query { rows, .. }) => {
-                lines.push(OwnedRow::new(vec![Datum::Text(
-                    format!("  Result rows: {}", rows.len()),
-                )]));
+                lines.push(OwnedRow::new(vec![Datum::Text(format!(
+                    "  Result rows: {}",
+                    rows.len()
+                ))]));
             }
             Ok(_) => {}
             Err(e) => {
-                lines.push(OwnedRow::new(vec![Datum::Text(
-                    format!("  Error: {}", e),
-                )]));
+                lines.push(OwnedRow::new(vec![Datum::Text(format!("  Error: {}", e))]));
             }
         }
 
@@ -547,16 +623,37 @@ impl DistributedQueryEngine {
         ids.into_iter().collect()
     }
 
-    fn collect_table_ids_from_plan(plan: &PhysicalPlan, ids: &mut std::collections::HashSet<falcon_common::types::TableId>) {
+    fn collect_table_ids_from_plan(
+        plan: &PhysicalPlan,
+        ids: &mut std::collections::HashSet<falcon_common::types::TableId>,
+    ) {
         match plan {
-            PhysicalPlan::SeqScan { table_id, filter, projections, having, ctes, unions, .. } => {
+            PhysicalPlan::SeqScan {
+                table_id,
+                filter,
+                projections,
+                having,
+                ctes,
+                unions,
+                ..
+            } => {
                 ids.insert(*table_id);
-                if let Some(f) = filter { Self::collect_table_ids_from_expr(f, ids); }
-                if let Some(h) = having { Self::collect_table_ids_from_expr(h, ids); }
+                if let Some(f) = filter {
+                    Self::collect_table_ids_from_expr(f, ids);
+                }
+                if let Some(h) = having {
+                    Self::collect_table_ids_from_expr(h, ids);
+                }
                 for proj in projections {
                     match proj {
                         falcon_sql_frontend::types::BoundProjection::Expr(e, _)
-                        | falcon_sql_frontend::types::BoundProjection::Aggregate(_, Some(e), _, _, _) => {
+                        | falcon_sql_frontend::types::BoundProjection::Aggregate(
+                            _,
+                            Some(e),
+                            _,
+                            _,
+                            _,
+                        ) => {
                             Self::collect_table_ids_from_expr(e, ids);
                         }
                         _ => {}
@@ -570,19 +667,36 @@ impl DistributedQueryEngine {
                     Self::collect_table_ids_from_select(union_sel, ids);
                 }
             }
-            PhysicalPlan::NestedLoopJoin { left_table_id, joins, .. }
-            | PhysicalPlan::HashJoin { left_table_id, joins, .. } => {
+            PhysicalPlan::NestedLoopJoin {
+                left_table_id,
+                joins,
+                ..
+            }
+            | PhysicalPlan::HashJoin {
+                left_table_id,
+                joins,
+                ..
+            } => {
                 ids.insert(*left_table_id);
-                for join in joins { ids.insert(join.right_table_id); }
+                for join in joins {
+                    ids.insert(join.right_table_id);
+                }
             }
             _ => {}
         }
     }
 
-    fn collect_table_ids_from_select(sel: &falcon_sql_frontend::types::BoundSelect, ids: &mut std::collections::HashSet<falcon_common::types::TableId>) {
+    fn collect_table_ids_from_select(
+        sel: &falcon_sql_frontend::types::BoundSelect,
+        ids: &mut std::collections::HashSet<falcon_common::types::TableId>,
+    ) {
         ids.insert(sel.table_id);
-        if let Some(f) = &sel.filter { Self::collect_table_ids_from_expr(f, ids); }
-        for join in &sel.joins { ids.insert(join.right_table_id); }
+        if let Some(f) = &sel.filter {
+            Self::collect_table_ids_from_expr(f, ids);
+        }
+        for join in &sel.joins {
+            ids.insert(join.right_table_id);
+        }
         for cte in &sel.ctes {
             ids.insert(cte.table_id);
             Self::collect_table_ids_from_select(&cte.select, ids);
@@ -592,39 +706,72 @@ impl DistributedQueryEngine {
         }
     }
 
-    fn collect_table_ids_from_expr(expr: &BoundExpr, ids: &mut std::collections::HashSet<falcon_common::types::TableId>) {
+    fn collect_table_ids_from_expr(
+        expr: &BoundExpr,
+        ids: &mut std::collections::HashSet<falcon_common::types::TableId>,
+    ) {
         match expr {
-            BoundExpr::ScalarSubquery(sel) => { Self::collect_table_ids_from_select(sel, ids); }
+            BoundExpr::ScalarSubquery(sel) => {
+                Self::collect_table_ids_from_select(sel, ids);
+            }
             BoundExpr::InSubquery { expr, subquery, .. } => {
                 Self::collect_table_ids_from_expr(expr, ids);
                 Self::collect_table_ids_from_select(subquery, ids);
             }
-            BoundExpr::Exists { subquery, .. } => { Self::collect_table_ids_from_select(subquery, ids); }
+            BoundExpr::Exists { subquery, .. } => {
+                Self::collect_table_ids_from_select(subquery, ids);
+            }
             BoundExpr::BinaryOp { left, right, .. } => {
                 Self::collect_table_ids_from_expr(left, ids);
                 Self::collect_table_ids_from_expr(right, ids);
             }
-            BoundExpr::Not(inner) | BoundExpr::IsNull(inner) | BoundExpr::IsNotNull(inner) | BoundExpr::Cast { expr: inner, .. } => {
+            BoundExpr::Not(inner)
+            | BoundExpr::IsNull(inner)
+            | BoundExpr::IsNotNull(inner)
+            | BoundExpr::Cast { expr: inner, .. } => {
                 Self::collect_table_ids_from_expr(inner, ids);
             }
-            BoundExpr::Between { expr, low, high, .. } => {
+            BoundExpr::Between {
+                expr, low, high, ..
+            } => {
                 Self::collect_table_ids_from_expr(expr, ids);
                 Self::collect_table_ids_from_expr(low, ids);
                 Self::collect_table_ids_from_expr(high, ids);
             }
-            BoundExpr::Case { operand, conditions, results, else_result } => {
-                if let Some(op) = operand { Self::collect_table_ids_from_expr(op, ids); }
-                for c in conditions { Self::collect_table_ids_from_expr(c, ids); }
-                for r in results { Self::collect_table_ids_from_expr(r, ids); }
-                if let Some(el) = else_result { Self::collect_table_ids_from_expr(el, ids); }
+            BoundExpr::Case {
+                operand,
+                conditions,
+                results,
+                else_result,
+            } => {
+                if let Some(op) = operand {
+                    Self::collect_table_ids_from_expr(op, ids);
+                }
+                for c in conditions {
+                    Self::collect_table_ids_from_expr(c, ids);
+                }
+                for r in results {
+                    Self::collect_table_ids_from_expr(r, ids);
+                }
+                if let Some(el) = else_result {
+                    Self::collect_table_ids_from_expr(el, ids);
+                }
             }
             BoundExpr::InList { expr, list, .. } => {
                 Self::collect_table_ids_from_expr(expr, ids);
-                for e in list { Self::collect_table_ids_from_expr(e, ids); }
+                for e in list {
+                    Self::collect_table_ids_from_expr(e, ids);
+                }
             }
-            BoundExpr::Function { args, .. } => { for a in args { Self::collect_table_ids_from_expr(a, ids); } }
+            BoundExpr::Function { args, .. } => {
+                for a in args {
+                    Self::collect_table_ids_from_expr(a, ids);
+                }
+            }
             BoundExpr::Coalesce(exprs) | BoundExpr::ArrayLiteral(exprs) => {
-                for e in exprs { Self::collect_table_ids_from_expr(e, ids); }
+                for e in exprs {
+                    Self::collect_table_ids_from_expr(e, ids);
+                }
             }
             BoundExpr::Like { expr, pattern, .. } => {
                 Self::collect_table_ids_from_expr(expr, ids);
@@ -642,34 +789,65 @@ impl DistributedQueryEngine {
                 Self::collect_table_ids_from_expr(left, ids);
                 Self::collect_table_ids_from_expr(right, ids);
             }
-            BoundExpr::ArraySlice { array, lower, upper } => {
+            BoundExpr::ArraySlice {
+                array,
+                lower,
+                upper,
+            } => {
                 Self::collect_table_ids_from_expr(array, ids);
-                if let Some(e) = lower { Self::collect_table_ids_from_expr(e, ids); }
-                if let Some(e) = upper { Self::collect_table_ids_from_expr(e, ids); }
+                if let Some(e) = lower {
+                    Self::collect_table_ids_from_expr(e, ids);
+                }
+                if let Some(e) = upper {
+                    Self::collect_table_ids_from_expr(e, ids);
+                }
             }
-            BoundExpr::AggregateExpr { arg: Some(inner), .. } => { Self::collect_table_ids_from_expr(inner, ids); }
-            BoundExpr::ColumnRef(_) | BoundExpr::Literal(_) | BoundExpr::OuterColumnRef(_) | BoundExpr::AggregateExpr { arg: None, .. }
-            | BoundExpr::SequenceNextval(_) | BoundExpr::SequenceCurrval(_) | BoundExpr::SequenceSetval(_, _)
-            | BoundExpr::Parameter(_) | BoundExpr::Grouping(_) => {}
+            BoundExpr::AggregateExpr {
+                arg: Some(inner), ..
+            } => {
+                Self::collect_table_ids_from_expr(inner, ids);
+            }
+            BoundExpr::ColumnRef(_)
+            | BoundExpr::Literal(_)
+            | BoundExpr::OuterColumnRef(_)
+            | BoundExpr::AggregateExpr { arg: None, .. }
+            | BoundExpr::SequenceNextval(_)
+            | BoundExpr::SequenceCurrval(_)
+            | BoundExpr::SequenceSetval(_, _)
+            | BoundExpr::Parameter(_)
+            | BoundExpr::Grouping(_) => {}
         }
     }
 
     /// Check if a BoundExpr contains any subquery node (InSubquery, Exists, ScalarSubquery).
     fn expr_has_subquery(expr: &BoundExpr) -> bool {
         match expr {
-            BoundExpr::ScalarSubquery(_) | BoundExpr::InSubquery { .. } | BoundExpr::Exists { .. } => true,
+            BoundExpr::ScalarSubquery(_)
+            | BoundExpr::InSubquery { .. }
+            | BoundExpr::Exists { .. } => true,
             BoundExpr::BinaryOp { left, right, .. } => {
                 Self::expr_has_subquery(left) || Self::expr_has_subquery(right)
             }
-            BoundExpr::Not(inner) | BoundExpr::IsNull(inner) | BoundExpr::IsNotNull(inner)
+            BoundExpr::Not(inner)
+            | BoundExpr::IsNull(inner)
+            | BoundExpr::IsNotNull(inner)
             | BoundExpr::Cast { expr: inner, .. } => Self::expr_has_subquery(inner),
             BoundExpr::Like { expr, pattern, .. } => {
                 Self::expr_has_subquery(expr) || Self::expr_has_subquery(pattern)
             }
-            BoundExpr::Between { expr, low, high, .. } => {
-                Self::expr_has_subquery(expr) || Self::expr_has_subquery(low) || Self::expr_has_subquery(high)
+            BoundExpr::Between {
+                expr, low, high, ..
+            } => {
+                Self::expr_has_subquery(expr)
+                    || Self::expr_has_subquery(low)
+                    || Self::expr_has_subquery(high)
             }
-            BoundExpr::Case { operand, conditions, results, else_result } => {
+            BoundExpr::Case {
+                operand,
+                conditions,
+                results,
+                else_result,
+            } => {
                 operand.as_deref().is_some_and(Self::expr_has_subquery)
                     || conditions.iter().any(Self::expr_has_subquery)
                     || results.iter().any(Self::expr_has_subquery)
@@ -679,7 +857,9 @@ impl DistributedQueryEngine {
                 Self::expr_has_subquery(expr) || list.iter().any(Self::expr_has_subquery)
             }
             BoundExpr::Function { args, .. } => args.iter().any(Self::expr_has_subquery),
-            BoundExpr::Coalesce(exprs) | BoundExpr::ArrayLiteral(exprs) => exprs.iter().any(Self::expr_has_subquery),
+            BoundExpr::Coalesce(exprs) | BoundExpr::ArrayLiteral(exprs) => {
+                exprs.iter().any(Self::expr_has_subquery)
+            }
             BoundExpr::ArrayIndex { array, index } => {
                 Self::expr_has_subquery(array) || Self::expr_has_subquery(index)
             }
@@ -689,15 +869,27 @@ impl DistributedQueryEngine {
             BoundExpr::AnyOp { left, right, .. } | BoundExpr::AllOp { left, right, .. } => {
                 Self::expr_has_subquery(left) || Self::expr_has_subquery(right)
             }
-            BoundExpr::ArraySlice { array, lower, upper } => {
+            BoundExpr::ArraySlice {
+                array,
+                lower,
+                upper,
+            } => {
                 Self::expr_has_subquery(array)
                     || lower.as_deref().is_some_and(Self::expr_has_subquery)
                     || upper.as_deref().is_some_and(Self::expr_has_subquery)
             }
-            BoundExpr::AggregateExpr { arg: Some(inner), .. } => Self::expr_has_subquery(inner),
-            BoundExpr::ColumnRef(_) | BoundExpr::Literal(_) | BoundExpr::OuterColumnRef(_) | BoundExpr::AggregateExpr { arg: None, .. }
-            | BoundExpr::SequenceNextval(_) | BoundExpr::SequenceCurrval(_) | BoundExpr::SequenceSetval(_, _)
-            | BoundExpr::Parameter(_) | BoundExpr::Grouping(_) => false,
+            BoundExpr::AggregateExpr {
+                arg: Some(inner), ..
+            } => Self::expr_has_subquery(inner),
+            BoundExpr::ColumnRef(_)
+            | BoundExpr::Literal(_)
+            | BoundExpr::OuterColumnRef(_)
+            | BoundExpr::AggregateExpr { arg: None, .. }
+            | BoundExpr::SequenceNextval(_)
+            | BoundExpr::SequenceCurrval(_)
+            | BoundExpr::SequenceSetval(_, _)
+            | BoundExpr::Parameter(_)
+            | BoundExpr::Grouping(_) => false,
         }
     }
 
@@ -705,10 +897,7 @@ impl DistributedQueryEngine {
     /// Gathers all subquery-referenced table data from all shards into a temp engine,
     /// then uses the Executor's materialize_filter to replace subquery nodes with
     /// concrete values. Returns the materialized filter expression.
-    fn materialize_dml_filter(
-        &self,
-        filter: &BoundExpr,
-    ) -> Result<BoundExpr, FalconError> {
+    fn materialize_dml_filter(&self, filter: &BoundExpr) -> Result<BoundExpr, FalconError> {
         // Collect table IDs referenced by subqueries in the filter
         let mut ids = std::collections::HashSet::new();
         Self::collect_table_ids_from_expr(filter, &mut ids);
@@ -719,14 +908,15 @@ impl DistributedQueryEngine {
         // Gather subquery tables from all shards
         let shard_ids = self.engine.shard_ids();
         for &table_id in &ids {
-            let schema = shard_ids.iter()
+            let schema = shard_ids
+                .iter()
                 .find_map(|sid| {
                     let s = self.engine.shard(*sid)?;
                     s.storage.get_table_schema_by_id(table_id)
                 })
-                .ok_or_else(|| FalconError::Internal(
-                    format!("Table {:?} not found on any shard", table_id),
-                ))?;
+                .ok_or_else(|| {
+                    FalconError::Internal(format!("Table {:?} not found on any shard", table_id))
+                })?;
 
             temp_storage.create_table(schema.clone()).map_err(|e| {
                 FalconError::Internal(format!("Failed to create temp table: {:?}", e))
@@ -735,17 +925,22 @@ impl DistributedQueryEngine {
             let gathered_rows: Vec<falcon_common::datum::OwnedRow> = {
                 let mut per_shard: Vec<Vec<falcon_common::datum::OwnedRow>> = Vec::new();
                 std::thread::scope(|s| {
-                    let handles: Vec<_> = shard_ids.iter().filter_map(|sid| {
-                        let shard = self.engine.shard(*sid)?;
-                        Some(s.spawn(move || {
-                            let shard_txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
-                            let read_ts = shard_txn.read_ts(shard.txn_mgr.current_ts());
-                            let rows = shard.storage.scan(table_id, shard_txn.txn_id, read_ts)
-                                .unwrap_or_default();
-                            let _ = shard.txn_mgr.commit(shard_txn.txn_id);
-                            rows.into_iter().map(|(_, r)| r).collect::<Vec<_>>()
-                        }))
-                    }).collect();
+                    let handles: Vec<_> = shard_ids
+                        .iter()
+                        .filter_map(|sid| {
+                            let shard = self.engine.shard(*sid)?;
+                            Some(s.spawn(move || {
+                                let shard_txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
+                                let read_ts = shard_txn.read_ts(shard.txn_mgr.current_ts());
+                                let rows = shard
+                                    .storage
+                                    .scan(table_id, shard_txn.txn_id, read_ts)
+                                    .unwrap_or_default();
+                                let _ = shard.txn_mgr.commit(shard_txn.txn_id);
+                                rows.into_iter().map(|(_, r)| r).collect::<Vec<_>>()
+                            }))
+                        })
+                        .collect();
                     for h in handles {
                         if let Ok(rows) = h.join() {
                             per_shard.push(rows);
@@ -757,9 +952,14 @@ impl DistributedQueryEngine {
 
             let temp_txn = temp_txn_mgr.begin(IsolationLevel::ReadCommitted);
             for row in gathered_rows {
-                temp_storage.insert(table_id, row, temp_txn.txn_id).map_err(|e| {
-                    FalconError::Internal(format!("Failed to insert into temp storage: {:?}", e))
-                })?;
+                temp_storage
+                    .insert(table_id, row, temp_txn.txn_id)
+                    .map_err(|e| {
+                        FalconError::Internal(format!(
+                            "Failed to insert into temp storage: {:?}",
+                            e
+                        ))
+                    })?;
             }
             temp_txn_mgr.commit(temp_txn.txn_id).map_err(|e| {
                 FalconError::Internal(format!("Failed to commit temp txn: {:?}", e))
@@ -782,12 +982,28 @@ impl DistributedQueryEngine {
         _txn: Option<&TxnHandle>,
     ) -> Result<ExecutionResult, FalconError> {
         let (left_table_id, joins) = match plan {
-            PhysicalPlan::NestedLoopJoin { left_table_id, joins, .. }
-            | PhysicalPlan::HashJoin { left_table_id, joins, .. } => (*left_table_id, joins),
-            _ => return Err(FalconError::internal_bug("E-QE-007", "exec_coordinator_join called on non-join plan", "plan type mismatch")),
+            PhysicalPlan::NestedLoopJoin {
+                left_table_id,
+                joins,
+                ..
+            }
+            | PhysicalPlan::HashJoin {
+                left_table_id,
+                joins,
+                ..
+            } => (*left_table_id, joins),
+            _ => {
+                return Err(FalconError::internal_bug(
+                    "E-QE-007",
+                    "exec_coordinator_join called on non-join plan",
+                    "plan type mismatch",
+                ))
+            }
         };
         let mut table_ids = vec![left_table_id];
-        for join in joins { table_ids.push(join.right_table_id); }
+        for join in joins {
+            table_ids.push(join.right_table_id);
+        }
         self.gather_and_execute_locally(&table_ids, plan)
     }
 
@@ -803,14 +1019,15 @@ impl DistributedQueryEngine {
 
         let shard_ids = self.engine.shard_ids();
         for &table_id in table_ids {
-            let schema = shard_ids.iter()
+            let schema = shard_ids
+                .iter()
                 .find_map(|sid| {
                     let s = self.engine.shard(*sid)?;
                     s.storage.get_table_schema_by_id(table_id)
                 })
-                .ok_or_else(|| FalconError::Internal(
-                    format!("Table {:?} not found on any shard", table_id),
-                ))?;
+                .ok_or_else(|| {
+                    FalconError::Internal(format!("Table {:?} not found on any shard", table_id))
+                })?;
 
             temp_storage.create_table(schema.clone()).map_err(|e| {
                 FalconError::Internal(format!("Failed to create temp table: {:?}", e))
@@ -820,17 +1037,22 @@ impl DistributedQueryEngine {
             let gathered_rows: Vec<OwnedRow> = {
                 let mut per_shard: Vec<Vec<OwnedRow>> = Vec::new();
                 std::thread::scope(|s| {
-                    let handles: Vec<_> = shard_ids.iter().filter_map(|sid| {
-                        let shard = self.engine.shard(*sid)?;
-                        Some(s.spawn(move || {
-                            let shard_txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
-                            let read_ts = shard_txn.read_ts(shard.txn_mgr.current_ts());
-                            let rows = shard.storage.scan(table_id, shard_txn.txn_id, read_ts)
-                                .unwrap_or_default();
-                            let _ = shard.txn_mgr.commit(shard_txn.txn_id);
-                            rows.into_iter().map(|(_, r)| r).collect::<Vec<_>>()
-                        }))
-                    }).collect();
+                    let handles: Vec<_> = shard_ids
+                        .iter()
+                        .filter_map(|sid| {
+                            let shard = self.engine.shard(*sid)?;
+                            Some(s.spawn(move || {
+                                let shard_txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
+                                let read_ts = shard_txn.read_ts(shard.txn_mgr.current_ts());
+                                let rows = shard
+                                    .storage
+                                    .scan(table_id, shard_txn.txn_id, read_ts)
+                                    .unwrap_or_default();
+                                let _ = shard.txn_mgr.commit(shard_txn.txn_id);
+                                rows.into_iter().map(|(_, r)| r).collect::<Vec<_>>()
+                            }))
+                        })
+                        .collect();
                     for h in handles {
                         if let Ok(rows) = h.join() {
                             per_shard.push(rows);
@@ -842,9 +1064,14 @@ impl DistributedQueryEngine {
 
             let temp_txn = temp_txn_mgr.begin(IsolationLevel::ReadCommitted);
             for row in gathered_rows {
-                temp_storage.insert(table_id, row, temp_txn.txn_id).map_err(|e| {
-                    FalconError::Internal(format!("Failed to insert into temp storage: {:?}", e))
-                })?;
+                temp_storage
+                    .insert(table_id, row, temp_txn.txn_id)
+                    .map_err(|e| {
+                        FalconError::Internal(format!(
+                            "Failed to insert into temp storage: {:?}",
+                            e
+                        ))
+                    })?;
             }
             temp_txn_mgr.commit(temp_txn.txn_id).map_err(|e| {
                 FalconError::Internal(format!("Failed to commit temp txn: {:?}", e))
@@ -857,10 +1084,7 @@ impl DistributedQueryEngine {
     }
 
     /// EXPLAIN ANALYZE for a DistPlan: execute the plan and show per-shard stats.
-    fn exec_explain_dist(
-        &self,
-        inner: &PhysicalPlan,
-    ) -> Result<ExecutionResult, FalconError> {
+    fn exec_explain_dist(&self, inner: &PhysicalPlan) -> Result<ExecutionResult, FalconError> {
         use falcon_common::datum::OwnedRow;
         use falcon_common::types::DataType;
 
@@ -870,7 +1094,11 @@ impl DistributedQueryEngine {
 
         // Build EXPLAIN output with plan structure + execution stats.
         let shard0 = self.engine.shard(ShardId(0)).ok_or_else(|| {
-            FalconError::internal_bug("E-QE-008", "No shard 0 available", "exec_explain_analyze_coordinator")
+            FalconError::internal_bug(
+                "E-QE-008",
+                "No shard 0 available",
+                "exec_explain_analyze_coordinator",
+            )
         })?;
         let local_exec = Executor::new(shard0.storage.clone(), shard0.txn_mgr.clone());
         let plan_lines = local_exec.format_plan(inner, 0);
@@ -881,40 +1109,72 @@ impl DistributedQueryEngine {
             .collect();
 
         // Append gather strategy details
-        if let PhysicalPlan::DistPlan { gather, target_shards, .. } = inner {
+        if let PhysicalPlan::DistPlan {
+            gather,
+            target_shards,
+            ..
+        } = inner
+        {
             lines.push(OwnedRow::new(vec![Datum::Text(String::new())]));
-            lines.push(OwnedRow::new(vec![Datum::Text(
-                format!("Distributed Plan ({} shards)", target_shards.len()),
-            )]));
+            lines.push(OwnedRow::new(vec![Datum::Text(format!(
+                "Distributed Plan ({} shards)",
+                target_shards.len()
+            ))]));
             match gather {
-                DistGather::Union { distinct, limit, offset } => {
-                    lines.push(OwnedRow::new(vec![Datum::Text(
-                        format!("  Gather: Union (distinct={}, limit={:?}, offset={:?})", distinct, limit, offset),
-                    )]));
+                DistGather::Union {
+                    distinct,
+                    limit,
+                    offset,
+                } => {
+                    lines.push(OwnedRow::new(vec![Datum::Text(format!(
+                        "  Gather: Union (distinct={}, limit={:?}, offset={:?})",
+                        distinct, limit, offset
+                    ))]));
                 }
-                DistGather::MergeSortLimit { sort_columns, limit, offset } => {
-                    let cols: Vec<String> = sort_columns.iter()
-                        .map(|(idx, asc)| format!("col{}:{}", idx, if *asc { "ASC" } else { "DESC" }))
+                DistGather::MergeSortLimit {
+                    sort_columns,
+                    limit,
+                    offset,
+                } => {
+                    let cols: Vec<String> = sort_columns
+                        .iter()
+                        .map(|(idx, asc)| {
+                            format!("col{}:{}", idx, if *asc { "ASC" } else { "DESC" })
+                        })
                         .collect();
-                    lines.push(OwnedRow::new(vec![Datum::Text(
-                        format!("  Gather: MergeSortLimit (sort=[{}], limit={:?}, offset={:?})",
-                            cols.join(", "), limit, offset),
-                    )]));
+                    lines.push(OwnedRow::new(vec![Datum::Text(format!(
+                        "  Gather: MergeSortLimit (sort=[{}], limit={:?}, offset={:?})",
+                        cols.join(", "),
+                        limit,
+                        offset
+                    ))]));
                 }
-                DistGather::TwoPhaseAgg { group_by_indices, agg_merges, having, avg_fixups, visible_columns, order_by, limit, offset } => {
+                DistGather::TwoPhaseAgg {
+                    group_by_indices,
+                    agg_merges,
+                    having,
+                    avg_fixups,
+                    visible_columns,
+                    order_by,
+                    limit,
+                    offset,
+                } => {
                     let merges: Vec<String> = agg_merges.iter().map(|m| m.to_string()).collect();
-                    lines.push(OwnedRow::new(vec![Datum::Text(
-                        format!("  Gather: TwoPhaseAgg (group_by={:?})", group_by_indices),
-                    )]));
+                    lines.push(OwnedRow::new(vec![Datum::Text(format!(
+                        "  Gather: TwoPhaseAgg (group_by={:?})",
+                        group_by_indices
+                    ))]));
                     for merge_label in &merges {
-                        lines.push(OwnedRow::new(vec![Datum::Text(
-                            format!("    merge: {}", merge_label),
-                        )]));
+                        lines.push(OwnedRow::new(vec![Datum::Text(format!(
+                            "    merge: {}",
+                            merge_label
+                        ))]));
                     }
                     if !avg_fixups.is_empty() {
-                        lines.push(OwnedRow::new(vec![Datum::Text(
-                            format!("    AVG decomposition: {:?} (visible_columns={})", avg_fixups, visible_columns),
-                        )]));
+                        lines.push(OwnedRow::new(vec![Datum::Text(format!(
+                            "    AVG decomposition: {:?} (visible_columns={})",
+                            avg_fixups, visible_columns
+                        ))]));
                     }
                     if having.is_some() {
                         lines.push(OwnedRow::new(vec![Datum::Text(
@@ -922,12 +1182,18 @@ impl DistributedQueryEngine {
                         )]));
                     }
                     if !order_by.is_empty() {
-                        let cols: Vec<String> = order_by.iter()
-                            .map(|(idx, asc)| format!("col{}:{}", idx, if *asc { "ASC" } else { "DESC" }))
+                        let cols: Vec<String> = order_by
+                            .iter()
+                            .map(|(idx, asc)| {
+                                format!("col{}:{}", idx, if *asc { "ASC" } else { "DESC" })
+                            })
                             .collect();
-                        lines.push(OwnedRow::new(vec![Datum::Text(
-                            format!("    ORDER BY: [{}], LIMIT: {:?}, OFFSET: {:?}", cols.join(", "), limit, offset),
-                        )]));
+                        lines.push(OwnedRow::new(vec![Datum::Text(format!(
+                            "    ORDER BY: [{}], LIMIT: {:?}, OFFSET: {:?}",
+                            cols.join(", "),
+                            limit,
+                            offset
+                        ))]));
                     }
                 }
             }
@@ -935,39 +1201,49 @@ impl DistributedQueryEngine {
 
         // Append execution stats
         lines.push(OwnedRow::new(vec![Datum::Text(String::new())]));
-        lines.push(OwnedRow::new(vec![Datum::Text(
-            format!("Execution Stats ({})", if result.is_ok() { "OK" } else { "ERROR" }),
-        )]));
-        lines.push(OwnedRow::new(vec![Datum::Text(
-            format!("  Shards participated: {}", stats.shards_participated),
-        )]));
-        lines.push(OwnedRow::new(vec![Datum::Text(
-            format!("  Total rows gathered: {}", stats.total_rows_gathered),
-        )]));
-        lines.push(OwnedRow::new(vec![Datum::Text(
-            format!("  Gather strategy: {}", stats.gather_strategy),
-        )]));
+        lines.push(OwnedRow::new(vec![Datum::Text(format!(
+            "Execution Stats ({})",
+            if result.is_ok() { "OK" } else { "ERROR" }
+        ))]));
+        lines.push(OwnedRow::new(vec![Datum::Text(format!(
+            "  Shards participated: {}",
+            stats.shards_participated
+        ))]));
+        lines.push(OwnedRow::new(vec![Datum::Text(format!(
+            "  Total rows gathered: {}",
+            stats.total_rows_gathered
+        ))]));
+        lines.push(OwnedRow::new(vec![Datum::Text(format!(
+            "  Gather strategy: {}",
+            stats.gather_strategy
+        ))]));
         if let Some(pruned) = stats.pruned_to_shard {
-            lines.push(OwnedRow::new(vec![Datum::Text(
-                format!("  Shard pruning: routed to shard {} (PK point lookup)", pruned),
-            )]));
+            lines.push(OwnedRow::new(vec![Datum::Text(format!(
+                "  Shard pruning: routed to shard {} (PK point lookup)",
+                pruned
+            ))]));
         }
-        lines.push(OwnedRow::new(vec![Datum::Text(
-            format!("  Total latency: {}us", stats.total_latency_us),
-        )]));
+        lines.push(OwnedRow::new(vec![Datum::Text(format!(
+            "  Total latency: {}us",
+            stats.total_latency_us
+        ))]));
         for (sid, lat) in &stats.per_shard_latency_us {
-            let row_count = stats.per_shard_row_count.iter()
+            let row_count = stats
+                .per_shard_row_count
+                .iter()
                 .find(|(s, _)| s == sid)
                 .map(|(_, c)| *c)
                 .unwrap_or(0);
-            lines.push(OwnedRow::new(vec![Datum::Text(
-                format!("  Shard {} latency: {}us, rows: {}", sid, lat, row_count),
-            )]));
+            lines.push(OwnedRow::new(vec![Datum::Text(format!(
+                "  Shard {} latency: {}us, rows: {}",
+                sid, lat, row_count
+            ))]));
         }
         if !stats.failed_shards.is_empty() {
-            lines.push(OwnedRow::new(vec![Datum::Text(
-                format!("  Failed/timed-out shards: {:?}", stats.failed_shards),
-            )]));
+            lines.push(OwnedRow::new(vec![Datum::Text(format!(
+                "  Failed/timed-out shards: {:?}",
+                stats.failed_shards
+            ))]));
         }
 
         Ok(ExecutionResult::Query {
@@ -977,28 +1253,34 @@ impl DistributedQueryEngine {
     }
 
     /// Execute DDL on ALL shards in parallel. Returns the result from the first shard.
-    fn exec_ddl_all_shards(
-        &self,
-        plan: &PhysicalPlan,
-    ) -> Result<ExecutionResult, FalconError> {
-        let results: Vec<Result<ExecutionResult, FalconError>> =
-            std::thread::scope(|s| {
-                let handles: Vec<_> = self.engine.all_shards()
-                    .iter()
-                    .map(|shard| {
-                        let plan_ref = plan;
-                        s.spawn(move || {
-                            let local_exec = Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
-                            local_exec.execute(plan_ref, None)
-                        })
+    fn exec_ddl_all_shards(&self, plan: &PhysicalPlan) -> Result<ExecutionResult, FalconError> {
+        let results: Vec<Result<ExecutionResult, FalconError>> = std::thread::scope(|s| {
+            let handles: Vec<_> = self
+                .engine
+                .all_shards()
+                .iter()
+                .map(|shard| {
+                    let plan_ref = plan;
+                    s.spawn(move || {
+                        let local_exec =
+                            Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
+                        local_exec.execute(plan_ref, None)
                     })
-                    .collect();
-                handles.into_iter()
-                    .map(|h| h.join().unwrap_or_else(|_| Err(FalconError::internal_bug(
-                        "E-QE-001", "shard thread panicked", "exec_ddl_all_shards"
-                    ))))
-                    .collect()
-            });
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join().unwrap_or_else(|_| {
+                        Err(FalconError::internal_bug(
+                            "E-QE-001",
+                            "shard thread panicked",
+                            "exec_ddl_all_shards",
+                        ))
+                    })
+                })
+                .collect()
+        });
 
         let mut first_result = None;
         for r in results {
@@ -1007,7 +1289,9 @@ impl DistributedQueryEngine {
                 first_result = Some(result);
             }
         }
-        first_result.ok_or_else(|| FalconError::internal_bug("E-QE-009", "No shards available", "exec_gc_all_shards"))
+        first_result.ok_or_else(|| {
+            FalconError::internal_bug("E-QE-009", "No shards available", "exec_gc_all_shards")
+        })
     }
 
     /// Execute a DML plan on a specific shard with an auto-commit transaction.
@@ -1017,14 +1301,22 @@ impl DistributedQueryEngine {
         plan: &PhysicalPlan,
     ) -> Result<ExecutionResult, FalconError> {
         let shard = self.engine.shard(shard_id).ok_or_else(|| {
-            FalconError::internal_bug("E-QE-010", format!("Shard {:?} not found", shard_id), "exec_dml_autocommit")
+            FalconError::internal_bug(
+                "E-QE-010",
+                format!("Shard {:?} not found", shard_id),
+                "exec_dml_autocommit",
+            )
         })?;
         let local_exec = Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
         let txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
         let result = local_exec.execute(plan, Some(&txn));
         match &result {
-            Ok(_) => { let _ = shard.txn_mgr.commit(txn.txn_id); }
-            Err(_) => { let _ = shard.txn_mgr.abort(txn.txn_id); }
+            Ok(_) => {
+                let _ = shard.txn_mgr.commit(txn.txn_id);
+            }
+            Err(_) => {
+                let _ = shard.txn_mgr.abort(txn.txn_id);
+            }
         }
         result
     }
@@ -1032,15 +1324,32 @@ impl DistributedQueryEngine {
     /// Split a multi-row INSERT by target shard: group rows by PK hash,
     /// build a per-shard INSERT plan, and execute each on its target shard.
     /// Falls back to shard 0 for rows whose PK cannot be extracted.
-    fn exec_insert_split(
-        &self,
-        plan: &PhysicalPlan,
-    ) -> Result<ExecutionResult, FalconError> {
+    fn exec_insert_split(&self, plan: &PhysicalPlan) -> Result<ExecutionResult, FalconError> {
         let (table_id, schema, columns, rows, source_select, returning, on_conflict) = match plan {
             PhysicalPlan::Insert {
-                table_id, schema, columns, rows, source_select, returning, on_conflict,
-            } => (*table_id, schema, columns, rows, source_select, returning, on_conflict),
-            _ => return Err(FalconError::internal_bug("E-QE-011", "exec_insert_split called with non-Insert", "plan type mismatch")),
+                table_id,
+                schema,
+                columns,
+                rows,
+                source_select,
+                returning,
+                on_conflict,
+            } => (
+                *table_id,
+                schema,
+                columns,
+                rows,
+                source_select,
+                returning,
+                on_conflict,
+            ),
+            _ => {
+                return Err(FalconError::internal_bug(
+                    "E-QE-011",
+                    "exec_insert_split called with non-Insert",
+                    "plan type mismatch",
+                ))
+            }
         };
 
         // INSERT ... SELECT — execute the SELECT at coordinator level to see all
@@ -1100,24 +1409,40 @@ impl DistributedQueryEngine {
                         let sid = *shard_id;
                         s.spawn(move || {
                             let shard = engine.shard(sid).ok_or_else(|| {
-                                FalconError::internal_bug("E-QE-012", format!("Shard {:?} not found", sid), "exec_insert_split parallel")
+                                FalconError::internal_bug(
+                                    "E-QE-012",
+                                    format!("Shard {:?} not found", sid),
+                                    "exec_insert_split parallel",
+                                )
                             })?;
                             let local_exec =
                                 Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
                             let txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
                             let result = local_exec.execute(shard_plan, Some(&txn));
                             match &result {
-                                Ok(_) => { let _ = shard.txn_mgr.commit(txn.txn_id); }
-                                Err(_) => { let _ = shard.txn_mgr.abort(txn.txn_id); }
+                                Ok(_) => {
+                                    let _ = shard.txn_mgr.commit(txn.txn_id);
+                                }
+                                Err(_) => {
+                                    let _ = shard.txn_mgr.abort(txn.txn_id);
+                                }
                             }
                             result
                         })
                     })
                     .collect();
-                shard_plans.iter().map(|(sid, _)| *sid)
-                    .zip(handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(FalconError::internal_bug(
-                        "E-QE-002", "shard thread panicked", "exec_dist_plan scatter"
-                    )))))
+                shard_plans
+                    .iter()
+                    .map(|(sid, _)| *sid)
+                    .zip(handles.into_iter().map(|h| {
+                        h.join().unwrap_or_else(|_| {
+                            Err(FalconError::internal_bug(
+                                "E-QE-002",
+                                "shard thread panicked",
+                                "exec_dist_plan scatter",
+                            ))
+                        })
+                    }))
                     .collect()
             });
 
@@ -1128,9 +1453,14 @@ impl DistributedQueryEngine {
 
         for (sid, result) in results {
             match result {
-                Ok(ExecutionResult::Dml { rows_affected, tag: t }) => {
+                Ok(ExecutionResult::Dml {
+                    rows_affected,
+                    tag: t,
+                }) => {
                     total_rows_affected += rows_affected;
-                    if tag.is_empty() { tag = t; }
+                    if tag.is_empty() {
+                        tag = t;
+                    }
                     succeeded += 1;
                 }
                 Ok(other) => return Ok(other),
@@ -1142,7 +1472,10 @@ impl DistributedQueryEngine {
             return Err(FalconError::Transient {
                 reason: format!(
                     "INSERT failed on {}/{} shards ({} succeeded): {}",
-                    errors.len(), shard_count, succeeded, errors.join("; ")
+                    errors.len(),
+                    shard_count,
+                    succeeded,
+                    errors.join("; ")
                 ),
                 retry_after_ms: 100,
             });
@@ -1175,17 +1508,30 @@ impl DistributedQueryEngine {
 
         let result_rows = match select_result {
             ExecutionResult::Query { rows, .. } => rows,
-            _ => return Ok(ExecutionResult::Dml { rows_affected: 0, tag: "INSERT".into() }),
+            _ => {
+                return Ok(ExecutionResult::Dml {
+                    rows_affected: 0,
+                    tag: "INSERT".into(),
+                })
+            }
         };
 
         if result_rows.is_empty() {
-            return Ok(ExecutionResult::Dml { rows_affected: 0, tag: "INSERT".into() });
+            return Ok(ExecutionResult::Dml {
+                rows_affected: 0,
+                tag: "INSERT".into(),
+            });
         }
 
         // Convert OwnedRows to BoundExpr::Literal VALUES rows
         let value_rows: Vec<Vec<BoundExpr>> = result_rows
             .iter()
-            .map(|row| row.values.iter().map(|d| BoundExpr::Literal(d.clone())).collect())
+            .map(|row| {
+                row.values
+                    .iter()
+                    .map(|d| BoundExpr::Literal(d.clone()))
+                    .collect()
+            })
             .collect();
 
         // Build an INSERT with VALUES (no source_select) and use the existing split logic
@@ -1203,23 +1549,32 @@ impl DistributedQueryEngine {
 
     /// Execute RunGc on ALL shards in parallel, aggregating results.
     fn exec_gc_all_shards(&self) -> Result<ExecutionResult, FalconError> {
-        let gc_results: Vec<Result<ExecutionResult, FalconError>> =
-            std::thread::scope(|s| {
-                let handles: Vec<_> = self.engine.all_shards()
-                    .iter()
-                    .map(|shard| {
-                        s.spawn(move || {
-                            let local_exec = Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
-                            local_exec.execute(&PhysicalPlan::RunGc, None)
-                        })
+        let gc_results: Vec<Result<ExecutionResult, FalconError>> = std::thread::scope(|s| {
+            let handles: Vec<_> = self
+                .engine
+                .all_shards()
+                .iter()
+                .map(|shard| {
+                    s.spawn(move || {
+                        let local_exec =
+                            Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
+                        local_exec.execute(&PhysicalPlan::RunGc, None)
                     })
-                    .collect();
-                handles.into_iter()
-                    .map(|h| h.join().unwrap_or_else(|_| Err(FalconError::internal_bug(
-                        "E-QE-003", "shard thread panicked", "exec_gc_all_shards"
-                    ))))
-                    .collect()
-            });
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join().unwrap_or_else(|_| {
+                        Err(FalconError::internal_bug(
+                            "E-QE-003",
+                            "shard thread panicked",
+                            "exec_gc_all_shards",
+                        ))
+                    })
+                })
+                .collect()
+        });
 
         let mut total_chains = 0i64;
         let mut watermark = 0i64;
@@ -1231,7 +1586,11 @@ impl DistributedQueryEngine {
                             if let Datum::Int64(val) = row.values[1] {
                                 match key.as_str() {
                                     "chains_processed" => total_chains += val,
-                                    "watermark_ts" => { if val > watermark { watermark = val; } }
+                                    "watermark_ts" => {
+                                        if val > watermark {
+                                            watermark = val;
+                                        }
+                                    }
                                     _ => {}
                                 }
                             }
@@ -1240,16 +1599,25 @@ impl DistributedQueryEngine {
                 }
             }
         }
-        use falcon_common::types::DataType;
         use falcon_common::datum::OwnedRow;
+        use falcon_common::types::DataType;
         let columns = vec![
             ("metric".to_string(), DataType::Text),
             ("value".to_string(), DataType::Int64),
         ];
         let rows = vec![
-            OwnedRow::new(vec![Datum::Text("watermark_ts".into()), Datum::Int64(watermark)]),
-            OwnedRow::new(vec![Datum::Text("chains_processed".into()), Datum::Int64(total_chains)]),
-            OwnedRow::new(vec![Datum::Text("shards_processed".into()), Datum::Int64(self.engine.all_shards().len() as i64)]),
+            OwnedRow::new(vec![
+                Datum::Text("watermark_ts".into()),
+                Datum::Int64(watermark),
+            ]),
+            OwnedRow::new(vec![
+                Datum::Text("chains_processed".into()),
+                Datum::Int64(total_chains),
+            ]),
+            OwnedRow::new(vec![
+                Datum::Text("shards_processed".into()),
+                Datum::Int64(self.engine.all_shards().len() as i64),
+            ]),
         ];
         Ok(ExecutionResult::Query { columns, rows })
     }
@@ -1261,42 +1629,59 @@ impl DistributedQueryEngine {
         shards: &[ShardId],
     ) -> Result<ExecutionResult, FalconError> {
         let shard_count = shards.len();
-        let results: Vec<(u64, Result<ExecutionResult, FalconError>)> =
-            std::thread::scope(|s| {
-                let handles: Vec<_> = shards
-                    .iter()
-                    .map(|sid| {
-                        let shard = self.engine.shard(*sid);
-                        let plan_ref = plan;
-                        let shard_id = sid.0;
-                        s.spawn(move || {
-                            let shard = match shard {
-                                Some(s) => s,
-                                None => return (shard_id, Err(FalconError::internal_bug(
-                                    "E-QE-004",
-                                    format!("DML dispatch: shard {} not found", shard_id),
-                                    "execute_dml_on_shards",
-                                ))),
-                            };
-                            let local_exec = Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
-                            let txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
-                            let result = local_exec.execute(plan_ref, Some(&txn));
-                            match &result {
-                                Ok(_) => { let _ = shard.txn_mgr.commit(txn.txn_id); }
-                                Err(_) => { let _ = shard.txn_mgr.abort(txn.txn_id); }
+        let results: Vec<(u64, Result<ExecutionResult, FalconError>)> = std::thread::scope(|s| {
+            let handles: Vec<_> = shards
+                .iter()
+                .map(|sid| {
+                    let shard = self.engine.shard(*sid);
+                    let plan_ref = plan;
+                    let shard_id = sid.0;
+                    s.spawn(move || {
+                        let shard = match shard {
+                            Some(s) => s,
+                            None => {
+                                return (
+                                    shard_id,
+                                    Err(FalconError::internal_bug(
+                                        "E-QE-004",
+                                        format!("DML dispatch: shard {} not found", shard_id),
+                                        "execute_dml_on_shards",
+                                    )),
+                                )
                             }
-                            (shard_id, result)
-                        })
+                        };
+                        let local_exec =
+                            Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
+                        let txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
+                        let result = local_exec.execute(plan_ref, Some(&txn));
+                        match &result {
+                            Ok(_) => {
+                                let _ = shard.txn_mgr.commit(txn.txn_id);
+                            }
+                            Err(_) => {
+                                let _ = shard.txn_mgr.abort(txn.txn_id);
+                            }
+                        }
+                        (shard_id, result)
                     })
-                    .collect();
-                handles.into_iter().map(|h| {
-                    h.join().unwrap_or_else(|_| (0, Err(FalconError::internal_bug(
-                        "E-QE-005",
-                        "DML dispatch: shard thread panicked",
-                        "std::thread::JoinHandle returned Err",
-                    ))))
-                }).collect()
-            });
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join().unwrap_or_else(|_| {
+                        (
+                            0,
+                            Err(FalconError::internal_bug(
+                                "E-QE-005",
+                                "DML dispatch: shard thread panicked",
+                                "std::thread::JoinHandle returned Err",
+                            )),
+                        )
+                    })
+                })
+                .collect()
+        });
 
         Self::merge_dml_results(results, shard_count)
     }
@@ -1316,9 +1701,14 @@ impl DistributedQueryEngine {
 
         for (shard_id, result) in results {
             match result {
-                Ok(ExecutionResult::Dml { rows_affected, tag: t }) => {
+                Ok(ExecutionResult::Dml {
+                    rows_affected,
+                    tag: t,
+                }) => {
                     total_rows_affected += rows_affected;
-                    if tag.is_empty() { tag = t; }
+                    if tag.is_empty() {
+                        tag = t;
+                    }
                     succeeded += 1;
                 }
                 Ok(ExecutionResult::Query { columns, rows }) => {
@@ -1329,7 +1719,9 @@ impl DistributedQueryEngine {
                     returning_rows.extend(rows);
                     succeeded += 1;
                 }
-                Ok(_) => { succeeded += 1; }
+                Ok(_) => {
+                    succeeded += 1;
+                }
                 Err(e) => errors.push(format!("shard {}: {}", shard_id, e)),
             }
         }
@@ -1338,7 +1730,10 @@ impl DistributedQueryEngine {
             return Err(FalconError::Transient {
                 reason: format!(
                     "DML failed on {}/{} shards ({} succeeded): {}",
-                    errors.len(), shard_count, succeeded, errors.join("; ")
+                    errors.len(),
+                    shard_count,
+                    succeeded,
+                    errors.join("; ")
                 ),
                 retry_after_ms: 100,
             });
@@ -1346,7 +1741,10 @@ impl DistributedQueryEngine {
 
         // If any shard returned RETURNING rows, return merged Query result
         if let Some(columns) = returning_columns {
-            return Ok(ExecutionResult::Query { columns, rows: returning_rows });
+            return Ok(ExecutionResult::Query {
+                columns,
+                rows: returning_rows,
+            });
         }
 
         Ok(ExecutionResult::Dml {
@@ -1357,36 +1755,49 @@ impl DistributedQueryEngine {
 
     /// Execute a DML plan (UPDATE/DELETE) on ALL shards in parallel, summing rows_affected.
     /// Collects partial results even when some shards fail, reporting all errors.
-    fn exec_dml_all_shards(
-        &self,
-        plan: &PhysicalPlan,
-    ) -> Result<ExecutionResult, FalconError> {
+    fn exec_dml_all_shards(&self, plan: &PhysicalPlan) -> Result<ExecutionResult, FalconError> {
         let shard_count = self.engine.all_shards().len();
-        let results: Vec<(usize, Result<ExecutionResult, FalconError>)> =
-            std::thread::scope(|s| {
-                let handles: Vec<_> = self.engine.all_shards()
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, shard)| {
-                        let plan_ref = plan;
-                        s.spawn(move || {
-                            let local_exec = Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
-                            let txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
-                            let result = local_exec.execute(plan_ref, Some(&txn));
-                            match &result {
-                                Ok(_) => { let _ = shard.txn_mgr.commit(txn.txn_id); }
-                                Err(_) => { let _ = shard.txn_mgr.abort(txn.txn_id); }
+        let results: Vec<(usize, Result<ExecutionResult, FalconError>)> = std::thread::scope(|s| {
+            let handles: Vec<_> = self
+                .engine
+                .all_shards()
+                .iter()
+                .enumerate()
+                .map(|(idx, shard)| {
+                    let plan_ref = plan;
+                    s.spawn(move || {
+                        let local_exec =
+                            Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
+                        let txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
+                        let result = local_exec.execute(plan_ref, Some(&txn));
+                        match &result {
+                            Ok(_) => {
+                                let _ = shard.txn_mgr.commit(txn.txn_id);
                             }
-                            (idx, result)
-                        })
+                            Err(_) => {
+                                let _ = shard.txn_mgr.abort(txn.txn_id);
+                            }
+                        }
+                        (idx, result)
                     })
-                    .collect();
-                handles.into_iter()
-                    .map(|h| h.join().unwrap_or_else(|_| (usize::MAX, Err(FalconError::internal_bug(
-                        "E-QE-004", "shard thread panicked", "exec_dml_all_shards"
-                    )))))
-                    .collect()
-            });
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join().unwrap_or_else(|_| {
+                        (
+                            usize::MAX,
+                            Err(FalconError::internal_bug(
+                                "E-QE-004",
+                                "shard thread panicked",
+                                "exec_dml_all_shards",
+                            )),
+                        )
+                    })
+                })
+                .collect()
+        });
 
         Self::merge_dml_results(results, shard_count)
     }
@@ -1419,7 +1830,11 @@ impl DistributedQueryEngine {
         let pk_col_idx = schema.primary_key_columns[0];
 
         match filter {
-            BoundExpr::BinaryOp { op: BinOp::Eq, left, right } => {
+            BoundExpr::BinaryOp {
+                op: BinOp::Eq,
+                left,
+                right,
+            } => {
                 if let Some(key) = self.match_pk_eq(pk_col_idx, left, right) {
                     return Some(key);
                 }
@@ -1429,10 +1844,13 @@ impl DistributedQueryEngine {
                 None
             }
             // AND chain: recurse into both sides
-            BoundExpr::BinaryOp { op: BinOp::And, left, right } => {
-                self.extract_pk_key(schema, left)
-                    .or_else(|| self.extract_pk_key(schema, right))
-            }
+            BoundExpr::BinaryOp {
+                op: BinOp::And,
+                left,
+                right,
+            } => self
+                .extract_pk_key(schema, left)
+                .or_else(|| self.extract_pk_key(schema, right)),
             _ => None,
         }
     }
@@ -1451,15 +1869,13 @@ impl DistributedQueryEngine {
         let filter = filter?;
 
         // Try bare InList or AND chain containing InList
-        self.extract_in_list_keys(pk_col_idx, filter)
-            .map(|keys| {
-                let mut shards: Vec<ShardId> = keys.iter()
-                    .map(|k| self.engine.shard_for_key(*k))
-                    .collect();
-                shards.sort_by_key(|s| s.0);
-                shards.dedup();
-                shards
-            })
+        self.extract_in_list_keys(pk_col_idx, filter).map(|keys| {
+            let mut shards: Vec<ShardId> =
+                keys.iter().map(|k| self.engine.shard_for_key(*k)).collect();
+            shards.sort_by_key(|s| s.0);
+            shards.dedup();
+            shards
+        })
     }
 
     /// Extract PK keys from an IN-list expression or AND chain containing one.
@@ -1471,10 +1887,15 @@ impl DistributedQueryEngine {
         use falcon_sql_frontend::types::{BinOp, BoundExpr};
 
         match filter {
-            BoundExpr::InList { expr, list, negated } if !negated => {
+            BoundExpr::InList {
+                expr,
+                list,
+                negated,
+            } if !negated => {
                 if let BoundExpr::ColumnRef(idx) = expr.as_ref() {
                     if *idx == pk_col_idx {
-                        let keys: Vec<i64> = list.iter()
+                        let keys: Vec<i64> = list
+                            .iter()
                             .filter_map(|e| self.extract_int_key(e))
                             .collect();
                         if keys.len() == list.len() {
@@ -1484,10 +1905,13 @@ impl DistributedQueryEngine {
                 }
                 None
             }
-            BoundExpr::BinaryOp { op: BinOp::And, left, right } => {
-                self.extract_in_list_keys(pk_col_idx, left)
-                    .or_else(|| self.extract_in_list_keys(pk_col_idx, right))
-            }
+            BoundExpr::BinaryOp {
+                op: BinOp::And,
+                left,
+                right,
+            } => self
+                .extract_in_list_keys(pk_col_idx, left)
+                .or_else(|| self.extract_in_list_keys(pk_col_idx, right)),
             _ => None,
         }
     }
@@ -1501,9 +1925,7 @@ impl DistributedQueryEngine {
     ) -> Option<i64> {
         use falcon_sql_frontend::types::BoundExpr;
         match col_expr {
-            BoundExpr::ColumnRef(idx) if *idx == pk_col_idx => {
-                self.extract_int_key(val_expr)
-            }
+            BoundExpr::ColumnRef(idx) if *idx == pk_col_idx => self.extract_int_key(val_expr),
             _ => None,
         }
     }
@@ -1566,7 +1988,10 @@ impl DistributedQueryEngine {
                 Ok(ExecutionResult::Query { rows, .. }) => rows.len(),
                 _ => 0,
             };
-            *self.last_scatter_stats.lock().unwrap_or_else(|p| p.into_inner()) = ScatterStats {
+            *self
+                .last_scatter_stats
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = ScatterStats {
                 shards_participated: 1,
                 total_rows_gathered: row_count,
                 per_shard_latency_us: vec![(single_shard.0, elapsed)],
@@ -1594,7 +2019,9 @@ impl DistributedQueryEngine {
         for &sid in target_shards {
             if self.engine.shard(sid).is_none() {
                 return Err(FalconError::internal_bug(
-                    "E-QE-013", format!("Shard {:?} not found", sid), "exec_dist_plan pre-validation",
+                    "E-QE-013",
+                    format!("Shard {:?} not found", sid),
+                    "exec_dist_plan pre-validation",
                 ));
             }
         }
@@ -1603,102 +2030,125 @@ impl DistributedQueryEngine {
         let cancelled = AtomicBool::new(false);
 
         // ── Scatter: execute subplan on each shard in parallel ──
-        let shard_results: Vec<Result<ShardResult, FalconError>> =
-            std::thread::scope(|s| {
-                let handles: Vec<_> = target_shards
-                    .iter()
-                    .map(|&shard_id| {
-                        let engine = &self.engine;
-                        let subplan_ref = subplan;
-                        let cancelled_ref = &cancelled;
-                        s.spawn(move || {
-                            // Check if already cancelled before starting
-                            if cancelled_ref.load(Ordering::Relaxed) {
+        let shard_results: Vec<Result<ShardResult, FalconError>> = std::thread::scope(|s| {
+            let handles: Vec<_> = target_shards
+                .iter()
+                .map(|&shard_id| {
+                    let engine = &self.engine;
+                    let subplan_ref = subplan;
+                    let cancelled_ref = &cancelled;
+                    s.spawn(move || {
+                        // Check if already cancelled before starting
+                        if cancelled_ref.load(Ordering::Relaxed) {
+                            return Err(FalconError::Transient {
+                                reason: format!(
+                                    "DistPlan cancelled before shard {:?} started",
+                                    shard_id,
+                                ),
+                                retry_after_ms: 50,
+                            });
+                        }
+
+                        let shard = match engine.shard(shard_id) {
+                            Some(s) => s,
+                            None => {
+                                return Err(FalconError::Cluster(
+                                    falcon_common::error::ClusterError::ShardNotFound(shard_id.0),
+                                ))
+                            }
+                        };
+
+                        // Retry once on transient failure.
+                        let max_attempts = 2u8;
+                        let mut last_err = None;
+                        for attempt in 0..max_attempts {
+                            if attempt > 0 {
+                                // Interruptible retry delay (condvar instead of bare sleep)
+                                {
+                                    let pair = std::sync::Mutex::new(false);
+                                    let cvar = std::sync::Condvar::new();
+                                    let guard = pair.lock().unwrap_or_else(|e| e.into_inner());
+                                    let _ = cvar.wait_timeout(guard, std::time::Duration::from_millis(5));
+                                }
+                                if cancelled_ref.load(Ordering::Relaxed) {
+                                    break;
+                                }
+                            }
+
+                            let executor =
+                                Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
+                            let txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
+                            let start = Instant::now();
+                            let result = executor.execute(subplan_ref, Some(&txn));
+                            let latency_us = start.elapsed().as_micros() as u64;
+                            let _ = shard.txn_mgr.commit(txn.txn_id);
+
+                            // Check timeout and signal cancellation
+                            if total_start.elapsed() > timeout {
+                                cancelled_ref.store(true, Ordering::Relaxed);
                                 return Err(FalconError::Transient {
                                     reason: format!(
-                                        "DistPlan cancelled before shard {:?} started", shard_id,
+                                        "DistPlan timeout after {}ms (shard {:?}, latency={}us)",
+                                        timeout.as_millis(),
+                                        shard_id,
+                                        latency_us,
                                     ),
-                                    retry_after_ms: 50,
+                                    retry_after_ms: 100,
                                 });
                             }
 
-                            let shard = match engine.shard(shard_id) {
-                                Some(s) => s,
-                                None => return Err(FalconError::Cluster(
-                                    falcon_common::error::ClusterError::ShardNotFound(shard_id.0)
-                                )),
-                            };
-
-                            // Retry once on transient failure.
-                            let max_attempts = 2u8;
-                            let mut last_err = None;
-                            for attempt in 0..max_attempts {
-                                if attempt > 0 {
-                                    std::thread::sleep(std::time::Duration::from_millis(5));
-                                    if cancelled_ref.load(Ordering::Relaxed) {
-                                        break;
-                                    }
-                                }
-
-                                let executor =
-                                    Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
-                                let txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
-                                let start = Instant::now();
-                                let result = executor.execute(subplan_ref, Some(&txn));
-                                let latency_us = start.elapsed().as_micros() as u64;
-                                let _ = shard.txn_mgr.commit(txn.txn_id);
-
-                                // Check timeout and signal cancellation
-                                if total_start.elapsed() > timeout {
-                                    cancelled_ref.store(true, Ordering::Relaxed);
-                                    return Err(FalconError::Transient {
-                                        reason: format!(
-                                            "DistPlan timeout after {}ms (shard {:?}, latency={}us)",
-                                            timeout.as_millis(), shard_id, latency_us,
-                                        ),
-                                        retry_after_ms: 100,
+                            match result {
+                                Ok(ExecutionResult::Query { columns, rows }) => {
+                                    return Ok(ShardResult {
+                                        shard_id,
+                                        columns,
+                                        rows,
+                                        latency_us,
                                     });
                                 }
-
-                                match result {
-                                    Ok(ExecutionResult::Query { columns, rows }) => {
-                                        return Ok(ShardResult {
-                                            shard_id,
-                                            columns,
-                                            rows,
-                                            latency_us,
-                                        });
-                                    }
-                                    Ok(_) => {
-                                        return Err(FalconError::internal_bug(
-                                            "E-QE-014",
-                                            "DistPlan subplan must return Query result",
-                                            format!("shard {:?}", shard_id),
-                                        ));
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "Shard {:?} attempt {}/{} failed: {}",
-                                            shard_id, attempt + 1, max_attempts, e,
-                                        );
-                                        last_err = Some(e);
-                                    }
+                                Ok(_) => {
+                                    return Err(FalconError::internal_bug(
+                                        "E-QE-014",
+                                        "DistPlan subplan must return Query result",
+                                        format!("shard {:?}", shard_id),
+                                    ));
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Shard {:?} attempt {}/{} failed: {}",
+                                        shard_id,
+                                        attempt + 1,
+                                        max_attempts,
+                                        e,
+                                    );
+                                    last_err = Some(e);
                                 }
                             }
+                        }
 
-                            Err(last_err.unwrap_or_else(|| FalconError::Internal(
-                                format!("Shard {:?} failed after {} attempts", shard_id, max_attempts),
-                            )))
-                        })
+                        Err(last_err.unwrap_or_else(|| {
+                            FalconError::Internal(format!(
+                                "Shard {:?} failed after {} attempts",
+                                shard_id, max_attempts
+                            ))
+                        }))
                     })
-                    .collect();
+                })
+                .collect();
 
-                handles.into_iter()
-                    .map(|h| h.join().unwrap_or_else(|_| Err(FalconError::internal_bug(
-                        "E-QE-005", "shard thread panicked", "exec_dist_plan_scatter"
-                    ))))
-                    .collect()
-            });
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join().unwrap_or_else(|_| {
+                        Err(FalconError::internal_bug(
+                            "E-QE-005",
+                            "shard thread panicked",
+                            "exec_dist_plan_scatter",
+                        ))
+                    })
+                })
+                .collect()
+        });
 
         // Collect results — partial failure resilience: log errors, continue with successful shards.
         let mut collected: Vec<ShardResult> = Vec::with_capacity(target_shards.len());
@@ -1715,23 +2165,33 @@ impl DistributedQueryEngine {
         }
         // If ALL shards failed, propagate the error.
         if collected.is_empty() {
-            let msgs: Vec<String> = failed_shards.iter()
+            let msgs: Vec<String> = failed_shards
+                .iter()
                 .map(|(sid, msg)| format!("shard_{}: {}", sid.0, msg))
                 .collect();
             return Err(FalconError::Transient {
                 reason: format!(
-                    "All {} shards failed: {}", target_shards.len(), msgs.join("; "),
+                    "All {} shards failed: {}",
+                    target_shards.len(),
+                    msgs.join("; "),
                 ),
                 retry_after_ms: 200,
             });
         }
 
         // ── Gather: merge using the same logic as DistributedExecutor ──
-        let columns = collected.first().map(|r| r.columns.clone()).unwrap_or_default();
+        let columns = collected
+            .first()
+            .map(|r| r.columns.clone())
+            .unwrap_or_default();
         let total_rows: usize = collected.iter().map(|r| r.rows.len()).sum();
 
         let merged_rows = match gather {
-            DistGather::Union { distinct, limit, offset } => {
+            DistGather::Union {
+                distinct,
+                limit,
+                offset,
+            } => {
                 let mut all = Vec::with_capacity(total_rows);
                 for sr in &collected {
                     all.extend(sr.rows.iter().cloned());
@@ -1754,7 +2214,11 @@ impl DistributedQueryEngine {
                 }
                 all
             }
-            DistGather::MergeSortLimit { sort_columns, limit, offset } => {
+            DistGather::MergeSortLimit {
+                sort_columns,
+                limit,
+                offset,
+            } => {
                 // Fast path: if each shard output is already sorted by `sort_columns`,
                 // do k-way merge (O(N log k)) with early stop at OFFSET+LIMIT.
                 let is_pre_sorted = collected.iter().all(|sr| {
@@ -1817,9 +2281,8 @@ impl DistributedQueryEngine {
                     }
 
                     // Build shard row slices
-                    let shard_rows: Vec<&[OwnedRow]> = collected.iter()
-                        .map(|sr| sr.rows.as_slice())
-                        .collect();
+                    let shard_rows: Vec<&[OwnedRow]> =
+                        collected.iter().map(|sr| sr.rows.as_slice()).collect();
 
                     // Initialize min-heap with first row from each non-empty shard
                     let sort_cols = Arc::new(sort_columns.clone());
@@ -1924,7 +2387,9 @@ impl DistributedQueryEngine {
                         DistAggMerge::CountDistinct(i) => AggMerge::CountDistinct(*i),
                         DistAggMerge::SumDistinct(i) => AggMerge::SumDistinct(*i),
                         DistAggMerge::AvgDistinct(i) => AggMerge::AvgDistinct(*i),
-                        DistAggMerge::StringAggDistinct(i, ref sep) => AggMerge::StringAggDistinct(*i, sep.clone()),
+                        DistAggMerge::StringAggDistinct(i, ref sep) => {
+                            AggMerge::StringAggDistinct(*i, sep.clone())
+                        }
                         DistAggMerge::ArrayAggDistinct(i) => AggMerge::ArrayAggDistinct(*i),
                     })
                     .collect();
@@ -1940,8 +2405,12 @@ impl DistributedQueryEngine {
                         let count_val = row.values.get(count_idx).cloned().unwrap_or(Datum::Null);
                         let avg = match (&sum_val, &count_val) {
                             (_, Datum::Int64(0)) | (_, Datum::Null) => Datum::Null,
-                            (Datum::Int64(s), Datum::Int64(c)) => Datum::Float64(*s as f64 / *c as f64),
-                            (Datum::Int32(s), Datum::Int64(c)) => Datum::Float64(*s as f64 / *c as f64),
+                            (Datum::Int64(s), Datum::Int64(c)) => {
+                                Datum::Float64(*s as f64 / *c as f64)
+                            }
+                            (Datum::Int32(s), Datum::Int64(c)) => {
+                                Datum::Float64(*s as f64 / *c as f64)
+                            }
                             (Datum::Float64(s), Datum::Int64(c)) => Datum::Float64(s / *c as f64),
                             _ => Datum::Null,
                         };
@@ -1955,7 +2424,8 @@ impl DistributedQueryEngine {
                 // Apply HAVING filter post-merge (was stripped from subplan)
                 if let Some(having_expr) = having {
                     merged.retain(|row| {
-                        falcon_executor::expr_engine::ExprEngine::eval_filter(having_expr, row).unwrap_or(false)
+                        falcon_executor::expr_engine::ExprEngine::eval_filter(having_expr, row)
+                            .unwrap_or(false)
                     });
                 }
                 // Apply post-merge ORDER BY

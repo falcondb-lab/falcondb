@@ -3,11 +3,11 @@
 //! The registry is the single source of truth for tenant metadata and runtime resource usage.
 //! It enforces QPS limits, memory quotas, and concurrent transaction caps per tenant.
 
-use std::sync::atomic::{AtomicU64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use dashmap::DashMap;
 
-use falcon_common::tenant::{TenantId, TenantConfig, TenantQuota, TenantStatus};
+use falcon_common::tenant::{TenantConfig, TenantId, TenantQuota, TenantStatus};
 
 /// Per-tenant runtime resource counters (lock-free atomics).
 #[derive(Debug)]
@@ -105,7 +105,7 @@ impl TenantRegistry {
     pub fn new() -> Self {
         let reg = Self {
             tenants: DashMap::new(),
-            qps_window_ms: 1000, // 1-second QPS windows
+            qps_window_ms: 1000,        // 1-second QPS windows
             next_id: AtomicU64::new(2), // 1 is reserved for SYSTEM_TENANT_ID
         };
         // Always register the system tenant.
@@ -121,13 +121,20 @@ impl TenantRegistry {
         }
         // Also reject duplicate names (case-insensitive).
         let name_lower = config.name.to_lowercase();
-        if self.tenants.iter().any(|e| e.value().config.name.to_lowercase() == name_lower) {
+        if self
+            .tenants
+            .iter()
+            .any(|e| e.value().config.name.to_lowercase() == name_lower)
+        {
             return false;
         }
-        self.tenants.insert(tenant_id, TenantEntry {
-            config,
-            counters: TenantResourceCounters::new(),
-        });
+        self.tenants.insert(
+            tenant_id,
+            TenantEntry {
+                config,
+                counters: TenantResourceCounters::new(),
+            },
+        );
         true
     }
 
@@ -138,7 +145,9 @@ impl TenantRegistry {
 
     /// Remove a tenant from the registry. Returns the config if found.
     pub fn remove_tenant(&self, tenant_id: TenantId) -> Option<TenantConfig> {
-        self.tenants.remove(&tenant_id).map(|(_, entry)| entry.config)
+        self.tenants
+            .remove(&tenant_id)
+            .map(|(_, entry)| entry.config)
     }
 
     /// Get a tenant's config (cloned).
@@ -170,12 +179,18 @@ impl TenantRegistry {
     pub fn check_begin_txn(&self, tenant_id: TenantId) -> QuotaCheckResult {
         let entry = match self.tenants.get(&tenant_id) {
             Some(e) => e,
-            None => return QuotaCheckResult::TenantNotActive { status: TenantStatus::Deleting },
+            None => {
+                return QuotaCheckResult::TenantNotActive {
+                    status: TenantStatus::Deleting,
+                }
+            }
         };
 
         // Status check
         if entry.config.status != TenantStatus::Active {
-            return QuotaCheckResult::TenantNotActive { status: entry.config.status };
+            return QuotaCheckResult::TenantNotActive {
+                status: entry.config.status,
+            };
         }
 
         let quota = &entry.config.quota;
@@ -184,7 +199,10 @@ impl TenantRegistry {
         if quota.max_concurrent_txns > 0 {
             let current = entry.counters.active_txns.load(Ordering::Relaxed);
             if current >= quota.max_concurrent_txns {
-                entry.counters.quota_exceeded_count.fetch_add(1, Ordering::Relaxed);
+                entry
+                    .counters
+                    .quota_exceeded_count
+                    .fetch_add(1, Ordering::Relaxed);
                 return QuotaCheckResult::TxnLimitExceeded {
                     limit: quota.max_concurrent_txns,
                     current,
@@ -203,12 +221,18 @@ impl TenantRegistry {
             if now_ms.saturating_sub(window_start) >= self.qps_window_ms {
                 // New window — reset
                 entry.counters.window_queries.store(0, Ordering::Relaxed);
-                entry.counters.window_start_ms.store(now_ms, Ordering::Relaxed);
+                entry
+                    .counters
+                    .window_start_ms
+                    .store(now_ms, Ordering::Relaxed);
             }
 
             let current_qps = entry.counters.window_queries.load(Ordering::Relaxed);
             if current_qps >= quota.max_qps {
-                entry.counters.quota_exceeded_count.fetch_add(1, Ordering::Relaxed);
+                entry
+                    .counters
+                    .quota_exceeded_count
+                    .fetch_add(1, Ordering::Relaxed);
                 return QuotaCheckResult::QpsExceeded {
                     limit: quota.max_qps,
                     current: current_qps,
@@ -220,7 +244,10 @@ impl TenantRegistry {
         if quota.max_memory_bytes > 0 {
             let current = entry.counters.memory_bytes.load(Ordering::Relaxed);
             if current >= quota.max_memory_bytes {
-                entry.counters.quota_exceeded_count.fetch_add(1, Ordering::Relaxed);
+                entry
+                    .counters
+                    .quota_exceeded_count
+                    .fetch_add(1, Ordering::Relaxed);
                 return QuotaCheckResult::MemoryExceeded {
                     limit: quota.max_memory_bytes,
                     current,
@@ -235,7 +262,10 @@ impl TenantRegistry {
     pub fn record_txn_begin(&self, tenant_id: TenantId) {
         if let Some(entry) = self.tenants.get(&tenant_id) {
             entry.counters.active_txns.fetch_add(1, Ordering::Relaxed);
-            entry.counters.window_queries.fetch_add(1, Ordering::Relaxed);
+            entry
+                .counters
+                .window_queries
+                .fetch_add(1, Ordering::Relaxed);
             entry.counters.total_queries.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -244,7 +274,10 @@ impl TenantRegistry {
     pub fn record_txn_commit(&self, tenant_id: TenantId) {
         if let Some(entry) = self.tenants.get(&tenant_id) {
             entry.counters.active_txns.fetch_sub(1, Ordering::Relaxed);
-            entry.counters.txns_committed.fetch_add(1, Ordering::Relaxed);
+            entry
+                .counters
+                .txns_committed
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -259,14 +292,20 @@ impl TenantRegistry {
     /// Record memory allocation for a tenant.
     pub fn record_memory_alloc(&self, tenant_id: TenantId, bytes: u64) {
         if let Some(entry) = self.tenants.get(&tenant_id) {
-            entry.counters.memory_bytes.fetch_add(bytes, Ordering::Relaxed);
+            entry
+                .counters
+                .memory_bytes
+                .fetch_add(bytes, Ordering::Relaxed);
         }
     }
 
     /// Record memory deallocation for a tenant.
     pub fn record_memory_dealloc(&self, tenant_id: TenantId, bytes: u64) {
         if let Some(entry) = self.tenants.get(&tenant_id) {
-            entry.counters.memory_bytes.fetch_sub(bytes, Ordering::Relaxed);
+            entry
+                .counters
+                .memory_bytes
+                .fetch_sub(bytes, Ordering::Relaxed);
         }
     }
 
@@ -328,7 +367,7 @@ impl Default for TenantRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use falcon_common::tenant::{TenantConfig, TenantQuota, TenantId, SYSTEM_TENANT_ID};
+    use falcon_common::tenant::{TenantConfig, TenantId, TenantQuota, SYSTEM_TENANT_ID};
 
     #[test]
     fn test_system_tenant_pre_registered() {
@@ -378,7 +417,13 @@ mod tests {
         // Third txn — should be rejected
         let result = reg.check_begin_txn(TenantId(10));
         assert!(!result.is_allowed());
-        assert!(matches!(result, QuotaCheckResult::TxnLimitExceeded { limit: 2, current: 2 }));
+        assert!(matches!(
+            result,
+            QuotaCheckResult::TxnLimitExceeded {
+                limit: 2,
+                current: 2
+            }
+        ));
 
         // Commit one — now allowed again
         reg.record_txn_commit(TenantId(10));
@@ -397,7 +442,10 @@ mod tests {
 
         reg.record_memory_alloc(TenantId(20), 1);
         let result = reg.check_begin_txn(TenantId(20));
-        assert!(matches!(result, QuotaCheckResult::MemoryExceeded { limit: 1000, .. }));
+        assert!(matches!(
+            result,
+            QuotaCheckResult::MemoryExceeded { limit: 1000, .. }
+        ));
 
         reg.record_memory_dealloc(TenantId(20), 500);
         assert!(reg.check_begin_txn(TenantId(20)).is_allowed());
@@ -411,7 +459,12 @@ mod tests {
         reg.update_status(TenantId(30), TenantStatus::Suspended);
 
         let result = reg.check_begin_txn(TenantId(30));
-        assert!(matches!(result, QuotaCheckResult::TenantNotActive { status: TenantStatus::Suspended }));
+        assert!(matches!(
+            result,
+            QuotaCheckResult::TenantNotActive {
+                status: TenantStatus::Suspended
+            }
+        ));
     }
 
     #[test]

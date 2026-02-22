@@ -17,21 +17,21 @@
 //! - MVCC: each value encodes `(txn_id, status, commit_ts, data)`
 //! - Backpressure: memtable budget, L0 stall count, compaction backlog
 
-pub mod bloom;
 pub mod block_cache;
-pub mod sst;
-pub mod memtable;
+pub mod bloom;
 pub mod compaction;
 pub mod engine;
-pub mod mvcc_encoding;
 pub mod idempotency;
+pub mod memtable;
+pub mod mvcc_encoding;
+pub mod sst;
 pub mod txn_audit;
 
-pub use engine::{LsmEngine, LsmConfig};
-pub use memtable::LsmMemTable;
-pub use sst::{SstWriter, SstReader, SstMeta, SstReadError};
 pub use block_cache::BlockCache;
 pub use bloom::BloomFilter;
 pub use compaction::Compactor;
-pub use mvcc_encoding::{MvccValue, MvccStatus, TxnMeta, TxnMetaStore, TxnOutcome};
-pub use idempotency::{IdempotencyStore, IdempotencyConfig, IdempotencyResult};
+pub use engine::{LsmConfig, LsmEngine};
+pub use idempotency::{IdempotencyConfig, IdempotencyResult, IdempotencyStore};
+pub use memtable::LsmMemTable;
+pub use mvcc_encoding::{MvccStatus, MvccValue, TxnMeta, TxnMetaStore, TxnOutcome};
+pub use sst::{SstMeta, SstReadError, SstReader, SstWriter};

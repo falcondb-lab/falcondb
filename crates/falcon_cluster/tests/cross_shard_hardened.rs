@@ -73,16 +73,23 @@ fn test_h2pc1_commit_with_latency_breakdown() {
     let target = vec![ShardId(0), ShardId(1), ShardId(2)];
 
     let result = coord
-        .execute(&target, IsolationLevel::ReadCommitted, |storage, _tm, txn_id| {
-            let row = OwnedRow::new(vec![Datum::Int32(42)]);
-            storage.insert(TableId(1), row, txn_id)?;
-            Ok(())
-        })
+        .execute(
+            &target,
+            IsolationLevel::ReadCommitted,
+            |storage, _tm, txn_id| {
+                let row = OwnedRow::new(vec![Datum::Int32(42)]);
+                storage.insert(TableId(1), row, txn_id)?;
+                Ok(())
+            },
+        )
         .unwrap();
 
     assert!(result.committed, "H2PC-1: should commit");
     assert_eq!(result.shard_count, 3);
-    assert!(result.latency.total_us > 0, "H2PC-1: total latency should be > 0");
+    assert!(
+        result.latency.total_us > 0,
+        "H2PC-1: total latency should be > 0"
+    );
     assert_eq!(
         result.latency.shard_rpc_us.len(),
         3,
@@ -94,7 +101,10 @@ fn test_h2pc1_commit_with_latency_breakdown() {
     // Verify data on all shards
     for &sid in &target {
         let shard = engine.shard(sid).unwrap();
-        let rows = shard.storage.scan(TableId(1), TxnId(9999), Timestamp(u64::MAX - 1)).unwrap();
+        let rows = shard
+            .storage
+            .scan(TableId(1), TxnId(9999), Timestamp(u64::MAX - 1))
+            .unwrap();
         assert_eq!(rows.len(), 1);
     }
 
@@ -114,17 +124,24 @@ fn test_h2pc2_abort_with_latency_and_reason() {
     let target = vec![ShardId(0), ShardId(1), ShardId(2)];
 
     let result = coord
-        .execute(&target, IsolationLevel::ReadCommitted, |storage, _tm, txn_id| {
-            let row = OwnedRow::new(vec![Datum::Int32(1)]);
-            storage.insert(TableId(1), row.clone(), txn_id)?;
-            storage.insert(TableId(1), row, txn_id)?; // duplicate PK
-            Ok(())
-        })
+        .execute(
+            &target,
+            IsolationLevel::ReadCommitted,
+            |storage, _tm, txn_id| {
+                let row = OwnedRow::new(vec![Datum::Int32(1)]);
+                storage.insert(TableId(1), row.clone(), txn_id)?;
+                storage.insert(TableId(1), row, txn_id)?; // duplicate PK
+                Ok(())
+            },
+        )
         .unwrap();
 
     assert!(!result.committed, "H2PC-2: should abort");
     // Latency breakdown should still be populated
-    assert!(result.latency.shard_rpc_us.len() >= 1, "H2PC-2: should have at least 1 shard RPC");
+    assert!(
+        result.latency.shard_rpc_us.len() >= 1,
+        "H2PC-2: should have at least 1 shard RPC"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -139,7 +156,10 @@ fn test_h2pc3_admission_control_rejects() {
     // Very low concurrency limit
     let config = HardenedConfig {
         coord_concurrency: (1, 1), // hard=1, soft=1
-        retry: RetryConfig { max_retries: 0, ..Default::default() },
+        retry: RetryConfig {
+            max_retries: 0,
+            ..Default::default()
+        },
         ..Default::default()
     };
     let coord = Arc::new(HardenedTwoPhaseCoordinator::new(engine.clone(), config));
@@ -177,7 +197,10 @@ fn test_h2pc3_admission_control_rejects() {
         )
         .unwrap();
 
-    assert!(!result.committed, "H2PC-3: should be rejected by admission control");
+    assert!(
+        !result.committed,
+        "H2PC-3: should be rejected by admission control"
+    );
     assert!(
         result.abort_reason.as_ref().unwrap().contains("admission"),
         "H2PC-3: abort reason should mention admission"
@@ -197,7 +220,10 @@ fn test_h2pc4_circuit_breaker_trips() {
 
     let config = HardenedConfig {
         circuit_breaker: (2, Duration::from_millis(100)),
-        retry: RetryConfig { max_retries: 0, ..Default::default() },
+        retry: RetryConfig {
+            max_retries: 0,
+            ..Default::default()
+        },
         ..Default::default()
     };
     let coord = HardenedTwoPhaseCoordinator::new(engine.clone(), config);
@@ -220,19 +246,31 @@ fn test_h2pc4_circuit_breaker_trips() {
 
     // Circuit breaker should now be open
     let stats = coord.circuit_breaker_stats();
-    assert_eq!(stats.state, CircuitState::Open, "H2PC-4: circuit breaker should be open");
+    assert_eq!(
+        stats.state,
+        CircuitState::Open,
+        "H2PC-4: circuit breaker should be open"
+    );
 
     // Next request should be rejected by circuit breaker
     let result = coord
-        .execute(&target, IsolationLevel::ReadCommitted, |storage, _tm, txn_id| {
-            let row = OwnedRow::new(vec![Datum::Int32(99)]);
-            storage.insert(TableId(1), row, txn_id)?;
-            Ok(())
-        })
+        .execute(
+            &target,
+            IsolationLevel::ReadCommitted,
+            |storage, _tm, txn_id| {
+                let row = OwnedRow::new(vec![Datum::Int32(99)]);
+                storage.insert(TableId(1), row, txn_id)?;
+                Ok(())
+            },
+        )
         .unwrap();
 
     assert!(!result.committed);
-    assert!(result.abort_reason.as_ref().unwrap().contains("circuit breaker"));
+    assert!(result
+        .abort_reason
+        .as_ref()
+        .unwrap()
+        .contains("circuit breaker"));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -246,11 +284,15 @@ fn test_h2pc5_retry_succeeds() {
 
     // Simple successful txn — verifies retry path with 0 retries needed
     let result = coord
-        .execute(&target, IsolationLevel::ReadCommitted, |storage, _tm, txn_id| {
-            let row = OwnedRow::new(vec![Datum::Int32(10)]);
-            storage.insert(TableId(1), row, txn_id)?;
-            Ok(())
-        })
+        .execute(
+            &target,
+            IsolationLevel::ReadCommitted,
+            |storage, _tm, txn_id| {
+                let row = OwnedRow::new(vec![Datum::Int32(10)]);
+                storage.insert(TableId(1), row, txn_id)?;
+                Ok(())
+            },
+        )
         .unwrap();
 
     assert!(result.committed, "H2PC-5: should commit");
@@ -269,12 +311,16 @@ fn test_h2pc6_permanent_not_retried() {
     let target = vec![ShardId(0)];
 
     let result = coord
-        .execute(&target, IsolationLevel::ReadCommitted, |storage, _tm, txn_id| {
-            let row = OwnedRow::new(vec![Datum::Int32(1)]);
-            storage.insert(TableId(1), row.clone(), txn_id)?;
-            storage.insert(TableId(1), row, txn_id)?; // duplicate → permanent
-            Ok(())
-        })
+        .execute(
+            &target,
+            IsolationLevel::ReadCommitted,
+            |storage, _tm, txn_id| {
+                let row = OwnedRow::new(vec![Datum::Int32(1)]);
+                storage.insert(TableId(1), row.clone(), txn_id)?;
+                storage.insert(TableId(1), row, txn_id)?; // duplicate → permanent
+                Ok(())
+            },
+        )
         .unwrap();
 
     assert!(!result.committed);
@@ -282,7 +328,10 @@ fn test_h2pc6_permanent_not_retried() {
     // For abort (Ok(false)), it retries as Conflict; but we also want to verify
     // the retry outcome is populated
     let retry = result.retry.as_ref().unwrap();
-    assert!(retry.attempts >= 1, "H2PC-6: should have at least 1 attempt");
+    assert!(
+        retry.attempts >= 1,
+        "H2PC-6: should have at least 1 attempt"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -296,24 +345,35 @@ fn test_h2pc7_conflict_tracker() {
 
     // Successful txn
     coord
-        .execute(&target, IsolationLevel::ReadCommitted, |storage, _tm, txn_id| {
-            let row = OwnedRow::new(vec![Datum::Int32(1)]);
-            storage.insert(TableId(1), row, txn_id)?;
-            Ok(())
-        })
+        .execute(
+            &target,
+            IsolationLevel::ReadCommitted,
+            |storage, _tm, txn_id| {
+                let row = OwnedRow::new(vec![Datum::Int32(1)]);
+                storage.insert(TableId(1), row, txn_id)?;
+                Ok(())
+            },
+        )
         .unwrap();
 
     // Failed txn
-    let _ = coord.execute(&target, IsolationLevel::ReadCommitted, |storage, _tm, txn_id| {
-        let row = OwnedRow::new(vec![Datum::Int32(2)]);
-        storage.insert(TableId(1), row.clone(), txn_id)?;
-        storage.insert(TableId(1), row, txn_id)?;
-        Ok(())
-    });
+    let _ = coord.execute(
+        &target,
+        IsolationLevel::ReadCommitted,
+        |storage, _tm, txn_id| {
+            let row = OwnedRow::new(vec![Datum::Int32(2)]);
+            storage.insert(TableId(1), row.clone(), txn_id)?;
+            storage.insert(TableId(1), row, txn_id)?;
+            Ok(())
+        },
+    );
 
     let snapshots = coord.conflict_snapshots();
     // Should have data for the shards we touched
-    assert!(!snapshots.is_empty(), "H2PC-7: should have conflict snapshots");
+    assert!(
+        !snapshots.is_empty(),
+        "H2PC-7: should have conflict snapshots"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -373,23 +433,42 @@ fn test_h2pc10_latency_waterfall_explainable() {
     let target = vec![ShardId(0), ShardId(1), ShardId(2)];
 
     let result = coord
-        .execute(&target, IsolationLevel::ReadCommitted, |storage, _tm, txn_id| {
-            let row = OwnedRow::new(vec![Datum::Int32(7)]);
-            storage.insert(TableId(1), row, txn_id)?;
-            Ok(())
-        })
+        .execute(
+            &target,
+            IsolationLevel::ReadCommitted,
+            |storage, _tm, txn_id| {
+                let row = OwnedRow::new(vec![Datum::Int32(7)]);
+                storage.insert(TableId(1), row, txn_id)?;
+                Ok(())
+            },
+        )
         .unwrap();
 
     assert!(result.committed);
 
     let waterfall = result.latency.waterfall();
-    assert!(waterfall.contains("queue="), "H2PC-10: waterfall should contain queue");
-    assert!(waterfall.contains("prep="), "H2PC-10: waterfall should contain prep");
-    assert!(waterfall.contains("commit="), "H2PC-10: waterfall should contain commit");
-    assert!(waterfall.contains("total="), "H2PC-10: waterfall should contain total");
+    assert!(
+        waterfall.contains("queue="),
+        "H2PC-10: waterfall should contain queue"
+    );
+    assert!(
+        waterfall.contains("prep="),
+        "H2PC-10: waterfall should contain prep"
+    );
+    assert!(
+        waterfall.contains("commit="),
+        "H2PC-10: waterfall should contain commit"
+    );
+    assert!(
+        waterfall.contains("total="),
+        "H2PC-10: waterfall should contain total"
+    );
 
     let dominant = result.latency.dominant_phase();
-    assert!(!dominant.is_empty(), "H2PC-10: dominant phase should be identifiable");
+    assert!(
+        !dominant.is_empty(),
+        "H2PC-10: dominant phase should be identifiable"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -403,15 +482,22 @@ fn test_h2pc11_observability_stats() {
 
     // Run a few txns
     for i in 0..5 {
-        let _ = coord.execute(&target, IsolationLevel::ReadCommitted, |storage, _tm, txn_id| {
-            let row = OwnedRow::new(vec![Datum::Int32(i)]);
-            storage.insert(TableId(1), row, txn_id)?;
-            Ok(())
-        });
+        let _ = coord.execute(
+            &target,
+            IsolationLevel::ReadCommitted,
+            |storage, _tm, txn_id| {
+                let row = OwnedRow::new(vec![Datum::Int32(i)]);
+                storage.insert(TableId(1), row, txn_id)?;
+                Ok(())
+            },
+        );
     }
 
     let conc = coord.concurrency_stats();
-    assert_eq!(conc.in_flight, 0, "no txns should be in-flight after completion");
+    assert_eq!(
+        conc.in_flight, 0,
+        "no txns should be in-flight after completion"
+    );
     assert!(conc.total_admitted >= 5);
 
     let cb = coord.circuit_breaker_stats();

@@ -133,16 +133,19 @@ impl LsmEngine {
     /// Create an in-memory-only LSM engine (for testing).
     pub fn open_in_memory() -> io::Result<Self> {
         let dir = std::env::temp_dir().join(format!("falcon_lsm_test_{}", std::process::id()));
-        Self::open(&dir, LsmConfig {
-            memtable_budget_bytes: 4 * 1024 * 1024,
-            block_cache_bytes: 8 * 1024 * 1024,
-            compaction: CompactionConfig {
-                l0_compaction_trigger: 4,
-                l0_stall_trigger: 8,
-                ..Default::default()
+        Self::open(
+            &dir,
+            LsmConfig {
+                memtable_budget_bytes: 4 * 1024 * 1024,
+                block_cache_bytes: 8 * 1024 * 1024,
+                compaction: CompactionConfig {
+                    l0_compaction_trigger: 4,
+                    l0_stall_trigger: 8,
+                    ..Default::default()
+                },
+                sync_writes: false,
             },
-            sync_writes: false,
-        })
+        )
     }
 
     // ── Write Path ──────────────────────────────────────────────────────
@@ -152,7 +155,8 @@ impl LsmEngine {
         self.maybe_stall_writes()?;
 
         let memtable = self.active_memtable.read().clone();
-        memtable.put(key.to_vec(), value.to_vec())
+        memtable
+            .put(key.to_vec(), value.to_vec())
             .map_err(|_| io::Error::other("memtable frozen during write"))?;
 
         self.maybe_trigger_flush();
@@ -164,7 +168,8 @@ impl LsmEngine {
         self.maybe_stall_writes()?;
 
         let memtable = self.active_memtable.read().clone();
-        memtable.delete(key.to_vec())
+        memtable
+            .delete(key.to_vec())
             .map_err(|_| io::Error::other("memtable frozen during write"))?;
 
         self.maybe_trigger_flush();
@@ -272,7 +277,9 @@ impl LsmEngine {
         self.levels.write()[0].push(meta);
 
         // Remove from frozen list
-        self.frozen_memtables.write().retain(|m| !Arc::ptr_eq(m, &frozen));
+        self.frozen_memtables
+            .write()
+            .retain(|m| !Arc::ptr_eq(m, &frozen));
 
         self.flushes_completed.fetch_add(1, Ordering::Relaxed);
 
@@ -293,7 +300,10 @@ impl LsmEngine {
 
         let (l0_files, l1_files) = {
             let levels = self.levels.read();
-            (levels[0].clone(), levels.get(1).cloned().unwrap_or_default())
+            (
+                levels[0].clone(),
+                levels.get(1).cloned().unwrap_or_default(),
+            )
         };
 
         let result = self.compactor.compact_l0_to_l1(&l0_files, &l1_files)?;
@@ -329,7 +339,8 @@ impl LsmEngine {
         let levels = self.levels.read();
 
         let total_sst_files: usize = levels.iter().map(|l| l.len()).sum();
-        let total_sst_bytes: u64 = levels.iter()
+        let total_sst_bytes: u64 = levels
+            .iter()
             .flat_map(|l| l.iter())
             .map(|m| m.file_size)
             .sum();
@@ -404,9 +415,10 @@ impl LsmEngine {
             self.writes_stalled.fetch_add(1, Ordering::Relaxed);
             // In production, this would block until compaction catches up.
             // For now, return a transient error.
-            return Err(io::Error::other(
-                format!("write stalled: L0 file count {} exceeds stall trigger", l0_count),
-            ));
+            return Err(io::Error::other(format!(
+                "write stalled: L0 file count {} exceeds stall trigger",
+                l0_count
+            )));
         }
         Ok(())
     }
@@ -425,13 +437,12 @@ impl LsmEngine {
                 continue;
             }
 
-            let filename = path.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
+            let filename = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
 
             // Parse level from filename: sst_L{level}_{seq}.sst
             let level = if filename.starts_with("sst_L") {
-                filename.get(5..6)
+                filename
+                    .get(5..6)
                     .and_then(|s| s.parse::<usize>().ok())
                     .unwrap_or(0)
             } else {
@@ -470,16 +481,20 @@ mod tests {
     use tempfile::TempDir;
 
     fn test_engine(dir: &Path) -> LsmEngine {
-        LsmEngine::open(dir, LsmConfig {
-            memtable_budget_bytes: 4096, // small for testing
-            block_cache_bytes: 1024 * 1024,
-            compaction: CompactionConfig {
-                l0_compaction_trigger: 4,
-                l0_stall_trigger: 20,
-                ..Default::default()
+        LsmEngine::open(
+            dir,
+            LsmConfig {
+                memtable_budget_bytes: 4096, // small for testing
+                block_cache_bytes: 1024 * 1024,
+                compaction: CompactionConfig {
+                    l0_compaction_trigger: 4,
+                    l0_stall_trigger: 20,
+                    ..Default::default()
+                },
+                sync_writes: false,
             },
-            sync_writes: false,
-        }).unwrap()
+        )
+        .unwrap()
     }
 
     #[test]
@@ -539,16 +554,20 @@ mod tests {
     #[test]
     fn test_lsm_auto_flush_on_budget() {
         let dir = TempDir::new().unwrap();
-        let engine = LsmEngine::open(dir.path(), LsmConfig {
-            memtable_budget_bytes: 200, // very small
-            block_cache_bytes: 1024 * 1024,
-            compaction: CompactionConfig {
-                l0_compaction_trigger: 100,
-                l0_stall_trigger: 200,
-                ..Default::default()
+        let engine = LsmEngine::open(
+            dir.path(),
+            LsmConfig {
+                memtable_budget_bytes: 200, // very small
+                block_cache_bytes: 1024 * 1024,
+                compaction: CompactionConfig {
+                    l0_compaction_trigger: 100,
+                    l0_stall_trigger: 200,
+                    ..Default::default()
+                },
+                sync_writes: false,
             },
-            sync_writes: false,
-        }).unwrap();
+        )
+        .unwrap();
 
         // Write enough data to trigger auto-flush
         for i in 0..50 {
@@ -564,16 +583,20 @@ mod tests {
     #[test]
     fn test_lsm_many_writes_and_reads() {
         let dir = TempDir::new().unwrap();
-        let engine = LsmEngine::open(dir.path(), LsmConfig {
-            memtable_budget_bytes: 2048,
-            block_cache_bytes: 1024 * 1024,
-            compaction: CompactionConfig {
-                l0_compaction_trigger: 4,
-                l0_stall_trigger: 50,
-                ..Default::default()
+        let engine = LsmEngine::open(
+            dir.path(),
+            LsmConfig {
+                memtable_budget_bytes: 2048,
+                block_cache_bytes: 1024 * 1024,
+                compaction: CompactionConfig {
+                    l0_compaction_trigger: 4,
+                    l0_stall_trigger: 50,
+                    ..Default::default()
+                },
+                sync_writes: false,
             },
-            sync_writes: false,
-        }).unwrap();
+        )
+        .unwrap();
 
         let n = 500;
         for i in 0..n {
@@ -597,16 +620,20 @@ mod tests {
     #[test]
     fn test_lsm_compaction_triggered() {
         let dir = TempDir::new().unwrap();
-        let engine = LsmEngine::open(dir.path(), LsmConfig {
-            memtable_budget_bytes: 512,
-            block_cache_bytes: 1024 * 1024,
-            compaction: CompactionConfig {
-                l0_compaction_trigger: 3,
-                l0_stall_trigger: 50,
-                ..Default::default()
+        let engine = LsmEngine::open(
+            dir.path(),
+            LsmConfig {
+                memtable_budget_bytes: 512,
+                block_cache_bytes: 1024 * 1024,
+                compaction: CompactionConfig {
+                    l0_compaction_trigger: 3,
+                    l0_stall_trigger: 50,
+                    ..Default::default()
+                },
+                sync_writes: false,
             },
-            sync_writes: false,
-        }).unwrap();
+        )
+        .unwrap();
 
         // Write enough to trigger multiple flushes and compaction
         for i in 0..200 {
@@ -616,8 +643,10 @@ mod tests {
         }
 
         let stats = engine.stats();
-        assert!(stats.compaction.runs_completed > 0 || stats.flushes_completed >= 3,
-            "expected compaction or multiple flushes");
+        assert!(
+            stats.compaction.runs_completed > 0 || stats.flushes_completed >= 3,
+            "expected compaction or multiple flushes"
+        );
     }
 
     #[test]

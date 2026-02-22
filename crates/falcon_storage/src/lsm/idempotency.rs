@@ -15,8 +15,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use falcon_common::types::TxnId;
 
-use super::engine::{LsmConfig, LsmEngine};
 use super::compaction::CompactionConfig;
+use super::engine::{LsmConfig, LsmEngine};
 
 /// Result of a previously-executed idempotent transaction.
 #[derive(Debug, Clone)]
@@ -66,11 +66,15 @@ impl IdempotencyResult {
 
         let key_len = u32::from_le_bytes(raw[pos..pos + 4].try_into().ok()?) as usize;
         pos += 4;
-        if pos + key_len > raw.len() { return None; }
+        if pos + key_len > raw.len() {
+            return None;
+        }
         let key = String::from_utf8(raw[pos..pos + key_len].to_vec()).ok()?;
         pos += key_len;
 
-        if pos + 8 + 1 + 4 > raw.len() { return None; }
+        if pos + 8 + 1 + 4 > raw.len() {
+            return None;
+        }
         let txn_id = TxnId(u64::from_le_bytes(raw[pos..pos + 8].try_into().ok()?));
         pos += 8;
         let committed = raw[pos] == 1;
@@ -78,7 +82,9 @@ impl IdempotencyResult {
         let payload_len = u32::from_le_bytes(raw[pos..pos + 4].try_into().ok()?) as usize;
         pos += 4;
 
-        if pos + payload_len + 16 > raw.len() { return None; }
+        if pos + payload_len + 16 > raw.len() {
+            return None;
+        }
         let result_payload = raw[pos..pos + payload_len].to_vec();
         pos += payload_len;
 
@@ -158,12 +164,10 @@ impl IdempotencyStore {
     pub fn check(&self, key: &str) -> io::Result<Option<IdempotencyResult>> {
         let store_key = Self::make_key(key);
         match self.engine.get(&store_key)? {
-            Some(raw) => {
-                match IdempotencyResult::decode(&raw) {
-                    Some(result) if !result.is_expired() => Ok(Some(result)),
-                    _ => Ok(None),
-                }
-            }
+            Some(raw) => match IdempotencyResult::decode(&raw) {
+                Some(result) if !result.is_expired() => Ok(Some(result)),
+                _ => Ok(None),
+            },
             None => Ok(None),
         }
     }
@@ -183,7 +187,11 @@ impl IdempotencyStore {
             .unwrap_or_default()
             .as_millis() as u64;
 
-        let effective_ttl = if ttl_ms == 0 { self.config.default_ttl_ms } else { ttl_ms };
+        let effective_ttl = if ttl_ms == 0 {
+            self.config.default_ttl_ms
+        } else {
+            ttl_ms
+        };
 
         let result = IdempotencyResult {
             key: key.to_string(),
@@ -314,7 +322,9 @@ mod tests {
         assert!(store.check("req-1").unwrap().is_none());
 
         // Store a result
-        store.store("req-1", TxnId(10), true, b"OK".to_vec(), 0).unwrap();
+        store
+            .store("req-1", TxnId(10), true, b"OK".to_vec(), 0)
+            .unwrap();
 
         // Should find it
         let result = store.check("req-1").unwrap().unwrap();
@@ -331,7 +341,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = IdempotencyStore::open(dir.path(), IdempotencyConfig::default()).unwrap();
 
-        store.store("req-dup", TxnId(5), true, b"result-A".to_vec(), 0).unwrap();
+        store
+            .store("req-dup", TxnId(5), true, b"result-A".to_vec(), 0)
+            .unwrap();
 
         // First check
         let r1 = store.check("req-dup").unwrap().unwrap();
@@ -361,7 +373,9 @@ mod tests {
 
         {
             let store = IdempotencyStore::open(dir.path(), IdempotencyConfig::default()).unwrap();
-            store.store("persist-key", TxnId(33), true, b"persisted".to_vec(), 0).unwrap();
+            store
+                .store("persist-key", TxnId(33), true, b"persisted".to_vec(), 0)
+                .unwrap();
             store.flush().unwrap();
         }
 
@@ -379,7 +393,9 @@ mod tests {
         let store = IdempotencyStore::open(dir.path(), IdempotencyConfig::default()).unwrap();
 
         // Store with 1ms TTL — will be expired by the time we check
-        store.store("expired-key", TxnId(1), true, vec![], 1).unwrap();
+        store
+            .store("expired-key", TxnId(1), true, vec![], 1)
+            .unwrap();
 
         // Sleep briefly to ensure expiry
         std::thread::sleep(std::time::Duration::from_millis(5));

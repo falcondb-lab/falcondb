@@ -6,8 +6,8 @@ use falcon_common::schema::TableSchema;
 use falcon_common::types::{ColumnId, DataType, TableId};
 use sqlparser::ast::{self, Expr, SelectItem, SetExpr, Value};
 
+use crate::binder::{AliasMap, Binder};
 use crate::types::*;
-use crate::binder::{Binder, AliasMap};
 
 impl Binder {
     pub(crate) fn bind_select(&self, query: &ast::Query) -> Result<BoundStatement, SqlError> {
@@ -30,7 +30,13 @@ impl Binder {
         inherited_ctes: Option<&HashMap<String, TableSchema>>,
     ) -> Result<BoundSelect, SqlError> {
         // Handle UNION / UNION ALL
-        if let SetExpr::SetOperation { left, right, set_quantifier, op } = query.body.as_ref() {
+        if let SetExpr::SetOperation {
+            left,
+            right,
+            set_quantifier,
+            op,
+        } = query.body.as_ref()
+        {
             let set_op_kind = match op {
                 ast::SetOperator::Union => SetOpKind::Union,
                 ast::SetOperator::Intersect => SetOpKind::Intersect,
@@ -76,17 +82,27 @@ impl Binder {
             let alias_map: AliasMap = HashMap::new();
             for ob in &query.order_by.as_ref().map_or(vec![], |o| o.exprs.clone()) {
                 let col_idx = self.resolve_order_by_expr(
-                    &ob.expr, &mut bound_left.projections, &bound_left.schema, &alias_map,
+                    &ob.expr,
+                    &mut bound_left.projections,
+                    &bound_left.schema,
+                    &alias_map,
                 )?;
                 let asc = ob.asc.unwrap_or(true);
-                order_by.push(BoundOrderBy { column_idx: col_idx, asc });
+                order_by.push(BoundOrderBy {
+                    column_idx: col_idx,
+                    asc,
+                });
             }
 
-            let limit = query.limit.as_ref()
+            let limit = query
+                .limit
+                .as_ref()
                 .map(|expr| Self::eval_limit_offset_expr(expr, "LIMIT"))
                 .transpose()?;
 
-            let offset = query.offset.as_ref()
+            let offset = query
+                .offset
+                .as_ref()
                 .map(|o| Self::eval_limit_offset_expr(&o.value, "OFFSET"))
                 .transpose()?;
 
@@ -125,19 +141,33 @@ impl Binder {
 
                 // Check for recursive CTE: WITH RECURSIVE name AS (base UNION ALL recursive)
                 if is_recursive {
-                    if let SetExpr::SetOperation { left, right, op: ast::SetOperator::Union, set_quantifier } = cte.query.body.as_ref() {
+                    if let SetExpr::SetOperation {
+                        left,
+                        right,
+                        op: ast::SetOperator::Union,
+                        set_quantifier,
+                    } = cte.query.body.as_ref()
+                    {
                         let is_all = matches!(set_quantifier, ast::SetQuantifier::All);
                         if !is_all {
-                            return Err(SqlError::Unsupported("Recursive CTE requires UNION ALL".into()));
+                            return Err(SqlError::Unsupported(
+                                "Recursive CTE requires UNION ALL".into(),
+                            ));
                         }
 
                         // Bind the base (anchor) part — no self-reference allowed
                         let base_query = ast::Query {
                             body: left.clone(),
-                            order_by: None, limit: None, offset: None,
-                            with: None, fetch: None, locks: vec![],
-                            limit_by: vec![], for_clause: None,
-                            settings: None, format_clause: None,
+                            order_by: None,
+                            limit: None,
+                            offset: None,
+                            with: None,
+                            fetch: None,
+                            locks: vec![],
+                            limit_by: vec![],
+                            for_clause: None,
+                            settings: None,
+                            format_clause: None,
                         };
                         let base_select = self.bind_select_query(&base_query)?;
 
@@ -164,13 +194,21 @@ impl Binder {
                         // Bind the recursive part — can reference the CTE by name
                         let recursive_query = ast::Query {
                             body: right.clone(),
-                            order_by: None, limit: None, offset: None,
-                            with: None, fetch: None, locks: vec![],
-                            limit_by: vec![], for_clause: None,
-                            settings: None, format_clause: None,
+                            order_by: None,
+                            limit: None,
+                            offset: None,
+                            with: None,
+                            fetch: None,
+                            locks: vec![],
+                            limit_by: vec![],
+                            for_clause: None,
+                            settings: None,
+                            format_clause: None,
                         };
                         let recursive_select = self.bind_select_query_with_outer(
-                            &recursive_query, None, Some(&cte_schemas),
+                            &recursive_query,
+                            None,
+                            Some(&cte_schemas),
                         )?;
 
                         bound_ctes.push(BoundCte {
@@ -235,8 +273,12 @@ impl Binder {
         } else {
             let from = &select.from[0];
             // Handle derived tables (subqueries in FROM)
-            if let ast::TableFactor::Derived { subquery, alias, .. } = &from.relation {
-                let derived_alias = alias.as_ref()
+            if let ast::TableFactor::Derived {
+                subquery, alias, ..
+            } = &from.relation
+            {
+                let derived_alias = alias
+                    .as_ref()
                     .map(|a| a.name.value.clone())
                     .unwrap_or_else(|| format!("__derived_{}", bound_ctes.len()));
                 let derived_select = self.bind_select_query(subquery)?;
@@ -291,23 +333,35 @@ impl Binder {
                 table_name = derived_alias.clone();
                 left_schema = derived_schema;
                 alias_map.insert(derived_alias.to_lowercase(), (derived_alias.clone(), 0));
-            } else if let ast::TableFactor::Table { name, args: Some(args), alias, .. } = &from.relation {
+            } else if let ast::TableFactor::Table {
+                name,
+                args: Some(args),
+                alias,
+                ..
+            } = &from.relation
+            {
                 // Table-valued function: GENERATE_SERIES(start, stop [, step])
                 let func_name = name.to_string().to_uppercase();
                 if func_name == "GENERATE_SERIES" {
-                    let tvf_alias = alias.as_ref()
+                    let tvf_alias = alias
+                        .as_ref()
                         .map(|a| a.name.value.clone())
                         .unwrap_or_else(|| "generate_series".to_string());
                     let tvf_table_id = TableId(3_000_000 + bound_ctes.len() as u64);
 
                     // Parse arguments
                     let ast::TableFunctionArgs { args: fn_args, .. } = args;
-                    let raw_args: Vec<&Expr> = fn_args.iter().filter_map(|a| match a {
-                        ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(e)) => Some(e),
-                        _ => None,
-                    }).collect();
+                    let raw_args: Vec<&Expr> = fn_args
+                        .iter()
+                        .filter_map(|a| match a {
+                            ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(e)) => Some(e),
+                            _ => None,
+                        })
+                        .collect();
                     if raw_args.len() < 2 {
-                        return Err(SqlError::Parse("GENERATE_SERIES requires at least 2 arguments".into()));
+                        return Err(SqlError::Parse(
+                            "GENERATE_SERIES requires at least 2 arguments".into(),
+                        ));
                     }
 
                     // Store args as literal values for executor
@@ -344,14 +398,24 @@ impl Binder {
                     let mut series_rows = Vec::new();
                     let (s, e, st) = match (&start_val, &stop_val, &step_val) {
                         (Datum::Int64(s), Datum::Int64(e), Datum::Int64(st)) => (*s, *e, *st),
-                        _ => return Err(SqlError::Parse("GENERATE_SERIES requires integer arguments".into())),
+                        _ => {
+                            return Err(SqlError::Parse(
+                                "GENERATE_SERIES requires integer arguments".into(),
+                            ))
+                        }
                     };
                     if st > 0 {
                         let mut v = s;
-                        while v <= e { series_rows.push(v); v += st; }
+                        while v <= e {
+                            series_rows.push(v);
+                            v += st;
+                        }
                     } else if st < 0 {
                         let mut v = s;
-                        while v >= e { series_rows.push(v); v += st; }
+                        while v >= e {
+                            series_rows.push(v);
+                            v += st;
+                        }
                     }
 
                     // Build a fake CTE select that produces these rows
@@ -375,7 +439,10 @@ impl Binder {
                         joins: vec![],
                         ctes: vec![],
                         unions: vec![],
-                        virtual_rows: series_rows.iter().map(|v| OwnedRow::new(vec![Datum::Int64(*v)])).collect(),
+                        virtual_rows: series_rows
+                            .iter()
+                            .map(|v| OwnedRow::new(vec![Datum::Int64(*v)]))
+                            .collect(),
                     };
 
                     cte_schemas.insert(tvf_alias.to_lowercase(), tvf_schema.clone());
@@ -395,35 +462,46 @@ impl Binder {
                     // Store inline data: we'll generate the rows in the executor
                     // by recognizing the table_id range 3_000_000+
                 } else if func_name == "UNNEST" {
-                    let unnest_alias = alias.as_ref()
+                    let unnest_alias = alias
+                        .as_ref()
                         .map(|a| a.name.value.clone())
                         .unwrap_or_else(|| "unnest".to_string());
                     let unnest_table_id = TableId(3_000_000 + bound_ctes.len() as u64);
 
                     let ast::TableFunctionArgs { args: fn_args, .. } = args;
-                    let raw_args: Vec<&Expr> = fn_args.iter().filter_map(|a| match a {
-                        ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(e)) => Some(e),
-                        _ => None,
-                    }).collect();
+                    let raw_args: Vec<&Expr> = fn_args
+                        .iter()
+                        .filter_map(|a| match a {
+                            ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(e)) => Some(e),
+                            _ => None,
+                        })
+                        .collect();
                     if raw_args.is_empty() {
-                        return Err(SqlError::Parse("UNNEST requires at least 1 argument".into()));
+                        return Err(SqlError::Parse(
+                            "UNNEST requires at least 1 argument".into(),
+                        ));
                     }
 
                     let arr_val = self.eval_const_expr(raw_args[0])?;
                     let elements = match arr_val {
                         Datum::Array(elems) => elems,
                         Datum::Null => vec![],
-                        _ => return Err(SqlError::Parse("UNNEST requires an array argument".into())),
+                        _ => {
+                            return Err(SqlError::Parse("UNNEST requires an array argument".into()))
+                        }
                     };
 
-                    let elem_type = elements.first().map(|d| match d {
-                        Datum::Int32(_) => DataType::Int32,
-                        Datum::Int64(_) => DataType::Int64,
-                        Datum::Float64(_) => DataType::Float64,
-                        Datum::Boolean(_) => DataType::Boolean,
-                        Datum::Text(_) => DataType::Text,
-                        _ => DataType::Text,
-                    }).unwrap_or(DataType::Text);
+                    let elem_type = elements
+                        .first()
+                        .map(|d| match d {
+                            Datum::Int32(_) => DataType::Int32,
+                            Datum::Int64(_) => DataType::Int64,
+                            Datum::Float64(_) => DataType::Float64,
+                            Datum::Boolean(_) => DataType::Boolean,
+                            Datum::Text(_) => DataType::Text,
+                            _ => DataType::Text,
+                        })
+                        .unwrap_or(DataType::Text);
 
                     let unnest_schema = TableSchema {
                         id: unnest_table_id,
@@ -463,7 +541,10 @@ impl Binder {
                         joins: vec![],
                         ctes: vec![],
                         unions: vec![],
-                        virtual_rows: elements.into_iter().map(|d| OwnedRow::new(vec![d])).collect(),
+                        virtual_rows: elements
+                            .into_iter()
+                            .map(|d| OwnedRow::new(vec![d]))
+                            .collect(),
                     };
 
                     cte_schemas.insert(unnest_alias.to_lowercase(), unnest_schema.clone());
@@ -478,17 +559,26 @@ impl Binder {
                     left_schema = unnest_schema;
                     alias_map.insert(unnest_alias.to_lowercase(), (unnest_alias.clone(), 0));
                 } else {
-                    return Err(SqlError::Unsupported(format!("Table function: {}", func_name)));
+                    return Err(SqlError::Unsupported(format!(
+                        "Table function: {}",
+                        func_name
+                    )));
                 }
-            } else if let ast::TableFactor::UNNEST { array_exprs, alias, .. } = &from.relation {
+            } else if let ast::TableFactor::UNNEST {
+                array_exprs, alias, ..
+            } = &from.relation
+            {
                 // Handle FROM UNNEST(ARRAY[...]) syntax (TableFactor::UNNEST variant)
-                let unnest_alias = alias.as_ref()
+                let unnest_alias = alias
+                    .as_ref()
                     .map(|a| a.name.value.clone())
                     .unwrap_or_else(|| "unnest".to_string());
                 let unnest_table_id = TableId(3_000_000 + bound_ctes.len() as u64);
 
                 if array_exprs.is_empty() {
-                    return Err(SqlError::Parse("UNNEST requires at least 1 argument".into()));
+                    return Err(SqlError::Parse(
+                        "UNNEST requires at least 1 argument".into(),
+                    ));
                 }
 
                 let arr_val = self.eval_const_expr(&array_exprs[0])?;
@@ -498,14 +588,17 @@ impl Binder {
                     _ => return Err(SqlError::Parse("UNNEST requires an array argument".into())),
                 };
 
-                let elem_type = elements.first().map(|d| match d {
-                    Datum::Int32(_) => DataType::Int32,
-                    Datum::Int64(_) => DataType::Int64,
-                    Datum::Float64(_) => DataType::Float64,
-                    Datum::Boolean(_) => DataType::Boolean,
-                    Datum::Text(_) => DataType::Text,
-                    _ => DataType::Text,
-                }).unwrap_or(DataType::Text);
+                let elem_type = elements
+                    .first()
+                    .map(|d| match d {
+                        Datum::Int32(_) => DataType::Int32,
+                        Datum::Int64(_) => DataType::Int64,
+                        Datum::Float64(_) => DataType::Float64,
+                        Datum::Boolean(_) => DataType::Boolean,
+                        Datum::Text(_) => DataType::Text,
+                        _ => DataType::Text,
+                    })
+                    .unwrap_or(DataType::Text);
 
                 let unnest_schema = TableSchema {
                     id: unnest_table_id,
@@ -545,7 +638,10 @@ impl Binder {
                     joins: vec![],
                     ctes: vec![],
                     unions: vec![],
-                    virtual_rows: elements.into_iter().map(|d| OwnedRow::new(vec![d])).collect(),
+                    virtual_rows: elements
+                        .into_iter()
+                        .map(|d| OwnedRow::new(vec![d]))
+                        .collect(),
                 };
 
                 cte_schemas.insert(unnest_alias.to_lowercase(), unnest_schema.clone());
@@ -565,7 +661,9 @@ impl Binder {
 
                 // ── Information schema / pg_catalog virtual tables ──
                 let tn_lower = table_name.to_lowercase();
-                if let Some((vt_schema, vt_rows)) = self.try_bind_virtual_catalog_table(&tn_lower, &bound_ctes) {
+                if let Some((vt_schema, vt_rows)) =
+                    self.try_bind_virtual_catalog_table(&tn_lower, &bound_ctes)
+                {
                     let vt_alias = left_alias.as_ref().unwrap_or(&table_name).clone();
                     let vt_id = TableId(4_000_000 + bound_ctes.len() as u64);
                     let vt_table_schema = TableSchema {
@@ -580,7 +678,9 @@ impl Binder {
                         ..Default::default()
                     };
                     let vt_projections: Vec<BoundProjection> = (0..vt_table_schema.columns.len())
-                        .map(|i| BoundProjection::Column(i, vt_table_schema.columns[i].name.clone()))
+                        .map(|i| {
+                            BoundProjection::Column(i, vt_table_schema.columns[i].name.clone())
+                        })
                         .collect();
                     let vt_select = BoundSelect {
                         table_id: vt_id,
@@ -612,20 +712,23 @@ impl Binder {
                     left_schema = vt_table_schema;
                     alias_map.insert(vt_alias.to_lowercase(), (vt_alias.clone(), 0));
                 } else {
-                    left_schema = if let Some(cte_schema) = cte_schemas.get(&table_name.to_lowercase()) {
-                        cte_schema.clone()
-                    } else if let Some(view) = self.catalog.find_view(&table_name).cloned() {
-                        // View expansion: bind view SQL as a CTE
-                        self.bind_view_as_cte(
-                            &table_name, &view.query_sql,
-                            &mut cte_schemas, &mut bound_ctes,
-                        )?
-                    } else {
-                        self.catalog
-                            .find_table(&table_name)
-                            .ok_or_else(|| SqlError::UnknownTable(table_name.clone()))?
-                            .clone()
-                    };
+                    left_schema =
+                        if let Some(cte_schema) = cte_schemas.get(&table_name.to_lowercase()) {
+                            cte_schema.clone()
+                        } else if let Some(view) = self.catalog.find_view(&table_name).cloned() {
+                            // View expansion: bind view SQL as a CTE
+                            self.bind_view_as_cte(
+                                &table_name,
+                                &view.query_sql,
+                                &mut cte_schemas,
+                                &mut bound_ctes,
+                            )?
+                        } else {
+                            self.catalog
+                                .find_table(&table_name)
+                                .ok_or_else(|| SqlError::UnknownTable(table_name.clone()))?
+                                .clone()
+                        };
                     // Register the left table by its real name
                     alias_map.insert(table_name.to_lowercase(), (table_name.clone(), 0));
                     // Register alias if present
@@ -643,10 +746,16 @@ impl Binder {
         // Handle implicit CROSS JOINs for multiple FROM items (e.g. FROM t1, t2)
         for extra_from in select.from.iter().skip(1) {
             let (extra_name, extra_alias) = self.extract_table_name(&extra_from.relation)?;
-            let extra_schema = if let Some(cte_schema) = cte_schemas.get(&extra_name.to_lowercase()) {
+            let extra_schema = if let Some(cte_schema) = cte_schemas.get(&extra_name.to_lowercase())
+            {
                 cte_schema.clone()
             } else if let Some(view) = self.catalog.find_view(&extra_name).cloned() {
-                self.bind_view_as_cte(&extra_name, &view.query_sql, &mut cte_schemas, &mut bound_ctes)?
+                self.bind_view_as_cte(
+                    &extra_name,
+                    &view.query_sql,
+                    &mut cte_schemas,
+                    &mut bound_ctes,
+                )?
             } else {
                 self.catalog
                     .find_table(&extra_name)
@@ -672,8 +781,12 @@ impl Binder {
         let from_joins = select.from.first().map(|f| &f.joins[..]).unwrap_or(&[]);
         for join_item in from_joins {
             // Handle derived tables in JOIN
-            if let ast::TableFactor::Derived { subquery, alias, .. } = &join_item.relation {
-                let d_alias = alias.as_ref()
+            if let ast::TableFactor::Derived {
+                subquery, alias, ..
+            } = &join_item.relation
+            {
+                let d_alias = alias
+                    .as_ref()
                     .map(|a| a.name.value.clone())
                     .unwrap_or_else(|| format!("__derived_{}", bound_ctes.len()));
                 let d_select = self.bind_select_query(subquery)?;
@@ -696,34 +809,51 @@ impl Binder {
                     };
                     d_columns.push(falcon_common::schema::ColumnDef {
                         id: ColumnId(d_columns.len() as u32),
-                        name: col_name, data_type, nullable: true,
-                        is_primary_key: false, default_value: None, is_serial: false,
+                        name: col_name,
+                        data_type,
+                        nullable: true,
+                        is_primary_key: false,
+                        default_value: None,
+                        is_serial: false,
                     });
                 }
                 let d_schema = TableSchema {
-                    id: d_table_id, name: d_alias.clone(), columns: d_columns,
-                    primary_key_columns: vec![], next_serial_values: std::collections::HashMap::new(),
-                    check_constraints: vec![], unique_constraints: vec![], foreign_keys: vec![],
+                    id: d_table_id,
+                    name: d_alias.clone(),
+                    columns: d_columns,
+                    primary_key_columns: vec![],
+                    next_serial_values: std::collections::HashMap::new(),
+                    check_constraints: vec![],
+                    unique_constraints: vec![],
+                    foreign_keys: vec![],
                     ..Default::default()
                 };
                 cte_schemas.insert(d_alias.to_lowercase(), d_schema.clone());
                 bound_ctes.push(BoundCte {
-                    name: d_alias.to_lowercase(), table_id: d_table_id, select: d_select,
+                    name: d_alias.to_lowercase(),
+                    table_id: d_table_id,
+                    select: d_select,
                     recursive_select: None,
                 });
             }
 
             let (right_table_name, right_alias) = self.extract_table_name(&join_item.relation)?;
-            let right_schema = if let Some(cte_schema) = cte_schemas.get(&right_table_name.to_lowercase()) {
-                cte_schema.clone()
-            } else if let Some(view) = self.catalog.find_view(&right_table_name).cloned() {
-                self.bind_view_as_cte(&right_table_name, &view.query_sql, &mut cte_schemas, &mut bound_ctes)?
-            } else {
-                self.catalog
-                    .find_table(&right_table_name)
-                    .ok_or_else(|| SqlError::UnknownTable(right_table_name.clone()))?
-                    .clone()
-            };
+            let right_schema =
+                if let Some(cte_schema) = cte_schemas.get(&right_table_name.to_lowercase()) {
+                    cte_schema.clone()
+                } else if let Some(view) = self.catalog.find_view(&right_table_name).cloned() {
+                    self.bind_view_as_cte(
+                        &right_table_name,
+                        &view.query_sql,
+                        &mut cte_schemas,
+                        &mut bound_ctes,
+                    )?
+                } else {
+                    self.catalog
+                        .find_table(&right_table_name)
+                        .ok_or_else(|| SqlError::UnknownTable(right_table_name.clone()))?
+                        .clone()
+                };
 
             let join_type = match &join_item.join_operator {
                 ast::JoinOperator::Inner(_) => JoinType::Inner,
@@ -731,17 +861,26 @@ impl Binder {
                 ast::JoinOperator::RightOuter(_) => JoinType::Right,
                 ast::JoinOperator::CrossJoin => JoinType::Cross,
                 ast::JoinOperator::FullOuter(_) => JoinType::FullOuter,
-                _ => return Err(SqlError::Unsupported(format!(
-                    "Join type: {:?}", std::mem::discriminant(&join_item.join_operator)
-                ))),
+                _ => {
+                    return Err(SqlError::Unsupported(format!(
+                        "Join type: {:?}",
+                        std::mem::discriminant(&join_item.join_operator)
+                    )))
+                }
             };
 
             let right_col_offset = combined_columns.len();
 
             // Register right table in alias map
-            alias_map.insert(right_table_name.to_lowercase(), (right_table_name.clone(), right_col_offset));
+            alias_map.insert(
+                right_table_name.to_lowercase(),
+                (right_table_name.clone(), right_col_offset),
+            );
             if let Some(ref alias) = right_alias {
-                alias_map.insert(alias.to_lowercase(), (right_table_name.clone(), right_col_offset));
+                alias_map.insert(
+                    alias.to_lowercase(),
+                    (right_table_name.clone(), right_col_offset),
+                );
             }
 
             // Extract ON condition
@@ -754,7 +893,10 @@ impl Binder {
                         ast::JoinConstraint::On(expr) => {
                             // Build a temporary combined schema for binding the ON condition
                             let temp_schema = self.build_combined_schema(
-                                &left_schema, &combined_columns, &right_schema, right_col_offset,
+                                &left_schema,
+                                &combined_columns,
+                                &right_schema,
+                                right_col_offset,
                             );
                             Some(self.bind_expr_with_aliases(expr, &temp_schema, &alias_map)?)
                         }
@@ -762,20 +904,31 @@ impl Binder {
                         ast::JoinConstraint::Using(columns) => {
                             // USING(col1, col2) -> build AND chain of left.col = right.col
                             let temp_schema = self.build_combined_schema(
-                                &left_schema, &combined_columns, &right_schema, right_col_offset,
+                                &left_schema,
+                                &combined_columns,
+                                &right_schema,
+                                right_col_offset,
                             );
                             let mut condition: Option<BoundExpr> = None;
                             for col_ident in columns {
                                 let col_name = col_ident.value.to_lowercase();
-                                let left_idx = temp_schema.columns.iter()
+                                let left_idx = temp_schema
+                                    .columns
+                                    .iter()
                                     .position(|c| c.name.to_lowercase() == col_name)
-                                    .ok_or_else(|| SqlError::UnknownColumn(col_ident.value.clone()))?;
-                                let right_idx = right_schema.find_column(&col_ident.value)
-                                    .ok_or_else(|| SqlError::UnknownColumn(col_ident.value.clone()))?;
+                                    .ok_or_else(|| {
+                                        SqlError::UnknownColumn(col_ident.value.clone())
+                                    })?;
+                                let right_idx =
+                                    right_schema.find_column(&col_ident.value).ok_or_else(
+                                        || SqlError::UnknownColumn(col_ident.value.clone()),
+                                    )?;
                                 let eq_expr = BoundExpr::BinaryOp {
                                     left: Box::new(BoundExpr::ColumnRef(left_idx)),
                                     op: BinOp::Eq,
-                                    right: Box::new(BoundExpr::ColumnRef(right_col_offset + right_idx)),
+                                    right: Box::new(BoundExpr::ColumnRef(
+                                        right_col_offset + right_idx,
+                                    )),
                                 };
                                 condition = Some(match condition {
                                     None => eq_expr,
@@ -791,19 +944,29 @@ impl Binder {
                         ast::JoinConstraint::Natural => {
                             // NATURAL JOIN: auto-detect shared column names
                             let temp_schema = self.build_combined_schema(
-                                &left_schema, &combined_columns, &right_schema, right_col_offset,
+                                &left_schema,
+                                &combined_columns,
+                                &right_schema,
+                                right_col_offset,
                             );
                             let mut condition: Option<BoundExpr> = None;
-                            let left_col_names: Vec<String> = combined_columns.iter()
-                                .map(|c| c.name.to_lowercase()).collect();
+                            let left_col_names: Vec<String> = combined_columns
+                                .iter()
+                                .map(|c| c.name.to_lowercase())
+                                .collect();
                             for right_col in &right_schema.columns {
                                 let rname = right_col.name.to_lowercase();
-                                if let Some(left_idx) = left_col_names.iter().position(|n| *n == rname) {
-                                    let right_idx = right_schema.find_column(&right_col.name).unwrap();
+                                if let Some(left_idx) =
+                                    left_col_names.iter().position(|n| *n == rname)
+                                {
+                                    let right_idx =
+                                        right_schema.find_column(&right_col.name).unwrap();
                                     let eq_expr = BoundExpr::BinaryOp {
                                         left: Box::new(BoundExpr::ColumnRef(left_idx)),
                                         op: BinOp::Eq,
-                                        right: Box::new(BoundExpr::ColumnRef(right_col_offset + right_idx)),
+                                        right: Box::new(BoundExpr::ColumnRef(
+                                            right_col_offset + right_idx,
+                                        )),
                                     };
                                     condition = Some(match condition {
                                         None => eq_expr,
@@ -856,8 +1019,10 @@ impl Binder {
             }
         };
 
-        // Build named window map from WINDOW clause (e.g. WINDOW w AS (...))  
-        let named_windows: std::collections::HashMap<String, ast::WindowSpec> = select.named_window.iter()
+        // Build named window map from WINDOW clause (e.g. WINDOW w AS (...))
+        let named_windows: std::collections::HashMap<String, ast::WindowSpec> = select
+            .named_window
+            .iter()
             .filter_map(|nwd| {
                 let name = nwd.0.value.to_lowercase();
                 match &nwd.1 {
@@ -877,14 +1042,28 @@ impl Binder {
                     }
                 }
                 SelectItem::UnnamedExpr(expr) => {
-                    let bound = self.bind_projection_expr_full(expr, &schema, &alias_map, outer_schema, &named_windows)?;
+                    let bound = self.bind_projection_expr_full(
+                        expr,
+                        &schema,
+                        &alias_map,
+                        outer_schema,
+                        &named_windows,
+                    )?;
                     projections.push(bound);
                 }
                 SelectItem::ExprWithAlias { expr, alias } => {
-                    let mut bound = self.bind_projection_expr_full(expr, &schema, &alias_map, outer_schema, &named_windows)?;
+                    let mut bound = self.bind_projection_expr_full(
+                        expr,
+                        &schema,
+                        &alias_map,
+                        outer_schema,
+                        &named_windows,
+                    )?;
                     match &mut bound {
                         BoundProjection::Column(_, ref mut a) => *a = alias.value.clone(),
-                        BoundProjection::Aggregate(_, _, ref mut a, _, _) => *a = alias.value.clone(),
+                        BoundProjection::Aggregate(_, _, ref mut a, _, _) => {
+                            *a = alias.value.clone()
+                        }
                         BoundProjection::Expr(_, ref mut a) => *a = alias.value.clone(),
                         BoundProjection::Window(ref mut wf) => wf.alias = alias.value.clone(),
                     }
@@ -910,7 +1089,8 @@ impl Binder {
                                 j.right_schema.columns.len()
                             } else {
                                 // CTE or derived table — count from offset to next join or end
-                                let next_offset = joins.iter()
+                                let next_offset = joins
+                                    .iter()
                                     .map(|j| j.right_col_offset)
                                     .filter(|&o| o > offset)
                                     .min()
@@ -920,7 +1100,10 @@ impl Binder {
                         };
                         for i in offset..offset + table_col_count {
                             if i < schema.columns.len() {
-                                projections.push(BoundProjection::Column(i, schema.columns[i].name.clone()));
+                                projections.push(BoundProjection::Column(
+                                    i,
+                                    schema.columns[i].name.clone(),
+                                ));
                             }
                         }
                     } else {
@@ -966,7 +1149,11 @@ impl Binder {
                                 let mut resolved = Vec::new();
                                 for e in set {
                                     let col_idx = self.resolve_group_by_expr(
-                                        e, &schema, &alias_map, outer_schema, &mut projections,
+                                        e,
+                                        &schema,
+                                        &alias_map,
+                                        outer_schema,
+                                        &mut projections,
                                     )?;
                                     resolved.push(col_idx);
                                 }
@@ -984,7 +1171,11 @@ impl Binder {
                             for list in lists {
                                 for e in list {
                                     let col_idx = self.resolve_group_by_expr(
-                                        e, &schema, &alias_map, outer_schema, &mut projections,
+                                        e,
+                                        &schema,
+                                        &alias_map,
+                                        outer_schema,
+                                        &mut projections,
                                     )?;
                                     cols.push(col_idx);
                                 }
@@ -1011,7 +1202,11 @@ impl Binder {
                             for list in lists {
                                 for e in list {
                                     let col_idx = self.resolve_group_by_expr(
-                                        e, &schema, &alias_map, outer_schema, &mut projections,
+                                        e,
+                                        &schema,
+                                        &alias_map,
+                                        outer_schema,
+                                        &mut projections,
                                     )?;
                                     cols.push(col_idx);
                                 }
@@ -1033,7 +1228,8 @@ impl Binder {
                             group_by.push(col_idx);
                         }
                         Expr::Value(Value::Number(n, _)) => {
-                            let idx: usize = n.parse()
+                            let idx: usize = n
+                                .parse()
                                 .map_err(|_| SqlError::Parse("Invalid GROUP BY index".into()))?;
                             if idx == 0 || idx > projections.len() {
                                 return Err(SqlError::Parse("GROUP BY index out of range".into()));
@@ -1047,7 +1243,9 @@ impl Binder {
                                     group_by.push(idx - 1);
                                 }
                                 _ => {
-                                    return Err(SqlError::Unsupported("GROUP BY on aggregate or window".into()));
+                                    return Err(SqlError::Unsupported(
+                                        "GROUP BY on aggregate or window".into(),
+                                    ));
                                 }
                             }
                         }
@@ -1060,13 +1258,15 @@ impl Binder {
                         }
                         other => {
                             // Complex expression: bind it and try to resolve to a column
-                            let bound = self.bind_expr_full(other, &schema, &alias_map, outer_schema)?;
+                            let bound =
+                                self.bind_expr_full(other, &schema, &alias_map, outer_schema)?;
                             if let BoundExpr::ColumnRef(col_idx) = &bound {
                                 group_by.push(*col_idx);
                             } else {
                                 // Add as hidden projection and group by its index
                                 let idx = projections.len();
-                                projections.push(BoundProjection::Expr(bound, format!("{}", other)));
+                                projections
+                                    .push(BoundProjection::Expr(bound, format!("{}", other)));
                                 group_by.push(idx);
                             }
                         }
@@ -1086,9 +1286,13 @@ impl Binder {
         let visible_projection_count = projections.len();
         let mut order_by = Vec::new();
         for ob in &query.order_by.as_ref().map_or(vec![], |o| o.exprs.clone()) {
-            let col_idx = self.resolve_order_by_expr(&ob.expr, &mut projections, &schema, &alias_map)?;
+            let col_idx =
+                self.resolve_order_by_expr(&ob.expr, &mut projections, &schema, &alias_map)?;
             let asc = ob.asc.unwrap_or(true);
-            order_by.push(BoundOrderBy { column_idx: col_idx, asc });
+            order_by.push(BoundOrderBy {
+                column_idx: col_idx,
+                asc,
+            });
         }
 
         // LIMIT
@@ -1112,9 +1316,8 @@ impl Binder {
                 let mut on_indices = Vec::new();
                 for expr in exprs {
                     // Resolve each DISTINCT ON expression to a projection index
-                    let idx = self.resolve_order_by_expr(
-                        expr, &mut projections, &schema, &alias_map,
-                    )?;
+                    let idx =
+                        self.resolve_order_by_expr(expr, &mut projections, &schema, &alias_map)?;
                     on_indices.push(idx);
                 }
                 DistinctMode::On(on_indices)
@@ -1179,12 +1382,12 @@ impl Binder {
         projections: &mut Vec<BoundProjection>,
     ) -> Result<usize, SqlError> {
         match expr {
-            Expr::Identifier(ident) => {
-                schema.find_column(&ident.value)
-                    .ok_or_else(|| SqlError::UnknownColumn(ident.value.clone()))
-            }
+            Expr::Identifier(ident) => schema
+                .find_column(&ident.value)
+                .ok_or_else(|| SqlError::UnknownColumn(ident.value.clone())),
             Expr::Value(Value::Number(n, _)) => {
-                let idx: usize = n.parse()
+                let idx: usize = n
+                    .parse()
                     .map_err(|_| SqlError::Parse("Invalid GROUP BY index".into()))?;
                 if idx == 0 || idx > projections.len() {
                     return Err(SqlError::Parse("GROUP BY index out of range".into()));
@@ -1192,12 +1395,15 @@ impl Binder {
                 match &projections[idx - 1] {
                     BoundProjection::Column(col_idx, _) => Ok(*col_idx),
                     BoundProjection::Expr(_, _) => Ok(idx - 1),
-                    _ => Err(SqlError::Unsupported("GROUP BY on aggregate or window".into())),
+                    _ => Err(SqlError::Unsupported(
+                        "GROUP BY on aggregate or window".into(),
+                    )),
                 }
             }
             Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
                 let col_name = &parts[1].value;
-                schema.find_column(col_name)
+                schema
+                    .find_column(col_name)
                     .ok_or_else(|| SqlError::UnknownColumn(col_name.clone()))
             }
             other => {
@@ -1245,7 +1451,10 @@ impl Binder {
             Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
                 let bound = self.bind_expr_full(expr, schema, aliases, outer_schema)?;
                 if let BoundExpr::ColumnRef(idx) = &bound {
-                    Ok(BoundProjection::Column(*idx, schema.columns[*idx].name.clone()))
+                    Ok(BoundProjection::Column(
+                        *idx,
+                        schema.columns[*idx].name.clone(),
+                    ))
                 } else {
                     Ok(BoundProjection::Expr(bound, format!("{}", expr)))
                 }
@@ -1265,27 +1474,32 @@ impl Binder {
                         WindowFunc::Ntile(n)
                     }
                     "LAG" => {
-                        let idx = col_idx.ok_or(SqlError::Unsupported("LAG requires column".into()))?;
+                        let idx =
+                            col_idx.ok_or(SqlError::Unsupported("LAG requires column".into()))?;
                         let offset = self.extract_int_arg(func, 1)?.unwrap_or(1);
                         WindowFunc::Lag(idx, offset)
                     }
                     "LEAD" => {
-                        let idx = col_idx.ok_or(SqlError::Unsupported("LEAD requires column".into()))?;
+                        let idx =
+                            col_idx.ok_or(SqlError::Unsupported("LEAD requires column".into()))?;
                         let offset = self.extract_int_arg(func, 1)?.unwrap_or(1);
                         WindowFunc::Lead(idx, offset)
                     }
                     "FIRST_VALUE" => {
-                        let idx = col_idx.ok_or(SqlError::Unsupported("FIRST_VALUE requires column".into()))?;
+                        let idx = col_idx
+                            .ok_or(SqlError::Unsupported("FIRST_VALUE requires column".into()))?;
                         WindowFunc::FirstValue(idx)
                     }
                     "LAST_VALUE" => {
-                        let idx = col_idx.ok_or(SqlError::Unsupported("LAST_VALUE requires column".into()))?;
+                        let idx = col_idx
+                            .ok_or(SqlError::Unsupported("LAST_VALUE requires column".into()))?;
                         WindowFunc::LastValue(idx)
                     }
                     "PERCENT_RANK" => WindowFunc::PercentRank,
                     "CUME_DIST" => WindowFunc::CumeDist,
                     "NTH_VALUE" => {
-                        let idx = col_idx.ok_or(SqlError::Unsupported("NTH_VALUE requires column".into()))?;
+                        let idx = col_idx
+                            .ok_or(SqlError::Unsupported("NTH_VALUE requires column".into()))?;
                         let n = self.extract_int_arg(func, 1)?.unwrap_or(1);
                         WindowFunc::NthValue(idx, n)
                     }
@@ -1294,7 +1508,12 @@ impl Binder {
                     "AVG" => WindowFunc::Agg(AggFunc::Avg, col_idx),
                     "MIN" => WindowFunc::Agg(AggFunc::Min, col_idx),
                     "MAX" => WindowFunc::Agg(AggFunc::Max, col_idx),
-                    _ => return Err(SqlError::Unsupported(format!("Window function: {}", func_name))),
+                    _ => {
+                        return Err(SqlError::Unsupported(format!(
+                            "Window function: {}",
+                            func_name
+                        )))
+                    }
                 };
 
                 // Parse OVER clause — resolve named window references
@@ -1302,27 +1521,36 @@ impl Binder {
                     ast::WindowType::WindowSpec(spec) => std::borrow::Cow::Borrowed(spec),
                     ast::WindowType::NamedWindow(ident) => {
                         let name = ident.value.to_lowercase();
-                        let spec = named_windows.get(&name)
+                        let spec = named_windows
+                            .get(&name)
                             .ok_or_else(|| SqlError::UnknownColumn(format!("window '{}'", name)))?;
                         std::borrow::Cow::Owned(spec.clone())
                     }
                 };
 
-                let partition_by: Vec<usize> = window_spec.partition_by.iter()
+                let partition_by: Vec<usize> = window_spec
+                    .partition_by
+                    .iter()
                     .map(|e| {
                         let bound = self.bind_expr_with_aliases(e, schema, aliases)?;
                         match bound {
                             BoundExpr::ColumnRef(idx) => Ok(idx),
                             // Allow positional reference: PARTITION BY 1
-                            BoundExpr::Literal(Datum::Int32(n)) if n >= 1 && (n as usize) <= schema.columns.len() => {
+                            BoundExpr::Literal(Datum::Int32(n))
+                                if n >= 1 && (n as usize) <= schema.columns.len() =>
+                            {
                                 Ok((n - 1) as usize)
                             }
-                            _ => Err(SqlError::Unsupported("Non-column PARTITION BY expression".into())),
+                            _ => Err(SqlError::Unsupported(
+                                "Non-column PARTITION BY expression".into(),
+                            )),
                         }
                     })
                     .collect::<Result<Vec<_>, _>>()?;
 
-                let order_by: Vec<BoundOrderBy> = window_spec.order_by.iter()
+                let order_by: Vec<BoundOrderBy> = window_spec
+                    .order_by
+                    .iter()
                     .map(|ob| {
                         let bound = self.bind_expr_with_aliases(&ob.expr, schema, aliases)?;
                         match bound {
@@ -1331,13 +1559,17 @@ impl Binder {
                                 asc: ob.asc.unwrap_or(true),
                             }),
                             // Allow positional reference: ORDER BY 1
-                            BoundExpr::Literal(Datum::Int32(n)) if n >= 1 && (n as usize) <= schema.columns.len() => {
+                            BoundExpr::Literal(Datum::Int32(n))
+                                if n >= 1 && (n as usize) <= schema.columns.len() =>
+                            {
                                 Ok(BoundOrderBy {
                                     column_idx: (n - 1) as usize,
                                     asc: ob.asc.unwrap_or(true),
                                 })
                             }
-                            _ => Err(SqlError::Unsupported("Non-column ORDER BY in window".into())),
+                            _ => Err(SqlError::Unsupported(
+                                "Non-column ORDER BY in window".into(),
+                            )),
                         }
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -1350,7 +1582,9 @@ impl Binder {
                         ast::WindowFrameUnits::Groups => WindowFrameMode::Groups,
                     };
                     let start = Self::bind_window_frame_bound(&wf.start_bound);
-                    let end = wf.end_bound.as_ref()
+                    let end = wf
+                        .end_bound
+                        .as_ref()
                         .map(Self::bind_window_frame_bound)
                         .unwrap_or(WindowFrameBound::CurrentRow);
                     WindowFrame { mode, start, end }
@@ -1376,18 +1610,22 @@ impl Binder {
                     if let ast::FunctionArguments::List(args) = &func.args {
                         if args.args.len() >= 2 {
                             // First arg: expression
-                            let agg_expr = if let Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(
-                                inner_expr,
-                            ))) = args.args.first()
+                            let agg_expr = if let Some(ast::FunctionArg::Unnamed(
+                                ast::FunctionArgExpr::Expr(inner_expr),
+                            )) = args.args.first()
                             {
                                 Some(self.bind_expr_with_aliases(inner_expr, schema, aliases)?)
                             } else {
-                                return Err(SqlError::Unsupported("STRING_AGG requires expression argument".into()));
+                                return Err(SqlError::Unsupported(
+                                    "STRING_AGG requires expression argument".into(),
+                                ));
                             };
                             // Second arg: separator literal
-                            let sep = if let Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(
-                                Expr::Value(Value::SingleQuotedString(s)),
-                            ))) = args.args.get(1)
+                            let sep = if let Some(ast::FunctionArg::Unnamed(
+                                ast::FunctionArgExpr::Expr(Expr::Value(Value::SingleQuotedString(
+                                    s,
+                                ))),
+                            )) = args.args.get(1)
                             {
                                 s.clone()
                             } else {
@@ -1398,11 +1636,20 @@ impl Binder {
                                 Some(ast::DuplicateTreatment::Distinct)
                             );
                             let alias = format!("string_agg({})", func);
-                            let bound_filter = self.bind_agg_filter(&func.filter, schema, aliases)?;
-                            return Ok(BoundProjection::Aggregate(AggFunc::StringAgg(sep), agg_expr, alias, is_distinct, bound_filter));
+                            let bound_filter =
+                                self.bind_agg_filter(&func.filter, schema, aliases)?;
+                            return Ok(BoundProjection::Aggregate(
+                                AggFunc::StringAgg(sep),
+                                agg_expr,
+                                alias,
+                                is_distinct,
+                                bound_filter,
+                            ));
                         }
                     }
-                    return Err(SqlError::Unsupported("STRING_AGG requires (column, separator)".into()));
+                    return Err(SqlError::Unsupported(
+                        "STRING_AGG requires (column, separator)".into(),
+                    ));
                 }
 
                 let agg = match func_name.as_str() {
@@ -1482,7 +1729,13 @@ impl Binder {
                 );
 
                 let bound_filter = self.bind_agg_filter(&func.filter, schema, aliases)?;
-                Ok(BoundProjection::Aggregate(agg, agg_expr, alias, agg_distinct, bound_filter))
+                Ok(BoundProjection::Aggregate(
+                    agg,
+                    agg_expr,
+                    alias,
+                    agg_distinct,
+                    bound_filter,
+                ))
             }
             _ => {
                 let bound = self.bind_expr_full(expr, schema, aliases, outer_schema)?;
@@ -1540,7 +1793,9 @@ impl Binder {
         use falcon_common::schema::ColumnDef;
 
         if values.rows.is_empty() {
-            return Err(SqlError::Parse("VALUES clause requires at least one row".into()));
+            return Err(SqlError::Parse(
+                "VALUES clause requires at least one row".into(),
+            ));
         }
 
         let num_cols = values.rows[0].len();
@@ -1565,7 +1820,9 @@ impl Binder {
         // Infer column types from first row
         let columns: Vec<ColumnDef> = (0..num_cols)
             .map(|i| {
-                let dt = virtual_rows[0].values[i].data_type().unwrap_or(DataType::Text);
+                let dt = virtual_rows[0].values[i]
+                    .data_type()
+                    .unwrap_or(DataType::Text);
                 ColumnDef {
                     id: ColumnId(i as u32),
                     name: format!("column{}", i + 1),
@@ -1596,16 +1853,22 @@ impl Binder {
         let visible_projection_count = projections.len();
 
         // Parse LIMIT/OFFSET from the outer query
-        let limit = query.limit.as_ref()
+        let limit = query
+            .limit
+            .as_ref()
             .map(|expr| match expr {
-                Expr::Value(Value::Number(n, _)) => n.parse::<usize>()
+                Expr::Value(Value::Number(n, _)) => n
+                    .parse::<usize>()
                     .map_err(|_| SqlError::Parse("Invalid LIMIT".into())),
                 _ => Err(SqlError::Parse("LIMIT must be a number".into())),
             })
             .transpose()?;
-        let offset = query.offset.as_ref()
+        let offset = query
+            .offset
+            .as_ref()
             .map(|o| match &o.value {
-                Expr::Value(Value::Number(n, _)) => n.parse::<usize>()
+                Expr::Value(Value::Number(n, _)) => n
+                    .parse::<usize>()
                     .map_err(|_| SqlError::Parse("Invalid OFFSET".into())),
                 _ => Err(SqlError::Parse("OFFSET must be a number".into())),
             })
@@ -1636,7 +1899,10 @@ impl Binder {
     fn bind_value_expr(&self, expr: &Expr) -> Result<Datum, SqlError> {
         match expr {
             Expr::Value(v) => Self::bind_value_literal(v),
-            Expr::UnaryOp { op: ast::UnaryOperator::Minus, expr: inner } => {
+            Expr::UnaryOp {
+                op: ast::UnaryOperator::Minus,
+                expr: inner,
+            } => {
                 let val = self.bind_value_expr(inner)?;
                 match val {
                     Datum::Int32(n) => Ok(Datum::Int32(-n)),
@@ -1645,37 +1911,50 @@ impl Binder {
                     _ => Err(SqlError::Parse("Cannot negate non-numeric value".into())),
                 }
             }
-            Expr::UnaryOp { op: ast::UnaryOperator::Plus, expr: inner } => {
-                self.bind_value_expr(inner)
-            }
+            Expr::UnaryOp {
+                op: ast::UnaryOperator::Plus,
+                expr: inner,
+            } => self.bind_value_expr(inner),
             Expr::Nested(inner) => self.bind_value_expr(inner),
             Expr::TypedString { data_type, value } => {
                 // e.g. DATE '2024-01-01', TIMESTAMP '...'
                 let target = format!("{}", data_type).to_lowercase();
                 Self::parse_typed_datum(value, &target)
             }
-            Expr::Cast { expr: cast_expr, data_type, .. } => {
+            Expr::Cast {
+                expr: cast_expr,
+                data_type,
+                ..
+            } => {
                 let val = self.bind_value_expr(cast_expr)?;
                 let target = format!("{}", data_type).to_lowercase();
                 match &val {
                     Datum::Text(s) => Self::parse_typed_datum(s, &target),
-                    Datum::Int32(n) if target.contains("float") || target.contains("double") || target.contains("real") || target.contains("numeric") => {
+                    Datum::Int32(n)
+                        if target.contains("float")
+                            || target.contains("double")
+                            || target.contains("real")
+                            || target.contains("numeric") =>
+                    {
                         Ok(Datum::Float64(*n as f64))
                     }
                     Datum::Int32(n) if target.contains("bigint") || target.contains("int8") => {
                         Ok(Datum::Int64(*n as i64))
                     }
-                    Datum::Int64(n) if target.contains("int") && !target.contains("bigint") && !target.contains("int8") => {
+                    Datum::Int64(n)
+                        if target.contains("int")
+                            && !target.contains("bigint")
+                            && !target.contains("int8") =>
+                    {
                         Ok(Datum::Int32(*n as i32))
                     }
-                    Datum::Float64(f) if target.contains("int") => {
-                        Ok(Datum::Int64(*f as i64))
-                    }
+                    Datum::Float64(f) if target.contains("int") => Ok(Datum::Int64(*f as i64)),
                     _ => Ok(val),
                 }
             }
             Expr::Array(ast::Array { elem, .. }) => {
-                let elements: Vec<Datum> = elem.iter()
+                let elements: Vec<Datum> = elem
+                    .iter()
                     .map(|e| self.bind_value_expr(e))
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(Datum::Array(elements))
@@ -1688,15 +1967,22 @@ impl Binder {
             Expr::Function(func) => {
                 let name = func.name.to_string().to_uppercase();
                 Err(SqlError::Unsupported(format!(
-                    "Function '{}' in VALUES clause (use INSERT ... SELECT instead)", name
+                    "Function '{}' in VALUES clause (use INSERT ... SELECT instead)",
+                    name
                 )))
             }
-            _ => Err(SqlError::Unsupported("Complex expression in VALUES clause".into())),
+            _ => Err(SqlError::Unsupported(
+                "Complex expression in VALUES clause".into(),
+            )),
         }
     }
 
     /// Evaluate a constant binary operation on two Datum values.
-    fn eval_const_binop(left: &Datum, op: &ast::BinaryOperator, right: &Datum) -> Result<Datum, SqlError> {
+    fn eval_const_binop(
+        left: &Datum,
+        op: &ast::BinaryOperator,
+        right: &Datum,
+    ) -> Result<Datum, SqlError> {
         use ast::BinaryOperator::*;
         match (left, op, right) {
             (Datum::Int32(a), Plus, Datum::Int32(b)) => Ok(Datum::Int32(a + b)),
@@ -1710,15 +1996,30 @@ impl Binder {
             (Datum::Float64(a), Plus, Datum::Float64(b)) => Ok(Datum::Float64(a + b)),
             (Datum::Float64(a), Minus, Datum::Float64(b)) => Ok(Datum::Float64(a - b)),
             (Datum::Float64(a), Multiply, Datum::Float64(b)) => Ok(Datum::Float64(a * b)),
-            (Datum::Float64(a), Divide, Datum::Float64(b)) if *b != 0.0 => Ok(Datum::Float64(a / b)),
+            (Datum::Float64(a), Divide, Datum::Float64(b)) if *b != 0.0 => {
+                Ok(Datum::Float64(a / b))
+            }
             // Mixed int/float promotion
-            (Datum::Int32(a), _, Datum::Float64(_)) => Self::eval_const_binop(&Datum::Float64(*a as f64), op, right),
-            (Datum::Float64(_), _, Datum::Int32(b)) => Self::eval_const_binop(left, op, &Datum::Float64(*b as f64)),
-            (Datum::Int32(a), _, Datum::Int64(_)) => Self::eval_const_binop(&Datum::Int64(*a as i64), op, right),
-            (Datum::Int64(_), _, Datum::Int32(b)) => Self::eval_const_binop(left, op, &Datum::Int64(*b as i64)),
+            (Datum::Int32(a), _, Datum::Float64(_)) => {
+                Self::eval_const_binop(&Datum::Float64(*a as f64), op, right)
+            }
+            (Datum::Float64(_), _, Datum::Int32(b)) => {
+                Self::eval_const_binop(left, op, &Datum::Float64(*b as f64))
+            }
+            (Datum::Int32(a), _, Datum::Int64(_)) => {
+                Self::eval_const_binop(&Datum::Int64(*a as i64), op, right)
+            }
+            (Datum::Int64(_), _, Datum::Int32(b)) => {
+                Self::eval_const_binop(left, op, &Datum::Int64(*b as i64))
+            }
             // String concat
-            (Datum::Text(a), StringConcat, Datum::Text(b)) => Ok(Datum::Text(format!("{}{}", a, b))),
-            _ => Err(SqlError::Unsupported(format!("Constant binary op {:?} in VALUES", op))),
+            (Datum::Text(a), StringConcat, Datum::Text(b)) => {
+                Ok(Datum::Text(format!("{}{}", a, b)))
+            }
+            _ => Err(SqlError::Unsupported(format!(
+                "Constant binary op {:?} in VALUES",
+                op
+            ))),
         }
     }
 
@@ -1733,7 +2034,9 @@ impl Binder {
                 _ => Err(SqlError::Parse(format!("Invalid BOOLEAN: '{}'", value))),
             }
         } else if target.contains("int") {
-            let n: i64 = value.parse().map_err(|_| SqlError::Parse(format!("Invalid INT: '{}'", value)))?;
+            let n: i64 = value
+                .parse()
+                .map_err(|_| SqlError::Parse(format!("Invalid INT: '{}'", value)))?;
             if target.contains("bigint") || target.contains("int8") {
                 Ok(Datum::Int64(n))
             } else if n >= i32::MIN as i64 && n <= i32::MAX as i64 {
@@ -1741,8 +2044,15 @@ impl Binder {
             } else {
                 Ok(Datum::Int64(n))
             }
-        } else if target.contains("float") || target.contains("double") || target.contains("real") || target.contains("numeric") || target.contains("decimal") {
-            let f: f64 = value.parse().map_err(|_| SqlError::Parse(format!("Invalid FLOAT: '{}'", value)))?;
+        } else if target.contains("float")
+            || target.contains("double")
+            || target.contains("real")
+            || target.contains("numeric")
+            || target.contains("decimal")
+        {
+            let f: f64 = value
+                .parse()
+                .map_err(|_| SqlError::Parse(format!("Invalid FLOAT: '{}'", value)))?;
             Ok(Datum::Float64(f))
         } else {
             // For date, timestamp, text, and other types: keep as text.
@@ -1771,7 +2081,10 @@ impl Binder {
             }
             Value::Boolean(b) => Ok(Datum::Boolean(*b)),
             Value::Null => Ok(Datum::Null),
-            _ => Err(SqlError::Unsupported(format!("Value type in VALUES: {:?}", v))),
+            _ => Err(SqlError::Unsupported(format!(
+                "Value type in VALUES: {:?}",
+                v
+            ))),
         }
     }
 
@@ -1809,7 +2122,10 @@ impl Binder {
                 // Not in projections — try source schema and add as hidden projection
                 if let Some(col_idx) = schema.find_column(&ident.value) {
                     let idx = projections.len();
-                    projections.push(BoundProjection::Column(col_idx, schema.columns[col_idx].name.clone()));
+                    projections.push(BoundProjection::Column(
+                        col_idx,
+                        schema.columns[col_idx].name.clone(),
+                    ));
                     return Ok(idx);
                 }
                 Err(SqlError::UnknownColumn(ident.value.clone()))
@@ -1835,10 +2151,16 @@ impl Binder {
                 let bound = self.bind_expr_with_aliases(expr, schema, aliases)?;
                 if let BoundExpr::ColumnRef(resolved_idx) = &bound {
                     let idx = projections.len();
-                    projections.push(BoundProjection::Column(*resolved_idx, schema.columns[*resolved_idx].name.clone()));
+                    projections.push(BoundProjection::Column(
+                        *resolved_idx,
+                        schema.columns[*resolved_idx].name.clone(),
+                    ));
                     return Ok(idx);
                 }
-                Err(SqlError::UnknownColumn(format!("{}.{}", parts[0].value, parts[1].value)))
+                Err(SqlError::UnknownColumn(format!(
+                    "{}.{}",
+                    parts[0].value, parts[1].value
+                )))
             }
             Expr::Value(Value::Number(n, _)) => {
                 let idx: usize = n
@@ -1865,26 +2187,36 @@ impl Binder {
     /// and simple arithmetic on constants.
     fn eval_limit_offset_expr(expr: &Expr, label: &str) -> Result<usize, SqlError> {
         match expr {
-            Expr::Value(Value::Number(n, _)) => {
-                n.parse::<usize>()
-                    .map_err(|_| SqlError::Parse(format!("Invalid {}", label)))
-            }
+            Expr::Value(Value::Number(n, _)) => n
+                .parse::<usize>()
+                .map_err(|_| SqlError::Parse(format!("Invalid {}", label))),
             Expr::Value(Value::Null) => {
                 // LIMIT NULL means no limit (treat as very large)
                 Ok(usize::MAX)
             }
-            Expr::UnaryOp { op: ast::UnaryOperator::Plus, expr: inner } => {
-                Self::eval_limit_offset_expr(inner, label)
-            }
+            Expr::UnaryOp {
+                op: ast::UnaryOperator::Plus,
+                expr: inner,
+            } => Self::eval_limit_offset_expr(inner, label),
             Expr::Nested(inner) => Self::eval_limit_offset_expr(inner, label),
-            Expr::Cast { expr: inner, data_type, .. } => {
+            Expr::Cast {
+                expr: inner,
+                data_type,
+                ..
+            } => {
                 // CAST(expr AS INT) — evaluate inner then check it's numeric
                 let val = Self::eval_limit_offset_expr(inner, label)?;
                 let type_str = format!("{}", data_type).to_uppercase();
-                if type_str.contains("INT") || type_str.contains("BIGINT") || type_str.contains("NUMERIC") {
+                if type_str.contains("INT")
+                    || type_str.contains("BIGINT")
+                    || type_str.contains("NUMERIC")
+                {
                     Ok(val)
                 } else {
-                    Err(SqlError::Parse(format!("{} CAST to non-integer type: {}", label, data_type)))
+                    Err(SqlError::Parse(format!(
+                        "{} CAST to non-integer type: {}",
+                        label, data_type
+                    )))
                 }
             }
             Expr::BinaryOp { left, op, right } => {
@@ -1901,10 +2233,16 @@ impl Binder {
                             Ok(l / r)
                         }
                     }
-                    _ => Err(SqlError::Parse(format!("{} expression contains unsupported operator", label))),
+                    _ => Err(SqlError::Parse(format!(
+                        "{} expression contains unsupported operator",
+                        label
+                    ))),
                 }
             }
-            _ => Err(SqlError::Parse(format!("{} must be a constant expression", label))),
+            _ => Err(SqlError::Parse(format!(
+                "{} must be a constant expression",
+                label
+            ))),
         }
     }
 
@@ -1919,18 +2257,16 @@ impl Binder {
             let (col_name, data_type) = match proj {
                 BoundProjection::Column(idx, alias) => {
                     let col = &source_schema.columns[*idx];
-                    let name = if alias.is_empty() { col.name.clone() } else { alias.clone() };
+                    let name = if alias.is_empty() {
+                        col.name.clone()
+                    } else {
+                        alias.clone()
+                    };
                     (name, col.data_type.clone())
                 }
-                BoundProjection::Aggregate(_, _, alias, _, _) => {
-                    (alias.clone(), DataType::Int64)
-                }
-                BoundProjection::Expr(_, alias) => {
-                    (alias.clone(), DataType::Text)
-                }
-                BoundProjection::Window(wf) => {
-                    (wf.alias.clone(), DataType::Int64)
-                }
+                BoundProjection::Aggregate(_, _, alias, _, _) => (alias.clone(), DataType::Int64),
+                BoundProjection::Expr(_, alias) => (alias.clone(), DataType::Text),
+                BoundProjection::Window(wf) => (wf.alias.clone(), DataType::Int64),
             };
             columns.push(falcon_common::schema::ColumnDef {
                 id: ColumnId(columns.len() as u32),
@@ -1970,8 +2306,16 @@ impl Binder {
                     ]));
                 }
                 rows.sort_by(|a, b| {
-                    let an = a.values.get(2).map(|d| format!("{}", d)).unwrap_or_default();
-                    let bn = b.values.get(2).map(|d| format!("{}", d)).unwrap_or_default();
+                    let an = a
+                        .values
+                        .get(2)
+                        .map(|d| format!("{}", d))
+                        .unwrap_or_default();
+                    let bn = b
+                        .values
+                        .get(2)
+                        .map(|d| format!("{}", d))
+                        .unwrap_or_default();
                     an.cmp(&bn)
                 });
                 Some((columns, rows))
@@ -2001,7 +2345,10 @@ impl Binder {
                                 Datum::Int32((i + 1) as i32),
                                 Datum::Text(format!("{}", col.data_type)),
                                 Datum::Text(if col.nullable { "YES" } else { "NO" }.into()),
-                                col.default_value.clone().map(|d| Datum::Text(format!("{}", d))).unwrap_or(Datum::Null),
+                                col.default_value
+                                    .clone()
+                                    .map(|d| Datum::Text(format!("{}", d)))
+                                    .unwrap_or(Datum::Null),
                             ]));
                         }
                     }
@@ -2025,7 +2372,12 @@ impl Binder {
                         Datum::Text("public".into()),
                         Datum::Text(tname.clone()),
                         Datum::Text("falcon".into()),
-                        Datum::Boolean(!self.catalog.find_table(tname).is_none_or(|s| s.primary_key_columns.is_empty())),
+                        Datum::Boolean(
+                            !self
+                                .catalog
+                                .find_table(tname)
+                                .is_none_or(|s| s.primary_key_columns.is_empty()),
+                        ),
                         Datum::Boolean(false),
                         Datum::Boolean(false),
                     ]));
@@ -2039,14 +2391,19 @@ impl Binder {
                     Self::vt_col(2, "viewowner", DataType::Text),
                     Self::vt_col(3, "definition", DataType::Text),
                 ];
-                let rows: Vec<OwnedRow> = self.catalog.views.iter().map(|v| {
-                    OwnedRow::new(vec![
-                        Datum::Text("public".into()),
-                        Datum::Text(v.name.clone()),
-                        Datum::Text("falcon".into()),
-                        Datum::Text(v.query_sql.clone()),
-                    ])
-                }).collect();
+                let rows: Vec<OwnedRow> = self
+                    .catalog
+                    .views
+                    .iter()
+                    .map(|v| {
+                        OwnedRow::new(vec![
+                            Datum::Text("public".into()),
+                            Datum::Text(v.name.clone()),
+                            Datum::Text("falcon".into()),
+                            Datum::Text(v.query_sql.clone()),
+                        ])
+                    })
+                    .collect();
                 Some((columns, rows))
             }
             "pg_catalog.pg_indexes" | "pg_indexes" => {
@@ -2065,9 +2422,21 @@ impl Binder {
                     Self::vt_col(2, "schema_owner", DataType::Text),
                 ];
                 let rows = vec![
-                    OwnedRow::new(vec![Datum::Text("falcon".into()), Datum::Text("public".into()), Datum::Text("falcon".into())]),
-                    OwnedRow::new(vec![Datum::Text("falcon".into()), Datum::Text("information_schema".into()), Datum::Text("falcon".into())]),
-                    OwnedRow::new(vec![Datum::Text("falcon".into()), Datum::Text("pg_catalog".into()), Datum::Text("falcon".into())]),
+                    OwnedRow::new(vec![
+                        Datum::Text("falcon".into()),
+                        Datum::Text("public".into()),
+                        Datum::Text("falcon".into()),
+                    ]),
+                    OwnedRow::new(vec![
+                        Datum::Text("falcon".into()),
+                        Datum::Text("information_schema".into()),
+                        Datum::Text("falcon".into()),
+                    ]),
+                    OwnedRow::new(vec![
+                        Datum::Text("falcon".into()),
+                        Datum::Text("pg_catalog".into()),
+                        Datum::Text("falcon".into()),
+                    ]),
                 ];
                 Some((columns, rows))
             }
@@ -2079,20 +2448,30 @@ impl Binder {
                     Self::vt_col(3, "typtype", DataType::Text),
                 ];
                 let type_entries = vec![
-                    (16, "bool", 1, "b"), (20, "int8", 8, "b"), (21, "int2", 2, "b"),
-                    (23, "int4", 4, "b"), (25, "text", -1, "b"), (700, "float4", 4, "b"),
-                    (701, "float8", 8, "b"), (1043, "varchar", -1, "b"),
-                    (1082, "date", 4, "b"), (1114, "timestamp", 8, "b"),
-                    (3802, "jsonb", -1, "b"), (2277, "anyarray", -1, "p"),
+                    (16, "bool", 1, "b"),
+                    (20, "int8", 8, "b"),
+                    (21, "int2", 2, "b"),
+                    (23, "int4", 4, "b"),
+                    (25, "text", -1, "b"),
+                    (700, "float4", 4, "b"),
+                    (701, "float8", 8, "b"),
+                    (1043, "varchar", -1, "b"),
+                    (1082, "date", 4, "b"),
+                    (1114, "timestamp", 8, "b"),
+                    (3802, "jsonb", -1, "b"),
+                    (2277, "anyarray", -1, "p"),
                 ];
-                let rows = type_entries.iter().map(|(oid, name, len, tt)| {
-                    OwnedRow::new(vec![
-                        Datum::Int32(*oid),
-                        Datum::Text(name.to_string()),
-                        Datum::Int32(*len),
-                        Datum::Text(tt.to_string()),
-                    ])
-                }).collect();
+                let rows = type_entries
+                    .iter()
+                    .map(|(oid, name, len, tt)| {
+                        OwnedRow::new(vec![
+                            Datum::Int32(*oid),
+                            Datum::Text(name.to_string()),
+                            Datum::Int32(*len),
+                            Datum::Text(tt.to_string()),
+                        ])
+                    })
+                    .collect();
                 Some((columns, rows))
             }
             "pg_catalog.pg_namespace" | "pg_namespace" => {
@@ -2102,9 +2481,21 @@ impl Binder {
                     Self::vt_col(2, "nspowner", DataType::Int32),
                 ];
                 let rows = vec![
-                    OwnedRow::new(vec![Datum::Int32(11), Datum::Text("pg_catalog".into()), Datum::Int32(10)]),
-                    OwnedRow::new(vec![Datum::Int32(2200), Datum::Text("public".into()), Datum::Int32(10)]),
-                    OwnedRow::new(vec![Datum::Int32(13183), Datum::Text("information_schema".into()), Datum::Int32(10)]),
+                    OwnedRow::new(vec![
+                        Datum::Int32(11),
+                        Datum::Text("pg_catalog".into()),
+                        Datum::Int32(10),
+                    ]),
+                    OwnedRow::new(vec![
+                        Datum::Int32(2200),
+                        Datum::Text("public".into()),
+                        Datum::Int32(10),
+                    ]),
+                    OwnedRow::new(vec![
+                        Datum::Int32(13183),
+                        Datum::Text("information_schema".into()),
+                        Datum::Int32(10),
+                    ]),
                 ];
                 Some((columns, rows))
             }
@@ -2115,9 +2506,12 @@ impl Binder {
                     Self::vt_col(2, "datdba", DataType::Int32),
                     Self::vt_col(3, "encoding", DataType::Int32),
                 ];
-                let rows = vec![
-                    OwnedRow::new(vec![Datum::Int32(1), Datum::Text("falcon".into()), Datum::Int32(10), Datum::Int32(6)]),
-                ];
+                let rows = vec![OwnedRow::new(vec![
+                    Datum::Int32(1),
+                    Datum::Text("falcon".into()),
+                    Datum::Int32(10),
+                    Datum::Int32(6),
+                ])];
                 Some((columns, rows))
             }
             _ => None,
@@ -2137,4 +2531,3 @@ impl Binder {
         }
     }
 }
-

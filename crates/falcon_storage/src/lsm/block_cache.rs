@@ -74,8 +74,12 @@ impl BlockCache {
                     entries.swap(0, idx);
                     // Update map indices
                     let mut map = self.map.lock();
-                    if let Some(v) = map.get_mut(&entries[0].key) { *v = 0; }
-                    if let Some(v) = map.get_mut(&entries[idx].key) { *v = idx; }
+                    if let Some(v) = map.get_mut(&entries[0].key) {
+                        *v = 0;
+                    }
+                    if let Some(v) = map.get_mut(&entries[idx].key) {
+                        *v = idx;
+                    }
                 }
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 return Some(block);
@@ -111,7 +115,7 @@ impl BlockCache {
 
         // Evict LRU entries until we have room
         while *current + block_size > self.capacity_bytes && !entries.is_empty() {
-            let evicted = entries.pop().unwrap();
+            let Some(evicted) = entries.pop() else { break };
             map.remove(&evicted.key);
             *current -= evicted.size;
             self.evictions.fetch_add(1, Ordering::Relaxed);
@@ -119,7 +123,14 @@ impl BlockCache {
 
         // Insert at front (most recently used)
         let new_idx = 0;
-        entries.insert(0, LruEntry { key, block, size: block_size });
+        entries.insert(
+            0,
+            LruEntry {
+                key,
+                block,
+                size: block_size,
+            },
+        );
         *current += block_size;
 
         // Rebuild map indices (shift everything after insert point)
@@ -171,7 +182,11 @@ impl BlockCache {
     pub fn hit_rate(&self) -> f64 {
         let h = self.hits() as f64;
         let m = self.misses() as f64;
-        if h + m == 0.0 { 0.0 } else { h / (h + m) }
+        if h + m == 0.0 {
+            0.0
+        } else {
+            h / (h + m)
+        }
     }
 
     /// Snapshot of cache statistics.
@@ -209,8 +224,13 @@ mod tests {
     #[test]
     fn test_cache_basic_insert_get() {
         let cache = BlockCache::new(4096);
-        let key = BlockKey { sst_id: 1, offset: 0 };
-        let block = CachedBlock { data: vec![1, 2, 3, 4] };
+        let key = BlockKey {
+            sst_id: 1,
+            offset: 0,
+        };
+        let block = CachedBlock {
+            data: vec![1, 2, 3, 4],
+        };
 
         cache.insert(key, block.clone());
         let result = cache.get(&key);
@@ -222,7 +242,10 @@ mod tests {
     #[test]
     fn test_cache_miss() {
         let cache = BlockCache::new(4096);
-        let key = BlockKey { sst_id: 99, offset: 0 };
+        let key = BlockKey {
+            sst_id: 99,
+            offset: 0,
+        };
         assert!(cache.get(&key).is_none());
         assert_eq!(cache.misses(), 1);
     }
@@ -233,8 +256,13 @@ mod tests {
         let cache = BlockCache::new(200);
 
         for i in 0..10u64 {
-            let key = BlockKey { sst_id: i, offset: 0 };
-            let block = CachedBlock { data: vec![0u8; 50] };
+            let key = BlockKey {
+                sst_id: i,
+                offset: 0,
+            };
+            let block = CachedBlock {
+                data: vec![0u8; 50],
+            };
             cache.insert(key, block);
         }
 
@@ -246,12 +274,18 @@ mod tests {
     #[test]
     fn test_cache_hit_rate() {
         let cache = BlockCache::new(4096);
-        let key = BlockKey { sst_id: 1, offset: 0 };
+        let key = BlockKey {
+            sst_id: 1,
+            offset: 0,
+        };
         cache.insert(key, CachedBlock { data: vec![1] });
 
         cache.get(&key); // hit
         cache.get(&key); // hit
-        cache.get(&BlockKey { sst_id: 99, offset: 0 }); // miss
+        cache.get(&BlockKey {
+            sst_id: 99,
+            offset: 0,
+        }); // miss
 
         assert_eq!(cache.hits(), 2);
         assert_eq!(cache.misses(), 1);
@@ -261,8 +295,13 @@ mod tests {
     #[test]
     fn test_cache_oversized_block_rejected() {
         let cache = BlockCache::new(100);
-        let key = BlockKey { sst_id: 1, offset: 0 };
-        let block = CachedBlock { data: vec![0u8; 200] };
+        let key = BlockKey {
+            sst_id: 1,
+            offset: 0,
+        };
+        let block = CachedBlock {
+            data: vec![0u8; 200],
+        };
         cache.insert(key, block);
         assert!(cache.is_empty());
     }

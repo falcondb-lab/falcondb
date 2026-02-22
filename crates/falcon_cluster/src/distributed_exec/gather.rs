@@ -23,11 +23,21 @@ pub(crate) fn cmp_datum(a: &Datum, b: &Datum) -> std::cmp::Ordering {
         (Datum::Int64(x), Datum::Int64(y)) => x.cmp(y),
         (Datum::Int32(x), Datum::Int64(y)) => (*x as i64).cmp(y),
         (Datum::Int64(x), Datum::Int32(y)) => x.cmp(&(*y as i64)),
-        (Datum::Float64(x), Datum::Float64(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-        (Datum::Float64(x), Datum::Int64(y)) => x.partial_cmp(&(*y as f64)).unwrap_or(std::cmp::Ordering::Equal),
-        (Datum::Int64(x), Datum::Float64(y)) => (*x as f64).partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-        (Datum::Float64(x), Datum::Int32(y)) => x.partial_cmp(&(*y as f64)).unwrap_or(std::cmp::Ordering::Equal),
-        (Datum::Int32(x), Datum::Float64(y)) => (*x as f64).partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+        (Datum::Float64(x), Datum::Float64(y)) => {
+            x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+        }
+        (Datum::Float64(x), Datum::Int64(y)) => x
+            .partial_cmp(&(*y as f64))
+            .unwrap_or(std::cmp::Ordering::Equal),
+        (Datum::Int64(x), Datum::Float64(y)) => (*x as f64)
+            .partial_cmp(y)
+            .unwrap_or(std::cmp::Ordering::Equal),
+        (Datum::Float64(x), Datum::Int32(y)) => x
+            .partial_cmp(&(*y as f64))
+            .unwrap_or(std::cmp::Ordering::Equal),
+        (Datum::Int32(x), Datum::Float64(y)) => (*x as f64)
+            .partial_cmp(y)
+            .unwrap_or(std::cmp::Ordering::Equal),
         (Datum::Text(x), Datum::Text(y)) => x.cmp(y),
         (Datum::Boolean(x), Datum::Boolean(y)) => x.cmp(y),
         (Datum::Timestamp(x), Datum::Timestamp(y)) => x.cmp(y),
@@ -94,7 +104,9 @@ pub fn merge_two_phase_agg(
                                 let existing = entry.get(*idx).cloned().unwrap_or(Datum::Null);
                                 let incoming = row.values.get(*idx).cloned().unwrap_or(Datum::Null);
                                 let merged = match (&existing, &incoming) {
-                                    (Datum::Boolean(a), Datum::Boolean(b)) => Datum::Boolean(*a && *b),
+                                    (Datum::Boolean(a), Datum::Boolean(b)) => {
+                                        Datum::Boolean(*a && *b)
+                                    }
                                     (Datum::Null, other) | (other, Datum::Null) => other.clone(),
                                     _ => existing,
                                 };
@@ -106,7 +118,9 @@ pub fn merge_two_phase_agg(
                                 let existing = entry.get(*idx).cloned().unwrap_or(Datum::Null);
                                 let incoming = row.values.get(*idx).cloned().unwrap_or(Datum::Null);
                                 let merged = match (&existing, &incoming) {
-                                    (Datum::Boolean(a), Datum::Boolean(b)) => Datum::Boolean(*a || *b),
+                                    (Datum::Boolean(a), Datum::Boolean(b)) => {
+                                        Datum::Boolean(*a || *b)
+                                    }
                                     (Datum::Null, other) | (other, Datum::Null) => other.clone(),
                                     _ => existing,
                                 };
@@ -144,7 +158,11 @@ pub fn merge_two_phase_agg(
                                     *val = merged;
                                 }
                             }
-                            AggMerge::CountDistinct(idx) | AggMerge::SumDistinct(idx) | AggMerge::AvgDistinct(idx) | AggMerge::StringAggDistinct(idx, _) | AggMerge::ArrayAggDistinct(idx) => {
+                            AggMerge::CountDistinct(idx)
+                            | AggMerge::SumDistinct(idx)
+                            | AggMerge::AvgDistinct(idx)
+                            | AggMerge::StringAggDistinct(idx, _)
+                            | AggMerge::ArrayAggDistinct(idx) => {
                                 // Merge: concatenate arrays of distinct values from shards.
                                 let existing = entry.get(*idx).cloned().unwrap_or(Datum::Null);
                                 let incoming = row.values.get(*idx).cloned().unwrap_or(Datum::Null);
@@ -169,16 +187,17 @@ pub fn merge_two_phase_agg(
     }
 
     // Post-merge fixup for collect-dedup variants: deduplicate arrays and reduce.
-    let distinct_fixups: Vec<(&AggMerge, usize)> = agg_merges.iter().filter_map(|m| {
-        match m {
+    let distinct_fixups: Vec<(&AggMerge, usize)> = agg_merges
+        .iter()
+        .filter_map(|m| match m {
             AggMerge::CountDistinct(idx) => Some((m, *idx)),
             AggMerge::SumDistinct(idx) => Some((m, *idx)),
             AggMerge::AvgDistinct(idx) => Some((m, *idx)),
             AggMerge::StringAggDistinct(idx, _) => Some((m, *idx)),
             AggMerge::ArrayAggDistinct(idx) => Some((m, *idx)),
             _ => None,
-        }
-    }).collect();
+        })
+        .collect();
 
     let mut result: Vec<OwnedRow> = groups.into_values().map(OwnedRow::new).collect();
     if !distinct_fixups.is_empty() {
@@ -187,9 +206,10 @@ pub fn merge_two_phase_agg(
                 if let Some(Datum::Array(arr)) = row.values.get(idx).cloned() {
                     // Deduplicate using binary-encoded keys
                     let mut seen = std::collections::HashSet::new();
-                    let unique_vals: Vec<&Datum> = arr.iter().filter(|d| {
-                        seen.insert(encode_group_key(&[0], &[(*d).clone()]))
-                    }).collect();
+                    let unique_vals: Vec<&Datum> = arr
+                        .iter()
+                        .filter(|d| seen.insert(encode_group_key(&[0], &[(*d).clone()])))
+                        .collect();
 
                     row.values[idx] = match merge {
                         AggMerge::CountDistinct(_) => Datum::Int64(unique_vals.len() as i64),
@@ -198,7 +218,11 @@ pub fn merge_two_phase_agg(
                             for val in unique_vals {
                                 acc = datum_add(&acc, val);
                             }
-                            if acc.is_null() { Datum::Int64(0) } else { acc }
+                            if acc.is_null() {
+                                Datum::Int64(0)
+                            } else {
+                                acc
+                            }
                         }
                         AggMerge::AvgDistinct(_) => {
                             if unique_vals.is_empty() {
@@ -222,7 +246,8 @@ pub fn merge_two_phase_agg(
                             if unique_vals.is_empty() {
                                 Datum::Null
                             } else {
-                                let parts: Vec<String> = unique_vals.iter().map(|d| format!("{}", d)).collect();
+                                let parts: Vec<String> =
+                                    unique_vals.iter().map(|d| format!("{}", d)).collect();
                                 Datum::Text(parts.join(sep))
                             }
                         }
@@ -237,7 +262,10 @@ pub fn merge_two_phase_agg(
                     };
                 } else if let Some(Datum::Null) = row.values.get(idx) {
                     row.values[idx] = match merge {
-                        AggMerge::SumDistinct(_) | AggMerge::AvgDistinct(_) | AggMerge::StringAggDistinct(_, _) | AggMerge::ArrayAggDistinct(_) => Datum::Null,
+                        AggMerge::SumDistinct(_)
+                        | AggMerge::AvgDistinct(_)
+                        | AggMerge::StringAggDistinct(_, _)
+                        | AggMerge::ArrayAggDistinct(_) => Datum::Null,
                         _ => Datum::Int64(0),
                     };
                 }
@@ -255,20 +283,71 @@ pub(crate) fn encode_group_key(group_by_indices: &[usize], values: &[Datum]) -> 
         let datum = values.get(i).unwrap_or(&Datum::Null);
         match datum {
             Datum::Null => key.push(0),
-            Datum::Boolean(b) => { key.push(1); key.push(if *b { 1 } else { 0 }); }
-            Datum::Int32(v) => { key.push(2); key.extend_from_slice(&v.to_be_bytes()); }
-            Datum::Int64(v) => { key.push(3); key.extend_from_slice(&v.to_be_bytes()); }
-            Datum::Float64(v) => { key.push(4); key.extend_from_slice(&v.to_be_bytes()); }
-            Datum::Text(s) => { key.push(5); key.extend_from_slice(&(s.len() as u32).to_be_bytes()); key.extend_from_slice(s.as_bytes()); }
-            Datum::Timestamp(v) => { key.push(6); key.extend_from_slice(&v.to_be_bytes()); }
-            Datum::Date(v) => { key.push(9); key.extend_from_slice(&v.to_be_bytes()); }
-            Datum::Array(arr) => { key.push(7); let s = format!("{:?}", arr); key.extend_from_slice(&(s.len() as u32).to_be_bytes()); key.extend_from_slice(s.as_bytes()); }
-            Datum::Jsonb(v) => { key.push(8); let s = v.to_string(); key.extend_from_slice(&(s.len() as u32).to_be_bytes()); key.extend_from_slice(s.as_bytes()); }
-            Datum::Decimal(m, s) => { key.push(10); key.push(*s); key.extend_from_slice(&m.to_be_bytes()); }
-            Datum::Time(us) => { key.push(11); key.extend_from_slice(&us.to_be_bytes()); }
-            Datum::Interval(mo, d, us) => { key.push(12); key.extend_from_slice(&mo.to_be_bytes()); key.extend_from_slice(&d.to_be_bytes()); key.extend_from_slice(&us.to_be_bytes()); }
-            Datum::Uuid(v) => { key.push(13); key.extend_from_slice(&v.to_be_bytes()); }
-            Datum::Bytea(bytes) => { key.push(14); key.extend_from_slice(&(bytes.len() as u32).to_be_bytes()); key.extend_from_slice(bytes); }
+            Datum::Boolean(b) => {
+                key.push(1);
+                key.push(if *b { 1 } else { 0 });
+            }
+            Datum::Int32(v) => {
+                key.push(2);
+                key.extend_from_slice(&v.to_be_bytes());
+            }
+            Datum::Int64(v) => {
+                key.push(3);
+                key.extend_from_slice(&v.to_be_bytes());
+            }
+            Datum::Float64(v) => {
+                key.push(4);
+                key.extend_from_slice(&v.to_be_bytes());
+            }
+            Datum::Text(s) => {
+                key.push(5);
+                key.extend_from_slice(&(s.len() as u32).to_be_bytes());
+                key.extend_from_slice(s.as_bytes());
+            }
+            Datum::Timestamp(v) => {
+                key.push(6);
+                key.extend_from_slice(&v.to_be_bytes());
+            }
+            Datum::Date(v) => {
+                key.push(9);
+                key.extend_from_slice(&v.to_be_bytes());
+            }
+            Datum::Array(arr) => {
+                key.push(7);
+                let s = format!("{:?}", arr);
+                key.extend_from_slice(&(s.len() as u32).to_be_bytes());
+                key.extend_from_slice(s.as_bytes());
+            }
+            Datum::Jsonb(v) => {
+                key.push(8);
+                let s = v.to_string();
+                key.extend_from_slice(&(s.len() as u32).to_be_bytes());
+                key.extend_from_slice(s.as_bytes());
+            }
+            Datum::Decimal(m, s) => {
+                key.push(10);
+                key.push(*s);
+                key.extend_from_slice(&m.to_be_bytes());
+            }
+            Datum::Time(us) => {
+                key.push(11);
+                key.extend_from_slice(&us.to_be_bytes());
+            }
+            Datum::Interval(mo, d, us) => {
+                key.push(12);
+                key.extend_from_slice(&mo.to_be_bytes());
+                key.extend_from_slice(&d.to_be_bytes());
+                key.extend_from_slice(&us.to_be_bytes());
+            }
+            Datum::Uuid(v) => {
+                key.push(13);
+                key.extend_from_slice(&v.to_be_bytes());
+            }
+            Datum::Bytea(bytes) => {
+                key.push(14);
+                key.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+                key.extend_from_slice(bytes);
+            }
         }
     }
     key

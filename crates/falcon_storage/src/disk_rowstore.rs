@@ -71,7 +71,9 @@ impl Page {
     }
 
     fn row_count(&self) -> usize {
-        if self.data.len() < 4 { return 0; }
+        if self.data.len() < 4 {
+            return 0;
+        }
         u32::from_le_bytes(self.data[0..4].try_into().unwrap_or([0; 4])) as usize
     }
 
@@ -83,28 +85,42 @@ impl Page {
     /// Read all rows stored in this page.
     fn read_rows(&self) -> Vec<(Vec<u8>, OwnedRow)> {
         let count = self.row_count();
-        if count == 0 { return Vec::new(); }
+        if count == 0 {
+            return Vec::new();
+        }
 
         let header_size = 4 + count * 8; // row_count + (offset, length) per row
         let mut rows = Vec::with_capacity(count);
 
         for i in 0..count {
             let slot_base = 4 + i * 8;
-            if slot_base + 8 > self.data.len() { break; }
+            if slot_base + 8 > self.data.len() {
+                break;
+            }
             let offset = u32::from_le_bytes(
-                self.data[slot_base..slot_base + 4].try_into().unwrap_or([0; 4])
+                self.data[slot_base..slot_base + 4]
+                    .try_into()
+                    .unwrap_or([0; 4]),
             ) as usize;
             let length = u32::from_le_bytes(
-                self.data[slot_base + 4..slot_base + 8].try_into().unwrap_or([0; 4])
+                self.data[slot_base + 4..slot_base + 8]
+                    .try_into()
+                    .unwrap_or([0; 4]),
             ) as usize;
 
-            if offset + length > self.data.len() { continue; }
+            if offset + length > self.data.len() {
+                continue;
+            }
             let row_bytes = &self.data[offset..offset + length];
 
             // First 4 bytes of row_bytes = pk_len, then pk, then row data
-            if row_bytes.len() < 4 { continue; }
+            if row_bytes.len() < 4 {
+                continue;
+            }
             let pk_len = u32::from_le_bytes(row_bytes[0..4].try_into().unwrap_or([0; 4])) as usize;
-            if 4 + pk_len > row_bytes.len() { continue; }
+            if 4 + pk_len > row_bytes.len() {
+                continue;
+            }
             let pk = row_bytes[4..4 + pk_len].to_vec();
             let row_data = &row_bytes[4 + pk_len..];
             if let Some(row) = deserialize_row(row_data) {
@@ -131,13 +147,19 @@ impl Page {
         for i in 0..count {
             let slot_base = 4 + i * 8;
             let offset = u32::from_le_bytes(
-                self.data[slot_base..slot_base + 4].try_into().unwrap_or([0; 4])
+                self.data[slot_base..slot_base + 4]
+                    .try_into()
+                    .unwrap_or([0; 4]),
             ) as usize;
             let length = u32::from_le_bytes(
-                self.data[slot_base + 4..slot_base + 8].try_into().unwrap_or([0; 4])
+                self.data[slot_base + 4..slot_base + 8]
+                    .try_into()
+                    .unwrap_or([0; 4]),
             ) as usize;
             let end = offset + length;
-            if end > data_end { data_end = end; }
+            if end > data_end {
+                data_end = end;
+            }
         }
 
         // Check if we have enough space
@@ -151,12 +173,15 @@ impl Page {
 
         // Shift existing data to make room for the new slot entry in the header
         if header_growth > 0 && data_end > old_header {
-            self.data.copy_within(old_header..data_end, old_header + header_growth);
+            self.data
+                .copy_within(old_header..data_end, old_header + header_growth);
             // Update existing slot offsets
             for i in 0..count {
                 let slot_base = 4 + i * 8;
                 let old_offset = u32::from_le_bytes(
-                    self.data[slot_base..slot_base + 4].try_into().unwrap_or([0; 4])
+                    self.data[slot_base..slot_base + 4]
+                        .try_into()
+                        .unwrap_or([0; 4]),
                 );
                 let new_offset = old_offset + header_growth as u32;
                 self.data[slot_base..slot_base + 4].copy_from_slice(&new_offset.to_le_bytes());
@@ -167,7 +192,8 @@ impl Page {
         // Write slot entry
         let slot_base = 4 + count * 8;
         self.data[slot_base..slot_base + 4].copy_from_slice(&(data_end as u32).to_le_bytes());
-        self.data[slot_base + 4..slot_base + 8].copy_from_slice(&(slot_data_len as u32).to_le_bytes());
+        self.data[slot_base + 4..slot_base + 8]
+            .copy_from_slice(&(slot_data_len as u32).to_le_bytes());
 
         // Write slot data: pk_len + pk + row_bytes
         let pk_len_bytes = (pk_len as u32).to_le_bytes();
@@ -209,7 +235,11 @@ impl BufferPool {
             .open(path)?;
 
         let file_len = file.metadata()?.len();
-        let next_page = if file_len == 0 { 1 } else { file_len / PAGE_SIZE as u64 + 1 };
+        let next_page = if file_len == 0 {
+            1
+        } else {
+            file_len / PAGE_SIZE as u64 + 1
+        };
 
         Ok(Self {
             capacity,
@@ -273,8 +303,12 @@ impl BufferPool {
         let mut page = Page::new(page_id);
         let offset = (page_id - 1) * PAGE_SIZE as u64;
         let mut file = self.file.write();
-        if file.seek(SeekFrom::Start(offset)).is_err() { return None; }
-        if file.read_exact(&mut page.data).is_err() { return None; }
+        if file.seek(SeekFrom::Start(offset)).is_err() {
+            return None;
+        }
+        if file.read_exact(&mut page.data).is_err() {
+            return None;
+        }
         self.put_page(page.clone());
         Some(page)
     }
@@ -327,8 +361,7 @@ impl DiskRowstoreTable {
     pub fn new(schema: TableSchema, data_dir: &Path) -> Result<Self, StorageError> {
         let table_file = data_dir.join(format!("table_{}.dat", schema.id.0));
         let pool = Arc::new(
-            BufferPool::open(&table_file, DEFAULT_BUFFER_POOL_PAGES)
-                .map_err(StorageError::Io)?
+            BufferPool::open(&table_file, DEFAULT_BUFFER_POOL_PAGES).map_err(StorageError::Io)?,
         );
 
         Ok(Self {
@@ -345,8 +378,7 @@ impl DiskRowstoreTable {
     pub fn new_in_memory(schema: TableSchema) -> Result<Self, StorageError> {
         // Use a temp file
         let tmp_dir = std::env::temp_dir().join("falcon_disk_rs");
-        std::fs::create_dir_all(&tmp_dir)
-            .map_err(StorageError::Io)?;
+        std::fs::create_dir_all(&tmp_dir).map_err(StorageError::Io)?;
         Self::new(schema, &tmp_dir)
     }
 
@@ -399,7 +431,9 @@ impl DiskRowstoreTable {
             }
         }
 
-        Err(StorageError::Io(std::io::Error::other("Failed to insert row into page")))
+        Err(StorageError::Io(std::io::Error::other(
+            "Failed to insert row into page",
+        )))
     }
 
     /// Point read by primary key.

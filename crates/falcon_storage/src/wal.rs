@@ -47,20 +47,11 @@ pub enum WalRecord {
         pk: Vec<u8>,
     },
     /// Commit a transaction.
-    CommitTxn {
-        txn_id: TxnId,
-        commit_ts: Timestamp,
-    },
+    CommitTxn { txn_id: TxnId, commit_ts: Timestamp },
     /// Commit a local fast-path transaction.
-    CommitTxnLocal {
-        txn_id: TxnId,
-        commit_ts: Timestamp,
-    },
+    CommitTxnLocal { txn_id: TxnId, commit_ts: Timestamp },
     /// Commit a global slow-path transaction.
-    CommitTxnGlobal {
-        txn_id: TxnId,
-        commit_ts: Timestamp,
-    },
+    CommitTxnGlobal { txn_id: TxnId, commit_ts: Timestamp },
     /// Abort a transaction.
     AbortTxn { txn_id: TxnId },
     /// Abort a local fast-path transaction.
@@ -76,7 +67,10 @@ pub enum WalRecord {
     /// DDL: drop view.
     DropView { name: String },
     /// DDL: alter table (operation stored as JSON for flexibility).
-    AlterTable { table_name: String, operation_json: String },
+    AlterTable {
+        table_name: String,
+        operation_json: String,
+    },
     /// DDL: create sequence.
     CreateSequence { name: String, start: i64 },
     /// DDL: drop sequence.
@@ -112,14 +106,9 @@ pub enum WalRecord {
     },
     /// P0-3: Coordinator commits the global transaction (decision record).
     /// After this record is durable, the coordinator sends COMMIT to all shards.
-    CoordinatorCommit {
-        txn_id: TxnId,
-        commit_ts: Timestamp,
-    },
+    CoordinatorCommit { txn_id: TxnId, commit_ts: Timestamp },
     /// P0-3: Coordinator aborts the global transaction (decision record).
-    CoordinatorAbort {
-        txn_id: TxnId,
-    },
+    CoordinatorAbort { txn_id: TxnId },
 }
 
 /// WAL writer: append-only, with group commit and segment rotation.
@@ -159,7 +148,12 @@ fn segment_filename(segment_id: u64) -> String {
 
 impl WalWriter {
     pub fn open(dir: &Path, sync_mode: SyncMode) -> Result<Self, StorageError> {
-        Self::open_with_options(dir, sync_mode, DEFAULT_SEGMENT_SIZE, DEFAULT_GROUP_COMMIT_SIZE)
+        Self::open_with_options(
+            dir,
+            sync_mode,
+            DEFAULT_SEGMENT_SIZE,
+            DEFAULT_GROUP_COMMIT_SIZE,
+        )
     }
 
     pub fn open_with_options(
@@ -175,7 +169,6 @@ impl WalWriter {
         let segment_id = latest_segment.unwrap_or(0);
         let seg_path = dir.join(segment_filename(segment_id));
 
-        
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -235,8 +228,8 @@ impl WalWriter {
     /// Append a record to the WAL. Returns the LSN.
     /// Group commit: if pending records reach the threshold, auto-flush.
     pub fn append(&self, record: &WalRecord) -> Result<u64, StorageError> {
-        let data = bincode::serialize(record)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let data =
+            bincode::serialize(record).map_err(|e| StorageError::Serialization(e.to_string()))?;
 
         let lsn = self.lsn.fetch_add(1, Ordering::SeqCst);
         let checksum = crc32fast::hash(&data);
@@ -424,27 +417,15 @@ impl WalReader {
         let mut pos = 0;
 
         // Skip segment header if present (magic + format version = 8 bytes)
-        if data.len() >= WAL_SEGMENT_HEADER_SIZE
-            && &data[0..4] == WAL_MAGIC.as_slice()
-        {
-            let _format_version = u32::from_le_bytes([
-                data[4], data[5], data[6], data[7],
-            ]);
+        if data.len() >= WAL_SEGMENT_HEADER_SIZE && &data[0..4] == WAL_MAGIC.as_slice() {
+            let _format_version = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
             pos = WAL_SEGMENT_HEADER_SIZE;
         }
         while pos + 8 <= data.len() {
-            let len = u32::from_le_bytes([
-                data[pos],
-                data[pos + 1],
-                data[pos + 2],
-                data[pos + 3],
-            ]) as usize;
-            let checksum = u32::from_le_bytes([
-                data[pos + 4],
-                data[pos + 5],
-                data[pos + 6],
-                data[pos + 7],
-            ]);
+            let len = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                as usize;
+            let checksum =
+                u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]]);
             pos += 8;
 
             if pos + len > data.len() {
@@ -496,8 +477,8 @@ impl CheckpointData {
     /// Write checkpoint to a file in the given directory.
     pub fn write_to_dir(&self, dir: &Path) -> Result<(), StorageError> {
         let path = dir.join(CHECKPOINT_FILENAME);
-        let data = bincode::serialize(self)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let data =
+            bincode::serialize(self).map_err(|e| StorageError::Serialization(e.to_string()))?;
         // Write atomically: write to temp file, then rename
         let tmp_path = dir.join("checkpoint.tmp");
         fs::write(&tmp_path, &data)?;
@@ -512,8 +493,8 @@ impl CheckpointData {
             return Ok(None);
         }
         let data = fs::read(&path)?;
-        let ckpt: Self = bincode::deserialize(&data)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let ckpt: Self =
+            bincode::deserialize(&data).map_err(|e| StorageError::Serialization(e.to_string()))?;
         Ok(Some(ckpt))
     }
 }

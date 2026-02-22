@@ -199,7 +199,11 @@ impl BgTaskSupervisor {
         // Sort by name for stable output
         task_list.sort_by(|a, b| a.name.cmp(&b.name));
         SupervisorSnapshot {
-            node_health: if critical_failures > 0 { NodeHealth::Degraded } else { NodeHealth::Healthy },
+            node_health: if critical_failures > 0 {
+                NodeHealth::Degraded
+            } else {
+                NodeHealth::Healthy
+            },
             tasks: task_list,
             critical_failures,
             total_registered: self.total_registered.load(Ordering::Relaxed),
@@ -253,7 +257,11 @@ mod tests {
     #[test]
     fn test_besteffort_failure_stays_healthy() {
         let sv = BgTaskSupervisor::new();
-        sv.register("rebalancer", "shard-rebalancer", TaskCriticality::BestEffort);
+        sv.register(
+            "rebalancer",
+            "shard-rebalancer",
+            TaskCriticality::BestEffort,
+        );
         sv.report_running("rebalancer");
         sv.report_failed("rebalancer", "no shards");
         assert_eq!(sv.task_state("rebalancer"), Some(TaskState::Failed));
@@ -284,7 +292,11 @@ mod tests {
     fn test_snapshot() {
         let sv = BgTaskSupervisor::new();
         sv.register("gc", "garbage-collector", TaskCriticality::Critical);
-        sv.register("rebalancer", "shard-rebalancer", TaskCriticality::BestEffort);
+        sv.register(
+            "rebalancer",
+            "shard-rebalancer",
+            TaskCriticality::BestEffort,
+        );
         sv.report_running("gc");
         sv.report_failed("rebalancer", "no shards");
 
@@ -312,7 +324,11 @@ mod tests {
     fn test_multiple_tasks_mixed() {
         let sv = BgTaskSupervisor::new();
         sv.register("gc", "garbage-collector", TaskCriticality::Critical);
-        sv.register("rebalancer", "shard-rebalancer", TaskCriticality::BestEffort);
+        sv.register(
+            "rebalancer",
+            "shard-rebalancer",
+            TaskCriticality::BestEffort,
+        );
         sv.register("indoubt", "2pc-resolver", TaskCriticality::Critical);
 
         sv.report_running("gc");

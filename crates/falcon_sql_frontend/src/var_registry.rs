@@ -92,23 +92,47 @@ impl VarRegistry {
     pub fn with_defaults() -> Self {
         let mut reg = Self::new();
 
-        reg.register("falcon_txn_stats", Box::new(|_| BoundStatement::ShowTxnStats));
-        reg.register("falcon_node_role", Box::new(|_| BoundStatement::ShowNodeRole));
-        reg.register("falcon_wal_stats", Box::new(|_| BoundStatement::ShowWalStats));
-        reg.register("falcon_connections", Box::new(|_| BoundStatement::ShowConnections));
+        reg.register(
+            "falcon_txn_stats",
+            Box::new(|_| BoundStatement::ShowTxnStats),
+        );
+        reg.register(
+            "falcon_node_role",
+            Box::new(|_| BoundStatement::ShowNodeRole),
+        );
+        reg.register(
+            "falcon_wal_stats",
+            Box::new(|_| BoundStatement::ShowWalStats),
+        );
+        reg.register(
+            "falcon_connections",
+            Box::new(|_| BoundStatement::ShowConnections),
+        );
         reg.register("falcon_gc", Box::new(|_| BoundStatement::RunGc));
-        reg.register("falcon_table_stats", Box::new(|_| {
-            BoundStatement::ShowTableStats { table_name: None }
-        }));
-        reg.register("falcon_sequences", Box::new(|_| BoundStatement::ShowSequences));
+        reg.register(
+            "falcon_table_stats",
+            Box::new(|_| BoundStatement::ShowTableStats { table_name: None }),
+        );
+        reg.register(
+            "falcon_sequences",
+            Box::new(|_| BoundStatement::ShowSequences),
+        );
         reg.register("falcon_tenants", Box::new(|_| BoundStatement::ShowTenants));
-        reg.register("falcon_tenant_usage", Box::new(|_| BoundStatement::ShowTenantUsage));
+        reg.register(
+            "falcon_tenant_usage",
+            Box::new(|_| BoundStatement::ShowTenantUsage),
+        );
 
         // Prefix handler: falcon_table_stats_<table_name>
-        reg.register_prefix("falcon_table_stats_", Box::new(|suffix| {
-            let tname = suffix.unwrap_or("").to_string();
-            BoundStatement::ShowTableStats { table_name: Some(tname) }
-        }));
+        reg.register_prefix(
+            "falcon_table_stats_",
+            Box::new(|suffix| {
+                let tname = suffix.unwrap_or("").to_string();
+                BoundStatement::ShowTableStats {
+                    table_name: Some(tname),
+                }
+            }),
+        );
 
         reg
     }

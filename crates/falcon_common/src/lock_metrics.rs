@@ -9,7 +9,7 @@
 //! Prometheus exporters or SHOW commands.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
 /// Contention threshold: if acquiring a lock takes longer than this, it
@@ -58,7 +58,10 @@ impl LockMetrics {
             let mut cur = self.max_wait_us.load(Ordering::Relaxed);
             while us > cur {
                 match self.max_wait_us.compare_exchange_weak(
-                    cur, us, Ordering::Relaxed, Ordering::Relaxed,
+                    cur,
+                    us,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
                 ) {
                     Ok(_) => break,
                     Err(actual) => cur = actual,
@@ -78,7 +81,10 @@ impl LockMetrics {
             let mut cur = self.max_wait_us.load(Ordering::Relaxed);
             while us > cur {
                 match self.max_wait_us.compare_exchange_weak(
-                    cur, us, Ordering::Relaxed, Ordering::Relaxed,
+                    cur,
+                    us,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
                 ) {
                     Ok(_) => break,
                     Err(actual) => cur = actual,
@@ -220,8 +226,12 @@ impl std::fmt::Display for LockMetricsReport {
             writeln!(
                 f,
                 "  [{}] reads={} writes={} contentions={} wait_us={} max_us={}",
-                s.name, s.read_acquires, s.write_acquires,
-                s.contentions, s.total_wait_us, s.max_wait_us,
+                s.name,
+                s.read_acquires,
+                s.write_acquires,
+                s.contentions,
+                s.total_wait_us,
+                s.max_wait_us,
             )?;
         }
         Ok(())

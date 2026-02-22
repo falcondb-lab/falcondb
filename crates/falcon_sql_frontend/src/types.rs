@@ -15,7 +15,9 @@ pub enum BoundStatement {
     Select(BoundSelect),
     Explain(Box<BoundStatement>),
     ExplainAnalyze(Box<BoundStatement>),
-    Truncate { table_name: String },
+    Truncate {
+        table_name: String,
+    },
     CreateIndex {
         index_name: String,
         table_name: String,
@@ -42,19 +44,35 @@ pub enum BoundStatement {
     ShowWalStats,
     ShowConnections,
     RunGc,
-    Analyze { table_name: String },
-    ShowTableStats { table_name: Option<String> },
-    CreateSequence { name: String, start: i64 },
-    DropSequence { name: String, if_exists: bool },
+    Analyze {
+        table_name: String,
+    },
+    ShowTableStats {
+        table_name: Option<String>,
+    },
+    CreateSequence {
+        name: String,
+        start: i64,
+    },
+    DropSequence {
+        name: String,
+        if_exists: bool,
+    },
     ShowSequences,
     /// Multi-tenancy: SHOW falcon.tenants
     ShowTenants,
     /// Multi-tenancy: SHOW falcon.tenant_usage
     ShowTenantUsage,
     /// Multi-tenancy: CREATE TENANT name [MAX_QPS n] [MAX_STORAGE_BYTES n]
-    CreateTenant { name: String, max_qps: u64, max_storage_bytes: u64 },
+    CreateTenant {
+        name: String,
+        max_qps: u64,
+        max_storage_bytes: u64,
+    },
     /// Multi-tenancy: DROP TENANT name
-    DropTenant { name: String },
+    DropTenant {
+        name: String,
+    },
     /// COPY table FROM STDIN
     CopyFrom {
         table_id: TableId,
@@ -110,13 +128,30 @@ pub struct BoundDropTable {
 pub enum AlterTableOp {
     AddColumn(falcon_common::schema::ColumnDef),
     DropColumn(String),
-    RenameColumn { old_name: String, new_name: String },
-    RenameTable { new_name: String },
-    AlterColumnType { column_name: String, new_type: falcon_common::types::DataType },
-    AlterColumnSetNotNull { column_name: String },
-    AlterColumnDropNotNull { column_name: String },
-    AlterColumnSetDefault { column_name: String, default_expr: BoundExpr },
-    AlterColumnDropDefault { column_name: String },
+    RenameColumn {
+        old_name: String,
+        new_name: String,
+    },
+    RenameTable {
+        new_name: String,
+    },
+    AlterColumnType {
+        column_name: String,
+        new_type: falcon_common::types::DataType,
+    },
+    AlterColumnSetNotNull {
+        column_name: String,
+    },
+    AlterColumnDropNotNull {
+        column_name: String,
+    },
+    AlterColumnSetDefault {
+        column_name: String,
+        default_expr: BoundExpr,
+    },
+    AlterColumnDropDefault {
+        column_name: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -225,9 +260,9 @@ pub struct BoundSelect {
 pub enum DistinctMode {
     /// No deduplication.
     None,
-    /// DISTINCT 鈥?remove fully duplicate rows.
+    /// DISTINCT — remove fully duplicate rows.
     All,
-    /// DISTINCT ON (expr, ...) 鈥?keep first row per distinct-on key group.
+    /// DISTINCT ON (expr, ...) — keep first row per distinct-on key group.
     /// The Vec contains projection indices for the DISTINCT ON expressions.
     On(Vec<usize>),
 }
@@ -264,8 +299,14 @@ pub enum BoundProjection {
     /// A column reference: (column_index_in_table, alias)
     Column(usize, String),
     /// An aggregate: (function, arg_expr, alias, distinct, filter)
-    Aggregate(AggFunc, Option<BoundExpr>, String, bool, Option<Box<BoundExpr>>),
-    /// A wildcard (*) 鈥?expanded during binding.
+    Aggregate(
+        AggFunc,
+        Option<BoundExpr>,
+        String,
+        bool,
+        Option<Box<BoundExpr>>,
+    ),
+    /// A wildcard (*) — expanded during binding.
     Expr(BoundExpr, String),
     /// A window function: (function, partition_by_cols, order_by, alias)
     Window(BoundWindowFunc),
@@ -301,8 +342,8 @@ pub enum AggFunc {
     RegrSYY,
     RegrSXY,
     // ── Ordered-set aggregates ──
-    PercentileCont(f64),   // fraction
-    PercentileDisc(f64),   // fraction
+    PercentileCont(f64), // fraction
+    PercentileDisc(f64), // fraction
     Mode,
     // ── Bit aggregates ──
     BitAndAgg,
@@ -315,15 +356,15 @@ pub enum WindowFunc {
     RowNumber,
     Rank,
     DenseRank,
-    Ntile(i64),                   // NTILE(n) 鈥?divide into n buckets
-    Lag(usize, i64),              // LAG(col_idx, offset)
-    Lead(usize, i64),             // LEAD(col_idx, offset)
-    FirstValue(usize),            // FIRST_VALUE(col_idx)
-    LastValue(usize),             // LAST_VALUE(col_idx)
-    PercentRank,                  // PERCENT_RANK()
-    CumeDist,                     // CUME_DIST()
-    NthValue(usize, i64),         // NTH_VALUE(col_idx, n)
-    Agg(AggFunc, Option<usize>),  // aggregate over window (func, col_idx)
+    Ntile(i64),                  // NTILE(n) — divide into n buckets
+    Lag(usize, i64),             // LAG(col_idx, offset)
+    Lead(usize, i64),            // LEAD(col_idx, offset)
+    FirstValue(usize),           // FIRST_VALUE(col_idx)
+    LastValue(usize),            // LAST_VALUE(col_idx)
+    PercentRank,                 // PERCENT_RANK()
+    CumeDist,                    // CUME_DIST()
+    NthValue(usize, i64),        // NTH_VALUE(col_idx, n)
+    Agg(AggFunc, Option<usize>), // aggregate over window (func, col_idx)
 }
 
 /// Window frame boundary specification.
@@ -359,7 +400,7 @@ pub struct WindowFrame {
 
 impl Default for WindowFrame {
     /// Default frame: RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
-    /// (entire partition 鈥?used when no ORDER BY and no explicit frame).
+    /// (entire partition — used when no ORDER BY and no explicit frame).
     fn default() -> Self {
         Self {
             mode: WindowFrameMode::Range,
@@ -390,15 +431,15 @@ impl WindowFrame {
 #[derive(Debug, Clone)]
 pub struct BoundWindowFunc {
     pub func: WindowFunc,
-    pub partition_by: Vec<usize>,       // column indices for PARTITION BY
-    pub order_by: Vec<BoundOrderBy>,    // ORDER BY within the window
-    pub frame: WindowFrame,             // window frame specification
+    pub partition_by: Vec<usize>,    // column indices for PARTITION BY
+    pub order_by: Vec<BoundOrderBy>, // ORDER BY within the window
+    pub frame: WindowFrame,          // window frame specification
     pub alias: String,
 }
 
 #[derive(Debug, Clone)]
 pub enum ScalarFunc {
-    // 鈹€鈹€ String functions (PG-standard) 鈹€鈹€
+    // ── String functions (PG-standard) ──
     Upper,
     Lower,
     Length,
@@ -434,7 +475,7 @@ pub enum ScalarFunc {
     SubstrCount,
     Normalize,
     ParseIdent,
-    // 鈹€鈹€ Math functions (PG-standard) 鈹€鈹€
+    // ── Math functions (PG-standard) ──
     Abs,
     Round,
     Ceil,
@@ -484,7 +525,7 @@ pub enum ScalarFunc {
     TruncPrecision,
     RoundPrecision,
     Clamp,
-    // 鈹€鈹€ Date/Time functions (PG-standard) 鈹€鈹€
+    // ── Date/Time functions (PG-standard) ──
     Now,
     CurrentDate,
     CurrentTime,
@@ -504,7 +545,7 @@ pub enum ScalarFunc {
     DateDiff,
     EpochFromTimestamp,
     MakeInterval,
-    // 鈹€鈹€ Array functions (PG-standard) 鈹€鈹€
+    // ── Array functions (PG-standard) ──
     ArrayLength,
     Cardinality,
     ArrayPosition,
@@ -548,7 +589,7 @@ pub enum ScalarFunc {
     ArrayEvery,
     ArraySome,
     OverlayArray,
-    // 鈹€鈹€ Regex functions (PG-standard) 鈹€鈹€
+    // ── Regex functions (PG-standard) ──
     RegexpReplace,
     RegexpMatch,
     RegexpCount,
@@ -557,7 +598,7 @@ pub enum ScalarFunc {
     RegexpInstr,
     RegexpLike,
     RegexpEscape,
-    // 鈹€鈹€ Crypto/encoding functions (PG-standard) 鈹€鈹€
+    // ── Crypto/encoding functions (PG-standard) ──
     Md5,
     Sha256,
     Encode,
@@ -565,20 +606,20 @@ pub enum ScalarFunc {
     ToHex,
     Hashtext,
     Crc32,
-    // 鈹€鈹€ Bit operations (PG-standard) 鈹€鈹€
+    // ── Bit operations (PG-standard) ──
     BitXor,
     BitAnd,
     BitOr,
     BitCount,
     BitNot,
-    // 鈹€鈹€ Utility functions (PG-standard) 鈹€鈹€
+    // ── Utility functions (PG-standard) ──
     PgTypeof,
     ToNumber,
     Random,
     GenRandomUuid,
     NumNonnulls,
     NumNulls,
-    // 鈹€鈹€ Fuzzy string matching (PG fuzzystrmatch extension) 鈹€鈹€
+    // ── Fuzzy string matching (PG fuzzystrmatch extension) ──
     Levenshtein,
     Soundex,
     Difference,
@@ -610,7 +651,10 @@ pub enum ScalarFunc {
     /// ARRAY_MATRIX_{ROW|COLUMN}_{operation}{suffix}(arr, rows, cols, idx)
     ArrayMatrixFunc(String),
     /// STRING_{name}_ENCODE(fields...) / STRING_{name}_DECODE(line, idx)
-    StringEncodingFunc { name: String, encode: bool },
+    StringEncodingFunc {
+        name: String,
+        encode: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -639,15 +683,35 @@ pub enum BoundExpr {
     /// IS NOT NULL check.
     IsNotNull(Box<BoundExpr>),
     /// IS NOT DISTINCT FROM (NULL-safe equality).
-    IsNotDistinctFrom { left: Box<BoundExpr>, right: Box<BoundExpr> },
+    IsNotDistinctFrom {
+        left: Box<BoundExpr>,
+        right: Box<BoundExpr>,
+    },
     /// LIKE / ILIKE pattern match.
-    Like { expr: Box<BoundExpr>, pattern: Box<BoundExpr>, negated: bool, case_insensitive: bool },
+    Like {
+        expr: Box<BoundExpr>,
+        pattern: Box<BoundExpr>,
+        negated: bool,
+        case_insensitive: bool,
+    },
     /// BETWEEN low AND high.
-    Between { expr: Box<BoundExpr>, low: Box<BoundExpr>, high: Box<BoundExpr>, negated: bool },
+    Between {
+        expr: Box<BoundExpr>,
+        low: Box<BoundExpr>,
+        high: Box<BoundExpr>,
+        negated: bool,
+    },
     /// IN (list).
-    InList { expr: Box<BoundExpr>, list: Vec<BoundExpr>, negated: bool },
-    /// CAST(expr AS type) 鈥?target stored as string for simplicity.
-    Cast { expr: Box<BoundExpr>, target_type: String },
+    InList {
+        expr: Box<BoundExpr>,
+        list: Vec<BoundExpr>,
+        negated: bool,
+    },
+    /// CAST(expr AS type) — target stored as string for simplicity.
+    Cast {
+        expr: Box<BoundExpr>,
+        target_type: String,
+    },
     /// CASE WHEN ... THEN ... ELSE ... END
     Case {
         operand: Option<Box<BoundExpr>>,
@@ -658,19 +722,36 @@ pub enum BoundExpr {
     /// COALESCE(a, b, ...)
     Coalesce(Vec<BoundExpr>),
     /// Scalar function call: UPPER, LOWER, LENGTH, SUBSTRING, CONCAT
-    Function { func: ScalarFunc, args: Vec<BoundExpr> },
-    /// Scalar subquery 鈥?returns a single value: `(SELECT MAX(id) FROM t)`.
+    Function {
+        func: ScalarFunc,
+        args: Vec<BoundExpr>,
+    },
+    /// Scalar subquery — returns a single value: `(SELECT MAX(id) FROM t)`.
     ScalarSubquery(Box<BoundSelect>),
     /// IN subquery: `expr IN (SELECT col FROM t)`.
-    InSubquery { expr: Box<BoundExpr>, subquery: Box<BoundSelect>, negated: bool },
+    InSubquery {
+        expr: Box<BoundExpr>,
+        subquery: Box<BoundSelect>,
+        negated: bool,
+    },
     /// EXISTS subquery: `EXISTS (SELECT 1 FROM t WHERE ...)`.
-    Exists { subquery: Box<BoundSelect>, negated: bool },
+    Exists {
+        subquery: Box<BoundSelect>,
+        negated: bool,
+    },
     /// Inline aggregate in HAVING expressions: evaluated per-group.
-    AggregateExpr { func: AggFunc, arg: Option<Box<BoundExpr>>, distinct: bool },
+    AggregateExpr {
+        func: AggFunc,
+        arg: Option<Box<BoundExpr>>,
+        distinct: bool,
+    },
     /// ARRAY literal: ARRAY[1, 2, 3]
     ArrayLiteral(Vec<BoundExpr>),
     /// Array subscript: arr[index] (1-indexed)
-    ArrayIndex { array: Box<BoundExpr>, index: Box<BoundExpr> },
+    ArrayIndex {
+        array: Box<BoundExpr>,
+        index: Box<BoundExpr>,
+    },
     /// Reference to a column in the outer query (correlated subquery).
     /// The usize is the column index in the outer query's schema.
     OuterColumnRef(usize),
@@ -683,13 +764,25 @@ pub enum BoundExpr {
     /// Parameter placeholder: $1, $2, ... (1-indexed).
     /// Used in prepared statements / parameterized queries.
     Parameter(usize),
-    /// expr op ANY(array_or_subquery) 鈥?true if comparison holds for any element.
-    AnyOp { left: Box<BoundExpr>, compare_op: BinOp, right: Box<BoundExpr> },
-    /// expr op ALL(array_or_subquery) 鈥?true if comparison holds for all elements.
-    AllOp { left: Box<BoundExpr>, compare_op: BinOp, right: Box<BoundExpr> },
+    /// expr op ANY(array_or_subquery) — true if comparison holds for any element.
+    AnyOp {
+        left: Box<BoundExpr>,
+        compare_op: BinOp,
+        right: Box<BoundExpr>,
+    },
+    /// expr op ALL(array_or_subquery) — true if comparison holds for all elements.
+    AllOp {
+        left: Box<BoundExpr>,
+        compare_op: BinOp,
+        right: Box<BoundExpr>,
+    },
     /// Array slice: arr[lower:upper] (1-indexed, inclusive bounds, PostgreSQL semantics).
-    ArraySlice { array: Box<BoundExpr>, lower: Option<Box<BoundExpr>>, upper: Option<Box<BoundExpr>> },
-    /// GROUPING(col1, col2, ...) 鈥?returns bitmask indicating which columns are
+    ArraySlice {
+        array: Box<BoundExpr>,
+        lower: Option<Box<BoundExpr>>,
+        upper: Option<Box<BoundExpr>>,
+    },
+    /// GROUPING(col1, col2, ...) — returns bitmask indicating which columns are
     /// super-aggregate NULLs in a GROUPING SETS / CUBE / ROLLUP result.
     /// Each usize is a column index in the source table.
     Grouping(Vec<usize>),
@@ -712,11 +805,11 @@ pub enum BinOp {
     Modulo,
     StringConcat,
     // JSONB operators
-    JsonArrow,       // -> (get object field/array element as jsonb)
-    JsonArrowText,   // ->> (get object field/array element as text)
-    JsonHashArrow,   // #> (get nested path as jsonb)
+    JsonArrow,         // -> (get object field/array element as jsonb)
+    JsonArrowText,     // ->> (get object field/array element as text)
+    JsonHashArrow,     // #> (get nested path as jsonb)
     JsonHashArrowText, // #>> (get nested path as text)
-    JsonContains,    // @> (left contains right)
-    JsonContainedBy, // <@ (left contained by right)
-    JsonExists,      // ? (key exists in jsonb)
+    JsonContains,      // @> (left contains right)
+    JsonContainedBy,   // <@ (left contained by right)
+    JsonExists,        // ? (key exists in jsonb)
 }

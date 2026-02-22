@@ -12,9 +12,9 @@ use falcon_common::datum::OwnedRow;
 use falcon_common::schema::TableSchema;
 use falcon_common::types::{TableId, Timestamp, TxnId};
 
-use falcon_common::error::StorageError;
 use crate::lsm::engine::LsmEngine;
 use crate::memtable::{encode_pk, PrimaryKey};
+use falcon_common::error::StorageError;
 
 /// An LSM-tree backed row store table.
 ///
@@ -49,7 +49,12 @@ impl LsmTable {
     }
 
     /// Update a row identified by its PK.
-    pub fn update(&self, pk: &PrimaryKey, new_row: &OwnedRow, _txn_id: TxnId) -> Result<(), StorageError> {
+    pub fn update(
+        &self,
+        pk: &PrimaryKey,
+        new_row: &OwnedRow,
+        _txn_id: TxnId,
+    ) -> Result<(), StorageError> {
         let value = Self::serialize_row(new_row)?;
         self.engine.put(pk, &value).map_err(StorageError::Io)?;
         Ok(())
@@ -69,10 +74,7 @@ impl LsmTable {
     pub fn scan(&self, _txn_id: TxnId, _read_ts: Timestamp) -> Vec<(PrimaryKey, OwnedRow)> {
         let mut results = Vec::new();
         // Read all entries from the active memtable
-        let entries = {
-            let active = self.engine.active_memtable_snapshot();
-            active
-        };
+        let entries = self.engine.active_memtable_snapshot();
         for (key, value_opt, _seq) in entries {
             if let Some(value) = value_opt {
                 if let Ok(row) = Self::deserialize_row(&value) {
@@ -96,12 +98,10 @@ impl LsmTable {
     // ── Serialization ──
 
     fn serialize_row(row: &OwnedRow) -> Result<Vec<u8>, StorageError> {
-        bincode::serialize(row)
-            .map_err(|e| StorageError::Serialization(e.to_string()))
+        bincode::serialize(row).map_err(|e| StorageError::Serialization(e.to_string()))
     }
 
     fn deserialize_row(bytes: &[u8]) -> Result<OwnedRow, StorageError> {
-        bincode::deserialize(bytes)
-            .map_err(|e| StorageError::Serialization(e.to_string()))
+        bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
     }
 }

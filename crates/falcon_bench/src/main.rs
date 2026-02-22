@@ -144,11 +144,7 @@ struct BenchResult {
     stats: falcon_txn::TxnStatsSnapshot,
 }
 
-fn run_workload(
-    args: &Args,
-    force_all_global: bool,
-    label: &str,
-) -> BenchResult {
+fn run_workload(args: &Args, force_all_global: bool, label: &str) -> BenchResult {
     let storage = Arc::new(StorageEngine::new_in_memory());
     storage.create_table(bench_schema()).unwrap();
 
@@ -257,19 +253,22 @@ fn print_result_text(r: &BenchResult) {
     println!("  Constraint viols:  {}", r.stats.constraint_violations);
     println!("  Degraded→Global:   {}", r.stats.degraded_to_global);
     println!("  ─── Latency (commit, µs) ───");
-    println!("  Fast-path  p50={:>6}  p95={:>6}  p99={:>6}  (n={})",
+    println!(
+        "  Fast-path  p50={:>6}  p95={:>6}  p99={:>6}  (n={})",
         r.stats.latency.fast_path.p50_us,
         r.stats.latency.fast_path.p95_us,
         r.stats.latency.fast_path.p99_us,
         r.stats.latency.fast_path.count,
     );
-    println!("  Slow-path  p50={:>6}  p95={:>6}  p99={:>6}  (n={})",
+    println!(
+        "  Slow-path  p50={:>6}  p95={:>6}  p99={:>6}  (n={})",
         r.stats.latency.slow_path.p50_us,
         r.stats.latency.slow_path.p95_us,
         r.stats.latency.slow_path.p99_us,
         r.stats.latency.slow_path.count,
     );
-    println!("  All        p50={:>6}  p95={:>6}  p99={:>6}  (n={})",
+    println!(
+        "  All        p50={:>6}  p95={:>6}  p99={:>6}  (n={})",
         r.stats.latency.all.p50_us,
         r.stats.latency.all.p95_us,
         r.stats.latency.all.p99_us,
@@ -280,8 +279,12 @@ fn print_result_text(r: &BenchResult) {
 
 fn print_result_csv(r: &BenchResult) {
     println!("label,ops,elapsed_ms,tps,committed,fast,slow,aborted,occ,constraint,fast_p50,fast_p95,fast_p99,slow_p50,slow_p95,slow_p99,all_p50,all_p95,all_p99");
-    println!("{},{},{},{:.1},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
-        r.label, r.ops, r.elapsed_ms, r.tps,
+    println!(
+        "{},{},{},{:.1},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+        r.label,
+        r.ops,
+        r.elapsed_ms,
+        r.tps,
         r.stats.total_committed,
         r.stats.fast_path_commits,
         r.stats.slow_path_commits,
@@ -351,7 +354,10 @@ fn run_scaleout(args: &Args) {
     let isolation = isolation_from_str(&args.isolation);
 
     println!("Running scatter/gather scale-out benchmark...");
-    println!("  ops/round: {}  records: {}\n", ops_per_round, record_count);
+    println!(
+        "  ops/round: {}  records: {}\n",
+        ops_per_round, record_count
+    );
 
     if args.export == "csv" {
         println!("shards,ops,elapsed_ms,tps,scatter_gather_total_us,max_subplan_us,gather_merge_us,rows_total");
@@ -407,12 +413,23 @@ fn run_scaleout(args: &Args) {
                         .map(|(_, r)| r)
                         .collect();
                     Ok((
-                        vec![("ycsb_key".into(), DataType::Int64), ("field0".into(), DataType::Text)],
+                        vec![
+                            ("ycsb_key".into(), DataType::Int64),
+                            ("field0".into(), DataType::Text),
+                        ],
                         filtered,
                     ))
                 });
                 let ((_, rows), metrics) = exec
-                    .scatter_gather(&subplan, &all_shards, &GatherStrategy::Union { distinct: false, limit: None, offset: None })
+                    .scatter_gather(
+                        &subplan,
+                        &all_shards,
+                        &GatherStrategy::Union {
+                            distinct: false,
+                            limit: None,
+                            offset: None,
+                        },
+                    )
                     .unwrap();
                 total_rows += rows.len();
                 total_sg_us += metrics.total_latency_us;
@@ -503,8 +520,14 @@ fn run_scaleout(args: &Args) {
             "csv" => {
                 println!(
                     "{},{},{},{:.1},{},{},{},{}",
-                    n_shards, ops_per_round, elapsed_ms, tps,
-                    total_sg_us, max_sub_us, gather_us, total_rows,
+                    n_shards,
+                    ops_per_round,
+                    elapsed_ms,
+                    tps,
+                    total_sg_us,
+                    max_sub_us,
+                    gather_us,
+                    total_rows,
                 );
             }
             "json" => {
@@ -557,12 +580,25 @@ fn run_failover_bench(args: &Args) {
         ]);
         let txn_id = TxnId(i + 1);
         let ts = Timestamp((i + 1) * 10);
-        group.primary.storage.insert(table_id, row.clone(), txn_id).unwrap();
-        group.primary.storage
+        group
+            .primary
+            .storage
+            .insert(table_id, row.clone(), txn_id)
+            .unwrap();
+        group
+            .primary
+            .storage
             .commit_txn(txn_id, ts, TxnType::Local)
             .unwrap();
-        group.ship_wal_record(WalRecord::Insert { txn_id, table_id, row });
-        group.ship_wal_record(WalRecord::CommitTxnLocal { txn_id, commit_ts: ts });
+        group.ship_wal_record(WalRecord::Insert {
+            txn_id,
+            table_id,
+            row,
+        });
+        group.ship_wal_record(WalRecord::CommitTxnLocal {
+            txn_id,
+            commit_ts: ts,
+        });
     }
     group.catch_up_replica(0).unwrap();
 
@@ -584,7 +620,9 @@ fn run_failover_bench(args: &Args) {
     let elapsed_before_ms = start_before.elapsed().as_millis() as u64;
     let tps_before = if elapsed_before_ms > 0 {
         ops_half as f64 / (elapsed_before_ms as f64 / 1000.0)
-    } else { 0.0 };
+    } else {
+        0.0
+    };
 
     // Phase 2: Failover
     let failover_start = Instant::now();
@@ -607,13 +645,17 @@ fn run_failover_bench(args: &Args) {
     let elapsed_after_ms = start_after.elapsed().as_millis() as u64;
     let tps_after = if elapsed_after_ms > 0 {
         ops_half as f64 / (elapsed_after_ms as f64 / 1000.0)
-    } else { 0.0 };
+    } else {
+        0.0
+    };
 
     // Compute percentiles
     fn percentiles(v: &mut [u64]) -> (u64, u64, u64) {
         v.sort();
         let len = v.len();
-        if len == 0 { return (0, 0, 0); }
+        if len == 0 {
+            return (0, 0, 0);
+        }
         let p50 = v[len * 50 / 100];
         let p95 = v[len * 95 / 100];
         let p99 = v[len.saturating_sub(1).min(len * 99 / 100)];
@@ -624,15 +666,28 @@ fn run_failover_bench(args: &Args) {
     let (ap50, ap95, ap99) = percentiles(&mut latencies_after);
 
     // Verify data integrity
-    let rows = group.primary.storage.scan(table_id, TxnId(999999), Timestamp(u64::MAX - 2)).unwrap();
+    let rows = group
+        .primary
+        .storage
+        .scan(table_id, TxnId(999999), Timestamp(u64::MAX - 2))
+        .unwrap();
     let data_intact = rows.len() == record_count as usize;
 
     match args.export.as_str() {
         "csv" => {
             println!("phase,ops,elapsed_ms,tps,p50_ns,p95_ns,p99_ns,failover_ms,data_intact");
-            println!("before,{},{},{:.1},{},{},{},0,true", ops_half, elapsed_before_ms, tps_before, bp50, bp95, bp99);
-            println!("failover,0,{},0,0,0,0,{},{}", failover_ms, failover_ms, data_intact);
-            println!("after,{},{},{:.1},{},{},{},0,{}", ops_half, elapsed_after_ms, tps_after, ap50, ap95, ap99, data_intact);
+            println!(
+                "before,{},{},{:.1},{},{},{},0,true",
+                ops_half, elapsed_before_ms, tps_before, bp50, bp95, bp99
+            );
+            println!(
+                "failover,0,{},0,0,0,0,{},{}",
+                failover_ms, failover_ms, data_intact
+            );
+            println!(
+                "after,{},{},{:.1},{},{},{},0,{}",
+                ops_half, elapsed_after_ms, tps_after, ap50, ap95, ap99, data_intact
+            );
         }
         "json" => {
             let obj = serde_json::json!({
@@ -658,7 +713,11 @@ fn run_failover_bench(args: &Args) {
             println!("  Ops:     {}  TPS: {:.1}", ops_half, tps_after);
             println!("  Latency: p50={}ns  p95={}ns  p99={}ns", ap50, ap95, ap99);
             println!("  ─── Data Integrity ───");
-            println!("  Rows after failover: {} (expected {})", rows.len(), record_count);
+            println!(
+                "  Rows after failover: {} (expected {})",
+                rows.len(),
+                record_count
+            );
             println!("  Data intact:         {}", data_intact);
             println!();
         }
@@ -673,9 +732,33 @@ fn tpcb_schema() -> Vec<TableSchema> {
             id: TableId(10),
             name: "pgbench_accounts".into(),
             columns: vec![
-                ColumnDef { id: ColumnId(0), name: "aid".into(), data_type: DataType::Int64, nullable: false, is_primary_key: true, default_value: None, is_serial: false },
-                ColumnDef { id: ColumnId(1), name: "bid".into(), data_type: DataType::Int64, nullable: false, is_primary_key: false, default_value: None, is_serial: false },
-                ColumnDef { id: ColumnId(2), name: "abalance".into(), data_type: DataType::Int64, nullable: false, is_primary_key: false, default_value: None, is_serial: false },
+                ColumnDef {
+                    id: ColumnId(0),
+                    name: "aid".into(),
+                    data_type: DataType::Int64,
+                    nullable: false,
+                    is_primary_key: true,
+                    default_value: None,
+                    is_serial: false,
+                },
+                ColumnDef {
+                    id: ColumnId(1),
+                    name: "bid".into(),
+                    data_type: DataType::Int64,
+                    nullable: false,
+                    is_primary_key: false,
+                    default_value: None,
+                    is_serial: false,
+                },
+                ColumnDef {
+                    id: ColumnId(2),
+                    name: "abalance".into(),
+                    data_type: DataType::Int64,
+                    nullable: false,
+                    is_primary_key: false,
+                    default_value: None,
+                    is_serial: false,
+                },
             ],
             primary_key_columns: vec![0],
             ..Default::default()
@@ -684,9 +767,33 @@ fn tpcb_schema() -> Vec<TableSchema> {
             id: TableId(11),
             name: "pgbench_tellers".into(),
             columns: vec![
-                ColumnDef { id: ColumnId(0), name: "tid".into(), data_type: DataType::Int64, nullable: false, is_primary_key: true, default_value: None, is_serial: false },
-                ColumnDef { id: ColumnId(1), name: "bid".into(), data_type: DataType::Int64, nullable: false, is_primary_key: false, default_value: None, is_serial: false },
-                ColumnDef { id: ColumnId(2), name: "tbalance".into(), data_type: DataType::Int64, nullable: false, is_primary_key: false, default_value: None, is_serial: false },
+                ColumnDef {
+                    id: ColumnId(0),
+                    name: "tid".into(),
+                    data_type: DataType::Int64,
+                    nullable: false,
+                    is_primary_key: true,
+                    default_value: None,
+                    is_serial: false,
+                },
+                ColumnDef {
+                    id: ColumnId(1),
+                    name: "bid".into(),
+                    data_type: DataType::Int64,
+                    nullable: false,
+                    is_primary_key: false,
+                    default_value: None,
+                    is_serial: false,
+                },
+                ColumnDef {
+                    id: ColumnId(2),
+                    name: "tbalance".into(),
+                    data_type: DataType::Int64,
+                    nullable: false,
+                    is_primary_key: false,
+                    default_value: None,
+                    is_serial: false,
+                },
             ],
             primary_key_columns: vec![0],
             ..Default::default()
@@ -695,8 +802,24 @@ fn tpcb_schema() -> Vec<TableSchema> {
             id: TableId(12),
             name: "pgbench_branches".into(),
             columns: vec![
-                ColumnDef { id: ColumnId(0), name: "bid".into(), data_type: DataType::Int64, nullable: false, is_primary_key: true, default_value: None, is_serial: false },
-                ColumnDef { id: ColumnId(1), name: "bbalance".into(), data_type: DataType::Int64, nullable: false, is_primary_key: false, default_value: None, is_serial: false },
+                ColumnDef {
+                    id: ColumnId(0),
+                    name: "bid".into(),
+                    data_type: DataType::Int64,
+                    nullable: false,
+                    is_primary_key: true,
+                    default_value: None,
+                    is_serial: false,
+                },
+                ColumnDef {
+                    id: ColumnId(1),
+                    name: "bbalance".into(),
+                    data_type: DataType::Int64,
+                    nullable: false,
+                    is_primary_key: false,
+                    default_value: None,
+                    is_serial: false,
+                },
             ],
             primary_key_columns: vec![0],
             ..Default::default()
@@ -721,19 +844,45 @@ fn run_tpcb(args: &Args) {
     // Load: branches
     for i in 0..n_branches {
         let txn = mgr.begin(isolation);
-        storage.insert(TableId(12), OwnedRow::new(vec![Datum::Int64(i as i64), Datum::Int64(0)]), txn.txn_id).unwrap();
+        storage
+            .insert(
+                TableId(12),
+                OwnedRow::new(vec![Datum::Int64(i as i64), Datum::Int64(0)]),
+                txn.txn_id,
+            )
+            .unwrap();
         mgr.commit(txn.txn_id).unwrap();
     }
     // Load: tellers
     for i in 0..n_tellers {
         let txn = mgr.begin(isolation);
-        storage.insert(TableId(11), OwnedRow::new(vec![Datum::Int64(i as i64), Datum::Int64((i % n_branches) as i64), Datum::Int64(0)]), txn.txn_id).unwrap();
+        storage
+            .insert(
+                TableId(11),
+                OwnedRow::new(vec![
+                    Datum::Int64(i as i64),
+                    Datum::Int64((i % n_branches) as i64),
+                    Datum::Int64(0),
+                ]),
+                txn.txn_id,
+            )
+            .unwrap();
         mgr.commit(txn.txn_id).unwrap();
     }
     // Load: accounts
     for i in 0..n_accounts {
         let txn = mgr.begin(isolation);
-        storage.insert(TableId(10), OwnedRow::new(vec![Datum::Int64(i as i64), Datum::Int64((i % n_branches) as i64), Datum::Int64(0)]), txn.txn_id).unwrap();
+        storage
+            .insert(
+                TableId(10),
+                OwnedRow::new(vec![
+                    Datum::Int64(i as i64),
+                    Datum::Int64((i % n_branches) as i64),
+                    Datum::Int64(0),
+                ]),
+                txn.txn_id,
+            )
+            .unwrap();
         mgr.commit(txn.txn_id).unwrap();
     }
 
@@ -760,8 +909,15 @@ fn run_tpcb(args: &Args) {
         for (pk, row) in &rows {
             if let Some(Datum::Int64(k)) = row.values.first() {
                 if *k == aid {
-                    let old_bal = match row.values.get(2) { Some(Datum::Int64(b)) => *b, _ => 0 };
-                    let new_row = OwnedRow::new(vec![Datum::Int64(aid), Datum::Int64(bid), Datum::Int64(old_bal + delta)]);
+                    let old_bal = match row.values.get(2) {
+                        Some(Datum::Int64(b)) => *b,
+                        _ => 0,
+                    };
+                    let new_row = OwnedRow::new(vec![
+                        Datum::Int64(aid),
+                        Datum::Int64(bid),
+                        Datum::Int64(old_bal + delta),
+                    ]);
                     let _ = storage.update(TableId(10), pk, new_row, txn.txn_id);
                     break;
                 }
@@ -777,13 +933,29 @@ fn run_tpcb(args: &Args) {
 
     let elapsed = start.elapsed();
     let elapsed_ms = elapsed.as_millis() as u64;
-    let tps = if elapsed_ms > 0 { args.ops as f64 / (elapsed_ms as f64 / 1000.0) } else { 0.0 };
+    let tps = if elapsed_ms > 0 {
+        args.ops as f64 / (elapsed_ms as f64 / 1000.0)
+    } else {
+        0.0
+    };
 
     latencies_us.sort();
     let len = latencies_us.len();
-    let p50 = if len > 0 { latencies_us[len * 50 / 100] } else { 0 };
-    let p95 = if len > 0 { latencies_us[len * 95 / 100] } else { 0 };
-    let p99 = if len > 0 { latencies_us[len.saturating_sub(1).min(len * 99 / 100)] } else { 0 };
+    let p50 = if len > 0 {
+        latencies_us[len * 50 / 100]
+    } else {
+        0
+    };
+    let p95 = if len > 0 {
+        latencies_us[len * 95 / 100]
+    } else {
+        0
+    };
+    let p99 = if len > 0 {
+        latencies_us[len.saturating_sub(1).min(len * 99 / 100)]
+    } else {
+        0
+    };
     let max = latencies_us.last().copied().unwrap_or(0);
 
     let stats = mgr.stats_snapshot();
@@ -805,8 +977,20 @@ fn run_tpcb(args: &Args) {
         }
         "csv" => {
             println!("workload,scale,ops,elapsed_ms,tps,committed,aborted,p50_us,p95_us,p99_us,max_us,backpressure");
-            println!("tpcb,{},{},{},{:.1},{},{},{},{},{},{},{}",
-                scale, args.ops, elapsed_ms, tps, committed, aborted, p50, p95, p99, max, stats.admission_rejections);
+            println!(
+                "tpcb,{},{},{},{:.1},{},{},{},{},{},{},{}",
+                scale,
+                args.ops,
+                elapsed_ms,
+                tps,
+                committed,
+                aborted,
+                p50,
+                p95,
+                p99,
+                max,
+                stats.admission_rejections
+            );
         }
         _ => {
             println!("═══════════════════════════════════════════════");
@@ -834,8 +1018,8 @@ fn run_tpcb(args: &Args) {
 // ── LSM disk-backed KV benchmark ────────────────────────────────────────
 
 fn run_lsm_bench(args: &Args) {
-    use falcon_storage::lsm::{LsmEngine, LsmConfig};
     use falcon_storage::lsm::compaction::CompactionConfig;
+    use falcon_storage::lsm::{LsmConfig, LsmEngine};
 
     let dir = std::env::temp_dir().join(format!("falcon_lsm_bench_{}", std::process::id()));
     let config = LsmConfig {
@@ -890,13 +1074,29 @@ fn run_lsm_bench(args: &Args) {
     }
     let elapsed = start.elapsed();
     let elapsed_ms = elapsed.as_millis() as u64;
-    let tps = if elapsed_ms > 0 { ops as f64 / (elapsed_ms as f64 / 1000.0) } else { 0.0 };
+    let tps = if elapsed_ms > 0 {
+        ops as f64 / (elapsed_ms as f64 / 1000.0)
+    } else {
+        0.0
+    };
 
     latencies_us.sort();
     let len = latencies_us.len();
-    let p50 = if len > 0 { latencies_us[len * 50 / 100] } else { 0 };
-    let p95 = if len > 0 { latencies_us[len * 95 / 100] } else { 0 };
-    let p99 = if len > 0 { latencies_us[len.saturating_sub(1).min(len * 99 / 100)] } else { 0 };
+    let p50 = if len > 0 {
+        latencies_us[len * 50 / 100]
+    } else {
+        0
+    };
+    let p95 = if len > 0 {
+        latencies_us[len * 95 / 100]
+    } else {
+        0
+    };
+    let p99 = if len > 0 {
+        latencies_us[len.saturating_sub(1).min(len * 99 / 100)]
+    } else {
+        0
+    };
     let max = latencies_us.last().copied().unwrap_or(0);
 
     let stats = engine.stats();
@@ -929,9 +1129,23 @@ fn run_lsm_bench(args: &Args) {
         }
         "csv" => {
             println!("workload,records,ops,elapsed_ms,tps,reads,writes,stalls,p50_us,p95_us,p99_us,max_us,flushes,compactions,cache_hit_rate");
-            println!("lsm_kv,{},{},{},{:.1},{},{},{},{},{},{},{},{},{},{:.4}",
-                n, ops, elapsed_ms, tps, reads, writes, stalls, p50, p95, p99, max,
-                stats.flushes_completed, stats.compaction.runs_completed, stats.block_cache.hit_rate);
+            println!(
+                "lsm_kv,{},{},{},{:.1},{},{},{},{},{},{},{},{},{},{:.4}",
+                n,
+                ops,
+                elapsed_ms,
+                tps,
+                reads,
+                writes,
+                stalls,
+                p50,
+                p95,
+                p99,
+                max,
+                stats.flushes_completed,
+                stats.compaction.runs_completed,
+                stats.block_cache.hit_rate
+            );
         }
         _ => {
             println!("═══════════════════════════════════════════════");
@@ -955,7 +1169,10 @@ fn run_lsm_bench(args: &Args) {
             println!("  Total SST files:   {}", stats.total_sst_files);
             println!("  Total SST bytes:   {}", stats.total_sst_bytes);
             println!("  Compaction runs:   {}", stats.compaction.runs_completed);
-            println!("  Block cache hit:   {:.2}%", stats.block_cache.hit_rate * 100.0);
+            println!(
+                "  Block cache hit:   {:.2}%",
+                stats.block_cache.hit_rate * 100.0
+            );
             println!();
         }
     }

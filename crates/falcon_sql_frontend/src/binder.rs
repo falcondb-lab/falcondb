@@ -37,7 +37,13 @@ pub struct Binder {
 
 impl Binder {
     pub fn new(catalog: Catalog) -> Self {
-        let next_id = catalog.tables_map().values().map(|t| t.id.0).max().unwrap_or(0) + 1;
+        let next_id = catalog
+            .tables_map()
+            .values()
+            .map(|t| t.id.0)
+            .max()
+            .unwrap_or(0)
+            + 1;
         Self {
             catalog,
             next_table_id: next_id,
@@ -86,7 +92,9 @@ impl Binder {
         });
         let bound = self.bind(stmt);
         let env = self.param_env.borrow_mut().take().ok_or_else(|| {
-            SqlError::InternalInvariant("param_env was not set before bind_with_params_lenient".into())
+            SqlError::InternalInvariant(
+                "param_env was not set before bind_with_params_lenient".into(),
+            )
         })?;
         let bound = bound?;
         let types = env.types().to_vec();
@@ -96,59 +104,66 @@ impl Binder {
     pub fn bind(&mut self, stmt: &Statement) -> Result<BoundStatement, SqlError> {
         match stmt {
             Statement::CreateTable(create) => self.bind_create_table(create),
-            Statement::Drop { object_type, names, if_exists, .. } => {
-                match object_type {
-                    ast::ObjectType::Table => {
-                        let name = names
-                            .first()
-                            .ok_or_else(|| SqlError::Parse("DROP TABLE requires a name".into()))?;
-                        Ok(BoundStatement::DropTable(BoundDropTable {
-                            table_name: name.to_string(),
-                            if_exists: *if_exists,
-                        }))
-                    }
-                    ast::ObjectType::Index => {
-                        let name = names
-                            .first()
-                            .ok_or_else(|| SqlError::Parse("DROP INDEX requires a name".into()))?;
-                        Ok(BoundStatement::DropIndex {
-                            index_name: name.to_string(),
-                        })
-                    }
-                    ast::ObjectType::View => {
-                        let name = names
-                            .first()
-                            .ok_or_else(|| SqlError::Parse("DROP VIEW requires a name".into()))?;
-                        Ok(BoundStatement::DropView {
-                            name: name.to_string(),
-                            if_exists: *if_exists,
-                        })
-                    }
-                    ast::ObjectType::Sequence => {
-                        let name = names
-                            .first()
-                            .ok_or_else(|| SqlError::Parse("DROP SEQUENCE requires a name".into()))?;
-                        Ok(BoundStatement::DropSequence {
-                            name: name.to_string(),
-                            if_exists: *if_exists,
-                        })
-                    }
-                    _ => Err(SqlError::Unsupported(format!(
-                        "DROP {:?}",
-                        object_type
-                    ))),
+            Statement::Drop {
+                object_type,
+                names,
+                if_exists,
+                ..
+            } => match object_type {
+                ast::ObjectType::Table => {
+                    let name = names
+                        .first()
+                        .ok_or_else(|| SqlError::Parse("DROP TABLE requires a name".into()))?;
+                    Ok(BoundStatement::DropTable(BoundDropTable {
+                        table_name: name.to_string(),
+                        if_exists: *if_exists,
+                    }))
                 }
-            }
-            Statement::AlterTable { operations, name, .. } => {
-                self.bind_alter_table(name, operations)
-            }
+                ast::ObjectType::Index => {
+                    let name = names
+                        .first()
+                        .ok_or_else(|| SqlError::Parse("DROP INDEX requires a name".into()))?;
+                    Ok(BoundStatement::DropIndex {
+                        index_name: name.to_string(),
+                    })
+                }
+                ast::ObjectType::View => {
+                    let name = names
+                        .first()
+                        .ok_or_else(|| SqlError::Parse("DROP VIEW requires a name".into()))?;
+                    Ok(BoundStatement::DropView {
+                        name: name.to_string(),
+                        if_exists: *if_exists,
+                    })
+                }
+                ast::ObjectType::Sequence => {
+                    let name = names
+                        .first()
+                        .ok_or_else(|| SqlError::Parse("DROP SEQUENCE requires a name".into()))?;
+                    Ok(BoundStatement::DropSequence {
+                        name: name.to_string(),
+                        if_exists: *if_exists,
+                    })
+                }
+                _ => Err(SqlError::Unsupported(format!("DROP {:?}", object_type))),
+            },
+            Statement::AlterTable {
+                operations, name, ..
+            } => self.bind_alter_table(name, operations),
             Statement::Insert(insert) => self.bind_insert(insert),
-            Statement::Update { table, assignments, selection, returning, from, .. } => {
-                self.bind_update(table, assignments, selection, returning, from)
-            }
+            Statement::Update {
+                table,
+                assignments,
+                selection,
+                returning,
+                from,
+                ..
+            } => self.bind_update(table, assignments, selection, returning, from),
             Statement::Delete(delete) => self.bind_delete(delete),
             Statement::Query(query) => self.bind_select(query),
-            Statement::Explain { statement, analyze, .. } => {
+            Statement::Explain {
+                statement, analyze, ..
+            } => {
                 let inner = self.bind(statement)?;
                 if *analyze {
                     Ok(BoundStatement::ExplainAnalyze(Box::new(inner)))
@@ -156,9 +171,9 @@ impl Binder {
                     Ok(BoundStatement::Explain(Box::new(inner)))
                 }
             }
-            Statement::Truncate { table_name, .. } => {
-                Ok(BoundStatement::Truncate { table_name: table_name.to_string() })
-            }
+            Statement::Truncate { table_name, .. } => Ok(BoundStatement::Truncate {
+                table_name: table_name.to_string(),
+            }),
             Statement::CreateIndex(create_idx) => {
                 let table_name = create_idx.table_name.to_string();
                 let schema = self
@@ -177,7 +192,17 @@ impl Binder {
                     .name
                     .as_ref()
                     .map(|n| n.to_string())
-                    .unwrap_or_else(|| format!("idx_{}_{}", table_name, column_indices.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("_")));
+                    .unwrap_or_else(|| {
+                        format!(
+                            "idx_{}_{}",
+                            table_name,
+                            column_indices
+                                .iter()
+                                .map(|i| i.to_string())
+                                .collect::<Vec<_>>()
+                                .join("_")
+                        )
+                    });
                 Ok(BoundStatement::CreateIndex {
                     index_name,
                     table_name,
@@ -203,7 +228,12 @@ impl Binder {
                 let name = table_name.to_string();
                 Ok(BoundStatement::Analyze { table_name: name })
             }
-            Statement::CreateView { name, query, or_replace, .. } => {
+            Statement::CreateView {
+                name,
+                query,
+                or_replace,
+                ..
+            } => {
                 let view_name = name.to_string();
                 let query_sql = format!("{}", query);
                 Ok(BoundStatement::CreateView {
@@ -212,18 +242,39 @@ impl Binder {
                     or_replace: *or_replace,
                 })
             }
-            Statement::CreateSequence { name, sequence_options, .. } => {
+            Statement::CreateSequence {
+                name,
+                sequence_options,
+                ..
+            } => {
                 let seq_name = name.to_string().to_lowercase();
-                let start = sequence_options.iter().find_map(|opt| {
-                    if let ast::SequenceOptions::StartWith(Expr::Value(Value::Number(n, _)), _) = opt {
-                        n.parse::<i64>().ok()
-                    } else { None }
-                }).unwrap_or(1);
-                Ok(BoundStatement::CreateSequence { name: seq_name, start })
+                let start = sequence_options
+                    .iter()
+                    .find_map(|opt| {
+                        if let ast::SequenceOptions::StartWith(
+                            Expr::Value(Value::Number(n, _)),
+                            _,
+                        ) = opt
+                        {
+                            n.parse::<i64>().ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(1);
+                Ok(BoundStatement::CreateSequence {
+                    name: seq_name,
+                    start,
+                })
             }
-            Statement::Copy { source, to, target, options, legacy_options, .. } => {
-                self.bind_copy(source, *to, target, options, legacy_options)
-            }
+            Statement::Copy {
+                source,
+                to,
+                target,
+                options,
+                legacy_options,
+                ..
+            } => self.bind_copy(source, *to, target, options, legacy_options),
             _ => Err(SqlError::Unsupported(format!(
                 "Statement type: {:?}",
                 std::mem::discriminant(stmt)
@@ -249,7 +300,10 @@ impl Binder {
             }
             ast::CopyTarget::Stdin | ast::CopyTarget::Stdout => {}
             ast::CopyTarget::File { filename } => {
-                return Err(SqlError::Unsupported(format!("COPY to/from file '{}'", filename)));
+                return Err(SqlError::Unsupported(format!(
+                    "COPY to/from file '{}'",
+                    filename
+                )));
             }
             ast::CopyTarget::Program { command } => {
                 return Err(SqlError::Unsupported(format!("COPY PROGRAM '{}'", command)));
@@ -259,7 +313,9 @@ impl Binder {
         // Handle COPY (query) TO STDOUT
         if let ast::CopySource::Query(query) = source {
             if !to {
-                return Err(SqlError::Unsupported("COPY (query) FROM is not supported".into()));
+                return Err(SqlError::Unsupported(
+                    "COPY (query) FROM is not supported".into(),
+                ));
             }
             let bound_query = self.bind_select_query(query)?;
 
@@ -275,8 +331,14 @@ impl Binder {
                     ast::CopyOption::Format(ident) => {
                         let fmt = ident.value.to_lowercase();
                         match fmt.as_str() {
-                            "csv" => { csv = true; delimiter = ','; }
-                            "text" => { csv = false; delimiter = '\t'; }
+                            "csv" => {
+                                csv = true;
+                                delimiter = ',';
+                            }
+                            "text" => {
+                                csv = false;
+                                delimiter = '\t';
+                            }
                             _ => return Err(SqlError::Unsupported(format!("COPY FORMAT {}", fmt))),
                         }
                     }
@@ -301,13 +363,15 @@ impl Binder {
 
         // Resolve table and columns
         let (table_name, col_idents) = match source {
-            ast::CopySource::Table { table_name, columns } => {
-                (table_name.to_string(), columns.clone())
-            }
+            ast::CopySource::Table {
+                table_name,
+                columns,
+            } => (table_name.to_string(), columns.clone()),
             ast::CopySource::Query(_) => unreachable!(),
         };
 
-        let schema = self.catalog
+        let schema = self
+            .catalog
             .find_table(&table_name)
             .ok_or_else(|| SqlError::UnknownTable(table_name.clone()))?;
         let table_id = schema.id;
@@ -316,11 +380,15 @@ impl Binder {
         let columns: Vec<usize> = if col_idents.is_empty() {
             (0..schema.columns.len()).collect()
         } else {
-            col_idents.iter().map(|ident| {
-                let col_name = ident.value.to_lowercase();
-                schema.find_column(&col_name)
-                    .ok_or(SqlError::UnknownColumn(col_name))
-            }).collect::<Result<Vec<_>, _>>()?
+            col_idents
+                .iter()
+                .map(|ident| {
+                    let col_name = ident.value.to_lowercase();
+                    schema
+                        .find_column(&col_name)
+                        .ok_or(SqlError::UnknownColumn(col_name))
+                })
+                .collect::<Result<Vec<_>, _>>()?
         };
 
         // Parse format options
@@ -336,8 +404,14 @@ impl Binder {
                 ast::CopyOption::Format(ident) => {
                     let fmt = ident.value.to_lowercase();
                     match fmt.as_str() {
-                        "csv" => { csv = true; delimiter = ','; }
-                        "text" => { csv = false; delimiter = '\t'; }
+                        "csv" => {
+                            csv = true;
+                            delimiter = ',';
+                        }
+                        "text" => {
+                            csv = false;
+                            delimiter = '\t';
+                        }
                         _ => return Err(SqlError::Unsupported(format!("COPY FORMAT {}", fmt))),
                     }
                 }
@@ -357,7 +431,9 @@ impl Binder {
                 ast::CopyLegacyOption::Null(s) => null_string = s.clone(),
                 ast::CopyLegacyOption::Csv(csv_opts) => {
                     csv = true;
-                    if delimiter == '\t' { delimiter = ','; }
+                    if delimiter == '\t' {
+                        delimiter = ',';
+                    }
                     for csv_opt in csv_opts {
                         match csv_opt {
                             ast::CopyLegacyCsvOption::Header => header = true,
@@ -373,21 +449,32 @@ impl Binder {
 
         if to {
             Ok(BoundStatement::CopyTo {
-                table_id, schema: schema.clone(), columns,
-                csv, delimiter, header, null_string, quote, escape,
+                table_id,
+                schema: schema.clone(),
+                columns,
+                csv,
+                delimiter,
+                header,
+                null_string,
+                quote,
+                escape,
             })
         } else {
             Ok(BoundStatement::CopyFrom {
-                table_id, schema: schema.clone(), columns,
-                csv, delimiter, header, null_string, quote, escape,
+                table_id,
+                schema: schema.clone(),
+                columns,
+                csv,
+                delimiter,
+                header,
+                null_string,
+                quote,
+                escape,
             })
         }
     }
 
-    fn bind_create_table(
-        &mut self,
-        create: &ast::CreateTable,
-    ) -> Result<BoundStatement, SqlError> {
+    fn bind_create_table(&mut self, create: &ast::CreateTable) -> Result<BoundStatement, SqlError> {
         let table_name = create.name.to_string();
         let mut columns = Vec::new();
         let mut pk_columns = Vec::new();
@@ -398,7 +485,9 @@ impl Binder {
                 ast::DataType::Custom(name, _) if name.to_string().to_lowercase() == "serial" => {
                     (DataType::Int32, true)
                 }
-                ast::DataType::Custom(name, _) if name.to_string().to_lowercase() == "bigserial" => {
+                ast::DataType::Custom(name, _)
+                    if name.to_string().to_lowercase() == "bigserial" =>
+                {
                     (DataType::Int64, true)
                 }
                 other => (self.resolve_data_type(other)?, false),
@@ -448,10 +537,15 @@ impl Binder {
         let mut unique_constraints: Vec<Vec<usize>> = Vec::new();
         for constraint in &create.constraints {
             match constraint {
-                ast::TableConstraint::PrimaryKey { columns: pk_cols, .. } => {
+                ast::TableConstraint::PrimaryKey {
+                    columns: pk_cols, ..
+                } => {
                     for pk_col in pk_cols {
                         let col_name = pk_col.value.to_lowercase();
-                        if let Some(idx) = columns.iter().position(|c| c.name.to_lowercase() == col_name) {
+                        if let Some(idx) = columns
+                            .iter()
+                            .position(|c| c.name.to_lowercase() == col_name)
+                        {
                             if !pk_columns.contains(&idx) {
                                 pk_columns.push(idx);
                                 columns[idx].is_primary_key = true;
@@ -465,11 +559,16 @@ impl Binder {
                 ast::TableConstraint::Check { expr, .. } => {
                     check_constraints.push(format!("{}", expr));
                 }
-                ast::TableConstraint::Unique { columns: uniq_cols, .. } => {
+                ast::TableConstraint::Unique {
+                    columns: uniq_cols, ..
+                } => {
                     let mut indices = Vec::new();
                     for uc in uniq_cols {
                         let col_name = uc.value.to_lowercase();
-                        if let Some(idx) = columns.iter().position(|c| c.name.to_lowercase() == col_name) {
+                        if let Some(idx) = columns
+                            .iter()
+                            .position(|c| c.name.to_lowercase() == col_name)
+                        {
                             indices.push(idx);
                         } else {
                             return Err(SqlError::UnknownColumn(uc.value.clone()));
@@ -492,8 +591,15 @@ impl Binder {
                     ast::ColumnOption::Unique { is_primary, .. } if !*is_primary => {
                         unique_constraints.push(vec![i]);
                     }
-                    ast::ColumnOption::ForeignKey { foreign_table, referred_columns, on_delete, on_update, .. } => {
-                        let ref_cols: Vec<String> = referred_columns.iter().map(|c| c.value.clone()).collect();
+                    ast::ColumnOption::ForeignKey {
+                        foreign_table,
+                        referred_columns,
+                        on_delete,
+                        on_update,
+                        ..
+                    } => {
+                        let ref_cols: Vec<String> =
+                            referred_columns.iter().map(|c| c.value.clone()).collect();
                         foreign_keys.push(falcon_common::schema::ForeignKey {
                             columns: vec![i],
                             ref_table: foreign_table.to_string(),
@@ -509,17 +615,29 @@ impl Binder {
 
         // Also collect table-level FOREIGN KEY constraints
         for constraint in &create.constraints {
-            if let ast::TableConstraint::ForeignKey { columns: fk_cols, foreign_table, referred_columns, on_delete, on_update, .. } = constraint {
+            if let ast::TableConstraint::ForeignKey {
+                columns: fk_cols,
+                foreign_table,
+                referred_columns,
+                on_delete,
+                on_update,
+                ..
+            } = constraint
+            {
                 let mut local_indices = Vec::new();
                 for fk_col in fk_cols {
                     let col_name = fk_col.value.to_lowercase();
-                    if let Some(idx) = columns.iter().position(|c| c.name.to_lowercase() == col_name) {
+                    if let Some(idx) = columns
+                        .iter()
+                        .position(|c| c.name.to_lowercase() == col_name)
+                    {
                         local_indices.push(idx);
                     } else {
                         return Err(SqlError::UnknownColumn(fk_col.value.clone()));
                     }
                 }
-                let ref_cols: Vec<String> = referred_columns.iter().map(|c| c.value.clone()).collect();
+                let ref_cols: Vec<String> =
+                    referred_columns.iter().map(|c| c.value.clone()).collect();
                 foreign_keys.push(falcon_common::schema::ForeignKey {
                     columns: local_indices,
                     ref_table: foreign_table.to_string(),
@@ -543,8 +661,12 @@ impl Binder {
         let storage_type = if let Some(ref engine) = create.engine {
             match engine.name.to_lowercase().as_str() {
                 "columnstore" => falcon_common::schema::StorageType::Columnstore,
-                "disk" | "disk_rowstore" | "diskrowstore" => falcon_common::schema::StorageType::DiskRowstore,
-                "lsm" | "lsm_rowstore" | "lsmrowstore" => falcon_common::schema::StorageType::LsmRowstore,
+                "disk" | "disk_rowstore" | "diskrowstore" => {
+                    falcon_common::schema::StorageType::DiskRowstore
+                }
+                "lsm" | "lsm_rowstore" | "lsmrowstore" => {
+                    falcon_common::schema::StorageType::LsmRowstore
+                }
                 "rowstore" | "memory" => falcon_common::schema::StorageType::Rowstore,
                 _ => falcon_common::schema::StorageType::Rowstore,
             }
@@ -569,8 +691,13 @@ impl Binder {
                     };
                     for part in val.split(',') {
                         let col_name = part.trim().to_lowercase();
-                        if col_name.is_empty() { continue; }
-                        if let Some(idx) = columns.iter().position(|c| c.name.to_lowercase() == col_name) {
+                        if col_name.is_empty() {
+                            continue;
+                        }
+                        if let Some(idx) = columns
+                            .iter()
+                            .position(|c| c.name.to_lowercase() == col_name)
+                        {
                             if !shard_key_cols.contains(&idx) {
                                 shard_key_cols.push(idx);
                             }
@@ -590,7 +717,9 @@ impl Binder {
                     };
                     sharding_policy = match val.as_str() {
                         "hash" => falcon_common::schema::ShardingPolicy::Hash,
-                        "reference" | "replicated" => falcon_common::schema::ShardingPolicy::Reference,
+                        "reference" | "replicated" => {
+                            falcon_common::schema::ShardingPolicy::Reference
+                        }
                         "none" => falcon_common::schema::ShardingPolicy::None,
                         _ => falcon_common::schema::ShardingPolicy::None,
                     };
@@ -600,7 +729,9 @@ impl Binder {
         }
 
         // If sharding=hash but no explicit shard_key, default to PK
-        if sharding_policy == falcon_common::schema::ShardingPolicy::Hash && shard_key_cols.is_empty() {
+        if sharding_policy == falcon_common::schema::ShardingPolicy::Hash
+            && shard_key_cols.is_empty()
+        {
             shard_key_cols = pk_columns.clone();
         }
 
@@ -618,7 +749,10 @@ impl Binder {
             sharding_policy,
         };
 
-        Ok(BoundStatement::CreateTable(BoundCreateTable { schema, if_not_exists: create.if_not_exists }))
+        Ok(BoundStatement::CreateTable(BoundCreateTable {
+            schema,
+            if_not_exists: create.if_not_exists,
+        }))
     }
 
     fn bind_alter_table(
@@ -634,7 +768,9 @@ impl Binder {
             .ok_or_else(|| SqlError::UnknownTable(table_name.clone()))?;
 
         if operations.is_empty() {
-            return Err(SqlError::Parse("ALTER TABLE requires at least one operation".into()));
+            return Err(SqlError::Parse(
+                "ALTER TABLE requires at least one operation".into(),
+            ));
         }
 
         let mut ops = Vec::new();
@@ -642,9 +778,10 @@ impl Binder {
             let op = match operation {
                 ast::AlterTableOperation::AddColumn { column_def, .. } => {
                     let data_type = self.resolve_data_type(&column_def.data_type)?;
-                    let nullable = !column_def.options.iter().any(|o| {
-                        matches!(o.option, ast::ColumnOption::NotNull)
-                    });
+                    let nullable = !column_def
+                        .options
+                        .iter()
+                        .any(|o| matches!(o.option, ast::ColumnOption::NotNull));
                     AlterTableOp::AddColumn(falcon_common::schema::ColumnDef {
                         id: ColumnId(0), // will be assigned by executor
                         name: column_def.name.value.clone(),
@@ -658,54 +795,61 @@ impl Binder {
                 ast::AlterTableOperation::DropColumn { column_name, .. } => {
                     AlterTableOp::DropColumn(column_name.value.clone())
                 }
-                ast::AlterTableOperation::RenameColumn { old_column_name, new_column_name } => {
-                    AlterTableOp::RenameColumn {
-                        old_name: old_column_name.value.clone(),
-                        new_name: new_column_name.value.clone(),
+                ast::AlterTableOperation::RenameColumn {
+                    old_column_name,
+                    new_column_name,
+                } => AlterTableOp::RenameColumn {
+                    old_name: old_column_name.value.clone(),
+                    new_name: new_column_name.value.clone(),
+                },
+                ast::AlterTableOperation::RenameTable {
+                    table_name: new_name,
+                } => AlterTableOp::RenameTable {
+                    new_name: new_name.to_string(),
+                },
+                ast::AlterTableOperation::AlterColumn { column_name, op } => match op {
+                    ast::AlterColumnOperation::SetDataType { data_type, .. } => {
+                        let new_type = self.resolve_data_type(data_type)?;
+                        AlterTableOp::AlterColumnType {
+                            column_name: column_name.value.clone(),
+                            new_type,
+                        }
                     }
-                }
-                ast::AlterTableOperation::RenameTable { table_name: new_name } => {
-                    AlterTableOp::RenameTable {
-                        new_name: new_name.to_string(),
+                    ast::AlterColumnOperation::SetNotNull => AlterTableOp::AlterColumnSetNotNull {
+                        column_name: column_name.value.clone(),
+                    },
+                    ast::AlterColumnOperation::DropNotNull => {
+                        AlterTableOp::AlterColumnDropNotNull {
+                            column_name: column_name.value.clone(),
+                        }
                     }
-                }
-                ast::AlterTableOperation::AlterColumn { column_name, op } => {
-                    match op {
-                        ast::AlterColumnOperation::SetDataType { data_type, .. } => {
-                            let new_type = self.resolve_data_type(data_type)?;
-                            AlterTableOp::AlterColumnType {
-                                column_name: column_name.value.clone(),
-                                new_type,
-                            }
+                    ast::AlterColumnOperation::SetDefault { value } => {
+                        let schema = _schema.clone();
+                        let aliases = std::collections::HashMap::new();
+                        let bound = self.bind_expr_with_aliases(value, &schema, &aliases)?;
+                        AlterTableOp::AlterColumnSetDefault {
+                            column_name: column_name.value.clone(),
+                            default_expr: bound,
                         }
-                        ast::AlterColumnOperation::SetNotNull => {
-                            AlterTableOp::AlterColumnSetNotNull {
-                                column_name: column_name.value.clone(),
-                            }
-                        }
-                        ast::AlterColumnOperation::DropNotNull => {
-                            AlterTableOp::AlterColumnDropNotNull {
-                                column_name: column_name.value.clone(),
-                            }
-                        }
-                        ast::AlterColumnOperation::SetDefault { value } => {
-                            let schema = _schema.clone();
-                            let aliases = std::collections::HashMap::new();
-                            let bound = self.bind_expr_with_aliases(value, &schema, &aliases)?;
-                            AlterTableOp::AlterColumnSetDefault {
-                                column_name: column_name.value.clone(),
-                                default_expr: bound,
-                            }
-                        }
-                        ast::AlterColumnOperation::DropDefault => {
-                            AlterTableOp::AlterColumnDropDefault {
-                                column_name: column_name.value.clone(),
-                            }
-                        }
-                        other => return Err(SqlError::Unsupported(format!("ALTER COLUMN operation: {:?}", std::mem::discriminant(other)))),
                     }
+                    ast::AlterColumnOperation::DropDefault => {
+                        AlterTableOp::AlterColumnDropDefault {
+                            column_name: column_name.value.clone(),
+                        }
+                    }
+                    other => {
+                        return Err(SqlError::Unsupported(format!(
+                            "ALTER COLUMN operation: {:?}",
+                            std::mem::discriminant(other)
+                        )))
+                    }
+                },
+                other => {
+                    return Err(SqlError::Unsupported(format!(
+                        "ALTER TABLE operation: {:?}",
+                        std::mem::discriminant(other)
+                    )))
                 }
-                other => return Err(SqlError::Unsupported(format!("ALTER TABLE operation: {:?}", std::mem::discriminant(other)))),
             };
             ops.push(op);
         }
@@ -740,7 +884,9 @@ impl Binder {
         };
 
         // Resolve value rows or SELECT source
-        let source = insert.source.as_ref()
+        let source = insert
+            .source
+            .as_ref()
             .ok_or_else(|| SqlError::Parse("INSERT requires VALUES or SELECT".into()))?;
         match source.body.as_ref() {
             SetExpr::Values(values) => {
@@ -788,7 +934,9 @@ impl Binder {
                     on_conflict,
                 }))
             }
-            _ => Err(SqlError::Unsupported("INSERT source must be VALUES or SELECT".into())),
+            _ => Err(SqlError::Unsupported(
+                "INSERT source must be VALUES or SELECT".into(),
+            )),
         }
     }
 
@@ -844,7 +992,10 @@ impl Binder {
         let mut aliases: AliasMap = std::collections::HashMap::new();
         aliases.insert(table_name.to_lowercase(), (table_name.clone(), 0));
         if let Some(ref ft) = from_table {
-            aliases.insert(ft.table_name.to_lowercase(), (ft.table_name.clone(), ft.col_offset));
+            aliases.insert(
+                ft.table_name.to_lowercase(),
+                (ft.table_name.clone(), ft.col_offset),
+            );
         }
 
         let bound_assignments: Vec<(usize, BoundExpr)> = assignments
@@ -939,7 +1090,10 @@ impl Binder {
         let mut aliases: AliasMap = std::collections::HashMap::new();
         aliases.insert(table_name.to_lowercase(), (table_name.clone(), 0));
         if let Some(ref ut) = using_table {
-            aliases.insert(ut.table_name.to_lowercase(), (ut.table_name.clone(), ut.col_offset));
+            aliases.insert(
+                ut.table_name.to_lowercase(),
+                (ut.table_name.clone(), ut.col_offset),
+            );
         }
 
         let filter = delete
@@ -959,7 +1113,10 @@ impl Binder {
         }))
     }
 
-    pub(crate) fn extract_table_name(&self, relation: &ast::TableFactor) -> Result<(String, Option<String>), SqlError> {
+    pub(crate) fn extract_table_name(
+        &self,
+        relation: &ast::TableFactor,
+    ) -> Result<(String, Option<String>), SqlError> {
         match relation {
             ast::TableFactor::Table { name, alias, .. } => {
                 let table_name = name.to_string();
@@ -968,7 +1125,8 @@ impl Binder {
             }
             ast::TableFactor::Derived { alias, .. } => {
                 // Derived table (subquery) — use alias as table name
-                let alias_name = alias.as_ref()
+                let alias_name = alias
+                    .as_ref()
                     .map(|a| a.name.value.clone())
                     .unwrap_or_else(|| "__derived__".to_string());
                 Ok((alias_name.clone(), Some(alias_name)))
@@ -1010,7 +1168,10 @@ impl Binder {
                     other => Ok(other),
                 }
             }
-            Expr::UnaryOp { op: ast::UnaryOperator::Minus, expr: inner } => {
+            Expr::UnaryOp {
+                op: ast::UnaryOperator::Minus,
+                expr: inner,
+            } => {
                 let val = self.eval_const_expr(inner)?;
                 match val {
                     Datum::Int64(n) => Ok(Datum::Int64(-n)),
@@ -1019,7 +1180,8 @@ impl Binder {
                 }
             }
             Expr::Array(ast::Array { elem, .. }) => {
-                let elems: Vec<Datum> = elem.iter()
+                let elems: Vec<Datum> = elem
+                    .iter()
                     .map(|e| self.eval_const_expr(e))
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(Datum::Array(elems))
@@ -1055,13 +1217,17 @@ impl Binder {
         }
     }
 
-    fn resolve_fk_action(action: &Option<ast::ReferentialAction>) -> falcon_common::schema::FkAction {
+    fn resolve_fk_action(
+        action: &Option<ast::ReferentialAction>,
+    ) -> falcon_common::schema::FkAction {
         match action {
             Some(ast::ReferentialAction::Cascade) => falcon_common::schema::FkAction::Cascade,
             Some(ast::ReferentialAction::SetNull) => falcon_common::schema::FkAction::SetNull,
             Some(ast::ReferentialAction::SetDefault) => falcon_common::schema::FkAction::SetDefault,
             Some(ast::ReferentialAction::Restrict) => falcon_common::schema::FkAction::Restrict,
-            Some(ast::ReferentialAction::NoAction) | None => falcon_common::schema::FkAction::NoAction,
+            Some(ast::ReferentialAction::NoAction) | None => {
+                falcon_common::schema::FkAction::NoAction
+            }
         }
     }
 
@@ -1091,26 +1257,30 @@ impl Binder {
                 let elem_type = match inner {
                     ast::ArrayElemTypeDef::AngleBracket(ref dt)
                     | ast::ArrayElemTypeDef::SquareBracket(ref dt, _)
-                    | ast::ArrayElemTypeDef::Parenthesis(ref dt) => {
-                        self.resolve_data_type(dt)?
-                    }
+                    | ast::ArrayElemTypeDef::Parenthesis(ref dt) => self.resolve_data_type(dt)?,
                     ast::ArrayElemTypeDef::None => DataType::Text,
                 };
                 Ok(DataType::Array(Box::new(elem_type)))
             }
             ast::DataType::JSON | ast::DataType::JSONB => Ok(DataType::Jsonb),
             // Map additional PG types to closest FalconDB equivalents
-            ast::DataType::Uuid => Ok(DataType::Text),        // UUID stored as text
-            ast::DataType::Bytea => Ok(DataType::Text),        // BYTEA stored as text (hex/escape)
+            ast::DataType::Uuid => Ok(DataType::Text), // UUID stored as text
+            ast::DataType::Bytea => Ok(DataType::Text), // BYTEA stored as text (hex/escape)
             ast::DataType::Char(_) | ast::DataType::Character(_) => Ok(DataType::Text),
-            ast::DataType::Interval => Ok(DataType::Text),     // INTERVAL stored as text
+            ast::DataType::Interval => Ok(DataType::Text), // INTERVAL stored as text
             ast::DataType::TinyInt(_) => Ok(DataType::Int32),
-            ast::DataType::UnsignedTinyInt(_) | ast::DataType::UnsignedSmallInt(_) |
-            ast::DataType::UnsignedInt(_) | ast::DataType::UnsignedInteger(_) => Ok(DataType::Int64),
-            ast::DataType::UnsignedBigInt(_) | ast::DataType::UnsignedInt8(_) => Ok(DataType::Int64),
-            ast::DataType::Blob(_) | ast::DataType::Binary(_) | ast::DataType::Varbinary(_) => Ok(DataType::Text),
-            ast::DataType::Enum(_) => Ok(DataType::Text),      // ENUM stored as text
-            ast::DataType::Regclass => Ok(DataType::Int32),    // regclass OID
+            ast::DataType::UnsignedTinyInt(_)
+            | ast::DataType::UnsignedSmallInt(_)
+            | ast::DataType::UnsignedInt(_)
+            | ast::DataType::UnsignedInteger(_) => Ok(DataType::Int64),
+            ast::DataType::UnsignedBigInt(_) | ast::DataType::UnsignedInt8(_) => {
+                Ok(DataType::Int64)
+            }
+            ast::DataType::Blob(_) | ast::DataType::Binary(_) | ast::DataType::Varbinary(_) => {
+                Ok(DataType::Text)
+            }
+            ast::DataType::Enum(_) => Ok(DataType::Text), // ENUM stored as text
+            ast::DataType::Regclass => Ok(DataType::Int32), // regclass OID
             ast::DataType::Custom(name, _) => {
                 let type_name = name.to_string().to_lowercase();
                 match type_name.as_str() {
@@ -1137,7 +1307,11 @@ impl Binder {
     }
 
     /// Extract optional column index from aggregate/window function args.
-    pub(crate) fn bind_agg_col_idx(&self, func: &ast::Function, schema: &TableSchema) -> Result<Option<usize>, SqlError> {
+    pub(crate) fn bind_agg_col_idx(
+        &self,
+        func: &ast::Function,
+        schema: &TableSchema,
+    ) -> Result<Option<usize>, SqlError> {
         match &func.args {
             ast::FunctionArguments::List(args) => {
                 if args.args.is_empty() {
@@ -1146,9 +1320,12 @@ impl Binder {
                     Expr::Identifier(ident),
                 ))) = args.args.first()
                 {
-                    Ok(Some(schema.find_column(&ident.value)
-                        .ok_or_else(|| SqlError::UnknownColumn(ident.value.clone()))?))
-                } else if let Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Wildcard)) = args.args.first() {
+                    Ok(Some(schema.find_column(&ident.value).ok_or_else(|| {
+                        SqlError::UnknownColumn(ident.value.clone())
+                    })?))
+                } else if let Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Wildcard)) =
+                    args.args.first()
+                {
                     Ok(None)
                 } else {
                     // Non-column arg (e.g. integer literal for NTILE) — return None
@@ -1161,13 +1338,21 @@ impl Binder {
     }
 
     /// Extract an integer literal from function args at the given position.
-    pub(crate) fn extract_int_arg(&self, func: &ast::Function, pos: usize) -> Result<Option<i64>, SqlError> {
+    pub(crate) fn extract_int_arg(
+        &self,
+        func: &ast::Function,
+        pos: usize,
+    ) -> Result<Option<i64>, SqlError> {
         match &func.args {
             ast::FunctionArguments::List(args) => {
-                if let Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(expr))) = args.args.get(pos) {
+                if let Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(expr))) =
+                    args.args.get(pos)
+                {
                     match expr {
                         Expr::Value(Value::Number(n, _)) => {
-                            Ok(Some(n.parse::<i64>().map_err(|_| SqlError::Unsupported("Invalid integer".into()))?))
+                            Ok(Some(n.parse::<i64>().map_err(|_| {
+                                SqlError::Unsupported("Invalid integer".into())
+                            })?))
                         }
                         _ => Ok(None),
                     }
@@ -1231,7 +1416,10 @@ impl Binder {
 
         let stmts = parse_sql(query_sql)?;
         if stmts.is_empty() {
-            return Err(SqlError::Parse(format!("View '{}' has empty SQL", view_name)));
+            return Err(SqlError::Parse(format!(
+                "View '{}' has empty SQL",
+                view_name
+            )));
         }
 
         let mut inner_binder = Binder::new(self.catalog.clone());
@@ -1239,7 +1427,12 @@ impl Binder {
 
         let view_select = match bound {
             BoundStatement::Select(sel) => sel,
-            _ => return Err(SqlError::Parse(format!("View '{}' must be a SELECT", view_name))),
+            _ => {
+                return Err(SqlError::Parse(format!(
+                    "View '{}' must be a SELECT",
+                    view_name
+                )))
+            }
         };
 
         let view_table_id = TableId(2_000_000 + bound_ctes.len() as u64);
@@ -1250,18 +1443,16 @@ impl Binder {
             let (col_name, data_type) = match proj {
                 BoundProjection::Column(idx, alias) => {
                     let col = &view_select.schema.columns[*idx];
-                    let name = if alias.is_empty() { col.name.clone() } else { alias.clone() };
+                    let name = if alias.is_empty() {
+                        col.name.clone()
+                    } else {
+                        alias.clone()
+                    };
                     (name, col.data_type.clone())
                 }
-                BoundProjection::Aggregate(_, _, alias, _, _) => {
-                    (alias.clone(), DataType::Float64)
-                }
-                BoundProjection::Expr(_, alias) => {
-                    (alias.clone(), DataType::Text)
-                }
-                BoundProjection::Window(w) => {
-                    (w.alias.clone(), DataType::Int64)
-                }
+                BoundProjection::Aggregate(_, _, alias, _, _) => (alias.clone(), DataType::Float64),
+                BoundProjection::Expr(_, alias) => (alias.clone(), DataType::Text),
+                BoundProjection::Window(w) => (w.alias.clone(), DataType::Int64),
             };
             columns.push(ColumnDef {
                 id: ColumnId(i as u32),
@@ -1348,12 +1539,20 @@ impl Binder {
                         for assign in &do_update.assignments {
                             let col_name = match &assign.target {
                                 ast::AssignmentTarget::ColumnName(name) => name.to_string(),
-                                _ => return Err(SqlError::Unsupported("Tuple assignment target".into())),
+                                _ => {
+                                    return Err(SqlError::Unsupported(
+                                        "Tuple assignment target".into(),
+                                    ))
+                                }
                             };
                             let col_idx = schema
                                 .find_column(&col_name)
                                 .ok_or_else(|| SqlError::UnknownColumn(col_name.clone()))?;
-                            let expr = self.bind_expr_with_aliases(&assign.value, &extended_schema, &aliases)?;
+                            let expr = self.bind_expr_with_aliases(
+                                &assign.value,
+                                &extended_schema,
+                                &aliases,
+                            )?;
                             assignments.push((col_idx, expr));
                         }
                         Ok(Some(OnConflictAction::DoUpdate(assignments)))
@@ -1364,4 +1563,3 @@ impl Binder {
         }
     }
 }
-

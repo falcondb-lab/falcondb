@@ -45,11 +45,7 @@ impl ParamEnv {
     /// - If the parameter has no type yet, assign the expected type.
     /// - If the parameter already has a type, check compatibility.
     /// - Compatible means identical or safely promotable.
-    pub fn unify_param(
-        &mut self,
-        index: usize,
-        expected: &DataType,
-    ) -> Result<(), SqlError> {
+    pub fn unify_param(&mut self, index: usize, expected: &DataType) -> Result<(), SqlError> {
         let slot = self.ensure_param(index);
         match slot {
             None => {
@@ -84,9 +80,7 @@ impl ParamEnv {
         self.param_types
             .iter()
             .enumerate()
-            .map(|(i, opt)| {
-                opt.clone().ok_or(SqlError::ParamTypeRequired(i + 1))
-            })
+            .map(|(i, opt)| opt.clone().ok_or(SqlError::ParamTypeRequired(i + 1)))
             .collect()
     }
 

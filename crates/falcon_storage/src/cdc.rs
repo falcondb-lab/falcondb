@@ -168,7 +168,11 @@ impl CdcManager {
     /// Create a replication slot.
     pub fn create_slot(&mut self, name: &str) -> Result<SlotId, String> {
         // Check for duplicate name
-        if self.slots.values().any(|s| s.name.eq_ignore_ascii_case(name)) {
+        if self
+            .slots
+            .values()
+            .any(|s| s.name.eq_ignore_ascii_case(name))
+        {
             return Err(format!("replication slot '{}' already exists", name));
         }
 
@@ -198,7 +202,9 @@ impl CdcManager {
 
     /// Drop a replication slot.
     pub fn drop_slot(&mut self, name: &str) -> Result<ReplicationSlot, String> {
-        let id = self.slots.iter()
+        let id = self
+            .slots
+            .iter()
             .find(|(_, s)| s.name.eq_ignore_ascii_case(name))
             .map(|(id, _)| *id)
             .ok_or_else(|| format!("replication slot '{}' not found", name))?;
@@ -208,7 +214,9 @@ impl CdcManager {
             return Err(format!("cannot drop active replication slot '{}'", name));
         }
 
-        self.slots.remove(&id).ok_or_else(|| "slot not found".to_string())
+        self.slots
+            .remove(&id)
+            .ok_or_else(|| "slot not found".to_string())
     }
 
     /// Emit a change event into the buffer.
@@ -322,7 +330,8 @@ impl CdcManager {
             return vec![];
         };
 
-        self.buffer.iter()
+        self.buffer
+            .iter()
             .filter(|e| e.lsn > slot.confirmed_flush_lsn)
             .filter(|e| {
                 // Apply table filter
@@ -338,7 +347,10 @@ impl CdcManager {
             .filter(|e| {
                 // Filter tx markers
                 if !slot.include_tx_markers {
-                    !matches!(e.op, ChangeOp::Begin | ChangeOp::Commit | ChangeOp::Rollback)
+                    !matches!(
+                        e.op,
+                        ChangeOp::Begin | ChangeOp::Commit | ChangeOp::Rollback
+                    )
                 } else {
                     true
                 }
@@ -349,7 +361,9 @@ impl CdcManager {
 
     /// Advance a slot's confirmed flush position (consumer acknowledges processing).
     pub fn advance_slot(&mut self, slot_id: SlotId, confirmed_lsn: CdcLsn) -> Result<(), String> {
-        let slot = self.slots.get_mut(&slot_id)
+        let slot = self
+            .slots
+            .get_mut(&slot_id)
             .ok_or_else(|| "slot not found".to_string())?;
         if confirmed_lsn > slot.confirmed_flush_lsn {
             slot.confirmed_flush_lsn = confirmed_lsn;
@@ -359,7 +373,9 @@ impl CdcManager {
 
     /// Activate a slot (consumer connects).
     pub fn activate_slot(&mut self, slot_id: SlotId) -> Result<(), String> {
-        let slot = self.slots.get_mut(&slot_id)
+        let slot = self
+            .slots
+            .get_mut(&slot_id)
             .ok_or_else(|| "slot not found".to_string())?;
         if slot.active {
             return Err("slot already active".to_string());
@@ -376,8 +392,14 @@ impl CdcManager {
     }
 
     /// Set table filter on a slot.
-    pub fn set_table_filter(&mut self, slot_id: SlotId, tables: Vec<TableId>) -> Result<(), String> {
-        let slot = self.slots.get_mut(&slot_id)
+    pub fn set_table_filter(
+        &mut self,
+        slot_id: SlotId,
+        tables: Vec<TableId>,
+    ) -> Result<(), String> {
+        let slot = self
+            .slots
+            .get_mut(&slot_id)
             .ok_or_else(|| "slot not found".to_string())?;
         slot.table_filter = Some(tables);
         Ok(())
@@ -385,7 +407,9 @@ impl CdcManager {
 
     /// Get a slot by name.
     pub fn get_slot_by_name(&self, name: &str) -> Option<&ReplicationSlot> {
-        self.slots.values().find(|s| s.name.eq_ignore_ascii_case(name))
+        self.slots
+            .values()
+            .find(|s| s.name.eq_ignore_ascii_case(name))
     }
 
     /// List all slots.
@@ -450,8 +474,20 @@ mod tests {
 
         // Emit some changes
         let row = OwnedRow::new(vec![Datum::Int32(1), Datum::Text("alice".into())]);
-        mgr.emit_insert(TxnId(1), TableId(10), "users", row.clone(), Some("1".into()));
-        mgr.emit_insert(TxnId(1), TableId(10), "users", row.clone(), Some("2".into()));
+        mgr.emit_insert(
+            TxnId(1),
+            TableId(10),
+            "users",
+            row.clone(),
+            Some("1".into()),
+        );
+        mgr.emit_insert(
+            TxnId(1),
+            TableId(10),
+            "users",
+            row.clone(),
+            Some("2".into()),
+        );
         mgr.emit_commit(TxnId(1));
 
         assert_eq!(mgr.buffer_len(), 3);
@@ -541,7 +577,14 @@ mod tests {
         let old = OwnedRow::new(vec![Datum::Int32(1), Datum::Text("old".into())]);
         let new = OwnedRow::new(vec![Datum::Int32(1), Datum::Text("new".into())]);
 
-        mgr.emit_update(TxnId(1), TableId(1), "t", Some(old.clone()), new, Some("1".into()));
+        mgr.emit_update(
+            TxnId(1),
+            TableId(1),
+            "t",
+            Some(old.clone()),
+            new,
+            Some("1".into()),
+        );
         mgr.emit_delete(TxnId(1), TableId(1), "t", Some(old), Some("1".into()));
 
         let changes = mgr.poll_changes(slot_id, 100);

@@ -22,7 +22,9 @@ pub struct NodeId(pub u64);
 pub struct TxnId(pub u64);
 
 /// Logical timestamp for MVCC.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
+)]
 pub struct Timestamp(pub u64);
 
 impl Timestamp {
@@ -100,8 +102,8 @@ impl DataType {
             DataType::Text => 25,
             DataType::Timestamp => 1114,
             DataType::Date => 1082,
-            DataType::Array(_) => 2277, // anyarray OID
-            DataType::Jsonb => 3802, // jsonb OID
+            DataType::Array(_) => 2277,      // anyarray OID
+            DataType::Jsonb => 3802,         // jsonb OID
             DataType::Decimal(_, _) => 1700, // numeric OID
             DataType::Time => 1083,
             DataType::Interval => 1186,
@@ -273,8 +275,7 @@ pub enum TxnPath {
 }
 
 /// Isolation levels supported.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum IsolationLevel {
     #[default]
     ReadCommitted,
@@ -349,4 +350,3 @@ impl TxnContext {
         Ok(())
     }
 }
-

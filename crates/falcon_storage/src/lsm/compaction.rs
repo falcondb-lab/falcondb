@@ -191,10 +191,14 @@ impl Compactor {
 
         // Update stats
         self.stats_runs.fetch_add(1, Ordering::Relaxed);
-        self.stats_bytes_read.fetch_add(bytes_read, Ordering::Relaxed);
-        self.stats_bytes_written.fetch_add(bytes_written, Ordering::Relaxed);
-        self.stats_files_consumed.fetch_add(consumed.len() as u64, Ordering::Relaxed);
-        self.stats_files_produced.fetch_add(produced.len() as u64, Ordering::Relaxed);
+        self.stats_bytes_read
+            .fetch_add(bytes_read, Ordering::Relaxed);
+        self.stats_bytes_written
+            .fetch_add(bytes_written, Ordering::Relaxed);
+        self.stats_files_consumed
+            .fetch_add(consumed.len() as u64, Ordering::Relaxed);
+        self.stats_files_produced
+            .fetch_add(produced.len() as u64, Ordering::Relaxed);
 
         Ok(CompactionResult {
             consumed,
@@ -226,7 +230,13 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn write_sst(dir: &Path, name: &str, entries: &[(&[u8], &[u8])], level: u32, seq: u64) -> SstMeta {
+    fn write_sst(
+        dir: &Path,
+        name: &str,
+        entries: &[(&[u8], &[u8])],
+        level: u32,
+        seq: u64,
+    ) -> SstMeta {
         let path = dir.join(name);
         let mut writer = SstWriter::new(&path, entries.len()).unwrap();
         for (k, v) in entries {
@@ -260,15 +270,21 @@ mod tests {
         let compactor = Compactor::new(config, dir.path());
 
         // Create two L0 SSTs with overlapping keys
-        let l0_1 = write_sst(dir.path(), "l0_1.sst", &[
-            (b"aaa", b"v1_old"),
-            (b"bbb", b"v2"),
-        ], 0, 1);
+        let l0_1 = write_sst(
+            dir.path(),
+            "l0_1.sst",
+            &[(b"aaa", b"v1_old"), (b"bbb", b"v2")],
+            0,
+            1,
+        );
 
-        let l0_2 = write_sst(dir.path(), "l0_2.sst", &[
-            (b"aaa", b"v1_new"),
-            (b"ccc", b"v3"),
-        ], 0, 2);
+        let l0_2 = write_sst(
+            dir.path(),
+            "l0_2.sst",
+            &[(b"aaa", b"v1_new"), (b"ccc", b"v3")],
+            0,
+            2,
+        );
 
         let result = compactor.compact_l0_to_l1(&[l0_1, l0_2], &[]).unwrap();
 
@@ -295,16 +311,22 @@ mod tests {
         let compactor = Compactor::new(config, dir.path());
 
         // Existing L1 file
-        let l1 = write_sst(dir.path(), "l1.sst", &[
-            (b"aaa", b"l1_val"),
-            (b"ddd", b"l1_d"),
-        ], 1, 0);
+        let l1 = write_sst(
+            dir.path(),
+            "l1.sst",
+            &[(b"aaa", b"l1_val"), (b"ddd", b"l1_d")],
+            1,
+            0,
+        );
 
         // New L0 file overlapping with L1
-        let l0 = write_sst(dir.path(), "l0.sst", &[
-            (b"aaa", b"l0_val"),
-            (b"bbb", b"l0_b"),
-        ], 0, 3);
+        let l0 = write_sst(
+            dir.path(),
+            "l0.sst",
+            &[(b"aaa", b"l0_val"), (b"bbb", b"l0_b")],
+            0,
+            3,
+        );
 
         let result = compactor.compact_l0_to_l1(&[l0], &[l1]).unwrap();
 
@@ -323,9 +345,7 @@ mod tests {
         let config = CompactionConfig::default();
         let compactor = Compactor::new(config, dir.path());
 
-        let l0 = write_sst(dir.path(), "l0.sst", &[
-            (b"key", b"val"),
-        ], 0, 1);
+        let l0 = write_sst(dir.path(), "l0.sst", &[(b"key", b"val")], 0, 1);
 
         compactor.compact_l0_to_l1(&[l0], &[]).unwrap();
 

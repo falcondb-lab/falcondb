@@ -132,20 +132,13 @@ impl ShardedEngine {
     /// abstraction required for distributed execution. In production, this
     /// would be an RPC call; here it's a direct function call on the
     /// shard's (StorageEngine, TxnManager).
-    pub fn execute_subplan<F>(
-        &self,
-        shard_id: ShardId,
-        f: F,
-    ) -> Result<SubPlanOutput, FalconError>
+    pub fn execute_subplan<F>(&self, shard_id: ShardId, f: F) -> Result<SubPlanOutput, FalconError>
     where
-        F: FnOnce(
-            &StorageEngine,
-            &TxnManager,
-        ) -> Result<SubPlanOutput, FalconError>,
+        F: FnOnce(&StorageEngine, &TxnManager) -> Result<SubPlanOutput, FalconError>,
     {
-        let shard = self.shard(shard_id).ok_or_else(|| {
-            FalconError::Internal(format!("Shard {:?} not found", shard_id))
-        })?;
+        let shard = self
+            .shard(shard_id)
+            .ok_or_else(|| FalconError::Internal(format!("Shard {:?} not found", shard_id)))?;
         f(&shard.storage, &shard.txn_mgr)
     }
 }

@@ -208,9 +208,7 @@ impl ReplicationTransport for ChannelTransport {
         match rx.try_recv() {
             Ok(chunk) => {
                 if !chunk.verify_checksum() {
-                    return Err(FalconError::Internal(
-                        "WalChunk checksum mismatch".into(),
-                    ));
+                    return Err(FalconError::Internal("WalChunk checksum mismatch".into()));
                 }
                 Ok(chunk)
             }

@@ -7,8 +7,7 @@ use crate::types::{ColumnId, DataType, TableId};
 
 /// Sharding policy for a table in a distributed cluster.
 /// Modeled after SingleStore's SHARD KEY / REFERENCE semantics.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ShardingPolicy {
     /// Hash-based sharding on the specified shard key columns.
     /// Rows are assigned to shards by hashing the shard key values.
@@ -22,12 +21,10 @@ pub enum ShardingPolicy {
     None,
 }
 
-
 /// Storage engine type for a table.
 /// Modeled after SingleStore's ROWSTORE / COLUMNSTORE distinction,
 /// plus an on-disk B-tree rowstore for larger-than-memory OLTP.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum StorageType {
     /// In-memory row store (default, like SingleStore ROWSTORE).
     /// Best for OLTP: point lookups, small range scans, high write throughput.
@@ -43,7 +40,6 @@ pub enum StorageType {
     /// Write-optimized with background compaction, suitable for write-heavy OLTP.
     LsmRowstore,
 }
-
 
 /// Column definition in a table schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,9 +97,9 @@ pub enum FkAction {
 /// A foreign key constraint referencing another table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForeignKey {
-    pub columns: Vec<usize>,           // local column indices
-    pub ref_table: String,             // referenced table name
-    pub ref_columns: Vec<String>,      // referenced column names
+    pub columns: Vec<usize>,      // local column indices
+    pub ref_table: String,        // referenced table name
+    pub ref_columns: Vec<String>, // referenced column names
     #[serde(default)]
     pub on_delete: FkAction,
     #[serde(default)]

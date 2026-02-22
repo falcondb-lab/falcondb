@@ -437,14 +437,7 @@ fn test_drop_table() {
     .unwrap();
     assert!(storage.get_table_schema("to_drop").is_some());
 
-    run_sql(
-        &storage,
-        &txn_mgr,
-        &executor,
-        "DROP TABLE to_drop",
-        None,
-    )
-    .unwrap();
+    run_sql(&storage, &txn_mgr, &executor, "DROP TABLE to_drop", None).unwrap();
     assert!(storage.get_table_schema("to_drop").is_none());
 }
 
@@ -533,26 +526,59 @@ fn test_where_filter() {
 fn test_group_by_sum() {
     let (storage, txn_mgr, executor) = setup();
 
-    run_sql(&storage, &txn_mgr, &executor,
-        "CREATE TABLE sales (id INT PRIMARY KEY, region TEXT, amount INT)", None).unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "CREATE TABLE sales (id INT PRIMARY KEY, region TEXT, amount INT)",
+        None,
+    )
+    .unwrap();
 
     let txn = txn_mgr.begin(IsolationLevel::ReadCommitted);
-    for (id, region, amount) in [(1,"east",100),(2,"west",200),(3,"east",150),(4,"west",300),(5,"east",50)] {
-        run_sql(&storage, &txn_mgr, &executor,
-            &format!("INSERT INTO sales VALUES ({}, '{}', {})", id, region, amount), Some(&txn)).unwrap();
+    for (id, region, amount) in [
+        (1, "east", 100),
+        (2, "west", 200),
+        (3, "east", 150),
+        (4, "west", 300),
+        (5, "east", 50),
+    ] {
+        run_sql(
+            &storage,
+            &txn_mgr,
+            &executor,
+            &format!(
+                "INSERT INTO sales VALUES ({}, '{}', {})",
+                id, region, amount
+            ),
+            Some(&txn),
+        )
+        .unwrap();
     }
     txn_mgr.commit(txn.txn_id).unwrap();
 
     let txn2 = txn_mgr.begin(IsolationLevel::ReadCommitted);
-    let result = run_sql(&storage, &txn_mgr, &executor,
-        "SELECT region, SUM(amount) FROM sales GROUP BY region ORDER BY region", Some(&txn2)).unwrap();
+    let result = run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "SELECT region, SUM(amount) FROM sales GROUP BY region ORDER BY region",
+        Some(&txn2),
+    )
+    .unwrap();
     match result {
         falcon_executor::ExecutionResult::Query { rows, columns } => {
             assert_eq!(columns.len(), 2);
             assert_eq!(rows.len(), 2);
-            assert_eq!(rows[0].values[0], falcon_common::datum::Datum::Text("east".into()));
+            assert_eq!(
+                rows[0].values[0],
+                falcon_common::datum::Datum::Text("east".into())
+            );
             assert_eq!(rows[0].values[1].as_i64().unwrap(), 300); // 100+150+50
-            assert_eq!(rows[1].values[0], falcon_common::datum::Datum::Text("west".into()));
+            assert_eq!(
+                rows[1].values[0],
+                falcon_common::datum::Datum::Text("west".into())
+            );
             assert_eq!(rows[1].values[1].as_i64().unwrap(), 500); // 200+300
         }
         _ => panic!("Expected Query result"),
@@ -564,29 +590,59 @@ fn test_group_by_sum() {
 fn test_group_by_count() {
     let (storage, txn_mgr, executor) = setup();
 
-    run_sql(&storage, &txn_mgr, &executor,
-        "CREATE TABLE items (id INT PRIMARY KEY, cat TEXT, price INT)", None).unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "CREATE TABLE items (id INT PRIMARY KEY, cat TEXT, price INT)",
+        None,
+    )
+    .unwrap();
 
     let txn = txn_mgr.begin(IsolationLevel::ReadCommitted);
-    for (id, cat, price) in [(1,"A",10),(2,"B",20),(3,"A",30),(4,"B",5),(5,"A",20)] {
-        run_sql(&storage, &txn_mgr, &executor,
-            &format!("INSERT INTO items VALUES ({}, '{}', {})", id, cat, price), Some(&txn)).unwrap();
+    for (id, cat, price) in [
+        (1, "A", 10),
+        (2, "B", 20),
+        (3, "A", 30),
+        (4, "B", 5),
+        (5, "A", 20),
+    ] {
+        run_sql(
+            &storage,
+            &txn_mgr,
+            &executor,
+            &format!("INSERT INTO items VALUES ({}, '{}', {})", id, cat, price),
+            Some(&txn),
+        )
+        .unwrap();
     }
     txn_mgr.commit(txn.txn_id).unwrap();
 
     let txn2 = txn_mgr.begin(IsolationLevel::ReadCommitted);
-    let result = run_sql(&storage, &txn_mgr, &executor,
-        "SELECT cat, COUNT(*), MIN(price), MAX(price) FROM items GROUP BY cat ORDER BY cat", Some(&txn2)).unwrap();
+    let result = run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "SELECT cat, COUNT(*), MIN(price), MAX(price) FROM items GROUP BY cat ORDER BY cat",
+        Some(&txn2),
+    )
+    .unwrap();
     match result {
         falcon_executor::ExecutionResult::Query { rows, .. } => {
             assert_eq!(rows.len(), 2);
             // A: count=3, min=10, max=30
-            assert_eq!(rows[0].values[0], falcon_common::datum::Datum::Text("A".into()));
+            assert_eq!(
+                rows[0].values[0],
+                falcon_common::datum::Datum::Text("A".into())
+            );
             assert_eq!(rows[0].values[1], falcon_common::datum::Datum::Int64(3));
             assert_eq!(rows[0].values[2], falcon_common::datum::Datum::Int32(10));
             assert_eq!(rows[0].values[3], falcon_common::datum::Datum::Int32(30));
             // B: count=2, min=5, max=20
-            assert_eq!(rows[1].values[0], falcon_common::datum::Datum::Text("B".into()));
+            assert_eq!(
+                rows[1].values[0],
+                falcon_common::datum::Datum::Text("B".into())
+            );
             assert_eq!(rows[1].values[1], falcon_common::datum::Datum::Int64(2));
             assert_eq!(rows[1].values[2], falcon_common::datum::Datum::Int32(5));
             assert_eq!(rows[1].values[3], falcon_common::datum::Datum::Int32(20));
@@ -600,8 +656,14 @@ fn test_group_by_count() {
 fn test_like_filter() {
     let (storage, txn_mgr, executor) = setup();
 
-    run_sql(&storage, &txn_mgr, &executor,
-        "CREATE TABLE products (id INT PRIMARY KEY, name TEXT, category TEXT)", None).unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "CREATE TABLE products (id INT PRIMARY KEY, name TEXT, category TEXT)",
+        None,
+    )
+    .unwrap();
 
     let txn = txn_mgr.begin(IsolationLevel::ReadCommitted);
     for (id, name, cat) in [
@@ -611,14 +673,29 @@ fn test_like_filter() {
         (4, "Grape Soda", "drinks"),
         (5, "Pineapple", "fruit"),
     ] {
-        run_sql(&storage, &txn_mgr, &executor,
-            &format!("INSERT INTO products VALUES ({}, '{}', '{}')", id, name, cat), Some(&txn)).unwrap();
+        run_sql(
+            &storage,
+            &txn_mgr,
+            &executor,
+            &format!(
+                "INSERT INTO products VALUES ({}, '{}', '{}')",
+                id, name, cat
+            ),
+            Some(&txn),
+        )
+        .unwrap();
     }
     txn_mgr.commit(txn.txn_id).unwrap();
 
     let txn2 = txn_mgr.begin(IsolationLevel::ReadCommitted);
-    let result = run_sql(&storage, &txn_mgr, &executor,
-        "SELECT name FROM products WHERE name LIKE 'Apple%' ORDER BY name", Some(&txn2)).unwrap();
+    let result = run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "SELECT name FROM products WHERE name LIKE 'Apple%' ORDER BY name",
+        Some(&txn2),
+    )
+    .unwrap();
     match result {
         falcon_executor::ExecutionResult::Query { rows, .. } => {
             assert_eq!(rows.len(), 2);
@@ -634,19 +711,43 @@ fn test_like_filter() {
 fn test_between_filter() {
     let (storage, txn_mgr, executor) = setup();
 
-    run_sql(&storage, &txn_mgr, &executor,
-        "CREATE TABLE scores (id INT PRIMARY KEY, name TEXT, score INT)", None).unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "CREATE TABLE scores (id INT PRIMARY KEY, name TEXT, score INT)",
+        None,
+    )
+    .unwrap();
 
     let txn = txn_mgr.begin(IsolationLevel::ReadCommitted);
-    for (id, name, score) in [(1,"Alice",85),(2,"Bob",42),(3,"Carol",95),(4,"Dave",70),(5,"Eve",55)] {
-        run_sql(&storage, &txn_mgr, &executor,
-            &format!("INSERT INTO scores VALUES ({}, '{}', {})", id, name, score), Some(&txn)).unwrap();
+    for (id, name, score) in [
+        (1, "Alice", 85),
+        (2, "Bob", 42),
+        (3, "Carol", 95),
+        (4, "Dave", 70),
+        (5, "Eve", 55),
+    ] {
+        run_sql(
+            &storage,
+            &txn_mgr,
+            &executor,
+            &format!("INSERT INTO scores VALUES ({}, '{}', {})", id, name, score),
+            Some(&txn),
+        )
+        .unwrap();
     }
     txn_mgr.commit(txn.txn_id).unwrap();
 
     let txn2 = txn_mgr.begin(IsolationLevel::ReadCommitted);
-    let result = run_sql(&storage, &txn_mgr, &executor,
-        "SELECT name FROM scores WHERE score BETWEEN 50 AND 90 ORDER BY name", Some(&txn2)).unwrap();
+    let result = run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "SELECT name FROM scores WHERE score BETWEEN 50 AND 90 ORDER BY name",
+        Some(&txn2),
+    )
+    .unwrap();
     match result {
         falcon_executor::ExecutionResult::Query { rows, .. } => {
             assert_eq!(rows.len(), 3);
@@ -663,8 +764,14 @@ fn test_between_filter() {
 fn test_in_list_filter() {
     let (storage, txn_mgr, executor) = setup();
 
-    run_sql(&storage, &txn_mgr, &executor,
-        "CREATE TABLE cities (id INT PRIMARY KEY, name TEXT, country TEXT)", None).unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "CREATE TABLE cities (id INT PRIMARY KEY, name TEXT, country TEXT)",
+        None,
+    )
+    .unwrap();
 
     let txn = txn_mgr.begin(IsolationLevel::ReadCommitted);
     for (id, name, country) in [
@@ -674,14 +781,29 @@ fn test_in_list_filter() {
         (4, "Berlin", "Germany"),
         (5, "Rome", "Italy"),
     ] {
-        run_sql(&storage, &txn_mgr, &executor,
-            &format!("INSERT INTO cities VALUES ({}, '{}', '{}')", id, name, country), Some(&txn)).unwrap();
+        run_sql(
+            &storage,
+            &txn_mgr,
+            &executor,
+            &format!(
+                "INSERT INTO cities VALUES ({}, '{}', '{}')",
+                id, name, country
+            ),
+            Some(&txn),
+        )
+        .unwrap();
     }
     txn_mgr.commit(txn.txn_id).unwrap();
 
     let txn2 = txn_mgr.begin(IsolationLevel::ReadCommitted);
-    let result = run_sql(&storage, &txn_mgr, &executor,
-        "SELECT name FROM cities WHERE country IN ('France', 'UK', 'Italy') ORDER BY name", Some(&txn2)).unwrap();
+    let result = run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "SELECT name FROM cities WHERE country IN ('France', 'UK', 'Italy') ORDER BY name",
+        Some(&txn2),
+    )
+    .unwrap();
     match result {
         falcon_executor::ExecutionResult::Query { rows, .. } => {
             assert_eq!(rows.len(), 3);
@@ -693,8 +815,14 @@ fn test_in_list_filter() {
     }
 
     // NOT IN
-    let result2 = run_sql(&storage, &txn_mgr, &executor,
-        "SELECT name FROM cities WHERE country NOT IN ('France', 'UK', 'Italy') ORDER BY name", Some(&txn2)).unwrap();
+    let result2 = run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "SELECT name FROM cities WHERE country NOT IN ('France', 'UK', 'Italy') ORDER BY name",
+        Some(&txn2),
+    )
+    .unwrap();
     match result2 {
         falcon_executor::ExecutionResult::Query { rows, .. } => {
             assert_eq!(rows.len(), 2);
@@ -710,19 +838,43 @@ fn test_in_list_filter() {
 fn test_cast_expression() {
     let (storage, txn_mgr, executor) = setup();
 
-    run_sql(&storage, &txn_mgr, &executor,
-        "CREATE TABLE vals (id INT PRIMARY KEY, num INT, label TEXT)", None).unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "CREATE TABLE vals (id INT PRIMARY KEY, num INT, label TEXT)",
+        None,
+    )
+    .unwrap();
 
     let txn = txn_mgr.begin(IsolationLevel::ReadCommitted);
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO vals VALUES (1, 42, '100')", Some(&txn)).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO vals VALUES (2, 7, '200')", Some(&txn)).unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO vals VALUES (1, 42, '100')",
+        Some(&txn),
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO vals VALUES (2, 7, '200')",
+        Some(&txn),
+    )
+    .unwrap();
     txn_mgr.commit(txn.txn_id).unwrap();
 
     let txn2 = txn_mgr.begin(IsolationLevel::ReadCommitted);
-    let result = run_sql(&storage, &txn_mgr, &executor,
-        "SELECT CAST(num AS TEXT) FROM vals WHERE id = 1", Some(&txn2)).unwrap();
+    let result = run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "SELECT CAST(num AS TEXT) FROM vals WHERE id = 1",
+        Some(&txn2),
+    )
+    .unwrap();
     match result {
         falcon_executor::ExecutionResult::Query { rows, .. } => {
             assert_eq!(rows.len(), 1);
@@ -731,8 +883,14 @@ fn test_cast_expression() {
         _ => panic!("Expected Query result"),
     }
 
-    let result2 = run_sql(&storage, &txn_mgr, &executor,
-        "SELECT id FROM vals WHERE CAST(label AS INTEGER) > 150", Some(&txn2)).unwrap();
+    let result2 = run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "SELECT id FROM vals WHERE CAST(label AS INTEGER) > 150",
+        Some(&txn2),
+    )
+    .unwrap();
     match result2 {
         falcon_executor::ExecutionResult::Query { rows, .. } => {
             assert_eq!(rows.len(), 1);
@@ -747,38 +905,92 @@ fn test_cast_expression() {
 fn test_inner_join() {
     let (storage, txn_mgr, executor) = setup();
 
-    run_sql(&storage, &txn_mgr, &executor,
-        "CREATE TABLE departments (dept_id INT PRIMARY KEY, dept_name TEXT)", None).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "CREATE TABLE employees (emp_id INT PRIMARY KEY, emp_name TEXT, fk_dept INT)", None).unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "CREATE TABLE departments (dept_id INT PRIMARY KEY, dept_name TEXT)",
+        None,
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "CREATE TABLE employees (emp_id INT PRIMARY KEY, emp_name TEXT, fk_dept INT)",
+        None,
+    )
+    .unwrap();
 
     let txn = txn_mgr.begin(IsolationLevel::ReadCommitted);
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO departments VALUES (1, 'Engineering')", Some(&txn)).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO departments VALUES (2, 'Sales')", Some(&txn)).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO departments VALUES (3, 'HR')", Some(&txn)).unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO departments VALUES (1, 'Engineering')",
+        Some(&txn),
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO departments VALUES (2, 'Sales')",
+        Some(&txn),
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO departments VALUES (3, 'HR')",
+        Some(&txn),
+    )
+    .unwrap();
 
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO employees VALUES (1, 'Alice', 1)", Some(&txn)).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO employees VALUES (2, 'Bob', 2)", Some(&txn)).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO employees VALUES (3, 'Carol', 1)", Some(&txn)).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO employees VALUES (4, 'Dave', 4)", Some(&txn)).unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO employees VALUES (1, 'Alice', 1)",
+        Some(&txn),
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO employees VALUES (2, 'Bob', 2)",
+        Some(&txn),
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO employees VALUES (3, 'Carol', 1)",
+        Some(&txn),
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO employees VALUES (4, 'Dave', 4)",
+        Some(&txn),
+    )
+    .unwrap();
     txn_mgr.commit(txn.txn_id).unwrap();
 
     let txn2 = txn_mgr.begin(IsolationLevel::ReadCommitted);
 
-    // INNER JOIN 鈥?only matching rows (unambiguous column names)
+    // INNER JOIN — only matching rows (unambiguous column names)
     let result = run_sql(&storage, &txn_mgr, &executor,
         "SELECT emp_name, dept_name FROM employees INNER JOIN departments ON fk_dept = dept_id ORDER BY emp_name",
         Some(&txn2)).unwrap();
     match result {
         falcon_executor::ExecutionResult::Query { rows, .. } => {
-            // Alice(1=Eng), Bob(2=Sales), Carol(1=Eng) 鈥?Dave excluded (dept 4 not found)
+            // Alice(1=Eng), Bob(2=Sales), Carol(1=Eng) — Dave excluded (dept 4 not found)
             assert_eq!(rows.len(), 3);
             assert_eq!(rows[0].values[0], Datum::Text("Alice".into()));
             assert_eq!(rows[0].values[1], Datum::Text("Engineering".into()));
@@ -796,32 +1008,79 @@ fn test_inner_join() {
 fn test_cross_join() {
     let (storage, txn_mgr, executor) = setup();
 
-    run_sql(&storage, &txn_mgr, &executor,
-        "CREATE TABLE colors (id INT PRIMARY KEY, color TEXT)", None).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "CREATE TABLE sizes (id INT PRIMARY KEY, size TEXT)", None).unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "CREATE TABLE colors (id INT PRIMARY KEY, color TEXT)",
+        None,
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "CREATE TABLE sizes (id INT PRIMARY KEY, size TEXT)",
+        None,
+    )
+    .unwrap();
 
     let txn = txn_mgr.begin(IsolationLevel::ReadCommitted);
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO colors VALUES (1, 'Red')", Some(&txn)).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO colors VALUES (2, 'Blue')", Some(&txn)).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO sizes VALUES (1, 'S')", Some(&txn)).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO sizes VALUES (2, 'M')", Some(&txn)).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO sizes VALUES (3, 'L')", Some(&txn)).unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO colors VALUES (1, 'Red')",
+        Some(&txn),
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO colors VALUES (2, 'Blue')",
+        Some(&txn),
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO sizes VALUES (1, 'S')",
+        Some(&txn),
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO sizes VALUES (2, 'M')",
+        Some(&txn),
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO sizes VALUES (3, 'L')",
+        Some(&txn),
+    )
+    .unwrap();
     txn_mgr.commit(txn.txn_id).unwrap();
 
     let txn2 = txn_mgr.begin(IsolationLevel::ReadCommitted);
-    let result = run_sql(&storage, &txn_mgr, &executor,
+    let result = run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
         "SELECT color, size FROM colors CROSS JOIN sizes ORDER BY color, size",
-        Some(&txn2)).unwrap();
+        Some(&txn2),
+    )
+    .unwrap();
     match result {
         falcon_executor::ExecutionResult::Query { rows, .. } => {
             assert_eq!(rows.len(), 6); // 2 colors * 3 sizes
-            // Blue+L, Blue+M, Blue+S, Red+L, Red+M, Red+S
+                                       // Blue+L, Blue+M, Blue+S, Red+L, Red+M, Red+S
             assert_eq!(rows[0].values[0], Datum::Text("Blue".into()));
             assert_eq!(rows[0].values[1], Datum::Text("L".into()));
             assert_eq!(rows[5].values[0], Datum::Text("Red".into()));
@@ -836,30 +1095,78 @@ fn test_cross_join() {
 fn test_left_join() {
     let (storage, txn_mgr, executor) = setup();
 
-    run_sql(&storage, &txn_mgr, &executor,
-        "CREATE TABLE authors (author_id INT PRIMARY KEY, author_name TEXT)", None).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "CREATE TABLE books (book_id INT PRIMARY KEY, title TEXT, fk_author INT)", None).unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "CREATE TABLE authors (author_id INT PRIMARY KEY, author_name TEXT)",
+        None,
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "CREATE TABLE books (book_id INT PRIMARY KEY, title TEXT, fk_author INT)",
+        None,
+    )
+    .unwrap();
 
     let txn = txn_mgr.begin(IsolationLevel::ReadCommitted);
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO authors VALUES (1, 'Tolkien')", Some(&txn)).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO authors VALUES (2, 'Asimov')", Some(&txn)).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO authors VALUES (3, 'Orwell')", Some(&txn)).unwrap(); // no books
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO authors VALUES (1, 'Tolkien')",
+        Some(&txn),
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO authors VALUES (2, 'Asimov')",
+        Some(&txn),
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO authors VALUES (3, 'Orwell')",
+        Some(&txn),
+    )
+    .unwrap(); // no books
 
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO books VALUES (1, 'The Hobbit', 1)", Some(&txn)).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO books VALUES (2, 'Foundation', 2)", Some(&txn)).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO books VALUES (3, 'LOTR', 1)", Some(&txn)).unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO books VALUES (1, 'The Hobbit', 1)",
+        Some(&txn),
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO books VALUES (2, 'Foundation', 2)",
+        Some(&txn),
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO books VALUES (3, 'LOTR', 1)",
+        Some(&txn),
+    )
+    .unwrap();
     txn_mgr.commit(txn.txn_id).unwrap();
 
     let txn2 = txn_mgr.begin(IsolationLevel::ReadCommitted);
 
-    // LEFT JOIN 鈥?all authors, even those without books
+    // LEFT JOIN — all authors, even those without books
     let result = run_sql(&storage, &txn_mgr, &executor,
         "SELECT author_name, title FROM authors LEFT JOIN books ON author_id = fk_author ORDER BY author_name, title",
         Some(&txn2)).unwrap();
@@ -885,26 +1192,61 @@ fn test_left_join() {
 fn test_scalar_subquery() {
     let (storage, txn_mgr, executor) = setup();
 
-    run_sql(&storage, &txn_mgr, &executor,
-        "CREATE TABLE scores (id INT PRIMARY KEY, player TEXT, score INT)", None).unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "CREATE TABLE scores (id INT PRIMARY KEY, player TEXT, score INT)",
+        None,
+    )
+    .unwrap();
 
     let txn = txn_mgr.begin(IsolationLevel::ReadCommitted);
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO scores VALUES (1, 'Alice', 90)", Some(&txn)).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO scores VALUES (2, 'Bob', 75)", Some(&txn)).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO scores VALUES (3, 'Carol', 95)", Some(&txn)).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO scores VALUES (4, 'Dave', 80)", Some(&txn)).unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO scores VALUES (1, 'Alice', 90)",
+        Some(&txn),
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO scores VALUES (2, 'Bob', 75)",
+        Some(&txn),
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO scores VALUES (3, 'Carol', 95)",
+        Some(&txn),
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO scores VALUES (4, 'Dave', 80)",
+        Some(&txn),
+    )
+    .unwrap();
     txn_mgr.commit(txn.txn_id).unwrap();
 
     let txn2 = txn_mgr.begin(IsolationLevel::ReadCommitted);
 
     // Scalar subquery: find players with max score
-    let result = run_sql(&storage, &txn_mgr, &executor,
+    let result = run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
         "SELECT player FROM scores WHERE score = (SELECT MAX(score) FROM scores)",
-        Some(&txn2)).unwrap();
+        Some(&txn2),
+    )
+    .unwrap();
     match result {
         falcon_executor::ExecutionResult::Query { rows, .. } => {
             assert_eq!(rows.len(), 1);
@@ -919,31 +1261,78 @@ fn test_scalar_subquery() {
 fn test_in_subquery() {
     let (storage, txn_mgr, executor) = setup();
 
-    run_sql(&storage, &txn_mgr, &executor,
-        "CREATE TABLE products (pid INT PRIMARY KEY, pname TEXT)", None).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "CREATE TABLE orders (oid INT PRIMARY KEY, product_id INT, qty INT)", None).unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "CREATE TABLE products (pid INT PRIMARY KEY, pname TEXT)",
+        None,
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "CREATE TABLE orders (oid INT PRIMARY KEY, product_id INT, qty INT)",
+        None,
+    )
+    .unwrap();
 
     let txn = txn_mgr.begin(IsolationLevel::ReadCommitted);
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO products VALUES (1, 'Widget')", Some(&txn)).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO products VALUES (2, 'Gadget')", Some(&txn)).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO products VALUES (3, 'Doohickey')", Some(&txn)).unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO products VALUES (1, 'Widget')",
+        Some(&txn),
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO products VALUES (2, 'Gadget')",
+        Some(&txn),
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO products VALUES (3, 'Doohickey')",
+        Some(&txn),
+    )
+    .unwrap();
 
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO orders VALUES (1, 1, 5)", Some(&txn)).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO orders VALUES (2, 3, 2)", Some(&txn)).unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO orders VALUES (1, 1, 5)",
+        Some(&txn),
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO orders VALUES (2, 3, 2)",
+        Some(&txn),
+    )
+    .unwrap();
     txn_mgr.commit(txn.txn_id).unwrap();
 
     let txn2 = txn_mgr.begin(IsolationLevel::ReadCommitted);
 
     // IN subquery: products that have orders
-    let result = run_sql(&storage, &txn_mgr, &executor,
+    let result = run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
         "SELECT pname FROM products WHERE pid IN (SELECT product_id FROM orders) ORDER BY pname",
-        Some(&txn2)).unwrap();
+        Some(&txn2),
+    )
+    .unwrap();
     match result {
         falcon_executor::ExecutionResult::Query { rows, .. } => {
             assert_eq!(rows.len(), 2);
@@ -954,9 +1343,14 @@ fn test_in_subquery() {
     }
 
     // NOT IN subquery: products without orders
-    let result = run_sql(&storage, &txn_mgr, &executor,
+    let result = run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
         "SELECT pname FROM products WHERE pid NOT IN (SELECT product_id FROM orders)",
-        Some(&txn2)).unwrap();
+        Some(&txn2),
+    )
+    .unwrap();
     match result {
         falcon_executor::ExecutionResult::Query { rows, .. } => {
             assert_eq!(rows.len(), 1);
@@ -971,31 +1365,78 @@ fn test_in_subquery() {
 fn test_exists_subquery() {
     let (storage, txn_mgr, executor) = setup();
 
-    run_sql(&storage, &txn_mgr, &executor,
-        "CREATE TABLE depts (did INT PRIMARY KEY, dname TEXT)", None).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "CREATE TABLE emps (eid INT PRIMARY KEY, ename TEXT, dept INT)", None).unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "CREATE TABLE depts (did INT PRIMARY KEY, dname TEXT)",
+        None,
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "CREATE TABLE emps (eid INT PRIMARY KEY, ename TEXT, dept INT)",
+        None,
+    )
+    .unwrap();
 
     let txn = txn_mgr.begin(IsolationLevel::ReadCommitted);
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO depts VALUES (1, 'Engineering')", Some(&txn)).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO depts VALUES (2, 'Marketing')", Some(&txn)).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO depts VALUES (3, 'Sales')", Some(&txn)).unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO depts VALUES (1, 'Engineering')",
+        Some(&txn),
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO depts VALUES (2, 'Marketing')",
+        Some(&txn),
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO depts VALUES (3, 'Sales')",
+        Some(&txn),
+    )
+    .unwrap();
 
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO emps VALUES (1, 'Alice', 1)", Some(&txn)).unwrap();
-    run_sql(&storage, &txn_mgr, &executor,
-        "INSERT INTO emps VALUES (2, 'Bob', 1)", Some(&txn)).unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO emps VALUES (1, 'Alice', 1)",
+        Some(&txn),
+    )
+    .unwrap();
+    run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
+        "INSERT INTO emps VALUES (2, 'Bob', 1)",
+        Some(&txn),
+    )
+    .unwrap();
     txn_mgr.commit(txn.txn_id).unwrap();
 
     let txn2 = txn_mgr.begin(IsolationLevel::ReadCommitted);
 
     // EXISTS: all depts returned because emps table is non-empty (uncorrelated)
-    let result = run_sql(&storage, &txn_mgr, &executor,
+    let result = run_sql(
+        &storage,
+        &txn_mgr,
+        &executor,
         "SELECT dname FROM depts WHERE EXISTS (SELECT 1 FROM emps) ORDER BY dname",
-        Some(&txn2)).unwrap();
+        Some(&txn2),
+    )
+    .unwrap();
     match result {
         falcon_executor::ExecutionResult::Query { rows, .. } => {
             assert_eq!(rows.len(), 3);

@@ -3,7 +3,11 @@ use falcon_common::error::ExecutionError;
 use falcon_sql_frontend::types::BinOp;
 use serde_json::Value as JsonValue;
 
-pub(crate) fn eval_binary_op(left: &Datum, op: BinOp, right: &Datum) -> Result<Datum, ExecutionError> {
+pub(crate) fn eval_binary_op(
+    left: &Datum,
+    op: BinOp,
+    right: &Datum,
+) -> Result<Datum, ExecutionError> {
     if left.is_null() || right.is_null() {
         return match op {
             BinOp::And => eval_and_null(left, right),
@@ -75,37 +79,35 @@ pub(crate) fn eval_binary_op(left: &Datum, op: BinOp, right: &Datum) -> Result<D
         BinOp::JsonContains => eval_json_contains(left, right),
         BinOp::JsonContainedBy => eval_json_contains(right, left),
         BinOp::JsonExists => eval_json_exists(left, right),
-        BinOp::StringConcat => {
-            match (left, right) {
-                (Datum::Array(a), Datum::Array(b)) => {
-                    let mut result = a.clone();
-                    result.extend(b.iter().cloned());
-                    Ok(Datum::Array(result))
-                }
-                (Datum::Array(a), elem) if !elem.is_null() => {
-                    let mut result = a.clone();
-                    result.push(elem.clone());
-                    Ok(Datum::Array(result))
-                }
-                (elem, Datum::Array(b)) if !elem.is_null() => {
-                    let mut result = vec![elem.clone()];
-                    result.extend(b.iter().cloned());
-                    Ok(Datum::Array(result))
-                }
-                (Datum::Null, _) | (_, Datum::Null) => Ok(Datum::Null),
-                (l, r) => {
-                    let ls = match l {
-                        Datum::Text(s) => s.clone(),
-                        other => format!("{}", other),
-                    };
-                    let rs = match r {
-                        Datum::Text(s) => s.clone(),
-                        other => format!("{}", other),
-                    };
-                    Ok(Datum::Text(format!("{}{}", ls, rs)))
-                }
+        BinOp::StringConcat => match (left, right) {
+            (Datum::Array(a), Datum::Array(b)) => {
+                let mut result = a.clone();
+                result.extend(b.iter().cloned());
+                Ok(Datum::Array(result))
             }
-        }
+            (Datum::Array(a), elem) if !elem.is_null() => {
+                let mut result = a.clone();
+                result.push(elem.clone());
+                Ok(Datum::Array(result))
+            }
+            (elem, Datum::Array(b)) if !elem.is_null() => {
+                let mut result = vec![elem.clone()];
+                result.extend(b.iter().cloned());
+                Ok(Datum::Array(result))
+            }
+            (Datum::Null, _) | (_, Datum::Null) => Ok(Datum::Null),
+            (l, r) => {
+                let ls = match l {
+                    Datum::Text(s) => s.clone(),
+                    other => format!("{}", other),
+                };
+                let rs = match r {
+                    Datum::Text(s) => s.clone(),
+                    other => format!("{}", other),
+                };
+                Ok(Datum::Text(format!("{}{}", ls, rs)))
+            }
+        },
     }
 }
 
@@ -161,7 +163,8 @@ fn datum_to_json(d: &Datum) -> Result<JsonValue, ExecutionError> {
         Datum::Text(s) => serde_json::from_str(s)
             .map_err(|e| ExecutionError::TypeError(format!("invalid JSON: {}", e))),
         _ => Err(ExecutionError::TypeError(format!(
-            "cannot use {:?} as JSONB", d
+            "cannot use {:?} as JSONB",
+            d
         ))),
     }
 }
@@ -187,12 +190,18 @@ fn eval_json_arrow(left: &Datum, right: &Datum, as_text: bool) -> Result<Datum, 
         Datum::Text(key) => json.get(key.as_str()).cloned(),
         Datum::Int32(idx) => json.get(*idx as usize).cloned(),
         Datum::Int64(idx) => json.get(*idx as usize).cloned(),
-        _ => return Err(ExecutionError::TypeError(
-            "JSONB -> operator requires text key or integer index".into(),
-        )),
+        _ => {
+            return Err(ExecutionError::TypeError(
+                "JSONB -> operator requires text key or integer index".into(),
+            ))
+        }
     };
     match result {
-        Some(v) => Ok(if as_text { json_to_text_datum(&v) } else { json_to_datum(&v) }),
+        Some(v) => Ok(if as_text {
+            json_to_text_datum(&v)
+        } else {
+            json_to_datum(&v)
+        }),
         None => Ok(Datum::Null),
     }
 }
@@ -201,18 +210,23 @@ fn eval_json_arrow(left: &Datum, right: &Datum, as_text: bool) -> Result<Datum, 
 fn eval_json_path(left: &Datum, right: &Datum, as_text: bool) -> Result<Datum, ExecutionError> {
     let mut json = datum_to_json(left)?;
     let path_elems = match right {
-        Datum::Array(arr) => arr.iter().map(|d| match d {
-            Datum::Text(s) => Ok(s.clone()),
-            other => Ok(format!("{}", other)),
-        }).collect::<Result<Vec<_>, ExecutionError>>()?,
+        Datum::Array(arr) => arr
+            .iter()
+            .map(|d| match d {
+                Datum::Text(s) => Ok(s.clone()),
+                other => Ok(format!("{}", other)),
+            })
+            .collect::<Result<Vec<_>, ExecutionError>>()?,
         Datum::Text(s) => {
             // Accept '{a,b,c}' PG-style path syntax
             let trimmed = s.trim_start_matches('{').trim_end_matches('}');
             trimmed.split(',').map(|p| p.trim().to_string()).collect()
         }
-        _ => return Err(ExecutionError::TypeError(
-            "JSONB #> operator requires text array path".into(),
-        )),
+        _ => {
+            return Err(ExecutionError::TypeError(
+                "JSONB #> operator requires text array path".into(),
+            ))
+        }
     };
 
     for elem in &path_elems {
@@ -232,7 +246,11 @@ fn eval_json_path(left: &Datum, right: &Datum, as_text: bool) -> Result<Datum, E
         };
     }
 
-    Ok(if as_text { json_to_text_datum(&json) } else { json_to_datum(&json) })
+    Ok(if as_text {
+        json_to_text_datum(&json)
+    } else {
+        json_to_datum(&json)
+    })
 }
 
 /// `@>`: left contains right (deep containment).
@@ -245,14 +263,12 @@ fn eval_json_contains(left: &Datum, right: &Datum) -> Result<Datum, ExecutionErr
 /// Recursive JSON containment check (PG @> semantics).
 fn json_contains(container: &JsonValue, containee: &JsonValue) -> bool {
     match (container, containee) {
-        (JsonValue::Object(lm), JsonValue::Object(rm)) => {
-            rm.iter().all(|(k, rv)| {
-                lm.get(k).is_some_and(|lv| json_contains(lv, rv))
-            })
-        }
-        (JsonValue::Array(la), JsonValue::Array(ra)) => {
-            ra.iter().all(|rv| la.iter().any(|lv| json_contains(lv, rv)))
-        }
+        (JsonValue::Object(lm), JsonValue::Object(rm)) => rm
+            .iter()
+            .all(|(k, rv)| lm.get(k).is_some_and(|lv| json_contains(lv, rv))),
+        (JsonValue::Array(la), JsonValue::Array(ra)) => ra
+            .iter()
+            .all(|rv| la.iter().any(|lv| json_contains(lv, rv))),
         (a, b) => a == b,
     }
 }

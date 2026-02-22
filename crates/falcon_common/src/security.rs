@@ -262,7 +262,9 @@ pub struct RoleCatalog {
 
 impl RoleCatalog {
     pub fn new() -> Self {
-        let mut catalog = Self { roles: HashMap::new() };
+        let mut catalog = Self {
+            roles: HashMap::new(),
+        };
         catalog.add_role(Role::superuser());
         catalog
     }
@@ -299,7 +301,10 @@ impl RoleCatalog {
         }
         // Check for circular inheritance
         if self.is_member_of_transitive(group, member) {
-            return Err(format!("circular role inheritance: {} is already a member of {}", group.0, member.0));
+            return Err(format!(
+                "circular role inheritance: {} is already a member of {}",
+                group.0, member.0
+            ));
         }
         if let Some(role) = self.roles.get_mut(&member) {
             role.member_of.insert(group);
@@ -415,9 +420,10 @@ impl PrivilegeManager {
         with_grant_option: bool,
     ) {
         // Check for duplicate
-        let exists = self.grants.iter().any(|g| {
-            g.grantee == grantee && g.privilege == privilege && g.object == object
-        });
+        let exists = self
+            .grants
+            .iter()
+            .any(|g| g.grantee == grantee && g.privilege == privilege && g.object == object);
         if !exists {
             self.grants.push(GrantEntry {
                 grantee,
@@ -430,15 +436,9 @@ impl PrivilegeManager {
     }
 
     /// Revoke a privilege on an object from a role.
-    pub fn revoke(
-        &mut self,
-        grantee: RoleId,
-        privilege: Privilege,
-        object: &ObjectRef,
-    ) {
-        self.grants.retain(|g| {
-            !(g.grantee == grantee && g.privilege == privilege && g.object == *object)
-        });
+    pub fn revoke(&mut self, grantee: RoleId, privilege: Privilege, object: &ObjectRef) {
+        self.grants
+            .retain(|g| !(g.grantee == grantee && g.privilege == privilege && g.object == *object));
     }
 
     /// Revoke all privileges on an object (used when dropping the object).
@@ -474,12 +474,7 @@ impl PrivilegeManager {
     }
 
     /// Add a default privilege for new objects in a schema.
-    pub fn add_schema_default(
-        &mut self,
-        grantor: RoleId,
-        schema: &str,
-        default: DefaultPrivilege,
-    ) {
+    pub fn add_schema_default(&mut self, grantor: RoleId, schema: &str, default: DefaultPrivilege) {
         self.schema_defaults
             .entry((grantor, schema.to_string()))
             .or_default()
@@ -496,7 +491,10 @@ impl PrivilegeManager {
 
     /// List all grants for a specific role.
     pub fn grants_for_role(&self, role_id: RoleId) -> Vec<&GrantEntry> {
-        self.grants.iter().filter(|g| g.grantee == role_id).collect()
+        self.grants
+            .iter()
+            .filter(|g| g.grantee == role_id)
+            .collect()
     }
 
     /// List all grants on a specific object.
@@ -513,8 +511,9 @@ impl PrivilegeManager {
 // ── Transaction Priority (P2-3) ──
 
 /// Transaction priority level for SLA-based scheduling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 pub enum TxnPriority {
     /// Background tasks (GC, analytics, maintenance). Lowest priority.
     Background = 0,
@@ -526,7 +525,6 @@ pub enum TxnPriority {
     /// System-internal transactions (schema changes, replication). Highest priority.
     System = 3,
 }
-
 
 impl fmt::Display for TxnPriority {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -624,7 +622,10 @@ mod tests {
     fn test_audit_event_type_display() {
         assert_eq!(AuditEventType::Login.to_string(), "LOGIN");
         assert_eq!(AuditEventType::Ddl.to_string(), "DDL");
-        assert_eq!(AuditEventType::PrivilegeChange.to_string(), "PRIVILEGE_CHANGE");
+        assert_eq!(
+            AuditEventType::PrivilegeChange.to_string(),
+            "PRIVILEGE_CHANGE"
+        );
     }
 
     // ── Priority tests ──
@@ -647,9 +648,18 @@ mod tests {
     #[test]
     fn test_txn_priority_parse() {
         assert_eq!(TxnPriority::from_str_ci("high"), Some(TxnPriority::High));
-        assert_eq!(TxnPriority::from_str_ci("NORMAL"), Some(TxnPriority::Normal));
-        assert_eq!(TxnPriority::from_str_ci("bg"), Some(TxnPriority::Background));
-        assert_eq!(TxnPriority::from_str_ci("critical"), Some(TxnPriority::High));
+        assert_eq!(
+            TxnPriority::from_str_ci("NORMAL"),
+            Some(TxnPriority::Normal)
+        );
+        assert_eq!(
+            TxnPriority::from_str_ci("bg"),
+            Some(TxnPriority::Background)
+        );
+        assert_eq!(
+            TxnPriority::from_str_ci("critical"),
+            Some(TxnPriority::High)
+        );
         assert_eq!(TxnPriority::from_str_ci("invalid"), None);
     }
 
@@ -702,7 +712,11 @@ mod tests {
     fn test_role_catalog_transitive_inheritance() {
         let mut catalog = RoleCatalog::new();
         catalog.add_role(Role::new_user(RoleId(1), "alice".into(), SYSTEM_TENANT_ID));
-        catalog.add_role(Role::new_user(RoleId(2), "editors".into(), SYSTEM_TENANT_ID));
+        catalog.add_role(Role::new_user(
+            RoleId(2),
+            "editors".into(),
+            SYSTEM_TENANT_ID,
+        ));
         catalog.add_role(Role::new_user(RoleId(3), "admins".into(), SYSTEM_TENANT_ID));
         // alice -> editors -> admins
         catalog.grant_role(RoleId(1), RoleId(2)).unwrap();
@@ -715,7 +729,11 @@ mod tests {
     fn test_role_catalog_effective_roles() {
         let mut catalog = RoleCatalog::new();
         catalog.add_role(Role::new_user(RoleId(1), "alice".into(), SYSTEM_TENANT_ID));
-        catalog.add_role(Role::new_user(RoleId(2), "editors".into(), SYSTEM_TENANT_ID));
+        catalog.add_role(Role::new_user(
+            RoleId(2),
+            "editors".into(),
+            SYSTEM_TENANT_ID,
+        ));
         catalog.add_role(Role::new_user(RoleId(3), "admins".into(), SYSTEM_TENANT_ID));
         catalog.grant_role(RoleId(1), RoleId(2)).unwrap();
         catalog.grant_role(RoleId(2), RoleId(3)).unwrap();
@@ -748,7 +766,11 @@ mod tests {
     fn test_role_catalog_revoke_membership() {
         let mut catalog = RoleCatalog::new();
         catalog.add_role(Role::new_user(RoleId(1), "alice".into(), SYSTEM_TENANT_ID));
-        catalog.add_role(Role::new_user(RoleId(2), "editors".into(), SYSTEM_TENANT_ID));
+        catalog.add_role(Role::new_user(
+            RoleId(2),
+            "editors".into(),
+            SYSTEM_TENANT_ID,
+        ));
         catalog.grant_role(RoleId(1), RoleId(2)).unwrap();
         assert!(catalog.is_member_of_transitive(RoleId(1), RoleId(2)));
         catalog.revoke_role(RoleId(1), RoleId(2)).unwrap();
@@ -769,8 +791,12 @@ mod tests {
         assert_eq!(pm.grant_count(), 1);
 
         let roles: HashSet<RoleId> = [RoleId(1)].into_iter().collect();
-        assert!(pm.check_privilege(&roles, Privilege::Select, &obj).is_allowed());
-        assert!(!pm.check_privilege(&roles, Privilege::Insert, &obj).is_allowed());
+        assert!(pm
+            .check_privilege(&roles, Privilege::Select, &obj)
+            .is_allowed());
+        assert!(!pm
+            .check_privilege(&roles, Privilege::Insert, &obj)
+            .is_allowed());
     }
 
     #[test]
@@ -784,9 +810,15 @@ mod tests {
         pm.grant(RoleId(1), Privilege::All, obj.clone(), RoleId(0), false);
 
         let roles: HashSet<RoleId> = [RoleId(1)].into_iter().collect();
-        assert!(pm.check_privilege(&roles, Privilege::Select, &obj).is_allowed());
-        assert!(pm.check_privilege(&roles, Privilege::Insert, &obj).is_allowed());
-        assert!(pm.check_privilege(&roles, Privilege::Delete, &obj).is_allowed());
+        assert!(pm
+            .check_privilege(&roles, Privilege::Select, &obj)
+            .is_allowed());
+        assert!(pm
+            .check_privilege(&roles, Privilege::Insert, &obj)
+            .is_allowed());
+        assert!(pm
+            .check_privilege(&roles, Privilege::Delete, &obj)
+            .is_allowed());
     }
 
     #[test]
@@ -815,17 +847,23 @@ mod tests {
 
         // Alice (RoleId(1)) is a member of editors — effective roles include both
         let effective: HashSet<RoleId> = [RoleId(1), RoleId(2)].into_iter().collect();
-        assert!(pm.check_privilege(&effective, Privilege::Select, &obj).is_allowed());
+        assert!(pm
+            .check_privilege(&effective, Privilege::Select, &obj)
+            .is_allowed());
     }
 
     #[test]
     fn test_privilege_manager_schema_defaults() {
         let mut pm = PrivilegeManager::new();
-        pm.add_schema_default(RoleId(0), "public", DefaultPrivilege {
-            grantee: RoleId(1),
-            object_type: ObjectType::Table,
-            privilege: Privilege::Select,
-        });
+        pm.add_schema_default(
+            RoleId(0),
+            "public",
+            DefaultPrivilege {
+                grantee: RoleId(1),
+                object_type: ObjectType::Table,
+                privilege: Privilege::Select,
+            },
+        );
         let defaults = pm.schema_defaults(RoleId(0), "public");
         assert_eq!(defaults.len(), 1);
         assert_eq!(defaults[0].privilege, Privilege::Select);

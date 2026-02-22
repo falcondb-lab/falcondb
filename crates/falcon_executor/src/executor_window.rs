@@ -48,7 +48,8 @@ impl Executor {
                     match &wf.func {
                         WindowFunc::RowNumber => {
                             for (rank, &row_idx) in indices.iter().enumerate() {
-                                result_rows[row_idx].values[proj_idx] = Datum::Int64((rank + 1) as i64);
+                                result_rows[row_idx].values[proj_idx] =
+                                    Datum::Int64((rank + 1) as i64);
                             }
                         }
                         WindowFunc::Rank => {
@@ -282,7 +283,9 @@ impl Executor {
         match &frame.end {
             WindowFrameBound::UnboundedFollowing => partition_len.saturating_sub(1),
             WindowFrameBound::CurrentRow => pos,
-            WindowFrameBound::Following(n) => (pos + *n as usize).min(partition_len.saturating_sub(1)),
+            WindowFrameBound::Following(n) => {
+                (pos + *n as usize).min(partition_len.saturating_sub(1))
+            }
             WindowFrameBound::Preceding(n) => pos.saturating_sub(*n as usize),
             WindowFrameBound::UnboundedPreceding => 0,
         }

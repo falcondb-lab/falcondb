@@ -116,7 +116,11 @@ impl AuditLog {
         self.record(AuditEvent {
             event_id: 0,
             timestamp_ms: 0,
-            event_type: if success { AuditEventType::Login } else { AuditEventType::AuthFailure },
+            event_type: if success {
+                AuditEventType::Login
+            } else {
+                AuditEventType::AuthFailure
+            },
             tenant_id,
             role_id,
             role_name: role_name.to_string(),
@@ -284,8 +288,22 @@ mod tests {
     #[test]
     fn test_audit_log_record_and_snapshot() {
         let log = AuditLog::new();
-        log.record_login(SYSTEM_TENANT_ID, RoleId(0), "falcon", 1, Some("127.0.0.1".into()), true);
-        log.record_ddl(SYSTEM_TENANT_ID, RoleId(0), "falcon", 1, "CREATE TABLE t(id INT)", true);
+        log.record_login(
+            SYSTEM_TENANT_ID,
+            RoleId(0),
+            "falcon",
+            1,
+            Some("127.0.0.1".into()),
+            true,
+        );
+        log.record_ddl(
+            SYSTEM_TENANT_ID,
+            RoleId(0),
+            "falcon",
+            1,
+            "CREATE TABLE t(id INT)",
+            true,
+        );
         log.flush();
 
         assert_eq!(log.total_events(), 2);
@@ -319,7 +337,14 @@ mod tests {
     fn test_snapshot_by_type() {
         let log = AuditLog::new();
         log.record_login(SYSTEM_TENANT_ID, RoleId(0), "falcon", 1, None, true);
-        log.record_ddl(SYSTEM_TENANT_ID, RoleId(0), "falcon", 1, "CREATE TABLE x(id INT)", true);
+        log.record_ddl(
+            SYSTEM_TENANT_ID,
+            RoleId(0),
+            "falcon",
+            1,
+            "CREATE TABLE x(id INT)",
+            true,
+        );
         log.record_login(SYSTEM_TENANT_ID, RoleId(1), "alice", 2, None, false);
         log.flush();
 
@@ -337,7 +362,14 @@ mod tests {
         let log = AuditLog::new();
         log.record_login(TenantId(1), RoleId(10), "alice", 1, None, true);
         log.record_login(TenantId(2), RoleId(20), "bob", 2, None, true);
-        log.record_ddl(TenantId(1), RoleId(10), "alice", 1, "CREATE TABLE t(x INT)", true);
+        log.record_ddl(
+            TenantId(1),
+            RoleId(10),
+            "alice",
+            1,
+            "CREATE TABLE t(x INT)",
+            true,
+        );
         log.flush();
 
         let t1_events = log.snapshot_by_tenant(TenantId(1), 10);
@@ -374,7 +406,10 @@ mod tests {
     fn test_privilege_change_event() {
         let log = AuditLog::new();
         log.record_privilege_change(
-            TenantId(1), RoleId(0), "falcon", 1,
+            TenantId(1),
+            RoleId(0),
+            "falcon",
+            1,
             "GRANT SELECT ON users TO alice",
         );
         log.flush();

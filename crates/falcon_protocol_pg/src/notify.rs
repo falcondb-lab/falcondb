@@ -11,8 +11,8 @@
 //! - NOTIFY sends on the broadcast channel; all current listeners receive it.
 //! - UNLISTEN removes the subscription.
 
-use std::collections::{HashMap, HashSet};
 use parking_lot::Mutex;
+use std::collections::{HashMap, HashSet};
 use tokio::sync::broadcast;
 
 /// A single notification payload.
@@ -66,12 +66,10 @@ impl NotificationHub {
     /// notifications. If the channel doesn't exist yet, it is created.
     pub fn listen(&self, channel: &str) -> broadcast::Receiver<Notification> {
         let mut channels = self.channels.lock();
-        let state = channels
-            .entry(channel.to_string())
-            .or_insert_with(|| {
-                let (tx, _) = broadcast::channel(CHANNEL_CAPACITY);
-                ChannelState { tx }
-            });
+        let state = channels.entry(channel.to_string()).or_insert_with(|| {
+            let (tx, _) = broadcast::channel(CHANNEL_CAPACITY);
+            ChannelState { tx }
+        });
         state.tx.subscribe()
     }
 

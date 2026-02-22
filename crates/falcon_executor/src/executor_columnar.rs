@@ -16,8 +16,8 @@ use falcon_common::schema::TableSchema;
 use falcon_common::types::DataType;
 use falcon_sql_frontend::types::*;
 
-use crate::executor::{Executor, ExecutionResult};
-use crate::vectorized::{RecordBatch, vectorized_aggregate, vectorized_filter, is_vectorizable};
+use crate::executor::{ExecutionResult, Executor};
+use crate::vectorized::{is_vectorizable, vectorized_aggregate, vectorized_filter, RecordBatch};
 
 impl Executor {
     /// Execute a pure aggregate query over pre-scanned columnar data.
@@ -74,8 +74,12 @@ impl Executor {
                     let col_name = alias.clone();
                     let data_type = match func {
                         AggFunc::Count => DataType::Int64,
-                        AggFunc::Sum | AggFunc::Avg | AggFunc::StddevPop | AggFunc::StddevSamp
-                        | AggFunc::VarPop | AggFunc::VarSamp => DataType::Float64,
+                        AggFunc::Sum
+                        | AggFunc::Avg
+                        | AggFunc::StddevPop
+                        | AggFunc::StddevSamp
+                        | AggFunc::VarPop
+                        | AggFunc::VarSamp => DataType::Float64,
                         _ => DataType::Text,
                     };
                     columns.push((col_name, data_type));
@@ -118,13 +122,17 @@ impl Executor {
 
                 BoundProjection::Column(col_idx, alias) => {
                     let col_name = if alias.is_empty() {
-                        schema.columns.get(*col_idx)
+                        schema
+                            .columns
+                            .get(*col_idx)
                             .map(|c| c.name.clone())
                             .unwrap_or_else(|| format!("col{}", col_idx))
                     } else {
                         alias.clone()
                     };
-                    let data_type = schema.columns.get(*col_idx)
+                    let data_type = schema
+                        .columns
+                        .get(*col_idx)
                         .map(|c| c.data_type.clone())
                         .unwrap_or(DataType::Text);
                     columns.push((col_name, data_type));
@@ -138,7 +146,11 @@ impl Executor {
                 }
 
                 BoundProjection::Expr(expr, alias) => {
-                    let col_name = if alias.is_empty() { "?column?".to_string() } else { alias.clone() };
+                    let col_name = if alias.is_empty() {
+                        "?column?".to_string()
+                    } else {
+                        alias.clone()
+                    };
                     columns.push((col_name, DataType::Text));
                     let dummy = OwnedRow::new(vec![]);
                     let val = crate::expr_engine::ExprEngine::eval_row(expr, &dummy)

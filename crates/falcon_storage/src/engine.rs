@@ -6,10 +6,10 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 
+use falcon_common::config::{NodeRole, WritePathEnforcement};
 use falcon_common::datum::OwnedRow;
 use falcon_common::error::StorageError;
 use falcon_common::schema::{Catalog, TableSchema};
-use falcon_common::config::{NodeRole, WritePathEnforcement};
 use falcon_common::types::{TableId, Timestamp, TxnId, TxnType};
 
 use crate::memory::{MemoryBudget, MemoryTracker};
@@ -93,18 +93,23 @@ impl ReplicationStats {
     /// Record a completed failover.
     pub fn record_failover(&self, duration_ms: u64) {
         self.promote_count.fetch_add(1, AtomicOrdering::Relaxed);
-        self.last_failover_time_ms.store(duration_ms, AtomicOrdering::Relaxed);
+        self.last_failover_time_ms
+            .store(duration_ms, AtomicOrdering::Relaxed);
         self.leader_changes.fetch_add(1, AtomicOrdering::Relaxed);
     }
 
     /// P1-3: Update the current replication lag.
     pub fn update_replication_lag(&self, lag_us: u64) {
-        self.replication_lag_us.store(lag_us, AtomicOrdering::Relaxed);
+        self.replication_lag_us
+            .store(lag_us, AtomicOrdering::Relaxed);
         // Update max via CAS loop
         let mut current_max = self.max_replication_lag_us.load(AtomicOrdering::Relaxed);
         while lag_us > current_max {
             match self.max_replication_lag_us.compare_exchange_weak(
-                current_max, lag_us, AtomicOrdering::Relaxed, AtomicOrdering::Relaxed,
+                current_max,
+                lag_us,
+                AtomicOrdering::Relaxed,
+                AtomicOrdering::Relaxed,
             ) {
                 Ok(_) => break,
                 Err(actual) => current_max = actual,
@@ -186,8 +191,16 @@ impl WalStats {
             flushes,
             fsync_total_us: fsync_total,
             fsync_max_us: self.fsync_max_us.load(AtomicOrdering::Relaxed),
-            fsync_avg_us: if flushes > 0 { fsync_total / flushes } else { 0 },
-            group_commit_avg_size: if gc_batches > 0 { gc_records as f64 / gc_batches as f64 } else { 0.0 },
+            fsync_avg_us: if flushes > 0 {
+                fsync_total / flushes
+            } else {
+                0
+            },
+            group_commit_avg_size: if gc_batches > 0 {
+                gc_records as f64 / gc_batches as f64
+            } else {
+                0.0
+            },
             backlog_bytes: self.backlog_bytes.load(AtomicOrdering::Relaxed),
         }
     }
@@ -195,12 +208,16 @@ impl WalStats {
     /// Record an fsync operation with its latency.
     #[allow(dead_code)]
     pub(crate) fn record_fsync(&self, latency_us: u64) {
-        self.fsync_total_us.fetch_add(latency_us, AtomicOrdering::Relaxed);
+        self.fsync_total_us
+            .fetch_add(latency_us, AtomicOrdering::Relaxed);
         // Update max via CAS loop
         let mut current_max = self.fsync_max_us.load(AtomicOrdering::Relaxed);
         while latency_us > current_max {
             match self.fsync_max_us.compare_exchange_weak(
-                current_max, latency_us, AtomicOrdering::Relaxed, AtomicOrdering::Relaxed,
+                current_max,
+                latency_us,
+                AtomicOrdering::Relaxed,
+                AtomicOrdering::Relaxed,
             ) {
                 Ok(_) => break,
                 Err(actual) => current_max = actual,
@@ -211,8 +228,10 @@ impl WalStats {
     /// Record a group commit batch.
     #[allow(dead_code)]
     pub(crate) fn record_group_commit(&self, batch_size: u64) {
-        self.group_commit_records.fetch_add(batch_size, AtomicOrdering::Relaxed);
-        self.group_commit_batches.fetch_add(1, AtomicOrdering::Relaxed);
+        self.group_commit_records
+            .fetch_add(batch_size, AtomicOrdering::Relaxed);
+        self.group_commit_batches
+            .fetch_add(1, AtomicOrdering::Relaxed);
     }
 }
 
@@ -247,7 +266,8 @@ impl ReplicaAckTracker {
                 }
             }
             None => {
-                self.ack_timestamps.insert(replica_id, AtomicU64::new(ack_ts));
+                self.ack_timestamps
+                    .insert(replica_id, AtomicU64::new(ack_ts));
             }
         }
     }
@@ -408,12 +428,14 @@ impl StorageEngine {
 
     /// Number of OLTP write-path columnstore violations (should be 0 on Primary).
     pub fn write_path_columnstore_violation_count(&self) -> u64 {
-        self.write_path_columnstore_violations.load(AtomicOrdering::Relaxed)
+        self.write_path_columnstore_violations
+            .load(AtomicOrdering::Relaxed)
     }
 
     /// Number of OLTP write-path disk-rowstore violations (should be 0 on Primary).
     pub fn write_path_disk_violation_count(&self) -> u64 {
-        self.write_path_disk_violations.load(AtomicOrdering::Relaxed)
+        self.write_path_disk_violations
+            .load(AtomicOrdering::Relaxed)
     }
 
     /// Set the write-path enforcement level.
@@ -562,10 +584,14 @@ impl StorageEngine {
         if let Some(ref wal) = self.wal {
             wal.append(record)?;
         }
-        self.wal_stats.records_written.fetch_add(1, AtomicOrdering::Relaxed);
+        self.wal_stats
+            .records_written
+            .fetch_add(1, AtomicOrdering::Relaxed);
         if let Some(ref observer) = self.wal_observer {
             observer(record);
-            self.wal_stats.observer_notifications.fetch_add(1, AtomicOrdering::Relaxed);
+            self.wal_stats
+                .observer_notifications
+                .fetch_add(1, AtomicOrdering::Relaxed);
         }
         Ok(())
     }
@@ -635,7 +661,10 @@ impl StorageEngine {
     pub(crate) fn record_write(&self, txn_id: TxnId, table_id: TableId, pk: PrimaryKey) {
         let mut entry = self.txn_write_sets.entry(txn_id).or_default();
         // Deduplicate: skip if this (table_id, pk) is already recorded
-        if !entry.iter().any(|op| op.table_id == table_id && op.pk == pk) {
+        if !entry
+            .iter()
+            .any(|op| op.table_id == table_id && op.pk == pk)
+        {
             entry.push(TxnWriteOp { table_id, pk });
         }
     }
@@ -769,7 +798,10 @@ impl StorageEngine {
     pub fn get_indexed_columns(&self, table_id: TableId) -> Vec<(usize, bool)> {
         if let Some(table) = self.tables.get(&table_id) {
             let indexes = table.secondary_indexes.read();
-            indexes.iter().map(|idx| (idx.column_idx, idx.unique)).collect()
+            indexes
+                .iter()
+                .map(|idx| (idx.column_idx, idx.unique))
+                .collect()
         } else {
             vec![]
         }
@@ -780,9 +812,15 @@ impl StorageEngine {
     /// Collect statistics for a table by scanning all committed rows.
     /// Uses a snapshot read at the latest timestamp visible to a fresh reader.
     pub fn analyze_table(&self, table_name: &str) -> Result<TableStatistics, StorageError> {
-        let schema = self.catalog.read().find_table(table_name).cloned()
+        let schema = self
+            .catalog
+            .read()
+            .find_table(table_name)
+            .cloned()
             .ok_or(StorageError::TableNotFound(TableId(0)))?;
-        let table = self.tables.get(&schema.id)
+        let table = self
+            .tables
+            .get(&schema.id)
             .ok_or(StorageError::TableNotFound(schema.id))?;
 
         // Snapshot scan: use a sentinel txn/ts to read all committed data
@@ -794,7 +832,10 @@ impl StorageEngine {
             .map(|(_pk, row)| row.values)
             .collect();
 
-        let columns: Vec<(usize, String)> = schema.columns.iter().enumerate()
+        let columns: Vec<(usize, String)> = schema
+            .columns
+            .iter()
+            .enumerate()
             .map(|(i, c)| (i, c.name.clone()))
             .collect();
 
@@ -828,7 +869,10 @@ impl StorageEngine {
 
     /// Allocate a synthetic internal TxnId that won't collide with user txns.
     pub(crate) fn next_internal_txn_id(&self) -> TxnId {
-        TxnId(self.internal_txn_counter.fetch_add(1, AtomicOrdering::Relaxed))
+        TxnId(
+            self.internal_txn_counter
+                .fetch_add(1, AtomicOrdering::Relaxed),
+        )
     }
 
     // ── Txn lifecycle ────────────────────────────────────────────────
@@ -866,7 +910,11 @@ impl StorageEngine {
     /// Validate the read-set for OCC under Snapshot Isolation.
     /// Returns Ok(()) if no read key was modified by a concurrent committed
     /// transaction after `start_ts`. Returns Err if a conflict is detected.
-    pub fn validate_read_set(&self, txn_id: TxnId, start_ts: Timestamp) -> Result<(), StorageError> {
+    pub fn validate_read_set(
+        &self,
+        txn_id: TxnId,
+        start_ts: Timestamp,
+    ) -> Result<(), StorageError> {
         if let Some(read_set) = self.txn_read_sets.get(&txn_id) {
             for op in read_set.value() {
                 if let Some(table) = self.tables.get(&op.table_id) {
@@ -879,7 +927,11 @@ impl StorageEngine {
         Ok(())
     }
 
-    pub(crate) fn commit_txn_local(&self, txn_id: TxnId, commit_ts: Timestamp) -> Result<(), StorageError> {
+    pub(crate) fn commit_txn_local(
+        &self,
+        txn_id: TxnId,
+        commit_ts: Timestamp,
+    ) -> Result<(), StorageError> {
         let write_set = self.take_write_set(txn_id);
         let _read_set = self.take_read_set(txn_id);
 
@@ -903,7 +955,11 @@ impl StorageEngine {
         Ok(())
     }
 
-    pub(crate) fn commit_txn_global(&self, txn_id: TxnId, commit_ts: Timestamp) -> Result<(), StorageError> {
+    pub(crate) fn commit_txn_global(
+        &self,
+        txn_id: TxnId,
+        commit_ts: Timestamp,
+    ) -> Result<(), StorageError> {
         let write_set = self.take_write_set(txn_id);
         let _read_set = self.take_read_set(txn_id);
 
@@ -1064,9 +1120,10 @@ impl StorageEngine {
     /// After checkpoint, old WAL segments before the current one can be purged.
     /// Returns (wal_segment_id, row_count) on success.
     pub fn checkpoint(&self) -> Result<(u64, usize), StorageError> {
-        let wal = self.wal.as_ref().ok_or_else(|| {
-            StorageError::Serialization("Cannot checkpoint without WAL".into())
-        })?;
+        let wal = self
+            .wal
+            .as_ref()
+            .ok_or_else(|| StorageError::Serialization("Cannot checkpoint without WAL".into()))?;
 
         // Flush any pending WAL writes first
         wal.flush()?;
@@ -1114,7 +1171,10 @@ impl StorageEngine {
 
         tracing::info!(
             "Checkpoint complete: segment={}, lsn={}, rows={}, purged_segments={}",
-            segment_id, lsn, total_rows, purged_segments
+            segment_id,
+            lsn,
+            total_rows,
+            purged_segments
         );
         Ok((segment_id, total_rows))
     }
@@ -1227,7 +1287,9 @@ impl StorageEngine {
             }
             tracing::info!(
                 "Checkpoint loaded: {} tables, segment={}, lsn={}",
-                ckpt.table_data.len(), ckpt.wal_segment_id, ckpt.wal_lsn
+                ckpt.table_data.len(),
+                ckpt.wal_segment_id,
+                ckpt.wal_lsn
             );
             // Read only WAL records from the checkpoint segment onward
             let reader = WalReader::new(wal_dir);
@@ -1354,17 +1416,26 @@ impl StorageEngine {
                 WalRecord::DropView { name } => {
                     engine.catalog.write().drop_view(name);
                 }
-                WalRecord::AlterTable { table_name, operation_json } => {
+                WalRecord::AlterTable {
+                    table_name,
+                    operation_json,
+                } => {
                     // Parse the operation JSON and replay the schema change
                     if let Ok(op) = serde_json::from_str::<serde_json::Value>(operation_json) {
                         let op_type = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
                         match op_type {
                             "add_column" => {
                                 if let Some(col_val) = op.get("column") {
-                                    if let Ok(col) = serde_json::from_value::<falcon_common::schema::ColumnDef>(col_val.clone()) {
+                                    if let Ok(col) =
+                                        serde_json::from_value::<falcon_common::schema::ColumnDef>(
+                                            col_val.clone(),
+                                        )
+                                    {
                                         let mut catalog = engine.catalog.write();
                                         if let Some(schema) = catalog.find_table_mut(table_name) {
-                                            let new_id = falcon_common::types::ColumnId(schema.columns.len() as u32);
+                                            let new_id = falcon_common::types::ColumnId(
+                                                schema.columns.len() as u32,
+                                            );
                                             let mut new_col = col;
                                             new_col.id = new_id;
                                             schema.columns.push(new_col);
@@ -1373,17 +1444,29 @@ impl StorageEngine {
                                 }
                             }
                             "drop_column" => {
-                                if let Some(col_name) = op.get("column_name").and_then(|v| v.as_str()) {
+                                if let Some(col_name) =
+                                    op.get("column_name").and_then(|v| v.as_str())
+                                {
                                     let mut catalog = engine.catalog.write();
                                     if let Some(schema) = catalog.find_table_mut(table_name) {
                                         let lower = col_name.to_lowercase();
-                                        if let Some(idx) = schema.columns.iter().position(|c| c.name.to_lowercase() == lower) {
+                                        if let Some(idx) = schema
+                                            .columns
+                                            .iter()
+                                            .position(|c| c.name.to_lowercase() == lower)
+                                        {
                                             schema.columns.remove(idx);
-                                            schema.primary_key_columns = schema.primary_key_columns.iter()
+                                            schema.primary_key_columns = schema
+                                                .primary_key_columns
+                                                .iter()
                                                 .filter_map(|&pk| {
-                                                    if pk == idx { None }
-                                                    else if pk > idx { Some(pk - 1) }
-                                                    else { Some(pk) }
+                                                    if pk == idx {
+                                                        None
+                                                    } else if pk > idx {
+                                                        Some(pk - 1)
+                                                    } else {
+                                                        Some(pk)
+                                                    }
                                                 })
                                                 .collect();
                                         }
@@ -1391,33 +1474,45 @@ impl StorageEngine {
                                 }
                             }
                             "rename_column" => {
-                                let old_name = op.get("old_name").and_then(|v| v.as_str()).unwrap_or("");
-                                let new_name = op.get("new_name").and_then(|v| v.as_str()).unwrap_or("");
+                                let old_name =
+                                    op.get("old_name").and_then(|v| v.as_str()).unwrap_or("");
+                                let new_name =
+                                    op.get("new_name").and_then(|v| v.as_str()).unwrap_or("");
                                 if !old_name.is_empty() && !new_name.is_empty() {
                                     let mut catalog = engine.catalog.write();
                                     if let Some(schema) = catalog.find_table_mut(table_name) {
                                         let lower = old_name.to_lowercase();
-                                        if let Some(col) = schema.columns.iter_mut().find(|c| c.name.to_lowercase() == lower) {
+                                        if let Some(col) = schema
+                                            .columns
+                                            .iter_mut()
+                                            .find(|c| c.name.to_lowercase() == lower)
+                                        {
                                             col.name = new_name.to_string();
                                         }
                                     }
                                 }
                             }
                             "rename_table" => {
-                                if let Some(new_name) = op.get("new_name").and_then(|v| v.as_str()) {
+                                if let Some(new_name) = op.get("new_name").and_then(|v| v.as_str())
+                                {
                                     let mut catalog = engine.catalog.write();
                                     catalog.rename_table(table_name, new_name);
                                 }
                             }
                             _ => {
-                                tracing::warn!("Unknown ALTER TABLE operation during recovery: {}", op_type);
+                                tracing::warn!(
+                                    "Unknown ALTER TABLE operation during recovery: {}",
+                                    op_type
+                                );
                             }
                         }
                     }
                 }
                 WalRecord::CreateSequence { name, start } => {
                     if !engine.sequences.contains_key(name.as_str()) {
-                        engine.sequences.insert(name.clone(), AtomicI64::new(start - 1));
+                        engine
+                            .sequences
+                            .insert(name.clone(), AtomicI64::new(start - 1));
                     }
                 }
                 WalRecord::DropSequence { name } => {
@@ -1434,10 +1529,17 @@ impl StorageEngine {
                         let table_id = table_schema.id;
                         let schema = table_schema.clone();
                         drop(catalog);
-                        engine.tables.insert(table_id, Arc::new(MemTable::new(schema)));
+                        engine
+                            .tables
+                            .insert(table_id, Arc::new(MemTable::new(schema)));
                     }
                 }
-                WalRecord::CreateIndex { index_name, table_name, column_idx, unique } => {
+                WalRecord::CreateIndex {
+                    index_name,
+                    table_name,
+                    column_idx,
+                    unique,
+                } => {
                     if !engine.index_registry.contains_key(index_name.as_str()) {
                         let _ = engine.create_index_impl(table_name, *column_idx, *unique);
                         if let Some(table_schema) = engine.catalog.read().find_table(table_name) {
@@ -1453,7 +1555,11 @@ impl StorageEngine {
                         }
                     }
                 }
-                WalRecord::DropIndex { index_name, table_name: _, column_idx } => {
+                WalRecord::DropIndex {
+                    index_name,
+                    table_name: _,
+                    column_idx,
+                } => {
                     if let Some((_, meta)) = engine.index_registry.remove(index_name.as_str()) {
                         if let Some(table_ref) = engine.tables.get(&meta.table_id) {
                             let mut indexes = table_ref.secondary_indexes.write();
@@ -1501,7 +1607,6 @@ impl StorageEngine {
         tracing::info!("WAL recovery complete: {} records replayed", records.len());
         Ok(engine)
     }
-
 }
 
 /// Map a DataType to the cast target string used by eval_cast_datum.
@@ -1524,4 +1629,3 @@ pub(crate) fn datatype_to_cast_target(dt: &falcon_common::types::DataType) -> St
         DataType::Bytea => "bytea".into(),
     }
 }
-

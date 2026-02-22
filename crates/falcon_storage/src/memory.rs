@@ -125,7 +125,6 @@ pub struct PerTableMemoryStats {
     pub estimated_bytes: u64,
 }
 
-
 /// Lock-free shard-local memory tracker.
 ///
 /// All counters use `AtomicI64` (signed) so that transient over-decrements in
@@ -190,7 +189,12 @@ impl MemoryTracker {
     /// Record deallocation of MVCC version bytes (e.g. GC reclaim).
     pub fn dealloc_mvcc(&self, bytes: u64) {
         let prev = self.mvcc_bytes.fetch_sub(bytes as i64, Ordering::Relaxed);
-        debug_assert!(prev >= bytes as i64, "mvcc_bytes underflow: prev={}, sub={}", prev, bytes);
+        debug_assert!(
+            prev >= bytes as i64,
+            "mvcc_bytes underflow: prev={}, sub={}",
+            prev,
+            bytes
+        );
         self.check_pressure_transition();
     }
 
@@ -205,7 +209,12 @@ impl MemoryTracker {
     /// Record deallocation of index bytes.
     pub fn dealloc_index(&self, bytes: u64) {
         let prev = self.index_bytes.fetch_sub(bytes as i64, Ordering::Relaxed);
-        debug_assert!(prev >= bytes as i64, "index_bytes underflow: prev={}, sub={}", prev, bytes);
+        debug_assert!(
+            prev >= bytes as i64,
+            "index_bytes underflow: prev={}, sub={}",
+            prev,
+            bytes
+        );
         self.check_pressure_transition();
     }
 
@@ -213,14 +222,22 @@ impl MemoryTracker {
 
     /// Record allocation of write-buffer bytes.
     pub fn alloc_write_buffer(&self, bytes: u64) {
-        self.write_buffer_bytes.fetch_add(bytes as i64, Ordering::Relaxed);
+        self.write_buffer_bytes
+            .fetch_add(bytes as i64, Ordering::Relaxed);
         self.check_pressure_transition();
     }
 
     /// Record deallocation of write-buffer bytes.
     pub fn dealloc_write_buffer(&self, bytes: u64) {
-        let prev = self.write_buffer_bytes.fetch_sub(bytes as i64, Ordering::Relaxed);
-        debug_assert!(prev >= bytes as i64, "write_buffer_bytes underflow: prev={}, sub={}", prev, bytes);
+        let prev = self
+            .write_buffer_bytes
+            .fetch_sub(bytes as i64, Ordering::Relaxed);
+        debug_assert!(
+            prev >= bytes as i64,
+            "write_buffer_bytes underflow: prev={}, sub={}",
+            prev,
+            bytes
+        );
         self.check_pressure_transition();
     }
 
@@ -338,7 +355,9 @@ impl MemoryTracker {
             return;
         }
         let current = self.pressure_state();
-        let prev_u8 = self.last_pressure_state.swap(current as u8, Ordering::Relaxed);
+        let prev_u8 = self
+            .last_pressure_state
+            .swap(current as u8, Ordering::Relaxed);
         let prev = Self::pressure_state_from_u8(prev_u8);
         if prev != current {
             let total = self.total_bytes();
@@ -617,8 +636,8 @@ impl GlobalMemoryGovernor {
         } else {
             1.0
         };
-        let delay_us = self.config.soft_delay_base_us as f64
-            * (1.0 + progress * self.config.soft_delay_scale);
+        let delay_us =
+            self.config.soft_delay_base_us as f64 * (1.0 + progress * self.config.soft_delay_scale);
         std::time::Duration::from_micros(delay_us as u64)
     }
 

@@ -35,8 +35,12 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                 Some(Datum::Float64(_)) => return Ok(args[0].clone()),
                 _ => return Err(ExecutionError::TypeError("TO_NUMBER requires text".into())),
             };
-            let cleaned: String = s.chars().filter(|c| c.is_ascii_digit() || *c == '.' || *c == '-' || *c == '+').collect();
-            cleaned.parse::<f64>()
+            let cleaned: String = s
+                .chars()
+                .filter(|c| c.is_ascii_digit() || *c == '.' || *c == '-' || *c == '+')
+                .collect();
+            cleaned
+                .parse::<f64>()
                 .map(Datum::Float64)
                 .map_err(|_| ExecutionError::TypeError(format!("Cannot convert '{}' to number", s)))
         }
@@ -79,6 +83,9 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             let count = args.iter().filter(|d| d.is_null()).count();
             Ok(Datum::Int64(count as i64))
         }
-        _ => Err(ExecutionError::TypeError(format!("Not a utility function: {:?}", func))),
+        _ => Err(ExecutionError::TypeError(format!(
+            "Not a utility function: {:?}",
+            func
+        ))),
     }
 }

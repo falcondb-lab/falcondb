@@ -6,28 +6,28 @@ use falcon_sql_frontend::types::ScalarFunc;
 
 pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Option<Result<Datum, ExecutionError>> {
     match func {
-        ScalarFunc::ArrayEvery |
-        ScalarFunc::ArraySome |
-        ScalarFunc::ArrayMin |
-        ScalarFunc::ArrayMax |
-        ScalarFunc::ArraySum |
-        ScalarFunc::ArrayAvg |
-        ScalarFunc::ArrayToSet |
-        ScalarFunc::ArrayRepeat |
-        ScalarFunc::ArrayRotate |
-        ScalarFunc::ArraySample |
-        ScalarFunc::ArrayShuffle |
-        ScalarFunc::ArrayGenerate |
-        ScalarFunc::ArrayToJson |
-        ScalarFunc::ArrayPositions |
-        ScalarFunc::ArrayZip |
-        ScalarFunc::ArrayNdims |
-        ScalarFunc::ArrayCompact |
-        ScalarFunc::ArrayFlatten |
-        ScalarFunc::ArrayIntersect |
-        ScalarFunc::ArrayExcept |
-        ScalarFunc::ArraySlice |
-        ScalarFunc::ArrayFill => Some(dispatch_inner(func, args)),
+        ScalarFunc::ArrayEvery
+        | ScalarFunc::ArraySome
+        | ScalarFunc::ArrayMin
+        | ScalarFunc::ArrayMax
+        | ScalarFunc::ArraySum
+        | ScalarFunc::ArrayAvg
+        | ScalarFunc::ArrayToSet
+        | ScalarFunc::ArrayRepeat
+        | ScalarFunc::ArrayRotate
+        | ScalarFunc::ArraySample
+        | ScalarFunc::ArrayShuffle
+        | ScalarFunc::ArrayGenerate
+        | ScalarFunc::ArrayToJson
+        | ScalarFunc::ArrayPositions
+        | ScalarFunc::ArrayZip
+        | ScalarFunc::ArrayNdims
+        | ScalarFunc::ArrayCompact
+        | ScalarFunc::ArrayFlatten
+        | ScalarFunc::ArrayIntersect
+        | ScalarFunc::ArrayExcept
+        | ScalarFunc::ArraySlice
+        | ScalarFunc::ArrayFill => Some(dispatch_inner(func, args)),
         _ => None,
     }
 }
@@ -38,7 +38,11 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let arr = match args.first() {
                 Some(Datum::Array(a)) => a.clone(),
                 Some(Datum::Null) => return Ok(Datum::Null),
-                _ => return Err(ExecutionError::TypeError("ARRAY_EVERY requires array".into())),
+                _ => {
+                    return Err(ExecutionError::TypeError(
+                        "ARRAY_EVERY requires array".into(),
+                    ))
+                }
             };
             for d in &arr {
                 match d {
@@ -53,7 +57,11 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let arr = match args.first() {
                 Some(Datum::Array(a)) => a.clone(),
                 Some(Datum::Null) => return Ok(Datum::Null),
-                _ => return Err(ExecutionError::TypeError("ARRAY_SOME requires array".into())),
+                _ => {
+                    return Err(ExecutionError::TypeError(
+                        "ARRAY_SOME requires array".into(),
+                    ))
+                }
             };
             let mut has_null = false;
             for d in &arr {
@@ -63,7 +71,11 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                     _ => {}
                 }
             }
-            if has_null { Ok(Datum::Null) } else { Ok(Datum::Boolean(false)) }
+            if has_null {
+                Ok(Datum::Null)
+            } else {
+                Ok(Datum::Boolean(false))
+            }
         }
         ScalarFunc::ArrayMin => {
             let arr = match args.first() {
@@ -134,19 +146,36 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let mut count = 0usize;
             for d in &arr {
                 match d {
-                    Datum::Int64(n) => { sum += *n as f64; count += 1; }
-                    Datum::Int32(n) => { sum += *n as f64; count += 1; }
-                    Datum::Float64(n) => { sum += n; count += 1; }
+                    Datum::Int64(n) => {
+                        sum += *n as f64;
+                        count += 1;
+                    }
+                    Datum::Int32(n) => {
+                        sum += *n as f64;
+                        count += 1;
+                    }
+                    Datum::Float64(n) => {
+                        sum += n;
+                        count += 1;
+                    }
                     _ => {}
                 }
             }
-            if count == 0 { Ok(Datum::Null) } else { Ok(Datum::Float64(sum / count as f64)) }
+            if count == 0 {
+                Ok(Datum::Null)
+            } else {
+                Ok(Datum::Float64(sum / count as f64))
+            }
         }
         ScalarFunc::ArrayToSet => {
             let arr = match args.first() {
                 Some(Datum::Array(a)) => a.clone(),
                 Some(Datum::Null) => return Ok(Datum::Null),
-                _ => return Err(ExecutionError::TypeError("ARRAY_TO_SET requires array".into())),
+                _ => {
+                    return Err(ExecutionError::TypeError(
+                        "ARRAY_TO_SET requires array".into(),
+                    ))
+                }
             };
             let mut seen = std::collections::HashSet::new();
             let mut result = Vec::new();
@@ -161,14 +190,24 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
         ScalarFunc::ArrayRepeat => {
             let elem = match args.first() {
                 Some(d) => d.clone(),
-                None => return Err(ExecutionError::TypeError("ARRAY_REPEAT requires element".into())),
+                None => {
+                    return Err(ExecutionError::TypeError(
+                        "ARRAY_REPEAT requires element".into(),
+                    ))
+                }
             };
-            if matches!(elem, Datum::Null) { return Ok(Datum::Null); }
+            if matches!(elem, Datum::Null) {
+                return Ok(Datum::Null);
+            }
             let count = match args.get(1) {
                 Some(Datum::Int64(n)) => *n as usize,
                 Some(Datum::Int32(n)) => *n as usize,
                 Some(Datum::Null) => return Ok(Datum::Null),
-                _ => return Err(ExecutionError::TypeError("ARRAY_REPEAT requires count".into())),
+                _ => {
+                    return Err(ExecutionError::TypeError(
+                        "ARRAY_REPEAT requires count".into(),
+                    ))
+                }
             };
             Ok(Datum::Array(vec![elem; count]))
         }
@@ -176,14 +215,24 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let arr = match args.first() {
                 Some(Datum::Array(a)) => a.clone(),
                 Some(Datum::Null) => return Ok(Datum::Null),
-                _ => return Err(ExecutionError::TypeError("ARRAY_ROTATE requires array".into())),
+                _ => {
+                    return Err(ExecutionError::TypeError(
+                        "ARRAY_ROTATE requires array".into(),
+                    ))
+                }
             };
-            if arr.is_empty() { return Ok(Datum::Array(arr)); }
+            if arr.is_empty() {
+                return Ok(Datum::Array(arr));
+            }
             let n = match args.get(1) {
                 Some(Datum::Int64(n)) => *n,
                 Some(Datum::Int32(n)) => *n as i64,
                 Some(Datum::Null) => return Ok(Datum::Null),
-                _ => return Err(ExecutionError::TypeError("ARRAY_ROTATE requires integer".into())),
+                _ => {
+                    return Err(ExecutionError::TypeError(
+                        "ARRAY_ROTATE requires integer".into(),
+                    ))
+                }
             };
             let len = arr.len() as i64;
             let rot = ((n % len) + len) % len;
@@ -195,18 +244,28 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let arr = match args.first() {
                 Some(Datum::Array(a)) => a.clone(),
                 Some(Datum::Null) => return Ok(Datum::Null),
-                _ => return Err(ExecutionError::TypeError("ARRAY_SAMPLE requires array".into())),
+                _ => {
+                    return Err(ExecutionError::TypeError(
+                        "ARRAY_SAMPLE requires array".into(),
+                    ))
+                }
             };
             let n = match args.get(1) {
                 Some(Datum::Int64(n)) => *n as usize,
                 Some(Datum::Int32(n)) => *n as usize,
                 Some(Datum::Null) => return Ok(Datum::Null),
-                _ => return Err(ExecutionError::TypeError("ARRAY_SAMPLE requires count".into())),
+                _ => {
+                    return Err(ExecutionError::TypeError(
+                        "ARRAY_SAMPLE requires count".into(),
+                    ))
+                }
             };
             let n = n.min(arr.len());
             use std::time::SystemTime;
-            let seed = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default().as_nanos() as u64;
+            let seed = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
             let mut indices: Vec<usize> = (0..arr.len()).collect();
             let mut rng = seed;
             for i in 0..n {
@@ -221,11 +280,17 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let arr = match args.first() {
                 Some(Datum::Array(a)) => a.clone(),
                 Some(Datum::Null) => return Ok(Datum::Null),
-                _ => return Err(ExecutionError::TypeError("ARRAY_SHUFFLE requires array".into())),
+                _ => {
+                    return Err(ExecutionError::TypeError(
+                        "ARRAY_SHUFFLE requires array".into(),
+                    ))
+                }
             };
             use std::time::SystemTime;
-            let seed = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default().as_nanos() as u64;
+            let seed = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
             let mut result = arr;
             let mut rng = seed;
             for i in (1..result.len()).rev() {
@@ -240,23 +305,43 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 Some(Datum::Int64(n)) => *n,
                 Some(Datum::Int32(n)) => *n as i64,
                 Some(Datum::Null) => return Ok(Datum::Null),
-                _ => return Err(ExecutionError::TypeError("ARRAY_GENERATE requires integer".into())),
+                _ => {
+                    return Err(ExecutionError::TypeError(
+                        "ARRAY_GENERATE requires integer".into(),
+                    ))
+                }
             };
             let stop = match args.get(1) {
                 Some(Datum::Int64(n)) => *n,
                 Some(Datum::Int32(n)) => *n as i64,
                 Some(Datum::Null) => return Ok(Datum::Null),
-                _ => return Err(ExecutionError::TypeError("ARRAY_GENERATE requires integer".into())),
+                _ => {
+                    return Err(ExecutionError::TypeError(
+                        "ARRAY_GENERATE requires integer".into(),
+                    ))
+                }
             };
             let step = match args.get(2) {
                 Some(Datum::Int64(n)) => *n,
                 Some(Datum::Int32(n)) => *n as i64,
-                None => if start <= stop { 1 } else { -1 },
+                None => {
+                    if start <= stop {
+                        1
+                    } else {
+                        -1
+                    }
+                }
                 Some(Datum::Null) => return Ok(Datum::Null),
-                _ => return Err(ExecutionError::TypeError("ARRAY_GENERATE step must be integer".into())),
+                _ => {
+                    return Err(ExecutionError::TypeError(
+                        "ARRAY_GENERATE step must be integer".into(),
+                    ))
+                }
             };
             if step == 0 {
-                return Err(ExecutionError::TypeError("ARRAY_GENERATE step cannot be zero".into()));
+                return Err(ExecutionError::TypeError(
+                    "ARRAY_GENERATE step cannot be zero".into(),
+                ));
             }
             let mut result = Vec::new();
             let mut i = start;
@@ -277,11 +362,19 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             fn datum_to_json(d: &Datum) -> String {
                 match d {
                     Datum::Null => "null".to_string(),
-                    Datum::Boolean(b) => if *b { "true".to_string() } else { "false".to_string() },
+                    Datum::Boolean(b) => {
+                        if *b {
+                            "true".to_string()
+                        } else {
+                            "false".to_string()
+                        }
+                    }
                     Datum::Int32(n) => n.to_string(),
                     Datum::Int64(n) => n.to_string(),
                     Datum::Float64(n) => format!("{}", n),
-                    Datum::Text(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+                    Datum::Text(s) => {
+                        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+                    }
                     Datum::Timestamp(us) => {
                         let secs = us / 1_000_000;
                         let nsecs = ((us % 1_000_000) * 1000) as u32;
@@ -296,8 +389,11 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                         format!("[{}]", elems.join(","))
                     }
                     Datum::Date(days) => {
-                        let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("unix epoch date is always valid");
-                        if let Some(d) = epoch.checked_add_signed(chrono::Duration::days(*days as i64)) {
+                        let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+                            .expect("unix epoch date is always valid");
+                        if let Some(d) =
+                            epoch.checked_add_signed(chrono::Duration::days(*days as i64))
+                        {
                             format!("\"{}\"", d.format("%Y-%m-%d"))
                         } else {
                             format!("{}", days)
@@ -314,21 +410,33 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                     Ok(Datum::Text(format!("[{}]", elems.join(","))))
                 }
                 Some(Datum::Null) => Ok(Datum::Null),
-                _ => Err(ExecutionError::TypeError("ARRAY_TO_JSON requires array".into())),
+                _ => Err(ExecutionError::TypeError(
+                    "ARRAY_TO_JSON requires array".into(),
+                )),
             }
         }
         ScalarFunc::ArrayPositions => {
             let arr = match args.first() {
                 Some(Datum::Array(a)) => a.clone(),
                 Some(Datum::Null) => return Ok(Datum::Null),
-                _ => return Err(ExecutionError::TypeError("ARRAY_POSITIONS requires array".into())),
+                _ => {
+                    return Err(ExecutionError::TypeError(
+                        "ARRAY_POSITIONS requires array".into(),
+                    ))
+                }
             };
             let elem = match args.get(1) {
                 Some(d) => d.clone(),
-                None => return Err(ExecutionError::TypeError("ARRAY_POSITIONS requires element".into())),
+                None => {
+                    return Err(ExecutionError::TypeError(
+                        "ARRAY_POSITIONS requires element".into(),
+                    ))
+                }
             };
             let target = format!("{}", elem);
-            let positions: Vec<Datum> = arr.iter().enumerate()
+            let positions: Vec<Datum> = arr
+                .iter()
+                .enumerate()
                 .filter(|(_, d)| format!("{}", d) == target)
                 .map(|(i, _)| Datum::Int64((i + 1) as i64))
                 .collect();
@@ -358,7 +466,11 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             fn count_dims(d: &Datum) -> i64 {
                 match d {
                     Datum::Array(a) => {
-                        if a.is_empty() { 1 } else { 1 + count_dims(&a[0]) }
+                        if a.is_empty() {
+                            1
+                        } else {
+                            1 + count_dims(&a[0])
+                        }
                     }
                     _ => 0,
                 }
@@ -366,14 +478,20 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             match args.first() {
                 Some(Datum::Array(_)) => Ok(Datum::Int64(count_dims(&args[0]))),
                 Some(Datum::Null) => Ok(Datum::Null),
-                _ => Err(ExecutionError::TypeError("ARRAY_NDIMS requires array".into())),
+                _ => Err(ExecutionError::TypeError(
+                    "ARRAY_NDIMS requires array".into(),
+                )),
             }
         }
         ScalarFunc::ArrayCompact => {
             let arr = match args.first() {
                 Some(Datum::Array(a)) => a.clone(),
                 Some(Datum::Null) => return Ok(Datum::Null),
-                _ => return Err(ExecutionError::TypeError("ARRAY_COMPACT requires array".into())),
+                _ => {
+                    return Err(ExecutionError::TypeError(
+                        "ARRAY_COMPACT requires array".into(),
+                    ))
+                }
             };
             let result: Vec<Datum> = arr.into_iter().filter(|d| !d.is_null()).collect();
             Ok(Datum::Array(result))
@@ -382,7 +500,11 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let arr = match args.first() {
                 Some(Datum::Array(a)) => a.clone(),
                 Some(Datum::Null) => return Ok(Datum::Null),
-                _ => return Err(ExecutionError::TypeError("ARRAY_FLATTEN requires array".into())),
+                _ => {
+                    return Err(ExecutionError::TypeError(
+                        "ARRAY_FLATTEN requires array".into(),
+                    ))
+                }
             };
             let mut result = Vec::new();
             for item in arr {
@@ -397,15 +519,24 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let arr1 = match args.first() {
                 Some(Datum::Array(a)) => a.clone(),
                 Some(Datum::Null) => return Ok(Datum::Null),
-                _ => return Err(ExecutionError::TypeError("ARRAY_INTERSECT requires array".into())),
+                _ => {
+                    return Err(ExecutionError::TypeError(
+                        "ARRAY_INTERSECT requires array".into(),
+                    ))
+                }
             };
             let arr2 = match args.get(1) {
                 Some(Datum::Array(a)) => a,
                 Some(Datum::Null) => return Ok(Datum::Null),
-                _ => return Err(ExecutionError::TypeError("ARRAY_INTERSECT requires array".into())),
+                _ => {
+                    return Err(ExecutionError::TypeError(
+                        "ARRAY_INTERSECT requires array".into(),
+                    ))
+                }
             };
             let arr2_keys: Vec<String> = arr2.iter().map(|d| format!("{:?}", d)).collect();
-            let result: Vec<Datum> = arr1.into_iter()
+            let result: Vec<Datum> = arr1
+                .into_iter()
                 .filter(|item| arr2_keys.contains(&format!("{:?}", item)))
                 .collect();
             Ok(Datum::Array(result))
@@ -414,15 +545,24 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let arr1 = match args.first() {
                 Some(Datum::Array(a)) => a.clone(),
                 Some(Datum::Null) => return Ok(Datum::Null),
-                _ => return Err(ExecutionError::TypeError("ARRAY_EXCEPT requires array".into())),
+                _ => {
+                    return Err(ExecutionError::TypeError(
+                        "ARRAY_EXCEPT requires array".into(),
+                    ))
+                }
             };
             let arr2 = match args.get(1) {
                 Some(Datum::Array(a)) => a,
                 Some(Datum::Null) => return Ok(Datum::Null),
-                _ => return Err(ExecutionError::TypeError("ARRAY_EXCEPT requires array".into())),
+                _ => {
+                    return Err(ExecutionError::TypeError(
+                        "ARRAY_EXCEPT requires array".into(),
+                    ))
+                }
             };
             let arr2_keys: Vec<String> = arr2.iter().map(|d| format!("{:?}", d)).collect();
-            let result: Vec<Datum> = arr1.into_iter()
+            let result: Vec<Datum> = arr1
+                .into_iter()
                 .filter(|item| !arr2_keys.contains(&format!("{:?}", item)))
                 .collect();
             Ok(Datum::Array(result))
@@ -431,13 +571,21 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let arr = match args.first() {
                 Some(Datum::Array(a)) => a.clone(),
                 Some(Datum::Null) => return Ok(Datum::Null),
-                _ => return Err(ExecutionError::TypeError("ARRAY_SLICE requires array".into())),
+                _ => {
+                    return Err(ExecutionError::TypeError(
+                        "ARRAY_SLICE requires array".into(),
+                    ))
+                }
             };
             let start = match args.get(1) {
                 Some(Datum::Int32(n)) => *n as usize,
                 Some(Datum::Int64(n)) => *n as usize,
                 Some(Datum::Null) => return Ok(Datum::Null),
-                _ => return Err(ExecutionError::TypeError("ARRAY_SLICE requires start".into())),
+                _ => {
+                    return Err(ExecutionError::TypeError(
+                        "ARRAY_SLICE requires start".into(),
+                    ))
+                }
             };
             let end = match args.get(2) {
                 Some(Datum::Int32(n)) => *n as usize,
@@ -456,13 +604,21 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
         ScalarFunc::ArrayFill => {
             let value = match args.first() {
                 Some(v) => v.clone(),
-                None => return Err(ExecutionError::TypeError("ARRAY_FILL requires value".into())),
+                None => {
+                    return Err(ExecutionError::TypeError(
+                        "ARRAY_FILL requires value".into(),
+                    ))
+                }
             };
             let count = match args.get(1) {
                 Some(Datum::Int32(n)) => *n as usize,
                 Some(Datum::Int64(n)) => *n as usize,
                 Some(Datum::Null) => return Ok(Datum::Null),
-                _ => return Err(ExecutionError::TypeError("ARRAY_FILL requires count".into())),
+                _ => {
+                    return Err(ExecutionError::TypeError(
+                        "ARRAY_FILL requires count".into(),
+                    ))
+                }
             };
             Ok(Datum::Array(vec![value; count]))
         }

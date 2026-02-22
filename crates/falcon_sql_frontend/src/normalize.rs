@@ -17,7 +17,7 @@ use falcon_common::datum::Datum;
 use falcon_common::schema::TableSchema;
 use falcon_common::types::DataType;
 
-use crate::types::{BoundExpr, BinOp, ScalarFunc};
+use crate::types::{BinOp, BoundExpr, ScalarFunc};
 
 /// Normalize a bound expression tree.
 /// Applies: BETWEEN expansion, constant folding, CNF flattening.
@@ -29,7 +29,12 @@ pub fn normalize_expr(expr: &BoundExpr) -> BoundExpr {
 /// Expand BETWEEN into >= AND <= (or < OR > for NOT BETWEEN).
 fn expand_between(expr: &BoundExpr) -> BoundExpr {
     match expr {
-        BoundExpr::Between { expr: inner, low, high, negated } => {
+        BoundExpr::Between {
+            expr: inner,
+            low,
+            high,
+            negated,
+        } => {
             let inner_n = expand_between(inner);
             let low_n = expand_between(low);
             let high_n = expand_between(high);
@@ -74,22 +79,39 @@ fn expand_between(expr: &BoundExpr) -> BoundExpr {
         BoundExpr::Not(inner) => BoundExpr::Not(Box::new(expand_between(inner))),
         BoundExpr::IsNull(inner) => BoundExpr::IsNull(Box::new(expand_between(inner))),
         BoundExpr::IsNotNull(inner) => BoundExpr::IsNotNull(Box::new(expand_between(inner))),
-        BoundExpr::Like { expr: inner, pattern, negated, case_insensitive } => BoundExpr::Like {
+        BoundExpr::Like {
+            expr: inner,
+            pattern,
+            negated,
+            case_insensitive,
+        } => BoundExpr::Like {
             expr: Box::new(expand_between(inner)),
             pattern: Box::new(expand_between(pattern)),
             negated: *negated,
             case_insensitive: *case_insensitive,
         },
-        BoundExpr::InList { expr: inner, list, negated } => BoundExpr::InList {
+        BoundExpr::InList {
+            expr: inner,
+            list,
+            negated,
+        } => BoundExpr::InList {
             expr: Box::new(expand_between(inner)),
             list: list.iter().map(expand_between).collect(),
             negated: *negated,
         },
-        BoundExpr::Cast { expr: inner, target_type } => BoundExpr::Cast {
+        BoundExpr::Cast {
+            expr: inner,
+            target_type,
+        } => BoundExpr::Cast {
             expr: Box::new(expand_between(inner)),
             target_type: target_type.clone(),
         },
-        BoundExpr::Case { operand, conditions, results, else_result } => BoundExpr::Case {
+        BoundExpr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => BoundExpr::Case {
             operand: operand.as_ref().map(|e| Box::new(expand_between(e))),
             conditions: conditions.iter().map(expand_between).collect(),
             results: results.iter().map(expand_between).collect(),
@@ -100,22 +122,36 @@ fn expand_between(expr: &BoundExpr) -> BoundExpr {
             func: func.clone(),
             args: args.iter().map(expand_between).collect(),
         },
-        BoundExpr::ArrayLiteral(elems) => BoundExpr::ArrayLiteral(elems.iter().map(expand_between).collect()),
+        BoundExpr::ArrayLiteral(elems) => {
+            BoundExpr::ArrayLiteral(elems.iter().map(expand_between).collect())
+        }
         BoundExpr::ArrayIndex { array, index } => BoundExpr::ArrayIndex {
             array: Box::new(expand_between(array)),
             index: Box::new(expand_between(index)),
         },
-        BoundExpr::AnyOp { left, compare_op, right } => BoundExpr::AnyOp {
+        BoundExpr::AnyOp {
+            left,
+            compare_op,
+            right,
+        } => BoundExpr::AnyOp {
             left: Box::new(expand_between(left)),
             compare_op: *compare_op,
             right: Box::new(expand_between(right)),
         },
-        BoundExpr::AllOp { left, compare_op, right } => BoundExpr::AllOp {
+        BoundExpr::AllOp {
+            left,
+            compare_op,
+            right,
+        } => BoundExpr::AllOp {
             left: Box::new(expand_between(left)),
             compare_op: *compare_op,
             right: Box::new(expand_between(right)),
         },
-        BoundExpr::ArraySlice { array, lower, upper } => BoundExpr::ArraySlice {
+        BoundExpr::ArraySlice {
+            array,
+            lower,
+            upper,
+        } => BoundExpr::ArraySlice {
             array: Box::new(expand_between(array)),
             lower: lower.as_ref().map(|l| Box::new(expand_between(l))),
             upper: upper.as_ref().map(|u| Box::new(expand_between(u))),
@@ -180,11 +216,19 @@ fn fold_constants(expr: &BoundExpr) -> BoundExpr {
                 right: Box::new(r),
             }
         }
-        BoundExpr::Cast { expr: inner, target_type } => BoundExpr::Cast {
+        BoundExpr::Cast {
+            expr: inner,
+            target_type,
+        } => BoundExpr::Cast {
             expr: Box::new(fold_constants(inner)),
             target_type: target_type.clone(),
         },
-        BoundExpr::Case { operand, conditions, results, else_result } => BoundExpr::Case {
+        BoundExpr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => BoundExpr::Case {
             operand: operand.as_ref().map(|e| Box::new(fold_constants(e))),
             conditions: conditions.iter().map(fold_constants).collect(),
             results: results.iter().map(fold_constants).collect(),
@@ -195,33 +239,56 @@ fn fold_constants(expr: &BoundExpr) -> BoundExpr {
             func: func.clone(),
             args: args.iter().map(fold_constants).collect(),
         },
-        BoundExpr::Like { expr: inner, pattern, negated, case_insensitive } => BoundExpr::Like {
+        BoundExpr::Like {
+            expr: inner,
+            pattern,
+            negated,
+            case_insensitive,
+        } => BoundExpr::Like {
             expr: Box::new(fold_constants(inner)),
             pattern: Box::new(fold_constants(pattern)),
             negated: *negated,
             case_insensitive: *case_insensitive,
         },
-        BoundExpr::InList { expr: inner, list, negated } => BoundExpr::InList {
+        BoundExpr::InList {
+            expr: inner,
+            list,
+            negated,
+        } => BoundExpr::InList {
             expr: Box::new(fold_constants(inner)),
             list: list.iter().map(fold_constants).collect(),
             negated: *negated,
         },
-        BoundExpr::ArrayLiteral(elems) => BoundExpr::ArrayLiteral(elems.iter().map(fold_constants).collect()),
+        BoundExpr::ArrayLiteral(elems) => {
+            BoundExpr::ArrayLiteral(elems.iter().map(fold_constants).collect())
+        }
         BoundExpr::ArrayIndex { array, index } => BoundExpr::ArrayIndex {
             array: Box::new(fold_constants(array)),
             index: Box::new(fold_constants(index)),
         },
-        BoundExpr::AnyOp { left, compare_op, right } => BoundExpr::AnyOp {
+        BoundExpr::AnyOp {
+            left,
+            compare_op,
+            right,
+        } => BoundExpr::AnyOp {
             left: Box::new(fold_constants(left)),
             compare_op: *compare_op,
             right: Box::new(fold_constants(right)),
         },
-        BoundExpr::AllOp { left, compare_op, right } => BoundExpr::AllOp {
+        BoundExpr::AllOp {
+            left,
+            compare_op,
+            right,
+        } => BoundExpr::AllOp {
             left: Box::new(fold_constants(left)),
             compare_op: *compare_op,
             right: Box::new(fold_constants(right)),
         },
-        BoundExpr::ArraySlice { array, lower, upper } => BoundExpr::ArraySlice {
+        BoundExpr::ArraySlice {
+            array,
+            lower,
+            upper,
+        } => BoundExpr::ArraySlice {
             array: Box::new(fold_constants(array)),
             lower: lower.as_ref().map(|l| Box::new(fold_constants(l))),
             upper: upper.as_ref().map(|u| Box::new(fold_constants(u))),
@@ -305,7 +372,11 @@ pub fn to_cnf_conjuncts(expr: &BoundExpr) -> Vec<BoundExpr> {
 
 fn collect_and_conjuncts(expr: &BoundExpr, out: &mut Vec<BoundExpr>) {
     match expr {
-        BoundExpr::BinaryOp { left, op: BinOp::And, right } => {
+        BoundExpr::BinaryOp {
+            left,
+            op: BinOp::And,
+            right,
+        } => {
             collect_and_conjuncts(left, out);
             collect_and_conjuncts(right, out);
         }
@@ -368,7 +439,9 @@ fn collect_param_types(expr: &BoundExpr, schema: &TableSchema, out: &mut ParamTy
             collect_param_types(left, schema, out);
             collect_param_types(right, schema, out);
         }
-        BoundExpr::InList { expr: inner, list, .. } => {
+        BoundExpr::InList {
+            expr: inner, list, ..
+        } => {
             // If inner is ColumnRef and list contains Parameters, infer from column
             if let BoundExpr::ColumnRef(col_idx) = inner.as_ref() {
                 if let Some(col) = schema.columns.get(*col_idx) {
@@ -385,12 +458,13 @@ fn collect_param_types(expr: &BoundExpr, schema: &TableSchema, out: &mut ParamTy
                 collect_param_types(item, schema, out);
             }
         }
-        BoundExpr::Not(inner)
-        | BoundExpr::IsNull(inner)
-        | BoundExpr::IsNotNull(inner) => {
+        BoundExpr::Not(inner) | BoundExpr::IsNull(inner) | BoundExpr::IsNotNull(inner) => {
             collect_param_types(inner, schema, out);
         }
-        BoundExpr::Cast { expr: inner, target_type } => {
+        BoundExpr::Cast {
+            expr: inner,
+            target_type,
+        } => {
             // CAST($1 AS int) → param has the target type
             if let BoundExpr::Parameter(param_idx) = inner.as_ref() {
                 if let Some(dt) = parse_cast_target(target_type) {
@@ -399,7 +473,11 @@ fn collect_param_types(expr: &BoundExpr, schema: &TableSchema, out: &mut ParamTy
             }
             collect_param_types(inner, schema, out);
         }
-        BoundExpr::Like { expr: inner, pattern, .. } => {
+        BoundExpr::Like {
+            expr: inner,
+            pattern,
+            ..
+        } => {
             // LIKE pattern is always Text
             if let BoundExpr::Parameter(param_idx) = pattern.as_ref() {
                 out.entry(*param_idx).or_insert(DataType::Text);
@@ -411,7 +489,12 @@ fn collect_param_types(expr: &BoundExpr, schema: &TableSchema, out: &mut ParamTy
             collect_param_types(inner, schema, out);
             collect_param_types(pattern, schema, out);
         }
-        BoundExpr::Between { expr: inner, low, high, .. } => {
+        BoundExpr::Between {
+            expr: inner,
+            low,
+            high,
+            ..
+        } => {
             // ColumnRef BETWEEN Parameter AND Parameter
             if let BoundExpr::ColumnRef(col_idx) = inner.as_ref() {
                 if let Some(col) = schema.columns.get(*col_idx) {
@@ -434,7 +517,12 @@ fn collect_param_types(expr: &BoundExpr, schema: &TableSchema, out: &mut ParamTy
             collect_param_types(left, schema, out);
             collect_param_types(right, schema, out);
         }
-        BoundExpr::Case { operand, conditions, results, else_result } => {
+        BoundExpr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
             // CASE operand WHEN Parameter → operand type
             if let Some(op) = operand {
                 if let BoundExpr::ColumnRef(col_idx) = op.as_ref() {
@@ -498,14 +586,17 @@ fn collect_param_types(expr: &BoundExpr, schema: &TableSchema, out: &mut ParamTy
             collect_param_types(array, schema, out);
             collect_param_types(index, schema, out);
         }
-        BoundExpr::AnyOp { left, right, .. }
-        | BoundExpr::AllOp { left, right, .. } => {
+        BoundExpr::AnyOp { left, right, .. } | BoundExpr::AllOp { left, right, .. } => {
             infer_from_col_param(left, right, schema, out);
             infer_from_col_param(right, left, schema, out);
             collect_param_types(left, schema, out);
             collect_param_types(right, schema, out);
         }
-        BoundExpr::ArraySlice { array, lower, upper } => {
+        BoundExpr::ArraySlice {
+            array,
+            lower,
+            upper,
+        } => {
             // Slice bounds are integers
             if let Some(l) = lower {
                 if let BoundExpr::Parameter(p) = l.as_ref() {
@@ -534,24 +625,18 @@ fn infer_from_col_param(
     schema: &TableSchema,
     out: &mut ParamTypes,
 ) {
-    if let (BoundExpr::ColumnRef(col_idx), BoundExpr::Parameter(param_idx)) =
-        (col_side, param_side)
+    if let (BoundExpr::ColumnRef(col_idx), BoundExpr::Parameter(param_idx)) = (col_side, param_side)
     {
         if let Some(col) = schema.columns.get(*col_idx) {
-            out.entry(*param_idx).or_insert_with(|| col.data_type.clone());
+            out.entry(*param_idx)
+                .or_insert_with(|| col.data_type.clone());
         }
     }
 }
 
 /// If `lit_side` is a Literal and `param_side` is Parameter, infer from the literal type.
-fn infer_from_literal_param(
-    lit_side: &BoundExpr,
-    param_side: &BoundExpr,
-    out: &mut ParamTypes,
-) {
-    if let (BoundExpr::Literal(datum), BoundExpr::Parameter(param_idx)) =
-        (lit_side, param_side)
-    {
+fn infer_from_literal_param(lit_side: &BoundExpr, param_side: &BoundExpr, out: &mut ParamTypes) {
+    if let (BoundExpr::Literal(datum), BoundExpr::Parameter(param_idx)) = (lit_side, param_side) {
         let dt = match datum {
             Datum::Int32(_) => DataType::Int32,
             Datum::Int64(_) => DataType::Int64,
@@ -570,13 +655,14 @@ fn parse_cast_target(target: &str) -> Option<DataType> {
     match t.as_str() {
         "int" | "int4" | "integer" => Some(DataType::Int32),
         "bigint" | "int8" => Some(DataType::Int64),
-        "float" | "float8" | "double precision" | "double" | "real" | "numeric" | "decimal"
-            => Some(DataType::Float64),
-        "text" | "varchar" | "char" | "character varying" | "character" | "bpchar"
-            => Some(DataType::Text),
+        "float" | "float8" | "double precision" | "double" | "real" | "numeric" | "decimal" => {
+            Some(DataType::Float64)
+        }
+        "text" | "varchar" | "char" | "character varying" | "character" | "bpchar" => {
+            Some(DataType::Text)
+        }
         "boolean" | "bool" => Some(DataType::Boolean),
-        "timestamp" | "timestamp without time zone" | "timestamptz"
-            => Some(DataType::Timestamp),
+        "timestamp" | "timestamp without time zone" | "timestamptz" => Some(DataType::Timestamp),
         "date" => Some(DataType::Date),
         "jsonb" | "json" => Some(DataType::Jsonb),
         _ => None,
@@ -589,10 +675,9 @@ fn infer_function_param_types(func: &ScalarFunc, args: &[BoundExpr], out: &mut P
     // Functions whose arguments have known types
     match func {
         // String functions: all args are text
-        Upper | Lower | Trim | Ltrim | Rtrim | Length | OctetLength
-        | Concat | ConcatWs | Replace | Repeat | Reverse | Left | Right
-        | Lpad | Rpad | Md5 | Sha256 | Initcap | Translate | Encode | Decode
-        | StartsWith => {
+        Upper | Lower | Trim | Ltrim | Rtrim | Length | OctetLength | Concat | ConcatWs
+        | Replace | Repeat | Reverse | Left | Right | Lpad | Rpad | Md5 | Sha256 | Initcap
+        | Translate | Encode | Decode | StartsWith => {
             for a in args {
                 if let BoundExpr::Parameter(p) = a {
                     out.entry(*p).or_insert(DataType::Text);
@@ -619,8 +704,7 @@ fn infer_function_param_types(func: &ScalarFunc, args: &[BoundExpr], out: &mut P
             }
         }
         // Math functions: numeric args
-        Abs | Ceil | Floor | Round | Trunc | Sqrt | Power | Log | Ln | Exp
-        | Sign | Mod => {
+        Abs | Ceil | Floor | Round | Trunc | Sqrt | Power | Log | Ln | Exp | Sign | Mod => {
             for a in args {
                 if let BoundExpr::Parameter(p) = a {
                     out.entry(*p).or_insert(DataType::Float64);
@@ -633,7 +717,10 @@ fn infer_function_param_types(func: &ScalarFunc, args: &[BoundExpr], out: &mut P
 }
 
 fn is_arithmetic(op: BinOp) -> bool {
-    matches!(op, BinOp::Plus | BinOp::Minus | BinOp::Multiply | BinOp::Divide | BinOp::Modulo)
+    matches!(
+        op,
+        BinOp::Plus | BinOp::Minus | BinOp::Multiply | BinOp::Divide | BinOp::Modulo
+    )
 }
 
 fn is_comparison(op: BinOp) -> bool {
@@ -667,7 +754,12 @@ pub fn extract_equality_sets(expr: &BoundExpr) -> Vec<EqualitySet> {
     let conjuncts = to_cnf_conjuncts(expr);
     let mut sets = Vec::new();
     for c in &conjuncts {
-        if let BoundExpr::InList { expr: inner, list, negated } = c {
+        if let BoundExpr::InList {
+            expr: inner,
+            list,
+            negated,
+        } = c
+        {
             if let BoundExpr::ColumnRef(col_idx) = inner.as_ref() {
                 let values: Vec<Datum> = list
                     .iter()
@@ -689,7 +781,12 @@ pub fn extract_equality_sets(expr: &BoundExpr) -> Vec<EqualitySet> {
             }
         }
         // Also detect `ColumnRef = Literal` as a single-value equality set
-        if let BoundExpr::BinaryOp { left, op: BinOp::Eq, right } = c {
+        if let BoundExpr::BinaryOp {
+            left,
+            op: BinOp::Eq,
+            right,
+        } = c
+        {
             if let (BoundExpr::ColumnRef(col_idx), BoundExpr::Literal(val)) =
                 (left.as_ref(), right.as_ref())
             {
@@ -777,16 +874,26 @@ pub fn expr_has_volatile(expr: &BoundExpr) -> bool {
         | BoundExpr::IsNull(inner)
         | BoundExpr::IsNotNull(inner)
         | BoundExpr::Cast { expr: inner, .. } => expr_has_volatile(inner),
-        BoundExpr::Like { expr: inner, pattern, .. } => {
-            expr_has_volatile(inner) || expr_has_volatile(pattern)
-        }
-        BoundExpr::Between { expr: inner, low, high, .. } => {
-            expr_has_volatile(inner) || expr_has_volatile(low) || expr_has_volatile(high)
-        }
-        BoundExpr::InList { expr: inner, list, .. } => {
-            expr_has_volatile(inner) || list.iter().any(expr_has_volatile)
-        }
-        BoundExpr::Case { operand, conditions, results, else_result } => {
+        BoundExpr::Like {
+            expr: inner,
+            pattern,
+            ..
+        } => expr_has_volatile(inner) || expr_has_volatile(pattern),
+        BoundExpr::Between {
+            expr: inner,
+            low,
+            high,
+            ..
+        } => expr_has_volatile(inner) || expr_has_volatile(low) || expr_has_volatile(high),
+        BoundExpr::InList {
+            expr: inner, list, ..
+        } => expr_has_volatile(inner) || list.iter().any(expr_has_volatile),
+        BoundExpr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
             operand.as_deref().is_some_and(expr_has_volatile)
                 || conditions.iter().any(expr_has_volatile)
                 || results.iter().any(expr_has_volatile)
@@ -798,11 +905,14 @@ pub fn expr_has_volatile(expr: &BoundExpr) -> bool {
         BoundExpr::ArrayIndex { array, index } => {
             expr_has_volatile(array) || expr_has_volatile(index)
         }
-        BoundExpr::AnyOp { left, right, .. }
-        | BoundExpr::AllOp { left, right, .. } => {
+        BoundExpr::AnyOp { left, right, .. } | BoundExpr::AllOp { left, right, .. } => {
             expr_has_volatile(left) || expr_has_volatile(right)
         }
-        BoundExpr::ArraySlice { array, lower, upper } => {
+        BoundExpr::ArraySlice {
+            array,
+            lower,
+            upper,
+        } => {
             expr_has_volatile(array)
                 || lower.as_deref().is_some_and(expr_has_volatile)
                 || upper.as_deref().is_some_and(expr_has_volatile)
@@ -978,10 +1088,7 @@ mod tests {
     fn test_infer_coalesce_with_column() {
         let schema = test_schema();
         // COALESCE(name, $1)
-        let expr = BoundExpr::Coalesce(vec![
-            BoundExpr::ColumnRef(1),
-            BoundExpr::Parameter(1),
-        ]);
+        let expr = BoundExpr::Coalesce(vec![BoundExpr::ColumnRef(1), BoundExpr::Parameter(1)]);
         let types = infer_param_types(&expr, &schema);
         assert_eq!(types.get(&1), Some(&DataType::Text));
     }

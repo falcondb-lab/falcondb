@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::crash_domain::{recent_panic_events, panic_count, PanicEvent};
+use crate::crash_domain::{panic_count, recent_panic_events, PanicEvent};
 
 /// Topology snapshot for the diagnostic bundle.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -137,7 +137,11 @@ impl DiagBundleBuilder {
         value: f64,
         labels: HashMap<String, String>,
     ) -> Self {
-        self.metrics.push(MetricEntry { name: name.into(), value, labels });
+        self.metrics.push(MetricEntry {
+            name: name.into(),
+            value,
+            labels,
+        });
         self
     }
 

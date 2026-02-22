@@ -13,7 +13,7 @@ use falcon_common::datum::{Datum, OwnedRow};
 use falcon_common::schema::{ColumnDef, StorageType, TableSchema};
 use falcon_common::types::*;
 use falcon_storage::engine::StorageEngine;
-use falcon_storage::wal::{WalRecord, WalWriter, SyncMode};
+use falcon_storage::wal::{SyncMode, WalRecord, WalWriter};
 
 fn test_schema(name: &str, table_id: TableId) -> TableSchema {
     TableSchema {
@@ -61,11 +61,13 @@ fn test_wal1_unique_monotonic_lsn() {
 
     let mut lsns = Vec::new();
     for i in 0..100 {
-        let lsn = wal.append(&WalRecord::Insert {
-            txn_id: TxnId(i as u64),
-            table_id: TableId(1),
-            row: make_row(i, "x"),
-        }).unwrap();
+        let lsn = wal
+            .append(&WalRecord::Insert {
+                txn_id: TxnId(i as u64),
+                table_id: TableId(1),
+                row: make_row(i, "x"),
+            })
+            .unwrap();
         lsns.push(lsn);
     }
 
@@ -132,17 +134,27 @@ fn test_wal4_wal5_replay_convergence_and_completeness() {
 
         // Committed txn
         let txn1 = TxnId(10);
-        engine.insert(TableId(1), make_row(1, "committed"), txn1).unwrap();
-        engine.commit_txn(txn1, Timestamp(100), TxnType::Local).unwrap();
+        engine
+            .insert(TableId(1), make_row(1, "committed"), txn1)
+            .unwrap();
+        engine
+            .commit_txn(txn1, Timestamp(100), TxnType::Local)
+            .unwrap();
 
         // Another committed txn
         let txn2 = TxnId(20);
-        engine.insert(TableId(1), make_row(2, "also_committed"), txn2).unwrap();
-        engine.commit_txn(txn2, Timestamp(200), TxnType::Local).unwrap();
+        engine
+            .insert(TableId(1), make_row(2, "also_committed"), txn2)
+            .unwrap();
+        engine
+            .commit_txn(txn2, Timestamp(200), TxnType::Local)
+            .unwrap();
 
         // Uncommitted txn (no commit record — should be rolled back on recovery)
         let txn3 = TxnId(30);
-        engine.insert(TableId(1), make_row(3, "uncommitted"), txn3).unwrap();
+        engine
+            .insert(TableId(1), make_row(3, "uncommitted"), txn3)
+            .unwrap();
         // No commit_txn for txn3!
 
         // Flush WAL
@@ -151,22 +163,48 @@ fn test_wal4_wal5_replay_convergence_and_completeness() {
 
     // Phase 2: Recover and verify
     let engine1 = StorageEngine::recover(dir.path()).unwrap();
-    let rows1 = engine1.scan(TableId(1), TxnId(999), Timestamp(u64::MAX - 1)).unwrap();
+    let rows1 = engine1
+        .scan(TableId(1), TxnId(999), Timestamp(u64::MAX - 1))
+        .unwrap();
 
     // WAL-5: Committed txns must be visible
-    assert_eq!(rows1.len(), 2, "WAL-5: expected 2 committed rows, got {}", rows1.len());
-    let vals: Vec<String> = rows1.iter().map(|(_, r)| {
-        match &r.values[1] { Datum::Text(s) => s.clone(), _ => "?".into() }
-    }).collect();
-    assert!(vals.contains(&"committed".to_string()), "WAL-5: committed txn missing");
-    assert!(vals.contains(&"also_committed".to_string()), "WAL-5: also_committed txn missing");
+    assert_eq!(
+        rows1.len(),
+        2,
+        "WAL-5: expected 2 committed rows, got {}",
+        rows1.len()
+    );
+    let vals: Vec<String> = rows1
+        .iter()
+        .map(|(_, r)| match &r.values[1] {
+            Datum::Text(s) => s.clone(),
+            _ => "?".into(),
+        })
+        .collect();
+    assert!(
+        vals.contains(&"committed".to_string()),
+        "WAL-5: committed txn missing"
+    );
+    assert!(
+        vals.contains(&"also_committed".to_string()),
+        "WAL-5: also_committed txn missing"
+    );
     // Uncommitted txn must NOT be visible
-    assert!(!vals.contains(&"uncommitted".to_string()), "WAL-5: uncommitted txn is visible!");
+    assert!(
+        !vals.contains(&"uncommitted".to_string()),
+        "WAL-5: uncommitted txn is visible!"
+    );
 
     // WAL-4: Second recovery produces identical state (compare by row values, not PK bytes)
     let engine2 = StorageEngine::recover(dir.path()).unwrap();
-    let rows2 = engine2.scan(TableId(1), TxnId(999), Timestamp(u64::MAX - 1)).unwrap();
-    assert_eq!(rows1.len(), rows2.len(), "WAL-4: replay divergence in row count");
+    let rows2 = engine2
+        .scan(TableId(1), TxnId(999), Timestamp(u64::MAX - 1))
+        .unwrap();
+    assert_eq!(
+        rows1.len(),
+        rows2.len(),
+        "WAL-4: replay divergence in row count"
+    );
     let mut vals1: Vec<Vec<Datum>> = rows1.iter().map(|(_, r)| r.values.clone()).collect();
     let mut vals2: Vec<Vec<Datum>> = rows2.iter().map(|(_, r)| r.values.clone()).collect();
     vals1.sort_by(|a, b| format!("{:?}", a).cmp(&format!("{:?}", b)));
@@ -190,7 +228,9 @@ fn test_wal2_idempotent_replay() {
 
         let txn1 = TxnId(10);
         engine.insert(TableId(1), make_row(1, "a"), txn1).unwrap();
-        engine.commit_txn(txn1, Timestamp(100), TxnType::Local).unwrap();
+        engine
+            .commit_txn(txn1, Timestamp(100), TxnType::Local)
+            .unwrap();
 
         let txn2 = TxnId(20);
         engine.insert(TableId(1), make_row(2, "b"), txn2).unwrap();
@@ -203,11 +243,11 @@ fn test_wal2_idempotent_replay() {
     let mut row_snapshots = Vec::new();
     for _ in 0..3 {
         let engine = StorageEngine::recover(dir.path()).unwrap();
-        let rows = engine.scan(TableId(1), TxnId(999), Timestamp(u64::MAX - 1)).unwrap();
-        let snapshot: Vec<(Vec<u8>, Vec<Datum>)> = rows
-            .into_iter()
-            .map(|(pk, row)| (pk, row.values))
-            .collect();
+        let rows = engine
+            .scan(TableId(1), TxnId(999), Timestamp(u64::MAX - 1))
+            .unwrap();
+        let snapshot: Vec<(Vec<u8>, Vec<Datum>)> =
+            rows.into_iter().map(|(pk, row)| (pk, row.values)).collect();
         row_snapshots.push(snapshot);
     }
 
@@ -236,8 +276,12 @@ fn test_wal6_checksum_corruption_halts_recovery() {
 
         for i in 0..5 {
             let txn = TxnId(100 + i as u64);
-            engine.insert(TableId(1), make_row(i, &format!("v{}", i)), txn).unwrap();
-            engine.commit_txn(txn, Timestamp(1000 + i as u64), TxnType::Local).unwrap();
+            engine
+                .insert(TableId(1), make_row(i, &format!("v{}", i)), txn)
+                .unwrap();
+            engine
+                .commit_txn(txn, Timestamp(1000 + i as u64), TxnType::Local)
+                .unwrap();
         }
         engine.flush_wal().unwrap();
     }
@@ -246,9 +290,7 @@ fn test_wal6_checksum_corruption_halts_recovery() {
     let wal_files: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name().to_string_lossy().ends_with(".wal")
-        })
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".wal"))
         .collect();
     assert!(!wal_files.is_empty(), "No WAL files found");
 
@@ -268,7 +310,10 @@ fn test_wal6_checksum_corruption_halts_recovery() {
     match engine.scan(TableId(1), TxnId(999), Timestamp(u64::MAX - 1)) {
         Ok(rows) => {
             // If table survived, must have fewer or equal rows
-            assert!(rows.len() <= 5, "WAL-6: more rows than written after corruption");
+            assert!(
+                rows.len() <= 5,
+                "WAL-6: more rows than written after corruption"
+            );
         }
         Err(_) => {
             // Table not found — corruption destroyed the CreateTable record.
@@ -292,15 +337,21 @@ fn test_crash_before_wal_write() {
         engine.create_table(schema).unwrap();
 
         let txn1 = TxnId(10);
-        engine.insert(TableId(1), make_row(1, "before_crash"), txn1).unwrap();
-        engine.commit_txn(txn1, Timestamp(100), TxnType::Local).unwrap();
+        engine
+            .insert(TableId(1), make_row(1, "before_crash"), txn1)
+            .unwrap();
+        engine
+            .commit_txn(txn1, Timestamp(100), TxnType::Local)
+            .unwrap();
 
         engine.flush_wal().unwrap();
         // "Crash" — txn2 never touches the engine
     }
 
     let engine = StorageEngine::recover(dir.path()).unwrap();
-    let rows = engine.scan(TableId(1), TxnId(999), Timestamp(u64::MAX - 1)).unwrap();
+    let rows = engine
+        .scan(TableId(1), TxnId(999), Timestamp(u64::MAX - 1))
+        .unwrap();
     assert_eq!(rows.len(), 1, "CRASH-1: only pre-crash txn should exist");
 }
 
@@ -319,20 +370,32 @@ fn test_crash_after_wal_write_before_commit() {
 
         // Committed txn
         let txn1 = TxnId(10);
-        engine.insert(TableId(1), make_row(1, "committed"), txn1).unwrap();
-        engine.commit_txn(txn1, Timestamp(100), TxnType::Local).unwrap();
+        engine
+            .insert(TableId(1), make_row(1, "committed"), txn1)
+            .unwrap();
+        engine
+            .commit_txn(txn1, Timestamp(100), TxnType::Local)
+            .unwrap();
 
         // WAL records written but no commit record
         let txn2 = TxnId(20);
-        engine.insert(TableId(1), make_row(2, "no_commit"), txn2).unwrap();
+        engine
+            .insert(TableId(1), make_row(2, "no_commit"), txn2)
+            .unwrap();
         // No commit! Simulates crash after write but before commit.
 
         engine.flush_wal().unwrap();
     }
 
     let engine = StorageEngine::recover(dir.path()).unwrap();
-    let rows = engine.scan(TableId(1), TxnId(999), Timestamp(u64::MAX - 1)).unwrap();
-    assert_eq!(rows.len(), 1, "CRASH-2: uncommitted txn should be rolled back");
+    let rows = engine
+        .scan(TableId(1), TxnId(999), Timestamp(u64::MAX - 1))
+        .unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "CRASH-2: uncommitted txn should be rolled back"
+    );
     let val = match &rows[0].1.values[1] {
         Datum::Text(s) => s.clone(),
         _ => panic!("expected text"),
@@ -355,42 +418,85 @@ fn test_crash_recovery_with_updates_and_deletes() {
 
         // Insert and commit
         let txn1 = TxnId(10);
-        engine.insert(TableId(1), make_row(1, "original"), txn1).unwrap();
-        engine.insert(TableId(1), make_row(2, "to_delete"), txn1).unwrap();
-        engine.insert(TableId(1), make_row(3, "unchanged"), txn1).unwrap();
-        engine.commit_txn(txn1, Timestamp(100), TxnType::Local).unwrap();
+        engine
+            .insert(TableId(1), make_row(1, "original"), txn1)
+            .unwrap();
+        engine
+            .insert(TableId(1), make_row(2, "to_delete"), txn1)
+            .unwrap();
+        engine
+            .insert(TableId(1), make_row(3, "unchanged"), txn1)
+            .unwrap();
+        engine
+            .commit_txn(txn1, Timestamp(100), TxnType::Local)
+            .unwrap();
 
         // Update row 1
         let txn2 = TxnId(20);
-        let pk1 = engine.scan(TableId(1), TxnId(999), Timestamp(u64::MAX - 1)).unwrap()
-            .into_iter().find(|(_, r)| r.values[0] == Datum::Int32(1)).unwrap().0;
-        engine.update(TableId(1), &pk1, make_row(1, "updated"), txn2).unwrap();
-        engine.commit_txn(txn2, Timestamp(200), TxnType::Local).unwrap();
+        let pk1 = engine
+            .scan(TableId(1), TxnId(999), Timestamp(u64::MAX - 1))
+            .unwrap()
+            .into_iter()
+            .find(|(_, r)| r.values[0] == Datum::Int32(1))
+            .unwrap()
+            .0;
+        engine
+            .update(TableId(1), &pk1, make_row(1, "updated"), txn2)
+            .unwrap();
+        engine
+            .commit_txn(txn2, Timestamp(200), TxnType::Local)
+            .unwrap();
 
         // Delete row 2
         let txn3 = TxnId(30);
-        let pk2 = engine.scan(TableId(1), TxnId(999), Timestamp(u64::MAX - 1)).unwrap()
-            .into_iter().find(|(_, r)| r.values[0] == Datum::Int32(2)).unwrap().0;
+        let pk2 = engine
+            .scan(TableId(1), TxnId(999), Timestamp(u64::MAX - 1))
+            .unwrap()
+            .into_iter()
+            .find(|(_, r)| r.values[0] == Datum::Int32(2))
+            .unwrap()
+            .0;
         engine.delete(TableId(1), &pk2, txn3).unwrap();
-        engine.commit_txn(txn3, Timestamp(300), TxnType::Local).unwrap();
+        engine
+            .commit_txn(txn3, Timestamp(300), TxnType::Local)
+            .unwrap();
 
         engine.flush_wal().unwrap();
     }
 
     let engine = StorageEngine::recover(dir.path()).unwrap();
-    let rows = engine.scan(TableId(1), TxnId(999), Timestamp(u64::MAX - 1)).unwrap();
+    let rows = engine
+        .scan(TableId(1), TxnId(999), Timestamp(u64::MAX - 1))
+        .unwrap();
 
-    assert_eq!(rows.len(), 2, "Expected 2 rows after update+delete recovery");
+    assert_eq!(
+        rows.len(),
+        2,
+        "Expected 2 rows after update+delete recovery"
+    );
 
-    let vals: std::collections::HashMap<i32, String> = rows.iter().map(|(_, r)| {
-        let id = match r.values[0] { Datum::Int32(i) => i, _ => -1 };
-        let val = match &r.values[1] { Datum::Text(s) => s.clone(), _ => "?".into() };
-        (id, val)
-    }).collect();
+    let vals: std::collections::HashMap<i32, String> = rows
+        .iter()
+        .map(|(_, r)| {
+            let id = match r.values[0] {
+                Datum::Int32(i) => i,
+                _ => -1,
+            };
+            let val = match &r.values[1] {
+                Datum::Text(s) => s.clone(),
+                _ => "?".into(),
+            };
+            (id, val)
+        })
+        .collect();
 
     assert_eq!(vals.get(&1).unwrap(), "updated", "Row 1 should be updated");
     assert!(!vals.contains_key(&2), "Row 2 should be deleted");
-    assert_eq!(vals.get(&3).unwrap(), "unchanged", "Row 3 should be unchanged");
+    assert_eq!(
+        vals.get(&3).unwrap(),
+        "unchanged",
+        "Row 3 should be unchanged"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -409,8 +515,12 @@ fn test_checkpoint_plus_wal_recovery() {
         // Insert rows and commit
         for i in 0..5 {
             let txn = TxnId(10 + i as u64);
-            engine.insert(TableId(1), make_row(i, &format!("pre_ckpt_{}", i)), txn).unwrap();
-            engine.commit_txn(txn, Timestamp(100 + i as u64), TxnType::Local).unwrap();
+            engine
+                .insert(TableId(1), make_row(i, &format!("pre_ckpt_{}", i)), txn)
+                .unwrap();
+            engine
+                .commit_txn(txn, Timestamp(100 + i as u64), TxnType::Local)
+                .unwrap();
         }
 
         // Checkpoint
@@ -420,8 +530,12 @@ fn test_checkpoint_plus_wal_recovery() {
         // More data after checkpoint
         for i in 5..10 {
             let txn = TxnId(100 + i as u64);
-            engine.insert(TableId(1), make_row(i, &format!("post_ckpt_{}", i)), txn).unwrap();
-            engine.commit_txn(txn, Timestamp(200 + i as u64), TxnType::Local).unwrap();
+            engine
+                .insert(TableId(1), make_row(i, &format!("post_ckpt_{}", i)), txn)
+                .unwrap();
+            engine
+                .commit_txn(txn, Timestamp(200 + i as u64), TxnType::Local)
+                .unwrap();
         }
 
         engine.flush_wal().unwrap();
@@ -429,8 +543,15 @@ fn test_checkpoint_plus_wal_recovery() {
 
     // Recover: should see all 10 rows (5 from checkpoint + 5 from WAL delta)
     let engine = StorageEngine::recover(dir.path()).unwrap();
-    let rows = engine.scan(TableId(1), TxnId(999), Timestamp(u64::MAX - 1)).unwrap();
-    assert_eq!(rows.len(), 10, "Checkpoint+WAL recovery: expected 10 rows, got {}", rows.len());
+    let rows = engine
+        .scan(TableId(1), TxnId(999), Timestamp(u64::MAX - 1))
+        .unwrap();
+    assert_eq!(
+        rows.len(),
+        10,
+        "Checkpoint+WAL recovery: expected 10 rows, got {}",
+        rows.len()
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -452,12 +573,20 @@ fn test_ddl_recovery_create_and_drop() {
 
         // Insert into both
         let txn1 = TxnId(10);
-        engine.insert(TableId(1), make_row(1, "keeper"), txn1).unwrap();
-        engine.commit_txn(txn1, Timestamp(100), TxnType::Local).unwrap();
+        engine
+            .insert(TableId(1), make_row(1, "keeper"), txn1)
+            .unwrap();
+        engine
+            .commit_txn(txn1, Timestamp(100), TxnType::Local)
+            .unwrap();
 
         let txn2 = TxnId(20);
-        engine.insert(TableId(2), make_row(1, "dropper"), txn2).unwrap();
-        engine.commit_txn(txn2, Timestamp(200), TxnType::Local).unwrap();
+        engine
+            .insert(TableId(2), make_row(1, "dropper"), txn2)
+            .unwrap();
+        engine
+            .commit_txn(txn2, Timestamp(200), TxnType::Local)
+            .unwrap();
 
         // Drop the second table
         engine.drop_table("drop_me").unwrap();
@@ -468,12 +597,17 @@ fn test_ddl_recovery_create_and_drop() {
     let engine = StorageEngine::recover(dir.path()).unwrap();
 
     // Table 1 should exist with data
-    let rows = engine.scan(TableId(1), TxnId(999), Timestamp(u64::MAX - 1)).unwrap();
+    let rows = engine
+        .scan(TableId(1), TxnId(999), Timestamp(u64::MAX - 1))
+        .unwrap();
     assert_eq!(rows.len(), 1, "keep_me table should have 1 row");
 
     // Table 2 should not exist
     let catalog = engine.get_catalog();
-    assert!(catalog.find_table("drop_me").is_none(), "drop_me should not exist after recovery");
+    assert!(
+        catalog.find_table("drop_me").is_none(),
+        "drop_me should not exist after recovery"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -493,23 +627,43 @@ fn test_interleaved_txn_recovery() {
         let txn_a = TxnId(100);
         let txn_b = TxnId(200);
 
-        engine.insert(TableId(1), make_row(1, "from_a"), txn_a).unwrap();
-        engine.insert(TableId(1), make_row(2, "from_b"), txn_b).unwrap();
-        engine.insert(TableId(1), make_row(3, "also_from_a"), txn_a).unwrap();
+        engine
+            .insert(TableId(1), make_row(1, "from_a"), txn_a)
+            .unwrap();
+        engine
+            .insert(TableId(1), make_row(2, "from_b"), txn_b)
+            .unwrap();
+        engine
+            .insert(TableId(1), make_row(3, "also_from_a"), txn_a)
+            .unwrap();
 
-        engine.commit_txn(txn_a, Timestamp(500), TxnType::Local).unwrap();
+        engine
+            .commit_txn(txn_a, Timestamp(500), TxnType::Local)
+            .unwrap();
         // txn_b is NOT committed — simulates in-flight txn at crash
 
         engine.flush_wal().unwrap();
     }
 
     let engine = StorageEngine::recover(dir.path()).unwrap();
-    let rows = engine.scan(TableId(1), TxnId(999), Timestamp(u64::MAX - 1)).unwrap();
+    let rows = engine
+        .scan(TableId(1), TxnId(999), Timestamp(u64::MAX - 1))
+        .unwrap();
 
     assert_eq!(rows.len(), 2, "Only txn_a's rows should survive");
-    let ids: Vec<i32> = rows.iter().map(|(_, r)| match r.values[0] {
-        Datum::Int32(i) => i, _ => -1
-    }).collect();
-    assert!(ids.contains(&1) && ids.contains(&3), "Expected rows 1 and 3 from txn_a");
-    assert!(!ids.contains(&2), "Row 2 from uncommitted txn_b should not survive");
+    let ids: Vec<i32> = rows
+        .iter()
+        .map(|(_, r)| match r.values[0] {
+            Datum::Int32(i) => i,
+            _ => -1,
+        })
+        .collect();
+    assert!(
+        ids.contains(&1) && ids.contains(&3),
+        "Expected rows 1 and 3 from txn_a"
+    );
+    assert!(
+        !ids.contains(&2),
+        "Row 2 from uncommitted txn_b should not survive"
+    );
 }

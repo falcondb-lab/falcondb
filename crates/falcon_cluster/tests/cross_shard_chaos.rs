@@ -113,15 +113,20 @@ fn chaos_1_pressure_all_txns_converge() {
 
     // Property: every txn is accounted for (no stuck)
     assert_eq!(
-        committed + aborted, num_txns,
+        committed + aborted,
+        num_txns,
         "CHAOS-1: all {} txns must be accounted for, got committed={} aborted={}",
-        num_txns, committed, aborted
+        num_txns,
+        committed,
+        aborted
     );
     // Property: majority should commit under normal pressure
     assert!(
         committed >= num_txns * 80 / 100,
         "CHAOS-1: ≥80% commit rate expected, got {}/{} in {}ms",
-        committed, num_txns, duration_ms
+        committed,
+        num_txns,
+        duration_ms
     );
     eprintln!(
         "[CHAOS-1] committed={} aborted={} total={} duration={}ms",
@@ -142,7 +147,10 @@ fn chaos_2_coordinator_restart_recovery() {
 
     // Phase 1: Run txns with coordinator #1
     let config1 = HardenedConfig {
-        retry: RetryConfig { max_retries: 1, ..Default::default() },
+        retry: RetryConfig {
+            max_retries: 1,
+            ..Default::default()
+        },
         coord_concurrency: (16, 12),
         ..Default::default()
     };
@@ -171,7 +179,10 @@ fn chaos_2_coordinator_restart_recovery() {
     drop(coord1);
 
     let config2 = HardenedConfig {
-        retry: RetryConfig { max_retries: 2, ..Default::default() },
+        retry: RetryConfig {
+            max_retries: 2,
+            ..Default::default()
+        },
         coord_concurrency: (16, 12),
         ..Default::default()
     };
@@ -289,10 +300,8 @@ fn chaos_4_concurrent_pressure_with_collisions() {
             let key = global_key.clone();
             s.spawn(move || {
                 for i in 0..txns_per_thread {
-                    let targets = vec![
-                        ShardId((t * 2) as u64 % 4),
-                        ShardId((t * 2 + 1) as u64 % 4),
-                    ];
+                    let targets =
+                        vec![ShardId((t * 2) as u64 % 4), ShardId((t * 2 + 1) as u64 % 4)];
                     // Every 7th txn uses a shared key to cause collisions
                     let k = if i % 7 == 0 {
                         42 // shared collision key
@@ -305,10 +314,8 @@ fn chaos_4_concurrent_pressure_with_collisions() {
                             &targets,
                             IsolationLevel::ReadCommitted,
                             |storage, _tm, txn_id| {
-                                let row = OwnedRow::new(vec![
-                                    Datum::Int32(k),
-                                    Datum::Int32(t as i32),
-                                ]);
+                                let row =
+                                    OwnedRow::new(vec![Datum::Int32(k), Datum::Int32(t as i32)]);
                                 storage.insert(TableId(1), row, txn_id)?;
                                 Ok(())
                             },
@@ -336,7 +343,8 @@ fn chaos_4_concurrent_pressure_with_collisions() {
     assert!(
         c >= total * 60 / 100,
         "CHAOS-4: ≥60% commit rate under collisions, got {}/{}",
-        c, total
+        c,
+        total
     );
 
     eprintln!(
@@ -356,7 +364,10 @@ fn chaos_5_circuit_breaker_recovery() {
 
     let config = HardenedConfig {
         circuit_breaker: (3, Duration::from_millis(50)), // trips after 3 failures, resets in 50ms
-        retry: RetryConfig { max_retries: 0, ..Default::default() },
+        retry: RetryConfig {
+            max_retries: 0,
+            ..Default::default()
+        },
         coord_concurrency: (16, 12),
         ..Default::default()
     };
@@ -462,7 +473,8 @@ fn chaos_6_committed_data_never_lost() {
             assert!(
                 visible_keys.contains(&k),
                 "CHAOS-6: committed key {} not visible on shard {:?}",
-                k, sid
+                k,
+                sid
             );
         }
     }
@@ -525,13 +537,11 @@ fn chaos_7_randomized_mixed_faults() {
 
     // Property: all accounted, no panics
     assert_eq!(
-        committed + aborted, num_txns,
+        committed + aborted,
+        num_txns,
         "CHAOS-7: all txns accounted for"
     );
-    assert!(
-        committed > 0,
-        "CHAOS-7: at least some txns should commit"
-    );
+    assert!(committed > 0, "CHAOS-7: at least some txns should commit");
 
     let stats = coord.concurrency_stats();
     assert_eq!(

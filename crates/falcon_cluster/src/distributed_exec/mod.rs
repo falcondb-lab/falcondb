@@ -152,32 +152,46 @@ pub enum GatherStrategy {
 impl std::fmt::Debug for GatherStrategy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            GatherStrategy::Union { distinct, limit, offset } => {
-                f.debug_struct("Union")
-                    .field("distinct", distinct)
-                    .field("limit", limit)
-                    .field("offset", offset)
-                    .finish()
-            }
-            GatherStrategy::OrderByLimit { sort_columns, limit, offset } => {
-                f.debug_struct("OrderByLimit")
-                    .field("sort_columns", sort_columns)
-                    .field("limit", limit)
-                    .field("offset", offset)
-                    .finish()
-            }
-            GatherStrategy::TwoPhaseAgg { group_by_indices, agg_merges, avg_fixups, visible_columns, having, order_by, limit, offset } => {
-                f.debug_struct("TwoPhaseAgg")
-                    .field("group_by_indices", group_by_indices)
-                    .field("agg_merges", agg_merges)
-                    .field("avg_fixups", avg_fixups)
-                    .field("visible_columns", visible_columns)
-                    .field("having", &having.as_ref().map(|_| "<fn>"))
-                    .field("order_by", order_by)
-                    .field("limit", limit)
-                    .field("offset", offset)
-                    .finish()
-            }
+            GatherStrategy::Union {
+                distinct,
+                limit,
+                offset,
+            } => f
+                .debug_struct("Union")
+                .field("distinct", distinct)
+                .field("limit", limit)
+                .field("offset", offset)
+                .finish(),
+            GatherStrategy::OrderByLimit {
+                sort_columns,
+                limit,
+                offset,
+            } => f
+                .debug_struct("OrderByLimit")
+                .field("sort_columns", sort_columns)
+                .field("limit", limit)
+                .field("offset", offset)
+                .finish(),
+            GatherStrategy::TwoPhaseAgg {
+                group_by_indices,
+                agg_merges,
+                avg_fixups,
+                visible_columns,
+                having,
+                order_by,
+                limit,
+                offset,
+            } => f
+                .debug_struct("TwoPhaseAgg")
+                .field("group_by_indices", group_by_indices)
+                .field("agg_merges", agg_merges)
+                .field("avg_fixups", avg_fixups)
+                .field("visible_columns", visible_columns)
+                .field("having", &having.as_ref().map(|_| "<fn>"))
+                .field("order_by", order_by)
+                .field("limit", limit)
+                .field("offset", offset)
+                .finish(),
         }
     }
 }

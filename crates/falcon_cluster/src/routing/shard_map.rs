@@ -142,7 +142,9 @@ impl ShardMap {
 
         tracing::info!(
             "ShardMap: split shard {:?} at midpoint {} -> new shard {:?}",
-            shard_id, mid, new_id
+            shard_id,
+            mid,
+            new_id
         );
 
         Some(new_id)
@@ -161,17 +163,19 @@ impl ShardMap {
         };
 
         // Determine which shard has the lower start
-        let (lo_idx, hi_idx) = if self.shards[idx_a].hash_range_start <= self.shards[idx_b].hash_range_start {
-            (idx_a, idx_b)
-        } else {
-            (idx_b, idx_a)
-        };
+        let (lo_idx, hi_idx) =
+            if self.shards[idx_a].hash_range_start <= self.shards[idx_b].hash_range_start {
+                (idx_a, idx_b)
+            } else {
+                (idx_b, idx_a)
+            };
 
         // Verify adjacency: lo.end == hi.start
         if self.shards[lo_idx].hash_range_end != self.shards[hi_idx].hash_range_start {
             tracing::warn!(
                 "ShardMap: cannot merge non-adjacent shards {:?} and {:?}",
-                shard_a, shard_b
+                shard_a,
+                shard_b
             );
             return false;
         }
@@ -188,7 +192,9 @@ impl ShardMap {
 
         tracing::info!(
             "ShardMap: merged shards {:?} and {:?} -> {:?}",
-            shard_a, shard_b, merged_id
+            shard_a,
+            shard_b,
+            merged_id
         );
 
         true

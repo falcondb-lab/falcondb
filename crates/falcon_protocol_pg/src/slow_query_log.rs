@@ -81,12 +81,18 @@ impl SlowQueryLog {
 
     /// Get the current threshold.
     pub fn threshold(&self) -> Duration {
-        self.inner.lock().unwrap_or_else(|p| p.into_inner()).threshold
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .threshold
     }
 
     /// Set the threshold. `Duration::ZERO` disables logging.
     pub fn set_threshold(&self, threshold: Duration) {
-        self.inner.lock().unwrap_or_else(|p| p.into_inner()).threshold = threshold;
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .threshold = threshold;
     }
 
     /// Get a snapshot of all entries and the total count.

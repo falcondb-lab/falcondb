@@ -128,16 +128,47 @@ pub enum LogicalPlan {
     },
 
     // ── DDL (pass-through) ──────────────────────────────────────────
-    CreateTable { schema: TableSchema, if_not_exists: bool },
-    DropTable { table_name: String, if_exists: bool },
-    AlterTable { table_name: String, ops: Vec<AlterTableOp> },
-    Truncate { table_name: String },
-    CreateIndex { index_name: String, table_name: String, column_indices: Vec<usize>, unique: bool },
-    DropIndex { index_name: String },
-    CreateView { name: String, query_sql: String, or_replace: bool },
-    DropView { name: String, if_exists: bool },
-    CreateSequence { name: String, start: i64 },
-    DropSequence { name: String, if_exists: bool },
+    CreateTable {
+        schema: TableSchema,
+        if_not_exists: bool,
+    },
+    DropTable {
+        table_name: String,
+        if_exists: bool,
+    },
+    AlterTable {
+        table_name: String,
+        ops: Vec<AlterTableOp>,
+    },
+    Truncate {
+        table_name: String,
+    },
+    CreateIndex {
+        index_name: String,
+        table_name: String,
+        column_indices: Vec<usize>,
+        unique: bool,
+    },
+    DropIndex {
+        index_name: String,
+    },
+    CreateView {
+        name: String,
+        query_sql: String,
+        or_replace: bool,
+    },
+    DropView {
+        name: String,
+        if_exists: bool,
+    },
+    CreateSequence {
+        name: String,
+        start: i64,
+    },
+    DropSequence {
+        name: String,
+        if_exists: bool,
+    },
 
     // ── Utility / Session ───────────────────────────────────────────
     Explain(Box<LogicalPlan>),
@@ -150,29 +181,55 @@ pub enum LogicalPlan {
     ShowWalStats,
     ShowConnections,
     RunGc,
-    Analyze { table_name: String },
-    ShowTableStats { table_name: Option<String> },
+    Analyze {
+        table_name: String,
+    },
+    ShowTableStats {
+        table_name: Option<String>,
+    },
     ShowSequences,
     ShowTenants,
     ShowTenantUsage,
-    CreateTenant { name: String, max_qps: u64, max_storage_bytes: u64 },
-    DropTenant { name: String },
+    CreateTenant {
+        name: String,
+        max_qps: u64,
+        max_storage_bytes: u64,
+    },
+    DropTenant {
+        name: String,
+    },
 
     // ── COPY ────────────────────────────────────────────────────────
     CopyFrom {
-        table_id: TableId, schema: TableSchema, columns: Vec<usize>,
-        csv: bool, delimiter: char, header: bool, null_string: String,
-        quote: char, escape: char,
+        table_id: TableId,
+        schema: TableSchema,
+        columns: Vec<usize>,
+        csv: bool,
+        delimiter: char,
+        header: bool,
+        null_string: String,
+        quote: char,
+        escape: char,
     },
     CopyTo {
-        table_id: TableId, schema: TableSchema, columns: Vec<usize>,
-        csv: bool, delimiter: char, header: bool, null_string: String,
-        quote: char, escape: char,
+        table_id: TableId,
+        schema: TableSchema,
+        columns: Vec<usize>,
+        csv: bool,
+        delimiter: char,
+        header: bool,
+        null_string: String,
+        quote: char,
+        escape: char,
     },
     CopyQueryTo {
         query: Box<LogicalPlan>,
-        csv: bool, delimiter: char, header: bool, null_string: String,
-        quote: char, escape: char,
+        csv: bool,
+        delimiter: char,
+        header: bool,
+        null_string: String,
+        quote: char,
+        escape: char,
     },
 }
 
@@ -201,28 +258,40 @@ impl LogicalPlan {
             BoundStatement::Truncate { table_name } => Ok(LogicalPlan::Truncate {
                 table_name: table_name.clone(),
             }),
-            BoundStatement::CreateIndex { index_name, table_name, column_indices, unique } => {
-                Ok(LogicalPlan::CreateIndex {
-                    index_name: index_name.clone(),
-                    table_name: table_name.clone(),
-                    column_indices: column_indices.clone(),
-                    unique: *unique,
-                })
-            }
+            BoundStatement::CreateIndex {
+                index_name,
+                table_name,
+                column_indices,
+                unique,
+            } => Ok(LogicalPlan::CreateIndex {
+                index_name: index_name.clone(),
+                table_name: table_name.clone(),
+                column_indices: column_indices.clone(),
+                unique: *unique,
+            }),
             BoundStatement::DropIndex { index_name } => Ok(LogicalPlan::DropIndex {
                 index_name: index_name.clone(),
             }),
-            BoundStatement::CreateView { name, query_sql, or_replace } => Ok(LogicalPlan::CreateView {
-                name: name.clone(), query_sql: query_sql.clone(), or_replace: *or_replace,
+            BoundStatement::CreateView {
+                name,
+                query_sql,
+                or_replace,
+            } => Ok(LogicalPlan::CreateView {
+                name: name.clone(),
+                query_sql: query_sql.clone(),
+                or_replace: *or_replace,
             }),
             BoundStatement::DropView { name, if_exists } => Ok(LogicalPlan::DropView {
-                name: name.clone(), if_exists: *if_exists,
+                name: name.clone(),
+                if_exists: *if_exists,
             }),
             BoundStatement::CreateSequence { name, start } => Ok(LogicalPlan::CreateSequence {
-                name: name.clone(), start: *start,
+                name: name.clone(),
+                start: *start,
             }),
             BoundStatement::DropSequence { name, if_exists } => Ok(LogicalPlan::DropSequence {
-                name: name.clone(), if_exists: *if_exists,
+                name: name.clone(),
+                if_exists: *if_exists,
             }),
 
             // ── DML ─────────────────────────────────────────────────
@@ -282,36 +351,80 @@ impl LogicalPlan {
             BoundStatement::ShowSequences => Ok(LogicalPlan::ShowSequences),
             BoundStatement::ShowTenants => Ok(LogicalPlan::ShowTenants),
             BoundStatement::ShowTenantUsage => Ok(LogicalPlan::ShowTenantUsage),
-            BoundStatement::CreateTenant { name, max_qps, max_storage_bytes } => {
-                Ok(LogicalPlan::CreateTenant {
-                    name: name.clone(),
-                    max_qps: *max_qps,
-                    max_storage_bytes: *max_storage_bytes,
-                })
+            BoundStatement::CreateTenant {
+                name,
+                max_qps,
+                max_storage_bytes,
+            } => Ok(LogicalPlan::CreateTenant {
+                name: name.clone(),
+                max_qps: *max_qps,
+                max_storage_bytes: *max_storage_bytes,
+            }),
+            BoundStatement::DropTenant { name } => {
+                Ok(LogicalPlan::DropTenant { name: name.clone() })
             }
-            BoundStatement::DropTenant { name } => Ok(LogicalPlan::DropTenant { name: name.clone() }),
 
             // ── COPY ─────────────────────────────────────────────────
-            BoundStatement::CopyFrom { table_id, schema, columns, csv, delimiter, header, null_string, quote, escape } => {
-                Ok(LogicalPlan::CopyFrom {
-                    table_id: *table_id, schema: schema.clone(), columns: columns.clone(),
-                    csv: *csv, delimiter: *delimiter, header: *header,
-                    null_string: null_string.clone(), quote: *quote, escape: *escape,
-                })
-            }
-            BoundStatement::CopyTo { table_id, schema, columns, csv, delimiter, header, null_string, quote, escape } => {
-                Ok(LogicalPlan::CopyTo {
-                    table_id: *table_id, schema: schema.clone(), columns: columns.clone(),
-                    csv: *csv, delimiter: *delimiter, header: *header,
-                    null_string: null_string.clone(), quote: *quote, escape: *escape,
-                })
-            }
-            BoundStatement::CopyQueryTo { query, csv, delimiter, header, null_string, quote, escape } => {
+            BoundStatement::CopyFrom {
+                table_id,
+                schema,
+                columns,
+                csv,
+                delimiter,
+                header,
+                null_string,
+                quote,
+                escape,
+            } => Ok(LogicalPlan::CopyFrom {
+                table_id: *table_id,
+                schema: schema.clone(),
+                columns: columns.clone(),
+                csv: *csv,
+                delimiter: *delimiter,
+                header: *header,
+                null_string: null_string.clone(),
+                quote: *quote,
+                escape: *escape,
+            }),
+            BoundStatement::CopyTo {
+                table_id,
+                schema,
+                columns,
+                csv,
+                delimiter,
+                header,
+                null_string,
+                quote,
+                escape,
+            } => Ok(LogicalPlan::CopyTo {
+                table_id: *table_id,
+                schema: schema.clone(),
+                columns: columns.clone(),
+                csv: *csv,
+                delimiter: *delimiter,
+                header: *header,
+                null_string: null_string.clone(),
+                quote: *quote,
+                escape: *escape,
+            }),
+            BoundStatement::CopyQueryTo {
+                query,
+                csv,
+                delimiter,
+                header,
+                null_string,
+                quote,
+                escape,
+            } => {
                 let inner = Self::from_bound_select(query);
                 Ok(LogicalPlan::CopyQueryTo {
                     query: Box::new(inner),
-                    csv: *csv, delimiter: *delimiter, header: *header,
-                    null_string: null_string.clone(), quote: *quote, escape: *escape,
+                    csv: *csv,
+                    delimiter: *delimiter,
+                    header: *header,
+                    null_string: null_string.clone(),
+                    quote: *quote,
+                    escape: *escape,
                 })
             }
         }
@@ -359,7 +472,10 @@ impl LogicalPlan {
         // 5. Aggregate (GROUP BY + aggregates)
         let has_agg = !sel.group_by.is_empty()
             || !sel.grouping_sets.is_empty()
-            || sel.projections.iter().any(|p| matches!(p, BoundProjection::Aggregate(..)));
+            || sel
+                .projections
+                .iter()
+                .any(|p| matches!(p, BoundProjection::Aggregate(..)));
         if has_agg {
             plan = LogicalPlan::Aggregate {
                 input: Box::new(plan),

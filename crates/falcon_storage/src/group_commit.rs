@@ -140,6 +140,7 @@ pub struct GroupCommitSyncer {
 
 impl GroupCommitSyncer {
     /// Create a new group commit syncer wrapping an existing WAL writer.
+    #[allow(clippy::let_and_return)]
     pub fn new(wal: Arc<WalWriter>, config: GroupCommitConfig) -> Arc<Self> {
         let syncer = Arc::new(Self {
             wal,
@@ -159,14 +160,21 @@ impl GroupCommitSyncer {
     }
 
     /// Start the background syncer thread. Returns a join handle.
-    pub fn start_syncer(self: &Arc<Self>) -> std::thread::JoinHandle<()> {
+    ///
+    /// Returns `Err` if the OS cannot spawn the thread (resource exhaustion).
+    /// The caller must handle this as a degraded condition — **no panic**.
+    pub fn start_syncer(self: &Arc<Self>) -> Result<std::thread::JoinHandle<()>, StorageError> {
         let syncer = Arc::clone(self);
         std::thread::Builder::new()
             .name("falcon-group-commit".into())
             .spawn(move || syncer.syncer_loop())
-            .unwrap_or_else(|e| {
-                tracing::error!("failed to spawn group-commit syncer: {}", e);
-                panic!("group-commit syncer thread spawn failed");
+            .map_err(|e| {
+                tracing::error!(
+                    component = "group-commit-syncer",
+                    error = %e,
+                    "failed to spawn background thread — node DEGRADED"
+                );
+                StorageError::Wal(format!("failed to spawn group-commit syncer: {}", e))
             })
     }
 
@@ -189,17 +197,28 @@ impl GroupCommitSyncer {
             // Wait until our LSN is fsynced
             while state.fsynced_lsn <= seq && !self.shutdown.load(Ordering::Relaxed) {
                 let timeout = Duration::from_micros(self.config.flush_interval_us * 10);
-                let result = cvar.wait_timeout(state, timeout).unwrap_or_else(|p| p.into_inner());
+                let result = cvar
+                    .wait_timeout(state, timeout)
+                    .unwrap_or_else(|p| p.into_inner());
                 state = result.0;
             }
             seq
         };
 
         let elapsed = start.elapsed().as_micros() as u64;
-        self.stats.total_wait_us.fetch_add(elapsed, Ordering::Relaxed);
-        let _ = self.stats.max_wait_us.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-            if elapsed > cur { Some(elapsed) } else { None }
-        });
+        self.stats
+            .total_wait_us
+            .fetch_add(elapsed, Ordering::Relaxed);
+        let _ = self
+            .stats
+            .max_wait_us
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                if elapsed > cur {
+                    Some(elapsed)
+                } else {
+                    None
+                }
+            });
         let _ = my_lsn;
 
         Ok(lsn)
@@ -296,7 +315,9 @@ impl GroupCommitSyncer {
         }
 
         self.stats.fsyncs.fetch_add(1, Ordering::Relaxed);
-        self.stats.records_synced.fetch_add(batch_size, Ordering::Relaxed);
+        self.stats
+            .records_synced
+            .fetch_add(batch_size, Ordering::Relaxed);
         self.stats.batches.fetch_add(1, Ordering::Relaxed);
 
         Ok(())
@@ -325,16 +346,22 @@ mod tests {
             max_batch_size: 8,
         };
         let syncer = GroupCommitSyncer::new(wal, config);
-        let handle = syncer.start_syncer();
+        let handle = syncer.start_syncer().unwrap();
 
         // Append records and wait for durability
         for i in 0..10 {
-            syncer.append_and_wait(&WalRecord::BeginTxn { txn_id: TxnId(i) }).unwrap();
+            syncer
+                .append_and_wait(&WalRecord::BeginTxn { txn_id: TxnId(i) })
+                .unwrap();
         }
 
         let stats = syncer.stats().snapshot();
         assert!(stats.fsyncs > 0, "should have performed at least one fsync");
-        assert!(stats.records_synced >= 10, "all 10 records should be synced, got {}", stats.records_synced);
+        assert!(
+            stats.records_synced >= 10,
+            "all 10 records should be synced, got {}",
+            stats.records_synced
+        );
 
         syncer.shutdown();
         handle.join().unwrap();
@@ -352,16 +379,25 @@ mod tests {
             max_batch_size: 5,
         };
         let syncer = GroupCommitSyncer::new(wal, config);
-        let handle = syncer.start_syncer();
+        let handle = syncer.start_syncer().unwrap();
 
         // Rapid-fire 20 appends — should batch into ~4 fsyncs
         for i in 0..20 {
-            syncer.append_and_wait(&WalRecord::BeginTxn { txn_id: TxnId(i) }).unwrap();
+            syncer
+                .append_and_wait(&WalRecord::BeginTxn { txn_id: TxnId(i) })
+                .unwrap();
         }
 
         let stats = syncer.stats().snapshot();
-        assert!(stats.fsyncs <= 20, "should batch fsyncs, not one per record");
-        assert!(stats.records_synced >= 20, "all 20 records should be synced, got {}", stats.records_synced);
+        assert!(
+            stats.fsyncs <= 20,
+            "should batch fsyncs, not one per record"
+        );
+        assert!(
+            stats.records_synced >= 20,
+            "all 20 records should be synced, got {}",
+            stats.records_synced
+        );
 
         syncer.shutdown();
         handle.join().unwrap();
@@ -376,11 +412,13 @@ mod tests {
         let wal = test_wal(&dir);
         let config = GroupCommitConfig::default();
         let syncer = GroupCommitSyncer::new(wal, config);
-        let handle = syncer.start_syncer();
+        let handle = syncer.start_syncer().unwrap();
 
         // Fire-and-forget appends
         for i in 0..5 {
-            syncer.append_no_wait(&WalRecord::BeginTxn { txn_id: TxnId(i) }).unwrap();
+            syncer
+                .append_no_wait(&WalRecord::BeginTxn { txn_id: TxnId(i) })
+                .unwrap();
         }
 
         // Give syncer time to flush
@@ -390,7 +428,11 @@ mod tests {
         handle.join().unwrap();
 
         let stats = syncer.stats().snapshot();
-        assert!(stats.records_synced >= 5, "all 5 records should be synced, got {}", stats.records_synced);
+        assert!(
+            stats.records_synced >= 5,
+            "all 5 records should be synced, got {}",
+            stats.records_synced
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -406,7 +448,7 @@ mod tests {
             max_batch_size: 16,
         };
         let syncer = GroupCommitSyncer::new(wal, config);
-        let handle = syncer.start_syncer();
+        let handle = syncer.start_syncer().unwrap();
 
         // 4 concurrent txn threads
         let mut threads = Vec::new();
@@ -427,7 +469,11 @@ mod tests {
         }
 
         let stats = syncer.stats().snapshot();
-        assert!(stats.records_synced >= 100, "all 100 records should be synced, got {}", stats.records_synced);
+        assert!(
+            stats.records_synced >= 100,
+            "all 100 records should be synced, got {}",
+            stats.records_synced
+        );
         // With batching, fsyncs should be much fewer than 100
         assert!(
             stats.fsyncs < 100,
@@ -448,9 +494,11 @@ mod tests {
         let wal = test_wal(&dir);
         let config = GroupCommitConfig::default();
         let syncer = GroupCommitSyncer::new(wal, config);
-        let handle = syncer.start_syncer();
+        let handle = syncer.start_syncer().unwrap();
 
-        syncer.append_and_wait(&WalRecord::BeginTxn { txn_id: TxnId(1) }).unwrap();
+        syncer
+            .append_and_wait(&WalRecord::BeginTxn { txn_id: TxnId(1) })
+            .unwrap();
 
         let stats = syncer.stats().snapshot();
         assert!(stats.fsyncs >= 1);
@@ -464,8 +512,17 @@ mod tests {
 
     #[test]
     fn test_commit_policy_from_durability() {
-        assert_eq!(CommitPolicy::from(DurabilityPolicy::LocalFsync), CommitPolicy::LocalDurable);
-        assert_eq!(CommitPolicy::from(DurabilityPolicy::QuorumAck), CommitPolicy::QuorumVisible);
-        assert_eq!(CommitPolicy::from(DurabilityPolicy::AllAck), CommitPolicy::ReplicaDurable);
+        assert_eq!(
+            CommitPolicy::from(DurabilityPolicy::LocalFsync),
+            CommitPolicy::LocalDurable
+        );
+        assert_eq!(
+            CommitPolicy::from(DurabilityPolicy::QuorumAck),
+            CommitPolicy::QuorumVisible
+        );
+        assert_eq!(
+            CommitPolicy::from(DurabilityPolicy::AllAck),
+            CommitPolicy::ReplicaDurable
+        );
     }
 }

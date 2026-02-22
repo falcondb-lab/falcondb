@@ -1,10 +1,10 @@
 #[cfg(test)]
 mod binder_tests {
-    use falcon_common::schema::{Catalog, ColumnDef, TableSchema};
-    use falcon_common::types::{ColumnId, DataType, TableId};
     use crate::binder::Binder;
     use crate::parser::parse_sql;
     use crate::types::*;
+    use falcon_common::schema::{Catalog, ColumnDef, TableSchema};
+    use falcon_common::types::{ColumnId, DataType, TableId};
 
     /// Build a simple catalog with a "users" table: id INT PK, name TEXT, age INT
     fn test_catalog() -> Catalog {
@@ -46,7 +46,7 @@ mod binder_tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         });
         catalog
     }
@@ -308,12 +308,10 @@ mod binder_tests {
     fn test_bind_is_null() {
         let stmt = bind_sql("SELECT * FROM users WHERE name IS NULL").unwrap();
         match stmt {
-            BoundStatement::Select(sel) => {
-                match sel.filter.as_ref().unwrap() {
-                    BoundExpr::IsNull(_) => {}
-                    other => panic!("Expected IsNull, got {:?}", other),
-                }
-            }
+            BoundStatement::Select(sel) => match sel.filter.as_ref().unwrap() {
+                BoundExpr::IsNull(_) => {}
+                other => panic!("Expected IsNull, got {:?}", other),
+            },
             _ => panic!("Expected Select"),
         }
     }
@@ -322,14 +320,12 @@ mod binder_tests {
     fn test_bind_like() {
         let stmt = bind_sql("SELECT * FROM users WHERE name LIKE '%alice%'").unwrap();
         match stmt {
-            BoundStatement::Select(sel) => {
-                match sel.filter.as_ref().unwrap() {
-                    BoundExpr::Like { negated, .. } => {
-                        assert!(!negated);
-                    }
-                    other => panic!("Expected Like, got {:?}", other),
+            BoundStatement::Select(sel) => match sel.filter.as_ref().unwrap() {
+                BoundExpr::Like { negated, .. } => {
+                    assert!(!negated);
                 }
-            }
+                other => panic!("Expected Like, got {:?}", other),
+            },
             _ => panic!("Expected Select"),
         }
     }
@@ -405,31 +401,79 @@ mod resolve_function_tests {
 
     #[test]
     fn test_resolve_basic_string_functions() {
-        assert!(matches!(resolve_scalar_func("UPPER"), Some(ScalarFunc::Upper)));
-        assert!(matches!(resolve_scalar_func("LOWER"), Some(ScalarFunc::Lower)));
-        assert!(matches!(resolve_scalar_func("TRIM"), Some(ScalarFunc::Trim)));
-        assert!(matches!(resolve_scalar_func("CONCAT"), Some(ScalarFunc::Concat)));
-        assert!(matches!(resolve_scalar_func("REPLACE"), Some(ScalarFunc::Replace)));
+        assert!(matches!(
+            resolve_scalar_func("UPPER"),
+            Some(ScalarFunc::Upper)
+        ));
+        assert!(matches!(
+            resolve_scalar_func("LOWER"),
+            Some(ScalarFunc::Lower)
+        ));
+        assert!(matches!(
+            resolve_scalar_func("TRIM"),
+            Some(ScalarFunc::Trim)
+        ));
+        assert!(matches!(
+            resolve_scalar_func("CONCAT"),
+            Some(ScalarFunc::Concat)
+        ));
+        assert!(matches!(
+            resolve_scalar_func("REPLACE"),
+            Some(ScalarFunc::Replace)
+        ));
     }
 
     #[test]
     fn test_resolve_aliases() {
-        assert!(matches!(resolve_scalar_func("LENGTH"), Some(ScalarFunc::Length)));
-        assert!(matches!(resolve_scalar_func("CHAR_LENGTH"), Some(ScalarFunc::Length)));
-        assert!(matches!(resolve_scalar_func("CHARACTER_LENGTH"), Some(ScalarFunc::Length)));
-        assert!(matches!(resolve_scalar_func("CEIL"), Some(ScalarFunc::Ceil)));
-        assert!(matches!(resolve_scalar_func("CEILING"), Some(ScalarFunc::Ceil)));
-        assert!(matches!(resolve_scalar_func("POWER"), Some(ScalarFunc::Power)));
-        assert!(matches!(resolve_scalar_func("POW"), Some(ScalarFunc::Power)));
+        assert!(matches!(
+            resolve_scalar_func("LENGTH"),
+            Some(ScalarFunc::Length)
+        ));
+        assert!(matches!(
+            resolve_scalar_func("CHAR_LENGTH"),
+            Some(ScalarFunc::Length)
+        ));
+        assert!(matches!(
+            resolve_scalar_func("CHARACTER_LENGTH"),
+            Some(ScalarFunc::Length)
+        ));
+        assert!(matches!(
+            resolve_scalar_func("CEIL"),
+            Some(ScalarFunc::Ceil)
+        ));
+        assert!(matches!(
+            resolve_scalar_func("CEILING"),
+            Some(ScalarFunc::Ceil)
+        ));
+        assert!(matches!(
+            resolve_scalar_func("POWER"),
+            Some(ScalarFunc::Power)
+        ));
+        assert!(matches!(
+            resolve_scalar_func("POW"),
+            Some(ScalarFunc::Power)
+        ));
     }
 
     #[test]
     fn test_resolve_math_functions() {
         assert!(matches!(resolve_scalar_func("ABS"), Some(ScalarFunc::Abs)));
-        assert!(matches!(resolve_scalar_func("ROUND"), Some(ScalarFunc::Round)));
-        assert!(matches!(resolve_scalar_func("FLOOR"), Some(ScalarFunc::Floor)));
-        assert!(matches!(resolve_scalar_func("SQRT"), Some(ScalarFunc::Sqrt)));
-        assert!(matches!(resolve_scalar_func("CBRT"), Some(ScalarFunc::Cbrt)));
+        assert!(matches!(
+            resolve_scalar_func("ROUND"),
+            Some(ScalarFunc::Round)
+        ));
+        assert!(matches!(
+            resolve_scalar_func("FLOOR"),
+            Some(ScalarFunc::Floor)
+        ));
+        assert!(matches!(
+            resolve_scalar_func("SQRT"),
+            Some(ScalarFunc::Sqrt)
+        ));
+        assert!(matches!(
+            resolve_scalar_func("CBRT"),
+            Some(ScalarFunc::Cbrt)
+        ));
         assert!(matches!(resolve_scalar_func("PI"), Some(ScalarFunc::Pi)));
         assert!(matches!(resolve_scalar_func("SIN"), Some(ScalarFunc::Sin)));
         assert!(matches!(resolve_scalar_func("COS"), Some(ScalarFunc::Cos)));
@@ -437,10 +481,22 @@ mod resolve_function_tests {
 
     #[test]
     fn test_resolve_array_functions() {
-        assert!(matches!(resolve_scalar_func("ARRAY_LENGTH"), Some(ScalarFunc::ArrayLength)));
-        assert!(matches!(resolve_scalar_func("ARRAY_APPEND"), Some(ScalarFunc::ArrayAppend)));
-        assert!(matches!(resolve_scalar_func("ARRAY_CAT"), Some(ScalarFunc::ArrayCat)));
-        assert!(matches!(resolve_scalar_func("ARRAY_SORT"), Some(ScalarFunc::ArraySort)));
+        assert!(matches!(
+            resolve_scalar_func("ARRAY_LENGTH"),
+            Some(ScalarFunc::ArrayLength)
+        ));
+        assert!(matches!(
+            resolve_scalar_func("ARRAY_APPEND"),
+            Some(ScalarFunc::ArrayAppend)
+        ));
+        assert!(matches!(
+            resolve_scalar_func("ARRAY_CAT"),
+            Some(ScalarFunc::ArrayCat)
+        ));
+        assert!(matches!(
+            resolve_scalar_func("ARRAY_SORT"),
+            Some(ScalarFunc::ArraySort)
+        ));
     }
 
     #[test]
@@ -458,16 +514,15 @@ mod resolve_function_tests {
         assert!(resolve_scalar_func("DATE_PART").is_none());
         assert!(resolve_scalar_func("EXTRACT").is_none());
     }
-
 }
 
 #[cfg(test)]
 mod parameter_tests {
-    use falcon_common::schema::{Catalog, ColumnDef, TableSchema};
-    use falcon_common::types::{ColumnId, DataType, TableId};
     use crate::binder::Binder;
     use crate::parser::parse_sql;
     use crate::types::*;
+    use falcon_common::schema::{Catalog, ColumnDef, TableSchema};
+    use falcon_common::types::{ColumnId, DataType, TableId};
 
     fn test_catalog() -> Catalog {
         let mut catalog = Catalog::new();
@@ -476,14 +531,22 @@ mod parameter_tests {
             name: "users".to_string(),
             columns: vec![
                 ColumnDef {
-                    id: ColumnId(0), name: "id".to_string(),
-                    data_type: DataType::Int32, nullable: false, is_primary_key: true,
-                    default_value: None, is_serial: false,
+                    id: ColumnId(0),
+                    name: "id".to_string(),
+                    data_type: DataType::Int32,
+                    nullable: false,
+                    is_primary_key: true,
+                    default_value: None,
+                    is_serial: false,
                 },
                 ColumnDef {
-                    id: ColumnId(1), name: "name".to_string(),
-                    data_type: DataType::Text, nullable: true, is_primary_key: false,
-                    default_value: None, is_serial: false,
+                    id: ColumnId(1),
+                    name: "name".to_string(),
+                    data_type: DataType::Text,
+                    nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                    is_serial: false,
                 },
             ],
             primary_key_columns: vec![0],
@@ -491,7 +554,7 @@ mod parameter_tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         });
         catalog
     }
@@ -506,7 +569,10 @@ mod parameter_tests {
             BoundStatement::Select(sel) => {
                 // Filter should contain a Parameter(1) node
                 let filter = sel.filter.as_ref().expect("should have filter");
-                assert!(contains_parameter(filter, 1), "Filter should contain $1 parameter");
+                assert!(
+                    contains_parameter(filter, 1),
+                    "Filter should contain $1 parameter"
+                );
             }
             _ => panic!("Expected Select"),
         }
@@ -544,13 +610,13 @@ mod parameter_tests {
 
 #[cfg(test)]
 mod normalize_tests {
-    use falcon_common::datum::Datum;
-    use crate::normalize::{normalize_expr, to_cnf_conjuncts, from_cnf_conjuncts};
+    use crate::normalize::{from_cnf_conjuncts, normalize_expr, to_cnf_conjuncts};
     use crate::types::*;
+    use falcon_common::datum::Datum;
 
     #[test]
     fn test_between_expansion() {
-        // col BETWEEN 1 AND 10 鈫?col >= 1 AND col <= 10
+        // col BETWEEN 1 AND 10  → col >= 1 AND col <= 10
         let expr = BoundExpr::Between {
             expr: Box::new(BoundExpr::ColumnRef(0)),
             low: Box::new(BoundExpr::Literal(Datum::Int32(1))),
@@ -560,13 +626,21 @@ mod normalize_tests {
         let normalized = normalize_expr(&expr);
         // Should be a BinaryOp AND
         match &normalized {
-            BoundExpr::BinaryOp { op: BinOp::And, left, right } => {
+            BoundExpr::BinaryOp {
+                op: BinOp::And,
+                left,
+                right,
+            } => {
                 match left.as_ref() {
-                    BoundExpr::BinaryOp { op: BinOp::GtEq, .. } => {}
+                    BoundExpr::BinaryOp {
+                        op: BinOp::GtEq, ..
+                    } => {}
                     other => panic!("Expected >= on left, got {:?}", other),
                 }
                 match right.as_ref() {
-                    BoundExpr::BinaryOp { op: BinOp::LtEq, .. } => {}
+                    BoundExpr::BinaryOp {
+                        op: BinOp::LtEq, ..
+                    } => {}
                     other => panic!("Expected <= on right, got {:?}", other),
                 }
             }
@@ -576,7 +650,7 @@ mod normalize_tests {
 
     #[test]
     fn test_not_between_expansion() {
-        // col NOT BETWEEN 1 AND 10 鈫?col < 1 OR col > 10
+        // col NOT BETWEEN 1 AND 10  → col < 1 OR col > 10
         let expr = BoundExpr::Between {
             expr: Box::new(BoundExpr::ColumnRef(0)),
             low: Box::new(BoundExpr::Literal(Datum::Int32(1))),
@@ -585,7 +659,11 @@ mod normalize_tests {
         };
         let normalized = normalize_expr(&expr);
         match &normalized {
-            BoundExpr::BinaryOp { op: BinOp::Or, left, right } => {
+            BoundExpr::BinaryOp {
+                op: BinOp::Or,
+                left,
+                right,
+            } => {
                 match left.as_ref() {
                     BoundExpr::BinaryOp { op: BinOp::Lt, .. } => {}
                     other => panic!("Expected < on left, got {:?}", other),
@@ -601,7 +679,7 @@ mod normalize_tests {
 
     #[test]
     fn test_constant_folding_arithmetic() {
-        // 2 + 3 鈫?5
+        // 2 + 3  → 5
         let expr = BoundExpr::BinaryOp {
             left: Box::new(BoundExpr::Literal(Datum::Int32(2))),
             op: BinOp::Plus,
@@ -616,7 +694,7 @@ mod normalize_tests {
 
     #[test]
     fn test_constant_folding_boolean() {
-        // true AND false 鈫?false
+        // true AND false  → false
         let expr = BoundExpr::BinaryOp {
             left: Box::new(BoundExpr::Literal(Datum::Boolean(true))),
             op: BinOp::And,
@@ -631,7 +709,7 @@ mod normalize_tests {
 
     #[test]
     fn test_constant_folding_not() {
-        // NOT true 鈫?false
+        // NOT true  → false
         let expr = BoundExpr::Not(Box::new(BoundExpr::Literal(Datum::Boolean(true))));
         let folded = normalize_expr(&expr);
         match &folded {
@@ -642,7 +720,7 @@ mod normalize_tests {
 
     #[test]
     fn test_constant_folding_string_concat() {
-        // 'hello' || ' world' 鈫?'hello world'
+        // 'hello' || ' world'  → 'hello world'
         let expr = BoundExpr::BinaryOp {
             left: Box::new(BoundExpr::Literal(Datum::Text("hello".into()))),
             op: BinOp::StringConcat,
@@ -657,7 +735,7 @@ mod normalize_tests {
 
     #[test]
     fn test_cnf_extraction() {
-        // (a AND b) AND c 鈫?[a, b, c]
+        // (a AND b) AND c  → [a, b, c]
         let a = BoundExpr::ColumnRef(0);
         let b = BoundExpr::ColumnRef(1);
         let c = BoundExpr::ColumnRef(2);
@@ -696,7 +774,7 @@ mod normalize_tests {
 
     #[test]
     fn test_is_null_constant_fold() {
-        // IS NULL on literal NULL 鈫?true
+        // IS NULL on literal NULL  → true
         let expr = BoundExpr::IsNull(Box::new(BoundExpr::Literal(Datum::Null)));
         let folded = normalize_expr(&expr);
         match &folded {
@@ -707,7 +785,7 @@ mod normalize_tests {
 
     #[test]
     fn test_is_not_null_constant_fold() {
-        // IS NOT NULL on literal 5 鈫?true
+        // IS NOT NULL on literal 5  → true
         let expr = BoundExpr::IsNotNull(Box::new(BoundExpr::Literal(Datum::Int32(5))));
         let folded = normalize_expr(&expr);
         match &folded {
@@ -758,11 +836,11 @@ mod normalize_tests {
 
 #[cfg(test)]
 mod param_type_inference_tests {
+    use crate::normalize::infer_param_types;
+    use crate::types::*;
     use falcon_common::datum::Datum;
     use falcon_common::schema::{ColumnDef, TableSchema};
     use falcon_common::types::{ColumnId, DataType, TableId};
-    use crate::normalize::infer_param_types;
-    use crate::types::*;
 
     fn users_schema() -> TableSchema {
         TableSchema {
@@ -770,19 +848,31 @@ mod param_type_inference_tests {
             name: "users".to_string(),
             columns: vec![
                 ColumnDef {
-                    id: ColumnId(0), name: "id".to_string(),
-                    data_type: DataType::Int32, nullable: false, is_primary_key: true,
-                    default_value: None, is_serial: false,
+                    id: ColumnId(0),
+                    name: "id".to_string(),
+                    data_type: DataType::Int32,
+                    nullable: false,
+                    is_primary_key: true,
+                    default_value: None,
+                    is_serial: false,
                 },
                 ColumnDef {
-                    id: ColumnId(1), name: "name".to_string(),
-                    data_type: DataType::Text, nullable: true, is_primary_key: false,
-                    default_value: None, is_serial: false,
+                    id: ColumnId(1),
+                    name: "name".to_string(),
+                    data_type: DataType::Text,
+                    nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                    is_serial: false,
                 },
                 ColumnDef {
-                    id: ColumnId(2), name: "age".to_string(),
-                    data_type: DataType::Int32, nullable: true, is_primary_key: false,
-                    default_value: None, is_serial: false,
+                    id: ColumnId(2),
+                    name: "age".to_string(),
+                    data_type: DataType::Int32,
+                    nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                    is_serial: false,
                 },
             ],
             primary_key_columns: vec![0],
@@ -790,13 +880,13 @@ mod param_type_inference_tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         }
     }
 
     #[test]
     fn test_infer_eq_comparison() {
-        // id = $1 鈫?$1 is Int32
+        // id = $1  → $1 is Int32
         let expr = BoundExpr::BinaryOp {
             left: Box::new(BoundExpr::ColumnRef(0)),
             op: BinOp::Eq,
@@ -808,7 +898,7 @@ mod param_type_inference_tests {
 
     #[test]
     fn test_infer_reversed_comparison() {
-        // $1 = name 鈫?$1 is Text
+        // $1 = name  → $1 is Text
         let expr = BoundExpr::BinaryOp {
             left: Box::new(BoundExpr::Parameter(1)),
             op: BinOp::Eq,
@@ -881,9 +971,9 @@ mod param_type_inference_tests {
 
 #[cfg(test)]
 mod equality_set_tests {
-    use falcon_common::datum::Datum;
     use crate::normalize::extract_equality_sets;
     use crate::types::*;
+    use falcon_common::datum::Datum;
 
     #[test]
     fn test_in_list_equality_set() {
@@ -1011,7 +1101,7 @@ mod equality_set_tests {
 
 #[cfg(test)]
 mod volatile_tests {
-    use crate::normalize::{is_volatile, expr_has_volatile};
+    use crate::normalize::{expr_has_volatile, is_volatile};
     use crate::types::*;
 
     #[test]
@@ -1070,7 +1160,9 @@ mod volatile_tests {
             op: BinOp::Eq,
             right: Box::new(BoundExpr::Function {
                 func: ScalarFunc::Upper,
-                args: vec![BoundExpr::Literal(falcon_common::datum::Datum::Text("hello".into()))],
+                args: vec![BoundExpr::Literal(falcon_common::datum::Datum::Text(
+                    "hello".into(),
+                ))],
             }),
         };
         assert!(!expr_has_volatile(&expr));
@@ -1087,9 +1179,16 @@ mod volatile_tests {
         // CASE WHEN true THEN random() ELSE 0 END
         let expr = BoundExpr::Case {
             operand: None,
-            conditions: vec![BoundExpr::Literal(falcon_common::datum::Datum::Boolean(true))],
-            results: vec![BoundExpr::Function { func: ScalarFunc::Random, args: vec![] }],
-            else_result: Some(Box::new(BoundExpr::Literal(falcon_common::datum::Datum::Int32(0)))),
+            conditions: vec![BoundExpr::Literal(falcon_common::datum::Datum::Boolean(
+                true,
+            ))],
+            results: vec![BoundExpr::Function {
+                func: ScalarFunc::Random,
+                args: vec![],
+            }],
+            else_result: Some(Box::new(BoundExpr::Literal(
+                falcon_common::datum::Datum::Int32(0),
+            ))),
         };
         assert!(expr_has_volatile(&expr));
     }
@@ -1102,11 +1201,11 @@ mod volatile_tests {
 
 #[cfg(test)]
 mod new_feature_tests {
-    use falcon_common::schema::{Catalog, ColumnDef, TableSchema};
-    use falcon_common::types::{ColumnId, DataType, TableId};
     use crate::binder::Binder;
     use crate::parser::parse_sql;
     use crate::types::*;
+    use falcon_common::schema::{Catalog, ColumnDef, TableSchema};
+    use falcon_common::types::{ColumnId, DataType, TableId};
 
     fn test_catalog() -> Catalog {
         let mut catalog = Catalog::new();
@@ -1115,16 +1214,31 @@ mod new_feature_tests {
             name: "users".to_string(),
             columns: vec![
                 ColumnDef {
-                    id: ColumnId(0), name: "id".to_string(), data_type: DataType::Int32,
-                    nullable: false, is_primary_key: true, default_value: None, is_serial: false,
+                    id: ColumnId(0),
+                    name: "id".to_string(),
+                    data_type: DataType::Int32,
+                    nullable: false,
+                    is_primary_key: true,
+                    default_value: None,
+                    is_serial: false,
                 },
                 ColumnDef {
-                    id: ColumnId(1), name: "name".to_string(), data_type: DataType::Text,
-                    nullable: true, is_primary_key: false, default_value: None, is_serial: false,
+                    id: ColumnId(1),
+                    name: "name".to_string(),
+                    data_type: DataType::Text,
+                    nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                    is_serial: false,
                 },
                 ColumnDef {
-                    id: ColumnId(2), name: "age".to_string(), data_type: DataType::Int32,
-                    nullable: true, is_primary_key: false, default_value: None, is_serial: false,
+                    id: ColumnId(2),
+                    name: "age".to_string(),
+                    data_type: DataType::Int32,
+                    nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                    is_serial: false,
                 },
             ],
             primary_key_columns: vec![0],
@@ -1132,7 +1246,7 @@ mod new_feature_tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         });
         catalog
     }
@@ -1291,12 +1405,10 @@ mod new_feature_tests {
                 assert!(sel.filter.is_some());
                 // IS DISTINCT FROM = NOT (IS NOT DISTINCT FROM)
                 match sel.filter.as_ref().unwrap() {
-                    BoundExpr::Not(inner) => {
-                        match inner.as_ref() {
-                            BoundExpr::IsNotDistinctFrom { .. } => {}
-                            other => panic!("Expected IsNotDistinctFrom inside Not, got {:?}", other),
-                        }
-                    }
+                    BoundExpr::Not(inner) => match inner.as_ref() {
+                        BoundExpr::IsNotDistinctFrom { .. } => {}
+                        other => panic!("Expected IsNotDistinctFrom inside Not, got {:?}", other),
+                    },
                     other => panic!("Expected Not wrapper, got {:?}", other),
                 }
             }
@@ -1310,7 +1422,13 @@ mod new_feature_tests {
     fn test_bind_copy_query_to() {
         let stmt = bind_sql("COPY (SELECT id, name FROM users) TO STDOUT").unwrap();
         match stmt {
-            BoundStatement::CopyQueryTo { query, csv, delimiter, header, .. } => {
+            BoundStatement::CopyQueryTo {
+                query,
+                csv,
+                delimiter,
+                header,
+                ..
+            } => {
                 assert!(!csv);
                 assert_eq!(delimiter, '\t');
                 assert!(!header);
@@ -1322,9 +1440,15 @@ mod new_feature_tests {
 
     #[test]
     fn test_bind_copy_query_to_csv() {
-        let stmt = bind_sql("COPY (SELECT * FROM users) TO STDOUT WITH (FORMAT csv, HEADER true)").unwrap();
+        let stmt = bind_sql("COPY (SELECT * FROM users) TO STDOUT WITH (FORMAT csv, HEADER true)")
+            .unwrap();
         match stmt {
-            BoundStatement::CopyQueryTo { csv, header, delimiter, .. } => {
+            BoundStatement::CopyQueryTo {
+                csv,
+                header,
+                delimiter,
+                ..
+            } => {
                 assert!(csv);
                 assert!(header);
                 assert_eq!(delimiter, ',');
@@ -1335,7 +1459,7 @@ mod new_feature_tests {
 
     #[test]
     fn test_bind_copy_query_from_unsupported() {
-        // Parser or binder should reject COPY (query) FROM 鈥?either way it must error
+        // Parser or binder should reject COPY (query) FROM  — either way it must error
         let catalog = test_catalog();
         let mut binder = Binder::new(catalog);
         let parse_result = parse_sql("COPY (SELECT * FROM users) FROM STDIN");
@@ -1350,11 +1474,15 @@ mod new_feature_tests {
 
     #[test]
     fn test_bind_insert_returning_compound_identifier() {
-        let stmt = bind_sql("INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30) RETURNING users.id").unwrap();
+        let stmt = bind_sql(
+            "INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30) RETURNING users.id",
+        )
+        .unwrap();
         match stmt {
             BoundStatement::Insert(ins) => {
                 assert_eq!(ins.returning.len(), 1);
-                assert!(matches!(&ins.returning[0].0, BoundExpr::ColumnRef(0))); // id is column 0
+                assert!(matches!(&ins.returning[0].0, BoundExpr::ColumnRef(0)));
+                // id is column 0
             }
             _ => panic!("Expected Insert"),
         }
@@ -1392,8 +1520,9 @@ mod new_feature_tests {
     #[test]
     fn test_bind_on_conflict_do_nothing() {
         let stmt = bind_sql(
-            "INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30) ON CONFLICT DO NOTHING"
-        ).unwrap();
+            "INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30) ON CONFLICT DO NOTHING",
+        )
+        .unwrap();
         match stmt {
             BoundStatement::Insert(ins) => {
                 assert!(matches!(ins.on_conflict, Some(OnConflictAction::DoNothing)));
@@ -1406,8 +1535,9 @@ mod new_feature_tests {
     fn test_bind_on_conflict_do_update_excluded() {
         let stmt = bind_sql(
             "INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30) \
-             ON CONFLICT (id) DO UPDATE SET name = excluded.name, age = excluded.age"
-        ).unwrap();
+             ON CONFLICT (id) DO UPDATE SET name = excluded.name, age = excluded.age",
+        )
+        .unwrap();
         match stmt {
             BoundStatement::Insert(ins) => {
                 match &ins.on_conflict {
@@ -1416,7 +1546,7 @@ mod new_feature_tests {
                         // name is col 1, age is col 2
                         assert_eq!(assignments[0].0, 1);
                         assert_eq!(assignments[1].0, 2);
-                        // excluded.name should resolve to ColumnRef(3+1=4) 鈥?but
+                        // excluded.name should resolve to ColumnRef(3+1=4)  — but
                         // since schema has 3 cols, excluded offset is 3
                         // excluded.name = ColumnRef(3+1) via CompoundIdentifier
                         // Actually: schema find_column returns first match by name,
@@ -1433,8 +1563,9 @@ mod new_feature_tests {
     fn test_bind_on_conflict_do_update_simple() {
         let stmt = bind_sql(
             "INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30) \
-             ON CONFLICT (id) DO UPDATE SET name = 'Bob'"
-        ).unwrap();
+             ON CONFLICT (id) DO UPDATE SET name = 'Bob'",
+        )
+        .unwrap();
         match stmt {
             BoundStatement::Insert(ins) => {
                 match &ins.on_conflict {
@@ -1458,7 +1589,11 @@ mod new_feature_tests {
             BoundStatement::Select(sel) => {
                 let filter = sel.filter.as_ref().expect("expected filter");
                 match filter {
-                    BoundExpr::AnyOp { left, compare_op, right } => {
+                    BoundExpr::AnyOp {
+                        left,
+                        compare_op,
+                        right,
+                    } => {
                         assert!(matches!(left.as_ref(), BoundExpr::ColumnRef(0)));
                         assert_eq!(*compare_op, BinOp::Eq);
                         assert!(matches!(right.as_ref(), BoundExpr::ArrayLiteral(_)));
@@ -1477,7 +1612,11 @@ mod new_feature_tests {
             BoundStatement::Select(sel) => {
                 let filter = sel.filter.as_ref().expect("expected filter");
                 match filter {
-                    BoundExpr::AllOp { left, compare_op, right } => {
+                    BoundExpr::AllOp {
+                        left,
+                        compare_op,
+                        right,
+                    } => {
                         assert!(matches!(left.as_ref(), BoundExpr::ColumnRef(2)));
                         assert_eq!(*compare_op, BinOp::Gt);
                         assert!(matches!(right.as_ref(), BoundExpr::ArrayLiteral(_)));
@@ -1516,7 +1655,14 @@ mod new_feature_tests {
             BoundStatement::Select(sel) => {
                 assert_eq!(sel.projections.len(), 1);
                 match &sel.projections[0] {
-                    BoundProjection::Expr(BoundExpr::ArraySlice { array, lower, upper }, _) => {
+                    BoundProjection::Expr(
+                        BoundExpr::ArraySlice {
+                            array,
+                            lower,
+                            upper,
+                        },
+                        _,
+                    ) => {
                         assert!(matches!(array.as_ref(), BoundExpr::ArrayLiteral(_)));
                         assert!(lower.is_some());
                         assert!(upper.is_some());
@@ -1549,8 +1695,9 @@ mod new_feature_tests {
     #[test]
     fn test_bind_returning_expression() {
         let stmt = bind_sql(
-            "INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30) RETURNING id, age + 1"
-        ).unwrap();
+            "INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30) RETURNING id, age + 1",
+        )
+        .unwrap();
         match stmt {
             BoundStatement::Insert(ins) => {
                 assert_eq!(ins.returning.len(), 2);
@@ -1566,9 +1713,7 @@ mod new_feature_tests {
 
     #[test]
     fn test_bind_returning_star() {
-        let stmt = bind_sql(
-            "DELETE FROM users WHERE id = 1 RETURNING *"
-        ).unwrap();
+        let stmt = bind_sql("DELETE FROM users WHERE id = 1 RETURNING *").unwrap();
         match stmt {
             BoundStatement::Delete(del) => {
                 // * expands to all 3 columns: id, name, age
@@ -1583,9 +1728,9 @@ mod new_feature_tests {
 
     #[test]
     fn test_bind_returning_with_alias() {
-        let stmt = bind_sql(
-            "UPDATE users SET age = 31 WHERE id = 1 RETURNING name AS updated_name"
-        ).unwrap();
+        let stmt =
+            bind_sql("UPDATE users SET age = 31 WHERE id = 1 RETURNING name AS updated_name")
+                .unwrap();
         match stmt {
             BoundStatement::Update(upd) => {
                 assert_eq!(upd.returning.len(), 1);
@@ -1672,14 +1817,22 @@ mod new_feature_tests {
             name: "orders".to_string(),
             columns: vec![
                 ColumnDef {
-                    id: ColumnId(0), name: "id".into(),
-                    data_type: DataType::Int32, nullable: false,
-                    is_primary_key: true, default_value: None, is_serial: false,
+                    id: ColumnId(0),
+                    name: "id".into(),
+                    data_type: DataType::Int32,
+                    nullable: false,
+                    is_primary_key: true,
+                    default_value: None,
+                    is_serial: false,
                 },
                 ColumnDef {
-                    id: ColumnId(1), name: "amount".into(),
-                    data_type: DataType::Int32, nullable: true,
-                    is_primary_key: false, default_value: None, is_serial: false,
+                    id: ColumnId(1),
+                    name: "amount".into(),
+                    data_type: DataType::Int32,
+                    nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                    is_serial: false,
                 },
             ],
             primary_key_columns: vec![0],
@@ -1687,7 +1840,7 @@ mod new_feature_tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         });
 
         let sql = "UPDATE users SET age = orders.amount FROM orders WHERE users.id = orders.id";
@@ -1711,19 +1864,21 @@ mod new_feature_tests {
         catalog.add_table(TableSchema {
             id: TableId(2),
             name: "orders".to_string(),
-            columns: vec![
-                ColumnDef {
-                    id: ColumnId(0), name: "id".into(),
-                    data_type: DataType::Int32, nullable: false,
-                    is_primary_key: true, default_value: None, is_serial: false,
-                },
-            ],
+            columns: vec![ColumnDef {
+                id: ColumnId(0),
+                name: "id".into(),
+                data_type: DataType::Int32,
+                nullable: false,
+                is_primary_key: true,
+                default_value: None,
+                is_serial: false,
+            }],
             primary_key_columns: vec![0],
             next_serial_values: Default::default(),
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         });
 
         let sql = "DELETE FROM users USING orders WHERE users.id = orders.id";
@@ -1745,32 +1900,31 @@ mod new_feature_tests {
 
     #[test]
     fn test_bind_distinct_on_single_column() {
-        let stmt = bind_sql("SELECT DISTINCT ON (name) name, age FROM users ORDER BY name, age").unwrap();
+        let stmt =
+            bind_sql("SELECT DISTINCT ON (name) name, age FROM users ORDER BY name, age").unwrap();
         match stmt {
-            BoundStatement::Select(sel) => {
-                match &sel.distinct {
-                    DistinctMode::On(indices) => {
-                        assert_eq!(indices.len(), 1);
-                    }
-                    other => panic!("Expected DistinctMode::On, got {:?}", other),
+            BoundStatement::Select(sel) => match &sel.distinct {
+                DistinctMode::On(indices) => {
+                    assert_eq!(indices.len(), 1);
                 }
-            }
+                other => panic!("Expected DistinctMode::On, got {:?}", other),
+            },
             _ => panic!("Expected Select"),
         }
     }
 
     #[test]
     fn test_bind_distinct_on_multiple_columns() {
-        let stmt = bind_sql("SELECT DISTINCT ON (name, age) name, age, id FROM users ORDER BY name, age").unwrap();
+        let stmt =
+            bind_sql("SELECT DISTINCT ON (name, age) name, age, id FROM users ORDER BY name, age")
+                .unwrap();
         match stmt {
-            BoundStatement::Select(sel) => {
-                match &sel.distinct {
-                    DistinctMode::On(indices) => {
-                        assert_eq!(indices.len(), 2);
-                    }
-                    other => panic!("Expected DistinctMode::On, got {:?}", other),
+            BoundStatement::Select(sel) => match &sel.distinct {
+                DistinctMode::On(indices) => {
+                    assert_eq!(indices.len(), 2);
                 }
-            }
+                other => panic!("Expected DistinctMode::On, got {:?}", other),
+            },
             _ => panic!("Expected Select"),
         }
     }

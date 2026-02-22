@@ -229,7 +229,13 @@ impl TxnMeta {
         let commit_ts = Timestamp(u64::from_le_bytes(raw[9..17].try_into().ok()?));
         let epoch = u64::from_le_bytes(raw[17..25].try_into().ok()?);
         let timestamp_ms = u64::from_le_bytes(raw[25..33].try_into().ok()?);
-        Some(Self { txn_id, outcome, commit_ts, epoch, timestamp_ms })
+        Some(Self {
+            txn_id,
+            outcome,
+            commit_ts,
+            epoch,
+            timestamp_ms,
+        })
     }
 
     /// Key for storing in the txn_meta LSM instance.
@@ -355,9 +361,9 @@ mod tests {
     fn test_mvcc_visibility_committed() {
         let val = MvccValue::committed(TxnId(1), Timestamp(100), b"data".to_vec());
 
-        assert!(val.is_visible(Timestamp(100)));  // exact match
-        assert!(val.is_visible(Timestamp(200)));  // future reader
-        assert!(!val.is_visible(Timestamp(99)));  // too early
+        assert!(val.is_visible(Timestamp(100))); // exact match
+        assert!(val.is_visible(Timestamp(200))); // future reader
+        assert!(!val.is_visible(Timestamp(99))); // too early
     }
 
     #[test]
@@ -379,15 +385,15 @@ mod tests {
     #[test]
     fn test_mvcc_gc_eligibility() {
         let committed = MvccValue::committed(TxnId(1), Timestamp(50), b"data".to_vec());
-        assert!(committed.is_gc_eligible(Timestamp(100)));  // older than safepoint
-        assert!(!committed.is_gc_eligible(Timestamp(50)));  // at safepoint
-        assert!(!committed.is_gc_eligible(Timestamp(30)));  // newer than safepoint
+        assert!(committed.is_gc_eligible(Timestamp(100))); // older than safepoint
+        assert!(!committed.is_gc_eligible(Timestamp(50))); // at safepoint
+        assert!(!committed.is_gc_eligible(Timestamp(30))); // newer than safepoint
 
         let aborted = MvccValue::aborted(TxnId(2));
-        assert!(aborted.is_gc_eligible(Timestamp(0)));  // always eligible
+        assert!(aborted.is_gc_eligible(Timestamp(0))); // always eligible
 
         let prepared = MvccValue::prepared(TxnId(3), b"data".to_vec());
-        assert!(!prepared.is_gc_eligible(Timestamp(u64::MAX)));  // never GC prepared
+        assert!(!prepared.is_gc_eligible(Timestamp(u64::MAX))); // never GC prepared
     }
 
     #[test]
@@ -412,12 +418,18 @@ mod tests {
     #[test]
     fn test_txn_meta_key_ordering() {
         let m1 = TxnMeta {
-            txn_id: TxnId(1), outcome: TxnOutcome::Committed,
-            commit_ts: Timestamp(0), epoch: 0, timestamp_ms: 0,
+            txn_id: TxnId(1),
+            outcome: TxnOutcome::Committed,
+            commit_ts: Timestamp(0),
+            epoch: 0,
+            timestamp_ms: 0,
         };
         let m2 = TxnMeta {
-            txn_id: TxnId(2), outcome: TxnOutcome::Committed,
-            commit_ts: Timestamp(0), epoch: 0, timestamp_ms: 0,
+            txn_id: TxnId(2),
+            outcome: TxnOutcome::Committed,
+            commit_ts: Timestamp(0),
+            epoch: 0,
+            timestamp_ms: 0,
         };
         // Keys should be ordered by txn_id (big-endian for sort order)
         assert!(m1.key() < m2.key());

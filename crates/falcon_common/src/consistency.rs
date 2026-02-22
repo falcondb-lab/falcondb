@@ -78,8 +78,7 @@ impl fmt::Display for CommitPoint {
 ///
 /// **Invariant POL-3**: Policy degradation MUST be observable via metrics
 ///   and the `DurabilityAnnotation` on the transaction record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum CommitPolicy {
     /// Local WAL fsync only. Crash-safe on the primary.
     /// - Client ACK after: local WAL fsync
@@ -98,16 +97,13 @@ pub enum CommitPolicy {
     /// - Client ACK after: local fsync AND N replicas have acked
     /// - Crash loss window: 0 if ≥1 replica survives
     /// - `required_acks`: number of replicas that must ACK
-    PrimaryPlusReplicaAck {
-        required_acks: u32,
-    },
+    PrimaryPlusReplicaAck { required_acks: u32 },
 
     /// Raft majority commit (if Raft consensus is enabled).
     /// - Client ACK after: Raft log entry committed by majority
     /// - Crash loss window: 0 (Raft guarantee)
     RaftMajority,
 }
-
 
 impl fmt::Display for CommitPolicy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -125,12 +121,18 @@ impl fmt::Display for CommitPolicy {
 impl CommitPolicy {
     /// Returns true if this policy requires local WAL fsync.
     pub fn requires_local_fsync(&self) -> bool {
-        matches!(self, Self::LocalWalSync | Self::PrimaryPlusReplicaAck { .. })
+        matches!(
+            self,
+            Self::LocalWalSync | Self::PrimaryPlusReplicaAck { .. }
+        )
     }
 
     /// Returns true if this policy requires replica acknowledgement.
     pub fn requires_replica_ack(&self) -> bool {
-        matches!(self, Self::PrimaryPlusReplicaAck { .. } | Self::RaftMajority)
+        matches!(
+            self,
+            Self::PrimaryPlusReplicaAck { .. } | Self::RaftMajority
+        )
     }
 
     /// Returns the minimum number of replica ACKs required (0 for local-only).
@@ -191,17 +193,11 @@ pub enum CommitOutcome {
     },
 
     /// Transaction aborted. MUST NOT be visible after recovery.
-    Aborted {
-        txn_id: TxnId,
-        reason: String,
-    },
+    Aborted { txn_id: TxnId, reason: String },
 
     /// Transaction outcome is unknown. Client MUST retry or check status.
     /// Maps to PG SQLSTATE `08006` (connection_failure) or `40001` (serialization_failure).
-    Indeterminate {
-        txn_id: TxnId,
-        reason: String,
-    },
+    Indeterminate { txn_id: TxnId, reason: String },
 }
 
 impl CommitOutcome {
@@ -250,8 +246,7 @@ pub mod wal_invariants {
     /// **WAL-4**: WAL replay produces identical state regardless of how
     /// many times it is replayed (convergence).
     /// `replay(replay(empty, WAL)) = replay(empty, WAL)`
-    pub const WAL_4_REPLAY_CONVERGENCE: &str =
-        "Repeated WAL replay converges to the same state";
+    pub const WAL_4_REPLAY_CONVERGENCE: &str = "Repeated WAL replay converges to the same state";
 
     /// **WAL-5**: After recovery, every committed transaction (i.e. has a
     /// CommitTxn record in WAL) MUST be visible. Every uncommitted
@@ -357,8 +352,7 @@ pub mod replication_invariants {
     /// **REP-3 (Ordering)**: WAL entries are applied on the replica in
     /// the same order they were written on the primary.
     /// `∀ e1, e2: primary_order(e1) < primary_order(e2) ⟹ replica_apply_order(e1) < replica_apply_order(e2)`
-    pub const REP_3_STRICT_ORDERING: &str =
-        "Replica applies WAL entries in primary's write order";
+    pub const REP_3_STRICT_ORDERING: &str = "Replica applies WAL entries in primary's write order";
 
     /// **REP-4 (ACK Semantics)**: A replica ACK means the WAL entry has
     /// been applied to the replica's storage engine (not just received).
@@ -376,8 +370,7 @@ pub enum ReplicationUnit {
 }
 
 /// What a replica ACK actually means.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ReplicaAckSemantics {
     /// WAL bytes received into memory buffer.
     Received,
@@ -387,7 +380,6 @@ pub enum ReplicaAckSemantics {
     #[default]
     Applied,
 }
-
 
 // ═══════════════════════════════════════════════════════════════════════════
 // §7: Failover / Promote Invariants
@@ -410,8 +402,7 @@ pub mod failover_invariants {
     /// **FAIL-3 (Fencing)**: The old primary MUST be fenced after promote.
     /// It MUST NOT accept new writes. Clients connecting to the old primary
     /// MUST receive an error.
-    pub const FAIL_3_FENCING: &str =
-        "Old primary must be fenced after promote (no new writes)";
+    pub const FAIL_3_FENCING: &str = "Old primary must be fenced after promote (no new writes)";
 }
 
 /// Preconditions that MUST be satisfied before a replica can be promoted.
@@ -459,8 +450,7 @@ pub struct PromoteResult {
 pub mod cross_shard_invariants {
     /// **XS-1 (Atomicity)**: A cross-shard transaction either commits on
     /// ALL participating shards or aborts on ALL. No partial commits.
-    pub const XS_1_ATOMICITY: &str =
-        "Cross-shard txn commits on all shards or aborts on all";
+    pub const XS_1_ATOMICITY: &str = "Cross-shard txn commits on all shards or aborts on all";
 
     /// **XS-2 (At-Most-Once Commit)**: A cross-shard transaction MUST NOT
     /// be committed more than once, even under coordinator retries.
@@ -482,8 +472,7 @@ pub mod cross_shard_invariants {
 }
 
 /// Cross-shard transaction model in use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CrossShardModel {
     /// Standard Two-Phase Commit (2PC) with coordinator WAL.
     TwoPhaseCommit,
@@ -491,7 +480,6 @@ pub enum CrossShardModel {
     #[default]
     HybridFastSlow,
 }
-
 
 // ═══════════════════════════════════════════════════════════════════════════
 // §9: Read Consistency Semantics
@@ -745,7 +733,9 @@ impl CommitPointEntry {
 
 impl fmt::Display for CommitPointEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "txn={} L={} D={} V={}",
+        write!(
+            f,
+            "txn={} L={} D={} V={}",
             self.txn_id.0,
             self.logical_us.map_or("-".to_string(), |v| v.to_string()),
             self.durable_us.map_or("-".to_string(), |v| v.to_string()),
@@ -853,21 +843,31 @@ impl CommitPointTracker {
         d2v_samples.sort_unstable();
 
         let count = entries.len() as u64;
-        let avg_l2d = if l2d_samples.is_empty() { 0 } else {
+        let avg_l2d = if l2d_samples.is_empty() {
+            0
+        } else {
             l2d_samples.iter().sum::<u64>() / l2d_samples.len() as u64
         };
-        let avg_d2v = if d2v_samples.is_empty() { 0 } else {
+        let avg_d2v = if d2v_samples.is_empty() {
+            0
+        } else {
             d2v_samples.iter().sum::<u64>() / d2v_samples.len() as u64
         };
         let max_l2d = l2d_samples.last().copied().unwrap_or(0);
         let max_d2v = d2v_samples.last().copied().unwrap_or(0);
 
-        let p99_l2d = if l2d_samples.is_empty() { 0 } else {
-            let idx = ((l2d_samples.len() as f64 * 0.99).ceil() as usize).min(l2d_samples.len()) - 1;
+        let p99_l2d = if l2d_samples.is_empty() {
+            0
+        } else {
+            let idx =
+                ((l2d_samples.len() as f64 * 0.99).ceil() as usize).min(l2d_samples.len()) - 1;
             l2d_samples[idx]
         };
-        let p99_d2v = if d2v_samples.is_empty() { 0 } else {
-            let idx = ((d2v_samples.len() as f64 * 0.99).ceil() as usize).min(d2v_samples.len()) - 1;
+        let p99_d2v = if d2v_samples.is_empty() {
+            0
+        } else {
+            let idx =
+                ((d2v_samples.len() as f64 * 0.99).ceil() as usize).min(d2v_samples.len()) - 1;
             d2v_samples[idx]
         };
 

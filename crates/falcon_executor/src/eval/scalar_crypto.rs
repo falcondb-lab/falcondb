@@ -45,14 +45,23 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             };
             match fmt.as_str() {
                 "hex" => {
-                    let hex: String = data.as_bytes().iter().map(|b| format!("{:02x}", b)).collect();
+                    let hex: String = data
+                        .as_bytes()
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect();
                     Ok(Datum::Text(hex))
                 }
                 "base64" => {
                     use base64::Engine;
-                    Ok(Datum::Text(base64::engine::general_purpose::STANDARD.encode(data.as_bytes())))
+                    Ok(Datum::Text(
+                        base64::engine::general_purpose::STANDARD.encode(data.as_bytes()),
+                    ))
                 }
-                _ => Err(ExecutionError::TypeError(format!("Unknown encoding: {}", fmt))),
+                _ => Err(ExecutionError::TypeError(format!(
+                    "Unknown encoding: {}",
+                    fmt
+                ))),
             }
         }
         ScalarFunc::Decode => {
@@ -71,18 +80,23 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                 "hex" => {
                     let bytes: Result<Vec<u8>, _> = (0..data.len())
                         .step_by(2)
-                        .map(|i| u8::from_str_radix(&data[i..i+2], 16))
+                        .map(|i| u8::from_str_radix(&data[i..i + 2], 16))
                         .collect();
-                    let bytes = bytes.map_err(|_| ExecutionError::TypeError("Invalid hex".into()))?;
+                    let bytes =
+                        bytes.map_err(|_| ExecutionError::TypeError("Invalid hex".into()))?;
                     Ok(Datum::Text(String::from_utf8_lossy(&bytes).to_string()))
                 }
                 "base64" => {
                     use base64::Engine;
-                    let bytes = base64::engine::general_purpose::STANDARD.decode(data.as_bytes())
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(data.as_bytes())
                         .map_err(|_| ExecutionError::TypeError("Invalid base64".into()))?;
                     Ok(Datum::Text(String::from_utf8_lossy(&bytes).to_string()))
                 }
-                _ => Err(ExecutionError::TypeError(format!("Unknown encoding: {}", fmt))),
+                _ => Err(ExecutionError::TypeError(format!(
+                    "Unknown encoding: {}",
+                    fmt
+                ))),
             }
         }
         ScalarFunc::ToHex => {
@@ -94,6 +108,9 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             };
             Ok(Datum::Text(format!("{:x}", n)))
         }
-        _ => Err(ExecutionError::TypeError(format!("Not a crypto function: {:?}", func))),
+        _ => Err(ExecutionError::TypeError(format!(
+            "Not a crypto function: {:?}",
+            func
+        ))),
     }
 }

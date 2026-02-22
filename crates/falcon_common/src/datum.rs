@@ -16,10 +16,10 @@ pub enum Datum {
     Int64(i64),
     Float64(f64),
     Text(String),
-    Timestamp(i64), // microseconds since Unix epoch
-    Date(i32),        // days since Unix epoch (1970-01-01)
+    Timestamp(i64),    // microseconds since Unix epoch
+    Date(i32),         // days since Unix epoch (1970-01-01)
     Array(Vec<Datum>), // PostgreSQL-style array
-    Jsonb(JsonValue), // JSONB stored as serde_json::Value
+    Jsonb(JsonValue),  // JSONB stored as serde_json::Value
     /// Fixed-point decimal for financial precision: mantissa × 10^(-scale).
     /// e.g. Decimal(12345, 2) = 123.45
     /// Supports up to 38 significant digits (i128 range).
@@ -47,7 +47,8 @@ impl Datum {
             Datum::Date(_) => Some(DataType::Date),
             Datum::Array(elems) => {
                 // Infer element type from the first non-null element.
-                let elem_type = elems.iter()
+                let elem_type = elems
+                    .iter()
                     .find_map(|d| d.data_type())
                     .unwrap_or(DataType::Text); // default to Text for empty/all-null arrays
                 Some(DataType::Array(Box::new(elem_type)))
@@ -119,8 +120,8 @@ impl Datum {
             }
             Datum::Date(days) => {
                 // SAFETY: 1970-01-01 is always a valid date — unwrap_or fallback is unreachable.
-                let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
-                    .unwrap_or(chrono::NaiveDate::MIN);
+                let epoch =
+                    chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap_or(chrono::NaiveDate::MIN);
                 if let Some(d) = epoch.checked_add_signed(chrono::Duration::days(*days as i64)) {
                     Some(d.format("%Y-%m-%d").to_string())
                 } else {
@@ -128,11 +129,14 @@ impl Datum {
                 }
             }
             Datum::Array(elems) => {
-                let inner: Vec<String> = elems.iter().map(|d| match d {
-                    Datum::Text(s) => format!("\"{}\"" , s),
-                    Datum::Null => "NULL".to_string(),
-                    other => format!("{}", other),
-                }).collect();
+                let inner: Vec<String> = elems
+                    .iter()
+                    .map(|d| match d {
+                        Datum::Text(s) => format!("\"{}\"", s),
+                        Datum::Null => "NULL".to_string(),
+                        other => format!("{}", other),
+                    })
+                    .collect();
                 Some(format!("{{{}}}", inner.join(",")))
             }
             Datum::Jsonb(v) => Some(v.to_string()),
@@ -156,15 +160,19 @@ impl Datum {
             (Datum::Float64(a), Datum::Float64(b)) => Some(Datum::Float64(a + b)),
             (Datum::Float64(a), Datum::Int64(b)) => Some(Datum::Float64(a + *b as f64)),
             (Datum::Float64(a), Datum::Int32(b)) => Some(Datum::Float64(a + *b as f64)),
-            (Datum::Decimal(a, sa), Datum::Decimal(b, sb)) => {
-                Some(decimal_add(*a, *sa, *b, *sb))
-            }
-            (Datum::Decimal(a, sa), Datum::Int64(b)) => {
-                Some(decimal_add(*a, *sa, *b as i128 * 10i128.pow(*sa as u32), *sa))
-            }
-            (Datum::Int64(a), Datum::Decimal(b, sb)) => {
-                Some(decimal_add(*a as i128 * 10i128.pow(*sb as u32), *sb, *b, *sb))
-            }
+            (Datum::Decimal(a, sa), Datum::Decimal(b, sb)) => Some(decimal_add(*a, *sa, *b, *sb)),
+            (Datum::Decimal(a, sa), Datum::Int64(b)) => Some(decimal_add(
+                *a,
+                *sa,
+                *b as i128 * 10i128.pow(*sa as u32),
+                *sa,
+            )),
+            (Datum::Int64(a), Datum::Decimal(b, sb)) => Some(decimal_add(
+                *a as i128 * 10i128.pow(*sb as u32),
+                *sb,
+                *b,
+                *sb,
+            )),
             _ => None,
         }
     }
@@ -198,8 +206,8 @@ impl fmt::Display for Datum {
             Datum::Text(s) => write!(f, "{}", s),
             Datum::Timestamp(us) => write!(f, "{}", us),
             Datum::Date(days) => {
-                let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
-                    .unwrap_or(chrono::NaiveDate::MIN);
+                let epoch =
+                    chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap_or(chrono::NaiveDate::MIN);
                 if let Some(d) = epoch.checked_add_signed(chrono::Duration::days(*days as i64)) {
                     write!(f, "{}", d.format("%Y-%m-%d"))
                 } else {
@@ -209,7 +217,9 @@ impl fmt::Display for Datum {
             Datum::Array(elems) => {
                 write!(f, "{{")?;
                 for (i, d) in elems.iter().enumerate() {
-                    if i > 0 { write!(f, ",")?; }
+                    if i > 0 {
+                        write!(f, ",")?;
+                    }
                     write!(f, "{}", d)?;
                 }
                 write!(f, "}}")
@@ -233,10 +243,24 @@ impl fmt::Display for Datum {
                 if *months != 0 {
                     let y = *months / 12;
                     let mo = *months % 12;
-                    if y != 0 { parts.push(format!("{} year{}", y, if y.abs() != 1 { "s" } else { "" })); }
-                    if mo != 0 { parts.push(format!("{} mon{}", mo, if mo.abs() != 1 { "s" } else { "" })); }
+                    if y != 0 {
+                        parts.push(format!("{} year{}", y, if y.abs() != 1 { "s" } else { "" }));
+                    }
+                    if mo != 0 {
+                        parts.push(format!(
+                            "{} mon{}",
+                            mo,
+                            if mo.abs() != 1 { "s" } else { "" }
+                        ));
+                    }
                 }
-                if *days != 0 { parts.push(format!("{} day{}", days, if days.abs() != 1 { "s" } else { "" })); }
+                if *days != 0 {
+                    parts.push(format!(
+                        "{} day{}",
+                        days,
+                        if days.abs() != 1 { "s" } else { "" }
+                    ));
+                }
                 if *us != 0 || parts.is_empty() {
                     let total_secs = us.abs() / 1_000_000;
                     let h = total_secs / 3600;
@@ -257,7 +281,9 @@ impl fmt::Display for Datum {
             }
             Datum::Bytea(bytes) => {
                 write!(f, "\\x")?;
-                for b in bytes { write!(f, "{:02x}", b)?; }
+                for b in bytes {
+                    write!(f, "{:02x}", b)?;
+                }
                 Ok(())
             }
         }
@@ -281,11 +307,14 @@ impl PartialEq for Datum {
             (Datum::Text(a), Datum::Text(b)) => a == b,
             (Datum::Timestamp(a), Datum::Timestamp(b)) => a == b,
             (Datum::Date(a), Datum::Date(b)) => a == b,
-            (Datum::Array(a), Datum::Array(b)) => a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x == y),
+            (Datum::Array(a), Datum::Array(b)) => {
+                a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x == y)
+            }
             (Datum::Jsonb(a), Datum::Jsonb(b)) => a == b,
             (Datum::Decimal(a, sa), Datum::Decimal(b, sb)) => {
-                if sa == sb { a == b }
-                else {
+                if sa == sb {
+                    a == b
+                } else {
                     let (na, nb) = decimal_normalize(*a, *sa, *b, *sb);
                     na == nb
                 }
@@ -299,7 +328,9 @@ impl PartialEq for Datum {
                 am == *b
             }
             (Datum::Time(a), Datum::Time(b)) => a == b,
-            (Datum::Interval(am, ad, aus), Datum::Interval(bm, bd, bus)) => am == bm && ad == bd && aus == bus,
+            (Datum::Interval(am, ad, aus), Datum::Interval(bm, bd, bus)) => {
+                am == bm && ad == bd && aus == bus
+            }
             (Datum::Uuid(a), Datum::Uuid(b)) => a == b,
             _ => false,
         }
@@ -313,19 +344,44 @@ impl Hash for Datum {
         // Use explicit type tags (NOT mem::discriminant) to ensure cross-type
         // equality consistency: Int32(x) == Int64(x) must produce the same hash.
         match self {
-            Datum::Null => { 0u8.hash(state); }
-            Datum::Boolean(b) => { 1u8.hash(state); b.hash(state); }
+            Datum::Null => {
+                0u8.hash(state);
+            }
+            Datum::Boolean(b) => {
+                1u8.hash(state);
+                b.hash(state);
+            }
             // Int32 and Int64 share tag 2, both hash as i64
-            Datum::Int32(v) => { 2u8.hash(state); (*v as i64).hash(state); }
-            Datum::Int64(v) => { 2u8.hash(state); v.hash(state); }
-            Datum::Float64(v) => { 3u8.hash(state); v.to_bits().hash(state); }
-            Datum::Text(s) => { 4u8.hash(state); s.hash(state); }
-            Datum::Timestamp(us) => { 5u8.hash(state); us.hash(state); }
-            Datum::Date(days) => { 8u8.hash(state); days.hash(state); }
+            Datum::Int32(v) => {
+                2u8.hash(state);
+                (*v as i64).hash(state);
+            }
+            Datum::Int64(v) => {
+                2u8.hash(state);
+                v.hash(state);
+            }
+            Datum::Float64(v) => {
+                3u8.hash(state);
+                v.to_bits().hash(state);
+            }
+            Datum::Text(s) => {
+                4u8.hash(state);
+                s.hash(state);
+            }
+            Datum::Timestamp(us) => {
+                5u8.hash(state);
+                us.hash(state);
+            }
+            Datum::Date(days) => {
+                8u8.hash(state);
+                days.hash(state);
+            }
             Datum::Array(elems) => {
                 6u8.hash(state);
                 elems.len().hash(state);
-                for e in elems { e.hash(state); }
+                for e in elems {
+                    e.hash(state);
+                }
             }
             Datum::Jsonb(v) => {
                 7u8.hash(state);
@@ -338,10 +394,24 @@ impl Hash for Datum {
                 nm.hash(state);
                 ns.hash(state);
             }
-            Datum::Time(us) => { 10u8.hash(state); us.hash(state); }
-            Datum::Interval(months, days, us) => { 11u8.hash(state); months.hash(state); days.hash(state); us.hash(state); }
-            Datum::Uuid(v) => { 12u8.hash(state); v.hash(state); }
-            Datum::Bytea(bytes) => { 13u8.hash(state); bytes.hash(state); }
+            Datum::Time(us) => {
+                10u8.hash(state);
+                us.hash(state);
+            }
+            Datum::Interval(months, days, us) => {
+                11u8.hash(state);
+                months.hash(state);
+                days.hash(state);
+                us.hash(state);
+            }
+            Datum::Uuid(v) => {
+                12u8.hash(state);
+                v.hash(state);
+            }
+            Datum::Bytea(bytes) => {
+                13u8.hash(state);
+                bytes.hash(state);
+            }
         }
     }
 }
@@ -544,7 +614,10 @@ mod decimal_tests {
 
     #[test]
     fn test_decimal_parse() {
-        assert_eq!(Datum::parse_decimal("123.45"), Some(Datum::Decimal(12345, 2)));
+        assert_eq!(
+            Datum::parse_decimal("123.45"),
+            Some(Datum::Decimal(12345, 2))
+        );
         assert_eq!(Datum::parse_decimal("-0.001"), Some(Datum::Decimal(-1, 3)));
         assert_eq!(Datum::parse_decimal("100"), Some(Datum::Decimal(100, 0)));
         assert_eq!(Datum::parse_decimal(""), None);
@@ -553,14 +626,14 @@ mod decimal_tests {
     #[test]
     fn test_decimal_add() {
         let a = Datum::Decimal(12345, 2); // 123.45
-        let b = Datum::Decimal(6789, 2);  // 67.89
+        let b = Datum::Decimal(6789, 2); // 67.89
         assert_eq!(a.add(&b), Some(Datum::Decimal(19134, 2))); // 191.34
     }
 
     #[test]
     fn test_decimal_add_different_scales() {
         let a = Datum::Decimal(100, 1); // 10.0
-        let b = Datum::Decimal(5, 2);   // 0.05
+        let b = Datum::Decimal(5, 2); // 0.05
         assert_eq!(a.add(&b), Some(Datum::Decimal(1005, 2))); // 10.05
     }
 
@@ -592,14 +665,20 @@ mod decimal_tests {
 
     #[test]
     fn test_decimal_pg_text() {
-        assert_eq!(Datum::Decimal(12345, 2).to_pg_text(), Some("123.45".to_string()));
+        assert_eq!(
+            Datum::Decimal(12345, 2).to_pg_text(),
+            Some("123.45".to_string())
+        );
     }
 
     #[test]
     fn test_decimal_sub_mul_div() {
         assert_eq!(decimal_sub(12345, 2, 6789, 2), Datum::Decimal(5556, 2)); // 55.56
         assert_eq!(decimal_mul(100, 2, 200, 2), Datum::Decimal(20000, 4)); // 0.2000
-        assert_eq!(decimal_div(100, 2, 3, 0, 6), Some(Datum::Decimal(333333, 6)));
+        assert_eq!(
+            decimal_div(100, 2, 3, 0, 6),
+            Some(Datum::Decimal(333333, 6))
+        );
         assert_eq!(decimal_div(100, 2, 0, 0, 6), None); // div by zero
     }
 
@@ -612,6 +691,9 @@ mod decimal_tests {
             h.finish()
         }
         // 10.0 and 10.00 should hash the same (after normalization)
-        assert_eq!(hash_datum(&Datum::Decimal(100, 1)), hash_datum(&Datum::Decimal(1000, 2)));
+        assert_eq!(
+            hash_datum(&Datum::Decimal(100, 1)),
+            hash_datum(&Datum::Decimal(1000, 2))
+        );
     }
 }

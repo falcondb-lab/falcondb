@@ -55,7 +55,9 @@ impl EncryptionKey {
         // production would use `ring::rand` or `getrandom`).
         let mut state = seed as u64;
         for chunk in bytes.chunks_mut(8) {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let b = state.to_le_bytes();
             for (i, byte) in chunk.iter_mut().enumerate() {
                 if i < b.len() {
@@ -236,7 +238,11 @@ impl KeyManager {
     /// Unwrap (decrypt) a DEK using the master key.
     pub fn unwrap_dek(&self, dek_id: DekId) -> Option<EncryptionKey> {
         let wrapped = self.wrapped_deks.get(&dek_id)?;
-        let decrypted = Self::xor_encrypt(&wrapped.ciphertext, self.master_key.as_bytes(), &wrapped.nonce);
+        let decrypted = Self::xor_encrypt(
+            &wrapped.ciphertext,
+            self.master_key.as_bytes(),
+            &wrapped.nonce,
+        );
         let mut key_bytes = [0u8; AES256_KEY_LEN];
         if decrypted.len() >= AES256_KEY_LEN {
             key_bytes.copy_from_slice(&decrypted[..AES256_KEY_LEN]);
@@ -250,16 +256,26 @@ impl KeyManager {
     }
 
     /// Encrypt a data block using a DEK.
-    pub fn encrypt_block(&self, dek_id: DekId, plaintext: &[u8], block_nonce: &[u8; NONCE_LEN]) -> Option<Vec<u8>> {
+    pub fn encrypt_block(
+        &self,
+        dek_id: DekId,
+        plaintext: &[u8],
+        block_nonce: &[u8; NONCE_LEN],
+    ) -> Option<Vec<u8>> {
         let dek = self.unwrap_dek(dek_id)?;
         let ciphertext = Self::xor_encrypt(plaintext, dek.as_bytes(), block_nonce);
         Some(ciphertext)
     }
 
     /// Decrypt a data block using a DEK.
-    pub fn decrypt_block(&self, dek_id: DekId, ciphertext: &[u8], block_nonce: &[u8; NONCE_LEN]) -> Option<Vec<u8>> {
+    pub fn decrypt_block(
+        &self,
+        dek_id: DekId,
+        ciphertext: &[u8],
+        block_nonce: &[u8; NONCE_LEN],
+    ) -> Option<Vec<u8>> {
         let dek = self.unwrap_dek(dek_id)?;
-        let plaintext = Self::xor_encrypt(ciphertext, dek.as_bytes(), &block_nonce);
+        let plaintext = Self::xor_encrypt(ciphertext, dek.as_bytes(), block_nonce);
         Some(plaintext)
     }
 
@@ -267,7 +283,7 @@ impl KeyManager {
     pub fn rotate_master_key(&mut self, new_passphrase: &str) {
         // Unwrap all DEKs with old master key
         let mut raw_deks: Vec<(DekId, EncryptionKey)> = Vec::new();
-        for (id, _) in &self.wrapped_deks {
+        for id in self.wrapped_deks.keys() {
             if let Some(dek) = self.unwrap_dek(*id) {
                 raw_deks.push((*id, dek));
             }
@@ -312,9 +328,8 @@ impl KeyManager {
         for (chunk_idx, chunk) in data.chunks(32).enumerate() {
             // Generate keystream block from key + nonce + counter
             for i in 0..32 {
-                keystream_block[i] = key[i]
-                    ^ nonce[i % NONCE_LEN]
-                    ^ ((chunk_idx as u8).wrapping_add(i as u8));
+                keystream_block[i] =
+                    key[i] ^ nonce[i % NONCE_LEN] ^ ((chunk_idx as u8).wrapping_add(i as u8));
             }
             // Mix further
             for i in 0..32 {

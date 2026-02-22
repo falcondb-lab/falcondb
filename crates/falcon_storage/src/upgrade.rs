@@ -88,8 +88,7 @@ pub fn check_rolling_upgrade_compatibility(
     if remote.minor < MIN_COMPATIBLE_MINOR && remote.major == MIN_COMPATIBLE_MAJOR {
         errors.push(format!(
             "Remote version {}.{}.{} is below minimum compatible {}.{}",
-            remote.major, remote.minor, remote.patch,
-            MIN_COMPATIBLE_MAJOR, MIN_COMPATIBLE_MINOR
+            remote.major, remote.minor, remote.patch, MIN_COMPATIBLE_MAJOR, MIN_COMPATIBLE_MINOR
         ));
     }
 
@@ -149,8 +148,7 @@ pub fn check_snapshot_compatibility(header: &VersionHeader) -> CompatibilityResu
     if header.major > current.major {
         errors.push(format!(
             "Snapshot from newer major version {}.{}.{} (current: {}.{}.{})",
-            header.major, header.minor, header.patch,
-            current.major, current.minor, current.patch,
+            header.major, header.minor, header.patch, current.major, current.minor, current.patch,
         ));
     }
 
@@ -207,7 +205,10 @@ mod tests {
         let mut remote = VersionHeader::current();
         remote.minor = local.minor + 1;
         let result = check_rolling_upgrade_compatibility(&local, &remote);
-        assert!(matches!(result, CompatibilityResult::CompatibleWithWarnings(_)));
+        assert!(matches!(
+            result,
+            CompatibilityResult::CompatibleWithWarnings(_)
+        ));
         assert!(result.is_compatible());
     }
 
@@ -217,7 +218,10 @@ mod tests {
         let mut remote = VersionHeader::current();
         remote.wal_format_version += 1;
         let result = check_rolling_upgrade_compatibility(&local, &remote);
-        assert!(matches!(result, CompatibilityResult::CompatibleWithWarnings(_)));
+        assert!(matches!(
+            result,
+            CompatibilityResult::CompatibleWithWarnings(_)
+        ));
     }
 
     #[test]

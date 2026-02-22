@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 
 use falcon_common::datum::{Datum, OwnedRow};
-use falcon_common::error::{FalconError, ExecutionError};
+use falcon_common::error::{ExecutionError, FalconError};
 use falcon_common::schema::{Catalog, TableSchema};
 use falcon_sql_frontend::binder::Binder;
 use falcon_sql_frontend::types::*;
 use falcon_txn::TxnHandle;
 
-use crate::expr_engine::ExprEngine;
 use crate::executor::{ExecutionResult, Executor};
+use crate::expr_engine::ExprEngine;
 
 impl Executor {
     /// Execute a BoundSelect as an inner subquery, returning the result rows.
@@ -47,8 +47,14 @@ impl Executor {
                     .unwrap_or(Datum::Null);
                 Ok(BoundExpr::Literal(val))
             }
-            BoundExpr::InSubquery { expr: inner_expr, subquery, negated } => {
-                if Self::bound_select_has_outer_ref(subquery) || Self::expr_has_outer_ref(inner_expr) {
+            BoundExpr::InSubquery {
+                expr: inner_expr,
+                subquery,
+                negated,
+            } => {
+                if Self::bound_select_has_outer_ref(subquery)
+                    || Self::expr_has_outer_ref(inner_expr)
+                {
                     return Ok(expr.clone());
                 }
                 let mat_expr = self.materialize_subqueries(inner_expr, txn)?;
@@ -95,7 +101,12 @@ impl Executor {
                 let m = self.materialize_subqueries(inner, txn)?;
                 Ok(BoundExpr::IsNotNull(Box::new(m)))
             }
-            BoundExpr::Like { expr: inner, pattern, negated, case_insensitive } => {
+            BoundExpr::Like {
+                expr: inner,
+                pattern,
+                negated,
+                case_insensitive,
+            } => {
                 let m = self.materialize_subqueries(inner, txn)?;
                 let mp = self.materialize_subqueries(pattern, txn)?;
                 Ok(BoundExpr::Like {
@@ -105,7 +116,12 @@ impl Executor {
                     case_insensitive: *case_insensitive,
                 })
             }
-            BoundExpr::Between { expr: inner, low, high, negated } => {
+            BoundExpr::Between {
+                expr: inner,
+                low,
+                high,
+                negated,
+            } => {
                 let me = self.materialize_subqueries(inner, txn)?;
                 let ml = self.materialize_subqueries(low, txn)?;
                 let mh = self.materialize_subqueries(high, txn)?;
@@ -116,7 +132,11 @@ impl Executor {
                     negated: *negated,
                 })
             }
-            BoundExpr::InList { expr: inner, list, negated } => {
+            BoundExpr::InList {
+                expr: inner,
+                list,
+                negated,
+            } => {
                 let me = self.materialize_subqueries(inner, txn)?;
                 let ml: Vec<BoundExpr> = list
                     .iter()
@@ -128,7 +148,10 @@ impl Executor {
                     negated: *negated,
                 })
             }
-            BoundExpr::Cast { expr: inner, target_type } => {
+            BoundExpr::Cast {
+                expr: inner,
+                target_type,
+            } => {
                 let m = self.materialize_subqueries(inner, txn)?;
                 Ok(BoundExpr::Cast {
                     expr: Box::new(m),
@@ -182,7 +205,11 @@ impl Executor {
                 })
             }
             // AggregateExpr — pass through (evaluated later in HAVING)
-            BoundExpr::AggregateExpr { func, arg, distinct } => {
+            BoundExpr::AggregateExpr {
+                func,
+                arg,
+                distinct,
+            } => {
                 let ma = arg
                     .as_ref()
                     .map(|e| self.materialize_subqueries(e, txn).map(Box::new))
@@ -216,7 +243,11 @@ impl Executor {
                     right: Box::new(mr),
                 })
             }
-            BoundExpr::AnyOp { left, compare_op, right } => {
+            BoundExpr::AnyOp {
+                left,
+                compare_op,
+                right,
+            } => {
                 let ml = self.materialize_subqueries(left, txn)?;
                 let mr = self.materialize_subqueries(right, txn)?;
                 Ok(BoundExpr::AnyOp {
@@ -225,7 +256,11 @@ impl Executor {
                     right: Box::new(mr),
                 })
             }
-            BoundExpr::AllOp { left, compare_op, right } => {
+            BoundExpr::AllOp {
+                left,
+                compare_op,
+                right,
+            } => {
                 let ml = self.materialize_subqueries(left, txn)?;
                 let mr = self.materialize_subqueries(right, txn)?;
                 Ok(BoundExpr::AllOp {
@@ -234,12 +269,18 @@ impl Executor {
                     right: Box::new(mr),
                 })
             }
-            BoundExpr::ArraySlice { array, lower, upper } => {
+            BoundExpr::ArraySlice {
+                array,
+                lower,
+                upper,
+            } => {
                 let ma = self.materialize_subqueries(array, txn)?;
-                let ml = lower.as_ref()
+                let ml = lower
+                    .as_ref()
                     .map(|e| self.materialize_subqueries(e, txn).map(Box::new))
                     .transpose()?;
-                let mu = upper.as_ref()
+                let mu = upper
+                    .as_ref()
                     .map(|e| self.materialize_subqueries(e, txn).map(Box::new))
                     .transpose()?;
                 Ok(BoundExpr::ArraySlice {
@@ -249,9 +290,14 @@ impl Executor {
                 })
             }
             // Leaf nodes — no subqueries
-            BoundExpr::Literal(_) | BoundExpr::ColumnRef(_) | BoundExpr::OuterColumnRef(_)
-            | BoundExpr::SequenceNextval(_) | BoundExpr::SequenceCurrval(_) | BoundExpr::SequenceSetval(_, _)
-            | BoundExpr::Parameter(_) | BoundExpr::Grouping(_) => Ok(expr.clone()),
+            BoundExpr::Literal(_)
+            | BoundExpr::ColumnRef(_)
+            | BoundExpr::OuterColumnRef(_)
+            | BoundExpr::SequenceNextval(_)
+            | BoundExpr::SequenceCurrval(_)
+            | BoundExpr::SequenceSetval(_, _)
+            | BoundExpr::Parameter(_)
+            | BoundExpr::Grouping(_) => Ok(expr.clone()),
         }
     }
 
@@ -275,18 +321,29 @@ impl Executor {
             BoundExpr::BinaryOp { left, right, .. } => {
                 Self::expr_has_outer_ref(left) || Self::expr_has_outer_ref(right)
             }
-            BoundExpr::Not(inner) | BoundExpr::IsNull(inner) | BoundExpr::IsNotNull(inner)
+            BoundExpr::Not(inner)
+            | BoundExpr::IsNull(inner)
+            | BoundExpr::IsNotNull(inner)
             | BoundExpr::Cast { expr: inner, .. } => Self::expr_has_outer_ref(inner),
             BoundExpr::Like { expr, pattern, .. } => {
                 Self::expr_has_outer_ref(expr) || Self::expr_has_outer_ref(pattern)
             }
-            BoundExpr::Between { expr, low, high, .. } => {
-                Self::expr_has_outer_ref(expr) || Self::expr_has_outer_ref(low) || Self::expr_has_outer_ref(high)
+            BoundExpr::Between {
+                expr, low, high, ..
+            } => {
+                Self::expr_has_outer_ref(expr)
+                    || Self::expr_has_outer_ref(low)
+                    || Self::expr_has_outer_ref(high)
             }
             BoundExpr::InList { expr, list, .. } => {
                 Self::expr_has_outer_ref(expr) || list.iter().any(Self::expr_has_outer_ref)
             }
-            BoundExpr::Case { operand, conditions, results, else_result } => {
+            BoundExpr::Case {
+                operand,
+                conditions,
+                results,
+                else_result,
+            } => {
                 operand.as_deref().is_some_and(Self::expr_has_outer_ref)
                     || conditions.iter().any(Self::expr_has_outer_ref)
                     || results.iter().any(Self::expr_has_outer_ref)
@@ -308,7 +365,11 @@ impl Executor {
             BoundExpr::AnyOp { left, right, .. } | BoundExpr::AllOp { left, right, .. } => {
                 Self::expr_has_outer_ref(left) || Self::expr_has_outer_ref(right)
             }
-            BoundExpr::ArraySlice { array, lower, upper } => {
+            BoundExpr::ArraySlice {
+                array,
+                lower,
+                upper,
+            } => {
                 Self::expr_has_outer_ref(array)
                     || lower.as_deref().is_some_and(Self::expr_has_outer_ref)
                     || upper.as_deref().is_some_and(Self::expr_has_outer_ref)
@@ -318,26 +379,37 @@ impl Executor {
                 Self::expr_has_outer_ref(expr) || Self::bound_select_has_outer_ref(subquery)
             }
             BoundExpr::Exists { subquery, .. } => Self::bound_select_has_outer_ref(subquery),
-            BoundExpr::SequenceNextval(_) | BoundExpr::SequenceCurrval(_) | BoundExpr::SequenceSetval(_, _)
-            | BoundExpr::Parameter(_) | BoundExpr::Grouping(_) => false,
+            BoundExpr::SequenceNextval(_)
+            | BoundExpr::SequenceCurrval(_)
+            | BoundExpr::SequenceSetval(_, _)
+            | BoundExpr::Parameter(_)
+            | BoundExpr::Grouping(_) => false,
         }
     }
 
     /// Check if a BoundSelect contains any OuterColumnRef in its filter or projections.
     fn bound_select_has_outer_ref(sel: &BoundSelect) -> bool {
         if let Some(ref f) = sel.filter {
-            if Self::expr_has_outer_ref(f) { return true; }
+            if Self::expr_has_outer_ref(f) {
+                return true;
+            }
         }
         if let Some(ref h) = sel.having {
-            if Self::expr_has_outer_ref(h) { return true; }
+            if Self::expr_has_outer_ref(h) {
+                return true;
+            }
         }
         for proj in &sel.projections {
             match proj {
                 BoundProjection::Expr(e, _) => {
-                    if Self::expr_has_outer_ref(e) { return true; }
+                    if Self::expr_has_outer_ref(e) {
+                        return true;
+                    }
                 }
                 BoundProjection::Aggregate(_, Some(e), _, _, _) => {
-                    if Self::expr_has_outer_ref(e) { return true; }
+                    if Self::expr_has_outer_ref(e) {
+                        return true;
+                    }
                 }
                 _ => {}
             }
@@ -358,49 +430,102 @@ impl Executor {
                 op: *op,
                 right: Box::new(Self::substitute_outer_refs(right, outer_row)),
             },
-            BoundExpr::Not(inner) => BoundExpr::Not(Box::new(Self::substitute_outer_refs(inner, outer_row))),
-            BoundExpr::IsNull(inner) => BoundExpr::IsNull(Box::new(Self::substitute_outer_refs(inner, outer_row))),
-            BoundExpr::IsNotNull(inner) => BoundExpr::IsNotNull(Box::new(Self::substitute_outer_refs(inner, outer_row))),
-            BoundExpr::Like { expr, pattern, negated, case_insensitive } => BoundExpr::Like {
+            BoundExpr::Not(inner) => {
+                BoundExpr::Not(Box::new(Self::substitute_outer_refs(inner, outer_row)))
+            }
+            BoundExpr::IsNull(inner) => {
+                BoundExpr::IsNull(Box::new(Self::substitute_outer_refs(inner, outer_row)))
+            }
+            BoundExpr::IsNotNull(inner) => {
+                BoundExpr::IsNotNull(Box::new(Self::substitute_outer_refs(inner, outer_row)))
+            }
+            BoundExpr::Like {
+                expr,
+                pattern,
+                negated,
+                case_insensitive,
+            } => BoundExpr::Like {
                 expr: Box::new(Self::substitute_outer_refs(expr, outer_row)),
                 pattern: Box::new(Self::substitute_outer_refs(pattern, outer_row)),
-                negated: *negated, case_insensitive: *case_insensitive,
+                negated: *negated,
+                case_insensitive: *case_insensitive,
             },
-            BoundExpr::Between { expr, low, high, negated } => BoundExpr::Between {
+            BoundExpr::Between {
+                expr,
+                low,
+                high,
+                negated,
+            } => BoundExpr::Between {
                 expr: Box::new(Self::substitute_outer_refs(expr, outer_row)),
                 low: Box::new(Self::substitute_outer_refs(low, outer_row)),
                 high: Box::new(Self::substitute_outer_refs(high, outer_row)),
                 negated: *negated,
             },
-            BoundExpr::InList { expr, list, negated } => BoundExpr::InList {
+            BoundExpr::InList {
+                expr,
+                list,
+                negated,
+            } => BoundExpr::InList {
                 expr: Box::new(Self::substitute_outer_refs(expr, outer_row)),
-                list: list.iter().map(|e| Self::substitute_outer_refs(e, outer_row)).collect(),
+                list: list
+                    .iter()
+                    .map(|e| Self::substitute_outer_refs(e, outer_row))
+                    .collect(),
                 negated: *negated,
             },
             BoundExpr::Cast { expr, target_type } => BoundExpr::Cast {
                 expr: Box::new(Self::substitute_outer_refs(expr, outer_row)),
                 target_type: target_type.clone(),
             },
-            BoundExpr::Case { operand, conditions, results, else_result } => BoundExpr::Case {
-                operand: operand.as_ref().map(|e| Box::new(Self::substitute_outer_refs(e, outer_row))),
-                conditions: conditions.iter().map(|e| Self::substitute_outer_refs(e, outer_row)).collect(),
-                results: results.iter().map(|e| Self::substitute_outer_refs(e, outer_row)).collect(),
-                else_result: else_result.as_ref().map(|e| Box::new(Self::substitute_outer_refs(e, outer_row))),
+            BoundExpr::Case {
+                operand,
+                conditions,
+                results,
+                else_result,
+            } => BoundExpr::Case {
+                operand: operand
+                    .as_ref()
+                    .map(|e| Box::new(Self::substitute_outer_refs(e, outer_row))),
+                conditions: conditions
+                    .iter()
+                    .map(|e| Self::substitute_outer_refs(e, outer_row))
+                    .collect(),
+                results: results
+                    .iter()
+                    .map(|e| Self::substitute_outer_refs(e, outer_row))
+                    .collect(),
+                else_result: else_result
+                    .as_ref()
+                    .map(|e| Box::new(Self::substitute_outer_refs(e, outer_row))),
             },
             BoundExpr::Coalesce(args) => BoundExpr::Coalesce(
-                args.iter().map(|e| Self::substitute_outer_refs(e, outer_row)).collect(),
+                args.iter()
+                    .map(|e| Self::substitute_outer_refs(e, outer_row))
+                    .collect(),
             ),
             BoundExpr::Function { func, args } => BoundExpr::Function {
                 func: func.clone(),
-                args: args.iter().map(|e| Self::substitute_outer_refs(e, outer_row)).collect(),
+                args: args
+                    .iter()
+                    .map(|e| Self::substitute_outer_refs(e, outer_row))
+                    .collect(),
             },
-            BoundExpr::AggregateExpr { func, arg, distinct } => BoundExpr::AggregateExpr {
+            BoundExpr::AggregateExpr {
+                func,
+                arg,
+                distinct,
+            } => BoundExpr::AggregateExpr {
                 func: func.clone(),
-                arg: arg.as_ref().map(|e| Box::new(Self::substitute_outer_refs(e, outer_row))),
+                arg: arg
+                    .as_ref()
+                    .map(|e| Box::new(Self::substitute_outer_refs(e, outer_row))),
                 distinct: *distinct,
             },
             BoundExpr::ArrayLiteral(elems) => BoundExpr::ArrayLiteral(
-                elems.iter().map(|e| Self::substitute_outer_refs(e, outer_row)).collect(),
+                elems
+                    .iter()
+                    .map(|e| Self::substitute_outer_refs(e, outer_row))
+                    .collect(),
             ),
             BoundExpr::ArrayIndex { array, index } => BoundExpr::ArrayIndex {
                 array: Box::new(Self::substitute_outer_refs(array, outer_row)),
@@ -410,26 +535,46 @@ impl Executor {
                 left: Box::new(Self::substitute_outer_refs(left, outer_row)),
                 right: Box::new(Self::substitute_outer_refs(right, outer_row)),
             },
-            BoundExpr::AnyOp { left, compare_op, right } => BoundExpr::AnyOp {
+            BoundExpr::AnyOp {
+                left,
+                compare_op,
+                right,
+            } => BoundExpr::AnyOp {
                 left: Box::new(Self::substitute_outer_refs(left, outer_row)),
                 compare_op: *compare_op,
                 right: Box::new(Self::substitute_outer_refs(right, outer_row)),
             },
-            BoundExpr::AllOp { left, compare_op, right } => BoundExpr::AllOp {
+            BoundExpr::AllOp {
+                left,
+                compare_op,
+                right,
+            } => BoundExpr::AllOp {
                 left: Box::new(Self::substitute_outer_refs(left, outer_row)),
                 compare_op: *compare_op,
                 right: Box::new(Self::substitute_outer_refs(right, outer_row)),
             },
-            BoundExpr::ArraySlice { array, lower, upper } => BoundExpr::ArraySlice {
+            BoundExpr::ArraySlice {
+                array,
+                lower,
+                upper,
+            } => BoundExpr::ArraySlice {
                 array: Box::new(Self::substitute_outer_refs(array, outer_row)),
-                lower: lower.as_ref().map(|e| Box::new(Self::substitute_outer_refs(e, outer_row))),
-                upper: upper.as_ref().map(|e| Box::new(Self::substitute_outer_refs(e, outer_row))),
+                lower: lower
+                    .as_ref()
+                    .map(|e| Box::new(Self::substitute_outer_refs(e, outer_row))),
+                upper: upper
+                    .as_ref()
+                    .map(|e| Box::new(Self::substitute_outer_refs(e, outer_row))),
             },
             BoundExpr::ScalarSubquery(sub) => {
                 let sub2 = Self::substitute_outer_refs_in_select(sub, outer_row);
                 BoundExpr::ScalarSubquery(Box::new(sub2))
             }
-            BoundExpr::InSubquery { expr, subquery, negated } => BoundExpr::InSubquery {
+            BoundExpr::InSubquery {
+                expr,
+                subquery,
+                negated,
+            } => BoundExpr::InSubquery {
                 expr: Box::new(Self::substitute_outer_refs(expr, outer_row)),
                 subquery: Box::new(Self::substitute_outer_refs_in_select(subquery, outer_row)),
                 negated: *negated,
@@ -438,22 +583,35 @@ impl Executor {
                 subquery: Box::new(Self::substitute_outer_refs_in_select(subquery, outer_row)),
                 negated: *negated,
             },
-            BoundExpr::SequenceNextval(_) | BoundExpr::SequenceCurrval(_) | BoundExpr::SequenceSetval(_, _)
-            | BoundExpr::Parameter(_) | BoundExpr::Grouping(_) => expr.clone(),
+            BoundExpr::SequenceNextval(_)
+            | BoundExpr::SequenceCurrval(_)
+            | BoundExpr::SequenceSetval(_, _)
+            | BoundExpr::Parameter(_)
+            | BoundExpr::Grouping(_) => expr.clone(),
         }
     }
 
     /// Substitute OuterColumnRef nodes inside a BoundSelect.
     fn substitute_outer_refs_in_select(sel: &BoundSelect, outer_row: &OwnedRow) -> BoundSelect {
         let mut sel2 = sel.clone();
-        sel2.filter = sel2.filter.as_ref().map(|f| Self::substitute_outer_refs(f, outer_row));
-        sel2.having = sel2.having.as_ref().map(|h| Self::substitute_outer_refs(h, outer_row));
-        sel2.projections = sel2.projections.iter().map(|p| match p {
-            BoundProjection::Expr(e, a) => {
-                BoundProjection::Expr(Self::substitute_outer_refs(e, outer_row), a.clone())
-            }
-            other => other.clone(),
-        }).collect();
+        sel2.filter = sel2
+            .filter
+            .as_ref()
+            .map(|f| Self::substitute_outer_refs(f, outer_row));
+        sel2.having = sel2
+            .having
+            .as_ref()
+            .map(|h| Self::substitute_outer_refs(h, outer_row));
+        sel2.projections = sel2
+            .projections
+            .iter()
+            .map(|p| match p {
+                BoundProjection::Expr(e, a) => {
+                    BoundProjection::Expr(Self::substitute_outer_refs(e, outer_row), a.clone())
+                }
+                other => other.clone(),
+            })
+            .collect();
         sel2
     }
 
@@ -503,7 +661,9 @@ impl Executor {
                                     Ok(Datum::Null) => {} // NULL is treated as satisfied (SQL semantics)
                                     _ => {
                                         return Err(FalconError::Execution(
-                                            ExecutionError::CheckConstraintViolation(check_sql.clone()),
+                                            ExecutionError::CheckConstraintViolation(
+                                                check_sql.clone(),
+                                            ),
                                         ));
                                     }
                                 }

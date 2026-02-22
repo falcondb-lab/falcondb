@@ -70,16 +70,26 @@ impl TxnLatencyBreakdown {
             ("commit_finalize", self.commit_finalize_us),
             ("queue_wait", self.queue_wait_us),
         ];
-        phases.iter().max_by_key(|p| p.1).map(|p| p.0).unwrap_or("unknown")
+        phases
+            .iter()
+            .max_by_key(|p| p.1)
+            .map(|p| p.0)
+            .unwrap_or("unknown")
     }
 
     /// Format as a compact waterfall string: `phase=Xus|phase=Yus|...`
     pub fn waterfall(&self) -> String {
         format!(
             "parse={}|route={}|exec={}|conflict={}|validate={}|repl={}|dur={}|commit={}|queue={}",
-            self.parse_bind_us, self.routing_us, self.execution_us,
-            self.conflict_wait_us, self.validate_us, self.replication_us,
-            self.durability_us, self.commit_finalize_us, self.queue_wait_us,
+            self.parse_bind_us,
+            self.routing_us,
+            self.execution_us,
+            self.conflict_wait_us,
+            self.validate_us,
+            self.replication_us,
+            self.durability_us,
+            self.commit_finalize_us,
+            self.queue_wait_us,
         )
     }
 }
@@ -209,19 +219,35 @@ impl AdmissionController {
     pub fn evaluate(inputs: &AdmissionInputs) -> AdmissionDecision {
         // Hard rejections first (priority order)
         if inputs.tenant_quota_exceeded {
-            return AdmissionDecision::Reject { reason: AdmissionRejectReason::TenantQuotaExceeded };
+            return AdmissionDecision::Reject {
+                reason: AdmissionRejectReason::TenantQuotaExceeded,
+            };
         }
         if inputs.max_queue_length > 0 && inputs.queue_length >= inputs.max_queue_length {
-            return AdmissionDecision::Reject { reason: AdmissionRejectReason::QueueFull };
+            return AdmissionDecision::Reject {
+                reason: AdmissionRejectReason::QueueFull,
+            };
         }
-        if inputs.memory_reject_threshold > 0.0 && inputs.memory_pressure >= inputs.memory_reject_threshold {
-            return AdmissionDecision::Reject { reason: AdmissionRejectReason::MemoryPressure };
+        if inputs.memory_reject_threshold > 0.0
+            && inputs.memory_pressure >= inputs.memory_reject_threshold
+        {
+            return AdmissionDecision::Reject {
+                reason: AdmissionRejectReason::MemoryPressure,
+            };
         }
-        if inputs.wal_backlog_reject_bytes > 0 && inputs.wal_backlog_bytes >= inputs.wal_backlog_reject_bytes {
-            return AdmissionDecision::Reject { reason: AdmissionRejectReason::WalBacklog };
+        if inputs.wal_backlog_reject_bytes > 0
+            && inputs.wal_backlog_bytes >= inputs.wal_backlog_reject_bytes
+        {
+            return AdmissionDecision::Reject {
+                reason: AdmissionRejectReason::WalBacklog,
+            };
         }
-        if inputs.replication_lag_reject_us > 0 && inputs.replication_lag_us >= inputs.replication_lag_reject_us {
-            return AdmissionDecision::Reject { reason: AdmissionRejectReason::ReplicationLag };
+        if inputs.replication_lag_reject_us > 0
+            && inputs.replication_lag_us >= inputs.replication_lag_reject_us
+        {
+            return AdmissionDecision::Reject {
+                reason: AdmissionRejectReason::ReplicationLag,
+            };
         }
 
         // Soft degradation: high memory or WAL pressure → async durability
@@ -237,7 +263,9 @@ impl AdmissionController {
         if inputs.max_queue_length > 0 && inputs.queue_length > inputs.max_queue_length / 2 {
             let pct = inputs.queue_length as f64 / inputs.max_queue_length as f64;
             let est_wait = (pct * 10_000.0) as u64; // rough estimate
-            return AdmissionDecision::Queue { estimated_wait_us: est_wait };
+            return AdmissionDecision::Queue {
+                estimated_wait_us: est_wait,
+            };
         }
 
         AdmissionDecision::Admit
@@ -361,8 +389,7 @@ pub struct GcDeterminismStatus {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Durability level for a transaction's commit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum DurabilityLevel {
     /// Quorum ack from replicas (strong durability, higher latency).
     QuorumAck,
@@ -374,7 +401,6 @@ pub enum DurabilityLevel {
     /// Async durability — commit returns before any fsync/ack (lowest latency, weakest).
     AsyncDurability,
 }
-
 
 impl fmt::Display for DurabilityLevel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -446,17 +472,20 @@ impl TxnBudget {
         let mut violations = Vec::new();
         if estimate.shard_count > self.max_shards {
             violations.push(format!(
-                "shards: {} > max {}", estimate.shard_count, self.max_shards
+                "shards: {} > max {}",
+                estimate.shard_count, self.max_shards
             ));
         }
         if estimate.estimated_commit_cost_us > self.max_latency_us {
             violations.push(format!(
-                "latency: {}us > max {}us", estimate.estimated_commit_cost_us, self.max_latency_us
+                "latency: {}us > max {}us",
+                estimate.estimated_commit_cost_us, self.max_latency_us
             ));
         }
         if estimate.estimated_rtt_count > self.max_rtts {
             violations.push(format!(
-                "rtts: {} > max {}", estimate.estimated_rtt_count, self.max_rtts
+                "rtts: {} > max {}",
+                estimate.estimated_rtt_count, self.max_rtts
             ));
         }
         TxnBudgetCheck {
@@ -543,8 +572,11 @@ impl VerificationAuditReport {
     pub fn summary(&self) -> String {
         format!(
             "checks={} passed={} failed={} coverage={:.1}% anomalies={}",
-            self.total_checks, self.passed, self.failed,
-            self.coverage_ratio * 100.0, self.anomalies_detected,
+            self.total_checks,
+            self.passed,
+            self.failed,
+            self.coverage_ratio * 100.0,
+            self.anomalies_detected,
         )
     }
 }
@@ -708,7 +740,10 @@ mod tests {
             memory_reject_threshold: 0.95,
             ..Default::default()
         };
-        assert_eq!(AdmissionController::evaluate(&inputs), AdmissionDecision::Admit);
+        assert_eq!(
+            AdmissionController::evaluate(&inputs),
+            AdmissionDecision::Admit
+        );
     }
 
     #[test]
@@ -720,7 +755,9 @@ mod tests {
         };
         assert_eq!(
             AdmissionController::evaluate(&inputs),
-            AdmissionDecision::Reject { reason: AdmissionRejectReason::QueueFull }
+            AdmissionDecision::Reject {
+                reason: AdmissionRejectReason::QueueFull
+            }
         );
     }
 
@@ -734,7 +771,9 @@ mod tests {
         };
         assert_eq!(
             AdmissionController::evaluate(&inputs),
-            AdmissionDecision::Reject { reason: AdmissionRejectReason::MemoryPressure }
+            AdmissionDecision::Reject {
+                reason: AdmissionRejectReason::MemoryPressure
+            }
         );
     }
 
@@ -748,7 +787,9 @@ mod tests {
         };
         assert_eq!(
             AdmissionController::evaluate(&inputs),
-            AdmissionDecision::Reject { reason: AdmissionRejectReason::WalBacklog }
+            AdmissionDecision::Reject {
+                reason: AdmissionRejectReason::WalBacklog
+            }
         );
     }
 
@@ -762,7 +803,9 @@ mod tests {
         };
         assert_eq!(
             AdmissionController::evaluate(&inputs),
-            AdmissionDecision::Reject { reason: AdmissionRejectReason::ReplicationLag }
+            AdmissionDecision::Reject {
+                reason: AdmissionRejectReason::ReplicationLag
+            }
         );
     }
 
@@ -774,7 +817,9 @@ mod tests {
         };
         assert_eq!(
             AdmissionController::evaluate(&inputs),
-            AdmissionDecision::Reject { reason: AdmissionRejectReason::TenantQuotaExceeded }
+            AdmissionDecision::Reject {
+                reason: AdmissionRejectReason::TenantQuotaExceeded
+            }
         );
     }
 
@@ -786,7 +831,10 @@ mod tests {
             max_queue_length: 100,
             ..Default::default()
         };
-        assert_eq!(AdmissionController::evaluate(&inputs), AdmissionDecision::Degrade);
+        assert_eq!(
+            AdmissionController::evaluate(&inputs),
+            AdmissionDecision::Degrade
+        );
     }
 
     #[test]
@@ -808,7 +856,10 @@ mod tests {
     fn test_durability_level_display() {
         assert_eq!(DurabilityLevel::QuorumAck.to_string(), "quorum_ack");
         assert_eq!(DurabilityLevel::AsyncDurability.to_string(), "async");
-        assert_eq!(DurabilityLevel::LocalFsyncPlusQuorum.to_string(), "local_fsync+quorum");
+        assert_eq!(
+            DurabilityLevel::LocalFsyncPlusQuorum.to_string(),
+            "local_fsync+quorum"
+        );
     }
 
     // ── §8: Cost Model & Budget ──
@@ -830,7 +881,10 @@ mod tests {
 
     #[test]
     fn test_budget_exceeded_shards() {
-        let budget = TxnBudget { max_shards: 4, ..Default::default() };
+        let budget = TxnBudget {
+            max_shards: 4,
+            ..Default::default()
+        };
         let estimate = TxnCostEstimate {
             shard_count: 10,
             estimated_rtt_count: 2,
@@ -845,7 +899,10 @@ mod tests {
 
     #[test]
     fn test_budget_exceeded_latency() {
-        let budget = TxnBudget { max_latency_us: 10_000, ..Default::default() };
+        let budget = TxnBudget {
+            max_latency_us: 10_000,
+            ..Default::default()
+        };
         let estimate = TxnCostEstimate {
             shard_count: 2,
             estimated_rtt_count: 2,
@@ -880,7 +937,10 @@ mod tests {
     #[test]
     fn test_verification_type_display() {
         assert_eq!(VerificationType::StateHash.to_string(), "state_hash");
-        assert_eq!(VerificationType::WalReplayChecksum.to_string(), "wal_replay_checksum");
+        assert_eq!(
+            VerificationType::WalReplayChecksum.to_string(),
+            "wal_replay_checksum"
+        );
     }
 
     // ── §9: Latency Contract ──
@@ -954,8 +1014,14 @@ mod tests {
     #[test]
     fn test_hotspot_alert_display() {
         assert_eq!(HotspotKind::Shard.to_string(), "shard");
-        assert_eq!(HotspotMitigation::WriteThrottle.to_string(), "write_throttle");
-        assert_eq!(HotspotMitigation::ReshardAdvice.to_string(), "reshard_advice");
+        assert_eq!(
+            HotspotMitigation::WriteThrottle.to_string(),
+            "write_throttle"
+        );
+        assert_eq!(
+            HotspotMitigation::ReshardAdvice.to_string(),
+            "reshard_advice"
+        );
     }
 
     // ── §6: GC Policy ──

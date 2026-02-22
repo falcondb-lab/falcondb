@@ -22,13 +22,12 @@ impl BloomFilter {
         let fp_rate = fp_rate.clamp(1e-10, 1.0);
 
         // Optimal number of bits: m = -n * ln(p) / (ln2)^2
-        let num_bits = (-(expected_keys as f64) * fp_rate.ln() / (2.0_f64.ln().powi(2)))
-            .ceil() as usize;
+        let num_bits =
+            (-(expected_keys as f64) * fp_rate.ln() / (2.0_f64.ln().powi(2))).ceil() as usize;
         let num_bits = num_bits.max(64);
 
         // Optimal number of hashes: k = (m/n) * ln2
-        let num_hashes = ((num_bits as f64 / expected_keys as f64) * 2.0_f64.ln())
-            .ceil() as u32;
+        let num_hashes = ((num_bits as f64 / expected_keys as f64) * 2.0_f64.ln()).ceil() as u32;
         let num_hashes = num_hashes.clamp(1, 30);
 
         let words = num_bits.div_ceil(64);
@@ -93,7 +92,11 @@ impl BloomFilter {
             let word = u64::from_le_bytes(data[offset..offset + 8].try_into().ok()?);
             bits.push(word);
         }
-        Some(Self { bits, num_bits, num_hashes })
+        Some(Self {
+            bits,
+            num_bits,
+            num_hashes,
+        })
     }
 
     /// Number of bits in the filter.
@@ -131,7 +134,9 @@ struct FnvHasher {
 
 impl FnvHasher {
     fn new() -> Self {
-        Self { state: 0xcbf29ce484222325 }
+        Self {
+            state: 0xcbf29ce484222325,
+        }
     }
 
     fn with_seed(seed: u64) -> Self {

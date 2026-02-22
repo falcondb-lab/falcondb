@@ -90,7 +90,9 @@ impl AuthRateLimiter {
     pub fn check(&self, source: &str) -> AuthRateResult {
         self.total_checks.fetch_add(1, Ordering::Relaxed);
         let mut sources = self.sources.lock();
-        let state = sources.entry(source.to_string()).or_insert_with(AuthSourceState::new);
+        let state = sources
+            .entry(source.to_string())
+            .or_insert_with(AuthSourceState::new);
         let now = Instant::now();
 
         // Check lockout
@@ -119,7 +121,9 @@ impl AuthRateLimiter {
     pub fn record_failure(&self, source: &str) {
         self.total_failures_recorded.fetch_add(1, Ordering::Relaxed);
         let mut sources = self.sources.lock();
-        let state = sources.entry(source.to_string()).or_insert_with(AuthSourceState::new);
+        let state = sources
+            .entry(source.to_string())
+            .or_insert_with(AuthSourceState::new);
         let now = Instant::now();
 
         // Prune old failures
@@ -277,7 +281,9 @@ impl PasswordPolicy {
         }
 
         if self.config.require_special
-            && !password.chars().any(|c| !c.is_alphanumeric() && !c.is_whitespace())
+            && !password
+                .chars()
+                .any(|c| !c.is_alphanumeric() && !c.is_whitespace())
         {
             reasons.push("Password must contain at least one special character".into());
         }
@@ -475,16 +481,13 @@ impl SqlFirewall {
     /// Detect common SQL injection patterns.
     fn detect_injection_patterns(sql_upper: &str) -> Option<String> {
         // Classic tautology injection: OR 1=1, OR '1'='1', OR ''=''
-        let tautology_patterns = [
-            "OR 1=1",
-            "OR '1'='1'",
-            "OR ''=''",
-            "OR TRUE",
-            "OR 1 = 1",
-        ];
+        let tautology_patterns = ["OR 1=1", "OR '1'='1'", "OR ''=''", "OR TRUE", "OR 1 = 1"];
         for pat in &tautology_patterns {
             if sql_upper.contains(pat) {
-                return Some(format!("SQL injection pattern detected: tautology ({})", pat));
+                return Some(format!(
+                    "SQL injection pattern detected: tautology ({})",
+                    pat
+                ));
             }
         }
 
@@ -512,7 +515,9 @@ impl SqlFirewall {
 
         // Sleep/benchmark injection (time-based blind injection)
         if sql_upper.contains("PG_SLEEP(") || sql_upper.contains("BENCHMARK(") {
-            return Some("SQL injection pattern detected: time-based injection (pg_sleep/benchmark)".into());
+            return Some(
+                "SQL injection pattern detected: time-based injection (pg_sleep/benchmark)".into(),
+            );
         }
 
         None
@@ -525,7 +530,10 @@ impl SqlFirewall {
             ("DROP SCHEMA", "DROP SCHEMA is restricted to superusers"),
             ("TRUNCATE", "TRUNCATE is restricted to superusers"),
             ("ALTER SYSTEM", "ALTER SYSTEM is restricted to superusers"),
-            ("COPY TO", "COPY TO (file export) is restricted to superusers"),
+            (
+                "COPY TO",
+                "COPY TO (file export) is restricted to superusers",
+            ),
             ("LOAD ", "LOAD is restricted to superusers"),
         ];
         for (pattern, reason) in &dangerous {
@@ -783,9 +791,15 @@ mod tests {
     #[test]
     fn test_firewall_allows_normal_sql() {
         let fw = SqlFirewall::new(SqlFirewallConfig::default());
-        assert!(fw.check("SELECT * FROM users WHERE id = 1", false).is_allowed());
-        assert!(fw.check("INSERT INTO orders (id, name) VALUES (1, 'test')", false).is_allowed());
-        assert!(fw.check("UPDATE users SET name = 'alice' WHERE id = 1", false).is_allowed());
+        assert!(fw
+            .check("SELECT * FROM users WHERE id = 1", false)
+            .is_allowed());
+        assert!(fw
+            .check("INSERT INTO orders (id, name) VALUES (1, 'test')", false)
+            .is_allowed());
+        assert!(fw
+            .check("UPDATE users SET name = 'alice' WHERE id = 1", false)
+            .is_allowed());
     }
 
     #[test]
@@ -801,7 +815,10 @@ mod tests {
     #[test]
     fn test_firewall_detects_comment_injection() {
         let fw = SqlFirewall::new(SqlFirewallConfig::default());
-        let result = fw.check("SELECT * FROM users WHERE name = 'admin' -- AND password = 'x'", false);
+        let result = fw.check(
+            "SELECT * FROM users WHERE name = 'admin' -- AND password = 'x'",
+            false,
+        );
         assert!(!result.is_allowed());
         if let SqlFirewallResult::Blocked { reason } = result {
             assert!(reason.contains("comment truncation"));
@@ -811,7 +828,10 @@ mod tests {
     #[test]
     fn test_firewall_detects_sleep_injection() {
         let fw = SqlFirewall::new(SqlFirewallConfig::default());
-        let result = fw.check("SELECT * FROM users WHERE id = 1; SELECT pg_sleep(10)", false);
+        let result = fw.check(
+            "SELECT * FROM users WHERE id = 1; SELECT pg_sleep(10)",
+            false,
+        );
         assert!(!result.is_allowed());
     }
 
@@ -844,7 +864,9 @@ mod tests {
     #[test]
     fn test_firewall_allows_semicolons_in_strings() {
         let fw = SqlFirewall::new(SqlFirewallConfig::default());
-        assert!(fw.check("SELECT * FROM t WHERE name = 'a;b'", false).is_allowed());
+        assert!(fw
+            .check("SELECT * FROM t WHERE name = 'a;b'", false)
+            .is_allowed());
     }
 
     #[test]

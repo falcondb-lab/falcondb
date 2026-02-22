@@ -207,7 +207,8 @@ impl SecurityManager {
 
     /// Check if an IP address is allowed to connect.
     pub fn check_ip(&self, ip: IpAddr) -> IpCheckResult {
-        self.total_connection_attempts.fetch_add(1, Ordering::Relaxed);
+        self.total_connection_attempts
+            .fetch_add(1, Ordering::Relaxed);
 
         if !*self.ip_allowlist_enabled.read() {
             return IpCheckResult::Disabled;
@@ -370,8 +371,14 @@ mod tests {
     #[test]
     fn test_security_summary() {
         let mgr = SecurityManager::new();
-        mgr.set_encryption_config(EncryptionConfig { enabled: true, ..Default::default() });
-        mgr.set_tls_config(TlsConfig { enabled: true, ..Default::default() });
+        mgr.set_encryption_config(EncryptionConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        mgr.set_tls_config(TlsConfig {
+            enabled: true,
+            ..Default::default()
+        });
         mgr.enable_ip_allowlist();
         mgr.add_allowed_ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
 

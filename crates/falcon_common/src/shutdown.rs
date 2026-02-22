@@ -124,7 +124,11 @@ mod tests {
         sig.shutdown();
         let (result, elapsed) = handle.join().unwrap();
         assert!(result);
-        assert!(elapsed < Duration::from_secs(1), "should wake within 1s, took {:?}", elapsed);
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "should wake within 1s, took {:?}",
+            elapsed
+        );
     }
 
     #[test]

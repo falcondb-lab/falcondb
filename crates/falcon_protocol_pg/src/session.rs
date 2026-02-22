@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use falcon_common::datum::Datum;
-use falcon_common::types::{DataType, IsolationLevel, TableId};
 use falcon_common::schema::TableSchema;
+use falcon_common::security::{RoleId, TxnPriority, SUPERUSER_ROLE_ID};
 use falcon_common::tenant::{TenantId, SYSTEM_TENANT_ID};
-use falcon_common::security::{RoleId, SUPERUSER_ROLE_ID, TxnPriority};
+use falcon_common::types::{DataType, IsolationLevel, TableId};
 use falcon_planner::PhysicalPlan;
 use falcon_txn::TxnHandle;
 
@@ -59,7 +59,10 @@ fn default_guc_vars() -> HashMap<String, String> {
     m.insert("integer_datetimes".into(), "on".into());
     m.insert("intervalstyle".into(), "postgres".into());
     m.insert("is_superuser".into(), "on".into());
-    m.insert("default_transaction_isolation".into(), "read committed".into());
+    m.insert(
+        "default_transaction_isolation".into(),
+        "read committed".into(),
+    );
     m.insert("max_connections".into(), "100".into());
     m.insert("application_name".into(), String::new());
     m.insert("extra_float_digits".into(), "1".into());

@@ -53,18 +53,13 @@ impl PolicyCommand {
 }
 
 /// Policy type: permissive (OR-combined) or restrictive (AND-combined).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum PolicyPermissiveness {
     /// Multiple permissive policies are OR-combined: any match allows access.
+    #[default]
     Permissive,
     /// Restrictive policies are AND-combined: all must match.
     Restrictive,
-}
-
-impl Default for PolicyPermissiveness {
-    fn default() -> Self {
-        Self::Permissive
-    }
 }
 
 /// A Row-Level Security policy on a table.
@@ -166,9 +161,14 @@ impl RlsPolicyManager {
     /// Drop a policy by name on a specific table.
     pub fn drop_policy(&mut self, table_id: TableId, policy_name: &str) -> Option<RlsPolicy> {
         let ids = self.table_policies.get(&table_id)?;
-        let target_id = ids.iter().find(|id| {
-            self.policies.get(id).map_or(false, |p| p.name.eq_ignore_ascii_case(policy_name))
-        }).copied()?;
+        let target_id = ids
+            .iter()
+            .find(|id| {
+                self.policies
+                    .get(id)
+                    .is_some_and(|p| p.name.eq_ignore_ascii_case(policy_name))
+            })
+            .copied()?;
 
         if let Some(ids) = self.table_policies.get_mut(&table_id) {
             ids.retain(|id| *id != target_id);
@@ -195,12 +195,14 @@ impl RlsPolicyManager {
 
     /// Check if RLS is enabled on a table.
     pub fn is_rls_enabled(&self, table_id: TableId) -> bool {
-        self.table_config.get(&table_id).map_or(false, |c| c.enabled)
+        self.table_config
+            .get(&table_id)
+            .is_some_and(|c| c.enabled)
     }
 
     /// Check if RLS is forced for table owner.
     pub fn is_rls_forced(&self, table_id: TableId) -> bool {
-        self.table_config.get(&table_id).map_or(false, |c| c.force)
+        self.table_config.get(&table_id).is_some_and(|c| c.force)
     }
 
     /// Check if a role should bypass RLS on a table.
@@ -256,7 +258,8 @@ impl RlsPolicyManager {
     ) -> Option<String> {
         let (permissive, restrictive) = self.applicable_policies(table_id, role_id, cmd);
 
-        let perm_exprs: Vec<&str> = permissive.iter()
+        let perm_exprs: Vec<&str> = permissive
+            .iter()
             .filter_map(|p| p.using_expr.as_deref())
             .collect();
 
@@ -279,7 +282,8 @@ impl RlsPolicyManager {
         if perm_exprs.len() == 1 {
             parts.push(perm_exprs[0].to_string());
         } else {
-            let combined = perm_exprs.iter()
+            let combined = perm_exprs
+                .iter()
                 .map(|e| format!("({})", e))
                 .collect::<Vec<_>>()
                 .join(" OR ");
@@ -305,7 +309,8 @@ impl RlsPolicyManager {
     ) -> Option<String> {
         let (permissive, restrictive) = self.applicable_policies(table_id, role_id, cmd);
 
-        let perm_exprs: Vec<&str> = permissive.iter()
+        let perm_exprs: Vec<&str> = permissive
+            .iter()
             .filter_map(|p| p.effective_check_expr())
             .collect();
 
@@ -325,7 +330,8 @@ impl RlsPolicyManager {
         if perm_exprs.len() == 1 {
             parts.push(perm_exprs[0].to_string());
         } else {
-            let combined = perm_exprs.iter()
+            let combined = perm_exprs
+                .iter()
                 .map(|e| format!("({})", e))
                 .collect::<Vec<_>>()
                 .join(" OR ");
@@ -348,7 +354,8 @@ impl RlsPolicyManager {
 
     /// List all policies on a table.
     pub fn policies_on_table(&self, table_id: TableId) -> Vec<&RlsPolicy> {
-        self.table_policies.get(&table_id)
+        self.table_policies
+            .get(&table_id)
             .map(|ids| ids.iter().filter_map(|id| self.policies.get(id)).collect())
             .unwrap_or_default()
     }
@@ -488,9 +495,16 @@ mod tests {
         let tid = TableId(1);
         mgr.enable_rls(tid);
         mgr.create_policy(make_policy("p1", tid, PolicyCommand::All, "tenant_id = 1"));
-        mgr.create_policy(make_policy("p2", tid, PolicyCommand::All, "is_public = true"));
+        mgr.create_policy(make_policy(
+            "p2",
+            tid,
+            PolicyCommand::All,
+            "is_public = true",
+        ));
 
-        let expr = mgr.combined_using_expr(tid, RoleId(1), PolicyCommand::Select).unwrap();
+        let expr = mgr
+            .combined_using_expr(tid, RoleId(1), PolicyCommand::Select)
+            .unwrap();
         assert!(expr.contains("OR"));
         assert!(expr.contains("tenant_id = 1"));
         assert!(expr.contains("is_public = true"));
@@ -507,7 +521,9 @@ mod tests {
         restrictive.permissiveness = PolicyPermissiveness::Restrictive;
         mgr.create_policy(restrictive);
 
-        let expr = mgr.combined_using_expr(tid, RoleId(1), PolicyCommand::Select).unwrap();
+        let expr = mgr
+            .combined_using_expr(tid, RoleId(1), PolicyCommand::Select)
+            .unwrap();
         assert!(expr.contains("tenant_id = 1"));
         assert!(expr.contains("AND"));
         assert!(expr.contains("deleted_at IS NULL"));

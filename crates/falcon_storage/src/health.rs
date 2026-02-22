@@ -133,7 +133,10 @@ impl HealthScorer {
             name: "transactions".into(),
             score: txn_score,
             status: HealthStatus::from(txn_score),
-            detail: format!("abort_rate={:.3} occ_rate={:.3}", inputs.txn_abort_rate, inputs.occ_conflict_rate),
+            detail: format!(
+                "abort_rate={:.3} occ_rate={:.3}",
+                inputs.txn_abort_rate, inputs.occ_conflict_rate
+            ),
         });
 
         // GC health (weight: 10)
@@ -164,15 +167,13 @@ impl HealthScorer {
         });
 
         // Weighted average
-        let overall = (
-            mem_score as f64 * 0.20
+        let overall = (mem_score as f64 * 0.20
             + wal_score as f64 * 0.15
             + repl_score as f64 * 0.15
             + txn_score as f64 * 0.20
             + gc_score as f64 * 0.10
             + storage_score as f64 * 0.10
-            + conn_score as f64 * 0.10
-        ) as u32;
+            + conn_score as f64 * 0.10) as u32;
 
         let overall = overall.min(100);
 
@@ -195,7 +196,10 @@ impl HealthScorer {
             10
         };
         if score < 70 {
-            recs.push(format!("Memory pressure is high ({:.0}%). Consider scaling up or reducing workload.", inputs.memory_pressure_ratio * 100.0));
+            recs.push(format!(
+                "Memory pressure is high ({:.0}%). Consider scaling up or reducing workload.",
+                inputs.memory_pressure_ratio * 100.0
+            ));
         }
         score
     }
@@ -212,7 +216,10 @@ impl HealthScorer {
             10
         };
         if score < 70 {
-            recs.push(format!("WAL backlog is {}MB. Check replication consumers.", backlog_mb));
+            recs.push(format!(
+                "WAL backlog is {}MB. Check replication consumers.",
+                backlog_mb
+            ));
         }
         score
     }
@@ -229,7 +236,10 @@ impl HealthScorer {
             10
         };
         if score < 70 {
-            recs.push(format!("Replication lag is {}ms. Check replica health.", lag_ms));
+            recs.push(format!(
+                "Replication lag is {}ms. Check replica health.",
+                lag_ms
+            ));
         }
         score
     }
@@ -237,12 +247,20 @@ impl HealthScorer {
     fn score_transactions(inputs: &HealthInputs, recs: &mut Vec<String>) -> u32 {
         let abort_penalty = (inputs.txn_abort_rate * 100.0) as u32;
         let occ_penalty = (inputs.occ_conflict_rate * 50.0) as u32;
-        let score = 100u32.saturating_sub(abort_penalty).saturating_sub(occ_penalty);
+        let score = 100u32
+            .saturating_sub(abort_penalty)
+            .saturating_sub(occ_penalty);
         if inputs.txn_abort_rate > 0.1 {
-            recs.push(format!("Transaction abort rate is {:.1}%. Investigate contention.", inputs.txn_abort_rate * 100.0));
+            recs.push(format!(
+                "Transaction abort rate is {:.1}%. Investigate contention.",
+                inputs.txn_abort_rate * 100.0
+            ));
         }
         if inputs.sla_violations > 0 {
-            recs.push(format!("{} SLA violations detected. Review priority configuration.", inputs.sla_violations));
+            recs.push(format!(
+                "{} SLA violations detected. Review priority configuration.",
+                inputs.sla_violations
+            ));
         }
         score
     }
@@ -267,7 +285,10 @@ impl HealthScorer {
             5
         };
         if score < 60 {
-            recs.push(format!("Disk usage is {:.0}%. Plan for capacity expansion.", inputs.disk_usage_ratio * 100.0));
+            recs.push(format!(
+                "Disk usage is {:.0}%. Plan for capacity expansion.",
+                inputs.disk_usage_ratio * 100.0
+            ));
         }
         score
     }
@@ -285,7 +306,10 @@ impl HealthScorer {
             20
         };
         if score < 60 {
-            recs.push(format!("Connection pool is {:.0}% full. Consider increasing max_connections.", ratio * 100.0));
+            recs.push(format!(
+                "Connection pool is {:.0}% full. Consider increasing max_connections.",
+                ratio * 100.0
+            ));
         }
         score
     }
@@ -342,10 +366,20 @@ impl CapacityPredictor {
         };
 
         let recommendation = match days_until_full {
-            Some(d) if d < 7 => format!("CRITICAL: {} will be exhausted in ~{} days. Immediate action required.", resource, d),
-            Some(d) if d < 30 => format!("WARNING: {} will be exhausted in ~{} days. Plan capacity expansion.", resource, d),
+            Some(d) if d < 7 => format!(
+                "CRITICAL: {} will be exhausted in ~{} days. Immediate action required.",
+                resource, d
+            ),
+            Some(d) if d < 30 => format!(
+                "WARNING: {} will be exhausted in ~{} days. Plan capacity expansion.",
+                resource, d
+            ),
             Some(d) => format!("{} has ~{} days of capacity remaining.", resource, d),
-            None if utilization > 0.9 => format!("{} is at {:.0}% utilization with no growth trend.", resource, utilization * 100.0),
+            None if utilization > 0.9 => format!(
+                "{} is at {:.0}% utilization with no growth trend.",
+                resource,
+                utilization * 100.0
+            ),
             None => format!("{} capacity is healthy.", resource),
         };
 
@@ -394,7 +428,11 @@ mod tests {
             ..HealthInputs::default()
         };
         let report = HealthScorer::score(&inputs);
-        let mem = report.components.iter().find(|c| c.name == "memory").unwrap();
+        let mem = report
+            .components
+            .iter()
+            .find(|c| c.name == "memory")
+            .unwrap();
         assert_eq!(mem.score, 10);
         assert_eq!(mem.status, HealthStatus::Critical);
         assert!(!report.recommendations.is_empty());
@@ -419,7 +457,11 @@ mod tests {
             ..HealthInputs::default()
         };
         let report = HealthScorer::score(&inputs);
-        let txn = report.components.iter().find(|c| c.name == "transactions").unwrap();
+        let txn = report
+            .components
+            .iter()
+            .find(|c| c.name == "transactions")
+            .unwrap();
         assert!(txn.score < 60);
     }
 
@@ -430,7 +472,11 @@ mod tests {
             ..HealthInputs::default()
         };
         let report = HealthScorer::score(&inputs);
-        let storage = report.components.iter().find(|c| c.name == "storage").unwrap();
+        let storage = report
+            .components
+            .iter()
+            .find(|c| c.name == "storage")
+            .unwrap();
         assert_eq!(storage.score, 5);
     }
 
@@ -447,11 +493,10 @@ mod tests {
     #[test]
     fn test_capacity_prediction_growth() {
         let pred = CapacityPredictor::predict(
-            "storage",
-            800,    // current
-            1000,   // max
-            600,    // 10 days ago
-            10,     // days
+            "storage", 800,  // current
+            1000, // max
+            600,  // 10 days ago
+            10,   // days
         );
         assert_eq!(pred.days_until_full, Some(10)); // 200 remaining / 20 per day = 10
         assert!((pred.growth_rate_per_day - 20.0).abs() < 0.1);
@@ -460,13 +505,7 @@ mod tests {
 
     #[test]
     fn test_capacity_prediction_critical() {
-        let pred = CapacityPredictor::predict(
-            "memory",
-            950,
-            1000,
-            900,
-            5,
-        );
+        let pred = CapacityPredictor::predict("memory", 950, 1000, 900, 5);
         // 50 remaining / 10 per day = 5 days
         assert_eq!(pred.days_until_full, Some(5));
         assert!(pred.recommendation.contains("CRITICAL"));

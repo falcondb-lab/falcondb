@@ -67,9 +67,9 @@ impl ColumnEncoding {
     pub fn get(&self, row_idx: usize) -> Option<Datum> {
         match self {
             ColumnEncoding::Plain(v) => v.get(row_idx).cloned(),
-            ColumnEncoding::Dictionary { dict, indices } => {
-                indices.get(row_idx).and_then(|&i| dict.get(i as usize).cloned())
-            }
+            ColumnEncoding::Dictionary { dict, indices } => indices
+                .get(row_idx)
+                .and_then(|&i| dict.get(i as usize).cloned()),
             ColumnEncoding::Rle(runs) => {
                 let mut offset = 0usize;
                 for (val, count) in runs {
@@ -188,7 +188,9 @@ impl ZoneMap {
 
         for v in values {
             match v {
-                Datum::Null => { has_null = true; }
+                Datum::Null => {
+                    has_null = true;
+                }
                 Datum::Int32(n) => {
                     let f = *n as f64;
                     min_f = Some(min_f.map_or(f, |m: f64| m.min(f)));
@@ -240,7 +242,9 @@ impl Segment {
     /// Build a segment from a batch of rows.
     pub fn from_rows(rows: &[OwnedRow], num_cols: usize, seq: u64) -> Self {
         let row_count = rows.len();
-        let mut col_values: Vec<Vec<Datum>> = (0..num_cols).map(|_| Vec::with_capacity(row_count)).collect();
+        let mut col_values: Vec<Vec<Datum>> = (0..num_cols)
+            .map(|_| Vec::with_capacity(row_count))
+            .collect();
 
         for row in rows {
             for (col_idx, col_vec) in col_values.iter_mut().enumerate().take(num_cols) {
@@ -265,7 +269,9 @@ impl Segment {
         if row_idx >= self.row_count {
             return None;
         }
-        let values: Vec<Datum> = self.columns.iter()
+        let values: Vec<Datum> = self
+            .columns
+            .iter()
             .map(|col| col.get(row_idx).unwrap_or(Datum::Null))
             .collect();
         Some(OwnedRow::new(values))
@@ -563,7 +569,9 @@ mod tests {
     #[test]
     fn test_encoding_dictionary() {
         // 100 rows with only 3 distinct values — should get dict encoding
-        let values: Vec<Datum> = (0..100).map(|i| Datum::Text(format!("v{}", i % 3))).collect();
+        let values: Vec<Datum> = (0..100)
+            .map(|i| Datum::Text(format!("v{}", i % 3)))
+            .collect();
         let enc = encode_column(&values);
         assert!(matches!(enc, ColumnEncoding::Dictionary { .. }));
         assert_eq!(enc.len(), 100);
@@ -574,11 +582,16 @@ mod tests {
         let table = ColumnStoreTable::new(test_schema());
         let txn = TxnId(1);
         for i in 0..10 {
-            table.insert(OwnedRow::new(vec![
-                Datum::Int64(i),
-                Datum::Text(format!("r{}", i)),
-                Datum::Float64(0.0),
-            ]), txn).unwrap();
+            table
+                .insert(
+                    OwnedRow::new(vec![
+                        Datum::Int64(i),
+                        Datum::Text(format!("r{}", i)),
+                        Datum::Float64(0.0),
+                    ]),
+                    txn,
+                )
+                .unwrap();
         }
         table.freeze_buffer();
         assert_eq!(table.scan(txn, Timestamp(100)).len(), 10);

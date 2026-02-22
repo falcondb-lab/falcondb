@@ -110,10 +110,7 @@ pub fn target_shard_from_datums(
 /// Determine all target shards for a table.
 /// Reference tables → all shards.
 /// Hash/None tables → all shards (for full scans; point queries use target_shard_for_row).
-pub fn all_shards_for_table(
-    _schema: &TableSchema,
-    num_shards: u64,
-) -> Vec<ShardId> {
+pub fn all_shards_for_table(_schema: &TableSchema, num_shards: u64) -> Vec<ShardId> {
     (0..num_shards).map(ShardId).collect()
 }
 
@@ -208,19 +205,31 @@ mod tests {
             name: "orders".to_string(),
             columns: vec![
                 ColumnDef {
-                    id: ColumnId(0), name: "id".into(),
-                    data_type: DataType::Int64, nullable: false,
-                    is_primary_key: true, default_value: None, is_serial: false,
+                    id: ColumnId(0),
+                    name: "id".into(),
+                    data_type: DataType::Int64,
+                    nullable: false,
+                    is_primary_key: true,
+                    default_value: None,
+                    is_serial: false,
                 },
                 ColumnDef {
-                    id: ColumnId(1), name: "customer_id".into(),
-                    data_type: DataType::Int64, nullable: false,
-                    is_primary_key: false, default_value: None, is_serial: false,
+                    id: ColumnId(1),
+                    name: "customer_id".into(),
+                    data_type: DataType::Int64,
+                    nullable: false,
+                    is_primary_key: false,
+                    default_value: None,
+                    is_serial: false,
                 },
                 ColumnDef {
-                    id: ColumnId(2), name: "amount".into(),
-                    data_type: DataType::Float64, nullable: true,
-                    is_primary_key: false, default_value: None, is_serial: false,
+                    id: ColumnId(2),
+                    name: "amount".into(),
+                    data_type: DataType::Float64,
+                    nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                    is_serial: false,
                 },
             ],
             primary_key_columns: vec![0],
@@ -234,13 +243,15 @@ mod tests {
         TableSchema {
             id: TableId(2),
             name: "countries".to_string(),
-            columns: vec![
-                ColumnDef {
-                    id: ColumnId(0), name: "code".into(),
-                    data_type: DataType::Text, nullable: false,
-                    is_primary_key: true, default_value: None, is_serial: false,
-                },
-            ],
+            columns: vec![ColumnDef {
+                id: ColumnId(0),
+                name: "code".into(),
+                data_type: DataType::Text,
+                nullable: false,
+                is_primary_key: true,
+                default_value: None,
+                is_serial: false,
+            }],
             primary_key_columns: vec![0],
             sharding_policy: ShardingPolicy::Reference,
             ..Default::default()
@@ -278,7 +289,10 @@ mod tests {
         ]);
         let h_single = compute_shard_hash(&row, &[1]);
         let h_multi = compute_shard_hash(&row, &[1, 2]);
-        assert_ne!(h_single, h_multi, "multi-col hash should differ from single-col");
+        assert_ne!(
+            h_single, h_multi,
+            "multi-col hash should differ from single-col"
+        );
     }
 
     #[test]
@@ -332,7 +346,8 @@ mod tests {
             assert!(
                 *count > 1500 && *count < 3500,
                 "shard {} has {} rows, expected ~2500",
-                i, count
+                i,
+                count
             );
         }
     }

@@ -12,10 +12,12 @@ use std::io::Cursor;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
-use openraft::storage::{LogFlushed, LogState, RaftLogReader, RaftLogStorage, RaftStateMachine, Snapshot};
+use openraft::storage::{
+    LogFlushed, LogState, RaftLogReader, RaftLogStorage, RaftStateMachine, Snapshot,
+};
 use openraft::{
-    BasicNode, Entry, EntryPayload, LogId, RaftLogId, RaftSnapshotBuilder,
-    SnapshotMeta, StorageError, StoredMembership, Vote,
+    BasicNode, Entry, EntryPayload, LogId, RaftLogId, RaftSnapshotBuilder, SnapshotMeta,
+    StorageError, StoredMembership, Vote,
 };
 use tokio::sync::Mutex;
 
@@ -65,7 +67,9 @@ impl Default for LogStore {
 
 impl LogStore {
     pub fn new() -> Self {
-        Self { inner: Arc::new(Mutex::new(LogStoreInner::new())) }
+        Self {
+            inner: Arc::new(Mutex::new(LogStoreInner::new())),
+        }
     }
 }
 
@@ -212,10 +216,7 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
         Ok((self.last_applied, self.last_membership.clone()))
     }
 
-    async fn apply<I>(
-        &mut self,
-        entries: I,
-    ) -> Result<Vec<FalconResponse>, StorageError<u64>>
+    async fn apply<I>(&mut self, entries: I) -> Result<Vec<FalconResponse>, StorageError<u64>>
     where
         I: IntoIterator<Item = Entry<TypeConfig>> + Send,
         I::IntoIter: Send,
@@ -243,9 +244,10 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
                                     // Return storage error to openraft so it can handle it.
                                     return Err(StorageError::IO {
                                         source: openraft::StorageIOError::write_state_machine(
-                                            &std::io::Error::other(
-                                                format!("apply callback: {}", e),
-                                            ),
+                                            &std::io::Error::other(format!(
+                                                "apply callback: {}",
+                                                e
+                                            )),
                                         ),
                                     });
                                 }
@@ -320,14 +322,15 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
 }
 
 impl RaftSnapshotBuilder<TypeConfig> for StateMachine {
-    async fn build_snapshot(
-        &mut self,
-    ) -> Result<Snapshot<TypeConfig>, StorageError<u64>> {
+    async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfig>, StorageError<u64>> {
         let data = serde_json::to_vec(&self.data).unwrap_or_default();
 
         self.snapshot_idx += 1;
-        let snapshot_id = format!("snap-{}-{}", self.snapshot_idx,
-            self.last_applied.map_or(0, |id| id.index));
+        let snapshot_id = format!(
+            "snap-{}-{}",
+            self.snapshot_idx,
+            self.last_applied.map_or(0, |id| id.index)
+        );
 
         let meta = SnapshotMeta {
             last_log_id: self.last_applied,

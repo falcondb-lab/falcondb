@@ -8,10 +8,10 @@ use falcon_sql_frontend::types::*;
 use falcon_storage::memtable::{encode_column_value, encode_pk_from_datums};
 use falcon_txn::TxnHandle;
 
+use crate::executor::{CteData, ExecutionResult, Executor};
 use crate::expr_engine::ExprEngine;
-use crate::executor::{Executor, CteData, ExecutionResult};
-use crate::vectorized::{RecordBatch, vectorized_filter, is_vectorizable};
 use crate::parallel::parallel_filter;
+use crate::vectorized::{is_vectorizable, vectorized_filter, RecordBatch};
 
 impl Executor {
     /// Try to detect a PK point lookup: `WHERE pk_col = literal` for single-column PKs.
@@ -29,7 +29,11 @@ impl Executor {
         let pk_col = pk_cols[0];
 
         match f {
-            BoundExpr::BinaryOp { left, op: BinOp::Eq, right } => {
+            BoundExpr::BinaryOp {
+                left,
+                op: BinOp::Eq,
+                right,
+            } => {
                 let (col_idx, datum) = match (left.as_ref(), right.as_ref()) {
                     (BoundExpr::ColumnRef(idx), BoundExpr::Literal(d)) => (*idx, d),
                     (BoundExpr::Literal(d), BoundExpr::ColumnRef(idx)) => (*idx, d),
@@ -42,9 +46,18 @@ impl Executor {
                     None
                 }
             }
-            BoundExpr::BinaryOp { left, op: BinOp::And, right } => {
+            BoundExpr::BinaryOp {
+                left,
+                op: BinOp::And,
+                right,
+            } => {
                 // Try left side
-                if let BoundExpr::BinaryOp { left: ll, op: BinOp::Eq, right: lr } = left.as_ref() {
+                if let BoundExpr::BinaryOp {
+                    left: ll,
+                    op: BinOp::Eq,
+                    right: lr,
+                } = left.as_ref()
+                {
                     let extracted = match (ll.as_ref(), lr.as_ref()) {
                         (BoundExpr::ColumnRef(idx), BoundExpr::Literal(d)) => Some((*idx, d)),
                         (BoundExpr::Literal(d), BoundExpr::ColumnRef(idx)) => Some((*idx, d)),
@@ -58,7 +71,12 @@ impl Executor {
                     }
                 }
                 // Try right side
-                if let BoundExpr::BinaryOp { left: rl, op: BinOp::Eq, right: rr } = right.as_ref() {
+                if let BoundExpr::BinaryOp {
+                    left: rl,
+                    op: BinOp::Eq,
+                    right: rr,
+                } = right.as_ref()
+                {
                     let extracted = match (rl.as_ref(), rr.as_ref()) {
                         (BoundExpr::ColumnRef(idx), BoundExpr::Literal(d)) => Some((*idx, d)),
                         (BoundExpr::Literal(d), BoundExpr::ColumnRef(idx)) => Some((*idx, d)),
@@ -95,7 +113,11 @@ impl Executor {
         // Pattern: BinaryOp { ColumnRef(idx), Eq, Literal(val) }
         // or BinaryOp { Literal(val), Eq, ColumnRef(idx) }
         match f {
-            BoundExpr::BinaryOp { left, op: BinOp::Eq, right } => {
+            BoundExpr::BinaryOp {
+                left,
+                op: BinOp::Eq,
+                right,
+            } => {
                 let (col_idx, datum) = match (left.as_ref(), right.as_ref()) {
                     (BoundExpr::ColumnRef(idx), BoundExpr::Literal(d)) => (*idx, d),
                     (BoundExpr::Literal(d), BoundExpr::ColumnRef(idx)) => (*idx, d),
@@ -109,9 +131,18 @@ impl Executor {
                 }
             }
             // Pattern: AND(col = literal, rest) — extract the indexed predicate
-            BoundExpr::BinaryOp { left, op: BinOp::And, right } => {
+            BoundExpr::BinaryOp {
+                left,
+                op: BinOp::And,
+                right,
+            } => {
                 // Try left side
-                if let BoundExpr::BinaryOp { left: ll, op: BinOp::Eq, right: lr } = left.as_ref() {
+                if let BoundExpr::BinaryOp {
+                    left: ll,
+                    op: BinOp::Eq,
+                    right: lr,
+                } = left.as_ref()
+                {
                     let extracted = match (ll.as_ref(), lr.as_ref()) {
                         (BoundExpr::ColumnRef(idx), BoundExpr::Literal(d)) => Some((*idx, d)),
                         (BoundExpr::Literal(d), BoundExpr::ColumnRef(idx)) => Some((*idx, d)),
@@ -125,7 +156,12 @@ impl Executor {
                     }
                 }
                 // Try right side
-                if let BoundExpr::BinaryOp { left: rl, op: BinOp::Eq, right: rr } = right.as_ref() {
+                if let BoundExpr::BinaryOp {
+                    left: rl,
+                    op: BinOp::Eq,
+                    right: rr,
+                } = right.as_ref()
+                {
                     let extracted = match (rl.as_ref(), rr.as_ref()) {
                         (BoundExpr::ColumnRef(idx), BoundExpr::Literal(d)) => Some((*idx, d)),
                         (BoundExpr::Literal(d), BoundExpr::ColumnRef(idx)) => Some((*idx, d)),
@@ -174,20 +210,37 @@ impl Executor {
         let key = encode_column_value(&datum);
 
         let read_ts = txn.read_ts(self.txn_mgr.current_ts());
-        let raw_rows = self.storage.index_scan(table_id, index_col, &key, txn.txn_id, read_ts)?;
+        let raw_rows = self
+            .storage
+            .index_scan(table_id, index_col, &key, txn.txn_id, read_ts)?;
 
         // From here, same pipeline as exec_seq_scan with the residual filter
         let mat_filter = self.materialize_filter(filter, txn)?;
         let mat_having = self.materialize_filter(having, txn)?;
 
-        let filter_has_correlated_sub = mat_filter.as_ref()
-            .is_some_and(Self::expr_has_outer_ref);
+        let filter_has_correlated_sub = mat_filter.as_ref().is_some_and(Self::expr_has_outer_ref);
 
-        let has_window = projections.iter().any(|p| matches!(p, BoundProjection::Window(..)));
-        let has_agg = projections.iter().any(|p| matches!(p, BoundProjection::Aggregate(..)));
+        let has_window = projections
+            .iter()
+            .any(|p| matches!(p, BoundProjection::Window(..)));
+        let has_agg = projections
+            .iter()
+            .any(|p| matches!(p, BoundProjection::Aggregate(..)));
 
         if (has_agg || !group_by.is_empty() || !grouping_sets.is_empty()) && !has_window {
-            return self.exec_aggregate(&raw_rows, schema, projections, mat_filter.as_ref(), group_by, grouping_sets, mat_having.as_ref(), order_by, limit, offset, distinct);
+            return self.exec_aggregate(
+                &raw_rows,
+                schema,
+                projections,
+                mat_filter.as_ref(),
+                group_by,
+                grouping_sets,
+                mat_having.as_ref(),
+                order_by,
+                limit,
+                offset,
+                distinct,
+            );
         }
 
         let mut filtered: Vec<&OwnedRow> = Vec::new();
@@ -195,10 +248,14 @@ impl Executor {
             if let Some(ref f) = mat_filter {
                 if filter_has_correlated_sub {
                     let row_filter = self.materialize_correlated(f, row, txn)?;
-                    if !crate::expr_engine::ExprEngine::eval_filter(&row_filter, row).map_err(FalconError::Execution)? {
+                    if !crate::expr_engine::ExprEngine::eval_filter(&row_filter, row)
+                        .map_err(FalconError::Execution)?
+                    {
                         continue;
                     }
-                } else if !crate::expr_engine::ExprEngine::eval_filter(f, row).map_err(FalconError::Execution)? {
+                } else if !crate::expr_engine::ExprEngine::eval_filter(f, row)
+                    .map_err(FalconError::Execution)?
+                {
                     continue;
                 }
             }
@@ -273,12 +330,18 @@ impl Executor {
         let (raw_rows, effective_filter): (Vec<(Vec<u8>, OwnedRow)>, Option<BoundExpr>) =
             if !virtual_rows.is_empty() {
                 // VALUES clause or GENERATE_SERIES — use inline data directly
-                (virtual_rows.iter().map(|r| (vec![], r.clone())).collect(), filter.cloned())
+                (
+                    virtual_rows.iter().map(|r| (vec![], r.clone())).collect(),
+                    filter.cloned(),
+                )
             } else if table_id == TableId(0) {
                 // Virtual dual table — single empty row for SELECT without FROM
                 (vec![(vec![], OwnedRow::new(vec![]))], filter.cloned())
             } else if let Some(cte_rows) = cte_data.get(&table_id) {
-                (cte_rows.iter().map(|r| (vec![], r.clone())).collect(), filter.cloned())
+                (
+                    cte_rows.iter().map(|r| (vec![], r.clone())).collect(),
+                    filter.cloned(),
+                )
             } else if let Some((pk, remaining)) = self.try_pk_point_lookup(filter, schema) {
                 // PK point lookup: O(1) hash lookup instead of full scan
                 let read_ts = txn.read_ts(self.txn_mgr.current_ts());
@@ -286,14 +349,21 @@ impl Executor {
                     Some(row) => (vec![(pk, row)], remaining),
                     None => (vec![], remaining),
                 }
-            } else if let Some((col_idx, key, remaining)) = self.try_index_scan_predicate(filter, table_id) {
+            } else if let Some((col_idx, key, remaining)) =
+                self.try_index_scan_predicate(filter, table_id)
+            {
                 // Index scan: use secondary index instead of full table scan
                 let read_ts = txn.read_ts(self.txn_mgr.current_ts());
-                let rows = self.storage.index_scan(table_id, col_idx, &key, txn.txn_id, read_ts)?;
+                let rows = self
+                    .storage
+                    .index_scan(table_id, col_idx, &key, txn.txn_id, read_ts)?;
                 (rows, remaining)
             } else {
                 let read_ts = txn.read_ts(self.txn_mgr.current_ts());
-                (self.storage.scan(table_id, txn.txn_id, read_ts)?, filter.cloned())
+                (
+                    self.storage.scan(table_id, txn.txn_id, read_ts)?,
+                    filter.cloned(),
+                )
             };
 
         // Materialize any subqueries in filter/having.
@@ -304,14 +374,17 @@ impl Executor {
 
         // Check if the materialized filter still contains correlated subqueries.
         // If so, we need per-row re-materialization during filtering.
-        let filter_has_correlated_sub = mat_filter.as_ref()
-            .is_some_and(Self::expr_has_outer_ref);
+        let filter_has_correlated_sub = mat_filter.as_ref().is_some_and(Self::expr_has_outer_ref);
 
         // Check if this is a window function query
-        let has_window = projections.iter().any(|p| matches!(p, BoundProjection::Window(..)));
+        let has_window = projections
+            .iter()
+            .any(|p| matches!(p, BoundProjection::Window(..)));
 
         // Check if this is an aggregate query
-        let has_agg = projections.iter().any(|p| matches!(p, BoundProjection::Aggregate(..)));
+        let has_agg = projections
+            .iter()
+            .any(|p| matches!(p, BoundProjection::Aggregate(..)));
 
         if (has_agg || !group_by.is_empty() || !grouping_sets.is_empty()) && !has_window {
             // ── Vectorized columnar aggregate path (ColumnStore tables only) ──
@@ -329,11 +402,32 @@ impl Executor {
             if is_simple_agg {
                 let read_ts = txn.read_ts(self.txn_mgr.current_ts());
                 if let Some(col_vecs) = self.storage.scan_columnar(table_id, txn.txn_id, read_ts) {
-                    return self.exec_columnar_aggregate(col_vecs, schema, projections, mat_filter.as_ref(), order_by, limit, offset, distinct);
+                    return self.exec_columnar_aggregate(
+                        col_vecs,
+                        schema,
+                        projections,
+                        mat_filter.as_ref(),
+                        order_by,
+                        limit,
+                        offset,
+                        distinct,
+                    );
                 }
             }
 
-            return self.exec_aggregate(&raw_rows, schema, projections, mat_filter.as_ref(), group_by, grouping_sets, mat_having.as_ref(), order_by, limit, offset, distinct);
+            return self.exec_aggregate(
+                &raw_rows,
+                schema,
+                projections,
+                mat_filter.as_ref(),
+                group_by,
+                grouping_sets,
+                mat_having.as_ref(),
+                order_by,
+                limit,
+                offset,
+                distinct,
+            );
         }
 
         // Filter — choose execution strategy based on data size and query shape.
@@ -348,7 +442,7 @@ impl Executor {
                     }
                 }
             } else if self.parallel_config.should_parallelize(raw_rows.len())
-                      && is_vectorizable(projections, mat_filter.as_ref())
+                && is_vectorizable(projections, mat_filter.as_ref())
             {
                 // ── Parallel filter path ──
                 let matched = parallel_filter(&raw_rows, f, &self.parallel_config);
@@ -462,9 +556,10 @@ impl Executor {
             DistinctMode::On(indices) => {
                 let mut seen: Vec<Vec<String>> = Vec::new();
                 rows.retain(|row| {
-                    let key: Vec<String> = indices.iter().map(|&i| {
-                        row.get(i).map(|d| format!("{}", d)).unwrap_or_default()
-                    }).collect();
+                    let key: Vec<String> = indices
+                        .iter()
+                        .map(|&i| row.get(i).map(|d| format!("{}", d)).unwrap_or_default())
+                        .collect();
                     if seen.contains(&key) {
                         false
                     } else {
@@ -494,10 +589,12 @@ impl Executor {
                 BoundProjection::Expr(expr, _) => {
                     if Self::expr_has_outer_ref(expr) {
                         let mat = self.materialize_correlated(expr, row, txn)?;
-                        let val = ExprEngine::eval_row(&mat, row).map_err(FalconError::Execution)?;
+                        let val =
+                            ExprEngine::eval_row(&mat, row).map_err(FalconError::Execution)?;
                         values.push(val);
                     } else {
-                        let val = ExprEngine::eval_row(expr, row).map_err(FalconError::Execution)?;
+                        let val =
+                            ExprEngine::eval_row(expr, row).map_err(FalconError::Execution)?;
                         values.push(val);
                     }
                 }
@@ -548,17 +645,23 @@ impl Executor {
     ) -> Result<Datum, FalconError> {
         match expr {
             BoundExpr::SequenceNextval(name) => {
-                let val = self.storage.sequence_nextval(name)
+                let val = self
+                    .storage
+                    .sequence_nextval(name)
                     .map_err(FalconError::Storage)?;
                 Ok(Datum::Int64(val))
             }
             BoundExpr::SequenceCurrval(name) => {
-                let val = self.storage.sequence_currval(name)
+                let val = self
+                    .storage
+                    .sequence_currval(name)
                     .map_err(FalconError::Storage)?;
                 Ok(Datum::Int64(val))
             }
             BoundExpr::SequenceSetval(name, value) => {
-                let val = self.storage.sequence_setval(name, *value)
+                let val = self
+                    .storage
+                    .sequence_setval(name, *value)
                     .map_err(FalconError::Storage)?;
                 Ok(Datum::Int64(val))
             }
@@ -566,4 +669,3 @@ impl Executor {
         }
     }
 }
-

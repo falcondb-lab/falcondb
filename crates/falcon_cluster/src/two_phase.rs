@@ -9,8 +9,8 @@
 //!    If commit fails on any shard after prepare, the coordinator logs
 //!    the inconsistency (in production, a recovery log resolves this).
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use falcon_common::error::FalconError;
@@ -19,10 +19,9 @@ use falcon_storage::engine::StorageEngine;
 use falcon_txn::manager::TxnManager;
 
 use crate::cross_shard::{
-    CircuitBreaker, ConcurrencyLimiter, CrossShardLatencyBreakdown,
-    CrossShardTxnResult, DeadlockDetector, FailureClass, LayeredTimeouts,
-    RetryConfig, RetryOutcome, ShardConflictTracker, TimeoutPhase,
-    TimeoutPolicy, WaitReason,
+    CircuitBreaker, ConcurrencyLimiter, CrossShardLatencyBreakdown, CrossShardTxnResult,
+    DeadlockDetector, FailureClass, LayeredTimeouts, RetryConfig, RetryOutcome,
+    ShardConflictTracker, TimeoutPhase, TimeoutPolicy, WaitReason,
 };
 use crate::sharded_engine::ShardedEngine;
 
@@ -75,11 +74,7 @@ impl TwoPhaseCoordinator {
         write_fn: F,
     ) -> Result<TwoPhaseResult, FalconError>
     where
-        F: Fn(
-                &StorageEngine,
-                &TxnManager,
-                falcon_common::types::TxnId,
-            ) -> Result<(), FalconError>
+        F: Fn(&StorageEngine, &TxnManager, falcon_common::types::TxnId) -> Result<(), FalconError>
             + Send
             + Sync,
     {
@@ -112,11 +107,7 @@ impl TwoPhaseCoordinator {
                     });
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "2PC prepare failed on shard {:?}: {}",
-                        shard_id,
-                        e
-                    );
+                    tracing::warn!("2PC prepare failed on shard {:?}: {}", shard_id, e);
                     // Mark as not prepared
                     participants.push(ShardParticipant {
                         shard_id,
@@ -148,7 +139,8 @@ impl TwoPhaseCoordinator {
                     None => {
                         tracing::error!(
                             "2PC commit: shard {:?} not found — skipping commit for txn {}",
-                            p.shard_id, p.txn_id
+                            p.shard_id,
+                            p.txn_id
                         );
                         continue;
                     }
@@ -271,11 +263,7 @@ impl HardenedTwoPhaseCoordinator {
         write_fn: F,
     ) -> Result<CrossShardTxnResult, FalconError>
     where
-        F: Fn(
-                &StorageEngine,
-                &TxnManager,
-                falcon_common::types::TxnId,
-            ) -> Result<(), FalconError>
+        F: Fn(&StorageEngine, &TxnManager, falcon_common::types::TxnId) -> Result<(), FalconError>
             + Send
             + Sync,
     {
@@ -344,11 +332,8 @@ impl HardenedTwoPhaseCoordinator {
 
             // Register with deadlock detector
             let shard_ids_raw: Vec<u64> = target_shards.iter().map(|s| s.0).collect();
-            self.deadlock_detector.register_wait(
-                txn_seq,
-                shard_ids_raw,
-                WaitReason::CommitBarrier,
-            );
+            self.deadlock_detector
+                .register_wait(txn_seq, shard_ids_raw, WaitReason::CommitBarrier);
 
             let result = self.execute_inner(
                 target_shards,
@@ -415,7 +400,12 @@ impl HardenedTwoPhaseCoordinator {
                 let backoff = self.config.retry.backoff_for_attempt(attempt);
                 retry_outcome.total_backoff += backoff;
                 latency.retry_backoff_us += backoff.as_micros() as u64;
-                std::thread::sleep(backoff);
+                // Interruptible backoff: use condvar timeout instead of bare sleep
+                // so the thread yields properly and doesn't block shutdown.
+                let pair = std::sync::Mutex::new(false);
+                let cvar = std::sync::Condvar::new();
+                let guard = pair.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = cvar.wait_timeout(guard, backoff);
             }
         }
 
@@ -446,11 +436,7 @@ impl HardenedTwoPhaseCoordinator {
         latency: &mut CrossShardLatencyBreakdown,
     ) -> Result<bool, FalconError>
     where
-        F: Fn(
-                &StorageEngine,
-                &TxnManager,
-                falcon_common::types::TxnId,
-            ) -> Result<(), FalconError>
+        F: Fn(&StorageEngine, &TxnManager, falcon_common::types::TxnId) -> Result<(), FalconError>
             + Send
             + Sync,
     {
@@ -465,7 +451,10 @@ impl HardenedTwoPhaseCoordinator {
                 self.abort_all(&participants);
                 latency.prepare_wal_us = prepare_start.elapsed().as_micros() as u64;
                 return Err(FalconError::Transient {
-                    reason: format!("2PC total timeout exceeded during prepare (shard {:?})", shard_id),
+                    reason: format!(
+                        "2PC total timeout exceeded during prepare (shard {:?})",
+                        shard_id
+                    ),
                     retry_after_ms: 100,
                 });
             }
@@ -497,7 +486,9 @@ impl HardenedTwoPhaseCoordinator {
                         return Err(FalconError::Transient {
                             reason: format!(
                                 "2PC prepare timeout on shard {:?} ({}us > {}us)",
-                                shard_id, rpc_us, self.config.timeouts.prepare.as_micros()
+                                shard_id,
+                                rpc_us,
+                                self.config.timeouts.prepare.as_micros()
                             ),
                             retry_after_ms: 50,
                         });
@@ -510,7 +501,9 @@ impl HardenedTwoPhaseCoordinator {
                     });
                 }
                 Err(e) => {
-                    latency.shard_rpc_us.push((shard_id.0, rpc_start.elapsed().as_micros() as u64));
+                    latency
+                        .shard_rpc_us
+                        .push((shard_id.0, rpc_start.elapsed().as_micros() as u64));
                     tracing::warn!("2PC prepare failed on shard {:?}: {}", shard_id, e);
                     participants.push(ShardParticipant {
                         shard_id,
@@ -547,7 +540,8 @@ impl HardenedTwoPhaseCoordinator {
                 if let Err(e) = shard.txn_mgr.commit(p.txn_id) {
                     tracing::error!(
                         "2PC commit failed on shard {:?} after prepare: {}",
-                        p.shard_id, e
+                        p.shard_id,
+                        e
                     );
                 }
             }

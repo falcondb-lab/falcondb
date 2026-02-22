@@ -12,8 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::RwLock;
 
 use falcon_common::security::{
-    GrantEntry, ObjectRef, Privilege, PrivilegeCheckResult,
-    Role, RoleId, SUPERUSER_ROLE_ID,
+    GrantEntry, ObjectRef, Privilege, PrivilegeCheckResult, Role, RoleId, SUPERUSER_ROLE_ID,
 };
 use falcon_common::tenant::{TenantId, SYSTEM_TENANT_ID};
 
@@ -46,7 +45,9 @@ impl RoleCatalog {
     pub fn create_role(&self, role: Role) -> bool {
         let mut roles = self.roles.write();
         // Check for duplicate name within same tenant
-        let dup = roles.values().any(|r| r.name == role.name && r.tenant_id == role.tenant_id);
+        let dup = roles
+            .values()
+            .any(|r| r.name == role.name && r.tenant_id == role.tenant_id);
         if dup {
             return false;
         }
@@ -77,14 +78,20 @@ impl RoleCatalog {
 
     /// Get a role by name within a tenant.
     pub fn get_role_by_name(&self, name: &str, tenant_id: TenantId) -> Option<Role> {
-        self.roles.read().values()
-            .find(|r| r.name == name && (r.tenant_id == tenant_id || r.tenant_id == SYSTEM_TENANT_ID))
+        self.roles
+            .read()
+            .values()
+            .find(|r| {
+                r.name == name && (r.tenant_id == tenant_id || r.tenant_id == SYSTEM_TENANT_ID)
+            })
             .cloned()
     }
 
     /// List all roles for a tenant.
     pub fn list_roles(&self, tenant_id: TenantId) -> Vec<Role> {
-        self.roles.read().values()
+        self.roles
+            .read()
+            .values()
             .filter(|r| r.tenant_id == tenant_id || r.tenant_id == SYSTEM_TENANT_ID)
             .cloned()
             .collect()
@@ -118,11 +125,9 @@ impl RoleCatalog {
     pub fn grant_privilege(&self, entry: GrantEntry) {
         let mut grants = self.grants.write();
         // Avoid duplicate grants
-        let exists = grants.iter().any(|g|
-            g.grantee == entry.grantee
-            && g.privilege == entry.privilege
-            && g.object == entry.object
-        );
+        let exists = grants.iter().any(|g| {
+            g.grantee == entry.grantee && g.privilege == entry.privilege && g.object == entry.object
+        });
         if !exists {
             grants.push(entry);
         }
@@ -131,7 +136,8 @@ impl RoleCatalog {
     /// Revoke a specific privilege.
     pub fn revoke_privilege(&self, grantee: RoleId, privilege: Privilege, object: &ObjectRef) {
         let mut grants = self.grants.write();
-        grants.retain(|g| !(g.grantee == grantee && g.privilege == privilege && g.object == *object));
+        grants
+            .retain(|g| !(g.grantee == grantee && g.privilege == privilege && g.object == *object));
     }
 
     /// Revoke all privileges on an object for a role.
@@ -187,7 +193,11 @@ impl RoleCatalog {
         self.effective_roles_inner(&roles, role_id)
     }
 
-    fn effective_roles_inner(&self, roles: &HashMap<RoleId, Role>, role_id: RoleId) -> HashSet<RoleId> {
+    fn effective_roles_inner(
+        &self,
+        roles: &HashMap<RoleId, Role>,
+        role_id: RoleId,
+    ) -> HashSet<RoleId> {
         let mut result = HashSet::new();
         let mut stack = vec![role_id];
         while let Some(rid) = stack.pop() {
@@ -208,7 +218,8 @@ impl RoleCatalog {
     pub fn effective_grants(&self, role_id: RoleId) -> Vec<GrantEntry> {
         let effective = self.effective_roles(role_id);
         let grants = self.grants.read();
-        grants.iter()
+        grants
+            .iter()
             .filter(|g| effective.contains(&g.grantee))
             .cloned()
             .collect()
@@ -234,7 +245,7 @@ impl Default for RoleCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use falcon_common::security::{ObjectRef, ObjectType, Privilege, RoleId, Role};
+    use falcon_common::security::{ObjectRef, ObjectType, Privilege, Role, RoleId};
     use falcon_common::tenant::TenantId;
 
     fn test_object() -> ObjectRef {
@@ -347,9 +358,15 @@ mod tests {
             with_grant_option: false,
         });
 
-        assert!(cat.check_privilege(id, Privilege::Select, &test_object()).is_allowed());
-        assert!(cat.check_privilege(id, Privilege::Insert, &test_object()).is_allowed());
-        assert!(cat.check_privilege(id, Privilege::Delete, &test_object()).is_allowed());
+        assert!(cat
+            .check_privilege(id, Privilege::Select, &test_object())
+            .is_allowed());
+        assert!(cat
+            .check_privilege(id, Privilege::Insert, &test_object())
+            .is_allowed());
+        assert!(cat
+            .check_privilege(id, Privilege::Delete, &test_object())
+            .is_allowed());
     }
 
     #[test]
@@ -386,9 +403,15 @@ mod tests {
         cat.grant_role(alice_id, editor_id);
 
         // alice should have SELECT (via editor → reader) and INSERT (via editor)
-        assert!(cat.check_privilege(alice_id, Privilege::Select, &test_object()).is_allowed());
-        assert!(cat.check_privilege(alice_id, Privilege::Insert, &test_object()).is_allowed());
-        assert!(!cat.check_privilege(alice_id, Privilege::Delete, &test_object()).is_allowed());
+        assert!(cat
+            .check_privilege(alice_id, Privilege::Select, &test_object())
+            .is_allowed());
+        assert!(cat
+            .check_privilege(alice_id, Privilege::Insert, &test_object())
+            .is_allowed());
+        assert!(!cat
+            .check_privilege(alice_id, Privilege::Delete, &test_object())
+            .is_allowed());
 
         // effective roles should be {alice, editor, reader}
         let effective = cat.effective_roles(alice_id);
@@ -411,10 +434,14 @@ mod tests {
             with_grant_option: false,
         });
 
-        assert!(cat.check_privilege(id, Privilege::Select, &test_object()).is_allowed());
+        assert!(cat
+            .check_privilege(id, Privilege::Select, &test_object())
+            .is_allowed());
 
         cat.revoke_privilege(id, Privilege::Select, &test_object());
-        assert!(!cat.check_privilege(id, Privilege::Select, &test_object()).is_allowed());
+        assert!(!cat
+            .check_privilege(id, Privilege::Select, &test_object())
+            .is_allowed());
     }
 
     #[test]
@@ -434,10 +461,14 @@ mod tests {
         });
 
         cat.grant_role(alice_id, reader_id);
-        assert!(cat.check_privilege(alice_id, Privilege::Select, &test_object()).is_allowed());
+        assert!(cat
+            .check_privilege(alice_id, Privilege::Select, &test_object())
+            .is_allowed());
 
         cat.revoke_role(alice_id, reader_id);
-        assert!(!cat.check_privilege(alice_id, Privilege::Select, &test_object()).is_allowed());
+        assert!(!cat
+            .check_privilege(alice_id, Privilege::Select, &test_object())
+            .is_allowed());
     }
 
     #[test]

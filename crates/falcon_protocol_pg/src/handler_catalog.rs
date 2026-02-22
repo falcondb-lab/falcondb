@@ -1,7 +1,7 @@
 use crate::codec::{BackendMessage, FieldDescription};
 use crate::session::PgSession;
 
-use super::handler::{QueryHandler, extract_where_eq};
+use super::handler::{extract_where_eq, QueryHandler};
 
 impl QueryHandler {
     /// Route information_schema and pg_catalog queries.
@@ -73,7 +73,12 @@ impl QueryHandler {
             // pg_description — object comments (stub)
             if sql_lower.contains("pg_description") {
                 return Some(self.single_row_result(
-                    vec![("objoid", 23, 4), ("classoid", 23, 4), ("objsubid", 23, 4), ("description", 25, -1)],
+                    vec![
+                        ("objoid", 23, 4),
+                        ("classoid", 23, 4),
+                        ("objsubid", 23, 4),
+                        ("description", 25, -1),
+                    ],
                     vec![],
                 ));
             }
@@ -103,19 +108,39 @@ impl QueryHandler {
         let fields = vec![
             FieldDescription {
                 name: "Schema".into(),
-                table_oid: 0, column_attr: 0, type_oid: 25, type_len: -1, type_modifier: -1, format_code: 0,
+                table_oid: 0,
+                column_attr: 0,
+                type_oid: 25,
+                type_len: -1,
+                type_modifier: -1,
+                format_code: 0,
             },
             FieldDescription {
                 name: "Name".into(),
-                table_oid: 0, column_attr: 0, type_oid: 25, type_len: -1, type_modifier: -1, format_code: 0,
+                table_oid: 0,
+                column_attr: 0,
+                type_oid: 25,
+                type_len: -1,
+                type_modifier: -1,
+                format_code: 0,
             },
             FieldDescription {
                 name: "Type".into(),
-                table_oid: 0, column_attr: 0, type_oid: 25, type_len: -1, type_modifier: -1, format_code: 0,
+                table_oid: 0,
+                column_attr: 0,
+                type_oid: 25,
+                type_len: -1,
+                type_modifier: -1,
+                format_code: 0,
             },
             FieldDescription {
                 name: "Owner".into(),
-                table_oid: 0, column_attr: 0, type_oid: 25, type_len: -1, type_modifier: -1, format_code: 0,
+                table_oid: 0,
+                column_attr: 0,
+                type_oid: 25,
+                type_len: -1,
+                type_modifier: -1,
+                format_code: 0,
             },
         ];
 
@@ -154,14 +179,17 @@ impl QueryHandler {
         // Optional WHERE table_name = '...' filter
         let filter = extract_where_eq(sql_lower, "table_name");
 
-        let rows: Vec<Vec<Option<String>>> = tables.iter()
+        let rows: Vec<Vec<Option<String>>> = tables
+            .iter()
             .filter(|t| filter.as_ref().is_none_or(|f| t.name.to_lowercase() == *f))
-            .map(|t| vec![
-                Some("falcon".into()),
-                Some("public".into()),
-                Some(t.name.clone()),
-                Some("BASE TABLE".into()),
-            ])
+            .map(|t| {
+                vec![
+                    Some("falcon".into()),
+                    Some("public".into()),
+                    Some(t.name.clone()),
+                    Some("BASE TABLE".into()),
+                ]
+            })
             .collect();
 
         self.single_row_result(cols, rows)
@@ -220,7 +248,11 @@ impl QueryHandler {
                     col.data_type.datetime_precision().map(|v| v.to_string()),
                     Some(col.data_type.pg_udt_name().into()),
                     Some(if col.is_serial { "YES" } else { "NO" }.into()),
-                    if col.is_serial { Some("BY DEFAULT".into()) } else { None },
+                    if col.is_serial {
+                        Some("BY DEFAULT".into())
+                    } else {
+                        None
+                    },
                 ]);
             }
         }
@@ -237,8 +269,16 @@ impl QueryHandler {
                 ("schema_owner", 25, -1),
             ],
             vec![
-                vec![Some("falcon".into()), Some("public".into()), Some("falcon".into())],
-                vec![Some("falcon".into()), Some("information_schema".into()), Some("falcon".into())],
+                vec![
+                    Some("falcon".into()),
+                    Some("public".into()),
+                    Some("falcon".into()),
+                ],
+                vec![
+                    Some("falcon".into()),
+                    Some("information_schema".into()),
+                    Some("falcon".into()),
+                ],
             ],
         )
     }
@@ -350,14 +390,18 @@ impl QueryHandler {
                     ("is_nullable", 25, -1),
                     ("column_default", 25, -1),
                 ];
-                let rows: Vec<Vec<Option<String>>> = schema.columns.iter().map(|col| {
-                    vec![
-                        Some(col.name.clone()),
-                        Some(col.data_type.pg_type_name().into()),
-                        Some(if col.nullable { "YES" } else { "NO" }.into()),
-                        col.default_value.as_ref().map(|d| format!("{}", d)),
-                    ]
-                }).collect();
+                let rows: Vec<Vec<Option<String>>> = schema
+                    .columns
+                    .iter()
+                    .map(|col| {
+                        vec![
+                            Some(col.name.clone()),
+                            Some(col.data_type.pg_type_name().into()),
+                            Some(if col.nullable { "YES" } else { "NO" }.into()),
+                            col.default_value.as_ref().map(|d| format!("{}", d)),
+                        ]
+                    })
+                    .collect();
                 return self.single_row_result(cols, rows);
             }
         }
@@ -371,24 +415,23 @@ impl QueryHandler {
         // Static list of Falcon-supported types mapped to PG OIDs.
         let builtin_types: Vec<(i32, &str, i16, &str, &str)> = vec![
             // (oid, typname, typlen, typtype, typnamespace_nspname)
-            (16,   "bool",       1,  "b", "pg_catalog"),
-            (20,   "int8",       8,  "b", "pg_catalog"),
-            (23,   "int4",       4,  "b", "pg_catalog"),
-            (25,   "text",      -1,  "b", "pg_catalog"),
-            (701,  "float8",     8,  "b", "pg_catalog"),
-            (1082, "date",       4,  "b", "pg_catalog"),
-            (1114, "timestamp",  8,  "b", "pg_catalog"),
-            (3802, "jsonb",     -1,  "b", "pg_catalog"),
-            (1007, "_int4",     -1,  "b", "pg_catalog"),
-            (1016, "_int8",     -1,  "b", "pg_catalog"),
-            (1009, "_text",     -1,  "b", "pg_catalog"),
-            (1022, "_float8",   -1,  "b", "pg_catalog"),
-            (1000, "_bool",     -1,  "b", "pg_catalog"),
-            (2277, "anyarray",  -1,  "p", "pg_catalog"),
+            (16, "bool", 1, "b", "pg_catalog"),
+            (20, "int8", 8, "b", "pg_catalog"),
+            (23, "int4", 4, "b", "pg_catalog"),
+            (25, "text", -1, "b", "pg_catalog"),
+            (701, "float8", 8, "b", "pg_catalog"),
+            (1082, "date", 4, "b", "pg_catalog"),
+            (1114, "timestamp", 8, "b", "pg_catalog"),
+            (3802, "jsonb", -1, "b", "pg_catalog"),
+            (1007, "_int4", -1, "b", "pg_catalog"),
+            (1016, "_int8", -1, "b", "pg_catalog"),
+            (1009, "_text", -1, "b", "pg_catalog"),
+            (1022, "_float8", -1, "b", "pg_catalog"),
+            (1000, "_bool", -1, "b", "pg_catalog"),
+            (2277, "anyarray", -1, "p", "pg_catalog"),
         ];
 
-        let filter_oid = extract_where_eq(sql_lower, "oid")
-            .and_then(|s| s.parse::<i32>().ok());
+        let filter_oid = extract_where_eq(sql_lower, "oid").and_then(|s| s.parse::<i32>().ok());
         let filter_name = extract_where_eq(sql_lower, "typname");
 
         let cols = vec![
@@ -400,7 +443,8 @@ impl QueryHandler {
             ("typnotnull", 16, 1),
         ];
 
-        let rows: Vec<Vec<Option<String>>> = builtin_types.iter()
+        let rows: Vec<Vec<Option<String>>> = builtin_types
+            .iter()
             .filter(|(oid, name, _, _, _)| {
                 filter_oid.as_ref().is_none_or(|f| f == oid)
                     && filter_name.as_ref().is_none_or(|f| f == name)
@@ -422,15 +466,23 @@ impl QueryHandler {
 
     /// pg_catalog.pg_namespace — schema listing.
     fn handle_pg_namespace(&self) -> Vec<BackendMessage> {
-        let cols = vec![
-            ("oid", 23, 4i16),
-            ("nspname", 25, -1),
-            ("nspowner", 23, 4),
-        ];
+        let cols = vec![("oid", 23, 4i16), ("nspname", 25, -1), ("nspowner", 23, 4)];
         let rows = vec![
-            vec![Some("11".into()), Some("pg_catalog".into()), Some("10".into())],
-            vec![Some("2200".into()), Some("public".into()), Some("10".into())],
-            vec![Some("12052".into()), Some("information_schema".into()), Some("10".into())],
+            vec![
+                Some("11".into()),
+                Some("pg_catalog".into()),
+                Some("10".into()),
+            ],
+            vec![
+                Some("2200".into()),
+                Some("public".into()),
+                Some("10".into()),
+            ],
+            vec![
+                Some("12052".into()),
+                Some("information_schema".into()),
+                Some("10".into()),
+            ],
         ];
         self.single_row_result(cols, rows)
     }
@@ -464,7 +516,9 @@ impl QueryHandler {
             }
             // PK index
             if !table.primary_key_columns.is_empty() {
-                let indkey = table.primary_key_columns.iter()
+                let indkey = table
+                    .primary_key_columns
+                    .iter()
                     .map(|i| (*i + 1).to_string())
                     .collect::<Vec<_>>()
                     .join(" ");
@@ -480,7 +534,8 @@ impl QueryHandler {
             }
             // UNIQUE constraint indexes
             for uc in &table.unique_constraints {
-                let indkey = uc.iter()
+                let indkey = uc
+                    .iter()
                     .map(|i| (*i + 1).to_string())
                     .collect::<Vec<_>>()
                     .join(" ");
@@ -510,11 +565,11 @@ impl QueryHandler {
             ("oid", 23, 4i16),
             ("conname", 25, -1),
             ("connamespace", 23, 4),
-            ("contype", 18, 1),    // p=PK, u=unique, f=FK, c=check
+            ("contype", 18, 1), // p=PK, u=unique, f=FK, c=check
             ("conrelid", 23, 4),
-            ("confrelid", 23, 4),  // 0 for non-FK
-            ("conkey", 25, -1),    // array of column numbers
-            ("confkey", 25, -1),   // array of FK referenced column numbers
+            ("confrelid", 23, 4), // 0 for non-FK
+            ("conkey", 25, -1),   // array of column numbers
+            ("confkey", 25, -1),  // array of FK referenced column numbers
         ];
 
         let mut rows: Vec<Vec<Option<String>>> = Vec::new();
@@ -530,10 +585,15 @@ impl QueryHandler {
 
             // PK constraint
             if !table.primary_key_columns.is_empty() {
-                let conkey = format!("{{{}}}", table.primary_key_columns.iter()
-                    .map(|i: &usize| (i + 1).to_string())
-                    .collect::<Vec<_>>()
-                    .join(","));
+                let conkey = format!(
+                    "{{{}}}",
+                    table
+                        .primary_key_columns
+                        .iter()
+                        .map(|i: &usize| (i + 1).to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
                 rows.push(vec![
                     Some(fake_oid.to_string()),
                     Some(format!("{}_pkey", table.name)),
@@ -549,9 +609,7 @@ impl QueryHandler {
 
             // UNIQUE constraints
             for (i, uc) in table.unique_constraints.iter().enumerate() {
-                let conkey_vals: Vec<String> = uc.iter()
-                    .map(|c| (*c + 1).to_string())
-                    .collect();
+                let conkey_vals: Vec<String> = uc.iter().map(|c| (*c + 1).to_string()).collect();
                 let conkey = format!("{{{}}}", conkey_vals.join(","));
                 rows.push(vec![
                     Some(fake_oid.to_string()),
@@ -568,21 +626,29 @@ impl QueryHandler {
 
             // FK constraints
             for (i, fk) in table.foreign_keys.iter().enumerate() {
-                let conkey = format!("{{{}}}", fk.columns.iter()
-                    .map(|c: &usize| (c + 1).to_string())
-                    .collect::<Vec<_>>()
-                    .join(","));
+                let conkey = format!(
+                    "{{{}}}",
+                    fk.columns
+                        .iter()
+                        .map(|c: &usize| (c + 1).to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
                 // Resolve referenced table OID
-                let ref_oid = tables.iter()
+                let ref_oid = tables
+                    .iter()
                     .find(|t| t.name.to_lowercase() == fk.ref_table.to_lowercase())
                     .map(|t| t.id.0 as i64 + 16384)
                     .unwrap_or(0);
                 // Resolve referenced column numbers
                 let confkey = if ref_oid > 0 {
-                    let ref_table = tables.iter()
+                    let ref_table = tables
+                        .iter()
                         .find(|t| t.name.to_lowercase() == fk.ref_table.to_lowercase());
                     if let Some(rt) = ref_table {
-                        let indices: Vec<String> = fk.ref_columns.iter()
+                        let indices: Vec<String> = fk
+                            .ref_columns
+                            .iter()
                             .filter_map(|rc| rt.find_column(rc).map(|i| (i + 1).to_string()))
                             .collect();
                         Some(format!("{{{}}}", indices.join(",")))
@@ -634,16 +700,14 @@ impl QueryHandler {
             ("datcollate", 25, -1),
             ("datctype", 25, -1),
         ];
-        let rows = vec![
-            vec![
-                Some("16384".into()),
-                Some("falcon".into()),
-                Some("10".into()),
-                Some("6".into()),  // UTF8
-                Some("en_US.UTF-8".into()),
-                Some("en_US.UTF-8".into()),
-            ],
-        ];
+        let rows = vec![vec![
+            Some("16384".into()),
+            Some("falcon".into()),
+            Some("10".into()),
+            Some("6".into()), // UTF8
+            Some("en_US.UTF-8".into()),
+            Some("en_US.UTF-8".into()),
+        ]];
         self.single_row_result(cols, rows)
     }
 
@@ -657,18 +721,90 @@ impl QueryHandler {
             ("short_desc", 25, -1),
         ];
         let rows = vec![
-            vec![Some("server_version".into()), Some("15.0".into()), None, Some("Version".into()), Some("FalconDB PG-compatible version".into())],
-            vec![Some("server_encoding".into()), Some("UTF8".into()), None, Some("Client".into()), Some("Server character set encoding".into())],
-            vec![Some("client_encoding".into()), Some("UTF8".into()), None, Some("Client".into()), Some("Client character set encoding".into())],
-            vec![Some("is_superuser".into()), Some("on".into()), None, Some("Auth".into()), Some("Current user is superuser".into())],
-            vec![Some("DateStyle".into()), Some("ISO, MDY".into()), None, Some("Client".into()), Some("Date display format".into())],
-            vec![Some("IntervalStyle".into()), Some("postgres".into()), None, Some("Client".into()), Some("Interval display format".into())],
-            vec![Some("TimeZone".into()), Some("UTC".into()), None, Some("Client".into()), Some("Current time zone".into())],
-            vec![Some("integer_datetimes".into()), Some("on".into()), None, Some("Preset".into()), Some("Datetimes are integer based".into())],
-            vec![Some("standard_conforming_strings".into()), Some("on".into()), None, Some("Client".into()), Some("Backslash handling in strings".into())],
-            vec![Some("max_connections".into()), Some("100".into()), None, Some("Connections".into()), Some("Max concurrent connections".into())],
-            vec![Some("search_path".into()), Some("\"$user\", public".into()), None, Some("Client".into()), Some("Schema search order".into())],
-            vec![Some("default_transaction_isolation".into()), Some("read committed".into()), None, Some("Client".into()), Some("Default isolation level".into())],
+            vec![
+                Some("server_version".into()),
+                Some("15.0".into()),
+                None,
+                Some("Version".into()),
+                Some("FalconDB PG-compatible version".into()),
+            ],
+            vec![
+                Some("server_encoding".into()),
+                Some("UTF8".into()),
+                None,
+                Some("Client".into()),
+                Some("Server character set encoding".into()),
+            ],
+            vec![
+                Some("client_encoding".into()),
+                Some("UTF8".into()),
+                None,
+                Some("Client".into()),
+                Some("Client character set encoding".into()),
+            ],
+            vec![
+                Some("is_superuser".into()),
+                Some("on".into()),
+                None,
+                Some("Auth".into()),
+                Some("Current user is superuser".into()),
+            ],
+            vec![
+                Some("DateStyle".into()),
+                Some("ISO, MDY".into()),
+                None,
+                Some("Client".into()),
+                Some("Date display format".into()),
+            ],
+            vec![
+                Some("IntervalStyle".into()),
+                Some("postgres".into()),
+                None,
+                Some("Client".into()),
+                Some("Interval display format".into()),
+            ],
+            vec![
+                Some("TimeZone".into()),
+                Some("UTC".into()),
+                None,
+                Some("Client".into()),
+                Some("Current time zone".into()),
+            ],
+            vec![
+                Some("integer_datetimes".into()),
+                Some("on".into()),
+                None,
+                Some("Preset".into()),
+                Some("Datetimes are integer based".into()),
+            ],
+            vec![
+                Some("standard_conforming_strings".into()),
+                Some("on".into()),
+                None,
+                Some("Client".into()),
+                Some("Backslash handling in strings".into()),
+            ],
+            vec![
+                Some("max_connections".into()),
+                Some("100".into()),
+                None,
+                Some("Connections".into()),
+                Some("Max concurrent connections".into()),
+            ],
+            vec![
+                Some("search_path".into()),
+                Some("\"$user\", public".into()),
+                None,
+                Some("Client".into()),
+                Some("Schema search order".into()),
+            ],
+            vec![
+                Some("default_transaction_isolation".into()),
+                Some("read committed".into()),
+                None,
+                Some("Client".into()),
+                Some("Default isolation level".into()),
+            ],
         ];
         self.single_row_result(cols, rows)
     }

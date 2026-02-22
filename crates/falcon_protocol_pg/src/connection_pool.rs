@@ -164,7 +164,11 @@ impl ConnectionPool {
         executor: Arc<Executor>,
         config: PoolConfig,
     ) -> Self {
-        let max = if config.max_size == 0 { usize::MAX >> 1 } else { config.max_size };
+        let max = if config.max_size == 0 {
+            usize::MAX >> 1
+        } else {
+            config.max_size
+        };
         let plan_cache = Arc::new(PlanCache::new(config.plan_cache_capacity));
         let slow_query_log = if config.slow_query_threshold_ms > 0 {
             Arc::new(SlowQueryLog::new(
@@ -214,7 +218,8 @@ impl ConnectionPool {
                 Some(permit) => permit,
                 None => {
                     self.stats.total_waits.fetch_add(1, Ordering::Relaxed);
-                    match tokio::time::timeout(timeout, self.semaphore.clone().acquire_owned()).await
+                    match tokio::time::timeout(timeout, self.semaphore.clone().acquire_owned())
+                        .await
                     {
                         Ok(Ok(permit)) => permit,
                         _ => {

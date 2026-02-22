@@ -15,7 +15,7 @@ mod mvcc_tests {
         let ts_commit = Timestamp(10);
 
         chain.prepend(txn1, Some(row(vec![Datum::Int32(42)])));
-        // Uncommitted 鈥?not visible to other txns
+        // Uncommitted  — not visible to other txns
         assert!(chain.read_committed(Timestamp(100)).is_none());
         // Visible to own txn
         assert!(chain.read_for_txn(txn1, Timestamp(0)).is_some());
@@ -94,7 +94,7 @@ mod mvcc_tests {
         let txn2 = TxnId(2);
 
         chain.prepend(txn1, Some(row(vec![Datum::Int32(1)])));
-        // txn1 has uncommitted write 鈥?txn2 should see conflict
+        // txn1 has uncommitted write  — txn2 should see conflict
         assert!(chain.has_write_conflict(txn2));
         // txn1 itself should NOT see conflict
         assert!(!chain.has_write_conflict(txn1));
@@ -163,7 +163,7 @@ mod memtable_tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         }
     }
 
@@ -358,7 +358,8 @@ mod wal_tests {
                 txn_id: TxnId(1),
                 table_id: TableId(1),
                 row: OwnedRow::new(vec![Datum::Int32(i)]),
-            }).unwrap();
+            })
+            .unwrap();
         }
         wal.flush().unwrap();
 
@@ -393,7 +394,8 @@ mod wal_tests {
 
         // Write 5 records (should auto-flush after 3rd)
         for i in 0..5 {
-            wal.append(&WalRecord::BeginTxn { txn_id: TxnId(i) }).unwrap();
+            wal.append(&WalRecord::BeginTxn { txn_id: TxnId(i) })
+                .unwrap();
         }
         // Flush remaining
         wal.flush().unwrap();
@@ -418,7 +420,8 @@ mod wal_tests {
                 txn_id: TxnId(1),
                 table_id: TableId(1),
                 row: OwnedRow::new(vec![Datum::Int32(i)]),
-            }).unwrap();
+            })
+            .unwrap();
         }
         wal.flush().unwrap();
 
@@ -475,7 +478,7 @@ mod engine_tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         }
     }
 
@@ -614,7 +617,7 @@ mod occ_tests {
 
         // txn3 at ts=5 sees txn1 commit (10 > 5)
         assert!(chain.has_committed_write_after(TxnId(3), Timestamp(5)));
-        // txn3 at ts=15: txn1 at 10 <= 15, txn2 aborted 鈥?no conflict
+        // txn3 at ts=15: txn1 at 10 <= 15, txn2 aborted  — no conflict
         assert!(!chain.has_committed_write_after(TxnId(3), Timestamp(15)));
     }
 
@@ -661,7 +664,7 @@ mod engine_occ_tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         }
     }
 
@@ -675,7 +678,7 @@ mod engine_occ_tests {
         engine.insert(TableId(100), row, txn1).unwrap();
         engine.commit_txn_local(txn1, Timestamp(10)).unwrap();
 
-        // txn2 reads 鈥?no concurrent modifications
+        // txn2 reads  — no concurrent modifications
         let txn2 = TxnId(2);
         let _rows = engine.scan(TableId(100), txn2, Timestamp(15)).unwrap();
         assert!(engine.validate_read_set(txn2, Timestamp(15)).is_ok());
@@ -715,12 +718,12 @@ mod engine_occ_tests {
         engine.insert(TableId(100), row, txn1).unwrap();
         engine.commit_txn_local(txn1, Timestamp(10)).unwrap();
 
-        // txn2 reads then commits 鈥?read-set should be cleaned
+        // txn2 reads then commits  — read-set should be cleaned
         let txn2 = TxnId(2);
         let _ = engine.scan(TableId(100), txn2, Timestamp(15)).unwrap();
         engine.commit_txn_local(txn2, Timestamp(20)).unwrap();
 
-        // After commit, validate finds no read-set 鈥?passes trivially
+        // After commit, validate finds no read-set  — passes trivially
         assert!(engine.validate_read_set(txn2, Timestamp(15)).is_ok());
     }
 
@@ -743,7 +746,12 @@ mod engine_occ_tests {
 
         // txn3 updates row id=2 and commits after txn2's start
         let txn3 = TxnId(3);
-        let pk2 = rows.iter().find(|(_, r)| r.values[0] == Datum::Int32(2)).unwrap().0.clone();
+        let pk2 = rows
+            .iter()
+            .find(|(_, r)| r.values[0] == Datum::Int32(2))
+            .unwrap()
+            .0
+            .clone();
         let new_row = OwnedRow::new(vec![Datum::Int32(2), Datum::Text("updated".into())]);
         engine.update(TableId(100), &pk2, new_row, txn3).unwrap();
         engine.commit_txn_local(txn3, Timestamp(20)).unwrap();
@@ -799,7 +807,7 @@ mod secondary_index_tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         }
     }
 
@@ -819,10 +827,13 @@ mod secondary_index_tests {
         ]);
         engine.insert(TableId(200), row, txn1).unwrap();
 
-        // Under 鏂规A: index is NOT updated until commit
+        // Under Approach A: index is NOT updated until commit
         let key = encode_column_value(&Datum::Text("alice".into()));
         let pks_before = engine.index_lookup(TableId(200), 1, &key).unwrap();
-        assert!(pks_before.is_empty(), "uncommitted insert should not appear in index");
+        assert!(
+            pks_before.is_empty(),
+            "uncommitted insert should not appear in index"
+        );
 
         // After commit, index should have the entry
         engine.commit_txn_local(txn1, Timestamp(10)).unwrap();
@@ -854,18 +865,35 @@ mod secondary_index_tests {
         ]);
         engine.update(TableId(200), &pk, new_row, txn2).unwrap();
 
-        // Under 鏂规A: index still shows "alice" (uncommitted update not reflected)
+        // Under Approach A: index still shows "alice" (uncommitted update not reflected)
         let old_key = encode_column_value(&Datum::Text("alice".into()));
-        assert_eq!(engine.index_lookup(TableId(200), 1, &old_key).unwrap().len(), 1,
-            "uncommitted update should not change index");
+        assert_eq!(
+            engine
+                .index_lookup(TableId(200), 1, &old_key)
+                .unwrap()
+                .len(),
+            1,
+            "uncommitted update should not change index"
+        );
 
         // After commit, old entry removed, new entry added
         engine.commit_txn_local(txn2, Timestamp(20)).unwrap();
-        assert!(engine.index_lookup(TableId(200), 1, &old_key).unwrap().is_empty(),
-            "old index entry should be removed after commit");
+        assert!(
+            engine
+                .index_lookup(TableId(200), 1, &old_key)
+                .unwrap()
+                .is_empty(),
+            "old index entry should be removed after commit"
+        );
         let new_key = encode_column_value(&Datum::Text("bob".into()));
-        assert_eq!(engine.index_lookup(TableId(200), 1, &new_key).unwrap().len(), 1,
-            "new index entry should exist after commit");
+        assert_eq!(
+            engine
+                .index_lookup(TableId(200), 1, &new_key)
+                .unwrap()
+                .len(),
+            1,
+            "new index entry should exist after commit"
+        );
     }
 
     #[test]
@@ -887,15 +915,23 @@ mod secondary_index_tests {
         let txn2 = TxnId(2);
         engine.delete(TableId(200), &pk, txn2).unwrap();
 
-        // Under 鏂规A: index still shows "alice" (uncommitted delete not reflected)
+        // Under Approach A: index still shows "alice" (uncommitted delete not reflected)
         let key = encode_column_value(&Datum::Text("alice".into()));
-        assert_eq!(engine.index_lookup(TableId(200), 1, &key).unwrap().len(), 1,
-            "uncommitted delete should not change index");
+        assert_eq!(
+            engine.index_lookup(TableId(200), 1, &key).unwrap().len(),
+            1,
+            "uncommitted delete should not change index"
+        );
 
         // After commit, index entry removed
         engine.commit_txn_local(txn2, Timestamp(20)).unwrap();
-        assert!(engine.index_lookup(TableId(200), 1, &key).unwrap().is_empty(),
-            "index entry should be removed after commit");
+        assert!(
+            engine
+                .index_lookup(TableId(200), 1, &key)
+                .unwrap()
+                .is_empty(),
+            "index entry should be removed after commit"
+        );
     }
 
     #[test]
@@ -930,7 +966,11 @@ mod secondary_index_tests {
         engine.commit_txn_local(txn2, Timestamp(20)).unwrap();
 
         let pks_after = engine.index_lookup(TableId(200), 2, &key).unwrap();
-        assert_eq!(pks_after.len(), 1, "only one row should remain in index after committed delete");
+        assert_eq!(
+            pks_after.len(),
+            1,
+            "only one row should remain in index after committed delete"
+        );
     }
 
     #[test]
@@ -952,8 +992,20 @@ mod secondary_index_tests {
         // Both indexes should have entries
         let name_key = encode_column_value(&Datum::Text("alice".into()));
         let age_key = encode_column_value(&Datum::Int32(30));
-        assert_eq!(engine.index_lookup(TableId(200), 1, &name_key).unwrap().len(), 1);
-        assert_eq!(engine.index_lookup(TableId(200), 2, &age_key).unwrap().len(), 1);
+        assert_eq!(
+            engine
+                .index_lookup(TableId(200), 1, &name_key)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            engine
+                .index_lookup(TableId(200), 2, &age_key)
+                .unwrap()
+                .len(),
+            1
+        );
 
         // Update both columns and commit
         let txn2 = TxnId(2);
@@ -966,14 +1018,32 @@ mod secondary_index_tests {
         engine.commit_txn_local(txn2, Timestamp(20)).unwrap();
 
         // Old entries removed from both indexes after commit
-        assert!(engine.index_lookup(TableId(200), 1, &name_key).unwrap().is_empty());
-        assert!(engine.index_lookup(TableId(200), 2, &age_key).unwrap().is_empty());
+        assert!(engine
+            .index_lookup(TableId(200), 1, &name_key)
+            .unwrap()
+            .is_empty());
+        assert!(engine
+            .index_lookup(TableId(200), 2, &age_key)
+            .unwrap()
+            .is_empty());
 
         // New entries present in both indexes
         let new_name_key = encode_column_value(&Datum::Text("bob".into()));
         let new_age_key = encode_column_value(&Datum::Int32(40));
-        assert_eq!(engine.index_lookup(TableId(200), 1, &new_name_key).unwrap().len(), 1);
-        assert_eq!(engine.index_lookup(TableId(200), 2, &new_age_key).unwrap().len(), 1);
+        assert_eq!(
+            engine
+                .index_lookup(TableId(200), 1, &new_name_key)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            engine
+                .index_lookup(TableId(200), 2, &new_age_key)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -997,13 +1067,25 @@ mod secondary_index_tests {
         engine.insert(TableId(200), row2, txn1).unwrap();
         engine.commit_txn_local(txn1, Timestamp(10)).unwrap();
 
-        // Now create index 鈥?it should backfill existing rows
+        // Now create index  — it should backfill existing rows
         engine.create_index("idx_test", 1).unwrap();
 
         let alice_key = encode_column_value(&Datum::Text("alice".into()));
         let bob_key = encode_column_value(&Datum::Text("bob".into()));
-        assert_eq!(engine.index_lookup(TableId(200), 1, &alice_key).unwrap().len(), 1);
-        assert_eq!(engine.index_lookup(TableId(200), 1, &bob_key).unwrap().len(), 1);
+        assert_eq!(
+            engine
+                .index_lookup(TableId(200), 1, &alice_key)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            engine
+                .index_lookup(TableId(200), 1, &bob_key)
+                .unwrap()
+                .len(),
+            1
+        );
 
         // Subsequent inserts should maintain the index after commit
         let txn2 = TxnId(2);
@@ -1016,7 +1098,13 @@ mod secondary_index_tests {
         engine.commit_txn_local(txn2, Timestamp(20)).unwrap();
 
         let charlie_key = encode_column_value(&Datum::Text("charlie".into()));
-        assert_eq!(engine.index_lookup(TableId(200), 1, &charlie_key).unwrap().len(), 1);
+        assert_eq!(
+            engine
+                .index_lookup(TableId(200), 1, &charlie_key)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -1024,7 +1112,7 @@ mod secondary_index_tests {
         let engine = StorageEngine::new_in_memory();
         engine.create_table(idx_schema()).unwrap();
 
-        // Insert/update/delete without any index 鈥?should work fine
+        // Insert/update/delete without any index  — should work fine
         let txn1 = TxnId(1);
         let row = OwnedRow::new(vec![
             Datum::Int32(1),
@@ -1047,7 +1135,7 @@ mod secondary_index_tests {
         engine.delete(TableId(200), &pk, txn3).unwrap();
         engine.commit_txn_local(txn3, Timestamp(30)).unwrap();
 
-        // No crash, no errors 鈥?index maintenance is a no-op when no indexes exist
+        // No crash, no errors  — index maintenance is a no-op when no indexes exist
     }
 
     #[test]
@@ -1064,17 +1152,27 @@ mod secondary_index_tests {
         ]);
         engine.insert(TableId(200), row, txn1).unwrap();
 
-        // Under 鏂规A: index should NOT have the entry (uncommitted)
+        // Under Approach A: index should NOT have the entry (uncommitted)
         let key = encode_column_value(&Datum::Text("alice".into()));
-        assert!(engine.index_lookup(TableId(200), 1, &key).unwrap().is_empty(),
-            "uncommitted insert should not appear in index");
+        assert!(
+            engine
+                .index_lookup(TableId(200), 1, &key)
+                .unwrap()
+                .is_empty(),
+            "uncommitted insert should not appear in index"
+        );
 
         // Abort the transaction
         engine.abort_txn_local(txn1).unwrap();
 
-        // Index still empty 鈥?abort is a no-op for indexes under 鏂规A
-        assert!(engine.index_lookup(TableId(200), 1, &key).unwrap().is_empty(),
-            "index should remain empty after abort");
+        // Index still empty  — abort is a no-op for indexes under Approach A
+        assert!(
+            engine
+                .index_lookup(TableId(200), 1, &key)
+                .unwrap()
+                .is_empty(),
+            "index should remain empty after abort"
+        );
     }
 
     #[test]
@@ -1105,20 +1203,42 @@ mod secondary_index_tests {
         let alice_key = encode_column_value(&Datum::Text("alice".into()));
         let bob_key = encode_column_value(&Datum::Text("bob".into()));
 
-        // Under 鏂规A: index still shows "alice" (committed), "bob" not in index
-        assert_eq!(engine.index_lookup(TableId(200), 1, &alice_key).unwrap().len(), 1,
-            "committed index entry should remain during uncommitted update");
-        assert!(engine.index_lookup(TableId(200), 1, &bob_key).unwrap().is_empty(),
-            "uncommitted update should not appear in index");
+        // Under Approach A: index still shows "alice" (committed), "bob" not in index
+        assert_eq!(
+            engine
+                .index_lookup(TableId(200), 1, &alice_key)
+                .unwrap()
+                .len(),
+            1,
+            "committed index entry should remain during uncommitted update"
+        );
+        assert!(
+            engine
+                .index_lookup(TableId(200), 1, &bob_key)
+                .unwrap()
+                .is_empty(),
+            "uncommitted update should not appear in index"
+        );
 
         // Abort txn2
         engine.abort_txn_local(txn2).unwrap();
 
         // After abort: "alice" still in index (was never removed), "bob" still absent
-        assert_eq!(engine.index_lookup(TableId(200), 1, &alice_key).unwrap().len(), 1,
-            "committed index entry should remain after abort");
-        assert!(engine.index_lookup(TableId(200), 1, &bob_key).unwrap().is_empty(),
-            "aborted update should not appear in index");
+        assert_eq!(
+            engine
+                .index_lookup(TableId(200), 1, &alice_key)
+                .unwrap()
+                .len(),
+            1,
+            "committed index entry should remain after abort"
+        );
+        assert!(
+            engine
+                .index_lookup(TableId(200), 1, &bob_key)
+                .unwrap()
+                .is_empty(),
+            "aborted update should not appear in index"
+        );
     }
 
     #[test]
@@ -1136,7 +1256,7 @@ mod secondary_index_tests {
         engine.insert(TableId(200), row1, txn1).unwrap();
         engine.commit_txn_local(txn1, Timestamp(10)).unwrap();
 
-        // Insert another row with same name 鈥?should fail
+        // Insert another row with same name  — should fail
         let txn2 = TxnId(2);
         let row2 = OwnedRow::new(vec![
             Datum::Int32(2),
@@ -1144,7 +1264,10 @@ mod secondary_index_tests {
             Datum::Int32(25),
         ]);
         let result = engine.insert(TableId(200), row2, txn2);
-        assert!(result.is_err(), "unique index should reject duplicate value");
+        assert!(
+            result.is_err(),
+            "unique index should reject duplicate value"
+        );
     }
 
     #[test]
@@ -1175,7 +1298,10 @@ mod secondary_index_tests {
             Datum::Int32(25),
         ]);
         let result = engine.insert(TableId(200), row2, txn3);
-        assert!(result.is_ok(), "unique index should allow value after delete");
+        assert!(
+            result.is_ok(),
+            "unique index should allow value after delete"
+        );
     }
 
     #[test]
@@ -1201,7 +1327,10 @@ mod secondary_index_tests {
 
         // Creating a unique index should fail due to existing duplicates
         let result = engine.create_unique_index("idx_test", 1);
-        assert!(result.is_err(), "unique index creation should fail with existing duplicates");
+        assert!(
+            result.is_err(),
+            "unique index creation should fail with existing duplicates"
+        );
     }
 
     #[test]
@@ -1252,7 +1381,7 @@ mod secondary_index_tests {
         assert_eq!(results[0].1.values[1], Datum::Text("v2".into()));
     }
 
-    // 鈹€鈹€ Commit-time unique constraint re-validation tests 鈹€鈹€
+    // ── Commit-time unique constraint re-validation tests ──
 
     #[test]
     fn test_concurrent_insert_same_unique_key_one_wins() {
@@ -1280,12 +1409,15 @@ mod secondary_index_tests {
         engine.insert(TableId(200), row1, txn1).unwrap();
         engine.insert(TableId(200), row2, txn2).unwrap();
 
-        // txn1 commits first 鈥?succeeds
+        // txn1 commits first  — succeeds
         engine.commit_txn_local(txn1, Timestamp(10)).unwrap();
 
-        // txn2 tries to commit 鈥?must fail (UniqueViolation)
+        // txn2 tries to commit  — must fail (UniqueViolation)
         let result = engine.commit_txn_local(txn2, Timestamp(20));
-        assert!(result.is_err(), "second concurrent insert of same unique key must fail at commit");
+        assert!(
+            result.is_err(),
+            "second concurrent insert of same unique key must fail at commit"
+        );
         match result.unwrap_err() {
             falcon_common::error::StorageError::UniqueViolation { column_idx, .. } => {
                 assert_eq!(column_idx, 1);
@@ -1315,7 +1447,7 @@ mod secondary_index_tests {
         engine.insert(TableId(200), row1, txn1).unwrap();
         engine.commit_txn_local(txn1, Timestamp(10)).unwrap();
 
-        // txn2 started after txn1 committed 鈥?insert-time check catches it
+        // txn2 started after txn1 committed  — insert-time check catches it
         let txn2 = TxnId(2);
         let row2 = OwnedRow::new(vec![
             Datum::Int32(2),
@@ -1323,13 +1455,16 @@ mod secondary_index_tests {
             Datum::Int32(25),
         ]);
         let insert_result = engine.insert(TableId(200), row2, txn2);
-        assert!(insert_result.is_err(), "insert should fail against committed unique key");
+        assert!(
+            insert_result.is_err(),
+            "insert should fail against committed unique key"
+        );
     }
 
     #[test]
     fn test_update_causing_unique_key_conflict_at_commit() {
         // txn1 commits "alice" (pk=1) and "bob" (pk=2).
-        // txn2 updates pk=2 to name="alice" 鈥?passes at DML time (no conflict yet
+        // txn2 updates pk=2 to name="alice"  — passes at DML time (no conflict yet
         // because the index check at update time is against committed index which
         // has "bob" for pk=2). At commit, re-validation catches it.
         let engine = StorageEngine::new_in_memory();
@@ -1351,18 +1486,23 @@ mod secondary_index_tests {
         let pk2 = engine.insert(TableId(200), row2, txn1).unwrap();
         engine.commit_txn_local(txn1, Timestamp(10)).unwrap();
 
-        // txn2 updates pk=2 to name="alice" 鈥?conflicts with pk=1
+        // txn2 updates pk=2 to name="alice"  — conflicts with pk=1
         let txn2 = TxnId(2);
         let updated_row = OwnedRow::new(vec![
             Datum::Int32(2),
             Datum::Text("alice".into()),
             Datum::Int32(25),
         ]);
-        engine.update(TableId(200), &pk2, updated_row, txn2).unwrap();
+        engine
+            .update(TableId(200), &pk2, updated_row, txn2)
+            .unwrap();
 
         // Commit should fail due to unique constraint on "alice"
         let result = engine.commit_txn_local(txn2, Timestamp(20));
-        assert!(result.is_err(), "update causing unique conflict must fail at commit");
+        assert!(
+            result.is_err(),
+            "update causing unique conflict must fail at commit"
+        );
         match result.unwrap_err() {
             falcon_common::error::StorageError::UniqueViolation { column_idx, .. } => {
                 assert_eq!(column_idx, 1);
@@ -1377,7 +1517,7 @@ mod secondary_index_tests {
         // Setup: txn1 and txn2 both start before any commit.
         // txn1 inserts "alice" (pk=1). txn2 inserts "carol" (pk=10) and "alice" (pk=20).
         // Both pass insert-time check (index is empty).
-        // txn1 commits first. txn2 commit fails 鈥?neither "carol" nor "alice" should commit.
+        // txn1 commits first. txn2 commit fails  — neither "carol" nor "alice" should commit.
         let engine = StorageEngine::new_in_memory();
         engine.create_table(idx_schema()).unwrap();
         engine.create_unique_index("idx_test", 1).unwrap();
@@ -1393,7 +1533,7 @@ mod secondary_index_tests {
         ]);
         engine.insert(TableId(200), row1, txn1).unwrap();
 
-        // txn2 inserts "carol" AND "alice" 鈥?both pass insert-time check (index empty)
+        // txn2 inserts "carol" AND "alice"  — both pass insert-time check (index empty)
         let row_carol = OwnedRow::new(vec![
             Datum::Int32(10),
             Datum::Text("carol".into()),
@@ -1407,16 +1547,20 @@ mod secondary_index_tests {
         engine.insert(TableId(200), row_carol, txn2).unwrap();
         engine.insert(TableId(200), row_alice2, txn2).unwrap();
 
-        // txn1 commits first 鈥?succeeds, "alice" now in index
+        // txn1 commits first  — succeeds, "alice" now in index
         engine.commit_txn_local(txn1, Timestamp(10)).unwrap();
 
-        // txn2 commit should fail 鈥?"alice" conflicts
+        // txn2 commit should fail  — "alice" conflicts
         let result = engine.commit_txn_local(txn2, Timestamp(20));
         assert!(result.is_err());
 
-        // Only txn1's row (pk=1, alice) should be visible 鈥?carol should NOT be committed
+        // Only txn1's row (pk=1, alice) should be visible  — carol should NOT be committed
         let rows = engine.scan(TableId(200), TxnId(3), Timestamp(30)).unwrap();
-        assert_eq!(rows.len(), 1, "atomicity: no partial commit on unique violation");
+        assert_eq!(
+            rows.len(),
+            1,
+            "atomicity: no partial commit on unique violation"
+        );
         assert_eq!(rows[0].1.values[0], Datum::Int32(1));
     }
 
@@ -1478,18 +1622,27 @@ mod secondary_index_tests {
 
         // Index scan for "alice" should return 2 rows
         let key = encode_column_value(&Datum::Text("alice".into()));
-        let results = engine.index_scan(TableId(200), 1, &key, TxnId(2), Timestamp(15)).unwrap();
+        let results = engine
+            .index_scan(TableId(200), 1, &key, TxnId(2), Timestamp(15))
+            .unwrap();
         assert_eq!(results.len(), 2, "index scan should return 2 alice rows");
 
         // Index scan for "bob" should return 1 row
         let bob_key = encode_column_value(&Datum::Text("bob".into()));
-        let bob_results = engine.index_scan(TableId(200), 1, &bob_key, TxnId(2), Timestamp(15)).unwrap();
+        let bob_results = engine
+            .index_scan(TableId(200), 1, &bob_key, TxnId(2), Timestamp(15))
+            .unwrap();
         assert_eq!(bob_results.len(), 1, "index scan should return 1 bob row");
 
         // Index scan for non-existent value should return 0 rows
         let none_key = encode_column_value(&Datum::Text("charlie".into()));
-        let none_results = engine.index_scan(TableId(200), 1, &none_key, TxnId(2), Timestamp(15)).unwrap();
-        assert!(none_results.is_empty(), "index scan for non-existent value should return 0 rows");
+        let none_results = engine
+            .index_scan(TableId(200), 1, &none_key, TxnId(2), Timestamp(15))
+            .unwrap();
+        assert!(
+            none_results.is_empty(),
+            "index scan for non-existent value should return 0 rows"
+        );
     }
 }
 
@@ -1530,7 +1683,7 @@ mod recovery_tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         }
     }
 
@@ -1550,25 +1703,32 @@ mod recovery_tests {
                 txn_id: TxnId(1),
                 table_id: TableId(1),
                 row: OwnedRow::new(vec![Datum::Int32(1), Datum::Text("committed".into())]),
-            }).unwrap();
+            })
+            .unwrap();
             wal.append(&WalRecord::CommitTxnLocal {
                 txn_id: TxnId(1),
                 commit_ts: Timestamp(10),
-            }).unwrap();
+            })
+            .unwrap();
 
-            // Uncommitted txn (no commit record 鈥?simulates crash)
+            // Uncommitted txn (no commit record  — simulates crash)
             wal.append(&WalRecord::Insert {
                 txn_id: TxnId(2),
                 table_id: TableId(1),
                 row: OwnedRow::new(vec![Datum::Int32(2), Datum::Text("uncommitted".into())]),
-            }).unwrap();
+            })
+            .unwrap();
             wal.flush().unwrap();
         }
 
-        // Recover 鈥?uncommitted txn should be aborted
+        // Recover  — uncommitted txn should be aborted
         let engine = StorageEngine::recover(&dir).unwrap();
         let rows = engine.scan(TableId(1), TxnId(3), Timestamp(100)).unwrap();
-        assert_eq!(rows.len(), 1, "only committed row should be visible after recovery");
+        assert_eq!(
+            rows.len(),
+            1,
+            "only committed row should be visible after recovery"
+        );
         assert_eq!(rows[0].1.values[1], Datum::Text("committed".into()));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1589,18 +1749,21 @@ mod recovery_tests {
                 txn_id: TxnId(1),
                 table_id: TableId(1),
                 row: OwnedRow::new(vec![Datum::Int32(1), Datum::Text("hello".into())]),
-            }).unwrap();
+            })
+            .unwrap();
             wal.append(&WalRecord::CommitTxnLocal {
                 txn_id: TxnId(1),
                 commit_ts: Timestamp(10),
-            }).unwrap();
+            })
+            .unwrap();
 
             // Uncommitted txn
             wal.append(&WalRecord::Insert {
                 txn_id: TxnId(2),
                 table_id: TableId(1),
                 row: OwnedRow::new(vec![Datum::Int32(2), Datum::Text("crash".into())]),
-            }).unwrap();
+            })
+            .unwrap();
             wal.flush().unwrap();
         }
 
@@ -1611,11 +1774,15 @@ mod recovery_tests {
             assert_eq!(rows.len(), 1);
         }
 
-        // Second recovery (idempotent 鈥?same result)
+        // Second recovery (idempotent  — same result)
         {
             let engine = StorageEngine::recover(&dir).unwrap();
             let rows = engine.scan(TableId(1), TxnId(3), Timestamp(100)).unwrap();
-            assert_eq!(rows.len(), 1, "idempotent recovery should produce same result");
+            assert_eq!(
+                rows.len(),
+                1,
+                "idempotent recovery should produce same result"
+            );
             assert_eq!(rows[0].1.values[1], Datum::Text("hello".into()));
         }
 
@@ -1633,30 +1800,37 @@ mod recovery_tests {
             engine.create_table(recovery_schema()).unwrap();
 
             let txn1 = TxnId(1);
-            let pk = engine.insert(
-                TableId(1),
-                OwnedRow::new(vec![Datum::Int32(1), Datum::Text("original".into())]),
-                txn1,
-            ).unwrap();
+            let pk = engine
+                .insert(
+                    TableId(1),
+                    OwnedRow::new(vec![Datum::Int32(1), Datum::Text("original".into())]),
+                    txn1,
+                )
+                .unwrap();
             engine.commit_txn_local(txn1, Timestamp(10)).unwrap();
 
             // Update without commit (simulates crash mid-update)
             let txn2 = TxnId(2);
-            engine.update(
-                TableId(1),
-                &pk,
-                OwnedRow::new(vec![Datum::Int32(1), Datum::Text("updated".into())]),
-                txn2,
-            ).unwrap();
-            // No commit 鈥?crash!
+            engine
+                .update(
+                    TableId(1),
+                    &pk,
+                    OwnedRow::new(vec![Datum::Int32(1), Datum::Text("updated".into())]),
+                    txn2,
+                )
+                .unwrap();
+            // No commit  — crash!
         }
 
-        // Recover 鈥?should see original value, not the uncommitted update
+        // Recover  — should see original value, not the uncommitted update
         let engine = StorageEngine::recover(&dir).unwrap();
         let rows = engine.scan(TableId(1), TxnId(3), Timestamp(100)).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].1.values[1], Datum::Text("original".into()),
-            "uncommitted update should be rolled back after recovery");
+        assert_eq!(
+            rows[0].1.values[1],
+            Datum::Text("original".into()),
+            "uncommitted update should be rolled back after recovery"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1672,23 +1846,29 @@ mod recovery_tests {
             engine.create_table(recovery_schema()).unwrap();
 
             let txn1 = TxnId(1);
-            let pk = engine.insert(
-                TableId(1),
-                OwnedRow::new(vec![Datum::Int32(1), Datum::Text("keep_me".into())]),
-                txn1,
-            ).unwrap();
+            let pk = engine
+                .insert(
+                    TableId(1),
+                    OwnedRow::new(vec![Datum::Int32(1), Datum::Text("keep_me".into())]),
+                    txn1,
+                )
+                .unwrap();
             engine.commit_txn_local(txn1, Timestamp(10)).unwrap();
 
             // Delete without commit
             let txn2 = TxnId(2);
             engine.delete(TableId(1), &pk, txn2).unwrap();
-            // No commit 鈥?crash!
+            // No commit  — crash!
         }
 
-        // Recover 鈥?row should still be visible
+        // Recover  — row should still be visible
         let engine = StorageEngine::recover(&dir).unwrap();
         let rows = engine.scan(TableId(1), TxnId(3), Timestamp(100)).unwrap();
-        assert_eq!(rows.len(), 1, "uncommitted delete should be rolled back after recovery");
+        assert_eq!(
+            rows.len(),
+            1,
+            "uncommitted delete should be rolled back after recovery"
+        );
         assert_eq!(rows[0].1.values[1], Datum::Text("keep_me".into()));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1709,24 +1889,32 @@ mod recovery_tests {
                 txn_id: TxnId(1),
                 table_id: TableId(1),
                 row: OwnedRow::new(vec![Datum::Int32(1), Datum::Text("aborted".into())]),
-            }).unwrap();
-            wal.append(&WalRecord::AbortTxnLocal { txn_id: TxnId(1) }).unwrap();
+            })
+            .unwrap();
+            wal.append(&WalRecord::AbortTxnLocal { txn_id: TxnId(1) })
+                .unwrap();
 
             wal.append(&WalRecord::Insert {
                 txn_id: TxnId(2),
                 table_id: TableId(1),
                 row: OwnedRow::new(vec![Datum::Int32(2), Datum::Text("committed".into())]),
-            }).unwrap();
+            })
+            .unwrap();
             wal.append(&WalRecord::CommitTxnLocal {
                 txn_id: TxnId(2),
                 commit_ts: Timestamp(20),
-            }).unwrap();
+            })
+            .unwrap();
             wal.flush().unwrap();
         }
 
         let engine = StorageEngine::recover(&dir).unwrap();
         let rows = engine.scan(TableId(1), TxnId(3), Timestamp(100)).unwrap();
-        assert_eq!(rows.len(), 1, "explicitly aborted txn should not be visible");
+        assert_eq!(
+            rows.len(),
+            1,
+            "explicitly aborted txn should not be visible"
+        );
         assert_eq!(rows[0].1.values[1], Datum::Text("committed".into()));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1734,7 +1922,10 @@ mod recovery_tests {
 
     #[test]
     fn test_recovery_global_txn_committed() {
-        let dir = std::env::temp_dir().join(format!("falcon_recovery_global_commit_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "falcon_recovery_global_commit_{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
 
         {
@@ -1745,19 +1936,29 @@ mod recovery_tests {
             wal.append(&WalRecord::Insert {
                 txn_id: TxnId(1),
                 table_id: TableId(1),
-                row: OwnedRow::new(vec![Datum::Int32(1), Datum::Text("global_committed".into())]),
-            }).unwrap();
-            wal.append(&WalRecord::PrepareTxn { txn_id: TxnId(1) }).unwrap();
+                row: OwnedRow::new(vec![
+                    Datum::Int32(1),
+                    Datum::Text("global_committed".into()),
+                ]),
+            })
+            .unwrap();
+            wal.append(&WalRecord::PrepareTxn { txn_id: TxnId(1) })
+                .unwrap();
             wal.append(&WalRecord::CommitTxnGlobal {
                 txn_id: TxnId(1),
                 commit_ts: Timestamp(10),
-            }).unwrap();
+            })
+            .unwrap();
             wal.flush().unwrap();
         }
 
         let engine = StorageEngine::recover(&dir).unwrap();
         let rows = engine.scan(TableId(1), TxnId(99), Timestamp(100)).unwrap();
-        assert_eq!(rows.len(), 1, "committed global txn should be visible after recovery");
+        assert_eq!(
+            rows.len(),
+            1,
+            "committed global txn should be visible after recovery"
+        );
         assert_eq!(rows[0].1.values[1], Datum::Text("global_committed".into()));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1765,7 +1966,10 @@ mod recovery_tests {
 
     #[test]
     fn test_recovery_global_txn_prepared_not_committed() {
-        let dir = std::env::temp_dir().join(format!("falcon_recovery_global_prepared_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "falcon_recovery_global_prepared_{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
 
         {
@@ -1778,26 +1982,34 @@ mod recovery_tests {
                 txn_id: TxnId(1),
                 table_id: TableId(1),
                 row: OwnedRow::new(vec![Datum::Int32(1), Datum::Text("local_ok".into())]),
-            }).unwrap();
+            })
+            .unwrap();
             wal.append(&WalRecord::CommitTxnLocal {
                 txn_id: TxnId(1),
                 commit_ts: Timestamp(10),
-            }).unwrap();
+            })
+            .unwrap();
 
             // Global txn: prepared but NOT committed (simulates coordinator crash)
             wal.append(&WalRecord::Insert {
                 txn_id: TxnId(2),
                 table_id: TableId(1),
                 row: OwnedRow::new(vec![Datum::Int32(2), Datum::Text("prepared_only".into())]),
-            }).unwrap();
-            wal.append(&WalRecord::PrepareTxn { txn_id: TxnId(2) }).unwrap();
-            // No commit record 鈥?crash after prepare
+            })
+            .unwrap();
+            wal.append(&WalRecord::PrepareTxn { txn_id: TxnId(2) })
+                .unwrap();
+            // No commit record  — crash after prepare
             wal.flush().unwrap();
         }
 
         let engine = StorageEngine::recover(&dir).unwrap();
         let rows = engine.scan(TableId(1), TxnId(99), Timestamp(100)).unwrap();
-        assert_eq!(rows.len(), 1, "prepared-but-not-committed global txn should be invisible");
+        assert_eq!(
+            rows.len(),
+            1,
+            "prepared-but-not-committed global txn should be invisible"
+        );
         assert_eq!(rows[0].1.values[1], Datum::Text("local_ok".into()));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1805,7 +2017,10 @@ mod recovery_tests {
 
     #[test]
     fn test_recovery_global_txn_prepared_then_aborted() {
-        let dir = std::env::temp_dir().join(format!("falcon_recovery_global_abort_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "falcon_recovery_global_abort_{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
 
         {
@@ -1818,27 +2033,40 @@ mod recovery_tests {
                 txn_id: TxnId(1),
                 table_id: TableId(1),
                 row: OwnedRow::new(vec![Datum::Int32(1), Datum::Text("aborted_global".into())]),
-            }).unwrap();
-            wal.append(&WalRecord::PrepareTxn { txn_id: TxnId(1) }).unwrap();
-            wal.append(&WalRecord::AbortTxnGlobal { txn_id: TxnId(1) }).unwrap();
+            })
+            .unwrap();
+            wal.append(&WalRecord::PrepareTxn { txn_id: TxnId(1) })
+                .unwrap();
+            wal.append(&WalRecord::AbortTxnGlobal { txn_id: TxnId(1) })
+                .unwrap();
 
             // Another global txn: committed normally
             wal.append(&WalRecord::Insert {
                 txn_id: TxnId(2),
                 table_id: TableId(1),
-                row: OwnedRow::new(vec![Datum::Int32(2), Datum::Text("committed_global".into())]),
-            }).unwrap();
-            wal.append(&WalRecord::PrepareTxn { txn_id: TxnId(2) }).unwrap();
+                row: OwnedRow::new(vec![
+                    Datum::Int32(2),
+                    Datum::Text("committed_global".into()),
+                ]),
+            })
+            .unwrap();
+            wal.append(&WalRecord::PrepareTxn { txn_id: TxnId(2) })
+                .unwrap();
             wal.append(&WalRecord::CommitTxnGlobal {
                 txn_id: TxnId(2),
                 commit_ts: Timestamp(20),
-            }).unwrap();
+            })
+            .unwrap();
             wal.flush().unwrap();
         }
 
         let engine = StorageEngine::recover(&dir).unwrap();
         let rows = engine.scan(TableId(1), TxnId(99), Timestamp(100)).unwrap();
-        assert_eq!(rows.len(), 1, "only committed global txn should survive recovery");
+        assert_eq!(
+            rows.len(),
+            1,
+            "only committed global txn should survive recovery"
+        );
         assert_eq!(rows[0].1.values[1], Datum::Text("committed_global".into()));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1846,14 +2074,19 @@ mod recovery_tests {
 
     #[test]
     fn test_recovery_create_index_durability() {
-        let dir = std::env::temp_dir().join(format!("falcon_recovery_create_index_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "falcon_recovery_create_index_{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
 
         // Phase 1: create table + create named index, then "crash"
         {
             let engine = StorageEngine::new(Some(&dir)).unwrap();
             engine.create_table(recovery_schema()).unwrap();
-            engine.create_named_index("idx_val", "rec_test", 1, false).unwrap();
+            engine
+                .create_named_index("idx_val", "rec_test", 1, false)
+                .unwrap();
         }
 
         // Phase 2: recover — index must be present in the registry
@@ -1873,14 +2106,17 @@ mod recovery_tests {
 
     #[test]
     fn test_recovery_drop_index_durability() {
-        let dir = std::env::temp_dir().join(format!("falcon_recovery_drop_index_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("falcon_recovery_drop_index_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
         // Phase 1: create table + index, then drop the index
         {
             let engine = StorageEngine::new(Some(&dir)).unwrap();
             engine.create_table(recovery_schema()).unwrap();
-            engine.create_named_index("idx_val", "rec_test", 1, false).unwrap();
+            engine
+                .create_named_index("idx_val", "rec_test", 1, false)
+                .unwrap();
             engine.drop_index("idx_val").unwrap();
         }
 
@@ -1936,7 +2172,7 @@ mod write_set_tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         }
     }
 
@@ -1947,10 +2183,34 @@ mod write_set_tests {
         engine.create_table(ws_schema(2, "t2")).unwrap();
 
         let txn1 = TxnId(1);
-        engine.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(1), Datum::Text("a".into())]), txn1).unwrap();
-        engine.insert(TableId(2), OwnedRow::new(vec![Datum::Int32(10), Datum::Text("x".into())]), txn1).unwrap();
-        engine.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(2), Datum::Text("b".into())]), txn1).unwrap();
-        engine.insert(TableId(2), OwnedRow::new(vec![Datum::Int32(20), Datum::Text("y".into())]), txn1).unwrap();
+        engine
+            .insert(
+                TableId(1),
+                OwnedRow::new(vec![Datum::Int32(1), Datum::Text("a".into())]),
+                txn1,
+            )
+            .unwrap();
+        engine
+            .insert(
+                TableId(2),
+                OwnedRow::new(vec![Datum::Int32(10), Datum::Text("x".into())]),
+                txn1,
+            )
+            .unwrap();
+        engine
+            .insert(
+                TableId(1),
+                OwnedRow::new(vec![Datum::Int32(2), Datum::Text("b".into())]),
+                txn1,
+            )
+            .unwrap();
+        engine
+            .insert(
+                TableId(2),
+                OwnedRow::new(vec![Datum::Int32(20), Datum::Text("y".into())]),
+                txn1,
+            )
+            .unwrap();
 
         engine.commit_txn_local(txn1, Timestamp(10)).unwrap();
 
@@ -1968,18 +2228,40 @@ mod write_set_tests {
 
         // Commit some baseline data
         let txn1 = TxnId(1);
-        engine.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(1), Datum::Text("base".into())]), txn1).unwrap();
+        engine
+            .insert(
+                TableId(1),
+                OwnedRow::new(vec![Datum::Int32(1), Datum::Text("base".into())]),
+                txn1,
+            )
+            .unwrap();
         engine.commit_txn_local(txn1, Timestamp(10)).unwrap();
 
         // Write to both tables, then abort
         let txn2 = TxnId(2);
-        engine.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(2), Datum::Text("aborted".into())]), txn2).unwrap();
-        engine.insert(TableId(2), OwnedRow::new(vec![Datum::Int32(10), Datum::Text("aborted".into())]), txn2).unwrap();
+        engine
+            .insert(
+                TableId(1),
+                OwnedRow::new(vec![Datum::Int32(2), Datum::Text("aborted".into())]),
+                txn2,
+            )
+            .unwrap();
+        engine
+            .insert(
+                TableId(2),
+                OwnedRow::new(vec![Datum::Int32(10), Datum::Text("aborted".into())]),
+                txn2,
+            )
+            .unwrap();
         engine.abort_txn_local(txn2).unwrap();
 
         let t1_rows = engine.scan(TableId(1), TxnId(3), Timestamp(20)).unwrap();
         let t2_rows = engine.scan(TableId(2), TxnId(3), Timestamp(20)).unwrap();
-        assert_eq!(t1_rows.len(), 1, "t1 should only have baseline row after abort");
+        assert_eq!(
+            t1_rows.len(),
+            1,
+            "t1 should only have baseline row after abort"
+        );
         assert_eq!(t2_rows.len(), 0, "t2 should be empty after abort");
     }
 
@@ -1989,20 +2271,36 @@ mod write_set_tests {
         engine.create_table(ws_schema(1, "t1")).unwrap();
 
         let txn1 = TxnId(1);
-        engine.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(1), Datum::Text("first".into())]), txn1).unwrap();
+        engine
+            .insert(
+                TableId(1),
+                OwnedRow::new(vec![Datum::Int32(1), Datum::Text("first".into())]),
+                txn1,
+            )
+            .unwrap();
 
         // Update the same key within the same txn
         let pk = crate::memtable::encode_pk(
             &OwnedRow::new(vec![Datum::Int32(1), Datum::Text("first".into())]),
             &[0],
         );
-        engine.update(TableId(1), &pk, OwnedRow::new(vec![Datum::Int32(1), Datum::Text("second".into())]), txn1).unwrap();
+        engine
+            .update(
+                TableId(1),
+                &pk,
+                OwnedRow::new(vec![Datum::Int32(1), Datum::Text("second".into())]),
+                txn1,
+            )
+            .unwrap();
         engine.commit_txn_local(txn1, Timestamp(10)).unwrap();
 
         let rows = engine.scan(TableId(1), TxnId(2), Timestamp(10)).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].1.values[1], Datum::Text("second".into()),
-            "should see the latest update within the same txn");
+        assert_eq!(
+            rows[0].1.values[1],
+            Datum::Text("second".into()),
+            "should see the latest update within the same txn"
+        );
     }
 
     #[test]
@@ -2013,8 +2311,20 @@ mod write_set_tests {
         // txn1 and txn2 both write
         let txn1 = TxnId(1);
         let txn2 = TxnId(2);
-        engine.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(1), Datum::Text("txn1".into())]), txn1).unwrap();
-        engine.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(2), Datum::Text("txn2".into())]), txn2).unwrap();
+        engine
+            .insert(
+                TableId(1),
+                OwnedRow::new(vec![Datum::Int32(1), Datum::Text("txn1".into())]),
+                txn1,
+            )
+            .unwrap();
+        engine
+            .insert(
+                TableId(1),
+                OwnedRow::new(vec![Datum::Int32(2), Datum::Text("txn2".into())]),
+                txn2,
+            )
+            .unwrap();
 
         // Commit txn1 only
         engine.commit_txn_local(txn1, Timestamp(10)).unwrap();
@@ -2027,7 +2337,11 @@ mod write_set_tests {
         // Now commit txn2
         engine.commit_txn_local(txn2, Timestamp(20)).unwrap();
         let rows = engine.scan(TableId(1), TxnId(3), Timestamp(20)).unwrap();
-        assert_eq!(rows.len(), 2, "both rows should be visible after both commits");
+        assert_eq!(
+            rows.len(),
+            2,
+            "both rows should be visible after both commits"
+        );
     }
 }
 
@@ -2068,7 +2382,7 @@ mod checkpoint_tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         }
     }
 
@@ -2083,8 +2397,20 @@ mod checkpoint_tests {
             engine.create_table(ckpt_schema()).unwrap();
 
             let txn1 = TxnId(1);
-            engine.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(1), Datum::Text("alpha".into())]), txn1).unwrap();
-            engine.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(2), Datum::Text("beta".into())]), txn1).unwrap();
+            engine
+                .insert(
+                    TableId(1),
+                    OwnedRow::new(vec![Datum::Int32(1), Datum::Text("alpha".into())]),
+                    txn1,
+                )
+                .unwrap();
+            engine
+                .insert(
+                    TableId(1),
+                    OwnedRow::new(vec![Datum::Int32(2), Datum::Text("beta".into())]),
+                    txn1,
+                )
+                .unwrap();
             engine.commit_txn_local(txn1, Timestamp(10)).unwrap();
 
             let (seg_id, row_count) = engine.checkpoint().unwrap();
@@ -2117,22 +2443,38 @@ mod checkpoint_tests {
             engine.create_table(ckpt_schema()).unwrap();
 
             let txn1 = TxnId(1);
-            engine.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(1), Datum::Text("before".into())]), txn1).unwrap();
+            engine
+                .insert(
+                    TableId(1),
+                    OwnedRow::new(vec![Datum::Int32(1), Datum::Text("before".into())]),
+                    txn1,
+                )
+                .unwrap();
             engine.commit_txn_local(txn1, Timestamp(10)).unwrap();
 
             engine.checkpoint().unwrap();
 
             // Write more data AFTER checkpoint
             let txn2 = TxnId(2);
-            engine.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(2), Datum::Text("after".into())]), txn2).unwrap();
+            engine
+                .insert(
+                    TableId(1),
+                    OwnedRow::new(vec![Datum::Int32(2), Datum::Text("after".into())]),
+                    txn2,
+                )
+                .unwrap();
             engine.commit_txn_local(txn2, Timestamp(20)).unwrap();
         }
 
-        // Phase 2: Recover 鈥?should see both pre- and post-checkpoint data
+        // Phase 2: Recover  — should see both pre- and post-checkpoint data
         {
             let engine = StorageEngine::recover(&dir).unwrap();
             let rows = engine.scan(TableId(1), TxnId(3), Timestamp(100)).unwrap();
-            assert_eq!(rows.len(), 2, "should recover pre- and post-checkpoint rows");
+            assert_eq!(
+                rows.len(),
+                2,
+                "should recover pre- and post-checkpoint rows"
+            );
 
             let vals: Vec<&Datum> = rows.iter().map(|(_, r)| &r.values[1]).collect();
             assert!(vals.contains(&&Datum::Text("before".into())));
@@ -2153,18 +2495,30 @@ mod checkpoint_tests {
             engine.create_table(ckpt_schema()).unwrap();
 
             let txn1 = TxnId(1);
-            engine.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(1), Datum::Text("committed".into())]), txn1).unwrap();
+            engine
+                .insert(
+                    TableId(1),
+                    OwnedRow::new(vec![Datum::Int32(1), Datum::Text("committed".into())]),
+                    txn1,
+                )
+                .unwrap();
             engine.commit_txn_local(txn1, Timestamp(10)).unwrap();
 
             engine.checkpoint().unwrap();
 
             // Uncommitted write after checkpoint (simulates crash)
             let txn2 = TxnId(2);
-            engine.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(2), Datum::Text("uncommitted".into())]), txn2).unwrap();
-            // No commit 鈥?crash!
+            engine
+                .insert(
+                    TableId(1),
+                    OwnedRow::new(vec![Datum::Int32(2), Datum::Text("uncommitted".into())]),
+                    txn2,
+                )
+                .unwrap();
+            // No commit  — crash!
         }
 
-        // Phase 2: Recover 鈥?uncommitted post-checkpoint write should be aborted
+        // Phase 2: Recover  — uncommitted post-checkpoint write should be aborted
         {
             let engine = StorageEngine::recover(&dir).unwrap();
             let rows = engine.scan(TableId(1), TxnId(3), Timestamp(100)).unwrap();
@@ -2185,13 +2539,25 @@ mod checkpoint_tests {
             engine.create_table(ckpt_schema()).unwrap();
 
             let txn1 = TxnId(1);
-            engine.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(1), Datum::Text("data".into())]), txn1).unwrap();
+            engine
+                .insert(
+                    TableId(1),
+                    OwnedRow::new(vec![Datum::Int32(1), Datum::Text("data".into())]),
+                    txn1,
+                )
+                .unwrap();
             engine.commit_txn_local(txn1, Timestamp(10)).unwrap();
 
             engine.checkpoint().unwrap();
 
             let txn2 = TxnId(2);
-            engine.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(2), Datum::Text("post".into())]), txn2).unwrap();
+            engine
+                .insert(
+                    TableId(1),
+                    OwnedRow::new(vec![Datum::Int32(2), Datum::Text("post".into())]),
+                    txn2,
+                )
+                .unwrap();
             engine.commit_txn_local(txn2, Timestamp(20)).unwrap();
         }
 
@@ -2206,7 +2572,11 @@ mod checkpoint_tests {
         {
             let engine = StorageEngine::recover(&dir).unwrap();
             let rows = engine.scan(TableId(1), TxnId(3), Timestamp(100)).unwrap();
-            assert_eq!(rows.len(), 2, "idempotent checkpoint recovery should produce same result");
+            assert_eq!(
+                rows.len(),
+                2,
+                "idempotent checkpoint recovery should produce same result"
+            );
         }
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2290,7 +2660,9 @@ mod checkpoint_tests {
                     post_txn,
                 )
                 .unwrap();
-            engine.commit_txn_local(post_txn, Timestamp(50_000)).unwrap();
+            engine
+                .commit_txn_local(post_txn, Timestamp(50_000))
+                .unwrap();
         }
 
         // Recovery remains correct after purge.
@@ -2353,7 +2725,7 @@ mod bench_tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         }
     }
 
@@ -2372,21 +2744,28 @@ mod bench_tests {
             // Pre-populate with n committed rows
             let bulk_txn = TxnId(1);
             for i in 0..n {
-                engine.insert(
-                    TableId(1),
-                    OwnedRow::new(vec![Datum::Int32(i as i32), Datum::Text(format!("row_{}", i))]),
-                    bulk_txn,
-                ).unwrap();
+                engine
+                    .insert(
+                        TableId(1),
+                        OwnedRow::new(vec![
+                            Datum::Int32(i as i32),
+                            Datum::Text(format!("row_{}", i)),
+                        ]),
+                        bulk_txn,
+                    )
+                    .unwrap();
             }
             engine.commit_txn_local(bulk_txn, Timestamp(10)).unwrap();
 
             // Write 1 row in a new txn and measure commit time
             let write_txn = TxnId(2);
-            engine.insert(
-                TableId(1),
-                OwnedRow::new(vec![Datum::Int32(n as i32 + 1), Datum::Text("new".into())]),
-                write_txn,
-            ).unwrap();
+            engine
+                .insert(
+                    TableId(1),
+                    OwnedRow::new(vec![Datum::Int32(n as i32 + 1), Datum::Text("new".into())]),
+                    write_txn,
+                )
+                .unwrap();
 
             let start = Instant::now();
             engine.commit_txn_local(write_txn, Timestamp(20)).unwrap();
@@ -2403,11 +2782,15 @@ mod bench_tests {
         // With write-set driven commit, commit at 100k should not be 100x slower than at 100.
         let (_, us_small) = results[0];
         let (_, us_large) = results[results.len() - 1];
-        let ratio = if us_small == 0 { 1.0 } else { us_large as f64 / us_small.max(1) as f64 };
+        let ratio = if us_small == 0 {
+            1.0
+        } else {
+            us_large as f64 / us_small.max(1) as f64
+        };
         eprintln!("  ratio (largest/smallest) = {:.1}x", ratio);
         assert!(
             ratio < 20.0,
-            "commit latency ratio {:.1}x exceeds 20x threshold 鈥?commit may not be O(|write_set|)",
+            "commit latency ratio {:.1}x exceeds 20x threshold  — commit may not be O(|write_set|)",
             ratio
         );
     }
@@ -2425,11 +2808,13 @@ mod bench_tests {
         let start_no_idx = Instant::now();
         let txn1 = TxnId(1);
         for i in 0..num_rows {
-            engine_no_idx.insert(
-                TableId(1),
-                OwnedRow::new(vec![Datum::Int32(i), Datum::Text(format!("v{}", i))]),
-                txn1,
-            ).unwrap();
+            engine_no_idx
+                .insert(
+                    TableId(1),
+                    OwnedRow::new(vec![Datum::Int32(i), Datum::Text(format!("v{}", i))]),
+                    txn1,
+                )
+                .unwrap();
         }
         engine_no_idx.commit_txn_local(txn1, Timestamp(10)).unwrap();
         let elapsed_no_idx = start_no_idx.elapsed().as_micros();
@@ -2442,11 +2827,13 @@ mod bench_tests {
         let start_idx = Instant::now();
         let txn2 = TxnId(1);
         for i in 0..num_rows {
-            engine_idx.insert(
-                TableId(1),
-                OwnedRow::new(vec![Datum::Int32(i), Datum::Text(format!("v{}", i))]),
-                txn2,
-            ).unwrap();
+            engine_idx
+                .insert(
+                    TableId(1),
+                    OwnedRow::new(vec![Datum::Int32(i), Datum::Text(format!("v{}", i))]),
+                    txn2,
+                )
+                .unwrap();
         }
         engine_idx.commit_txn_local(txn2, Timestamp(10)).unwrap();
         let elapsed_idx = start_idx.elapsed().as_micros();
@@ -2483,7 +2870,7 @@ mod bench_tests {
 #[cfg(test)]
 mod gc_tests {
     use crate::engine::StorageEngine;
-    use crate::gc::{compute_safepoint, GcConfig, GcStats, sweep_memtable};
+    use crate::gc::{compute_safepoint, sweep_memtable, GcConfig, GcStats};
     use crate::memtable::MemTable;
     use crate::mvcc::VersionChain;
     use falcon_common::datum::{Datum, OwnedRow};
@@ -2499,27 +2886,25 @@ mod gc_tests {
         TableSchema {
             id: TableId(1),
             name: "t".into(),
-            columns: vec![
-                ColumnDef {
-                    id: ColumnId(0),
-                    name: "id".into(),
-                    data_type: DataType::Int32,
-                    nullable: false,
-                    is_primary_key: true,
-                    default_value: None,
-                    is_serial: false,
-                },
-            ],
+            columns: vec![ColumnDef {
+                id: ColumnId(0),
+                name: "id".into(),
+                data_type: DataType::Int32,
+                nullable: false,
+                is_primary_key: true,
+                default_value: None,
+                is_serial: false,
+            }],
             primary_key_columns: vec![0],
             next_serial_values: std::collections::HashMap::new(),
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         }
     }
 
-    // 鈹€鈹€ Version chain GC with stats 鈹€鈹€
+    // ── Version chain GC with stats ──
 
     #[test]
     fn test_gc_chain_reclaims_old_versions() {
@@ -2585,7 +2970,7 @@ mod gc_tests {
         chain.prepend(TxnId(2), Some(row(2)));
         chain.commit(TxnId(2), Timestamp(20));
         chain.prepend(TxnId(3), Some(row(3)));
-        // Abort txn 3 鈥?sets commit_ts to MAX
+        // Abort txn 3  — sets commit_ts to MAX
         chain.abort(TxnId(3));
 
         // GC at watermark 25: head has commit_ts=MAX (aborted), skip it.
@@ -2619,7 +3004,7 @@ mod gc_tests {
         assert_eq!(chain.version_chain_len(), 2);
     }
 
-    // 鈹€鈹€ Safepoint computation 鈹€鈹€
+    // ── Safepoint computation ──
 
     #[test]
     fn test_safepoint_basic() {
@@ -2640,18 +3025,23 @@ mod gc_tests {
         assert_eq!(sp, Timestamp(0)); // saturating_sub
     }
 
-    // 鈹€鈹€ MemTable sweep 鈹€鈹€
+    // ── MemTable sweep ──
 
     #[test]
     fn test_sweep_memtable_basic() {
         let table = MemTable::new(test_schema());
-        let config = GcConfig { min_chain_length: 0, ..Default::default() };
+        let config = GcConfig {
+            min_chain_length: 0,
+            ..Default::default()
+        };
         let stats = GcStats::new();
 
         // Insert + commit two versions for key 1
         table.insert(row(1), TxnId(1)).unwrap();
         table.commit_txn(TxnId(1), Timestamp(10));
-        table.update(&crate::memtable::encode_pk(&row(1), &[0]), row(1), TxnId(2)).unwrap();
+        table
+            .update(&crate::memtable::encode_pk(&row(1), &[0]), row(1), TxnId(2))
+            .unwrap();
         table.commit_txn(TxnId(2), Timestamp(20));
 
         // Sweep at watermark 15
@@ -2677,7 +3067,9 @@ mod gc_tests {
 
         // Insert 5 keys
         for i in 1..=5 {
-            table.insert(OwnedRow::new(vec![Datum::Int32(i)]), TxnId(i as u64)).unwrap();
+            table
+                .insert(OwnedRow::new(vec![Datum::Int32(i)]), TxnId(i as u64))
+                .unwrap();
             table.commit_txn(TxnId(i as u64), Timestamp(i as u64 * 10));
         }
 
@@ -2707,7 +3099,7 @@ mod gc_tests {
         assert_eq!(result.keys_skipped, 1);
     }
 
-    // 鈹€鈹€ Engine-level GC 鈹€鈹€
+    // ── Engine-level GC ──
 
     #[test]
     fn test_engine_run_gc_basic() {
@@ -2716,10 +3108,22 @@ mod gc_tests {
 
         // Insert + update (creates 2 versions)
         engine.insert(TableId(1), row(1), TxnId(1)).unwrap();
-        engine.commit_txn(TxnId(1), Timestamp(10), falcon_common::types::TxnType::Local).unwrap();
+        engine
+            .commit_txn(
+                TxnId(1),
+                Timestamp(10),
+                falcon_common::types::TxnType::Local,
+            )
+            .unwrap();
         let pk = crate::memtable::encode_pk(&row(1), &[0]);
         engine.update(TableId(1), &pk, row(1), TxnId(2)).unwrap();
-        engine.commit_txn(TxnId(2), Timestamp(20), falcon_common::types::TxnType::Local).unwrap();
+        engine
+            .commit_txn(
+                TxnId(2),
+                Timestamp(20),
+                falcon_common::types::TxnType::Local,
+            )
+            .unwrap();
 
         let chains = engine.run_gc(Timestamp(25));
         assert!(chains >= 1);
@@ -2736,14 +3140,35 @@ mod gc_tests {
 
         // Insert 3 versions for key 1
         engine.insert(TableId(1), row(1), TxnId(1)).unwrap();
-        engine.commit_txn(TxnId(1), Timestamp(10), falcon_common::types::TxnType::Local).unwrap();
+        engine
+            .commit_txn(
+                TxnId(1),
+                Timestamp(10),
+                falcon_common::types::TxnType::Local,
+            )
+            .unwrap();
         let pk = crate::memtable::encode_pk(&row(1), &[0]);
         engine.update(TableId(1), &pk, row(1), TxnId(2)).unwrap();
-        engine.commit_txn(TxnId(2), Timestamp(20), falcon_common::types::TxnType::Local).unwrap();
+        engine
+            .commit_txn(
+                TxnId(2),
+                Timestamp(20),
+                falcon_common::types::TxnType::Local,
+            )
+            .unwrap();
         engine.update(TableId(1), &pk, row(1), TxnId(3)).unwrap();
-        engine.commit_txn(TxnId(3), Timestamp(30), falcon_common::types::TxnType::Local).unwrap();
+        engine
+            .commit_txn(
+                TxnId(3),
+                Timestamp(30),
+                falcon_common::types::TxnType::Local,
+            )
+            .unwrap();
 
-        let config = GcConfig { min_chain_length: 0, ..Default::default() };
+        let config = GcConfig {
+            min_chain_length: 0,
+            ..Default::default()
+        };
         let stats = GcStats::new();
         let result = engine.run_gc_with_config(Timestamp(25), &config, &stats);
 
@@ -2756,7 +3181,7 @@ mod gc_tests {
         assert_eq!(snap.total_reclaimed_versions, 1);
     }
 
-    // 鈹€鈹€ Concurrent read + GC 鈹€鈹€
+    // ── Concurrent read + GC ──
 
     #[test]
     fn test_gc_concurrent_with_read() {
@@ -2769,23 +3194,38 @@ mod gc_tests {
         for i in 1..=5u64 {
             let pk = crate::memtable::encode_pk(&OwnedRow::new(vec![Datum::Int32(1)]), &[0]);
             if i == 1 {
-                engine.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(1)]), TxnId(i)).unwrap();
+                engine
+                    .insert(TableId(1), OwnedRow::new(vec![Datum::Int32(1)]), TxnId(i))
+                    .unwrap();
             } else {
-                engine.update(TableId(1), &pk, OwnedRow::new(vec![Datum::Int32(i as i32)]), TxnId(i)).unwrap();
+                engine
+                    .update(
+                        TableId(1),
+                        &pk,
+                        OwnedRow::new(vec![Datum::Int32(i as i32)]),
+                        TxnId(i),
+                    )
+                    .unwrap();
             }
-            engine.commit_txn(TxnId(i), Timestamp(i * 10), falcon_common::types::TxnType::Local).unwrap();
+            engine
+                .commit_txn(
+                    TxnId(i),
+                    Timestamp(i * 10),
+                    falcon_common::types::TxnType::Local,
+                )
+                .unwrap();
         }
 
         // Spawn GC in a thread
         let engine_gc = engine.clone();
-        let gc_handle = std::thread::spawn(move || {
-            engine_gc.run_gc(Timestamp(35))
-        });
+        let gc_handle = std::thread::spawn(move || engine_gc.run_gc(Timestamp(35)));
 
         // Concurrent reads
         let engine_read = engine.clone();
         let read_handle = std::thread::spawn(move || {
-            let rows = engine_read.scan(TableId(1), TxnId(999), Timestamp(100)).unwrap();
+            let rows = engine_read
+                .scan(TableId(1), TxnId(999), Timestamp(100))
+                .unwrap();
             assert_eq!(rows.len(), 1);
             rows[0].1.values[0].clone()
         });
@@ -2796,7 +3236,7 @@ mod gc_tests {
         assert_eq!(val, Datum::Int32(5));
     }
 
-    // 鈹€鈹€ Long txn blocks GC 鈹€鈹€
+    // ── Long txn blocks GC ──
 
     #[test]
     fn test_long_txn_prevents_gc() {
@@ -2805,12 +3245,30 @@ mod gc_tests {
 
         // Create 3 versions
         engine.insert(TableId(1), row(1), TxnId(1)).unwrap();
-        engine.commit_txn(TxnId(1), Timestamp(10), falcon_common::types::TxnType::Local).unwrap();
+        engine
+            .commit_txn(
+                TxnId(1),
+                Timestamp(10),
+                falcon_common::types::TxnType::Local,
+            )
+            .unwrap();
         let pk = crate::memtable::encode_pk(&row(1), &[0]);
         engine.update(TableId(1), &pk, row(2), TxnId(2)).unwrap();
-        engine.commit_txn(TxnId(2), Timestamp(20), falcon_common::types::TxnType::Local).unwrap();
+        engine
+            .commit_txn(
+                TxnId(2),
+                Timestamp(20),
+                falcon_common::types::TxnType::Local,
+            )
+            .unwrap();
         engine.update(TableId(1), &pk, row(3), TxnId(3)).unwrap();
-        engine.commit_txn(TxnId(3), Timestamp(30), falcon_common::types::TxnType::Local).unwrap();
+        engine
+            .commit_txn(
+                TxnId(3),
+                Timestamp(30),
+                falcon_common::types::TxnType::Local,
+            )
+            .unwrap();
 
         // Simulate a long-running txn with start_ts=15.
         // Safepoint = min_active_ts - 1 = 14.
@@ -2818,7 +3276,10 @@ mod gc_tests {
         let safepoint = compute_safepoint(Timestamp(15), Timestamp::MAX);
         assert_eq!(safepoint, Timestamp(14));
 
-        let config = GcConfig { min_chain_length: 0, ..Default::default() };
+        let config = GcConfig {
+            min_chain_length: 0,
+            ..Default::default()
+        };
         let stats = GcStats::new();
         let result = engine.run_gc_with_config(safepoint, &config, &stats);
         assert_eq!(result.reclaimed_versions, 0, "long txn should prevent GC");
@@ -2829,7 +3290,7 @@ mod gc_tests {
         assert_eq!(rows[0].1.values[0], Datum::Int32(1));
     }
 
-    // 鈹€鈹€ GC stats tracking 鈹€鈹€
+    // ── GC stats tracking ──
 
     #[test]
     fn test_gc_stats_accumulate() {
@@ -2843,7 +3304,7 @@ mod gc_tests {
         assert!((snap.avg_chain_length - 6.0).abs() < 0.01);
     }
 
-    // 鈹€鈹€ GC benchmark: memory over time 鈹€鈹€
+    // ── GC benchmark: memory over time ──
 
     #[test]
     fn test_gc_benchmark_memory_reclamation() {
@@ -2855,25 +3316,36 @@ mod gc_tests {
 
         // Phase 1: Insert keys + multiple updates (creates version chains)
         for key in 0..num_keys {
-            engine.insert(
-                TableId(1),
-                OwnedRow::new(vec![Datum::Int32(key)]),
-                TxnId(key as u64 * 100 + 1),
-            ).unwrap();
-            engine.commit_txn(
-                TxnId(key as u64 * 100 + 1),
-                Timestamp(key as u64 * 100 + 1),
-                falcon_common::types::TxnType::Local,
-            ).unwrap();
+            engine
+                .insert(
+                    TableId(1),
+                    OwnedRow::new(vec![Datum::Int32(key)]),
+                    TxnId(key as u64 * 100 + 1),
+                )
+                .unwrap();
+            engine
+                .commit_txn(
+                    TxnId(key as u64 * 100 + 1),
+                    Timestamp(key as u64 * 100 + 1),
+                    falcon_common::types::TxnType::Local,
+                )
+                .unwrap();
 
-            let pk = crate::memtable::encode_pk(
-                &OwnedRow::new(vec![Datum::Int32(key)]), &[0],
-            );
+            let pk = crate::memtable::encode_pk(&OwnedRow::new(vec![Datum::Int32(key)]), &[0]);
             for upd in 1..=num_updates {
                 let txn = TxnId(key as u64 * 100 + upd as u64 + 1);
                 let ts = Timestamp(key as u64 * 100 + upd as u64 + 1);
-                engine.update(TableId(1), &pk, OwnedRow::new(vec![Datum::Int32(key + upd as i32)]), txn).unwrap();
-                engine.commit_txn(txn, ts, falcon_common::types::TxnType::Local).unwrap();
+                engine
+                    .update(
+                        TableId(1),
+                        &pk,
+                        OwnedRow::new(vec![Datum::Int32(key + upd as i32)]),
+                        txn,
+                    )
+                    .unwrap();
+                engine
+                    .commit_txn(txn, ts, falcon_common::types::TxnType::Local)
+                    .unwrap();
             }
         }
 
@@ -2881,12 +3353,18 @@ mod gc_tests {
         assert_eq!(chains_before, num_keys as usize);
 
         // Phase 2: GC sweep
-        let config = GcConfig { min_chain_length: 0, ..Default::default() };
+        let config = GcConfig {
+            min_chain_length: 0,
+            ..Default::default()
+        };
         let stats = GcStats::new();
         let watermark = Timestamp(u64::MAX - 2);
         let result = engine.run_gc_with_config(watermark, &config, &stats);
 
-        eprintln!("\n=== GC Benchmark ({} keys x {} updates) ===", num_keys, num_updates);
+        eprintln!(
+            "\n=== GC Benchmark ({} keys x {} updates) ===",
+            num_keys, num_updates
+        );
         eprintln!("  chains_inspected: {}", result.chains_inspected);
         eprintln!("  chains_pruned:    {}", result.chains_pruned);
         eprintln!("  reclaimed_versions: {}", result.reclaimed_versions);
@@ -2903,7 +3381,10 @@ mod gc_tests {
 
         // After GC, each chain should have exactly 1 version
         let snap2 = GcStats::new();
-        let config2 = GcConfig { min_chain_length: 0, ..Default::default() };
+        let config2 = GcConfig {
+            min_chain_length: 0,
+            ..Default::default()
+        };
         sweep_memtable(
             &engine.get_table(TableId(1)).unwrap(),
             watermark,
@@ -2914,13 +3395,13 @@ mod gc_tests {
         assert_eq!(s.max_chain_length_observed, 1);
     }
 
-    // 鈹€鈹€ GcRunner background task 鈹€鈹€
+    // ── GcRunner background task ──
 
     #[test]
     fn test_gc_runner_background_sweep() {
         use crate::gc::{GcRunner, SafepointProvider};
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicU64, Ordering as AOrdering};
+        use std::sync::Arc;
 
         struct TestProvider {
             ts: AtomicU64,
@@ -2939,14 +3420,34 @@ mod gc_tests {
 
         // Create 3 versions for key 1
         engine.insert(TableId(1), row(1), TxnId(1)).unwrap();
-        engine.commit_txn(TxnId(1), Timestamp(10), falcon_common::types::TxnType::Local).unwrap();
+        engine
+            .commit_txn(
+                TxnId(1),
+                Timestamp(10),
+                falcon_common::types::TxnType::Local,
+            )
+            .unwrap();
         let pk = crate::memtable::encode_pk(&row(1), &[0]);
         engine.update(TableId(1), &pk, row(2), TxnId(2)).unwrap();
-        engine.commit_txn(TxnId(2), Timestamp(20), falcon_common::types::TxnType::Local).unwrap();
+        engine
+            .commit_txn(
+                TxnId(2),
+                Timestamp(20),
+                falcon_common::types::TxnType::Local,
+            )
+            .unwrap();
         engine.update(TableId(1), &pk, row(3), TxnId(3)).unwrap();
-        engine.commit_txn(TxnId(3), Timestamp(30), falcon_common::types::TxnType::Local).unwrap();
+        engine
+            .commit_txn(
+                TxnId(3),
+                Timestamp(30),
+                falcon_common::types::TxnType::Local,
+            )
+            .unwrap();
 
-        let provider = Arc::new(TestProvider { ts: AtomicU64::new(100) });
+        let provider = Arc::new(TestProvider {
+            ts: AtomicU64::new(100),
+        });
         let config = GcConfig {
             interval_ms: 10, // 10ms interval for fast test
             min_chain_length: 0,
@@ -2963,8 +3464,14 @@ mod gc_tests {
 
         // Verify GC ran
         let snap = engine.gc_stats_snapshot();
-        assert!(snap.total_sweeps > 0, "GC runner should have run at least one sweep");
-        assert!(snap.total_reclaimed_versions > 0, "should have reclaimed versions");
+        assert!(
+            snap.total_sweeps > 0,
+            "GC runner should have run at least one sweep"
+        );
+        assert!(
+            snap.total_reclaimed_versions > 0,
+            "should have reclaimed versions"
+        );
 
         // Data should still be readable
         let rows = engine.scan(TableId(1), TxnId(999), Timestamp(100)).unwrap();
@@ -2972,7 +3479,7 @@ mod gc_tests {
         assert_eq!(rows[0].1.values[0], Datum::Int32(3));
     }
 
-    // 鈹€鈹€ Crash-recovery after GC 鈹€鈹€
+    // ── Crash-recovery after GC ──
 
     #[test]
     fn test_gc_then_crash_recovery() {
@@ -2986,42 +3493,68 @@ mod gc_tests {
 
             // Insert + update (2 versions)
             engine.insert(TableId(1), row(1), TxnId(1)).unwrap();
-            engine.commit_txn(TxnId(1), Timestamp(10), falcon_common::types::TxnType::Local).unwrap();
+            engine
+                .commit_txn(
+                    TxnId(1),
+                    Timestamp(10),
+                    falcon_common::types::TxnType::Local,
+                )
+                .unwrap();
             let pk = crate::memtable::encode_pk(&row(1), &[0]);
             engine.update(TableId(1), &pk, row(2), TxnId(2)).unwrap();
-            engine.commit_txn(TxnId(2), Timestamp(20), falcon_common::types::TxnType::Local).unwrap();
+            engine
+                .commit_txn(
+                    TxnId(2),
+                    Timestamp(20),
+                    falcon_common::types::TxnType::Local,
+                )
+                .unwrap();
 
             // Also insert key 2 and leave it
-            engine.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(99)]), TxnId(3)).unwrap();
-            engine.commit_txn(TxnId(3), Timestamp(30), falcon_common::types::TxnType::Local).unwrap();
+            engine
+                .insert(TableId(1), OwnedRow::new(vec![Datum::Int32(99)]), TxnId(3))
+                .unwrap();
+            engine
+                .commit_txn(
+                    TxnId(3),
+                    Timestamp(30),
+                    falcon_common::types::TxnType::Local,
+                )
+                .unwrap();
 
-            // Run GC 鈥?reclaims old version of key 1 in memory
+            // Run GC  — reclaims old version of key 1 in memory
             let result = engine.gc_sweep(Timestamp(25));
             assert_eq!(result.reclaimed_versions, 1);
 
-            // "crash" 鈥?engine dropped, WAL persisted
+            // "crash"  — engine dropped, WAL persisted
         }
 
         // Phase 2: Recover from WAL
         {
             let recovered = StorageEngine::recover(&dir).unwrap();
-            // WAL replays all committed writes 鈥?both keys should exist
-            let rows = recovered.scan(TableId(1), TxnId(999), Timestamp(100)).unwrap();
+            // WAL replays all committed writes  — both keys should exist
+            let rows = recovered
+                .scan(TableId(1), TxnId(999), Timestamp(100))
+                .unwrap();
             assert_eq!(rows.len(), 2, "both keys should survive recovery");
 
             // Key 1 should have latest value (2)
             let pk1 = crate::memtable::encode_pk(&row(1), &[0]);
-            let val = recovered.get(TableId(1), &pk1, TxnId(999), Timestamp(100)).unwrap();
+            let val = recovered
+                .get(TableId(1), &pk1, TxnId(999), Timestamp(100))
+                .unwrap();
             assert_eq!(val.unwrap().values[0], Datum::Int32(2));
 
             // Key 99 should exist
             let pk99 = crate::memtable::encode_pk(&OwnedRow::new(vec![Datum::Int32(99)]), &[0]);
-            let val99 = recovered.get(TableId(1), &pk99, TxnId(999), Timestamp(100)).unwrap();
+            let val99 = recovered
+                .get(TableId(1), &pk99, TxnId(999), Timestamp(100))
+                .unwrap();
             assert_eq!(val99.unwrap().values[0], Datum::Int32(99));
         }
     }
 
-    // 鈹€鈹€ No-GC vs With-GC benchmark 鈹€鈹€
+    // ── No-GC vs With-GC benchmark ──
 
     #[test]
     fn test_gc_benchmark_no_gc_vs_gc() {
@@ -3048,44 +3581,55 @@ mod gc_tests {
                 check_constraints: vec![],
                 unique_constraints: vec![],
                 foreign_keys: vec![],
-            ..Default::default()
+                ..Default::default()
             };
             engine.create_table(schema).unwrap();
 
             for key in 0..num_keys {
                 let base = key as u64 * (num_updates + 1) + 1;
-                engine.insert(
-                    TableId(1),
-                    OwnedRow::new(vec![Datum::Int32(key)]),
-                    TxnId(base),
-                ).unwrap();
-                engine.commit_txn(
-                    TxnId(base), Timestamp(base),
-                    falcon_common::types::TxnType::Local,
-                ).unwrap();
+                engine
+                    .insert(
+                        TableId(1),
+                        OwnedRow::new(vec![Datum::Int32(key)]),
+                        TxnId(base),
+                    )
+                    .unwrap();
+                engine
+                    .commit_txn(
+                        TxnId(base),
+                        Timestamp(base),
+                        falcon_common::types::TxnType::Local,
+                    )
+                    .unwrap();
 
-                let pk = crate::memtable::encode_pk(
-                    &OwnedRow::new(vec![Datum::Int32(key)]), &[0],
-                );
+                let pk = crate::memtable::encode_pk(&OwnedRow::new(vec![Datum::Int32(key)]), &[0]);
                 for upd in 1..=num_updates {
                     let txn = TxnId(base + upd);
                     let ts = Timestamp(base + upd);
-                    engine.update(
-                        TableId(1), &pk,
-                        OwnedRow::new(vec![Datum::Int32(key + upd as i32)]),
-                        txn,
-                    ).unwrap();
-                    engine.commit_txn(txn, ts, falcon_common::types::TxnType::Local).unwrap();
+                    engine
+                        .update(
+                            TableId(1),
+                            &pk,
+                            OwnedRow::new(vec![Datum::Int32(key + upd as i32)]),
+                            txn,
+                        )
+                        .unwrap();
+                    engine
+                        .commit_txn(txn, ts, falcon_common::types::TxnType::Local)
+                        .unwrap();
                 }
             }
             engine
         }
 
-        // 鈹€鈹€ No GC 鈹€鈹€
+        // ── No GC ──
         let engine_no_gc = fill_engine(num_keys, num_updates);
         let chains_no_gc = engine_no_gc.total_chain_count();
         let stats_no_gc = GcStats::new();
-        let config = GcConfig { min_chain_length: 0, ..Default::default() };
+        let config = GcConfig {
+            min_chain_length: 0,
+            ..Default::default()
+        };
         // Measure chain lengths without GC
         for entry in engine_no_gc.get_table(TableId(1)).unwrap().data.iter() {
             stats_no_gc.observe_chain_length(entry.value().version_chain_len() as u64);
@@ -3102,7 +3646,7 @@ mod gc_tests {
         latencies_no_gc.sort();
         let p99_no_gc = latencies_no_gc[98];
 
-        // 鈹€鈹€ With GC 鈹€鈹€
+        // ── With GC ──
         let engine_gc = fill_engine(num_keys, num_updates);
         let watermark = Timestamp(u64::MAX - 2);
         let gc_result = engine_gc.run_gc_with_config(watermark, &config, &GcStats::new());
@@ -3122,35 +3666,51 @@ mod gc_tests {
         latencies_gc.sort();
         let p99_gc = latencies_gc[98];
 
-        eprintln!("\n=== No-GC vs With-GC ({} keys 脳 {} updates) ===", num_keys, num_updates);
-        eprintln!("  [No GC]  chains: {}, max_chain_len: {}, avg_chain_len: {:.1}, p99_read_ns: {}",
-            chains_no_gc, snap_no_gc.max_chain_length_observed, snap_no_gc.avg_chain_length, p99_no_gc);
-        eprintln!("  [GC]     chains: {}, max_chain_len: {}, avg_chain_len: {:.1}, p99_read_ns: {}",
-            chains_no_gc, snap_gc.max_chain_length_observed, snap_gc.avg_chain_length, p99_gc);
-        eprintln!("  GC reclaimed: {} versions, {} bytes, {}us",
-            gc_result.reclaimed_versions, gc_result.reclaimed_bytes, gc_result.sweep_duration_us);
+        eprintln!(
+            "\n=== No-GC vs With-GC ({} keys × {} updates) ===",
+            num_keys, num_updates
+        );
+        eprintln!(
+            "  [No GC]  chains: {}, max_chain_len: {}, avg_chain_len: {:.1}, p99_read_ns: {}",
+            chains_no_gc,
+            snap_no_gc.max_chain_length_observed,
+            snap_no_gc.avg_chain_length,
+            p99_no_gc
+        );
+        eprintln!(
+            "  [GC]     chains: {}, max_chain_len: {}, avg_chain_len: {:.1}, p99_read_ns: {}",
+            chains_no_gc, snap_gc.max_chain_length_observed, snap_gc.avg_chain_length, p99_gc
+        );
+        eprintln!(
+            "  GC reclaimed: {} versions, {} bytes, {}us",
+            gc_result.reclaimed_versions, gc_result.reclaimed_bytes, gc_result.sweep_duration_us
+        );
 
         // Assertions
         assert_eq!(snap_no_gc.max_chain_length_observed, num_updates + 1);
         assert_eq!(snap_gc.max_chain_length_observed, 1);
         assert!(gc_result.reclaimed_versions > 0);
-        // p99 with GC should be 鈮?p99 without GC (shorter chains 鈫?faster reads)
+        // p99 with GC should be ≈p99 without GC (shorter chains  → faster reads)
         // (This is a statistical assertion; allow 2x slack for CI jitter)
         assert!(
             p99_gc <= p99_no_gc * 2 + 10000,
             "p99 with GC ({}) should not be dramatically worse than without ({})",
-            p99_gc, p99_no_gc,
+            p99_gc,
+            p99_no_gc,
         );
     }
 }
 
 #[cfg(test)]
 mod wal_observer_tests {
-    use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
-    use falcon_common::datum::{Datum, OwnedRow};
-    use falcon_common::types::{ColumnId, DataType, TableId, Timestamp, TxnId, TxnType};
     use crate::engine::StorageEngine;
+    use falcon_common::datum::{Datum, OwnedRow};
     use falcon_common::schema::{ColumnDef, TableSchema};
+    use falcon_common::types::{ColumnId, DataType, TableId, Timestamp, TxnId, TxnType};
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    };
 
     fn test_schema(name: &str) -> TableSchema {
         TableSchema {
@@ -3181,7 +3741,7 @@ mod wal_observer_tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         }
     }
 
@@ -3198,37 +3758,92 @@ mod wal_observer_tests {
         // DDL: create_table (1 WAL record)
         let schema = test_schema("t1");
         let table_id = engine.create_table(schema).unwrap();
-        assert_eq!(counter.load(Ordering::SeqCst), 1, "create_table should fire observer");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "create_table should fire observer"
+        );
 
         // DML: insert (1 WAL record)
         let txn1 = TxnId(1);
-        engine.insert(table_id, OwnedRow::new(vec![Datum::Int32(1), Datum::Int32(100)]), txn1).unwrap();
-        assert_eq!(counter.load(Ordering::SeqCst), 2, "insert should fire observer");
+        engine
+            .insert(
+                table_id,
+                OwnedRow::new(vec![Datum::Int32(1), Datum::Int32(100)]),
+                txn1,
+            )
+            .unwrap();
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            2,
+            "insert should fire observer"
+        );
 
         // DML: update (1 WAL record)
-        let pk = engine.insert(table_id, OwnedRow::new(vec![Datum::Int32(2), Datum::Int32(200)]), txn1).unwrap();
+        let pk = engine
+            .insert(
+                table_id,
+                OwnedRow::new(vec![Datum::Int32(2), Datum::Int32(200)]),
+                txn1,
+            )
+            .unwrap();
         assert_eq!(counter.load(Ordering::SeqCst), 3);
-        engine.update(table_id, &pk, OwnedRow::new(vec![Datum::Int32(2), Datum::Int32(999)]), txn1).unwrap();
-        assert_eq!(counter.load(Ordering::SeqCst), 4, "update should fire observer");
+        engine
+            .update(
+                table_id,
+                &pk,
+                OwnedRow::new(vec![Datum::Int32(2), Datum::Int32(999)]),
+                txn1,
+            )
+            .unwrap();
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            4,
+            "update should fire observer"
+        );
 
         // DML: delete (1 WAL record)
         engine.delete(table_id, &pk, txn1).unwrap();
-        assert_eq!(counter.load(Ordering::SeqCst), 5, "delete should fire observer");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            5,
+            "delete should fire observer"
+        );
 
         // Txn: commit_local (1 WAL record)
-        engine.commit_txn(txn1, Timestamp(10), TxnType::Local).unwrap();
-        assert_eq!(counter.load(Ordering::SeqCst), 6, "commit should fire observer");
+        engine
+            .commit_txn(txn1, Timestamp(10), TxnType::Local)
+            .unwrap();
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            6,
+            "commit should fire observer"
+        );
 
         // Txn: abort_local (1 WAL record)
         let txn2 = TxnId(2);
-        engine.insert(table_id, OwnedRow::new(vec![Datum::Int32(3), Datum::Int32(300)]), txn2).unwrap();
+        engine
+            .insert(
+                table_id,
+                OwnedRow::new(vec![Datum::Int32(3), Datum::Int32(300)]),
+                txn2,
+            )
+            .unwrap();
         assert_eq!(counter.load(Ordering::SeqCst), 7);
         engine.abort_txn(txn2, TxnType::Local).unwrap();
-        assert_eq!(counter.load(Ordering::SeqCst), 8, "abort should fire observer");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            8,
+            "abort should fire observer"
+        );
 
         // DDL: drop_table (1 WAL record)
         engine.drop_table("t1").unwrap();
-        assert_eq!(counter.load(Ordering::SeqCst), 9, "drop_table should fire observer");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            9,
+            "drop_table should fire observer"
+        );
     }
 
     #[test]
@@ -3238,8 +3853,16 @@ mod wal_observer_tests {
         let schema = test_schema("t2");
         let table_id = engine.create_table(schema).unwrap();
         let txn = TxnId(10);
-        engine.insert(table_id, OwnedRow::new(vec![Datum::Int32(1), Datum::Int32(1)]), txn).unwrap();
-        engine.commit_txn(txn, Timestamp(1), TxnType::Local).unwrap();
+        engine
+            .insert(
+                table_id,
+                OwnedRow::new(vec![Datum::Int32(1), Datum::Int32(1)]),
+                txn,
+            )
+            .unwrap();
+        engine
+            .commit_txn(txn, Timestamp(1), TxnType::Local)
+            .unwrap();
     }
 
     #[test]
@@ -3250,27 +3873,41 @@ mod wal_observer_tests {
 
         // Insert and commit some rows
         let txn = TxnId(1);
-        engine.insert(table_id, OwnedRow::new(vec![Datum::Int32(1), Datum::Int32(10)]), txn).unwrap();
-        engine.insert(table_id, OwnedRow::new(vec![Datum::Int32(2), Datum::Int32(20)]), txn).unwrap();
-        engine.commit_txn(txn, Timestamp(5), TxnType::Local).unwrap();
+        engine
+            .insert(
+                table_id,
+                OwnedRow::new(vec![Datum::Int32(1), Datum::Int32(10)]),
+                txn,
+            )
+            .unwrap();
+        engine
+            .insert(
+                table_id,
+                OwnedRow::new(vec![Datum::Int32(2), Datum::Int32(20)]),
+                txn,
+            )
+            .unwrap();
+        engine
+            .commit_txn(txn, Timestamp(5), TxnType::Local)
+            .unwrap();
 
         let ckpt = engine.snapshot_checkpoint_data();
         assert_eq!(ckpt.catalog.table_count(), 1);
         assert!(ckpt.catalog.find_table("ckpt_test").is_some());
         assert_eq!(ckpt.table_data.len(), 1);
         assert_eq!(ckpt.table_data[0].1.len(), 2); // 2 rows
-        // In-memory engine has no WAL, so lsn/segment are 0
+                                                   // In-memory engine has no WAL, so lsn/segment are 0
         assert_eq!(ckpt.wal_lsn, 0);
         assert_eq!(ckpt.wal_segment_id, 0);
     }
 
-    // 鈹€鈹€ ReplicaAckTracker tests 鈹€鈹€
+    // ── ReplicaAckTracker tests ──
 
     #[test]
     fn test_replica_ack_tracker_no_replicas() {
         use crate::engine::ReplicaAckTracker;
         let tracker = ReplicaAckTracker::new();
-        // No replicas 鈫?no constraint
+        // No replicas  → no constraint
         assert_eq!(tracker.min_replica_safe_ts(), Timestamp::MAX);
         assert_eq!(tracker.replica_count(), 0);
     }
@@ -3339,13 +3976,19 @@ mod wal_observer_tests {
     #[test]
     fn test_engine_replica_ack_tracker_integration() {
         let engine = StorageEngine::new_in_memory();
-        // Initially no replicas 鈫?MAX
-        assert_eq!(engine.replica_ack_tracker().min_replica_safe_ts(), Timestamp::MAX);
+        // Initially no replicas  → MAX
+        assert_eq!(
+            engine.replica_ack_tracker().min_replica_safe_ts(),
+            Timestamp::MAX
+        );
 
         // Register replicas
         engine.replica_ack_tracker().update_ack(0, 50);
         engine.replica_ack_tracker().update_ack(1, 30);
-        assert_eq!(engine.replica_ack_tracker().min_replica_safe_ts(), Timestamp(30));
+        assert_eq!(
+            engine.replica_ack_tracker().min_replica_safe_ts(),
+            Timestamp(30)
+        );
 
         // GC safepoint should be constrained by replica
         use crate::gc::compute_safepoint;
@@ -3364,8 +4007,8 @@ mod wal_observer_tests {
     #[test]
     fn test_gc_runner_with_dynamic_replica_acks() {
         use crate::gc::{GcConfig, GcRunner, SafepointProvider};
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicU64, Ordering as AOrdering};
+        use std::sync::Arc;
 
         struct DynamicProvider {
             ts: AtomicU64,
@@ -3390,14 +4033,24 @@ mod wal_observer_tests {
 
         // Create 3 versions for key 1
         engine.insert(TableId(99), mk_row(1), TxnId(1)).unwrap();
-        engine.commit_txn(TxnId(1), Timestamp(10), TxnType::Local).unwrap();
+        engine
+            .commit_txn(TxnId(1), Timestamp(10), TxnType::Local)
+            .unwrap();
         let pk = crate::memtable::encode_pk(&mk_row(1), &[0]);
-        engine.update(TableId(99), &pk, mk_row(2), TxnId(2)).unwrap();
-        engine.commit_txn(TxnId(2), Timestamp(20), TxnType::Local).unwrap();
-        engine.update(TableId(99), &pk, mk_row(3), TxnId(3)).unwrap();
-        engine.commit_txn(TxnId(3), Timestamp(30), TxnType::Local).unwrap();
+        engine
+            .update(TableId(99), &pk, mk_row(2), TxnId(2))
+            .unwrap();
+        engine
+            .commit_txn(TxnId(2), Timestamp(20), TxnType::Local)
+            .unwrap();
+        engine
+            .update(TableId(99), &pk, mk_row(3), TxnId(3))
+            .unwrap();
+        engine
+            .commit_txn(TxnId(3), Timestamp(30), TxnType::Local)
+            .unwrap();
 
-        // Register a slow replica at ts=5 鈥?should block GC
+        // Register a slow replica at ts=5  — should block GC
         engine.replica_ack_tracker().update_ack(0, 5);
 
         let provider = Arc::new(DynamicProvider {
@@ -3410,7 +4063,8 @@ mod wal_observer_tests {
             ..Default::default()
         };
 
-        let mut runner = GcRunner::start(engine.clone(), provider.clone(), config.clone()).expect("spawn in test");
+        let mut runner = GcRunner::start(engine.clone(), provider.clone(), config.clone())
+            .expect("spawn in test");
         std::thread::sleep(std::time::Duration::from_millis(50));
         runner.stop();
 
@@ -3427,7 +4081,10 @@ mod wal_observer_tests {
         runner2.stop();
 
         let snap2 = engine.gc_stats_snapshot();
-        assert!(snap2.total_reclaimed_versions > 0, "GC should reclaim after replica catches up");
+        assert!(
+            snap2.total_reclaimed_versions > 0,
+            "GC should reclaim after replica catches up"
+        );
     }
 }
 
@@ -3504,14 +4161,26 @@ mod columnstore_integration_tests {
         engine.create_table(cs_schema()).unwrap();
 
         for i in 0..5i64 {
-            engine.insert(TableId(500), OwnedRow::new(vec![Datum::Int64(i), Datum::Text(format!("v{}", i))]), TxnId(1)).unwrap();
+            engine
+                .insert(
+                    TableId(500),
+                    OwnedRow::new(vec![Datum::Int64(i), Datum::Text(format!("v{}", i))]),
+                    TxnId(1),
+                )
+                .unwrap();
         }
 
         // ColumnStore has no MVCC — all rows visible at any read_ts
         let rows_past = engine.scan(TableId(500), TxnId(2), Timestamp(0)).unwrap();
-        let rows_future = engine.scan(TableId(500), TxnId(2), Timestamp(u64::MAX)).unwrap();
+        let rows_future = engine
+            .scan(TableId(500), TxnId(2), Timestamp(u64::MAX))
+            .unwrap();
         assert_eq!(rows_past.len(), 5, "ColumnStore: all rows visible at ts=0");
-        assert_eq!(rows_future.len(), 5, "ColumnStore: all rows visible at ts=MAX");
+        assert_eq!(
+            rows_future.len(),
+            5,
+            "ColumnStore: all rows visible at ts=MAX"
+        );
     }
 
     #[test]
@@ -3524,7 +4193,10 @@ mod columnstore_integration_tests {
 
         // UPDATE is not supported on COLUMNSTORE (analytics workload)
         let result = engine.update(TableId(500), &pk, row, TxnId(2));
-        assert!(result.is_err(), "UPDATE on COLUMNSTORE must return an error");
+        assert!(
+            result.is_err(),
+            "UPDATE on COLUMNSTORE must return an error"
+        );
     }
 
     #[test]
@@ -3537,7 +4209,10 @@ mod columnstore_integration_tests {
 
         // DELETE is not supported on COLUMNSTORE
         let result = engine.delete(TableId(500), &pk, TxnId(2));
-        assert!(result.is_err(), "DELETE on COLUMNSTORE must return an error");
+        assert!(
+            result.is_err(),
+            "DELETE on COLUMNSTORE must return an error"
+        );
     }
 
     #[test]
@@ -3546,7 +4221,10 @@ mod columnstore_integration_tests {
         engine.set_node_role(NodeRole::Primary);
 
         let result = engine.create_table(cs_schema());
-        assert!(result.is_err(), "COLUMNSTORE must be rejected on Primary nodes");
+        assert!(
+            result.is_err(),
+            "COLUMNSTORE must be rejected on Primary nodes"
+        );
     }
 
     #[test]
@@ -3555,16 +4233,28 @@ mod columnstore_integration_tests {
         let engine = analytics_engine();
         engine.create_table(cs_schema()).unwrap();
 
-        engine.insert(TableId(500), OwnedRow::new(vec![Datum::Int64(1), Datum::Text("x".into())]), TxnId(1)).unwrap();
+        engine
+            .insert(
+                TableId(500),
+                OwnedRow::new(vec![Datum::Int64(1), Datum::Text("x".into())]),
+                TxnId(1),
+            )
+            .unwrap();
 
         // Visible before commit
-        let before = engine.scan(TableId(500), TxnId(99), Timestamp(100)).unwrap();
+        let before = engine
+            .scan(TableId(500), TxnId(99), Timestamp(100))
+            .unwrap();
         assert_eq!(before.len(), 1);
 
-        engine.commit_txn(TxnId(1), Timestamp(10), TxnType::Local).unwrap();
+        engine
+            .commit_txn(TxnId(1), Timestamp(10), TxnType::Local)
+            .unwrap();
 
         // Still visible after commit
-        let after = engine.scan(TableId(500), TxnId(99), Timestamp(100)).unwrap();
+        let after = engine
+            .scan(TableId(500), TxnId(99), Timestamp(100))
+            .unwrap();
         assert_eq!(after.len(), 1);
     }
 }
@@ -3618,8 +4308,20 @@ mod disk_rowstore_integration_tests {
         let engine = analytics_engine();
         engine.create_table(disk_schema()).unwrap();
 
-        engine.insert(TableId(600), OwnedRow::new(vec![Datum::Int64(1), Datum::Text("a".into())]), TxnId(1)).unwrap();
-        engine.insert(TableId(600), OwnedRow::new(vec![Datum::Int64(2), Datum::Text("b".into())]), TxnId(1)).unwrap();
+        engine
+            .insert(
+                TableId(600),
+                OwnedRow::new(vec![Datum::Int64(1), Datum::Text("a".into())]),
+                TxnId(1),
+            )
+            .unwrap();
+        engine
+            .insert(
+                TableId(600),
+                OwnedRow::new(vec![Datum::Int64(2), Datum::Text("b".into())]),
+                TxnId(1),
+            )
+            .unwrap();
 
         let rows = engine.scan(TableId(600), TxnId(2), Timestamp(100)).unwrap();
         assert_eq!(rows.len(), 2);
@@ -3630,8 +4332,21 @@ mod disk_rowstore_integration_tests {
         let engine = analytics_engine();
         engine.create_table(disk_schema()).unwrap();
 
-        let pk = engine.insert(TableId(600), OwnedRow::new(vec![Datum::Int64(1), Datum::Text("old".into())]), TxnId(1)).unwrap();
-        engine.update(TableId(600), &pk, OwnedRow::new(vec![Datum::Int64(1), Datum::Text("new".into())]), TxnId(2)).unwrap();
+        let pk = engine
+            .insert(
+                TableId(600),
+                OwnedRow::new(vec![Datum::Int64(1), Datum::Text("old".into())]),
+                TxnId(1),
+            )
+            .unwrap();
+        engine
+            .update(
+                TableId(600),
+                &pk,
+                OwnedRow::new(vec![Datum::Int64(1), Datum::Text("new".into())]),
+                TxnId(2),
+            )
+            .unwrap();
 
         let rows = engine.scan(TableId(600), TxnId(3), Timestamp(100)).unwrap();
         assert_eq!(rows.len(), 1);
@@ -3643,7 +4358,13 @@ mod disk_rowstore_integration_tests {
         let engine = analytics_engine();
         engine.create_table(disk_schema()).unwrap();
 
-        let pk = engine.insert(TableId(600), OwnedRow::new(vec![Datum::Int64(1), Datum::Text("gone".into())]), TxnId(1)).unwrap();
+        let pk = engine
+            .insert(
+                TableId(600),
+                OwnedRow::new(vec![Datum::Int64(1), Datum::Text("gone".into())]),
+                TxnId(1),
+            )
+            .unwrap();
         engine.delete(TableId(600), &pk, TxnId(2)).unwrap();
 
         let rows = engine.scan(TableId(600), TxnId(3), Timestamp(100)).unwrap();
@@ -3656,10 +4377,18 @@ mod disk_rowstore_integration_tests {
         let engine = analytics_engine();
         engine.create_table(disk_schema()).unwrap();
 
-        engine.insert(TableId(600), OwnedRow::new(vec![Datum::Int64(1), Datum::Text("x".into())]), TxnId(1)).unwrap();
+        engine
+            .insert(
+                TableId(600),
+                OwnedRow::new(vec![Datum::Int64(1), Datum::Text("x".into())]),
+                TxnId(1),
+            )
+            .unwrap();
 
         let rows_ts0 = engine.scan(TableId(600), TxnId(2), Timestamp(0)).unwrap();
-        let rows_tsmax = engine.scan(TableId(600), TxnId(2), Timestamp(u64::MAX)).unwrap();
+        let rows_tsmax = engine
+            .scan(TableId(600), TxnId(2), Timestamp(u64::MAX))
+            .unwrap();
         assert_eq!(rows_ts0.len(), 1, "DiskRowstore: row visible at ts=0");
         assert_eq!(rows_tsmax.len(), 1, "DiskRowstore: row visible at ts=MAX");
     }
@@ -3672,7 +4401,10 @@ mod disk_rowstore_integration_tests {
         let row = OwnedRow::new(vec![Datum::Int64(42), Datum::Text("dup".into())]);
         engine.insert(TableId(600), row.clone(), TxnId(1)).unwrap();
         let result = engine.insert(TableId(600), row, TxnId(2));
-        assert!(result.is_err(), "duplicate PK must be rejected by DiskRowstore");
+        assert!(
+            result.is_err(),
+            "duplicate PK must be rejected by DiskRowstore"
+        );
     }
 
     #[test]
@@ -3681,7 +4413,10 @@ mod disk_rowstore_integration_tests {
         engine.set_node_role(NodeRole::Primary);
 
         let result = engine.create_table(disk_schema());
-        assert!(result.is_err(), "DISK_ROWSTORE must be rejected on Primary nodes");
+        assert!(
+            result.is_err(),
+            "DISK_ROWSTORE must be rejected on Primary nodes"
+        );
     }
 
     #[test]
@@ -3690,14 +4425,26 @@ mod disk_rowstore_integration_tests {
         let engine = analytics_engine();
         engine.create_table(disk_schema()).unwrap();
 
-        engine.insert(TableId(600), OwnedRow::new(vec![Datum::Int64(1), Datum::Text("y".into())]), TxnId(1)).unwrap();
+        engine
+            .insert(
+                TableId(600),
+                OwnedRow::new(vec![Datum::Int64(1), Datum::Text("y".into())]),
+                TxnId(1),
+            )
+            .unwrap();
 
-        let before = engine.scan(TableId(600), TxnId(99), Timestamp(100)).unwrap();
+        let before = engine
+            .scan(TableId(600), TxnId(99), Timestamp(100))
+            .unwrap();
         assert_eq!(before.len(), 1);
 
-        engine.commit_txn(TxnId(1), Timestamp(10), TxnType::Local).unwrap();
+        engine
+            .commit_txn(TxnId(1), Timestamp(10), TxnType::Local)
+            .unwrap();
 
-        let after = engine.scan(TableId(600), TxnId(99), Timestamp(100)).unwrap();
+        let after = engine
+            .scan(TableId(600), TxnId(99), Timestamp(100))
+            .unwrap();
         assert_eq!(after.len(), 1);
     }
 }

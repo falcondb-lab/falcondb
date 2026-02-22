@@ -2,11 +2,11 @@
 mod txn_manager_tests {
     use std::sync::Arc;
 
-    use falcon_common::types::{IsolationLevel, ShardId, Timestamp, TxnId};
-    use falcon_storage::engine::StorageEngine;
     use falcon_common::datum::{Datum, OwnedRow};
     use falcon_common::schema::{ColumnDef, TableSchema};
     use falcon_common::types::{ColumnId, DataType, TableId};
+    use falcon_common::types::{IsolationLevel, ShardId, Timestamp, TxnId};
+    use falcon_storage::engine::StorageEngine;
 
     use crate::manager::{
         SlowPathMode, TxnClassification, TxnManager, TxnOutcome, TxnPath, TxnState, TxnType,
@@ -41,7 +41,7 @@ mod txn_manager_tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         }
     }
 
@@ -52,7 +52,7 @@ mod txn_manager_tests {
         (storage, mgr)
     }
 
-    // 鈹€鈹€ Fast-path (LocalTxn) tests 鈹€鈹€
+    // ── Fast-path (LocalTxn) tests ──
 
     #[test]
     fn test_local_txn_fast_path_commit() {
@@ -87,21 +87,19 @@ mod txn_manager_tests {
         let commit_ts = mgr.commit(txn.txn_id).unwrap();
         assert!(commit_ts.0 > 0);
 
-        // LocalTxn goes directly Active 鈫?Committed, never Prepared
+        // LocalTxn goes directly Active  → Committed, never Prepared
         // (verified structurally: the fast-path branch does not set Prepared)
         assert!(mgr.get_txn(txn.txn_id).is_none()); // removed after commit
     }
 
-    // 鈹€鈹€ Slow-path (GlobalTxn) tests 鈹€鈹€
+    // ── Slow-path (GlobalTxn) tests ──
 
     #[test]
     fn test_global_txn_slow_path_commit() {
         let (storage, mgr) = setup();
 
-        let classification = TxnClassification::global(
-            vec![ShardId(0), ShardId(1)],
-            SlowPathMode::Xa2Pc,
-        );
+        let classification =
+            TxnClassification::global(vec![ShardId(0), ShardId(1)], SlowPathMode::Xa2Pc);
         let txn = mgr.begin_with_classification(IsolationLevel::ReadCommitted, classification);
         assert_eq!(txn.txn_type, TxnType::Global);
         assert_eq!(txn.path, TxnPath::Slow);
@@ -131,7 +129,7 @@ mod txn_manager_tests {
         assert!(updated.degraded);
     }
 
-    // 鈹€鈹€ OCC validation tests 鈹€鈹€
+    // ── OCC validation tests ──
 
     #[test]
     fn test_si_occ_conflict_aborts_txn() {
@@ -151,10 +149,12 @@ mod txn_manager_tests {
         // txn3 updates the same key and commits (after txn2 started)
         let txn3 = mgr.begin(IsolationLevel::SnapshotIsolation);
         let new_row = OwnedRow::new(vec![Datum::Int32(1), Datum::Text("v2".into())]);
-        storage.update(TableId(1), &pk, new_row, txn3.txn_id).unwrap();
+        storage
+            .update(TableId(1), &pk, new_row, txn3.txn_id)
+            .unwrap();
         mgr.commit(txn3.txn_id).unwrap();
 
-        // txn2 tries to commit 鈥?should fail with WriteConflict
+        // txn2 tries to commit  — should fail with WriteConflict
         let result = mgr.commit(txn2.txn_id);
         assert!(result.is_err());
     }
@@ -177,15 +177,17 @@ mod txn_manager_tests {
         // txn3 updates and commits
         let txn3 = mgr.begin(IsolationLevel::ReadCommitted);
         let new_row = OwnedRow::new(vec![Datum::Int32(1), Datum::Text("v2".into())]);
-        storage.update(TableId(1), &pk, new_row, txn3.txn_id).unwrap();
+        storage
+            .update(TableId(1), &pk, new_row, txn3.txn_id)
+            .unwrap();
         mgr.commit(txn3.txn_id).unwrap();
 
-        // txn2 commits 鈥?should succeed (RC doesn't do OCC validation)
+        // txn2 commits  — should succeed (RC doesn't do OCC validation)
         let result = mgr.commit(txn2.txn_id);
         assert!(result.is_ok());
     }
 
-    // 鈹€鈹€ Abort tests 鈹€鈹€
+    // ── Abort tests ──
 
     #[test]
     fn test_abort_cleans_up_writes() {
@@ -198,11 +200,13 @@ mod txn_manager_tests {
         mgr.abort(txn.txn_id).unwrap();
 
         // Verify no data visible
-        let rows = storage.scan(TableId(1), TxnId(999), Timestamp(1000)).unwrap();
+        let rows = storage
+            .scan(TableId(1), TxnId(999), Timestamp(1000))
+            .unwrap();
         assert_eq!(rows.len(), 0);
     }
 
-    // 鈹€鈹€ Stats tests 鈹€鈹€
+    // ── Stats tests ──
 
     #[test]
     fn test_stats_snapshot() {
@@ -215,10 +219,8 @@ mod txn_manager_tests {
         mgr.commit(txn1.txn_id).unwrap();
 
         // Slow-path commit
-        let classification = TxnClassification::global(
-            vec![ShardId(0), ShardId(1)],
-            SlowPathMode::Xa2Pc,
-        );
+        let classification =
+            TxnClassification::global(vec![ShardId(0), ShardId(1)], SlowPathMode::Xa2Pc);
         let txn2 = mgr.begin_with_classification(IsolationLevel::ReadCommitted, classification);
         let row2 = OwnedRow::new(vec![Datum::Int32(2), Datum::Text("b".into())]);
         storage.insert(TableId(1), row2, txn2.txn_id).unwrap();
@@ -244,7 +246,8 @@ mod txn_manager_tests {
         assert_eq!(txn.txn_type, TxnType::Local);
 
         // Observe a second shard
-        mgr.observe_involved_shards(txn.txn_id, &[ShardId(1)]).unwrap();
+        mgr.observe_involved_shards(txn.txn_id, &[ShardId(1)])
+            .unwrap();
 
         let updated = mgr.get_txn(txn.txn_id).unwrap();
         assert_eq!(updated.txn_type, TxnType::Global);
@@ -252,7 +255,7 @@ mod txn_manager_tests {
         assert_eq!(updated.involved_shards.len(), 2);
     }
 
-    // 鈹€鈹€ Prepare invariant tests 鈹€鈹€
+    // ── Prepare invariant tests ──
 
     #[test]
     fn test_prepare_rejects_local_txn() {
@@ -277,10 +280,8 @@ mod txn_manager_tests {
     fn test_prepare_accepts_global_txn() {
         let (_storage, mgr) = setup();
 
-        let classification = TxnClassification::global(
-            vec![ShardId(0), ShardId(1)],
-            SlowPathMode::Xa2Pc,
-        );
+        let classification =
+            TxnClassification::global(vec![ShardId(0), ShardId(1)], SlowPathMode::Xa2Pc);
         let txn = mgr.begin_with_classification(IsolationLevel::ReadCommitted, classification);
         assert_eq!(txn.txn_type, TxnType::Global);
 
@@ -292,7 +293,7 @@ mod txn_manager_tests {
         assert_eq!(updated.state, TxnState::Prepared);
     }
 
-    // 鈹€鈹€ Observability tests 鈹€鈹€
+    // ── Observability tests ──
 
     #[test]
     fn test_txn_handle_fields_observable() {
@@ -311,10 +312,8 @@ mod txn_manager_tests {
         mgr.commit(txn1.txn_id).unwrap();
 
         // Global slow-path
-        let classification = TxnClassification::global(
-            vec![ShardId(0), ShardId(1)],
-            SlowPathMode::Xa2Pc,
-        );
+        let classification =
+            TxnClassification::global(vec![ShardId(0), ShardId(1)], SlowPathMode::Xa2Pc);
         let txn2 = mgr.begin_with_classification(IsolationLevel::ReadCommitted, classification);
         assert_eq!(txn2.txn_type, TxnType::Global);
         assert_eq!(txn2.path, TxnPath::Slow);
@@ -343,15 +342,19 @@ mod txn_manager_tests {
 
         // txn2 reads under SI
         let txn2 = mgr.begin(IsolationLevel::SnapshotIsolation);
-        let _ = storage.get(TableId(1), &pk, txn2.txn_id, txn2.start_ts).unwrap();
+        let _ = storage
+            .get(TableId(1), &pk, txn2.txn_id, txn2.start_ts)
+            .unwrap();
 
         // txn3 concurrently updates and commits
         let txn3 = mgr.begin(IsolationLevel::SnapshotIsolation);
         let new_row = OwnedRow::new(vec![Datum::Int32(1), Datum::Text("v2".into())]);
-        storage.update(TableId(1), &pk, new_row, txn3.txn_id).unwrap();
+        storage
+            .update(TableId(1), &pk, new_row, txn3.txn_id)
+            .unwrap();
         mgr.commit(txn3.txn_id).unwrap();
 
-        // txn2 commit fails 鈥?OCC rejects
+        // txn2 commit fails  — OCC rejects
         let result = mgr.commit(txn2.txn_id);
         assert!(result.is_err());
 
@@ -360,27 +363,34 @@ mod txn_manager_tests {
         assert!(stats.occ_conflicts >= 1);
     }
 
-    // 鈹€鈹€ Conservative upgrade: Local 鈫?Global, never Global 鈫?Local 鈹€鈹€
+    // ── Conservative upgrade: Local  → Global, never Global  → Local ──
 
     #[test]
     fn test_cannot_downgrade_global_to_local() {
         let (_storage, mgr) = setup();
 
-        let classification = TxnClassification::global(
-            vec![ShardId(0), ShardId(1)],
-            SlowPathMode::Xa2Pc,
-        );
+        let classification =
+            TxnClassification::global(vec![ShardId(0), ShardId(1)], SlowPathMode::Xa2Pc);
         let txn = mgr.begin_with_classification(IsolationLevel::ReadCommitted, classification);
         assert_eq!(txn.txn_type, TxnType::Global);
 
         // observe_involved_shards with a single shard should NOT downgrade to Local
-        mgr.observe_involved_shards(txn.txn_id, &[ShardId(0)]).unwrap();
+        mgr.observe_involved_shards(txn.txn_id, &[ShardId(0)])
+            .unwrap();
         let updated = mgr.get_txn(txn.txn_id).unwrap();
-        assert_eq!(updated.txn_type, TxnType::Global, "Global must not downgrade to Local");
-        assert_eq!(updated.path, TxnPath::Slow, "Slow path must not revert to Fast");
+        assert_eq!(
+            updated.txn_type,
+            TxnType::Global,
+            "Global must not downgrade to Local"
+        );
+        assert_eq!(
+            updated.path,
+            TxnPath::Slow,
+            "Slow path must not revert to Fast"
+        );
     }
 
-    // 鈹€鈹€ Commit-time unique constraint via TxnManager 鈹€鈹€
+    // ── Commit-time unique constraint via TxnManager ──
 
     fn setup_mgr() -> (Arc<StorageEngine>, Arc<TxnManager>) {
         let storage = Arc::new(StorageEngine::new_in_memory());
@@ -406,21 +416,25 @@ mod txn_manager_tests {
         let row1 = OwnedRow::new(vec![Datum::Int32(1), Datum::Text("hello".into())]);
         storage.insert(TableId(1), row1, txn1.txn_id).unwrap();
 
-        // txn2 inserts val="hello" (different PK) 鈥?both pass insert-time check
+        // txn2 inserts val="hello" (different PK)  — both pass insert-time check
         let txn2 = mgr.begin(IsolationLevel::ReadCommitted);
         let row2 = OwnedRow::new(vec![Datum::Int32(2), Datum::Text("hello".into())]);
         storage.insert(TableId(1), row2, txn2.txn_id).unwrap();
 
-        // txn1 commits (fast-path) 鈥?succeeds
+        // txn1 commits (fast-path)  — succeeds
         mgr.commit(txn1.txn_id).unwrap();
 
-        // txn2 commits (fast-path) 鈥?must fail with ConstraintViolation
+        // txn2 commits (fast-path)  — must fail with ConstraintViolation
         let result = mgr.commit(txn2.txn_id);
         assert!(result.is_err());
         match result.unwrap_err() {
             falcon_common::error::TxnError::ConstraintViolation(id, msg) => {
                 assert_eq!(id, txn2.txn_id);
-                assert!(msg.contains("unique"), "message should mention unique: {}", msg);
+                assert!(
+                    msg.contains("unique"),
+                    "message should mention unique: {}",
+                    msg
+                );
             }
             other => panic!("Expected ConstraintViolation, got: {:?}", other),
         }
@@ -436,18 +450,16 @@ mod txn_manager_tests {
         let row1 = OwnedRow::new(vec![Datum::Int32(1), Datum::Text("hello".into())]);
         storage.insert(TableId(1), row1, txn1.txn_id).unwrap();
 
-        let classification = TxnClassification::global(
-            vec![ShardId(0), ShardId(1)],
-            SlowPathMode::Xa2Pc,
-        );
+        let classification =
+            TxnClassification::global(vec![ShardId(0), ShardId(1)], SlowPathMode::Xa2Pc);
         let txn2 = mgr.begin_with_classification(IsolationLevel::ReadCommitted, classification);
         let row2 = OwnedRow::new(vec![Datum::Int32(2), Datum::Text("hello".into())]);
         storage.insert(TableId(1), row2, txn2.txn_id).unwrap();
 
-        // txn1 commits (fast-path) 鈥?succeeds
+        // txn1 commits (fast-path)  — succeeds
         mgr.commit(txn1.txn_id).unwrap();
 
-        // txn2 commits (slow-path) 鈥?must fail with ConstraintViolation
+        // txn2 commits (slow-path)  — must fail with ConstraintViolation
         let result = mgr.commit(txn2.txn_id);
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -466,28 +478,46 @@ mod txn_manager_tests {
 
         // Commit "a" via fast-path
         let txn1 = mgr.begin(IsolationLevel::ReadCommitted);
-        storage.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(1), Datum::Text("a".into())]), txn1.txn_id).unwrap();
+        storage
+            .insert(
+                TableId(1),
+                OwnedRow::new(vec![Datum::Int32(1), Datum::Text("a".into())]),
+                txn1.txn_id,
+            )
+            .unwrap();
         mgr.commit(txn1.txn_id).unwrap();
 
-        // Try "a" again via fast-path 鈥?should fail
+        // Try "a" again via fast-path  — should fail
         let txn2 = mgr.begin(IsolationLevel::ReadCommitted);
         // Insert-time check catches it (index already has "a")
-        let r2 = storage.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(2), Datum::Text("a".into())]), txn2.txn_id);
-        assert!(r2.is_err(), "fast-path: insert-time unique check should fail");
+        let r2 = storage.insert(
+            TableId(1),
+            OwnedRow::new(vec![Datum::Int32(2), Datum::Text("a".into())]),
+            txn2.txn_id,
+        );
+        assert!(
+            r2.is_err(),
+            "fast-path: insert-time unique check should fail"
+        );
         mgr.abort(txn2.txn_id).unwrap();
 
-        // Try "a" again via slow-path 鈥?should also fail
-        let classification = TxnClassification::global(
-            vec![ShardId(0), ShardId(1)],
-            SlowPathMode::Xa2Pc,
-        );
+        // Try "a" again via slow-path  — should also fail
+        let classification =
+            TxnClassification::global(vec![ShardId(0), ShardId(1)], SlowPathMode::Xa2Pc);
         let txn3 = mgr.begin_with_classification(IsolationLevel::ReadCommitted, classification);
-        let r3 = storage.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(3), Datum::Text("a".into())]), txn3.txn_id);
-        assert!(r3.is_err(), "slow-path: insert-time unique check should fail");
+        let r3 = storage.insert(
+            TableId(1),
+            OwnedRow::new(vec![Datum::Int32(3), Datum::Text("a".into())]),
+            txn3.txn_id,
+        );
+        assert!(
+            r3.is_err(),
+            "slow-path: insert-time unique check should fail"
+        );
         mgr.abort(txn3.txn_id).unwrap();
     }
 
-    // 鈹€鈹€ Observability: latency, history, percentiles 鈹€鈹€
+    // ── Observability: latency, history, percentiles ──
 
     #[test]
     fn test_commit_latency_recorded_in_stats() {
@@ -515,13 +545,25 @@ mod txn_manager_tests {
 
         // fast-path
         let txn1 = mgr.begin(IsolationLevel::ReadCommitted);
-        storage.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(1), Datum::Text("a".into())]), txn1.txn_id).unwrap();
+        storage
+            .insert(
+                TableId(1),
+                OwnedRow::new(vec![Datum::Int32(1), Datum::Text("a".into())]),
+                txn1.txn_id,
+            )
+            .unwrap();
         mgr.commit(txn1.txn_id).unwrap();
 
         // slow-path
         let c = TxnClassification::global(vec![ShardId(0), ShardId(1)], SlowPathMode::Xa2Pc);
         let txn2 = mgr.begin_with_classification(IsolationLevel::ReadCommitted, c);
-        storage.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(2), Datum::Text("b".into())]), txn2.txn_id).unwrap();
+        storage
+            .insert(
+                TableId(1),
+                OwnedRow::new(vec![Datum::Int32(2), Datum::Text("b".into())]),
+                txn2.txn_id,
+            )
+            .unwrap();
         mgr.commit(txn2.txn_id).unwrap();
 
         let stats = mgr.stats_snapshot();
@@ -536,12 +578,24 @@ mod txn_manager_tests {
 
         // Commit one
         let txn1 = mgr.begin(IsolationLevel::ReadCommitted);
-        storage.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(1), Datum::Text("a".into())]), txn1.txn_id).unwrap();
+        storage
+            .insert(
+                TableId(1),
+                OwnedRow::new(vec![Datum::Int32(1), Datum::Text("a".into())]),
+                txn1.txn_id,
+            )
+            .unwrap();
         mgr.commit(txn1.txn_id).unwrap();
 
         // Abort one
         let txn2 = mgr.begin(IsolationLevel::ReadCommitted);
-        storage.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(2), Datum::Text("b".into())]), txn2.txn_id).unwrap();
+        storage
+            .insert(
+                TableId(1),
+                OwnedRow::new(vec![Datum::Int32(2), Datum::Text("b".into())]),
+                txn2.txn_id,
+            )
+            .unwrap();
         mgr.abort(txn2.txn_id).unwrap();
 
         let history = mgr.txn_history_snapshot();
@@ -558,9 +612,21 @@ mod txn_manager_tests {
 
         // Two concurrent inserts of same unique key
         let txn1 = mgr.begin(IsolationLevel::ReadCommitted);
-        storage.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(1), Datum::Text("dup".into())]), txn1.txn_id).unwrap();
+        storage
+            .insert(
+                TableId(1),
+                OwnedRow::new(vec![Datum::Int32(1), Datum::Text("dup".into())]),
+                txn1.txn_id,
+            )
+            .unwrap();
         let txn2 = mgr.begin(IsolationLevel::ReadCommitted);
-        storage.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(2), Datum::Text("dup".into())]), txn2.txn_id).unwrap();
+        storage
+            .insert(
+                TableId(1),
+                OwnedRow::new(vec![Datum::Int32(2), Datum::Text("dup".into())]),
+                txn2.txn_id,
+            )
+            .unwrap();
 
         mgr.commit(txn1.txn_id).unwrap();
         let _ = mgr.commit(txn2.txn_id); // should fail
@@ -574,7 +640,13 @@ mod txn_manager_tests {
         let (storage, mgr) = setup_mgr();
 
         let txn = mgr.begin(IsolationLevel::ReadCommitted);
-        storage.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(1), Datum::Text("a".into())]), txn.txn_id).unwrap();
+        storage
+            .insert(
+                TableId(1),
+                OwnedRow::new(vec![Datum::Int32(1), Datum::Text("a".into())]),
+                txn.txn_id,
+            )
+            .unwrap();
         mgr.commit(txn.txn_id).unwrap();
 
         assert_eq!(mgr.stats_snapshot().latency.all.count, 1);
@@ -591,7 +663,13 @@ mod txn_manager_tests {
         let (storage, mgr) = setup_mgr();
 
         let txn = mgr.begin(IsolationLevel::ReadCommitted);
-        storage.insert(TableId(1), OwnedRow::new(vec![Datum::Int32(1), Datum::Text("a".into())]), txn.txn_id).unwrap();
+        storage
+            .insert(
+                TableId(1),
+                OwnedRow::new(vec![Datum::Int32(1), Datum::Text("a".into())]),
+                txn.txn_id,
+            )
+            .unwrap();
         mgr.abort_with_reason(txn.txn_id, "user_cancel").unwrap();
 
         let history = mgr.txn_history_snapshot();
@@ -629,7 +707,10 @@ mod txn_manager_tests {
         assert_eq!(info.min_active_start_ts, txn1.start_ts);
         // current_ts is ahead of min_active by at least 3 (3 txns allocated ts)
         assert!(info.current_ts.0 > info.min_active_start_ts.0);
-        assert!(info.stalled, "should be stalled: active txns holding back safepoint");
+        assert!(
+            info.stalled,
+            "should be stalled: active txns holding back safepoint"
+        );
     }
 
     #[test]
@@ -640,16 +721,20 @@ mod txn_manager_tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
 
         let age = mgr.longest_txn_age_us();
-        assert!(age >= 10_000, "Expected age >= 10ms (10000us), got {}us", age);
+        assert!(
+            age >= 10_000,
+            "Expected age >= 10ms (10000us), got {}us",
+            age
+        );
     }
 
-    // 鈹€鈹€ Admission control tests 鈹€鈹€
+    // ── Admission control tests ──
 
     fn setup_with_budget(soft: u64, hard: u64) -> (Arc<StorageEngine>, Arc<TxnManager>) {
         use falcon_storage::memory::MemoryBudget;
-        let storage = Arc::new(StorageEngine::new_in_memory_with_budget(
-            MemoryBudget::new(soft, hard),
-        ));
+        let storage = Arc::new(StorageEngine::new_in_memory_with_budget(MemoryBudget::new(
+            soft, hard,
+        )));
         storage.create_table(test_schema()).unwrap();
         let mgr = Arc::new(TxnManager::new(storage.clone()));
         (storage, mgr)
@@ -658,9 +743,12 @@ mod txn_manager_tests {
     #[test]
     fn test_try_begin_succeeds_under_normal_pressure() {
         let (_storage, mgr) = setup_with_budget(10_000, 20_000);
-        // No memory allocated 鈫?Normal state
+        // No memory allocated  → Normal state
         let result = mgr.try_begin(IsolationLevel::ReadCommitted);
-        assert!(result.is_ok(), "try_begin should succeed under Normal pressure");
+        assert!(
+            result.is_ok(),
+            "try_begin should succeed under Normal pressure"
+        );
     }
 
     #[test]
@@ -806,7 +894,8 @@ mod txn_manager_tests {
         assert_eq!(txn.path, TxnPath::Fast);
 
         // Observe additional shard → implicit upgrade
-        mgr.observe_involved_shards(txn.txn_id, &[ShardId(1)]).unwrap();
+        mgr.observe_involved_shards(txn.txn_id, &[ShardId(1)])
+            .unwrap();
 
         let handle = mgr.get_txn(txn.txn_id).unwrap();
         assert_eq!(handle.txn_type, TxnType::Global);

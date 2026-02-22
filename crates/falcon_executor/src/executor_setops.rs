@@ -18,7 +18,11 @@ impl Executor {
             ExecutionResult::Query { columns, rows } => {
                 (std::mem::take(columns), std::mem::take(rows))
             }
-            _ => return Err(FalconError::Internal("Set operation base must be query result".into())),
+            _ => {
+                return Err(FalconError::Internal(
+                    "Set operation base must be query result".into(),
+                ))
+            }
         };
 
         let mut all_rows = base_rows;
@@ -74,8 +78,10 @@ impl Executor {
                 }
                 SetOpKind::Intersect => {
                     // Keep only rows present in both sides
-                    let right_set: std::collections::HashSet<String> =
-                        right_rows.iter().map(|r| format!("{:?}", r.values)).collect();
+                    let right_set: std::collections::HashSet<String> = right_rows
+                        .iter()
+                        .map(|r| format!("{:?}", r.values))
+                        .collect();
                     all_rows.retain(|r| right_set.contains(&format!("{:?}", r.values)));
                     if !is_all {
                         self.dedup_rows(&mut all_rows);
@@ -83,8 +89,10 @@ impl Executor {
                 }
                 SetOpKind::Except => {
                     // Remove rows that appear in the right side
-                    let right_set: std::collections::HashSet<String> =
-                        right_rows.iter().map(|r| format!("{:?}", r.values)).collect();
+                    let right_set: std::collections::HashSet<String> = right_rows
+                        .iter()
+                        .map(|r| format!("{:?}", r.values))
+                        .collect();
                     all_rows.retain(|r| !right_set.contains(&format!("{:?}", r.values)));
                     if !is_all {
                         self.dedup_rows(&mut all_rows);
@@ -189,7 +197,9 @@ impl Executor {
         };
         match result {
             ExecutionResult::Query { rows, .. } => Ok(rows),
-            _ => Err(FalconError::Internal("CTE must produce query result".into())),
+            _ => Err(FalconError::Internal(
+                "CTE must produce query result".into(),
+            )),
         }
     }
 }

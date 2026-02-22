@@ -25,10 +25,13 @@ pub mod wal_stream;
 pub use catchup::{apply_wal_record_to_engine, WriteOp};
 pub use promote::ShardReplicaGroup;
 pub use replica_state::{ReplicaNode, ReplicaRole};
-pub use runner::{ReplicaRunner, ReplicaRunnerConfig, ReplicaRunnerHandle, ReplicaRunnerMetrics, ReplicaRunnerMetricsSnapshot};
+pub use runner::{
+    ReplicaRunner, ReplicaRunnerConfig, ReplicaRunnerHandle, ReplicaRunnerMetrics,
+    ReplicaRunnerMetricsSnapshot,
+};
 pub use wal_stream::{
-    AsyncReplicationTransport, ChannelTransport, InProcessTransport, LsnWalRecord,
-    ReplicationLog, ReplicationTransport, WalChunk,
+    AsyncReplicationTransport, ChannelTransport, InProcessTransport, LsnWalRecord, ReplicationLog,
+    ReplicationTransport, WalChunk,
 };
 
 use std::sync::atomic::{AtomicU64, Ordering};

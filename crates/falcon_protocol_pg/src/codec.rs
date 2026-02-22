@@ -60,14 +60,22 @@ pub enum FrontendMessage {
 pub enum BackendMessage {
     /// Authentication request.
     AuthenticationOk,
-    AuthenticationMd5Password { salt: [u8; 4] },
+    AuthenticationMd5Password {
+        salt: [u8; 4],
+    },
     AuthenticationCleartextPassword,
     /// AuthenticationSASL (type 10) — list of SASL mechanisms.
-    AuthenticationSASL { mechanisms: Vec<String> },
+    AuthenticationSASL {
+        mechanisms: Vec<String>,
+    },
     /// AuthenticationSASLContinue (type 11) — server challenge data.
-    AuthenticationSASLContinue { data: Vec<u8> },
+    AuthenticationSASLContinue {
+        data: Vec<u8>,
+    },
     /// AuthenticationSASLFinal (type 12) — server proof.
-    AuthenticationSASLFinal { data: Vec<u8> },
+    AuthenticationSASLFinal {
+        data: Vec<u8>,
+    },
     /// Asynchronous notification ('A') — from NOTIFY.
     NotificationResponse {
         process_id: i32,
@@ -75,17 +83,31 @@ pub enum BackendMessage {
         payload: String,
     },
     /// Parameter status ('S').
-    ParameterStatus { name: String, value: String },
+    ParameterStatus {
+        name: String,
+        value: String,
+    },
     /// Backend key data ('K').
-    BackendKeyData { process_id: i32, secret_key: i32 },
+    BackendKeyData {
+        process_id: i32,
+        secret_key: i32,
+    },
     /// Ready for query ('Z').
-    ReadyForQuery { txn_status: u8 },
+    ReadyForQuery {
+        txn_status: u8,
+    },
     /// Row description ('T').
-    RowDescription { fields: Vec<FieldDescription> },
+    RowDescription {
+        fields: Vec<FieldDescription>,
+    },
     /// Data row ('D').
-    DataRow { values: Vec<Option<String>> },
+    DataRow {
+        values: Vec<Option<String>>,
+    },
     /// Command complete ('C').
-    CommandComplete { tag: String },
+    CommandComplete {
+        tag: String,
+    },
     /// Error response ('E').
     ErrorResponse {
         severity: String,
@@ -93,7 +115,9 @@ pub enum BackendMessage {
         message: String,
     },
     /// Notice response ('N').
-    NoticeResponse { message: String },
+    NoticeResponse {
+        message: String,
+    },
     /// Empty query response ('I').
     EmptyQueryResponse,
     /// Parse complete ('1').
@@ -105,7 +129,9 @@ pub enum BackendMessage {
     /// No data ('n').
     NoData,
     /// Parameter description ('t').
-    ParameterDescription { type_oids: Vec<i32> },
+    ParameterDescription {
+        type_oids: Vec<i32>,
+    },
     /// CopyInResponse ('G') — server ready to receive COPY data.
     CopyInResponse {
         format: u8, // 0 = text, 1 = binary
@@ -167,7 +193,10 @@ pub fn decode_startup(buf: &mut BytesMut) -> Result<Option<FrontendMessage>, Str
         }
         let process_id = msg_buf.get_i32();
         let secret_key = msg_buf.get_i32();
-        return Ok(Some(FrontendMessage::CancelRequest { process_id, secret_key }));
+        return Ok(Some(FrontendMessage::CancelRequest {
+            process_id,
+            secret_key,
+        }));
     }
 
     // Normal startup: version 3.0 = 196608
@@ -214,26 +243,42 @@ pub fn decode_message(buf: &mut BytesMut) -> Result<Option<FrontendMessage>, Str
         b'P' => {
             let name = read_cstring(&mut msg_buf)?;
             let query = read_cstring(&mut msg_buf)?;
-            let num_params = if msg_buf.remaining() >= 2 { msg_buf.get_i16() } else { 0 };
+            let num_params = if msg_buf.remaining() >= 2 {
+                msg_buf.get_i16()
+            } else {
+                0
+            };
             let mut param_types = Vec::new();
             for _ in 0..num_params {
                 if msg_buf.remaining() >= 4 {
                     param_types.push(msg_buf.get_i32());
                 }
             }
-            Ok(Some(FrontendMessage::Parse { name, query, param_types }))
+            Ok(Some(FrontendMessage::Parse {
+                name,
+                query,
+                param_types,
+            }))
         }
         b'B' => {
             let portal = read_cstring(&mut msg_buf)?;
             let statement = read_cstring(&mut msg_buf)?;
-            let num_formats = if msg_buf.remaining() >= 2 { msg_buf.get_i16() } else { 0 };
+            let num_formats = if msg_buf.remaining() >= 2 {
+                msg_buf.get_i16()
+            } else {
+                0
+            };
             let mut param_formats = Vec::new();
             for _ in 0..num_formats {
                 if msg_buf.remaining() >= 2 {
                     param_formats.push(msg_buf.get_i16());
                 }
             }
-            let num_values = if msg_buf.remaining() >= 2 { msg_buf.get_i16() } else { 0 };
+            let num_values = if msg_buf.remaining() >= 2 {
+                msg_buf.get_i16()
+            } else {
+                0
+            };
             let mut param_values = Vec::new();
             for _ in 0..num_values {
                 if msg_buf.remaining() >= 4 {
@@ -249,28 +294,50 @@ pub fn decode_message(buf: &mut BytesMut) -> Result<Option<FrontendMessage>, Str
                     }
                 }
             }
-            let num_result_formats = if msg_buf.remaining() >= 2 { msg_buf.get_i16() } else { 0 };
+            let num_result_formats = if msg_buf.remaining() >= 2 {
+                msg_buf.get_i16()
+            } else {
+                0
+            };
             let mut result_formats = Vec::new();
             for _ in 0..num_result_formats {
                 if msg_buf.remaining() >= 2 {
                     result_formats.push(msg_buf.get_i16());
                 }
             }
-            Ok(Some(FrontendMessage::Bind { portal, statement, param_formats, param_values, result_formats }))
+            Ok(Some(FrontendMessage::Bind {
+                portal,
+                statement,
+                param_formats,
+                param_values,
+                result_formats,
+            }))
         }
         b'D' => {
-            let kind = if msg_buf.has_remaining() { msg_buf.get_u8() } else { b'S' };
+            let kind = if msg_buf.has_remaining() {
+                msg_buf.get_u8()
+            } else {
+                b'S'
+            };
             let name = read_cstring(&mut msg_buf)?;
             Ok(Some(FrontendMessage::Describe { kind, name }))
         }
         b'E' => {
             let portal = read_cstring(&mut msg_buf)?;
-            let max_rows = if msg_buf.remaining() >= 4 { msg_buf.get_i32() } else { 0 };
+            let max_rows = if msg_buf.remaining() >= 4 {
+                msg_buf.get_i32()
+            } else {
+                0
+            };
             Ok(Some(FrontendMessage::Execute { portal, max_rows }))
         }
         b'S' => Ok(Some(FrontendMessage::Sync)),
         b'C' => {
-            let kind = if msg_buf.has_remaining() { msg_buf.get_u8() } else { b'S' };
+            let kind = if msg_buf.has_remaining() {
+                msg_buf.get_u8()
+            } else {
+                b'S'
+            };
             let name = read_cstring(&mut msg_buf)?;
             Ok(Some(FrontendMessage::Close { kind, name }))
         }
@@ -286,7 +353,11 @@ pub fn decode_message(buf: &mut BytesMut) -> Result<Option<FrontendMessage>, Str
             Ok(Some(FrontendMessage::CopyFail(message)))
         }
         _ => {
-            tracing::warn!("Unknown frontend message type: {} (0x{:02x})", msg_type as char, msg_type);
+            tracing::warn!(
+                "Unknown frontend message type: {} (0x{:02x})",
+                msg_type as char,
+                msg_type
+            );
             Ok(None)
         }
     }
@@ -337,7 +408,11 @@ pub fn encode_message(msg: &BackendMessage) -> BytesMut {
             buf.put_i32(12);
             buf.put_slice(data);
         }
-        BackendMessage::NotificationResponse { process_id, channel, payload } => {
+        BackendMessage::NotificationResponse {
+            process_id,
+            channel,
+            payload,
+        } => {
             let body_len = 4 + channel.len() + 1 + payload.len() + 1;
             buf.put_u8(b'A');
             buf.put_i32(4 + body_len as i32);
@@ -467,7 +542,10 @@ pub fn encode_message(msg: &BackendMessage) -> BytesMut {
                 buf.put_i32(*oid);
             }
         }
-        BackendMessage::CopyInResponse { format, column_formats } => {
+        BackendMessage::CopyInResponse {
+            format,
+            column_formats,
+        } => {
             let len = 4 + 1 + 2 + column_formats.len() as i32 * 2;
             buf.put_u8(b'G');
             buf.put_i32(len);
@@ -477,7 +555,10 @@ pub fn encode_message(msg: &BackendMessage) -> BytesMut {
                 buf.put_i16(*cf);
             }
         }
-        BackendMessage::CopyOutResponse { format, column_formats } => {
+        BackendMessage::CopyOutResponse {
+            format,
+            column_formats,
+        } => {
             let len = 4 + 1 + 2 + column_formats.len() as i32 * 2;
             buf.put_u8(b'H');
             buf.put_i32(len);

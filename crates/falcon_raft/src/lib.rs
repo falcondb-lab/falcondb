@@ -82,9 +82,15 @@ impl RaftNode {
                 .validate()
                 .map_err(|e| ConsensusError::ProposalFailed(format!("config: {}", e)))?,
         );
-        let raft = Raft::new(node_id, config, NetworkFactory, LogStore::new(), StateMachine::new())
-            .await
-            .map_err(|e| ConsensusError::ProposalFailed(format!("init: {}", e)))?;
+        let raft = Raft::new(
+            node_id,
+            config,
+            NetworkFactory,
+            LogStore::new(),
+            StateMachine::new(),
+        )
+        .await
+        .map_err(|e| ConsensusError::ProposalFailed(format!("init: {}", e)))?;
         let mut members = BTreeMap::new();
         members.insert(node_id, BasicNode::new("127.0.0.1"));
         raft.initialize(members)
@@ -137,7 +143,9 @@ impl RaftGroup {
         apply_fn: Option<ApplyFn>,
     ) -> Result<Self, ConsensusError> {
         if node_ids.is_empty() {
-            return Err(ConsensusError::ProposalFailed("node_ids must not be empty".into()));
+            return Err(ConsensusError::ProposalFailed(
+                "node_ids must not be empty".into(),
+            ));
         }
         let config = Arc::new(
             Config {
@@ -175,7 +183,12 @@ impl RaftGroup {
                 .await
                 .map_err(|e| ConsensusError::ProposalFailed(format!("bootstrap: {}", e)))?;
         }
-        Ok(Self { router, node_ids, config, apply_fn })
+        Ok(Self {
+            router,
+            node_ids,
+            config,
+            apply_fn,
+        })
     }
 
     /// Wait for a leader to be elected, polling up to `timeout`.
@@ -190,7 +203,9 @@ impl RaftGroup {
                 }
             }
             if tokio::time::Instant::now() >= deadline {
-                return Err(ConsensusError::ProposalFailed("leader election timed out".into()));
+                return Err(ConsensusError::ProposalFailed(
+                    "leader election timed out".into(),
+                ));
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -267,12 +282,19 @@ impl RaftGroup {
     /// Add a new voting member to the cluster.
     pub async fn add_voter(&self, node_id: u64, addr: &str) -> Result<(), ConsensusError> {
         let leader_id = self.wait_for_leader(Duration::from_secs(2)).await?;
-        let raft = self.router.get_node(leader_id).ok_or(ConsensusError::NodeNotFound(leader_id))?;
+        let raft = self
+            .router
+            .get_node(leader_id)
+            .ok_or(ConsensusError::NodeNotFound(leader_id))?;
         raft.add_learner(node_id, BasicNode::new(addr), true)
             .await
             .map_err(|e| ConsensusError::MembershipFailed(format!("{}", e)))?;
-        let members: Vec<u64> = self.node_ids.iter().copied()
-            .chain(std::iter::once(node_id)).collect();
+        let members: Vec<u64> = self
+            .node_ids
+            .iter()
+            .copied()
+            .chain(std::iter::once(node_id))
+            .collect();
         raft.change_membership(members, false)
             .await
             .map_err(|e| ConsensusError::MembershipFailed(format!("{}", e)))?;
@@ -282,9 +304,16 @@ impl RaftGroup {
     /// Remove a voting member from the cluster.
     pub async fn remove_voter(&self, node_id: u64) -> Result<(), ConsensusError> {
         let leader_id = self.wait_for_leader(Duration::from_secs(2)).await?;
-        let raft = self.router.get_node(leader_id).ok_or(ConsensusError::NodeNotFound(leader_id))?;
-        let remaining: Vec<u64> = self.node_ids.iter().copied()
-            .filter(|&id| id != node_id).collect();
+        let raft = self
+            .router
+            .get_node(leader_id)
+            .ok_or(ConsensusError::NodeNotFound(leader_id))?;
+        let remaining: Vec<u64> = self
+            .node_ids
+            .iter()
+            .copied()
+            .filter(|&id| id != node_id)
+            .collect();
         raft.change_membership(remaining, false)
             .await
             .map_err(|e| ConsensusError::MembershipFailed(format!("{}", e)))?;
@@ -293,8 +322,13 @@ impl RaftGroup {
 
     /// Trigger a snapshot on a specific node.
     pub async fn trigger_snapshot(&self, node_id: u64) -> Result<(), ConsensusError> {
-        let raft = self.router.get_node(node_id).ok_or(ConsensusError::NodeNotFound(node_id))?;
-        raft.trigger().snapshot().await
+        let raft = self
+            .router
+            .get_node(node_id)
+            .ok_or(ConsensusError::NodeNotFound(node_id))?;
+        raft.trigger()
+            .snapshot()
+            .await
             .map_err(|e| ConsensusError::ProposalFailed(format!("snapshot: {}", e)))?;
         Ok(())
     }
@@ -303,15 +337,20 @@ impl RaftGroup {
     pub async fn shutdown(self) -> Result<(), ConsensusError> {
         for id in self.node_ids.clone() {
             if let Some(raft) = self.router.get_node(id) {
-                raft.shutdown().await
-                    .map_err(|e| ConsensusError::ProposalFailed(format!("shutdown {}: {}", id, e)))?;
+                raft.shutdown().await.map_err(|e| {
+                    ConsensusError::ProposalFailed(format!("shutdown {}: {}", id, e))
+                })?;
             }
         }
         Ok(())
     }
 
-    pub fn node_count(&self) -> usize { self.node_ids.len() }
-    pub fn node_ids(&self) -> &[u64] { &self.node_ids }
+    pub fn node_count(&self) -> usize {
+        self.node_ids.len()
+    }
+    pub fn node_ids(&self) -> &[u64] {
+        &self.node_ids
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -329,25 +368,34 @@ pub struct RaftConsensus {
 
 impl RaftConsensus {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self { groups: RwLock::new(BTreeMap::new()) })
+        Arc::new(Self {
+            groups: RwLock::new(BTreeMap::new()),
+        })
     }
 
     pub fn register_shard(&self, shard: ShardId, group: RaftGroup) {
         self.groups.write().insert(
             shard.0,
-            Arc::new(RaftGroupHandle { group: tokio::sync::Mutex::new(group) }),
+            Arc::new(RaftGroupHandle {
+                group: tokio::sync::Mutex::new(group),
+            }),
         );
     }
 
     fn get_group(&self, shard: ShardId) -> Result<Arc<RaftGroupHandle>, ConsensusError> {
-        self.groups.read().get(&shard.0).cloned()
+        self.groups
+            .read()
+            .get(&shard.0)
+            .cloned()
             .ok_or(ConsensusError::NotLeader(shard))
     }
 }
 
 impl Default for RaftConsensus {
     fn default() -> Self {
-        Self { groups: RwLock::new(BTreeMap::new()) }
+        Self {
+            groups: RwLock::new(BTreeMap::new()),
+        }
     }
 }
 
@@ -359,7 +407,9 @@ impl Consensus for RaftConsensus {
         g.propose(entry.data).await
     }
     async fn is_leader(&self, shard: ShardId) -> bool {
-        let Ok(h) = self.get_group(shard) else { return false; };
+        let Ok(h) = self.get_group(shard) else {
+            return false;
+        };
         let g = h.group.lock().await;
         g.current_leader().await.is_some()
     }
@@ -388,7 +438,10 @@ mod tests {
         let node = RaftNode::new_single_node(1).await.unwrap();
         let m = node.inner().metrics().borrow().clone();
         assert_eq!(m.id, 1);
-        assert!(m.current_leader.is_some(), "single node should elect itself leader");
+        assert!(
+            m.current_leader.is_some(),
+            "single node should elect itself leader"
+        );
         assert_eq!(m.current_leader.unwrap(), 1);
         node.shutdown().await.unwrap();
     }
@@ -402,7 +455,10 @@ mod tests {
         node.propose(b"falcon".to_vec()).await.unwrap();
         let m = node.inner().metrics().borrow().clone();
         assert!(m.last_applied.is_some());
-        assert!(m.last_applied.unwrap().index >= 4, "expected >= 4 applied entries");
+        assert!(
+            m.last_applied.unwrap().index >= 4,
+            "expected >= 4 applied entries"
+        );
         node.shutdown().await.unwrap();
     }
 
@@ -423,7 +479,10 @@ mod tests {
             node.propose(i.to_le_bytes().to_vec()).await.unwrap();
         }
         let m = node.inner().metrics().borrow().clone();
-        assert!(m.last_applied.unwrap().index >= 11, "expected >= 11 applied entries");
+        assert!(
+            m.last_applied.unwrap().index >= 11,
+            "expected >= 11 applied entries"
+        );
         node.shutdown().await.unwrap();
     }
 
@@ -452,7 +511,12 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(400)).await;
         for &id in group.node_ids() {
             if let Some(raft) = group.get_node(id) {
-                let applied = raft.metrics().borrow().last_applied.map(|l| l.index).unwrap_or(0);
+                let applied = raft
+                    .metrics()
+                    .borrow()
+                    .last_applied
+                    .map(|l| l.index)
+                    .unwrap_or(0);
                 assert!(applied >= 5, "node {} applied only {} entries", id, applied);
             }
         }
@@ -494,7 +558,9 @@ mod tests {
             // Only query nodes still reachable (i.e. still in the router).
             let mut found = None;
             for &id in &[1u64, 2, 3] {
-                if id == old_leader { continue; }
+                if id == old_leader {
+                    continue;
+                }
                 if let Some(raft) = group.get_node(id) {
                     let leader = raft.metrics().borrow().current_leader;
                     if let Some(l) = leader {
@@ -505,14 +571,19 @@ mod tests {
                     }
                 }
             }
-            if let Some(l) = found { break l; }
+            if let Some(l) = found {
+                break l;
+            }
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "timed out waiting for new leader after failover"
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         };
-        assert_ne!(new_leader, old_leader, "new leader must differ from old leader");
+        assert_ne!(
+            new_leader, old_leader,
+            "new leader must differ from old leader"
+        );
         // Propose after failover — route to surviving nodes.
         group.propose(b"after-failover".to_vec()).await.unwrap();
         group.shutdown().await.unwrap();
@@ -548,7 +619,12 @@ mod tests {
         consensus.register_shard(shard, group);
         assert!(consensus.is_leader(shard).await);
         consensus
-            .propose(shard, LogEntry { data: b"via-trait".to_vec() })
+            .propose(
+                shard,
+                LogEntry {
+                    data: b"via-trait".to_vec(),
+                },
+            )
             .await
             .unwrap();
     }
@@ -564,8 +640,18 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(400)).await;
         for &id in group.node_ids() {
             if let Some(raft) = group.get_node(id) {
-                let applied = raft.metrics().borrow().last_applied.map(|l| l.index).unwrap_or(0);
-                assert!(applied >= 10, "node {} applied only {} entries", id, applied);
+                let applied = raft
+                    .metrics()
+                    .borrow()
+                    .last_applied
+                    .map(|l| l.index)
+                    .unwrap_or(0);
+                assert!(
+                    applied >= 10,
+                    "node {} applied only {} entries",
+                    id,
+                    applied
+                );
             }
         }
         group.shutdown().await.unwrap();

@@ -50,7 +50,11 @@ impl Default for ParallelConfig {
 impl ParallelConfig {
     /// Create a config with parallelism disabled.
     pub fn single_threaded() -> Self {
-        Self { max_threads: 0, min_rows_for_parallel: usize::MAX, batch_size: 1024 }
+        Self {
+            max_threads: 0,
+            min_rows_for_parallel: usize::MAX,
+            batch_size: 1024,
+        }
     }
 
     /// Should we use parallel execution for this many rows?
@@ -148,8 +152,13 @@ pub struct PartialAggState {
 impl Default for PartialAggState {
     fn default() -> Self {
         Self {
-            count: 0, sum: 0.0, min: None, max: None,
-            m2: 0.0, mean: 0.0, first_row: None,
+            count: 0,
+            sum: 0.0,
+            min: None,
+            max: None,
+            m2: 0.0,
+            mean: 0.0,
+            first_row: None,
         }
     }
 }
@@ -163,8 +172,12 @@ impl PartialAggState {
         if let Some(v) = val {
             self.count += 1;
             self.sum += v;
-            if self.min.map_or(true, |m| v < m) { self.min = Some(v); }
-            if self.max.map_or(true, |m| v > m) { self.max = Some(v); }
+            if self.min.is_none_or(|m| v < m) {
+                self.min = Some(v);
+            }
+            if self.max.is_none_or(|m| v > m) {
+                self.max = Some(v);
+            }
             // Welford's online algorithm for variance
             let delta = v - self.mean;
             self.mean += delta / self.count as f64;
@@ -175,7 +188,9 @@ impl PartialAggState {
 
     /// Merge another partial state into this one.
     pub fn merge(&mut self, other: &PartialAggState) {
-        if other.count == 0 { return; }
+        if other.count == 0 {
+            return;
+        }
         if self.first_row.is_none() {
             self.first_row = other.first_row.clone();
         }
@@ -185,7 +200,8 @@ impl PartialAggState {
         if combined_count > 0 {
             let delta = other.mean - self.mean;
             let combined_mean = combined_sum / combined_count as f64;
-            let combined_m2 = self.m2 + other.m2
+            let combined_m2 = self.m2
+                + other.m2
                 + delta * delta * (self.count as f64 * other.count as f64 / combined_count as f64);
             self.m2 = combined_m2;
             self.mean = combined_mean;
@@ -205,29 +221,48 @@ impl PartialAggState {
         match func {
             AggFunc::Count => Datum::Int64(self.count),
             AggFunc::Sum => {
-                if self.count == 0 { Datum::Null } else { Datum::Float64(self.sum) }
+                if self.count == 0 {
+                    Datum::Null
+                } else {
+                    Datum::Float64(self.sum)
+                }
             }
             AggFunc::Avg => {
-                if self.count == 0 { Datum::Null }
-                else { Datum::Float64(self.sum / self.count as f64) }
+                if self.count == 0 {
+                    Datum::Null
+                } else {
+                    Datum::Float64(self.sum / self.count as f64)
+                }
             }
             AggFunc::Min => self.min.map(Datum::Float64).unwrap_or(Datum::Null),
             AggFunc::Max => self.max.map(Datum::Float64).unwrap_or(Datum::Null),
             AggFunc::VarPop => {
-                if self.count == 0 { Datum::Null }
-                else { Datum::Float64(self.m2 / self.count as f64) }
+                if self.count == 0 {
+                    Datum::Null
+                } else {
+                    Datum::Float64(self.m2 / self.count as f64)
+                }
             }
             AggFunc::VarSamp => {
-                if self.count < 2 { Datum::Null }
-                else { Datum::Float64(self.m2 / (self.count - 1) as f64) }
+                if self.count < 2 {
+                    Datum::Null
+                } else {
+                    Datum::Float64(self.m2 / (self.count - 1) as f64)
+                }
             }
             AggFunc::StddevPop => {
-                if self.count == 0 { Datum::Null }
-                else { Datum::Float64((self.m2 / self.count as f64).sqrt()) }
+                if self.count == 0 {
+                    Datum::Null
+                } else {
+                    Datum::Float64((self.m2 / self.count as f64).sqrt())
+                }
             }
             AggFunc::StddevSamp => {
-                if self.count < 2 { Datum::Null }
-                else { Datum::Float64((self.m2 / (self.count - 1) as f64).sqrt()) }
+                if self.count < 2 {
+                    Datum::Null
+                } else {
+                    Datum::Float64((self.m2 / (self.count - 1) as f64).sqrt())
+                }
             }
             _ => Datum::Null, // unsupported aggregate
         }
@@ -268,9 +303,15 @@ pub fn parallel_grouped_aggregate(
                 let mut local_map: HashMap<GroupKey, PartialAggState> = HashMap::new();
                 for i in start..end {
                     let row = &r[i].1;
-                    let key: GroupKey = gb.iter().map(|&idx| {
-                        row.values.get(idx).map(|d| format!("{}", d)).unwrap_or_default()
-                    }).collect();
+                    let key: GroupKey = gb
+                        .iter()
+                        .map(|&idx| {
+                            row.values
+                                .get(idx)
+                                .map(|d| format!("{}", d))
+                                .unwrap_or_default()
+                        })
+                        .collect();
                     let val = row.values.get(agg_col_idx).and_then(|d| d.as_f64());
                     let state = local_map.entry(key).or_default();
                     state.update(val, row);
@@ -300,9 +341,15 @@ fn single_thread_aggregate(
 ) -> HashMap<GroupKey, PartialAggState> {
     let mut map: HashMap<GroupKey, PartialAggState> = HashMap::new();
     for (_pk, row) in rows {
-        let key: GroupKey = group_by.iter().map(|&idx| {
-            row.values.get(idx).map(|d| format!("{}", d)).unwrap_or_default()
-        }).collect();
+        let key: GroupKey = group_by
+            .iter()
+            .map(|&idx| {
+                row.values
+                    .get(idx)
+                    .map(|d| format!("{}", d))
+                    .unwrap_or_default()
+            })
+            .collect();
         let val = row.values.get(agg_col_idx).and_then(|d| d.as_f64());
         map.entry(key).or_default().update(val, row);
     }
@@ -363,10 +410,14 @@ mod tests {
     fn test_partial_agg_merge() {
         let dummy = OwnedRow::new(vec![]);
         let mut s1 = PartialAggState::default();
-        for v in [10.0, 20.0] { s1.update(Some(v), &dummy); }
+        for v in [10.0, 20.0] {
+            s1.update(Some(v), &dummy);
+        }
 
         let mut s2 = PartialAggState::default();
-        for v in [30.0] { s2.update(Some(v), &dummy); }
+        for v in [30.0] {
+            s2.update(Some(v), &dummy);
+        }
 
         s1.merge(&s2);
         assert_eq!(s1.count, 3);
@@ -387,9 +438,9 @@ mod tests {
 
     #[test]
     fn test_parallel_filter_small() {
-        let rows: Vec<(Vec<u8>, OwnedRow)> = (0..5).map(|i| {
-            (vec![], OwnedRow::new(vec![Datum::Int64(i)]))
-        }).collect();
+        let rows: Vec<(Vec<u8>, OwnedRow)> = (0..5)
+            .map(|i| (vec![], OwnedRow::new(vec![Datum::Int64(i)])))
+            .collect();
         let filter = BoundExpr::BinaryOp {
             left: Box::new(BoundExpr::ColumnRef(0)),
             op: BinOp::Gt,

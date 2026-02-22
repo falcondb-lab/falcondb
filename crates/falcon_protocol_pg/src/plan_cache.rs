@@ -19,7 +19,7 @@ struct PlanCacheInner {
     hits: u64,
     /// Total misses (plan not found).
     misses: u64,
-    /// Schema generation counter 鈥?incremented on DDL, used to invalidate.
+    /// Schema generation counter — incremented on DDL, used to invalidate.
     schema_generation: u64,
     /// Generation at which each entry was cached.
     entry_generations: HashMap<String, u64>,
@@ -57,7 +57,9 @@ impl PlanCache {
         let mut inner = self.inner.write().ok()?;
 
         // Check if entry exists and is from current schema generation
-        let gen_valid = inner.entry_generations.get(&key)
+        let gen_valid = inner
+            .entry_generations
+            .get(&key)
             .map(|g| *g == inner.schema_generation);
 
         match gen_valid {
@@ -74,7 +76,7 @@ impl PlanCache {
                 result
             }
             Some(false) => {
-                // Stale entry 鈥?remove it
+                // Stale entry — remove it
                 inner.entries.remove(&key);
                 inner.entry_generations.remove(&key);
                 inner.misses += 1;
@@ -96,11 +98,15 @@ impl PlanCache {
             return;
         }
 
-        let Ok(mut inner) = self.inner.write() else { return };
+        let Ok(mut inner) = self.inner.write() else {
+            return;
+        };
 
-        // Evict if at capacity 鈥?remove least accessed entry
+        // Evict if at capacity — remove least accessed entry
         if inner.entries.len() >= inner.capacity && !inner.entries.contains_key(&key) {
-            if let Some(evict_key) = inner.entries.iter()
+            if let Some(evict_key) = inner
+                .entries
+                .iter()
                 .min_by_key(|(_, (_, count))| *count)
                 .map(|(k, _)| k.clone())
             {
@@ -140,7 +146,11 @@ impl PlanCache {
             capacity: inner.capacity,
             hits: inner.hits,
             misses: inner.misses,
-            hit_rate_pct: if total > 0 { (inner.hits as f64 / total as f64) * 100.0 } else { 0.0 },
+            hit_rate_pct: if total > 0 {
+                (inner.hits as f64 / total as f64) * 100.0
+            } else {
+                0.0
+            },
         }
     }
 }
@@ -156,14 +166,15 @@ fn normalize_sql(sql: &str) -> String {
 
 /// Only cache SELECT/INSERT/UPDATE/DELETE plans, not DDL/txn control.
 fn is_cacheable(plan: &PhysicalPlan) -> bool {
-    matches!(plan,
+    matches!(
+        plan,
         PhysicalPlan::SeqScan { .. }
-        | PhysicalPlan::NestedLoopJoin { .. }
-        | PhysicalPlan::HashJoin { .. }
-        | PhysicalPlan::Insert { .. }
-        | PhysicalPlan::Update { .. }
-        | PhysicalPlan::Delete { .. }
-        | PhysicalPlan::DistPlan { .. }
+            | PhysicalPlan::NestedLoopJoin { .. }
+            | PhysicalPlan::HashJoin { .. }
+            | PhysicalPlan::Insert { .. }
+            | PhysicalPlan::Update { .. }
+            | PhysicalPlan::Delete { .. }
+            | PhysicalPlan::DistPlan { .. }
     )
 }
 
@@ -192,7 +203,7 @@ mod tests {
             check_constraints: vec![],
             unique_constraints: vec![],
             foreign_keys: vec![],
-        ..Default::default()
+            ..Default::default()
         };
         PhysicalPlan::SeqScan {
             table_id: TableId(1),
@@ -251,7 +262,10 @@ mod tests {
         cache.get("select 1");
         // Adding a third should evict SELECT 2 (lower access count)
         cache.put("SELECT 3", dummy_plan());
-        assert!(cache.get("select 1").is_some(), "frequently accessed should survive");
+        assert!(
+            cache.get("select 1").is_some(),
+            "frequently accessed should survive"
+        );
         assert!(cache.get("select 3").is_some());
     }
 
@@ -275,7 +289,7 @@ mod tests {
                 check_constraints: vec![],
                 unique_constraints: vec![],
                 foreign_keys: vec![],
-            ..Default::default()
+                ..Default::default()
             },
             if_not_exists: false,
         };

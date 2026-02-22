@@ -29,7 +29,11 @@ impl StorageEngine {
         if let Some(table) = self.tables.get(&table_id) {
             let row_bytes = crate::mvcc::estimate_row_bytes(&row);
             self.memory_tracker.alloc_write_buffer(row_bytes);
-            self.append_wal(&WalRecord::Insert { txn_id, table_id, row: row.clone() })?;
+            self.append_wal(&WalRecord::Insert {
+                txn_id,
+                table_id,
+                row: row.clone(),
+            })?;
             let pk = table.insert(row, txn_id)?;
             self.record_write(txn_id, table_id, pk.clone());
             return Ok(pk);
@@ -38,7 +42,11 @@ impl StorageEngine {
         // Columnstore
         if let Some(cs) = self.columnstore_tables.get(&table_id) {
             self.record_write_path_violation_columnstore()?;
-            self.append_wal(&WalRecord::Insert { txn_id, table_id, row: row.clone() })?;
+            self.append_wal(&WalRecord::Insert {
+                txn_id,
+                table_id,
+                row: row.clone(),
+            })?;
             let pk = crate::memtable::encode_pk(&row, cs.schema.pk_indices());
             cs.insert(row, txn_id)?;
             return Ok(pk);
@@ -47,14 +55,22 @@ impl StorageEngine {
         // Disk rowstore
         if let Some(disk) = self.disk_tables.get(&table_id) {
             self.record_write_path_violation_disk()?;
-            self.append_wal(&WalRecord::Insert { txn_id, table_id, row: row.clone() })?;
+            self.append_wal(&WalRecord::Insert {
+                txn_id,
+                table_id,
+                row: row.clone(),
+            })?;
             let pk = disk.insert(row, txn_id)?;
             return Ok(pk);
         }
 
         // LSM rowstore
         if let Some(lsm) = self.lsm_tables.get(&table_id) {
-            self.append_wal(&WalRecord::Insert { txn_id, table_id, row: row.clone() })?;
+            self.append_wal(&WalRecord::Insert {
+                txn_id,
+                table_id,
+                row: row.clone(),
+            })?;
             let pk = lsm.insert(&row, txn_id)?;
             self.record_write(txn_id, table_id, pk.clone());
             return Ok(pk);
@@ -74,7 +90,12 @@ impl StorageEngine {
         if let Some(table) = self.tables.get(&table_id) {
             let row_bytes = crate::mvcc::estimate_row_bytes(&new_row);
             self.memory_tracker.alloc_write_buffer(row_bytes);
-            self.append_wal(&WalRecord::Update { txn_id, table_id, pk: pk.clone(), new_row: new_row.clone() })?;
+            self.append_wal(&WalRecord::Update {
+                txn_id,
+                table_id,
+                pk: pk.clone(),
+                new_row: new_row.clone(),
+            })?;
             table.update(pk, new_row, txn_id)?;
             self.record_write(txn_id, table_id, pk.clone());
             return Ok(());
@@ -83,14 +104,24 @@ impl StorageEngine {
         // Disk rowstore
         if let Some(disk) = self.disk_tables.get(&table_id) {
             self.record_write_path_violation_disk()?;
-            self.append_wal(&WalRecord::Update { txn_id, table_id, pk: pk.clone(), new_row: new_row.clone() })?;
+            self.append_wal(&WalRecord::Update {
+                txn_id,
+                table_id,
+                pk: pk.clone(),
+                new_row: new_row.clone(),
+            })?;
             disk.update(pk, new_row, txn_id)?;
             return Ok(());
         }
 
         // LSM rowstore
         if let Some(lsm) = self.lsm_tables.get(&table_id) {
-            self.append_wal(&WalRecord::Update { txn_id, table_id, pk: pk.clone(), new_row: new_row.clone() })?;
+            self.append_wal(&WalRecord::Update {
+                txn_id,
+                table_id,
+                pk: pk.clone(),
+                new_row: new_row.clone(),
+            })?;
             lsm.update(pk, &new_row, txn_id)?;
             return Ok(());
         }
@@ -98,7 +129,9 @@ impl StorageEngine {
         // Columnstore: UPDATE not natively supported (analytics workload)
         if self.columnstore_tables.contains_key(&table_id) {
             self.record_write_path_violation_columnstore()?;
-            return Err(StorageError::Io(std::io::Error::other("UPDATE not supported on COLUMNSTORE tables")));
+            return Err(StorageError::Io(std::io::Error::other(
+                "UPDATE not supported on COLUMNSTORE tables",
+            )));
         }
 
         Err(StorageError::TableNotFound(table_id))
@@ -114,7 +147,11 @@ impl StorageEngine {
         if let Some(table) = self.tables.get(&table_id) {
             let tombstone_bytes = std::mem::size_of::<crate::mvcc::Version>() as u64;
             self.memory_tracker.alloc_write_buffer(tombstone_bytes);
-            self.append_wal(&WalRecord::Delete { txn_id, table_id, pk: pk.clone() })?;
+            self.append_wal(&WalRecord::Delete {
+                txn_id,
+                table_id,
+                pk: pk.clone(),
+            })?;
             table.delete(pk, txn_id)?;
             self.record_write(txn_id, table_id, pk.clone());
             return Ok(());
@@ -123,14 +160,22 @@ impl StorageEngine {
         // Disk rowstore
         if let Some(disk) = self.disk_tables.get(&table_id) {
             self.record_write_path_violation_disk()?;
-            self.append_wal(&WalRecord::Delete { txn_id, table_id, pk: pk.clone() })?;
+            self.append_wal(&WalRecord::Delete {
+                txn_id,
+                table_id,
+                pk: pk.clone(),
+            })?;
             disk.delete(pk, txn_id)?;
             return Ok(());
         }
 
         // LSM rowstore
         if let Some(lsm) = self.lsm_tables.get(&table_id) {
-            self.append_wal(&WalRecord::Delete { txn_id, table_id, pk: pk.clone() })?;
+            self.append_wal(&WalRecord::Delete {
+                txn_id,
+                table_id,
+                pk: pk.clone(),
+            })?;
             lsm.delete(pk, txn_id)?;
             self.record_write(txn_id, table_id, pk.clone());
             return Ok(());
@@ -139,7 +184,9 @@ impl StorageEngine {
         // Columnstore: DELETE not natively supported
         if self.columnstore_tables.contains_key(&table_id) {
             self.record_write_path_violation_columnstore()?;
-            return Err(StorageError::Io(std::io::Error::other("DELETE not supported on COLUMNSTORE tables")));
+            return Err(StorageError::Io(std::io::Error::other(
+                "DELETE not supported on COLUMNSTORE tables",
+            )));
         }
 
         Err(StorageError::TableNotFound(table_id))
@@ -310,11 +357,7 @@ impl StorageEngine {
 
     /// Delete a single row by primary key and immediately commit (local txn).
     /// Intended for internal operations like shard migration.
-    pub fn delete_row(
-        &self,
-        table_id: TableId,
-        pk: &PrimaryKey,
-    ) -> Result<(), StorageError> {
+    pub fn delete_row(&self, table_id: TableId, pk: &PrimaryKey) -> Result<(), StorageError> {
         let txn_id = self.next_internal_txn_id();
         let commit_ts = Timestamp(txn_id.0);
         self.delete(table_id, pk, txn_id)?;
@@ -334,14 +377,16 @@ impl StorageEngine {
     /// Returns `Ok(())` when the write may proceed, `Err` when it must be rejected.
     pub(crate) fn record_write_path_violation_columnstore(&self) -> Result<(), StorageError> {
         use falcon_common::config::WritePathEnforcement;
-        self.write_path_columnstore_violations.fetch_add(1, AtomicOrdering::Relaxed);
+        self.write_path_columnstore_violations
+            .fetch_add(1, AtomicOrdering::Relaxed);
         match self.write_path_enforcement {
             WritePathEnforcement::Warn => {
                 if self.node_role == NodeRole::Primary {
                     tracing::warn!(
                         "OLTP write-path violation: write touched COLUMNSTORE on Primary node \
                          (enforcement=warn, total={})",
-                        self.write_path_columnstore_violations.load(AtomicOrdering::Relaxed),
+                        self.write_path_columnstore_violations
+                            .load(AtomicOrdering::Relaxed),
                     );
                 }
                 Ok(())
@@ -350,11 +395,12 @@ impl StorageEngine {
                 tracing::error!(
                     "OLTP write-path violation DENIED: write touched COLUMNSTORE on {:?} node \
                      (enforcement={:?})",
-                    self.node_role, self.write_path_enforcement,
+                    self.node_role,
+                    self.write_path_enforcement,
                 );
                 Err(StorageError::Io(std::io::Error::other(
                     "write-path violation: COLUMNSTORE write forbidden on this node \
-                     (enforcement=hard-deny)"
+                     (enforcement=hard-deny)",
                 )))
             }
         }
@@ -365,14 +411,16 @@ impl StorageEngine {
     /// Same enforcement semantics as `record_write_path_violation_columnstore`.
     pub(crate) fn record_write_path_violation_disk(&self) -> Result<(), StorageError> {
         use falcon_common::config::WritePathEnforcement;
-        self.write_path_disk_violations.fetch_add(1, AtomicOrdering::Relaxed);
+        self.write_path_disk_violations
+            .fetch_add(1, AtomicOrdering::Relaxed);
         match self.write_path_enforcement {
             WritePathEnforcement::Warn => {
                 if self.node_role == NodeRole::Primary {
                     tracing::warn!(
                         "OLTP write-path violation: write touched DISK_ROWSTORE on Primary node \
                          (enforcement=warn, total={})",
-                        self.write_path_disk_violations.load(AtomicOrdering::Relaxed),
+                        self.write_path_disk_violations
+                            .load(AtomicOrdering::Relaxed),
                     );
                 }
                 Ok(())
@@ -381,11 +429,12 @@ impl StorageEngine {
                 tracing::error!(
                     "OLTP write-path violation DENIED: write touched DISK_ROWSTORE on {:?} node \
                      (enforcement={:?})",
-                    self.node_role, self.write_path_enforcement,
+                    self.node_role,
+                    self.write_path_enforcement,
                 );
                 Err(StorageError::Io(std::io::Error::other(
                     "write-path violation: DISK_ROWSTORE write forbidden on this node \
-                     (enforcement=hard-deny)"
+                     (enforcement=hard-deny)",
                 )))
             }
         }

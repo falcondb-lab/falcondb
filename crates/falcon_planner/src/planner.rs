@@ -88,7 +88,10 @@ impl Planner {
                     })
                 } else {
                     // Use HashJoin for equi-joins (all joins have equality conditions)
-                    let use_hash_join = sel.joins.iter().all(|j| Self::is_equi_join_condition(j.condition.as_ref()));
+                    let use_hash_join = sel
+                        .joins
+                        .iter()
+                        .all(|j| Self::is_equi_join_condition(j.condition.as_ref()));
                     if use_hash_join {
                         Ok(PhysicalPlan::HashJoin {
                             left_table_id: sel.table_id,
@@ -135,32 +138,33 @@ impl Planner {
             BoundStatement::Truncate { table_name } => Ok(PhysicalPlan::Truncate {
                 table_name: table_name.clone(),
             }),
-            BoundStatement::CreateIndex { index_name, table_name, column_indices, unique } => {
-                Ok(PhysicalPlan::CreateIndex {
-                    index_name: index_name.clone(),
-                    table_name: table_name.clone(),
-                    column_indices: column_indices.clone(),
-                    unique: *unique,
-                })
-            }
-            BoundStatement::DropIndex { index_name } => {
-                Ok(PhysicalPlan::DropIndex {
-                    index_name: index_name.clone(),
-                })
-            }
-            BoundStatement::CreateView { name, query_sql, or_replace } => {
-                Ok(PhysicalPlan::CreateView {
-                    name: name.clone(),
-                    query_sql: query_sql.clone(),
-                    or_replace: *or_replace,
-                })
-            }
-            BoundStatement::DropView { name, if_exists } => {
-                Ok(PhysicalPlan::DropView {
-                    name: name.clone(),
-                    if_exists: *if_exists,
-                })
-            }
+            BoundStatement::CreateIndex {
+                index_name,
+                table_name,
+                column_indices,
+                unique,
+            } => Ok(PhysicalPlan::CreateIndex {
+                index_name: index_name.clone(),
+                table_name: table_name.clone(),
+                column_indices: column_indices.clone(),
+                unique: *unique,
+            }),
+            BoundStatement::DropIndex { index_name } => Ok(PhysicalPlan::DropIndex {
+                index_name: index_name.clone(),
+            }),
+            BoundStatement::CreateView {
+                name,
+                query_sql,
+                or_replace,
+            } => Ok(PhysicalPlan::CreateView {
+                name: name.clone(),
+                query_sql: query_sql.clone(),
+                or_replace: *or_replace,
+            }),
+            BoundStatement::DropView { name, if_exists } => Ok(PhysicalPlan::DropView {
+                name: name.clone(),
+                if_exists: *if_exists,
+            }),
             BoundStatement::Begin => Ok(PhysicalPlan::Begin),
             BoundStatement::Commit => Ok(PhysicalPlan::Commit),
             BoundStatement::Rollback => Ok(PhysicalPlan::Rollback),
@@ -169,41 +173,95 @@ impl Planner {
             BoundStatement::ShowWalStats => Ok(PhysicalPlan::ShowWalStats),
             BoundStatement::ShowConnections => Ok(PhysicalPlan::ShowConnections),
             BoundStatement::RunGc => Ok(PhysicalPlan::RunGc),
-            BoundStatement::Analyze { table_name } => Ok(PhysicalPlan::Analyze { table_name: table_name.clone() }),
-            BoundStatement::ShowTableStats { table_name } => Ok(PhysicalPlan::ShowTableStats { table_name: table_name.clone() }),
-            BoundStatement::CreateSequence { name, start } => Ok(PhysicalPlan::CreateSequence { name: name.clone(), start: *start }),
-            BoundStatement::DropSequence { name, if_exists } => Ok(PhysicalPlan::DropSequence { name: name.clone(), if_exists: *if_exists }),
+            BoundStatement::Analyze { table_name } => Ok(PhysicalPlan::Analyze {
+                table_name: table_name.clone(),
+            }),
+            BoundStatement::ShowTableStats { table_name } => Ok(PhysicalPlan::ShowTableStats {
+                table_name: table_name.clone(),
+            }),
+            BoundStatement::CreateSequence { name, start } => Ok(PhysicalPlan::CreateSequence {
+                name: name.clone(),
+                start: *start,
+            }),
+            BoundStatement::DropSequence { name, if_exists } => Ok(PhysicalPlan::DropSequence {
+                name: name.clone(),
+                if_exists: *if_exists,
+            }),
             BoundStatement::ShowSequences => Ok(PhysicalPlan::ShowSequences),
             BoundStatement::ShowTenants => Ok(PhysicalPlan::ShowTenants),
             BoundStatement::ShowTenantUsage => Ok(PhysicalPlan::ShowTenantUsage),
-            BoundStatement::CreateTenant { name, max_qps, max_storage_bytes } => {
-                Ok(PhysicalPlan::CreateTenant {
-                    name: name.clone(),
-                    max_qps: *max_qps,
-                    max_storage_bytes: *max_storage_bytes,
-                })
+            BoundStatement::CreateTenant {
+                name,
+                max_qps,
+                max_storage_bytes,
+            } => Ok(PhysicalPlan::CreateTenant {
+                name: name.clone(),
+                max_qps: *max_qps,
+                max_storage_bytes: *max_storage_bytes,
+            }),
+            BoundStatement::DropTenant { name } => {
+                Ok(PhysicalPlan::DropTenant { name: name.clone() })
             }
-            BoundStatement::DropTenant { name } => Ok(PhysicalPlan::DropTenant { name: name.clone() }),
-            BoundStatement::CopyFrom { table_id, schema, columns, csv, delimiter, header, null_string, quote, escape } => {
-                Ok(PhysicalPlan::CopyFrom {
-                    table_id: *table_id, schema: schema.clone(), columns: columns.clone(),
-                    csv: *csv, delimiter: *delimiter, header: *header,
-                    null_string: null_string.clone(), quote: *quote, escape: *escape,
-                })
-            }
-            BoundStatement::CopyTo { table_id, schema, columns, csv, delimiter, header, null_string, quote, escape } => {
-                Ok(PhysicalPlan::CopyTo {
-                    table_id: *table_id, schema: schema.clone(), columns: columns.clone(),
-                    csv: *csv, delimiter: *delimiter, header: *header,
-                    null_string: null_string.clone(), quote: *quote, escape: *escape,
-                })
-            }
-            BoundStatement::CopyQueryTo { query, csv, delimiter, header, null_string, quote, escape } => {
+            BoundStatement::CopyFrom {
+                table_id,
+                schema,
+                columns,
+                csv,
+                delimiter,
+                header,
+                null_string,
+                quote,
+                escape,
+            } => Ok(PhysicalPlan::CopyFrom {
+                table_id: *table_id,
+                schema: schema.clone(),
+                columns: columns.clone(),
+                csv: *csv,
+                delimiter: *delimiter,
+                header: *header,
+                null_string: null_string.clone(),
+                quote: *quote,
+                escape: *escape,
+            }),
+            BoundStatement::CopyTo {
+                table_id,
+                schema,
+                columns,
+                csv,
+                delimiter,
+                header,
+                null_string,
+                quote,
+                escape,
+            } => Ok(PhysicalPlan::CopyTo {
+                table_id: *table_id,
+                schema: schema.clone(),
+                columns: columns.clone(),
+                csv: *csv,
+                delimiter: *delimiter,
+                header: *header,
+                null_string: null_string.clone(),
+                quote: *quote,
+                escape: *escape,
+            }),
+            BoundStatement::CopyQueryTo {
+                query,
+                csv,
+                delimiter,
+                header,
+                null_string,
+                quote,
+                escape,
+            } => {
                 let inner_plan = Self::plan(&BoundStatement::Select(*query.clone()))?;
                 Ok(PhysicalPlan::CopyQueryTo {
                     query: Box::new(inner_plan),
-                    csv: *csv, delimiter: *delimiter, header: *header,
-                    null_string: null_string.clone(), quote: *quote, escape: *escape,
+                    csv: *csv,
+                    delimiter: *delimiter,
+                    header: *header,
+                    null_string: null_string.clone(),
+                    quote: *quote,
+                    escape: *escape,
                 })
             }
         }
@@ -298,12 +356,32 @@ impl Planner {
         // Extract gather-strategy inputs before consuming plan.
         let gather_and_offsets = match &plan {
             PhysicalPlan::SeqScan {
-                projections, group_by, grouping_sets, having, order_by, limit, offset, distinct,
-                filter, ctes, unions, ..
+                projections,
+                group_by,
+                grouping_sets,
+                having,
+                order_by,
+                limit,
+                offset,
+                distinct,
+                filter,
+                ctes,
+                unions,
+                ..
             }
             | PhysicalPlan::IndexScan {
-                projections, group_by, grouping_sets, having, order_by, limit, offset, distinct,
-                filter, ctes, unions, ..
+                projections,
+                group_by,
+                grouping_sets,
+                having,
+                order_by,
+                limit,
+                offset,
+                distinct,
+                filter,
+                ctes,
+                unions,
+                ..
             } => {
                 // If the query has cross-table subqueries (IN/EXISTS/scalar subquery),
                 // CTEs, UNIONs, or GROUPING SETS, DON'T distribute — requires
@@ -316,14 +394,25 @@ impl Planner {
                     None
                 } else {
                     Some((
-                        Self::choose_gather_strategy(projections, group_by, having.clone(), order_by, *limit, *offset, distinct),
-                        *limit, *offset,
+                        Self::choose_gather_strategy(
+                            projections,
+                            group_by,
+                            having.clone(),
+                            order_by,
+                            *limit,
+                            *offset,
+                            distinct,
+                        ),
+                        *limit,
+                        *offset,
                     ))
                 }
             }
             // NestedLoopJoin: NOT wrapped in DistPlan — requires coordinator-side join
             // to ensure cross-shard correctness. The query engine handles this specially.
-            PhysicalPlan::NestedLoopJoin { .. } | PhysicalPlan::HashJoin { .. } | PhysicalPlan::MergeSortJoin { .. } => None,
+            PhysicalPlan::NestedLoopJoin { .. }
+            | PhysicalPlan::HashJoin { .. }
+            | PhysicalPlan::MergeSortJoin { .. } => None,
             _ => None,
         };
 
@@ -371,22 +460,26 @@ impl Planner {
         distinct: &DistinctMode,
     ) -> (DistGather, Option<Vec<BoundProjection>>) {
         // Check for aggregate-only projections (all projections are aggregates or group-by columns)
-        if let Some(result) = Self::try_two_phase_agg(projections, group_by, having, order_by, limit, offset) {
+        if let Some(result) =
+            Self::try_two_phase_agg(projections, group_by, having, order_by, limit, offset)
+        {
             return result;
         }
 
         let gather = if !order_by.is_empty() {
-            let sort_columns: Vec<(usize, bool)> = order_by
-                .iter()
-                .map(|ob| (ob.column_idx, ob.asc))
-                .collect();
+            let sort_columns: Vec<(usize, bool)> =
+                order_by.iter().map(|ob| (ob.column_idx, ob.asc)).collect();
             DistGather::MergeSortLimit {
                 sort_columns,
                 limit,
                 offset,
             }
         } else {
-            DistGather::Union { distinct: !matches!(distinct, DistinctMode::None), limit, offset }
+            DistGather::Union {
+                distinct: !matches!(distinct, DistinctMode::None),
+                limit,
+                offset,
+            }
         };
         (gather, None)
     }
@@ -407,14 +500,34 @@ impl Planner {
             _ => limit,
         };
         match &mut plan {
-            PhysicalPlan::SeqScan { limit: lim, offset: off, .. }
-            | PhysicalPlan::IndexScan { limit: lim, offset: off, .. } => {
+            PhysicalPlan::SeqScan {
+                limit: lim,
+                offset: off,
+                ..
+            }
+            | PhysicalPlan::IndexScan {
+                limit: lim,
+                offset: off,
+                ..
+            } => {
                 *off = None;
                 *lim = combined;
             }
-            PhysicalPlan::NestedLoopJoin { limit: lim, offset: off, .. }
-            | PhysicalPlan::HashJoin { limit: lim, offset: off, .. }
-            | PhysicalPlan::MergeSortJoin { limit: lim, offset: off, .. } => {
+            PhysicalPlan::NestedLoopJoin {
+                limit: lim,
+                offset: off,
+                ..
+            }
+            | PhysicalPlan::HashJoin {
+                limit: lim,
+                offset: off,
+                ..
+            }
+            | PhysicalPlan::MergeSortJoin {
+                limit: lim,
+                offset: off,
+                ..
+            } => {
                 *off = None;
                 *lim = combined;
             }
@@ -442,7 +555,8 @@ impl Planner {
         }
         for proj in projections {
             match proj {
-                BoundProjection::Expr(expr, _) | BoundProjection::Aggregate(_, Some(expr), _, _, _) => {
+                BoundProjection::Expr(expr, _)
+                | BoundProjection::Aggregate(_, Some(expr), _, _, _) => {
                     if Self::expr_has_subquery(expr) {
                         return true;
                     }
@@ -456,7 +570,9 @@ impl Planner {
     /// Recursively check if a BoundExpr contains any subquery node.
     fn expr_has_subquery(expr: &BoundExpr) -> bool {
         match expr {
-            BoundExpr::ScalarSubquery(_) | BoundExpr::InSubquery { .. } | BoundExpr::Exists { .. } => true,
+            BoundExpr::ScalarSubquery(_)
+            | BoundExpr::InSubquery { .. }
+            | BoundExpr::Exists { .. } => true,
             BoundExpr::BinaryOp { left, right, .. } => {
                 Self::expr_has_subquery(left) || Self::expr_has_subquery(right)
             }
@@ -466,14 +582,39 @@ impl Planner {
             BoundExpr::Like { expr, pattern, .. } => {
                 Self::expr_has_subquery(expr) || Self::expr_has_subquery(pattern)
             }
-            BoundExpr::Between { expr, low, high, .. } => {
-                Self::expr_has_subquery(expr) || Self::expr_has_subquery(low) || Self::expr_has_subquery(high)
+            BoundExpr::Between {
+                expr, low, high, ..
+            } => {
+                Self::expr_has_subquery(expr)
+                    || Self::expr_has_subquery(low)
+                    || Self::expr_has_subquery(high)
             }
-            BoundExpr::Case { operand, conditions, results, else_result } => {
-                if let Some(op) = operand { if Self::expr_has_subquery(op) { return true; } }
-                for cond in conditions { if Self::expr_has_subquery(cond) { return true; } }
-                for res in results { if Self::expr_has_subquery(res) { return true; } }
-                if let Some(el) = else_result { if Self::expr_has_subquery(el) { return true; } }
+            BoundExpr::Case {
+                operand,
+                conditions,
+                results,
+                else_result,
+            } => {
+                if let Some(op) = operand {
+                    if Self::expr_has_subquery(op) {
+                        return true;
+                    }
+                }
+                for cond in conditions {
+                    if Self::expr_has_subquery(cond) {
+                        return true;
+                    }
+                }
+                for res in results {
+                    if Self::expr_has_subquery(res) {
+                        return true;
+                    }
+                }
+                if let Some(el) = else_result {
+                    if Self::expr_has_subquery(el) {
+                        return true;
+                    }
+                }
                 false
             }
             BoundExpr::InList { expr, list, .. } => {
@@ -482,7 +623,9 @@ impl Planner {
             BoundExpr::Function { args, .. } => args.iter().any(Self::expr_has_subquery),
             BoundExpr::Cast { expr: inner, .. } => Self::expr_has_subquery(inner),
             BoundExpr::Coalesce(exprs) => exprs.iter().any(Self::expr_has_subquery),
-            BoundExpr::AggregateExpr { arg: Some(inner), .. } => Self::expr_has_subquery(inner),
+            BoundExpr::AggregateExpr {
+                arg: Some(inner), ..
+            } => Self::expr_has_subquery(inner),
             BoundExpr::ArrayLiteral(exprs) => exprs.iter().any(Self::expr_has_subquery),
             BoundExpr::ArrayIndex { array, index } => {
                 Self::expr_has_subquery(array) || Self::expr_has_subquery(index)
@@ -493,15 +636,25 @@ impl Planner {
             BoundExpr::AnyOp { left, right, .. } | BoundExpr::AllOp { left, right, .. } => {
                 Self::expr_has_subquery(left) || Self::expr_has_subquery(right)
             }
-            BoundExpr::ArraySlice { array, lower, upper } => {
+            BoundExpr::ArraySlice {
+                array,
+                lower,
+                upper,
+            } => {
                 Self::expr_has_subquery(array)
                     || lower.as_deref().is_some_and(Self::expr_has_subquery)
                     || upper.as_deref().is_some_and(Self::expr_has_subquery)
             }
             // Leaf nodes: no subqueries
-            BoundExpr::ColumnRef(_) | BoundExpr::Literal(_) | BoundExpr::OuterColumnRef(_) | BoundExpr::AggregateExpr { arg: None, .. }
-            | BoundExpr::SequenceNextval(_) | BoundExpr::SequenceCurrval(_) | BoundExpr::SequenceSetval(_, _)
-            | BoundExpr::Parameter(_) | BoundExpr::Grouping(_) => false,
+            BoundExpr::ColumnRef(_)
+            | BoundExpr::Literal(_)
+            | BoundExpr::OuterColumnRef(_)
+            | BoundExpr::AggregateExpr { arg: None, .. }
+            | BoundExpr::SequenceNextval(_)
+            | BoundExpr::SequenceCurrval(_)
+            | BoundExpr::SequenceSetval(_, _)
+            | BoundExpr::Parameter(_)
+            | BoundExpr::Grouping(_) => false,
         }
     }
 
@@ -527,7 +680,11 @@ impl Planner {
         let mut agg_merges = Vec::new();
         let mut has_agg = false;
         let mut output_idx = group_by.len(); // aggregates come after group-by columns
-        let visible_columns = group_by.len() + projections.iter().filter(|p| matches!(p, BoundProjection::Aggregate(..))).count();
+        let visible_columns = group_by.len()
+            + projections
+                .iter()
+                .filter(|p| matches!(p, BoundProjection::Aggregate(..)))
+                .count();
 
         // Track AVG decomposition: (sum_output_idx, hidden_count_idx)
         let mut avg_fixups: Vec<(usize, usize)> = Vec::new();
@@ -551,7 +708,9 @@ impl Planner {
                             AggFunc::Max => DistAggMerge::Max(output_idx),
                             AggFunc::BoolAnd => DistAggMerge::BoolAnd(output_idx),
                             AggFunc::BoolOr => DistAggMerge::BoolOr(output_idx),
-                            AggFunc::StringAgg(ref sep) => DistAggMerge::StringAggDistinct(output_idx, sep.clone()),
+                            AggFunc::StringAgg(ref sep) => {
+                                DistAggMerge::StringAggDistinct(output_idx, sep.clone())
+                            }
                             AggFunc::ArrayAgg => DistAggMerge::ArrayAggDistinct(output_idx),
                             // Statistical/ordered-set/bit aggregates: fall back to non-distributed
                             _ => return None,
@@ -572,7 +731,9 @@ impl Planner {
                         AggFunc::Max => DistAggMerge::Max(output_idx),
                         AggFunc::BoolAnd => DistAggMerge::BoolAnd(output_idx),
                         AggFunc::BoolOr => DistAggMerge::BoolOr(output_idx),
-                        AggFunc::StringAgg(ref sep) => DistAggMerge::StringAgg(output_idx, sep.clone()),
+                        AggFunc::StringAgg(ref sep) => {
+                            DistAggMerge::StringAgg(output_idx, sep.clone())
+                        }
                         AggFunc::ArrayAgg => DistAggMerge::ArrayAgg(output_idx),
                         AggFunc::Avg => {
                             // Decompose AVG(col) into SUM(col) at this position
@@ -627,7 +788,11 @@ impl Planner {
             for proj in projections {
                 if let BoundProjection::Aggregate(func, arg, _, _, _) = proj {
                     let arg_col = arg.as_ref().and_then(|e| {
-                        if let BoundExpr::ColumnRef(c) = e { Some(*c) } else { None }
+                        if let BoundExpr::ColumnRef(c) = e {
+                            Some(*c)
+                        } else {
+                            None
+                        }
                     });
                     agg_output_map.push((func.clone(), arg_col, idx));
                     idx += 1;
@@ -637,35 +802,89 @@ impl Planner {
         });
 
         // Check if any subplan projection rewriting is needed
-        let has_distinct_agg = agg_merges.iter().any(|m| matches!(m, DistAggMerge::CountDistinct(_) | DistAggMerge::SumDistinct(_) | DistAggMerge::AvgDistinct(_) | DistAggMerge::StringAggDistinct(_, _) | DistAggMerge::ArrayAggDistinct(_)));
+        let has_distinct_agg = agg_merges.iter().any(|m| {
+            matches!(
+                m,
+                DistAggMerge::CountDistinct(_)
+                    | DistAggMerge::SumDistinct(_)
+                    | DistAggMerge::AvgDistinct(_)
+                    | DistAggMerge::StringAggDistinct(_, _)
+                    | DistAggMerge::ArrayAggDistinct(_)
+            )
+        });
         let needs_rewrite = !avg_fixups.is_empty() || has_distinct_agg;
 
         let rewritten_projs = if needs_rewrite {
-            let mut new_projs: Vec<BoundProjection> = projections.iter().map(|p| {
-                match p {
-                    BoundProjection::Aggregate(AggFunc::Avg, arg, alias, true, filter) if arg.is_some() => {
-                        // Replace AVG(DISTINCT col) with ARRAY_AGG(DISTINCT col)
-                        BoundProjection::Aggregate(AggFunc::ArrayAgg, arg.clone(), alias.clone(), true, filter.clone())
+            let mut new_projs: Vec<BoundProjection> = projections
+                .iter()
+                .map(|p| {
+                    match p {
+                        BoundProjection::Aggregate(AggFunc::Avg, arg, alias, true, filter)
+                            if arg.is_some() =>
+                        {
+                            // Replace AVG(DISTINCT col) with ARRAY_AGG(DISTINCT col)
+                            BoundProjection::Aggregate(
+                                AggFunc::ArrayAgg,
+                                arg.clone(),
+                                alias.clone(),
+                                true,
+                                filter.clone(),
+                            )
+                        }
+                        BoundProjection::Aggregate(AggFunc::Avg, arg, alias, distinct, filter) => {
+                            // Replace AVG with SUM for the subplan (non-distinct decomposition)
+                            BoundProjection::Aggregate(
+                                AggFunc::Sum,
+                                arg.clone(),
+                                alias.clone(),
+                                *distinct,
+                                filter.clone(),
+                            )
+                        }
+                        BoundProjection::Aggregate(AggFunc::Count, arg, alias, true, filter)
+                            if arg.is_some() =>
+                        {
+                            // Replace COUNT(DISTINCT col) with ARRAY_AGG(DISTINCT col)
+                            BoundProjection::Aggregate(
+                                AggFunc::ArrayAgg,
+                                arg.clone(),
+                                alias.clone(),
+                                true,
+                                filter.clone(),
+                            )
+                        }
+                        BoundProjection::Aggregate(AggFunc::Sum, arg, alias, true, filter)
+                            if arg.is_some() =>
+                        {
+                            // Replace SUM(DISTINCT col) with ARRAY_AGG(DISTINCT col)
+                            BoundProjection::Aggregate(
+                                AggFunc::ArrayAgg,
+                                arg.clone(),
+                                alias.clone(),
+                                true,
+                                filter.clone(),
+                            )
+                        }
+                        BoundProjection::Aggregate(
+                            AggFunc::StringAgg(_),
+                            arg,
+                            alias,
+                            true,
+                            filter,
+                        ) if arg.is_some() => {
+                            // Replace STRING_AGG(DISTINCT col, sep) with ARRAY_AGG(DISTINCT col)
+                            BoundProjection::Aggregate(
+                                AggFunc::ArrayAgg,
+                                arg.clone(),
+                                alias.clone(),
+                                true,
+                                filter.clone(),
+                            )
+                        }
+                        _ => p.clone(),
                     }
-                    BoundProjection::Aggregate(AggFunc::Avg, arg, alias, distinct, filter) => {
-                        // Replace AVG with SUM for the subplan (non-distinct decomposition)
-                        BoundProjection::Aggregate(AggFunc::Sum, arg.clone(), alias.clone(), *distinct, filter.clone())
-                    }
-                    BoundProjection::Aggregate(AggFunc::Count, arg, alias, true, filter) if arg.is_some() => {
-                        // Replace COUNT(DISTINCT col) with ARRAY_AGG(DISTINCT col)
-                        BoundProjection::Aggregate(AggFunc::ArrayAgg, arg.clone(), alias.clone(), true, filter.clone())
-                    }
-                    BoundProjection::Aggregate(AggFunc::Sum, arg, alias, true, filter) if arg.is_some() => {
-                        // Replace SUM(DISTINCT col) with ARRAY_AGG(DISTINCT col)
-                        BoundProjection::Aggregate(AggFunc::ArrayAgg, arg.clone(), alias.clone(), true, filter.clone())
-                    }
-                    BoundProjection::Aggregate(AggFunc::StringAgg(_), arg, alias, true, filter) if arg.is_some() => {
-                        // Replace STRING_AGG(DISTINCT col, sep) with ARRAY_AGG(DISTINCT col)
-                        BoundProjection::Aggregate(AggFunc::ArrayAgg, arg.clone(), alias.clone(), true, filter.clone())
-                    }
-                    _ => p.clone(),
-                }
-            }).collect();
+                })
+                .collect();
             // Append hidden COUNT projections for AVG decomposition
             new_projs.extend(hidden_projections);
             Some(new_projs)
@@ -673,50 +892,51 @@ impl Planner {
             None
         };
 
-        let sort_columns: Vec<(usize, bool)> = order_by
-            .iter()
-            .map(|ob| (ob.column_idx, ob.asc))
-            .collect();
+        let sort_columns: Vec<(usize, bool)> =
+            order_by.iter().map(|ob| (ob.column_idx, ob.asc)).collect();
 
-        Some((DistGather::TwoPhaseAgg {
-            group_by_indices: group_by_output_indices,
-            agg_merges,
-            having: rewritten_having,
-            avg_fixups,
-            visible_columns,
-            order_by: sort_columns,
-            limit,
-            offset,
-        }, rewritten_projs))
+        Some((
+            DistGather::TwoPhaseAgg {
+                group_by_indices: group_by_output_indices,
+                agg_merges,
+                having: rewritten_having,
+                avg_fixups,
+                visible_columns,
+                order_by: sort_columns,
+                limit,
+                offset,
+            },
+            rewritten_projs,
+        ))
     }
 
     /// Recursively rewrite AggregateExpr nodes in an expression to ColumnRef
     /// pointing to the merged output column positions.
-    fn rewrite_agg_refs(
-        expr: BoundExpr,
-        agg_map: &[(AggFunc, Option<usize>, usize)],
-    ) -> BoundExpr {
+    fn rewrite_agg_refs(expr: BoundExpr, agg_map: &[(AggFunc, Option<usize>, usize)]) -> BoundExpr {
         match expr {
-            BoundExpr::AggregateExpr { ref func, ref arg, .. } => {
+            BoundExpr::AggregateExpr {
+                ref func, ref arg, ..
+            } => {
                 let arg_col = arg.as_ref().and_then(|e| {
-                    if let BoundExpr::ColumnRef(c) = e.as_ref() { Some(*c) } else { None }
+                    if let BoundExpr::ColumnRef(c) = e.as_ref() {
+                        Some(*c)
+                    } else {
+                        None
+                    }
                 });
                 for (af, ac, out_idx) in agg_map {
-                    if std::mem::discriminant(af) == std::mem::discriminant(func)
-                        && *ac == arg_col
+                    if std::mem::discriminant(af) == std::mem::discriminant(func) && *ac == arg_col
                     {
                         return BoundExpr::ColumnRef(*out_idx);
                     }
                 }
                 expr
             }
-            BoundExpr::BinaryOp { left, op, right } => {
-                BoundExpr::BinaryOp {
-                    left: Box::new(Self::rewrite_agg_refs(*left, agg_map)),
-                    op,
-                    right: Box::new(Self::rewrite_agg_refs(*right, agg_map)),
-                }
-            }
+            BoundExpr::BinaryOp { left, op, right } => BoundExpr::BinaryOp {
+                left: Box::new(Self::rewrite_agg_refs(*left, agg_map)),
+                op,
+                right: Box::new(Self::rewrite_agg_refs(*right, agg_map)),
+            },
             BoundExpr::Not(inner) => {
                 BoundExpr::Not(Box::new(Self::rewrite_agg_refs(*inner, agg_map)))
             }
@@ -726,35 +946,71 @@ impl Planner {
             BoundExpr::IsNotNull(inner) => {
                 BoundExpr::IsNotNull(Box::new(Self::rewrite_agg_refs(*inner, agg_map)))
             }
-            BoundExpr::Cast { expr: inner, target_type } => BoundExpr::Cast {
+            BoundExpr::Cast {
+                expr: inner,
+                target_type,
+            } => BoundExpr::Cast {
                 expr: Box::new(Self::rewrite_agg_refs(*inner, agg_map)),
                 target_type,
             },
             BoundExpr::Function { func, args } => BoundExpr::Function {
                 func,
-                args: args.into_iter().map(|a| Self::rewrite_agg_refs(a, agg_map)).collect(),
+                args: args
+                    .into_iter()
+                    .map(|a| Self::rewrite_agg_refs(a, agg_map))
+                    .collect(),
             },
             BoundExpr::Coalesce(args) => BoundExpr::Coalesce(
-                args.into_iter().map(|a| Self::rewrite_agg_refs(a, agg_map)).collect(),
+                args.into_iter()
+                    .map(|a| Self::rewrite_agg_refs(a, agg_map))
+                    .collect(),
             ),
-            BoundExpr::Case { operand, conditions, results, else_result } => BoundExpr::Case {
+            BoundExpr::Case {
+                operand,
+                conditions,
+                results,
+                else_result,
+            } => BoundExpr::Case {
                 operand: operand.map(|e| Box::new(Self::rewrite_agg_refs(*e, agg_map))),
-                conditions: conditions.into_iter().map(|c| Self::rewrite_agg_refs(c, agg_map)).collect(),
-                results: results.into_iter().map(|r| Self::rewrite_agg_refs(r, agg_map)).collect(),
+                conditions: conditions
+                    .into_iter()
+                    .map(|c| Self::rewrite_agg_refs(c, agg_map))
+                    .collect(),
+                results: results
+                    .into_iter()
+                    .map(|r| Self::rewrite_agg_refs(r, agg_map))
+                    .collect(),
                 else_result: else_result.map(|e| Box::new(Self::rewrite_agg_refs(*e, agg_map))),
             },
-            BoundExpr::Like { expr: inner, pattern, negated, case_insensitive } => BoundExpr::Like {
+            BoundExpr::Like {
+                expr: inner,
+                pattern,
+                negated,
+                case_insensitive,
+            } => BoundExpr::Like {
                 expr: Box::new(Self::rewrite_agg_refs(*inner, agg_map)),
                 pattern: Box::new(Self::rewrite_agg_refs(*pattern, agg_map)),
                 negated,
                 case_insensitive,
             },
-            BoundExpr::InList { expr: inner, list, negated } => BoundExpr::InList {
+            BoundExpr::InList {
+                expr: inner,
+                list,
+                negated,
+            } => BoundExpr::InList {
                 expr: Box::new(Self::rewrite_agg_refs(*inner, agg_map)),
-                list: list.into_iter().map(|l| Self::rewrite_agg_refs(l, agg_map)).collect(),
+                list: list
+                    .into_iter()
+                    .map(|l| Self::rewrite_agg_refs(l, agg_map))
+                    .collect(),
                 negated,
             },
-            BoundExpr::Between { expr: inner, low, high, negated } => BoundExpr::Between {
+            BoundExpr::Between {
+                expr: inner,
+                low,
+                high,
+                negated,
+            } => BoundExpr::Between {
                 expr: Box::new(Self::rewrite_agg_refs(*inner, agg_map)),
                 low: Box::new(Self::rewrite_agg_refs(*low, agg_map)),
                 high: Box::new(Self::rewrite_agg_refs(*high, agg_map)),
@@ -765,23 +1021,38 @@ impl Planner {
                 right: Box::new(Self::rewrite_agg_refs(*right, agg_map)),
             },
             BoundExpr::ArrayLiteral(elems) => BoundExpr::ArrayLiteral(
-                elems.into_iter().map(|e| Self::rewrite_agg_refs(e, agg_map)).collect(),
+                elems
+                    .into_iter()
+                    .map(|e| Self::rewrite_agg_refs(e, agg_map))
+                    .collect(),
             ),
             BoundExpr::ArrayIndex { array, index } => BoundExpr::ArrayIndex {
                 array: Box::new(Self::rewrite_agg_refs(*array, agg_map)),
                 index: Box::new(Self::rewrite_agg_refs(*index, agg_map)),
             },
-            BoundExpr::AnyOp { left, compare_op, right } => BoundExpr::AnyOp {
+            BoundExpr::AnyOp {
+                left,
+                compare_op,
+                right,
+            } => BoundExpr::AnyOp {
                 left: Box::new(Self::rewrite_agg_refs(*left, agg_map)),
                 compare_op,
                 right: Box::new(Self::rewrite_agg_refs(*right, agg_map)),
             },
-            BoundExpr::AllOp { left, compare_op, right } => BoundExpr::AllOp {
+            BoundExpr::AllOp {
+                left,
+                compare_op,
+                right,
+            } => BoundExpr::AllOp {
                 left: Box::new(Self::rewrite_agg_refs(*left, agg_map)),
                 compare_op,
                 right: Box::new(Self::rewrite_agg_refs(*right, agg_map)),
             },
-            BoundExpr::ArraySlice { array, lower, upper } => BoundExpr::ArraySlice {
+            BoundExpr::ArraySlice {
+                array,
+                lower,
+                upper,
+            } => BoundExpr::ArraySlice {
                 array: Box::new(Self::rewrite_agg_refs(*array, agg_map)),
                 lower: lower.map(|l| Box::new(Self::rewrite_agg_refs(*l, agg_map))),
                 upper: upper.map(|u| Box::new(Self::rewrite_agg_refs(*u, agg_map))),
@@ -801,13 +1072,19 @@ impl Planner {
 
     fn is_equi_expr(expr: &BoundExpr) -> bool {
         match expr {
-            BoundExpr::BinaryOp { op: BinOp::Eq, left, right } => {
+            BoundExpr::BinaryOp {
+                op: BinOp::Eq,
+                left,
+                right,
+            } => {
                 matches!(left.as_ref(), BoundExpr::ColumnRef(_))
                     && matches!(right.as_ref(), BoundExpr::ColumnRef(_))
             }
-            BoundExpr::BinaryOp { op: BinOp::And, left, right } => {
-                Self::is_equi_expr(left) && Self::is_equi_expr(right)
-            }
+            BoundExpr::BinaryOp {
+                op: BinOp::And,
+                left,
+                right,
+            } => Self::is_equi_expr(left) && Self::is_equi_expr(right),
             _ => false,
         }
     }
@@ -824,26 +1101,29 @@ impl Planner {
     ///   NL cost  = left_rows * right_rows
     ///   Hash cost = left_rows + right_rows + build_cost(min(left, right))
     ///   Sort cost = (left_rows * log(left_rows) + right_rows * log(right_rows)) + merge_cost
-    fn choose_join_strategy(
-        sel: &BoundSelect,
-        stats: &TableRowCounts,
-    ) -> PhysicalPlan {
+    fn choose_join_strategy(sel: &BoundSelect, stats: &TableRowCounts) -> PhysicalPlan {
         let left_rows = stats.get(&sel.table_id).copied().unwrap_or(1000);
-        let all_equi = sel.joins.iter().all(|j| Self::is_equi_join_condition(j.condition.as_ref()));
+        let all_equi = sel
+            .joins
+            .iter()
+            .all(|j| Self::is_equi_join_condition(j.condition.as_ref()));
 
         // Estimate total right-side rows
-        let right_rows_sum: u64 = sel.joins.iter()
+        let right_rows_sum: u64 = sel
+            .joins
+            .iter()
             .map(|j| stats.get(&j.right_table_id).copied().unwrap_or(1000))
             .sum();
 
         // Check if ORDER BY matches any join key (merge join can avoid sort)
-        let order_by_matches_join_key = !sel.order_by.is_empty() && sel.joins.iter().any(|j| {
-            if let Some(ref cond) = j.condition {
-                Self::order_by_matches_join_condition(&sel.order_by, cond)
-            } else {
-                false
-            }
-        });
+        let order_by_matches_join_key = !sel.order_by.is_empty()
+            && sel.joins.iter().any(|j| {
+                if let Some(ref cond) = j.condition {
+                    Self::order_by_matches_join_condition(&sel.order_by, cond)
+                } else {
+                    false
+                }
+            });
 
         let strategy = if !all_equi {
             // Non-equi join → must use NL
@@ -920,7 +1200,9 @@ impl Planner {
         }
         // Check if the first ORDER BY column matches any join key column
         if let Some(first_ob) = order_by.first() {
-            key_cols.iter().any(|(l, r)| first_ob.column_idx == *l || first_ob.column_idx == *r)
+            key_cols
+                .iter()
+                .any(|(l, r)| first_ob.column_idx == *l || first_ob.column_idx == *r)
         } else {
             false
         }
@@ -930,12 +1212,22 @@ impl Planner {
     fn extract_equi_columns(expr: &BoundExpr) -> Vec<(usize, usize)> {
         let mut pairs = Vec::new();
         match expr {
-            BoundExpr::BinaryOp { left, op: BinOp::Eq, right } => {
-                if let (BoundExpr::ColumnRef(l), BoundExpr::ColumnRef(r)) = (left.as_ref(), right.as_ref()) {
+            BoundExpr::BinaryOp {
+                left,
+                op: BinOp::Eq,
+                right,
+            } => {
+                if let (BoundExpr::ColumnRef(l), BoundExpr::ColumnRef(r)) =
+                    (left.as_ref(), right.as_ref())
+                {
                     pairs.push((*l, *r));
                 }
             }
-            BoundExpr::BinaryOp { left, op: BinOp::And, right } => {
+            BoundExpr::BinaryOp {
+                left,
+                op: BinOp::And,
+                right,
+            } => {
                 pairs.extend(Self::extract_equi_columns(left));
                 pairs.extend(Self::extract_equi_columns(right));
             }
@@ -946,10 +1238,7 @@ impl Planner {
 
     /// Try to produce an IndexScan plan for a single-table SELECT when the
     /// filter contains a `col = literal` predicate on an indexed column.
-    fn try_index_scan_plan(
-        sel: &BoundSelect,
-        indexes: &IndexedColumns,
-    ) -> Option<PhysicalPlan> {
+    fn try_index_scan_plan(sel: &BoundSelect, indexes: &IndexedColumns) -> Option<PhysicalPlan> {
         let filter = sel.filter.as_ref()?;
         let indexed_cols = indexes.get(&sel.table_id)?;
         if indexed_cols.is_empty() {
@@ -987,7 +1276,11 @@ impl Planner {
     ) -> Option<(usize, BoundExpr, Option<BoundExpr>)> {
         match filter {
             // Simple: col = literal
-            BoundExpr::BinaryOp { left, op: BinOp::Eq, right } => {
+            BoundExpr::BinaryOp {
+                left,
+                op: BinOp::Eq,
+                right,
+            } => {
                 let (col_idx, lit) = match (left.as_ref(), right.as_ref()) {
                     (BoundExpr::ColumnRef(idx), BoundExpr::Literal(_)) => (*idx, right.as_ref()),
                     (BoundExpr::Literal(_), BoundExpr::ColumnRef(idx)) => (*idx, left.as_ref()),
@@ -1000,12 +1293,25 @@ impl Planner {
                 }
             }
             // AND: try to extract from either side
-            BoundExpr::BinaryOp { left, op: BinOp::And, right } => {
+            BoundExpr::BinaryOp {
+                left,
+                op: BinOp::And,
+                right,
+            } => {
                 // Try left side first
-                if let BoundExpr::BinaryOp { left: ll, op: BinOp::Eq, right: lr } = left.as_ref() {
+                if let BoundExpr::BinaryOp {
+                    left: ll,
+                    op: BinOp::Eq,
+                    right: lr,
+                } = left.as_ref()
+                {
                     let extracted = match (ll.as_ref(), lr.as_ref()) {
-                        (BoundExpr::ColumnRef(idx), BoundExpr::Literal(_)) => Some((*idx, lr.as_ref())),
-                        (BoundExpr::Literal(_), BoundExpr::ColumnRef(idx)) => Some((*idx, ll.as_ref())),
+                        (BoundExpr::ColumnRef(idx), BoundExpr::Literal(_)) => {
+                            Some((*idx, lr.as_ref()))
+                        }
+                        (BoundExpr::Literal(_), BoundExpr::ColumnRef(idx)) => {
+                            Some((*idx, ll.as_ref()))
+                        }
                         _ => None,
                     };
                     if let Some((col_idx, lit)) = extracted {
@@ -1015,10 +1321,19 @@ impl Planner {
                     }
                 }
                 // Try right side
-                if let BoundExpr::BinaryOp { left: rl, op: BinOp::Eq, right: rr } = right.as_ref() {
+                if let BoundExpr::BinaryOp {
+                    left: rl,
+                    op: BinOp::Eq,
+                    right: rr,
+                } = right.as_ref()
+                {
                     let extracted = match (rl.as_ref(), rr.as_ref()) {
-                        (BoundExpr::ColumnRef(idx), BoundExpr::Literal(_)) => Some((*idx, rr.as_ref())),
-                        (BoundExpr::Literal(_), BoundExpr::ColumnRef(idx)) => Some((*idx, rl.as_ref())),
+                        (BoundExpr::ColumnRef(idx), BoundExpr::Literal(_)) => {
+                            Some((*idx, rr.as_ref()))
+                        }
+                        (BoundExpr::Literal(_), BoundExpr::ColumnRef(idx)) => {
+                            Some((*idx, rl.as_ref()))
+                        }
                         _ => None,
                     };
                     if let Some((col_idx, lit)) = extracted {

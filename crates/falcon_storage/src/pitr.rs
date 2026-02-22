@@ -239,14 +239,16 @@ impl WalArchiver {
     pub fn find_base_backup(&self, target: &RecoveryTarget) -> Option<&BaseBackup> {
         match target {
             RecoveryTarget::Latest => self.base_backups.last(),
-            RecoveryTarget::Lsn(target_lsn) => {
-                self.base_backups.iter().rev()
-                    .find(|b| b.start_lsn <= *target_lsn)
-            }
-            RecoveryTarget::Time(target_ms) => {
-                self.base_backups.iter().rev()
-                    .find(|b| b.start_time_ms <= *target_ms)
-            }
+            RecoveryTarget::Lsn(target_lsn) => self
+                .base_backups
+                .iter()
+                .rev()
+                .find(|b| b.start_lsn <= *target_lsn),
+            RecoveryTarget::Time(target_ms) => self
+                .base_backups
+                .iter()
+                .rev()
+                .find(|b| b.start_time_ms <= *target_ms),
             RecoveryTarget::Xid(_) | RecoveryTarget::RestorePoint(_) => {
                 // For XID/restore point, use the latest backup and scan forward
                 self.base_backups.last()
@@ -267,7 +269,8 @@ impl WalArchiver {
             _ => Lsn::MAX, // for time/xid targets, we need to scan all and stop when matched
         };
 
-        self.segments.range(start..=end)
+        self.segments
+            .range(start..=end)
             .map(|(_, seg)| seg)
             .collect()
     }
@@ -285,7 +288,9 @@ impl WalArchiver {
             .as_millis() as u64;
         let cutoff = cutoff_ms.saturating_sub(retention.as_millis() as u64);
 
-        let to_remove: Vec<Lsn> = self.segments.iter()
+        let to_remove: Vec<Lsn> = self
+            .segments
+            .iter()
             .filter(|(_, seg)| seg.latest_time_ms < cutoff)
             .map(|(lsn, _)| *lsn)
             .collect();
@@ -561,6 +566,9 @@ mod tests {
         assert_eq!(RecoveryTarget::Latest.to_string(), "latest");
         assert_eq!(RecoveryTarget::Lsn(Lsn(100)).to_string(), "lsn:0/00000064");
         assert_eq!(RecoveryTarget::Xid(42).to_string(), "xid:42");
-        assert_eq!(RecoveryTarget::RestorePoint("v1".into()).to_string(), "restore_point:v1");
+        assert_eq!(
+            RecoveryTarget::RestorePoint("v1".into()).to_string(),
+            "restore_point:v1"
+        );
     }
 }

@@ -77,11 +77,7 @@ impl ShardReplicaGroup {
         let mut write_sets: HashMap<TxnId, Vec<WriteOp>> = HashMap::new();
 
         for lsn_record in &pending {
-            apply_wal_record_to_engine(
-                &replica.storage,
-                &lsn_record.record,
-                &mut write_sets,
-            )?;
+            apply_wal_record_to_engine(&replica.storage, &lsn_record.record, &mut write_sets)?;
             if lsn_record.lsn > max_lsn {
                 max_lsn = lsn_record.lsn;
             }
@@ -118,11 +114,7 @@ impl ShardReplicaGroup {
             if lsn_record.lsn <= max_lsn {
                 continue;
             }
-            apply_wal_record_to_engine(
-                &replica.storage,
-                &lsn_record.record,
-                &mut write_sets,
-            )?;
+            apply_wal_record_to_engine(&replica.storage, &lsn_record.record, &mut write_sets)?;
             max_lsn = lsn_record.lsn;
         }
 

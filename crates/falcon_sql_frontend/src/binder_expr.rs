@@ -6,8 +6,8 @@ use falcon_common::schema::TableSchema;
 use falcon_common::types::DataType;
 use sqlparser::ast::{self, Expr, Value};
 
+use crate::binder::{AliasMap, Binder};
 use crate::types::*;
-use crate::binder::{Binder, AliasMap};
 
 impl Binder {
     pub fn bind_expr(&self, expr: &Expr, schema: &TableSchema) -> Result<BoundExpr, SqlError> {
@@ -39,7 +39,8 @@ impl Binder {
                     Ok(BoundExpr::ColumnRef(col_idx))
                 } else if let Some(outer) = outer_schema {
                     // Try outer schema for correlated subquery
-                    let outer_idx = outer.find_column(&ident.value)
+                    let outer_idx = outer
+                        .find_column(&ident.value)
                         .ok_or_else(|| SqlError::UnknownColumn(ident.value.clone()))?;
                     Ok(BoundExpr::OuterColumnRef(outer_idx))
                 } else {
@@ -54,18 +55,28 @@ impl Binder {
                 let resolved_table = aliases.get(&qualifier).map(|(name, _offset)| name.clone());
                 let lookup_name = resolved_table.as_deref().unwrap_or(&qualifier);
 
-                let matching: Vec<usize> = schema.columns.iter().enumerate()
+                let matching: Vec<usize> = schema
+                    .columns
+                    .iter()
+                    .enumerate()
                     .filter(|(_, c)| c.name.to_lowercase() == col_name)
                     .map(|(i, _)| i)
                     .collect();
                 if matching.is_empty() {
                     // Try outer schema for correlated subquery
                     if let Some(outer) = outer_schema {
-                        let outer_idx = outer.find_column(&col_name)
-                            .ok_or_else(|| SqlError::UnknownColumn(format!("{}.{}", parts[0].value, parts[1].value)))?;
+                        let outer_idx = outer.find_column(&col_name).ok_or_else(|| {
+                            SqlError::UnknownColumn(format!(
+                                "{}.{}",
+                                parts[0].value, parts[1].value
+                            ))
+                        })?;
                         return Ok(BoundExpr::OuterColumnRef(outer_idx));
                     }
-                    return Err(SqlError::UnknownColumn(format!("{}.{}", parts[0].value, parts[1].value)));
+                    return Err(SqlError::UnknownColumn(format!(
+                        "{}.{}",
+                        parts[0].value, parts[1].value
+                    )));
                 }
                 if matching.len() == 1 {
                     // If the qualifier is not recognized in the inner scope,
@@ -83,8 +94,7 @@ impl Binder {
                 if let Some((_real_name, col_offset)) = aliases.get(&qualifier) {
                     // Find the column by name starting from the alias offset
                     for &idx in &matching {
-                        if idx >= *col_offset
-                            && schema.columns[idx].name.to_lowercase() == col_name
+                        if idx >= *col_offset && schema.columns[idx].name.to_lowercase() == col_name
                         {
                             return Ok(BoundExpr::ColumnRef(idx));
                         }
@@ -106,9 +116,11 @@ impl Binder {
                             if idx >= col_pos {
                                 let start = idx - col_pos;
                                 if start + table_schema.columns.len() <= schema.columns.len() {
-                                    let matches_table = table_schema.columns.iter().enumerate().all(|(j, tc)| {
-                                        schema.columns[start + j].name.to_lowercase() == tc.name.to_lowercase()
-                                    });
+                                    let matches_table =
+                                        table_schema.columns.iter().enumerate().all(|(j, tc)| {
+                                            schema.columns[start + j].name.to_lowercase()
+                                                == tc.name.to_lowercase()
+                                        });
                                     if matches_table {
                                         return Ok(BoundExpr::ColumnRef(idx));
                                     }
@@ -121,9 +133,9 @@ impl Binder {
             }
             Expr::Value(Value::Placeholder(s)) => {
                 // $1, $2, ... parameter placeholders (1-indexed)
-                let idx = s.trim_start_matches('$')
-                    .parse::<usize>()
-                    .map_err(|_| SqlError::Parse(format!("Invalid parameter placeholder: {}", s)))?;
+                let idx = s.trim_start_matches('$').parse::<usize>().map_err(|_| {
+                    SqlError::Parse(format!("Invalid parameter placeholder: {}", s))
+                })?;
                 if idx == 0 {
                     return Err(SqlError::Parse("Parameter index must be >= 1".into()));
                 }
@@ -192,7 +204,12 @@ impl Binder {
                 Ok(BoundExpr::IsNotNull(Box::new(bound)))
             }
             Expr::Nested(inner) => self.bind_expr_full(inner, schema, aliases, outer_schema),
-            Expr::Like { negated, expr: like_expr, pattern, .. } => {
+            Expr::Like {
+                negated,
+                expr: like_expr,
+                pattern,
+                ..
+            } => {
                 let bound_expr = self.bind_expr_full(like_expr, schema, aliases, outer_schema)?;
                 let bound_pattern = self.bind_expr_full(pattern, schema, aliases, outer_schema)?;
                 Ok(BoundExpr::Like {
@@ -202,7 +219,12 @@ impl Binder {
                     case_insensitive: false,
                 })
             }
-            Expr::ILike { negated, expr: like_expr, pattern, .. } => {
+            Expr::ILike {
+                negated,
+                expr: like_expr,
+                pattern,
+                ..
+            } => {
                 let bound_expr = self.bind_expr_full(like_expr, schema, aliases, outer_schema)?;
                 let bound_pattern = self.bind_expr_full(pattern, schema, aliases, outer_schema)?;
                 Ok(BoundExpr::Like {
@@ -212,8 +234,14 @@ impl Binder {
                     case_insensitive: true,
                 })
             }
-            Expr::Between { expr: between_expr, negated, low, high } => {
-                let bound_expr = self.bind_expr_full(between_expr, schema, aliases, outer_schema)?;
+            Expr::Between {
+                expr: between_expr,
+                negated,
+                low,
+                high,
+            } => {
+                let bound_expr =
+                    self.bind_expr_full(between_expr, schema, aliases, outer_schema)?;
                 let bound_low = self.bind_expr_full(low, schema, aliases, outer_schema)?;
                 let bound_high = self.bind_expr_full(high, schema, aliases, outer_schema)?;
                 Ok(BoundExpr::Between {
@@ -223,7 +251,11 @@ impl Binder {
                     negated: *negated,
                 })
             }
-            Expr::InList { expr: in_expr, list, negated } => {
+            Expr::InList {
+                expr: in_expr,
+                list,
+                negated,
+            } => {
                 let bound_expr = self.bind_expr_full(in_expr, schema, aliases, outer_schema)?;
                 let bound_list: Vec<BoundExpr> = list
                     .iter()
@@ -235,7 +267,11 @@ impl Binder {
                     negated: *negated,
                 })
             }
-            Expr::Cast { expr: cast_expr, data_type, .. } => {
+            Expr::Cast {
+                expr: cast_expr,
+                data_type,
+                ..
+            } => {
                 let bound_expr = self.bind_expr_full(cast_expr, schema, aliases, outer_schema)?;
                 let target_type = format!("{}", data_type);
                 Ok(BoundExpr::Cast {
@@ -247,7 +283,11 @@ impl Binder {
                 let bound = self.bind_select_query_with_outer(query, Some(schema), None)?;
                 Ok(BoundExpr::ScalarSubquery(Box::new(bound)))
             }
-            Expr::InSubquery { expr: in_expr, subquery, negated } => {
+            Expr::InSubquery {
+                expr: in_expr,
+                subquery,
+                negated,
+            } => {
                 let bound_expr = self.bind_expr_full(in_expr, schema, aliases, outer_schema)?;
                 let bound_sub = self.bind_select_query_with_outer(subquery, Some(schema), None)?;
                 Ok(BoundExpr::InSubquery {
@@ -263,7 +303,12 @@ impl Binder {
                     negated: *negated,
                 })
             }
-            Expr::Case { operand, conditions, results, else_result } => {
+            Expr::Case {
+                operand,
+                conditions,
+                results,
+                else_result,
+            } => {
                 let bound_operand = operand
                     .as_ref()
                     .map(|e| self.bind_expr_full(e, schema, aliases, outer_schema))
@@ -291,14 +336,16 @@ impl Binder {
             }
             Expr::Function(func) if func.name.to_string().to_uppercase() == "COALESCE" => {
                 let args = match &func.args {
-                    ast::FunctionArguments::List(args) => {
-                        args.args.iter().map(|a| match a {
+                    ast::FunctionArguments::List(args) => args
+                        .args
+                        .iter()
+                        .map(|a| match a {
                             ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(e)) => {
                                 self.bind_expr_full(e, schema, aliases, outer_schema)
                             }
                             _ => Err(SqlError::Unsupported("Complex COALESCE argument".into())),
-                        }).collect::<Result<Vec<_>, _>>()?
-                    }
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
                     _ => return Err(SqlError::Unsupported("COALESCE requires arguments".into())),
                 };
                 Ok(BoundExpr::Coalesce(args))
@@ -306,16 +353,20 @@ impl Binder {
             Expr::Function(func) if func.name.to_string().to_uppercase() == "NULLIF" => {
                 // NULLIF(a, b) => CASE WHEN a = b THEN NULL ELSE a END
                 let args: Vec<&Expr> = match &func.args {
-                    ast::FunctionArguments::List(args) => {
-                        args.args.iter().filter_map(|a| match a {
+                    ast::FunctionArguments::List(args) => args
+                        .args
+                        .iter()
+                        .filter_map(|a| match a {
                             ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(e)) => Some(e),
                             _ => None,
-                        }).collect()
-                    }
+                        })
+                        .collect(),
                     _ => return Err(SqlError::Unsupported("NULLIF requires arguments".into())),
                 };
                 if args.len() != 2 {
-                    return Err(SqlError::Parse("NULLIF requires exactly 2 arguments".into()));
+                    return Err(SqlError::Parse(
+                        "NULLIF requires exactly 2 arguments".into(),
+                    ));
                 }
                 let a = self.bind_expr_full(args[0], schema, aliases, outer_schema)?;
                 let b = self.bind_expr_full(args[1], schema, aliases, outer_schema)?;
@@ -333,63 +384,107 @@ impl Binder {
             Expr::Function(func) if func.name.to_string().to_uppercase() == "GROUPING" => {
                 // GROUPING(col1, col2, ...) — resolve each arg to a column index
                 let col_exprs: Vec<&Expr> = match &func.args {
-                    ast::FunctionArguments::List(args) => {
-                        args.args.iter().filter_map(|a| match a {
+                    ast::FunctionArguments::List(args) => args
+                        .args
+                        .iter()
+                        .filter_map(|a| match a {
                             ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(e)) => Some(e),
                             _ => None,
-                        }).collect()
+                        })
+                        .collect(),
+                    _ => {
+                        return Err(SqlError::Parse(
+                            "GROUPING requires at least one argument".into(),
+                        ))
                     }
-                    _ => return Err(SqlError::Parse("GROUPING requires at least one argument".into())),
                 };
                 if col_exprs.is_empty() {
-                    return Err(SqlError::Parse("GROUPING requires at least one argument".into()));
+                    return Err(SqlError::Parse(
+                        "GROUPING requires at least one argument".into(),
+                    ));
                 }
                 let mut col_indices = Vec::new();
                 for e in col_exprs {
                     match e {
                         Expr::Identifier(ident) => {
-                            let col_idx = schema.find_column(&ident.value)
+                            let col_idx = schema
+                                .find_column(&ident.value)
                                 .ok_or_else(|| SqlError::UnknownColumn(ident.value.clone()))?;
                             col_indices.push(col_idx);
                         }
                         Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
                             let col_name = &parts[1].value;
-                            let col_idx = schema.find_column(col_name)
+                            let col_idx = schema
+                                .find_column(col_name)
                                 .ok_or_else(|| SqlError::UnknownColumn(col_name.clone()))?;
                             col_indices.push(col_idx);
                         }
-                        _ => return Err(SqlError::Parse("GROUPING arguments must be column references".into())),
+                        _ => {
+                            return Err(SqlError::Parse(
+                                "GROUPING arguments must be column references".into(),
+                            ))
+                        }
                     }
                 }
                 Ok(BoundExpr::Grouping(col_indices))
             }
-            Expr::Substring { expr: sub_expr, substring_from, substring_for, .. } => {
-                let mut args = vec![self.bind_expr_full(sub_expr, schema, aliases, outer_schema)?];
+            Expr::Substring {
+                expr: sub_expr,
+                substring_from,
+                substring_for,
+                ..
+            } => {
+                let mut args =
+                    vec![self.bind_expr_full(sub_expr, schema, aliases, outer_schema)?];
                 if let Some(from_expr) = substring_from {
                     args.push(self.bind_expr_full(from_expr, schema, aliases, outer_schema)?);
                 }
                 if let Some(for_expr) = substring_for {
                     args.push(self.bind_expr_full(for_expr, schema, aliases, outer_schema)?);
                 }
-                Ok(BoundExpr::Function { func: ScalarFunc::Substring, args })
+                Ok(BoundExpr::Function {
+                    func: ScalarFunc::Substring,
+                    args,
+                })
             }
-            Expr::Floor { expr: floor_expr, .. } => {
+            Expr::Floor {
+                expr: floor_expr, ..
+            } => {
                 let arg = self.bind_expr_full(floor_expr, schema, aliases, outer_schema)?;
-                Ok(BoundExpr::Function { func: ScalarFunc::Floor, args: vec![arg] })
+                Ok(BoundExpr::Function {
+                    func: ScalarFunc::Floor,
+                    args: vec![arg],
+                })
             }
-            Expr::Ceil { expr: ceil_expr, .. } => {
+            Expr::Ceil {
+                expr: ceil_expr, ..
+            } => {
                 let arg = self.bind_expr_full(ceil_expr, schema, aliases, outer_schema)?;
-                Ok(BoundExpr::Function { func: ScalarFunc::Ceil, args: vec![arg] })
+                Ok(BoundExpr::Function {
+                    func: ScalarFunc::Ceil,
+                    args: vec![arg],
+                })
             }
-            Expr::Trim { expr: trim_expr, .. } => {
+            Expr::Trim {
+                expr: trim_expr, ..
+            } => {
                 let arg = self.bind_expr_full(trim_expr, schema, aliases, outer_schema)?;
-                Ok(BoundExpr::Function { func: ScalarFunc::Trim, args: vec![arg] })
+                Ok(BoundExpr::Function {
+                    func: ScalarFunc::Trim,
+                    args: vec![arg],
+                })
             }
-            Expr::Position { expr: pos_expr, r#in: in_expr } => {
+            Expr::Position {
+                expr: pos_expr,
+                r#in: in_expr,
+            } => {
                 let needle = self.bind_expr_full(pos_expr, schema, aliases, outer_schema)?;
                 let haystack = self.bind_expr_full(in_expr, schema, aliases, outer_schema)?;
                 // POSITION(needle IN haystack) -> args = [haystack, needle] for strpos semantics
-                Ok(BoundExpr::Function { func: ScalarFunc::Position, args: vec![haystack, needle] })
+                Ok(BoundExpr::Function {
+                    func: ScalarFunc::Position,
+                    args: vec![haystack, needle],
+                })
             }
             Expr::Function(func) => {
                 let func_name = func.name.to_string().to_uppercase();
@@ -448,41 +543,86 @@ impl Binder {
                 };
                 if let Some(agg) = agg_func {
                     let is_distinct = if let ast::FunctionArguments::List(args) = &func.args {
-                        matches!(args.duplicate_treatment, Some(ast::DuplicateTreatment::Distinct))
-                    } else { false };
+                        matches!(
+                            args.duplicate_treatment,
+                            Some(ast::DuplicateTreatment::Distinct)
+                        )
+                    } else {
+                        false
+                    };
                     let bound_arg = if let ast::FunctionArguments::List(args) = &func.args {
                         if args.args.is_empty() {
                             None
-                        } else if let Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Wildcard)) = args.args.first() {
+                        } else if let Some(ast::FunctionArg::Unnamed(
+                            ast::FunctionArgExpr::Wildcard,
+                        )) = args.args.first()
+                        {
                             None
-                        } else if let Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(inner))) = args.args.first() {
-                            Some(Box::new(self.bind_expr_full(inner, schema, aliases, outer_schema)?))
-                        } else { None }
-                    } else { None };
-                    return Ok(BoundExpr::AggregateExpr { func: agg, arg: bound_arg, distinct: is_distinct });
+                        } else if let Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(
+                            inner,
+                        ))) = args.args.first()
+                        {
+                            Some(Box::new(self.bind_expr_full(
+                                inner,
+                                schema,
+                                aliases,
+                                outer_schema,
+                            )?))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    return Ok(BoundExpr::AggregateExpr {
+                        func: agg,
+                        arg: bound_arg,
+                        distinct: is_distinct,
+                    });
                 }
                 // Special-case functions that need custom arg handling
                 match func_name.as_str() {
                     "NOW" | "CURRENT_TIMESTAMP" => {
-                        return Ok(BoundExpr::Function { func: ScalarFunc::Now, args: vec![] });
+                        return Ok(BoundExpr::Function {
+                            func: ScalarFunc::Now,
+                            args: vec![],
+                        });
                     }
                     "CURRENT_DATE" => {
-                        return Ok(BoundExpr::Function { func: ScalarFunc::CurrentDate, args: vec![] });
+                        return Ok(BoundExpr::Function {
+                            func: ScalarFunc::CurrentDate,
+                            args: vec![],
+                        });
                     }
                     "CURRENT_TIME" => {
-                        return Ok(BoundExpr::Function { func: ScalarFunc::CurrentTime, args: vec![] });
+                        return Ok(BoundExpr::Function {
+                            func: ScalarFunc::CurrentTime,
+                            args: vec![],
+                        });
                     }
                     "DATE_TRUNC" => {
-                        let bound_args = self.bind_func_args_full(func, schema, aliases, outer_schema)?;
-                        return Ok(BoundExpr::Function { func: ScalarFunc::DateTrunc, args: bound_args });
+                        let bound_args =
+                            self.bind_func_args_full(func, schema, aliases, outer_schema)?;
+                        return Ok(BoundExpr::Function {
+                            func: ScalarFunc::DateTrunc,
+                            args: bound_args,
+                        });
                     }
                     "DATE_PART" => {
-                        let bound_args = self.bind_func_args_full(func, schema, aliases, outer_schema)?;
-                        return Ok(BoundExpr::Function { func: ScalarFunc::Extract, args: bound_args });
+                        let bound_args =
+                            self.bind_func_args_full(func, schema, aliases, outer_schema)?;
+                        return Ok(BoundExpr::Function {
+                            func: ScalarFunc::Extract,
+                            args: bound_args,
+                        });
                     }
                     "EXTRACT" => {
-                        let bound_args = self.bind_func_args_full(func, schema, aliases, outer_schema)?;
-                        return Ok(BoundExpr::Function { func: ScalarFunc::Extract, args: bound_args });
+                        let bound_args =
+                            self.bind_func_args_full(func, schema, aliases, outer_schema)?;
+                        return Ok(BoundExpr::Function {
+                            func: ScalarFunc::Extract,
+                            args: bound_args,
+                        });
                     }
                     _ => {}
                 }
@@ -490,9 +630,16 @@ impl Binder {
                 let scalar_func = crate::resolve_function::resolve_scalar_func(&func_name)
                     .ok_or_else(|| SqlError::Unsupported(format!("Function: {}", func_name)))?;
                 let bound_args = self.bind_func_args_full(func, schema, aliases, outer_schema)?;
-                Ok(BoundExpr::Function { func: scalar_func, args: bound_args })
+                Ok(BoundExpr::Function {
+                    func: scalar_func,
+                    args: bound_args,
+                })
             }
-            Expr::Extract { field, expr: extract_expr, syntax: _ } => {
+            Expr::Extract {
+                field,
+                expr: extract_expr,
+                syntax: _,
+            } => {
                 let ts_expr = self.bind_expr_full(extract_expr, schema, aliases, outer_schema)?;
                 let field_str = format!("{}", field).to_uppercase();
                 Ok(BoundExpr::Function {
@@ -501,37 +648,58 @@ impl Binder {
                 })
             }
             Expr::Array(ast::Array { elem, .. }) => {
-                let bound_elems: Vec<BoundExpr> = elem.iter()
+                let bound_elems: Vec<BoundExpr> = elem
+                    .iter()
                     .map(|e| self.bind_expr_full(e, schema, aliases, outer_schema))
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(BoundExpr::ArrayLiteral(bound_elems))
             }
-            Expr::Overlay { expr: ov_expr, overlay_what, overlay_from, overlay_for } => {
+            Expr::Overlay {
+                expr: ov_expr,
+                overlay_what,
+                overlay_from,
+                overlay_for,
+            } => {
                 let bound_str = self.bind_expr_full(ov_expr, schema, aliases, outer_schema)?;
-                let bound_what = self.bind_expr_full(overlay_what, schema, aliases, outer_schema)?;
-                let bound_from = self.bind_expr_full(overlay_from, schema, aliases, outer_schema)?;
+                let bound_what =
+                    self.bind_expr_full(overlay_what, schema, aliases, outer_schema)?;
+                let bound_from =
+                    self.bind_expr_full(overlay_from, schema, aliases, outer_schema)?;
                 let mut args = vec![bound_str, bound_what, bound_from];
                 if let Some(ov_for) = overlay_for {
                     args.push(self.bind_expr_full(ov_for, schema, aliases, outer_schema)?);
                 }
-                Ok(BoundExpr::Function { func: ScalarFunc::Overlay, args })
+                Ok(BoundExpr::Function {
+                    func: ScalarFunc::Overlay,
+                    args,
+                })
             }
-            Expr::Subscript { expr: sub_expr, subscript } => {
+            Expr::Subscript {
+                expr: sub_expr,
+                subscript,
+            } => {
                 let bound_arr = self.bind_expr_full(sub_expr, schema, aliases, outer_schema)?;
                 match subscript.as_ref() {
                     ast::Subscript::Index { index } => {
-                        let bound_idx = self.bind_expr_full(index, schema, aliases, outer_schema)?;
+                        let bound_idx =
+                            self.bind_expr_full(index, schema, aliases, outer_schema)?;
                         Ok(BoundExpr::ArrayIndex {
                             array: Box::new(bound_arr),
                             index: Box::new(bound_idx),
                         })
                     }
-                    ast::Subscript::Slice { lower_bound, upper_bound, .. } => {
-                        let bound_lower = lower_bound.as_ref()
+                    ast::Subscript::Slice {
+                        lower_bound,
+                        upper_bound,
+                        ..
+                    } => {
+                        let bound_lower = lower_bound
+                            .as_ref()
                             .map(|e| self.bind_expr_full(e, schema, aliases, outer_schema))
                             .transpose()?
                             .map(Box::new);
-                        let bound_upper = upper_bound.as_ref()
+                        let bound_upper = upper_bound
+                            .as_ref()
                             .map(|e| self.bind_expr_full(e, schema, aliases, outer_schema))
                             .transpose()?
                             .map(Box::new);
@@ -602,7 +770,11 @@ impl Binder {
                     target_type: "interval".to_string(),
                 })
             }
-            Expr::AnyOp { left, compare_op, right } => {
+            Expr::AnyOp {
+                left,
+                compare_op,
+                right,
+            } => {
                 let bound_left = self.bind_expr_full(left, schema, aliases, outer_schema)?;
                 let bound_right = self.bind_expr_full(right, schema, aliases, outer_schema)?;
                 let op = self.resolve_bin_op(compare_op)?;
@@ -612,7 +784,11 @@ impl Binder {
                     right: Box::new(bound_right),
                 })
             }
-            Expr::AllOp { left, compare_op, right } => {
+            Expr::AllOp {
+                left,
+                compare_op,
+                right,
+            } => {
                 let bound_left = self.bind_expr_full(left, schema, aliases, outer_schema)?;
                 let bound_right = self.bind_expr_full(right, schema, aliases, outer_schema)?;
                 let op = self.resolve_bin_op(compare_op)?;
@@ -640,25 +816,35 @@ impl Binder {
     /// Extract a string argument from a function call at the given position.
     fn extract_string_arg(&self, func: &ast::Function, pos: usize) -> Result<String, SqlError> {
         if let ast::FunctionArguments::List(args) = &func.args {
-            if let Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(
-                Expr::Value(Value::SingleQuotedString(s))
-            ))) = args.args.get(pos) {
+            if let Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(Expr::Value(
+                Value::SingleQuotedString(s),
+            )))) = args.args.get(pos)
+            {
                 return Ok(s.to_lowercase());
             }
         }
-        Err(SqlError::Parse(format!("Expected string argument at position {}", pos)))
+        Err(SqlError::Parse(format!(
+            "Expected string argument at position {}",
+            pos
+        )))
     }
 
     /// Extract an integer argument from a function call at the given position.
     fn extract_int_arg_from_func(&self, func: &ast::Function, pos: usize) -> Result<i64, SqlError> {
         if let ast::FunctionArguments::List(args) = &func.args {
-            if let Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(
-                Expr::Value(Value::Number(n, _))
-            ))) = args.args.get(pos) {
-                return n.parse::<i64>().map_err(|_| SqlError::Parse("Invalid integer".into()));
+            if let Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(Expr::Value(
+                Value::Number(n, _),
+            )))) = args.args.get(pos)
+            {
+                return n
+                    .parse::<i64>()
+                    .map_err(|_| SqlError::Parse("Invalid integer".into()));
             }
         }
-        Err(SqlError::Parse(format!("Expected integer argument at position {}", pos)))
+        Err(SqlError::Parse(format!(
+            "Expected integer argument at position {}",
+            pos
+        )))
     }
 
     /// If `expr` is a Parameter and `other` has a known type from the schema,
@@ -681,9 +867,7 @@ impl Binder {
     /// Try to infer the DataType of a bound expression from the schema context.
     fn infer_expr_type(expr: &BoundExpr, schema: &TableSchema) -> Option<DataType> {
         match expr {
-            BoundExpr::ColumnRef(idx) => {
-                schema.columns.get(*idx).map(|c| c.data_type.clone())
-            }
+            BoundExpr::ColumnRef(idx) => schema.columns.get(*idx).map(|c| c.data_type.clone()),
             BoundExpr::Literal(datum) => datum_to_datatype(datum),
             BoundExpr::Cast { target_type, .. } => parse_target_type(target_type),
             _ => None,
@@ -699,14 +883,16 @@ impl Binder {
         outer_schema: Option<&TableSchema>,
     ) -> Result<Vec<BoundExpr>, SqlError> {
         match &func.args {
-            ast::FunctionArguments::List(args) => {
-                args.args.iter().map(|a| match a {
+            ast::FunctionArguments::List(args) => args
+                .args
+                .iter()
+                .map(|a| match a {
                     ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(e)) => {
                         self.bind_expr_full(e, schema, aliases, outer_schema)
                     }
                     _ => Err(SqlError::Unsupported("Complex function argument".into())),
-                }).collect()
-            }
+                })
+                .collect(),
             _ => Err(SqlError::Unsupported("Invalid function arguments".into())),
         }
     }
