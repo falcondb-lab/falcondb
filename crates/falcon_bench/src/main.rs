@@ -81,6 +81,47 @@ struct Args {
     #[arg(long, default_value_t = 42)]
     seed: u64,
 
+    /// Run bulk-insert benchmark from a SQL file (requires a running FalconDB server).
+    #[arg(long, default_value_t = false)]
+    bulk: bool,
+
+    /// SQL file to execute in bulk mode.
+    #[arg(long, default_value = "bulk_insert.sql")]
+    bulk_file: String,
+
+    /// Server host for bulk mode.
+    #[arg(long, default_value = "localhost")]
+    bulk_host: String,
+
+    /// Server port for bulk mode.
+    #[arg(long, default_value_t = 5433u16)]
+    bulk_port: u16,
+
+    /// Database user for bulk mode.
+    #[arg(long, default_value = "falcon")]
+    bulk_user: String,
+
+    /// Database password for bulk mode (or set PGPASSWORD env var).
+    #[arg(long, default_value = "")]
+    bulk_password: String,
+
+    /// Database name for bulk mode.
+    #[arg(long, default_value = "falcon")]
+    bulk_dbname: String,
+
+    /// Number of statements per progress report in bulk mode.
+    #[arg(long, default_value_t = 10usize)]
+    bulk_progress_interval: usize,
+
+    /// SSL mode for bulk mode connection: disable | prefer | require.
+    /// PG18 clients default to 'prefer'; set 'disable' for local FalconDB.
+    #[arg(long, default_value = "disable")]
+    bulk_sslmode: String,
+
+    /// Connection timeout in seconds for bulk mode (0 = no timeout).
+    #[arg(long, default_value_t = 30u64)]
+    bulk_connect_timeout: u64,
+
     /// Run long-run stress test mode.
     #[arg(long, default_value_t = false)]
     long_run: bool,
@@ -1663,12 +1704,323 @@ fn run_long_run(args: &Args) {
     }
 }
 
+// ── Bulk Insert Benchmark (via PG wire protocol) ─────────────────────────
+
+/// Split a SQL string into individual statements on `;`, respecting
+/// single-quoted strings, double-quoted identifiers, and `--` / `/* */` comments.
+fn split_sql(input: &str) -> Vec<String> {
+    // Strip UTF-8 BOM if present
+    let input = input.strip_prefix('\u{FEFF}').unwrap_or(input);
+    let mut stmts: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let chars: Vec<char> = input.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    while i < len {
+        let ch = chars[i];
+        // -- line comment
+        if ch == '-' && i + 1 < len && chars[i + 1] == '-' {
+            while i < len && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        // /* block comment */
+        if ch == '/' && i + 1 < len && chars[i + 1] == '*' {
+            i += 2;
+            while i + 1 < len && !(chars[i] == '*' && chars[i + 1] == '/') {
+                i += 1;
+            }
+            i += 2;
+            continue;
+        }
+        // single-quoted string
+        if ch == '\'' {
+            cur.push(ch);
+            i += 1;
+            while i < len {
+                let c = chars[i];
+                cur.push(c);
+                i += 1;
+                if c == '\'' {
+                    if i < len && chars[i] == '\'' {
+                        cur.push(chars[i]);
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        // double-quoted identifier
+        if ch == '"' {
+            cur.push(ch);
+            i += 1;
+            while i < len {
+                let c = chars[i];
+                cur.push(c);
+                i += 1;
+                if c == '"' {
+                    if i < len && chars[i] == '"' {
+                        cur.push(chars[i]);
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        // statement terminator
+        if ch == ';' {
+            let s = cur.trim().to_string();
+            if !s.is_empty() {
+                stmts.push(s);
+            }
+            cur.clear();
+            i += 1;
+            continue;
+        }
+        cur.push(ch);
+        i += 1;
+    }
+    let s = cur.trim().to_string();
+    if !s.is_empty() {
+        stmts.push(s);
+    }
+    stmts
+}
+
+fn run_bulk_bench(args: &Args) {
+    let password = if args.bulk_password.is_empty() {
+        std::env::var("PGPASSWORD").unwrap_or_default()
+    } else {
+        args.bulk_password.clone()
+    };
+
+    let sql = match std::fs::read_to_string(&args.bulk_file) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("ERROR: Cannot read file '{}': {}", args.bulk_file, e);
+            std::process::exit(1);
+        }
+    };
+
+    let stmts = split_sql(&sql);
+    let total_stmts = stmts.len();
+    if total_stmts == 0 {
+        eprintln!("ERROR: No SQL statements found in '{}'", args.bulk_file);
+        std::process::exit(1);
+    }
+
+    let connect_str = {
+        let mut s = format!(
+            "host={} port={} user={} dbname={} sslmode={}",
+            args.bulk_host, args.bulk_port, args.bulk_user, args.bulk_dbname, args.bulk_sslmode
+        );
+        if !password.is_empty() {
+            s.push_str(&format!(" password={}", password));
+        }
+        if args.bulk_connect_timeout > 0 {
+            s.push_str(&format!(" connect_timeout={}", args.bulk_connect_timeout));
+        }
+        s
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    rt.block_on(async {
+        let (client, connection) = match tokio_postgres::connect(&connect_str, tokio_postgres::NoTls).await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("ERROR: Connection failed: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        // Drive the connection in the background
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                eprintln!("Connection error: {}", e);
+            }
+        });
+
+        println!("═══════════════════════════════════════════════════════");
+        println!("  Falcon Bulk Insert Benchmark");
+        println!("═══════════════════════════════════════════════════════");
+        println!("  File:              {}", args.bulk_file);
+        println!("  Server:            {}:{}", args.bulk_host, args.bulk_port);
+        println!("  Total statements:  {}", total_stmts);
+        println!("  Progress interval: every {} statements", args.bulk_progress_interval);
+        println!("───────────────────────────────────────────────────────");
+
+        let mut latencies_us: Vec<u64> = Vec::with_capacity(total_stmts);
+        let mut errors = 0u64;
+        let mut rows_affected: u64 = 0;
+        let mut ddl_count = 0u64;
+        let mut dml_count = 0u64;
+
+        let bench_start = std::time::Instant::now();
+
+        for (idx, stmt) in stmts.iter().enumerate() {
+            let op_start = std::time::Instant::now();
+
+            match client.simple_query(stmt).await {
+                Ok(results) => {
+                    for msg in &results {
+                        if let tokio_postgres::SimpleQueryMessage::CommandComplete(n) = msg {
+                            rows_affected += n;
+                        }
+                    }
+                    let upper = stmt.trim_start().to_uppercase();
+                    if upper.starts_with("INSERT") || upper.starts_with("UPDATE") || upper.starts_with("DELETE") {
+                        dml_count += 1;
+                    } else {
+                        ddl_count += 1;
+                    }
+                }
+                Err(e) => {
+                    errors += 1;
+                    eprintln!("  [stmt {}] ERROR: {}", idx + 1, e);
+                }
+            }
+
+            latencies_us.push(op_start.elapsed().as_micros() as u64);
+
+            // Progress report
+            if args.bulk_progress_interval > 0 && (idx + 1) % args.bulk_progress_interval == 0 {
+                let elapsed_so_far = bench_start.elapsed().as_millis() as u64;
+                let tps_so_far = if elapsed_so_far > 0 {
+                    (idx + 1) as f64 / (elapsed_so_far as f64 / 1000.0)
+                } else {
+                    0.0
+                };
+                println!(
+                    "  [{:>6}/{:>6}] elapsed: {:>6} ms  stmt/s: {:>8.1}  rows: {:>10}  errors: {}",
+                    idx + 1,
+                    total_stmts,
+                    elapsed_so_far,
+                    tps_so_far,
+                    rows_affected,
+                    errors
+                );
+            }
+        }
+
+        let elapsed_ms = bench_start.elapsed().as_millis() as u64;
+        let tps = if elapsed_ms > 0 {
+            total_stmts as f64 / (elapsed_ms as f64 / 1000.0)
+        } else {
+            0.0
+        };
+        let rows_per_sec = if elapsed_ms > 0 {
+            rows_affected as f64 / (elapsed_ms as f64 / 1000.0)
+        } else {
+            0.0
+        };
+
+        // Compute latency percentiles
+        latencies_us.sort_unstable();
+        let len = latencies_us.len();
+        let p50 = if len > 0 { latencies_us[len * 50 / 100] } else { 0 };
+        let p95 = if len > 0 { latencies_us[len * 95 / 100] } else { 0 };
+        let p99 = if len > 0 { latencies_us[(len * 99 / 100).min(len - 1)] } else { 0 };
+        let max = latencies_us.last().copied().unwrap_or(0);
+        let avg = if len > 0 {
+            latencies_us.iter().sum::<u64>() / len as u64
+        } else {
+            0
+        };
+
+        match args.export.as_str() {
+            "json" => {
+                let obj = serde_json::json!({
+                    "workload": "bulk_insert",
+                    "file": args.bulk_file,
+                    "total_statements": total_stmts,
+                    "dml_statements": dml_count,
+                    "ddl_statements": ddl_count,
+                    "rows_affected": rows_affected,
+                    "errors": errors,
+                    "elapsed_ms": elapsed_ms,
+                    "stmt_per_sec": tps,
+                    "rows_per_sec": rows_per_sec,
+                    "latency_us": {
+                        "avg": avg,
+                        "p50": p50,
+                        "p95": p95,
+                        "p99": p99,
+                        "max": max
+                    }
+                });
+                println!("{}", serde_json::to_string_pretty(&obj).unwrap());
+            }
+            "csv" => {
+                println!("workload,file,total_stmts,dml,ddl,rows_affected,errors,elapsed_ms,stmt_per_sec,rows_per_sec,avg_us,p50_us,p95_us,p99_us,max_us");
+                println!(
+                    "bulk_insert,{},{},{},{},{},{},{},{:.1},{:.1},{},{},{},{},{}",
+                    args.bulk_file,
+                    total_stmts,
+                    dml_count,
+                    ddl_count,
+                    rows_affected,
+                    errors,
+                    elapsed_ms,
+                    tps,
+                    rows_per_sec,
+                    avg,
+                    p50,
+                    p95,
+                    p99,
+                    max
+                );
+            }
+            _ => {
+                println!("───────────────────────────────────────────────────────");
+                println!("  RESULTS");
+                println!("───────────────────────────────────────────────────────");
+                println!("  Total statements:  {}", total_stmts);
+                println!("  DML statements:    {}", dml_count);
+                println!("  DDL statements:    {}", ddl_count);
+                println!("  Rows affected:     {}", rows_affected);
+                println!("  Errors:            {}", errors);
+                println!("  Elapsed:           {} ms", elapsed_ms);
+                println!("  Stmt/s:            {:.1}", tps);
+                println!("  Rows/s:            {:.1}", rows_per_sec);
+                println!("  ─── Per-Statement Latency (µs) ───");
+                println!("  Avg:    {:>8}", avg);
+                println!("  P50:    {:>8}", p50);
+                println!("  P95:    {:>8}", p95);
+                println!("  P99:    {:>8}", p99);
+                println!("  Max:    {:>8}", max);
+                println!("═══════════════════════════════════════════════════════");
+                if errors > 0 {
+                    println!("  WARNING: {} statement(s) failed.", errors);
+                } else {
+                    println!("  All statements executed successfully.");
+                }
+                println!("═══════════════════════════════════════════════════════");
+            }
+        }
+
+        if errors > 0 {
+            std::process::exit(2);
+        }
+    });
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────
 
 fn main() {
     let args = Args::parse();
 
-    if args.long_run {
+    if args.bulk {
+        run_bulk_bench(&args);
+    } else if args.long_run {
         run_long_run(&args);
     } else if args.tpcb {
         run_tpcb(&args);

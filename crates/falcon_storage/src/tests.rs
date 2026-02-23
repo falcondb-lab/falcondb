@@ -3553,20 +3553,16 @@ mod gc_tests {
         assert_eq!(result.reclaimed_versions, (num_keys * num_updates) as u64);
         assert!(result.reclaimed_bytes > 0);
 
-        // After GC, each chain should have exactly 1 version
-        let snap2 = GcStats::new();
-        let config2 = GcConfig {
-            min_chain_length: 0,
-            ..Default::default()
-        };
-        sweep_memtable(
-            &engine.get_table(TableId(1)).unwrap(),
-            watermark,
-            &config2,
-            &snap2,
-        );
-        let s = snap2.snapshot();
-        assert_eq!(s.max_chain_length_observed, 1);
+        // After GC, each chain should have exactly 1 version.
+        // gc_candidates is 0 after full reclamation, so verify directly.
+        let table = engine.get_table(TableId(1)).unwrap();
+        let max_chain = table
+            .data
+            .iter()
+            .map(|e| e.value().version_chain_len())
+            .max()
+            .unwrap_or(0);
+        assert_eq!(max_chain, 1);
     }
 
     // ── GcRunner background task ──

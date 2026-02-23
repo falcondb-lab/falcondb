@@ -22,14 +22,22 @@ pub struct FalconConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GcSectionConfig {
     /// Enable background GC (default: true).
+    #[serde(default = "default_true")]
     pub enabled: bool,
     /// Interval between GC sweeps in milliseconds (default: 1000).
+    #[serde(default = "default_gc_interval")]
     pub interval_ms: u64,
     /// Max keys per sweep (0 = unlimited).
+    #[serde(default)]
     pub batch_size: usize,
     /// Minimum version chain length before GC considers a key (default: 2).
+    #[serde(default = "default_min_chain_length")]
     pub min_chain_length: usize,
 }
+
+fn default_true() -> bool { true }
+fn default_gc_interval() -> u64 { 1000 }
+fn default_min_chain_length() -> usize { 2 }
 
 impl Default for GcSectionConfig {
     fn default() -> Self {
@@ -147,6 +155,11 @@ pub struct StorageConfig {
     /// Default: Warn (backward-compatible). Production Primary: HardDeny.
     #[serde(default)]
     pub write_path_enforcement: WritePathEnforcement,
+    /// Whether LSM tables sync every write to disk (true = durable, false = faster).
+    /// Set false for bulk-load workloads; set true for production OLTP durability.
+    /// Default: false (WAL already provides crash-recovery guarantees).
+    #[serde(default)]
+    pub lsm_sync_writes: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -378,29 +391,36 @@ pub struct MemoryConfig {
     /// Per-shard soft memory limit in bytes.
     /// When usage >= soft_limit, new write transactions are delayed or rejected.
     /// 0 = no soft limit (backpressure disabled).
+    #[serde(default)]
     pub shard_soft_limit_bytes: u64,
     /// Per-shard hard memory limit in bytes.
     /// When usage >= hard_limit, ALL new transactions are rejected.
     /// 0 = no hard limit.
+    #[serde(default)]
     pub shard_hard_limit_bytes: u64,
     /// Per-node memory limit in bytes.
     /// sum(shard hard limits) should not exceed this.
     /// 0 = no node limit.
+    #[serde(default)]
     pub node_limit_bytes: u64,
     /// Cluster-level logical memory limit in bytes.
     /// sum(node limits) should not exceed this.
     /// 0 = no cluster limit.
+    #[serde(default)]
     pub cluster_limit_bytes: u64,
     /// Backpressure policy when shard is in PRESSURE state.
     #[serde(default)]
     pub pressure_policy: PressurePolicy,
     /// Maximum write-set size (number of keys) per transaction under PRESSURE.
     /// 0 = no per-txn write limit.
+    #[serde(default)]
     pub max_txn_write_keys: usize,
     /// Maximum memory bytes a single transaction may allocate under PRESSURE.
     /// 0 = no per-txn memory limit.
+    #[serde(default)]
     pub max_txn_write_bytes: u64,
     /// Whether to enable backpressure (default: true).
+    #[serde(default = "default_true")]
     pub enabled: bool,
 }
 
@@ -449,6 +469,7 @@ impl Default for FalconConfig {
                 wal_enabled: true,
                 data_dir: "./falcon_data".to_string(),
                 write_path_enforcement: WritePathEnforcement::Warn,
+                lsm_sync_writes: false,
             },
             wal: WalConfig {
                 group_commit: true,

@@ -57,6 +57,12 @@ pub enum WalRecord {
         table_id: TableId,
         row: OwnedRow,
     },
+    /// Batch insert multiple rows (single WAL record for performance).
+    BatchInsert {
+        txn_id: TxnId,
+        table_id: TableId,
+        rows: Vec<OwnedRow>,
+    },
     /// Update a row (full row replacement).
     Update {
         txn_id: TxnId,

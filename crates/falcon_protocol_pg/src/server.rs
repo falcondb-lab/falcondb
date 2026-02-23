@@ -769,7 +769,8 @@ async fn handle_connection_with_timeout(
                     .to_string();
                 let timezone = session.get_guc("timezone").unwrap_or("UTC").to_string();
                 let startup_params: Vec<(&str, String)> = vec![
-                    ("server_version", "15.0.0".into()),
+                    ("server_version", "18.0.0".into()),
+                    ("server_version_num", "180000".into()),
                     ("server_encoding", "UTF8".into()),
                     ("client_encoding", client_enc),
                     ("DateStyle", datestyle),

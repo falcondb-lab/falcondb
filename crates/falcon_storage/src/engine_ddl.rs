@@ -15,6 +15,7 @@ use crate::wal::WalRecord;
 #[cfg(feature = "columnstore")]
 use crate::columnstore::ColumnStoreTable;
 #[cfg(not(feature = "columnstore"))]
+#[allow(unused_imports)]
 use crate::columnstore_stub::ColumnStoreTable;
 
 #[cfg(feature = "disk_rowstore")]
@@ -97,7 +98,10 @@ impl StorageEngine {
                     let engine = Arc::new(
                         crate::lsm::engine::LsmEngine::open(
                             &lsm_dir,
-                            crate::lsm::engine::LsmConfig::default(),
+                            crate::lsm::engine::LsmConfig {
+                                sync_writes: self.lsm_sync_writes,
+                                ..crate::lsm::engine::LsmConfig::default()
+                            },
                         )
                         .map_err(StorageError::Io)?,
                     );
@@ -125,7 +129,7 @@ impl StorageEngine {
         // WAL + replication observer
         let json = serde_json::to_string(&schema)
             .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.append_and_flush_wal(&WalRecord::CreateTable { schema_json: json })?;
+        self.append_wal(&WalRecord::CreateTable { schema_json: json })?;
 
         catalog.add_table(schema);
         Ok(table_id)
@@ -149,7 +153,7 @@ impl StorageEngine {
         let meta_page_id = PageId((table_id.0 as u64) << 32);
         self.ustm.unregister_page(meta_page_id);
 
-        self.append_and_flush_wal(&WalRecord::DropTable {
+        self.append_wal(&WalRecord::DropTable {
             table_name: name.to_string(),
         })?;
 
@@ -215,7 +219,10 @@ impl StorageEngine {
                     let engine = Arc::new(
                         crate::lsm::engine::LsmEngine::open(
                             &lsm_dir,
-                            crate::lsm::engine::LsmConfig::default(),
+                            crate::lsm::engine::LsmConfig {
+                                sync_writes: self.lsm_sync_writes,
+                                ..crate::lsm::engine::LsmConfig::default()
+                            },
                         )
                         .map_err(StorageError::Io)?,
                     );
@@ -231,7 +238,7 @@ impl StorageEngine {
             }
         }
 
-        self.append_and_flush_wal(&WalRecord::TruncateTable {
+        self.append_wal(&WalRecord::TruncateTable {
             table_name: name.to_string(),
         })?;
         Ok(())
@@ -266,7 +273,7 @@ impl StorageEngine {
         });
         drop(catalog);
 
-        self.append_and_flush_wal(&WalRecord::CreateView {
+        self.append_wal(&WalRecord::CreateView {
             name: name.to_string(),
             query_sql: query_sql.to_string(),
         })?;
@@ -284,7 +291,7 @@ impl StorageEngine {
         catalog.drop_view(name);
         drop(catalog);
 
-        self.append_and_flush_wal(&WalRecord::DropView {
+        self.append_wal(&WalRecord::DropView {
             name: name.to_string(),
         })?;
         Ok(())
@@ -323,7 +330,7 @@ impl StorageEngine {
 
         let col_json =
             serde_json::to_string(&col).map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.append_and_flush_wal(&WalRecord::AlterTable {
+        self.append_wal(&WalRecord::AlterTable {
             table_name: table_name.to_string(),
             operation_json: format!(r#"{{"op":"add_column","column":{}}}"#, col_json),
         })?;
@@ -419,7 +426,7 @@ impl StorageEngine {
         );
         self.online_ddl.start(ddl_id);
 
-        self.append_and_flush_wal(&WalRecord::AlterTable {
+        self.append_wal(&WalRecord::AlterTable {
             table_name: table_name.to_string(),
             operation_json: format!(r#"{{"op":"drop_column","column_name":"{}"}}"#, col_name),
         })?;
@@ -458,7 +465,7 @@ impl StorageEngine {
         );
         self.online_ddl.start(ddl_id);
 
-        self.append_and_flush_wal(&WalRecord::AlterTable {
+        self.append_wal(&WalRecord::AlterTable {
             table_name: table_name.to_string(),
             operation_json: format!(
                 r#"{{"op":"rename_column","old_name":"{}","new_name":"{}"}}"#,
@@ -491,7 +498,7 @@ impl StorageEngine {
         );
         self.online_ddl.start(ddl_id);
 
-        self.append_and_flush_wal(&WalRecord::AlterTable {
+        self.append_wal(&WalRecord::AlterTable {
             table_name: old_name.to_string(),
             operation_json: format!(r#"{{"op":"rename_table","new_name":"{}"}}"#, new_name),
         })?;
@@ -750,7 +757,7 @@ impl StorageEngine {
             },
         );
 
-        self.append_and_flush_wal(&WalRecord::CreateIndex {
+        self.append_wal(&WalRecord::CreateIndex {
             index_name: index_name.to_string(),
             table_name: table_name.to_string(),
             column_idx,
@@ -772,7 +779,7 @@ impl StorageEngine {
             indexes.retain(|idx| idx.column_idx != meta.column_idx);
         }
 
-        self.append_and_flush_wal(&WalRecord::DropIndex {
+        self.append_wal(&WalRecord::DropIndex {
             index_name: index_name.to_string(),
             table_name: meta.table_name.clone(),
             column_idx: meta.column_idx,
@@ -976,7 +983,7 @@ impl StorageEngine {
         self.sequences
             .insert(name.to_string(), AtomicI64::new(start - 1));
 
-        self.append_and_flush_wal(&WalRecord::CreateSequence {
+        self.append_wal(&WalRecord::CreateSequence {
             name: name.to_string(),
             start,
         })?;
@@ -988,7 +995,7 @@ impl StorageEngine {
             .remove(name)
             .ok_or(StorageError::TableNotFound(TableId(0)))?;
 
-        self.append_and_flush_wal(&WalRecord::DropSequence {
+        self.append_wal(&WalRecord::DropSequence {
             name: name.to_string(),
         })?;
         Ok(())

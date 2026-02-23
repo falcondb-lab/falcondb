@@ -4,7 +4,7 @@
 //! Non-production fields (columnstore, disk_rowstore, lsm) are retained for
 //! experimental builds but MUST NOT be used on the default write path.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
@@ -337,6 +337,7 @@ pub struct StorageEngine {
     #[cfg(feature = "lsm")]
     pub(crate) lsm_tables: DashMap<TableId, Arc<LsmTable>>,
     /// Data directory for disk-based tables (None = in-memory only).
+    #[allow(dead_code)]
     pub(crate) data_dir: Option<PathBuf>,
     /// Schema catalog (protected by RwLock for DDL).
     pub(crate) catalog: RwLock<Catalog>,
@@ -344,6 +345,8 @@ pub struct StorageEngine {
     pub(crate) wal: Option<Arc<WalWriter>>,
     /// Per-transaction write-set for key-scoped commit/abort.
     pub(crate) txn_write_sets: DashMap<TxnId, Vec<TxnWriteOp>>,
+    /// Per-transaction write-set dedup index for O(1) duplicate detection.
+    txn_write_dedup: DashMap<TxnId, HashSet<(TableId, PrimaryKey)>>,
     /// Per-transaction read-set for OCC validation at commit time.
     pub(crate) txn_read_sets: DashMap<TxnId, Vec<TxnReadOp>>,
     /// Cumulative GC statistics (lock-free atomics).
@@ -377,6 +380,8 @@ pub struct StorageEngine {
     pub(crate) write_path_disk_violations: AtomicU64,
     /// Enforcement level for write-path purity violations on Primary nodes.
     pub(crate) write_path_enforcement: WritePathEnforcement,
+    /// Whether LSM tables sync every write to disk.
+    pub(crate) lsm_sync_writes: bool,
     // ── Enterprise Features ──
     /// Row-Level Security policy manager.
     pub rls_manager: RwLock<RlsPolicyManager>,
@@ -390,6 +395,9 @@ pub struct StorageEngine {
     pub cdc_manager: RwLock<CdcManager>,
     /// USTM (User-Space Tiered Memory) page cache engine.
     pub ustm: Arc<crate::ustm::UstmEngine>,
+    /// Pre-tracked write-buffer bytes per transaction (set during batch_insert).
+    /// Avoids re-scanning the write-set in estimate_write_set_bytes at commit.
+    pub(crate) txn_write_bytes: DashMap<TxnId, AtomicU64>,
 }
 
 impl StorageEngine {
@@ -425,8 +433,13 @@ impl StorageEngine {
 
     /// Create a new storage engine. If `wal_dir` is Some, WAL is enabled.
     pub fn new(wal_dir: Option<&Path>) -> Result<Self, StorageError> {
+        Self::new_with_sync_mode(wal_dir, SyncMode::FDataSync)
+    }
+
+    /// Create a new storage engine with a specific WAL sync mode.
+    pub fn new_with_sync_mode(wal_dir: Option<&Path>, sync_mode: SyncMode) -> Result<Self, StorageError> {
         let wal = if let Some(dir) = wal_dir {
-            Some(Arc::new(WalWriter::open(dir, SyncMode::FDataSync)?))
+            Some(Arc::new(WalWriter::open(dir, sync_mode)?))
         } else {
             None
         };
@@ -443,6 +456,7 @@ impl StorageEngine {
             catalog: RwLock::new(Catalog::new()),
             wal,
             txn_write_sets: DashMap::new(),
+            txn_write_dedup: DashMap::new(),
             txn_read_sets: DashMap::new(),
             gc_stats: crate::gc::GcStats::new(),
             gc_config: crate::gc::GcConfig::default(),
@@ -459,12 +473,14 @@ impl StorageEngine {
             write_path_columnstore_violations: AtomicU64::new(0),
             write_path_disk_violations: AtomicU64::new(0),
             write_path_enforcement: WritePathEnforcement::Warn,
+            lsm_sync_writes: false,
             rls_manager: RwLock::new(RlsPolicyManager::new()),
             key_manager: RwLock::new(KeyManager::disabled()),
             partition_manager: RwLock::new(PartitionManager::new()),
             wal_archiver: RwLock::new(WalArchiver::disabled()),
             cdc_manager: RwLock::new(CdcManager::disabled()),
             ustm: Self::default_ustm(),
+            txn_write_bytes: DashMap::new(),
         })
     }
 
@@ -494,6 +510,13 @@ impl StorageEngine {
     /// Call this after `set_node_role` to configure production enforcement.
     pub fn set_write_path_enforcement(&mut self, enforcement: WritePathEnforcement) {
         self.write_path_enforcement = enforcement;
+    }
+
+    /// Set whether LSM tables sync every write to disk.
+    /// false = WAL provides crash recovery (faster bulk insert).
+    /// true  = every LSM write is fsynced (extra durability).
+    pub fn set_lsm_sync_writes(&mut self, sync: bool) {
+        self.lsm_sync_writes = sync;
     }
 
     /// Current write-path enforcement level.
@@ -529,6 +552,7 @@ impl StorageEngine {
             catalog: RwLock::new(Catalog::new()),
             wal,
             txn_write_sets: DashMap::new(),
+            txn_write_dedup: DashMap::new(),
             txn_read_sets: DashMap::new(),
             gc_stats: crate::gc::GcStats::new(),
             gc_config: crate::gc::GcConfig::default(),
@@ -545,12 +569,14 @@ impl StorageEngine {
             write_path_columnstore_violations: AtomicU64::new(0),
             write_path_disk_violations: AtomicU64::new(0),
             write_path_enforcement: WritePathEnforcement::Warn,
+            lsm_sync_writes: false,
             rls_manager: RwLock::new(RlsPolicyManager::new()),
             key_manager: RwLock::new(KeyManager::disabled()),
             partition_manager: RwLock::new(PartitionManager::new()),
             wal_archiver: RwLock::new(WalArchiver::disabled()),
             cdc_manager: RwLock::new(CdcManager::disabled()),
             ustm: Self::default_ustm(),
+            txn_write_bytes: DashMap::new(),
         })
     }
 
@@ -568,6 +594,7 @@ impl StorageEngine {
             catalog: RwLock::new(Catalog::new()),
             wal: None,
             txn_write_sets: DashMap::new(),
+            txn_write_dedup: DashMap::new(),
             txn_read_sets: DashMap::new(),
             gc_stats: crate::gc::GcStats::new(),
             gc_config: crate::gc::GcConfig::default(),
@@ -584,12 +611,14 @@ impl StorageEngine {
             write_path_columnstore_violations: AtomicU64::new(0),
             write_path_disk_violations: AtomicU64::new(0),
             write_path_enforcement: WritePathEnforcement::Warn,
+            lsm_sync_writes: false,
             rls_manager: RwLock::new(RlsPolicyManager::new()),
             key_manager: RwLock::new(KeyManager::disabled()),
             partition_manager: RwLock::new(PartitionManager::new()),
             wal_archiver: RwLock::new(WalArchiver::disabled()),
             cdc_manager: RwLock::new(CdcManager::disabled()),
             ustm: Self::default_ustm(),
+            txn_write_bytes: DashMap::new(),
         }
     }
 
@@ -607,6 +636,7 @@ impl StorageEngine {
             catalog: RwLock::new(Catalog::new()),
             wal: None,
             txn_write_sets: DashMap::new(),
+            txn_write_dedup: DashMap::new(),
             txn_read_sets: DashMap::new(),
             gc_stats: crate::gc::GcStats::new(),
             gc_config: crate::gc::GcConfig::default(),
@@ -623,12 +653,14 @@ impl StorageEngine {
             write_path_columnstore_violations: AtomicU64::new(0),
             write_path_disk_violations: AtomicU64::new(0),
             write_path_enforcement: WritePathEnforcement::Warn,
+            lsm_sync_writes: false,
             rls_manager: RwLock::new(RlsPolicyManager::new()),
             key_manager: RwLock::new(KeyManager::disabled()),
             partition_manager: RwLock::new(PartitionManager::new()),
             wal_archiver: RwLock::new(WalArchiver::disabled()),
             cdc_manager: RwLock::new(CdcManager::disabled()),
             ustm: Self::default_ustm(),
+            txn_write_bytes: DashMap::new(),
         }
     }
 
@@ -738,14 +770,26 @@ impl StorageEngine {
     }
 
     pub(crate) fn record_write(&self, txn_id: TxnId, table_id: TableId, pk: PrimaryKey) {
-        let mut entry = self.txn_write_sets.entry(txn_id).or_default();
-        // Deduplicate: skip if this (table_id, pk) is already recorded
-        if !entry
-            .iter()
-            .any(|op| op.table_id == table_id && op.pk == pk)
-        {
-            entry.push(TxnWriteOp { table_id, pk });
+        let mut dedup = self.txn_write_dedup.entry(txn_id).or_default();
+        if dedup.insert((table_id, pk.clone())) {
+            self.txn_write_sets
+                .entry(txn_id)
+                .or_default()
+                .push(TxnWriteOp { table_id, pk });
         }
+    }
+
+    /// Record a write without dedup checking. Use ONLY when the caller
+    /// guarantees uniqueness (e.g. INSERT with PK enforced by memtable).
+    pub(crate) fn record_write_no_dedup(&self, txn_id: TxnId, table_id: TableId, pk: PrimaryKey) {
+        self.txn_write_dedup
+            .entry(txn_id)
+            .or_default()
+            .insert((table_id, pk.clone()));
+        self.txn_write_sets
+            .entry(txn_id)
+            .or_default()
+            .push(TxnWriteOp { table_id, pk });
     }
 
     pub(crate) fn record_read(&self, txn_id: TxnId, table_id: TableId, pk: PrimaryKey) {
@@ -763,6 +807,7 @@ impl StorageEngine {
     }
 
     pub(crate) fn take_write_set(&self, txn_id: TxnId) -> Vec<TxnWriteOp> {
+        self.txn_write_dedup.remove(&txn_id);
         self.txn_write_sets
             .remove(&txn_id)
             .map(|(_, writes)| writes)
@@ -1014,9 +1059,20 @@ impl StorageEngine {
         let write_set = self.take_write_set(txn_id);
         let _read_set = self.take_read_set(txn_id);
 
+        // Fast path: read-only transactions have no writes to commit.
+        // Skip WAL record, memory accounting, and constraint validation.
+        if write_set.is_empty() {
+            self.txn_write_bytes.remove(&txn_id);
+            return Ok(());
+        }
+
         // Memory accounting: on commit, write-buffer bytes become committed MVCC bytes.
-        // We estimate based on write-set size. The actual bytes were tracked at insert/update time.
-        let ws_bytes = self.estimate_write_set_bytes(txn_id, &write_set);
+        // Fast path: use pre-tracked bytes from batch_insert if available.
+        let ws_bytes = if let Some((_, tracked)) = self.txn_write_bytes.remove(&txn_id) {
+            tracked.load(AtomicOrdering::Relaxed)
+        } else {
+            self.estimate_write_set_bytes(txn_id, &write_set)
+        };
         self.memory_tracker.dealloc_write_buffer(ws_bytes);
         self.memory_tracker.alloc_mvcc(ws_bytes);
 
@@ -1029,7 +1085,7 @@ impl StorageEngine {
             return Err(e);
         }
 
-        self.append_and_flush_wal(&WalRecord::CommitTxnLocal { txn_id, commit_ts })?;
+        self.append_wal(&WalRecord::CommitTxnLocal { txn_id, commit_ts })?;
 
         Ok(())
     }
@@ -1042,8 +1098,18 @@ impl StorageEngine {
         let write_set = self.take_write_set(txn_id);
         let _read_set = self.take_read_set(txn_id);
 
+        // Fast path: read-only transactions
+        if write_set.is_empty() {
+            self.txn_write_bytes.remove(&txn_id);
+            return Ok(());
+        }
+
         // Memory accounting: write-buffer → mvcc transition
-        let ws_bytes = self.estimate_write_set_bytes(txn_id, &write_set);
+        let ws_bytes = if let Some((_, tracked)) = self.txn_write_bytes.remove(&txn_id) {
+            tracked.load(AtomicOrdering::Relaxed)
+        } else {
+            self.estimate_write_set_bytes(txn_id, &write_set)
+        };
         self.memory_tracker.dealloc_write_buffer(ws_bytes);
         self.memory_tracker.alloc_mvcc(ws_bytes);
 
@@ -1055,7 +1121,7 @@ impl StorageEngine {
             return Err(e);
         }
 
-        self.append_and_flush_wal(&WalRecord::CommitTxnGlobal { txn_id, commit_ts })?;
+        self.append_wal(&WalRecord::CommitTxnGlobal { txn_id, commit_ts })?;
 
         Ok(())
     }
@@ -1065,7 +1131,11 @@ impl StorageEngine {
         let _read_set = self.take_read_set(txn_id);
 
         // Memory accounting: aborted writes free the write-buffer allocation
-        let ws_bytes = self.estimate_write_set_bytes(txn_id, &write_set);
+        let ws_bytes = if let Some((_, tracked)) = self.txn_write_bytes.remove(&txn_id) {
+            tracked.load(AtomicOrdering::Relaxed)
+        } else {
+            self.estimate_write_set_bytes(txn_id, &write_set)
+        };
         self.memory_tracker.dealloc_write_buffer(ws_bytes);
 
         self.apply_abort_to_write_set(txn_id, &write_set);
@@ -1080,7 +1150,11 @@ impl StorageEngine {
         let _read_set = self.take_read_set(txn_id);
 
         // Memory accounting: aborted writes free the write-buffer allocation
-        let ws_bytes = self.estimate_write_set_bytes(txn_id, &write_set);
+        let ws_bytes = if let Some((_, tracked)) = self.txn_write_bytes.remove(&txn_id) {
+            tracked.load(AtomicOrdering::Relaxed)
+        } else {
+            self.estimate_write_set_bytes(txn_id, &write_set)
+        };
         self.memory_tracker.dealloc_write_buffer(ws_bytes);
 
         self.apply_abort_to_write_set(txn_id, &write_set);
@@ -1431,6 +1505,25 @@ impl StorageEngine {
                                     table_id: *table_id,
                                     pk,
                                 });
+                        }
+                    }
+                }
+                WalRecord::BatchInsert {
+                    txn_id,
+                    table_id,
+                    rows,
+                } => {
+                    if let Some(table) = engine.tables.get(table_id) {
+                        for row in rows {
+                            if let Ok(pk) = table.insert(row.clone(), *txn_id) {
+                                recovered_write_sets
+                                    .entry(*txn_id)
+                                    .or_default()
+                                    .push(TxnWriteOp {
+                                        table_id: *table_id,
+                                        pk,
+                                    });
+                            }
                         }
                     }
                 }

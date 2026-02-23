@@ -11,6 +11,67 @@ use crate::executor::{CteData, ExecutionResult, Executor};
 use crate::expr_engine::ExprEngine;
 
 impl Executor {
+    /// Evaluate a single row's expressions, apply defaults, coerce types, fill serials.
+    fn build_insert_row(
+        &self,
+        schema: &TableSchema,
+        columns: &[usize],
+        row_exprs: &[BoundExpr],
+    ) -> Result<Vec<Datum>, FalconError> {
+        let dummy_row = OwnedRow::new(vec![]);
+        let mut values: Vec<Datum> = schema
+            .columns
+            .iter()
+            .map(|c| c.default_value.clone().unwrap_or(Datum::Null))
+            .collect();
+        for (i, expr) in row_exprs.iter().enumerate() {
+            let col_idx = columns[i];
+            let val = ExprEngine::eval_row(expr, &dummy_row).map_err(FalconError::Execution)?;
+            values[col_idx] = val;
+        }
+
+        // Coerce values to match column data types (e.g. Text -> Date, Text -> Timestamp)
+        for (col_idx, col) in schema.columns.iter().enumerate() {
+            if values[col_idx].is_null() {
+                continue;
+            }
+            if let Some(val_type) = values[col_idx].data_type() {
+                if val_type != col.data_type {
+                    let target = datatype_to_cast_target(&col.data_type);
+                    if let Ok(cast_val) =
+                        crate::eval::cast::eval_cast(values[col_idx].clone(), &target)
+                    {
+                        values[col_idx] = cast_val;
+                    }
+                }
+            }
+        }
+
+        // Auto-fill SERIAL columns that are still NULL (not explicitly provided)
+        for (col_idx, col) in schema.columns.iter().enumerate() {
+            if col.is_serial && values[col_idx].is_null() {
+                let next_val = self.storage.next_serial_value(&schema.name, col_idx)?;
+                values[col_idx] = if col.data_type == DataType::Int64 {
+                    Datum::Int64(next_val)
+                } else {
+                    Datum::Int32(next_val as i32)
+                };
+            }
+        }
+
+        // Enforce NOT NULL constraints
+        for (i, val) in values.iter().enumerate() {
+            if val.is_null() && !schema.columns[i].nullable {
+                return Err(FalconError::Execution(ExecutionError::TypeError(format!(
+                    "NULL value in column '{}' violates NOT NULL constraint",
+                    schema.columns[i].name
+                ))));
+            }
+        }
+
+        Ok(values)
+    }
+
     pub(crate) fn exec_insert(
         &self,
         table_id: falcon_common::types::TableId,
@@ -21,104 +82,93 @@ impl Executor {
         on_conflict: &Option<OnConflictAction>,
         txn: &TxnHandle,
     ) -> Result<ExecutionResult, FalconError> {
-        let mut count = 0u64;
-        let dummy_row = OwnedRow::new(vec![]);
-        let mut returning_rows = Vec::new();
+        // ── Fast path: no RETURNING, no ON CONFLICT ──────────────────────
+        // Evaluate all rows, batch constraint checks, then batch_insert.
+        if returning.is_empty() && on_conflict.is_none() {
+            return self.exec_insert_batch(table_id, schema, columns, rows, txn);
+        }
 
+        // ── Slow path: RETURNING or ON CONFLICT requires per-row handling ─
+        self.exec_insert_slow(table_id, schema, columns, rows, returning, on_conflict, txn)
+    }
+
+    /// Fast batch INSERT path: no RETURNING, no ON CONFLICT.
+    fn exec_insert_batch(
+        &self,
+        table_id: falcon_common::types::TableId,
+        schema: &TableSchema,
+        columns: &[usize],
+        rows: &[Vec<BoundExpr>],
+        txn: &TxnHandle,
+    ) -> Result<ExecutionResult, FalconError> {
+        let t_start = std::time::Instant::now();
+        // Phase 1: Evaluate all rows and check per-row constraints (NOT NULL, CHECK)
+        let has_checks = !schema.check_constraints.is_empty();
+        let mut built_rows: Vec<OwnedRow> = Vec::with_capacity(rows.len());
         for row_exprs in rows {
-            // Build a full row with defaults (or NULLs) for missing columns
-            let mut values: Vec<Datum> = schema
-                .columns
-                .iter()
-                .map(|c| c.default_value.clone().unwrap_or(Datum::Null))
-                .collect();
-            for (i, expr) in row_exprs.iter().enumerate() {
-                let col_idx = columns[i];
-                let val = ExprEngine::eval_row(expr, &dummy_row).map_err(FalconError::Execution)?;
-                values[col_idx] = val;
+            let values = self.build_insert_row(schema, columns, row_exprs)?;
+
+            // Enforce CHECK constraints (only if any exist)
+            if has_checks {
+                let check_row = OwnedRow::new(values.clone());
+                self.eval_check_constraints(schema, &check_row)?;
+                built_rows.push(check_row);
+            } else {
+                built_rows.push(OwnedRow::new(values));
             }
+        }
 
-            // Coerce values to match column data types (e.g. Text -> Date, Text -> Timestamp)
-            for (col_idx, col) in schema.columns.iter().enumerate() {
-                if values[col_idx].is_null() {
-                    continue;
-                }
-                if let Some(val_type) = values[col_idx].data_type() {
-                    if val_type != col.data_type {
-                        let target = datatype_to_cast_target(&col.data_type);
-                        if let Ok(cast_val) =
-                            crate::eval::cast::eval_cast(values[col_idx].clone(), &target)
-                        {
-                            values[col_idx] = cast_val;
-                        }
-                    }
-                }
-            }
+        let t_phase1 = t_start.elapsed();
+        // Phase 2: Batch UNIQUE constraint check — scan existing rows ONCE
+        if !schema.unique_constraints.is_empty() {
+            let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+            let existing_rows = self.storage.scan(table_id, txn.txn_id, read_ts)?;
 
-            // Auto-fill SERIAL columns that are still NULL (not explicitly provided)
-            for (col_idx, col) in schema.columns.iter().enumerate() {
-                if col.is_serial && values[col_idx].is_null() {
-                    let next_val = self.storage.next_serial_value(&schema.name, col_idx)?;
-                    values[col_idx] = if col.data_type == DataType::Int64 {
-                        Datum::Int64(next_val)
-                    } else {
-                        Datum::Int32(next_val as i32)
-                    };
-                }
-            }
-
-            // Enforce NOT NULL constraints
-            for (i, val) in values.iter().enumerate() {
-                if val.is_null() && !schema.columns[i].nullable {
-                    return Err(FalconError::Execution(ExecutionError::TypeError(format!(
-                        "NULL value in column '{}' violates NOT NULL constraint",
-                        schema.columns[i].name
-                    ))));
-                }
-            }
-
-            // Enforce CHECK constraints
-            let check_row = OwnedRow::new(values.clone());
-            self.eval_check_constraints(schema, &check_row)?;
-
-            // Enforce UNIQUE constraints
-            if !schema.unique_constraints.is_empty() {
-                let read_ts = txn.read_ts(self.txn_mgr.current_ts());
-                let existing_rows = self.storage.scan(table_id, txn.txn_id, read_ts)?;
-                for uniq_cols in &schema.unique_constraints {
-                    let new_vals: Vec<&Datum> = uniq_cols.iter().map(|&idx| &values[idx]).collect();
-                    // Skip if any value is NULL (NULLs are always unique per SQL standard)
-                    if new_vals.iter().any(|v| v.is_null()) {
+            for uniq_cols in &schema.unique_constraints {
+                // Build a HashSet of existing values for O(1) lookup
+                let mut existing_set: std::collections::HashSet<Vec<Datum>> =
+                    std::collections::HashSet::with_capacity(existing_rows.len());
+                for (_, existing_row) in &existing_rows {
+                    let key: Vec<Datum> = uniq_cols
+                        .iter()
+                        .map(|&idx| existing_row.values[idx].clone())
+                        .collect();
+                    // Skip rows with NULL in unique columns
+                    if key.iter().any(|v| v.is_null()) {
                         continue;
                     }
-                    for (_, existing_row) in &existing_rows {
-                        let existing_vals: Vec<&Datum> = uniq_cols
+                    existing_set.insert(key);
+                }
+
+                // Check each new row + track new rows for intra-batch dedup
+                for new_row in &built_rows {
+                    let key: Vec<Datum> = uniq_cols
+                        .iter()
+                        .map(|&idx| new_row.values[idx].clone())
+                        .collect();
+                    if key.iter().any(|v| v.is_null()) {
+                        continue;
+                    }
+                    if !existing_set.insert(key) {
+                        let col_names: Vec<&str> = uniq_cols
                             .iter()
-                            .map(|&idx| &existing_row.values[idx])
+                            .map(|&idx| schema.columns[idx].name.as_str())
                             .collect();
-                        if new_vals == existing_vals {
-                            let col_names: Vec<&str> = uniq_cols
-                                .iter()
-                                .map(|&idx| schema.columns[idx].name.as_str())
-                                .collect();
-                            return Err(FalconError::Execution(ExecutionError::TypeError(
-                                format!(
-                                    "UNIQUE constraint violated on column(s): {}",
-                                    col_names.join(", ")
-                                ),
-                            )));
-                        }
+                        return Err(FalconError::Execution(ExecutionError::TypeError(
+                            format!(
+                                "UNIQUE constraint violated on column(s): {}",
+                                col_names.join(", ")
+                            ),
+                        )));
                     }
                 }
             }
+        }
 
-            // Enforce FOREIGN KEY constraints
+        // Phase 3: Batch FK constraint check — scan each referenced table ONCE
+        if !schema.foreign_keys.is_empty() {
+            let read_ts = txn.read_ts(self.txn_mgr.current_ts());
             for fk in &schema.foreign_keys {
-                let fk_vals: Vec<&Datum> = fk.columns.iter().map(|&idx| &values[idx]).collect();
-                // Skip if any FK value is NULL
-                if fk_vals.iter().any(|v| v.is_null()) {
-                    continue;
-                }
                 let ref_schema = self
                     .storage
                     .get_table_schema(&fk.ref_table)
@@ -134,20 +184,187 @@ impl Executor {
                     .iter()
                     .map(|name| ref_schema.find_column(name).unwrap_or(0))
                     .collect();
-                let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+
+                // Scan referenced table ONCE, build HashSet of valid FK values
                 let ref_rows = self.storage.scan(ref_table_id, txn.txn_id, read_ts)?;
-                let found = ref_rows.iter().any(|(_, ref_row)| {
-                    let ref_vals: Vec<&Datum> = ref_col_indices
+                let fk_set: std::collections::HashSet<Vec<Datum>> = ref_rows
+                    .iter()
+                    .map(|(_, ref_row)| {
+                        ref_col_indices
+                            .iter()
+                            .map(|&idx| ref_row.values[idx].clone())
+                            .collect()
+                    })
+                    .collect();
+
+                // Check each new row
+                for new_row in &built_rows {
+                    let fk_vals: Vec<Datum> =
+                        fk.columns.iter().map(|&idx| new_row.values[idx].clone()).collect();
+                    if fk_vals.iter().any(|v| v.is_null()) {
+                        continue;
+                    }
+                    if !fk_set.contains(&fk_vals) {
+                        return Err(FalconError::Execution(ExecutionError::TypeError(
+                            format!(
+                                "FOREIGN KEY constraint violated: no matching row in '{}'",
+                                fk.ref_table
+                            ),
+                        )));
+                    }
+                }
+            }
+        }
+
+        // Phase 4: Batch insert — single WAL write
+        let count = built_rows.len() as u64;
+        let t_before_insert = std::time::Instant::now();
+        self.storage
+            .batch_insert(table_id, built_rows, txn.txn_id)
+            .map_err(FalconError::Storage)?;
+        let t_phase4 = t_before_insert.elapsed();
+        let t_total = t_start.elapsed();
+        if count >= 1000 {
+            tracing::info!(
+                "exec_insert_batch: rows={} phase1={:.1}ms phase4_insert={:.1}ms total={:.1}ms",
+                count,
+                t_phase1.as_secs_f64() * 1000.0,
+                t_phase4.as_secs_f64() * 1000.0,
+                t_total.as_secs_f64() * 1000.0,
+            );
+        }
+
+        Ok(ExecutionResult::Dml {
+            rows_affected: count,
+            tag: "INSERT".into(),
+        })
+    }
+
+    /// Slow per-row INSERT path: supports RETURNING and ON CONFLICT.
+    fn exec_insert_slow(
+        &self,
+        table_id: falcon_common::types::TableId,
+        schema: &TableSchema,
+        columns: &[usize],
+        rows: &[Vec<BoundExpr>],
+        returning: &[(BoundExpr, String)],
+        on_conflict: &Option<OnConflictAction>,
+        txn: &TxnHandle,
+    ) -> Result<ExecutionResult, FalconError> {
+        let mut count = 0u64;
+        let mut returning_rows = Vec::new();
+
+        // Pre-scan for UNIQUE constraints once (not per row)
+        let unique_existing = if !schema.unique_constraints.is_empty() {
+            let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+            Some(self.storage.scan(table_id, txn.txn_id, read_ts)?)
+        } else {
+            None
+        };
+
+        // Pre-build FK lookup sets once
+        let fk_lookup: Vec<(Vec<usize>, std::collections::HashSet<Vec<Datum>>)> =
+            if !schema.foreign_keys.is_empty() {
+                let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+                schema
+                    .foreign_keys
+                    .iter()
+                    .map(|fk| {
+                        let ref_schema = self
+                            .storage
+                            .get_table_schema(&fk.ref_table)
+                            .ok_or_else(|| {
+                                FalconError::Execution(ExecutionError::TypeError(format!(
+                                    "Referenced table '{}' not found",
+                                    fk.ref_table
+                                )))
+                            })?;
+                        let ref_table_id = ref_schema.id;
+                        let ref_col_indices: Vec<usize> = fk
+                            .ref_columns
+                            .iter()
+                            .map(|name| ref_schema.find_column(name).unwrap_or(0))
+                            .collect();
+                        let ref_rows =
+                            self.storage.scan(ref_table_id, txn.txn_id, read_ts)?;
+                        let fk_set: std::collections::HashSet<Vec<Datum>> = ref_rows
+                            .iter()
+                            .map(|(_, ref_row)| {
+                                ref_col_indices
+                                    .iter()
+                                    .map(|&idx| ref_row.values[idx].clone())
+                                    .collect()
+                            })
+                            .collect();
+                        Ok((fk.columns.clone(), fk_set))
+                    })
+                    .collect::<Result<Vec<_>, FalconError>>()?
+            } else {
+                vec![]
+            };
+
+        // Build UNIQUE constraint HashSets from existing rows
+        let mut unique_sets: Vec<std::collections::HashSet<Vec<Datum>>> =
+            if let Some(ref existing) = unique_existing {
+                schema
+                    .unique_constraints
+                    .iter()
+                    .map(|uniq_cols| {
+                        existing
+                            .iter()
+                            .filter_map(|(_, row)| {
+                                let key: Vec<Datum> =
+                                    uniq_cols.iter().map(|&idx| row.values[idx].clone()).collect();
+                                if key.iter().any(|v| v.is_null()) {
+                                    None
+                                } else {
+                                    Some(key)
+                                }
+                            })
+                            .collect()
+                    })
+                    .collect()
+            } else {
+                vec![]
+            };
+
+        for row_exprs in rows {
+            let values = self.build_insert_row(schema, columns, row_exprs)?;
+
+            // Enforce CHECK constraints
+            if !schema.check_constraints.is_empty() {
+                let check_row = OwnedRow::new(values.clone());
+                self.eval_check_constraints(schema, &check_row)?;
+            }
+
+            // Enforce UNIQUE constraints (using pre-built HashSets)
+            for (set_idx, uniq_cols) in schema.unique_constraints.iter().enumerate() {
+                let key: Vec<Datum> = uniq_cols.iter().map(|&idx| values[idx].clone()).collect();
+                if key.iter().any(|v| v.is_null()) {
+                    continue;
+                }
+                if !unique_sets[set_idx].insert(key) {
+                    let col_names: Vec<&str> = uniq_cols
                         .iter()
-                        .map(|&idx| &ref_row.values[idx])
+                        .map(|&idx| schema.columns[idx].name.as_str())
                         .collect();
-                    ref_vals == fk_vals
-                });
-                if !found {
                     return Err(FalconError::Execution(ExecutionError::TypeError(format!(
-                        "FOREIGN KEY constraint violated: no matching row in '{}'",
-                        fk.ref_table
+                        "UNIQUE constraint violated on column(s): {}",
+                        col_names.join(", ")
                     ))));
+                }
+            }
+
+            // Enforce FOREIGN KEY constraints (using pre-built HashSets)
+            for (fk_cols, fk_set) in &fk_lookup {
+                let fk_vals: Vec<Datum> = fk_cols.iter().map(|&idx| values[idx].clone()).collect();
+                if fk_vals.iter().any(|v| v.is_null()) {
+                    continue;
+                }
+                if !fk_set.contains(&fk_vals) {
+                    return Err(FalconError::Execution(ExecutionError::TypeError(
+                        "FOREIGN KEY constraint violated".into(),
+                    )));
                 }
             }
 
@@ -155,7 +372,7 @@ impl Executor {
             match self.storage.insert(table_id, row, txn.txn_id) {
                 Ok(_) => {
                     if !returning.is_empty() {
-                        let ret_row = OwnedRow::new(values.clone());
+                        let ret_row = OwnedRow::new(values);
                         let ret_vals: Vec<Datum> = returning
                             .iter()
                             .map(|(expr, _)| {
@@ -202,7 +419,7 @@ impl Executor {
                                     let new_row = OwnedRow::new(new_values.clone());
                                     self.storage.update(table_id, pk, new_row, txn.txn_id)?;
                                     if !returning.is_empty() {
-                                        let ret_row = OwnedRow::new(new_values.clone());
+                                        let ret_row = OwnedRow::new(new_values);
                                         let ret_vals: Vec<Datum> = returning
                                             .iter()
                                             .map(|(expr, _)| {

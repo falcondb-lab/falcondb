@@ -16,7 +16,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use super::page::{AccessPriority, PageHandle, PageId};
+use super::page::{PageHandle, PageId};
 
 /// Configuration for the LIRS-2 cache.
 #[derive(Debug, Clone)]
@@ -339,7 +339,7 @@ impl Lirs2Cache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ustm::page::{PageData, PageHandle};
+    use crate::ustm::page::{AccessPriority, PageData, PageHandle};
 
     fn make_handle(id: u64) -> Arc<PageHandle> {
         let h = Arc::new(PageHandle::new(PageId(id), AccessPriority::HotRow));

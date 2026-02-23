@@ -8,8 +8,6 @@ use std::collections::{BinaryHeap, HashSet};
 use std::cmp::Ordering as CmpOrdering;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Instant;
-
 use parking_lot::Mutex;
 
 use super::page::PageId;

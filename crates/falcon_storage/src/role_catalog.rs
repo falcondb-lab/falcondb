@@ -245,7 +245,7 @@ impl Default for RoleCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use falcon_common::security::{ObjectRef, ObjectType, Privilege, Role, RoleId};
+    use falcon_common::security::{ObjectRef, ObjectType, Privilege, Role};
     use falcon_common::tenant::TenantId;
 
     fn test_object() -> ObjectRef {

@@ -4,7 +4,7 @@
 //! map, then the disk-rowstore map.  This avoids coupling to the catalog's
 //! `storage_type` at the DML layer — the table simply lives in one map.
 
-use std::sync::atomic::Ordering as AtomicOrdering;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use falcon_common::config::NodeRole;
 use falcon_common::datum::OwnedRow;
@@ -106,6 +106,71 @@ impl StorageEngine {
         }
 
         Err(StorageError::TableNotFound(table_id))
+    }
+
+    /// Batch insert multiple rows with a single WAL record.
+    /// Much faster than calling `insert()` in a loop for multi-row INSERT.
+    /// Only supports the default rowstore path.
+    pub fn batch_insert(
+        &self,
+        table_id: TableId,
+        rows: Vec<OwnedRow>,
+        txn_id: TxnId,
+    ) -> Result<Vec<PrimaryKey>, StorageError> {
+        if rows.is_empty() {
+            return Ok(vec![]);
+        }
+        let t0 = std::time::Instant::now();
+
+        let table = self
+            .tables
+            .get(&table_id)
+            .ok_or(StorageError::TableNotFound(table_id))?;
+
+        // Batch memory tracking
+        let total_bytes: u64 = rows.iter().map(|r| crate::mvcc::estimate_row_bytes(r)).sum();
+        self.memory_tracker.alloc_write_buffer(total_bytes);
+
+        // Pre-track bytes so commit can skip estimate_write_set_bytes re-scan
+        self.txn_write_bytes
+            .entry(txn_id)
+            .or_insert_with(|| AtomicU64::new(0))
+            .fetch_add(total_bytes, AtomicOrdering::Relaxed);
+
+        let t1 = std::time::Instant::now();
+        // Single WAL record for all rows — move rows in, serialize, then take back.
+        // This avoids an expensive O(rows) clone.
+        let row_count = rows.len();
+        let wal_record = WalRecord::BatchInsert { txn_id, table_id, rows };
+        self.append_wal(&wal_record)?;
+        let rows = match wal_record {
+            WalRecord::BatchInsert { rows, .. } => rows,
+            _ => unreachable!(),
+        };
+        let t_wal = t1.elapsed();
+
+        // Insert rows into memtable and collect PKs
+        let t2 = std::time::Instant::now();
+        let mut pks = Vec::with_capacity(row_count);
+        for row in rows {
+            let pk = table.insert(row, txn_id)?;
+            self.record_write_no_dedup(txn_id, table_id, pk.clone());
+            pks.push(pk);
+        }
+        let t_memtable = t2.elapsed();
+
+        if row_count >= 1000 {
+            tracing::info!(
+                "batch_insert: rows={} mem_track={:.1}ms wal={:.1}ms memtable+ws={:.1}ms total={:.1}ms",
+                row_count,
+                t1.duration_since(t0).as_secs_f64() * 1000.0,
+                t_wal.as_secs_f64() * 1000.0,
+                t_memtable.as_secs_f64() * 1000.0,
+                t0.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+
+        Ok(pks)
     }
 
     pub fn update(
@@ -283,6 +348,36 @@ impl StorageEngine {
             return Ok(None);
         }
 
+        Err(StorageError::TableNotFound(table_id))
+    }
+
+    /// Count visible rows without materializing any row data.
+    /// Used for fast COUNT(*) without WHERE clause.
+    pub fn count_visible(
+        &self,
+        table_id: TableId,
+        txn_id: TxnId,
+        read_ts: Timestamp,
+    ) -> Result<usize, StorageError> {
+        if let Some(table) = self.tables.get(&table_id) {
+            return Ok(table.count_visible(txn_id, read_ts));
+        }
+        Err(StorageError::TableNotFound(table_id))
+    }
+
+    /// Scan top-K rows ordered by PK. Only materializes K rows instead of all N.
+    /// Used for ORDER BY <pk_col> [ASC|DESC] LIMIT K.
+    pub fn scan_top_k_by_pk(
+        &self,
+        table_id: TableId,
+        txn_id: TxnId,
+        read_ts: Timestamp,
+        k: usize,
+        ascending: bool,
+    ) -> Result<Vec<(PrimaryKey, OwnedRow)>, StorageError> {
+        if let Some(table) = self.tables.get(&table_id) {
+            return Ok(table.scan_top_k_by_pk(txn_id, read_ts, k, ascending));
+        }
         Err(StorageError::TableNotFound(table_id))
     }
 
@@ -514,6 +609,7 @@ impl StorageEngine {
     /// Record that a write operation touched a disk-rowstore table.
     ///
     /// Same enforcement semantics as `record_write_path_violation_columnstore`.
+    #[allow(dead_code)]
     pub(crate) fn record_write_path_violation_disk(&self) -> Result<(), StorageError> {
         use falcon_common::config::WritePathEnforcement;
         self.write_path_disk_violations

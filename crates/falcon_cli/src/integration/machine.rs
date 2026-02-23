@@ -96,6 +96,7 @@ pub struct Identity {
 }
 
 impl Identity {
+    #[allow(dead_code)]
     pub fn new(operator: impl Into<String>, source: impl Into<String>) -> Self {
         Self {
             operator: operator.into(),

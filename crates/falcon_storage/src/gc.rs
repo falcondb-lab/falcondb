@@ -226,6 +226,15 @@ pub fn sweep_memtable(
         ..Default::default()
     };
 
+    // Fast path: if no writes created multi-version chains since the last
+    // sweep, there is nothing for GC to reclaim. Skip the full DashMap
+    // iteration to avoid O(n) shard-lock contention with INSERT writers.
+    if table.gc_candidates() == 0 {
+        result.sweep_duration_us = start.elapsed().as_micros() as u64;
+        stats.record_sweep(&result);
+        return result;
+    }
+
     let mut processed = 0u64;
 
     for entry in table.data.iter() {
@@ -256,6 +265,13 @@ pub fn sweep_memtable(
         }
 
         processed += 1;
+    }
+
+    // Decrement gc_candidates by the number of versions actually reclaimed.
+    // This allows the counter to reach 0 once all multi-version chains are
+    // cleaned up, re-enabling the fast-skip path.
+    if result.reclaimed_versions > 0 {
+        table.gc_candidates_sub(result.reclaimed_versions);
     }
 
     result.sweep_duration_us = start.elapsed().as_micros() as u64;

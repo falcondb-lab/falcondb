@@ -3,7 +3,7 @@ use crate::format::OutputMode;
 use crate::policy::guardrail::{
     all_pass, evaluate_guardrails, render_guardrail_report, ClusterSnapshot,
 };
-use crate::policy::model::{Condition, Policy, RiskCeiling};
+use crate::policy::model::{Policy, RiskCeiling};
 use anyhow::Result;
 
 /// Result of simulating a policy.

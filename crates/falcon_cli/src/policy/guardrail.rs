@@ -12,6 +12,7 @@ impl GuardrailVerdict {
         matches!(self, Self::Pass)
     }
 
+    #[allow(dead_code)]
     pub fn reason(&self) -> Option<&str> {
         match self {
             Self::Blocked(r) => Some(r.as_str()),

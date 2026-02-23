@@ -180,6 +180,60 @@ impl Executor {
         }
     }
 
+    /// Detect ORDER BY <pk_col> [ASC|DESC] LIMIT K pattern for scan_top_k_by_pk.
+    /// Returns Some((k, ascending)) if all conditions are met.
+    #[allow(clippy::too_many_arguments)]
+    fn try_pk_ordered_limit(
+        &self,
+        schema: &TableSchema,
+        filter: Option<&BoundExpr>,
+        order_by: &[BoundOrderBy],
+        limit: Option<usize>,
+        offset: Option<usize>,
+        group_by: &[usize],
+        distinct: &DistinctMode,
+        has_agg: &bool,
+        has_window: &bool,
+        virtual_rows: &[OwnedRow],
+        table_id: TableId,
+        cte_data: &CteData,
+    ) -> Option<(usize, bool)> {
+        // Must have: LIMIT, single ORDER BY column, no filter/agg/group/offset/distinct/window
+        let k = limit?;
+        if k == 0
+            || offset.is_some()
+            || filter.is_some()
+            || *has_agg
+            || *has_window
+            || !group_by.is_empty()
+            || !matches!(distinct, DistinctMode::None)
+            || !virtual_rows.is_empty()
+            || table_id == TableId(0)
+            || cte_data.contains_key(&table_id)
+            || order_by.len() != 1
+        {
+            return None;
+        }
+        // Must be single-column PK
+        let pk_cols = &schema.primary_key_columns;
+        if pk_cols.len() != 1 {
+            return None;
+        }
+        let pk_col_idx = pk_cols[0];
+        let ob = &order_by[0];
+        // Check if the ORDER BY projection maps to the PK column
+        // (ob.column_idx is index into projection list)
+        // We accept both Column(col_idx, _) and Expr(ColumnRef(col_idx), _)
+        // Since this is checked before raw_rows is computed, we don't have
+        // the projections here. Use a simple heuristic: for SELECT *, the
+        // order_by column_idx directly maps to the table column index.
+        if ob.column_idx == pk_col_idx {
+            Some((k, ob.asc))
+        } else {
+            None
+        }
+    }
+
     /// Execute an index scan: look up rows via secondary index, then apply
     /// residual filter + project + group + sort + limit (same pipeline as seq scan).
     #[allow(clippy::too_many_arguments)]
@@ -326,6 +380,51 @@ impl Executor {
         cte_data: &CteData,
         virtual_rows: &[OwnedRow],
     ) -> Result<ExecutionResult, FalconError> {
+        // Pre-compute aggregate/window flags (needed for scan strategy selection)
+        let has_window = projections
+            .iter()
+            .any(|p| matches!(p, BoundProjection::Window(..)));
+        let has_agg = projections
+            .iter()
+            .any(|p| matches!(p, BoundProjection::Aggregate(..)));
+
+        // ── COUNT(*) fast path: early exit before scanning ──
+        // When ALL projections are COUNT(*) with no filter/GROUP BY/HAVING on a real table,
+        // just count visible rows via MVCC visibility checks — zero row cloning.
+        if has_agg
+            && !has_window
+            && group_by.is_empty()
+            && grouping_sets.is_empty()
+            && filter.is_none()
+            && having.is_none()
+            && virtual_rows.is_empty()
+            && table_id != TableId(0)
+            && cte_data.get(&table_id).is_none()
+        {
+            let is_pure_count_star = projections.iter().all(|p| {
+                matches!(
+                    p,
+                    BoundProjection::Aggregate(AggFunc::Count, None, _, false, None)
+                )
+            });
+            if is_pure_count_star {
+                let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+                if let Ok(count) = self.storage.count_visible(table_id, txn.txn_id, read_ts) {
+                    let columns = self.resolve_output_columns(projections, schema);
+                    let row = OwnedRow::new(
+                        projections
+                            .iter()
+                            .map(|_| Datum::Int64(count as i64))
+                            .collect(),
+                    );
+                    return Ok(ExecutionResult::Query {
+                        columns,
+                        rows: vec![row],
+                    });
+                }
+            }
+        }
+
         // Check if this is a dual (no-FROM) or CTE table, otherwise scan storage
         let (raw_rows, effective_filter): (Vec<(Vec<u8>, OwnedRow)>, Option<BoundExpr>) =
             if !virtual_rows.is_empty() {
@@ -358,6 +457,19 @@ impl Executor {
                     .storage
                     .index_scan(table_id, col_idx, &key, txn.txn_id, read_ts)?;
                 (rows, remaining)
+            } else if let Some((k, ascending)) = self.try_pk_ordered_limit(
+                schema, filter, order_by, limit, offset, group_by, distinct,
+                &has_agg, &has_window, virtual_rows, table_id, cte_data,
+            ) {
+                // ORDER BY <pk> LIMIT K: only materialize K rows
+                let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+                let rows = self.storage.scan_top_k_by_pk(
+                    table_id, txn.txn_id, read_ts, k, ascending,
+                )?;
+                // Rows are already sorted and limited — clear order_by/limit
+                // to skip redundant sort+limit later. We do this via a wrapper
+                // that returns the rows and signals "already sorted".
+                (rows, filter.cloned())
             } else {
                 let read_ts = txn.read_ts(self.txn_mgr.current_ts());
                 (
@@ -376,15 +488,7 @@ impl Executor {
         // If so, we need per-row re-materialization during filtering.
         let filter_has_correlated_sub = mat_filter.as_ref().is_some_and(Self::expr_has_outer_ref);
 
-        // Check if this is a window function query
-        let has_window = projections
-            .iter()
-            .any(|p| matches!(p, BoundProjection::Window(..)));
-
-        // Check if this is an aggregate query
-        let has_agg = projections
-            .iter()
-            .any(|p| matches!(p, BoundProjection::Aggregate(..)));
+        // (has_window and has_agg already computed above)
 
         if (has_agg || !group_by.is_empty() || !grouping_sets.is_empty()) && !has_window {
             // ── Vectorized columnar aggregate path (ColumnStore tables only) ──
@@ -400,6 +504,28 @@ impl Executor {
                 && cte_data.get(&table_id).is_none();
 
             if is_simple_agg {
+                // ── COUNT(*) fast path (rowstore) ──
+                // When ALL projections are COUNT(*) and there's no filter, skip full scan
+                // and just count visible rows via MVCC visibility checks (no row cloning).
+                let is_pure_count_star = mat_filter.is_none()
+                    && projections.iter().all(|p| matches!(
+                        p,
+                        BoundProjection::Aggregate(AggFunc::Count, None, _, false, None)
+                    ));
+                if is_pure_count_star {
+                    let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+                    if let Ok(count) = self.storage.count_visible(table_id, txn.txn_id, read_ts) {
+                        let columns = self.resolve_output_columns(projections, schema);
+                        let row = OwnedRow::new(
+                            projections.iter().map(|_| Datum::Int64(count as i64)).collect(),
+                        );
+                        return Ok(ExecutionResult::Query {
+                            columns,
+                            rows: vec![row],
+                        });
+                    }
+                }
+
                 let read_ts = txn.read_ts(self.txn_mgr.current_ts());
                 if let Some(col_vecs) = self.storage.scan_columnar(table_id, txn.txn_id, read_ts) {
                     return self.exec_columnar_aggregate(

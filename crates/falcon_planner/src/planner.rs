@@ -52,6 +52,7 @@ impl Planner {
                 returning: ins.returning.clone(),
                 on_conflict: ins.on_conflict.clone(),
             }),
+            // Owned fast-path is plan_insert_owned() below.
             BoundStatement::Update(upd) => Ok(PhysicalPlan::Update {
                 table_id: upd.table_id,
                 schema: upd.schema.clone(),
@@ -265,6 +266,20 @@ impl Planner {
                 })
             }
         }
+    }
+
+    /// Plan an INSERT by taking ownership — avoids cloning the rows vector.
+    /// Used by the handler fast-path for DML to eliminate the O(rows) clone.
+    pub fn plan_insert_owned(ins: BoundInsert) -> Result<PhysicalPlan, SqlError> {
+        Ok(PhysicalPlan::Insert {
+            table_id: ins.table_id,
+            schema: ins.schema,
+            columns: ins.columns,
+            rows: ins.rows,
+            source_select: ins.source_select,
+            returning: ins.returning,
+            on_conflict: ins.on_conflict,
+        })
     }
 
     /// Plan with cost-based join reordering and index scan detection.

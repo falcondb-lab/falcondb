@@ -723,10 +723,17 @@ impl QueryHandler {
         let rows = vec![
             vec![
                 Some("server_version".into()),
-                Some("15.0".into()),
+                Some("18.0.0".into()),
                 None,
                 Some("Version".into()),
                 Some("FalconDB PG-compatible version".into()),
+            ],
+            vec![
+                Some("server_version_num".into()),
+                Some("180000".into()),
+                None,
+                Some("Version".into()),
+                Some("FalconDB PG-compatible version number".into()),
             ],
             vec![
                 Some("server_encoding".into()),

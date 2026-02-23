@@ -18,6 +18,7 @@
 //! - Non-transactional reads that skip visibility checks → violates isolation
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -164,6 +165,11 @@ pub struct MemTable {
     pub data: DashMap<PrimaryKey, Arc<VersionChain>>,
     /// Secondary B-tree indexes: column_index → (encoded_value → set of PKs).
     pub secondary_indexes: RwLock<Vec<SecondaryIndex>>,
+    /// Hint counter: approximate number of writes that created multi-version
+    /// chains (insert-to-existing, update, delete). GC can skip the full
+    /// DashMap iteration when this is 0 — eliminating O(n) shard-lock
+    /// contention on INSERT-only workloads.
+    gc_candidates: AtomicU64,
 }
 
 /// A secondary index on one or more columns using a BTreeMap.
@@ -351,6 +357,7 @@ impl MemTable {
             schema,
             data: DashMap::new(),
             secondary_indexes: RwLock::new(Vec::new()),
+            gc_candidates: AtomicU64::new(0),
         }
     }
 
@@ -380,6 +387,7 @@ impl MemTable {
                 return Err(falcon_common::error::StorageError::DuplicateKey);
             }
             chain.prepend(txn_id, Some(row));
+            self.gc_candidates.fetch_add(1, AtomicOrdering::Relaxed);
         } else {
             let chain = Arc::new(VersionChain::new());
             chain.prepend(txn_id, Some(row));
@@ -402,6 +410,7 @@ impl MemTable {
                 return Err(falcon_common::error::StorageError::DuplicateKey);
             }
             chain.prepend(txn_id, Some(new_row));
+            self.gc_candidates.fetch_add(1, AtomicOrdering::Relaxed);
             Ok(())
         } else {
             Err(falcon_common::error::StorageError::KeyNotFound)
@@ -420,6 +429,7 @@ impl MemTable {
                 return Err(falcon_common::error::StorageError::DuplicateKey);
             }
             chain.prepend(txn_id, None); // tombstone
+            self.gc_candidates.fetch_add(1, AtomicOrdering::Relaxed);
             Ok(())
         } else {
             Err(falcon_common::error::StorageError::KeyNotFound)
@@ -435,7 +445,7 @@ impl MemTable {
 
     /// Full table scan visible to a transaction.
     pub fn scan(&self, txn_id: TxnId, read_ts: Timestamp) -> Vec<(PrimaryKey, OwnedRow)> {
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(self.data.len());
         for entry in self.data.iter() {
             if let Some(row) = entry.value().read_for_txn(txn_id, read_ts) {
                 results.push((entry.key().clone(), row));
@@ -515,9 +525,69 @@ impl MemTable {
         }
     }
 
+    /// Count visible rows without cloning row data (O(n) visibility checks, zero alloc).
+    pub fn count_visible(&self, txn_id: TxnId, read_ts: Timestamp) -> usize {
+        let mut count = 0;
+        for entry in self.data.iter() {
+            if entry.value().is_visible(txn_id, read_ts) {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Scan top-K rows ordered by PK. Collects only PKs (cheap), sorts them,
+    /// then point-gets only K rows — avoids materializing all N rows.
+    pub fn scan_top_k_by_pk(
+        &self,
+        txn_id: TxnId,
+        read_ts: Timestamp,
+        k: usize,
+        ascending: bool,
+    ) -> Vec<(PrimaryKey, OwnedRow)> {
+        // Phase 1: collect visible PKs (no row clone)
+        let mut visible_pks: Vec<PrimaryKey> = Vec::with_capacity(self.data.len());
+        for entry in self.data.iter() {
+            if entry.value().is_visible(txn_id, read_ts) {
+                visible_pks.push(entry.key().clone());
+            }
+        }
+        // Phase 2: sort PKs
+        if ascending {
+            visible_pks.sort();
+        } else {
+            visible_pks.sort_by(|a, b| b.cmp(a));
+        }
+        // Phase 3: materialize only top K rows via point lookups
+        visible_pks.truncate(k);
+        let mut results = Vec::with_capacity(k);
+        for pk in visible_pks {
+            if let Some(row) = self.get(&pk, txn_id, read_ts) {
+                results.push((pk, row));
+            }
+        }
+        results
+    }
+
     /// Row count (approximate — counts all chains with at least one committed version).
     pub fn row_count_approx(&self) -> usize {
         self.data.len()
+    }
+
+    /// Approximate number of multi-version chain writes pending GC.
+    /// When 0, GC can safely skip the full DashMap iteration.
+    pub fn gc_candidates(&self) -> u64 {
+        self.gc_candidates.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Decrement the GC candidate counter after reclaiming versions.
+    pub fn gc_candidates_sub(&self, n: u64) {
+        // Saturating subtract to avoid underflow from races
+        let prev = self.gc_candidates.fetch_sub(n, AtomicOrdering::Relaxed);
+        if prev < n {
+            // Raced past zero; reset to 0
+            self.gc_candidates.store(0, AtomicOrdering::Relaxed);
+        }
     }
 
     // ── Secondary index helpers ─────────────────────────────────────

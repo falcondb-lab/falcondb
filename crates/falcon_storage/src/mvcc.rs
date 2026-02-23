@@ -353,6 +353,24 @@ impl VersionChain {
         false
     }
 
+    /// Check if a non-tombstone version is visible to the given txn/read_ts.
+    /// Same logic as read_for_txn but avoids cloning the row data.
+    pub fn is_visible(&self, txn_id: TxnId, read_ts: Timestamp) -> bool {
+        let head = self.head.read();
+        let mut current = head.clone();
+        while let Some(ver) = current {
+            if ver.created_by == txn_id {
+                return ver.data.is_some();
+            }
+            let cts = ver.get_commit_ts();
+            if cts.0 > 0 && cts <= read_ts {
+                return ver.data.is_some();
+            }
+            current = ver.get_prev();
+        }
+        false
+    }
+
     /// Check if this key has any live version (committed or same-txn uncommitted non-tombstone).
     /// Used by INSERT to detect duplicate primary keys.
     pub fn has_live_version(&self, txn_id: TxnId) -> bool {

@@ -10,7 +10,7 @@ use crate::manage::apply::require_apply;
 use crate::manage::plan::{PlanOutput, RiskLevel};
 use crate::policy::model::PolicyStatus;
 use crate::policy::parser::parse_policy_create;
-use crate::policy::simulator::{simulate_local_policy, simulate_policy};
+use crate::policy::simulator::simulate_policy;
 use crate::runner::format_rows_as_string;
 use anyhow::{bail, Result};
 

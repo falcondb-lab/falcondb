@@ -8,7 +8,7 @@ use crate::failover::{run_failover, FailoverCmd};
 use crate::format::OutputMode;
 use crate::history::{load_history, save_history};
 use crate::import::{parse_import, run_import};
-use crate::integration::machine::{wrap_machine_error, wrap_machine_output, CliMode, Identity};
+use crate::integration::machine::{wrap_machine_output, CliMode, Identity};
 use crate::integration::{run_events, run_integration, EventsCmd, IntegrationCmd};
 use crate::manage::audit::{run_audit, AuditCmd};
 use crate::manage::cluster_mgmt::{

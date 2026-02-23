@@ -6,16 +6,28 @@ use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
 
+/// Custom timer that formats timestamps in local time using chrono.
+struct LocalTimer;
+
+impl tracing_subscriber::fmt::time::FormatTime for LocalTimer {
+    fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
+        let now = chrono::Local::now();
+        write!(w, "{}", now.format("%Y-%m-%dT%H:%M:%S%.3f%:z"))
+    }
+}
+
 /// Initialize the global tracing subscriber with structured logging.
 pub fn init_tracing() {
     let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,falcon=debug"));
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let fmt_layer = fmt::layer()
+        .with_timer(LocalTimer)
         .with_target(true)
         .with_thread_ids(true)
         .with_file(true)
-        .with_line_number(true);
+        .with_line_number(true)
+        .with_ansi(false);
 
     tracing_subscriber::registry()
         .with(env_filter)

@@ -13,6 +13,7 @@ impl PolicyStatus {
         }
     }
 
+    #[allow(dead_code)]
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_lowercase().as_str() {
             "enabled" => Some(Self::Enabled),
@@ -177,6 +178,7 @@ impl Default for Guardrail {
 
 /// A complete policy definition.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Policy {
     pub id: String,
     pub description: String,

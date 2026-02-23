@@ -49,7 +49,8 @@ pub struct Portal {
 /// Default session GUC variables.
 fn default_guc_vars() -> HashMap<String, String> {
     let mut m = HashMap::new();
-    m.insert("server_version".into(), "15.0.0".into());
+    m.insert("server_version".into(), "18.0.0".into());
+    m.insert("server_version_num".into(), "180000".into());
     m.insert("server_encoding".into(), "UTF8".into());
     m.insert("client_encoding".into(), "UTF8".into());
     m.insert("standard_conforming_strings".into(), "on".into());

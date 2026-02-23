@@ -50,6 +50,20 @@ pub fn apply_wal_record_to_engine(
                 });
             }
         }
+        WalRecord::BatchInsert {
+            txn_id,
+            table_id,
+            rows,
+        } => {
+            for row in rows {
+                if let Ok(pk) = engine.insert(*table_id, row.clone(), *txn_id) {
+                    write_sets.entry(*txn_id).or_default().push(WriteOp {
+                        table_id: *table_id,
+                        pk,
+                    });
+                }
+            }
+        }
         WalRecord::Update {
             txn_id,
             table_id,

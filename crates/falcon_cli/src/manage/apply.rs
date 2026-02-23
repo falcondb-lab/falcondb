@@ -78,12 +78,11 @@ pub fn require_apply(apply: bool, command: &str) -> Result<()> {
 /// Guard: prompt for confirmation unless --yes was passed.
 /// In non-interactive (piped) mode, always requires --yes.
 #[allow(dead_code)]
-pub fn confirm(yes: bool, prompt: &str) -> Result<bool> {
+pub fn confirm(yes: bool, _prompt: &str) -> Result<bool> {
     if yes {
         return Ok(true);
     }
 
-    // Check if stdin is a TTY
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
@@ -93,20 +92,15 @@ pub fn confirm(yes: bool, prompt: &str) -> Result<bool> {
                 "Non-interactive mode: use --yes to confirm management commands without a prompt."
             );
         }
+        eprint!("{} [y/N] ", _prompt);
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| anyhow::anyhow!("Failed to read confirmation: {}", e))?;
+        return Ok(input.trim().eq_ignore_ascii_case("y"));
     }
     #[cfg(not(unix))]
-    {
-        // On non-Unix (Windows), require --yes in non-interactive contexts
-        // For simplicity, always require --yes in script mode
-        bail!("Use --yes to confirm management commands in non-interactive mode.");
-    }
-
-    eprint!("{} [y/N] ", prompt);
-    let mut input = String::new();
-    std::io::stdin()
-        .read_line(&mut input)
-        .map_err(|e| anyhow::anyhow!("Failed to read confirmation: {}", e))?;
-    Ok(input.trim().eq_ignore_ascii_case("y"))
+    bail!("Use --yes to confirm management commands in non-interactive mode.");
 }
 
 #[cfg(test)]

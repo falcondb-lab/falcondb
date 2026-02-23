@@ -26,7 +26,7 @@ impl QueryHandler {
             return Some(self.single_row_result(
                 vec![("version", 25, -1)],
                 vec![vec![Some(
-                    "PostgreSQL 15.0.0 on FalconDB (in-memory OLTP)".into(),
+                    "PostgreSQL 18.0.0 on FalconDB (in-memory OLTP)".into(),
                 )]],
             ));
         }

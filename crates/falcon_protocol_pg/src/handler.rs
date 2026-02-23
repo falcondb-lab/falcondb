@@ -19,6 +19,7 @@ use falcon_common::types::ShardId;
 use falcon_executor::{ExecutionResult, Executor, PriorityScheduler, PrioritySchedulerConfig};
 use falcon_planner::{IndexedColumns, PhysicalPlan, PlannedTxnType, Planner, TableRowCounts};
 use falcon_sql_frontend::binder::Binder;
+use falcon_sql_frontend::types::{BoundExpr, BoundInsert, BoundStatement};
 use falcon_sql_frontend::parser::parse_sql;
 use falcon_storage::engine::StorageEngine;
 use falcon_txn::{SlowPathMode, TxnClassification, TxnManager};
@@ -252,6 +253,257 @@ impl QueryHandler {
         }
     }
 
+    /// Fast-path parser for simple INSERT INTO table (cols) VALUES (...), ...
+    /// Bypasses sqlparser-rs entirely, producing BoundInsert directly.
+    /// Returns None if the SQL doesn't match the simple pattern (falls back to standard path).
+    fn try_fast_insert_parse(&self, sql: &str) -> Option<BoundInsert> {
+        let trimmed = sql.trim();
+        // Quick prefix check (case-insensitive)
+        if trimmed.len() < 20 || !trimmed[..11].eq_ignore_ascii_case("INSERT INTO") {
+            return None;
+        }
+        let rest = trimmed[11..].trim_start();
+
+        // Extract table name (identifier chars)
+        let tbl_end = rest.find(|c: char| !c.is_alphanumeric() && c != '_' && c != '"')?;
+        if tbl_end == 0 { return None; }
+        let table_name = rest[..tbl_end].trim_matches('"');
+        let rest = rest[tbl_end..].trim_start();
+
+        // Extract column list: (col1, col2, ...)
+        if !rest.starts_with('(') { return None; }
+        let col_end = rest.find(')')?;
+        let col_names: Vec<&str> = rest[1..col_end].split(',').map(|s| s.trim().trim_matches('"')).collect();
+        if col_names.is_empty() { return None; }
+        let rest = rest[col_end + 1..].trim_start();
+
+        // Expect VALUES keyword
+        if rest.len() < 6 || !rest[..6].eq_ignore_ascii_case("VALUES") { return None; }
+        // Reject RETURNING / ON CONFLICT (fall back to standard path)
+        {
+            let upper = rest.to_ascii_uppercase();
+            if upper.contains("RETURNING") || upper.contains("ON CONFLICT") {
+                return None;
+            }
+        }
+        let values_str = rest[6..].trim_start();
+
+        // Look up table in catalog
+        let catalog = self.storage.get_catalog();
+        let schema = catalog.find_table(table_name)?.clone();
+        let col_indices: Vec<usize> = col_names.iter().map(|name| {
+            schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(name))
+        }).collect::<Option<Vec<_>>>()?;
+
+        // Collect column DataTypes for value parsing
+        use falcon_common::types::DataType;
+        let col_types: Vec<&DataType> = col_indices.iter().map(|&i| &schema.columns[i].data_type).collect();
+        let ncols = col_indices.len();
+
+        // Parse VALUES tuples using byte-level scanner
+        let bytes = values_str.as_bytes();
+        let len = bytes.len();
+        let mut pos = 0;
+        let mut rows: Vec<Vec<BoundExpr>> = Vec::new();
+
+        while pos < len {
+            // Skip whitespace and commas between tuples
+            while pos < len && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r' | b',') {
+                pos += 1;
+            }
+            if pos >= len || bytes[pos] == b';' { break; }
+            if bytes[pos] != b'(' { return None; }
+            pos += 1;
+
+            let mut vals = Vec::with_capacity(ncols);
+            for vi in 0..ncols {
+                // Skip whitespace
+                while pos < len && bytes[pos] == b' ' { pos += 1; }
+                if vi > 0 {
+                    if pos < len && bytes[pos] == b',' { pos += 1; }
+                    while pos < len && bytes[pos] == b' ' { pos += 1; }
+                }
+
+                // Parse one value
+                let datum = if bytes[pos] == b'\'' {
+                    // String literal
+                    pos += 1;
+                    let mut s = String::new();
+                    let mut start = pos;
+                    loop {
+                        if pos >= len { return None; }
+                        if bytes[pos] == b'\'' {
+                            s.push_str(std::str::from_utf8(&bytes[start..pos]).ok()?);
+                            pos += 1;
+                            if pos < len && bytes[pos] == b'\'' {
+                                // Escaped quote
+                                s.push('\'');
+                                pos += 1;
+                                start = pos;
+                            } else {
+                                break;
+                            }
+                        } else {
+                            pos += 1;
+                        }
+                    }
+                    Datum::Text(s)
+                } else if bytes[pos] == b'N' || bytes[pos] == b'n' {
+                    // NULL
+                    if pos + 4 <= len && values_str[pos..pos+4].eq_ignore_ascii_case("null") {
+                        pos += 4;
+                        Datum::Null
+                    } else {
+                        return None;
+                    }
+                } else if bytes[pos] == b't' || bytes[pos] == b'T' {
+                    // true
+                    if pos + 4 <= len && values_str[pos..pos+4].eq_ignore_ascii_case("true") {
+                        pos += 4;
+                        Datum::Boolean(true)
+                    } else {
+                        return None;
+                    }
+                } else if bytes[pos] == b'f' || bytes[pos] == b'F' {
+                    // false
+                    if pos + 5 <= len && values_str[pos..pos+5].eq_ignore_ascii_case("false") {
+                        pos += 5;
+                        Datum::Boolean(false)
+                    } else {
+                        return None;
+                    }
+                } else if bytes[pos] == b'-' || bytes[pos].is_ascii_digit() {
+                    // Number
+                    let num_start = pos;
+                    if bytes[pos] == b'-' { pos += 1; }
+                    let mut is_float = false;
+                    while pos < len && bytes[pos].is_ascii_digit() { pos += 1; }
+                    if pos < len && bytes[pos] == b'.' {
+                        is_float = true;
+                        pos += 1;
+                        while pos < len && bytes[pos].is_ascii_digit() { pos += 1; }
+                    }
+                    // Scientific notation
+                    if pos < len && (bytes[pos] == b'e' || bytes[pos] == b'E') {
+                        is_float = true;
+                        pos += 1;
+                        if pos < len && (bytes[pos] == b'+' || bytes[pos] == b'-') { pos += 1; }
+                        while pos < len && bytes[pos].is_ascii_digit() { pos += 1; }
+                    }
+                    let num_str = std::str::from_utf8(&bytes[num_start..pos]).ok()?;
+                    if is_float {
+                        Datum::Float64(num_str.parse().ok()?)
+                    } else {
+                        match col_types[vi] {
+                            DataType::Int32 => Datum::Int32(num_str.parse().ok()?),
+                            DataType::Float64 => Datum::Float64(num_str.parse().ok()?),
+                            _ => Datum::Int64(num_str.parse().ok()?),
+                        }
+                    }
+                } else {
+                    return None;
+                };
+                vals.push(BoundExpr::Literal(datum));
+            }
+
+            // Skip whitespace and expect ')'
+            while pos < len && bytes[pos] == b' ' { pos += 1; }
+            if pos >= len || bytes[pos] != b')' { return None; }
+            pos += 1;
+            rows.push(vals);
+        }
+
+        if rows.is_empty() { return None; }
+
+        Some(BoundInsert {
+            table_id: schema.id,
+            table_name: table_name.to_string(),
+            schema,
+            columns: col_indices,
+            rows,
+            source_select: None,
+            returning: vec![],
+            on_conflict: None,
+        })
+    }
+
+    /// Execute a single DML plan (fast-path for INSERT). Handles autocommit.
+    fn execute_single_plan(
+        &self,
+        sql: &str,
+        plan: PhysicalPlan,
+        session: &mut PgSession,
+    ) -> Result<Vec<BackendMessage>, FalconError> {
+        let mut messages = Vec::new();
+
+        // Begin autocommit txn if needed
+        let auto_txn = if session.txn.is_none() {
+            let routing = plan.routing_hint();
+            let classification = classification_from_routing_hint(&routing);
+            let txn = match self
+                .txn_mgr
+                .try_begin_with_classification(session.default_isolation, classification)
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    let ce: FalconError = e.into();
+                    return Ok(vec![self.error_response(&ce)]);
+                }
+            };
+            session.txn = Some(txn);
+            true
+        } else {
+            false
+        };
+
+        // Execute
+        let result = if let Some(dist) = &self.dist_engine {
+            dist.execute(&plan, session.txn.as_ref())
+        } else {
+            self.executor.execute(&plan, session.txn.as_ref())
+        };
+
+        match result {
+            Ok(ExecutionResult::Dml { rows_affected, tag }) => {
+                let cmd_tag = match tag.as_str() {
+                    "INSERT" => format!("INSERT 0 {}", rows_affected),
+                    "UPDATE" => format!("UPDATE {}", rows_affected),
+                    "DELETE" => format!("DELETE {}", rows_affected),
+                    _ => format!("{} {}", tag, rows_affected),
+                };
+                messages.push(BackendMessage::CommandComplete { tag: cmd_tag });
+            }
+            Ok(other) => {
+                // Unexpected result type for fast-path; shouldn't happen
+                messages.push(BackendMessage::CommandComplete {
+                    tag: format!("{:?}", other),
+                });
+            }
+            Err(e) => {
+                if auto_txn {
+                    if let Some(ref txn) = session.txn {
+                        let _ = self.txn_mgr.abort(txn.txn_id);
+                    }
+                    session.txn = None;
+                    self.flush_txn_stats();
+                }
+                messages.push(self.error_response(&e));
+                return Ok(messages);
+            }
+        }
+
+        // Auto-commit
+        if auto_txn {
+            if let Some(ref txn) = session.txn {
+                let _ = self.txn_mgr.commit(txn.txn_id);
+            }
+            session.txn = None;
+            self.flush_txn_stats();
+        }
+
+        Ok(messages)
+    }
+
     /// Inner query processing logic, called from `handle_query` inside a
     /// crash-domain guard.
     fn handle_query_inner(
@@ -259,7 +511,16 @@ impl QueryHandler {
         sql: &str,
         session: &mut PgSession,
     ) -> Result<Vec<BackendMessage>, FalconError> {
-        // Parse
+        // ── Fast-path: lightweight INSERT parser (bypasses sqlparser-rs) ──
+        if let Some(fast_ins) = self.try_fast_insert_parse(sql) {
+            let plan = match Planner::plan_insert_owned(fast_ins) {
+                Ok(p) => Planner::wrap_distributed(p, &self.cluster_shard_ids),
+                Err(e) => return Ok(vec![self.error_response(&FalconError::Sql(e))]),
+            };
+            return self.execute_single_plan(sql, plan, session);
+        }
+
+        // ── Standard path: sqlparser + binder + planner ──
         let stmts = match parse_sql(sql) {
             Ok(stmts) => stmts,
             Err(e) => {
@@ -285,22 +546,33 @@ impl QueryHandler {
                     }
                 };
 
-                // Plan (with cost-based join reordering and index scan detection)
-                let row_counts = self.build_row_counts();
-                let indexed_cols = self.build_indexed_columns();
-                let p = match Planner::plan_with_indexes(&bound, &row_counts, &indexed_cols) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        messages.push(self.error_response(&FalconError::Sql(e)));
-                        return Ok(messages);
+                // Fast path for INSERT: skip row_counts/indexed_cols (unused)
+                // and use owned planning to avoid cloning the rows vector.
+                let p = if let BoundStatement::Insert(ins) = bound {
+                    match Planner::plan_insert_owned(ins) {
+                        Ok(p) => Planner::wrap_distributed(p, &self.cluster_shard_ids),
+                        Err(e) => {
+                            messages.push(self.error_response(&FalconError::Sql(e)));
+                            return Ok(messages);
+                        }
                     }
+                } else {
+                    let row_counts = self.build_row_counts();
+                    let indexed_cols = self.build_indexed_columns();
+                    let p = match Planner::plan_with_indexes(&bound, &row_counts, &indexed_cols) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            messages.push(self.error_response(&FalconError::Sql(e)));
+                            return Ok(messages);
+                        }
+                    };
+                    let p = Planner::wrap_distributed(p, &self.cluster_shard_ids);
+                    // Cache the plan (skip DML — each UPDATE/DELETE has unique literals)
+                    if !matches!(p, PhysicalPlan::Update { .. } | PhysicalPlan::Delete { .. }) {
+                        self.plan_cache.put(sql, p.clone());
+                    }
+                    p
                 };
-
-                // Wrap in DistPlan if multi-shard cluster
-                let p = Planner::wrap_distributed(p, &self.cluster_shard_ids);
-
-                // Cache the plan
-                self.plan_cache.put(sql, p.clone());
                 p
             };
 

@@ -14,6 +14,7 @@ use falcon_protocol_pg::server::PgServer;
 use falcon_storage::engine::StorageEngine;
 use falcon_storage::gc::{GcConfig, GcRunner};
 use falcon_storage::memory::MemoryBudget;
+use falcon_storage::wal::SyncMode;
 use falcon_txn::TxnManager;
 
 #[derive(Parser, Debug)]
@@ -124,13 +125,20 @@ async fn main() -> Result<()> {
     };
 
     // Initialize storage engine (shard 0 is also the "local" engine for single-shard mode)
+    let wal_sync_mode = match config.wal.sync_mode.as_str() {
+        "none" => SyncMode::None,
+        "fsync" => SyncMode::FSync,
+        _ => SyncMode::FDataSync,
+    };
+    tracing::info!("WAL sync mode: {:?}", wal_sync_mode);
+
     let storage = if config.storage.wal_enabled {
         let data_dir = Path::new(&config.storage.data_dir);
         let mut engine = if data_dir.join("falcon.wal").exists() {
             tracing::info!("Recovering from WAL at {:?}", data_dir);
             StorageEngine::recover(data_dir)?
         } else {
-            StorageEngine::new(Some(data_dir))?
+            StorageEngine::new_with_sync_mode(Some(data_dir), wal_sync_mode)?
         };
 
         // Apply memory budget from config
@@ -151,6 +159,10 @@ async fn main() -> Result<()> {
         if config.ustm.enabled {
             engine.set_ustm_config(&config.ustm);
         }
+
+        // Apply LSM sync_writes from storage config
+        engine.set_lsm_sync_writes(config.storage.lsm_sync_writes);
+        tracing::info!("LSM sync_writes: {}", config.storage.lsm_sync_writes);
 
         // Hook WAL observer for primary replication
         if let Some(ref log) = replication_log {
@@ -184,6 +196,10 @@ async fn main() -> Result<()> {
         if config.ustm.enabled {
             engine.set_ustm_config(&config.ustm);
         }
+
+        // Apply LSM sync_writes from storage config
+        engine.set_lsm_sync_writes(config.storage.lsm_sync_writes);
+        tracing::info!("LSM sync_writes: {}", config.storage.lsm_sync_writes);
 
         // Even in-memory mode can replicate if role is Primary
         if let Some(ref log) = replication_log {

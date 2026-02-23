@@ -258,7 +258,7 @@ impl std::fmt::Display for CommitPhase {
 #[derive(Debug, Clone)]
 struct CommitPhaseEntry {
     phase: CommitPhase,
-    entered_at: Instant,
+    _entered_at: Instant,
     commit_ts: Option<u64>,
 }
 
@@ -298,7 +298,7 @@ impl CommitPhaseTracker {
             txn_id,
             CommitPhaseEntry {
                 phase: CommitPhase::None,
-                entered_at: Instant::now(),
+                _entered_at: Instant::now(),
                 commit_ts: None,
             },
         );

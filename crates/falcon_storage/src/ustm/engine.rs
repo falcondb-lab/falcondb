@@ -9,10 +9,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use parking_lot::Mutex;
-
-use super::io_scheduler::{IoError, IoRequest, IoPriority, IoResponse, IoScheduler, IoSchedulerConfig, IoSchedulerStats};
-use super::page::{AccessPriority, PageData, PageHandle, PageId, PinGuard, Tier};
+use super::io_scheduler::{IoError, IoRequest, IoPriority, IoScheduler, IoSchedulerConfig, IoSchedulerStats};
+use super::page::{AccessPriority, PageData, PageHandle, PageId, PinGuard};
 use super::prefetcher::{Prefetcher, PrefetcherConfig, PrefetcherStats, PrefetchSource};
 use super::zones::{ZoneConfig, ZoneError, ZoneManager, ZoneStats};
 
@@ -360,6 +358,7 @@ impl UstmEngine {
 mod tests {
     use super::*;
     use crate::ustm::lirs2::Lirs2Config;
+    use crate::ustm::Tier;
     use std::io::Write;
 
     fn test_config() -> UstmConfig {

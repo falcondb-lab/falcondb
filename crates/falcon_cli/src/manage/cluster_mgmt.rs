@@ -2,7 +2,7 @@ use crate::client::DbClient;
 use crate::format::OutputMode;
 use crate::manage::apply::{require_apply, ApplyResult};
 use crate::manage::plan::{PlanOutput, RiskLevel};
-use anyhow::{bail, Result};
+use anyhow::Result;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClusterMode {
