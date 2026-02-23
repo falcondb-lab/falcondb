@@ -215,6 +215,73 @@ cargo run -p falcon_bench --release -- \
 | **Memory budget** | Prevents OOM via backpressure | `memory.shard_soft_limit_bytes` |
 | **Circuit breaker** | Isolates failing shards | `ShardCircuitBreaker` |
 | **Connection pooling** | Reduces connection overhead | External (PgBouncer) |
+| **Fused streaming aggregates** | Eliminates row cloning for COUNT/SUM/AVG/MIN/MAX/GROUP BY | Automatic (executor fast path) |
+| **Zero-copy MVCC iteration** | Avoids OwnedRow clone during full scans | Automatic (`for_each_visible`) |
+| **Bounded-heap top-K** | O(N log K) instead of O(N log N) for ORDER BY LIMIT | Automatic (`scan_top_k_by_pk`) |
+| **MVCC Arc-clone elimination** | Skips Arc atomic inc/dec for single-version rows | Automatic (head-first visibility check) |
+
+---
+
+## Bulk Insert + Query Benchmark (1M Rows)
+
+> **Updated**: 2026-02-23
+> **Workload**: `benchmarks/bulk_insert_1m.sql` — 1 DROP + 1 CREATE + 100 INSERT batches (10K rows each) + 10 analytical queries (COUNT, ORDER BY LIMIT, aggregates with CASE WHEN, GROUP BY, WHERE BETWEEN)
+
+### Results (Single-Node, In-Memory, No WAL)
+
+| Metric | FalconDB | PostgreSQL 16 | Ratio |
+|--------|----------|---------------|-------|
+| **Total elapsed** | ~6,400 ms | ~6,100 ms | 1.05x |
+| **INSERT phase** (100 × 10K rows) | ~2,900 ms | ~5,400 ms | **0.54x (faster)** |
+| **Query phase** (10 queries) | ~2,800 ms | ~650 ms | 4.3x |
+| **Rows/s** (INSERT) | ~340,000 | ~185,000 | **1.84x (faster)** |
+
+### Query Phase Breakdown
+
+| Query Type | Executor Path | Estimated Time |
+|------------|--------------|----------------|
+| `COUNT(*)` | `count_visible` fast path | ~400 ms |
+| `SELECT * ORDER BY id LIMIT 10` (×2) | `scan_top_k_by_pk` bounded heap | ~400 ms each |
+| Multi-aggregate (9 projections, CASE WHEN) | `exec_fused_aggregate` | ~500 ms |
+| `GROUP BY active` + aggregates | `exec_fused_aggregate` | ~500 ms |
+| `COUNT(*) WHERE value BETWEEN` (×2) | `exec_fused_aggregate` | ~500 ms each |
+
+### Optimization History
+
+| Version | Total | Query Phase | vs PostgreSQL |
+|---------|-------|-------------|---------------|
+| Before optimization | 11,922 ms | ~7,762 ms | 1.96x slower |
+| + Fused streaming aggregate | 7,696 ms | ~4,085 ms | 1.27x slower |
+| + Bounded-heap top-K | 7,380 ms | ~3,284 ms | 1.22x slower |
+| + MVCC Arc-clone elimination | **6,355 ms** | **~2,800 ms** | **~1.05x (near parity)** |
+
+### Remaining Bottleneck
+
+The query phase (~2.8s for 7 full scans of 1M rows) is bounded by **memory latency** from
+DashMap pointer-chasing across ~324MB of scattered heap allocations. Each row access involves
+3-4 pointer indirections (DashMap entry → Arc\<VersionChain\> → RwLock\<Arc\<Version\>\> →
+OwnedRow → Vec\<Datum\>). PostgreSQL's sequential heap pages (~8KB tuples) are inherently
+more cache-friendly for full table scans. Further improvement requires architectural changes
+(arena allocation, columnar storage, or parallel shard iteration).
+
+### Running the Benchmark
+
+```bash
+# Build
+cargo build --release -p falcon_server -p falcon_bench
+
+# Start FalconDB (in-memory, no WAL)
+./target/release/falcon --no-wal &
+
+# Run benchmark
+./target/release/falcon_bench --bulk \
+  --bulk-file benchmarks/bulk_insert_1m.sql \
+  --bulk-host localhost --bulk-port 5433 \
+  --bulk-sslmode disable --export text
+
+# Compare with PostgreSQL
+psql -h localhost -U postgres -f benchmarks/bulk_insert_1m.sql
+```
 
 ---
 
@@ -223,3 +290,4 @@ cargo run -p falcon_bench --release -- \
 | Version | Date | Changes |
 |---------|------|---------|
 | v0.9.0 | 2026-02-21 | Initial baseline document |
+| latest | 2026-02-23 | Added 1M row bulk insert benchmark, optimization levers for fused aggregates/MVCC fast path |

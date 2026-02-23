@@ -26,5 +26,9 @@ tracing.workspace = true
 toml.workspace = true
 serde.workspace = true
 
+[features]
+default = []
+lsm = ["falcon_storage/lsm"]
+
 [dev-dependencies]
 serde_json.workspace = true

@@ -194,6 +194,7 @@ cargo test --workspace
 | **v1.0.2** | ✅ Done | Failover × txn hardening — FailoverTxnCoordinator, InDoubtTtlEnforcer |
 | **v1.0.3** | ✅ Done | Stability hardening — TxnStateGuard, CommitPhaseTracker, RetryGuard, 45 tests |
 | **USTM Engine** | ✅ Done | 2,643 tests — User-Space Tiered Memory, LIRS-2, query prefetch, full DML+DDL integration |
+| **Query Perf** | ✅ Done | 2,643 tests — Fused streaming aggregates, zero-copy MVCC, bounded-heap top-K, 1M row near-PG parity |
 | **v1.0.0** | 📋 Planned | Production-Grade Database Kernel — all gates pass |
 
 ---

@@ -92,10 +92,11 @@ Future (M2+): disaggregate into dedicated compute / storage / meta roles.
 
 | Item | Detail |
 |------|--------|
-| **Responsibility** | Execute physical plan operators, produce result rows; enforce per-txn READ ONLY and timeout guards; query governor with structured abort reasons |
+| **Responsibility** | Execute physical plan operators, produce result rows; enforce per-txn READ ONLY and timeout guards; query governor with structured abort reasons; fused streaming aggregates for large-table scans |
 | **Input** | `PhysicalPlan` + txn handle |
 | **Output** | `RowStream` (iterator of `Row`) |
-| **Core types** | `Operator` trait, `SeqScan`, `IndexScan`, `Filter`, `Project`, `Sort`, `Agg`, `Insert`, `Update`, `Delete`, `QueryGovernor`, `GovernorAbortReason` |
+| **Core types** | `Operator` trait, `SeqScan`, `IndexScan`, `Filter`, `Project`, `Sort`, `Agg`, `Insert`, `Update`, `Delete`, `QueryGovernor`, `GovernorAbortReason`, `ProjAccum`, `exec_fused_aggregate` |
+| **Fast paths** | `exec_fused_aggregate` — single-pass WHERE+GROUP BY+aggregate over MVCC chains (zero row clone); `try_streaming_aggs` — simple column-ref aggregates via `compute_simple_aggs`; `try_pk_ordered_limit` — bounded-heap top-K via `scan_top_k_by_pk` |
 | **Dependencies** | `storage` (via trait), `txn`, `common` |
 | **Replaceable** | Row-at-a-time ↔ vectorized; push ↔ pull model |
 
@@ -114,10 +115,11 @@ Future (M2+): disaggregate into dedicated compute / storage / meta roles.
 
 | Item | Detail |
 |------|--------|
-| **Responsibility** | Store tuples in memory with MVCC versions; maintain indexes (hash PK + BTree secondary + unique + composite/covering/prefix); WAL write + recovery; MVCC garbage collection; replication stats; LSM disk-backed engine |
+| **Responsibility** | Store tuples in memory with MVCC versions; maintain indexes (hash PK + BTree secondary + unique + composite/covering/prefix); WAL write + recovery; MVCC garbage collection; replication stats; LSM disk-backed engine; zero-copy row iteration; streaming aggregate computation |
 | **Input** | Get/Put/Delete/Scan with txn context |
 | **Output** | Tuples (visible version for given txn) |
 | **Core types** | `StorageEngine`, `MemTable`, `VersionChain`, `SecondaryIndex`, `WalWriter`, `WalRecord`, `GcConfig`, `GcStats`, `GcRunner`, `ReplicationStats`, `LsmEngine` |
+| **MVCC fast paths** | `with_visible_data` — zero-copy closure-based row access; `for_each_visible` — streaming DashMap iteration without Vec allocation; `scan_top_k_by_pk` — bounded `BinaryHeap` for O(N log K) top-K; `compute_simple_aggs` — single-pass COUNT/SUM/MIN/MAX; Arc-clone elimination on head version for all visibility checks |
 | **Dependencies** | `common` |
 | **Replaceable** | Entire engine (RocksDB adapter, FoundationDB adapter); index impl (BTree, SkipList, ART) |
 

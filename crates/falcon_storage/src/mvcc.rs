@@ -70,17 +70,25 @@ pub struct GcChainResult {
 #[derive(Debug)]
 pub struct VersionChain {
     pub head: RwLock<Option<Arc<Version>>>,
+    /// Fast-path cache: commit_ts of the head version when the chain has
+    /// exactly one committed non-tombstone version. 0 = fast path unavailable.
+    /// Allows `is_visible()` to return `true` without acquiring the RwLock
+    /// or chasing the Arc<Version> pointer (eliminates 2 cache misses per row).
+    fast_commit_ts: AtomicU64,
 }
 
 impl VersionChain {
     pub fn new() -> Self {
         Self {
             head: RwLock::new(None),
+            fast_commit_ts: AtomicU64::new(0),
         }
     }
 
     /// Prepend a new version to the chain.
     pub fn prepend(&self, txn_id: TxnId, data: Option<OwnedRow>) {
+        // Invalidate fast path — chain is now multi-version or has uncommitted head
+        self.fast_commit_ts.store(0, Ordering::Release);
         let mut head = self.head.write();
         let prev = head.take();
         let version = Arc::new(Version {
@@ -96,13 +104,21 @@ impl VersionChain {
     /// Returns the latest committed version with commit_ts <= read_ts.
     pub fn read_committed(&self, read_ts: Timestamp) -> Option<OwnedRow> {
         let head = self.head.read();
-        let mut current = head.clone();
-        while let Some(ver) = current {
+        // Fast path: check head version without Arc clone
+        if let Some(ref ver) = *head {
             let cts = ver.get_commit_ts();
             if cts.0 > 0 && cts <= read_ts {
                 return ver.data.clone();
             }
-            current = ver.get_prev();
+            // Slow path: traverse prev chain
+            let mut current = ver.get_prev();
+            while let Some(ver) = current {
+                let cts = ver.get_commit_ts();
+                if cts.0 > 0 && cts <= read_ts {
+                    return ver.data.clone();
+                }
+                current = ver.get_prev();
+            }
         }
         None
     }
@@ -110,18 +126,27 @@ impl VersionChain {
     /// Find the visible version for a specific transaction (sees own writes).
     pub fn read_for_txn(&self, txn_id: TxnId, read_ts: Timestamp) -> Option<OwnedRow> {
         let head = self.head.read();
-        let mut current = head.clone();
-        while let Some(ver) = current {
-            // See own uncommitted writes
+        // Fast path: check head version without Arc clone
+        if let Some(ref ver) = *head {
             if ver.created_by == txn_id {
                 return ver.data.clone();
             }
-            // See committed versions
             let cts = ver.get_commit_ts();
             if cts.0 > 0 && cts <= read_ts {
                 return ver.data.clone();
             }
-            current = ver.get_prev();
+            // Slow path: traverse prev chain (needs Arc clone)
+            let mut current = ver.get_prev();
+            while let Some(ver) = current {
+                if ver.created_by == txn_id {
+                    return ver.data.clone();
+                }
+                let cts = ver.get_commit_ts();
+                if cts.0 > 0 && cts <= read_ts {
+                    return ver.data.clone();
+                }
+                current = ver.get_prev();
+            }
         }
         None
     }
@@ -173,6 +198,11 @@ impl VersionChain {
                 continue;
             }
             current = ver.get_prev();
+        }
+        // Enable fast_commit_ts when this is a single-version non-tombstone chain
+        // (common case: fresh INSERT commit with no prior versions).
+        if new_data.is_some() && old_data.is_none() {
+            self.fast_commit_ts.store(commit_ts.0, Ordering::Release);
         }
         (new_data, old_data)
     }
@@ -341,14 +371,26 @@ impl VersionChain {
     /// Used for OCC read-set validation under Snapshot Isolation.
     pub fn has_committed_write_after(&self, exclude_txn: TxnId, after_ts: Timestamp) -> bool {
         let head = self.head.read();
-        let mut current = head.clone();
-        while let Some(ver) = current {
+        // Fast path: check head version without Arc clone
+        if let Some(ref ver) = *head {
             let cts = ver.get_commit_ts();
             if ver.created_by != exclude_txn && cts.0 > 0 && cts != Timestamp::MAX && cts > after_ts
             {
                 return true;
             }
-            current = ver.get_prev();
+            // Slow path: traverse prev chain
+            let mut current = ver.get_prev();
+            while let Some(ver) = current {
+                let cts = ver.get_commit_ts();
+                if ver.created_by != exclude_txn
+                    && cts.0 > 0
+                    && cts != Timestamp::MAX
+                    && cts > after_ts
+                {
+                    return true;
+                }
+                current = ver.get_prev();
+            }
         }
         false
     }
@@ -356,9 +398,15 @@ impl VersionChain {
     /// Check if a non-tombstone version is visible to the given txn/read_ts.
     /// Same logic as read_for_txn but avoids cloning the row data.
     pub fn is_visible(&self, txn_id: TxnId, read_ts: Timestamp) -> bool {
+        // Ultra-fast path: single committed non-tombstone version.
+        // Avoids RwLock acquire + Arc<Version> pointer chase (2 fewer cache misses).
+        let fcts = self.fast_commit_ts.load(Ordering::Acquire);
+        if fcts > 0 && Timestamp(fcts) <= read_ts {
+            return true;
+        }
         let head = self.head.read();
-        let mut current = head.clone();
-        while let Some(ver) = current {
+        // Fast path: check head version without Arc clone
+        if let Some(ref ver) = *head {
             if ver.created_by == txn_id {
                 return ver.data.is_some();
             }
@@ -366,9 +414,54 @@ impl VersionChain {
             if cts.0 > 0 && cts <= read_ts {
                 return ver.data.is_some();
             }
-            current = ver.get_prev();
+            // Slow path: traverse prev chain
+            let mut current = ver.get_prev();
+            while let Some(ver) = current {
+                if ver.created_by == txn_id {
+                    return ver.data.is_some();
+                }
+                let cts = ver.get_commit_ts();
+                if cts.0 > 0 && cts <= read_ts {
+                    return ver.data.is_some();
+                }
+                current = ver.get_prev();
+            }
         }
         false
+    }
+
+    /// Call closure with reference to visible row data (avoids clone).
+    /// Returns None if no visible version or if it's a tombstone.
+    pub fn with_visible_data<R>(
+        &self,
+        txn_id: TxnId,
+        read_ts: Timestamp,
+        f: impl FnOnce(&OwnedRow) -> R,
+    ) -> Option<R> {
+        let head = self.head.read();
+        // Fast path: check head version without Arc clone
+        if let Some(ref ver) = *head {
+            if ver.created_by == txn_id {
+                return ver.data.as_ref().map(f);
+            }
+            let cts = ver.get_commit_ts();
+            if cts.0 > 0 && cts <= read_ts {
+                return ver.data.as_ref().map(f);
+            }
+            // Slow path: traverse prev chain
+            let mut current = ver.get_prev();
+            while let Some(ver) = current {
+                if ver.created_by == txn_id {
+                    return ver.data.as_ref().map(|row| f(row));
+                }
+                let cts = ver.get_commit_ts();
+                if cts.0 > 0 && cts <= read_ts {
+                    return ver.data.as_ref().map(|row| f(row));
+                }
+                current = ver.get_prev();
+            }
+        }
+        None
     }
 
     /// Check if this key has any live version (committed or same-txn uncommitted non-tombstone).

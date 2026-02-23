@@ -7,11 +7,11 @@
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use falcon_common::config::NodeRole;
-use falcon_common::datum::OwnedRow;
+use falcon_common::datum::{Datum, OwnedRow};
 use falcon_common::error::StorageError;
 use falcon_common::types::{TableId, Timestamp, TxnId, TxnType};
 
-use crate::memtable::PrimaryKey;
+use crate::memtable::{PrimaryKey, SimpleAggOp};
 use crate::ustm::{AccessPriority, PageData, PageId};
 use crate::wal::WalRecord;
 
@@ -120,7 +120,25 @@ impl StorageEngine {
         if rows.is_empty() {
             return Ok(vec![]);
         }
-        let t0 = std::time::Instant::now();
+
+        // LSM rowstore (feature-gated) — fall back to per-row insert
+        #[cfg(feature = "lsm")]
+        if let Some(lsm) = self.lsm_tables.get(&table_id) {
+            let row_count = rows.len();
+            let wal_record = WalRecord::BatchInsert { txn_id, table_id, rows };
+            self.append_wal(&wal_record)?;
+            let rows = match wal_record {
+                WalRecord::BatchInsert { rows, .. } => rows,
+                _ => unreachable!(),
+            };
+            let mut pks = Vec::with_capacity(row_count);
+            for row in rows {
+                let pk = lsm.insert(&row, txn_id)?;
+                self.record_write(txn_id, table_id, pk.clone());
+                pks.push(pk);
+            }
+            return Ok(pks);
+        }
 
         let table = self
             .tables
@@ -137,7 +155,6 @@ impl StorageEngine {
             .or_insert_with(|| AtomicU64::new(0))
             .fetch_add(total_bytes, AtomicOrdering::Relaxed);
 
-        let t1 = std::time::Instant::now();
         // Single WAL record for all rows — move rows in, serialize, then take back.
         // This avoids an expensive O(rows) clone.
         let row_count = rows.len();
@@ -147,27 +164,13 @@ impl StorageEngine {
             WalRecord::BatchInsert { rows, .. } => rows,
             _ => unreachable!(),
         };
-        let t_wal = t1.elapsed();
 
         // Insert rows into memtable and collect PKs
-        let t2 = std::time::Instant::now();
         let mut pks = Vec::with_capacity(row_count);
         for row in rows {
             let pk = table.insert(row, txn_id)?;
             self.record_write_no_dedup(txn_id, table_id, pk.clone());
             pks.push(pk);
-        }
-        let t_memtable = t2.elapsed();
-
-        if row_count >= 1000 {
-            tracing::info!(
-                "batch_insert: rows={} mem_track={:.1}ms wal={:.1}ms memtable+ws={:.1}ms total={:.1}ms",
-                row_count,
-                t1.duration_since(t0).as_secs_f64() * 1000.0,
-                t_wal.as_secs_f64() * 1000.0,
-                t_memtable.as_secs_f64() * 1000.0,
-                t0.elapsed().as_secs_f64() * 1000.0,
-            );
         }
 
         Ok(pks)
@@ -334,7 +337,7 @@ impl StorageEngine {
             // USTM: LSM point-get — check Warm zone first, then fall through to LSM.
             // The Warm zone acts as a read cache for recently accessed LSM rows.
             let page_id = ustm_page_id(table_id, pk);
-            let result = lsm.get(pk, txn_id, read_ts);
+            let result = lsm.get(pk)?;
 
             // Cache the access in Warm zone for LIRS-2 tracking.
             let data = PageData::new(pk.clone());
@@ -377,6 +380,63 @@ impl StorageEngine {
     ) -> Result<Vec<(PrimaryKey, OwnedRow)>, StorageError> {
         if let Some(table) = self.tables.get(&table_id) {
             return Ok(table.scan_top_k_by_pk(txn_id, read_ts, k, ascending));
+        }
+        Err(StorageError::TableNotFound(table_id))
+    }
+
+    /// Compute simple aggregates in a streaming pass without materializing rows.
+    pub fn compute_simple_aggs(
+        &self,
+        table_id: TableId,
+        txn_id: TxnId,
+        read_ts: Timestamp,
+        agg_specs: &[(SimpleAggOp, Option<usize>)],
+    ) -> Result<Vec<Datum>, StorageError> {
+        if let Some(table) = self.tables.get(&table_id) {
+            return Ok(table.compute_simple_aggs(txn_id, read_ts, agg_specs));
+        }
+        Err(StorageError::TableNotFound(table_id))
+    }
+
+    /// Stream through all visible rows without cloning (zero-copy).
+    /// The closure receives a reference to each visible row.
+    pub fn for_each_visible<F>(
+        &self,
+        table_id: TableId,
+        txn_id: TxnId,
+        read_ts: Timestamp,
+        f: F,
+    ) -> Result<(), StorageError>
+    where
+        F: FnMut(&OwnedRow),
+    {
+        if let Some(table) = self.tables.get(&table_id) {
+            table.for_each_visible(txn_id, read_ts, f);
+            return Ok(());
+        }
+        Err(StorageError::TableNotFound(table_id))
+    }
+
+    /// Parallel map-reduce over all visible rows.
+    /// Each thread gets its own accumulator; partial results are merged at the end.
+    /// Automatically falls back to sequential for small tables.
+    pub fn map_reduce_visible<T, Init, Map, Reduce>(
+        &self,
+        table_id: TableId,
+        txn_id: TxnId,
+        read_ts: Timestamp,
+        init: Init,
+        map: Map,
+        reduce: Reduce,
+    ) -> Result<T, StorageError>
+    where
+        T: Send,
+        Init: Fn() -> T + Sync,
+        Map: Fn(&mut T, &OwnedRow) + Sync,
+        Reduce: Fn(T, T) -> T,
+    {
+        if let Some(table) = self.tables.get(&table_id) {
+            return Ok(table.map_reduce_visible(txn_id, read_ts, init, map, reduce));
         }
         Err(StorageError::TableNotFound(table_id))
     }

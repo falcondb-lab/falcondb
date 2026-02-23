@@ -60,6 +60,11 @@ cargo run -p falcon_bench -- --lsm --ops 10000
 | `--failover` | false | Run failover benchmark |
 | `--tpcb` | false | Run TPC-B workload |
 | `--lsm` | false | Run LSM KV benchmark |
+| `--bulk` | false | Run bulk insert + query benchmark from SQL file |
+| `--bulk-file` | — | Path to SQL file (e.g. `benchmarks/bulk_insert_1m.sql`) |
+| `--bulk-host` | localhost | Target host |
+| `--bulk-port` | 5433 | Target port |
+| `--bulk-sslmode` | disable | SSL mode (`disable`, `require`) |
 | `--long-run` | false | Run long-run stress test |
 | `--duration` | 60s | Duration for long-run (e.g. `60s`, `10m`, `1h`, `24h`) |
 | `--sample-interval-secs` | 5 | Metrics sampling interval |

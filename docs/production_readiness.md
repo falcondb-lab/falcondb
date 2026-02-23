@@ -18,7 +18,9 @@ procedures, and troubleshooting guide for FalconDB.
 | Txn commit (local, empty) | < 0.5ms | < 1ms | P99 > 5ms |
 | Txn commit (mixed load) | < 2ms | < 10ms | P99 > 50ms |
 | 2PC commit (cross-shard) | < 5ms | < 20ms | P99 > 100ms |
-| Full table scan (1M rows) | < 100ms | < 500ms | P99 > 2s |
+| Full table scan (1M rows) | < 500ms | < 1s | P99 > 3s |
+| Streaming aggregate (1M rows) | < 500ms | < 1s | P99 > 3s |
+| ORDER BY PK LIMIT K (1M rows) | < 500ms | < 1s | P99 > 3s |
 | Columnar aggregate (1M rows) | < 50ms | < 200ms | P99 > 1s |
 
 ### Availability

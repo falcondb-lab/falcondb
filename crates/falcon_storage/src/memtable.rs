@@ -17,8 +17,9 @@
 //! - Bypassing WAL append on commit → violates crash-safety
 //! - Non-transactional reads that skip visibility checks → violates isolation
 
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::cmp::Reverse;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -33,6 +34,16 @@ use crate::mvcc::VersionChain;
 /// Hex-encode a byte slice for diagnostic/observability output.
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Simple aggregate operation for streaming computation (no GROUP BY).
+#[derive(Debug, Clone, Copy)]
+pub enum SimpleAggOp {
+    CountStar,
+    Count,
+    Sum,
+    Min,
+    Max,
 }
 
 /// Primary key encoded as a byte vector for hashing / comparison.
@@ -170,6 +181,13 @@ pub struct MemTable {
     /// DashMap iteration when this is 0 — eliminating O(n) shard-lock
     /// contention on INSERT-only workloads.
     gc_candidates: AtomicU64,
+    /// Exact count of committed live (non-tombstone) rows.
+    /// Incremented on INSERT commit, decremented on DELETE commit.
+    /// Enables O(1) COUNT(*) without WHERE clause.
+    committed_row_count: AtomicI64,
+    /// Ordered PK index: maintained at commit time.
+    /// Enables O(K) scan_top_k_by_pk instead of O(N) full DashMap scan.
+    pk_order: RwLock<BTreeSet<PrimaryKey>>,
 }
 
 /// A secondary index on one or more columns using a BTreeMap.
@@ -358,6 +376,8 @@ impl MemTable {
             data: DashMap::new(),
             secondary_indexes: RwLock::new(Vec::new()),
             gc_candidates: AtomicU64::new(0),
+            committed_row_count: AtomicI64::new(0),
+            pk_order: RwLock::new(BTreeSet::new()),
         }
     }
 
@@ -443,6 +463,89 @@ impl MemTable {
             .and_then(|chain| chain.read_for_txn(txn_id, read_ts))
     }
 
+    /// Stream through all visible rows without cloning.
+    /// Calls the closure with a reference to each visible row's data.
+    /// This avoids the O(N) allocation cost of scan() for aggregate/filter queries.
+    pub fn for_each_visible<F>(&self, txn_id: TxnId, read_ts: Timestamp, mut f: F)
+    where
+        F: FnMut(&OwnedRow),
+    {
+        for entry in self.data.iter() {
+            entry.value().with_visible_data(txn_id, read_ts, |row| {
+                f(row);
+            });
+        }
+    }
+
+    /// Parallel map-reduce over all visible rows.
+    ///
+    /// Phase 1: collect Arc<VersionChain> refs from DashMap (sequential, ~10ms for 1M).
+    /// Phase 2: split into chunks, each thread creates its own accumulator via `init`,
+    ///          processes rows via `map`, then all partial results are merged via `reduce`.
+    ///
+    /// Falls back to sequential for small tables (< 50K rows).
+    pub fn map_reduce_visible<T, Init, Map, Reduce>(
+        &self,
+        txn_id: TxnId,
+        read_ts: Timestamp,
+        init: Init,
+        map: Map,
+        reduce: Reduce,
+    ) -> T
+    where
+        T: Send,
+        Init: Fn() -> T + Sync,
+        Map: Fn(&mut T, &OwnedRow) + Sync,
+        Reduce: Fn(T, T) -> T,
+    {
+        let len = self.data.len();
+        if len < 50_000 {
+            let mut acc = init();
+            for entry in self.data.iter() {
+                entry.value().with_visible_data(txn_id, read_ts, |row| {
+                    map(&mut acc, row);
+                });
+            }
+            return acc;
+        }
+
+        // Phase 1: collect chain refs (Arc pointer copies, no row data clone)
+        let chains: Vec<Arc<VersionChain>> =
+            self.data.iter().map(|e| e.value().clone()).collect();
+
+        // Phase 2: parallel map-reduce
+        let num_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(8);
+        let chunk_size = (chains.len() + num_threads - 1) / num_threads;
+
+        std::thread::scope(|s| {
+            let handles: Vec<_> = chains
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    let init = &init;
+                    let map = &map;
+                    s.spawn(move || {
+                        let mut acc = init();
+                        for chain in chunk {
+                            chain.with_visible_data(txn_id, read_ts, |row| {
+                                map(&mut acc, row);
+                            });
+                        }
+                        acc
+                    })
+                })
+                .collect();
+
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .reduce(|a, b| reduce(a, b))
+                .unwrap_or_else(|| init())
+        })
+    }
+
     /// Full table scan visible to a transaction.
     pub fn scan(&self, txn_id: TxnId, read_ts: Timestamp) -> Vec<(PrimaryKey, OwnedRow)> {
         let mut results = Vec::with_capacity(self.data.len());
@@ -460,6 +563,7 @@ impl MemTable {
         for entry in self.data.iter() {
             let pk = entry.key().clone();
             let (new_data, old_data) = entry.value().commit_and_report(txn_id, commit_ts);
+            self.adjust_row_count_and_pk_order(&pk, &new_data, &old_data);
             self.index_update_on_commit(&pk, new_data.as_ref(), old_data.as_ref());
         }
     }
@@ -486,6 +590,7 @@ impl MemTable {
         for pk in keys {
             if let Some(chain) = self.data.get(pk) {
                 let (new_data, old_data) = chain.commit_and_report(txn_id, commit_ts);
+                self.adjust_row_count_and_pk_order(pk, &new_data, &old_data);
                 self.index_update_on_commit(pk, new_data.as_ref(), old_data.as_ref());
             }
         }
@@ -525,19 +630,158 @@ impl MemTable {
         }
     }
 
-    /// Count visible rows without cloning row data (O(n) visibility checks, zero alloc).
+    /// Count visible rows without cloning row data.
+    /// Fast path: if no GC candidates exist (INSERT-only workload), the
+    /// committed_row_count is exact and avoids the O(N) DashMap scan entirely.
     pub fn count_visible(&self, txn_id: TxnId, read_ts: Timestamp) -> usize {
-        let mut count = 0;
+        let count = self.committed_row_count.load(AtomicOrdering::Acquire);
+        if count >= 0 && self.gc_candidates.load(AtomicOrdering::Relaxed) == 0 {
+            return count as usize;
+        }
+        // Slow path: full scan with per-row visibility checks
+        let mut n = 0;
         for entry in self.data.iter() {
             if entry.value().is_visible(txn_id, read_ts) {
-                count += 1;
+                n += 1;
             }
         }
-        count
+        n
     }
 
-    /// Scan top-K rows ordered by PK. Collects only PKs (cheap), sorts them,
-    /// then point-gets only K rows — avoids materializing all N rows.
+    /// Adjust committed_row_count and pk_order based on commit_and_report results.
+    /// INSERT (new=Some, old=None) → +1 and add PK to ordered index.
+    /// DELETE (new=None, old=Some) → −1 and remove PK from ordered index.
+    #[inline]
+    fn adjust_row_count_and_pk_order(
+        &self,
+        pk: &PrimaryKey,
+        new_data: &Option<OwnedRow>,
+        old_data: &Option<OwnedRow>,
+    ) {
+        match (new_data.is_some(), old_data.is_some()) {
+            (true, false) => {
+                // New INSERT commit
+                self.committed_row_count.fetch_add(1, AtomicOrdering::Relaxed);
+                self.pk_order.write().insert(pk.clone());
+            }
+            (false, true) => {
+                // DELETE commit
+                self.committed_row_count.fetch_sub(1, AtomicOrdering::Relaxed);
+                self.pk_order.write().remove(pk);
+            }
+            _ => {} // UPDATE (true, true) or no-op (false, false)
+        }
+    }
+
+    /// Compute simple aggregates (COUNT*, SUM, MIN, MAX) in a single streaming
+    /// pass over visible rows WITHOUT cloning any row data.
+    /// `agg_specs`: list of (AggOp, Option<col_index>). None col = COUNT(*).
+    /// Returns one Datum per spec.
+    pub fn compute_simple_aggs(
+        &self,
+        txn_id: TxnId,
+        read_ts: Timestamp,
+        agg_specs: &[(SimpleAggOp, Option<usize>)],
+    ) -> Vec<Datum> {
+        let n = agg_specs.len();
+        let mut counts = vec![0i64; n];
+        let mut sums_i = vec![0i64; n];
+        let mut sums_f = vec![0f64; n];
+        let mut is_float = vec![false; n];
+        let mut mins: Vec<Option<Datum>> = vec![None; n];
+        let mut maxs: Vec<Option<Datum>> = vec![None; n];
+
+        for entry in self.data.iter() {
+            entry.value().with_visible_data(txn_id, read_ts, |row| {
+                for (i, (op, col_opt)) in agg_specs.iter().enumerate() {
+                    match op {
+                        SimpleAggOp::CountStar => {
+                            counts[i] += 1;
+                        }
+                        SimpleAggOp::Count => {
+                            if let Some(ci) = col_opt {
+                                if !matches!(row.values.get(*ci), Some(Datum::Null) | None) {
+                                    counts[i] += 1;
+                                }
+                            }
+                        }
+                        SimpleAggOp::Sum => {
+                            if let Some(ci) = col_opt {
+                                match row.values.get(*ci) {
+                                    Some(Datum::Int32(v)) => {
+                                        counts[i] += 1;
+                                        sums_i[i] += *v as i64;
+                                        sums_f[i] += *v as f64;
+                                    }
+                                    Some(Datum::Int64(v)) => {
+                                        counts[i] += 1;
+                                        sums_i[i] += *v;
+                                        sums_f[i] += *v as f64;
+                                    }
+                                    Some(Datum::Float64(v)) => {
+                                        counts[i] += 1;
+                                        is_float[i] = true;
+                                        sums_f[i] += *v;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        SimpleAggOp::Min => {
+                            if let Some(ci) = col_opt {
+                                let d = &row.values[*ci];
+                                if !matches!(d, Datum::Null) {
+                                    if mins[i].is_none()
+                                        || d.partial_cmp(mins[i].as_ref().unwrap())
+                                            == Some(std::cmp::Ordering::Less)
+                                    {
+                                        mins[i] = Some(d.clone());
+                                    }
+                                }
+                            }
+                        }
+                        SimpleAggOp::Max => {
+                            if let Some(ci) = col_opt {
+                                let d = &row.values[*ci];
+                                if !matches!(d, Datum::Null) {
+                                    if maxs[i].is_none()
+                                        || d.partial_cmp(maxs[i].as_ref().unwrap())
+                                            == Some(std::cmp::Ordering::Greater)
+                                    {
+                                        maxs[i] = Some(d.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Build result Datums
+        agg_specs
+            .iter()
+            .enumerate()
+            .map(|(i, (op, _))| match op {
+                SimpleAggOp::CountStar | SimpleAggOp::Count => Datum::Int64(counts[i]),
+                SimpleAggOp::Sum => {
+                    if counts[i] == 0 {
+                        Datum::Null
+                    } else if is_float[i] {
+                        Datum::Float64(sums_f[i])
+                    } else {
+                        Datum::Int64(sums_i[i])
+                    }
+                }
+                SimpleAggOp::Min => mins[i].clone().unwrap_or(Datum::Null),
+                SimpleAggOp::Max => maxs[i].clone().unwrap_or(Datum::Null),
+            })
+            .collect()
+    }
+
+    /// Scan top-K rows ordered by PK.
+    /// Fast path: uses the ordered PK index (BTreeSet) for O(K) lookups.
+    /// Fallback: bounded heap scan O(N log K) when pk_order is empty.
     pub fn scan_top_k_by_pk(
         &self,
         txn_id: TxnId,
@@ -545,23 +789,78 @@ impl MemTable {
         k: usize,
         ascending: bool,
     ) -> Vec<(PrimaryKey, OwnedRow)> {
-        // Phase 1: collect visible PKs (no row clone)
-        let mut visible_pks: Vec<PrimaryKey> = Vec::with_capacity(self.data.len());
-        for entry in self.data.iter() {
-            if entry.value().is_visible(txn_id, read_ts) {
-                visible_pks.push(entry.key().clone());
+        if k == 0 {
+            return vec![];
+        }
+
+        // Fast path: use ordered PK index (O(K) point lookups instead of O(N) scan)
+        let pk_set = self.pk_order.read();
+        if !pk_set.is_empty() {
+            let mut results = Vec::with_capacity(k);
+            if ascending {
+                for pk in pk_set.iter() {
+                    if let Some(row) = self.get(pk, txn_id, read_ts) {
+                        results.push((pk.clone(), row));
+                        if results.len() >= k {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                for pk in pk_set.iter().rev() {
+                    if let Some(row) = self.get(pk, txn_id, read_ts) {
+                        results.push((pk.clone(), row));
+                        if results.len() >= k {
+                            break;
+                        }
+                    }
+                }
             }
+            return results;
         }
-        // Phase 2: sort PKs
-        if ascending {
-            visible_pks.sort();
+        drop(pk_set);
+
+        // Fallback: bounded heap scan (O(N log K))
+        let top_pks = if ascending {
+            let mut heap: BinaryHeap<PrimaryKey> = BinaryHeap::with_capacity(k + 1);
+            for entry in self.data.iter() {
+                if entry.value().is_visible(txn_id, read_ts) {
+                    let pk = entry.key();
+                    if heap.len() < k {
+                        heap.push(pk.clone());
+                    } else if let Some(top) = heap.peek() {
+                        if pk.as_slice() < top.as_slice() {
+                            heap.pop();
+                            heap.push(pk.clone());
+                        }
+                    }
+                }
+            }
+            heap.into_sorted_vec()
         } else {
-            visible_pks.sort_by(|a, b| b.cmp(a));
-        }
-        // Phase 3: materialize only top K rows via point lookups
-        visible_pks.truncate(k);
-        let mut results = Vec::with_capacity(k);
-        for pk in visible_pks {
+            let mut heap: BinaryHeap<Reverse<PrimaryKey>> =
+                BinaryHeap::with_capacity(k + 1);
+            for entry in self.data.iter() {
+                if entry.value().is_visible(txn_id, read_ts) {
+                    let pk = entry.key();
+                    if heap.len() < k {
+                        heap.push(Reverse(pk.clone()));
+                    } else if let Some(Reverse(top)) = heap.peek() {
+                        if pk.as_slice() > top.as_slice() {
+                            heap.pop();
+                            heap.push(Reverse(pk.clone()));
+                        }
+                    }
+                }
+            }
+            let mut pks: Vec<PrimaryKey> =
+                heap.into_sorted_vec().into_iter().map(|r| r.0).collect();
+            pks.reverse();
+            pks
+        };
+        // Phase 2: materialize only K rows via point lookups
+        let mut results = Vec::with_capacity(top_pks.len());
+        for pk in top_pks {
             if let Some(row) = self.get(&pk, txn_id, read_ts) {
                 results.push((pk, row));
             }

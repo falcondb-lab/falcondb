@@ -430,7 +430,7 @@ impl QueryHandler {
     /// Execute a single DML plan (fast-path for INSERT). Handles autocommit.
     fn execute_single_plan(
         &self,
-        sql: &str,
+        _sql: &str,
         plan: PhysicalPlan,
         session: &mut PgSession,
     ) -> Result<Vec<BackendMessage>, FalconError> {

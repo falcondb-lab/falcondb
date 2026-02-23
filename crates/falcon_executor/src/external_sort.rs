@@ -13,6 +13,7 @@ use std::collections::BinaryHeap;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use falcon_common::config::SpillConfig;
 use falcon_common::datum::{Datum, OwnedRow};
@@ -148,11 +149,13 @@ impl ExternalSorter {
 
     /// Create a unique subdirectory for this sort's run files.
     fn create_run_dir(&self) -> Result<PathBuf, FalconError> {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let seq = COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
         let id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let dir = self.temp_dir.join(format!("sort_{}", id));
+        let dir = self.temp_dir.join(format!("sort_{}_{}", id, seq));
         fs::create_dir_all(&dir).map_err(|e| {
             FalconError::Internal(format!("Failed to create spill directory {:?}: {}", dir, e))
         })?;

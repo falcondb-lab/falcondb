@@ -1,15 +1,551 @@
 #![allow(clippy::too_many_arguments)]
 
+use std::collections::HashMap;
+
 use falcon_common::datum::{Datum, OwnedRow};
 use falcon_common::error::{ExecutionError, FalconError};
 use falcon_common::schema::TableSchema;
-use falcon_common::types::DataType;
+use falcon_common::types::{DataType, TableId};
 use falcon_sql_frontend::types::*;
+use falcon_txn::TxnHandle;
 
 use crate::executor::{ExecutionResult, Executor};
 use crate::expr_engine::ExprEngine;
 
+// ── Streaming aggregate accumulator ─────────────────────────────────────────
+
+/// Per-projection accumulator state for fused streaming aggregation.
+enum ProjAccum {
+    /// COUNT(*) — no expression
+    CountStar(i64),
+    /// COUNT(expr) / SUM / AVG / MIN / MAX
+    Agg {
+        func: AggFunc,
+        count: i64,
+        sum_i: i64,
+        sum_f: f64,
+        has_int: bool,
+        has_float: bool,
+        min_val: Option<Datum>,
+        max_val: Option<Datum>,
+    },
+    /// Column or Expr projection — stores first row's value
+    FirstVal(Datum),
+}
+
+impl ProjAccum {
+    fn new_count_star() -> Self {
+        ProjAccum::CountStar(0)
+    }
+
+    fn new_agg(func: &AggFunc) -> Self {
+        ProjAccum::Agg {
+            func: func.clone(),
+            count: 0,
+            sum_i: 0,
+            sum_f: 0.0,
+            has_int: false,
+            has_float: false,
+            min_val: None,
+            max_val: None,
+        }
+    }
+
+    fn feed_count_star(&mut self) {
+        if let ProjAccum::CountStar(n) = self {
+            *n += 1;
+        }
+    }
+
+    fn feed_value(&mut self, val: &Datum) {
+        match self {
+            ProjAccum::CountStar(n) => *n += 1,
+            ProjAccum::Agg {
+                func,
+                count,
+                sum_i,
+                sum_f,
+                has_int,
+                has_float,
+                min_val,
+                max_val,
+            } => {
+                if val.is_null() {
+                    return;
+                }
+                match func {
+                    AggFunc::Count => {
+                        *count += 1;
+                    }
+                    AggFunc::Sum => {
+                        match val {
+                            Datum::Int32(v) => {
+                                *sum_i += *v as i64;
+                                *has_int = true;
+                            }
+                            Datum::Int64(v) => {
+                                *sum_i += v;
+                                *has_int = true;
+                            }
+                            Datum::Float64(v) => {
+                                *sum_f += v;
+                                *has_float = true;
+                            }
+                            _ => {
+                                if let Some(f) = val.as_f64() {
+                                    *sum_f += f;
+                                    *has_float = true;
+                                }
+                            }
+                        }
+                        *count += 1;
+                    }
+                    AggFunc::Avg => {
+                        if let Some(f) = val.as_f64() {
+                            *sum_f += f;
+                            *count += 1;
+                        }
+                    }
+                    AggFunc::Min => {
+                        *min_val = Some(match min_val.take() {
+                            None => val.clone(),
+                            Some(cur) => {
+                                if val < &cur {
+                                    val.clone()
+                                } else {
+                                    cur
+                                }
+                            }
+                        });
+                    }
+                    AggFunc::Max => {
+                        *max_val = Some(match max_val.take() {
+                            None => val.clone(),
+                            Some(cur) => {
+                                if val > &cur {
+                                    val.clone()
+                                } else {
+                                    cur
+                                }
+                            }
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            ProjAccum::FirstVal(_) => {}
+        }
+    }
+
+    /// Merge two partial accumulators (used by parallel map-reduce aggregation).
+    fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (ProjAccum::CountStar(a), ProjAccum::CountStar(b)) => ProjAccum::CountStar(a + b),
+            (
+                ProjAccum::Agg {
+                    func,
+                    count: c1,
+                    sum_i: s1,
+                    sum_f: sf1,
+                    has_int: hi1,
+                    has_float: hf1,
+                    min_val: mn1,
+                    max_val: mx1,
+                },
+                ProjAccum::Agg {
+                    count: c2,
+                    sum_i: s2,
+                    sum_f: sf2,
+                    has_int: hi2,
+                    has_float: hf2,
+                    min_val: mn2,
+                    max_val: mx2,
+                    ..
+                },
+            ) => ProjAccum::Agg {
+                func,
+                count: c1 + c2,
+                sum_i: s1 + s2,
+                sum_f: sf1 + sf2,
+                has_int: hi1 || hi2,
+                has_float: hf1 || hf2,
+                min_val: match (mn1, mn2) {
+                    (None, b) => b,
+                    (a, None) => a,
+                    (Some(a), Some(b)) => Some(if a < b { a } else { b }),
+                },
+                max_val: match (mx1, mx2) {
+                    (None, b) => b,
+                    (a, None) => a,
+                    (Some(a), Some(b)) => Some(if a > b { a } else { b }),
+                },
+            },
+            (a @ ProjAccum::FirstVal(_), ProjAccum::FirstVal(_)) => a,
+            (a, _) => a,
+        }
+    }
+
+    fn result(&self) -> Datum {
+        match self {
+            ProjAccum::CountStar(n) => Datum::Int64(*n),
+            ProjAccum::Agg {
+                func,
+                count,
+                sum_i,
+                sum_f,
+                has_int,
+                has_float,
+                min_val,
+                max_val,
+                ..
+            } => match func {
+                AggFunc::Count => Datum::Int64(*count),
+                AggFunc::Sum => {
+                    if *count == 0 {
+                        Datum::Null
+                    } else if *has_float {
+                        Datum::Float64(*sum_f + *sum_i as f64)
+                    } else if *has_int {
+                        Datum::Int64(*sum_i)
+                    } else {
+                        Datum::Null
+                    }
+                }
+                AggFunc::Avg => {
+                    if *count == 0 {
+                        Datum::Null
+                    } else {
+                        Datum::Float64(*sum_f / *count as f64)
+                    }
+                }
+                AggFunc::Min => min_val.clone().unwrap_or(Datum::Null),
+                AggFunc::Max => max_val.clone().unwrap_or(Datum::Null),
+                _ => Datum::Null,
+            },
+            ProjAccum::FirstVal(d) => d.clone(),
+        }
+    }
+}
+
+/// Encode group key from row into a reusable buffer (avoids per-row allocation).
+fn encode_group_key(buf: &mut Vec<u8>, row: &OwnedRow, group_cols: &[usize]) {
+    buf.clear();
+    for &col_idx in group_cols {
+        let datum = row.get(col_idx).unwrap_or(&Datum::Null);
+        match datum {
+            Datum::Null => buf.push(0),
+            Datum::Boolean(b) => {
+                buf.push(1);
+                buf.push(*b as u8);
+            }
+            Datum::Int32(v) => {
+                buf.push(2);
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            Datum::Int64(v) => {
+                buf.push(3);
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            Datum::Float64(v) => {
+                buf.push(4);
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            Datum::Text(s) => {
+                buf.push(5);
+                buf.extend_from_slice(s.as_bytes());
+                buf.push(0);
+            }
+            other => {
+                buf.push(255);
+                buf.extend_from_slice(format!("{}", other).as_bytes());
+                buf.push(0);
+            }
+        }
+    }
+}
+
 impl Executor {
+    /// Check if a fused streaming aggregate is possible (no row cloning).
+    /// Returns None if the query shape is not eligible.
+    pub(crate) fn is_fused_eligible(
+        projections: &[BoundProjection],
+        grouping_sets: &[Vec<usize>],
+        having: Option<&BoundExpr>,
+    ) -> bool {
+        if !grouping_sets.is_empty() || having.is_some() {
+            return false;
+        }
+        for proj in projections {
+            match proj {
+                BoundProjection::Aggregate(func, _expr, _, distinct, agg_filter) => {
+                    if *distinct || agg_filter.is_some() {
+                        return false;
+                    }
+                    match func {
+                        AggFunc::Count | AggFunc::Sum | AggFunc::Avg
+                        | AggFunc::Min | AggFunc::Max => {}
+                        _ => return false,
+                    }
+                }
+                BoundProjection::Column(..) | BoundProjection::Expr(..) => {}
+                BoundProjection::Window(..) => return false,
+            }
+        }
+        true
+    }
+
+    /// Create fresh accumulators for each projection.
+    fn create_accums(projections: &[BoundProjection]) -> Vec<ProjAccum> {
+        projections
+            .iter()
+            .map(|p| match p {
+                BoundProjection::Aggregate(_func, None, _, _, _) => ProjAccum::new_count_star(),
+                BoundProjection::Aggregate(func, Some(_), _, _, _) => ProjAccum::new_agg(func),
+                _ => ProjAccum::FirstVal(Datum::Null),
+            })
+            .collect()
+    }
+
+    /// Feed one row into a group's accumulators.
+    fn feed_row_to_accums(
+        accums: &mut [ProjAccum],
+        projections: &[BoundProjection],
+        row: &OwnedRow,
+        is_first: bool,
+    ) -> Result<(), FalconError> {
+        for (i, proj) in projections.iter().enumerate() {
+            match proj {
+                BoundProjection::Aggregate(_func, None, _, _, _) => {
+                    accums[i].feed_count_star();
+                }
+                BoundProjection::Aggregate(_func, Some(expr), _, _, _) => {
+                    let val = ExprEngine::eval_row(expr, row)
+                        .map_err(FalconError::Execution)?;
+                    accums[i].feed_value(&val);
+                }
+                BoundProjection::Column(idx, _) => {
+                    if is_first {
+                        accums[i] = ProjAccum::FirstVal(
+                            row.get(*idx).cloned().unwrap_or(Datum::Null),
+                        );
+                    }
+                }
+                BoundProjection::Expr(expr, _) => {
+                    if is_first {
+                        let val = ExprEngine::eval_row(expr, row)
+                            .map_err(FalconError::Execution)?;
+                        accums[i] = ProjAccum::FirstVal(val);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Fused streaming aggregate: single pass through MVCC chains, zero row cloning.
+    /// Handles WHERE filter + GROUP BY + simple aggregates (COUNT/SUM/AVG/MIN/MAX).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn exec_fused_aggregate(
+        &self,
+        table_id: TableId,
+        schema: &TableSchema,
+        projections: &[BoundProjection],
+        filter: Option<&BoundExpr>,
+        group_by: &[usize],
+        order_by: &[BoundOrderBy],
+        limit: Option<usize>,
+        offset: Option<usize>,
+        distinct: &DistinctMode,
+        txn: &TxnHandle,
+    ) -> Result<ExecutionResult, FalconError> {
+        let mat_filter = self.materialize_filter(filter, txn)?;
+        let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+
+        let columns = self.resolve_output_columns(projections, schema);
+
+        if group_by.is_empty() {
+            // ── No GROUP BY: single global group (parallel map-reduce) ──
+            struct PartialNoGroup {
+                accums: Vec<ProjAccum>,
+                first: bool,
+                error: Option<FalconError>,
+            }
+            let mat_filter_ref = &mat_filter;
+            let result = self.storage.map_reduce_visible(
+                table_id,
+                txn.txn_id,
+                read_ts,
+                || PartialNoGroup {
+                    accums: Self::create_accums(projections),
+                    first: true,
+                    error: None,
+                },
+                |state, row| {
+                    if state.error.is_some() {
+                        return;
+                    }
+                    if let Some(ref f) = *mat_filter_ref {
+                        match ExprEngine::eval_filter(f, row) {
+                            Ok(true) => {}
+                            Ok(false) => return,
+                            Err(e) => {
+                                state.error = Some(FalconError::Execution(e));
+                                return;
+                            }
+                        }
+                    }
+                    if let Err(e) = Self::feed_row_to_accums(
+                        &mut state.accums, projections, row, state.first,
+                    ) {
+                        state.error = Some(e);
+                        return;
+                    }
+                    state.first = false;
+                },
+                |a, b| {
+                    if a.error.is_some() {
+                        return a;
+                    }
+                    if b.error.is_some() {
+                        return b;
+                    }
+                    PartialNoGroup {
+                        accums: a
+                            .accums
+                            .into_iter()
+                            .zip(b.accums)
+                            .map(|(x, y)| x.merge(y))
+                            .collect(),
+                        first: a.first && b.first,
+                        error: None,
+                    }
+                },
+            )?;
+            if let Some(e) = result.error {
+                return Err(e);
+            }
+
+            let values: Vec<Datum> = result.accums.iter().map(|a| a.result()).collect();
+            return Ok(ExecutionResult::Query {
+                columns,
+                rows: vec![OwnedRow::new(values)],
+            });
+        }
+
+        // ── GROUP BY: hash-aggregate (parallel map-reduce) ──
+        struct PartialGroupBy {
+            groups: HashMap<Vec<u8>, (Vec<ProjAccum>, bool)>,
+            key_buf: Vec<u8>,
+            error: Option<FalconError>,
+        }
+        let mat_filter_ref = &mat_filter;
+        let result = self.storage.map_reduce_visible(
+            table_id,
+            txn.txn_id,
+            read_ts,
+            || PartialGroupBy {
+                groups: HashMap::new(),
+                key_buf: Vec::with_capacity(32),
+                error: None,
+            },
+            |state, row| {
+                if state.error.is_some() {
+                    return;
+                }
+                if let Some(ref f) = *mat_filter_ref {
+                    match ExprEngine::eval_filter(f, row) {
+                        Ok(true) => {}
+                        Ok(false) => return,
+                        Err(e) => {
+                            state.error = Some(FalconError::Execution(e));
+                            return;
+                        }
+                    }
+                }
+                encode_group_key(&mut state.key_buf, row, group_by);
+
+                let (accums, is_first) =
+                    if let Some(entry) = state.groups.get_mut(state.key_buf.as_slice()) {
+                        entry
+                    } else {
+                        let a = Self::create_accums(projections);
+                        state.groups.insert(state.key_buf.clone(), (a, true));
+                        state.groups.get_mut(state.key_buf.as_slice()).unwrap()
+                    };
+
+                let first = *is_first;
+                *is_first = false;
+
+                if let Err(e) = Self::feed_row_to_accums(
+                    accums, projections, row, first,
+                ) {
+                    state.error = Some(e);
+                }
+            },
+            |mut a, b| {
+                if a.error.is_some() {
+                    return a;
+                }
+                if b.error.is_some() {
+                    return b;
+                }
+                // Merge b's groups into a
+                for (key, (b_accums, b_first)) in b.groups {
+                    if let Some((a_accums, a_first)) = a.groups.get_mut(&key) {
+                        *a_accums = std::mem::take(a_accums)
+                            .into_iter()
+                            .zip(b_accums)
+                            .map(|(x, y)| x.merge(y))
+                            .collect();
+                        *a_first = *a_first && b_first;
+                    } else {
+                        a.groups.insert(key, (b_accums, b_first));
+                    }
+                }
+                a
+            },
+        )?;
+        if let Some(e) = result.error {
+            return Err(e);
+        }
+        let groups = result.groups;
+
+        // Convert groups to result rows
+        let mut result_rows: Vec<OwnedRow> = Vec::with_capacity(groups.len());
+        for (_key, (accums, _)) in &groups {
+            let values: Vec<Datum> = accums.iter().map(|a| a.result()).collect();
+            result_rows.push(OwnedRow::new(values));
+        }
+
+        // ORDER BY
+        crate::external_sort::sort_rows(
+            &mut result_rows,
+            order_by,
+            self.external_sorter.as_ref(),
+        )?;
+
+        // DISTINCT
+        self.apply_distinct(distinct, &mut result_rows);
+
+        // OFFSET + LIMIT
+        if let Some(off) = offset {
+            if off < result_rows.len() {
+                result_rows = result_rows.split_off(off);
+            } else {
+                result_rows.clear();
+            }
+        }
+        if let Some(lim) = limit {
+            result_rows.truncate(lim);
+        }
+
+        Ok(ExecutionResult::Query {
+            columns,
+            rows: result_rows,
+        })
+    }
+
     pub(crate) fn exec_aggregate(
         &self,
         raw_rows: &[(Vec<u8>, OwnedRow)],

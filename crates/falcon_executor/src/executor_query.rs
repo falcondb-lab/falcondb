@@ -5,7 +5,7 @@ use falcon_common::error::FalconError;
 use falcon_common::schema::TableSchema;
 use falcon_common::types::TableId;
 use falcon_sql_frontend::types::*;
-use falcon_storage::memtable::{encode_column_value, encode_pk_from_datums};
+use falcon_storage::memtable::{encode_column_value, encode_pk_from_datums, SimpleAggOp};
 use falcon_txn::TxnHandle;
 
 use crate::executor::{CteData, ExecutionResult, Executor};
@@ -178,6 +178,114 @@ impl Executor {
             }
             _ => None,
         }
+    }
+
+    /// Try streaming aggregates: detect simple COUNT/SUM/AVG/MIN/MAX on column refs
+    /// and compute them in one pass without materializing any rows.
+    fn try_streaming_aggs(
+        &self,
+        projections: &[BoundProjection],
+        schema: &TableSchema,
+        table_id: TableId,
+        txn: &TxnHandle,
+    ) -> Option<ExecutionResult> {
+        // Build aggregate specs. For AVG, decompose into SUM + COUNT.
+        // Track: (SimpleAggOp, Option<col_idx>) and how to map back to projections.
+        struct AggMapping {
+            sum_idx: Option<usize>,   // index in specs for SUM (used by AVG)
+            count_idx: Option<usize>, // index in specs for COUNT (used by AVG)
+            direct_idx: Option<usize>, // index in specs for direct agg
+            is_avg: bool,
+        }
+
+        let mut specs: Vec<(SimpleAggOp, Option<usize>)> = Vec::new();
+        let mut mappings: Vec<AggMapping> = Vec::new();
+
+        for proj in projections {
+            match proj {
+                BoundProjection::Aggregate(func, arg, _, distinct, filter) => {
+                    if *distinct || filter.is_some() {
+                        return None; // can't handle DISTINCT or filtered aggs
+                    }
+                    let col_idx = match arg {
+                        None => None, // COUNT(*)
+                        Some(BoundExpr::ColumnRef(idx)) => Some(*idx),
+                        _ => return None, // complex expression — bail
+                    };
+                    match func {
+                        AggFunc::Count => {
+                            let idx = specs.len();
+                            specs.push((
+                                if col_idx.is_none() { SimpleAggOp::CountStar } else { SimpleAggOp::Count },
+                                col_idx,
+                            ));
+                            mappings.push(AggMapping {
+                                sum_idx: None, count_idx: None, direct_idx: Some(idx), is_avg: false,
+                            });
+                        }
+                        AggFunc::Sum => {
+                            let idx = specs.len();
+                            specs.push((SimpleAggOp::Sum, col_idx));
+                            mappings.push(AggMapping {
+                                sum_idx: None, count_idx: None, direct_idx: Some(idx), is_avg: false,
+                            });
+                        }
+                        AggFunc::Avg => {
+                            let si = specs.len();
+                            specs.push((SimpleAggOp::Sum, col_idx));
+                            let ci = specs.len();
+                            specs.push((SimpleAggOp::Count, col_idx));
+                            mappings.push(AggMapping {
+                                sum_idx: Some(si), count_idx: Some(ci), direct_idx: None, is_avg: true,
+                            });
+                        }
+                        AggFunc::Min => {
+                            let idx = specs.len();
+                            specs.push((SimpleAggOp::Min, col_idx));
+                            mappings.push(AggMapping {
+                                sum_idx: None, count_idx: None, direct_idx: Some(idx), is_avg: false,
+                            });
+                        }
+                        AggFunc::Max => {
+                            let idx = specs.len();
+                            specs.push((SimpleAggOp::Max, col_idx));
+                            mappings.push(AggMapping {
+                                sum_idx: None, count_idx: None, direct_idx: Some(idx), is_avg: false,
+                            });
+                        }
+                        _ => return None, // unsupported aggregate
+                    }
+                }
+                _ => return None, // non-aggregate projection
+            }
+        }
+
+        let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+        let raw_results = self
+            .storage
+            .compute_simple_aggs(table_id, txn.txn_id, read_ts, &specs)
+            .ok()?;
+
+        // Map raw results back to projection order
+        let mut values = Vec::with_capacity(projections.len());
+        for m in &mappings {
+            if m.is_avg {
+                let sum = &raw_results[m.sum_idx.unwrap()];
+                let count = &raw_results[m.count_idx.unwrap()];
+                match (sum.as_f64(), count.as_f64()) {
+                    (Some(s), Some(c)) if c > 0.0 => values.push(Datum::Float64(s / c)),
+                    _ => values.push(Datum::Null),
+                }
+            } else {
+                values.push(raw_results[m.direct_idx.unwrap()].clone());
+            }
+        }
+
+        let columns = self.resolve_output_columns(projections, schema);
+        Some(ExecutionResult::Query {
+            columns,
+            rows: vec![OwnedRow::new(values)],
+        })
     }
 
     /// Detect ORDER BY <pk_col> [ASC|DESC] LIMIT K pattern for scan_top_k_by_pk.
@@ -423,6 +531,35 @@ impl Executor {
                     });
                 }
             }
+
+            // ── Streaming aggregate fast path ──
+            // For mixed simple aggregates (COUNT/SUM/AVG/MIN/MAX) on column refs,
+            // compute in a single pass without materializing any rows.
+            if let Some(result) = self.try_streaming_aggs(
+                projections, schema, table_id, txn,
+            ) {
+                return Ok(result);
+            }
+        }
+
+        // ── Fused streaming aggregate path ──
+        // For aggregate queries (with or without GROUP BY / WHERE filter) on a real
+        // rowstore table, compute results in a single pass through MVCC chains
+        // without cloning any rows. This avoids O(N) row + PK allocation.
+        if (has_agg || !group_by.is_empty())
+            && !has_window
+            && grouping_sets.is_empty()
+            && having.is_none()
+            && virtual_rows.is_empty()
+            && table_id != TableId(0)
+            && cte_data.get(&table_id).is_none()
+            && !filter.is_some_and(|f| Self::expr_has_outer_ref(f))
+            && Self::is_fused_eligible(projections, grouping_sets, having)
+        {
+            return self.exec_fused_aggregate(
+                table_id, schema, projections, filter, group_by,
+                order_by, limit, offset, distinct, txn,
+            );
         }
 
         // Check if this is a dual (no-FROM) or CTE table, otherwise scan storage

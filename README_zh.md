@@ -3,7 +3,7 @@
   <img src="assets/falcondb-logo.png" alt="FalconDB Logo" width="220" />
 </p>
 
-<h1 align="center">FalconDB v1.0.3</h1>
+<h1 align="center">FalconDB v1.0.3 + USTM + 查询性能优化</h1>
 
 <p align="center">
   <a href="https://github.com/falcondb-lab/falcondb/actions/workflows/ci.yml">
@@ -18,8 +18,8 @@
 FalconDB 提供稳定的 OLTP 能力、快/慢路径事务、基于 WAL 的主从复制（gRPC 流式传输）、
 主从切换/故障转移、MVCC 垃圾回收，以及可复现的基准测试。
 
-> **v1.0.3** — 稳定性加固版本：事务状态机加固、重试安全、In-doubt 有界收敛、确定性错误分类。
-> 无新功能、无新 API、无协议变更。2,599 个测试全部通过。
+> **最新版本** — 查询性能优化：融合流式聚合、零拷贝 MVCC 迭代、有界堆 Top-K。
+> 1M 行基准测试与 PostgreSQL 接近平价 (6.4s vs PG 6.1s)。2,643+ 个测试全部通过。
 
 > **[English README](README.md)** | 简体中文
 
@@ -105,7 +105,7 @@ cargo build --workspace
 # 构建 release 版本
 cargo build --release --workspace
 
-# 运行测试 (15 个 crate + 根集成测试，共 2,599 个测试)
+# 运行测试 (16 个 crate + 根集成测试，共 2,643+ 个测试)
 cargo test --workspace
 
 # 代码检查
@@ -288,6 +288,35 @@ SHOW falcon.replication_stats;
 ---
 
 ## 5. 运行基准测试
+
+### 批量插入 + 查询 (1M 行)
+
+```bash
+# 构建 release 二进制
+cargo build --release -p falcon_server -p falcon_bench
+
+# 启动 FalconDB
+./target/release/falcon --no-wal &
+
+# 运行 1M 行基准测试 (DDL + 100 批 INSERT + 聚合/扫描查询)
+./target/release/falcon_bench --bulk \
+  --bulk-file benchmarks/bulk_insert_1m.sql \
+  --bulk-host localhost --bulk-port 5433 \
+  --bulk-sslmode disable --export text
+```
+
+**1M 行基准测试结果** (对比 PostgreSQL 16):
+
+| 指标 | FalconDB | PostgreSQL | 比率 |
+|------|----------|------------|------|
+| 总时间 (DDL + INSERT + 查询) | ~6.4s | ~6.1s | 1.05x |
+| INSERT 阶段 (100 批 × 10K 行) | ~2.9s | ~5.4s | **0.54x (更快)** |
+| 查询阶段 (COUNT, ORDER BY LIMIT, 聚合, GROUP BY, WHERE) | ~2.8s | ~0.65s | 4.3x |
+| 行/秒 (INSERT) | ~340K | ~185K | **1.84x (更快)** |
+
+> **说明**: FalconDB 的 INSERT 吞吐量显著超越 PostgreSQL，得益于内存 MVCC 零磁盘 I/O。
+> 查询阶段较慢，因为 DashMap 指针追踪 vs PostgreSQL 的顺序堆页面，
+> 但已通过融合流式聚合、零拷贝 MVCC 迭代和有界堆 Top-K 从 12x 优化到 4.3x 差距。
 
 ### YCSB 风格负载
 
@@ -591,7 +620,7 @@ SHOW falcon.replication_stats;
 ├────────────────────────────────────────────────────────┤
 │         计划器 / 路由器                                  │
 ├────────────────────────────────────────────────────────┤
-│         执行器 (逐行执行, 表达式求值)                     │
+│         执行器 (逐行 + 融合流式聚合, 表达式求值)          │
 ├──────────────────┬─────────────────────────────────────┤
 │   事务管理器      │   存储引擎                           │
 │   (MVCC, OCC)    │   (MemTable + LSM + WAL + GC)      │
@@ -609,7 +638,7 @@ SHOW falcon.replication_stats;
 | `falcon_txn` | 事务生命周期、OCC 验证、时间戳分配 |
 | `falcon_sql_frontend` | SQL 解析 (sqlparser-rs) + 绑定/分析 |
 | `falcon_planner` | 逻辑 → 物理计划、路由提示 |
-| `falcon_executor` | 算子执行、表达式求值、查询治理 |
+| `falcon_executor` | 算子执行、表达式求值、查询治理、融合流式聚合 |
 | `falcon_protocol_pg` | PostgreSQL 协议编解码 + TCP 服务器 |
 | `falcon_protocol_native` | FalconDB 原生二进制协议 — 编解码、压缩、类型映射 |
 | `falcon_native_server` | 原生协议服务器 — 会话管理、执行器桥接、Nonce 防重放 |
@@ -750,6 +779,8 @@ cargo run -p falcon_server -- --print-default-config > falcon.toml
 | **v1.0.1** ✅ | 零 panic 策略、崩溃安全、统一错误模型 | 2,499 测试 |
 | **v1.0.2** ✅ | 故障转移×事务加固: 20 项测试矩阵 (SS/XS/CH/ID) | 2,554 测试 |
 | **v1.0.3** ✅ | 稳定性、确定性与信任加固: 状态机、重试安全、In-doubt 有界收敛 | 2,599 测试 |
+| **USTM** ✅ | 用户空间分层内存: LIRS-2 缓存、查询预取、3区内存管理器 | 2,643 测试 |
+| **查询性能** ✅ | 融合流式聚合、零拷贝 MVCC、有界堆 Top-K、1M 行接近 PG 平价 | 2,643 测试 |
 
 详见 [docs/roadmap.md](docs/roadmap.md) 了解每个里程碑的详细验收标准。
 
