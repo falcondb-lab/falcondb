@@ -271,29 +271,93 @@ mmap 的 msync 无法保证写入顺序，USTM 完全绕开 mmap 的写路径：
 
 ---
 
-## 7. 实现路线图
+## 7. 实现状态（已完成）
 
-| 阶段 | 交付物 | 预计工作量 |
-|------|--------|-----------|
-| **P0** | PageHandle + Hot/Warm/Cold 三区管理 | 2-3 周 |
-| **P1** | Direct I/O 读写 + 替换 mmap 读取 SST | 2 周 |
-| **P2** | LIRS-2 驱逐算法 | 1-2 周 |
-| **P3** | io_uring 集成 (Linux) / IOCP (Windows) | 2-3 周 |
-| **P4** | QueryAwarePrefetcher | 2 周 |
-| **P5** | I/O Scheduler（优先级调度） | 1 周 |
-| **P6** | 基准测试 + 调优 | 2 周 |
+> 本节记录实际代码实现情况，对应 `crates/falcon_storage/src/ustm/`。
 
-**总计**：约 12-16 周，可由 1-2 名高级系统工程师完成。
+### 7.1 已实现模块
+
+| 模块 | 文件 | 状态 | 测试数 |
+|------|------|------|--------|
+| 核心类型 | `page.rs` | ✅ 完成 | 7 |
+| LIRS-2 驱逐 | `lirs2.rs` | ✅ 完成 | 9 |
+| I/O 调度器 | `io_scheduler.rs` | ✅ 完成（同步 I/O 后端） | 4 |
+| 查询预取器 | `prefetcher.rs` | ✅ 完成 | 7 |
+| 三区管理器 | `zones.rs` | ✅ 完成 | 8 |
+| 引擎协调器 | `engine.rs` | ✅ 完成 | 10 |
+| 模块声明 | `mod.rs` | ✅ 完成 | — |
+
+**合计：45 个单元测试，全部通过。**
+
+### 7.2 StorageEngine 集成
+
+| 集成点 | 文件 | 状态 |
+|--------|------|------|
+| `ustm` 字段 + 4 个构造函数 | `engine.rs` | ✅ |
+| `set_ustm_config()` / `ustm_stats()` / `shutdown()` | `engine.rs` | ✅ |
+| INSERT / UPDATE / DELETE / GET / SCAN（Rowstore） | `engine_dml.rs` | ✅ |
+| INSERT / UPDATE / DELETE / GET / SCAN（LSM） | `engine_dml.rs` | ✅ |
+| CREATE TABLE / DROP TABLE | `engine_ddl.rs` | ✅ |
+| `[ustm]` 配置节 | `falcon_common/config.rs` | ✅ |
+| 服务器启动集成 | `falcon_server/main.rs` | ✅ |
+| `examples/primary.toml` 示例配置 | — | ✅ |
+
+### 7.3 DML 路径集成细节
+
+```
+INSERT (Rowstore) → ustm.alloc_hot(PageId, HotRow)
+INSERT (LSM)      → ustm.insert_warm(PageId, HotRow)   ← 磁盘表走 Warm Zone
+UPDATE (Rowstore) → ustm.alloc_hot(PageId, HotRow)     ← 刷新 Hot Zone
+UPDATE (LSM)      → ustm.insert_warm(PageId, HotRow)   ← 刷新 Warm Zone
+DELETE (Rowstore) → ustm.alloc_hot(PageId, HotRow)     ← 写入 tombstone
+DELETE (LSM)      → ustm.unregister_page(PageId)       ← 主动驱逐
+GET    (Rowstore) → ustm.insert_warm(PageId, HotRow)   ← LIRS-2 访问跟踪
+GET    (LSM)      → ustm.insert_warm(PageId, HotRow)   ← 读缓存跟踪
+SCAN   (Rowstore) → ustm.prefetch_hint(SeqScan)        ← 顺序扫描预取
+SCAN   (LSM)      → ustm.prefetch_hint(SeqScan, sst_path) ← 指向 SST 目录
+```
+
+### 7.4 DDL 路径集成细节
+
+```
+CREATE TABLE → ustm.alloc_hot(meta_page, IndexInternal)  ← 永不驱逐
+DROP TABLE   → ustm.unregister_page(meta_page)           ← 清理元数据页
+```
+
+### 7.5 待完成（后续迭代）
+
+| 项目 | 说明 | 优先级 |
+|------|------|--------|
+| io_uring 后端 | 当前使用同步 I/O，Linux 生产环境需替换 | P1 |
+| IOCP 后端 | Windows 异步 I/O 适配 | P2 |
+| LIRS-2 侵入式链表 | 当前 `VecDeque::retain()` 是 O(n)，大规模需优化 | P1 |
+| USTM 统计 SHOW 命令 | `SHOW falcon.ustm_stats` 暴露给 SQL 层 | P2 |
+| 基准测试 | YCSB 对比 mmap 性能数据 | P2 |
 
 ---
 
-## 8. 适用场景
+## 8. 实现路线图（原始计划 vs 实际）
+
+| 阶段 | 交付物 | 计划工作量 | 实际状态 |
+|------|--------|-----------|---------|
+| **P0** | PageHandle + Hot/Warm/Cold 三区管理 | 2-3 周 | ✅ 完成 |
+| **P1** | Direct I/O 读写 + 替换 mmap 读取 SST | 2 周 | ✅ 同步 I/O 完成（io_uring 待接入） |
+| **P2** | LIRS-2 驱逐算法 | 1-2 周 | ✅ 完成 |
+| **P3** | io_uring 集成 (Linux) / IOCP (Windows) | 2-3 周 | ⏳ 待实现 |
+| **P4** | QueryAwarePrefetcher | 2 周 | ✅ 完成 |
+| **P5** | I/O Scheduler（优先级调度） | 1 周 | ✅ 完成 |
+| **P6** | StorageEngine 全路径集成 | — | ✅ 完成（Rowstore + LSM） |
+| **P7** | 基准测试 + 调优 | 2 周 | ⏳ 待实现 |
+
+---
+
+## 9. 适用场景
 
 USTM 特别适合：
 - **OLTP 数据库**：确定性延迟是核心需求
-- **数据集 > 内存**：需要智能的冷热分层
+- **数据集 > 内存**：需要智能的冷热分层（LSM + Warm Zone）
 - **混合负载**：OLTP 查询与后台 Compaction 并存
-- **高并发**：多核扩展性要求高
+- **高并发**：多核扩展性要求高（无 TLB Shootdown）
 
 不适合：
 - 数据集 < 内存（纯 MemTable 更简单高效）

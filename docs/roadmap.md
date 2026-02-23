@@ -190,6 +190,10 @@ cargo test --workspace
 | **Storage Hardening** | ✅ Done | 7 modules, 61 tests — WAL recovery, compaction, memory budget, GC safepoint, fault injection |
 | **Distributed Hardening** | ✅ Done | 6 modules, 62 tests — epoch fencing, leader lease, migration, throttle, supervisor |
 | **Native Protocol** | ✅ Done | 2,239 tests — binary protocol, JDBC driver, compression, HA failover |
+| **v1.0.1** | ✅ Done | Zero-panic policy — 0 unwrap/expect/panic in production paths |
+| **v1.0.2** | ✅ Done | Failover × txn hardening — FailoverTxnCoordinator, InDoubtTtlEnforcer |
+| **v1.0.3** | ✅ Done | Stability hardening — TxnStateGuard, CommitPhaseTracker, RetryGuard, 45 tests |
+| **USTM Engine** | ✅ Done | 2,643 tests — User-Space Tiered Memory, LIRS-2, query prefetch, full DML+DDL integration |
 | **v1.0.0** | 📋 Planned | Production-Grade Database Kernel — all gates pass |
 
 ---

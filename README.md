@@ -4,7 +4,7 @@
   <img src="assets/falcondb-logo.png" alt="FalconDB Logo" width="220" />
 </p>
 
-<h1 align="center">FalconDB v1.0.3</h1>
+<h1 align="center">FalconDB v1.0.3 + USTM</h1>
 
 <p align="center">
   <strong>PG-Compatible · Distributed · Memory-First · Deterministic Transaction Semantics</strong>
@@ -107,7 +107,7 @@ Attempting to use them returns a clear `ErrorResponse` with the appropriate SQLS
 |---------|:------------:|-------|
 | Raft consensus replication | — | Not started; current replication is WAL-shipping + gRPC |
 | Disk spill / tiered storage | STUB | `disk_rowstore.rs`, `columnstore.rs` — code exists but not on production path |
-| LSM-tree storage engine | EXPERIMENTAL | `lsm/` — compile-gated, not default |
+| LSM-tree storage engine | EXPERIMENTAL | `lsm/` — compile-gated, not default; USTM-integrated for both Rowstore and LSM |
 | Online DDL (non-blocking ALTER) | STUB | `online_ddl.rs` — state machine scaffolding only |
 | HTAP / ColumnStore analytics | STUB | `columnstore.rs` — not wired to query planner |
 | Transparent Data Encryption | STUB | `encryption.rs` — key manager scaffolding only |
@@ -128,7 +128,7 @@ cargo build --workspace
 # Build release
 cargo build --release --workspace
 
-# Run tests (2,599 tests across 15 crates + root integration)
+# Run tests (2,643 tests across 15 crates + root integration)
 cargo test --workspace
 
 # Lint
@@ -227,6 +227,17 @@ enabled = true                      # Enable MVCC garbage collection
 interval_ms = 1000                  # GC sweep interval (milliseconds)
 batch_size = 0                      # 0 = unlimited (sweep all chains per cycle)
 min_chain_length = 2                # Skip chains shorter than this
+
+[ustm]
+enabled = true                      # Enable USTM page cache (replaces mmap)
+hot_capacity_bytes = 536870912      # 512 MB — MemTable + index internals (never evicted)
+warm_capacity_bytes = 268435456     # 256 MB — SST page cache (LIRS-2 eviction)
+lirs_lir_capacity = 4096            # Protected high-frequency pages
+lirs_hir_capacity = 1024            # Eviction candidate pages
+background_iops_limit = 500         # Max IOPS for compaction/GC I/O
+prefetch_iops_limit = 200           # Max IOPS for query-driven prefetch
+prefetch_enabled = true             # Enable query-aware prefetcher
+page_size = 8192                    # Default page size (8 KB)
 
 [replication]
 commit_ack = "primary_durable"      # Scheme A: commit ack = primary WAL fsync
@@ -440,7 +451,12 @@ SHOW falcon.scatter_stats;
 ### DDL
 
 ```sql
+-- Default: Rowstore (in-memory, USTM Hot Zone)
 CREATE TABLE users (id INT PRIMARY KEY, name TEXT, age INT);
+
+-- LSM: disk-backed, USTM Warm Zone cache (survives memory pressure)
+CREATE TABLE events (id BIGSERIAL PRIMARY KEY, payload TEXT) ENGINE=lsm;
+
 CREATE TABLE IF NOT EXISTS orders (
     id SERIAL PRIMARY KEY,
     user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -622,6 +638,10 @@ Core PG-compatible functions including: `UPPER`, `LOWER`, `LENGTH`, `SUBSTRING`,
 ├──────────────────┬─────────────────────────────────────┤
 │   Txn Manager    │   Storage Engine                    │
 │   (MVCC, OCC)    │   (MemTable + LSM + WAL + GC)      │
+│                  ├─────────────────────────────────────┤
+│                  │   USTM — User-Space Tiered Memory   │
+│                  │   Hot(DRAM) │ Warm(LIRS-2) │ Cold   │
+│                  │   IoScheduler │ QueryPrefetcher     │
 ├──────────────────┴─────────────────────────────────────┤
 │  Cluster (ShardMap, Replication, Failover, Epoch)      │
 └────────────────────────────────────────────────────────┘
@@ -632,7 +652,7 @@ Core PG-compatible functions including: `UPPER`, `LOWER`, `LENGTH`, `SUBSTRING`,
 | Crate | Responsibility |
 |-------|---------------|
 | `falcon_common` | Shared types, errors, config, datum, schema, RLS, RBAC |
-| `falcon_storage` | In-memory tables, LSM engine, MVCC, indexes, WAL, GC, TDE, partitioning, PITR, CDC |
+| `falcon_storage` | In-memory tables, LSM engine, MVCC, indexes, WAL, GC, TDE, partitioning, PITR, CDC, **USTM page cache** |
 | `falcon_txn` | Transaction lifecycle, OCC validation, timestamp allocation |
 | `falcon_sql_frontend` | SQL parsing (sqlparser-rs) + binding/analysis |
 | `falcon_planner` | Logical → physical plan, routing hints |

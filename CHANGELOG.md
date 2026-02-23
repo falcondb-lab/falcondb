@@ -7,6 +7,96 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased] — USTM Engine & StorageEngine Integration
+
+### Added — USTM (User-Space Tiered Memory) Engine (`falcon_storage::ustm`)
+
+A complete replacement for mmap-based storage access. Gives FalconDB full control
+over memory residency, eviction, and I/O scheduling. Based on the design in
+`docs/design_ustm.md`.
+
+#### Core Modules (6 new files, `crates/falcon_storage/src/ustm/`)
+
+- **`page.rs`** — Core types: `PageId`, `PageHandle`, `PageData`, `AccessPriority`
+  (IndexInternal > HotRow > WarmScan > Cold), `Tier` enum, `PinGuard` (RAII unpin),
+  `fast_hash_pk()` for PK → PageId derivation. 7 tests.
+- **`lirs2.rs`** — LIRS-2 scan-resistant cache replacement algorithm. Classifies pages
+  into LIR (protected) and HIR (eviction candidate) sets. Prevents sequential scans
+  from polluting the cache. Configurable `lir_capacity` / `hir_resident_capacity` /
+  `hir_nonresident_capacity`. 9 tests.
+- **`io_scheduler.rs`** — Priority-based I/O scheduler with three queues:
+  Query (highest) > Prefetch > Background. `TokenBucket` rate limiter prevents
+  compaction/GC from starving foreground queries. 4 tests.
+- **`prefetcher.rs`** — Query-aware prefetcher. Receives `PrefetchSource` hints
+  (`SeqScan`, `IndexRangeScan`, `HashJoin`) from the executor, deduplicates requests,
+  and submits async I/O before data is explicitly requested. 7 tests.
+- **`zones.rs`** — Three-Zone Memory Manager:
+  - **Hot Zone**: MemTable pages + index internals. Pinned in DRAM, never evicted.
+  - **Warm Zone**: SST page cache. Managed by LIRS-2 eviction.
+  - **Cold Zone**: Disk-resident pages. Registered for future async fetch.
+  8 tests.
+- **`engine.rs`** — Top-level `UstmEngine` coordinator. Unified `fetch_pinned()` API
+  (Hot → Warm → Cold disk read). `alloc_hot()`, `insert_warm()`, `register_page()`,
+  `unregister_page()`, `prefetch_hint()`, `prefetch_tick()`, `stats()`, `shutdown()`.
+  10 tests.
+
+**Total: 45 new tests, all passing.**
+
+#### StorageEngine Integration
+
+- **`StorageEngine` struct** — new `ustm: Arc<UstmEngine>` field, initialized in all
+  4 constructors (`new`, `new_in_memory`, `new_in_memory_with_budget`,
+  `new_with_wal_options`). `recover()` inherits via `Self::new()`.
+- **`set_ustm_config(&UstmSectionConfig)`** — replace USTM engine from config at runtime.
+- **`ustm_stats()`** — expose `UstmStats` snapshot for observability.
+- **`shutdown()`** — graceful shutdown: `ustm.shutdown()` + WAL flush + stats log.
+
+#### DML Integration (`engine_dml.rs`)
+
+| Operation | Rowstore | LSM (`ENGINE=lsm`) |
+|-----------|----------|-------------------|
+| INSERT | Hot Zone (HotRow priority) | Warm Zone (disk-backed) |
+| UPDATE | Hot Zone refresh | Warm Zone refresh |
+| DELETE | Hot Zone write | Warm Zone evict (`unregister_page`) |
+| GET | Warm Zone LIRS-2 tracking | Warm Zone LIRS-2 tracking |
+| SCAN | SeqScan prefetch hint | SeqScan prefetch hint → SST path |
+
+#### DDL Integration (`engine_ddl.rs`)
+
+- **CREATE TABLE** → registers table metadata page in Hot Zone (`IndexInternal` priority, never evicted)
+- **DROP TABLE** → `unregister_page()` cleans up metadata page
+
+#### Configuration (`falcon_common::config`)
+
+New `[ustm]` section in `FalconConfig` / `falcon.toml`:
+
+```toml
+[ustm]
+enabled = true
+hot_capacity_bytes = 536870912       # 512 MB
+warm_capacity_bytes = 268435456      # 256 MB
+lirs_lir_capacity = 4096
+lirs_hir_capacity = 1024
+background_iops_limit = 500
+prefetch_iops_limit = 200
+prefetch_enabled = true
+page_size = 8192
+```
+
+`examples/primary.toml` updated with the `[ustm]` section.
+
+#### Server Integration (`falcon_server/src/main.rs`)
+
+`engine.set_ustm_config(&config.ustm)` called in both WAL-enabled and in-memory
+startup paths when `ustm.enabled = true`.
+
+### Verification
+
+- **USTM unit tests**: 45 pass, 0 failures
+- **Full workspace**: 2,643 pass, 0 failures (no regressions)
+
+---
+
 ## [1.0.3] — 2026-02-22 — Stability, Determinism & Trust Hardening (LTS Patch)
 
 This is a **stability-only hardening release**. No new features, no new SQL syntax,
