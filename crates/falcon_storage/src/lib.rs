@@ -18,6 +18,7 @@ pub mod role_catalog;
 pub mod security_manager;
 pub mod stats;
 pub mod upgrade;
+pub mod ustm;
 pub mod verification;
 pub mod wal;
 

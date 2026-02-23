@@ -463,6 +463,15 @@ async fn run_statements(
                         }
                     }
                 }
+                MetaCommand::ListTables
+                | MetaCommand::DescribeTable(_)
+                | MetaCommand::ListDatabases => {
+                    match meta::execute_meta(&cmd, client).await {
+                        Ok(meta::MetaResult::Output(s)) => print!("{}", s),
+                        Ok(_) => {}
+                        Err(e) => eprintln!("ERROR: {:#}", e),
+                    }
+                }
                 // Other meta-commands are silently skipped in script mode
                 // (\q, \x, \timing etc. don't make sense in -c/-f)
                 _ => {}

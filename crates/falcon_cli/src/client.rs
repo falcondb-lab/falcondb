@@ -32,11 +32,16 @@ impl DbClient {
         dbname: &str,
         password: Option<&str>,
     ) -> Result<Self> {
-        let pwd = password.unwrap_or("");
-        let conn_str = format!(
-            "host={} port={} user={} dbname={} password={}",
-            host, port, user, dbname, pwd
-        );
+        let conn_str = match password {
+            Some(pwd) if !pwd.is_empty() => format!(
+                "host={} port={} user={} dbname={} password={}",
+                host, port, user, dbname, pwd
+            ),
+            _ => format!(
+                "host={} port={} user={} dbname={}",
+                host, port, user, dbname
+            ),
+        };
         debug!(
             "Connecting: host={} port={} user={} dbname={}",
             host, port, user, dbname

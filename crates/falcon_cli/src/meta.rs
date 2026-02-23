@@ -127,10 +127,10 @@ Management (v0.5 — plan/apply, requires --apply to execute)
         MetaCommand::ConnInfo => Ok(MetaResult::Output(client.conninfo())),
 
         MetaCommand::ListTables => {
-            let sql = "SELECT table_schema, table_name, table_type \
-                       FROM information_schema.tables \
-                       WHERE table_schema NOT IN ('pg_catalog','information_schema') \
-                       ORDER BY table_schema, table_name";
+            let sql = "SELECT t.table_schema, t.table_name, t.table_type \
+                       FROM information_schema.tables t \
+                       WHERE t.table_schema NOT IN ('pg_catalog','information_schema') \
+                       ORDER BY t.table_schema, t.table_name";
             let (rows, _tag) = client.query_simple(sql).await?;
             if rows.is_empty() {
                 return Ok(MetaResult::Output("No relations found.".to_string()));
@@ -138,10 +138,12 @@ Management (v0.5 — plan/apply, requires --apply to execute)
             let mut out = format!("{:<20} {:<30} {}\n", "Schema", "Name", "Type");
             out.push_str(&"-".repeat(60));
             out.push('\n');
+            let cols: Vec<String> = rows[0].columns().iter().map(|c| c.name().to_string()).collect();
+            let idx = |name: &str| cols.iter().position(|c| c == name);
             for row in &rows {
-                let schema = row.get(0).unwrap_or("");
-                let name = row.get(1).unwrap_or("");
-                let typ = row.get(2).unwrap_or("");
+                let schema = idx("table_schema").and_then(|i| row.get(i)).unwrap_or("");
+                let name   = idx("table_name").and_then(|i| row.get(i)).unwrap_or("");
+                let typ    = idx("table_type").and_then(|i| row.get(i)).unwrap_or("");
                 out.push_str(&format!("{:<20} {:<30} {}\n", schema, name, typ));
             }
             Ok(MetaResult::Output(out))
@@ -168,11 +170,13 @@ Management (v0.5 — plan/apply, requires --apply to execute)
                 "Column", "Type", "Nullable", "Default"
             ));
             out.push_str(&format!("  {}\n", "-".repeat(70)));
+            let cols: Vec<String> = rows[0].columns().iter().map(|c| c.name().to_string()).collect();
+            let idx = |name: &str| cols.iter().position(|c| c == name);
             for row in &rows {
-                let col = row.get(0).unwrap_or("");
-                let typ = row.get(1).unwrap_or("");
-                let nullable = row.get(2).unwrap_or("");
-                let default = row.get(3).unwrap_or("");
+                let col      = idx("column_name").and_then(|i| row.get(i)).unwrap_or("");
+                let typ      = idx("data_type").and_then(|i| row.get(i)).unwrap_or("");
+                let nullable = idx("is_nullable").and_then(|i| row.get(i)).unwrap_or("");
+                let default  = idx("column_default").and_then(|i| row.get(i)).unwrap_or("");
                 out.push_str(&format!(
                     "  {:<25} {:<20} {:<10} {}\n",
                     col, typ, nullable, default
@@ -189,8 +193,10 @@ Management (v0.5 — plan/apply, requires --apply to execute)
                 return Ok(MetaResult::Output("No databases found.".to_string()));
             }
             let mut out = "List of databases:\n".to_string();
+            let cols: Vec<String> = rows[0].columns().iter().map(|c| c.name().to_string()).collect();
+            let datname_idx = cols.iter().position(|c| c == "datname").unwrap_or(0);
             for row in &rows {
-                out.push_str(&format!("  {}\n", row.get(0).unwrap_or("")));
+                out.push_str(&format!("  {}\n", row.get(datname_idx).unwrap_or("")));
             }
             Ok(MetaResult::Output(out))
         }

@@ -14,6 +14,8 @@ pub struct FalconConfig {
     pub memory: MemoryConfig,
     #[serde(default)]
     pub gc: GcSectionConfig,
+    #[serde(default)]
+    pub ustm: UstmSectionConfig,
 }
 
 /// GC configuration section in falcon.toml.
@@ -325,6 +327,48 @@ impl Default for ReplicationConfig {
     }
 }
 
+/// USTM (User-Space Tiered Memory) engine configuration.
+///
+/// Controls the three-zone page cache that replaces mmap for SST reads.
+/// When `enabled = false`, the storage engine bypasses USTM entirely.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UstmSectionConfig {
+    /// Enable the USTM page cache (default: true).
+    pub enabled: bool,
+    /// Hot zone capacity in bytes (MemTable + index internals).
+    pub hot_capacity_bytes: u64,
+    /// Warm zone capacity in bytes (SST page cache).
+    pub warm_capacity_bytes: u64,
+    /// LIRS-2 LIR set capacity (protected high-frequency pages).
+    pub lirs_lir_capacity: usize,
+    /// LIRS-2 HIR-resident capacity (eviction candidates).
+    pub lirs_hir_capacity: usize,
+    /// Maximum background IOPS for compaction/GC I/O.
+    pub background_iops_limit: u64,
+    /// Maximum prefetch IOPS.
+    pub prefetch_iops_limit: u64,
+    /// Enable query-aware prefetcher.
+    pub prefetch_enabled: bool,
+    /// Default page size in bytes.
+    pub page_size: u32,
+}
+
+impl Default for UstmSectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            hot_capacity_bytes: 512 * 1024 * 1024,   // 512 MB
+            warm_capacity_bytes: 256 * 1024 * 1024,   // 256 MB
+            lirs_lir_capacity: 4096,
+            lirs_hir_capacity: 1024,
+            background_iops_limit: 500,
+            prefetch_iops_limit: 200,
+            prefetch_enabled: true,
+            page_size: 8192,
+        }
+    }
+}
+
 /// Memory budget and backpressure configuration.
 ///
 /// Defines hierarchical memory limits (shard → node → cluster) and the
@@ -419,6 +463,7 @@ impl Default for FalconConfig {
             spill: SpillConfig::default(),
             memory: MemoryConfig::default(),
             gc: GcSectionConfig::default(),
+            ustm: UstmSectionConfig::default(),
         }
     }
 }

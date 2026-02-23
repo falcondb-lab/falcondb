@@ -12,9 +12,24 @@ use falcon_common::error::StorageError;
 use falcon_common::types::{TableId, Timestamp, TxnId, TxnType};
 
 use crate::memtable::PrimaryKey;
+use crate::ustm::{AccessPriority, PageData, PageId};
 use crate::wal::WalRecord;
 
 use super::engine::StorageEngine;
+
+/// Derive a USTM PageId from a table id and primary key hash.
+#[inline]
+fn ustm_page_id(table_id: TableId, pk: &PrimaryKey) -> PageId {
+    // Combine table_id (upper 32 bits) with a hash of the PK (lower 32 bits)
+    let pk_hash = crate::ustm::page::fast_hash_pk(pk);
+    PageId((table_id.0 as u64) << 32 | pk_hash as u64)
+}
+
+/// Derive a USTM PageId for a table-level page (DDL / scan).
+#[inline]
+fn ustm_table_page_id(table_id: TableId, page_seq: u32) -> PageId {
+    PageId((table_id.0 as u64) << 32 | page_seq as u64)
+}
 
 impl StorageEngine {
     // ── Core DML ─────────────────────────────────────────────────────
@@ -36,6 +51,12 @@ impl StorageEngine {
             })?;
             let pk = table.insert(row, txn_id)?;
             self.record_write(txn_id, table_id, pk.clone());
+
+            // USTM: track the written row in the Hot zone for cache warming.
+            let page_id = ustm_page_id(table_id, &pk);
+            let data = PageData::new(pk.clone());
+            let _ = self.ustm.alloc_hot(page_id, data, AccessPriority::HotRow);
+
             return Ok(pk);
         }
 
@@ -75,6 +96,12 @@ impl StorageEngine {
             })?;
             let pk = lsm.insert(&row, txn_id)?;
             self.record_write(txn_id, table_id, pk.clone());
+
+            // USTM: LSM writes go to Warm zone (data lives on disk, not Hot DRAM).
+            let page_id = ustm_page_id(table_id, &pk);
+            let data = PageData::new(pk.clone());
+            self.ustm.insert_warm(page_id, data, AccessPriority::HotRow);
+
             return Ok(pk);
         }
 
@@ -127,6 +154,12 @@ impl StorageEngine {
                 new_row: new_row.clone(),
             })?;
             lsm.update(pk, &new_row, txn_id)?;
+
+            // USTM: refresh Warm zone entry after update.
+            let page_id = ustm_page_id(table_id, pk);
+            let data = PageData::new(pk.clone());
+            self.ustm.insert_warm(page_id, data, AccessPriority::HotRow);
+
             return Ok(());
         }
 
@@ -184,6 +217,11 @@ impl StorageEngine {
             })?;
             lsm.delete(pk, txn_id)?;
             self.record_write(txn_id, table_id, pk.clone());
+
+            // USTM: evict the deleted page from Warm zone.
+            let page_id = ustm_page_id(table_id, pk);
+            self.ustm.unregister_page(page_id);
+
             return Ok(());
         }
 
@@ -208,6 +246,12 @@ impl StorageEngine {
         // Rowstore
         if let Some(table) = self.tables.get(&table_id) {
             self.record_read(txn_id, table_id, pk.clone());
+
+            // USTM: record page access in Warm zone for LIRS-2 tracking.
+            let page_id = ustm_page_id(table_id, pk);
+            let data = PageData::new(pk.clone());
+            self.ustm.insert_warm(page_id, data, AccessPriority::HotRow);
+
             return Ok(table.get(pk, txn_id, read_ts));
         }
 
@@ -215,6 +259,23 @@ impl StorageEngine {
         #[cfg(feature = "disk_rowstore")]
         if let Some(disk) = self.disk_tables.get(&table_id) {
             return Ok(disk.get(pk, txn_id, read_ts));
+        }
+
+        // LSM rowstore (feature-gated)
+        #[cfg(feature = "lsm")]
+        if let Some(lsm) = self.lsm_tables.get(&table_id) {
+            self.record_read(txn_id, table_id, pk.clone());
+
+            // USTM: LSM point-get — check Warm zone first, then fall through to LSM.
+            // The Warm zone acts as a read cache for recently accessed LSM rows.
+            let page_id = ustm_page_id(table_id, pk);
+            let result = lsm.get(pk, txn_id, read_ts);
+
+            // Cache the access in Warm zone for LIRS-2 tracking.
+            let data = PageData::new(pk.clone());
+            self.ustm.insert_warm(page_id, data, AccessPriority::HotRow);
+
+            return Ok(result);
         }
 
         // Columnstore: point-get not efficient, return not found
@@ -237,6 +298,22 @@ impl StorageEngine {
             for (pk, _) in &results {
                 self.record_read(txn_id, table_id, pk.clone());
             }
+
+            // USTM: issue prefetch hint for sequential scan pages.
+            if results.len() > 1 {
+                let scan_pages: Vec<PageId> = (0..results.len().min(16) as u32)
+                    .map(|i| ustm_table_page_id(table_id, i))
+                    .collect();
+                self.ustm.prefetch_hint(
+                    crate::ustm::PrefetchSource::SeqScan {
+                        start_page: scan_pages[0],
+                        count: scan_pages.len(),
+                    },
+                    std::path::PathBuf::from(format!("table_{}", table_id.0)),
+                );
+                self.ustm.prefetch_tick();
+            }
+
             return Ok(results);
         }
 
@@ -257,6 +334,25 @@ impl StorageEngine {
         #[cfg(feature = "lsm")]
         if let Some(lsm) = self.lsm_tables.get(&table_id) {
             let results = lsm.scan(txn_id, read_ts);
+
+            // USTM: LSM scan — issue prefetch hints for upcoming SST pages.
+            // LSM data lives on disk, so prefetch is especially valuable.
+            if results.len() > 1 {
+                let data_dir = self
+                    .data_dir
+                    .as_deref()
+                    .unwrap_or_else(|| std::path::Path::new("."));
+                let sst_path = data_dir.join(format!("lsm_table_{}", table_id.0));
+                self.ustm.prefetch_hint(
+                    crate::ustm::PrefetchSource::SeqScan {
+                        start_page: ustm_table_page_id(table_id, 0),
+                        count: results.len().min(16),
+                    },
+                    sst_path,
+                );
+                self.ustm.prefetch_tick();
+            }
+
             return Ok(results);
         }
 

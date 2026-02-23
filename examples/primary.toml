@@ -20,6 +20,17 @@ flush_interval_us = 1000
 sync_mode = "fdatasync"
 segment_size_bytes = 67108864
 
+[ustm]
+enabled = true
+hot_capacity_bytes = 536870912       # 512 MB — MemTable + index internals
+warm_capacity_bytes = 268435456      # 256 MB — SST page cache (LIRS-2)
+lirs_lir_capacity = 4096             # Protected high-frequency pages
+lirs_hir_capacity = 1024             # Eviction candidate pages
+background_iops_limit = 500          # Max IOPS for compaction/GC
+prefetch_iops_limit = 200            # Max IOPS for query-driven prefetch
+prefetch_enabled = true              # Enable query-aware prefetcher
+page_size = 8192                     # Default page size (8 KB)
+
 [replication]
 role = "primary"
 grpc_listen_addr = "0.0.0.0:50051"

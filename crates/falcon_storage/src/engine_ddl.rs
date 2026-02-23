@@ -9,6 +9,7 @@ use falcon_common::types::TableId;
 
 use crate::memtable::MemTable;
 use crate::online_ddl::{DdlOpKind, BACKFILL_BATCH_SIZE};
+use crate::ustm::{AccessPriority, PageData, PageId};
 use crate::wal::WalRecord;
 
 #[cfg(feature = "columnstore")]
@@ -112,6 +113,15 @@ impl StorageEngine {
             }
         }
 
+        // USTM: register table metadata page in Hot zone.
+        let meta_page_id = PageId((table_id.0 as u64) << 32);
+        let meta_bytes = schema.name.as_bytes().to_vec();
+        let _ = self.ustm.alloc_hot(
+            meta_page_id,
+            PageData::new(meta_bytes),
+            AccessPriority::IndexInternal,
+        );
+
         // WAL + replication observer
         let json = serde_json::to_string(&schema)
             .map_err(|e| StorageError::Serialization(e.to_string()))?;
@@ -134,6 +144,10 @@ impl StorageEngine {
         self.disk_tables.remove(&table_id);
         #[cfg(feature = "lsm")]
         self.lsm_tables.remove(&table_id);
+
+        // USTM: unregister table metadata page.
+        let meta_page_id = PageId((table_id.0 as u64) << 32);
+        self.ustm.unregister_page(meta_page_id);
 
         self.append_and_flush_wal(&WalRecord::DropTable {
             table_name: name.to_string(),

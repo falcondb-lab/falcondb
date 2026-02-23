@@ -12,7 +12,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 
-use falcon_common::config::{NodeRole, WritePathEnforcement};
+use falcon_common::config::{NodeRole, UstmSectionConfig, WritePathEnforcement};
 use falcon_common::datum::OwnedRow;
 use falcon_common::error::StorageError;
 use falcon_common::schema::{Catalog, TableSchema};
@@ -388,9 +388,41 @@ pub struct StorageEngine {
     pub wal_archiver: RwLock<WalArchiver>,
     /// Change Data Capture stream manager.
     pub cdc_manager: RwLock<CdcManager>,
+    /// USTM (User-Space Tiered Memory) page cache engine.
+    pub ustm: Arc<crate::ustm::UstmEngine>,
 }
 
 impl StorageEngine {
+    /// Build a USTM engine from config (or use defaults).
+    fn build_ustm(cfg: &UstmSectionConfig) -> Arc<crate::ustm::UstmEngine> {
+        use crate::ustm::*;
+        Arc::new(UstmEngine::new(UstmConfig {
+            zones: ZoneConfig {
+                hot_capacity_bytes: cfg.hot_capacity_bytes,
+                warm_capacity_bytes: cfg.warm_capacity_bytes,
+                lirs2: Lirs2Config {
+                    lir_capacity: cfg.lirs_lir_capacity,
+                    hir_resident_capacity: cfg.lirs_hir_capacity,
+                    hir_nonresident_capacity: cfg.lirs_hir_capacity * 2,
+                },
+            },
+            io_scheduler: IoSchedulerConfig {
+                background_iops_limit: cfg.background_iops_limit,
+                prefetch_iops_limit: cfg.prefetch_iops_limit,
+                max_pending_per_queue: 1024,
+            },
+            prefetcher: PrefetcherConfig {
+                enabled: cfg.prefetch_enabled,
+                ..PrefetcherConfig::default()
+            },
+            default_page_size: cfg.page_size,
+        }))
+    }
+
+    fn default_ustm() -> Arc<crate::ustm::UstmEngine> {
+        Self::build_ustm(&UstmSectionConfig::default())
+    }
+
     /// Create a new storage engine. If `wal_dir` is Some, WAL is enabled.
     pub fn new(wal_dir: Option<&Path>) -> Result<Self, StorageError> {
         let wal = if let Some(dir) = wal_dir {
@@ -432,6 +464,7 @@ impl StorageEngine {
             partition_manager: RwLock::new(PartitionManager::new()),
             wal_archiver: RwLock::new(WalArchiver::disabled()),
             cdc_manager: RwLock::new(CdcManager::disabled()),
+            ustm: Self::default_ustm(),
         })
     }
 
@@ -517,6 +550,7 @@ impl StorageEngine {
             partition_manager: RwLock::new(PartitionManager::new()),
             wal_archiver: RwLock::new(WalArchiver::disabled()),
             cdc_manager: RwLock::new(CdcManager::disabled()),
+            ustm: Self::default_ustm(),
         })
     }
 
@@ -555,6 +589,7 @@ impl StorageEngine {
             partition_manager: RwLock::new(PartitionManager::new()),
             wal_archiver: RwLock::new(WalArchiver::disabled()),
             cdc_manager: RwLock::new(CdcManager::disabled()),
+            ustm: Self::default_ustm(),
         }
     }
 
@@ -593,7 +628,26 @@ impl StorageEngine {
             partition_manager: RwLock::new(PartitionManager::new()),
             wal_archiver: RwLock::new(WalArchiver::disabled()),
             cdc_manager: RwLock::new(CdcManager::disabled()),
+            ustm: Self::default_ustm(),
         }
+    }
+
+    /// Replace the USTM engine with one built from the given config.
+    /// Call this after construction if you have a custom `[ustm]` config section.
+    pub fn set_ustm_config(&mut self, cfg: &UstmSectionConfig) {
+        self.ustm = Self::build_ustm(cfg);
+        tracing::info!(
+            "USTM engine configured: hot={}MB, warm={}MB, lirs_lir={}, prefetch={}",
+            cfg.hot_capacity_bytes / (1024 * 1024),
+            cfg.warm_capacity_bytes / (1024 * 1024),
+            cfg.lirs_lir_capacity,
+            cfg.prefetch_enabled,
+        );
+    }
+
+    /// Get a snapshot of USTM engine statistics.
+    pub fn ustm_stats(&self) -> crate::ustm::UstmStats {
+        self.ustm.stats()
     }
 
     /// Set a WAL observer callback for replication. Called after every WAL append.
@@ -1631,6 +1685,23 @@ impl StorageEngine {
 
         tracing::info!("WAL recovery complete: {} records replayed", records.len());
         Ok(engine)
+    }
+
+    /// Gracefully shut down the storage engine.
+    /// Flushes WAL, shuts down USTM page cache, and releases resources.
+    pub fn shutdown(&self) {
+        self.ustm.shutdown();
+        if let Some(ref wal) = self.wal {
+            if let Err(e) = wal.flush() {
+                tracing::warn!("WAL flush on shutdown failed: {}", e);
+            }
+        }
+        tracing::info!(
+            "StorageEngine shut down (USTM stats: hot={}B, warm={}B, evictions={})",
+            self.ustm.stats().zones.hot_used_bytes,
+            self.ustm.stats().zones.warm_used_bytes,
+            self.ustm.stats().zones.evictions,
+        );
     }
 }
 

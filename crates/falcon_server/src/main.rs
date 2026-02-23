@@ -147,6 +147,11 @@ async fn main() -> Result<()> {
             );
         }
 
+        // Apply USTM configuration
+        if config.ustm.enabled {
+            engine.set_ustm_config(&config.ustm);
+        }
+
         // Hook WAL observer for primary replication
         if let Some(ref log) = replication_log {
             let log_clone = log.clone();
@@ -173,6 +178,11 @@ async fn main() -> Result<()> {
                 config.memory.shard_soft_limit_bytes,
                 config.memory.shard_hard_limit_bytes,
             );
+        }
+
+        // Apply USTM configuration
+        if config.ustm.enabled {
+            engine.set_ustm_config(&config.ustm);
         }
 
         // Even in-memory mode can replicate if role is Primary
