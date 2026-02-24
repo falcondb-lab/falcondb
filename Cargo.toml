@@ -83,6 +83,10 @@ uuid = { version = "1", features = ["v4"] }
 # Chrono
 chrono = { version = "0.4", features = ["serde"] }
 
+# TLS
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
+
 # CRC for WAL checksums
 crc32fast = "1"
 

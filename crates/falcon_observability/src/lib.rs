@@ -548,6 +548,79 @@ pub fn record_bg_supervisor_metrics(
 // Lock contention metrics (D6-1)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// v1.0.4: Determinism & failure safety metrics
+// ---------------------------------------------------------------------------
+
+/// Record transaction terminal state metrics (v1.0.4 §2).
+/// Every transaction MUST end with exactly one call to this function.
+pub fn record_txn_terminal_state(
+    terminal_type: &str, // "committed", "aborted_retryable", "aborted_non_retryable", "rejected", "indeterminate"
+    reason: &str,        // abort/reject reason or "" for committed
+    sqlstate: &str,
+) {
+    metrics::counter!(
+        "falcon_txn_terminal_total",
+        "type" => terminal_type.to_string(),
+        "reason" => reason.to_string(),
+        "sqlstate" => sqlstate.to_string()
+    )
+    .increment(1);
+}
+
+/// Record per-resource admission rejection (v1.0.4 §1).
+pub fn record_admission_rejection(resource_name: &str, sqlstate: &str) {
+    metrics::counter!(
+        "falcon_admission_rejection_total",
+        "resource" => resource_name.to_string(),
+        "sqlstate" => sqlstate.to_string()
+    )
+    .increment(1);
+}
+
+/// Record failover recovery duration (v1.0.4 §3).
+pub fn record_failover_recovery_duration_ms(duration_ms: u64, outcome: &str) {
+    metrics::histogram!(
+        "falcon_failover_recovery_duration_ms",
+        "outcome" => outcome.to_string()
+    )
+    .record(duration_ms as f64);
+    metrics::counter!(
+        "falcon_failover_recovery_total",
+        "outcome" => outcome.to_string()
+    )
+    .increment(1);
+}
+
+/// Record queue depth metrics (v1.0.4 §4).
+pub fn record_queue_depth_metrics(
+    queue_name: &str,
+    depth: u64,
+    capacity: u64,
+    peak: u64,
+    total_enqueued: u64,
+    total_rejected: u64,
+) {
+    let n = queue_name.to_string();
+    metrics::gauge!("falcon_queue_depth", "queue" => n.clone()).set(depth as f64);
+    metrics::gauge!("falcon_queue_capacity", "queue" => n.clone()).set(capacity as f64);
+    metrics::gauge!("falcon_queue_peak", "queue" => n.clone()).set(peak as f64);
+    metrics::gauge!("falcon_queue_enqueued_total", "queue" => n.clone())
+        .set(total_enqueued as f64);
+    metrics::gauge!("falcon_queue_rejected_total", "queue" => n).set(total_rejected as f64);
+}
+
+/// Record idempotent replay metrics (v1.0.4 §6).
+pub fn record_replay_metrics(
+    replayed_count: u64,
+    duplicate_count: u64,
+    violation_count: u64,
+) {
+    metrics::gauge!("falcon_replay_replayed_total").set(replayed_count as f64);
+    metrics::gauge!("falcon_replay_duplicate_total").set(duplicate_count as f64);
+    metrics::gauge!("falcon_replay_violation_total").set(violation_count as f64);
+}
+
 /// Record lock contention event for a named lock/structure.
 pub fn record_lock_contention(lock_name: &str, wait_us: u64) {
     metrics::counter!(

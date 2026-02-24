@@ -11,3 +11,4 @@ pub mod plan_cache;
 pub mod server;
 pub mod session;
 pub mod slow_query_log;
+pub mod tls;

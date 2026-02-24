@@ -24,6 +24,7 @@ pub mod routing;
 pub mod security_hardening;
 pub mod sharded_engine;
 pub mod stability_hardening;
+pub mod determinism_hardening;
 pub mod sharding;
 pub mod token_bucket;
 pub mod two_phase;
@@ -42,7 +43,11 @@ mod tests;
 pub use bg_supervisor::{
     BgTaskCriticality, BgTaskInfo, BgTaskSnapshot, BgTaskState, BgTaskSupervisor, NodeHealth,
 };
-pub use cluster::{NodeInfo, NodeStatus};
+pub use cluster::{
+    MemberInfo, MemberSummary, MembershipConfig, MembershipError, MembershipEvent,
+    MembershipEventType, MembershipManager, MembershipMetrics, MembershipView, NodeInfo,
+    NodeMetrics, NodeRole, NodeState, NodeStatus,
+};
 pub use cluster_ops::{
     ClusterAdmin, ClusterEvent, ClusterEventLog, EventCategory, EventSeverity, NodeModeController,
     NodeOperationalMode, ScaleInLifecycle, ScaleInState, ScaleOutLifecycle, ScaleOutState,
@@ -93,6 +98,12 @@ pub use stability_hardening::{
     FailoverOutcomeGuard, FailoverOutcomeGuardMetrics, InDoubtEscalator, InDoubtEscalatorMetrics,
     InDoubtReason, ProtocolPhase, ResolutionMethod, RetryGuard, RetryGuardMetrics,
     StateOrdinal, TxnOutcomeEntry, TxnOutcomeJournal, TxnStateGuard, TxnStateGuardMetrics,
+};
+pub use determinism_hardening::{
+    AbortReason, CommitPhase as DeterminismCommitPhase, DeterministicRejectPolicy,
+    FailoverCrashRecord, FailoverExpectedOutcome, IdempotentReplayValidator,
+    QueueDepthGuard, QueueDepthSnapshot, QueueSlot, RejectReason, ResourceExhaustionContract,
+    RetryPolicy, TxnTerminalState,
 };
 pub use sharded_engine::ShardedEngine;
 pub use sharding::{

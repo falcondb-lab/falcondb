@@ -5,7 +5,6 @@ use bytes::BytesMut;
 use dashmap::DashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-
 use falcon_cluster::{DistributedQueryEngine, ReplicaRunnerMetrics};
 use falcon_common::config::{AuthConfig, AuthMethod};
 use falcon_common::types::ShardId;
@@ -19,6 +18,8 @@ use crate::handler::QueryHandler;
 use crate::logical_replication;
 use crate::notify::NotificationHub;
 use crate::session::PgSession;
+use crate::tls::{self, TlsConfig};
+use tokio_rustls::TlsAcceptor;
 
 /// Entry in the cancellation registry for a session.
 struct CancelEntry {
@@ -59,6 +60,10 @@ pub struct PgServer {
     connection_pool: Option<Arc<ConnectionPool>>,
     /// Shared LISTEN/NOTIFY hub — all sessions share this so NOTIFY reaches all listeners.
     notification_hub: Arc<NotificationHub>,
+    /// Optional TLS acceptor (built from TlsConfig at startup).
+    tls_acceptor: Option<Arc<TlsAcceptor>>,
+    /// TLS configuration.
+    tls_config: TlsConfig,
 }
 
 impl PgServer {
@@ -85,6 +90,8 @@ impl PgServer {
             cancel_registry: Arc::new(DashMap::new()),
             connection_pool: None,
             notification_hub: Arc::new(NotificationHub::new()),
+            tls_acceptor: None,
+            tls_config: TlsConfig::default(),
         }
     }
 
@@ -114,7 +121,38 @@ impl PgServer {
             cancel_registry: Arc::new(DashMap::new()),
             connection_pool: None,
             notification_hub: Arc::new(NotificationHub::new()),
+            tls_acceptor: None,
+            tls_config: TlsConfig::default(),
         }
+    }
+
+    /// Configure TLS for SSL connections.
+    ///
+    /// **TLS-2**: If TLS is enabled but cert/key are invalid, this returns an error.
+    /// The caller MUST treat this as a fatal boot error.
+    pub fn set_tls_config(&mut self, config: TlsConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if config.enabled {
+            let acceptor = tls::build_tls_acceptor(&config)?;
+            self.tls_acceptor = Some(Arc::new(acceptor));
+            tracing::info!(
+                "TLS enabled (require={}), cert={:?}, key={:?}",
+                config.require,
+                config.cert_path,
+                config.key_path,
+            );
+        }
+        self.tls_config = config;
+        Ok(())
+    }
+
+    /// Whether TLS is configured and available.
+    pub fn tls_enabled(&self) -> bool {
+        self.tls_acceptor.is_some()
+    }
+
+    /// Whether TLS is required (plaintext rejected).
+    pub fn tls_required(&self) -> bool {
+        self.tls_config.require
     }
 
     /// Enable the server-side connection pool with the given configuration.
@@ -277,6 +315,8 @@ impl PgServer {
         let cancel_reg = self.cancel_registry.clone();
         let replica_metrics = self.replica_metrics.clone();
         let notification_hub = self.notification_hub.clone();
+        let tls_acceptor = self.tls_acceptor.clone();
+        let tls_required = self.tls_config.require;
 
         // Increment active connections now; the handler will decrement on exit.
         // The actual max_connections check happens after the startup handshake
@@ -305,6 +345,8 @@ impl PgServer {
                             auth_config,
                             cancel_reg.clone(),
                             notification_hub.clone(),
+                            tls_acceptor,
+                            tls_required,
                         )
                         .await
                         {
@@ -366,6 +408,8 @@ impl PgServer {
                     auth_config,
                     cancel_reg.clone(),
                     notification_hub,
+                    tls_acceptor,
+                    tls_required,
                 )
                 .await
                 {
@@ -382,7 +426,7 @@ impl PgServer {
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_connection_with_timeout(
-    mut stream: TcpStream,
+    mut raw_stream: TcpStream,
     session_id: i32,
     handler: QueryHandler,
     default_statement_timeout_ms: u64,
@@ -392,6 +436,8 @@ async fn handle_connection_with_timeout(
     auth_config: AuthConfig,
     cancel_registry: CancellationRegistry,
     notification_hub: Arc<NotificationHub>,
+    tls_acceptor: Option<Arc<TlsAcceptor>>,
+    tls_required: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut buf = BytesMut::with_capacity(8192);
     let mut session = PgSession::new_with_hub(session_id, notification_hub);
@@ -415,29 +461,118 @@ async fn handle_connection_with_timeout(
         },
     );
 
-    // Phase 1: Startup handshake
-    loop {
-        let n = stream.read_buf(&mut buf).await?;
+    // Phase 0: SSL/TLS negotiation (on raw TcpStream).
+    // PG protocol: if the client wants TLS, SslRequest is the first message.
+    // We handle it here, then wrap the stream as PgStream for all subsequent I/O.
+    let mut stream: crate::tls::PgStream = loop {
+        let n = raw_stream.read_buf(&mut buf).await?;
         if n == 0 {
             return Ok(());
         }
 
+        // Peek at the message to check for SslRequest without consuming non-SSL messages
+        if buf.len() >= 8 {
+            let version = i32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+            if version == 80877103 {
+                // SslRequest — consume it
+                let _ = codec::decode_startup(&mut buf)?;
+
+                if let Some(ref acceptor) = tls_acceptor {
+                    // Respond 'S' (willing to upgrade)
+                    raw_stream.write_all(b"S").await?;
+                    raw_stream.flush().await?;
+
+                    match acceptor.accept(raw_stream).await {
+                        Ok(tls_stream) => {
+                            tracing::info!("TLS handshake completed (session {})", session_id);
+                            break crate::tls::PgStream::Tls(tls_stream);
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "TLS handshake failed (session {}): {}", session_id, e
+                            );
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    // TLS not configured — respond 'N'
+                    raw_stream.write_all(b"N").await?;
+                    raw_stream.flush().await?;
+
+                    if tls_required {
+                        // TLS-1: require_ssl=true but no cert configured → reject
+                        tracing::warn!(
+                            "SSL required but not configured, rejecting session {}",
+                            session_id
+                        );
+                        return Ok(());
+                    }
+                    // Client will send Startup next on plaintext
+                    continue;
+                }
+            } else if version == 80877102 {
+                // CancelRequest — handle on raw stream
+                if let Some(FrontendMessage::CancelRequest {
+                    process_id,
+                    secret_key: sk,
+                }) = codec::decode_startup(&mut buf)?
+                {
+                    if let Some(entry) = cancel_registry.get(&process_id) {
+                        if entry.secret_key == sk {
+                            entry.cancelled.store(true, Ordering::SeqCst);
+                            tracing::info!(
+                                "Cancel request accepted for session {}", process_id
+                            );
+                        }
+                    }
+                }
+                return Ok(());
+            } else {
+                // Normal Startup message — no SSL requested
+                if tls_required {
+                    // TLS-1: plaintext connection when require_ssl=true → FATAL
+                    if let Some(FrontendMessage::Startup { .. }) =
+                        codec::decode_startup(&mut buf)?
+                    {
+                        let msg = BackendMessage::ErrorResponse {
+                            severity: "FATAL".into(),
+                            code: "08P01".into(),
+                            message: "no pg_hba.conf entry for host, SSL required".into(),
+                        };
+                        let err_buf = codec::encode_message(&msg);
+                        raw_stream.write_all(&err_buf).await?;
+                        raw_stream.flush().await?;
+                    }
+                    return Ok(());
+                }
+                // Wrap as plaintext PgStream — buf still has the Startup bytes
+                break crate::tls::PgStream::Plain(raw_stream);
+            }
+        }
+        // Not enough bytes yet, keep reading
+    };
+
+    // Phase 1: Startup handshake (on PgStream — either plain or TLS)
+    loop {
+        // If buf already has data from Phase 0, try to decode before reading more
+        if buf.is_empty() {
+            let n = stream.read_buf(&mut buf).await?;
+            if n == 0 {
+                return Ok(());
+            }
+        }
+
         match codec::decode_startup(&mut buf)? {
             Some(FrontendMessage::SslRequest) => {
-                // SSL/TLS negotiation: respond 'S' if TLS is configured, 'N' otherwise.
-                // A full TLS implementation would upgrade the stream here using
-                // tokio_rustls or tokio_native_tls. For now we signal willingness
-                // but fall back to 'N' since no TLS cert is configured at runtime.
-                // When TLS certs are provided, replace this with stream upgrade.
+                // Late SslRequest after initial negotiation — not supported, respond N
                 stream.write_all(b"N").await?;
+                stream.flush().await?;
                 continue;
             }
             Some(FrontendMessage::CancelRequest {
                 process_id,
                 secret_key: sk,
             }) => {
-                // Cancel request arrives on a separate connection.
-                // Look up the target session and signal cancellation.
                 if let Some(entry) = cancel_registry.get(&process_id) {
                     if entry.secret_key == sk {
                         entry.cancelled.store(true, Ordering::SeqCst);
@@ -449,7 +584,6 @@ async fn handle_connection_with_timeout(
                         );
                     }
                 }
-                // Per PG protocol, the cancel connection is closed immediately
                 return Ok(());
             }
             Some(FrontendMessage::Startup { version, params }) => {
@@ -1600,8 +1734,8 @@ async fn handle_connection_with_timeout(
 /// Replication commands arrive as simple Query messages. When START_REPLICATION
 /// is received, we enter CopyBoth streaming mode and send XLogData messages
 /// from the CDC buffer, with periodic keepalives.
-async fn handle_replication_session(
-    stream: &mut TcpStream,
+async fn handle_replication_session<S: AsyncReadExt + AsyncWriteExt + Unpin>(
+    stream: &mut S,
     buf: &mut BytesMut,
     session: &mut PgSession,
     session_id: i32,
@@ -1729,8 +1863,8 @@ async fn handle_replication_session(
 /// Polls CDC events from the slot, sends them as XLogData CopyData messages,
 /// and sends periodic keepalives. Exits when the client sends CopyDone or
 /// the connection closes.
-async fn handle_replication_streaming(
-    stream: &mut TcpStream,
+async fn handle_replication_streaming<S: AsyncReadExt + AsyncWriteExt + Unpin>(
+    stream: &mut S,
     buf: &mut BytesMut,
     storage: &Arc<StorageEngine>,
     slot_name: &str,
@@ -1875,8 +2009,8 @@ async fn handle_replication_streaming(
     }
 }
 
-async fn send_message(
-    stream: &mut TcpStream,
+async fn send_message<S: AsyncWriteExt + Unpin>(
+    stream: &mut S,
     msg: &BackendMessage,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let buf = codec::encode_message(msg);

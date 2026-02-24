@@ -19,3 +19,5 @@ md-5.workspace = true
 sha2.workspace = true
 dashmap.workspace = true
 parking_lot.workspace = true
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true

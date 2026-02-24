@@ -7,6 +7,72 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.0.4] — Production-Grade Determinism & Failure Safety
+
+### Added — Determinism Hardening (`falcon_cluster::determinism_hardening`)
+
+#### §1 Resource Exhaustion Contract
+- **`ResourceExhaustionContract`** — formalized exhaustion semantics for all 9 exhaustible
+  resources (memory hard/soft, WAL backlog, replication lag, connection/query/write/cross-shard/DDL
+  concurrency). Each entry defines: SQLSTATE, retry policy, max rejection latency, metric name.
+- **`validate_contracts()`** — compile-time self-consistency check for all contracts.
+- **`DeterministicRejectPolicy`** — unified per-resource rejection counter with total tracking.
+- **Invariant RES-1**: No resource exhaustion path may block implicitly.
+- **Invariant RES-2**: Every rejection increments a per-resource counter visible via metrics.
+- **Invariant RES-3**: No queue may grow without bound.
+
+#### §2 Transaction Outcome Formalization
+- **`TxnTerminalState`** enum — Committed, AbortedRetryable, AbortedNonRetryable, Rejected,
+  Indeterminate. Every txn MUST end in exactly one terminal state.
+- **`AbortReason`** — 9 variants covering all abort paths (serialization, deadlock, constraint,
+  timeout, explicit rollback, failover, read-only, storage error, invariant violation).
+- **`RejectReason`** — 10 variants covering all pre-admission rejection paths.
+- **`RetryPolicy`** — NoRetry, RetryAfter, ExponentialBackoff, RetryOnDifferentNode.
+- **`classify_error()`** — canonical FalconError → TxnTerminalState classification function.
+- Each terminal state maps to exactly one SQLSTATE code and retry policy.
+
+#### §3 Failover × Commit Invariant Validation
+- **`CommitPhase`** — Active → WalLogged → WalDurable → Visible → Acknowledged (strict ordering).
+- **`FailoverCrashRecord`** — models txn state at crash time for invariant validation.
+- **`validate_failover_invariants()`** — validates FC-1 (crash before CP-D → rollback),
+  FC-2 (crash after CP-D → survive), with policy-dependent handling.
+- Tests for all crash phases, violation detection, and policy-dependent behavior.
+
+#### §4 Queue Depth Guard
+- **`QueueDepthGuard`** — bounded queue with hard capacity and RAII `QueueSlot`.
+- No silent growth: `try_enqueue()` rejects immediately at capacity.
+- Peak tracking, total enqueued/rejected counters, snapshot for observability.
+
+#### §5 Idempotent Replay Validator
+- **`IdempotentReplayValidator`** — tracks replayed txn_ids, detects duplicate replays,
+  counts idempotency violations.
+
+### Added — Observability (v1.0.4 §6)
+- `falcon_txn_terminal_total{type,reason,sqlstate}` — counter per terminal state
+- `falcon_admission_rejection_total{resource,sqlstate}` — counter per resource rejection
+- `falcon_failover_recovery_duration_ms{outcome}` — histogram
+- `falcon_queue_depth{queue}`, `falcon_queue_capacity{queue}`, `falcon_queue_peak{queue}` — gauges
+- `falcon_queue_enqueued_total{queue}`, `falcon_queue_rejected_total{queue}` — gauges
+- `falcon_replay_replayed_total`, `falcon_replay_duplicate_total`, `falcon_replay_violation_total`
+
+### Added — Documentation (v1.0.4 §7)
+- `docs/CONSISTENCY.md` — normative consistency contract with 10 forbidden states,
+  code references for every invariant, observability contract
+- `docs/sql_compatibility.md` — frozen SQL compatibility matrix (statements, types,
+  operators, functions, explicitly unsupported features with SQLSTATE codes)
+- `docs/stability_report_v104.md` — stability evidence template with soak test config
+
+### Added — CI Gate
+- `scripts/ci_v104_determinism_gate.sh` — 7-gate verification (determinism tests,
+  stability regression, failover regression, full workspace, clippy, contract validation,
+  terminal state coverage)
+
+### Tests
+- 34 new unit tests in `determinism_hardening.rs`
+- All existing v1.0.3 stability and v1.0.2 failover tests preserved
+
+---
+
 ## [Unreleased] — Query Performance Optimization
 
 ### Improved — 1M Row Scan & Aggregate Performance (1.83x overall speedup)
