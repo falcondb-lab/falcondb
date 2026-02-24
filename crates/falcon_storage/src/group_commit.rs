@@ -59,6 +59,15 @@ pub struct GroupCommitConfig {
     pub flush_interval_us: u64,
     /// Maximum pending records before forcing an fsync.
     pub max_batch_size: u64,
+    /// Group commit coalescing window (microseconds).
+    /// The syncer thread sleeps for this duration to accumulate more
+    /// records before issuing a single fsync. Typical range: 100–500 µs.
+    /// Set to 0 for immediate flush (lowest latency, highest fsync rate).
+    pub group_commit_window_us: u64,
+    /// Capacity of the in-memory ring buffer (bytes) for WAL write batching.
+    /// Records accumulate here before being flushed to the WAL device.
+    /// Default: 256 KB.
+    pub ring_buffer_capacity: usize,
 }
 
 impl Default for GroupCommitConfig {
@@ -66,6 +75,8 @@ impl Default for GroupCommitConfig {
         Self {
             flush_interval_us: 1000, // 1ms
             max_batch_size: 64,
+            group_commit_window_us: 200, // 200µs default coalescing window
+            ring_buffer_capacity: 256 * 1024, // 256 KB
         }
     }
 }
@@ -83,6 +94,10 @@ pub struct GroupCommitStats {
     pub total_wait_us: AtomicU64,
     /// Maximum single wait time (microseconds).
     pub max_wait_us: AtomicU64,
+    /// Current ring buffer usage in bytes.
+    pub ring_buffer_used: AtomicU64,
+    /// Peak ring buffer usage in bytes.
+    pub ring_buffer_peak: AtomicU64,
 }
 
 impl GroupCommitStats {
@@ -93,6 +108,8 @@ impl GroupCommitStats {
             batches: AtomicU64::new(0),
             total_wait_us: AtomicU64::new(0),
             max_wait_us: AtomicU64::new(0),
+            ring_buffer_used: AtomicU64::new(0),
+            ring_buffer_peak: AtomicU64::new(0),
         }
     }
 
@@ -103,6 +120,8 @@ impl GroupCommitStats {
             batches: self.batches.load(Ordering::Relaxed),
             total_wait_us: self.total_wait_us.load(Ordering::Relaxed),
             max_wait_us: self.max_wait_us.load(Ordering::Relaxed),
+            ring_buffer_used: self.ring_buffer_used.load(Ordering::Relaxed),
+            ring_buffer_peak: self.ring_buffer_peak.load(Ordering::Relaxed),
         }
     }
 }
@@ -121,6 +140,8 @@ pub struct GroupCommitStatsSnapshot {
     pub batches: u64,
     pub total_wait_us: u64,
     pub max_wait_us: u64,
+    pub ring_buffer_used: u64,
+    pub ring_buffer_peak: u64,
 }
 
 /// The group commit syncer manages batched WAL fsync.
@@ -136,6 +157,8 @@ pub struct GroupCommitSyncer {
     shutdown: Arc<AtomicBool>,
     /// The LSN counter — each append increments this.
     next_lsn: AtomicU64,
+    /// Unflushed bytes in the ring buffer (written but not yet fsynced).
+    pending_bytes: AtomicU64,
 }
 
 impl GroupCommitSyncer {
@@ -155,8 +178,21 @@ impl GroupCommitSyncer {
             stats: Arc::new(GroupCommitStats::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
             next_lsn: AtomicU64::new(1),
+            pending_bytes: AtomicU64::new(0),
         });
         syncer
+    }
+
+    /// Returns the LSN that has been durably fsynced.
+    pub fn flushed_lsn(&self) -> u64 {
+        let (lock, _) = &*self.state;
+        let state = lock.lock().unwrap_or_else(|p| p.into_inner());
+        state.fsynced_lsn
+    }
+
+    /// Returns the number of bytes written but not yet fsynced (WAL backlog).
+    pub fn wal_backlog_bytes(&self) -> u64 {
+        self.pending_bytes.load(Ordering::Relaxed)
     }
 
     /// Start the background syncer thread. Returns a join handle.
@@ -253,6 +289,7 @@ impl GroupCommitSyncer {
     /// The background syncer loop.
     fn syncer_loop(&self) {
         let flush_interval = Duration::from_micros(self.config.flush_interval_us);
+        let coalesce_window = Duration::from_micros(self.config.group_commit_window_us);
 
         loop {
             if self.shutdown.load(Ordering::Relaxed) {
@@ -274,10 +311,14 @@ impl GroupCommitSyncer {
                     state.pending_count > 0
                 } else if state.pending_count >= self.config.max_batch_size {
                     true // Batch is full, flush immediately
-                } else {
-                    // Wait a short interval to coalesce more records
+                } else if self.config.group_commit_window_us > 0 {
+                    // Coalescing window: wait a short interval to accumulate
+                    // more records, reducing fsync rate and improving throughput.
                     drop(state);
-                    std::thread::sleep(flush_interval);
+                    std::thread::sleep(coalesce_window);
+                    true
+                } else {
+                    // No coalescing window: flush immediately
                     true
                 }
             };
@@ -303,7 +344,12 @@ impl GroupCommitSyncer {
             return Ok(());
         }
 
+        let wal_lsn = self.wal.current_lsn();
+        let backlog_before = self.pending_bytes.load(Ordering::Relaxed);
         self.wal.flush()?;
+
+        // Reset backlog — all pending bytes are now durable
+        self.pending_bytes.store(0, Ordering::Relaxed);
 
         {
             let (lock, cvar) = &*self.state;
@@ -319,6 +365,15 @@ impl GroupCommitSyncer {
             .records_synced
             .fetch_add(batch_size, Ordering::Relaxed);
         self.stats.batches.fetch_add(1, Ordering::Relaxed);
+        self.stats.ring_buffer_used.store(0, Ordering::Relaxed);
+
+        tracing::trace!(
+            batch_size = batch_size,
+            commit_lsn = lsn_snapshot,
+            flushed_lsn = wal_lsn,
+            backlog_bytes = backlog_before,
+            "group-commit flush"
+        );
 
         Ok(())
     }
@@ -344,6 +399,7 @@ mod tests {
         let config = GroupCommitConfig {
             flush_interval_us: 500,
             max_batch_size: 8,
+            ..Default::default()
         };
         let syncer = GroupCommitSyncer::new(wal, config);
         let handle = syncer.start_syncer().unwrap();
@@ -377,6 +433,7 @@ mod tests {
         let config = GroupCommitConfig {
             flush_interval_us: 10_000, // 10ms — long interval to encourage batching
             max_batch_size: 5,
+            ..Default::default()
         };
         let syncer = GroupCommitSyncer::new(wal, config);
         let handle = syncer.start_syncer().unwrap();
@@ -446,6 +503,7 @@ mod tests {
         let config = GroupCommitConfig {
             flush_interval_us: 500,
             max_batch_size: 16,
+            ..Default::default()
         };
         let syncer = GroupCommitSyncer::new(wal, config);
         let handle = syncer.start_syncer().unwrap();

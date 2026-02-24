@@ -23,7 +23,7 @@
 //! - Replication stream emitting records not yet WAL-durable → phantom commits
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -32,6 +32,185 @@ use falcon_common::error::StorageError;
 use falcon_common::types::{TableId, Timestamp, TxnId};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WAL Device Trait — abstraction over the durable storage backend
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Abstraction over the physical WAL storage backend.
+///
+/// Decouples WAL record serialisation from the I/O path so that future
+/// backends (Windows IOCP, O_DIRECT/raw disk, cloud block storage) can be
+/// swapped in without touching the `WalWriter` logic.
+///
+/// **Invariant**: After `flush()` returns `Ok(())`, all bytes passed to
+/// prior `append()` calls are durable (according to the configured
+/// `SyncMode`).
+pub trait WalDevice: Send + Sync {
+    /// Append raw bytes to the device. Returns the number of bytes written.
+    fn append(&self, data: &[u8]) -> Result<usize, StorageError>;
+
+    /// Flush buffered writes and (depending on `SyncMode`) fsync to disk.
+    fn flush(&self, sync_mode: SyncMode) -> Result<(), StorageError>;
+
+    /// Read `len` bytes starting at `offset` from the device.
+    fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, StorageError>;
+
+    /// Current size of the device in bytes.
+    fn size(&self) -> u64;
+
+    /// Rotate to a new segment / file. Returns the new segment identifier.
+    /// Implementations that don't support segmentation can return Ok(0).
+    fn rotate(&self) -> Result<u64, StorageError>;
+}
+
+/// File-based WAL device — the default implementation using POSIX/NTFS files.
+///
+/// This is a thin wrapper that captures the existing `BufWriter<File>` logic
+/// behind the `WalDevice` trait, preserving all existing behaviour.
+pub struct WalDeviceFile {
+    inner: Mutex<WalDeviceFileInner>,
+}
+
+struct WalDeviceFileInner {
+    writer: BufWriter<File>,
+    dir: PathBuf,
+    current_segment: u64,
+    current_size: u64,
+    max_segment_size: u64,
+}
+
+impl WalDeviceFile {
+    /// Open (or create) a WAL device backed by segment files in `dir`.
+    pub fn open(dir: &Path, max_segment_size: u64) -> Result<Self, StorageError> {
+        fs::create_dir_all(dir)?;
+
+        let latest = find_latest_segment_in(dir);
+        let seg_id = latest.unwrap_or(0);
+        let seg_path = dir.join(segment_filename(seg_id));
+
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&seg_path)?;
+        let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let is_new = file_len == 0;
+        let mut size = file_len;
+
+        let mut writer = BufWriter::new(file);
+        if is_new {
+            writer.write_all(WAL_MAGIC)?;
+            writer.write_all(&WAL_FORMAT_VERSION.to_le_bytes())?;
+            writer.flush()?;
+            size = WAL_SEGMENT_HEADER_SIZE as u64;
+        }
+
+        Ok(Self {
+            inner: Mutex::new(WalDeviceFileInner {
+                writer,
+                dir: dir.to_path_buf(),
+                current_segment: seg_id,
+                current_size: size,
+                max_segment_size,
+            }),
+        })
+    }
+
+    /// Current segment ID.
+    pub fn current_segment_id(&self) -> u64 {
+        self.inner.lock().current_segment
+    }
+
+    /// WAL directory path.
+    pub fn dir(&self) -> PathBuf {
+        self.inner.lock().dir.clone()
+    }
+}
+
+impl WalDevice for WalDeviceFile {
+    fn append(&self, data: &[u8]) -> Result<usize, StorageError> {
+        let mut inner = self.inner.lock();
+
+        // Check segment rotation
+        if inner.current_size + data.len() as u64 > inner.max_segment_size {
+            self.rotate_inner(&mut inner)?;
+        }
+
+        inner.writer.write_all(data)?;
+        inner.current_size += data.len() as u64;
+        Ok(data.len())
+    }
+
+    fn flush(&self, sync_mode: SyncMode) -> Result<(), StorageError> {
+        let mut inner = self.inner.lock();
+        inner.writer.flush()?;
+        match sync_mode {
+            SyncMode::None => {}
+            SyncMode::FSync | SyncMode::FDataSync => {
+                inner.writer.get_ref().sync_data()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, StorageError> {
+        let inner = self.inner.lock();
+        let seg_path = inner.dir.join(segment_filename(inner.current_segment));
+        let mut file = File::open(&seg_path)?;
+        use std::io::Seek;
+        file.seek(std::io::SeekFrom::Start(offset))?;
+        let mut buf = vec![0u8; len];
+        file.read_exact(&mut buf)?;
+        Ok(buf)
+    }
+
+    fn size(&self) -> u64 {
+        self.inner.lock().current_size
+    }
+
+    fn rotate(&self) -> Result<u64, StorageError> {
+        let mut inner = self.inner.lock();
+        self.rotate_inner(&mut inner)
+    }
+}
+
+impl WalDeviceFile {
+    fn rotate_inner(&self, inner: &mut WalDeviceFileInner) -> Result<u64, StorageError> {
+        inner.writer.flush()?;
+        inner.writer.get_ref().sync_data()?;
+
+        inner.current_segment += 1;
+        let new_path = inner.dir.join(segment_filename(inner.current_segment));
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&new_path)?;
+        inner.writer = BufWriter::new(file);
+        inner.writer.write_all(WAL_MAGIC)?;
+        inner.writer.write_all(&WAL_FORMAT_VERSION.to_le_bytes())?;
+        inner.current_size = WAL_SEGMENT_HEADER_SIZE as u64;
+
+        tracing::debug!("WAL device rotated to segment {}", inner.current_segment);
+        Ok(inner.current_segment)
+    }
+}
+
+/// Helper: find the latest segment file in a directory.
+fn find_latest_segment_in(dir: &Path) -> Option<u64> {
+    let mut max_id = None;
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("falcon_") && name.ends_with(".wal") {
+                if let Ok(id) = name[7..name.len() - 4].parse::<u64>() {
+                    max_id = Some(max_id.map_or(id, |cur: u64| cur.max(id)));
+                }
+            }
+        }
+    }
+    max_id
+}
 
 /// WAL format version for compatibility checks during online upgrades.
 /// Increment this when the WalRecord enum changes in a backward-incompatible way.
@@ -172,7 +351,7 @@ const DEFAULT_SEGMENT_SIZE: u64 = 64 * 1024 * 1024;
 /// Default group commit batch: 32 records.
 const DEFAULT_GROUP_COMMIT_SIZE: usize = 32;
 
-fn segment_filename(segment_id: u64) -> String {
+pub fn segment_filename(segment_id: u64) -> String {
     format!("falcon_{:06}.wal", segment_id)
 }
 

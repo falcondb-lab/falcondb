@@ -240,13 +240,26 @@ impl PgServer {
     ///
     /// The server stops accepting new connections when `shutdown` resolves,
     /// then waits up to `drain_timeout` for active connections to finish.
+    ///
+    /// **Shutdown contract**: The `TcpListener` is explicitly dropped inside
+    /// this method before returning. This guarantees deterministic port release
+    /// on both Windows and Linux — we never rely on runtime drop ordering.
     pub async fn run_with_shutdown(
         &self,
         shutdown: impl std::future::Future<Output = ()>,
         drain_timeout: std::time::Duration,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let listener = TcpListener::bind(&self.listen_addr).await?;
-        tracing::info!("FalconDB PG server listening on {}", self.listen_addr);
+        let local_addr = listener
+            .local_addr()
+            .map(|a| a.to_string())
+            .unwrap_or_else(|_| self.listen_addr.clone());
+        let port = local_addr
+            .rsplit(':')
+            .next()
+            .unwrap_or("unknown")
+            .to_string();
+        tracing::info!("FalconDB PG server listening on {}", local_addr);
 
         tokio::pin!(shutdown);
 
@@ -258,11 +271,21 @@ impl PgServer {
                     self.spawn_connection(stream);
                 }
                 _ = &mut shutdown => {
-                    tracing::info!("Shutdown signal received, stopping new connections");
                     break;
                 }
             }
         }
+
+        // ── Explicit listener drop — deterministic port release ──
+        // This MUST happen before we return, not as a side-effect of
+        // function exit or runtime teardown.
+        drop(listener);
+        tracing::info!(
+            server = "pg_server",
+            port = %port,
+            "pg server shutdown: listener dropped (port={})",
+            port,
+        );
 
         // Drain active connections
         let active = self.active_connections.load(Ordering::Relaxed);
@@ -298,7 +321,7 @@ impl PgServer {
             }
         }
 
-        tracing::info!("Graceful shutdown complete");
+        tracing::info!("PG server graceful shutdown complete");
         Ok(())
     }
 
@@ -2241,14 +2264,29 @@ fn decode_param_value_binary(
             // Binary format: raw bytes, no encoding needed
             Datum::Bytea(bytes.to_vec())
         }
+        Some(DataType::Uuid) => {
+            // PG binary UUID format: 16 bytes raw
+            if bytes.len() == 16 {
+                let s = format!(
+                    "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                    bytes[0], bytes[1], bytes[2], bytes[3],
+                    bytes[4], bytes[5],
+                    bytes[6], bytes[7],
+                    bytes[8], bytes[9],
+                    bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+                );
+                Datum::Text(s)
+            } else {
+                Datum::Text(String::from_utf8_lossy(bytes).into_owned())
+            }
+        }
         Some(DataType::Text)
         | Some(DataType::Timestamp)
         | Some(DataType::Date)
         | Some(DataType::Jsonb)
         | Some(DataType::Array(_))
         | Some(DataType::Time)
-        | Some(DataType::Interval)
-        | Some(DataType::Uuid) => Datum::Text(String::from_utf8_lossy(bytes).into_owned()),
+        | Some(DataType::Interval) => Datum::Text(String::from_utf8_lossy(bytes).into_owned()),
         Some(DataType::Decimal(_, _)) => {
             let s = String::from_utf8_lossy(bytes);
             Datum::parse_decimal(&s).unwrap_or(Datum::Text(s.into_owned()))
@@ -2774,6 +2812,32 @@ mod tests {
             decode_param_value_binary(&Some(vec![1u8]), None),
             Datum::Boolean(true)
         ));
+    }
+
+    #[test]
+    fn test_decode_binary_uuid_16bytes() {
+        use falcon_common::datum::Datum;
+        use falcon_common::types::DataType;
+        // UUID: 550e8400-e29b-41d4-a716-446655440000
+        let raw = Some(vec![
+            0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44,
+            0x00, 0x00,
+        ]);
+        match decode_param_value_binary(&raw, Some(&DataType::Uuid)) {
+            Datum::Text(s) => assert_eq!(s, "550e8400-e29b-41d4-a716-446655440000"),
+            other => panic!("expected UUID text, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_decode_binary_uuid_text_fallback() {
+        use falcon_common::datum::Datum;
+        use falcon_common::types::DataType;
+        let raw = Some(b"550e8400-e29b-41d4-a716-446655440000".to_vec());
+        match decode_param_value_binary(&raw, Some(&DataType::Uuid)) {
+            Datum::Text(s) => assert_eq!(s, "550e8400-e29b-41d4-a716-446655440000"),
+            other => panic!("expected UUID text, got {:?}", other),
+        }
     }
 
     // ── SCRAM-SHA-256 crypto helper tests ──

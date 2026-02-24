@@ -5,7 +5,9 @@ edition.workspace = true
 
 [dependencies]
 falcon_common = { path = "../falcon_common" }
+falcon_proto = { path = "../falcon_proto" }
 tokio.workspace = true
+tokio-stream = { workspace = true }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -14,3 +16,6 @@ tracing.workspace = true
 thiserror.workspace = true
 openraft.workspace = true
 parking_lot.workspace = true
+tonic.workspace = true
+prost.workspace = true
+futures-core = "0.3"

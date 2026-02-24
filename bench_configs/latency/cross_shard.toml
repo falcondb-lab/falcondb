@@ -1,0 +1,25 @@
+# FalconDB P2 — Cross-Shard Distributed Query Benchmark
+# Verifies pushdown effectiveness and network byte reduction.
+
+[workload]
+duration_sec = 300
+concurrent_connections = 50
+target_tps = 200
+shard_count = 4
+cross_shard_ratio = 0.5
+agg_query_ratio = 0.3
+limit_query_ratio = 0.4
+table_count = 10
+rows_per_table = 100000
+
+[workload.mix]
+select = 70
+insert = 15
+update = 10
+delete = 5
+
+[thresholds]
+max_p99_ms = 50
+max_p999_ms = 200
+max_network_bytes_per_query = 1048576
+min_pushdown_savings_pct = 20

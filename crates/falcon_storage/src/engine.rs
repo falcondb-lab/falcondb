@@ -398,6 +398,11 @@ pub struct StorageEngine {
     /// Pre-tracked write-buffer bytes per transaction (set during batch_insert).
     /// Avoids re-scanning the write-set in estimate_write_set_bytes at commit.
     pub(crate) txn_write_bytes: DashMap<TxnId, AtomicU64>,
+    // ── v1.0.7: Hot/Cold Memory Tiering ──
+    /// Cold store for compressed old MVCC version payloads.
+    pub cold_store: Arc<crate::cold_store::ColdStore>,
+    /// String intern pool for low-cardinality string deduplication.
+    pub intern_pool: Arc<crate::cold_store::StringInternPool>,
 }
 
 impl StorageEngine {
@@ -481,6 +486,8 @@ impl StorageEngine {
             cdc_manager: RwLock::new(CdcManager::disabled()),
             ustm: Self::default_ustm(),
             txn_write_bytes: DashMap::new(),
+            cold_store: Arc::new(crate::cold_store::ColdStore::new_in_memory()),
+            intern_pool: Arc::new(crate::cold_store::StringInternPool::new()),
         })
     }
 
@@ -577,6 +584,8 @@ impl StorageEngine {
             cdc_manager: RwLock::new(CdcManager::disabled()),
             ustm: Self::default_ustm(),
             txn_write_bytes: DashMap::new(),
+            cold_store: Arc::new(crate::cold_store::ColdStore::new_in_memory()),
+            intern_pool: Arc::new(crate::cold_store::StringInternPool::new()),
         })
     }
 
@@ -619,6 +628,8 @@ impl StorageEngine {
             cdc_manager: RwLock::new(CdcManager::disabled()),
             ustm: Self::default_ustm(),
             txn_write_bytes: DashMap::new(),
+            cold_store: Arc::new(crate::cold_store::ColdStore::new_in_memory()),
+            intern_pool: Arc::new(crate::cold_store::StringInternPool::new()),
         }
     }
 
@@ -661,6 +672,8 @@ impl StorageEngine {
             cdc_manager: RwLock::new(CdcManager::disabled()),
             ustm: Self::default_ustm(),
             txn_write_bytes: DashMap::new(),
+            cold_store: Arc::new(crate::cold_store::ColdStore::new_in_memory()),
+            intern_pool: Arc::new(crate::cold_store::StringInternPool::new()),
         }
     }
 
@@ -1187,6 +1200,60 @@ impl StorageEngine {
             wal.flush()?;
         }
         Ok(())
+    }
+
+    /// Current WAL LSN (monotonically increasing sequence number).
+    /// Returns 0 if WAL is disabled.
+    pub fn current_wal_lsn(&self) -> u64 {
+        self.wal.as_ref().map_or(0, |w| w.current_lsn())
+    }
+
+    /// Current WAL segment ID. Returns 0 if WAL is disabled.
+    pub fn current_wal_segment(&self) -> u64 {
+        self.wal.as_ref().map_or(0, |w| w.current_segment_id())
+    }
+
+    /// Flushed (durable) WAL LSN — approximated from WAL stats.
+    /// In production, the GroupCommitSyncer tracks the precise flushed LSN;
+    /// here we report current_lsn as the upper bound (records appended).
+    /// The actual flushed LSN is <= current_lsn. Returns 0 if WAL is disabled.
+    pub fn flushed_wal_lsn(&self) -> u64 {
+        // Best approximation: if flushes > 0, the latest flush covered up to current_lsn.
+        // The GroupCommitSyncer (external) tracks the precise boundary.
+        if self.wal_stats.flushes.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+            self.current_wal_lsn()
+        } else {
+            0
+        }
+    }
+
+    /// Current WAL backlog bytes (written but not yet replicated/archived).
+    /// Returns 0 if WAL is disabled.
+    pub fn wal_backlog_bytes(&self) -> u64 {
+        self.wal_stats.backlog_bytes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    // ── v1.0.7: Cold Store accessors ────────────────────────────────
+
+    /// Snapshot of cold store metrics.
+    pub fn cold_store_metrics(&self) -> crate::cold_store::ColdStoreMetricsSnapshot {
+        self.cold_store.metrics.snapshot()
+    }
+
+    /// Hot memory bytes (MVCC bytes tracked by memory tracker).
+    pub fn memory_hot_bytes(&self) -> u64 {
+        let snap = self.memory_tracker.snapshot();
+        snap.mvcc_bytes
+    }
+
+    /// Cold memory bytes (compressed, in cold store).
+    pub fn memory_cold_bytes(&self) -> u64 {
+        self.cold_store.metrics.cold_bytes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// String intern pool hit rate.
+    pub fn intern_hit_rate(&self) -> f64 {
+        self.intern_pool.hit_rate()
     }
 
     // ── Garbage Collection ──────────────────────────────────────────

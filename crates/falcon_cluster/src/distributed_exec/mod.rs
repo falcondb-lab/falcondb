@@ -10,6 +10,7 @@
 //! - **Timeout**: per-scatter timeout check after each shard completes
 
 pub mod gather;
+pub mod network_stats;
 pub mod scatter;
 
 // Re-export all public types at the module level for backward compatibility.

@@ -92,6 +92,42 @@ impl QueryHandler {
                     ],
                 ));
             }
+            // pg_stat_user_tables — table statistics (Hibernate/Spring query this)
+            if sql_lower.contains("pg_stat_user_tables") {
+                return Some(self.handle_pg_stat_user_tables());
+            }
+            // pg_statio_user_tables — table I/O statistics (ORM startup probe)
+            if sql_lower.contains("pg_statio_user_tables") {
+                return Some(self.handle_pg_statio_user_tables());
+            }
+            // pg_class — generic (without relkind filter handled above)
+            if sql_lower.contains("pg_class") {
+                return Some(self.handle_pg_class(sql_lower));
+            }
+            // pg_proc — function/procedure listing (ORM introspection)
+            if sql_lower.contains("pg_proc") {
+                return Some(self.single_row_result(
+                    vec![
+                        ("oid", 23, 4),
+                        ("proname", 25, -1),
+                        ("pronamespace", 23, 4),
+                        ("prorettype", 23, 4),
+                    ],
+                    vec![],
+                ));
+            }
+            // pg_enum — enum type values (ORM introspection)
+            if sql_lower.contains("pg_enum") {
+                return Some(self.single_row_result(
+                    vec![
+                        ("oid", 23, 4),
+                        ("enumtypid", 23, 4),
+                        ("enumsortorder", 701, 8),
+                        ("enumlabel", 25, -1),
+                    ],
+                    vec![],
+                ));
+            }
             // Fallback: empty result for unhandled catalog queries
             return Some(self.single_row_result(vec![], vec![]));
         }
@@ -813,6 +849,136 @@ impl QueryHandler {
                 Some("Default isolation level".into()),
             ],
         ];
+        self.single_row_result(cols, rows)
+    }
+
+    /// pg_stat_user_tables — table-level statistics (Hibernate/Spring probe this on startup).
+    fn handle_pg_stat_user_tables(&self) -> Vec<BackendMessage> {
+        let catalog = self.storage.get_catalog();
+        let tables = catalog.list_tables();
+
+        let cols = vec![
+            ("relid", 23, 4i16),
+            ("schemaname", 25, -1),
+            ("relname", 25, -1),
+            ("seq_scan", 20, 8),
+            ("seq_tup_read", 20, 8),
+            ("idx_scan", 20, 8),
+            ("idx_tup_fetch", 20, 8),
+            ("n_tup_ins", 20, 8),
+            ("n_tup_upd", 20, 8),
+            ("n_tup_del", 20, 8),
+            ("n_live_tup", 20, 8),
+            ("n_dead_tup", 20, 8),
+        ];
+
+        let rows: Vec<Vec<Option<String>>> = tables
+            .iter()
+            .map(|t| {
+                let oid = (t.id.0 as i64 + 16384).to_string();
+                vec![
+                    Some(oid),
+                    Some("public".into()),
+                    Some(t.name.clone()),
+                    Some("0".into()), // seq_scan
+                    Some("0".into()), // seq_tup_read
+                    Some("0".into()), // idx_scan
+                    Some("0".into()), // idx_tup_fetch
+                    Some("0".into()), // n_tup_ins
+                    Some("0".into()), // n_tup_upd
+                    Some("0".into()), // n_tup_del
+                    Some("0".into()), // n_live_tup
+                    Some("0".into()), // n_dead_tup
+                ]
+            })
+            .collect();
+
+        self.single_row_result(cols, rows)
+    }
+
+    /// pg_statio_user_tables — table I/O statistics (ORM startup probe).
+    fn handle_pg_statio_user_tables(&self) -> Vec<BackendMessage> {
+        let catalog = self.storage.get_catalog();
+        let tables = catalog.list_tables();
+
+        let cols = vec![
+            ("relid", 23, 4i16),
+            ("schemaname", 25, -1),
+            ("relname", 25, -1),
+            ("heap_blks_read", 20, 8),
+            ("heap_blks_hit", 20, 8),
+            ("idx_blks_read", 20, 8),
+            ("idx_blks_hit", 20, 8),
+        ];
+
+        let rows: Vec<Vec<Option<String>>> = tables
+            .iter()
+            .map(|t| {
+                let oid = (t.id.0 as i64 + 16384).to_string();
+                vec![
+                    Some(oid),
+                    Some("public".into()),
+                    Some(t.name.clone()),
+                    Some("0".into()),
+                    Some("0".into()),
+                    Some("0".into()),
+                    Some("0".into()),
+                ]
+            })
+            .collect();
+
+        self.single_row_result(cols, rows)
+    }
+
+    /// pg_catalog.pg_class — generic handler for pg_class queries without relkind filter.
+    fn handle_pg_class(&self, sql_lower: &str) -> Vec<BackendMessage> {
+        let catalog = self.storage.get_catalog();
+        let tables = catalog.list_tables();
+
+        let filter_name = extract_where_eq(sql_lower, "relname");
+        let filter_oid = extract_where_eq(sql_lower, "oid");
+
+        let cols = vec![
+            ("oid", 23, 4i16),
+            ("relname", 25, -1),
+            ("relnamespace", 23, 4),
+            ("relkind", 18, 1),
+            ("reltuples", 701, 8),
+            ("relpages", 23, 4),
+            ("relhasindex", 16, 1),
+            ("relowner", 23, 4),
+        ];
+
+        let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+        for t in &tables {
+            let oid = (t.id.0 as i64 + 16384).to_string();
+            if let Some(ref f) = filter_name {
+                if t.name.to_lowercase() != *f {
+                    continue;
+                }
+            }
+            if let Some(ref f) = filter_oid {
+                if *f != oid {
+                    continue;
+                }
+            }
+            let has_index = if !t.primary_key_columns.is_empty() {
+                "t"
+            } else {
+                "f"
+            };
+            rows.push(vec![
+                Some(oid),
+                Some(t.name.clone()),
+                Some("2200".into()), // public namespace
+                Some("r".into()),    // ordinary table
+                Some("0".into()),    // reltuples (unknown)
+                Some("0".into()),    // relpages
+                Some(has_index.into()),
+                Some("10".into()), // owner OID
+            ]);
+        }
+
         self.single_row_result(cols, rows)
     }
 }

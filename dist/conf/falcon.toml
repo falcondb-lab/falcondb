@@ -1,0 +1,107 @@
+# ============================================================================
+# FalconDB Configuration — Windows Green Distribution
+# ============================================================================
+#
+# This file is loaded via:
+#   falcon.exe --config conf\falcon.toml
+#
+# All paths are relative to the ZIP root (parent of bin/).
+# When running from FalconDB\bin\, the working directory should be FalconDB\.
+
+# Config schema version — do not edit manually. Use 'falcon config migrate'.
+config_version = 3
+
+# ── Server ──────────────────────────────────────────────────────────────────
+
+[server]
+# PostgreSQL wire-protocol listen address.
+# Connect with: psql -h 127.0.0.1 -p 5443
+pg_listen_addr = "0.0.0.0:5443"
+
+# Admin / health-check HTTP listen address.
+# Probes: GET /health, GET /ready, GET /status
+admin_listen_addr = "0.0.0.0:8080"
+
+# Unique node identifier (change for multi-node clusters).
+node_id = 1
+
+# Maximum concurrent client connections (0 = unlimited).
+max_connections = 1024
+
+# Statement execution timeout in milliseconds (0 = no timeout).
+statement_timeout_ms = 0
+
+# Idle connection timeout in milliseconds (0 = no timeout).
+idle_timeout_ms = 300000   # 5 minutes
+
+# Seconds to wait for active connections to drain on shutdown.
+shutdown_drain_timeout_secs = 30
+
+# ── Authentication ──────────────────────────────────────────────────────────
+# method: "trust" (no auth), "password", "md5", "scram-sha-256"
+[server.auth]
+method = "trust"
+# username = ""
+# password = ""
+
+# ── TLS (optional) ─────────────────────────────────────────────────────────
+# Uncomment and set paths to enable TLS on the PG wire protocol.
+[server.tls]
+# cert_path = "conf/server.crt"
+# key_path  = "conf/server.key"
+
+# ── Storage ─────────────────────────────────────────────────────────────────
+
+[storage]
+# Data directory for WAL segments, snapshots, and SST files.
+# Relative to the working directory (should be the ZIP root).
+data_dir = "data"
+
+# Enable WAL for crash recovery and replication.
+wal_enabled = true
+
+# Memory limit in bytes (0 = unlimited, uses available RAM).
+memory_limit_bytes = 0
+
+# ── WAL ─────────────────────────────────────────────────────────────────────
+
+[wal]
+# Group commit: batch multiple transactions into one fsync.
+group_commit = true
+
+# Group commit flush interval in microseconds.
+flush_interval_us = 1000
+
+# Sync mode: "fsync", "fdatasync", or "none".
+# "fdatasync" is the recommended default for Windows + Linux.
+sync_mode = "fdatasync"
+
+# Maximum WAL segment size before rotation (64 MB).
+segment_size_bytes = 67108864
+
+# ── Replication ─────────────────────────────────────────────────────────────
+
+[replication]
+# Node role: "standalone", "primary", "replica", "analytics"
+role = "standalone"
+
+# gRPC listen address for replication service (primary only).
+grpc_listen_addr = "0.0.0.0:50051"
+
+# Primary's gRPC endpoint (replica/analytics only).
+primary_endpoint = "http://127.0.0.1:50051"
+
+# ── Memory Backpressure ─────────────────────────────────────────────────────
+
+[memory]
+# Per-shard soft/hard memory limits (0 = disabled).
+# shard_soft_limit_bytes = 1073741824   # 1 GB
+# shard_hard_limit_bytes = 2147483648   # 2 GB
+
+# ── GC ──────────────────────────────────────────────────────────────────────
+
+[gc]
+enabled = true
+interval_ms = 1000
+batch_size = 0
+min_chain_length = 2

@@ -9,3 +9,7 @@
 pub mod falcon_replication {
     tonic::include_proto!("falcon.replication");
 }
+
+pub mod falcon_raft {
+    tonic::include_proto!("falcon.raft");
+}

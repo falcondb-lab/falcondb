@@ -1,8 +1,14 @@
 use serde::{Deserialize, Serialize};
 
+/// Current config schema version. Bump when config format changes.
+pub const CURRENT_CONFIG_VERSION: u32 = 4;
+
 /// Top-level server configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FalconConfig {
+    /// Config schema version. Used for automated migration on upgrades.
+    #[serde(default = "default_config_version")]
+    pub config_version: u32,
     pub server: ServerConfig,
     pub storage: StorageConfig,
     pub wal: WalConfig,
@@ -16,7 +22,18 @@ pub struct FalconConfig {
     pub gc: GcSectionConfig,
     #[serde(default)]
     pub ustm: UstmSectionConfig,
+    /// v1.0.8: Compression profile (off / balanced / aggressive).
+    #[serde(default = "default_compression_profile")]
+    pub compression_profile: String,
+    /// v1.0.8: WAL backend mode (auto / posix / win_async / raw_experimental).
+    #[serde(default = "default_wal_mode")]
+    pub wal_mode: String,
+    /// v1.0.8: Gateway configuration.
+    #[serde(default)]
+    pub gateway: GatewayConfig,
 }
+
+fn default_config_version() -> u32 { CURRENT_CONFIG_VERSION }
 
 /// GC configuration section in falcon.toml.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,6 +149,11 @@ fn default_shutdown_drain_timeout_secs() -> u64 {
     30
 }
 
+fn default_wal_backend() -> String { "file".to_string() }
+fn default_group_commit_window_us() -> u64 { 200 }
+fn default_compression_profile() -> String { "balanced".to_string() }
+fn default_wal_mode() -> String { "auto".to_string() }
+
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
@@ -186,6 +208,15 @@ pub struct WalConfig {
     /// transactions are rejected. 0 = disabled.
     #[serde(default)]
     pub replication_lag_admission_threshold_ms: u64,
+    /// v1.0.7: WAL backend mode. Values: "file" (default), "win_async_file".
+    #[serde(default = "default_wal_backend")]
+    pub backend: String,
+    /// v1.0.7: Enable FILE_FLAG_NO_BUFFERING on Windows (requires NTFS, aligned writes).
+    #[serde(default)]
+    pub no_buffering: bool,
+    /// v1.0.7: Group commit coalescing window in microseconds (0 = immediate).
+    #[serde(default = "default_group_commit_window_us")]
+    pub group_commit_window_us: u64,
 }
 
 /// Configuration for spill-to-disk (external sort, hash aggregation overflow).
@@ -450,9 +481,46 @@ impl Default for MemoryConfig {
     }
 }
 
+/// v1.0.8: Gateway configuration section in falcon.toml.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayConfig {
+    /// Gateway role: "smart_gateway" (default), "dedicated_gateway", "compute_only".
+    #[serde(default = "default_gateway_role")]
+    pub role: String,
+    /// Maximum concurrent inflight requests (0 = unlimited).
+    #[serde(default)]
+    pub max_inflight: u64,
+    /// Maximum concurrent forwarded requests (0 = unlimited).
+    #[serde(default)]
+    pub max_forwarded: u64,
+    /// Forward request timeout in milliseconds.
+    #[serde(default = "default_forward_timeout_ms")]
+    pub forward_timeout_ms: u64,
+    /// Topology cache staleness threshold in seconds.
+    #[serde(default = "default_topology_staleness_secs")]
+    pub topology_staleness_secs: u64,
+}
+
+fn default_gateway_role() -> String { "smart_gateway".to_string() }
+fn default_forward_timeout_ms() -> u64 { 5000 }
+fn default_topology_staleness_secs() -> u64 { 30 }
+
+impl Default for GatewayConfig {
+    fn default() -> Self {
+        Self {
+            role: default_gateway_role(),
+            max_inflight: 0,
+            max_forwarded: 0,
+            forward_timeout_ms: default_forward_timeout_ms(),
+            topology_staleness_secs: default_topology_staleness_secs(),
+        }
+    }
+}
+
 impl Default for FalconConfig {
     fn default() -> Self {
         Self {
+            config_version: CURRENT_CONFIG_VERSION,
             server: ServerConfig {
                 pg_listen_addr: "0.0.0.0:5433".to_string(),
                 admin_listen_addr: "0.0.0.0:8080".to_string(),
@@ -479,12 +547,18 @@ impl Default for FalconConfig {
                 durability_policy: DurabilityPolicy::LocalFsync,
                 backlog_admission_threshold_bytes: 0,
                 replication_lag_admission_threshold_ms: 0,
+                backend: default_wal_backend(),
+                no_buffering: false,
+                group_commit_window_us: default_group_commit_window_us(),
             },
             replication: ReplicationConfig::default(),
             spill: SpillConfig::default(),
             memory: MemoryConfig::default(),
             gc: GcSectionConfig::default(),
             ustm: UstmSectionConfig::default(),
+            compression_profile: default_compression_profile(),
+            wal_mode: default_wal_mode(),
+            gateway: GatewayConfig::default(),
         }
     }
 }

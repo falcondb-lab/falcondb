@@ -26,7 +26,9 @@ pub mod sharded_engine;
 pub mod stability_hardening;
 pub mod determinism_hardening;
 pub mod sharding;
+pub mod sla_admission;
 pub mod token_bucket;
+pub mod smart_gateway;
 pub mod two_phase;
 
 /// Protobuf types and tonic client/server for WAL replication.
@@ -67,7 +69,10 @@ pub use ha::{
     FailoverOrchestratorMetrics, FailureDetector, HAConfig, HAReplicaGroup, HAReplicaStatus,
     HAStatus, PrimaryHealth, ReplicaHealth, ReplicaHealthStatus, SyncMode, SyncReplicationWaiter,
 };
-pub use query_engine::DistributedQueryEngine;
+pub use query_engine::{
+    DistributedQueryEngine, GatewayAdmissionConfig, GatewayAdmissionControl,
+    GatewayDisposition, GatewayMetrics, GatewayMetricsSnapshot,
+};
 pub use rebalancer::{
     MigrationPhase, MigrationPlan, MigrationStatus, MigrationTask, RebalanceRunner,
     RebalanceRunnerConfig, RebalanceRunnerHandle, RebalancerConfig, RebalancerStatus,
@@ -110,5 +115,17 @@ pub use sharding::{
     all_shards_for_table, compute_shard_hash, compute_shard_hash_from_datums, target_shard_for_row,
     target_shard_from_datums,
 };
+pub use sla_admission::{
+    AdmissionDecision, LatencyPercentiles, LatencyTracker, RejectionExplanation, RejectionSignal,
+    SlaAdmissionController, SlaAdmissionMetrics, SlaConfig, SlaPermit, TxnClass,
+    TxnClassificationHints, classify_txn,
+};
 pub use token_bucket::{TokenBucket, TokenBucketConfig, TokenBucketError, TokenBucketSnapshot};
+pub use smart_gateway::{
+    ClusterTopology, CompressionProfile, GatewayError, GatewayErrorCode, GatewayRole,
+    HostPort, JdbcConnectionUrl, RequestClassification, RouteDecision, SeedGatewayList,
+    SmartGateway, SmartGatewayConfig, SmartGatewayMetrics, SmartGatewayMetricsSnapshot,
+    TopologyCache, TopologyCacheMetrics, TopologyCacheMetricsSnapshot, TopologyEntry,
+    WalMode,
+};
 pub use two_phase::TwoPhaseCoordinator;

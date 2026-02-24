@@ -3,6 +3,10 @@ name = "falcon_server"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "falcon_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "falcon"
 path = "src/main.rs"
@@ -19,12 +23,18 @@ falcon_raft = { path = "../falcon_raft" }
 falcon_sql_frontend = { path = "../falcon_sql_frontend" }
 falcon_planner = { path = "../falcon_planner" }
 tokio.workspace = true
+tokio-util.workspace = true
 tonic.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
 toml.workspace = true
 serde.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"
 
 [features]
 default = []

@@ -6,6 +6,7 @@ use falcon_common::schema::TableSchema;
 use falcon_common::security::{RoleId, TxnPriority, SUPERUSER_ROLE_ID};
 use falcon_common::tenant::{TenantId, SYSTEM_TENANT_ID};
 use falcon_common::types::{DataType, IsolationLevel, TableId};
+use falcon_executor::CursorStream;
 use falcon_planner::PhysicalPlan;
 use falcon_txn::TxnHandle;
 
@@ -115,18 +116,14 @@ pub struct CopyState {
 }
 
 /// State for a server-side cursor (DECLARE/FETCH/CLOSE).
-#[derive(Debug, Clone)]
+///
+/// Uses `CursorStream` for streaming access — rows are served in
+/// FETCH-sized chunks instead of being fully materialized at DECLARE time.
 pub struct CursorState {
     /// Cursor name.
     pub name: String,
-    /// Pre-computed result rows.
-    pub rows: Vec<falcon_common::datum::OwnedRow>,
-    /// Column descriptors.
-    pub columns: Vec<(String, falcon_common::types::DataType)>,
-    /// Current position (next row to fetch).
-    pub position: usize,
-    /// True if the cursor is holdable (survives transaction end).
-    pub with_hold: bool,
+    /// Streaming cursor (deferred or materialized).
+    pub stream: CursorStream,
 }
 
 /// Per-connection session state.

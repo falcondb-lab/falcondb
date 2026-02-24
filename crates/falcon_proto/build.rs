@@ -1,6 +1,8 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let proto_file = "proto/falcon_replication.proto";
-    println!("cargo:rerun-if-changed={}", proto_file);
+    let replication_proto = "proto/falcon_replication.proto";
+    let raft_proto = "proto/falcon_raft.proto";
+    println!("cargo:rerun-if-changed={}", replication_proto);
+    println!("cargo:rerun-if-changed={}", raft_proto);
     println!("cargo:rerun-if-changed=proto");
 
     // Use the vendored protoc binary so the build works without a system install.
@@ -11,7 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::configure()
         .build_server(true)
         .build_client(true)
-        .compile_protos(&[proto_file], &["proto"])?;
+        .compile_protos(&[replication_proto, raft_proto], &["proto"])?;
 
     Ok(())
 }

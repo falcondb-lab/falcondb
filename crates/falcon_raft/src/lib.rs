@@ -6,7 +6,9 @@
 //! - `SingleNodeConsensus`: no-op for single-node deployments
 
 pub mod network;
+pub mod server;
 pub mod store;
+pub mod transport;
 pub mod types;
 
 use std::collections::BTreeMap;

@@ -621,6 +621,101 @@ pub fn record_replay_metrics(
     metrics::gauge!("falcon_replay_violation_total").set(violation_count as f64);
 }
 
+// ── P2: SLA Admission Metrics ──────────────────────────────────────────
+
+/// Record SLA admission controller metrics (P2-1).
+pub fn record_sla_admission_metrics(
+    p99_us: u64,
+    p999_us: u64,
+    target_p99_ms: f64,
+    target_p999_ms: f64,
+    inflight_fast: u64,
+    inflight_slow: u64,
+    inflight_ddl: u64,
+    total_accepted: u64,
+    total_rejected: u64,
+) {
+    metrics::gauge!("falcon_sla_p99_us").set(p99_us as f64);
+    metrics::gauge!("falcon_sla_p999_us").set(p999_us as f64);
+    metrics::gauge!("falcon_sla_target_p99_ms").set(target_p99_ms);
+    metrics::gauge!("falcon_sla_target_p999_ms").set(target_p999_ms);
+    metrics::gauge!("falcon_sla_inflight_fast").set(inflight_fast as f64);
+    metrics::gauge!("falcon_sla_inflight_slow").set(inflight_slow as f64);
+    metrics::gauge!("falcon_sla_inflight_ddl").set(inflight_ddl as f64);
+    metrics::gauge!("falcon_sla_total_accepted").set(total_accepted as f64);
+    metrics::gauge!("falcon_sla_total_rejected").set(total_rejected as f64);
+}
+
+/// Record SLA admission rejection by signal (P2-1).
+pub fn record_sla_rejection(signal: &str, txn_class: &str) {
+    metrics::counter!(
+        "falcon_sla_rejection_total",
+        "signal" => signal.to_string(),
+        "txn_class" => txn_class.to_string()
+    )
+    .increment(1);
+}
+
+// ── P2: GC Budget Metrics ─────────────────────────────────────────────
+
+/// Record GC budget metrics (P2-2).
+pub fn record_gc_budget_metrics(
+    sweep_duration_us: u64,
+    budget_exhausted: bool,
+    key_budget_exhausted: bool,
+    latency_throttled: bool,
+    reclaimed_versions: u64,
+    reclaimed_bytes: u64,
+    max_chain_length: u64,
+    mean_chain_length: f64,
+) {
+    metrics::histogram!("falcon_gc_sweep_duration_us").record(sweep_duration_us as f64);
+    metrics::gauge!("falcon_gc_reclaimed_versions").set(reclaimed_versions as f64);
+    metrics::gauge!("falcon_gc_reclaimed_bytes").set(reclaimed_bytes as f64);
+    metrics::gauge!("falcon_gc_max_chain_length").set(max_chain_length as f64);
+    metrics::gauge!("falcon_gc_mean_chain_length").set(mean_chain_length);
+    if budget_exhausted {
+        metrics::counter!("falcon_gc_budget_exhausted_total").increment(1);
+    }
+    if key_budget_exhausted {
+        metrics::counter!("falcon_gc_key_budget_exhausted_total").increment(1);
+    }
+    if latency_throttled {
+        metrics::counter!("falcon_gc_latency_throttled_total").increment(1);
+    }
+}
+
+// ── P2: Network Transfer Metrics ──────────────────────────────────────
+
+/// Record distributed query network transfer metrics (P2-3).
+pub fn record_dist_query_network_metrics(
+    bytes_in: u64,
+    bytes_out: u64,
+    rows_in: u64,
+    rows_out: u64,
+    limit_pushed: bool,
+    partial_agg: bool,
+    filter_pushed: bool,
+) {
+    metrics::counter!("falcon_dist_query_bytes_in_total").increment(bytes_in);
+    metrics::counter!("falcon_dist_query_bytes_out_total").increment(bytes_out);
+    metrics::counter!("falcon_dist_query_rows_in_total").increment(rows_in);
+    metrics::counter!("falcon_dist_query_rows_out_total").increment(rows_out);
+    metrics::counter!("falcon_dist_query_total").increment(1);
+    if limit_pushed {
+        metrics::counter!("falcon_dist_query_limit_pushdown_total").increment(1);
+    }
+    if partial_agg {
+        metrics::counter!("falcon_dist_query_partial_agg_total").increment(1);
+    }
+    if filter_pushed {
+        metrics::counter!("falcon_dist_query_filter_pushdown_total").increment(1);
+    }
+    if bytes_in > bytes_out {
+        metrics::counter!("falcon_dist_query_bytes_saved_total").increment(bytes_in - bytes_out);
+    }
+}
+
 /// Record lock contention event for a named lock/structure.
 pub fn record_lock_contention(lock_name: &str, wait_us: u64) {
     metrics::counter!(

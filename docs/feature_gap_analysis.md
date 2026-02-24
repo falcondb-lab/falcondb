@@ -1,8 +1,8 @@
 # FalconDB Feature Gap Analysis
 
-> Updated: 2026-02-23  
+> Updated: 2026-02-24  
 > Scope: Full codebase audit across all 16 crates + Java JDBC driver  
-> Status: 2,643+ tests passing, 0 failures
+> Status: 2,700+ tests passing, 0 failures
 
 ---
 
@@ -35,6 +35,9 @@ The following items from the original gap analysis have been implemented:
 | Partitioned tables | ✅ Fixed (2026-02-22) — `PartitionManager` with Range/Hash/List strategies, routing, pruning, 10 tests |
 | No memory budget enforcement | ✅ Fixed (2026-02-22) — `UnifiedMemoryBudget` with 5 categories, 3 escalation levels, 10 tests |
 | No native protocol / JDBC driver | ✅ Fixed (2026-02-22) — `falcon_protocol_native` + `falcon_native_server` (67 tests) + Java JDBC driver with HA failover |
+| Cluster Membership — empty placeholder | ✅ Fixed (2026-02-24) — `MembershipManager` with NodeState machine (Joining→Active→Draining→Leaving→Dead), epoch/version monotonicity, quorum checks, heartbeat, dead-node detection, observability metrics. 23 tests |
+| SSL/TLS — runtime partial | ✅ Fixed (2026-02-24) — `tls.rs` module with `TlsConfig`, `TlsAcceptor` via tokio-rustls, `PgStream` (plain/TLS), SSLRequest negotiation with stream upgrade, `require_ssl` enforcement (TLS-1/TLS-2/TLS-3 invariants). 9 tests |
+| No CURSOR / DECLARE / FETCH | ✅ Fixed (2026-02-24) — `CursorStream` with `ChunkedRows` for streaming FETCH, `CursorState` uses streaming API, MOVE FORWARD/BACKWARD support. 11 tests |
 
 ---
 
@@ -42,53 +45,23 @@ The following items from the original gap analysis have been implemented:
 
 **Location:** `falcon_common/src/types.rs` — `enum DataType`; `falcon_common/src/datum.rs` — `enum Datum`
 
-Currently supported: `Boolean, Int32, Int64, Float64, Decimal, Text, Timestamp, Date, Array, Jsonb`
+Currently supported: `Boolean, Int32, Int64, Float64, Decimal, Text, Timestamp, Date, Time, Interval, Uuid, Bytea, Array, Jsonb`
 
 **Missing types commonly expected by PG clients and ORMs:**
-- **TIME** — time-of-day without date
-- **INTERVAL** — duration/delta (used in date arithmetic)
-- **UUID** — native UUID type (currently returned as `Text` from `GEN_RANDOM_UUID()`)
-- **BYTEA** — binary data
 - **SMALLINT (INT16)** — 2-byte integer
 - **REAL (FLOAT32)** — single-precision float
 
-**Impact:** ORMs like SQLAlchemy, Prisma, and JDBC drivers introspect column types. Missing types cause schema creation failures or silent data truncation.
+**Impact:** Low — most ORMs map SMALLINT→INT32 and REAL→FLOAT64 transparently.
 
 ---
 
-## 2. No CURSOR / DECLARE / FETCH Support (Severity: MEDIUM)
-
-**Problem:** Server-side cursors (`DECLARE cursor_name CURSOR FOR ...`, `FETCH n FROM cursor_name`) are not implemented. JDBC `setFetchSize()` and many BI tools rely on cursors for large result set streaming.
-
-**Current state:** No parser/binder/executor support for cursor statements. All query results are fully materialized in memory.
-
----
-
-## 3. Raft Network — Single-Node Stub (Severity: MEDIUM)
+## 2. Raft Network — Single-Node Stub (Severity: LOW)
 
 **Location:** `falcon_raft/src/network.rs`
 
 **Problem:** The `NetworkFactory` returns a `NetworkConnection` that fails all RPCs with `Unreachable("single-node mode")`. Raft consensus only works in single-node mode.
 
-**Note:** FalconDB has a separate WAL-based streaming replication (primary→replica via gRPC) that works for multi-node. The Raft layer is a stub for future use.
-
-**Fix:** Implement `RaftNetwork` using tonic gRPC to forward `AppendEntries`, `Vote`, and `InstallSnapshot` RPCs to remote nodes.
-
----
-
-## 4. Cluster Membership — Empty Placeholder (Severity: MEDIUM)
-
-**Location:** `falcon_cluster/src/cluster/membership.rs`
-
-**Problem:** No dynamic node join/leave, health checking, or membership management. Cluster topology is static and configured at startup.
-
----
-
-## 5. SSL/TLS — Config Supported, Runtime Partial (Severity: LOW)
-
-**Location:** `falcon_protocol_pg/src/server.rs` — SSLRequest handling
-
-**Problem:** TLS config is parsed from `falcon.toml` but the SSLRequest handshake path responds with `N` (not supported) unless a cert/key is explicitly configured. Encrypted connections require explicit cert/key setup.
+**Note:** FalconDB has a separate WAL-based streaming replication (primary→replica via gRPC) that works for multi-node. The Raft layer is a stub for future use. The new `MembershipManager` handles cluster membership independently of Raft.
 
 ---
 
@@ -96,5 +69,5 @@ Currently supported: `Boolean, Int32, Int64, Float64, Decimal, Text, Timestamp, 
 
 | Priority | Count | Items |
 |----------|-------|-------|
-| **MEDIUM** | 3 | Missing data types (SMALLINT/REAL), No cursors, Raft network stub |
-| **LOW** | 1 | SSL/TLS runtime partial |
+| **MEDIUM** | 1 | Missing data types (SMALLINT/REAL) |
+| **LOW** | 1 | Raft network stub (streaming replication works independently) |

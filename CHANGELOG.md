@@ -7,6 +7,208 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.0.8] — Unified Cluster Access, Smart Gateway, Client & Ops Experience
+
+### Added — Cluster Access Model v1
+
+- **`GatewayRole`** — formal node role: `DedicatedGateway`, `SmartGateway`, `ComputeOnly`.
+  Defines which nodes accept client connections and which own shards.
+- **`ClusterTopology`** — deployment recommendation: Small (1–3), Medium (4–8), Large (9+).
+- Official promise: JDBC never needs to know the leader; leader changes ≠ client disconnection.
+
+### Added — Smart Gateway v1
+
+- **`SmartGateway`** (`falcon_cluster::smart_gateway`) — unified request router.
+  Classifies every request: `LOCAL_EXEC`, `FORWARD_TO_LEADER`, `REJECT_NO_ROUTE`, `REJECT_OVERLOADED`.
+- **No blind forwarding**: verifies target node alive before forward.
+- **No silent retry**: errors explicit with retry hints.
+- **No infinite queuing**: overloaded → immediate reject (`max_queue_depth = 0` default).
+- **`SmartGatewayConfig`** — `node_id`, `role`, `max_inflight` (10K), `max_forwarded` (5K),
+  `forward_timeout` (5s), `topology_staleness` (30s).
+- **`SmartGatewayMetrics`** — atomic counters: `local_exec_total`, `forward_total`,
+  `reject_no_route_total`, `reject_overloaded_total`, `reject_timeout_total`, `forward_latency_us`,
+  `forward_latency_peak_us`, `forward_failed`, `client_connect_total`, `client_failover_total`.
+
+### Added — Gateway Topology Cache
+
+- **`TopologyCache`** — epoch-versioned `shard_id → (leader_node, leader_addr, epoch)`.
+  Monotonic epoch, RwLock for read-heavy workload, thread-safe.
+- `update_leader()` bumps epoch on leader change; same leader → no bump.
+- `invalidate()` / `invalidate_node()` for NOT_LEADER responses and node crashes.
+- `TopologyCacheMetrics`: `cache_hits`, `cache_misses`, `epoch_bumps`, `invalidations`,
+  `leader_changes`, `hit_rate`.
+
+### Added — JDBC Multi-Host URL
+
+- **`JdbcConnectionUrl`** — parser for `jdbc:falcondb://host1:port,host2:port/db?params`.
+  Supports multi-host seed lists, default port (5443), default database (`falcon`).
+- **`SeedGatewayList`** — client-side failover: round-robin on consecutive failures,
+  `max_failures_before_switch = 3`, `all_seeds_exhausted()` detection.
+
+### Added — JDBC Error Code & Retry Contract
+
+- **`GatewayErrorCode`** — 5 codes: `NotLeader` (FD001), `NoRoute` (FD002),
+  `Overloaded` (FD003), `Timeout` (FD004), `Fatal` (FD000).
+- Each code carries: `is_retryable()`, `retry_delay_ms()`, `sqlstate()`.
+- **`GatewayError`** — structured error with `code`, `message`, `leader_hint`,
+  `retry_after_ms`, `epoch`, `shard_id`.
+
+### Added — Compression Profiles (Product-Level)
+
+- **`CompressionProfile`** — `Off` / `Balanced` / `Aggressive`.
+  Single config knob: `compression_profile = "balanced"`.
+- Each profile maps to: `min_version_age`, `codec`, `block_cache_capacity`,
+  `compactor_batch_size`, `compactor_interval_ms`.
+- Change without restart.
+
+### Added — WAL Backend Policy (Product-Level)
+
+- **`WalMode`** — `Auto` / `Posix` / `WinAsync` / `RawExperimental`.
+  Single config knob: `wal_mode = "auto"`.
+- `Auto` selects platform-optimal backend; `RawExperimental` clearly marked HIGH risk.
+
+### Changed — Configuration (v1.0.8)
+
+- **`FalconConfig`** gains: `compression_profile` (default `"balanced"`),
+  `wal_mode` (default `"auto"`), `gateway` section (`GatewayConfig`).
+- **`GatewayConfig`** — `role`, `max_inflight`, `max_forwarded`, `forward_timeout_ms`,
+  `topology_staleness_secs`.
+- Config schema version bumped to 4.
+
+### Changed — Observability
+
+- **`/admin/status`** gains `smart_gateway` section: role, epoch, requests_total,
+  local_exec_total, forward_total, reject counts, inflight, forwarded,
+  forward_latency_avg/peak_us, forward_failed, client_connect/failover_total,
+  topology (shard_count, node_count, cache_hit_rate, leader_changes, invalidations).
+
+### Tests
+
+- 36 smart_gateway unit tests: JDBC URL parsing, error codes, topology cache,
+  gateway routing, compression profiles, WAL modes, concurrent safety.
+- 17 client-focused integration tests: JDBC failover, leader switch, error contract,
+  overload, concurrent clients, leader changes during requests.
+- 14 gateway scale integration tests: single/multi gateway, shared topology,
+  crash/restart, client recovery, epoch monotonicity, latency guardrails.
+
+### Documentation
+
+- `docs/cluster_access_model.md` — Gateway roles, deployment topologies, promises.
+- `docs/jdbc_connection.md` — URL format, retry contract, failover behavior.
+- `docs/gateway_behavior.md` — Request lifecycle, classification rules, admission.
+- `docs/wal_backend_matrix.md` — WAL modes, risk matrix, diagnostics, rollback.
+- `docs/compression_profiles.md` — Off/Balanced/Aggressive, observability, migration.
+
+---
+
+## [1.0.7] — Memory Compression (Hot/Cold) + WAL Advanced Backend + Ops Simplicity
+
+### Added — Hot/Cold Memory Tiering
+
+- **`ColdStore`** (`falcon_storage::cold_store`) — append-only segment-based compressed storage
+  for old MVCC version payloads. Block format: `[codec:u8][original_len:u32][compressed_len:u32][data...]`.
+  Configurable max segment size (default 64 MB). LRU block cache for read amortization.
+- **`ColdStoreConfig`** — `enabled`, `max_segment_size`, `codec` (LZ4/None), `compression_enabled`
+  (global toggle), `block_cache_capacity` (default 16 MB).
+- **`ColdHandle`** — compact 20-byte reference (`segment_id`, `offset`, `len`) replacing
+  `Option<OwnedRow>` in cold-migrated versions.
+- **`CompactorConfig`** — background cold migration config: `min_version_age` (default 300),
+  `batch_size` (1000), `interval_ms` (5000). Idempotent, non-blocking, failure-safe.
+- **`ColdStoreMetrics`** — atomic counters: `cold_bytes`, `cold_original_bytes`,
+  `cold_segments_total`, `cold_read_total`, `cold_decompress_total`,
+  `cold_decompress_latency_us`, `cold_decompress_peak_us`, `cold_migrate_total`.
+  Derived: `compression_ratio()`, `avg_decompress_us()`.
+
+### Added — String Intern Pool
+
+- **`StringInternPool`** — thread-safe read-biased pool. `intern(s) → InternId(u32)`,
+  `resolve(id) → String`. Atomic `hit_rate()` tracking. Reduces memory for
+  low-cardinality string columns (status codes, regions, enums).
+
+### Added — LZ4 Compression Backend
+
+- Default codec: LZ4 via `lz4_flex` (pure Rust, no C dependency).
+- Fallback: `CompressionCodec::None` — raw bytes, zero CPU overhead.
+- Per-block codec tag enables mixed-codec segments and zero-downtime codec changes.
+- Global toggle: `compression.enabled = true|false`.
+
+### Changed — Observability
+
+- **`/admin/status`** now includes `memory` section: `hot_bytes`, `cold_bytes`,
+  `cold_segments`, `compression_ratio`, `cold_read_total`, `cold_decompress_avg_us`,
+  `cold_decompress_peak_us`, `cold_migrate_total`, `intern_hit_rate`.
+- **`StorageEngine`** gains: `cold_store_metrics()`, `memory_hot_bytes()`,
+  `memory_cold_bytes()`, `intern_hit_rate()`.
+
+### Changed — WAL Configuration (v1.0.7)
+
+- **`WalConfig`** gains: `backend` (`"file"` | `"win_async_file"`), `no_buffering` (bool),
+  `group_commit_window_us` (default 200µs). Configurable in `falcon.toml` `[wal]` section.
+
+### Tests
+
+- 17 cold store unit tests: store/read roundtrip, compression ratio, segment rotation,
+  cache hit/miss, metrics, block encode/decode, intern pool, concurrent safety.
+- 18 compression correctness integration tests: LZ4 vs None consistency, segment rotation
+  data integrity, concurrent store/read, cache eviction, empty/large rows.
+- 7 performance guardrail tests: memory savings ≥30%, cold read p99 < 1ms (cached),
+  p99 < 10ms (uncached), store throughput > 10K rows/sec, cache amortization,
+  no hang under concurrent pressure, intern pool savings.
+
+### Documentation
+
+- `docs/memory_compression.md` — Hot/Cold architecture, migration conditions, compression
+  codecs, transaction semantics, observability, rollback procedures.
+- `docs/windows_wal_modes.md` — `file`, `win_async_file`, raw disk (experimental),
+  configuration reference, recommendations, risk matrix.
+
+---
+
+## [1.0.6] — Deterministic WAL I/O & Production-Ready Gateway
+
+### Added — WAL I/O
+
+- **`WalDeviceWinAsync`** (`falcon_storage::wal_win_async`) — Windows IOCP/Overlapped I/O WAL
+  device. Uses `FILE_FLAG_OVERLAPPED` via `std::os::windows::fs::OpenOptionsExt`, IOCP completion
+  port for deterministic flush acknowledgement, optional `FILE_FLAG_NO_BUFFERING` with sector
+  alignment, and `FlushFileBuffers` for durable sync. Non-Windows stub provided.
+- **Group commit enhancements** — `GroupCommitConfig` gains `group_commit_window_us` (configurable
+  coalescing window, default 200µs) and `ring_buffer_capacity` (default 256 KB). `GroupCommitStats`
+  tracks `ring_buffer_used` and `ring_buffer_peak`. New accessors: `flushed_lsn()`,
+  `wal_backlog_bytes()`.
+- **WAL diagnostics** — `iocp_available()`, `check_no_buffering_support()`,
+  `check_disk_alignment()` for runtime platform capability checks.
+
+### Added — Gateway
+
+- **`GatewayDisposition`** enum — semantic classification for every gateway request:
+  `LocalExec`, `ForwardedToLeader`, `RejectNoLeader`, `RejectOverloaded`, `RejectTimeout`.
+  Includes `is_success()`, `is_retryable()`, `as_str()` helpers.
+- **`GatewayAdmissionControl`** — lock-free CAS-based admission control with configurable
+  `max_inflight` and `max_forwarded` limits. Fast-reject on overload (no queuing, no p99 explosion).
+- **`GatewayMetrics`** enhanced with per-disposition counters: `local_exec_total`, `reject_total`,
+  `reject_no_leader`, `reject_overloaded`, `reject_timeout`.
+- **`DistributedQueryEngine::new_with_admission()`** — constructor accepting explicit admission config.
+
+### Changed — Observability
+
+- **`/admin/status`** endpoint now returns `wal.current_lsn`, `wal.flushed_lsn`,
+  `wal.wal_backlog_bytes`, and a new `gateway` section with `inflight`, `forwarded`, `rejected`,
+  `local_exec_total`, `forward_total`.
+- **`falcon doctor`** now includes WAL I/O diagnostics: IOCP support, `FILE_FLAG_NO_BUFFERING`
+  compatibility, disk alignment check, and recommended WAL mode.
+
+### Tests
+
+- 7 WAL pressure tests: group commit window variants (0/200/500µs), concurrent writers, fsync mode
+  comparison, flushed_lsn tracking, ring buffer stats.
+- 13 gateway pressure tests: disposition classification, admission control limits, concurrent CAS
+  safety, metrics accumulation, no-hang-under-overload, explicit reject latency (p99 < 1ms).
+- 5 WAL IOCP unit tests (Windows only): config defaults, open/append/flush, multiple appends,
+  IOCP availability, NO_BUFFERING check.
+
+---
+
 ## [1.0.4] — Production-Grade Determinism & Failure Safety
 
 ### Added — Determinism Hardening (`falcon_cluster::determinism_hardening`)

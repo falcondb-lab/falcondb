@@ -1,11 +1,15 @@
 // ── PRODUCTION modules (always compiled) ──
 pub mod audit;
 pub mod backup;
+pub mod cold_store;
 pub mod engine;
+pub mod logical_backup;
 mod engine_ddl;
 mod engine_dml;
 pub mod gc;
+pub mod gc_budget;
 pub mod group_commit;
+pub mod io;
 pub mod health;
 pub mod hotspot;
 pub mod index;
@@ -21,6 +25,7 @@ pub mod upgrade;
 pub mod ustm;
 pub mod verification;
 pub mod wal;
+pub mod wal_win_async;
 
 // ── Enterprise stubs (always compiled for handler compat, disabled at runtime) ──
 pub mod cdc;

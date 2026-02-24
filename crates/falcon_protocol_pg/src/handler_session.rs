@@ -582,18 +582,19 @@ impl QueryHandler {
             }];
         };
 
-        // Execute the query and store results in cursor
+        // Execute the query and store results in a streaming cursor.
+        // The query is executed now but rows are served in chunks via FETCH.
         let txn = session.txn.as_ref();
         match self.execute_sql_for_cursor(&query, txn) {
             Ok((columns, rows)) => {
+                let stream = falcon_executor::CursorStream::new_materialized(
+                    columns, rows, with_hold,
+                );
                 session.cursors.insert(
                     cursor_name.clone(),
                     crate::session::CursorState {
                         name: cursor_name,
-                        rows,
-                        columns,
-                        position: 0,
-                        with_hold,
+                        stream,
                     },
                 );
                 vec![BackendMessage::CommandComplete {
@@ -659,9 +660,10 @@ impl QueryHandler {
             }
         };
 
-        // Build field descriptions
+        // Build field descriptions from the stream's column metadata
         let fields: Vec<FieldDescription> = cursor
-            .columns
+            .stream
+            .columns()
             .iter()
             .map(|(name, dt)| {
                 let (type_oid, type_len) = Self::data_type_to_pg_oid(dt);
@@ -679,10 +681,11 @@ impl QueryHandler {
 
         let mut msgs = vec![BackendMessage::RowDescription { fields }];
 
-        // Fetch up to `count` rows from current position
-        let end = (cursor.position + count).min(cursor.rows.len());
-        for i in cursor.position..end {
-            let row_vals: Vec<Option<String>> = cursor.rows[i]
+        // Fetch up to `count` rows via streaming cursor
+        let batch = cursor.stream.next_batch(count).unwrap_or_default();
+        let fetched = batch.len();
+        for row in &batch {
+            let row_vals: Vec<Option<String>> = row
                 .values
                 .iter()
                 .map(|d| {
@@ -695,8 +698,6 @@ impl QueryHandler {
                 .collect();
             msgs.push(BackendMessage::DataRow { values: row_vals });
         }
-        let fetched = end - cursor.position;
-        cursor.position = end;
 
         msgs.push(BackendMessage::CommandComplete {
             tag: format!("FETCH {}", fetched),
@@ -811,14 +812,9 @@ impl QueryHandler {
         match session.cursors.get_mut(&cursor_name) {
             Some(cursor) => {
                 let moved = if backward {
-                    let actual = count.min(cursor.position);
-                    cursor.position -= actual;
-                    actual
+                    cursor.stream.retreat(count)
                 } else {
-                    let remaining = cursor.rows.len().saturating_sub(cursor.position);
-                    let actual = count.min(remaining);
-                    cursor.position += actual;
-                    actual
+                    cursor.stream.advance(count)
                 };
                 vec![BackendMessage::CommandComplete {
                     tag: format!("MOVE {}", moved),

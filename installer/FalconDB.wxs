@@ -1,0 +1,172 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  FalconDB — WiX v4 MSI Installer Definition
+  ============================================
+
+  Build with:
+    wix build -o FalconDB-x.y.z-x64.msi installer\FalconDB.wxs
+
+  Design:
+    - Installs to:  C:\Program Files\FalconDB\  (read-only)
+    - Data lives in: C:\ProgramData\FalconDB\   (preserved on uninstall)
+    - Registers Windows Service "FalconDB" with auto-start + recovery
+    - Supports major upgrade (in-place A → B)
+    - Uninstall removes program files + service, preserves data
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- Package metadata                                                   -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <Package
+    Name="FalconDB"
+    Manufacturer="FalconDB"
+    Version="!(bind.FileVersion.FalconExe)"
+    UpgradeCode="E7A1B2C3-D4E5-6F78-9A0B-1C2D3E4F5A6B"
+    Scope="perMachine"
+    InstallerVersion="500"
+    Compressed="yes">
+
+    <SummaryInformation
+      Description="FalconDB — PG-Compatible In-Memory OLTP Database"
+      Manufacturer="FalconDB" />
+
+    <!-- Embed CAB in MSI for single-file distribution -->
+    <Media Id="1" Cabinet="falcon.cab" EmbedCab="yes" />
+
+    <!-- ═════════════════════════════════════════════════════════════════ -->
+    <!-- Major Upgrade: automatically remove previous versions            -->
+    <!-- ═════════════════════════════════════════════════════════════════ -->
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of FalconDB is already installed."
+      Schedule="afterInstallInitialize" />
+
+    <!-- ═════════════════════════════════════════════════════════════════ -->
+    <!-- Properties                                                       -->
+    <!-- ═════════════════════════════════════════════════════════════════ -->
+
+    <!-- Allow command-line override: msiexec /i ... INSTALLDIR="D:\FalconDB" -->
+    <Property Id="INSTALLDIR" Value="[ProgramFiles64Folder]FalconDB\" />
+
+    <!-- ProgramData root — never customizable, always ProgramData -->
+    <Property Id="DATAROOTDIR" Value="[CommonAppDataFolder]FalconDB\" />
+
+    <!-- ═════════════════════════════════════════════════════════════════ -->
+    <!-- Directory structure                                              -->
+    <!-- ═════════════════════════════════════════════════════════════════ -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLDIR" Name="FalconDB">
+        <Directory Id="BinDir" Name="bin" />
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="DATAROOTDIR" Name="FalconDB">
+        <Directory Id="ConfDir" Name="conf" />
+        <Directory Id="DataDir" Name="data" />
+        <Directory Id="LogsDir" Name="logs" />
+        <Directory Id="CertsDir" Name="certs" />
+      </Directory>
+    </StandardDirectory>
+
+    <!-- ═════════════════════════════════════════════════════════════════ -->
+    <!-- Components — Program Files (removed on uninstall)                -->
+    <!-- ═════════════════════════════════════════════════════════════════ -->
+    <ComponentGroup Id="ProductComponents" Directory="BinDir">
+
+      <!-- falcon.exe -->
+      <Component Id="FalconExeComponent" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
+        <File Id="FalconExe"
+              Source="$(var.BinSource)\falcon.exe"
+              KeyPath="yes" />
+
+        <!-- Service registration (same component as the exe) -->
+        <ServiceInstall
+          Id="FalconDBService"
+          Name="FalconDB"
+          DisplayName="FalconDB Database Server"
+          Description="FalconDB — PG-Compatible In-Memory OLTP Database"
+          Type="ownProcess"
+          Start="auto"
+          ErrorControl="normal"
+          Arguments="service dispatch --config &quot;[DATAROOTDIR]conf\falcon.toml&quot;">
+
+          <ServiceConfig
+            DelayedAutoStart="no"
+            OnInstall="yes"
+            OnReinstall="yes" />
+
+          <util:ServiceConfig
+            xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util"
+            FirstFailureActionType="restart"
+            SecondFailureActionType="restart"
+            ThirdFailureActionType="restart"
+            RestartServiceDelayInSeconds="5"
+            ResetPeriodInDays="1" />
+
+        </ServiceInstall>
+
+        <!-- Service lifecycle: start after install, stop before uninstall -->
+        <ServiceControl
+          Id="FalconDBServiceControl"
+          Name="FalconDB"
+          Start="install"
+          Stop="both"
+          Remove="uninstall"
+          Wait="yes" />
+
+      </Component>
+
+    </ComponentGroup>
+
+    <!-- ═════════════════════════════════════════════════════════════════ -->
+    <!-- Components — ProgramData (PRESERVED on uninstall)                -->
+    <!-- NeverOverwrite="yes" prevents upgrades from clobbering config    -->
+    <!-- Permanent="yes" prevents uninstall from removing data dirs       -->
+    <!-- ═════════════════════════════════════════════════════════════════ -->
+    <ComponentGroup Id="DataComponents">
+
+      <!-- conf/falcon.toml — install default only if not already present -->
+      <Component Id="DefaultConfig" Directory="ConfDir"
+                 Guid="B2C3D4E5-F6A7-8901-BCDE-F23456789012"
+                 NeverOverwrite="yes" Permanent="yes">
+        <File Id="FalconToml"
+              Source="$(var.ConfSource)\falcon.toml"
+              KeyPath="yes" />
+      </Component>
+
+      <!-- data/ directory marker (permanent — survives uninstall) -->
+      <Component Id="DataDirMarker" Directory="DataDir"
+                 Guid="C3D4E5F6-A7B8-9012-CDEF-345678901234"
+                 Permanent="yes">
+        <CreateFolder />
+      </Component>
+
+      <!-- logs/ directory marker (permanent) -->
+      <Component Id="LogsDirMarker" Directory="LogsDir"
+                 Guid="D4E5F6A7-B8C9-0123-DEFA-456789012345"
+                 Permanent="yes">
+        <CreateFolder />
+      </Component>
+
+      <!-- certs/ directory marker (permanent) -->
+      <Component Id="CertsDirMarker" Directory="CertsDir"
+                 Guid="E5F6A7B8-C9D0-1234-EFAB-567890123456"
+                 Permanent="yes">
+        <CreateFolder />
+      </Component>
+
+    </ComponentGroup>
+
+    <!-- Service registration is co-located in FalconExeComponent above -->
+
+    <!-- ═════════════════════════════════════════════════════════════════ -->
+    <!-- Features                                                         -->
+    <!-- ═════════════════════════════════════════════════════════════════ -->
+    <Feature Id="ProductFeature" Title="FalconDB" Level="1">
+      <ComponentGroupRef Id="ProductComponents" />
+      <ComponentGroupRef Id="DataComponents" />
+    </Feature>
+
+  </Package>
+</Wix>

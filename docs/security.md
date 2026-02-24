@@ -254,6 +254,58 @@ SHOW falcon.audit_log;
 
 ---
 
+## Windows Service Security
+
+### Service Account
+
+By default, FalconDB runs as `LocalSystem`. For production, use a dedicated
+service account with minimal privileges:
+
+```powershell
+# Create a dedicated service account
+New-LocalUser -Name "FalconDBSvc" -Description "FalconDB Service Account" -NoPassword
+
+# Grant permissions to ProgramData directory
+$acl = Get-Acl "C:\ProgramData\FalconDB"
+$rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+    "FalconDBSvc", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+$acl.SetAccessRule($rule)
+Set-Acl "C:\ProgramData\FalconDB" $acl
+
+# Update service to run as the dedicated account
+sc.exe config FalconDB obj= ".\FalconDBSvc" password= "<password>"
+```
+
+### File System Permissions
+
+| Path | Account | Permission |
+|------|---------|------------|
+| `C:\Program Files\FalconDB\` | SYSTEM, Administrators | Read + Execute |
+| `C:\ProgramData\FalconDB\conf\` | FalconDBSvc | Read |
+| `C:\ProgramData\FalconDB\data\` | FalconDBSvc | Full Control |
+| `C:\ProgramData\FalconDB\logs\` | FalconDBSvc | Full Control |
+| `C:\ProgramData\FalconDB\certs\` | FalconDBSvc | Read |
+
+### TLS Certificate Paths (Windows)
+
+```toml
+[server.tls]
+enabled = true
+cert_path = "C:\\ProgramData\\FalconDB\\certs\\server.crt"
+key_path = "C:\\ProgramData\\FalconDB\\certs\\server.key"
+ca_cert_path = "C:\\ProgramData\\FalconDB\\certs\\ca.crt"
+```
+
+### Windows-Specific Best Practices
+
+1. **Never run as Administrator** for application connections
+2. **No writes to `C:\Program Files\`** — data lives in ProgramData only
+3. **No writes to user directories** — service mode uses fixed paths
+4. **Logs never contain passwords** — auth credentials are masked in tracing output
+5. **Config never hardcodes passwords** — use `${FALCON_DB_PASSWORD}` env var syntax
+
+---
+
 ## Security Checklist (Production)
 
 | # | Item | Verify |

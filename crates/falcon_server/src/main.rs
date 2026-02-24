@@ -4,24 +4,33 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 use falcon_cluster::{DistributedQueryEngine, ShardedEngine};
 use falcon_common::config::{FalconConfig, NodeRole};
 use falcon_common::types::ShardId;
 use falcon_executor::Executor;
 use falcon_protocol_pg::server::PgServer;
+use falcon_server::shutdown::{self, ShutdownCoordinator, ShutdownReason};
+use falcon_server::service;
 use falcon_storage::engine::StorageEngine;
 use falcon_storage::gc::{GcConfig, GcRunner};
 use falcon_storage::memory::MemoryBudget;
 use falcon_storage::wal::SyncMode;
 use falcon_txn::TxnManager;
 
+// ═══════════════════════════════════════════════════════════════════════════
+// CLI Definition
+// ═══════════════════════════════════════════════════════════════════════════
+
 #[derive(Parser, Debug)]
 #[command(name = "falcon", about = "FalconDB — PG-Compatible In-Memory OLTP")]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Config file path.
-    #[arg(short, long, default_value = "falcon.toml")]
+    #[arg(short, long, default_value = "falcon.toml", global = true)]
     config: String,
 
     /// PG listen address (overrides config).
@@ -61,10 +70,185 @@ struct Cli {
     print_default_config: bool,
 }
 
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Manage FalconDB as a Windows Service.
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
+    /// Run diagnostic checks.
+    Doctor,
+    /// Show version and build information.
+    Version,
+    /// Show server and service status.
+    Status,
+    /// Config management (migrate, check).
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+    /// Purge all FalconDB data (ProgramData). Requires confirmation.
+    Purge {
+        /// Skip confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ConfigAction {
+    /// Migrate config file to the current schema version.
+    Migrate,
+    /// Check config version without modifying.
+    Check,
+}
+
+#[derive(Subcommand, Debug)]
+enum ServiceAction {
+    /// Install FalconDB as a Windows Service.
+    Install,
+    /// Uninstall the FalconDB Windows Service.
+    Uninstall,
+    /// Start the FalconDB Windows Service.
+    Start,
+    /// Stop the FalconDB Windows Service.
+    Stop,
+    /// Restart the FalconDB Windows Service.
+    Restart,
+    /// Show status of the FalconDB Windows Service.
+    Status,
+    /// Internal: run as Windows Service (called by SCM, not by users).
+    #[command(hide = true)]
+    Dispatch,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// main() — dispatch to console run, service commands, or doctor
+// ═══════════════════════════════════════════════════════════════════════════
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    match cli.command {
+        // ── Service subcommands ──
+        Some(Command::Service { action }) => {
+            match action {
+                ServiceAction::Install => {
+                    service::commands::install(&cli.config)
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                }
+                ServiceAction::Uninstall => {
+                    service::commands::uninstall()
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                }
+                ServiceAction::Start => {
+                    service::commands::start()
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                }
+                ServiceAction::Stop => {
+                    service::commands::stop()
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                }
+                ServiceAction::Restart => {
+                    service::commands::restart()
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                }
+                ServiceAction::Status => {
+                    service::commands::status()
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                }
+                ServiceAction::Dispatch => {
+                    // Service mode: initialize file logger, then dispatch to SCM
+                    let log_dir = service::paths::service_log_dir();
+                    let _ = std::fs::create_dir_all(&log_dir);
+                    let _guard = service::logger::init_file_logger(&log_dir, "falcon.log");
+                    tracing::info!(mode = "service", "FalconDB starting in service mode");
+
+                    // Register the server runner so the SCM callback can invoke it
+                    service::windows::set_server_runner(Box::new(|config_path, coord| {
+                        Box::pin(run_server(config_path.clone(), coord))
+                    }));
+
+                    service::windows::scm::set_config_path(&cli.config);
+                    #[cfg(windows)]
+                    {
+                        service::windows::scm::dispatch()
+                            .map_err(|e| anyhow::anyhow!("Service dispatch failed: {}", e))?;
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        anyhow::bail!("Service dispatch is only available on Windows");
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        // ── Doctor ──
+        Some(Command::Doctor) => {
+            falcon_server::doctor::run_doctor(&cli.config);
+            Ok(())
+        }
+
+        // ── Version ──
+        Some(Command::Version) => {
+            print_version();
+            Ok(())
+        }
+
+        // ── Status ──
+        Some(Command::Status) => {
+            service::commands::status()
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            Ok(())
+        }
+
+        // ── Config ──
+        Some(Command::Config { action }) => {
+            match action {
+                ConfigAction::Migrate => {
+                    falcon_server::config_migrate::run_config_migrate(&cli.config);
+                }
+                ConfigAction::Check => {
+                    let text = std::fs::read_to_string(&cli.config)
+                        .unwrap_or_default();
+                    match falcon_server::config_migrate::check_config_version(&text) {
+                        falcon_server::config_migrate::ConfigVersionStatus::Current => {
+                            println!("Config version: {} (current)", falcon_common::config::CURRENT_CONFIG_VERSION);
+                        }
+                        falcon_server::config_migrate::ConfigVersionStatus::NeedsMigration { from, to } => {
+                            println!("Config version: {} (needs migration to {})", from, to);
+                            println!("Run: falcon config migrate --config {}", cli.config);
+                        }
+                        falcon_server::config_migrate::ConfigVersionStatus::TooNew { found, max_supported } => {
+                            eprintln!("Config version {} is newer than supported (max: {})", found, max_supported);
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        // ── Purge ──
+        Some(Command::Purge { yes }) => {
+            run_purge(yes);
+            Ok(())
+        }
+
+        // ── Default: console mode (backward-compatible) ──
+        None => {
+            run_console(cli).await
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Console mode — the original main() flow
+// ═══════════════════════════════════════════════════════════════════════════
+
+async fn run_console(cli: Cli) -> Result<()> {
     // --print-default-config: dump default TOML and exit
     if cli.print_default_config {
         let default_config = FalconConfig::default();
@@ -77,12 +261,41 @@ async fn main() -> Result<()> {
     // Install crash domain panic hook (must be before any other initialization)
     falcon_common::crash_domain::install_panic_hook();
 
-    // Initialize observability
+    // Initialize observability (stderr for console mode)
     falcon_observability::init_tracing();
-    tracing::info!("Starting FalconDB...");
+    tracing::info!(mode = "console", "Starting FalconDB...");
 
+    run_server_inner(&cli.config, &cli, None).await
+}
+
+/// Core server logic — called from both console mode and service mode.
+///
+/// When `external_coordinator` is `Some`, the server uses it (service mode).
+/// When `None`, the server creates its own coordinator and waits for OS signals.
+pub async fn run_server(config_path: String, external_coordinator: Option<ShutdownCoordinator>) -> Result<()> {
+    let cli = Cli {
+        command: None,
+        config: config_path.to_string(),
+        pg_addr: None,
+        data_dir: None,
+        no_wal: false,
+        shards: 1,
+        metrics_addr: "0.0.0.0:9090".to_string(),
+        role: None,
+        primary_endpoint: None,
+        grpc_addr: None,
+        print_default_config: false,
+    };
+    run_server_inner(&config_path, &cli, external_coordinator).await
+}
+
+async fn run_server_inner(
+    config_path: &str,
+    cli: &Cli,
+    external_coordinator: Option<ShutdownCoordinator>,
+) -> Result<()> {
     // Load or create config
-    let mut config = load_config(&cli.config);
+    let mut config = load_config(config_path);
 
     // CLI overrides
     if let Some(ref addr) = cli.pg_addr {
@@ -315,8 +528,14 @@ async fn main() -> Result<()> {
         None
     };
 
+    // ═══════════════════════════════════════════════════════════════════
+    // Shutdown Protocol — single CancellationToken as root primitive
+    // ═══════════════════════════════════════════════════════════════════
+    let coordinator = external_coordinator.unwrap_or_else(ShutdownCoordinator::new);
+
     // Role-based replication startup
     let mut replica_runner_handle: Option<falcon_cluster::ReplicaRunnerHandle> = None;
+    let mut grpc_join_handle: Option<tokio::task::JoinHandle<()>> = None;
     match config.replication.role {
         NodeRole::Primary => {
             let grpc_addr = config.replication.grpc_listen_addr.clone();
@@ -336,17 +555,29 @@ async fn main() -> Result<()> {
                 .parse()
                 .map_err(|e| anyhow::anyhow!("Invalid grpc_listen_addr '{}': {}", grpc_addr, e))?;
 
-            tokio::spawn(async move {
+            // Wire gRPC server with graceful shutdown via CancellationToken.
+            // The JoinHandle is captured and awaited during ordered teardown.
+            let grpc_token = coordinator.child_token();
+            let grpc_port = grpc_addr_parsed.port().to_string();
+            grpc_join_handle = Some(tokio::spawn(async move {
                 use falcon_cluster::proto::wal_replication_server::WalReplicationServer;
                 tracing::info!("gRPC replication server starting on {}", grpc_addr_parsed);
                 if let Err(e) = tonic::transport::Server::builder()
                     .add_service(WalReplicationServer::new(svc))
-                    .serve(grpc_addr_parsed)
+                    .serve_with_shutdown(grpc_addr_parsed, async move {
+                        grpc_token.cancelled().await;
+                    })
                     .await
                 {
                     tracing::error!("gRPC replication server error: {}", e);
                 }
-            });
+                tracing::info!(
+                    server = "grpc_replication",
+                    port = %grpc_port,
+                    "grpc server shutdown (port={})",
+                    grpc_port,
+                );
+            }));
         }
         NodeRole::Replica => {
             let runner_config = falcon_cluster::ReplicaRunnerConfig {
@@ -421,10 +652,7 @@ async fn main() -> Result<()> {
         pg_port
     );
 
-    // Shared shutdown signal for PG server and health check server
-    let (shutdown_tx, _) = tokio::sync::watch::channel(false);
-
-    // Start health check HTTP server
+    // ── Health check HTTP server (JoinHandle tracked) ──
     let health_state = Arc::new(health::HealthState::new(
         config.replication.role,
         pg_server.active_connections_handle(),
@@ -432,74 +660,89 @@ async fn main() -> Result<()> {
     ));
     health_state.set_max_connections(config.server.max_connections);
     let health_addr = config.server.admin_listen_addr.clone();
-    let mut health_rx = shutdown_tx.subscribe();
+    let health_token = coordinator.child_token();
     let health_state_for_server = health_state.clone();
-    tokio::spawn(async move {
+    let health_handle = tokio::spawn(async move {
         health::run_health_server(&health_addr, health_state_for_server, async move {
-            let _ = health_rx.changed().await;
+            health_token.cancelled().await;
         })
         .await;
     });
 
-    // Run PG server with graceful shutdown on SIGINT (Ctrl+C) or SIGTERM.
-    // Mark health state as not-ready immediately so load balancers stop
-    // routing traffic before the drain begins.
+    // ── PG server — blocks until shutdown signal or external coordinator, then drains ──
     let health_state_for_shutdown = health_state.clone();
+    let coord_for_signal = coordinator.clone();
     let drain_timeout =
         std::time::Duration::from_secs(config.server.shutdown_drain_timeout_secs.max(1));
     pg_server
         .run_with_shutdown(
             async move {
-                let shutdown_reason = wait_for_shutdown_signal().await;
-                tracing::info!("{} — initiating graceful shutdown", shutdown_reason);
-                // Mark not-ready immediately so health probes return 503
-                health_state_for_shutdown.set_ready(false);
+                // In service mode, the coordinator is cancelled by SCM event handler.
+                // In console mode, we wait for OS signals.
+                tokio::select! {
+                    reason = shutdown::wait_for_os_signal() => {
+                        tracing::info!(reason = %reason, "OS signal received — initiating graceful shutdown");
+                        health_state_for_shutdown.set_ready(false);
+                        coord_for_signal.shutdown(reason);
+                    }
+                    _ = coord_for_signal.cancelled() => {
+                        tracing::info!(reason = %coord_for_signal.reason(), "Shutdown coordinator triggered — initiating graceful shutdown");
+                        health_state_for_shutdown.set_ready(false);
+                    }
+                }
             },
             drain_timeout,
         )
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    // Stop replica runner gracefully if running
+    // ═══════════════════════════════════════════════════════════════════
+    // Ordered teardown — await ALL server JoinHandles, flush WAL
+    // ═══════════════════════════════════════════════════════════════════
+    tracing::info!(reason = %coordinator.reason(), "Ordered teardown starting");
+
+    // 1. Stop replica runner gracefully if running
     if let Some(handle) = replica_runner_handle {
         tracing::info!("Stopping ReplicaRunner...");
         handle.stop().await;
         tracing::info!("ReplicaRunner stopped");
     }
 
-    // Signal health server to shut down too
-    let _ = shutdown_tx.send(true);
+    // 2. Ensure global shutdown is signalled (in case PG server exited without signal)
+    if !coordinator.is_shutting_down() {
+        coordinator.shutdown(ShutdownReason::Requested);
+    }
 
-    Ok(())
-}
+    // 3. Await gRPC server shutdown
+    if let Some(h) = grpc_join_handle {
+        tracing::info!("Awaiting gRPC replication server shutdown...");
+        let _ = h.await;
+        tracing::info!("gRPC replication server stopped");
+    }
 
-/// Wait for SIGINT (Ctrl+C) or SIGTERM, returning a description of which signal fired.
-async fn wait_for_shutdown_signal() -> &'static str {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        match signal(SignalKind::terminate()) {
-            Ok(mut sigterm) => {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => "SIGINT (Ctrl+C) received",
-                    _ = sigterm.recv() => "SIGTERM received",
-                }
+    // 4. Await health server shutdown
+    tracing::info!("Awaiting health server shutdown...");
+    let _ = health_handle.await;
+    tracing::info!("Health server stopped");
+
+    // 5. Final WAL flush — ensure all committed data is durable before exit
+    if storage.is_wal_enabled() {
+        match storage.flush_wal() {
+            Ok(()) => {
+                let lsn = storage.current_wal_lsn();
+                tracing::info!(flushed_lsn = lsn, "WAL final flush complete");
             }
             Err(e) => {
-                tracing::warn!(
-                    "Failed to register SIGTERM handler: {} — falling back to Ctrl+C only",
-                    e
-                );
-                let _ = tokio::signal::ctrl_c().await;
-                "SIGINT (Ctrl+C) received (SIGTERM unavailable)"
+                tracing::error!(error = %e, "WAL final flush FAILED — data may be lost");
             }
         }
     }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-        "SIGINT (Ctrl+C) received"
-    }
+
+    tracing::info!(
+        reason = %coordinator.reason(),
+        "FalconDB shutdown complete — all ports released, WAL flushed"
+    );
+    Ok(())
 }
 
 fn parse_node_role(s: &str) -> Result<NodeRole, String> {
@@ -512,6 +755,70 @@ fn parse_node_role(s: &str) -> Result<NodeRole, String> {
             "Invalid role '{}': expected standalone, primary, replica, or analytics",
             s
         )),
+    }
+}
+
+fn print_version() {
+    println!("FalconDB v{}", env!("CARGO_PKG_VERSION"));
+    println!("  Config schema: v{}", falcon_common::config::CURRENT_CONFIG_VERSION);
+    println!("  Build target:  {}", std::env::consts::ARCH);
+    println!("  OS:            {}", std::env::consts::OS);
+    println!("  Exe:           {}", std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "unknown".into()));
+}
+
+fn run_purge(skip_confirm: bool) {
+    let root = service::paths::program_data_root();
+    println!("FalconDB Purge");
+    println!("==============");
+    println!();
+    println!("This will PERMANENTLY delete ALL FalconDB data:");
+    println!("  {}", root.display());
+    println!();
+
+    if !root.exists() {
+        println!("Nothing to purge — directory does not exist.");
+        return;
+    }
+
+    if !skip_confirm {
+        println!("Type 'YES' to confirm:");
+        let mut input = String::new();
+        if std::io::stdin().read_line(&mut input).is_err() {
+            eprintln!("Failed to read input.");
+            std::process::exit(1);
+        }
+        if input.trim() != "YES" {
+            println!("Aborted.");
+            return;
+        }
+    }
+
+    // Check if service is running
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("sc.exe")
+            .args(["query", service::paths::SERVICE_NAME])
+            .output();
+        if let Ok(o) = output {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            if stdout.contains("RUNNING") {
+                eprintln!("ERROR: Service is running. Stop it first: falcon service stop");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    match std::fs::remove_dir_all(&root) {
+        Ok(_) => {
+            println!("Purged: {}", root.display());
+            println!("All data, config, logs, and certificates have been removed.");
+        }
+        Err(e) => {
+            eprintln!("ERROR: Failed to purge {}: {}", root.display(), e);
+            std::process::exit(1);
+        }
     }
 }
 

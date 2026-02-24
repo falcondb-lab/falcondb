@@ -16,11 +16,13 @@ pub mod governor;
 pub mod parallel;
 pub mod param_subst;
 pub mod priority_scheduler;
+pub mod row_stream;
 #[cfg(test)]
 mod tests;
 pub mod vectorized;
 
 pub use executor::{ExecutionResult, Executor};
+pub use row_stream::{ChunkedRows, CursorStream};
 pub use governor::{
     GovernorAbortReason, GovernorSnapshot, QueryGovernor, QueryGovernorConfig, QueryLimits,
 };

@@ -14,6 +14,8 @@ use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+use falcon_cluster::DistributedQueryEngine;
+use falcon_cluster::SmartGateway;
 use falcon_common::config::NodeRole;
 use falcon_storage::engine::StorageEngine;
 
@@ -269,6 +271,10 @@ pub struct HealthState {
     max_connections: AtomicUsize,
     /// Reference to storage engine for WAL stats.
     storage: Arc<StorageEngine>,
+    /// v1.0.6: Optional reference to distributed query engine for gateway metrics.
+    dist_engine: Option<Arc<DistributedQueryEngine>>,
+    /// v1.0.8: Optional reference to smart gateway for unified cluster access metrics.
+    smart_gateway: Option<Arc<SmartGateway>>,
 }
 
 impl HealthState {
@@ -285,7 +291,21 @@ impl HealthState {
             active_connections,
             max_connections: AtomicUsize::new(0),
             storage,
+            dist_engine: None,
+            smart_gateway: None,
         }
+    }
+
+    /// Set the distributed query engine reference for gateway metrics.
+    #[allow(dead_code)]
+    pub fn set_dist_engine(&mut self, engine: Arc<DistributedQueryEngine>) {
+        self.dist_engine = Some(engine);
+    }
+
+    /// Set the smart gateway reference for v1.0.8 unified cluster access metrics.
+    #[allow(dead_code)]
+    pub fn set_smart_gateway(&mut self, gw: Arc<SmartGateway>) {
+        self.smart_gateway = Some(gw);
     }
 
     /// Set the max connections limit for reporting in /status.
@@ -331,6 +351,10 @@ impl HealthState {
 ///
 /// Listens on `addr` and serves health/readiness probes until
 /// the `shutdown` future resolves.
+///
+/// **Shutdown contract**: The `TcpListener` is explicitly dropped inside
+/// this function before returning. This guarantees deterministic port release
+/// on both Windows and Linux — we never rely on runtime drop ordering.
 pub async fn run_health_server(
     addr: &str,
     state: Arc<HealthState>,
@@ -346,6 +370,11 @@ pub async fn run_health_server(
             return;
         }
     };
+
+    let port = listener
+        .local_addr()
+        .map(|a| a.port().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
 
     tokio::pin!(shutdown);
 
@@ -367,11 +396,19 @@ pub async fn run_health_server(
                 }
             }
             _ = &mut shutdown => {
-                tracing::info!("Health check server shutting down");
                 break;
             }
         }
     }
+
+    // ── Explicit listener drop — deterministic port release ──
+    drop(listener);
+    tracing::info!(
+        server = "http_health",
+        port = %port,
+        "http server shutdown: listener dropped (port={})",
+        port,
+    );
 }
 
 async fn handle_health_request(
@@ -444,13 +481,87 @@ async fn handle_health_request(
                 ("503 Service Unavailable", body)
             }
         }
-        // Detailed status: full metrics for monitoring dashboards.
-        "/status" => {
+        // Detailed status — Single Source of Truth (SSOT) for ops dashboards.
+        // v1.0.6: added flushed_lsn, wal_backlog_bytes, gateway section
+        "/status" | "/admin/status" => {
             let wal_stats = state.storage.wal_stats_snapshot();
             let active = state.active_connections.load(Ordering::Relaxed);
             let max_conn = state.max_connections.load(Ordering::Relaxed);
+            let wal_lsn = state.storage.current_wal_lsn();
+            let wal_segment = state.storage.current_wal_segment();
+            let version = env!("CARGO_PKG_VERSION");
+            let config_version = falcon_common::config::CURRENT_CONFIG_VERSION;
+
+            // v1.0.6: flushed_lsn and backlog from group commit syncer
+            let flushed_lsn = state.storage.flushed_wal_lsn();
+            let wal_backlog = state.storage.wal_backlog_bytes();
+
+            // v1.0.6: gateway metrics from dist engine (if available)
+            let (gw_inflight, gw_forwarded, gw_rejected, gw_local, gw_fwd_total) =
+                if let Some(ref de) = state.dist_engine {
+                    let snap = de.gateway_metrics_snapshot();
+                    let (inflight, forwarded) = de.admission_snapshot();
+                    (inflight, forwarded, snap.reject_total, snap.local_exec_total, snap.forward_total)
+                } else {
+                    (0, 0, 0, 0, 0)
+                };
+
+            // v1.0.7: cold store / memory tiering metrics
+            let hot_bytes = state.storage.memory_hot_bytes();
+            let cold_bytes = state.storage.memory_cold_bytes();
+            let cold_snap = state.storage.cold_store_metrics();
+            let intern_hit = state.storage.intern_hit_rate();
+
+            // v1.0.8: smart gateway metrics
+            let sgw_json = if let Some(ref sgw) = state.smart_gateway {
+                let ms = sgw.metrics_snapshot();
+                let ts = sgw.topology_metrics();
+                format!(
+                    concat!(
+                        r#","smart_gateway":{{"role":"{}","epoch":{},"#,
+                        r#""requests_total":{},"local_exec_total":{},"forward_total":{},"#,
+                        r#""reject_no_route":{},"reject_overloaded":{},"reject_timeout":{},"#,
+                        r#""inflight":{},"forwarded":{},"#,
+                        r#""forward_latency_avg_us":{},"forward_latency_peak_us":{},"forward_failed":{},"#,
+                        r#""client_connect_total":{},"client_failover_total":{},"#,
+                        r#""topology":{{"shard_count":{},"node_count":{},"cache_hit_rate":{:.3},"leader_changes":{},"invalidations":{}}}}}}}"#,
+                    ),
+                    sgw.config.role,
+                    ts.epoch,
+                    ms.requests_total,
+                    ms.local_exec_total,
+                    ms.forward_total,
+                    ms.reject_no_route_total,
+                    ms.reject_overloaded_total,
+                    ms.reject_timeout_total,
+                    ms.inflight,
+                    ms.forwarded,
+                    ms.forward_latency_avg_us,
+                    ms.forward_latency_peak_us,
+                    ms.forward_failed,
+                    ms.client_connect_total,
+                    ms.client_failover_total,
+                    ts.shard_count,
+                    ts.node_count,
+                    ts.hit_rate,
+                    ts.leader_changes,
+                    ts.invalidations,
+                )
+            } else {
+                String::new()
+            };
+
             let body = format!(
-                r#"{{"status":"ok","role":"{}","uptime_secs":{},"live":{},"ready":{},"active_connections":{},"max_connections":{},"wal_enabled":{},"wal_records_written":{},"wal_flushes":{},"wal_fsync_avg_us":{}}}"#,
+                concat!(
+                    r#"{{"status":"ok","version":"{}","config_version":{},"#,
+                    r#""role":"{}","uptime_secs":{},"live":{},"ready":{},"#,
+                    r#""active_connections":{},"max_connections":{},"#,
+                    r#""wal":{{"enabled":{},"current_lsn":{},"flushed_lsn":{},"segment":{},"wal_backlog_bytes":{},"records_written":{},"flushes":{},"fsync_avg_us":{}}},"#,
+                    r#""gateway":{{"inflight":{},"forwarded":{},"rejected":{},"local_exec_total":{},"forward_total":{}}},"#,
+                    r#""memory":{{"hot_bytes":{},"cold_bytes":{},"cold_segments":{},"compression_ratio":{:.2},"cold_read_total":{},"cold_decompress_avg_us":{:.1},"cold_decompress_peak_us":{},"cold_migrate_total":{},"intern_hit_rate":{:.3}}}{}}}"#,
+                ),
+                version,
+                config_version,
                 state.role_str(),
                 state.uptime_secs(),
                 state.is_live(),
@@ -458,9 +569,28 @@ async fn handle_health_request(
                 active,
                 max_conn,
                 state.storage.is_wal_enabled(),
+                wal_lsn,
+                flushed_lsn,
+                wal_segment,
+                wal_backlog,
                 wal_stats.records_written,
                 wal_stats.flushes,
                 wal_stats.fsync_avg_us,
+                gw_inflight,
+                gw_forwarded,
+                gw_rejected,
+                gw_local,
+                gw_fwd_total,
+                hot_bytes,
+                cold_bytes,
+                cold_snap.cold_segments_total,
+                cold_snap.compression_ratio,
+                cold_snap.cold_read_total,
+                cold_snap.avg_decompress_us,
+                cold_snap.cold_decompress_peak_us,
+                cold_snap.cold_migrate_total,
+                intern_hit,
+                sgw_json,
             );
             ("200 OK", body)
         }

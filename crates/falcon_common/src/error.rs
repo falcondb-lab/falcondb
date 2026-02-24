@@ -110,6 +110,9 @@ pub enum StorageError {
 
     #[error("Memory limit exceeded: shard at hard limit, all transactions rejected ({used_bytes} / {limit_bytes} bytes)")]
     MemoryLimitExceeded { used_bytes: u64, limit_bytes: u64 },
+
+    #[error("Cold store error: {0}")]
+    ColdStore(String),
 }
 
 /// Transaction layer errors.

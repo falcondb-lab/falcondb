@@ -104,7 +104,8 @@ public class FalconConnection implements Connection {
 
     @Override
     public DatabaseMetaData getMetaData() throws SQLException {
-        throw new SQLFeatureNotSupportedException("DatabaseMetaData not yet implemented");
+        checkClosed();
+        return new FalconDatabaseMetaData(this);
     }
 
     @Override
