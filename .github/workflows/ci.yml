@@ -74,6 +74,13 @@ jobs:
           java-version: 17
       - run: chmod +x scripts/ci_jdbc_smoke.sh && ./scripts/ci_jdbc_smoke.sh
 
+  version-check:
+    name: Version Consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: chmod +x scripts/ci_version_check.sh && ./scripts/ci_version_check.sh
+
   windows:
     name: Windows Check
     runs-on: windows-latest

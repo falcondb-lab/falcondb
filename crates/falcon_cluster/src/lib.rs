@@ -28,6 +28,13 @@ pub mod determinism_hardening;
 pub mod sharding;
 pub mod sla_admission;
 pub mod token_bucket;
+pub mod control_plane;
+pub mod enterprise_ops;
+pub mod enterprise_security;
+pub mod ga_hardening;
+pub mod cost_capacity;
+pub mod segment_streaming;
+pub mod self_healing;
 pub mod smart_gateway;
 pub mod two_phase;
 
@@ -127,5 +134,70 @@ pub use smart_gateway::{
     SmartGateway, SmartGatewayConfig, SmartGatewayMetrics, SmartGatewayMetricsSnapshot,
     TopologyCache, TopologyCacheMetrics, TopologyCacheMetricsSnapshot, TopologyEntry,
     WalMode,
+};
+pub use self_healing::{
+    BackpressureConfig, BackpressureController, BackpressureMetrics,
+    CatchUpConfig, CatchUpMetrics, CatchUpPhase, ClusterFailureDetector,
+    ClusterHealthLevel, ClusterHealthResponse, ClusterStatusResponse,
+    DrainPhase, ElectionConfig, ElectionError, ElectionMetrics, ElectionState,
+    FailureDetectorConfig, FailureDetectorMetrics, JoinPhase,
+    LeaderElectionCoordinator, LifecycleMetrics, NodeDrainState,
+    NodeHealthRecord, NodeJoinState, NodeLiveness, NodeLifecycleCoordinator,
+    OpsAuditEvent, OpsAuditLog, OpsCommand, OpsEventType,
+    PressureLevel, PressureSignal, ProtocolVersion,
+    ReplicaCatchUpCoordinator, ReplicaCatchUpState, ReplicaLagClass,
+    RollingUpgradeCoordinator, ShardElection, SloSnapshot, SloTracker,
+    UpgradeMetrics, UpgradeNodeRecord, UpgradeNodeState, UpgradeOrder,
+};
+pub use control_plane::{
+    CommandDispatcher, CommandResult, ConfigEntry, ConfigStore,
+    ConsistentMetadataStore, ControlPlaneCommand, ControllerHAGroup,
+    ControllerHAMetrics, ControllerNode, ControllerRole,
+    DataNodeRecord, DataNodeState, MetadataCommand, MetadataDomain,
+    MetadataOperation, MetadataStoreMetrics, MetadataWriteResult,
+    NodeCapabilities, NodeRegistry, NodeRegistryMetrics,
+    PlacementMetrics, ReadConsistency, ShardPlacement,
+    ShardPlacementManager, ShardPlacementState,
+};
+pub use enterprise_security::{
+    AuditCategory, AuditSeverity, AuthnManager, AuthnMetrics,
+    AuthnRequest, AuthnResult, BackupJob, BackupJobStatus,
+    BackupOrchestrator, BackupOrchestratorMetrics, BackupTarget,
+    CertMetrics, CertRotationEvent, CertificateManager,
+    CertificateRecord, CredentialType, EnterpriseAuditEvent,
+    EnterpriseAuditLog, EnterpriseAuditMetrics, EnterpriseBackupType,
+    EnterprisePermission, EnterpriseRbac, RbacCheckResult,
+    RbacGrant, RbacMetrics, RbacScope, RestoreJob, RestoreType,
+    StoredCredential, TlsLinkType, UserRecord,
+};
+pub use enterprise_ops::{
+    AdminApiRouter, AdminEndpoint, AutoRebalancer, CapacityAlert,
+    CapacityAlertLevel, CapacityMetrics, CapacityPlanner,
+    ClusterOverviewResponse, ForecastResult, Incident,
+    IncidentSeverity, IncidentTimeline, MigrationState,
+    MigrationTask as EnterpriseMigrationTask, NodeDetailResponse,
+    RebalanceConfig, RebalanceMetrics, RebalanceTrigger,
+    ResourceSample, ResourceType, ShardDetailResponse,
+    SloDefinition, SloEngine, SloEngineMetrics, SloEvaluation,
+    SloMetricType, TimelineEvent, TimelineEventType, TimelineMetrics,
+};
+pub use ga_hardening::{
+    BgIsolatorMetrics, BgTaskIsolator, BgTaskQuota, BgTaskType, BgTaskUsage,
+    BreachType, ComponentState, ComponentType, ConfigRollbackManager,
+    ConfigRollbackMetrics, CrashHardeningCoordinator, CrashHardeningMetrics,
+    GuardedPath, GuardrailBreach, GuardrailMetrics, LatencyGuardrailEngine,
+    LeakDetectionResult, LeakDetectorMetrics, LeakResourceType, LifecycleOrder,
+    PathGuardrail, RecoveryAction, ResourceLeakDetector, ResourceSnapshot,
+    RolloutState, ShutdownType, StartupRecord, ThrottleDecision,
+    VersionedConfig,
+};
+pub use cost_capacity::{
+    AdminConsoleV2, AdminV2Endpoint, CapacityGuardAlert, CapacityGuardMetrics,
+    CapacityGuardSeverity, CapacityGuardV2, ChangeImpactMetrics,
+    ChangeImpactPreview, ClusterCostSummary, CostTracker, CostTrackerMetrics,
+    DecisionPoint, HardenedAuditLog, HardenedAuditMetrics, ImpactEstimate,
+    ImpactRisk, MetricChange, PostmortemGenerator, PostmortemMetrics,
+    PostmortemReport, PostmortemTimelineEntry, PressureType, ProposedChange,
+    Recommendation, ShardCost, TableCost, UnifiedAuditEvent,
 };
 pub use two_phase::TwoPhaseCoordinator;

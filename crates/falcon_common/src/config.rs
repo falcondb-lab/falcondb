@@ -88,6 +88,10 @@ pub struct ServerConfig {
     /// for active connections to finish before forcing exit. Default: 30s.
     #[serde(default = "default_shutdown_drain_timeout_secs")]
     pub shutdown_drain_timeout_secs: u64,
+    /// Slow transaction detection threshold in microseconds (0 = disabled).
+    /// Transactions exceeding this latency are logged as WARN. Default: 100ms.
+    #[serde(default = "default_slow_txn_threshold_us")]
+    pub slow_txn_threshold_us: u64,
     /// Authentication configuration.
     #[serde(default)]
     pub auth: AuthConfig,
@@ -147,6 +151,10 @@ pub struct AuthConfig {
 
 fn default_shutdown_drain_timeout_secs() -> u64 {
     30
+}
+
+fn default_slow_txn_threshold_us() -> u64 {
+    100_000 // 100ms
 }
 
 fn default_wal_backend() -> String { "file".to_string() }
@@ -529,6 +537,7 @@ impl Default for FalconConfig {
                 statement_timeout_ms: 0,
                 idle_timeout_ms: 0,
                 shutdown_drain_timeout_secs: 30,
+                slow_txn_threshold_us: 100_000,
                 auth: AuthConfig::default(),
                 tls: TlsConfig::default(),
             },

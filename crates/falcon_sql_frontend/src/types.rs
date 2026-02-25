@@ -73,6 +73,16 @@ pub enum BoundStatement {
     DropTenant {
         name: String,
     },
+    /// DDL: CREATE DATABASE name
+    CreateDatabase {
+        name: String,
+        if_not_exists: bool,
+    },
+    /// DDL: DROP DATABASE name
+    DropDatabase {
+        name: String,
+        if_exists: bool,
+    },
     /// COPY table FROM STDIN
     CopyFrom {
         table_id: TableId,

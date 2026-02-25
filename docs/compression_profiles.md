@@ -4,13 +4,17 @@
 
 FalconDB v1.0.8 introduces **compression profiles** — a single configuration knob that controls the entire hot/cold memory tiering system. Users don't need to understand cold store internals.
 
+> **Since v1.2**: All codecs are provided by the `falcon_segment_codec` crate (built on `zstd-safe`).
+> Zstd is now the default codec for Balanced and Aggressive profiles.
+
 ## Profiles
 
-| Profile | Config Value | Cold Migration | Codec | Cache Size | Use Case |
-|---------|-------------|---------------|-------|-----------|----------|
-| Off | `"off"` | Disabled | None | 0 | Maximum throughput, no compression overhead |
-| Balanced | `"balanced"` | 5 min age | LZ4 | 16 MB | Default — good memory savings, low CPU |
-| Aggressive | `"aggressive"` | 1 min age | LZ4 | 64 MB | Maximum memory savings, higher CPU |
+| Profile | Config Value | Cold Migration | Codec | Level | Cache Size | Use Case |
+|---------|-------------|---------------|-------|-------|-----------|----------|
+| Off | `"off"` | Disabled | None | — | 0 | Maximum throughput, no compression overhead |
+| Balanced | `"balanced"` | 5 min age | **Zstd** | 3 | 16 MB | Default — good memory savings, moderate CPU |
+| Aggressive | `"aggressive"` | 1 min age | **Zstd** | 5 | 64 MB | Maximum memory savings, higher CPU |
+| Legacy-LZ4 | `"legacy-lz4"` | 5 min age | LZ4 | — | 16 MB | Pre-v1.2 behavior, LZ4 only |
 
 ## Configuration
 
@@ -52,17 +56,20 @@ compression_profile = "balanced"
 ```
 
 - Old MVCC versions (>5 min) migrated to cold store
-- LZ4 compression (fast, ~60% ratio on typical data)
+- **Zstd compression** (level 3) via `falcon_segment_codec::ZstdBlockCodec`
+- Typical ratio: 3–5x on repetitive data (up from 1.5–3x with LZ4)
 - 16 MB block cache for read amortization
+- Decompression isolated via `DecompressPool` (never on OLTP executor)
 - Background compactor runs every 5 seconds
-- **Best for**: Most workloads — saves 30–60% memory with minimal latency impact
+- **Best for**: Most workloads — saves 40–70% memory with minimal latency impact
 
 Effective settings:
 | Parameter | Value |
 |-----------|-------|
 | `compression_enabled` | true |
 | `min_version_age` | 300 (~5 min) |
-| `codec` | lz4 |
+| `codec` | zstd |
+| `zstd_level` | 3 |
 | `block_cache_capacity` | 16 MB |
 | `compactor_batch_size` | 1000 |
 | `compactor_interval_ms` | 5000 |
@@ -74,8 +81,10 @@ compression_profile = "aggressive"
 ```
 
 - Old MVCC versions (>1 min) migrated to cold store
-- LZ4 compression
+- **Zstd compression** (level 5) via `falcon_segment_codec::ZstdBlockCodec`
+- Typical ratio: 4–8x on repetitive data
 - 64 MB block cache (larger to handle more cold reads)
+- Optional dictionary support for further ratio gains
 - Background compactor runs every 1 second with larger batches
 - **Best for**: Memory-constrained environments, large datasets, analytical workloads
 
@@ -84,7 +93,8 @@ Effective settings:
 |-----------|-------|
 | `compression_enabled` | true |
 | `min_version_age` | 60 (~1 min) |
-| `codec` | lz4 |
+| `codec` | zstd |
+| `zstd_level` | 5 |
 | `block_cache_capacity` | 64 MB |
 | `compactor_batch_size` | 5000 |
 | `compactor_interval_ms` | 1000 |
@@ -139,10 +149,11 @@ compression_profile = "aggressive"
 
 ## Performance Expectations
 
-| Profile | Memory Savings | p99 Latency Impact | CPU Overhead |
-|---------|---------------|-------------------|-------------|
-| Off | 0% | 0% | 0% |
-| Balanced | 30–60% | < 2% | < 3% |
-| Aggressive | 50–75% | < 5% | < 8% |
+| Profile | Memory Savings | p99 Latency Impact | CPU Overhead | Compression Ratio |
+|---------|---------------|-------------------|-------------|------------------|
+| Off | 0% | 0% | 0% | 1.0x |
+| Balanced (Zstd L3) | 40–70% | < 2% | < 5% | 3–5x |
+| Aggressive (Zstd L5) | 55–80% | < 5% | < 10% | 4–8x |
+| Legacy-LZ4 | 30–60% | < 2% | < 3% | 1.5–3x |
 
 These are measured on typical OLTP workloads with mixed read/write patterns.

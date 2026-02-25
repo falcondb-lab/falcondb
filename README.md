@@ -4,7 +4,7 @@
   <img src="assets/falcondb-logo.png" alt="FalconDB Logo" width="220" />
 </p>
 
-<h1 align="center">FalconDB v1.0.3 + USTM + Query Performance</h1>
+<h1 align="center">FalconDB</h1>
 
 <p align="center">
   <strong>PG-Compatible · Distributed · Memory-First · Deterministic Transaction Semantics</strong>
@@ -14,15 +14,19 @@
   <a href="https://github.com/falcondb-lab/falcondb/actions/workflows/ci.yml">
     <img src="https://github.com/falcondb-lab/falcondb/actions/workflows/ci.yml/badge.svg" alt="CI" />
   </a>
+  <img src="https://img.shields.io/badge/version-1.2.0-blue" alt="Version" />
   <img src="https://img.shields.io/badge/MSRV-1.75-blue" alt="MSRV" />
   <img src="https://img.shields.io/badge/license-Apache--2.0-green" alt="License" />
 </p>
 
 > English | **[简体中文](README_zh.md)**
 
-> **v1.0.3 Positioning** — FalconDB is a **PG-compatible, distributed, memory-first
-> OLTP database** with deterministic transaction semantics. Benchmarked against
-> SingleStore (OLTP) and VoltDB.
+<!-- Version: sourced from workspace Cargo.toml [workspace.package] version -->
+<!-- Do NOT hardcode version numbers anywhere else. See docs/versioning.md -->
+
+> FalconDB is a **PG-compatible, distributed, memory-first OLTP database** with
+> deterministic transaction semantics. Benchmarked against SingleStore (OLTP)
+> and VoltDB.
 >
 > - ✅ **Low latency** — single-shard fast-path commits bypass 2PC entirely
 > - ✅ **Scan performance** — fused streaming aggregates, zero-copy MVCC iteration, near-PG parity on 1M rows

@@ -263,7 +263,13 @@ async fn run_console(cli: Cli) -> Result<()> {
 
     // Initialize observability (stderr for console mode)
     falcon_observability::init_tracing();
-    tracing::info!(mode = "console", "Starting FalconDB...");
+    tracing::info!(
+        mode = "console",
+        version = env!("CARGO_PKG_VERSION"),
+        git = env!("FALCONDB_GIT_HASH"),
+        built = env!("FALCONDB_BUILD_TIME"),
+        "Starting FalconDB..."
+    );
 
     run_server_inner(&cli.config, &cli, None).await
 }
@@ -347,11 +353,31 @@ async fn run_server_inner(
 
     let storage = if config.storage.wal_enabled {
         let data_dir = Path::new(&config.storage.data_dir);
-        let mut engine = if data_dir.join("falcon.wal").exists() {
+        tracing::info!(
+            "WAL mode: '{}' (no_buffering={})",
+            config.wal_mode,
+            config.wal.no_buffering,
+        );
+        let has_wal = data_dir.join("falcon.wal").exists()
+            || std::fs::read_dir(data_dir)
+                .map(|entries| {
+                    entries.flatten().any(|e| {
+                        let name = e.file_name();
+                        let s = name.to_string_lossy();
+                        s.starts_with("falcon_") && s.ends_with(".wal")
+                    })
+                })
+                .unwrap_or(false);
+        let mut engine = if has_wal {
             tracing::info!("Recovering from WAL at {:?}", data_dir);
             StorageEngine::recover(data_dir)?
         } else {
-            StorageEngine::new_with_sync_mode(Some(data_dir), wal_sync_mode)?
+            StorageEngine::new_with_wal_mode(
+                Some(data_dir),
+                wal_sync_mode,
+                &config.wal_mode,
+                config.wal.no_buffering,
+            )?
         };
 
         // Apply memory budget from config
@@ -428,6 +454,8 @@ async fn run_server_inner(
 
     // Initialize transaction manager
     let txn_mgr = Arc::new(TxnManager::new(storage.clone()));
+    txn_mgr.set_slow_txn_threshold_us(config.server.slow_txn_threshold_us);
+    tracing::info!("Slow txn threshold: {}us (0=disabled)", config.server.slow_txn_threshold_us);
 
     // Initialize executor (read-only on replicas/analytics to reject writes at SQL level)
     let mut executor = if matches!(
@@ -760,12 +788,24 @@ fn parse_node_role(s: &str) -> Result<NodeRole, String> {
 
 fn print_version() {
     println!("FalconDB v{}", env!("CARGO_PKG_VERSION"));
+    println!("  Git commit:    {}", env!("FALCONDB_GIT_HASH"));
+    println!("  Build time:    {}", env!("FALCONDB_BUILD_TIME"));
     println!("  Config schema: v{}", falcon_common::config::CURRENT_CONFIG_VERSION);
     println!("  Build target:  {}", std::env::consts::ARCH);
     println!("  OS:            {}", std::env::consts::OS);
     println!("  Exe:           {}", std::env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "unknown".into()));
+}
+
+/// Returns the version string for use by other modules (e.g., startup banner).
+pub fn falcondb_version_string() -> String {
+    format!(
+        "FalconDB v{} (git:{} built:{})",
+        env!("CARGO_PKG_VERSION"),
+        env!("FALCONDB_GIT_HASH"),
+        env!("FALCONDB_BUILD_TIME"),
+    )
 }
 
 fn run_purge(skip_confirm: bool) {

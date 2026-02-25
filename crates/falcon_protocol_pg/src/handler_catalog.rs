@@ -736,14 +736,22 @@ impl QueryHandler {
             ("datcollate", 25, -1),
             ("datctype", 25, -1),
         ];
-        let rows = vec![vec![
-            Some("16384".into()),
-            Some("falcon".into()),
-            Some("10".into()),
-            Some("6".into()), // UTF8
-            Some("en_US.UTF-8".into()),
-            Some("en_US.UTF-8".into()),
-        ]];
+        let catalog = self.storage.get_catalog();
+        let databases = catalog.list_databases();
+        let rows: Vec<Vec<Option<String>>> = databases
+            .iter()
+            .map(|db| {
+                vec![
+                    Some(db.oid.to_string()),
+                    Some(db.name.clone()),
+                    Some("10".into()),
+                    Some("6".into()), // UTF8
+                    Some("en_US.UTF-8".into()),
+                    Some("en_US.UTF-8".into()),
+                ]
+            })
+            .collect();
+        drop(catalog);
         self.single_row_result(cols, rows)
     }
 

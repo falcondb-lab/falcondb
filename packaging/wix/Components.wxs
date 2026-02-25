@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FalconDB — Program Files Components
+  Installs to: C:\Program Files\FalconDB\
+  Removed on uninstall (data in ProgramData is preserved).
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <?include Variables.wxi ?>
+
+  <!-- ════════════════════════════════════════════════════════════════
+       Binary components: bin\falcon.exe
+       ════════════════════════════════════════════════════════════════ -->
+  <ComponentGroup Id="BinComponents" Directory="BINDIR">
+    <Component Id="FalconExe" Guid="{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}">
+      <File Id="falcon.exe"
+            Source="$(var.StageDir)\bin\falcon.exe"
+            KeyPath="yes" />
+    </Component>
+  </ComponentGroup>
+
+  <!-- ════════════════════════════════════════════════════════════════
+       Documentation / metadata in install root
+       ════════════════════════════════════════════════════════════════ -->
+  <ComponentGroup Id="DocComponents" Directory="INSTALLFOLDER">
+    <Component Id="VersionFile" Guid="{B2C3D4E5-F6A7-8901-BCDE-F12345678901}">
+      <File Id="VERSION"
+            Source="$(var.StageDir)\VERSION"
+            KeyPath="yes" />
+    </Component>
+
+    <Component Id="LicenseFile" Guid="{C3D4E5F6-A7B8-9012-CDEF-123456789012}">
+      <File Id="LICENSE"
+            Source="$(var.StageDir)\LICENSE"
+            KeyPath="yes" />
+    </Component>
+
+    <Component Id="NoticeFile" Guid="{D4E5F6A7-B8C9-0123-DEFA-234567890123}">
+      <File Id="NOTICE"
+            Source="$(var.StageDir)\NOTICE"
+            KeyPath="yes" />
+    </Component>
+  </ComponentGroup>
+
+</Wix>

@@ -105,6 +105,14 @@ pub struct MemorySnapshot {
     pub mvcc_bytes: u64,
     pub index_bytes: u64,
     pub write_buffer_bytes: u64,
+    /// P1-1: WAL / group-commit buffer bytes.
+    pub wal_buffer_bytes: u64,
+    /// P1-1: Replication / streaming buffer bytes.
+    pub replication_buffer_bytes: u64,
+    /// P1-1: Snapshot / streaming transfer buffer bytes.
+    pub snapshot_buffer_bytes: u64,
+    /// P1-1: SQL execution intermediate result bytes.
+    pub exec_buffer_bytes: u64,
     pub pressure_state: PressureState,
     pub soft_limit: u64,
     pub hard_limit: u64,
@@ -142,6 +150,14 @@ pub struct MemoryTracker {
     index_bytes: AtomicI64,
     /// Uncommitted write-buffer bytes.
     write_buffer_bytes: AtomicI64,
+    /// P1-1: WAL / group-commit buffer bytes.
+    wal_buffer_bytes: AtomicI64,
+    /// P1-1: Replication / streaming buffer bytes.
+    replication_buffer_bytes: AtomicI64,
+    /// P1-1: Snapshot / streaming transfer buffer bytes.
+    snapshot_buffer_bytes: AtomicI64,
+    /// P1-1: SQL execution intermediate result bytes.
+    exec_buffer_bytes: AtomicI64,
 
     /// Memory budget for this shard.
     budget: MemoryBudget,
@@ -165,6 +181,10 @@ impl MemoryTracker {
             mvcc_bytes: AtomicI64::new(0),
             index_bytes: AtomicI64::new(0),
             write_buffer_bytes: AtomicI64::new(0),
+            wal_buffer_bytes: AtomicI64::new(0),
+            replication_buffer_bytes: AtomicI64::new(0),
+            snapshot_buffer_bytes: AtomicI64::new(0),
+            exec_buffer_bytes: AtomicI64::new(0),
             budget,
             rejected_txn_count: AtomicU64::new(0),
             delayed_txn_count: AtomicU64::new(0),
@@ -241,6 +261,62 @@ impl MemoryTracker {
         self.check_pressure_transition();
     }
 
+    // ── Accounting: WAL buffer ──
+
+    /// Record allocation of WAL / group-commit buffer bytes.
+    pub fn alloc_wal_buffer(&self, bytes: u64) {
+        self.wal_buffer_bytes.fetch_add(bytes as i64, Ordering::Relaxed);
+        self.check_pressure_transition();
+    }
+
+    /// Record deallocation of WAL / group-commit buffer bytes.
+    pub fn dealloc_wal_buffer(&self, bytes: u64) {
+        self.wal_buffer_bytes.fetch_sub(bytes as i64, Ordering::Relaxed);
+        self.check_pressure_transition();
+    }
+
+    // ── Accounting: Replication buffer ──
+
+    /// Record allocation of replication / streaming buffer bytes.
+    pub fn alloc_replication_buffer(&self, bytes: u64) {
+        self.replication_buffer_bytes.fetch_add(bytes as i64, Ordering::Relaxed);
+        self.check_pressure_transition();
+    }
+
+    /// Record deallocation of replication / streaming buffer bytes.
+    pub fn dealloc_replication_buffer(&self, bytes: u64) {
+        self.replication_buffer_bytes.fetch_sub(bytes as i64, Ordering::Relaxed);
+        self.check_pressure_transition();
+    }
+
+    // ── Accounting: Snapshot buffer ──
+
+    /// Record allocation of snapshot / streaming transfer buffer bytes.
+    pub fn alloc_snapshot_buffer(&self, bytes: u64) {
+        self.snapshot_buffer_bytes.fetch_add(bytes as i64, Ordering::Relaxed);
+        self.check_pressure_transition();
+    }
+
+    /// Record deallocation of snapshot / streaming transfer buffer bytes.
+    pub fn dealloc_snapshot_buffer(&self, bytes: u64) {
+        self.snapshot_buffer_bytes.fetch_sub(bytes as i64, Ordering::Relaxed);
+        self.check_pressure_transition();
+    }
+
+    // ── Accounting: SQL execution buffer ──
+
+    /// Record allocation of SQL execution intermediate result bytes.
+    pub fn alloc_exec_buffer(&self, bytes: u64) {
+        self.exec_buffer_bytes.fetch_add(bytes as i64, Ordering::Relaxed);
+        self.check_pressure_transition();
+    }
+
+    /// Record deallocation of SQL execution intermediate result bytes.
+    pub fn dealloc_exec_buffer(&self, bytes: u64) {
+        self.exec_buffer_bytes.fetch_sub(bytes as i64, Ordering::Relaxed);
+        self.check_pressure_transition();
+    }
+
     // ── Queries ──
 
     /// Total memory usage across all categories.
@@ -248,7 +324,11 @@ impl MemoryTracker {
         let m = self.mvcc_bytes.load(Ordering::Relaxed).max(0) as u64;
         let i = self.index_bytes.load(Ordering::Relaxed).max(0) as u64;
         let w = self.write_buffer_bytes.load(Ordering::Relaxed).max(0) as u64;
-        m + i + w
+        let wal = self.wal_buffer_bytes.load(Ordering::Relaxed).max(0) as u64;
+        let repl = self.replication_buffer_bytes.load(Ordering::Relaxed).max(0) as u64;
+        let snap = self.snapshot_buffer_bytes.load(Ordering::Relaxed).max(0) as u64;
+        let exec = self.exec_buffer_bytes.load(Ordering::Relaxed).max(0) as u64;
+        m + i + w + wal + repl + snap + exec
     }
 
     /// MVCC bytes currently tracked.
@@ -281,12 +361,36 @@ impl MemoryTracker {
         &self.budget
     }
 
+    /// WAL buffer bytes currently tracked.
+    pub fn wal_buffer_bytes(&self) -> u64 {
+        self.wal_buffer_bytes.load(Ordering::Relaxed).max(0) as u64
+    }
+
+    /// Replication buffer bytes currently tracked.
+    pub fn replication_buffer_bytes(&self) -> u64 {
+        self.replication_buffer_bytes.load(Ordering::Relaxed).max(0) as u64
+    }
+
+    /// Snapshot buffer bytes currently tracked.
+    pub fn snapshot_buffer_bytes(&self) -> u64 {
+        self.snapshot_buffer_bytes.load(Ordering::Relaxed).max(0) as u64
+    }
+
+    /// SQL execution buffer bytes currently tracked.
+    pub fn exec_buffer_bytes(&self) -> u64 {
+        self.exec_buffer_bytes.load(Ordering::Relaxed).max(0) as u64
+    }
+
     /// Take an immutable snapshot for observability.
     pub fn snapshot(&self) -> MemorySnapshot {
         let mvcc = self.mvcc_bytes();
         let index = self.index_bytes();
         let wb = self.write_buffer_bytes();
-        let total = mvcc + index + wb;
+        let wal = self.wal_buffer_bytes();
+        let repl = self.replication_buffer_bytes();
+        let snap = self.snapshot_buffer_bytes();
+        let exec = self.exec_buffer_bytes();
+        let total = mvcc + index + wb + wal + repl + snap + exec;
         let ratio = if self.budget.hard_limit > 0 {
             total as f64 / self.budget.hard_limit as f64
         } else {
@@ -297,6 +401,10 @@ impl MemoryTracker {
             mvcc_bytes: mvcc,
             index_bytes: index,
             write_buffer_bytes: wb,
+            wal_buffer_bytes: wal,
+            replication_buffer_bytes: repl,
+            snapshot_buffer_bytes: snap,
+            exec_buffer_bytes: exec,
             pressure_state: self.budget.evaluate(total),
             soft_limit: self.budget.soft_limit,
             hard_limit: self.budget.hard_limit,

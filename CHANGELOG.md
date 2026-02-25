@@ -7,6 +7,434 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.2.0] — Commercial-Grade Readiness (P0 + P1 + P2) + Segment-Level Zstd Compression
+
+> **Theme**: FalconDB advances from "technically strong" to "industry-positioned, commercially credible".
+> P0 establishes version consistency, failover determinism, reproducible benchmarks, and evidence.
+> P1 adds memory control, long-run stability, replication integrity, and production operability.
+> P2 locks industry focus (Financial Trading OLTP), defines the product edition, SLA, commercial model, and PoC path.
+
+### Added — P2-1: Industry Focus Decision
+
+- **`docs/industry_focus.md`** — binding strategic decision: Financial Trading & Risk Control OLTP.
+  - Target systems: OMS, Risk Engine, Position Keeper, Clearing Ledger.
+  - Explicit rejection of Industrial/MES, Energy/Metering with reasoning.
+  - PostgreSQL / Oracle / MySQL gap analysis per financial requirement.
+  - FalconDB's 7 irreplaceable advantages mapped to architecture.
+
+### Added — P2-2: Industry Edition Product Definition
+
+- **`docs/industry_edition_overview.md`** — FalconDB Financial Edition:
+  - 3 core use cases: Order Entry, Real-Time Risk, Clearing Ledger.
+  - Transaction model: Snapshot Isolation, OCC, first-committer-wins.
+  - Write model: memory-first hot path, WAL group commit, sync replication.
+  - SLA commitments with evidence links.
+  - Default `falcondb-financial.toml` configuration (zero-tuning start).
+  - PG wire compatibility matrix.
+
+### Added — P2-3: Industry SLA & Replacement Proof
+
+- **`docs/industry_sla.md`** — every SLA claim traceable to evidence:
+  - Write latency: P99 < 1ms, P99.9 < 5ms.
+  - Zero phantom commits (P0-2 proven).
+  - Failover: RPO=0 (sync), RTO < 30s, impact window < 3s.
+  - FalconDB vs PostgreSQL: 5–20× latency, deterministic failover, built-in backpressure.
+  - FalconDB vs Oracle: Apache 2.0 vs $47.5K/core, $8.5M+ savings over 5 years.
+  - Explicit non-claims listed.
+
+### Added — P2-4: Commercial Model & License Boundary
+
+- **`docs/commercial_model.md`** — binding product decision:
+  - **Core** (Apache 2.0, forever free): storage engine, WAL, replication, PG wire, backpressure, metrics, CLI.
+  - **Financial Edition** (commercial): ops console, advanced replication, compliance pack, priority support.
+  - Pricing model: per-node/year vs Oracle per-core perpetual.
+  - Value equation: $8.5M–$9M savings vs Oracle over 5 years.
+  - Revenue projection: path to $10M ARR (40 institutions × $250K).
+  - "Never charge for" list: core engine, basic replication, metrics, docs.
+
+### Added — P2-5: Industry PoC Playbook
+
+- **`docs/industry_poc_playbook.md`** — repeatable 2–4 week PoC process:
+  - Week 0: Qualification + success criteria agreement.
+  - Week 1: Customer schema + workload.
+  - Week 2: Performance + resilience measurement.
+  - Week 3 (optional): 72h stability.
+  - Week 4: Report + decision.
+  - Success criteria template (7 measurable criteria).
+  - PoC report template.
+  - Anti-patterns list (6 "do not" rules).
+  - Cost control: < $10K total.
+
+### Added — P2-6: P2 Evidence Pack
+
+- **`evidence/industry/`** with 3 sub-categories:
+  - `sla/` — SLA traceability JSON, SLA doc snapshots.
+  - `poc/` — PoC playbook snapshots.
+  - `comparisons/` — FalconDB vs PG/Oracle structured comparison JSON.
+- **`scripts/collect_evidence_p2.sh`** — one-click P2 evidence collection with `--verify` mode.
+- **`evidence/INDEX.md`** — updated with P2 categories (E9–E12) and completeness checklist.
+
+### Added — P1-1: Global Memory Budget & Backpressure System
+
+- **`MemoryTracker`** now tracks **7 memory consumers**: MVCC, Index, WriteBuffer, WAL buffer, Replication buffer, Snapshot buffer, SQL execution buffer.
+- **`GlobalMemoryGovernor`** — node-wide 4-tier backpressure: None → Soft (delay) → Hard (reject writes) → Emergency (reject all + urgent GC).
+- **`MemorySnapshot`** includes all 7 consumers, pressure ratio, and backpressure counters.
+- **16 integration tests** (`crates/falcon_storage/tests/memory_backpressure.rs`): all consumers tracked, pressure transitions, governor tiers, concurrent safety, recovery.
+- **`docs/memory_backpressure.md`** — architecture, configuration, forbidden behaviors, troubleshooting.
+- **Guarantee**: FalconDB will never silently OOM. Under memory pressure it throttles, rejects, or sheds — every action logged and metered.
+
+### Added — P1-2: Long-Run Stability Verification (72h / 7d)
+
+- **`scripts/run_stability_test.sh`** — automated long-run stability test with `--duration 72h` / `--duration 7d`.
+  - Samples RSS, TPS, latency, error count, WAL backlog every 60s.
+  - Generates timestamped report + metrics CSV.
+  - Detects memory leaks (>20% RSS growth) and performance degradation.
+- **`evidence/stability/72h_report_template.md`** + **`7d_report_template.md`** — standardized report formats.
+
+### Added — P1-3: Replication Drift & Data Integrity Guard
+
+- **`crates/falcon_cluster/tests/replication_integrity.rs`** — 5 integration tests:
+  - Empty cluster consistency, 100-row replication checksum match, drift detection (unshipped records), failover integrity, 1000-row large dataset.
+- **Order-independent checksum**: sort rows by PK, hash all column values.
+- **Drift detection**: row count mismatch and checksum divergence flagged programmatically.
+- **`docs/replication_integrity.md`** — check methods, drift types, recovery paths, scheduling.
+
+### Added — P1-4: Production Operability Baseline
+
+- **`docs/operability_baseline.md`** — complete ops reference:
+  - Health endpoints (`/health`, `/ready`, `/status`)
+  - Full Prometheus metrics catalog (7 categories, 60+ metrics)
+  - Structured log level policy (INFO/WARN/ERROR/FATAL)
+  - Troubleshooting runbook: TPS drop, memory pressure, replica lag, high abort rate, WAL latency
+  - Recommended Prometheus alerting rules + Grafana dashboard panels
+
+### Added — P1-5: P1 Evidence Pack
+
+- **`evidence/`** extended with 4 new categories:
+  - `memory/` — backpressure test output, governor stats JSON
+  - `stability/` — 72h/7d report templates + metrics CSV
+  - `replication/` — integrity test output, drift detection JSON
+  - `operability/` — metrics catalog extract, health check responses
+- **`scripts/collect_evidence_p1.sh`** — one-click P1 evidence collection with `--verify` mode.
+- **`evidence/INDEX.md`** — updated with P1 categories (E5–E8) and completeness checklist.
+
+### Added — P0-1: Single Source of Truth for Versioning
+
+- **`[workspace.package] version`** is the ONLY version definition. All crates use `version.workspace = true`.
+- **`crates/falcon_server/build.rs`** — injects `FALCONDB_GIT_HASH` and `FALCONDB_BUILD_TIME` at compile time.
+- **`falcon --version`** now prints version, git hash, build time, config schema, arch, OS.
+- **Startup log** includes version, git commit, and build timestamp.
+- **`scripts/extract_version.ps1`** — extracts version from Cargo.toml, optionally updates `dist/VERSION`.
+- **`scripts/ci_version_check.sh`** — CI gate: verifies all version references are consistent.
+- **`scripts/build_windows_dist.ps1`** — auto-generates VERSION file from Cargo.toml (no static copy).
+- **`.github/workflows/release.yml`** — tag-triggered release: validates tag vs Cargo.toml, builds Linux + Windows, uploads to GitHub Releases.
+- **`docs/versioning.md`** — version management policy and bump procedure.
+
+### Added — P0-2: Failover Determinism Evidence System
+
+- **`crates/falcon_cluster/tests/failover_determinism.rs`** — 10 integration tests (9 matrix + 1 summary).
+  - **3 fault types**: LeaderCrash, NetworkPartition, WalStall
+  - **3 load types**: ReadHeavy, WriteHeavy, Mixed
+  - **Txn classification**: Committed, Aborted, Retried, In-Doubt — explicit per experiment
+  - **Metrics**: TPS (before/during/after), p50/p99/p99.9/p99.99 latency, failover time
+  - **Invariant**: Zero phantom commits across all 9 experiments ✅
+- **`scripts/run_failover_matrix.sh`** — one-click matrix runner with `--ci-nightly` reduced mode.
+- **`docs/failover_determinism_report.md`** — SLA boundaries, guarantees, non-guarantees, reproduction steps.
+
+### Added — P0-3: Public Reproducible Benchmark System
+
+- **`benchmarks/`** scaffold with FalconDB vs PostgreSQL comparison:
+  - `workloads/setup.sql` — shared schema (100K accounts)
+  - `workloads/single_table_oltp.sql` — W1: 70% SELECT, 20% UPDATE, 10% INSERT
+  - `workloads/multi_table_txn.sql` — W2: BEGIN → SELECT → INSERT → UPDATE×2 → COMMIT
+  - `falcondb/config.toml` + `postgresql/postgresql.conf` — fair parity configs
+  - `scripts/run_all.sh` — one-click full benchmark suite with `--quick` mode
+  - `scripts/run_workload.sh` — pgbench-based per-workload runner
+  - `RESULTS.md` — results template with reproduction steps
+  - `README.md` — methodology, hardware requirements, known limitations
+
+### Added — P0-4: Evidence Pack
+
+- **`evidence/`** directory with 4 categories:
+  - `versioning/` — CI version gate output, binary version, Cargo.toml version
+  - `failover/` — matrix results, summary JSON
+  - `benchmarks/` — raw pgbench output, environment capture
+  - `ci_reports/` — workspace test results, pass/fail summary
+- **`scripts/collect_evidence.sh`** — one-click evidence collection with `--verify` mode.
+- **`evidence/INDEX.md`** — master index: every claim → script + raw data.
+
+### Changed — Version Infrastructure
+
+- **`Cargo.toml`** — workspace version updated to `1.2.0`
+- **`dist/VERSION`** — updated to `v1.2.0`
+- **`README.md`** / **`README_zh.md`** — removed hardcoded version from title, added version badge
+- **`.github/workflows/ci.yml`** — added `version-check` job
+
+### P0 Zstd Compression (unchanged from previous entry)
+
+> Compression becomes a first-class segment-level infrastructure primitive.
+> All Zstd access goes through a unified `SegmentCodecImpl` trait. No code outside
+> `falcon_segment_codec` calls zstd or lz4 directly.
+
+### Added — New Crate: `falcon_segment_codec`
+
+- **`SegmentCodecImpl` trait** — unified compression abstraction for all segment types.
+- **`ZstdBlockCodec`** — built on `zstd-safe` 7.2 (NOT the high-level `zstd` crate). Independent blocks, dictionary support, configurable level/checksum.
+- **`Lz4BlockCodec`** — LZ4 via `lz4_flex`.
+- **`NoneCodec`** — passthrough.
+- **`CodecPolicy`** — WAL=None/LZ4, Cold=Zstd (default), Snapshot=Zstd (forced).
+- **`DictionaryRegistry`** — load/use pre-trained dictionaries (training external). Dictionaries stored as `DICT_SEGMENT` in SegmentStore, manifest-tracked.
+- **`CompressedBlock`** — wire format `[uncompressed_len:u32][compressed_len:u32][block_crc:u32][data]`.
+- **`DecompressPool`** — concurrency-limited decompression, never on OLTP executor thread.
+- **`DecompressCache`** — LRU byte-capacity limited, keyed by `(segment_id, block_index)`.
+- **`StreamingCodecCaps` + `negotiate_streaming_codec()`** — streaming codec orthogonal to segment codec; chunk-level, independently decompressible.
+- **`recompress()`** — GC/dictionary-upgrade recompression; always creates new segment.
+- **`CompressMetrics` + `CodecMetricsSnapshot`** — full compress/decompress/cache/dictionary observability.
+- **`zstd_version()`** — reports libzstd version from zstd-safe.
+
+### Added — Tests
+
+- **34 unit tests** in `falcon_segment_codec` (codec roundtrips, dictionary, cache, pool, recompress, metrics).
+- **19 integration tests** in `codec_integration` (CRC verification, dict missing/mismatch, codec policy enforcement, cached read <1ms, ratio ≥3x, throughput ≥100 MB/s, full dictionary lifecycle, streaming negotiation E2E, cache effectiveness).
+
+### Added — Documentation
+
+- `docs/segment_codec_zstd.md` — architecture, why zstd-safe, trait API, block format
+- `docs/dictionary_in_segment_store.md` — DICT_SEGMENT lifecycle, registry API
+- `docs/streaming_codec_negotiation.md` — orthogonal design, negotiation rules
+- `docs/segment_codec_matrix.md` — codec availability matrix by segment kind
+
+### Changed — Updated Documentation
+
+- `docs/cold_segment_format.md` — new block format, Zstd default, dictionary support, decompression isolation
+- `docs/memory_compression.md` — Zstd as default codec, falcon_segment_codec references
+- `docs/compression_profiles.md` — Balanced/Aggressive now use Zstd, Legacy-LZ4 profile added
+- `docs/unified_data_plane_full.md` — falcon_segment_codec integration, dictionary segments
+- `docs/bootstrap_flow.md` — DICT_SEGMENT fetch ordering requirement
+- `docs/crate_audit_report.md` — falcon_segment_codec crate entry
+
+### Changed — Dependencies
+
+- `Cargo.toml` (workspace) — Added `zstd-safe = "7.2"`, `falcon_segment_codec` path dep
+- `crates/falcon_storage/Cargo.toml` — Added `falcon_segment_codec.workspace = true`
+
+---
+
+## [1.1.1] — Enterprise Hardening, Predictable Operations, Cost & Risk Control
+
+> **Theme**: FalconDB enters steady-state operation. All unpredictable behavior eliminated.
+> The system behaves the same at 3 a.m. on day 300 as it did on day 1.
+
+### Added — P0: GA Stability
+
+- **`CrashHardeningCoordinator`** — explicit startup/shutdown lifecycle for all 8 component types (DataNode, Gateway, Controller, Compactor, ReplicationWorker, BackupWorker, AuditDrain, SnapshotWorker), deterministic startup/shutdown order, shutdown sentinel for crash detection, recovery action logging (WAL replay, checkpoint restore, cold rebuild, replication resume, in-doubt resolution, index rebuild).
+- **`ConfigRollbackManager`** — versioned + checksummed config entries, staged rollout state machine (Staged→Canary→RollingOut→Applied/RolledBack), one-click rollback to any previous version, checksum verification for tamper detection.
+- **`ResourceLeakDetector`** — periodic resource sampling (FD, TCP, thread, hot/cold memory, cache), linear regression leak analysis with R² confidence, configurable alarm thresholds per resource type, 72h+ stability verification.
+- **`LatencyGuardrailEngine`** — per-path guardrails for 6 hot paths (WAL commit, gateway forward, cold decompress, replication apply, index lookup, txn commit), p99/p999/absolute-max thresholds, automatic backpressure on breach, rolling percentile computation.
+- **`BgTaskIsolator`** — CPU/IO/memory quotas for 7 background task types (compaction, cold migration, snapshot, rebalance, backup, index build, GC), dynamic throttle under foreground load, throttle decisions (Allow/Throttle/Reject).
+
+### Added — P1: Enterprise Operations
+
+- **`CostTracker`** — per-table cost breakdown (hot/cold memory, WAL IO, replication traffic, compression ratio, savings), per-shard cost breakdown, cluster cost summary with history, top-N tables by resource usage.
+- **`CapacityGuardV2`** — auto-detect memory/WAL/cold pressure with configurable warning/urgent thresholds, generates typed recommendations (ScaleOut, IncreaseCompression, WalGc, ColdCompaction, ShardRebalance, ConnectionPoolResize).
+- **`HardenedAuditLog`** — unified event schema with trace ID + span ID, cross-component trace correlation, SIEM-compatible JSON-lines export (ELK/Splunk ready).
+- **`PostmortemGenerator`** — auto-capture decision points with trigger metrics/thresholds/outcomes, continuous metric sampling with explicit timestamps, auto-generated postmortem reports with timeline + metric changes + decision points, `falconctl postmortem export` text format.
+
+### Added — P2: Enterprise UX
+
+- **`AdminConsoleV2`** — 10 admin endpoints (/admin/v2/slo, /cost, /capacity, /compression, /timeline, /guardrails, /leaks, /bgtasks, /postmortem, /impact).
+- **`ChangeImpactPreview`** — estimate CPU/memory/storage/latency impact before operational changes (compression, add/remove node, replication factor, connection pool, WAL GC, cold compaction), risk assessment (Low/Medium/High), guardrail compliance check.
+
+### Added — Tests
+
+- **37 unit tests** in `ga_hardening` module (crash lifecycle, config rollback, leak detection, guardrails, background isolation, concurrency).
+- **28 unit tests** in `cost_capacity` module (cost tracking, capacity guard, audit correlation, postmortem generation, change impact, concurrency).
+- **20 integration tests** in `ga_soak_test` (crash recovery, sentinel, multi-cycle recovery, config rollback, staged rollout, 72h leak stability, leak detection, guardrail paths, backpressure, background isolation, cost visibility, capacity guard, audit trace correlation, SIEM export, postmortem replay, change impact scenarios, full 7-day soak simulation).
+
+### Added — Documentation
+
+- `docs/ga_hardening.md` — crash recovery, resource leak detection, shutdown sentinel
+- `docs/config_management.md` — versioned config, staged rollout, rollback procedures
+- `docs/performance_guardrails.md` — latency guardrails, background task isolation
+- `docs/cost_capacity.md` — cost visibility, capacity guard v2, change impact preview
+- `docs/postmortem.md` — postmortem generation, audit log hardening, SIEM export
+
+---
+
+## [1.1.0] — Enterprise Control Plane, Security, Lifecycle, Predictable Ops
+
+> **Theme**: FalconDB is a database system acceptable to IT / security departments.
+
+### Added — Control Plane v1
+
+- **`ControllerHAGroup`** — 3-node HA controller with Raft-based leader election, term tracking, heartbeat.
+- **`NodeRegistry`** — data-plane node registration, heartbeat-based liveness (Online/Suspect/Offline/Draining/Joining/Upgrading).
+- **`ConfigStore`** — versioned dynamic configuration distribution with change history.
+- **`ConsistentMetadataStore`** — Raft-backed consistent key-value store with 5 domains (ClusterConfig, ShardPlacement, VersionEpoch, SecurityPolicy, NodeRegistry), CAS support, leader-only writes.
+- **`ShardPlacementManager`** — authoritative shard→node mapping, health evaluation (Healthy/UnderReplicated/Migrating/Orphaned).
+- **`CommandDispatcher`** — ops command queuing (Drain/Join/Upgrade/Rebalance/SetConfig/ForceElection).
+
+### Added — AuthN/AuthZ v1
+
+- **`AuthnManager`** — multi-credential authentication (password/token/mTLS), account lockout, credential rotation.
+- **`EnterpriseRbac`** — RBAC at Cluster/Database/Table scope, wildcard grants, superuser bypass, least-privilege enforcement.
+- **13 enterprise permissions** across 3 scope levels.
+- Auth failure responses never leak topology information.
+
+### Added — Full-Chain TLS & Key Rotation
+
+- **`CertificateManager`** — manages certs for all 4 link types (Client↔Gateway, Gateway↔DataNode, DataNode↔Replica, DataNode↔Controller).
+- Certificate hot-reload via `rotate_cert()` — zero restart, zero disconnect.
+- Expiry detection and rotation history tracking.
+
+### Added — Backup/Restore v1
+
+- **`BackupOrchestrator`** — enterprise backup orchestration with Full/Incremental/WAL Archive types.
+- Storage targets: Local filesystem, S3, OSS.
+- Restore types: Latest, ToLsn, ToTimestamp (PITR), NewCluster.
+- Observable lifecycle: Scheduled → Running → Completed/Failed.
+- Retention policy and backup history.
+
+### Added — Enterprise Audit Log v1
+
+- **`EnterpriseAuditLog`** — tamper-proof HMAC hash chain, 10 event categories, 3 severity levels.
+- SIEM-ready JSON-lines export via `export_jsonl()`.
+- `verify_integrity()` detects any chain tampering.
+- Thread-safe: hash chain ordering guaranteed under concurrent writes.
+
+### Added — Auto Rebalance / Scale v1
+
+- **`AutoRebalancer`** — computes rebalance plans on node join/leave, rate-limited migrations.
+- Migration state machine: Pending → Preparing → Copying → CatchingUp → Cutover → Completed.
+- SLA-safe: auto-pause when latency impact detected, configurable `max_concurrent` and `rate_limit_bytes_per_sec`.
+
+### Added — Capacity Planning & Forecast
+
+- **`CapacityPlanner`** — tracks WAL size, memory, cold storage, shard count, connections.
+- Linear regression forecasting with time-to-exhaustion prediction.
+- Alert levels: OK, Watch, Warning, Critical.
+
+### Added — SLO Engine v1
+
+- **`SloEngine`** — define/compute/export SLOs for availability, latency p99/p999, durability, replication lag, error rate.
+- Rolling window evaluation with error budget tracking.
+- Prometheus export via `export_prometheus()`.
+
+### Added — Incident & Event Timeline
+
+- **`IncidentTimeline`** — auto-correlate failures, leader changes, ops actions, metric anomalies.
+- Incident lifecycle: create → correlate → resolve with root cause and impact.
+- Correlation window configurable.
+
+### Added — Admin Console API Model
+
+- **`AdminApiRouter`** — 11 structured endpoints for cluster visualization, shard management, backup, SLO, audit, incidents, capacity, config.
+
+### Added — Enterprise Documentation
+
+- `docs/enterprise_architecture.md` — full system architecture overview
+- `docs/security_model.md` — AuthN/AuthZ/TLS/Audit security model
+- `docs/backup_restore.md` — backup/restore guide with PITR
+- `docs/rbac.md` — RBAC permission model and examples
+- `docs/control_plane.md` — control plane operations guide
+- `docs/ops_runbook_enterprise.md` — enterprise operational procedures
+
+### Added — Enterprise Compliance Tests
+
+- 20 integration tests in `enterprise_compliance.rs` covering:
+  - Controller HA failover, metadata consistency, CAS race prevention
+  - Auth lockout/recovery, credential rotation, topology leak prevention
+  - RBAC least privilege, role hierarchy
+  - TLS rotation across all links, expiry detection
+  - Full backup/restore with PITR
+  - Audit chain integrity under concurrent load, SIEM export
+  - Auto-rebalance on node join, SLA pause/resume
+  - SLO multi-metric evaluation, error budget depletion
+  - Incident auto-correlation lifecycle
+  - Full enterprise lifecycle orchestration
+
+### Test Summary
+
+- **67 new unit tests** (control_plane: 22, enterprise_security: 28, enterprise_ops: 17)
+- **20 new integration tests** (enterprise_compliance)
+- **0 failures, 0 regressions**
+
+---
+
+## [1.0.9] — Self-Healing, Ops Automation, SLA & Production Readiness
+
+### Added — Failure Detector v1
+
+- **`ClusterFailureDetector`** — cluster-wide node liveness tracker with ALIVE/SUSPECT/DEAD state machine.
+- **`NodeLiveness`** — five-state enum: `Alive`, `Suspect`, `Dead`, `Draining`, `Joining`.
+- **`NodeHealthRecord`** — per-node health record with LSN, replication lag, version, uptime.
+- Configurable `suspect_threshold` (default 3s), `failure_timeout` (default 10s), `max_consecutive_misses` (default 5).
+- Monotonic **epoch** counter bumped on every state transition for fencing.
+
+### Added — Automatic Leader Re-election
+
+- **`LeaderElectionCoordinator`** — term-based election with configurable quorum.
+- **`ShardElection`** — per-shard election state: Stable / Electing / NoLeader.
+- Highest-LSN candidate wins; stale-term candidates rejected.
+- Anti-split-brain: term validation + epoch fencing + optional quorum.
+
+### Added — Automatic Replica Catch-up
+
+- **`ReplicaCatchUpCoordinator`** — classifies lag as CaughtUp / WalReplay / SnapshotRequired.
+- WAL streaming for small gaps (≤ `snapshot_threshold_lsn`), full snapshot for large gaps.
+- Progress tracking with phase, bytes transferred, completion percentage.
+
+### Added — Rolling Upgrade v1
+
+- **`RollingUpgradeCoordinator`** — ordered upgrade: follower → gateway → leader.
+- **`ProtocolVersion`** — wire compatibility check (same major, minor within 1 step).
+- Per-node lifecycle: Pending → Draining → Upgrading → Rejoining → Complete/Failed.
+
+### Added — Node Drain & Join
+
+- **`NodeLifecycleCoordinator`** — manages graceful drain and join operations.
+- Drain phases: RejectingNew → DrainingInflight → TransferringShards → Drained.
+- Join phases: Requesting → Syncing → Ready → Active.
+
+### Added — SLA/SLO Metrics
+
+- **`SloTracker`** — sliding-window metrics for write/read availability, p99 latency, replication lag, gateway reject rate.
+- **`SloSnapshot`** — point-in-time snapshot for `/admin/slo` endpoint.
+
+### Added — Backpressure v2 (Multi-Signal)
+
+- **`BackpressureController`** — multi-signal admission control: CPU, Memory, WAL backlog, Replication lag.
+- Four pressure levels: Normal (100%) → Elevated (80%) → High (50%) → Critical (10%).
+- Deterministic admission gate based on request hash.
+
+### Added — falconctl Ops Subcommands
+
+- **`OpsCommand`** enum: `ClusterStatus`, `ClusterHealth`, `NodeDrain`, `NodeJoin`, `UpgradePlan`, `UpgradeApply`.
+- **`ClusterStatusResponse`** / **`ClusterHealthResponse`** — structured response types.
+- **`ClusterHealthLevel`** — Healthy / Degraded / Critical.
+
+### Added — Ops Audit Log
+
+- **`OpsAuditLog`** — ring-buffer audit log for all cluster operations.
+- **`OpsEventType`** — 16 event types: NodeUp/Down/Suspect, LeaderElected/Lost, Drain/Join Start/Complete, Upgrade lifecycle, ConfigChanged, BackpressureChanged, CatchUp Start/Complete.
+- Monotonic event IDs with Unix timestamps.
+
+### Added — Documentation
+
+- `docs/self_healing.md` — failure detection architecture, state machine, epoch fencing.
+- `docs/rolling_upgrade.md` — upgrade ordering, protocol compatibility, workflow.
+- `docs/sla_slo.md` — SLO metrics, /admin/slo endpoint, alerting recommendations.
+- `docs/ops_runbook.md` — operational procedures for common scenarios.
+- `docs/falconctl_ops.md` — CLI command reference for ops subcommands.
+
+### Added — Tests
+
+- 31 unit tests in `self_healing` module covering all 9 subsystems + 3 concurrency tests.
+- 19 integration tests in `self_healing_chaos.rs`: leader kill, follower kill, network jitter, WAL backlog escalation, gateway overload, rolling upgrade lifecycle, drain/join lifecycle, SLO accuracy, concurrent orchestration, full self-healing cycle, multi-signal backpressure, audit completeness.
+- 0 failures, 0 regressions.
+
+---
+
 ## [1.0.8] — Unified Cluster Access, Smart Gateway, Client & Ops Experience
 
 ### Added — Cluster Access Model v1

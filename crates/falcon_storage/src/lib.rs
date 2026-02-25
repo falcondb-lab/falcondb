@@ -24,6 +24,12 @@ pub mod stats;
 pub mod upgrade;
 pub mod ustm;
 pub mod verification;
+pub mod csn;
+pub mod delta_lsn;
+pub mod structured_lsn;
+pub mod unified_data_plane;
+pub mod unified_data_plane_full;
+pub mod zstd_segment;
 pub mod wal;
 pub mod wal_win_async;
 

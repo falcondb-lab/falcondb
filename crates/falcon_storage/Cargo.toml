@@ -33,6 +33,8 @@ tracing.workspace = true
 crc32fast.workspace = true
 xxhash-rust.workspace = true
 lz4_flex.workspace = true
+zstd.workspace = true
+falcon_segment_codec.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = [

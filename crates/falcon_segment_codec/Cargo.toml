@@ -1,0 +1,18 @@
+[package]
+name = "falcon_segment_codec"
+version.workspace = true
+edition.workspace = true
+description = "Segment-level compression codecs for FalconDB (Zstd via zstd-safe, LZ4, None)"
+
+[features]
+default = ["zstd"]
+zstd = []
+
+[dependencies]
+# Low-level zstd bindings — we bypass the high-level `zstd` crate entirely.
+# All Zstd access goes through SegmentCodec trait; no raw zstd API leaks out.
+zstd-safe = "7.2"
+lz4_flex.workspace = true
+parking_lot.workspace = true
+
+[dev-dependencies]

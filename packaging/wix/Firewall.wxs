@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FalconDB — Firewall Rules (Optional)
+  
+  Adds Windows Firewall inbound rules for:
+    - PG wire protocol (default 5443/TCP)
+    - Admin HTTP API   (default 8080/TCP)
+  
+  Controlled by property ADD_FIREWALL_RULES:
+    - Default: 1 (enabled)
+    - Disable: msiexec /i FalconDB.msi ADD_FIREWALL_RULES=0
+  
+  Rules are removed on uninstall.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:fire="http://wixtoolset.org/schemas/v4/wxs/firewall">
+  <?include Variables.wxi ?>
+
+  <ComponentGroup Id="FirewallComponents">
+
+    <!-- PG wire protocol: port 5443 TCP -->
+    <Component Id="FirewallPgRule"
+               Directory="BINDIR"
+               Guid="{F2A3B4C5-D6E7-8901-5678-012345678901}"
+               Condition="ADD_FIREWALL_RULES = 1">
+      <fire:FirewallException
+        Id="FalconPgPort"
+        Name="FalconDB PostgreSQL Protocol"
+        Port="$(var.PgPort)"
+        Protocol="tcp"
+        Scope="any"
+        Profile="all" />
+      <RegistryValue Root="HKLM"
+                     Key="SOFTWARE\$(var.Manufacturer)\$(var.ProductName)"
+                     Name="FirewallPgRule"
+                     Type="integer"
+                     Value="1"
+                     KeyPath="yes" />
+    </Component>
+
+    <!-- Admin HTTP API: port 8080 TCP -->
+    <Component Id="FirewallHttpRule"
+               Directory="BINDIR"
+               Guid="{A3B4C5D6-E7F8-9012-6789-123456789012}"
+               Condition="ADD_FIREWALL_RULES = 1">
+      <fire:FirewallException
+        Id="FalconHttpPort"
+        Name="FalconDB Admin HTTP"
+        Port="$(var.HttpPort)"
+        Protocol="tcp"
+        Scope="any"
+        Profile="all" />
+      <RegistryValue Root="HKLM"
+                     Key="SOFTWARE\$(var.Manufacturer)\$(var.ProductName)"
+                     Name="FirewallHttpRule"
+                     Type="integer"
+                     Value="1"
+                     KeyPath="yes" />
+    </Component>
+
+  </ComponentGroup>
+
+</Wix>

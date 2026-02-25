@@ -3,7 +3,7 @@
   <img src="assets/falcondb-logo.png" alt="FalconDB Logo" width="220" />
 </p>
 
-<h1 align="center">FalconDB v1.0.3 + USTM + 查询性能优化</h1>
+<h1 align="center">FalconDB</h1>
 
 <p align="center">
   <a href="https://github.com/falcondb-lab/falcondb/actions/workflows/ci.yml">

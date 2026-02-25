@@ -31,6 +31,18 @@ pub struct Planner;
 impl Planner {
     pub fn plan(stmt: &BoundStatement) -> Result<PhysicalPlan, SqlError> {
         match stmt {
+            BoundStatement::CreateDatabase { name, if_not_exists } => {
+                Ok(PhysicalPlan::CreateDatabase {
+                    name: name.clone(),
+                    if_not_exists: *if_not_exists,
+                })
+            }
+            BoundStatement::DropDatabase { name, if_exists } => {
+                Ok(PhysicalPlan::DropDatabase {
+                    name: name.clone(),
+                    if_exists: *if_exists,
+                })
+            }
             BoundStatement::CreateTable(ct) => Ok(PhysicalPlan::CreateTable {
                 schema: ct.schema.clone(),
                 if_not_exists: ct.if_not_exists,

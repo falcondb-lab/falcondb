@@ -1,0 +1,21 @@
+# FalconDB Benchmark Configuration
+# Tuned for fair comparison with PostgreSQL on same hardware
+
+[server]
+pg_listen_addr = "127.0.0.1:5443"
+
+[storage]
+data_dir = "./bench_data"
+wal_enabled = true
+lsm_sync_writes = false
+
+[wal]
+sync_mode = "fdatasync"
+group_commit_window_us = 200
+
+[memory]
+shard_soft_limit_bytes = 2147483648   # 2 GB
+shard_hard_limit_bytes = 3221225472   # 3 GB
+
+[compression]
+compression_profile = "off"           # No compression overhead during benchmark

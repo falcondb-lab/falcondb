@@ -114,10 +114,24 @@ Write-Host "  scripts/uninstall_service.ps1"
 # Root files
 Copy-Item (Join-Path $DistSource "README_WINDOWS.md") (Join-Path $StagingDir "README_WINDOWS.md")
 Copy-Item (Join-Path $DistSource "README_WINDOWS_POC.md") (Join-Path $StagingDir "README_WINDOWS_POC.md")
-Copy-Item (Join-Path $DistSource "VERSION") (Join-Path $StagingDir "VERSION")
+
+# VERSION — auto-generated from workspace Cargo.toml (Single Source of Truth)
+$cargoContent = Get-Content (Join-Path $RepoRoot "Cargo.toml") -Raw
+if ($cargoContent -match 'version\s*=\s*"([^"]+)"') {
+    $PkgVersion = $Matches[1]
+} else {
+    $PkgVersion = "unknown"
+}
+$gitHash = "unknown"
+try { $gitHash = (git -C $RepoRoot rev-parse --short=8 HEAD 2>$null) } catch {}
+@"
+FalconDB v$PkgVersion
+Build: windows-x86_64
+Git: $gitHash
+"@ | Set-Content -Path (Join-Path $StagingDir "VERSION") -Encoding UTF8
 Write-Host "  README_WINDOWS.md"
 Write-Host "  README_WINDOWS_POC.md"
-Write-Host "  VERSION"
+Write-Host "  VERSION (auto-generated: v$PkgVersion)"
 
 # PoC check script
 Copy-Item (Join-Path $RepoRoot "scripts\poc_check_windows.ps1") (Join-Path $scriptsDir "poc_check_windows.ps1")

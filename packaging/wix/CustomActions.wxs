@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FalconDB — Custom Actions (minimal)
+  
+  PHILOSOPHY: Avoid CustomActions whenever possible.
+  Only use them for things WiX standard elements cannot do.
+  
+  Currently: empty placeholder.
+  If service failure recovery via WixUtilExtension doesn't work,
+  fall back to sc.exe failure configuration here.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <?include Variables.wxi ?>
+
+  <!--
+    RESERVED: If util:ServiceConfig doesn't support failure actions
+    on your WiX version, uncomment this block to configure via sc.exe.
+    
+    <CustomAction Id="ConfigServiceRecovery"
+                  Directory="BINDIR"
+                  ExeCommand='[SystemFolder]sc.exe failure $(var.ServiceName) reset= 86400 actions= restart/10000/restart/10000/restart/30000'
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+    
+    <InstallExecuteSequence>
+      <Custom Action="ConfigServiceRecovery" After="StartServices">
+        NOT Installed
+      </Custom>
+    </InstallExecuteSequence>
+  -->
+
+</Wix>

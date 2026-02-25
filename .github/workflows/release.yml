@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate-tag:
+    name: Validate Tag vs Cargo.toml
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.extract.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: extract
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          CARGO_VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          echo "Tag version:   $TAG_VERSION"
+          echo "Cargo version: $CARGO_VERSION"
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "FAIL: Tag $TAG_VERSION does not match Cargo.toml $CARGO_VERSION"
+            exit 1
+          fi
+          echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
+
+  build-linux:
+    name: Build Linux
+    needs: [validate-tag]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --workspace
+      - run: cargo test --workspace
+      - name: Package
+        run: |
+          VERSION=${{ needs.validate-tag.outputs.version }}
+          mkdir -p dist-linux/FalconDB/bin
+          cp target/release/falcon dist-linux/FalconDB/bin/
+          cp target/release/fsql dist-linux/FalconDB/bin/ 2>/dev/null || true
+          cp -r dist/conf dist-linux/FalconDB/
+          echo "FalconDB v${VERSION}" > dist-linux/FalconDB/VERSION
+          echo "Build: linux-x86_64" >> dist-linux/FalconDB/VERSION
+          echo "Git: $(git rev-parse --short=8 HEAD)" >> dist-linux/FalconDB/VERSION
+          cd dist-linux && tar czf ../FalconDB-${VERSION}-linux-x86_64.tar.gz FalconDB/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-dist
+          path: FalconDB-*.tar.gz
+
+  build-windows:
+    name: Build Windows
+    needs: [validate-tag]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --workspace
+      - run: cargo test --workspace
+      - name: Package ZIP
+        shell: pwsh
+        run: |
+          $Version = "${{ needs.validate-tag.outputs.version }}"
+          .\scripts\build_windows_dist.ps1 -Release -SkipBuild
+          Rename-Item "target\dist\FalconDB-windows-x86_64.zip" "FalconDB-${Version}-windows-x86_64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-dist
+          path: target/dist/FalconDB-*.zip
+
+  release:
+    name: Create Release
+    needs: [validate-tag, build-linux, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: artifacts/
+      - name: Extract Release Notes
+        run: |
+          VERSION=${{ needs.validate-tag.outputs.version }}
+          # Extract section for this version from CHANGELOG.md
+          awk "/^## \[${VERSION}\]/{found=1; next} /^## \[/{if(found) exit} found" CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "Release v${VERSION}" > release-notes.md
+          fi
+      - uses: softprops/action-gh-release@v1
+        with:
+          body_path: release-notes.md
+          files: artifacts/*
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

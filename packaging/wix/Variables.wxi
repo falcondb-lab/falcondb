@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FalconDB — WiX v4 Shared Variables
+  UpgradeCode is PERMANENT. Never change it after first release.
+-->
+<Include>
+  <?define Manufacturer = "FalconDB" ?>
+  <?define ProductName = "FalconDB" ?>
+  <?define ProductDescription = "FalconDB Enterprise Database Server" ?>
+
+  <!-- UpgradeCode: FIXED FOREVER. Identifies the product line for Major Upgrade. -->
+  <?define UpgradeCode = "{7A3B8C2D-1E4F-5A6B-9C0D-2E3F4A5B6C7D}" ?>
+
+  <!-- Version: overridden by build.ps1 via -d ProductVersion=x.y.z -->
+  <?ifndef ProductVersion ?>
+    <?define ProductVersion = "1.0.0" ?>
+  <?endif ?>
+
+  <!-- Staging directory: overridden by build.ps1 -->
+  <?ifndef StageDir ?>
+    <?define StageDir = "..\..\dist\windows\stage" ?>
+  <?endif ?>
+
+  <!-- Service configuration -->
+  <?define ServiceName = "FalconDB" ?>
+  <?define ServiceDisplayName = "FalconDB Database Server" ?>
+  <?define ServiceDescription = "FalconDB enterprise database engine — PostgreSQL wire-compatible." ?>
+
+  <!-- Network ports -->
+  <?define PgPort = "5443" ?>
+  <?define HttpPort = "8080" ?>
+
+  <!-- Install paths -->
+  <?define InstallFolderName = "FalconDB" ?>
+  <?define ProgramDataPath = "FalconDB" ?>
+</Include>

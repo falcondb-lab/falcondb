@@ -27,6 +27,43 @@ use crate::lsm_table::LsmTable;
 use super::engine::{datatype_to_cast_target, IndexMeta, StorageEngine};
 
 impl StorageEngine {
+    // ── Database DDL ─────────────────────────────────────────────────
+
+    pub fn create_database(&self, name: &str, owner: &str) -> Result<u32, StorageError> {
+        let mut catalog = self.catalog.write();
+        catalog
+            .create_database(name, owner)
+            .map_err(|e| StorageError::DatabaseAlreadyExists(e))?;
+        let oid = catalog
+            .find_database(name)
+            .map(|db| db.oid)
+            .unwrap_or(0);
+        drop(catalog);
+
+        self.append_wal(&WalRecord::CreateDatabase {
+            name: name.to_string(),
+            owner: owner.to_string(),
+        })?;
+
+        tracing::info!("Created database '{}' (oid={})", name, oid);
+        Ok(oid)
+    }
+
+    pub fn drop_database(&self, name: &str) -> Result<(), StorageError> {
+        let mut catalog = self.catalog.write();
+        catalog
+            .drop_database(name)
+            .map_err(|e| StorageError::DatabaseNotFound(e))?;
+        drop(catalog);
+
+        self.append_wal(&WalRecord::DropDatabase {
+            name: name.to_string(),
+        })?;
+
+        tracing::info!("Dropped database '{}'", name);
+        Ok(())
+    }
+
     // ── Table DDL ────────────────────────────────────────────────────
 
     pub fn create_table(&self, schema: TableSchema) -> Result<TableId, StorageError> {

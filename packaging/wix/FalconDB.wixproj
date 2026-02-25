@@ -1,0 +1,33 @@
+<Project Sdk="WixToolset.Sdk/4.0">
+  <PropertyGroup>
+    <OutputType>Package</OutputType>
+    <Platform>x64</Platform>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <OutputName>FalconDB-$(ProductVersion)-x64</OutputName>
+  </PropertyGroup>
+
+  <!-- WiX extensions -->
+  <ItemGroup>
+    <PackageReference Include="WixToolset.Util.wixext" Version="4.*" />
+    <PackageReference Include="WixToolset.Firewall.wixext" Version="4.*" />
+    <PackageReference Include="WixToolset.UI.wixext" Version="4.*" />
+  </ItemGroup>
+
+  <!-- Source files -->
+  <ItemGroup>
+    <Compile Include="Product.wxs" />
+    <Compile Include="Components.wxs" />
+    <Compile Include="ProgramData.wxs" />
+    <Compile Include="Service.wxs" />
+    <Compile Include="Upgrade.wxs" />
+    <Compile Include="Firewall.wxs" />
+    <Compile Include="UI.wxs" />
+    <Compile Include="CustomActions.wxs" />
+  </ItemGroup>
+
+  <!-- Default variables (overridden by build.ps1) -->
+  <PropertyGroup>
+    <DefineConstants Condition="'$(ProductVersion)' == ''">ProductVersion=1.0.0</DefineConstants>
+    <DefineConstants Condition="'$(StageDir)' == ''">StageDir=..\..\dist\windows\stage</DefineConstants>
+  </PropertyGroup>
+</Project>

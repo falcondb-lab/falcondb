@@ -277,6 +277,44 @@ impl Executor {
         txn: Option<&TxnHandle>,
     ) -> Result<ExecutionResult, FalconError> {
         match plan {
+            PhysicalPlan::CreateDatabase {
+                name,
+                if_not_exists,
+            } => {
+                self.reject_if_read_only("CREATE DATABASE")?;
+                match self.storage.create_database(name, "falcon") {
+                    Ok(_oid) => Ok(ExecutionResult::Ddl {
+                        message: format!("CREATE DATABASE"),
+                    }),
+                    Err(falcon_common::error::StorageError::DatabaseAlreadyExists(_))
+                        if *if_not_exists =>
+                    {
+                        Ok(ExecutionResult::Ddl {
+                            message: format!("CREATE DATABASE"),
+                        })
+                    }
+                    Err(e) => Err(e.into()),
+                }
+            }
+            PhysicalPlan::DropDatabase {
+                name,
+                if_exists,
+            } => {
+                self.reject_if_read_only("DROP DATABASE")?;
+                match self.storage.drop_database(name) {
+                    Ok(()) => Ok(ExecutionResult::Ddl {
+                        message: format!("DROP DATABASE"),
+                    }),
+                    Err(falcon_common::error::StorageError::DatabaseNotFound(_))
+                        if *if_exists =>
+                    {
+                        Ok(ExecutionResult::Ddl {
+                            message: format!("DROP DATABASE"),
+                        })
+                    }
+                    Err(e) => Err(e.into()),
+                }
+            }
             PhysicalPlan::CreateTable {
                 schema,
                 if_not_exists,
@@ -1517,6 +1555,24 @@ impl Executor {
                     lines.push(format!("{}  Returning: {} column(s)", pad, returning.len()));
                 }
                 lines
+            }
+            PhysicalPlan::CreateDatabase {
+                name,
+                if_not_exists,
+            } => {
+                vec![format!(
+                    "{}CreateDatabase {} (if_not_exists={})",
+                    pad, name, if_not_exists
+                )]
+            }
+            PhysicalPlan::DropDatabase {
+                name,
+                if_exists,
+            } => {
+                vec![format!(
+                    "{}DropDatabase {} (if_exists={})",
+                    pad, name, if_exists
+                )]
             }
             PhysicalPlan::CreateTable {
                 schema,

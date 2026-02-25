@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FalconDB — Minimal UI
+  
+  Provides:
+    - Install directory selection
+    - Firewall rules checkbox
+    - Completion page with connection info
+  
+  Silent install fully supported:
+    msiexec /i FalconDB.msi /qn
+    msiexec /i FalconDB.msi /qn INSTALLFOLDER="D:\FalconDB" ADD_FIREWALL_RULES=0
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <?include Variables.wxi ?>
+
+  <!--
+    Use the standard WixUI_InstallDir dialog set.
+    This provides: Welcome → EULA (if license present) → InstallDir → Ready → Progress → Complete.
+    For silent install (/qn), no UI is shown at all.
+  -->
+  <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+
+  <!--
+    Exit dialog text: show connection info after install completes.
+  -->
+  <Property Id="WIXUI_EXITDIALOGOPTIONALTEXT"
+            Value="FalconDB has been installed successfully.&#13;&#10;&#13;&#10;Connect: psql -h 127.0.0.1 -p $(var.PgPort) -U falcon&#13;&#10;Admin:   http://127.0.0.1:$(var.HttpPort)/health&#13;&#10;Service: sc query $(var.ServiceName)&#13;&#10;Config:  C:\ProgramData\$(var.ProgramDataPath)\conf\falcon.toml&#13;&#10;Logs:    C:\ProgramData\$(var.ProgramDataPath)\logs\" />
+
+</Wix>

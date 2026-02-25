@@ -1,4 +1,4 @@
-# Memory Compression — Hot/Cold Tiering (v1.0.7)
+# Memory Compression — Hot/Cold Tiering (v1.0.7, updated v1.2)
 
 ## Overview
 
@@ -33,29 +33,42 @@ FalconDB v1.0.7 introduces **Hot/Cold memory tiering** to reduce RSS without deg
 ### Cold Store
 
 - Append-only segments with configurable max size (default: 64 MB)
-- Block format: `[codec:u8][original_len:u32][compressed_len:u32][data...]`
-- Row payloads serialized via `bincode`, then compressed
+- Block format (via `falcon_segment_codec`): `[uncompressed_len:u32][compressed_len:u32][block_crc:u32][compressed_data]`
+- Row payloads serialized via `bincode`, then compressed through `SegmentCodecImpl` trait
 - Cold-migrated versions reference payload via `ColdHandle { segment_id, offset, len }`
+- All compression goes through `falcon_segment_codec` crate — no direct zstd/lz4 calls
 
 ## Compression
 
 | Setting | Values | Default |
 |---------|--------|---------|
 | `compression.enabled` | `true` / `false` | `true` |
-| `compression.codec` | `lz4` / `none` | `lz4` |
+| `compression.codec` | `none` / `lz4` / `zstd` | `zstd` |
+| `compression.zstd_level` | 1–22 | 3 |
 | `block_cache_capacity` | bytes | 16 MB |
 | `max_segment_size` | bytes | 64 MB |
 
-### LZ4 (default)
+### Zstd (default since v1.2)
 
-- Uses `lz4_flex` (pure Rust, no C dependency)
+- Uses `zstd-safe` (safe Rust bindings to libzstd) via `falcon_segment_codec::ZstdBlockCodec`
+- Block-level compression (each block independently decompressible)
+- Typical ratio: 3–8x for repetitive/text-heavy rows
+- Supports optional dictionary for further ratio improvement
+- Decompression isolated to `DecompressPool` — **never on OLTP executor thread**
+- Configurable level: 1 (fast) → 9 (archival)
+
+### LZ4 (alternative)
+
+- Uses `lz4_flex` (pure Rust) via `falcon_segment_codec::Lz4BlockCodec`
 - Block-level compression (each row independently)
 - Typical ratio: 1.5–3x for text-heavy rows
 - Decompress latency: sub-microsecond for small blocks
+- Best for latency-sensitive cold reads where ratio is less important
 
 ### None (fallback)
 
-- Raw bytes, no compression overhead
+- Raw bytes via `falcon_segment_codec::NoneCodec`
+- No compression overhead
 - Use when CPU is the bottleneck or data is already compressed
 - Toggle at runtime by changing config and restarting
 
@@ -93,7 +106,11 @@ A version is eligible when ALL of:
 4. Populate cache
 5. Deserialize `OwnedRow`
 
-Decompress runs on the calling thread but is bounded: LZ4 decompression is ~4 GB/s on modern CPUs. The block cache ensures repeated reads (e.g., index lookups) are sub-microsecond.
+**Decompression isolation**: Zstd decompression runs in `falcon_segment_codec::DecompressPool`
+(dedicated thread pool with concurrency limit), **never** on the OLTP executor thread.
+LZ4 decompression is fast enough (~4 GB/s) to run inline. The `DecompressCache` (LRU,
+byte-capacity limited, keyed by `(segment_id, block_index)`) ensures repeated reads are
+sub-microsecond.
 
 ## Transaction Semantics
 
@@ -157,5 +174,6 @@ Low-cardinality string columns (status codes, region names, enum values) benefit
 | Memory reduction | ≥ 30% | For typical OLTP with repetitive text columns |
 | p99 read latency | ≤ 5% increase | With block cache warm |
 | Cold read (cached) | < 1 ms p99 | Sub-microsecond typical |
-| Cold read (uncached) | < 10 ms p99 | LZ4 decompress + deserialize |
+| Cold read (uncached) | < 10 ms p99 | Zstd/LZ4 decompress + deserialize |
+| Zstd compression ratio | ≥ 3x | For repetitive data |
 | Store throughput | > 10K rows/sec | Append-only, no contention |

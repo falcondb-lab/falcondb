@@ -17,10 +17,11 @@ members = [
     "crates/falcon_server",
     "crates/falcon_bench",
     "crates/falcon_cli",
+    "crates/falcon_segment_codec",
 ]
 
 [workspace.package]
-version = "1.0.0-rc.1"
+version = "1.2.0"
 edition = "2021"
 rust-version = "1.75"
 license = "Apache-2.0"
@@ -100,6 +101,9 @@ base64 = "0.22"
 
 # Compression
 lz4_flex = "0.11"
+zstd = "0.13"
+zstd-safe = "7.2"
+falcon_segment_codec = { path = "crates/falcon_segment_codec" }
 
 [profile.release]
 opt-level = 3

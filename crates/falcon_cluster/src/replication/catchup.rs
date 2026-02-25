@@ -27,6 +27,12 @@ pub fn apply_wal_record_to_engine(
         WalRecord::BeginTxn { .. } | WalRecord::PrepareTxn { .. } => {
             // No-op for replica replay.
         }
+        WalRecord::CreateDatabase { name, owner } => {
+            let _ = engine.create_database(name, owner);
+        }
+        WalRecord::DropDatabase { name } => {
+            let _ = engine.drop_database(name);
+        }
         WalRecord::CreateTable { schema_json } => {
             let schema: TableSchema = serde_json::from_str(schema_json)
                 .map_err(|e| FalconError::Internal(format!("Schema parse error: {}", e)))?;

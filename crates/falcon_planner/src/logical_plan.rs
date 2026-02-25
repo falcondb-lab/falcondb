@@ -242,6 +242,12 @@ impl LogicalPlan {
     /// are applied here. The optimizer works on the resulting tree.
     pub fn from_bound(stmt: &BoundStatement) -> Result<Self, falcon_common::error::SqlError> {
         match stmt {
+            // ── Database DDL (pass-through to legacy planner) ─────
+            BoundStatement::CreateDatabase { .. } | BoundStatement::DropDatabase { .. } => {
+                Err(falcon_common::error::SqlError::Unsupported(
+                    "Database DDL uses legacy planner path".into(),
+                ))
+            }
             // ── DDL ─────────────────────────────────────────────────
             BoundStatement::CreateTable(ct) => Ok(LogicalPlan::CreateTable {
                 schema: ct.schema.clone(),

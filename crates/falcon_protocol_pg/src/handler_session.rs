@@ -44,7 +44,7 @@ impl QueryHandler {
         {
             return Some(self.single_row_result(
                 vec![("current_database", 25, -1)],
-                vec![vec![Some("falcon".into())]],
+                vec![vec![Some(session.database.clone())]],
             ));
         }
         if sql_lower == "select current_user" {
@@ -146,6 +146,70 @@ impl QueryHandler {
         // RELEASE [SAVEPOINT] <name>
         if sql_lower.starts_with("release ") {
             return Some(self.handle_release_savepoint(sql_lower, session));
+        }
+
+        // USE database — switch session to a different database
+        if sql_lower.starts_with("use ") {
+            let db_name = sql_lower.trim_start_matches("use ").trim().to_string();
+            if db_name.is_empty() {
+                return Some(vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "42601".into(),
+                    message: "USE requires a database name".into(),
+                }]);
+            }
+            let catalog = self.storage.get_catalog();
+            if catalog.find_database(&db_name).is_some() {
+                let real_name = catalog.find_database(&db_name).unwrap().name.clone();
+                drop(catalog);
+                session.database = real_name;
+                return Some(vec![BackendMessage::CommandComplete {
+                    tag: "USE".into(),
+                }]);
+            } else {
+                drop(catalog);
+                return Some(vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "3D000".into(),
+                    message: format!("database \"{}\" does not exist", db_name),
+                }]);
+            }
+        }
+
+        // DROP DATABASE [IF EXISTS] name
+        if sql_lower.starts_with("drop database ") {
+            let rest = sql_lower.trim_start_matches("drop database ").trim();
+            let (if_exists, db_name) = if rest.starts_with("if exists ") {
+                (true, rest.trim_start_matches("if exists ").trim().to_string())
+            } else {
+                (false, rest.to_string())
+            };
+            if db_name.is_empty() {
+                return Some(vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "42601".into(),
+                    message: "DROP DATABASE requires a database name".into(),
+                }]);
+            }
+            match self.storage.drop_database(&db_name) {
+                Ok(()) => {
+                    return Some(vec![BackendMessage::CommandComplete {
+                        tag: "DROP DATABASE".into(),
+                    }]);
+                }
+                Err(e) if if_exists => {
+                    return Some(vec![BackendMessage::CommandComplete {
+                        tag: "DROP DATABASE".into(),
+                    }]);
+                }
+                Err(e) => {
+                    return Some(vec![BackendMessage::ErrorResponse {
+                        severity: "ERROR".into(),
+                        code: "3D000".into(),
+                        message: format!("{}", e),
+                    }]);
+                }
+            }
         }
 
         // CREATE TENANT name [MAX_QPS n] [MAX_CONNECTIONS n] [MAX_STORAGE_BYTES n]

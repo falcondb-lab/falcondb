@@ -85,6 +85,42 @@
 
 ---
 
+## 5. `falcon_segment_codec` — Segment-Level Compression (NEW in v1.2)
+
+### 5.1 Architecture
+
+New dedicated crate for all segment-level compression. Built on `zstd-safe` 7.2 (NOT the high-level `zstd` crate).
+
+| Component | Description |
+|-----------|-------------|
+| `SegmentCodecImpl` trait | Unified abstraction — all compression goes through this |
+| `ZstdBlockCodec` | Zstd via `zstd-safe` CCtx/DCtx, independent blocks, dictionary support |
+| `Lz4BlockCodec` | LZ4 via `lz4_flex` |
+| `NoneCodec` | Passthrough |
+| `DictionaryRegistry` | Load/use dictionaries (training is external) |
+| `DecompressPool` | Concurrency-limited decompression, OLTP isolation |
+| `DecompressCache` | LRU byte-capacity limited, keyed by (segment_id, block_index) |
+| `CompressMetrics` | Full compress/decompress/cache observability |
+
+### 5.2 Risk Points
+
+| # | File:Line | Risk | Severity | Description |
+|---|-----------|------|----------|-------------|
+| SC1 | `lib.rs` (DictionaryRegistry) | **No dictionary expiry** | LOW | Old dictionaries accumulate in memory. Acceptable for current scale; should add eviction for large deployments. |
+| SC2 | `lib.rs` (DecompressPool) | **Atomic inflight not RAII** | LOW | `inflight` counter is manually decremented. A panic between increment and decrement would leak a slot. Mitigated by catch_unwind in pool callers. |
+
+### 5.3 Fixes
+
+No fixes required — crate is new, clean build, 53 tests pass.
+
+### 5.4 Test Coverage
+
+- 34 unit tests covering all components (codec roundtrips, dictionary, cache, pool, metrics)
+- 19 integration tests (correctness, perf guardrails, E2E lifecycle)
+- Performance guardrails: cached read <1ms, ratio ≥3x, throughput ≥100 MB/s
+
+---
+
 ## Summary — All Fixes Implemented
 
 | # | Priority | Status | Description |

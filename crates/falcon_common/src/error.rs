@@ -80,6 +80,12 @@ pub enum StorageError {
     #[error("Table already exists: {0}")]
     TableAlreadyExists(String),
 
+    #[error("Database already exists: {0}")]
+    DatabaseAlreadyExists(String),
+
+    #[error("Database not found: {0}")]
+    DatabaseNotFound(String),
+
     #[error("Key not found")]
     KeyNotFound,
 
@@ -289,6 +295,8 @@ impl FalconError {
             }
             FalconError::Storage(StorageError::TableNotFound(_)) => ErrorKind::UserError,
             FalconError::Storage(StorageError::TableAlreadyExists(_)) => ErrorKind::UserError,
+            FalconError::Storage(StorageError::DatabaseAlreadyExists(_)) => ErrorKind::UserError,
+            FalconError::Storage(StorageError::DatabaseNotFound(_)) => ErrorKind::UserError,
             FalconError::Storage(StorageError::DuplicateKey) => ErrorKind::UserError,
             FalconError::Storage(StorageError::UniqueViolation { .. }) => ErrorKind::UserError,
             FalconError::Txn(TxnError::ConstraintViolation(_, _)) => ErrorKind::UserError,

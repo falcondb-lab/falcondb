@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FalconDB — Windows Service Registration
+  
+  MSI-managed service lifecycle:
+    Install:   register + start
+    Upgrade:   stop old → replace → start new (via MajorUpgrade chain)
+    Uninstall: stop + remove
+  
+  Recovery strategy: restart on failure (up to 3 times, reset after 24h).
+  Applied via CustomAction calling sc.exe (WiX ServiceConfig for failure
+  actions requires WixUtilExtension which may not handle all cases).
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <?include Variables.wxi ?>
+
+  <ComponentGroup Id="ServiceComponents">
+
+    <!-- ════════════════════════════════════════════════════════════════
+         Service Install + Control
+         ════════════════════════════════════════════════════════════════ -->
+    <Component Id="FalconService"
+               Directory="BINDIR"
+               Guid="{D0E1F2A3-B4C5-6789-3456-890123456789}">
+
+      <!-- Register the Windows Service -->
+      <ServiceInstall
+        Id="InstallFalconService"
+        Name="$(var.ServiceName)"
+        DisplayName="$(var.ServiceDisplayName)"
+        Description="$(var.ServiceDescription)"
+        Type="ownProcess"
+        Start="auto"
+        Account="LocalSystem"
+        ErrorControl="normal"
+        Arguments="--mode service --config &quot;[CommonAppDataFolder]$(var.ProgramDataPath)\conf\falcon.toml&quot;" />
+
+      <!-- Service control during MSI operations -->
+      <ServiceControl
+        Id="StartFalconService"
+        Name="$(var.ServiceName)"
+        Start="install"
+        Stop="both"
+        Remove="uninstall"
+        Wait="yes" />
+
+      <!-- Service failure recovery via WixUtilExtension -->
+      <util:ServiceConfig
+        ServiceName="$(var.ServiceName)"
+        FirstFailureActionType="restart"
+        SecondFailureActionType="restart"
+        ThirdFailureActionType="restart"
+        RestartServiceDelayInSeconds="10"
+        ResetPeriodInDays="1" />
+
+      <!-- KeyPath: registry marker (service component needs a keypath) -->
+      <RegistryValue Root="HKLM"
+                     Key="SOFTWARE\$(var.Manufacturer)\$(var.ProductName)"
+                     Name="ServiceInstalled"
+                     Type="integer"
+                     Value="1"
+                     KeyPath="yes" />
+    </Component>
+
+  </ComponentGroup>
+
+</Wix>

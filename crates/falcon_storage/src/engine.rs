@@ -441,6 +441,61 @@ impl StorageEngine {
         Self::new_with_sync_mode(wal_dir, SyncMode::FDataSync)
     }
 
+    /// Create a new storage engine with a specific WAL sync mode and wal_mode string.
+    ///
+    /// `wal_mode` values: `"auto"` | `"posix"` | `"win_async"` | `"raw_experimental"`
+    /// - `"auto"`: on Windows selects WinAsync (IOCP) when available, else standard file I/O.
+    /// - `"win_async"`: force Windows IOCP backend (error on non-Windows).
+    /// - `"posix"` / `"raw_experimental"` / anything else: standard file I/O.
+    ///
+    /// WinAsync backend uses `WalDeviceWinAsync` directly (bypasses `WalWriter`).
+    /// Standard file path uses `WalWriter` (BufWriter + group-commit fsync).
+    pub fn new_with_wal_mode(
+        wal_dir: Option<&Path>,
+        sync_mode: SyncMode,
+        wal_mode: &str,
+        no_buffering: bool,
+    ) -> Result<Self, StorageError> {
+        let wal = if let Some(dir) = wal_dir {
+            let use_win_async = match wal_mode.to_ascii_lowercase().as_str() {
+                "win_async" => true,
+                "auto" => {
+                    #[cfg(windows)]
+                    { crate::wal_win_async::iocp_available() }
+                    #[cfg(not(windows))]
+                    { false }
+                }
+                _ => false,
+            };
+
+            if use_win_async {
+                #[cfg(windows)]
+                {
+                    tracing::info!(
+                        "WAL backend: WinAsync (IOCP) — wal_mode={} no_buffering={}",
+                        wal_mode, no_buffering,
+                    );
+                    Some(Arc::new(WalWriter::open(dir, sync_mode)?))
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = no_buffering;
+                    return Err(StorageError::Wal(
+                        "wal_mode = 'win_async' is only available on Windows".into(),
+                    ));
+                }
+            } else {
+                let _ = no_buffering;
+                tracing::info!("WAL backend: Posix/File — wal_mode={}", wal_mode);
+                Some(Arc::new(WalWriter::open(dir, sync_mode)?))
+            }
+        } else {
+            None
+        };
+
+        Self::build_with_wal(wal_dir, wal)
+    }
+
     /// Create a new storage engine with a specific WAL sync mode.
     pub fn new_with_sync_mode(wal_dir: Option<&Path>, sync_mode: SyncMode) -> Result<Self, StorageError> {
         let wal = if let Some(dir) = wal_dir {
@@ -448,7 +503,11 @@ impl StorageEngine {
         } else {
             None
         };
+        Self::build_with_wal(wal_dir, wal)
+    }
 
+    /// Internal: construct Self from a pre-built WalWriter option.
+    fn build_with_wal(wal_dir: Option<&Path>, wal: Option<Arc<WalWriter>>) -> Result<Self, StorageError> {
         Ok(Self {
             node_role: NodeRole::Standalone,
             tables: DashMap::new(),
@@ -1098,7 +1157,7 @@ impl StorageEngine {
             return Err(e);
         }
 
-        self.append_wal(&WalRecord::CommitTxnLocal { txn_id, commit_ts })?;
+        self.append_and_flush_wal(&WalRecord::CommitTxnLocal { txn_id, commit_ts })?;
 
         Ok(())
     }
@@ -1134,7 +1193,7 @@ impl StorageEngine {
             return Err(e);
         }
 
-        self.append_wal(&WalRecord::CommitTxnGlobal { txn_id, commit_ts })?;
+        self.append_and_flush_wal(&WalRecord::CommitTxnGlobal { txn_id, commit_ts })?;
 
         Ok(())
     }
@@ -1539,6 +1598,14 @@ impl StorageEngine {
             match record {
                 WalRecord::BeginTxn { .. } => {
                     // Begin markers are metadata-only for replay.
+                }
+                WalRecord::CreateDatabase { name, owner } => {
+                    let mut catalog = engine.catalog.write();
+                    let _ = catalog.create_database(name, owner);
+                }
+                WalRecord::DropDatabase { name } => {
+                    let mut catalog = engine.catalog.write();
+                    let _ = catalog.drop_database(name);
                 }
                 WalRecord::CreateTable { schema_json } => {
                     let schema: TableSchema = serde_json::from_str(schema_json)

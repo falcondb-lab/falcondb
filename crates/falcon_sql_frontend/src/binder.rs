@@ -103,6 +103,13 @@ impl Binder {
 
     pub fn bind(&mut self, stmt: &Statement) -> Result<BoundStatement, SqlError> {
         match stmt {
+            Statement::CreateDatabase { db_name, if_not_exists, .. } => {
+                let name = db_name.to_string();
+                Ok(BoundStatement::CreateDatabase {
+                    name,
+                    if_not_exists: *if_not_exists,
+                })
+            }
             Statement::CreateTable(create) => self.bind_create_table(create),
             Statement::Drop {
                 object_type,
@@ -110,6 +117,15 @@ impl Binder {
                 if_exists,
                 ..
             } => match object_type {
+                ast::ObjectType::Schema => {
+                    let name = names
+                        .first()
+                        .ok_or_else(|| SqlError::Parse("DROP DATABASE requires a name".into()))?;
+                    Ok(BoundStatement::DropDatabase {
+                        name: name.to_string(),
+                        if_exists: *if_exists,
+                    })
+                }
                 ast::ObjectType::Table => {
                     let name = names
                         .first()

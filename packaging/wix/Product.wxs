@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FalconDB — WiX v4 Product Definition
+  MSI core: Package identity, MajorUpgrade, Feature tree, install directory.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <?include Variables.wxi ?>
+
+  <Package
+    Name="$(var.ProductName)"
+    Manufacturer="$(var.Manufacturer)"
+    Version="$(var.ProductVersion)"
+    UpgradeCode="$(var.UpgradeCode)"
+    Scope="perMachine"
+    InstallerVersion="500"
+    Compressed="yes">
+
+    <SummaryInformation
+      Description="$(var.ProductDescription)"
+      Manufacturer="$(var.Manufacturer)" />
+
+    <!-- Single CAB embedded in MSI -->
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- ════════════════════════════════════════════════════════════════
+         Major Upgrade — auto-uninstall older versions
+         ════════════════════════════════════════════════════════════════ -->
+    <MajorUpgrade
+      Schedule="afterInstallInitialize"
+      DowngradeErrorMessage="A newer version of [ProductName] is already installed. Remove it first to downgrade."
+      AllowSameVersionUpgrades="yes" />
+
+    <!-- ════════════════════════════════════════════════════════════════
+         Install directory: C:\Program Files\FalconDB\
+         ════════════════════════════════════════════════════════════════ -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="$(var.InstallFolderName)">
+        <Directory Id="BINDIR" Name="bin" />
+      </Directory>
+    </StandardDirectory>
+
+    <!-- ProgramData directory tree defined in ProgramData.wxs -->
+
+    <!-- ════════════════════════════════════════════════════════════════
+         Feature tree
+         ════════════════════════════════════════════════════════════════ -->
+    <Feature Id="Core"
+             Title="FalconDB Core"
+             Description="FalconDB database server and configuration."
+             Level="1"
+             AllowAbsent="no">
+      <ComponentGroupRef Id="BinComponents" />
+      <ComponentGroupRef Id="DocComponents" />
+      <ComponentGroupRef Id="ProgramDataComponents" />
+      <ComponentGroupRef Id="ServiceComponents" />
+    </Feature>
+
+    <Feature Id="Firewall"
+             Title="Firewall Rules"
+             Description="Add Windows Firewall inbound rules for PG ($(var.PgPort)) and HTTP ($(var.HttpPort))."
+             Level="1"
+             AllowAbsent="yes">
+      <ComponentGroupRef Id="FirewallComponents" />
+    </Feature>
+
+    <!-- ════════════════════════════════════════════════════════════════
+         Properties (user-overridable on command line)
+         ════════════════════════════════════════════════════════════════ -->
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <Property Id="ADD_FIREWALL_RULES" Value="1" />
+    <Property Id="ARPPRODUCTICON" Value="FalconIcon" />
+
+    <!-- ════════════════════════════════════════════════════════════════
+         Launch conditions
+         ════════════════════════════════════════════════════════════════ -->
+    <Launch Condition="VersionNT64" Message="[ProductName] requires a 64-bit operating system." />
+
+  </Package>
+</Wix>

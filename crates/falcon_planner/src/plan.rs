@@ -35,6 +35,16 @@ impl TxnRoutingHint {
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum PhysicalPlan {
+    /// DDL: create database
+    CreateDatabase {
+        name: String,
+        if_not_exists: bool,
+    },
+    /// DDL: drop database
+    DropDatabase {
+        name: String,
+        if_exists: bool,
+    },
     /// DDL: create table
     CreateTable {
         schema: TableSchema,

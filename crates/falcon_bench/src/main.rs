@@ -1814,10 +1814,31 @@ fn run_bulk_bench(args: &Args) {
         std::process::exit(1);
     }
 
+    // Normalize and validate sslmode: 'enable' is not a libpq value, map it to 'require'.
+    let sslmode = match args.bulk_sslmode.to_ascii_lowercase().as_str() {
+        "disable" | "allow" | "prefer" | "require" | "verify-ca" | "verify-full" => {
+            args.bulk_sslmode.to_ascii_lowercase()
+        }
+        "enable" | "on" | "yes" | "true" | "1" => {
+            eprintln!(
+                "WARN: --bulk-sslmode '{}' is not a valid libpq value; using 'require' instead.",
+                args.bulk_sslmode
+            );
+            "require".to_string()
+        }
+        other => {
+            eprintln!(
+                "ERROR: Invalid --bulk-sslmode '{}'. Valid values: disable | allow | prefer | require | verify-ca | verify-full",
+                other
+            );
+            std::process::exit(1);
+        }
+    };
+
     let connect_str = {
         let mut s = format!(
             "host={} port={} user={} dbname={} sslmode={}",
-            args.bulk_host, args.bulk_port, args.bulk_user, args.bulk_dbname, args.bulk_sslmode
+            args.bulk_host, args.bulk_port, args.bulk_user, args.bulk_dbname, sslmode
         );
         if !password.is_empty() {
             s.push_str(&format!(" password={}", password));
@@ -1837,7 +1858,10 @@ fn run_bulk_bench(args: &Args) {
         let (client, connection) = match tokio_postgres::connect(&connect_str, tokio_postgres::NoTls).await {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("ERROR: Connection failed: {}", e);
+                eprintln!(
+                    "ERROR: Connection failed: {}\n  Connection: {}:{}  user={} dbname={} sslmode={}\n  Hint: use --bulk-sslmode disable for local FalconDB (no TLS)",
+                    e, args.bulk_host, args.bulk_port, args.bulk_user, args.bulk_dbname, sslmode
+                );
                 std::process::exit(1);
             }
         };

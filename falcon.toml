@@ -6,6 +6,7 @@ max_connections = 1024
 statement_timeout_ms = 0
 idle_timeout_ms = 0
 shutdown_drain_timeout_secs = 30
+slow_txn_threshold_us = 0
 
 [storage]
 memory_limit_bytes = 0
@@ -13,11 +14,15 @@ wal_enabled = true
 data_dir = "./falcon_data"
 lsm_sync_writes = false
 
+
+
 [wal]
 group_commit = true
 flush_interval_us = 1000
-sync_mode = "none"
+sync_mode = "fdatasync"
 segment_size_bytes = 67108864
+wal_mode = "win_async"
+no_buffering = false
 
 [gc]
 enabled = false

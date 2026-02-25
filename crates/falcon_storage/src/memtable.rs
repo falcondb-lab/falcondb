@@ -587,13 +587,49 @@ impl MemTable {
         self.validate_unique_constraints_for_commit(txn_id, keys)?;
 
         // Phase 2: All checks passed — apply MVCC commits + index updates.
+        // Collect pk_order changes in local vecs to avoid acquiring the
+        // global RwLock N times (one per key). A single bulk write at the
+        // end reduces contention from O(N) locks to O(1) per transaction.
+        let mut pk_inserts: Vec<PrimaryKey> = Vec::new();
+        let mut pk_deletes: Vec<PrimaryKey> = Vec::new();
+        let mut row_delta: i64 = 0;
+
         for pk in keys {
             if let Some(chain) = self.data.get(pk) {
                 let (new_data, old_data) = chain.commit_and_report(txn_id, commit_ts);
-                self.adjust_row_count_and_pk_order(pk, &new_data, &old_data);
+                match (new_data.is_some(), old_data.is_some()) {
+                    (true, false) => {
+                        row_delta += 1;
+                        pk_inserts.push(pk.clone());
+                    }
+                    (false, true) => {
+                        row_delta -= 1;
+                        pk_deletes.push(pk.clone());
+                    }
+                    _ => {}
+                }
                 self.index_update_on_commit(pk, new_data.as_ref(), old_data.as_ref());
             }
         }
+
+        // Apply row count atomically.
+        if row_delta > 0 {
+            self.committed_row_count.fetch_add(row_delta, AtomicOrdering::Relaxed);
+        } else if row_delta < 0 {
+            self.committed_row_count.fetch_sub(-row_delta, AtomicOrdering::Relaxed);
+        }
+
+        // Apply pk_order changes with a single write-lock acquisition.
+        if !pk_inserts.is_empty() || !pk_deletes.is_empty() {
+            let mut order = self.pk_order.write();
+            for pk in pk_inserts {
+                order.insert(pk);
+            }
+            for pk in pk_deletes {
+                order.remove(&pk);
+            }
+        }
+
         Ok(())
     }
 

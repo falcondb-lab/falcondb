@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FalconDB — ProgramData Components
+  
+  Creates: C:\ProgramData\FalconDB\{conf,data,logs,certs}
+  
+  CRITICAL STRATEGIES:
+  1. conf\falcon.toml: NeverOverwrite — first install writes template, upgrades preserve user edits
+  2. data\, logs\: directories survive uninstall (Component with Permanent="yes")
+  3. Uninstall: ProgramData is NEVER removed (user data preserved)
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <?include Variables.wxi ?>
+
+  <!-- ════════════════════════════════════════════════════════════════
+       ProgramData directory tree
+       ════════════════════════════════════════════════════════════════ -->
+  <StandardDirectory Id="CommonAppDataFolder">
+    <Directory Id="PROGRAMDATAROOT" Name="$(var.ProgramDataPath)">
+      <Directory Id="CONFDATADIR" Name="conf" />
+      <Directory Id="DATADATADIR" Name="data" />
+      <Directory Id="LOGSDATADIR" Name="logs" />
+      <Directory Id="CERTSDATADIR" Name="certs" />
+    </Directory>
+  </StandardDirectory>
+
+  <ComponentGroup Id="ProgramDataComponents">
+
+    <!-- ─── conf\falcon.toml ─────────────────────────────────────────
+         NeverOverwrite: MSI writes the file only if it does not exist.
+         Permanent: the file is NOT removed on uninstall.
+         This means:
+           - First install: template is written
+           - Upgrade: user edits are preserved (file already exists → skip)
+           - Uninstall: file stays on disk
+         ───────────────────────────────────────────────────────────── -->
+    <Component Id="ConfigFile"
+               Directory="CONFDATADIR"
+               Guid="{E5F6A7B8-C9D0-1234-EF01-345678901234}"
+               NeverOverwrite="yes"
+               Permanent="yes">
+      <File Id="falcon.toml"
+            Source="$(var.StageDir)\conf\falcon.toml"
+            KeyPath="yes" />
+    </Component>
+
+    <!-- ─── data\ directory ──────────────────────────────────────────
+         Permanent: directory survives uninstall.
+         CreateFolder ensures the directory is created even if empty.
+         ───────────────────────────────────────────────────────────── -->
+    <Component Id="DataDirectory"
+               Directory="DATADATADIR"
+               Guid="{F6A7B8C9-D0E1-2345-F012-456789012345}"
+               Permanent="yes">
+      <CreateFolder />
+      <RegistryValue Root="HKLM"
+                     Key="SOFTWARE\$(var.Manufacturer)\$(var.ProductName)"
+                     Name="DataDir"
+                     Type="string"
+                     Value="[DATADATADIR]"
+                     KeyPath="yes" />
+    </Component>
+
+    <!-- ─── logs\ directory ──────────────────────────────────────────
+         Same strategy as data: permanent, survives uninstall.
+         ───────────────────────────────────────────────────────────── -->
+    <Component Id="LogsDirectory"
+               Directory="LOGSDATADIR"
+               Guid="{A7B8C9D0-E1F2-3456-0123-567890123456}"
+               Permanent="yes">
+      <CreateFolder />
+      <RegistryValue Root="HKLM"
+                     Key="SOFTWARE\$(var.Manufacturer)\$(var.ProductName)"
+                     Name="LogsDir"
+                     Type="string"
+                     Value="[LOGSDATADIR]"
+                     KeyPath="yes" />
+    </Component>
+
+    <!-- ─── certs\ directory (optional, for TLS) ─────────────────── -->
+    <Component Id="CertsDirectory"
+               Directory="CERTSDATADIR"
+               Guid="{B8C9D0E1-F2A3-4567-1234-678901234567}"
+               Permanent="yes">
+      <CreateFolder />
+      <RegistryValue Root="HKLM"
+                     Key="SOFTWARE\$(var.Manufacturer)\$(var.ProductName)"
+                     Name="CertsDir"
+                     Type="string"
+                     Value="[CERTSDATADIR]"
+                     KeyPath="yes" />
+    </Component>
+
+    <!-- ─── Registry: install metadata ───────────────────────────── -->
+    <Component Id="RegistryEntries"
+               Directory="PROGRAMDATAROOT"
+               Guid="{C9D0E1F2-A3B4-5678-2345-789012345678}">
+      <RegistryKey Root="HKLM"
+                   Key="SOFTWARE\$(var.Manufacturer)\$(var.ProductName)">
+        <RegistryValue Name="InstallDir" Type="string" Value="[INSTALLFOLDER]" />
+        <RegistryValue Name="Version" Type="string" Value="$(var.ProductVersion)" />
+        <RegistryValue Name="ProgramDataDir" Type="string" Value="[PROGRAMDATAROOT]" />
+      </RegistryKey>
+    </Component>
+
+  </ComponentGroup>
+
+</Wix>

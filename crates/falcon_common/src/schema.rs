@@ -164,6 +164,19 @@ impl TableSchema {
     }
 }
 
+/// A database entry in the catalog.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatabaseEntry {
+    /// Unique database OID (used in pg_catalog.pg_database).
+    pub oid: u32,
+    /// Database name (case-preserving, lookup is case-insensitive).
+    pub name: String,
+    /// Owner of the database (defaults to the creating user).
+    pub owner: String,
+    /// Encoding (always UTF8 for FalconDB).
+    pub encoding: String,
+}
+
 /// A view definition: name + the SQL query that defines it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ViewDef {
@@ -181,14 +194,33 @@ pub struct Catalog {
     next_table_id: u64,
     #[serde(default)]
     pub views: Vec<ViewDef>,
+    #[serde(default = "Catalog::default_databases")]
+    databases: Vec<DatabaseEntry>,
+    #[serde(default = "Catalog::default_next_db_oid")]
+    next_database_oid: u32,
 }
 
 impl Catalog {
+    fn default_databases() -> Vec<DatabaseEntry> {
+        vec![DatabaseEntry {
+            oid: 1,
+            name: "falcon".to_string(),
+            owner: "falcon".to_string(),
+            encoding: "UTF8".to_string(),
+        }]
+    }
+
+    fn default_next_db_oid() -> u32 {
+        2
+    }
+
     pub fn new() -> Self {
         Self {
             tables: HashMap::new(),
             next_table_id: 1,
             views: Vec::new(),
+            databases: Self::default_databases(),
+            next_database_oid: 2,
         }
     }
 
@@ -268,5 +300,46 @@ impl Catalog {
 
     pub fn list_views(&self) -> &[ViewDef] {
         &self.views
+    }
+
+    // ── Database management ──
+
+    pub fn create_database(&mut self, name: &str, owner: &str) -> Result<u32, String> {
+        let lower = name.to_lowercase();
+        if self.databases.iter().any(|db| db.name.to_lowercase() == lower) {
+            return Err(format!("database \"{}\" already exists", name));
+        }
+        let oid = self.next_database_oid;
+        self.next_database_oid += 1;
+        self.databases.push(DatabaseEntry {
+            oid,
+            name: name.to_string(),
+            owner: owner.to_string(),
+            encoding: "UTF8".to_string(),
+        });
+        Ok(oid)
+    }
+
+    pub fn drop_database(&mut self, name: &str) -> Result<(), String> {
+        let lower = name.to_lowercase();
+        if lower == "falcon" {
+            return Err("cannot drop the default database \"falcon\"".to_string());
+        }
+        let len_before = self.databases.len();
+        self.databases.retain(|db| db.name.to_lowercase() != lower);
+        if self.databases.len() < len_before {
+            Ok(())
+        } else {
+            Err(format!("database \"{}\" does not exist", name))
+        }
+    }
+
+    pub fn find_database(&self, name: &str) -> Option<&DatabaseEntry> {
+        let lower = name.to_lowercase();
+        self.databases.iter().find(|db| db.name.to_lowercase() == lower)
+    }
+
+    pub fn list_databases(&self) -> &[DatabaseEntry] {
+        &self.databases
     }
 }

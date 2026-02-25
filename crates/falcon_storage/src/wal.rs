@@ -267,6 +267,10 @@ pub enum WalRecord {
     AbortTxnLocal { txn_id: TxnId },
     /// Abort a global slow-path transaction.
     AbortTxnGlobal { txn_id: TxnId },
+    /// DDL: create database.
+    CreateDatabase { name: String, owner: String },
+    /// DDL: drop database.
+    DropDatabase { name: String },
     /// DDL: create table (schema stored as JSON).
     CreateTable { schema_json: String },
     /// DDL: drop table.

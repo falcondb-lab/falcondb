@@ -5458,4 +5458,78 @@ mod ddl_concurrency_tests {
             "dropping nonexistent index should return error"
         );
     }
+
+    #[test]
+    fn test_ddl_create_database() {
+        let engine = StorageEngine::new_in_memory();
+        let oid = engine.create_database("testdb", "admin").unwrap();
+        assert!(oid > 0);
+        let catalog = engine.get_catalog();
+        let db = catalog.find_database("testdb");
+        assert!(db.is_some());
+        assert_eq!(db.unwrap().name, "testdb");
+        assert_eq!(db.unwrap().owner, "admin");
+    }
+
+    #[test]
+    fn test_ddl_create_database_already_exists() {
+        let engine = StorageEngine::new_in_memory();
+        engine.create_database("testdb", "admin").unwrap();
+        let result = engine.create_database("testdb", "admin");
+        assert!(result.is_err(), "creating duplicate database should fail");
+    }
+
+    #[test]
+    fn test_ddl_create_database_case_insensitive() {
+        let engine = StorageEngine::new_in_memory();
+        engine.create_database("TestDB", "admin").unwrap();
+        let result = engine.create_database("testdb", "admin");
+        assert!(result.is_err(), "case-insensitive duplicate should fail");
+    }
+
+    #[test]
+    fn test_ddl_drop_database() {
+        let engine = StorageEngine::new_in_memory();
+        engine.create_database("dropme", "admin").unwrap();
+        engine.drop_database("dropme").unwrap();
+        let catalog = engine.get_catalog();
+        assert!(catalog.find_database("dropme").is_none());
+    }
+
+    #[test]
+    fn test_ddl_drop_database_not_found() {
+        let engine = StorageEngine::new_in_memory();
+        let result = engine.drop_database("nosuchdb");
+        assert!(result.is_err(), "dropping nonexistent database should fail");
+    }
+
+    #[test]
+    fn test_ddl_drop_default_database_rejected() {
+        let engine = StorageEngine::new_in_memory();
+        let result = engine.drop_database("falcon");
+        assert!(
+            result.is_err(),
+            "dropping the default 'falcon' database should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_ddl_list_databases_includes_default() {
+        let engine = StorageEngine::new_in_memory();
+        let catalog = engine.get_catalog();
+        let dbs = catalog.list_databases();
+        assert!(dbs.iter().any(|db| db.name == "falcon"));
+    }
+
+    #[test]
+    fn test_ddl_list_databases_after_create() {
+        let engine = StorageEngine::new_in_memory();
+        engine.create_database("db1", "admin").unwrap();
+        engine.create_database("db2", "admin").unwrap();
+        let catalog = engine.get_catalog();
+        let dbs = catalog.list_databases();
+        assert_eq!(dbs.len(), 3); // falcon + db1 + db2
+        assert!(dbs.iter().any(|db| db.name == "db1"));
+        assert!(dbs.iter().any(|db| db.name == "db2"));
+    }
 }

@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FalconDB — Upgrade Strategy
+  
+  Major Upgrade flow (A → B):
+    1. MSI detects older version via UpgradeCode
+    2. afterInstallInitialize: old product scheduled for removal
+    3. ServiceControl stops old service
+    4. Old files removed from Program Files
+    5. New files installed
+    6. ProgramData components: NeverOverwrite preserves config
+    7. Service re-registered with new binary
+    8. ServiceControl starts new service
+  
+  ProgramData preservation:
+    - ProgramData components have Permanent="yes"
+    - They are NOT affected by RemoveExistingProducts
+    - conf\falcon.toml has NeverOverwrite: existing file is never replaced
+    - data\ and logs\ directories are permanent
+  
+  Rollback:
+    - If install/upgrade fails at any point, MSI rolls back automatically
+    - Service state returns to pre-operation state
+    - Files are restored to previous version
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <?include Variables.wxi ?>
+
+  <!--
+    NOTE: MajorUpgrade is defined in Product.wxs.
+    This file documents the upgrade contract and provides
+    any additional upgrade-related components if needed.
+    
+    The upgrade chain is:
+      1. MajorUpgrade (Product.wxs) handles version detection
+      2. ServiceControl (Service.wxs) handles stop/start
+      3. NeverOverwrite + Permanent (ProgramData.wxs) preserves user data
+      4. Components.wxs handles file replacement in Program Files
+    
+    No additional CustomActions are needed for the standard upgrade path.
+  -->
+
+  <!--
+    Upgrade property: set by MajorUpgrade when an older version is detected.
+    Can be used in conditions if needed.
+  -->
+  <Property Id="PREVIOUSVERSIONINSTALLED" Secure="yes" />
+
+  <!--
+    Registry: track upgrade history for diagnostics.
+  -->
+  <ComponentGroup Id="UpgradeTracking">
+    <Component Id="UpgradeHistory"
+               Directory="PROGRAMDATAROOT"
+               Guid="{E1F2A3B4-C5D6-7890-4567-901234567890}">
+      <RegistryKey Root="HKLM"
+                   Key="SOFTWARE\$(var.Manufacturer)\$(var.ProductName)\Upgrades">
+        <RegistryValue Name="LastUpgradeVersion" Type="string" Value="$(var.ProductVersion)" />
+      </RegistryKey>
+    </Component>
+  </ComponentGroup>
+
+</Wix>
