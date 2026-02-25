@@ -73,7 +73,7 @@ impl Histogram {
         let base = pos as f64 * bucket_fraction;
         // Within the straddling bucket, assume uniform distribution → ~0.5 of bucket
         if pos < num_buckets {
-            (base + 0.5 * bucket_fraction).min(1.0)
+            0.5f64.mul_add(bucket_fraction, base).min(1.0)
         } else {
             1.0
         }
@@ -307,9 +307,9 @@ fn datum_cmp(a: &Datum, b: &Datum) -> Option<std::cmp::Ordering> {
             let (na, nb) = if sa == sb {
                 (*a, *b)
             } else if sa > sb {
-                (*a, *b * 10i128.pow((*sa - *sb) as u32))
+                (*a, *b * 10i128.pow(u32::from(*sa - *sb)))
             } else {
-                (*a * 10i128.pow((*sb - *sa) as u32), *b)
+                (*a * 10i128.pow(u32::from(*sb - *sa)), *b)
             };
             Some(na.cmp(&nb))
         }
@@ -384,7 +384,7 @@ pub fn collect_column_stats(
             match &min_vals[i] {
                 None => min_vals[i] = Some(datum.clone()),
                 Some(cur_min) => {
-                    if let Some(std::cmp::Ordering::Less) = datum_cmp(datum, cur_min) {
+                    if datum_cmp(datum, cur_min) == Some(std::cmp::Ordering::Less) {
                         min_vals[i] = Some(datum.clone());
                     }
                 }
@@ -393,7 +393,7 @@ pub fn collect_column_stats(
             match &max_vals[i] {
                 None => max_vals[i] = Some(datum.clone()),
                 Some(cur_max) => {
-                    if let Some(std::cmp::Ordering::Greater) = datum_cmp(datum, cur_max) {
+                    if datum_cmp(datum, cur_max) == Some(std::cmp::Ordering::Greater) {
                         max_vals[i] = Some(datum.clone());
                     }
                 }

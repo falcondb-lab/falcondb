@@ -176,12 +176,12 @@ impl ExternalSorter {
         let mut run_paths = Vec::new();
         let chunks: Vec<Vec<OwnedRow>> = std::mem::take(rows)
             .chunks(self.threshold)
-            .map(|c| c.to_vec())
+            .map(<[falcon_common::datum::OwnedRow]>::to_vec)
             .collect();
 
         for (i, mut chunk) in chunks.into_iter().enumerate() {
             chunk.sort_by(|a, b| cmp(a, b));
-            let path = run_dir.join(format!("run_{:06}.bin", i));
+            let path = run_dir.join(format!("run_{i:06}.bin"));
             let bytes_written = write_run(&path, &chunk)?;
             self.metrics.bytes_spilled.fetch_add(bytes_written, AtomicOrdering::Relaxed);
             self.metrics.runs_created.fetch_add(1, AtomicOrdering::Relaxed);
@@ -197,7 +197,7 @@ impl ExternalSorter {
                     next_paths.push(group[0].clone());
                 } else {
                     let merged_path =
-                        run_dir.join(format!("merge_g{}_i{}.bin", merge_gen, group_idx));
+                        run_dir.join(format!("merge_g{merge_gen}_i{group_idx}.bin"));
                     merge_runs(group, &merged_path, order_by)?;
                     // Remove consumed input runs
                     for p in group {
@@ -228,9 +228,9 @@ impl ExternalSorter {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let dir = self.temp_dir.join(format!("sort_{}_{}", id, seq));
+        let dir = self.temp_dir.join(format!("sort_{id}_{seq}"));
         fs::create_dir_all(&dir).map_err(|e| {
-            FalconError::Internal(format!("Failed to create spill directory {:?}: {}", dir, e))
+            FalconError::Internal(format!("Failed to create spill directory {dir:?}: {e}"))
         })?;
         Ok(dir)
     }
@@ -243,7 +243,7 @@ impl ExternalSorter {
 /// Returns total bytes written.
 fn write_run(path: &Path, rows: &[OwnedRow]) -> Result<u64, FalconError> {
     let file = File::create(path).map_err(|e| {
-        FalconError::Internal(format!("Failed to create spill file {:?}: {}", path, e))
+        FalconError::Internal(format!("Failed to create spill file {path:?}: {e}"))
     })?;
     let mut w = BufWriter::new(file);
     let mut total_bytes: u64 = 8; // row_count header
@@ -252,7 +252,7 @@ fn write_run(path: &Path, rows: &[OwnedRow]) -> Result<u64, FalconError> {
         .map_err(io_err)?;
     for row in rows {
         let bytes = bincode::serialize(row)
-            .map_err(|e| FalconError::Internal(format!("Spill serialization error: {}", e)))?;
+            .map_err(|e| FalconError::Internal(format!("Spill serialization error: {e}")))?;
         w.write_all(&(bytes.len() as u32).to_le_bytes())
             .map_err(io_err)?;
         w.write_all(&bytes).map_err(io_err)?;
@@ -272,7 +272,7 @@ fn read_run(path: &Path) -> Result<Vec<OwnedRow>, FalconError> {
 /// Read an entire sorted run, tracking bytes read.
 fn read_run_tracked(path: &Path) -> Result<(Vec<OwnedRow>, u64), FalconError> {
     let file = File::open(path).map_err(|e| {
-        FalconError::Internal(format!("Failed to open spill file {:?}: {}", path, e))
+        FalconError::Internal(format!("Failed to open spill file {path:?}: {e}"))
     })?;
     let mut r = BufReader::new(file);
     let count = read_u64(&mut r)?;
@@ -285,7 +285,7 @@ fn read_run_tracked(path: &Path) -> Result<(Vec<OwnedRow>, u64), FalconError> {
         let mut data = vec![0u8; len];
         r.read_exact(&mut data).map_err(io_err)?;
         let row: OwnedRow = bincode::deserialize(&data)
-            .map_err(|e| FalconError::Internal(format!("Spill deserialization error: {}", e)))?;
+            .map_err(|e| FalconError::Internal(format!("Spill deserialization error: {e}")))?;
         rows.push(row);
         total_bytes += 4 + len as u64;
     }
@@ -301,7 +301,7 @@ struct RunReader {
 impl RunReader {
     fn open(path: &Path) -> Result<Self, FalconError> {
         let file = File::open(path).map_err(|e| {
-            FalconError::Internal(format!("Failed to open spill file {:?}: {}", path, e))
+            FalconError::Internal(format!("Failed to open spill file {path:?}: {e}"))
         })?;
         let mut reader = BufReader::new(file);
         let remaining = read_u64(&mut reader)?;
@@ -349,8 +349,7 @@ fn merge_runs(
     // Open output
     let file = File::create(output_path).map_err(|e| {
         FalconError::Internal(format!(
-            "Failed to create merge file {:?}: {}",
-            output_path, e
+            "Failed to create merge file {output_path:?}: {e}"
         ))
     })?;
     let mut w = BufWriter::new(file);
@@ -359,7 +358,7 @@ fn merge_runs(
     while let Some(entry) = heap.pop() {
         // Write the smallest row
         let bytes = bincode::serialize(&entry.row)
-            .map_err(|e| FalconError::Internal(format!("Spill serialization error: {}", e)))?;
+            .map_err(|e| FalconError::Internal(format!("Spill serialization error: {e}")))?;
         w.write_all(&(bytes.len() as u32).to_le_bytes())
             .map_err(io_err)?;
         w.write_all(&bytes).map_err(io_err)?;
@@ -428,11 +427,11 @@ fn read_one_row(r: &mut impl Read) -> Result<OwnedRow, FalconError> {
     let mut data = vec![0u8; len];
     r.read_exact(&mut data).map_err(io_err)?;
     bincode::deserialize(&data)
-        .map_err(|e| FalconError::Internal(format!("Spill deserialization error: {}", e)))
+        .map_err(|e| FalconError::Internal(format!("Spill deserialization error: {e}")))
 }
 
 fn io_err(e: std::io::Error) -> FalconError {
-    FalconError::Internal(format!("Spill I/O error: {}", e))
+    FalconError::Internal(format!("Spill I/O error: {e}"))
 }
 
 // ── Convenience function for executor integration ──

@@ -237,7 +237,7 @@ pub fn sweep_memtable(
 
     let mut processed = 0u64;
 
-    for entry in table.data.iter() {
+    for entry in &table.data {
         // Batch limit
         if config.batch_size > 0 && processed >= config.batch_size as u64 {
             result.keys_skipped += table.data.len() as u64 - processed;
@@ -483,11 +483,11 @@ pub enum ReadViewHolder {
 impl std::fmt::Display for ReadViewHolder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Transaction(id) => write!(f, "txn:{}", id),
-            Self::Cursor(name) => write!(f, "cursor:{}", name),
-            Self::ReplicationSlot(name) => write!(f, "repl_slot:{}", name),
-            Self::Backup(name) => write!(f, "backup:{}", name),
-            Self::Internal(name) => write!(f, "internal:{}", name),
+            Self::Transaction(id) => write!(f, "txn:{id}"),
+            Self::Cursor(name) => write!(f, "cursor:{name}"),
+            Self::ReplicationSlot(name) => write!(f, "repl_slot:{name}"),
+            Self::Backup(name) => write!(f, "backup:{name}"),
+            Self::Internal(name) => write!(f, "internal:{name}"),
         }
     }
 }

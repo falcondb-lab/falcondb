@@ -14,7 +14,7 @@ impl AuditCmd {
     pub fn parse(arg: &str) -> Self {
         match arg.trim().to_lowercase().as_str() {
             "recent" | "" => Self::Recent,
-            other => Self::Detail(other.to_string()),
+            other => Self::Detail(other.to_owned()),
         }
     }
 }
@@ -39,8 +39,7 @@ async fn audit_recent(client: &DbClient, mode: OutputMode) -> Result<String> {
 
     if rows.is_empty() {
         return Ok(
-            "No audit records found. (falcon.audit_log view not present or no events recorded)\n"
-                .to_string(),
+            "No audit records found. (falcon.audit_log view not present or no events recorded)\n".to_owned(),
         );
     }
 
@@ -61,13 +60,13 @@ async fn audit_detail(client: &DbClient, event_id: &str, mode: OutputMode) -> Re
         .unwrap_or_else(|_| (Vec::new(), String::new()));
 
     if rows.is_empty() {
-        return Ok(format!("Audit event '{}' not found.\n", event_id));
+        return Ok(format!("Audit event '{event_id}' not found.\n"));
     }
 
     Ok(format_rows_as_string(
         &rows,
         mode,
-        &format!("Audit Event {}", event_id),
+        &format!("Audit Event {event_id}"),
     ))
 }
 

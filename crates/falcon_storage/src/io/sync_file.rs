@@ -61,7 +61,7 @@ impl SyncFileBackend {
     fn check_inflight(&self, bytes: u64) -> Result<(), IoError> {
         if self.config.max_inflight_ops > 0 {
             let ops = self.inflight_ops.load(Ordering::Relaxed);
-            if ops >= self.config.max_inflight_ops as u64 {
+            if ops >= u64::from(self.config.max_inflight_ops) {
                 return Err(IoError::new(
                     IoErrorKind::Timeout,
                     format!(

@@ -18,8 +18,8 @@ pub async fn plan_node_drain(client: &DbClient, node_id: &str, mode: OutputMode)
         .await
         .ok()
         .and_then(|(rows, _)| rows.into_iter().next())
-        .and_then(|r| r.get(0).map(|v| v.to_string()))
-        .unwrap_or_else(|| "unknown".to_string());
+        .and_then(|r| r.get(0).map(std::string::ToString::to_string))
+        .unwrap_or_else(|| "unknown".to_owned());
 
     // Query node health
     let health_sql = format!(
@@ -35,11 +35,11 @@ pub async fn plan_node_drain(client: &DbClient, node_id: &str, mode: OutputMode)
         .and_then(|(rows, _)| rows.into_iter().next())
         .map(|r| {
             (
-                r.get(0).unwrap_or("unknown").to_string(),
-                r.get(1).unwrap_or("unknown").to_string(),
+                r.get(0).unwrap_or("unknown").to_owned(),
+                r.get(1).unwrap_or("unknown").to_owned(),
             )
         })
-        .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
+        .unwrap_or_else(|| ("unknown".to_owned(), "unknown".to_owned()));
 
     let risk = if role == "leader" {
         RiskLevel::High
@@ -47,7 +47,7 @@ pub async fn plan_node_drain(client: &DbClient, node_id: &str, mode: OutputMode)
         RiskLevel::Medium
     };
 
-    let mut plan = PlanOutput::new(format!("node drain {}", node_id), risk)
+    let mut plan = PlanOutput::new(format!("node drain {node_id}"), risk)
         .field("Node ID", node_id)
         .field("Current Role", &role)
         .field("Health Status", &health)
@@ -56,14 +56,12 @@ pub async fn plan_node_drain(client: &DbClient, node_id: &str, mode: OutputMode)
 
     if role == "leader" {
         plan = plan.warn(format!(
-            "Node '{}' is a leader — draining may trigger leader election",
-            node_id
+            "Node '{node_id}' is a leader — draining may trigger leader election"
         ));
     }
     if active_txns != "0" && active_txns != "unknown" {
         plan = plan.warn(format!(
-            "{} active transaction(s) must complete before drain finishes",
-            active_txns
+            "{active_txns} active transaction(s) must complete before drain finishes"
         ));
     }
 
@@ -76,7 +74,7 @@ pub async fn apply_node_drain(
     node_id: &str,
     apply: bool,
 ) -> Result<ApplyResult> {
-    require_apply(apply, &format!("node drain {}", node_id))?;
+    require_apply(apply, &format!("node drain {node_id}"))?;
 
     let sql = format!(
         "SELECT falcon.admin_drain_node('{}')",
@@ -84,15 +82,14 @@ pub async fn apply_node_drain(
     );
     match client.query_simple(&sql).await {
         Ok(_) => Ok(ApplyResult::success(
-            format!("node drain {}", node_id),
+            format!("node drain {node_id}"),
             format!(
-                "Node '{}' is now draining. No new transactions will be routed to it.",
-                node_id
+                "Node '{node_id}' is now draining. No new transactions will be routed to it."
             ),
         )),
         Err(e) => Ok(ApplyResult::rejected(
-            format!("node drain {}", node_id),
-            format!("Server rejected drain: {}", e),
+            format!("node drain {node_id}"),
+            format!("Server rejected drain: {e}"),
         )),
     }
 }
@@ -116,11 +113,11 @@ pub async fn plan_node_resume(
         .and_then(|(rows, _)| rows.into_iter().next())
         .map(|r| {
             (
-                r.get(0).unwrap_or("unknown").to_string(),
-                r.get(1).unwrap_or("unknown").to_string(),
+                r.get(0).unwrap_or("unknown").to_owned(),
+                r.get(1).unwrap_or("unknown").to_owned(),
             )
         })
-        .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
+        .unwrap_or_else(|| ("unknown".to_owned(), "unknown".to_owned()));
 
     let risk = if health == "degraded" {
         RiskLevel::High
@@ -128,7 +125,7 @@ pub async fn plan_node_resume(
         RiskLevel::Low
     };
 
-    let mut plan = PlanOutput::new(format!("node resume {}", node_id), risk)
+    let mut plan = PlanOutput::new(format!("node resume {node_id}"), risk)
         .field("Node ID", node_id)
         .field("Current Role", &role)
         .field("Health Status", &health)
@@ -139,8 +136,7 @@ pub async fn plan_node_resume(
 
     if health == "degraded" {
         plan = plan.warn(format!(
-            "Node '{}' health is degraded — resuming may route traffic to an unhealthy node",
-            node_id
+            "Node '{node_id}' health is degraded — resuming may route traffic to an unhealthy node"
         ));
     }
 
@@ -153,7 +149,7 @@ pub async fn apply_node_resume(
     node_id: &str,
     apply: bool,
 ) -> Result<ApplyResult> {
-    require_apply(apply, &format!("node resume {}", node_id))?;
+    require_apply(apply, &format!("node resume {node_id}"))?;
 
     let sql = format!(
         "SELECT falcon.admin_resume_node('{}')",
@@ -161,15 +157,14 @@ pub async fn apply_node_resume(
     );
     match client.query_simple(&sql).await {
         Ok(_) => Ok(ApplyResult::success(
-            format!("node resume {}", node_id),
+            format!("node resume {node_id}"),
             format!(
-                "Node '{}' has been resumed. Transaction routing is re-enabled.",
-                node_id
+                "Node '{node_id}' has been resumed. Transaction routing is re-enabled."
             ),
         )),
         Err(e) => Ok(ApplyResult::rejected(
-            format!("node resume {}", node_id),
-            format!("Server rejected resume: {}", e),
+            format!("node resume {node_id}"),
+            format!("Server rejected resume: {e}"),
         )),
     }
 }

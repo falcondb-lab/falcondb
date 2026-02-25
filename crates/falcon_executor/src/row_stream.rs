@@ -208,12 +208,12 @@ impl CursorStream {
 
     /// Whether all rows have been consumed.
     pub fn is_exhausted(&self) -> bool {
-        self.inner.as_ref().is_some_and(|i| i.is_exhausted())
+        self.inner.as_ref().is_some_and(ChunkedRows::is_exhausted)
     }
 
     /// Current position.
     pub fn position(&self) -> usize {
-        self.inner.as_ref().map_or(0, |i| i.position())
+        self.inner.as_ref().map_or(0, ChunkedRows::position)
     }
 
     /// Move forward (for MOVE).

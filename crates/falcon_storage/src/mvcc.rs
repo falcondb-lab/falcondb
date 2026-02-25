@@ -292,12 +292,9 @@ impl VersionChain {
     /// Estimate the memory footprint of a single Version (header + row data).
     pub fn estimate_version_bytes(ver: &Version) -> u64 {
         let header = mem::size_of::<Version>() as u64;
-        let data_bytes = match &ver.data {
-            Some(row) => {
-                row.values.iter().map(estimate_datum_bytes).sum::<u64>() + 24 // Vec overhead
-            }
-            None => 0,
-        };
+        let data_bytes = ver.data.as_ref().map_or(0, |row| {
+            row.values.iter().map(estimate_datum_bytes).sum::<u64>() + 24 // Vec overhead
+        });
         header + data_bytes
     }
 
@@ -515,15 +512,13 @@ fn estimate_datum_bytes(d: &falcon_common::datum::Datum) -> u64 {
         Datum::Null => 0,
         Datum::Boolean(_) => 1,
         Datum::Int32(_) => 4,
-        Datum::Int64(_) | Datum::Float64(_) => 8,
-        Datum::Date(_) | Datum::Time(_) => 8,
-        Datum::Timestamp(_) => 16,
-        Datum::Uuid(_) => 16,
-        Datum::Interval(_, _, _) => 24,
+        Datum::Int64(_) | Datum::Float64(_)
+        | Datum::Date(_) | Datum::Time(_) => 8,
+        Datum::Timestamp(_) | Datum::Uuid(_) => 16,
+        Datum::Interval(_, _, _) | Datum::Decimal(_, _) => 24,
         Datum::Text(s) => s.len() as u64 + 24, // String heap + ptr/len/cap
         Datum::Bytea(b) => b.len() as u64 + 24, // Vec<u8> heap + ptr/len/cap
         Datum::Jsonb(v) => v.to_string().len() as u64 + 24,
-        Datum::Decimal(_, _) => 24, // two i128-scale fields
         Datum::Array(a) => (a.len() as u64) * 16 + 24, // Vec<Datum> overhead
     }
 }

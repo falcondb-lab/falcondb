@@ -1,9 +1,10 @@
+use chrono::{Datelike, Timelike};
 use falcon_common::datum::Datum;
 use falcon_common::error::ExecutionError;
 use falcon_sql_frontend::types::ScalarFunc;
 
 /// Dispatch a time/date-domain scalar function.
-pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionError> {
+pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionError> {
     match func {
         ScalarFunc::Now => {
             let now = chrono::Utc::now();
@@ -33,10 +34,10 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                 }
             };
             let ts_us = match args.get(1) {
-                Some(Datum::Timestamp(us)) => *us,
-                Some(Datum::Date(days)) => *days as i64 * 86400 * 1_000_000,
-                Some(Datum::Int64(us)) => *us,
-                Some(Datum::Int32(us)) => *us as i64,
+                Some(Datum::Timestamp(us))
+                | Some(Datum::Int64(us)) => *us,
+                Some(Datum::Date(days)) => i64::from(*days) * 86400 * 1_000_000,
+                Some(Datum::Int32(us)) => i64::from(*us),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -60,8 +61,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                 "EPOCH" => ts_us / 1_000_000,
                 _ => {
                     return Err(ExecutionError::TypeError(format!(
-                        "Unknown EXTRACT field: {}",
-                        field
+                        "Unknown EXTRACT field: {field}"
                     )))
                 }
             };
@@ -78,10 +78,10 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                 }
             };
             let ts_us = match args.get(1) {
-                Some(Datum::Timestamp(us)) => *us,
-                Some(Datum::Date(days)) => *days as i64 * 86400 * 1_000_000,
-                Some(Datum::Int64(us)) => *us,
-                Some(Datum::Int32(us)) => *us as i64,
+                Some(Datum::Timestamp(us))
+                | Some(Datum::Int64(us)) => *us,
+                Some(Datum::Date(days)) => i64::from(*days) * 86400 * 1_000_000,
+                Some(Datum::Int32(us)) => i64::from(*us),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -93,7 +93,6 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             let nsecs = ((ts_us % 1_000_000).abs() * 1000) as u32;
             let dt = chrono::DateTime::from_timestamp(secs, nsecs)
                 .ok_or_else(|| ExecutionError::TypeError("Invalid timestamp".into()))?;
-            use chrono::{Datelike, Timelike};
             let truncated = match field.as_str() {
                 "year" => dt
                     .with_month(1)
@@ -121,22 +120,21 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                 "second" => dt.with_nanosecond(0),
                 _ => {
                     return Err(ExecutionError::TypeError(format!(
-                        "Unknown DATE_TRUNC field: {}",
-                        field
+                        "Unknown DATE_TRUNC field: {field}"
                     )))
                 }
             };
-            match truncated {
-                Some(t) => Ok(Datum::Timestamp(t.timestamp_micros())),
-                None => Err(ExecutionError::TypeError("DATE_TRUNC failed".into())),
-            }
+            truncated.map_or_else(
+                || Err(ExecutionError::TypeError("DATE_TRUNC failed".into())),
+                |t| Ok(Datum::Timestamp(t.timestamp_micros())),
+            )
         }
         ScalarFunc::ToChar => {
             // TO_CHAR(timestamp, format) — format timestamp as string
             let ts_us = match args.first() {
-                Some(Datum::Timestamp(us)) => *us,
-                Some(Datum::Date(days)) => *days as i64 * 86400 * 1_000_000,
-                Some(Datum::Int64(us)) => *us,
+                Some(Datum::Timestamp(us))
+                | Some(Datum::Int64(us)) => *us,
+                Some(Datum::Date(days)) => i64::from(*days) * 86400 * 1_000_000,
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -181,8 +179,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             Ok(Datum::Text(dt.format(&chrono_fmt).to_string()))
         }
         _ => Err(ExecutionError::TypeError(format!(
-            "Not a time function: {:?}",
-            func
+            "Not a time function: {func:?}"
         ))),
     }
 }

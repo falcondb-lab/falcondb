@@ -91,15 +91,15 @@ impl RaftTransport for RaftTransportService {
 
         let openraft_req: openraft::raft::AppendEntriesRequest<TypeConfig> =
             bincode::deserialize(payload)
-                .map_err(|e| Status::internal(format!("deserialize append_entries: {}", e)))?;
+                .map_err(|e| Status::internal(format!("deserialize append_entries: {e}")))?;
 
         let resp = raft
             .append_entries(openraft_req)
             .await
-            .map_err(|e| Status::internal(format!("append_entries: {}", e)))?;
+            .map_err(|e| Status::internal(format!("append_entries: {e}")))?;
 
         let resp_bytes = bincode::serialize(&resp)
-            .map_err(|e| Status::internal(format!("serialize response: {}", e)))?;
+            .map_err(|e| Status::internal(format!("serialize response: {e}")))?;
 
         Ok(Response::new(pb::AppendEntriesResponse { data: resp_bytes }))
     }
@@ -148,35 +148,35 @@ impl RaftTransport for RaftTransportService {
             RpcType::AppendEntries => {
                 let openraft_req: openraft::raft::AppendEntriesRequest<TypeConfig> =
                     bincode::deserialize(payload)
-                        .map_err(|e| Status::internal(format!("deser append: {}", e)))?;
+                        .map_err(|e| Status::internal(format!("deser append: {e}")))?;
                 let resp = raft
                     .append_entries(openraft_req)
                     .await
-                    .map_err(|e| Status::internal(format!("append: {}", e)))?;
+                    .map_err(|e| Status::internal(format!("append: {e}")))?;
                 bincode::serialize(&resp)
-                    .map_err(|e| Status::internal(format!("ser: {}", e)))?
+                    .map_err(|e| Status::internal(format!("ser: {e}")))?
             }
             RpcType::RequestVote => {
                 let openraft_req: openraft::raft::VoteRequest<u64> =
                     bincode::deserialize(payload)
-                        .map_err(|e| Status::internal(format!("deser vote: {}", e)))?;
+                        .map_err(|e| Status::internal(format!("deser vote: {e}")))?;
                 let resp = raft
                     .vote(openraft_req)
                     .await
-                    .map_err(|e| Status::internal(format!("vote: {}", e)))?;
+                    .map_err(|e| Status::internal(format!("vote: {e}")))?;
                 bincode::serialize(&resp)
-                    .map_err(|e| Status::internal(format!("ser: {}", e)))?
+                    .map_err(|e| Status::internal(format!("ser: {e}")))?
             }
             RpcType::InstallSnapshot => {
                 let openraft_req: openraft::raft::InstallSnapshotRequest<TypeConfig> =
                     bincode::deserialize(payload)
-                        .map_err(|e| Status::internal(format!("deser snap: {}", e)))?;
+                        .map_err(|e| Status::internal(format!("deser snap: {e}")))?;
                 let resp = raft
                     .install_snapshot(openraft_req)
                     .await
-                    .map_err(|e| Status::internal(format!("snap: {}", e)))?;
+                    .map_err(|e| Status::internal(format!("snap: {e}")))?;
                 bincode::serialize(&resp)
-                    .map_err(|e| Status::internal(format!("ser: {}", e)))?
+                    .map_err(|e| Status::internal(format!("ser: {e}")))?
             }
         };
 
@@ -196,7 +196,7 @@ impl RaftTransport for RaftTransportService {
             .ok_or_else(|| Status::unavailable("raft node not initialized"))?;
 
         let mut stream = request.into_inner();
-        let mut snapshot_data = Vec::new();
+        let mut _snapshot_data = Vec::new();
         let mut total_bytes: u64 = 0;
         let mut _meta: Option<pb::SnapshotMeta> = None;
 
@@ -204,7 +204,7 @@ impl RaftTransport for RaftTransportService {
         while let Some(chunk) = stream
             .message()
             .await
-            .map_err(|e| Status::internal(format!("stream recv: {}", e)))?
+            .map_err(|e| Status::internal(format!("stream recv: {e}")))?
         {
             if chunk.meta.is_some() {
                 _meta = chunk.meta;
@@ -222,7 +222,7 @@ impl RaftTransport for RaftTransportService {
                 }
             }
 
-            snapshot_data.extend_from_slice(&chunk.data);
+            _snapshot_data.extend_from_slice(&chunk.data);
             total_bytes += chunk.data.len() as u64;
 
             if chunk.done {
@@ -261,7 +261,7 @@ pub async fn start_raft_transport_server(
     let svc = RaftTransportService::new(local);
     let addr = listen_addr
         .parse()
-        .map_err(|e| format!("invalid listen addr {}: {}", listen_addr, e))?;
+        .map_err(|e| format!("invalid listen addr {listen_addr}: {e}"))?;
 
     let handle = tokio::spawn(async move {
         tracing::info!("Raft transport server listening on {}", addr);

@@ -157,10 +157,10 @@ const fn default_slow_txn_threshold_us() -> u64 {
     100_000 // 100ms
 }
 
-fn default_wal_backend() -> String { "file".to_string() }
+fn default_wal_backend() -> String { "file".to_owned() }
 const fn default_group_commit_window_us() -> u64 { 200 }
-fn default_compression_profile() -> String { "balanced".to_string() }
-fn default_wal_mode() -> String { "auto".to_string() }
+fn default_compression_profile() -> String { "balanced".to_owned() }
+fn default_wal_mode() -> String { "auto".to_owned() }
 
 impl Default for AuthConfig {
     fn default() -> Self {
@@ -258,7 +258,7 @@ pub struct SpillConfig {
 const fn default_spill_memory_rows_threshold() -> usize { 500_000 }
 const fn default_spill_merge_fan_in() -> usize { 16 }
 const fn default_hash_agg_group_limit() -> usize { 1_000_000 }
-fn default_pressure_spill_trigger() -> String { "soft".to_string() }
+fn default_pressure_spill_trigger() -> String { "soft".to_owned() }
 
 impl Default for SpillConfig {
     fn default() -> Self {
@@ -391,8 +391,8 @@ impl Default for ReplicationConfig {
     fn default() -> Self {
         Self {
             role: NodeRole::Standalone,
-            grpc_listen_addr: "0.0.0.0:50051".to_string(),
-            primary_endpoint: "http://127.0.0.1:50051".to_string(),
+            grpc_listen_addr: "0.0.0.0:50051".to_owned(),
+            primary_endpoint: "http://127.0.0.1:50051".to_owned(),
             max_records_per_chunk: 1000,
             poll_interval_ms: 100,
             max_backoff_ms: 30_000,
@@ -532,7 +532,7 @@ pub struct GatewayConfig {
     pub topology_staleness_secs: u64,
 }
 
-fn default_gateway_role() -> String { "smart_gateway".to_string() }
+fn default_gateway_role() -> String { "smart_gateway".to_owned() }
 const fn default_forward_timeout_ms() -> u64 { 5000 }
 const fn default_topology_staleness_secs() -> u64 { 30 }
 
@@ -553,8 +553,8 @@ impl Default for FalconConfig {
         Self {
             config_version: CURRENT_CONFIG_VERSION,
             server: ServerConfig {
-                pg_listen_addr: "0.0.0.0:5433".to_string(),
-                admin_listen_addr: "0.0.0.0:8080".to_string(),
+                pg_listen_addr: "0.0.0.0:5433".to_owned(),
+                admin_listen_addr: "0.0.0.0:8080".to_owned(),
                 node_id: 1,
                 max_connections: 1024,
                 statement_timeout_ms: 0,
@@ -567,14 +567,14 @@ impl Default for FalconConfig {
             storage: StorageConfig {
                 memory_limit_bytes: 0,
                 wal_enabled: true,
-                data_dir: "./falcon_data".to_string(),
+                data_dir: "./falcon_data".to_owned(),
                 write_path_enforcement: WritePathEnforcement::Warn,
                 lsm_sync_writes: false,
             },
             wal: WalConfig {
                 group_commit: true,
                 flush_interval_us: 1000,
-                sync_mode: "fdatasync".to_string(),
+                sync_mode: "fdatasync".to_owned(),
                 segment_size_bytes: 64 * 1024 * 1024,
                 durability_policy: DurabilityPolicy::LocalFsync,
                 backlog_admission_threshold_bytes: 0,
@@ -751,8 +751,8 @@ impl DeprecatedFieldChecker {
                 Some(k) => k,
                 None => return patterns,
             };
-            patterns.push(format!("{} =", key));
-            patterns.push(format!("{}=", key));
+            patterns.push(format!("{key} ="));
+            patterns.push(format!("{key}="));
         }
         patterns
     }

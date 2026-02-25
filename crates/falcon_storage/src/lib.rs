@@ -77,9 +77,9 @@ fn date_to_days_since_epoch(year: i32, month: u32, day: u32) -> Option<i32> {
     }
     // Calculate days from year 0 to (year, month, day) using civil calendar
     // Then subtract days from year 0 to 1970-01-01
-    let y = if month <= 2 { year - 1 } else { year } as i64;
-    let m = if month <= 2 { month + 9 } else { month - 3 } as i64;
-    let era_days = 365 * y + y / 4 - y / 100 + y / 400 + (153 * m + 2) / 5 + day as i64 - 1;
+    let y = i64::from(if month <= 2 { year - 1 } else { year });
+    let m = i64::from(if month <= 2 { month + 9 } else { month - 3 });
+    let era_days = 365 * y + y / 4 - y / 100 + y / 400 + (153 * m + 2) / 5 + i64::from(day) - 1;
     // Epoch (1970-01-01) in the same formula
     let epoch_days = {
         let ey = 1969i64; // month 1 <= 2, so y = year - 1 = 1969
@@ -109,29 +109,29 @@ pub(crate) fn eval_cast_datum(
                 .map(Datum::Int32)
                 .map_err(|e| e.to_string()),
             Datum::Boolean(b) => Ok(Datum::Int32(if *b { 1 } else { 0 })),
-            _ => Err(format!("Cannot cast {:?} to int", val)),
+            _ => Err(format!("Cannot cast {val:?} to int")),
         },
         "bigint" => match &val {
             Datum::Int64(_) => Ok(val),
-            Datum::Int32(v) => Ok(Datum::Int64(*v as i64)),
+            Datum::Int32(v) => Ok(Datum::Int64(i64::from(*v))),
             Datum::Float64(v) => Ok(Datum::Int64(*v as i64)),
             Datum::Text(s) => s
                 .parse::<i64>()
                 .map(Datum::Int64)
                 .map_err(|e| e.to_string()),
-            _ => Err(format!("Cannot cast {:?} to bigint", val)),
+            _ => Err(format!("Cannot cast {val:?} to bigint")),
         },
         "float8" => match &val {
             Datum::Float64(_) => Ok(val),
-            Datum::Int32(v) => Ok(Datum::Float64(*v as f64)),
+            Datum::Int32(v) => Ok(Datum::Float64(f64::from(*v))),
             Datum::Int64(v) => Ok(Datum::Float64(*v as f64)),
             Datum::Text(s) => s
                 .parse::<f64>()
                 .map(Datum::Float64)
                 .map_err(|e| e.to_string()),
-            _ => Err(format!("Cannot cast {:?} to float8", val)),
+            _ => Err(format!("Cannot cast {val:?} to float8")),
         },
-        "text" => Ok(Datum::Text(format!("{}", val))),
+        "text" => Ok(Datum::Text(format!("{val}"))),
         "boolean" => match &val {
             Datum::Boolean(_) => Ok(val),
             Datum::Int32(v) => Ok(Datum::Boolean(*v != 0)),
@@ -139,19 +139,19 @@ pub(crate) fn eval_cast_datum(
             Datum::Text(s) => match s.to_lowercase().as_str() {
                 "true" | "t" | "1" | "yes" => Ok(Datum::Boolean(true)),
                 "false" | "f" | "0" | "no" => Ok(Datum::Boolean(false)),
-                _ => Err(format!("Cannot cast '{}' to boolean", s)),
+                _ => Err(format!("Cannot cast '{s}' to boolean")),
             },
-            _ => Err(format!("Cannot cast {:?} to boolean", val)),
+            _ => Err(format!("Cannot cast {val:?} to boolean")),
         },
         "timestamp" => match &val {
             Datum::Timestamp(_) => Ok(val),
             Datum::Date(days) => {
-                let us = *days as i64 * 86400 * 1_000_000;
+                let us = i64::from(*days) * 86400 * 1_000_000;
                 Ok(Datum::Timestamp(us))
             }
             Datum::Int64(us) => Ok(Datum::Timestamp(*us)),
-            Datum::Int32(us) => Ok(Datum::Timestamp(*us as i64)),
-            _ => Err(format!("Cannot cast {:?} to timestamp", val)),
+            Datum::Int32(us) => Ok(Datum::Timestamp(i64::from(*us))),
+            _ => Err(format!("Cannot cast {val:?} to timestamp")),
         },
         "date" => match &val {
             Datum::Date(_) => Ok(val),
@@ -165,31 +165,31 @@ pub(crate) fn eval_cast_datum(
                 if parts.len() == 3 {
                     let y: i32 = parts[0]
                         .parse()
-                        .map_err(|_| format!("Cannot cast '{}' to date", s))?;
+                        .map_err(|_| format!("Cannot cast '{s}' to date"))?;
                     let m: u32 = parts[1]
                         .parse()
-                        .map_err(|_| format!("Cannot cast '{}' to date", s))?;
+                        .map_err(|_| format!("Cannot cast '{s}' to date"))?;
                     let d: u32 = parts[2]
                         .parse()
-                        .map_err(|_| format!("Cannot cast '{}' to date", s))?;
+                        .map_err(|_| format!("Cannot cast '{s}' to date"))?;
                     let days = date_to_days_since_epoch(y, m, d)
-                        .ok_or_else(|| format!("Cannot cast '{}' to date: invalid date", s))?;
+                        .ok_or_else(|| format!("Cannot cast '{s}' to date: invalid date"))?;
                     Ok(Datum::Date(days))
                 } else {
-                    Err(format!("Cannot cast '{}' to date", s))
+                    Err(format!("Cannot cast '{s}' to date"))
                 }
             }
             Datum::Int32(d) => Ok(Datum::Date(*d)),
             Datum::Int64(d) => Ok(Datum::Date(*d as i32)),
-            _ => Err(format!("Cannot cast {:?} to date", val)),
+            _ => Err(format!("Cannot cast {val:?} to date")),
         },
         "jsonb" => match &val {
             Datum::Jsonb(_) => Ok(val),
             Datum::Text(s) => serde_json::from_str(s)
                 .map(Datum::Jsonb)
-                .map_err(|e| format!("Cannot cast to jsonb: {}", e)),
-            _ => Err(format!("Cannot cast {:?} to jsonb", val)),
+                .map_err(|e| format!("Cannot cast to jsonb: {e}")),
+            _ => Err(format!("Cannot cast {val:?} to jsonb")),
         },
-        _ => Err(format!("Unsupported cast target: {}", target)),
+        _ => Err(format!("Unsupported cast target: {target}")),
     }
 }

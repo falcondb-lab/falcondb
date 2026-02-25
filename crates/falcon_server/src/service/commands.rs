@@ -13,15 +13,13 @@ pub fn install(config_path: &str) -> Result<(), String> {
 
     // Resolve absolute paths
     let exe_path = std::env::current_exe()
-        .map_err(|e| format!("Cannot determine exe path: {}", e))?;
+        .map_err(|e| format!("Cannot determine exe path: {e}"))?;
 
     let config_abs = if std::path::Path::new(config_path).is_absolute() {
-        config_path.to_string()
+        config_path.to_owned()
     } else {
         std::env::current_dir()
-            .map(|d| d.join(config_path))
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| config_path.to_string())
+            .map(|d| d.join(config_path)).map_or_else(|_| config_path.to_owned(), |p| p.to_string_lossy().to_string())
     };
 
     // Copy config to ProgramData if it's not already there
@@ -33,8 +31,7 @@ pub fn install(config_path: &str) -> Result<(), String> {
             println!("  Config copied to: {}", service_conf.display());
         } else {
             return Err(format!(
-                "Config file not found: {}\n  Provide a valid --config path or place falcon.toml in conf/",
-                config_abs
+                "Config file not found: {config_abs}\n  Provide a valid --config path or place falcon.toml in conf/"
             ));
         }
     } else {
@@ -52,18 +49,17 @@ pub fn install(config_path: &str) -> Result<(), String> {
         service_conf.display()
     );
 
-    println!("  binPath: {}", bin_path);
+    println!("  binPath: {bin_path}");
 
     // Check if service already exists
     let query = Command::new("sc.exe")
         .args(["query", SERVICE_NAME])
         .output()
-        .map_err(|e| format!("Failed to run sc.exe: {}", e))?;
+        .map_err(|e| format!("Failed to run sc.exe: {e}"))?;
 
     if query.status.success() {
         return Err(format!(
-            "Service '{}' already exists. Run 'falcon service uninstall' first.",
-            SERVICE_NAME
+            "Service '{SERVICE_NAME}' already exists. Run 'falcon service uninstall' first."
         ));
     }
 
@@ -72,12 +68,12 @@ pub fn install(config_path: &str) -> Result<(), String> {
         .args([
             "create",
             SERVICE_NAME,
-            &format!("binPath= {}", bin_path),
-            &format!("DisplayName= {}", SERVICE_DISPLAY_NAME),
+            &format!("binPath= {bin_path}"),
+            &format!("DisplayName= {SERVICE_DISPLAY_NAME}"),
             "start= auto",
         ])
         .output()
-        .map_err(|e| format!("Failed to run sc.exe create: {}", e))?;
+        .map_err(|e| format!("Failed to run sc.exe create: {e}"))?;
 
     if !create.status.success() {
         let stderr = String::from_utf8_lossy(&create.stderr);
@@ -107,7 +103,7 @@ pub fn install(config_path: &str) -> Result<(), String> {
         .output();
 
     println!();
-    println!("Service '{}' installed successfully.", SERVICE_NAME);
+    println!("Service '{SERVICE_NAME}' installed successfully.");
     println!();
     println!("  Config:  {}", service_conf.display());
     println!("  Data:    {}", service_data_dir().display());
@@ -126,17 +122,17 @@ pub fn uninstall() -> Result<(), String> {
     let query = Command::new("sc.exe")
         .args(["query", SERVICE_NAME])
         .output()
-        .map_err(|e| format!("Failed to run sc.exe: {}", e))?;
+        .map_err(|e| format!("Failed to run sc.exe: {e}"))?;
 
     if !query.status.success() {
-        println!("Service '{}' does not exist. Nothing to do.", SERVICE_NAME);
+        println!("Service '{SERVICE_NAME}' does not exist. Nothing to do.");
         return Ok(());
     }
 
     // Stop if running
     let stdout = String::from_utf8_lossy(&query.stdout);
     if stdout.contains("RUNNING") {
-        println!("Stopping service '{}'...", SERVICE_NAME);
+        println!("Stopping service '{SERVICE_NAME}'...");
         let _ = Command::new("sc.exe")
             .args(["stop", SERVICE_NAME])
             .output();
@@ -146,7 +142,7 @@ pub fn uninstall() -> Result<(), String> {
             let check = Command::new("sc.exe")
                 .args(["query", SERVICE_NAME])
                 .output()
-                .map_err(|e| format!("sc.exe query failed: {}", e))?;
+                .map_err(|e| format!("sc.exe query failed: {e}"))?;
             let out = String::from_utf8_lossy(&check.stdout);
             if out.contains("STOPPED") {
                 println!("  Service stopped.");
@@ -159,14 +155,14 @@ pub fn uninstall() -> Result<(), String> {
     let delete = Command::new("sc.exe")
         .args(["delete", SERVICE_NAME])
         .output()
-        .map_err(|e| format!("Failed to run sc.exe delete: {}", e))?;
+        .map_err(|e| format!("Failed to run sc.exe delete: {e}"))?;
 
     if !delete.status.success() {
         let stderr = String::from_utf8_lossy(&delete.stderr);
         return Err(format!("sc.exe delete failed: {}", stderr.trim()));
     }
 
-    println!("Service '{}' uninstalled.", SERVICE_NAME);
+    println!("Service '{SERVICE_NAME}' uninstalled.");
     println!();
     println!("Note: Data and config in {} are NOT deleted.", program_data_root().display());
     println!("  Remove manually if desired.");
@@ -179,10 +175,10 @@ pub fn start() -> Result<(), String> {
     let output = Command::new("sc.exe")
         .args(["start", SERVICE_NAME])
         .output()
-        .map_err(|e| format!("Failed to run sc.exe: {}", e))?;
+        .map_err(|e| format!("Failed to run sc.exe: {e}"))?;
 
     if output.status.success() {
-        println!("Service '{}' start requested.", SERVICE_NAME);
+        println!("Service '{SERVICE_NAME}' start requested.");
         println!("  Check status: falcon service status");
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -202,10 +198,10 @@ pub fn stop() -> Result<(), String> {
     let output = Command::new("sc.exe")
         .args(["stop", SERVICE_NAME])
         .output()
-        .map_err(|e| format!("Failed to run sc.exe: {}", e))?;
+        .map_err(|e| format!("Failed to run sc.exe: {e}"))?;
 
     if output.status.success() {
-        println!("Service '{}' stop requested.", SERVICE_NAME);
+        println!("Service '{SERVICE_NAME}' stop requested.");
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -229,7 +225,7 @@ pub fn restart() -> Result<(), String> {
         let check = Command::new("sc.exe")
             .args(["query", SERVICE_NAME])
             .output()
-            .map_err(|e| format!("sc.exe query failed: {}", e))?;
+            .map_err(|e| format!("sc.exe query failed: {e}"))?;
         let out = String::from_utf8_lossy(&check.stdout);
         if out.contains("STOPPED") {
             break;
@@ -243,10 +239,10 @@ pub fn status() -> Result<(), String> {
     let output = Command::new("sc.exe")
         .args(["query", SERVICE_NAME])
         .output()
-        .map_err(|e| format!("Failed to run sc.exe: {}", e))?;
+        .map_err(|e| format!("Failed to run sc.exe: {e}"))?;
 
     if !output.status.success() {
-        println!("Service '{}' is not installed.", SERVICE_NAME);
+        println!("Service '{SERVICE_NAME}' is not installed.");
         return Ok(());
     }
 
@@ -269,15 +265,13 @@ pub fn status() -> Result<(), String> {
     let pid = stdout
         .lines()
         .find(|l| l.contains("PID"))
-        .and_then(|l| l.split(':').nth(1))
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "N/A".to_string());
+        .and_then(|l| l.split(':').nth(1)).map_or_else(|| "N/A".to_owned(), |s| s.trim().to_owned());
 
     println!("FalconDB Service Status");
     println!("=======================");
-    println!("  Service:  {}", SERVICE_NAME);
-    println!("  State:    {}", state);
-    println!("  PID:      {}", pid);
+    println!("  Service:  {SERVICE_NAME}");
+    println!("  State:    {state}");
+    println!("  PID:      {pid}");
     println!("  Config:   {}", service_config_path().display());
     println!("  Data:     {}", service_data_dir().display());
     println!("  Logs:     {}", service_log_dir().display());
@@ -295,7 +289,7 @@ pub fn status() -> Result<(), String> {
 /// Patch the service config to use ProgramData paths for data_dir.
 fn patch_service_config(config_path: &std::path::Path) -> Result<(), String> {
     let content = std::fs::read_to_string(config_path)
-        .map_err(|e| format!("Failed to read config: {}", e))?;
+        .map_err(|e| format!("Failed to read config: {e}"))?;
 
     // Replace relative data_dir with absolute ProgramData path
     let data_dir_abs = service_data_dir()
@@ -311,19 +305,19 @@ fn patch_service_config(config_path: &std::path::Path) -> Result<(), String> {
                 if let Some(val) = trimmed.split('=').nth(1) {
                     let val = val.trim().trim_matches('"');
                     if !val.contains(':') && !val.starts_with("\\\\") {
-                        return format!("data_dir = \"{}\"", data_dir_abs);
+                        return format!("data_dir = \"{data_dir_abs}\"");
                     }
                 }
-                line.to_string()
+                line.to_owned()
             } else {
-                line.to_string()
+                line.to_owned()
             }
         })
         .collect::<Vec<_>>()
         .join("\n");
 
     std::fs::write(config_path, patched)
-        .map_err(|e| format!("Failed to write patched config: {}", e))?;
+        .map_err(|e| format!("Failed to write patched config: {e}"))?;
 
     Ok(())
 }

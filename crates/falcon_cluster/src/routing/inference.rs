@@ -48,7 +48,7 @@ impl ShardRouterClient {
             .endpoints
             .get(&leader_id)
             .map(|e| e.value().clone())
-            .ok_or_else(|| format!("No endpoint for node {}", leader_id))?;
+            .ok_or_else(|| format!("No endpoint for node {leader_id}"))?;
 
         tracing::debug!(
             shard_id = shard.id.0,
@@ -61,8 +61,7 @@ impl ShardRouterClient {
         // to make a gRPC call. For MVP, we return an error indicating remote
         // execution is not yet wired (single-node mode handles everything locally).
         Err(format!(
-            "Remote execution not yet implemented (would forward to {} at {})",
-            leader_id, endpoint
+            "Remote execution not yet implemented (would forward to {leader_id} at {endpoint})"
         ))
     }
 }

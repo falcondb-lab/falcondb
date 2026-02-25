@@ -82,7 +82,7 @@ impl RaftNode {
         let config = Arc::new(
             Config::default()
                 .validate()
-                .map_err(|e| ConsensusError::ProposalFailed(format!("config: {}", e)))?,
+                .map_err(|e| ConsensusError::ProposalFailed(format!("config: {e}")))?,
         );
         let raft = Raft::new(
             node_id,
@@ -92,12 +92,12 @@ impl RaftNode {
             StateMachine::new(),
         )
         .await
-        .map_err(|e| ConsensusError::ProposalFailed(format!("init: {}", e)))?;
+        .map_err(|e| ConsensusError::ProposalFailed(format!("init: {e}")))?;
         let mut members = BTreeMap::new();
         members.insert(node_id, BasicNode::new("127.0.0.1"));
         raft.initialize(members)
             .await
-            .map_err(|e| ConsensusError::ProposalFailed(format!("bootstrap: {}", e)))?;
+            .map_err(|e| ConsensusError::ProposalFailed(format!("bootstrap: {e}")))?;
         Ok(Self { raft })
     }
 
@@ -105,7 +105,7 @@ impl RaftNode {
         self.raft
             .client_write(FalconRequest::Write { data })
             .await
-            .map_err(|e| ConsensusError::ProposalFailed(format!("{}", e)))?;
+            .map_err(|e| ConsensusError::ProposalFailed(format!("{e}")))?;
         Ok(())
     }
 
@@ -117,7 +117,7 @@ impl RaftNode {
         self.raft
             .shutdown()
             .await
-            .map_err(|e| ConsensusError::ProposalFailed(format!("shutdown: {}", e)))?;
+            .map_err(|e| ConsensusError::ProposalFailed(format!("shutdown: {e}")))?;
         Ok(())
     }
 }
@@ -157,18 +157,15 @@ impl RaftGroup {
                 ..Default::default()
             }
             .validate()
-            .map_err(|e| ConsensusError::ProposalFailed(format!("config: {}", e)))?,
+            .map_err(|e| ConsensusError::ProposalFailed(format!("config: {e}")))?,
         );
         let router = RaftRouter::new();
         let mut members: BTreeMap<u64, BasicNode> = BTreeMap::new();
         for &id in &node_ids {
-            members.insert(id, BasicNode::new(format!("node-{}", id).as_str()));
+            members.insert(id, BasicNode::new(format!("node-{id}").as_str()));
         }
         for &node_id in &node_ids {
-            let sm = match &apply_fn {
-                Some(cb) => StateMachine::with_apply_fn(cb.clone()),
-                None => StateMachine::new(),
-            };
+            let sm = apply_fn.as_ref().map_or_else(StateMachine::new, |cb| StateMachine::with_apply_fn(cb.clone()));
             let raft = Raft::new(
                 node_id,
                 config.clone(),
@@ -177,13 +174,13 @@ impl RaftGroup {
                 sm,
             )
             .await
-            .map_err(|e| ConsensusError::ProposalFailed(format!("node {} init: {}", node_id, e)))?;
+            .map_err(|e| ConsensusError::ProposalFailed(format!("node {node_id} init: {e}")))?;
             router.add_node(node_id, raft);
         }
         if let Some(raft) = router.get_node(node_ids[0]) {
             raft.initialize(members)
                 .await
-                .map_err(|e| ConsensusError::ProposalFailed(format!("bootstrap: {}", e)))?;
+                .map_err(|e| ConsensusError::ProposalFailed(format!("bootstrap: {e}")))?;
         }
         Ok(Self {
             router,
@@ -242,7 +239,7 @@ impl RaftGroup {
                 match raft.client_write(req.clone()).await {
                     Ok(_) => return Ok(()),
                     Err(e) => {
-                        last_err = ConsensusError::ProposalFailed(format!("node {}: {}", id, e));
+                        last_err = ConsensusError::ProposalFailed(format!("node {id}: {e}"));
                     }
                 }
             }
@@ -264,10 +261,7 @@ impl RaftGroup {
         if self.router.get_node(node_id).is_some() {
             return Ok(());
         }
-        let sm = match &self.apply_fn {
-            Some(cb) => StateMachine::with_apply_fn(cb.clone()),
-            None => StateMachine::new(),
-        };
+        let sm = self.apply_fn.as_ref().map_or_else(StateMachine::new, |cb| StateMachine::with_apply_fn(cb.clone()));
         let raft = Raft::new(
             node_id,
             self.config.clone(),
@@ -276,7 +270,7 @@ impl RaftGroup {
             sm,
         )
         .await
-        .map_err(|e| ConsensusError::ProposalFailed(format!("reconnect: {}", e)))?;
+        .map_err(|e| ConsensusError::ProposalFailed(format!("reconnect: {e}")))?;
         self.router.add_node(node_id, raft);
         Ok(())
     }
@@ -290,7 +284,7 @@ impl RaftGroup {
             .ok_or(ConsensusError::NodeNotFound(leader_id))?;
         raft.add_learner(node_id, BasicNode::new(addr), true)
             .await
-            .map_err(|e| ConsensusError::MembershipFailed(format!("{}", e)))?;
+            .map_err(|e| ConsensusError::MembershipFailed(format!("{e}")))?;
         let members: Vec<u64> = self
             .node_ids
             .iter()
@@ -299,7 +293,7 @@ impl RaftGroup {
             .collect();
         raft.change_membership(members, false)
             .await
-            .map_err(|e| ConsensusError::MembershipFailed(format!("{}", e)))?;
+            .map_err(|e| ConsensusError::MembershipFailed(format!("{e}")))?;
         Ok(())
     }
 
@@ -318,7 +312,7 @@ impl RaftGroup {
             .collect();
         raft.change_membership(remaining, false)
             .await
-            .map_err(|e| ConsensusError::MembershipFailed(format!("{}", e)))?;
+            .map_err(|e| ConsensusError::MembershipFailed(format!("{e}")))?;
         Ok(())
     }
 
@@ -331,7 +325,7 @@ impl RaftGroup {
         raft.trigger()
             .snapshot()
             .await
-            .map_err(|e| ConsensusError::ProposalFailed(format!("snapshot: {}", e)))?;
+            .map_err(|e| ConsensusError::ProposalFailed(format!("snapshot: {e}")))?;
         Ok(())
     }
 
@@ -340,7 +334,7 @@ impl RaftGroup {
         for id in self.node_ids.clone() {
             if let Some(raft) = self.router.get_node(id) {
                 raft.shutdown().await.map_err(|e| {
-                    ConsensusError::ProposalFailed(format!("shutdown {}: {}", id, e))
+                    ConsensusError::ProposalFailed(format!("shutdown {id}: {e}"))
                 })?;
             }
         }

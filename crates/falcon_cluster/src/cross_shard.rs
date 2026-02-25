@@ -96,8 +96,7 @@ impl CrossShardLatencyBreakdown {
         phases
             .iter()
             .max_by_key(|p| p.1)
-            .map(|p| p.0)
-            .unwrap_or("unknown")
+            .map_or("unknown", |p| p.0)
     }
 
     /// Compact waterfall string for tracing.
@@ -290,7 +289,7 @@ impl std::fmt::Display for ConcurrencyReject {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::HardLimitReached { current, limit } => {
-                write!(f, "concurrency hard limit reached ({}/{})", current, limit)
+                write!(f, "concurrency hard limit reached ({current}/{limit})")
             }
         }
     }
@@ -405,7 +404,7 @@ impl RetryConfig {
         // Add jitter: uniform random in [0, jitter_ratio * base_us]
         let jitter_us = if self.jitter_ratio > 0.0 {
             // Deterministic pseudo-random based on attempt number for reproducibility
-            let seed = attempt as u64 * 6364136223846793005 + 1442695040888963407;
+            let seed = u64::from(attempt) * 6364136223846793005 + 1442695040888963407;
             let frac = (seed % 10000) as f64 / 10000.0;
             (frac * self.jitter_ratio * base_us as f64) as u64
         } else {
@@ -793,7 +792,7 @@ impl std::fmt::Display for WaitReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::CoordinatorQueue => write!(f, "coordinator_queue"),
-            Self::ShardLockWait(s) => write!(f, "shard_lock_wait(shard_{})", s),
+            Self::ShardLockWait(s) => write!(f, "shard_lock_wait(shard_{s})"),
             Self::Validate => write!(f, "validate"),
             Self::WalWrite => write!(f, "wal_write"),
             Self::ReplicationAck => write!(f, "replication_ack"),

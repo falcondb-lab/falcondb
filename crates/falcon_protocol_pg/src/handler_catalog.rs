@@ -194,7 +194,7 @@ impl QueryHandler {
         }
 
         messages.push(BackendMessage::CommandComplete {
-            tag: format!("SELECT {}", table_count),
+            tag: format!("SELECT {table_count}"),
         });
 
         messages
@@ -267,7 +267,7 @@ impl QueryHandler {
                 let default_str = if col.is_serial {
                     Some(format!("nextval('{}_{}_seq'::regclass)", t.name, col.name))
                 } else {
-                    col.default_value.as_ref().map(|d| format!("{}", d))
+                    col.default_value.as_ref().map(|d| format!("{d}"))
                 };
                 rows.push(vec![
                     Some("falcon".into()),
@@ -434,7 +434,7 @@ impl QueryHandler {
                             Some(col.name.clone()),
                             Some(col.data_type.pg_type_name().into()),
                             Some(if col.nullable { "YES" } else { "NO" }.into()),
-                            col.default_value.as_ref().map(|d| format!("{}", d)),
+                            col.default_value.as_ref().map(|d| format!("{d}")),
                         ]
                     })
                     .collect();
@@ -674,8 +674,7 @@ impl QueryHandler {
                 let ref_oid = tables
                     .iter()
                     .find(|t| t.name.to_lowercase() == fk.ref_table.to_lowercase())
-                    .map(|t| t.id.0 as i64 + 16384)
-                    .unwrap_or(0);
+                    .map_or(0, |t| t.id.0 as i64 + 16384);
                 // Resolve referenced column numbers
                 let confkey = if ref_oid > 0 {
                     let ref_table = tables

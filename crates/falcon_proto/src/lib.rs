@@ -4,7 +4,7 @@
 //! Rust code into `$OUT_DIR` at build time. No generated `.rs` files are
 //! checked into version control.
 
-#![allow(clippy::all, clippy::pedantic)]
+#![allow(clippy::all, clippy::pedantic, clippy::nursery)]
 
 pub mod falcon_replication {
     tonic::include_proto!("falcon.replication");

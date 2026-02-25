@@ -603,7 +603,7 @@ pub fn encode_message(msg: &BackendMessage) -> BytesMut {
 fn read_cstring(buf: &mut BytesMut) -> Result<String, String> {
     if let Some(pos) = buf.iter().position(|&b| b == 0) {
         let s = String::from_utf8(buf[..pos].to_vec())
-            .map_err(|e| format!("Invalid UTF-8 in cstring: {}", e))?;
+            .map_err(|e| format!("Invalid UTF-8 in cstring: {e}"))?;
         buf.advance(pos + 1);
         Ok(s)
     } else {

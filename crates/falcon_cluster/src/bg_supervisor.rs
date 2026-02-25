@@ -107,9 +107,9 @@ impl BgTaskSupervisor {
         let now = Instant::now();
         let mut tasks = self.tasks.write();
         tasks.insert(
-            name.to_string(),
+            name.to_owned(),
             BgTaskInfo {
-                name: name.to_string(),
+                name: name.to_owned(),
                 criticality,
                 state: BgTaskState::Starting,
                 failure_reason: None,
@@ -141,7 +141,7 @@ impl BgTaskSupervisor {
         let mut tasks = self.tasks.write();
         if let Some(task) = tasks.get_mut(name) {
             task.state = BgTaskState::Failed;
-            task.failure_reason = Some(reason.to_string());
+            task.failure_reason = Some(reason.to_owned());
             task.last_state_change = Instant::now();
             let is_critical = task.criticality == BgTaskCriticality::Critical;
             tracing::error!(

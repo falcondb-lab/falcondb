@@ -173,7 +173,7 @@ impl SegmentCodecImpl for Lz4BlockCodec {
 
     fn decompress_block(&self, input: &[u8], _original_len: usize) -> Result<Vec<u8>, CodecError> {
         lz4_flex::decompress_size_prepended(input)
-            .map_err(|e| CodecError(format!("lz4 decompress: {}", e)))
+            .map_err(|e| CodecError(format!("lz4 decompress: {e}")))
     }
 }
 
@@ -235,15 +235,15 @@ impl ZstdBlockCodec {
 
         let mut cctx = zstd_safe::CCtx::create();
         cctx.set_parameter(zstd_safe::CParameter::CompressionLevel(self.config.level))
-            .map_err(|c| CodecError(format!("zstd set level: code {}", c)))?;
+            .map_err(|c| CodecError(format!("zstd set level: code {c}")))?;
         cctx.set_parameter(zstd_safe::CParameter::ChecksumFlag(self.config.checksum))
-            .map_err(|c| CodecError(format!("zstd set checksum: code {}", c)))?;
+            .map_err(|c| CodecError(format!("zstd set checksum: code {c}")))?;
         if let Some(ref dict) = self.dict_data {
             cctx.load_dictionary(dict)
-                .map_err(|c| CodecError(format!("zstd load dict for compress: code {}", c)))?;
+                .map_err(|c| CodecError(format!("zstd load dict for compress: code {c}")))?;
         }
         let written = cctx.compress2(&mut output[..], input)
-            .map_err(|c| CodecError(format!("zstd compress2: code {}", c)))?;
+            .map_err(|c| CodecError(format!("zstd compress2: code {c}")))?;
 
         output.truncate(written);
         Ok(output)
@@ -258,10 +258,10 @@ impl ZstdBlockCodec {
         let mut dctx = zstd_safe::DCtx::create();
         if let Some(ref dict) = self.dict_data {
             dctx.load_dictionary(dict)
-                .map_err(|c| CodecError(format!("zstd load dict for decompress: code {}", c)))?;
+                .map_err(|c| CodecError(format!("zstd load dict for decompress: code {c}")))?;
         }
         let written = dctx.decompress(&mut output[..], input)
-            .map_err(|c| CodecError(format!("zstd decompress: code {}", c)))?;
+            .map_err(|c| CodecError(format!("zstd decompress: code {c}")))?;
 
         output.truncate(written);
         Ok(output)
@@ -324,7 +324,7 @@ pub struct DictionaryHandle {
 fn djb2_crc(data: &[u8]) -> u32 {
     let mut hash: u32 = 5381;
     for &b in data {
-        hash = hash.wrapping_mul(33).wrapping_add(b as u32);
+        hash = hash.wrapping_mul(33).wrapping_add(u32::from(b));
     }
     hash
 }
@@ -420,9 +420,9 @@ impl DictionaryRegistry {
         config: ZstdCodecConfig,
     ) -> Result<ZstdBlockCodec, CodecError> {
         let handle = self.get(dictionary_id)
-            .ok_or_else(|| CodecError(format!("dictionary {} not found", dictionary_id)))?;
+            .ok_or_else(|| CodecError(format!("dictionary {dictionary_id} not found")))?;
         if !handle.verify() {
-            return Err(CodecError(format!("dictionary {} checksum mismatch", dictionary_id)));
+            return Err(CodecError(format!("dictionary {dictionary_id} checksum mismatch")));
         }
         Ok(ZstdBlockCodec::with_dictionary(config, handle.data))
     }
@@ -496,7 +496,7 @@ impl CompressedBlock {
     /// Decompress this block using the given codec.
     pub fn decompress(&self, codec: &dyn SegmentCodecImpl) -> Result<Vec<u8>, CodecError> {
         if !self.verify() {
-            return Err(CodecError("block CRC mismatch".to_string()));
+            return Err(CodecError("block CRC mismatch".to_owned()));
         }
         codec.decompress_block(&self.data, self.header.uncompressed_len as usize)
     }
@@ -622,7 +622,7 @@ pub fn read_blocks(
     data: &[u8],
 ) -> Result<Vec<Vec<u8>>, CodecError> {
     if data.len() < 4 {
-        return Err(CodecError("data too small for block count".to_string()));
+        return Err(CodecError("data too small for block count".to_owned()));
     }
     let block_count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
     let mut offset = 4;
@@ -630,7 +630,7 @@ pub fn read_blocks(
 
     for i in 0..block_count {
         let (block, consumed) = CompressedBlock::from_bytes(&data[offset..])
-            .ok_or_else(|| CodecError(format!("failed to parse block {}", i)))?;
+            .ok_or_else(|| CodecError(format!("failed to parse block {i}")))?;
         let decompressed = block.decompress(codec)?;
         rows.push(decompressed);
         offset += consumed;
@@ -720,7 +720,7 @@ pub fn decompress_streaming_chunk(
         StreamingCodecId::None => Ok(data.to_vec()),
         StreamingCodecId::Lz4 => {
             lz4_flex::decompress_size_prepended(data)
-                .map_err(|e| CodecError(format!("lz4 stream decompress: {}", e)))
+                .map_err(|e| CodecError(format!("lz4 stream decompress: {e}")))
         }
         StreamingCodecId::Zstd => {
             let c = ZstdBlockCodec::new(ZstdCodecConfig::default());
@@ -857,10 +857,10 @@ impl DecompressPool {
         }
 
         let current = self.inflight.fetch_add(1, Ordering::Relaxed);
-        if current >= self.max_concurrent as u64 {
+        if current >= u64::from(self.max_concurrent) {
             self.inflight.fetch_sub(1, Ordering::Relaxed);
             self.metrics.rejected.fetch_add(1, Ordering::Relaxed);
-            return Err(CodecError("decompress pool overloaded".to_string()));
+            return Err(CodecError("decompress pool overloaded".to_owned()));
         }
 
         let start = std::time::Instant::now();

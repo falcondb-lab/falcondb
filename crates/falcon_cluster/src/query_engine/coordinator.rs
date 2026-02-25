@@ -68,7 +68,20 @@ impl super::DistributedQueryEngine {
     ) -> Result<ExecutionResult, FalconError> {
         let temp_storage = Arc::new(StorageEngine::new_in_memory());
         let temp_txn_mgr = Arc::new(TxnManager::new(temp_storage.clone()));
+        self.populate_temp_storage(table_ids, &temp_storage, &temp_txn_mgr)?;
+        let temp_exec = Executor::new(temp_storage, temp_txn_mgr.clone());
+        let temp_txn = temp_txn_mgr.begin(IsolationLevel::ReadCommitted);
+        temp_exec.execute(plan, Some(&temp_txn))
+    }
 
+    /// Gather rows for the given tables from all shards into `temp_storage`.
+    /// Shared by `gather_and_execute_locally` and `materialize_dml_filter`.
+    fn populate_temp_storage(
+        &self,
+        table_ids: &[falcon_common::types::TableId],
+        temp_storage: &Arc<StorageEngine>,
+        temp_txn_mgr: &Arc<TxnManager>,
+    ) -> Result<(), FalconError> {
         let shard_ids = self.engine.shard_ids();
         for &table_id in table_ids {
             let schema = shard_ids
@@ -78,61 +91,52 @@ impl super::DistributedQueryEngine {
                     s.storage.get_table_schema_by_id(table_id)
                 })
                 .ok_or_else(|| {
-                    FalconError::Internal(format!("Table {:?} not found on any shard", table_id))
+                    FalconError::Internal(format!("Table {table_id:?} not found on any shard"))
                 })?;
 
             temp_storage.create_table(schema.clone()).map_err(|e| {
-                FalconError::Internal(format!("Failed to create temp table: {:?}", e))
+                FalconError::Internal(format!("Failed to create temp table: {e:?}"))
             })?;
 
-            // Parallel gather from all shards
-            let gathered_rows: Vec<OwnedRow> = {
-                let mut per_shard: Vec<Vec<OwnedRow>> = Vec::new();
-                std::thread::scope(|s| {
-                    let handles: Vec<_> = shard_ids
-                        .iter()
-                        .filter_map(|sid| {
-                            let shard = self.engine.shard(*sid)?;
-                            Some(s.spawn(move || {
-                                let shard_txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
-                                let read_ts = shard_txn.read_ts(shard.txn_mgr.current_ts());
-                                let rows = shard
-                                    .storage
-                                    .scan(table_id, shard_txn.txn_id, read_ts)
-                                    .unwrap_or_default();
-                                let _ = shard.txn_mgr.commit(shard_txn.txn_id);
-                                rows.into_iter().map(|(_, r)| r).collect::<Vec<_>>()
-                            }))
-                        })
-                        .collect();
-                    for h in handles {
-                        if let Ok(rows) = h.join() {
-                            per_shard.push(rows);
-                        }
+            // Parallel gather from all shards.
+            let mut per_shard: Vec<Vec<OwnedRow>> = Vec::with_capacity(shard_ids.len());
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = shard_ids
+                    .iter()
+                    .filter_map(|sid| {
+                        let shard = self.engine.shard(*sid)?;
+                        Some(scope.spawn(move || {
+                            let shard_txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
+                            let read_ts = shard_txn.read_ts(shard.txn_mgr.current_ts());
+                            let rows = shard
+                                .storage
+                                .scan(table_id, shard_txn.txn_id, read_ts)
+                                .unwrap_or_default();
+                            let _ = shard.txn_mgr.commit(shard_txn.txn_id);
+                            rows.into_iter().map(|(_, r)| r).collect::<Vec<_>>()
+                        }))
+                    })
+                    .collect();
+                for h in handles {
+                    if let Ok(rows) = h.join() {
+                        per_shard.push(rows);
                     }
-                });
-                per_shard.into_iter().flatten().collect()
-            };
+                }
+            });
 
             let temp_txn = temp_txn_mgr.begin(IsolationLevel::ReadCommitted);
-            for row in gathered_rows {
+            for row in per_shard.into_iter().flatten() {
                 temp_storage
                     .insert(table_id, row, temp_txn.txn_id)
                     .map_err(|e| {
-                        FalconError::Internal(format!(
-                            "Failed to insert into temp storage: {:?}",
-                            e
-                        ))
+                        FalconError::Internal(format!("Failed to insert into temp storage: {e:?}"))
                     })?;
             }
             temp_txn_mgr.commit(temp_txn.txn_id).map_err(|e| {
-                FalconError::Internal(format!("Failed to commit temp txn: {:?}", e))
+                FalconError::Internal(format!("Failed to commit temp txn: {e:?}"))
             })?;
         }
-
-        let temp_exec = Executor::new(temp_storage, temp_txn_mgr.clone());
-        let temp_txn = temp_txn_mgr.begin(IsolationLevel::ReadCommitted);
-        temp_exec.execute(plan, Some(&temp_txn))
+        Ok(())
     }
 
     /// Materialize subqueries in a DML filter at coordinator level.
@@ -146,68 +150,8 @@ impl super::DistributedQueryEngine {
 
         let temp_storage = Arc::new(StorageEngine::new_in_memory());
         let temp_txn_mgr = Arc::new(TxnManager::new(temp_storage.clone()));
-
-        // Gather subquery tables from all shards
-        let shard_ids = self.engine.shard_ids();
-        for &table_id in &ids {
-            let schema = shard_ids
-                .iter()
-                .find_map(|sid| {
-                    let s = self.engine.shard(*sid)?;
-                    s.storage.get_table_schema_by_id(table_id)
-                })
-                .ok_or_else(|| {
-                    FalconError::Internal(format!("Table {:?} not found on any shard", table_id))
-                })?;
-
-            temp_storage.create_table(schema.clone()).map_err(|e| {
-                FalconError::Internal(format!("Failed to create temp table: {:?}", e))
-            })?;
-
-            let gathered_rows: Vec<falcon_common::datum::OwnedRow> = {
-                let mut per_shard: Vec<Vec<falcon_common::datum::OwnedRow>> = Vec::new();
-                std::thread::scope(|s| {
-                    let handles: Vec<_> = shard_ids
-                        .iter()
-                        .filter_map(|sid| {
-                            let shard = self.engine.shard(*sid)?;
-                            Some(s.spawn(move || {
-                                let shard_txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
-                                let read_ts = shard_txn.read_ts(shard.txn_mgr.current_ts());
-                                let rows = shard
-                                    .storage
-                                    .scan(table_id, shard_txn.txn_id, read_ts)
-                                    .unwrap_or_default();
-                                let _ = shard.txn_mgr.commit(shard_txn.txn_id);
-                                rows.into_iter().map(|(_, r)| r).collect::<Vec<_>>()
-                            }))
-                        })
-                        .collect();
-                    for h in handles {
-                        if let Ok(rows) = h.join() {
-                            per_shard.push(rows);
-                        }
-                    }
-                });
-                per_shard.into_iter().flatten().collect()
-            };
-
-            let temp_txn = temp_txn_mgr.begin(IsolationLevel::ReadCommitted);
-            for row in gathered_rows {
-                temp_storage
-                    .insert(table_id, row, temp_txn.txn_id)
-                    .map_err(|e| {
-                        FalconError::Internal(format!(
-                            "Failed to insert into temp storage: {:?}",
-                            e
-                        ))
-                    })?;
-            }
-            temp_txn_mgr.commit(temp_txn.txn_id).map_err(|e| {
-                FalconError::Internal(format!("Failed to commit temp txn: {:?}", e))
-            })?;
-        }
-
+        let ids_vec: Vec<_> = ids.into_iter().collect();
+        self.populate_temp_storage(&ids_vec, &temp_storage, &temp_txn_mgr)?;
         // Use a temp Executor to materialize subqueries with full cross-shard data
         let temp_exec = Executor::new(temp_storage, temp_txn_mgr.clone());
         let temp_txn = temp_txn_mgr.begin(IsolationLevel::ReadCommitted);
@@ -217,6 +161,7 @@ impl super::DistributedQueryEngine {
     // ── Plan walking: extract TableIds and detect subqueries ──────────────
 
     /// Extract all TableIds referenced in a plan (main table + subquery/CTE/UNION tables).
+    #[inline]
     pub(crate) fn extract_table_ids(plan: &PhysicalPlan) -> Vec<falcon_common::types::TableId> {
         use std::collections::HashSet;
 
@@ -323,7 +268,10 @@ impl super::DistributedQueryEngine {
             BoundExpr::Exists { subquery, .. } => {
                 Self::collect_table_ids_from_select(subquery, ids);
             }
-            BoundExpr::BinaryOp { left, right, .. } => {
+            BoundExpr::BinaryOp { left, right, .. }
+            | BoundExpr::IsNotDistinctFrom { left, right }
+            | BoundExpr::AnyOp { left, right, .. }
+            | BoundExpr::AllOp { left, right, .. } => {
                 Self::collect_table_ids_from_expr(left, ids);
                 Self::collect_table_ids_from_expr(right, ids);
             }
@@ -365,12 +313,9 @@ impl super::DistributedQueryEngine {
                     Self::collect_table_ids_from_expr(e, ids);
                 }
             }
-            BoundExpr::Function { args, .. } => {
-                for a in args {
-                    Self::collect_table_ids_from_expr(a, ids);
-                }
-            }
-            BoundExpr::Coalesce(exprs) | BoundExpr::ArrayLiteral(exprs) => {
+            BoundExpr::Function { args: exprs, .. }
+            | BoundExpr::Coalesce(exprs)
+            | BoundExpr::ArrayLiteral(exprs) => {
                 for e in exprs {
                     Self::collect_table_ids_from_expr(e, ids);
                 }
@@ -382,14 +327,6 @@ impl super::DistributedQueryEngine {
             BoundExpr::ArrayIndex { array, index } => {
                 Self::collect_table_ids_from_expr(array, ids);
                 Self::collect_table_ids_from_expr(index, ids);
-            }
-            BoundExpr::IsNotDistinctFrom { left, right } => {
-                Self::collect_table_ids_from_expr(left, ids);
-                Self::collect_table_ids_from_expr(right, ids);
-            }
-            BoundExpr::AnyOp { left, right, .. } | BoundExpr::AllOp { left, right, .. } => {
-                Self::collect_table_ids_from_expr(left, ids);
-                Self::collect_table_ids_from_expr(right, ids);
             }
             BoundExpr::ArraySlice {
                 array,
@@ -422,12 +359,16 @@ impl super::DistributedQueryEngine {
     }
 
     /// Check if a BoundExpr contains any subquery node (InSubquery, Exists, ScalarSubquery).
+    #[inline]
     pub(crate) fn expr_has_subquery(expr: &BoundExpr) -> bool {
         match expr {
             BoundExpr::ScalarSubquery(_)
             | BoundExpr::InSubquery { .. }
             | BoundExpr::Exists { .. } => true,
-            BoundExpr::BinaryOp { left, right, .. } => {
+            BoundExpr::BinaryOp { left, right, .. }
+            | BoundExpr::IsNotDistinctFrom { left, right }
+            | BoundExpr::AnyOp { left, right, .. }
+            | BoundExpr::AllOp { left, right, .. } => {
                 Self::expr_has_subquery(left) || Self::expr_has_subquery(right)
             }
             BoundExpr::Not(inner)
@@ -458,18 +399,11 @@ impl super::DistributedQueryEngine {
             BoundExpr::InList { expr, list, .. } => {
                 Self::expr_has_subquery(expr) || list.iter().any(Self::expr_has_subquery)
             }
-            BoundExpr::Function { args, .. } => args.iter().any(Self::expr_has_subquery),
-            BoundExpr::Coalesce(exprs) | BoundExpr::ArrayLiteral(exprs) => {
-                exprs.iter().any(Self::expr_has_subquery)
-            }
+            BoundExpr::Function { args: exprs, .. }
+            | BoundExpr::Coalesce(exprs)
+            | BoundExpr::ArrayLiteral(exprs) => exprs.iter().any(Self::expr_has_subquery),
             BoundExpr::ArrayIndex { array, index } => {
                 Self::expr_has_subquery(array) || Self::expr_has_subquery(index)
-            }
-            BoundExpr::IsNotDistinctFrom { left, right } => {
-                Self::expr_has_subquery(left) || Self::expr_has_subquery(right)
-            }
-            BoundExpr::AnyOp { left, right, .. } | BoundExpr::AllOp { left, right, .. } => {
-                Self::expr_has_subquery(left) || Self::expr_has_subquery(right)
             }
             BoundExpr::ArraySlice {
                 array,

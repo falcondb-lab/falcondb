@@ -195,7 +195,7 @@ impl PriorityScheduler {
             Duration::from_secs(3600) // effectively infinite
         };
 
-        let mut guard = self.slot_lock.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = self.slot_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
         loop {
             // Check backpressure: if high-priority work is waiting, pause low-priority
@@ -207,8 +207,7 @@ impl PriorityScheduler {
                         lane.total_rejected.fetch_add(1, Ordering::Relaxed);
                         return Err(FalconError::Transient {
                             reason: format!(
-                                "priority scheduler: low-priority query paused due to high-priority backpressure ({} high waiters)",
-                                high_waiting
+                                "priority scheduler: low-priority query paused due to high-priority backpressure ({high_waiting} high waiters)"
                             ),
                             retry_after_ms: 100,
                         });
@@ -216,7 +215,7 @@ impl PriorityScheduler {
                     let (g, _) = self
                         .slot_cond
                         .wait_timeout(guard, Duration::from_millis(50))
-                        .unwrap_or_else(|p| p.into_inner());
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     guard = g;
                     continue;
                 }
@@ -253,7 +252,7 @@ impl PriorityScheduler {
             let (g, _) = self
                 .slot_cond
                 .wait_timeout(guard, remaining.min(Duration::from_millis(50)))
-                .unwrap_or_else(|p| p.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard = g;
         }
     }

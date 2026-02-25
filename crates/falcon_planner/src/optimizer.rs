@@ -122,8 +122,7 @@ fn rule_predicate_pushdown(plan: LogicalPlan) -> LogicalPlan {
                     // Determine max column index in the base scan
                     let base_col_count = joins
                         .first()
-                        .map(|j| j.right_col_offset)
-                        .unwrap_or(usize::MAX);
+                        .map_or(usize::MAX, |j| j.right_col_offset);
 
                     for conj in conjuncts {
                         if max_column_ref(&conj) < base_col_count {
@@ -732,7 +731,10 @@ fn collect_expr_refs(expr: &BoundExpr, out: &mut HashSet<usize>) {
         BoundExpr::ColumnRef(idx) => {
             out.insert(*idx);
         }
-        BoundExpr::BinaryOp { left, right, .. } => {
+        BoundExpr::BinaryOp { left, right, .. }
+        | BoundExpr::IsNotDistinctFrom { left, right }
+        | BoundExpr::AnyOp { left, right, .. }
+        | BoundExpr::AllOp { left, right, .. } => {
             collect_expr_refs(left, out);
             collect_expr_refs(right, out);
         }
@@ -757,12 +759,8 @@ fn collect_expr_refs(expr: &BoundExpr, out: &mut HashSet<usize>) {
             collect_expr_refs(expr, out);
             collect_expr_refs(pattern, out);
         }
-        BoundExpr::Function { args, .. } => {
-            for a in args {
-                collect_expr_refs(a, out);
-            }
-        }
-        BoundExpr::Coalesce(args) => {
+        BoundExpr::Function { args, .. }
+        | BoundExpr::Coalesce(args) => {
             for a in args {
                 collect_expr_refs(a, out);
             }
@@ -785,14 +783,6 @@ fn collect_expr_refs(expr: &BoundExpr, out: &mut HashSet<usize>) {
             if let Some(el) = else_result {
                 collect_expr_refs(el, out);
             }
-        }
-        BoundExpr::IsNotDistinctFrom { left, right } => {
-            collect_expr_refs(left, out);
-            collect_expr_refs(right, out);
-        }
-        BoundExpr::AnyOp { left, right, .. } | BoundExpr::AllOp { left, right, .. } => {
-            collect_expr_refs(left, out);
-            collect_expr_refs(right, out);
         }
         BoundExpr::ArrayLiteral(exprs) => {
             for e in exprs {
@@ -819,16 +809,12 @@ fn collect_expr_refs(expr: &BoundExpr, out: &mut HashSet<usize>) {
         BoundExpr::AggregateExpr { arg: Some(a), .. } => {
             collect_expr_refs(a, out);
         }
-        BoundExpr::AggregateExpr { arg: None, .. } => {}
         _ => {}
     }
 }
 
 fn merge_required(parent: &Option<HashSet<usize>>, extra: &HashSet<usize>) -> HashSet<usize> {
-    match parent {
-        Some(p) => p.union(extra).copied().collect(),
-        None => extra.clone(),
-    }
+    parent.as_ref().map_or_else(|| extra.clone(), |p| p.union(extra).copied().collect())
 }
 
 // ── Rule 5: Subquery Decorrelation ──────────────────────────────────────
@@ -1182,8 +1168,8 @@ fn extract_pairs_recursive(expr: &BoundExpr, pairs: &mut Vec<(usize, usize)>) {
 fn count_output_columns(plan: &LogicalPlan) -> usize {
     match plan {
         LogicalPlan::Scan { schema, .. } => schema.columns.len(),
-        LogicalPlan::Project { projections, .. } => projections.len(),
-        LogicalPlan::Aggregate { projections, .. } => projections.len(),
+        LogicalPlan::Project { projections, .. }
+        | LogicalPlan::Aggregate { projections, .. } => projections.len(),
         LogicalPlan::Filter { input, .. }
         | LogicalPlan::Sort { input, .. }
         | LogicalPlan::Limit { input, .. }
@@ -1237,12 +1223,14 @@ fn build_correlation_condition(pairs: &[(usize, usize)], right_offset: usize) ->
 fn predicate_uses_only_column_refs(expr: &BoundExpr) -> bool {
     match expr {
         BoundExpr::ColumnRef(_) | BoundExpr::Literal(_) | BoundExpr::Parameter(_) => true,
-        BoundExpr::BinaryOp { left, right, .. } => {
+        BoundExpr::BinaryOp { left, right, .. }
+        | BoundExpr::IsNotDistinctFrom { left, right } => {
             predicate_uses_only_column_refs(left) && predicate_uses_only_column_refs(right)
         }
-        BoundExpr::Not(inner) | BoundExpr::IsNull(inner) | BoundExpr::IsNotNull(inner) => {
-            predicate_uses_only_column_refs(inner)
-        }
+        BoundExpr::Not(inner)
+        | BoundExpr::IsNull(inner)
+        | BoundExpr::IsNotNull(inner)
+        | BoundExpr::Cast { expr: inner, .. } => predicate_uses_only_column_refs(inner),
         BoundExpr::Between {
             expr, low, high, ..
         } => {
@@ -1256,10 +1244,6 @@ fn predicate_uses_only_column_refs(expr: &BoundExpr) -> bool {
         }
         BoundExpr::Like { expr, pattern, .. } => {
             predicate_uses_only_column_refs(expr) && predicate_uses_only_column_refs(pattern)
-        }
-        BoundExpr::Cast { expr: inner, .. } => predicate_uses_only_column_refs(inner),
-        BoundExpr::IsNotDistinctFrom { left, right } => {
-            predicate_uses_only_column_refs(left) && predicate_uses_only_column_refs(right)
         }
         _ => false,
     }
@@ -1305,10 +1289,14 @@ fn combine_conjuncts(mut preds: Vec<BoundExpr>) -> BoundExpr {
 fn max_column_ref(expr: &BoundExpr) -> usize {
     match expr {
         BoundExpr::ColumnRef(idx) => *idx,
-        BoundExpr::BinaryOp { left, right, .. } => max_column_ref(left).max(max_column_ref(right)),
-        BoundExpr::Not(inner) | BoundExpr::IsNull(inner) | BoundExpr::IsNotNull(inner) => {
-            max_column_ref(inner)
+        BoundExpr::BinaryOp { left, right, .. }
+        | BoundExpr::IsNotDistinctFrom { left, right } => {
+            max_column_ref(left).max(max_column_ref(right))
         }
+        BoundExpr::Not(inner)
+        | BoundExpr::IsNull(inner)
+        | BoundExpr::IsNotNull(inner)
+        | BoundExpr::Cast { expr: inner, .. } => max_column_ref(inner),
         BoundExpr::Between {
             expr, low, high, ..
         } => max_column_ref(expr)
@@ -1319,12 +1307,8 @@ fn max_column_ref(expr: &BoundExpr) -> usize {
             max_column_ref(expr).max(max_list)
         }
         BoundExpr::Like { expr, pattern, .. } => max_column_ref(expr).max(max_column_ref(pattern)),
-        BoundExpr::Cast { expr: inner, .. } => max_column_ref(inner),
-        BoundExpr::IsNotDistinctFrom { left, right } => {
-            max_column_ref(left).max(max_column_ref(right))
-        }
-        BoundExpr::Function { args, .. } => args.iter().map(max_column_ref).max().unwrap_or(0),
-        BoundExpr::Coalesce(args) => args.iter().map(max_column_ref).max().unwrap_or(0),
+        BoundExpr::Function { args, .. }
+        | BoundExpr::Coalesce(args) => args.iter().map(max_column_ref).max().unwrap_or(0),
         _ => 0,
     }
 }

@@ -510,9 +510,6 @@ impl Planner {
             }
             // NestedLoopJoin: NOT wrapped in DistPlan — requires coordinator-side join
             // to ensure cross-shard correctness. The query engine handles this specially.
-            PhysicalPlan::NestedLoopJoin { .. }
-            | PhysicalPlan::HashJoin { .. }
-            | PhysicalPlan::MergeSortJoin { .. } => None,
             _ => None,
         };
 
@@ -609,11 +606,8 @@ impl Planner {
                 limit: lim,
                 offset: off,
                 ..
-            } => {
-                *off = None;
-                *lim = combined;
             }
-            PhysicalPlan::NestedLoopJoin {
+            | PhysicalPlan::NestedLoopJoin {
                 limit: lim,
                 offset: off,
                 ..
@@ -673,12 +667,16 @@ impl Planner {
             BoundExpr::ScalarSubquery(_)
             | BoundExpr::InSubquery { .. }
             | BoundExpr::Exists { .. } => true,
-            BoundExpr::BinaryOp { left, right, .. } => {
+            BoundExpr::BinaryOp { left, right, .. }
+            | BoundExpr::IsNotDistinctFrom { left, right }
+            | BoundExpr::AnyOp { left, right, .. }
+            | BoundExpr::AllOp { left, right, .. } => {
                 Self::expr_has_subquery(left) || Self::expr_has_subquery(right)
             }
-            BoundExpr::Not(inner) | BoundExpr::IsNull(inner) | BoundExpr::IsNotNull(inner) => {
-                Self::expr_has_subquery(inner)
-            }
+            BoundExpr::Not(inner)
+            | BoundExpr::IsNull(inner)
+            | BoundExpr::IsNotNull(inner)
+            | BoundExpr::Cast { expr: inner, .. } => Self::expr_has_subquery(inner),
             BoundExpr::Like { expr, pattern, .. } => {
                 Self::expr_has_subquery(expr) || Self::expr_has_subquery(pattern)
             }
@@ -720,21 +718,14 @@ impl Planner {
             BoundExpr::InList { expr, list, .. } => {
                 Self::expr_has_subquery(expr) || list.iter().any(Self::expr_has_subquery)
             }
-            BoundExpr::Function { args, .. } => args.iter().any(Self::expr_has_subquery),
-            BoundExpr::Cast { expr: inner, .. } => Self::expr_has_subquery(inner),
-            BoundExpr::Coalesce(exprs) => exprs.iter().any(Self::expr_has_subquery),
+            BoundExpr::Function { args: exprs, .. }
+            | BoundExpr::Coalesce(exprs)
+            | BoundExpr::ArrayLiteral(exprs) => exprs.iter().any(Self::expr_has_subquery),
             BoundExpr::AggregateExpr {
                 arg: Some(inner), ..
             } => Self::expr_has_subquery(inner),
-            BoundExpr::ArrayLiteral(exprs) => exprs.iter().any(Self::expr_has_subquery),
             BoundExpr::ArrayIndex { array, index } => {
                 Self::expr_has_subquery(array) || Self::expr_has_subquery(index)
-            }
-            BoundExpr::IsNotDistinctFrom { left, right } => {
-                Self::expr_has_subquery(left) || Self::expr_has_subquery(right)
-            }
-            BoundExpr::AnyOp { left, right, .. } | BoundExpr::AllOp { left, right, .. } => {
-                Self::expr_has_subquery(left) || Self::expr_has_subquery(right)
             }
             BoundExpr::ArraySlice {
                 array,
@@ -1164,10 +1155,7 @@ impl Planner {
     /// Check if a join condition is an equi-join (simple equality between columns).
     /// Returns true for `col_a = col_b` or `col_a = col_b AND col_c = col_d` patterns.
     fn is_equi_join_condition(condition: Option<&BoundExpr>) -> bool {
-        match condition {
-            None => false, // CROSS JOIN — no condition, use nested loop
-            Some(expr) => Self::is_equi_expr(expr),
-        }
+        condition.is_some_and(Self::is_equi_expr)
     }
 
     fn is_equi_expr(expr: &BoundExpr) -> bool {
@@ -1218,11 +1206,9 @@ impl Planner {
         // Check if ORDER BY matches any join key (merge join can avoid sort)
         let order_by_matches_join_key = !sel.order_by.is_empty()
             && sel.joins.iter().any(|j| {
-                if let Some(ref cond) = j.condition {
+                j.condition.as_ref().is_some_and(|cond| {
                     Self::order_by_matches_join_condition(&sel.order_by, cond)
-                } else {
-                    false
-                }
+                })
             });
 
         let strategy = if !all_equi {
@@ -1299,13 +1285,11 @@ impl Planner {
             return false;
         }
         // Check if the first ORDER BY column matches any join key column
-        if let Some(first_ob) = order_by.first() {
+        order_by.first().is_some_and(|first_ob| {
             key_cols
                 .iter()
                 .any(|(l, r)| first_ob.column_idx == *l || first_ob.column_idx == *r)
-        } else {
-            false
-        }
+        })
     }
 
     /// Extract (left_col, right_col) pairs from equi-join conditions.

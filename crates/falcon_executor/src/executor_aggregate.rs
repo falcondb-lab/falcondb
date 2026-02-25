@@ -80,7 +80,7 @@ impl ProjAccum {
                     AggFunc::Sum => {
                         match val {
                             Datum::Int32(v) => {
-                                *sum_i += *v as i64;
+                                *sum_i += i64::from(*v);
                                 *has_int = true;
                             }
                             Datum::Int64(v) => {
@@ -180,7 +180,6 @@ impl ProjAccum {
                     (Some(a), Some(b)) => Some(if a > b { a } else { b }),
                 },
             },
-            (a @ Self::FirstVal(_), Self::FirstVal(_)) => a,
             (a, _) => a,
         }
     }
@@ -236,7 +235,7 @@ fn encode_group_key(buf: &mut Vec<u8>, row: &OwnedRow, group_cols: &[usize]) {
             Datum::Null => buf.push(0),
             Datum::Boolean(b) => {
                 buf.push(1);
-                buf.push(*b as u8);
+                buf.push(u8::from(*b));
             }
             Datum::Int32(v) => {
                 buf.push(2);
@@ -257,7 +256,7 @@ fn encode_group_key(buf: &mut Vec<u8>, row: &OwnedRow, group_cols: &[usize]) {
             }
             other => {
                 buf.push(255);
-                buf.extend_from_slice(format!("{}", other).as_bytes());
+                buf.extend_from_slice(format!("{other}").as_bytes());
                 buf.push(0);
             }
         }
@@ -426,7 +425,7 @@ impl Executor {
                 return Err(e);
             }
 
-            let values: Vec<Datum> = result.accums.iter().map(|a| a.result()).collect();
+            let values: Vec<Datum> = result.accums.iter().map(ProjAccum::result).collect();
             return Ok(ExecutionResult::Query {
                 columns,
                 rows: vec![OwnedRow::new(values)],
@@ -529,7 +528,7 @@ impl Executor {
         // Convert groups to result rows
         let mut result_rows: Vec<OwnedRow> = Vec::with_capacity(groups.len());
         for (accums, _) in groups.values() {
-            let values: Vec<Datum> = accums.iter().map(|a| a.result()).collect();
+            let values: Vec<Datum> = accums.iter().map(ProjAccum::result).collect();
             result_rows.push(OwnedRow::new(values));
         }
 
@@ -634,7 +633,7 @@ impl Executor {
                 k.len() == key.len()
                     && k.iter()
                         .zip(key.iter())
-                        .all(|(a, b)| format!("{}", a) == format!("{}", b))
+                        .all(|(a, b)| format!("{a}") == format!("{b}"))
             }) {
                 groups[pos].1.push(i);
             } else {
@@ -684,7 +683,7 @@ impl Executor {
                 let key = row
                     .values
                     .iter()
-                    .map(|d| format!("{}", d))
+                    .map(|d| format!("{d}"))
                     .collect::<Vec<_>>()
                     .join("\0");
                 seen.insert(key)
@@ -749,7 +748,7 @@ impl Executor {
                 k.len() == key.len()
                     && k.iter()
                         .zip(key.iter())
-                        .all(|(a, b)| format!("{}", a) == format!("{}", b))
+                        .all(|(a, b)| format!("{a}") == format!("{b}"))
             }) {
                 groups[pos].1.push(i);
             } else {
@@ -1008,7 +1007,7 @@ impl Executor {
                 if v.is_null() {
                     continue;
                 }
-                let key = format!("{}", v);
+                let key = format!("{v}");
                 if seen.insert(key) {
                     vals.push(v);
                 }
@@ -1029,7 +1028,7 @@ impl Executor {
                 }
             }
             AggFunc::Sum => {
-                let expr = agg_expr.ok_or(FalconError::Execution(ExecutionError::TypeError(
+                let expr = agg_expr.ok_or_else(|| FalconError::Execution(ExecutionError::TypeError(
                     "SUM requires an argument".into(),
                 )))?;
                 let vals = if distinct {
@@ -1048,7 +1047,7 @@ impl Executor {
                 Ok(acc)
             }
             AggFunc::Avg => {
-                let expr = agg_expr.ok_or(FalconError::Execution(ExecutionError::TypeError(
+                let expr = agg_expr.ok_or_else(|| FalconError::Execution(ExecutionError::TypeError(
                     "AVG requires an argument".into(),
                 )))?;
                 let vals = if distinct {
@@ -1071,7 +1070,7 @@ impl Executor {
                 }
             }
             AggFunc::Min => {
-                let expr = agg_expr.ok_or(FalconError::Execution(ExecutionError::TypeError(
+                let expr = agg_expr.ok_or_else(|| FalconError::Execution(ExecutionError::TypeError(
                     "MIN requires an argument".into(),
                 )))?;
                 let vals = eval_all(expr)?;
@@ -1091,7 +1090,7 @@ impl Executor {
                 Ok(min_val.unwrap_or(Datum::Null))
             }
             AggFunc::Max => {
-                let expr = agg_expr.ok_or(FalconError::Execution(ExecutionError::TypeError(
+                let expr = agg_expr.ok_or_else(|| FalconError::Execution(ExecutionError::TypeError(
                     "MAX requires an argument".into(),
                 )))?;
                 let vals = eval_all(expr)?;
@@ -1111,7 +1110,7 @@ impl Executor {
                 Ok(max_val.unwrap_or(Datum::Null))
             }
             AggFunc::BoolAnd => {
-                let expr = agg_expr.ok_or(FalconError::Execution(ExecutionError::TypeError(
+                let expr = agg_expr.ok_or_else(|| FalconError::Execution(ExecutionError::TypeError(
                     "BOOL_AND requires an argument".into(),
                 )))?;
                 let vals = eval_all(expr)?;
@@ -1129,7 +1128,7 @@ impl Executor {
                 Ok(Datum::Boolean(result))
             }
             AggFunc::BoolOr => {
-                let expr = agg_expr.ok_or(FalconError::Execution(ExecutionError::TypeError(
+                let expr = agg_expr.ok_or_else(|| FalconError::Execution(ExecutionError::TypeError(
                     "BOOL_OR requires an argument".into(),
                 )))?;
                 let vals = eval_all(expr)?;
@@ -1147,19 +1146,19 @@ impl Executor {
                 Ok(Datum::Boolean(result))
             }
             AggFunc::StringAgg(sep) => {
-                let expr = agg_expr.ok_or(FalconError::Execution(ExecutionError::TypeError(
+                let expr = agg_expr.ok_or_else(|| FalconError::Execution(ExecutionError::TypeError(
                     "STRING_AGG requires an argument".into(),
                 )))?;
                 let mut parts: Vec<String> = Vec::new();
                 if distinct {
                     let vals = distinct_vals(expr)?;
                     for val in vals {
-                        parts.push(format!("{}", val));
+                        parts.push(format!("{val}"));
                     }
                 } else {
                     let vals = eval_all(expr)?;
                     for val in vals {
-                        parts.push(format!("{}", val));
+                        parts.push(format!("{val}"));
                     }
                 }
                 if parts.is_empty() {
@@ -1169,7 +1168,7 @@ impl Executor {
                 }
             }
             AggFunc::ArrayAgg => {
-                let expr = agg_expr.ok_or(FalconError::Execution(ExecutionError::TypeError(
+                let expr = agg_expr.ok_or_else(|| FalconError::Execution(ExecutionError::TypeError(
                     "ARRAY_AGG requires an argument".into(),
                 )))?;
                 let vals = if distinct {
@@ -1185,7 +1184,7 @@ impl Executor {
             }
             // ── Statistical aggregates (single-argument) ──
             AggFunc::VarPop | AggFunc::VarSamp | AggFunc::StddevPop | AggFunc::StddevSamp => {
-                let expr = agg_expr.ok_or(FalconError::Execution(ExecutionError::TypeError(
+                let expr = agg_expr.ok_or_else(|| FalconError::Execution(ExecutionError::TypeError(
                     "Statistical aggregate requires an argument".into(),
                 )))?;
                 let vals = if distinct {
@@ -1193,7 +1192,7 @@ impl Executor {
                 } else {
                     eval_all(expr)?
                 };
-                let floats: Vec<f64> = vals.iter().filter_map(|v| v.as_f64()).collect();
+                let floats: Vec<f64> = vals.iter().filter_map(falcon_common::datum::Datum::as_f64).collect();
                 let n = floats.len();
                 if n == 0 {
                     return Ok(Datum::Null);
@@ -1233,7 +1232,7 @@ impl Executor {
                 // regr(y, x) expects 2 args but our AST only captures the first.
                 // We'll use a convention: if the expression evaluates to a pair-like
                 // value, split it. Otherwise, use column indices 0 and 1 from the row.
-                let expr = agg_expr.ok_or(FalconError::Execution(ExecutionError::TypeError(
+                let expr = agg_expr.ok_or_else(|| FalconError::Execution(ExecutionError::TypeError(
                     "Two-argument aggregate requires an argument".into(),
                 )))?;
                 // Collect (y, x) pairs from consecutive column refs or the first two columns
@@ -1250,8 +1249,8 @@ impl Executor {
                     let x = row
                         .values
                         .get(1)
-                        .and_then(|d| d.as_f64())
-                        .or_else(|| row.values.first().and_then(|d| d.as_f64()));
+                        .and_then(falcon_common::datum::Datum::as_f64)
+                        .or_else(|| row.values.first().and_then(falcon_common::datum::Datum::as_f64));
                     if let (Some(yv), Some(xv)) = (y, x) {
                         pairs.push((yv, xv));
                     }
@@ -1308,7 +1307,7 @@ impl Executor {
                                 if sxx == 0.0 {
                                     Ok(Datum::Null)
                                 } else {
-                                    Ok(Datum::Float64(avg_y - (sxy / sxx) * avg_x))
+                                    Ok(Datum::Float64((sxy / sxx).mul_add(-avg_x, avg_y)))
                                 }
                             }
                             AggFunc::RegrR2 => {
@@ -1325,7 +1324,7 @@ impl Executor {
             }
             // ── Ordered-set aggregates ──
             AggFunc::Mode => {
-                let expr = agg_expr.ok_or(FalconError::Execution(ExecutionError::TypeError(
+                let expr = agg_expr.ok_or_else(|| FalconError::Execution(ExecutionError::TypeError(
                     "MODE requires an argument".into(),
                 )))?;
                 let vals = eval_all(expr)?;
@@ -1334,7 +1333,7 @@ impl Executor {
                 }
                 let mut freq: Vec<(String, usize, Datum)> = Vec::new();
                 for v in vals {
-                    let key = format!("{}", v);
+                    let key = format!("{v}");
                     if let Some(entry) = freq.iter_mut().find(|(k, _, _)| *k == key) {
                         entry.1 += 1;
                     } else {
@@ -1345,15 +1344,14 @@ impl Executor {
                 Ok(freq
                     .into_iter()
                     .next()
-                    .map(|(_, _, v)| v)
-                    .unwrap_or(Datum::Null))
+                    .map_or(Datum::Null, |(_, _, v)| v))
             }
             AggFunc::PercentileCont(frac) => {
-                let expr = agg_expr.ok_or(FalconError::Execution(ExecutionError::TypeError(
+                let expr = agg_expr.ok_or_else(|| FalconError::Execution(ExecutionError::TypeError(
                     "PERCENTILE_CONT requires an argument".into(),
                 )))?;
                 let vals = eval_all(expr)?;
-                let mut floats: Vec<f64> = vals.iter().filter_map(|v| v.as_f64()).collect();
+                let mut floats: Vec<f64> = vals.iter().filter_map(falcon_common::datum::Datum::as_f64).collect();
                 if floats.is_empty() {
                     return Ok(Datum::Null);
                 }
@@ -1365,16 +1363,16 @@ impl Executor {
                 let result = if lo == hi {
                     floats[lo]
                 } else {
-                    floats[lo] + (floats[hi] - floats[lo]) * (idx - lo as f64)
+                    (floats[hi] - floats[lo]).mul_add(idx - lo as f64, floats[lo])
                 };
                 Ok(Datum::Float64(result))
             }
             AggFunc::PercentileDisc(frac) => {
-                let expr = agg_expr.ok_or(FalconError::Execution(ExecutionError::TypeError(
+                let expr = agg_expr.ok_or_else(|| FalconError::Execution(ExecutionError::TypeError(
                     "PERCENTILE_DISC requires an argument".into(),
                 )))?;
                 let vals = eval_all(expr)?;
-                let mut floats: Vec<f64> = vals.iter().filter_map(|v| v.as_f64()).collect();
+                let mut floats: Vec<f64> = vals.iter().filter_map(falcon_common::datum::Datum::as_f64).collect();
                 if floats.is_empty() {
                     return Ok(Datum::Null);
                 }
@@ -1385,7 +1383,7 @@ impl Executor {
             }
             // ── Bit aggregates ──
             AggFunc::BitAndAgg => {
-                let expr = agg_expr.ok_or(FalconError::Execution(ExecutionError::TypeError(
+                let expr = agg_expr.ok_or_else(|| FalconError::Execution(ExecutionError::TypeError(
                     "BIT_AND requires an argument".into(),
                 )))?;
                 let vals = eval_all(expr)?;
@@ -1398,10 +1396,10 @@ impl Executor {
                         result = Some(result.map_or(i, |r| r & i));
                     }
                 }
-                Ok(result.map(Datum::Int64).unwrap_or(Datum::Null))
+                Ok(result.map_or(Datum::Null, Datum::Int64))
             }
             AggFunc::BitOrAgg => {
-                let expr = agg_expr.ok_or(FalconError::Execution(ExecutionError::TypeError(
+                let expr = agg_expr.ok_or_else(|| FalconError::Execution(ExecutionError::TypeError(
                     "BIT_OR requires an argument".into(),
                 )))?;
                 let vals = eval_all(expr)?;
@@ -1417,7 +1415,7 @@ impl Executor {
                 Ok(Datum::Int64(result))
             }
             AggFunc::BitXorAgg => {
-                let expr = agg_expr.ok_or(FalconError::Execution(ExecutionError::TypeError(
+                let expr = agg_expr.ok_or_else(|| FalconError::Execution(ExecutionError::TypeError(
                     "BIT_XOR requires an argument".into(),
                 )))?;
                 let vals = eval_all(expr)?;

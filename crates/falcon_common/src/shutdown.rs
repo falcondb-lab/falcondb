@@ -68,12 +68,12 @@ impl ShutdownSignal {
         if self.is_shutdown() {
             return true;
         }
-        let guard = self.inner.mutex.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = self.inner.mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let (_guard, _timeout) = self
             .inner
             .condvar
             .wait_timeout(guard, duration)
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.is_shutdown()
     }
 }

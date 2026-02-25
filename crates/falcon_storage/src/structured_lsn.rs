@@ -360,7 +360,7 @@ impl LsnAllocatorConfig {
     pub fn validate(&self) {
         assert!(self.segment_size.is_power_of_two(), "segment_size must be power of 2");
         assert!(self.segment_size <= DEFAULT_MAX_SEGMENT_SIZE,
-            "segment_size must be <= {} bytes", DEFAULT_MAX_SEGMENT_SIZE);
+            "segment_size must be <= {DEFAULT_MAX_SEGMENT_SIZE} bytes");
         assert!(self.record_alignment.is_power_of_two(), "record_alignment must be power of 2");
         assert!(self.record_alignment <= 4096, "record_alignment must be <= 4096");
         assert!(self.default_reservation_bytes > 0, "default_reservation_bytes must be > 0");
@@ -657,7 +657,7 @@ impl WriterCursor {
     ///
     /// **Zero global synchronization.** This is a local pointer bump.
     #[inline]
-    pub fn allocate(&mut self, bytes: u64) -> Option<StructuredLsn> {
+    pub const fn allocate(&mut self, bytes: u64) -> Option<StructuredLsn> {
         if self.reservation.fits(self.current, bytes) {
             let lsn = self.current;
             self.current = StructuredLsn::from_raw(self.current.raw() + bytes);
@@ -675,7 +675,7 @@ impl WriterCursor {
 
     /// Whether the reservation is fully consumed.
     #[inline]
-    pub fn is_exhausted(&self) -> bool {
+    pub const fn is_exhausted(&self) -> bool {
         self.reservation.is_exhausted(self.current)
     }
 
@@ -789,12 +789,10 @@ pub fn recover_from_headers(headers: &[(u64, Vec<u8>)]) -> RecoveryState {
 
     segments.sort_by_key(|s| s.segment_id);
 
-    let resume_lsn = if let Some(last) = segments.last() {
+    let resume_lsn = segments.last().map_or(StructuredLsn::ZERO, |last| {
         // Resume after the last valid data in the last segment
         StructuredLsn::new(last.segment_id, last.last_valid_offset)
-    } else {
-        StructuredLsn::ZERO
-    };
+    });
 
     RecoveryState { segments, resume_lsn }
 }

@@ -570,7 +570,7 @@ impl ChaosRunner {
                     self.injector.kill_leader();
                     std::thread::sleep(Duration::from_millis(*duration_ms));
                     self.injector.revive_leader();
-                    format!("KillLeader({}ms)", duration_ms)
+                    format!("KillLeader({duration_ms}ms)")
                 }
                 ChaosScenario::ReplicaDelay {
                     delay_us,
@@ -579,11 +579,11 @@ impl ChaosRunner {
                     self.injector.set_replica_delay(*delay_us);
                     std::thread::sleep(Duration::from_millis(*duration_ms));
                     self.injector.set_replica_delay(0);
-                    format!("ReplicaDelay({}us, {}ms)", delay_us, duration_ms)
+                    format!("ReplicaDelay({delay_us}us, {duration_ms}ms)")
                 }
                 ChaosScenario::WalCorruption => {
                     self.injector.arm_wal_corruption();
-                    "WalCorruption".to_string()
+                    "WalCorruption".to_owned()
                 }
                 ChaosScenario::DiskLatency {
                     delay_us,
@@ -592,7 +592,7 @@ impl ChaosRunner {
                     self.injector.set_disk_delay(*delay_us);
                     std::thread::sleep(Duration::from_millis(*duration_ms));
                     self.injector.set_disk_delay(0);
-                    format!("DiskLatency({}us, {}ms)", delay_us, duration_ms)
+                    format!("DiskLatency({delay_us}us, {duration_ms}ms)")
                 }
                 ChaosScenario::NetworkPartition {
                     group_a,
@@ -604,8 +604,7 @@ impl ChaosRunner {
                     std::thread::sleep(Duration::from_millis(*duration_ms));
                     self.injector.heal_partition();
                     format!(
-                        "NetworkPartition(a={:?}, b={:?}, {}ms)",
-                        group_a, group_b, duration_ms
+                        "NetworkPartition(a={group_a:?}, b={group_b:?}, {duration_ms}ms)"
                     )
                 }
                 ChaosScenario::CpuIoJitter {
@@ -616,7 +615,7 @@ impl ChaosRunner {
                     self.injector.set_jitter(config.clone());
                     std::thread::sleep(Duration::from_millis(*duration_ms));
                     self.injector.set_jitter(JitterConfig::disabled());
-                    format!("CpuIoJitter({}, {}ms)", mode, duration_ms)
+                    format!("CpuIoJitter({mode}, {duration_ms}ms)")
                 }
             };
 

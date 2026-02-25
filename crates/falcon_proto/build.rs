@@ -1,8 +1,8 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let replication_proto = "proto/falcon_replication.proto";
     let raft_proto = "proto/falcon_raft.proto";
-    println!("cargo:rerun-if-changed={}", replication_proto);
-    println!("cargo:rerun-if-changed={}", raft_proto);
+    println!("cargo:rerun-if-changed={replication_proto}");
+    println!("cargo:rerun-if-changed={raft_proto}");
     println!("cargo:rerun-if-changed=proto");
 
     // Use the vendored protoc binary so the build works without a system install.

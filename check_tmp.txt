@@ -1,0 +1,20 @@
+﻿cargo :     Checking falcon_common v1.2.0 (F:\db\crates\falcon_common)
+所在位置 行:1 字符: 1
++ cargo check --workspace 2>&1 | Out-File -FilePath F:\db\check_tmp.txt ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Checking fa...\falcon_common):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Checking falcon_storage v1.2.0 (F:\db\crates\falcon_storage)
+    Checking falcon_sql_frontend v1.2.0 (F:\db\crates\falcon_sql_frontend)
+    Checking falcon_raft v1.2.0 (F:\db\crates\falcon_raft)
+    Checking falcon_protocol_native v1.2.0 (F:\db\crates\falcon_protocol_native)
+    Checking falcon_planner v1.2.0 (F:\db\crates\falcon_planner)
+    Checking falcon_txn v1.2.0 (F:\db\crates\falcon_txn)
+    Checking falcon_executor v1.2.0 (F:\db\crates\falcon_executor)
+    Checking falcon_cluster v1.2.0 (F:\db\crates\falcon_cluster)
+    Checking falcon_protocol_pg v1.2.0 (F:\db\crates\falcon_protocol_pg)
+    Checking falcon_bench v1.2.0 (F:\db\crates\falcon_bench)
+    Checking falcon_native_server v1.2.0 (F:\db\crates\falcon_native_server)
+    Checking falcon_server v1.2.0 (F:\db\crates\falcon_server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.66s

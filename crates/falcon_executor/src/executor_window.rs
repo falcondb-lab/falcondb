@@ -23,7 +23,7 @@ impl Executor {
                     let mut key = Vec::new();
                     for &col in &wf.partition_by {
                         let datum = row.get(col).unwrap_or(&Datum::Null);
-                        key.extend_from_slice(&format!("{:?}|", datum).into_bytes());
+                        key.extend_from_slice(&format!("{datum:?}|").into_bytes());
                     }
                     partitions.entry(key).or_default().push(i);
                 }

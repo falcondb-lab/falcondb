@@ -5,29 +5,28 @@ use sha2::{Digest, Sha256};
 
 use super::common::expect_text_arg;
 
-pub(crate) fn eval_md5(args: &[Datum]) -> Result<Datum, ExecutionError> {
+pub fn eval_md5(args: &[Datum]) -> Result<Datum, ExecutionError> {
     let s = match expect_text_arg(args, 0, "MD5")? {
         Some(s) => s,
         None => return Ok(Datum::Null),
     };
 
-    use md5::Digest as _;
     let hash = md5::Md5::digest(s.as_bytes());
-    Ok(Datum::Text(format!("{:x}", hash)))
+    Ok(Datum::Text(format!("{hash:x}")))
 }
 
-pub(crate) fn eval_sha256(args: &[Datum]) -> Result<Datum, ExecutionError> {
+pub fn eval_sha256(args: &[Datum]) -> Result<Datum, ExecutionError> {
     let s = match expect_text_arg(args, 0, "SHA256")? {
         Some(s) => s,
         None => return Ok(Datum::Null),
     };
 
     let hash = Sha256::digest(s.as_bytes());
-    Ok(Datum::Text(format!("{:x}", hash)))
+    Ok(Datum::Text(format!("{hash:x}")))
 }
 
 /// Dispatch a crypto/encoding-domain scalar function.
-pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionError> {
+pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionError> {
     match func {
         ScalarFunc::Md5 => eval_md5(args),
         ScalarFunc::Sha256 => eval_sha256(args),
@@ -48,7 +47,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                     let hex: String = data
                         .as_bytes()
                         .iter()
-                        .map(|b| format!("{:02x}", b))
+                        .map(|b| format!("{b:02x}"))
                         .collect();
                     Ok(Datum::Text(hex))
                 }
@@ -59,8 +58,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                     ))
                 }
                 _ => Err(ExecutionError::TypeError(format!(
-                    "Unknown encoding: {}",
-                    fmt
+                    "Unknown encoding: {fmt}"
                 ))),
             }
         }
@@ -94,23 +92,21 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                     Ok(Datum::Text(String::from_utf8_lossy(&bytes).to_string()))
                 }
                 _ => Err(ExecutionError::TypeError(format!(
-                    "Unknown encoding: {}",
-                    fmt
+                    "Unknown encoding: {fmt}"
                 ))),
             }
         }
         ScalarFunc::ToHex => {
             let n = match args.first() {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("TO_HEX requires integer".into())),
             };
-            Ok(Datum::Text(format!("{:x}", n)))
+            Ok(Datum::Text(format!("{n:x}")))
         }
         _ => Err(ExecutionError::TypeError(format!(
-            "Not a crypto function: {:?}",
-            func
+            "Not a crypto function: {func:?}"
         ))),
     }
 }

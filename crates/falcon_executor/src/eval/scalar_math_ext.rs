@@ -1,8 +1,12 @@
+use std::collections::hash_map::DefaultHasher;
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
+
 use falcon_common::datum::Datum;
 use falcon_common::error::ExecutionError;
 use falcon_sql_frontend::types::ScalarFunc;
 
-pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Option<Result<Datum, ExecutionError>> {
+pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Option<Result<Datum, ExecutionError>> {
     match func {
         ScalarFunc::Cbrt
         | ScalarFunc::Factorial
@@ -67,7 +71,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let n = match args.first() {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("CBRT requires numeric".into())),
             };
@@ -76,7 +80,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
         ScalarFunc::Factorial => {
             let n = match args.first() {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -98,13 +102,13 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
         ScalarFunc::Gcd => {
             let a = match args.first() {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("GCD requires integer".into())),
             };
             let b = match args.get(1) {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("GCD requires integer".into())),
             };
@@ -119,13 +123,13 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
         ScalarFunc::Lcm => {
             let a = match args.first() {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("LCM requires integer".into())),
             };
             let b = match args.get(1) {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("LCM requires integer".into())),
             };
@@ -145,7 +149,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let n = match args.first() {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("SIN requires numeric".into())),
             };
@@ -155,7 +159,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let n = match args.first() {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("COS requires numeric".into())),
             };
@@ -165,7 +169,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let n = match args.first() {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("TAN requires numeric".into())),
             };
@@ -175,7 +179,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let n = match args.first() {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("ASIN requires numeric".into())),
             };
@@ -185,7 +189,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let n = match args.first() {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("ACOS requires numeric".into())),
             };
@@ -195,7 +199,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let n = match args.first() {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("ATAN requires numeric".into())),
             };
@@ -205,14 +209,14 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let y = match args.first() {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("ATAN2 requires numeric".into())),
             };
             let x = match args.get(1) {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("ATAN2 requires numeric".into())),
             };
@@ -237,14 +241,14 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let val = match args.first() {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("CLAMP requires numeric".into())),
             };
             let min_val = match args.get(1) {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -255,7 +259,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let max_val = match args.get(2) {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -287,7 +291,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             };
             let start = match args.get(2) {
                 Some(Datum::Int64(n)) => (*n - 1).max(0) as usize,
-                Some(Datum::Int32(n)) => (*n as i64 - 1).max(0) as usize,
+                Some(Datum::Int32(n)) => (i64::from(*n) - 1).max(0) as usize,
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -311,7 +315,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             // BIT_COUNT(integer) → number of set bits (popcount)
             let n = match args.first() {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -319,13 +323,13 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                     ))
                 }
             };
-            Ok(Datum::Int64(n.count_ones() as i64))
+            Ok(Datum::Int64(i64::from(n.count_ones())))
         }
         ScalarFunc::BitNot => {
             // BIT_NOT(integer) → bitwise NOT
             let n = match args.first() {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("BIT_NOT requires integer".into())),
             };
@@ -335,7 +339,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let n = match args.first() {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("ASINH requires numeric".into())),
             };
@@ -345,7 +349,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let n = match args.first() {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("ACOSH requires numeric".into())),
             };
@@ -360,7 +364,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let n = match args.first() {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("ATANH requires numeric".into())),
             };
@@ -375,13 +379,13 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             // BIT_XOR(a, b) → bitwise XOR
             let a = match args.first() {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("BIT_XOR requires integer".into())),
             };
             let b = match args.get(1) {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("BIT_XOR requires integer".into())),
             };
@@ -391,13 +395,13 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             // BIT_AND_FUNC(a, b) → bitwise AND
             let a = match args.first() {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("BIT_AND requires integer".into())),
             };
             let b = match args.get(1) {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("BIT_AND requires integer".into())),
             };
@@ -407,13 +411,13 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             // BIT_OR_FUNC(a, b) → bitwise OR
             let a = match args.first() {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("BIT_OR requires integer".into())),
             };
             let b = match args.get(1) {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("BIT_OR requires integer".into())),
             };
@@ -426,8 +430,6 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("HASHTEXT requires text".into())),
             };
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
             let mut hasher = DefaultHasher::new();
             s.hash(&mut hasher);
             Ok(Datum::Int64(hasher.finish() as i64))
@@ -442,7 +444,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             // Simple CRC32 implementation
             let mut crc: u32 = 0xFFFFFFFF;
             for byte in &s {
-                crc ^= *byte as u32;
+                crc ^= u32::from(*byte);
                 for _ in 0..8 {
                     if crc & 1 != 0 {
                         crc = (crc >> 1) ^ 0xEDB88320;
@@ -451,14 +453,14 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                     }
                 }
             }
-            Ok(Datum::Int64((crc ^ 0xFFFFFFFF) as i64))
+            Ok(Datum::Int64(i64::from(crc ^ 0xFFFFFFFF)))
         }
         ScalarFunc::TruncPrecision => {
             // TRUNC_PRECISION(number, places) → truncate to given decimal places
             let n = match args.first() {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -468,7 +470,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             };
             let places = match args.get(1) {
                 Some(Datum::Int64(p)) => *p,
-                Some(Datum::Int32(p)) => *p as i64,
+                Some(Datum::Int32(p)) => i64::from(*p),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => 0,
             };
@@ -480,7 +482,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let n = match args.first() {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -490,7 +492,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             };
             let places = match args.get(1) {
                 Some(Datum::Int64(p)) => *p,
-                Some(Datum::Int32(p)) => *p as i64,
+                Some(Datum::Int32(p)) => i64::from(*p),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => 0,
             };
@@ -518,7 +520,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 }
             };
             let re = regex::Regex::new(&pattern)
-                .map_err(|e| ExecutionError::TypeError(format!("Invalid regex: {}", e)))?;
+                .map_err(|e| ExecutionError::TypeError(format!("Invalid regex: {e}")))?;
             Ok(Datum::Boolean(re.is_match(&source)))
         }
         ScalarFunc::TrimScale => {
@@ -526,7 +528,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let n = match args.first() {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => return Ok(Datum::Float64(*n as f64)),
-                Some(Datum::Int32(n)) => return Ok(Datum::Float64(*n as f64)),
+                Some(Datum::Int32(n)) => return Ok(Datum::Float64(f64::from(*n))),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -535,7 +537,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 }
             };
             // Format and remove trailing zeros
-            let s = format!("{}", n);
+            let s = format!("{n}");
             let trimmed = if s.contains('.') {
                 s.trim_end_matches('0').trim_end_matches('.')
             } else {
@@ -555,7 +557,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                     ))
                 }
             };
-            let s = format!("{}", n);
+            let s = format!("{n}");
             let scale = if let Some(pos) = s.find('.') {
                 let frac = s[pos + 1..].trim_end_matches('0');
                 frac.len()
@@ -592,14 +594,14 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             // DIV(a, b) → integer division (truncated toward zero)
             let a = match args.first() {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 Some(Datum::Float64(n)) => *n as i64,
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("DIV requires numeric".into())),
             };
             let b = match args.get(1) {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 Some(Datum::Float64(n)) => *n as i64,
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("DIV requires numeric".into())),
@@ -617,7 +619,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("SCALE requires numeric".into())),
             };
-            let s = format!("{}", n);
+            let s = format!("{n}");
             let scale = if let Some(pos) = s.find('.') {
                 s.len() - pos - 1
             } else {
@@ -632,7 +634,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("UNNEST requires array".into())),
             };
-            let text: Vec<String> = arr.iter().map(|d| format!("{}", d)).collect();
+            let text: Vec<String> = arr.iter().map(|d| format!("{d}")).collect();
             Ok(Datum::Text(text.join("\n")))
         }
         ScalarFunc::RegexpInstr => {
@@ -656,8 +658,8 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 }
             };
             let re = regex::Regex::new(&pattern)
-                .map_err(|e| ExecutionError::TypeError(format!("Invalid regex: {}", e)))?;
-            let pos = re.find(&source).map(|m| m.start() + 1).unwrap_or(0);
+                .map_err(|e| ExecutionError::TypeError(format!("Invalid regex: {e}")))?;
+            let pos = re.find(&source).map_or(0, |m| m.start() + 1);
             Ok(Datum::Int64(pos as i64))
         }
         ScalarFunc::WidthBucket => {
@@ -665,7 +667,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let val = match args.first() {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -676,7 +678,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let low = match args.get(1) {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -687,7 +689,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let high = match args.get(2) {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -697,7 +699,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             };
             let count = match args.get(3) {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -719,7 +721,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let n = match args.first() {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("LOG10 requires numeric".into())),
             };
@@ -729,7 +731,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let n = match args.first() {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("LOG2 requires numeric".into())),
             };
@@ -739,7 +741,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let n = match args.first() {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("COT requires numeric".into())),
             };
@@ -749,7 +751,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let n = match args.first() {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("SINH requires numeric".into())),
             };
@@ -759,7 +761,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let n = match args.first() {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("COSH requires numeric".into())),
             };
@@ -769,7 +771,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let n = match args.first() {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("TANH requires numeric".into())),
             };
@@ -809,7 +811,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             };
             let parts: Vec<Datum> = s
                 .split(&delim)
-                .map(|p| Datum::Text(p.to_string()))
+                .map(|p| Datum::Text(p.to_owned()))
                 .collect();
             Ok(Datum::Array(parts))
         }
@@ -831,12 +833,12 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let mut result = fmt;
             for (i, arg) in args[1..].iter().enumerate() {
                 let placeholder = format!("%{}", i + 1);
-                let val_str = format!("{}", arg);
+                let val_str = format!("{arg}");
                 result = result.replace(&placeholder, &val_str);
             }
             result = result.replace(
                 "%s",
-                &args.get(1).map_or(String::new(), |a| format!("{}", a)),
+                &args.get(1).map_or(String::new(), |a| format!("{a}")),
             );
             Ok(Datum::Text(result))
         }
@@ -893,7 +895,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                         } else {
                             trimmed
                         };
-                    Datum::Text(unquoted.to_string())
+                    Datum::Text(unquoted.to_owned())
                 })
                 .collect();
             Ok(Datum::Array(parts))
@@ -947,7 +949,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 return Ok(Datum::Text(String::new()));
             }
             let upper = s.to_uppercase();
-            let chars: Vec<char> = upper.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+            let chars: Vec<char> = upper.chars().filter(char::is_ascii_alphabetic).collect();
             if chars.is_empty() {
                 return Ok(Datum::Text(String::new()));
             }
@@ -986,7 +988,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                     return String::new();
                 }
                 let upper = s.to_uppercase();
-                let chars: Vec<char> = upper.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+                let chars: Vec<char> = upper.chars().filter(char::is_ascii_alphabetic).collect();
                 if chars.is_empty() {
                     return String::new();
                 }
@@ -1045,10 +1047,10 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("SIMILARITY requires text".into())),
             };
-            fn trigrams(s: &str) -> std::collections::HashSet<String> {
+            fn trigrams(s: &str) -> HashSet<String> {
                 let padded = format!("  {} ", s.to_lowercase());
                 let chars: Vec<char> = padded.chars().collect();
-                let mut set = std::collections::HashSet::new();
+                let mut set = HashSet::new();
                 for w in chars.windows(3) {
                     set.insert(w.iter().collect::<String>());
                 }

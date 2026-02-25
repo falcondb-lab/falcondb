@@ -24,7 +24,12 @@ pub fn apply_wal_record_to_engine(
     write_sets: &mut HashMap<TxnId, Vec<WriteOp>>,
 ) -> Result<(), FalconError> {
     match record {
-        WalRecord::BeginTxn { .. } | WalRecord::PrepareTxn { .. } => {
+        WalRecord::BeginTxn { .. }
+        | WalRecord::PrepareTxn { .. }
+        | WalRecord::Checkpoint { .. }
+        | WalRecord::CoordinatorPrepare { .. }
+        | WalRecord::CoordinatorCommit { .. }
+        | WalRecord::CoordinatorAbort { .. } => {
             // No-op for replica replay.
         }
         WalRecord::CreateDatabase { name, owner } => {
@@ -35,7 +40,7 @@ pub fn apply_wal_record_to_engine(
         }
         WalRecord::CreateTable { schema_json } => {
             let schema: TableSchema = serde_json::from_str(schema_json)
-                .map_err(|e| FalconError::Internal(format!("Schema parse error: {}", e)))?;
+                .map_err(|e| FalconError::Internal(format!("Schema parse error: {e}")))?;
             // Skip if already exists.
             if engine.get_catalog().find_table(&schema.name).is_none() {
                 engine.create_table(schema)?;
@@ -237,14 +242,6 @@ pub fn apply_wal_record_to_engine(
         }
         WalRecord::RevokeRole { member, group } => {
             let _ = engine.revoke_role_membership(member, group);
-        }
-        WalRecord::Checkpoint { .. } => {
-            // No-op for replica replay.
-        }
-        WalRecord::CoordinatorPrepare { .. }
-        | WalRecord::CoordinatorCommit { .. }
-        | WalRecord::CoordinatorAbort { .. } => {
-            // P0-3: Coordinator decision records — no-op on replicas.
         }
     }
     Ok(())

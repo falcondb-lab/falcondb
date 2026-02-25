@@ -3,7 +3,7 @@ use falcon_common::error::ExecutionError;
 use falcon_sql_frontend::types::BinOp;
 use serde_json::Value as JsonValue;
 
-pub(crate) fn eval_binary_op(
+pub fn eval_binary_op(
     left: &Datum,
     op: BinOp,
     right: &Datum,
@@ -32,19 +32,19 @@ pub(crate) fn eval_binary_op(
         BinOp::And => {
             let lb = left
                 .as_bool()
-                .ok_or(ExecutionError::TypeError("AND requires boolean".into()))?;
+                .ok_or_else(|| ExecutionError::TypeError("AND requires boolean".into()))?;
             let rb = right
                 .as_bool()
-                .ok_or(ExecutionError::TypeError("AND requires boolean".into()))?;
+                .ok_or_else(|| ExecutionError::TypeError("AND requires boolean".into()))?;
             Ok(Datum::Boolean(lb && rb))
         }
         BinOp::Or => {
             let lb = left
                 .as_bool()
-                .ok_or(ExecutionError::TypeError("OR requires boolean".into()))?;
+                .ok_or_else(|| ExecutionError::TypeError("OR requires boolean".into()))?;
             let rb = right
                 .as_bool()
-                .ok_or(ExecutionError::TypeError("OR requires boolean".into()))?;
+                .ok_or_else(|| ExecutionError::TypeError("OR requires boolean".into()))?;
             Ok(Datum::Boolean(lb || rb))
         }
         BinOp::Plus => eval_arithmetic(left, right, |a, b| a + b, |a, b| a + b),
@@ -99,13 +99,13 @@ pub(crate) fn eval_binary_op(
             (l, r) => {
                 let ls = match l {
                     Datum::Text(s) => s.clone(),
-                    other => format!("{}", other),
+                    other => format!("{other}"),
                 };
                 let rs = match r {
                     Datum::Text(s) => s.clone(),
-                    other => format!("{}", other),
+                    other => format!("{other}"),
                 };
-                Ok(Datum::Text(format!("{}{}", ls, rs)))
+                Ok(Datum::Text(format!("{ls}{rs}")))
             }
         },
     }
@@ -118,37 +118,36 @@ fn eval_arithmetic(
     float_op: impl Fn(f64, f64) -> f64,
 ) -> Result<Datum, ExecutionError> {
     match (left, right) {
-        (Datum::Int32(a), Datum::Int32(b)) => Ok(Datum::Int64(int_op(*a as i64, *b as i64))),
+        (Datum::Int32(a), Datum::Int32(b)) => Ok(Datum::Int64(int_op(i64::from(*a), i64::from(*b)))),
         (Datum::Int64(a), Datum::Int64(b)) => Ok(Datum::Int64(int_op(*a, *b))),
-        (Datum::Int32(a), Datum::Int64(b)) => Ok(Datum::Int64(int_op(*a as i64, *b))),
-        (Datum::Int64(a), Datum::Int32(b)) => Ok(Datum::Int64(int_op(*a, *b as i64))),
+        (Datum::Int32(a), Datum::Int64(b)) => Ok(Datum::Int64(int_op(i64::from(*a), *b))),
+        (Datum::Int64(a), Datum::Int32(b)) => Ok(Datum::Int64(int_op(*a, i64::from(*b)))),
         (Datum::Float64(a), Datum::Float64(b)) => Ok(Datum::Float64(float_op(*a, *b))),
-        (Datum::Float64(a), Datum::Int32(b)) => Ok(Datum::Float64(float_op(*a, *b as f64))),
+        (Datum::Float64(a), Datum::Int32(b)) => Ok(Datum::Float64(float_op(*a, f64::from(*b)))),
         (Datum::Float64(a), Datum::Int64(b)) => Ok(Datum::Float64(float_op(*a, *b as f64))),
-        (Datum::Int32(a), Datum::Float64(b)) => Ok(Datum::Float64(float_op(*a as f64, *b))),
+        (Datum::Int32(a), Datum::Float64(b)) => Ok(Datum::Float64(float_op(f64::from(*a), *b))),
         (Datum::Int64(a), Datum::Float64(b)) => Ok(Datum::Float64(float_op(*a as f64, *b))),
         _ => Err(ExecutionError::TypeError(format!(
-            "Cannot perform arithmetic on {:?} and {:?}",
-            left, right
+            "Cannot perform arithmetic on {left:?} and {right:?}"
         ))),
     }
 }
 
 const fn eval_and_null(left: &Datum, right: &Datum) -> Result<Datum, ExecutionError> {
-    if let Some(false) = left.as_bool() {
+    if matches!(left.as_bool(), Some(false)) {
         return Ok(Datum::Boolean(false));
     }
-    if let Some(false) = right.as_bool() {
+    if matches!(right.as_bool(), Some(false)) {
         return Ok(Datum::Boolean(false));
     }
     Ok(Datum::Null)
 }
 
 const fn eval_or_null(left: &Datum, right: &Datum) -> Result<Datum, ExecutionError> {
-    if let Some(true) = left.as_bool() {
+    if matches!(left.as_bool(), Some(true)) {
         return Ok(Datum::Boolean(true));
     }
-    if let Some(true) = right.as_bool() {
+    if matches!(right.as_bool(), Some(true)) {
         return Ok(Datum::Boolean(true));
     }
     Ok(Datum::Null)
@@ -161,10 +160,9 @@ fn datum_to_json(d: &Datum) -> Result<JsonValue, ExecutionError> {
     match d {
         Datum::Jsonb(v) => Ok(v.clone()),
         Datum::Text(s) => serde_json::from_str(s)
-            .map_err(|e| ExecutionError::TypeError(format!("invalid JSON: {}", e))),
+            .map_err(|e| ExecutionError::TypeError(format!("invalid JSON: {e}"))),
         _ => Err(ExecutionError::TypeError(format!(
-            "cannot use {:?} as JSONB",
-            d
+            "cannot use {d:?} as JSONB"
         ))),
     }
 }
@@ -196,14 +194,9 @@ fn eval_json_arrow(left: &Datum, right: &Datum, as_text: bool) -> Result<Datum, 
             ))
         }
     };
-    match result {
-        Some(v) => Ok(if as_text {
-            json_to_text_datum(&v)
-        } else {
-            json_to_datum(&v)
-        }),
-        None => Ok(Datum::Null),
-    }
+    Ok(result.map_or(Datum::Null, |v| {
+        if as_text { json_to_text_datum(&v) } else { json_to_datum(&v) }
+    }))
 }
 
 /// `#>` or `#>>`: extract nested path from a text array.
@@ -214,13 +207,13 @@ fn eval_json_path(left: &Datum, right: &Datum, as_text: bool) -> Result<Datum, E
             .iter()
             .map(|d| match d {
                 Datum::Text(s) => Ok(s.clone()),
-                other => Ok(format!("{}", other)),
+                other => Ok(format!("{other}")),
             })
             .collect::<Result<Vec<_>, ExecutionError>>()?,
         Datum::Text(s) => {
             // Accept '{a,b,c}' PG-style path syntax
             let trimmed = s.trim_start_matches('{').trim_end_matches('}');
-            trimmed.split(',').map(|p| p.trim().to_string()).collect()
+            trimmed.split(',').map(|p| p.trim().to_owned()).collect()
         }
         _ => {
             return Err(ExecutionError::TypeError(
@@ -300,10 +293,10 @@ fn coerce_for_comparison(left: &Datum, right: &Datum) -> (Datum, Datum) {
         }
         // Int32 vs Int64: promote Int32 to Int64
         (Datum::Int32(a), Datum::Int64(_)) => {
-            return (Datum::Int64(*a as i64), right.clone());
+            return (Datum::Int64(i64::from(*a)), right.clone());
         }
         (Datum::Int64(_), Datum::Int32(b)) => {
-            return (left.clone(), Datum::Int64(*b as i64));
+            return (left.clone(), Datum::Int64(i64::from(*b)));
         }
         _ => {}
     }
@@ -315,7 +308,7 @@ fn eval_json_exists(left: &Datum, right: &Datum) -> Result<Datum, ExecutionError
     let json = datum_to_json(left)?;
     let key = match right {
         Datum::Text(s) => s.clone(),
-        other => format!("{}", other),
+        other => format!("{other}"),
     };
     let exists = match &json {
         JsonValue::Object(map) => map.contains_key(&key),

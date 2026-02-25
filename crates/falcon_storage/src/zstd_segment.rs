@@ -223,7 +223,7 @@ pub struct ZstdBlock {
 
 fn djb2_crc(data: &[u8]) -> u32 {
     let mut hash: u32 = 5381;
-    for &b in data { hash = hash.wrapping_mul(33).wrapping_add(b as u32); }
+    for &b in data { hash = hash.wrapping_mul(33).wrapping_add(u32::from(b)); }
     hash
 }
 
@@ -270,12 +270,12 @@ impl ZstdBlock {
 pub fn zstd_compress_block(data: &[u8], level: i32, dict: Option<&[u8]>) -> Result<ZstdBlock, String> {
     let compressed = if let Some(dict_data) = dict {
         let mut compressor = zstd::bulk::Compressor::with_dictionary(level, dict_data)
-            .map_err(|e| format!("zstd init compressor with dict: {}", e))?;
+            .map_err(|e| format!("zstd init compressor with dict: {e}"))?;
         compressor.compress(data)
-            .map_err(|e| format!("zstd dict compress: {}", e))?
+            .map_err(|e| format!("zstd dict compress: {e}"))?
     } else {
         zstd::bulk::compress(data, level)
-            .map_err(|e| format!("zstd compress: {}", e))?
+            .map_err(|e| format!("zstd compress: {e}"))?
     };
 
     let crc = djb2_crc(&compressed);
@@ -291,18 +291,18 @@ pub fn zstd_compress_block(data: &[u8], level: i32, dict: Option<&[u8]>) -> Resu
 /// Decompress a Zstd block.
 pub fn zstd_decompress_block(block: &ZstdBlock, dict: Option<&[u8]>) -> Result<Vec<u8>, String> {
     if !block.verify() {
-        return Err("CRC mismatch on compressed block".to_string());
+        return Err("CRC mismatch on compressed block".to_owned());
     }
 
     let capacity = block.uncompressed_len as usize;
     let decompressed = if let Some(dict_data) = dict {
         let mut decompressor = zstd::bulk::Decompressor::with_dictionary(dict_data)
-            .map_err(|e| format!("zstd init decompressor with dict: {}", e))?;
+            .map_err(|e| format!("zstd init decompressor with dict: {e}"))?;
         decompressor.decompress(&block.compressed_data, capacity)
-            .map_err(|e| format!("zstd dict decompress: {}", e))?
+            .map_err(|e| format!("zstd dict decompress: {e}"))?
     } else {
         zstd::bulk::decompress(&block.compressed_data, capacity)
-            .map_err(|e| format!("zstd decompress: {}", e))?
+            .map_err(|e| format!("zstd decompress: {e}"))?
     };
 
     Ok(decompressed)
@@ -324,10 +324,10 @@ pub fn lz4_compress_block(data: &[u8]) -> Result<ZstdBlock, String> {
 /// Decompress an LZ4 block.
 pub fn lz4_decompress_block(block: &ZstdBlock) -> Result<Vec<u8>, String> {
     if !block.verify() {
-        return Err("CRC mismatch on compressed block".to_string());
+        return Err("CRC mismatch on compressed block".to_owned());
     }
     lz4_flex::decompress_size_prepended(&block.compressed_data)
-        .map_err(|e| format!("lz4 decompress: {}", e))
+        .map_err(|e| format!("lz4 decompress: {e}"))
 }
 
 /// Compress a block with the appropriate codec.
@@ -353,7 +353,7 @@ pub fn decompress_block(block: &ZstdBlock, dict: Option<&[u8]>) -> Result<Vec<u8
     match block.encoding {
         ColdBlockEncoding::Raw => {
             if !block.verify() {
-                return Err("CRC mismatch on raw block".to_string());
+                return Err("CRC mismatch on raw block".to_owned());
             }
             Ok(block.compressed_data.clone())
         }
@@ -388,7 +388,7 @@ pub fn write_zstd_cold_segment(
     let mut meta = ZstdSegmentMeta::new(level);
     if dict_id > 0 {
         meta.dictionary_id = dict_id;
-        meta.dictionary_checksum = dict.map(djb2_crc).unwrap_or(0);
+        meta.dictionary_checksum = dict.map_or(0, djb2_crc);
     }
 
     // Write block count first so reader knows when to stop
@@ -416,15 +416,15 @@ pub fn read_zstd_cold_segment(
     dict: Option<&[u8]>,
 ) -> Result<Vec<Vec<u8>>, String> {
     let body = store.get_segment_body(segment_id)
-        .map_err(|e| format!("read segment: {}", e))?;
+        .map_err(|e| format!("read segment: {e}"))?;
 
     if body.len() < UNIFIED_HEADER_SIZE as usize {
-        return Err("segment too small".to_string());
+        return Err("segment too small".to_owned());
     }
 
     let data = &body[UNIFIED_HEADER_SIZE as usize..];
     if data.len() < 4 {
-        return Err("segment body too small for block count".to_string());
+        return Err("segment body too small for block count".to_owned());
     }
     let block_count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
     let mut offset = 4;
@@ -432,7 +432,7 @@ pub fn read_zstd_cold_segment(
 
     for _ in 0..block_count {
         let (block, consumed) = ZstdBlock::from_bytes(&data[offset..])
-            .ok_or_else(|| "failed to parse block".to_string())?;
+            .ok_or_else(|| "failed to parse block".to_owned())?;
         let decompressed = decompress_block(&block, dict)?;
         rows.push(decompressed);
         offset += consumed;
@@ -522,12 +522,12 @@ impl DictionaryStore {
         max_dict_size: usize,
     ) -> Result<DictionaryEntry, String> {
         if samples.is_empty() {
-            return Err("no samples for dictionary training".to_string());
+            return Err("no samples for dictionary training".to_owned());
         }
 
         // Use zstd's dictionary training
         let dict_data = zstd::dict::from_samples(samples, max_dict_size)
-            .map_err(|e| format!("zstd dict training: {}", e))?;
+            .map_err(|e| format!("zstd dict training: {e}"))?;
 
         let dict_id = self.next_dict_id.fetch_add(1, Ordering::Relaxed);
         let checksum = djb2_crc(&dict_data);
@@ -610,12 +610,12 @@ impl DictionaryStore {
         schema_version: u64,
     ) -> Result<DictionaryEntry, String> {
         let body = store.get_segment_body(segment_id)
-            .map_err(|e| format!("load dict segment: {}", e))?;
+            .map_err(|e| format!("load dict segment: {e}"))?;
 
         let data = if body.len() > UNIFIED_HEADER_SIZE as usize {
             body[UNIFIED_HEADER_SIZE as usize..].to_vec()
         } else {
-            return Err("dict segment too small".to_string());
+            return Err("dict segment too small".to_owned());
         };
 
         let checksum = djb2_crc(&data);
@@ -709,7 +709,7 @@ pub fn compress_streaming_chunk(data: &[u8], codec: SegmentCodec, level: i32) ->
         SegmentCodec::Lz4 => Ok(lz4_flex::compress_prepend_size(data)),
         SegmentCodec::Zstd => {
             zstd::bulk::compress(data, level)
-                .map_err(|e| format!("zstd stream compress: {}", e))
+                .map_err(|e| format!("zstd stream compress: {e}"))
         }
     }
 }
@@ -720,11 +720,11 @@ pub fn decompress_streaming_chunk(data: &[u8], codec: SegmentCodec, max_size: us
         SegmentCodec::None => Ok(data.to_vec()),
         SegmentCodec::Lz4 => {
             lz4_flex::decompress_size_prepended(data)
-                .map_err(|e| format!("lz4 stream decompress: {}", e))
+                .map_err(|e| format!("lz4 stream decompress: {e}"))
         }
         SegmentCodec::Zstd => {
             zstd::bulk::decompress(data, max_size)
-                .map_err(|e| format!("zstd stream decompress: {}", e))
+                .map_err(|e| format!("zstd stream decompress: {e}"))
         }
     }
 }
@@ -891,10 +891,10 @@ impl DecompressPool {
 
         // Check concurrency limit
         let current = self.inflight.fetch_add(1, Ordering::Relaxed);
-        if current >= self.max_concurrent as u64 {
+        if current >= u64::from(self.max_concurrent) {
             self.inflight.fetch_sub(1, Ordering::Relaxed);
             self.metrics.rejected_overload.fetch_add(1, Ordering::Relaxed);
-            return Err("decompress pool overloaded".to_string());
+            return Err("decompress pool overloaded".to_owned());
         }
 
         let start = std::time::Instant::now();
@@ -1005,16 +1005,16 @@ pub fn recompress_segment(
     // Read source
     let rows = read_zstd_cold_segment(store, request.source_segment_id, old_dict)?;
     let old_size = store.segment_size(request.source_segment_id)
-        .map_err(|e| format!("segment size: {}", e))?;
+        .map_err(|e| format!("segment size: {e}"))?;
 
     // Write new segment
     let (new_seg_id, _meta) = write_zstd_cold_segment(
         store, table_id, shard_id, &rows,
         request.target_level, new_dict, request.new_dictionary_id,
-    ).map_err(|e| format!("write recompressed: {}", e))?;
+    ).map_err(|e| format!("write recompressed: {e}"))?;
 
     let new_size = store.segment_size(new_seg_id)
-        .map_err(|e| format!("new segment size: {}", e))?;
+        .map_err(|e| format!("new segment size: {e}"))?;
 
     Ok(RecompressResult {
         old_segment_id: request.source_segment_id,

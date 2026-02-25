@@ -43,17 +43,17 @@ pub enum GatewayDisposition {
 
 impl GatewayDisposition {
     /// Whether this disposition represents a successful execution.
-    pub fn is_success(&self) -> bool {
+    pub const fn is_success(&self) -> bool {
         matches!(self, Self::LocalExec | Self::ForwardedToLeader)
     }
 
     /// Whether the client should retry this request.
-    pub fn is_retryable(&self) -> bool {
+    pub const fn is_retryable(&self) -> bool {
         matches!(self, Self::RejectOverloaded | Self::RejectTimeout)
     }
 
     /// Label for metrics/logging.
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::LocalExec => "LOCAL_EXEC",
             Self::ForwardedToLeader => "FORWARDED_TO_LEADER",
@@ -102,7 +102,7 @@ pub struct GatewayAdmissionControl {
 }
 
 impl GatewayAdmissionControl {
-    pub fn new(config: GatewayAdmissionConfig) -> Self {
+    pub const fn new(config: GatewayAdmissionConfig) -> Self {
         Self {
             config,
             inflight: AtomicU64::new(0),
@@ -206,7 +206,7 @@ pub struct GatewayMetrics {
 }
 
 impl GatewayMetrics {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             forward_total: AtomicU64::new(0),
             forward_failed_total: AtomicU64::new(0),

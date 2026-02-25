@@ -40,6 +40,7 @@ impl Default for WalWinAsyncConfig {
 #[cfg(windows)]
 mod inner {
     use std::fs::OpenOptions;
+    use std::io::{Read, Seek};
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
     use std::path::{Path, PathBuf};
@@ -182,8 +183,7 @@ mod inner {
                     if ok == 0 {
                         let err = unsafe { GetLastError() };
                         return Err(StorageError::Wal(format!(
-                            "FlushFileBuffers failed: win32 error {}",
-                            err
+                            "FlushFileBuffers failed: win32 error {err}"
                         )));
                     }
                 }
@@ -196,8 +196,7 @@ mod inner {
             let inner = self.inner.lock();
             let seg_path = inner.dir.join(crate::wal::segment_filename(inner.current_segment));
             let mut file = std::fs::File::open(&seg_path)?;
-            use std::io::{Read, Seek, SeekFrom};
-            file.seek(SeekFrom::Start(offset))?;
+            file.seek(std::io::SeekFrom::Start(offset))?;
             let mut buf = vec![0u8; len];
             file.read_exact(&mut buf)?;
             Ok(buf)
@@ -279,8 +278,7 @@ mod inner {
         if iocp == 0 {
             let err = unsafe { GetLastError() };
             return Err(StorageError::Wal(format!(
-                "CreateIoCompletionPort failed: win32 error {}",
-                err
+                "CreateIoCompletionPort failed: win32 error {err}"
             )));
         }
 
@@ -332,8 +330,7 @@ mod inner {
             let err = unsafe { GetLastError() };
             if err != ERROR_IO_PENDING {
                 return Err(StorageError::Wal(format!(
-                    "WriteFile (overlapped) failed: win32 error {}",
-                    err
+                    "WriteFile (overlapped) failed: win32 error {err}"
                 )));
             }
         }
@@ -356,8 +353,7 @@ mod inner {
         if wait_result == 0 {
             let err = unsafe { GetLastError() };
             return Err(StorageError::Wal(format!(
-                "IOCP GetQueuedCompletionStatus failed: win32 error {}",
-                err
+                "IOCP GetQueuedCompletionStatus failed: win32 error {err}"
             )));
         }
 

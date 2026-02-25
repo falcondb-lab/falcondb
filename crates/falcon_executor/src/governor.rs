@@ -235,23 +235,21 @@ impl std::fmt::Display for GovernorAbortReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::RowLimitExceeded { produced, limit } => {
-                write!(f, "row limit exceeded: {} rows (max {})", produced, limit)
+                write!(f, "row limit exceeded: {produced} rows (max {limit})")
             }
             Self::ByteLimitExceeded { produced, limit } => write!(
                 f,
-                "result size limit exceeded: {} bytes (max {})",
-                produced, limit
+                "result size limit exceeded: {produced} bytes (max {limit})"
             ),
             Self::TimeoutExceeded {
                 elapsed_ms,
                 limit_ms,
             } => write!(
                 f,
-                "execution timeout: {}ms elapsed (max {}ms)",
-                elapsed_ms, limit_ms
+                "execution timeout: {elapsed_ms}ms elapsed (max {limit_ms}ms)"
             ),
             Self::MemoryLimitExceeded { used, limit } => {
-                write!(f, "memory limit exceeded: {} bytes (max {})", used, limit)
+                write!(f, "memory limit exceeded: {used} bytes (max {limit})")
             }
         }
     }

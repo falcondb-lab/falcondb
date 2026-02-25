@@ -75,9 +75,11 @@ pub struct ScatterGatherMetrics {
     pub failed_shards: Vec<u64>,
 }
 
-/// A subplan to execute on a shard. For MVP, this is a closure-based interface
-/// that operates directly on the shard's (StorageEngine, TxnManager).
-/// In production, this would be a serializable plan sent over RPC.
+/// A subplan to execute on a shard.
+///
+/// For MVP, this is a closure-based interface that operates directly on the
+/// shard's (StorageEngine, TxnManager). In production, this would be a
+/// serializable plan sent over RPC.
 pub struct SubPlan {
     /// Human-readable description for observability.
     pub description: String,
@@ -98,7 +100,7 @@ impl SubPlan {
             + 'static,
     {
         Self {
-            description: description.to_string(),
+            description: description.to_owned(),
             execute_fn: Box::new(f),
         }
     }

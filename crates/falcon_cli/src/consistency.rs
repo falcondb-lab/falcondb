@@ -80,7 +80,7 @@ async fn consistency_in_doubt(client: &DbClient, mode: OutputMode) -> Result<Str
                         ORDER BY prepared";
         let (fb_rows, _) = client.query_simple(fallback).await?;
         if fb_rows.is_empty() {
-            return Ok("No in-doubt transactions found.\n".to_string());
+            return Ok("No in-doubt transactions found.\n".to_owned());
         }
         return Ok(format_rows_as_string(
             &fb_rows,

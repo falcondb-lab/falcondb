@@ -33,7 +33,7 @@ use crate::mvcc::VersionChain;
 
 /// Hex-encode a byte slice for diagnostic/observability output.
 fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Simple aggregate operation for streaming computation (no GROUP BY).
@@ -475,7 +475,7 @@ impl MemTable {
     where
         F: FnMut(&OwnedRow),
     {
-        for entry in self.data.iter() {
+        for entry in &self.data {
             entry.value().with_visible_data(txn_id, read_ts, |row| {
                 f(row);
             });
@@ -507,7 +507,7 @@ impl MemTable {
         let len = self.data.len();
         if len < 50_000 {
             let mut acc = init();
-            for entry in self.data.iter() {
+            for entry in &self.data {
                 entry.value().with_visible_data(txn_id, read_ts, |row| {
                     map(&mut acc, row);
                 });
@@ -521,7 +521,7 @@ impl MemTable {
 
         // Phase 2: parallel map-reduce
         let num_threads = std::thread::available_parallelism()
-            .map(|n| n.get())
+            .map(std::num::NonZero::get)
             .unwrap_or(4)
             .min(8);
         let chunk_size = chains.len().div_ceil(num_threads);
@@ -553,7 +553,7 @@ impl MemTable {
     /// Full table scan visible to a transaction.
     pub fn scan(&self, txn_id: TxnId, read_ts: Timestamp) -> Vec<(PrimaryKey, OwnedRow)> {
         let mut results = Vec::with_capacity(self.data.len());
-        for entry in self.data.iter() {
+        for entry in &self.data {
             if let Some(row) = entry.value().read_for_txn(txn_id, read_ts) {
                 results.push((entry.key().clone(), row));
             }
@@ -564,11 +564,33 @@ impl MemTable {
     /// Commit all writes by a transaction (legacy full-scan path).
     /// Also maintains secondary indexes at commit time (方案A).
     pub fn commit_txn(&self, txn_id: TxnId, commit_ts: Timestamp) {
-        for entry in self.data.iter() {
+        // Collect pk_order changes locally to avoid acquiring the global RwLock
+        // once per key. A single bulk write at the end reduces contention from
+        // O(N) write-lock acquisitions to O(1), matching commit_keys behaviour.
+        let mut pk_inserts: Vec<PrimaryKey> = Vec::new();
+        let mut pk_deletes: Vec<PrimaryKey> = Vec::new();
+        let mut row_delta: i64 = 0;
+
+        for entry in &self.data {
             let pk = entry.key().clone();
             let (new_data, old_data) = entry.value().commit_and_report(txn_id, commit_ts);
-            self.adjust_row_count_and_pk_order(&pk, &new_data, &old_data);
+            match (new_data.is_some(), old_data.is_some()) {
+                (true, false) => { row_delta += 1; pk_inserts.push(pk.clone()); }
+                (false, true) => { row_delta -= 1; pk_deletes.push(pk.clone()); }
+                _ => {}
+            }
             self.index_update_on_commit(&pk, new_data.as_ref(), old_data.as_ref());
+        }
+
+        if row_delta > 0 {
+            self.committed_row_count.fetch_add(row_delta, AtomicOrdering::Relaxed);
+        } else if row_delta < 0 {
+            self.committed_row_count.fetch_sub(-row_delta, AtomicOrdering::Relaxed);
+        }
+        if !pk_inserts.is_empty() || !pk_deletes.is_empty() {
+            let mut order = self.pk_order.write();
+            for pk in pk_inserts { order.insert(pk); }
+            for pk in pk_deletes { order.remove(&pk); }
         }
     }
 
@@ -640,7 +662,7 @@ impl MemTable {
     /// Abort all writes by a transaction (legacy full-scan path).
     /// Under 方案A, indexes are not touched at DML time, so no index rollback needed.
     pub fn abort_txn(&self, txn_id: TxnId) {
-        for entry in self.data.iter() {
+        for entry in &self.data {
             entry.value().abort_and_report(txn_id);
         }
     }
@@ -663,11 +685,7 @@ impl MemTable {
         exclude_txn: TxnId,
         after_ts: Timestamp,
     ) -> bool {
-        if let Some(chain) = self.data.get(pk) {
-            chain.has_committed_write_after(exclude_txn, after_ts)
-        } else {
-            false
-        }
+        self.data.get(pk).is_some_and(|chain| chain.has_committed_write_after(exclude_txn, after_ts))
     }
 
     /// Count visible rows without cloning row data.
@@ -680,37 +698,12 @@ impl MemTable {
         }
         // Slow path: full scan with per-row visibility checks
         let mut n = 0;
-        for entry in self.data.iter() {
+        for entry in &self.data {
             if entry.value().is_visible(txn_id, read_ts) {
                 n += 1;
             }
         }
         n
-    }
-
-    /// Adjust committed_row_count and pk_order based on commit_and_report results.
-    /// INSERT (new=Some, old=None) → +1 and add PK to ordered index.
-    /// DELETE (new=None, old=Some) → −1 and remove PK from ordered index.
-    #[inline]
-    fn adjust_row_count_and_pk_order(
-        &self,
-        pk: &PrimaryKey,
-        new_data: &Option<OwnedRow>,
-        old_data: &Option<OwnedRow>,
-    ) {
-        match (new_data.is_some(), old_data.is_some()) {
-            (true, false) => {
-                // New INSERT commit
-                self.committed_row_count.fetch_add(1, AtomicOrdering::Relaxed);
-                self.pk_order.write().insert(pk.clone());
-            }
-            (false, true) => {
-                // DELETE commit
-                self.committed_row_count.fetch_sub(1, AtomicOrdering::Relaxed);
-                self.pk_order.write().remove(pk);
-            }
-            _ => {} // UPDATE (true, true) or no-op (false, false)
-        }
     }
 
     /// Compute simple aggregates (COUNT*, SUM, MIN, MAX) in a single streaming
@@ -731,7 +724,7 @@ impl MemTable {
         let mut mins: Vec<Option<Datum>> = vec![None; n];
         let mut maxs: Vec<Option<Datum>> = vec![None; n];
 
-        for entry in self.data.iter() {
+        for entry in &self.data {
             entry.value().with_visible_data(txn_id, read_ts, |row| {
                 for (i, (op, col_opt)) in agg_specs.iter().enumerate() {
                     match op {
@@ -750,8 +743,8 @@ impl MemTable {
                                 match row.values.get(*ci) {
                                     Some(Datum::Int32(v)) => {
                                         counts[i] += 1;
-                                        sums_i[i] += *v as i64;
-                                        sums_f[i] += *v as f64;
+                                        sums_i[i] += i64::from(*v);
+                                        sums_f[i] += f64::from(*v);
                                     }
                                     Some(Datum::Int64(v)) => {
                                         counts[i] += 1;
@@ -861,7 +854,7 @@ impl MemTable {
         // Fallback: bounded heap scan (O(N log K))
         let top_pks = if ascending {
             let mut heap: BinaryHeap<PrimaryKey> = BinaryHeap::with_capacity(k + 1);
-            for entry in self.data.iter() {
+            for entry in &self.data {
                 if entry.value().is_visible(txn_id, read_ts) {
                     let pk = entry.key();
                     if heap.len() < k {
@@ -878,7 +871,7 @@ impl MemTable {
         } else {
             let mut heap: BinaryHeap<Reverse<PrimaryKey>> =
                 BinaryHeap::with_capacity(k + 1);
-            for entry in self.data.iter() {
+            for entry in &self.data {
                 if entry.value().is_visible(txn_id, read_ts) {
                     let pk = entry.key();
                     if heap.len() < k {
@@ -947,11 +940,7 @@ impl MemTable {
 
         for pk in keys {
             // Read the uncommitted row this txn is about to commit
-            let uncommitted = if let Some(chain) = self.data.get(pk) {
-                chain.read_uncommitted_for_txn(txn_id)
-            } else {
-                None
-            };
+            let uncommitted = self.data.get(pk).and_then(|chain| chain.read_uncommitted_for_txn(txn_id));
 
             // Only check inserts/updates (Some(Some(row))), skip deletes (Some(None))
             let new_row = match uncommitted {
@@ -1069,7 +1058,7 @@ impl MemTable {
             tree.clear();
         }
         // Re-insert from current data
-        for entry in self.data.iter() {
+        for entry in &self.data {
             let pk = entry.key().clone();
             let chain = entry.value();
             if let Some(row) = chain.read_latest() {

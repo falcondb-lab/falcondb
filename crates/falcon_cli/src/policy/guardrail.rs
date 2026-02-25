@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use crate::policy::model::{Guardrail, RiskCeiling};
 
 /// Result of evaluating a guardrail.
@@ -33,7 +35,7 @@ pub struct ClusterSnapshot {
 impl ClusterSnapshot {
     pub fn unknown() -> Self {
         Self {
-            health: "unknown".to_string(),
+            health: "unknown".to_owned(),
             recent_fire_count: 0,
             secs_since_last_fire: None,
             action_risk_level: RiskCeiling::Low,
@@ -102,7 +104,7 @@ pub fn evaluate_guardrails(
 
 /// Returns true if all guardrails pass.
 pub fn all_pass(verdicts: &[GuardrailVerdict]) -> bool {
-    verdicts.iter().all(|v| v.is_pass())
+    verdicts.iter().all(GuardrailVerdict::is_pass)
 }
 
 /// Render guardrail evaluation results as a human-readable string.
@@ -118,20 +120,19 @@ pub fn render_guardrail_report(guardrail: &Guardrail, verdicts: &[GuardrailVerdi
         let label = labels.get(i).copied().unwrap_or("Check");
         match verdict {
             GuardrailVerdict::Pass => {
-                out.push_str(&format!("    ✓ {}: PASS\n", label));
+                let _ = writeln!(out, "    ✓ {label}: PASS");
             }
             GuardrailVerdict::Blocked(reason) => {
-                out.push_str(&format!("    ✗ {}: BLOCKED — {}\n", label, reason));
+                let _ = writeln!(out, "    ✗ {label}: BLOCKED — {reason}");
             }
         }
     }
-    out.push_str(&format!(
-        "  Config: max_frequency={} time_window={}s cooldown={}s risk_ceiling={}\n",
+    let _ = writeln!(out, "  Config: max_frequency={} time_window={}s cooldown={}s risk_ceiling={}",
         guardrail.max_frequency,
         guardrail.time_window_secs,
         guardrail.cooldown_secs,
         guardrail.risk_ceiling.as_str()
-    ));
+    );
     out
 }
 

@@ -317,8 +317,17 @@ impl Executor {
     pub fn expr_has_outer_ref(expr: &BoundExpr) -> bool {
         match expr {
             BoundExpr::OuterColumnRef(_) => true,
-            BoundExpr::Literal(_) | BoundExpr::ColumnRef(_) => false,
-            BoundExpr::BinaryOp { left, right, .. } => {
+            BoundExpr::Literal(_)
+            | BoundExpr::ColumnRef(_)
+            | BoundExpr::SequenceNextval(_)
+            | BoundExpr::SequenceCurrval(_)
+            | BoundExpr::SequenceSetval(_, _)
+            | BoundExpr::Parameter(_)
+            | BoundExpr::Grouping(_) => false,
+            BoundExpr::BinaryOp { left, right, .. }
+            | BoundExpr::IsNotDistinctFrom { left, right }
+            | BoundExpr::AnyOp { left, right, .. }
+            | BoundExpr::AllOp { left, right, .. } => {
                 Self::expr_has_outer_ref(left) || Self::expr_has_outer_ref(right)
             }
             BoundExpr::Not(inner)
@@ -349,21 +358,14 @@ impl Executor {
                     || results.iter().any(Self::expr_has_outer_ref)
                     || else_result.as_deref().is_some_and(Self::expr_has_outer_ref)
             }
-            BoundExpr::Coalesce(args) | BoundExpr::ArrayLiteral(args) => {
-                args.iter().any(Self::expr_has_outer_ref)
-            }
-            BoundExpr::Function { args, .. } => args.iter().any(Self::expr_has_outer_ref),
+            BoundExpr::Function { args, .. }
+            | BoundExpr::Coalesce(args)
+            | BoundExpr::ArrayLiteral(args) => args.iter().any(Self::expr_has_outer_ref),
             BoundExpr::AggregateExpr { arg, .. } => {
                 arg.as_deref().is_some_and(Self::expr_has_outer_ref)
             }
             BoundExpr::ArrayIndex { array, index } => {
                 Self::expr_has_outer_ref(array) || Self::expr_has_outer_ref(index)
-            }
-            BoundExpr::IsNotDistinctFrom { left, right } => {
-                Self::expr_has_outer_ref(left) || Self::expr_has_outer_ref(right)
-            }
-            BoundExpr::AnyOp { left, right, .. } | BoundExpr::AllOp { left, right, .. } => {
-                Self::expr_has_outer_ref(left) || Self::expr_has_outer_ref(right)
             }
             BoundExpr::ArraySlice {
                 array,
@@ -379,11 +381,6 @@ impl Executor {
                 Self::expr_has_outer_ref(expr) || Self::bound_select_has_outer_ref(subquery)
             }
             BoundExpr::Exists { subquery, .. } => Self::bound_select_has_outer_ref(subquery),
-            BoundExpr::SequenceNextval(_)
-            | BoundExpr::SequenceCurrval(_)
-            | BoundExpr::SequenceSetval(_, _)
-            | BoundExpr::Parameter(_)
-            | BoundExpr::Grouping(_) => false,
         }
     }
 
@@ -401,12 +398,8 @@ impl Executor {
         }
         for proj in &sel.projections {
             match proj {
-                BoundProjection::Expr(e, _) => {
-                    if Self::expr_has_outer_ref(e) {
-                        return true;
-                    }
-                }
-                BoundProjection::Aggregate(_, Some(e), _, _, _) => {
+                BoundProjection::Expr(e, _)
+                | BoundProjection::Aggregate(_, Some(e), _, _, _) => {
                     if Self::expr_has_outer_ref(e) {
                         return true;
                     }
@@ -424,7 +417,13 @@ impl Executor {
                 let val = outer_row.get(*idx).cloned().unwrap_or(Datum::Null);
                 BoundExpr::Literal(val)
             }
-            BoundExpr::Literal(_) | BoundExpr::ColumnRef(_) => expr.clone(),
+            BoundExpr::Literal(_)
+            | BoundExpr::ColumnRef(_)
+            | BoundExpr::SequenceNextval(_)
+            | BoundExpr::SequenceCurrval(_)
+            | BoundExpr::SequenceSetval(_, _)
+            | BoundExpr::Parameter(_)
+            | BoundExpr::Grouping(_) => expr.clone(),
             BoundExpr::BinaryOp { left, op, right } => BoundExpr::BinaryOp {
                 left: Box::new(Self::substitute_outer_refs(left, outer_row)),
                 op: *op,
@@ -583,11 +582,6 @@ impl Executor {
                 subquery: Box::new(Self::substitute_outer_refs_in_select(subquery, outer_row)),
                 negated: *negated,
             },
-            BoundExpr::SequenceNextval(_)
-            | BoundExpr::SequenceCurrval(_)
-            | BoundExpr::SequenceSetval(_, _)
-            | BoundExpr::Parameter(_)
-            | BoundExpr::Grouping(_) => expr.clone(),
         }
     }
 
@@ -657,8 +651,9 @@ impl Executor {
                             {
                                 // Evaluate against the row
                                 match ExprEngine::eval_row(&bound, row) {
-                                    Ok(Datum::Boolean(true)) => {} // constraint satisfied
-                                    Ok(Datum::Null) => {} // NULL is treated as satisfied (SQL semantics)
+                                    Ok(Datum::Boolean(true)) | Ok(Datum::Null) => {
+                                        // constraint satisfied (NULL treated as satisfied per SQL semantics)
+                                    }
                                     _ => {
                                         return Err(FalconError::Execution(
                                             ExecutionError::CheckConstraintViolation(

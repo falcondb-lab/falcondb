@@ -192,7 +192,7 @@ pub fn sweep_memtable_budgeted(
 
     let mut processed = 0u64;
 
-    for entry in table.data.iter() {
+    for entry in &table.data {
         // Time budget check (every 64 keys to amortize syscall cost)
         if processed.is_multiple_of(64) && processed > 0
             && start.elapsed() >= max_time

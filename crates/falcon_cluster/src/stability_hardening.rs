@@ -137,16 +137,13 @@ impl TxnStateGuard {
         m.total_transitions += 1;
 
         // Unknown state names → reject
-        let (from_o, to_o) = match (from_ord, to_ord) {
-            (Some(f), Some(t)) => (f, t),
-            _ => {
-                m.rejected_transitions += 1;
-                return Err(TxnError::InvalidTransition(
-                    txn_id,
-                    from.to_string(),
-                    to.to_string(),
-                ));
-            }
+        let (from_o, to_o) = if let (Some(f), Some(t)) = (from_ord, to_ord) { (f, t) } else {
+            m.rejected_transitions += 1;
+            return Err(TxnError::InvalidTransition(
+                txn_id,
+                from.to_owned(),
+                to.to_owned(),
+            ));
         };
 
         // Idempotent terminal re-entry
@@ -172,8 +169,8 @@ impl TxnStateGuard {
             );
             return Err(TxnError::InvalidTransition(
                 txn_id,
-                from.to_string(),
-                format!("{} (regression from {:?})", to, current_hwm),
+                from.to_owned(),
+                format!("{to} (regression from {current_hwm:?})"),
             ));
         }
 
@@ -199,11 +196,11 @@ impl TxnStateGuard {
         }
         audit.push(StateTransitionRecord {
             txn_id,
-            from_state: from.to_string(),
-            to_state: to.to_string(),
+            from_state: from.to_owned(),
+            to_state: to.to_owned(),
             timestamp_us: Instant::now().elapsed().as_micros() as u64,
             valid,
-            reason: reason.to_string(),
+            reason: reason.to_owned(),
         });
     }
 
@@ -352,8 +349,7 @@ impl CommitPhaseTracker {
         self.entries
             .read()
             .get(&txn_id)
-            .map(|e| e.phase >= CommitPhase::Visible)
-            .unwrap_or(false)
+            .is_some_and(|e| e.phase >= CommitPhase::Visible)
     }
 
     /// Complete and remove tracking for a txn.
@@ -785,7 +781,7 @@ impl FailoverOutcomeGuard {
             );
             return Err(TxnError::InvariantViolation(
                 txn_id,
-                format!("stale epoch: {} < current {}", epoch, current),
+                format!("stale epoch: {epoch} < current {current}"),
             ));
         }
 
@@ -856,12 +852,11 @@ impl ErrorClassStabilizer {
             if cached_kind != kind {
                 self.instability_count.fetch_add(1, Ordering::Relaxed);
                 return Err(format!(
-                    "classification instability: '{}' was {:?} now {:?}",
-                    error_desc, cached_kind, kind
+                    "classification instability: '{error_desc}' was {cached_kind:?} now {kind:?}"
                 ));
             }
         } else {
-            cache.insert(error_desc.to_string(), kind);
+            cache.insert(error_desc.to_owned(), kind);
         }
         Ok(())
     }
@@ -869,7 +864,7 @@ impl ErrorClassStabilizer {
     /// Classify a FalconError and validate stability.
     pub fn classify_and_validate(&self, error: &FalconError) -> ErrorKind {
         let kind = error.kind();
-        let desc = format!("{}", error);
+        let desc = format!("{error}");
         // Best-effort stability check — log but don't fail
         if let Err(msg) = self.validate_classification(&desc, kind) {
             tracing::error!(
@@ -946,7 +941,7 @@ impl DefensiveValidator {
             _ => {
                 m.rejections += 1;
                 m.invalid_state_names += 1;
-                Err(format!("unrecognized state name: '{}'", name))
+                Err(format!("unrecognized state name: '{name}'"))
             }
         }
     }
@@ -970,8 +965,7 @@ impl DefensiveValidator {
                 return Err(TxnError::InvariantViolation(
                     txn_id,
                     format!(
-                        "invalid message ordering: {} before {}",
-                        incoming, current
+                        "invalid message ordering: {incoming} before {current}"
                     ),
                 ));
             }
@@ -982,7 +976,7 @@ impl DefensiveValidator {
             m.invalid_phase_ordering += 1;
             return Err(TxnError::InvariantViolation(
                 txn_id,
-                format!("prepare before begin: {}", current),
+                format!("prepare before begin: {current}"),
             ));
         }
 
@@ -1074,7 +1068,7 @@ pub struct TxnOutcomeJournal {
 }
 
 impl TxnOutcomeJournal {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self::with_capacity(50_000)
     }
 

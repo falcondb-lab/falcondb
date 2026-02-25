@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use crate::client::DbClient;
 use anyhow::Result;
 
@@ -38,34 +40,33 @@ pub fn parse_meta(line: &str) -> Option<MetaCommand> {
     let rest = trimmed[1..].trim();
     let (cmd, arg) = rest
         .split_once(char::is_whitespace)
-        .map(|(c, a)| (c, a.trim()))
-        .unwrap_or((rest, ""));
+        .map_or((rest, ""), |(c, a)| (c, a.trim()));
 
     Some(match cmd {
         "q" | "quit" => MetaCommand::Quit,
         "?" | "help" => MetaCommand::Help,
         "conninfo" => MetaCommand::ConnInfo,
         "dt" => MetaCommand::ListTables,
-        "d" if !arg.is_empty() => MetaCommand::DescribeTable(arg.to_string()),
+        "d" if !arg.is_empty() => MetaCommand::DescribeTable(arg.to_owned()),
         "d" => MetaCommand::ListTables,
         "l" => MetaCommand::ListDatabases,
-        "c" if !arg.is_empty() => MetaCommand::Connect(arg.to_string()),
+        "c" if !arg.is_empty() => MetaCommand::Connect(arg.to_owned()),
         "x" => MetaCommand::ToggleExpanded,
         "timing" => MetaCommand::ToggleTiming,
-        "export" => MetaCommand::Export(trimmed.to_string()),
-        "import" => MetaCommand::Import(trimmed.to_string()),
-        "cluster" => MetaCommand::Cluster(arg.to_string()),
-        "txn" => MetaCommand::Txn(arg.to_string()),
-        "consistency" => MetaCommand::Consistency(arg.to_string()),
-        "node" => MetaCommand::Node(arg.to_string()),
-        "failover" => MetaCommand::Failover(arg.to_string()),
-        "shard" => MetaCommand::Shard(arg.to_string()),
-        "audit" => MetaCommand::Audit(arg.to_string()),
-        "policy" => MetaCommand::Policy(arg.to_string()),
-        "automation" => MetaCommand::Automation(arg.to_string()),
-        "integration" => MetaCommand::Integration(arg.to_string()),
-        "events" => MetaCommand::Events(arg.to_string()),
-        other => MetaCommand::Unknown(format!("\\{}", other)),
+        "export" => MetaCommand::Export(trimmed.to_owned()),
+        "import" => MetaCommand::Import(trimmed.to_owned()),
+        "cluster" => MetaCommand::Cluster(arg.to_owned()),
+        "txn" => MetaCommand::Txn(arg.to_owned()),
+        "consistency" => MetaCommand::Consistency(arg.to_owned()),
+        "node" => MetaCommand::Node(arg.to_owned()),
+        "failover" => MetaCommand::Failover(arg.to_owned()),
+        "shard" => MetaCommand::Shard(arg.to_owned()),
+        "audit" => MetaCommand::Audit(arg.to_owned()),
+        "policy" => MetaCommand::Policy(arg.to_owned()),
+        "automation" => MetaCommand::Automation(arg.to_owned()),
+        "integration" => MetaCommand::Integration(arg.to_owned()),
+        "events" => MetaCommand::Events(arg.to_owned()),
+        other => MetaCommand::Unknown(format!("\\{other}")),
     })
 }
 
@@ -121,7 +122,7 @@ Management (v0.5 — plan/apply, requires --apply to execute)
   \\failover simulate <node_id>         dry-run failover simulation
   \\audit [recent|<event_id>]           view audit log
 ";
-            Ok(MetaResult::Output(help.to_string()))
+            Ok(MetaResult::Output(help.to_owned()))
         }
 
         MetaCommand::ConnInfo => Ok(MetaResult::Output(client.conninfo())),
@@ -133,18 +134,18 @@ Management (v0.5 — plan/apply, requires --apply to execute)
                        ORDER BY t.table_schema, t.table_name";
             let (rows, _tag) = client.query_simple(sql).await?;
             if rows.is_empty() {
-                return Ok(MetaResult::Output("No relations found.".to_string()));
+                return Ok(MetaResult::Output("No relations found.".to_owned()));
             }
             let mut out = format!("{:<20} {:<30} {}\n", "Schema", "Name", "Type");
             out.push_str(&"-".repeat(60));
             out.push('\n');
-            let cols: Vec<String> = rows[0].columns().iter().map(|c| c.name().to_string()).collect();
+            let cols: Vec<String> = rows[0].columns().iter().map(|c| c.name().to_owned()).collect();
             let idx = |name: &str| cols.iter().position(|c| c == name);
             for row in &rows {
                 let schema = idx("table_schema").and_then(|i| row.get(i)).unwrap_or("");
                 let name   = idx("table_name").and_then(|i| row.get(i)).unwrap_or("");
                 let typ    = idx("table_type").and_then(|i| row.get(i)).unwrap_or("");
-                out.push_str(&format!("{:<20} {:<30} {}\n", schema, name, typ));
+                let _ = writeln!(out, "{schema:<20} {name:<30} {typ}");
             }
             Ok(MetaResult::Output(out))
         }
@@ -160,27 +161,22 @@ Management (v0.5 — plan/apply, requires --apply to execute)
             let (rows, _tag) = client.query_simple(&sql).await?;
             if rows.is_empty() {
                 return Ok(MetaResult::Output(format!(
-                    "Did not find any relation named \"{}\".",
-                    table
+                    "Did not find any relation named \"{table}\"."
                 )));
             }
-            let mut out = format!("Table \"{}\":\n", table);
-            out.push_str(&format!(
-                "  {:<25} {:<20} {:<10} {}\n",
-                "Column", "Type", "Nullable", "Default"
-            ));
-            out.push_str(&format!("  {}\n", "-".repeat(70)));
-            let cols: Vec<String> = rows[0].columns().iter().map(|c| c.name().to_string()).collect();
+            let mut out = format!("Table \"{table}\":\n");
+            let _ = writeln!(out, "  {:<25} {:<20} {:<10} Default",
+                "Column", "Type", "Nullable"
+            );
+            let _ = writeln!(out, "  {}", "-".repeat(70));
+            let cols: Vec<String> = rows[0].columns().iter().map(|c| c.name().to_owned()).collect();
             let idx = |name: &str| cols.iter().position(|c| c == name);
             for row in &rows {
                 let col      = idx("column_name").and_then(|i| row.get(i)).unwrap_or("");
                 let typ      = idx("data_type").and_then(|i| row.get(i)).unwrap_or("");
                 let nullable = idx("is_nullable").and_then(|i| row.get(i)).unwrap_or("");
                 let default  = idx("column_default").and_then(|i| row.get(i)).unwrap_or("");
-                out.push_str(&format!(
-                    "  {:<25} {:<20} {:<10} {}\n",
-                    col, typ, nullable, default
-                ));
+                let _ = writeln!(out, "  {col:<25} {typ:<20} {nullable:<10} {default}");
             }
             Ok(MetaResult::Output(out))
         }
@@ -190,13 +186,13 @@ Management (v0.5 — plan/apply, requires --apply to execute)
                 "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname";
             let (rows, _tag) = client.query_simple(sql).await?;
             if rows.is_empty() {
-                return Ok(MetaResult::Output("No databases found.".to_string()));
+                return Ok(MetaResult::Output("No databases found.".to_owned()));
             }
-            let mut out = "List of databases:\n".to_string();
-            let cols: Vec<String> = rows[0].columns().iter().map(|c| c.name().to_string()).collect();
+            let mut out = "List of databases:\n".to_owned();
+            let cols: Vec<String> = rows[0].columns().iter().map(|c| c.name().to_owned()).collect();
             let datname_idx = cols.iter().position(|c| c == "datname").unwrap_or(0);
             for row in &rows {
-                out.push_str(&format!("  {}\n", row.get(datname_idx).unwrap_or("")));
+                let _ = writeln!(out, "  {}", row.get(datname_idx).unwrap_or(""));
             }
             Ok(MetaResult::Output(out))
         }
@@ -234,8 +230,7 @@ Management (v0.5 — plan/apply, requires --apply to execute)
         MetaCommand::Events(arg) => Ok(MetaResult::Events(arg.clone())),
 
         MetaCommand::Unknown(cmd) => Ok(MetaResult::Output(format!(
-            "Invalid command \"{}\". Try \\? for help.",
-            cmd
+            "Invalid command \"{cmd}\". Try \\? for help."
         ))),
     }
 }

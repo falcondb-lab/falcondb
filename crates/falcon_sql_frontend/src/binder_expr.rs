@@ -134,7 +134,7 @@ impl Binder {
             Expr::Value(Value::Placeholder(s)) => {
                 // $1, $2, ... parameter placeholders (1-indexed)
                 let idx = s.trim_start_matches('$').parse::<usize>().map_err(|_| {
-                    SqlError::Parse(format!("Invalid parameter placeholder: {}", s))
+                    SqlError::Parse(format!("Invalid parameter placeholder: {s}"))
                 })?;
                 if idx == 0 {
                     return Err(SqlError::Parse("Parameter index must be >= 1".into()));
@@ -150,7 +150,7 @@ impl Binder {
                 Ok(BoundExpr::Literal(datum))
             }
             Expr::TypedString { data_type, value } => {
-                let target_type = format!("{}", data_type).to_lowercase();
+                let target_type = format!("{data_type}").to_lowercase();
                 Ok(BoundExpr::Cast {
                     expr: Box::new(BoundExpr::Literal(Datum::Text(value.clone()))),
                     target_type,
@@ -273,7 +273,7 @@ impl Binder {
                 ..
             } => {
                 let bound_expr = self.bind_expr_full(cast_expr, schema, aliases, outer_schema)?;
-                let target_type = format!("{}", data_type);
+                let target_type = format!("{data_type}");
                 Ok(BoundExpr::Cast {
                     expr: Box::new(bound_expr),
                     target_type,
@@ -551,11 +551,8 @@ impl Binder {
                         false
                     };
                     let bound_arg = if let ast::FunctionArguments::List(args) = &func.args {
-                        if args.args.is_empty() {
-                            None
-                        } else if let Some(ast::FunctionArg::Unnamed(
-                            ast::FunctionArgExpr::Wildcard,
-                        )) = args.args.first()
+                        if args.args.is_empty()
+                            || matches!(args.args.first(), Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Wildcard)))
                         {
                             None
                         } else if let Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(
@@ -608,15 +605,7 @@ impl Binder {
                             args: bound_args,
                         });
                     }
-                    "DATE_PART" => {
-                        let bound_args =
-                            self.bind_func_args_full(func, schema, aliases, outer_schema)?;
-                        return Ok(BoundExpr::Function {
-                            func: ScalarFunc::Extract,
-                            args: bound_args,
-                        });
-                    }
-                    "EXTRACT" => {
+                    "DATE_PART" | "EXTRACT" => {
                         let bound_args =
                             self.bind_func_args_full(func, schema, aliases, outer_schema)?;
                         return Ok(BoundExpr::Function {
@@ -628,7 +617,7 @@ impl Binder {
                 }
                 // Resolve function name to ScalarFunc variant
                 let scalar_func = crate::resolve_function::resolve_scalar_func(&func_name)
-                    .ok_or_else(|| SqlError::Unsupported(format!("Function: {}", func_name)))?;
+                    .ok_or_else(|| SqlError::Unsupported(format!("Function: {func_name}")))?;
                 let bound_args = self.bind_func_args_full(func, schema, aliases, outer_schema)?;
                 Ok(BoundExpr::Function {
                     func: scalar_func,
@@ -641,7 +630,7 @@ impl Binder {
                 syntax: _,
             } => {
                 let ts_expr = self.bind_expr_full(extract_expr, schema, aliases, outer_schema)?;
-                let field_str = format!("{}", field).to_uppercase();
+                let field_str = format!("{field}").to_uppercase();
                 Ok(BoundExpr::Function {
                     func: ScalarFunc::Extract,
                     args: vec![BoundExpr::Literal(Datum::Text(field_str)), ts_expr],
@@ -767,7 +756,7 @@ impl Binder {
                 let bound_val = self.bind_expr_full(value, schema, aliases, outer_schema)?;
                 Ok(BoundExpr::Cast {
                     expr: Box::new(bound_val),
-                    target_type: "interval".to_string(),
+                    target_type: "interval".to_owned(),
                 })
             }
             Expr::AnyOp {
@@ -798,7 +787,7 @@ impl Binder {
                     right: Box::new(bound_right),
                 })
             }
-            _ => Err(SqlError::Unsupported(format!("Expression: {:?}", expr))),
+            _ => Err(SqlError::Unsupported(format!("Expression: {expr:?}"))),
         }
     }
 
@@ -824,8 +813,7 @@ impl Binder {
             }
         }
         Err(SqlError::Parse(format!(
-            "Expected string argument at position {}",
-            pos
+            "Expected string argument at position {pos}"
         )))
     }
 
@@ -842,8 +830,7 @@ impl Binder {
             }
         }
         Err(SqlError::Parse(format!(
-            "Expected integer argument at position {}",
-            pos
+            "Expected integer argument at position {pos}"
         )))
     }
 
@@ -908,8 +895,6 @@ const fn datum_to_datatype(datum: &Datum) -> Option<DataType> {
         Datum::Text(_) => Some(DataType::Text),
         Datum::Timestamp(_) => Some(DataType::Timestamp),
         Datum::Jsonb(_) => Some(DataType::Jsonb),
-        Datum::Array(_) => None, // array element type unknown from value alone
-        Datum::Null => None,
         _ => None,
     }
 }
@@ -919,8 +904,8 @@ fn parse_target_type(target: &str) -> Option<DataType> {
     match target.to_lowercase().as_str() {
         "int" | "integer" | "int4" => Some(DataType::Int32),
         "bigint" | "int8" => Some(DataType::Int64),
-        "float" | "double precision" | "float8" => Some(DataType::Float64),
-        "real" | "float4" => Some(DataType::Float64),
+        "float" | "double precision" | "float8"
+        | "real" | "float4" => Some(DataType::Float64),
         "text" | "varchar" | "character varying" => Some(DataType::Text),
         "boolean" | "bool" => Some(DataType::Boolean),
         "timestamp" | "timestamp without time zone" => Some(DataType::Timestamp),

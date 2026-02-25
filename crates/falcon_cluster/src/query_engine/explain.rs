@@ -48,8 +48,7 @@ impl super::DistributedQueryEngine {
                     offset,
                 } => {
                     lines.push(OwnedRow::new(vec![Datum::Text(format!(
-                        "  Gather: Union (distinct={}, limit={:?}, offset={:?})",
-                        distinct, limit, offset
+                        "  Gather: Union (distinct={distinct}, limit={limit:?}, offset={offset:?})"
                     ))]));
                 }
                 DistGather::MergeSortLimit {
@@ -80,21 +79,18 @@ impl super::DistributedQueryEngine {
                     limit,
                     offset,
                 } => {
-                    let merges: Vec<String> = agg_merges.iter().map(|m| m.to_string()).collect();
+                    let merges: Vec<String> = agg_merges.iter().map(std::string::ToString::to_string).collect();
                     lines.push(OwnedRow::new(vec![Datum::Text(format!(
-                        "  Gather: TwoPhaseAgg (group_by={:?})",
-                        group_by_indices
+                        "  Gather: TwoPhaseAgg (group_by={group_by_indices:?})"
                     ))]));
                     for merge_label in &merges {
                         lines.push(OwnedRow::new(vec![Datum::Text(format!(
-                            "    merge: {}",
-                            merge_label
+                            "    merge: {merge_label}"
                         ))]));
                     }
                     if !avg_fixups.is_empty() {
                         lines.push(OwnedRow::new(vec![Datum::Text(format!(
-                            "    AVG decomposition: {:?} (visible_columns={})",
-                            avg_fixups, visible_columns
+                            "    AVG decomposition: {avg_fixups:?} (visible_columns={visible_columns})"
                         ))]));
                     }
                     if having.is_some() {
@@ -140,8 +136,7 @@ impl super::DistributedQueryEngine {
         ))]));
         if let Some(pruned) = stats.pruned_to_shard {
             lines.push(OwnedRow::new(vec![Datum::Text(format!(
-                "  Shard pruning: routed to shard {} (PK point lookup)",
-                pruned
+                "  Shard pruning: routed to shard {pruned} (PK point lookup)"
             ))]));
         }
         lines.push(OwnedRow::new(vec![Datum::Text(format!(
@@ -153,11 +148,9 @@ impl super::DistributedQueryEngine {
                 .per_shard_row_count
                 .iter()
                 .find(|(s, _)| s == sid)
-                .map(|(_, c)| *c)
-                .unwrap_or(0);
+                .map_or(0, |(_, c)| *c);
             lines.push(OwnedRow::new(vec![Datum::Text(format!(
-                "  Shard {} latency: {}us, rows: {}",
-                sid, lat, row_count
+                "  Shard {sid} latency: {lat}us, rows: {row_count}"
             ))]));
         }
         if !stats.failed_shards.is_empty() {
@@ -186,8 +179,7 @@ impl super::DistributedQueryEngine {
             "NestedLoopJoin"
         };
         lines.push(OwnedRow::new(vec![Datum::Text(format!(
-            "CoordinatorJoin ({}, gather-all-then-join)",
-            strategy
+            "CoordinatorJoin ({strategy}, gather-all-then-join)"
         ))]));
         let (left_table_id, joins, filter, order_by, limit, offset) = match plan {
             PhysicalPlan::NestedLoopJoin {
@@ -246,10 +238,10 @@ impl super::DistributedQueryEngine {
                 ))]));
             }
             if let Some(l) = limit {
-                lines.push(OwnedRow::new(vec![Datum::Text(format!("  Limit: {}", l))]));
+                lines.push(OwnedRow::new(vec![Datum::Text(format!("  Limit: {l}"))]));
             }
             if let Some(o) = offset {
-                lines.push(OwnedRow::new(vec![Datum::Text(format!("  Offset: {}", o))]));
+                lines.push(OwnedRow::new(vec![Datum::Text(format!("  Offset: {o}"))]));
             }
 
             // Execute and show row counts
@@ -263,7 +255,7 @@ impl super::DistributedQueryEngine {
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    lines.push(OwnedRow::new(vec![Datum::Text(format!("  Error: {}", e))]));
+                    lines.push(OwnedRow::new(vec![Datum::Text(format!("  Error: {e}"))]));
                 }
             }
         }
@@ -302,7 +294,7 @@ impl super::DistributedQueryEngine {
             }
             Ok(_) => {}
             Err(e) => {
-                lines.push(OwnedRow::new(vec![Datum::Text(format!("  Error: {}", e))]));
+                lines.push(OwnedRow::new(vec![Datum::Text(format!("  Error: {e}"))]));
             }
         }
 

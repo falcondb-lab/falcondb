@@ -60,7 +60,7 @@ impl ShardReplicaGroup {
     /// Returns the number of records applied.
     pub fn catch_up_replica(&self, replica_idx: usize) -> Result<usize, FalconError> {
         let replica = self.replicas.get(replica_idx).ok_or_else(|| {
-            FalconError::Internal(format!("Replica index {} out of range", replica_idx))
+            FalconError::Internal(format!("Replica index {replica_idx} out of range"))
         })?;
 
         let from_lsn = replica.current_lsn();
@@ -103,7 +103,7 @@ impl ShardReplicaGroup {
         }
 
         let replica = self.replicas.get(replica_idx).ok_or_else(|| {
-            FalconError::Internal(format!("Replica index {} out of range", replica_idx))
+            FalconError::Internal(format!("Replica index {replica_idx} out of range"))
         })?;
 
         let mut write_sets: HashMap<TxnId, Vec<WriteOp>> = HashMap::new();
@@ -178,7 +178,7 @@ impl ShardReplicaGroup {
         self.catch_up_replica(replica_idx)?;
 
         let replica = self.replicas.get(replica_idx).ok_or_else(|| {
-            FalconError::Internal(format!("Replica index {} out of range", replica_idx))
+            FalconError::Internal(format!("Replica index {replica_idx} out of range"))
         })?;
 
         // Step 3: Swap roles.

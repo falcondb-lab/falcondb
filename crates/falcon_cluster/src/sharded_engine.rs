@@ -138,7 +138,7 @@ impl ShardedEngine {
     {
         let shard = self
             .shard(shard_id)
-            .ok_or_else(|| FalconError::Internal(format!("Shard {:?} not found", shard_id)))?;
+            .ok_or_else(|| FalconError::Internal(format!("Shard {shard_id:?} not found")))?;
         f(&shard.storage, &shard.txn_mgr)
     }
 }

@@ -42,7 +42,7 @@ impl fmt::Display for PartitionStrategy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Range => write!(f, "RANGE"),
-            Self::Hash { modulus } => write!(f, "HASH({})", modulus),
+            Self::Hash { modulus } => write!(f, "HASH({modulus})"),
             Self::List => write!(f, "LIST"),
         }
     }
@@ -64,14 +64,8 @@ impl RangeBound {
 
     /// Check if a value falls within this range [lower, upper).
     pub fn contains(&self, value: &Datum) -> bool {
-        let above_lower = match &self.lower {
-            Some(lo) => value >= lo,
-            None => true,
-        };
-        let below_upper = match &self.upper {
-            Some(hi) => value < hi,
-            None => true,
-        };
+        let above_lower = self.lower.as_ref().is_none_or(|lo| value >= lo);
+        let below_upper = self.upper.as_ref().is_none_or(|hi| value < hi);
         above_lower && below_upper
     }
 }
@@ -233,7 +227,7 @@ impl PartitionManager {
                 PartitionBound::Hash { remainder } => {
                     if let PartitionStrategy::Hash { modulus } = &def.strategy {
                         let hash = datum_hash(key_value);
-                        if hash % (*modulus as u64) == *remainder as u64 {
+                        if hash % u64::from(*modulus) == u64::from(*remainder) {
                             return Some(part.table_id);
                         }
                     }

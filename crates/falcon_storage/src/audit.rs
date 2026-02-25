@@ -127,7 +127,7 @@ impl AuditLog {
             },
             tenant_id,
             role_id,
-            role_name: role_name.to_string(),
+            role_name: role_name.to_owned(),
             session_id,
             source_ip,
             detail: if success {
@@ -156,7 +156,7 @@ impl AuditLog {
             event_type: AuditEventType::Ddl,
             tenant_id,
             role_id,
-            role_name: role_name.to_string(),
+            role_name: role_name.to_owned(),
             session_id,
             source_ip: None,
             detail: if success {
@@ -184,10 +184,10 @@ impl AuditLog {
             event_type: AuditEventType::PrivilegeChange,
             tenant_id,
             role_id,
-            role_name: role_name.to_string(),
+            role_name: role_name.to_owned(),
             session_id,
             source_ip: None,
-            detail: detail.to_string(),
+            detail: detail.to_owned(),
             sql: None,
             success: true,
         });
@@ -277,7 +277,7 @@ impl Default for AuditLog {
 /// Truncate SQL for storage in audit events.
 fn truncate_sql(sql: &str, max_len: usize) -> String {
     if sql.len() <= max_len {
-        sql.to_string()
+        sql.to_owned()
     } else {
         format!("{}...", &sql[..max_len])
     }

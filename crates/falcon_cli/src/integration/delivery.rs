@@ -23,8 +23,8 @@ impl DeliveryStatus {
 impl std::fmt::Display for DeliveryStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Failed(reason) => write!(f, "failed: {}", reason),
-            Self::Retrying(n) => write!(f, "retrying (attempt {})", n),
+            Self::Failed(reason) => write!(f, "failed: {reason}"),
+            Self::Retrying(n) => write!(f, "retrying (attempt {n})"),
             other => f.write_str(other.as_str()),
         }
     }

@@ -18,7 +18,7 @@ pub fn run_doctor(config_path: &str) {
     let mut warn = 0u32;
 
     // 1. Config file
-    print!("  [check] Config file: {} ... ", config_path);
+    print!("  [check] Config file: {config_path} ... ");
     if Path::new(config_path).exists() {
         println!("OK");
         pass += 1;
@@ -47,12 +47,12 @@ pub fn run_doctor(config_path: &str) {
                     }
                 }
                 Err(e) => {
-                    println!("FAIL — parse error: {}", e);
+                    println!("FAIL — parse error: {e}");
                     fail += 1;
                 }
             },
             Err(e) => {
-                println!("FAIL — read error: {}", e);
+                println!("FAIL — read error: {e}");
                 fail += 1;
             }
         }
@@ -63,15 +63,15 @@ pub fn run_doctor(config_path: &str) {
 
     // 2. Ports
     for (name, port) in &[("PG", 5443u16), ("Admin/Health", 8080)] {
-        print!("  [check] Port {} ({}) ... ", port, name);
+        print!("  [check] Port {port} ({name}) ... ");
         match TcpListener::bind(("127.0.0.1", *port)) {
             Ok(_) => {
                 println!("AVAILABLE");
                 pass += 1;
             }
             Err(e) => {
-                println!("IN USE ({})", e);
-                println!("         Fix: netstat -ano | findstr :{}", port);
+                println!("IN USE ({e})");
+                println!("         Fix: netstat -ano | findstr :{port}");
                 fail += 1;
             }
         }
@@ -79,7 +79,7 @@ pub fn run_doctor(config_path: &str) {
 
     // 3. Data directory
     let data_dirs = [
-        "data".to_string(),
+        "data".to_owned(),
         crate::service::paths::service_data_dir()
             .to_string_lossy()
             .to_string(),
@@ -87,7 +87,7 @@ pub fn run_doctor(config_path: &str) {
     for dir in &data_dirs {
         let p = Path::new(dir);
         if p.exists() {
-            print!("  [check] Data dir: {} ... ", dir);
+            print!("  [check] Data dir: {dir} ... ");
             let test_file = p.join(".falcon_doctor_test");
             match std::fs::write(&test_file, b"test") {
                 Ok(_) => {
@@ -96,7 +96,7 @@ pub fn run_doctor(config_path: &str) {
                     pass += 1;
                 }
                 Err(e) => {
-                    println!("NOT WRITABLE ({})", e);
+                    println!("NOT WRITABLE ({e})");
                     println!("         Fix: check directory permissions");
                     fail += 1;
                 }
@@ -134,23 +134,20 @@ pub fn run_doctor(config_path: &str) {
     // 5. Clock skew (basic — warn if system clock looks stale)
     print!("  [check] System clock ... ");
     let now = std::time::SystemTime::now();
-    match now.duration_since(std::time::UNIX_EPOCH) {
-        Ok(d) => {
-            let secs = d.as_secs();
-            // Sanity: epoch > 2020-01-01 (1577836800) and < 2040-01-01 (2208988800)
-            if secs > 1_577_836_800 && secs < 2_208_988_800 {
-                println!("OK");
-                pass += 1;
-            } else {
-                println!("WARN — clock looks incorrect (epoch={})", secs);
-                println!("         Fix: sync system clock (w32tm /resync or NTP)");
-                warn += 1;
-            }
-        }
-        Err(_) => {
-            println!("WARN — clock before UNIX epoch");
+    if let Ok(d) = now.duration_since(std::time::UNIX_EPOCH) {
+        let secs = d.as_secs();
+        // Sanity: epoch > 2020-01-01 (1577836800) and < 2040-01-01 (2208988800)
+        if secs > 1_577_836_800 && secs < 2_208_988_800 {
+            println!("OK");
+            pass += 1;
+        } else {
+            println!("WARN — clock looks incorrect (epoch={secs})");
+            println!("         Fix: sync system clock (w32tm /resync or NTP)");
             warn += 1;
         }
+    } else {
+        println!("WARN — clock before UNIX epoch");
+        warn += 1;
     }
 
     // 6. Service status (Windows only)
@@ -217,7 +214,7 @@ pub fn run_doctor(config_path: &str) {
         let (no_buf_ok, sector_size) =
             falcon_storage::wal_win_async::check_no_buffering_support(&check_dir);
         if no_buf_ok {
-            println!("OK (sector_size={})", sector_size);
+            println!("OK (sector_size={sector_size})");
             pass += 1;
         } else {
             println!("NOT SUPPORTED");
@@ -229,10 +226,10 @@ pub fn run_doctor(config_path: &str) {
         let (aligned, sector, fs_hint) =
             falcon_storage::wal_win_async::check_disk_alignment(&check_dir);
         if aligned {
-            println!("OK ({}, sector={})", fs_hint, sector);
+            println!("OK ({fs_hint}, sector={sector})");
             pass += 1;
         } else {
-            println!("WARN — alignment check failed ({})", fs_hint);
+            println!("WARN — alignment check failed ({fs_hint})");
             warn += 1;
         }
 
@@ -252,7 +249,7 @@ pub fn run_doctor(config_path: &str) {
 
     // Summary
     println!();
-    println!("Summary: {} passed, {} failed, {} warnings", pass, fail, warn);
+    println!("Summary: {pass} passed, {fail} failed, {warn} warnings");
     if fail > 0 {
         println!("  Fix the failures above before starting FalconDB.");
         std::process::exit(1);

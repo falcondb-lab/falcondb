@@ -245,8 +245,7 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
                                     return Err(StorageError::IO {
                                         source: openraft::StorageIOError::write_state_machine(
                                             &std::io::Error::other(format!(
-                                                "apply callback: {}",
-                                                e
+                                                "apply callback: {e}"
                                             )),
                                         ),
                                     });
@@ -311,13 +310,10 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
     async fn get_current_snapshot(
         &mut self,
     ) -> Result<Option<Snapshot<TypeConfig>>, StorageError<u64>> {
-        match &self.current_snapshot {
-            Some(snap) => Ok(Some(Snapshot {
-                meta: snap.meta.clone(),
-                snapshot: Box::new(Cursor::new(snap.data.clone())),
-            })),
-            None => Ok(None),
-        }
+        Ok(self.current_snapshot.as_ref().map(|snap| Snapshot {
+            meta: snap.meta.clone(),
+            snapshot: Box::new(Cursor::new(snap.data.clone())),
+        }))
     }
 }
 

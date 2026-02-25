@@ -60,10 +60,7 @@ impl Binder {
         stmt: &Statement,
         type_hints: Option<&[DataType]>,
     ) -> Result<BindResult, SqlError> {
-        *self.param_env.borrow_mut() = Some(match type_hints {
-            Some(hints) => ParamEnv::with_type_hints(hints),
-            None => ParamEnv::new(),
-        });
+        *self.param_env.borrow_mut() = Some(type_hints.map_or_else(ParamEnv::new, ParamEnv::with_type_hints));
         let bound = self.bind(stmt);
         let env = self.param_env.borrow_mut().take().ok_or_else(|| {
             SqlError::InternalInvariant("param_env was not set before bind_with_params".into())
@@ -86,10 +83,7 @@ impl Binder {
         stmt: &Statement,
         type_hints: Option<&[DataType]>,
     ) -> Result<(BoundStatement, Vec<Option<DataType>>), SqlError> {
-        *self.param_env.borrow_mut() = Some(match type_hints {
-            Some(hints) => ParamEnv::with_type_hints(hints),
-            None => ParamEnv::new(),
-        });
+        *self.param_env.borrow_mut() = Some(type_hints.map_or_else(ParamEnv::new, ParamEnv::with_type_hints));
         let bound = self.bind(stmt);
         let env = self.param_env.borrow_mut().take().ok_or_else(|| {
             SqlError::InternalInvariant(
@@ -170,7 +164,7 @@ impl Binder {
                         if_exists: *if_exists,
                     })
                 }
-                _ => Err(SqlError::Unsupported(format!("DROP {:?}", object_type))),
+                _ => Err(SqlError::Unsupported(format!("DROP {object_type:?}"))),
             },
             Statement::AlterTable {
                 operations, name, ..
@@ -216,14 +210,14 @@ impl Binder {
                 let index_name = create_idx
                     .name
                     .as_ref()
-                    .map(|n| n.to_string())
+                    .map(std::string::ToString::to_string)
                     .unwrap_or_else(|| {
                         format!(
                             "idx_{}_{}",
                             table_name,
                             column_indices
                                 .iter()
-                                .map(|i| i.to_string())
+                                .map(std::string::ToString::to_string)
                                 .collect::<Vec<_>>()
                                 .join("_")
                         )
@@ -246,7 +240,7 @@ impl Binder {
                     .join("_");
                 match self.var_registry.resolve(&var_name) {
                     Some(stmt) => Ok(stmt),
-                    None => Err(SqlError::Unsupported(format!("SHOW {}", var_name))),
+                    None => Err(SqlError::Unsupported(format!("SHOW {var_name}"))),
                 }
             }
             Statement::Analyze { table_name, .. } => {
@@ -260,7 +254,7 @@ impl Binder {
                 ..
             } => {
                 let view_name = name.to_string();
-                let query_sql = format!("{}", query);
+                let query_sql = format!("{query}");
                 Ok(BoundStatement::CreateView {
                     name: view_name,
                     query_sql,
@@ -311,10 +305,10 @@ impl Binder {
             } => {
                 let name = names
                     .first()
-                    .map(|n| n.to_string())
+                    .map(std::string::ToString::to_string)
                     .unwrap_or_default();
                 let pw = match password {
-                    Some(ast::Password::Password(expr)) => Some(format!("{}", expr)),
+                    Some(ast::Password::Password(expr)) => Some(format!("{expr}")),
                     _ => None,
                 };
                 Ok(BoundStatement::CreateRole {
@@ -345,7 +339,7 @@ impl Binder {
                             ast::RoleOption::CreateRole(b) => al_createrole = Some(*b),
                             ast::RoleOption::Password(p) => {
                                 pwd = Some(match p {
-                                    ast::Password::Password(expr) => Some(format!("{}", expr)),
+                                    ast::Password::Password(expr) => Some(format!("{expr}")),
                                     ast::Password::NullPassword => None,
                                 });
                             }
@@ -369,27 +363,27 @@ impl Binder {
                 ..
             } => {
                 let priv_str = match privileges {
-                    ast::Privileges::All { .. } => "ALL".to_string(),
+                    ast::Privileges::All { .. } => "ALL".to_owned(),
                     ast::Privileges::Actions(actions) => {
-                        actions.iter().map(|a| format!("{}", a)).collect::<Vec<_>>().join(", ")
+                        actions.iter().map(|a| format!("{a}")).collect::<Vec<_>>().join(", ")
                     }
                 };
                 let (obj_type, obj_name) = match objects {
                     ast::GrantObjects::Tables(names) => {
-                        let name = names.first().map(|n| n.to_string()).unwrap_or_default();
-                        ("TABLE".to_string(), name)
+                        let name = names.first().map(std::string::ToString::to_string).unwrap_or_default();
+                        ("TABLE".to_owned(), name)
                     }
                     ast::GrantObjects::Schemas(names) => {
-                        let name = names.first().map(|n| n.to_string()).unwrap_or_default();
-                        ("SCHEMA".to_string(), name)
+                        let name = names.first().map(std::string::ToString::to_string).unwrap_or_default();
+                        ("SCHEMA".to_owned(), name)
                     }
                     ast::GrantObjects::Sequences(names) => {
-                        let name = names.first().map(|n| n.to_string()).unwrap_or_default();
-                        ("SEQUENCE".to_string(), name)
+                        let name = names.first().map(std::string::ToString::to_string).unwrap_or_default();
+                        ("SEQUENCE".to_owned(), name)
                     }
                     ast::GrantObjects::AllTablesInSchema { schemas } => {
-                        let name = schemas.first().map(|n| n.to_string()).unwrap_or_default();
-                        ("SCHEMA".to_string(), name)
+                        let name = schemas.first().map(std::string::ToString::to_string).unwrap_or_default();
+                        ("SCHEMA".to_owned(), name)
                     }
                     _ => {
                         return Err(SqlError::Unsupported("GRANT on this object type".into()));
@@ -413,27 +407,27 @@ impl Binder {
                 ..
             } => {
                 let priv_str = match privileges {
-                    ast::Privileges::All { .. } => "ALL".to_string(),
+                    ast::Privileges::All { .. } => "ALL".to_owned(),
                     ast::Privileges::Actions(actions) => {
-                        actions.iter().map(|a| format!("{}", a)).collect::<Vec<_>>().join(", ")
+                        actions.iter().map(|a| format!("{a}")).collect::<Vec<_>>().join(", ")
                     }
                 };
                 let (obj_type, obj_name) = match objects {
                     ast::GrantObjects::Tables(names) => {
-                        let name = names.first().map(|n| n.to_string()).unwrap_or_default();
-                        ("TABLE".to_string(), name)
+                        let name = names.first().map(std::string::ToString::to_string).unwrap_or_default();
+                        ("TABLE".to_owned(), name)
                     }
                     ast::GrantObjects::Schemas(names) => {
-                        let name = names.first().map(|n| n.to_string()).unwrap_or_default();
-                        ("SCHEMA".to_string(), name)
+                        let name = names.first().map(std::string::ToString::to_string).unwrap_or_default();
+                        ("SCHEMA".to_owned(), name)
                     }
                     ast::GrantObjects::Sequences(names) => {
-                        let name = names.first().map(|n| n.to_string()).unwrap_or_default();
-                        ("SEQUENCE".to_string(), name)
+                        let name = names.first().map(std::string::ToString::to_string).unwrap_or_default();
+                        ("SEQUENCE".to_owned(), name)
                     }
                     ast::GrantObjects::AllTablesInSchema { schemas } => {
-                        let name = schemas.first().map(|n| n.to_string()).unwrap_or_default();
-                        ("SCHEMA".to_string(), name)
+                        let name = schemas.first().map(std::string::ToString::to_string).unwrap_or_default();
+                        ("SCHEMA".to_owned(), name)
                     }
                     _ => {
                         return Err(SqlError::Unsupported("REVOKE on this object type".into()));
@@ -483,12 +477,11 @@ impl Binder {
             ast::CopyTarget::Stdin | ast::CopyTarget::Stdout => {}
             ast::CopyTarget::File { filename } => {
                 return Err(SqlError::Unsupported(format!(
-                    "COPY to/from file '{}'",
-                    filename
+                    "COPY to/from file '{filename}'"
                 )));
             }
             ast::CopyTarget::Program { command } => {
-                return Err(SqlError::Unsupported(format!("COPY PROGRAM '{}'", command)));
+                return Err(SqlError::Unsupported(format!("COPY PROGRAM '{command}'")));
             }
         }
 
@@ -505,7 +498,7 @@ impl Binder {
             let mut csv = false;
             let mut delimiter = '\t';
             let mut header = false;
-            let mut null_string = "\\N".to_string();
+            let mut null_string = "\\N".to_owned();
             let mut quote = '"';
             let mut escape = '"';
             for opt in options {
@@ -521,7 +514,7 @@ impl Binder {
                                 csv = false;
                                 delimiter = '\t';
                             }
-                            _ => return Err(SqlError::Unsupported(format!("COPY FORMAT {}", fmt))),
+                            _ => return Err(SqlError::Unsupported(format!("COPY FORMAT {fmt}"))),
                         }
                     }
                     ast::CopyOption::Delimiter(c) => delimiter = *c,
@@ -577,7 +570,7 @@ impl Binder {
         let mut csv = false;
         let mut delimiter = '\t';
         let mut header = false;
-        let mut null_string = "\\N".to_string();
+        let mut null_string = "\\N".to_owned();
         let mut quote = '"';
         let mut escape = '"';
 
@@ -594,7 +587,7 @@ impl Binder {
                             csv = false;
                             delimiter = '\t';
                         }
-                        _ => return Err(SqlError::Unsupported(format!("COPY FORMAT {}", fmt))),
+                        _ => return Err(SqlError::Unsupported(format!("COPY FORMAT {fmt}"))),
                     }
                 }
                 ast::CopyOption::Delimiter(c) => delimiter = *c,
@@ -739,7 +732,7 @@ impl Binder {
                     }
                 }
                 ast::TableConstraint::Check { expr, .. } => {
-                    check_constraints.push(format!("{}", expr));
+                    check_constraints.push(format!("{expr}"));
                 }
                 ast::TableConstraint::Unique {
                     columns: uniq_cols, ..
@@ -768,7 +761,7 @@ impl Binder {
             for option in &col_def.options {
                 match &option.option {
                     ast::ColumnOption::Check(expr) => {
-                        check_constraints.push(format!("{}", expr));
+                        check_constraints.push(format!("{expr}"));
                     }
                     ast::ColumnOption::Unique { is_primary, .. } if !*is_primary => {
                         unique_constraints.push(vec![i]);
@@ -840,8 +833,9 @@ impl Binder {
             }
         }
         // Resolve storage engine type from ENGINE= option (like SingleStore)
-        let storage_type = if let Some(ref engine) = create.engine {
-            match engine.name.to_lowercase().as_str() {
+        let storage_type = create.engine.as_ref().map_or(
+            falcon_common::schema::StorageType::Rowstore,
+            |engine| match engine.name.to_lowercase().as_str() {
                 "columnstore" => falcon_common::schema::StorageType::Columnstore,
                 "disk" | "disk_rowstore" | "diskrowstore" => {
                     falcon_common::schema::StorageType::DiskRowstore
@@ -849,12 +843,9 @@ impl Binder {
                 "lsm" | "lsm_rowstore" | "lsmrowstore" => {
                     falcon_common::schema::StorageType::LsmRowstore
                 }
-                "rowstore" | "memory" => falcon_common::schema::StorageType::Rowstore,
                 _ => falcon_common::schema::StorageType::Rowstore,
-            }
-        } else {
-            falcon_common::schema::StorageType::Rowstore
-        };
+            },
+        );
 
         // Parse SHARD KEY and SHARDING policy from WITH options
         // Syntax: CREATE TABLE t (...) WITH (shard_key = 'col1,col2', sharding = 'hash')
@@ -867,9 +858,9 @@ impl Binder {
             match key.as_str() {
                 "shard_key" => {
                     let val: String = match &opt.value {
-                        Expr::Value(Value::SingleQuotedString(s)) => s.clone(),
-                        Expr::Value(Value::DoubleQuotedString(s)) => s.clone(),
-                        other => format!("{}", other),
+                        Expr::Value(Value::SingleQuotedString(s))
+                        | Expr::Value(Value::DoubleQuotedString(s)) => s.clone(),
+                        other => format!("{other}"),
                     };
                     for part in val.split(',') {
                         let col_name = part.trim().to_lowercase();
@@ -893,16 +884,15 @@ impl Binder {
                 }
                 "sharding" => {
                     let val: String = match &opt.value {
-                        Expr::Value(Value::SingleQuotedString(s)) => s.to_lowercase(),
-                        Expr::Value(Value::DoubleQuotedString(s)) => s.to_lowercase(),
-                        other => format!("{}", other).to_lowercase(),
+                        Expr::Value(Value::SingleQuotedString(s))
+                        | Expr::Value(Value::DoubleQuotedString(s)) => s.to_lowercase(),
+                        other => format!("{other}").to_lowercase(),
                     };
                     sharding_policy = match val.as_str() {
                         "hash" => falcon_common::schema::ShardingPolicy::Hash,
                         "reference" | "replicated" => {
                             falcon_common::schema::ShardingPolicy::Reference
                         }
-                        "none" => falcon_common::schema::ShardingPolicy::None,
                         _ => falcon_common::schema::ShardingPolicy::None,
                     };
                 }
@@ -1187,7 +1177,7 @@ impl Binder {
                     ast::AssignmentTarget::ColumnName(name) => name.to_string(),
                     ast::AssignmentTarget::Tuple(names) => names
                         .iter()
-                        .map(|n| n.to_string())
+                        .map(std::string::ToString::to_string)
                         .collect::<Vec<_>>()
                         .join("."),
                 };
@@ -1218,8 +1208,8 @@ impl Binder {
 
     fn bind_delete(&self, delete: &ast::Delete) -> Result<BoundStatement, SqlError> {
         let from_tables = match &delete.from {
-            ast::FromTable::WithFromKeyword(tables) => tables,
-            ast::FromTable::WithoutKeyword(tables) => tables,
+            ast::FromTable::WithFromKeyword(tables)
+            | ast::FromTable::WithoutKeyword(tables) => tables,
         };
         let from = from_tables
             .first()
@@ -1310,7 +1300,7 @@ impl Binder {
                 let alias_name = alias
                     .as_ref()
                     .map(|a| a.name.value.clone())
-                    .unwrap_or_else(|| "__derived__".to_string());
+                    .unwrap_or_else(|| "__derived__".to_owned());
                 Ok((alias_name.clone(), Some(alias_name)))
             }
             _ => Err(SqlError::Unsupported("Non-table FROM source".into())),
@@ -1327,7 +1317,7 @@ impl Binder {
                 } else if let Ok(f) = n.parse::<f64>() {
                     Ok(Datum::Float64(f))
                 } else {
-                    Err(SqlError::Parse(format!("Cannot parse number: {}", n)))
+                    Err(SqlError::Parse(format!("Cannot parse number: {n}")))
                 }
             }
             Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => {
@@ -1335,7 +1325,7 @@ impl Binder {
             }
             Value::Boolean(b) => Ok(Datum::Boolean(*b)),
             Value::Null => Ok(Datum::Null),
-            _ => Err(SqlError::Unsupported(format!("Value type: {:?}", value))),
+            _ => Err(SqlError::Unsupported(format!("Value type: {value:?}"))),
         }
     }
 
@@ -1346,7 +1336,7 @@ impl Binder {
                 let d = self.value_to_datum(v)?;
                 // Promote Int32 to Int64 for consistency
                 match d {
-                    Datum::Int32(n) => Ok(Datum::Int64(n as i64)),
+                    Datum::Int32(n) => Ok(Datum::Int64(i64::from(n))),
                     other => Ok(other),
                 }
             }
@@ -1395,7 +1385,7 @@ impl Binder {
             ast::BinaryOperator::AtArrow => Ok(BinOp::JsonContains),
             ast::BinaryOperator::ArrowAt => Ok(BinOp::JsonContainedBy),
             ast::BinaryOperator::Question => Ok(BinOp::JsonExists),
-            _ => Err(SqlError::Unsupported(format!("Operator: {:?}", op))),
+            _ => Err(SqlError::Unsupported(format!("Operator: {op:?}"))),
         }
     }
 
@@ -1416,11 +1406,18 @@ impl Binder {
     pub(crate) fn resolve_data_type(&self, dt: &ast::DataType) -> Result<DataType, SqlError> {
         match dt {
             ast::DataType::Boolean | ast::DataType::Bool => Ok(DataType::Boolean),
-            ast::DataType::Int(None) | ast::DataType::Integer(None) | ast::DataType::Int4(_) => {
-                Ok(DataType::Int32)
-            }
-            ast::DataType::SmallInt(None) | ast::DataType::Int2(_) => Ok(DataType::Int32),
-            ast::DataType::BigInt(None) | ast::DataType::Int8(_) => Ok(DataType::Int64),
+            ast::DataType::Int(None) | ast::DataType::Integer(None) | ast::DataType::Int4(_)
+            | ast::DataType::SmallInt(None)
+            | ast::DataType::Int2(_)
+            | ast::DataType::TinyInt(_)
+            | ast::DataType::Regclass => Ok(DataType::Int32),
+            ast::DataType::BigInt(None) | ast::DataType::Int8(_)
+            | ast::DataType::UnsignedTinyInt(_)
+            | ast::DataType::UnsignedSmallInt(_)
+            | ast::DataType::UnsignedInt(_)
+            | ast::DataType::UnsignedInteger(_)
+            | ast::DataType::UnsignedBigInt(_)
+            | ast::DataType::UnsignedInt8(_) => Ok(DataType::Int64),
             ast::DataType::Float8
             | ast::DataType::Float(None)
             | ast::DataType::DoublePrecision
@@ -1432,7 +1429,16 @@ impl Binder {
             ast::DataType::Text
             | ast::DataType::Varchar(_)
             | ast::DataType::CharVarying(_)
-            | ast::DataType::String(_) => Ok(DataType::Text),
+            | ast::DataType::String(_)
+            | ast::DataType::Char(_)
+            | ast::DataType::Character(_)
+            | ast::DataType::Interval
+            | ast::DataType::Enum(_)
+            | ast::DataType::Uuid
+            | ast::DataType::Bytea
+            | ast::DataType::Blob(_)
+            | ast::DataType::Binary(_)
+            | ast::DataType::Varbinary(_) => Ok(DataType::Text),
             ast::DataType::Timestamp(_, _) => Ok(DataType::Timestamp),
             ast::DataType::Date => Ok(DataType::Date),
             ast::DataType::Array(inner) => {
@@ -1446,45 +1452,24 @@ impl Binder {
             }
             ast::DataType::JSON | ast::DataType::JSONB => Ok(DataType::Jsonb),
             // Map additional PG types to closest FalconDB equivalents
-            ast::DataType::Uuid => Ok(DataType::Text), // UUID stored as text
-            ast::DataType::Bytea => Ok(DataType::Text), // BYTEA stored as text (hex/escape)
-            ast::DataType::Char(_) | ast::DataType::Character(_) => Ok(DataType::Text),
-            ast::DataType::Interval => Ok(DataType::Text), // INTERVAL stored as text
-            ast::DataType::TinyInt(_) => Ok(DataType::Int32),
-            ast::DataType::UnsignedTinyInt(_)
-            | ast::DataType::UnsignedSmallInt(_)
-            | ast::DataType::UnsignedInt(_)
-            | ast::DataType::UnsignedInteger(_) => Ok(DataType::Int64),
-            ast::DataType::UnsignedBigInt(_) | ast::DataType::UnsignedInt8(_) => {
-                Ok(DataType::Int64)
-            }
-            ast::DataType::Blob(_) | ast::DataType::Binary(_) | ast::DataType::Varbinary(_) => {
-                Ok(DataType::Text)
-            }
-            ast::DataType::Enum(_) => Ok(DataType::Text), // ENUM stored as text
-            ast::DataType::Regclass => Ok(DataType::Int32), // regclass OID
             ast::DataType::Custom(name, _) => {
                 let type_name = name.to_string().to_lowercase();
                 match type_name.as_str() {
-                    "uuid" => Ok(DataType::Text),
-                    "bytea" => Ok(DataType::Text),
-                    "inet" | "cidr" | "macaddr" => Ok(DataType::Text),
-                    "money" => Ok(DataType::Float64),
-                    "oid" | "regclass" | "regtype" => Ok(DataType::Int32),
-                    "name" => Ok(DataType::Text),
-                    "int2" | "smallint" => Ok(DataType::Int32),
-                    "int4" | "integer" | "int" => Ok(DataType::Int32),
+                    "uuid" | "bytea" | "inet" | "cidr" | "macaddr"
+                    | "name" | "varchar" | "character varying" | "bpchar"
+                    | "interval" => Ok(DataType::Text),
+                    "oid" | "regclass" | "regtype"
+                    | "int2" | "smallint"
+                    | "int4" | "integer" | "int" => Ok(DataType::Int32),
                     "int8" | "bigint" => Ok(DataType::Int64),
-                    "float4" | "real" => Ok(DataType::Float64),
-                    "float8" | "double precision" => Ok(DataType::Float64),
-                    "numeric" | "decimal" => Ok(DataType::Float64),
-                    "varchar" | "character varying" | "bpchar" => Ok(DataType::Text),
+                    "money" | "float4" | "real"
+                    | "float8" | "double precision"
+                    | "numeric" | "decimal" => Ok(DataType::Float64),
                     "timestamp" | "timestamptz" => Ok(DataType::Timestamp),
-                    "interval" => Ok(DataType::Text),
-                    _ => Err(SqlError::Unsupported(format!("Data type: {}", type_name))),
+                    _ => Err(SqlError::Unsupported(format!("Data type: {type_name}"))),
                 }
             }
-            _ => Err(SqlError::Unsupported(format!("Data type: {:?}", dt))),
+            _ => Err(SqlError::Unsupported(format!("Data type: {dt:?}"))),
         }
     }
 
@@ -1505,9 +1490,7 @@ impl Binder {
                     Ok(Some(schema.find_column(&ident.value).ok_or_else(|| {
                         SqlError::UnknownColumn(ident.value.clone())
                     })?))
-                } else if let Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Wildcard)) =
-                    args.args.first()
-                {
+                } else if matches!(args.args.first(), Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Wildcard))) {
                     Ok(None)
                 } else {
                     // Non-column arg (e.g. integer literal for NTILE) — return None
@@ -1569,7 +1552,7 @@ impl Binder {
                     let alias = if let BoundExpr::ColumnRef(idx) = &bound {
                         schema.columns[*idx].name.clone()
                     } else {
-                        format!("{}", expr)
+                        format!("{expr}")
                     };
                     result.push((bound, alias));
                 }
@@ -1599,8 +1582,7 @@ impl Binder {
         let stmts = parse_sql(query_sql)?;
         if stmts.is_empty() {
             return Err(SqlError::Parse(format!(
-                "View '{}' has empty SQL",
-                view_name
+                "View '{view_name}' has empty SQL"
             )));
         }
 
@@ -1611,8 +1593,7 @@ impl Binder {
             BoundStatement::Select(sel) => sel,
             _ => {
                 return Err(SqlError::Parse(format!(
-                    "View '{}' must be a SELECT",
-                    view_name
+                    "View '{view_name}' must be a SELECT"
                 )))
             }
         };
@@ -1649,7 +1630,7 @@ impl Binder {
 
         let view_schema = TableSchema {
             id: view_table_id,
-            name: view_name.to_string(),
+            name: view_name.to_owned(),
             columns,
             primary_key_columns: vec![],
             next_serial_values: std::collections::HashMap::new(),
@@ -1715,7 +1696,7 @@ impl Binder {
                             ..Default::default()
                         };
                         let mut aliases: AliasMap = std::collections::HashMap::new();
-                        aliases.insert("excluded".to_string(), (schema.name.clone(), num_cols));
+                        aliases.insert("excluded".to_owned(), (schema.name.clone(), num_cols));
 
                         let mut assignments = Vec::new();
                         for assign in &do_update.assignments {

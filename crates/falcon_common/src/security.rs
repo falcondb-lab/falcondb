@@ -476,7 +476,7 @@ impl PrivilegeManager {
     /// Add a default privilege for new objects in a schema.
     pub fn add_schema_default(&mut self, grantor: RoleId, schema: &str, default: DefaultPrivilege) {
         self.schema_defaults
-            .entry((grantor, schema.to_string()))
+            .entry((grantor, schema.to_owned()))
             .or_default()
             .push(default);
     }
@@ -484,7 +484,7 @@ impl PrivilegeManager {
     /// Get default privileges for a schema (to apply when creating new objects).
     pub fn schema_defaults(&self, grantor: RoleId, schema: &str) -> Vec<&DefaultPrivilege> {
         self.schema_defaults
-            .get(&(grantor, schema.to_string()))
+            .get(&(grantor, schema.to_owned()))
             .map(|v| v.iter().collect::<Vec<_>>())
             .unwrap_or_default()
     }

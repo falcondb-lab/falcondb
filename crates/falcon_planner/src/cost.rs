@@ -111,14 +111,11 @@ pub fn reorder_joins(
 /// original left table (`[0, left_cols)`) and its own right table
 /// (`[right_col_offset, right_col_offset + right_cols)`).
 fn is_self_contained(join: &BoundJoin, left_cols: usize) -> bool {
-    match &join.condition {
-        None => true, // unconditional INNER join (unusual but safe)
-        Some(expr) => {
-            let right_start = join.right_col_offset;
-            let right_end = right_start + join.right_schema.columns.len();
-            all_refs_in_ranges(expr, left_cols, right_start, right_end)
-        }
-    }
+    join.condition.as_ref().is_none_or(|expr| {
+        let right_start = join.right_col_offset;
+        let right_end = right_start + join.right_schema.columns.len();
+        all_refs_in_ranges(expr, left_cols, right_start, right_end)
+    })
 }
 
 /// Return true iff every `ColumnRef(idx)` in the expression satisfies
@@ -131,7 +128,9 @@ fn all_refs_in_ranges(
 ) -> bool {
     match expr {
         BoundExpr::ColumnRef(idx) => *idx < left_cols || (*idx >= right_start && *idx < right_end),
-        BoundExpr::BinaryOp { left, right, .. } => {
+        BoundExpr::BinaryOp { left, right, .. }
+        | BoundExpr::AnyOp { left, right, .. }
+        | BoundExpr::AllOp { left, right, .. } => {
             all_refs_in_ranges(left, left_cols, right_start, right_end)
                 && all_refs_in_ranges(right, left_cols, right_start, right_end)
         }
@@ -145,10 +144,6 @@ fn all_refs_in_ranges(
         BoundExpr::Function { args, .. } => args
             .iter()
             .all(|a| all_refs_in_ranges(a, left_cols, right_start, right_end)),
-        BoundExpr::AnyOp { left, right, .. } | BoundExpr::AllOp { left, right, .. } => {
-            all_refs_in_ranges(left, left_cols, right_start, right_end)
-                && all_refs_in_ranges(right, left_cols, right_start, right_end)
-        }
         BoundExpr::ArraySlice {
             array,
             lower,

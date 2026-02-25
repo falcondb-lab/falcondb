@@ -273,7 +273,7 @@ impl ReplicaRunner {
 
         self.storage
             .apply_checkpoint_data(&ckpt_data)
-            .map_err(|e| FalconError::Internal(format!("apply_checkpoint_data: {}", e)))?;
+            .map_err(|e| FalconError::Internal(format!("apply_checkpoint_data: {e}")))?;
 
         metrics.applied_lsn.store(ckpt_lsn, Ordering::SeqCst);
 

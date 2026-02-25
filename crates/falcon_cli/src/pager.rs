@@ -21,7 +21,7 @@ impl Pager {
             return None;
         }
 
-        let pager_cmd = std::env::var("PAGER").unwrap_or_else(|_| "less".to_string());
+        let pager_cmd = std::env::var("PAGER").unwrap_or_else(|_| "less".to_owned());
         let args: Vec<&str> = if pager_cmd == "less" {
             vec!["-S", "-F", "-X"]
         } else {
@@ -78,7 +78,7 @@ pub fn print_with_pager(output: &str, disable_pager: bool) {
         pager.write(output);
         pager.finish();
     } else {
-        print!("{}", output);
+        print!("{output}");
     }
 }
 

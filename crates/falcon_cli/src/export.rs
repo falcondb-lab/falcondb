@@ -86,7 +86,7 @@ pub async fn run_export(client: &DbClient, cmd: &ExportCmd) -> Result<u64> {
         rows[0]
             .columns()
             .iter()
-            .map(|c| c.name().to_string())
+            .map(|c| c.name().to_owned())
             .collect()
     };
 
@@ -198,7 +198,7 @@ fn parse_options(mut s: &str, opts: &mut CsvOptions, overwrite: &mut bool) -> Re
             s = s[10..].trim();
             let (tok, rest) = parse_token(s)?;
             opts.delimiter = crate::csv::parse_delimiter(&tok)
-                .ok_or_else(|| anyhow::anyhow!("EXPORT: invalid delimiter '{}'", tok))?;
+                .ok_or_else(|| anyhow::anyhow!("EXPORT: invalid delimiter '{tok}'"))?;
             s = rest;
         } else if upper.starts_with("NULL AS ") {
             s = s[8..].trim();
@@ -209,14 +209,14 @@ fn parse_options(mut s: &str, opts: &mut CsvOptions, overwrite: &mut bool) -> Re
             s = s[6..].trim();
             let (tok, rest) = parse_token(s)?;
             let q = crate::csv::parse_delimiter(&tok)
-                .ok_or_else(|| anyhow::anyhow!("EXPORT: invalid QUOTE char '{}'", tok))?;
+                .ok_or_else(|| anyhow::anyhow!("EXPORT: invalid QUOTE char '{tok}'"))?;
             opts.quote = q;
             s = rest;
         } else if upper.starts_with("ESCAPE ") {
             s = s[7..].trim();
             let (tok, rest) = parse_token(s)?;
             let e = crate::csv::parse_delimiter(&tok)
-                .ok_or_else(|| anyhow::anyhow!("EXPORT: invalid ESCAPE char '{}'", tok))?;
+                .ok_or_else(|| anyhow::anyhow!("EXPORT: invalid ESCAPE char '{tok}'"))?;
             opts.escape = e;
             s = rest;
         } else if upper.starts_with("ENCODING ") {
@@ -228,7 +228,7 @@ fn parse_options(mut s: &str, opts: &mut CsvOptions, overwrite: &mut bool) -> Re
             *overwrite = true;
             s = s[9..].trim();
         } else {
-            bail!("EXPORT: unknown option near '{}'", s);
+            bail!("EXPORT: unknown option near '{s}'");
         }
     }
     Ok(())
@@ -239,7 +239,7 @@ fn strip_outer_quotes(s: &str) -> String {
     if (s.starts_with('\'') && s.ends_with('\'')) || (s.starts_with('"') && s.ends_with('"')) {
         s[1..s.len() - 1].to_string()
     } else {
-        s.to_string()
+        s.to_owned()
     }
 }
 

@@ -247,7 +247,7 @@ impl BackupManager {
             meta.status = BackupStatus::Failed;
             meta.completed_at_ms = now_ms;
             meta.duration_ms = now_ms.saturating_sub(meta.started_at_ms);
-            meta.error = Some(error.to_string());
+            meta.error = Some(error.to_owned());
             self.total_backups_failed.fetch_add(1, Ordering::Relaxed);
             true
         } else {

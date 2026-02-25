@@ -1,7 +1,7 @@
 use falcon_common::datum::Datum;
 use falcon_common::error::ExecutionError;
 
-pub(crate) fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionError> {
+pub fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionError> {
     if val.is_null() {
         return Ok(Datum::Null);
     }
@@ -14,11 +14,10 @@ pub(crate) fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionErro
             Datum::Text(s) => s
                 .parse::<i32>()
                 .map(Datum::Int32)
-                .map_err(|_| ExecutionError::TypeError(format!("Cannot cast '{}' to smallint", s))),
+                .map_err(|_| ExecutionError::TypeError(format!("Cannot cast '{s}' to smallint"))),
             Datum::Boolean(b) => Ok(Datum::Int32(if *b { 1 } else { 0 })),
             _ => Err(ExecutionError::TypeError(format!(
-                "Cannot cast {:?} to smallint",
-                val
+                "Cannot cast {val:?} to smallint"
             ))),
         },
         "int" | "integer" | "int4" => match &val {
@@ -28,40 +27,37 @@ pub(crate) fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionErro
             Datum::Text(s) => s
                 .parse::<i32>()
                 .map(Datum::Int32)
-                .map_err(|_| ExecutionError::TypeError(format!("Cannot cast '{}' to int", s))),
+                .map_err(|_| ExecutionError::TypeError(format!("Cannot cast '{s}' to int"))),
             Datum::Boolean(b) => Ok(Datum::Int32(if *b { 1 } else { 0 })),
             _ => Err(ExecutionError::TypeError(format!(
-                "Cannot cast {:?} to int",
-                val
+                "Cannot cast {val:?} to int"
             ))),
         },
         "bigint" | "int8" => match &val {
             Datum::Int64(_) => Ok(val),
-            Datum::Int32(v) => Ok(Datum::Int64(*v as i64)),
+            Datum::Int32(v) => Ok(Datum::Int64(i64::from(*v))),
             Datum::Float64(v) => Ok(Datum::Int64(*v as i64)),
             Datum::Text(s) => s
                 .parse::<i64>()
                 .map(Datum::Int64)
-                .map_err(|_| ExecutionError::TypeError(format!("Cannot cast '{}' to bigint", s))),
+                .map_err(|_| ExecutionError::TypeError(format!("Cannot cast '{s}' to bigint"))),
             _ => Err(ExecutionError::TypeError(format!(
-                "Cannot cast {:?} to bigint",
-                val
+                "Cannot cast {val:?} to bigint"
             ))),
         },
         "float" | "double" | "float8" | "real" | "float4" | "numeric" | "decimal" => match &val {
             Datum::Float64(_) => Ok(val),
-            Datum::Int32(v) => Ok(Datum::Float64(*v as f64)),
+            Datum::Int32(v) => Ok(Datum::Float64(f64::from(*v))),
             Datum::Int64(v) => Ok(Datum::Float64(*v as f64)),
             Datum::Text(s) => s
                 .parse::<f64>()
                 .map(Datum::Float64)
-                .map_err(|_| ExecutionError::TypeError(format!("Cannot cast '{}' to float", s))),
+                .map_err(|_| ExecutionError::TypeError(format!("Cannot cast '{s}' to float"))),
             _ => Err(ExecutionError::TypeError(format!(
-                "Cannot cast {:?} to float",
-                val
+                "Cannot cast {val:?} to float"
             ))),
         },
-        "text" | "varchar" | "char" => Ok(Datum::Text(format!("{}", val))),
+        "text" | "varchar" | "char" => Ok(Datum::Text(format!("{val}"))),
         "boolean" | "bool" => match &val {
             Datum::Boolean(_) => Ok(val),
             Datum::Int32(v) => Ok(Datum::Boolean(*v != 0)),
@@ -70,24 +66,22 @@ pub(crate) fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionErro
                 "true" | "t" | "1" | "yes" => Ok(Datum::Boolean(true)),
                 "false" | "f" | "0" | "no" => Ok(Datum::Boolean(false)),
                 _ => Err(ExecutionError::TypeError(format!(
-                    "Cannot cast '{}' to boolean",
-                    s
+                    "Cannot cast '{s}' to boolean"
                 ))),
             },
             _ => Err(ExecutionError::TypeError(format!(
-                "Cannot cast {:?} to boolean",
-                val
+                "Cannot cast {val:?} to boolean"
             ))),
         },
         "timestamp" | "timestamp without time zone" => match &val {
             Datum::Timestamp(_) => Ok(val),
             Datum::Date(days) => {
                 // Convert date (days since epoch) to timestamp (microseconds since epoch) at midnight
-                let us = *days as i64 * 86400 * 1_000_000;
+                let us = i64::from(*days) * 86400 * 1_000_000;
                 Ok(Datum::Timestamp(us))
             }
             Datum::Int64(us) => Ok(Datum::Timestamp(*us)),
-            Datum::Int32(us) => Ok(Datum::Timestamp(*us as i64)),
+            Datum::Int32(us) => Ok(Datum::Timestamp(i64::from(*us))),
             Datum::Text(s) => {
                 if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
                     Ok(Datum::Timestamp(dt.and_utc().timestamp_micros()))
@@ -97,19 +91,17 @@ pub(crate) fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionErro
                 } else if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
                     let dt = match d.and_hms_opt(0, 0, 0) {
                         Some(dt) => dt,
-                        None => return Err(ExecutionError::TypeError(format!("Cannot cast '{}' to timestamp", s))),
+                        None => return Err(ExecutionError::TypeError(format!("Cannot cast '{s}' to timestamp"))),
                     };
                     Ok(Datum::Timestamp(dt.and_utc().timestamp_micros()))
                 } else {
                     Err(ExecutionError::TypeError(format!(
-                        "Cannot cast '{}' to timestamp",
-                        s
+                        "Cannot cast '{s}' to timestamp"
                     )))
                 }
             }
             _ => Err(ExecutionError::TypeError(format!(
-                "Cannot cast {:?} to timestamp",
-                val
+                "Cannot cast {val:?} to timestamp"
             ))),
         },
         "date" => match &val {
@@ -125,7 +117,7 @@ pub(crate) fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionErro
                     .or_else(|_| NaiveDate::parse_from_str(s, "%m/%d/%Y"))
                     .or_else(|_| NaiveDate::parse_from_str(s, "%Y%m%d"))
                     .map_err(|e| {
-                        ExecutionError::TypeError(format!("Cannot cast '{}' to date: {}", s, e))
+                        ExecutionError::TypeError(format!("Cannot cast '{s}' to date: {e}"))
                     })?;
                 let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)
                     .unwrap_or_else(|| NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or(NaiveDate::MIN));
@@ -135,30 +127,26 @@ pub(crate) fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionErro
             Datum::Int32(d) => Ok(Datum::Date(*d)),
             Datum::Int64(d) => Ok(Datum::Date(*d as i32)),
             _ => Err(ExecutionError::TypeError(format!(
-                "Cannot cast {:?} to date",
-                val
+                "Cannot cast {val:?} to date"
             ))),
         },
         "jsonb" | "json" => match &val {
             Datum::Jsonb(_) => Ok(val),
             Datum::Text(s) => serde_json::from_str(s).map(Datum::Jsonb).map_err(|e| {
-                ExecutionError::TypeError(format!("Cannot cast '{}' to jsonb: {}", s, e))
+                ExecutionError::TypeError(format!("Cannot cast '{s}' to jsonb: {e}"))
             }),
             _ => Err(ExecutionError::TypeError(format!(
-                "Cannot cast {:?} to jsonb",
-                val
+                "Cannot cast {val:?} to jsonb"
             ))),
         },
         t if t.ends_with("[]") => match val {
             Datum::Array(_) => Ok(val),
             _ => Err(ExecutionError::TypeError(format!(
-                "Cannot cast {:?} to {}",
-                val, target
+                "Cannot cast {val:?} to {target}"
             ))),
         },
         _ => Err(ExecutionError::TypeError(format!(
-            "Unknown target type: {}",
-            target
+            "Unknown target type: {target}"
         ))),
     }
 }

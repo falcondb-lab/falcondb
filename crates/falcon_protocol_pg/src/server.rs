@@ -251,14 +251,11 @@ impl PgServer {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let listener = TcpListener::bind(&self.listen_addr).await?;
         let local_addr = listener
-            .local_addr()
-            .map(|a| a.to_string())
-            .unwrap_or_else(|_| self.listen_addr.clone());
+            .local_addr().map_or_else(|_| self.listen_addr.clone(), |a| a.to_string());
         let port = local_addr
             .rsplit(':')
             .next()
-            .unwrap_or("unknown")
-            .to_string();
+            .unwrap_or("unknown").to_owned();
         tracing::info!("FalconDB PG server listening on {}", local_addr);
 
         tokio::pin!(shutdown);
@@ -351,48 +348,45 @@ impl PgServer {
             let pool = pool.clone();
 
             tokio::spawn(async move {
-                match pool.acquire().await {
-                    Some(pooled) => {
-                        let mut handler = pooled.handler_clone();
-                        if let Some(ref rm) = replica_metrics {
-                            handler.set_replica_metrics(rm.clone());
-                        }
-                        if let Err(e) = handle_connection_with_timeout(
-                            stream,
-                            session_id,
-                            handler,
-                            timeout_ms,
-                            idle_ms,
-                            max_connections,
-                            active.clone(),
-                            auth_config,
-                            cancel_reg.clone(),
-                            notification_hub.clone(),
-                            tls_acceptor,
-                            tls_required,
-                        )
-                        .await
-                        {
-                            tracing::error!("Connection error (session {}): {}", session_id, e);
-                        }
-                        // pooled guard dropped here → permit returned to pool
-                        drop(pooled);
+                if let Some(pooled) = pool.acquire().await {
+                    let mut handler = pooled.handler_clone();
+                    if let Some(ref rm) = replica_metrics {
+                        handler.set_replica_metrics(rm.clone());
                     }
-                    None => {
-                        tracing::warn!(
-                            "Connection pool exhausted, rejecting session {}",
-                            session_id
-                        );
-                        let msg = BackendMessage::ErrorResponse {
-                            severity: "FATAL".into(),
-                            code: "53300".into(),
-                            message: "connection pool exhausted".into(),
-                        };
-                        let buf = codec::encode_message(&msg);
-                        let mut stream = stream;
-                        let _ = stream.write_all(&buf).await;
-                        let _ = stream.flush().await;
+                    if let Err(e) = handle_connection_with_timeout(
+                        stream,
+                        session_id,
+                        handler,
+                        timeout_ms,
+                        idle_ms,
+                        max_connections,
+                        active.clone(),
+                        auth_config,
+                        cancel_reg.clone(),
+                        notification_hub.clone(),
+                        tls_acceptor,
+                        tls_required,
+                    )
+                    .await
+                    {
+                        tracing::error!("Connection error (session {}): {}", session_id, e);
                     }
+                    // pooled guard dropped here → permit returned to pool
+                    drop(pooled);
+                } else {
+                    tracing::warn!(
+                        "Connection pool exhausted, rejecting session {}",
+                        session_id
+                    );
+                    let msg = BackendMessage::ErrorResponse {
+                        severity: "FATAL".into(),
+                        code: "53300".into(),
+                        message: "connection pool exhausted".into(),
+                    };
+                    let buf = codec::encode_message(&msg);
+                    let mut stream = stream;
+                    let _ = stream.write_all(&buf).await;
+                    let _ = stream.flush().await;
                 }
                 cancel_reg.remove(&session_id);
                 active.fetch_sub(1, Ordering::Relaxed);
@@ -644,8 +638,8 @@ async fn handle_connection_with_timeout(
                 let catalog_role = catalog.find_role_by_name(&session.user);
                 let catalog_password: Option<String> = catalog_role
                     .and_then(|r| r.password_hash.clone());
-                let catalog_can_login = catalog_role.map(|r| r.can_login).unwrap_or(true);
-                let catalog_is_superuser = catalog_role.map(|r| r.is_superuser).unwrap_or(false);
+                let catalog_can_login = catalog_role.is_none_or(|r| r.can_login);
+                let catalog_is_superuser = catalog_role.is_some_and(|r| r.is_superuser);
 
                 // If a role exists in the catalog but cannot login, reject immediately.
                 if catalog_role.is_some() && !catalog_can_login {
@@ -810,7 +804,7 @@ async fn handle_connection_with_timeout(
                         // Parse client-first-message: n,,n=<user>,r=<client-nonce>
                         let client_first_bare =
                             if let Some(stripped) = client_first_msg.strip_prefix("n,,") {
-                                stripped.to_string()
+                                stripped.to_owned()
                             } else {
                                 client_first_msg.clone()
                             };
@@ -818,9 +812,7 @@ async fn handle_connection_with_timeout(
                         let client_nonce = client_first_bare
                             .split(',')
                             .find(|p| p.starts_with("r="))
-                            .map(|p| &p[2..])
-                            .unwrap_or("")
-                            .to_string();
+                            .map_or("", |p| &p[2..]).to_owned();
 
                         // Generate server nonce and salt
                         use sha2::Digest as Sha2Digest;
@@ -830,7 +822,7 @@ async fn handle_connection_with_timeout(
                             let s = RandomState::new();
                             format!("{:016x}", s.build_hasher().finish())
                         };
-                        let combined_nonce = format!("{}{}", client_nonce, server_nonce_raw);
+                        let combined_nonce = format!("{client_nonce}{server_nonce_raw}");
                         let iterations = 4096u32;
                         let salt_bytes: [u8; 16] = {
                             use std::collections::hash_map::RandomState;
@@ -848,7 +840,7 @@ async fn handle_connection_with_timeout(
 
                         // Step 3: Send AuthenticationSASLContinue (server-first-message)
                         let server_first_msg =
-                            format!("r={},s={},i={}", combined_nonce, salt_b64, iterations);
+                            format!("r={combined_nonce},s={salt_b64},i={iterations}");
                         send_message(
                             &mut stream,
                             &BackendMessage::AuthenticationSASLContinue {
@@ -875,8 +867,7 @@ async fn handle_connection_with_timeout(
                         let client_proof_b64 = client_final_msg
                             .split(',')
                             .find(|p| p.starts_with("p="))
-                            .map(|p| &p[2..])
-                            .unwrap_or("");
+                            .map_or("", |p| &p[2..]);
 
                         // Derive keys using PBKDF2-HMAC-SHA256
                         let salted_password =
@@ -898,8 +889,7 @@ async fn handle_connection_with_timeout(
                             .collect::<Vec<_>>()
                             .join(",");
                         let auth_message = format!(
-                            "{},{},{}",
-                            client_first_bare, server_first_msg, client_final_without_proof
+                            "{client_first_bare},{server_first_msg},{client_final_without_proof}"
                         );
 
                         let client_signature = hmac_sha256(&stored_key, auth_message.as_bytes());
@@ -928,7 +918,7 @@ async fn handle_connection_with_timeout(
 
                         // Step 5: Send AuthenticationSASLFinal (server signature)
                         let server_sig_b64 = base64_encode(&server_signature);
-                        let server_final_msg = format!("v={}", server_sig_b64);
+                        let server_final_msg = format!("v={server_sig_b64}");
                         send_message(
                             &mut stream,
                             &BackendMessage::AuthenticationSASLFinal {
@@ -945,17 +935,14 @@ async fn handle_connection_with_timeout(
                 // Use session GUC values so client-supplied startup params are reflected.
                 let app_name = session
                     .get_guc("application_name")
-                    .unwrap_or("")
-                    .to_string();
+                    .unwrap_or("").to_owned();
                 let client_enc = session
                     .get_guc("client_encoding")
-                    .unwrap_or("UTF8")
-                    .to_string();
+                    .unwrap_or("UTF8").to_owned();
                 let datestyle = session
                     .get_guc("datestyle")
-                    .unwrap_or("ISO, MDY")
-                    .to_string();
-                let timezone = session.get_guc("timezone").unwrap_or("UTC").to_string();
+                    .unwrap_or("ISO, MDY").to_owned();
+                let timezone = session.get_guc("timezone").unwrap_or("UTC").to_owned();
                 let startup_params: Vec<(&str, String)> = vec![
                     ("server_version", "18.0.0".into()),
                     ("server_version_num", "180000".into()),
@@ -1025,8 +1012,7 @@ async fn handle_connection_with_timeout(
                 severity: "FATAL".into(),
                 code: "53300".into(),
                 message: format!(
-                    "sorry, too many clients already ({} of {} connections used)",
-                    current, max_connections
+                    "sorry, too many clients already ({current} of {max_connections} connections used)"
                 ),
             };
             let _ = send_message(&mut stream, &msg).await;
@@ -1040,7 +1026,7 @@ async fn handle_connection_with_timeout(
         return handle_replication_session(
             &mut stream,
             &mut buf,
-            &mut session,
+            &session,
             session_id,
             &handler,
             idle_timeout_ms,
@@ -1052,25 +1038,21 @@ async fn handle_connection_with_timeout(
     loop {
         let n = if idle_timeout_ms > 0 {
             let idle_dur = std::time::Duration::from_millis(idle_timeout_ms);
-            match tokio::time::timeout(idle_dur, stream.read_buf(&mut buf)).await {
-                Ok(result) => result?,
-                Err(_) => {
-                    tracing::info!(
-                        "Idle timeout ({}ms) for session {}",
-                        idle_timeout_ms,
-                        session_id
-                    );
-                    let msg = BackendMessage::ErrorResponse {
-                        severity: "FATAL".into(),
-                        code: "57P01".into(),
-                        message: format!(
-                            "terminating connection due to idle timeout ({}ms)",
-                            idle_timeout_ms
-                        ),
-                    };
-                    let _ = send_message(&mut stream, &msg).await;
-                    return Ok(());
-                }
+            if let Ok(result) = tokio::time::timeout(idle_dur, stream.read_buf(&mut buf)).await { result? } else {
+                tracing::info!(
+                    "Idle timeout ({}ms) for session {}",
+                    idle_timeout_ms,
+                    session_id
+                );
+                let msg = BackendMessage::ErrorResponse {
+                    severity: "FATAL".into(),
+                    code: "57P01".into(),
+                    message: format!(
+                        "terminating connection due to idle timeout ({idle_timeout_ms}ms)"
+                    ),
+                };
+                let _ = send_message(&mut stream, &msg).await;
+                return Ok(());
             }
         } else {
             stream.read_buf(&mut buf).await?
@@ -1175,7 +1157,7 @@ async fn handle_connection_with_timeout(
                                 vec![BackendMessage::ErrorResponse {
                                     severity: "ERROR".into(),
                                     code: "XX000".into(),
-                                    message: format!("Internal error: {}", e),
+                                    message: format!("Internal error: {e}"),
                                 }]
                             }
                             Err(_) => {
@@ -1238,7 +1220,7 @@ async fn handle_connection_with_timeout(
                                         vec![BackendMessage::ErrorResponse {
                                             severity: "ERROR".into(),
                                             code: "XX000".into(),
-                                            message: format!("Internal error: {}", e),
+                                            message: format!("Internal error: {e}"),
                                         }]
                                     }
                                 }
@@ -1308,8 +1290,7 @@ async fn handle_connection_with_timeout(
                                                 severity: "ERROR".into(),
                                                 code: "57014".into(),
                                                 message: format!(
-                                                    "COPY FROM STDIN failed: {}",
-                                                    reason
+                                                    "COPY FROM STDIN failed: {reason}"
                                                 ),
                                             },
                                         )
@@ -1631,7 +1612,7 @@ async fn handle_connection_with_timeout(
                                 Ok(Err(e)) => vec![BackendMessage::ErrorResponse {
                                     severity: "ERROR".into(),
                                     code: "XX000".into(),
-                                    message: format!("Internal error: {}", e),
+                                    message: format!("Internal error: {e}"),
                                 }],
                                 Err(_) => {
                                     tracing::warn!(
@@ -1707,7 +1688,7 @@ async fn handle_connection_with_timeout(
                                             vec![BackendMessage::ErrorResponse {
                                                 severity: "ERROR".into(),
                                                 code: "XX000".into(),
-                                                message: format!("Internal error: {}", e),
+                                                message: format!("Internal error: {e}"),
                                             }]
                                         }
                                     }
@@ -1791,7 +1772,7 @@ async fn handle_connection_with_timeout(
 async fn handle_replication_session<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     stream: &mut S,
     buf: &mut BytesMut,
-    session: &mut PgSession,
+    session: &PgSession,
     session_id: i32,
     handler: &QueryHandler,
     idle_timeout_ms: u64,
@@ -1799,20 +1780,16 @@ async fn handle_replication_session<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     loop {
         let n = if idle_timeout_ms > 0 {
             let idle_dur = std::time::Duration::from_millis(idle_timeout_ms);
-            match tokio::time::timeout(idle_dur, stream.read_buf(buf)).await {
-                Ok(result) => result?,
-                Err(_) => {
-                    let msg = BackendMessage::ErrorResponse {
-                        severity: "FATAL".into(),
-                        code: "57P01".into(),
-                        message: format!(
-                            "terminating replication connection due to idle timeout ({}ms)",
-                            idle_timeout_ms
-                        ),
-                    };
-                    let _ = send_message(stream, &msg).await;
-                    return Ok(());
-                }
+            if let Ok(result) = tokio::time::timeout(idle_dur, stream.read_buf(buf)).await { result? } else {
+                let msg = BackendMessage::ErrorResponse {
+                    severity: "FATAL".into(),
+                    code: "57P01".into(),
+                    message: format!(
+                        "terminating replication connection due to idle timeout ({idle_timeout_ms}ms)"
+                    ),
+                };
+                let _ = send_message(stream, &msg).await;
+                return Ok(());
             }
         } else {
             stream.read_buf(buf).await?
@@ -2078,7 +2055,7 @@ async fn send_message<S: AsyncWriteExt + Unpin>(
 /// NULL parameters are substituted as the literal `NULL`.
 fn bind_params(sql: &str, param_values: &[Option<Vec<u8>>]) -> String {
     if param_values.is_empty() {
-        return sql.to_string();
+        return sql.to_owned();
     }
     let mut result = String::with_capacity(sql.len() + param_values.len() * 8);
     let bytes = sql.as_bytes();
@@ -2143,32 +2120,26 @@ fn decode_param_value(
 
     match type_hint {
         Some(DataType::Int32) => s
-            .parse::<i32>()
-            .map(Datum::Int32)
-            .unwrap_or(Datum::Text(s.to_string())),
+            .parse::<i32>().map_or_else(|_| Datum::Text(s.to_owned()), Datum::Int32),
         Some(DataType::Int64) => s
-            .parse::<i64>()
-            .map(Datum::Int64)
-            .unwrap_or(Datum::Text(s.to_string())),
+            .parse::<i64>().map_or_else(|_| Datum::Text(s.to_owned()), Datum::Int64),
         Some(DataType::Float64) => s
-            .parse::<f64>()
-            .map(Datum::Float64)
-            .unwrap_or(Datum::Text(s.to_string())),
+            .parse::<f64>().map_or_else(|_| Datum::Text(s.to_owned()), Datum::Float64),
         Some(DataType::Boolean) => match s.to_lowercase().as_str() {
             "t" | "true" | "1" | "yes" | "on" => Datum::Boolean(true),
             "f" | "false" | "0" | "no" | "off" => Datum::Boolean(false),
-            _ => Datum::Text(s.to_string()),
+            _ => Datum::Text(s.to_owned()),
         },
-        Some(DataType::Text) => Datum::Text(s.to_string()),
-        Some(DataType::Timestamp) => Datum::Text(s.to_string()), // timestamp stored as text for now
-        Some(DataType::Date) => Datum::Text(s.to_string()),
-        Some(DataType::Array(_)) => Datum::Text(s.to_string()), // arrays as text for now
-        Some(DataType::Jsonb) => Datum::Text(s.to_string()),    // jsonb as text for now
+        Some(DataType::Text)
+        | Some(DataType::Timestamp)
+        | Some(DataType::Date)
+        | Some(DataType::Array(_))
+        | Some(DataType::Jsonb)
+        | Some(DataType::Time)
+        | Some(DataType::Interval)
+        | Some(DataType::Uuid) => Datum::Text(s.to_owned()),
         Some(DataType::Decimal(_, _)) => {
-            Datum::parse_decimal(s).unwrap_or(Datum::Text(s.to_string()))
-        }
-        Some(DataType::Time) | Some(DataType::Interval) | Some(DataType::Uuid) => {
-            Datum::Text(s.to_string())
+            Datum::parse_decimal(s).unwrap_or_else(|| Datum::Text(s.to_owned()))
         }
         Some(DataType::Bytea) => {
             // Accept PG hex format: \x<hex> or raw bytes as text
@@ -2190,7 +2161,7 @@ fn decode_param_value(
             } else if let Ok(f) = s.parse::<f64>() {
                 Datum::Float64(f)
             } else {
-                Datum::Text(s.to_string())
+                Datum::Text(s.to_owned())
             }
         }
     }
@@ -2241,9 +2212,7 @@ fn decode_param_value_binary(
             } else {
                 // Fallback: try text parse
                 let s = String::from_utf8_lossy(bytes);
-                s.parse::<i32>()
-                    .map(Datum::Int32)
-                    .unwrap_or(Datum::Text(s.into_owned()))
+                s.parse::<i32>().map_or_else(|_| Datum::Text(s.into_owned()), Datum::Int32)
             }
         }
         Some(DataType::Int64) => {
@@ -2255,12 +2224,10 @@ fn decode_param_value_binary(
             } else if bytes.len() == 4 {
                 // Some drivers send int4 binary for int8 columns
                 let v = i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-                Datum::Int64(v as i64)
+                Datum::Int64(i64::from(v))
             } else {
                 let s = String::from_utf8_lossy(bytes);
-                s.parse::<i64>()
-                    .map(Datum::Int64)
-                    .unwrap_or(Datum::Text(s.into_owned()))
+                s.parse::<i64>().map_or_else(|_| Datum::Text(s.into_owned()), Datum::Int64)
             }
         }
         Some(DataType::Float64) => {
@@ -2272,12 +2239,10 @@ fn decode_param_value_binary(
             } else if bytes.len() == 4 {
                 // float4 binary
                 let v = f32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-                Datum::Float64(v as f64)
+                Datum::Float64(f64::from(v))
             } else {
                 let s = String::from_utf8_lossy(bytes);
-                s.parse::<f64>()
-                    .map(Datum::Float64)
-                    .unwrap_or(Datum::Text(s.into_owned()))
+                s.parse::<f64>().map_or_else(|_| Datum::Text(s.into_owned()), Datum::Float64)
             }
         }
         Some(DataType::Boolean) => {
@@ -2293,7 +2258,7 @@ fn decode_param_value_binary(
         }
         Some(DataType::Bytea) => {
             // Binary format: raw bytes, no encoding needed
-            Datum::Bytea(bytes.to_vec())
+            Datum::Bytea(bytes.clone())
         }
         Some(DataType::Uuid) => {
             // PG binary UUID format: 16 bytes raw
@@ -2320,7 +2285,7 @@ fn decode_param_value_binary(
         | Some(DataType::Interval) => Datum::Text(String::from_utf8_lossy(bytes).into_owned()),
         Some(DataType::Decimal(_, _)) => {
             let s = String::from_utf8_lossy(bytes);
-            Datum::parse_decimal(&s).unwrap_or(Datum::Text(s.into_owned()))
+            Datum::parse_decimal(&s).unwrap_or_else(|| Datum::Text(s.into_owned()))
         }
         None => {
             // No type hint: try to infer from byte length
@@ -2442,9 +2407,9 @@ fn base64_encode(data: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let b0 = u32::from(chunk[0]);
+        let b1 = if chunk.len() > 1 { u32::from(chunk[1]) } else { 0 };
+        let b2 = if chunk.len() > 2 { u32::from(chunk[2]) } else { 0 };
         let triple = (b0 << 16) | (b1 << 8) | b2;
         result.push(ALPHABET[((triple >> 18) & 0x3F) as usize] as char);
         result.push(ALPHABET[((triple >> 12) & 0x3F) as usize] as char);

@@ -3,7 +3,7 @@ use falcon_common::error::ExecutionError;
 use falcon_sql_frontend::types::ScalarFunc;
 
 /// Dispatch a math-domain scalar function.
-pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionError> {
+pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionError> {
     match func {
         ScalarFunc::Abs => match args.first() {
             Some(Datum::Int32(n)) => Ok(Datum::Int32(n.abs())),
@@ -43,14 +43,14 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
         },
         ScalarFunc::Power => {
             let base = match args.first() {
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Int64(n)) => *n as f64,
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("POWER requires numeric".into())),
             };
             let exp = match args.get(1) {
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Int64(n)) => *n as f64,
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Null) => return Ok(Datum::Null),
@@ -64,7 +64,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
         }
         ScalarFunc::Sqrt => {
             let val = match args.first() {
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Int64(n)) => *n as f64,
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Null) => return Ok(Datum::Null),
@@ -96,7 +96,6 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             let precision = match args.get(1) {
                 Some(Datum::Int32(n)) => *n,
                 Some(Datum::Int64(n)) => *n as i32,
-                None => 0,
                 _ => 0,
             };
             let factor = 10f64.powi(precision);
@@ -104,7 +103,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
         }
         ScalarFunc::Ln => {
             let val = match args.first() {
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Int64(n)) => *n as f64,
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Null) => return Ok(Datum::Null),
@@ -115,14 +114,14 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
         ScalarFunc::Log => {
             let (base, val) = if args.len() >= 2 {
                 let b = match args.first() {
-                    Some(Datum::Int32(n)) => *n as f64,
+                    Some(Datum::Int32(n)) => f64::from(*n),
                     Some(Datum::Int64(n)) => *n as f64,
                     Some(Datum::Float64(n)) => *n,
                     Some(Datum::Null) => return Ok(Datum::Null),
                     _ => return Err(ExecutionError::TypeError("LOG requires numeric".into())),
                 };
                 let v = match args.get(1) {
-                    Some(Datum::Int32(n)) => *n as f64,
+                    Some(Datum::Int32(n)) => f64::from(*n),
                     Some(Datum::Int64(n)) => *n as f64,
                     Some(Datum::Float64(n)) => *n,
                     Some(Datum::Null) => return Ok(Datum::Null),
@@ -131,7 +130,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                 (b, v)
             } else {
                 let v = match args.first() {
-                    Some(Datum::Int32(n)) => *n as f64,
+                    Some(Datum::Int32(n)) => f64::from(*n),
                     Some(Datum::Int64(n)) => *n as f64,
                     Some(Datum::Float64(n)) => *n,
                     Some(Datum::Null) => return Ok(Datum::Null),
@@ -143,7 +142,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
         }
         ScalarFunc::Exp => {
             let val = match args.first() {
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Int64(n)) => *n as f64,
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Null) => return Ok(Datum::Null),
@@ -155,14 +154,14 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
         ScalarFunc::Mod => {
             let a = match args.first() {
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("MOD requires numeric".into())),
             };
             let b = match args.get(1) {
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("MOD requires numeric".into())),
@@ -182,7 +181,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             let v = match args.first() {
                 Some(Datum::Float64(f)) => *f,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("DEGREES requires numeric".into())),
             };
@@ -192,7 +191,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             let v = match args.first() {
                 Some(Datum::Float64(f)) => *f,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("RADIANS requires numeric".into())),
             };
@@ -200,7 +199,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
         }
         ScalarFunc::Greatest => {
             let mut best: Option<Datum> = None;
-            for a in args.iter() {
+            for a in args {
                 if a.is_null() {
                     continue;
                 }
@@ -217,7 +216,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
         }
         ScalarFunc::Least => {
             let mut best: Option<Datum> = None;
-            for a in args.iter() {
+            for a in args {
                 if a.is_null() {
                     continue;
                 }
@@ -233,8 +232,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             Ok(best.unwrap_or(Datum::Null))
         }
         _ => Err(ExecutionError::TypeError(format!(
-            "Not a math function: {:?}",
-            func
+            "Not a math function: {func:?}"
         ))),
     }
 }

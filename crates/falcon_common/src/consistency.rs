@@ -111,7 +111,7 @@ impl fmt::Display for CommitPolicy {
             Self::LocalWalSync => write!(f, "LOCAL_WAL_SYNC"),
             Self::PrimaryWalOnly => write!(f, "PRIMARY_WAL_ONLY"),
             Self::PrimaryPlusReplicaAck { required_acks } => {
-                write!(f, "PRIMARY_PLUS_REPLICA_ACK({})", required_acks)
+                write!(f, "PRIMARY_PLUS_REPLICA_ACK({required_acks})")
             }
             Self::RaftMajority => write!(f, "RAFT_MAJORITY"),
         }
@@ -203,9 +203,9 @@ pub enum CommitOutcome {
 impl CommitOutcome {
     pub const fn txn_id(&self) -> TxnId {
         match self {
-            Self::Committed { txn_id, .. } => *txn_id,
-            Self::Aborted { txn_id, .. } => *txn_id,
-            Self::Indeterminate { txn_id, .. } => *txn_id,
+            Self::Committed { txn_id, .. }
+            | Self::Aborted { txn_id, .. }
+            | Self::Indeterminate { txn_id, .. } => *txn_id,
         }
     }
 
@@ -306,20 +306,20 @@ impl CrashPoint {
     /// Whether a transaction at this crash point MUST survive recovery.
     pub const fn must_survive_recovery(&self, policy: &CommitPolicy) -> bool {
         match self {
-            Self::BeforeWalWrite => false,
-            Self::AfterWalWriteBeforeCommit => false,
+            Self::BeforeWalWrite
+            | Self::AfterWalWriteBeforeCommit => false,
             Self::AfterCommitBeforeSync => {
                 // Only survives if policy doesn't require fsync
                 matches!(policy, CommitPolicy::PrimaryWalOnly)
             }
             Self::AfterSyncBeforeAck => policy.requires_local_fsync(),
-            Self::AfterAckBeforeReplication => true, // WAL is durable locally
-            Self::AfterReplicationAck => true,
+            Self::AfterAckBeforeReplication
+            | Self::AfterReplicationAck => true, // WAL is durable locally
         }
     }
 
     /// Whether a transaction at this crash point is allowed to be lost.
-    pub fn may_be_lost(&self, policy: &CommitPolicy) -> bool {
+    pub const fn may_be_lost(&self, policy: &CommitPolicy) -> bool {
         !self.must_survive_recovery(policy)
     }
 
@@ -349,8 +349,8 @@ pub mod replication_invariants {
     pub const REP_2_NO_PHANTOM_COMMITS: &str =
         "Replica never commits a transaction that primary has not committed";
 
-    /// **REP-3 (Ordering)**: WAL entries are applied on the replica in
-    /// the same order they were written on the primary.
+    /// **REP-3 (Ordering)**: WAL entries are applied in primary's write order.
+    ///
     /// `∀ e1, e2: primary_order(e1) < primary_order(e2) ⟹ replica_apply_order(e1) < replica_apply_order(e2)`
     pub const REP_3_STRICT_ORDERING: &str = "Replica applies WAL entries in primary's write order";
 
@@ -470,8 +470,9 @@ pub mod cross_shard_invariants {
     pub const XS_2_AT_MOST_ONCE: &str =
         "Cross-shard txn commits at most once (no duplicate commits)";
 
-    /// **XS-3 (Coordinator Crash Recovery)**: If the coordinator crashes
-    /// after writing `CoordinatorCommit` to its WAL, recovery MUST
+    /// **XS-3 (Coordinator Crash Recovery)**: Deterministic resolution after coordinator crash.
+    ///
+    /// If the coordinator crashes after writing `CoordinatorCommit` to its WAL, recovery MUST
     /// complete the commit on all participants. If only `CoordinatorPrepare`
     /// exists, recovery MUST abort all participants.
     ///
@@ -482,9 +483,10 @@ pub mod cross_shard_invariants {
     pub const XS_3_COORDINATOR_CRASH_RECOVERY: &str =
         "Coordinator crash recovery resolves in-doubt txns deterministically";
 
-    /// **XS-4 (Participant Crash Recovery)**: A participant that crashes
-    /// after PREPARE but before receiving the coordinator's decision MUST
-    /// hold the transaction in PREPARED state until the coordinator resolves.
+    /// **XS-4 (Participant Crash Recovery)**: Hold PREPARED state until coordinator resolves.
+    ///
+    /// A participant that crashes after PREPARE but before receiving the coordinator's
+    /// decision MUST hold the transaction in PREPARED state until the coordinator resolves.
     ///
     /// ```
     /// use falcon_common::consistency::cross_shard_invariants::*;
@@ -493,10 +495,10 @@ pub mod cross_shard_invariants {
     pub const XS_4_PARTICIPANT_CRASH_RECOVERY: &str =
         "Participant holds PREPARED txn until coordinator resolves";
 
-    /// **XS-5 (Timeout Rollback — No Hanging Locks)**: If a cross-shard
-    /// transaction exceeds its hard timeout, it MUST be aborted on ALL
-    /// participants. No participant may hold locks or prepared state
-    /// indefinitely.
+    /// **XS-5 (Timeout Rollback — No Hanging Locks)**: Abort on all participants at timeout.
+    ///
+    /// If a cross-shard transaction exceeds its hard timeout, it MUST be aborted on ALL
+    /// participants. No participant may hold locks or prepared state indefinitely.
     ///
     /// ```
     /// use falcon_common::consistency::cross_shard_invariants::*;
@@ -708,16 +710,14 @@ pub fn validate_commit_timeline(
     if let (Some(l), Some(d)) = (logical_ts, durable_ts) {
         if l > d {
             return Err(format!(
-                "CP-1 violation: logical_ts({}) > durable_ts({})",
-                l, d
+                "CP-1 violation: logical_ts({l}) > durable_ts({d})"
             ));
         }
     }
     if let (Some(d), Some(c)) = (durable_ts, client_visible_ts) {
         if d > c {
             return Err(format!(
-                "CP-1 violation: durable_ts({}) > client_visible_ts({})",
-                d, c
+                "CP-1 violation: durable_ts({d}) > client_visible_ts({c})"
             ));
         }
     }
@@ -737,8 +737,7 @@ pub fn validate_prefix_property(
     for rtxn in replica_commits {
         if !primary_commits.contains(rtxn) {
             return Err(format!(
-                "REP-1/REP-2 violation: replica has txn {} not in primary",
-                rtxn
+                "REP-1/REP-2 violation: replica has txn {rtxn} not in primary"
             ));
         }
     }
@@ -754,8 +753,7 @@ pub fn validate_promote_commit_set(
     for ntxn in new_primary_commits {
         if !old_primary_commits.contains(ntxn) {
             return Err(format!(
-                "FAIL-1 violation: new primary has txn {} not in old primary",
-                ntxn
+                "FAIL-1 violation: new primary has txn {ntxn} not in old primary"
             ));
         }
     }
@@ -819,9 +817,9 @@ impl fmt::Display for CommitPointEntry {
             f,
             "txn={} L={} D={} V={}",
             self.txn_id.0,
-            self.logical_us.map_or_else(|| "-".to_string(), |v| v.to_string()),
-            self.durable_us.map_or_else(|| "-".to_string(), |v| v.to_string()),
-            self.visible_us.map_or_else(|| "-".to_string(), |v| v.to_string()),
+            self.logical_us.map_or_else(|| "-".to_owned(), |v| v.to_string()),
+            self.durable_us.map_or_else(|| "-".to_owned(), |v| v.to_string()),
+            self.visible_us.map_or_else(|| "-".to_owned(), |v| v.to_string()),
         )
     }
 }
@@ -861,9 +859,9 @@ impl CommitPointTracker {
     /// Record the LogicalCommit timestamp for a transaction.
     pub fn record_logical(&self, txn_id: TxnId, timestamp_us: u64) {
         self.ensure_entry(txn_id);
-        let idx = self.index.read().unwrap_or_else(|p| p.into_inner());
+        let idx = self.index.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(&pos) = idx.get(&txn_id) {
-            let mut entries = self.entries.write().unwrap_or_else(|p| p.into_inner());
+            let mut entries = self.entries.write().unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(entry) = entries.get_mut(pos) {
                 entry.logical_us = Some(timestamp_us);
             }
@@ -873,9 +871,9 @@ impl CommitPointTracker {
     /// Record the DurableCommit timestamp for a transaction.
     pub fn record_durable(&self, txn_id: TxnId, timestamp_us: u64) {
         self.ensure_entry(txn_id);
-        let idx = self.index.read().unwrap_or_else(|p| p.into_inner());
+        let idx = self.index.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(&pos) = idx.get(&txn_id) {
-            let mut entries = self.entries.write().unwrap_or_else(|p| p.into_inner());
+            let mut entries = self.entries.write().unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(entry) = entries.get_mut(pos) {
                 entry.durable_us = Some(timestamp_us);
             }
@@ -885,9 +883,9 @@ impl CommitPointTracker {
     /// Record the ClientVisibleCommit timestamp for a transaction.
     pub fn record_visible(&self, txn_id: TxnId, timestamp_us: u64) {
         self.ensure_entry(txn_id);
-        let idx = self.index.read().unwrap_or_else(|p| p.into_inner());
+        let idx = self.index.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(&pos) = idx.get(&txn_id) {
-            let mut entries = self.entries.write().unwrap_or_else(|p| p.into_inner());
+            let mut entries = self.entries.write().unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(entry) = entries.get_mut(pos) {
                 entry.visible_us = Some(timestamp_us);
             }
@@ -897,16 +895,16 @@ impl CommitPointTracker {
     /// Get a commit point entry for a specific transaction.
     pub fn get(&self, txn_id: TxnId) -> Option<CommitPointEntry> {
         let pos = {
-            let idx = self.index.read().unwrap_or_else(|p| p.into_inner());
+            let idx = self.index.read().unwrap_or_else(std::sync::PoisonError::into_inner);
             *idx.get(&txn_id)?
         };
-        let entries = self.entries.read().unwrap_or_else(|p| p.into_inner());
+        let entries = self.entries.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         entries.get(pos).cloned()
     }
 
     /// Compute aggregate lag statistics from all tracked entries.
     pub fn lag_stats(&self) -> CommitPointLagStats {
-        let entries = self.entries.read().unwrap_or_else(|p| p.into_inner());
+        let entries = self.entries.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         if entries.is_empty() {
             return CommitPointLagStats::default();
         }
@@ -969,23 +967,23 @@ impl CommitPointTracker {
 
     /// Number of tracked entries.
     pub fn len(&self) -> usize {
-        self.entries.read().unwrap_or_else(|p| p.into_inner()).len()
+        self.entries.read().unwrap_or_else(std::sync::PoisonError::into_inner).len()
     }
 
     /// Whether the tracker is empty.
     pub fn is_empty(&self) -> bool {
-        self.entries.read().unwrap_or_else(|p| p.into_inner()).is_empty()
+        self.entries.read().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty()
     }
 
     fn ensure_entry(&self, txn_id: TxnId) {
         {
-            let idx = self.index.read().unwrap_or_else(|p| p.into_inner());
+            let idx = self.index.read().unwrap_or_else(std::sync::PoisonError::into_inner);
             if idx.contains_key(&txn_id) {
                 return;
             }
         }
-        let mut entries = self.entries.write().unwrap_or_else(|p| p.into_inner());
-        let mut idx = self.index.write().unwrap_or_else(|p| p.into_inner());
+        let mut entries = self.entries.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut idx = self.index.write().unwrap_or_else(std::sync::PoisonError::into_inner);
 
         // Evict oldest if at capacity
         while entries.len() >= self.max_entries {

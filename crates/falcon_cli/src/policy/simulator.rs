@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use crate::client::DbClient;
 use crate::format::OutputMode;
 use crate::policy::guardrail::{
@@ -29,19 +31,17 @@ impl SimulationResult {
 
     fn render_table(&self) -> String {
         let mut out = String::new();
-        out.push_str(&format!("╔══ SIMULATION: policy '{}' ══\n", self.policy_id));
-        out.push_str(&format!(
-            "  Condition     : {} [{}]\n",
+        let _ = writeln!(out, "╔══ SIMULATION: policy '{}' ══", self.policy_id);
+        let _ = writeln!(out, "  Condition     : {} [{}]",
             self.condition_description,
             if self.condition_met { "MET" } else { "NOT MET" }
-        ));
-        out.push_str(&format!("  Action        : {}\n", self.action_description));
-        out.push_str(&format!("  Risk          : {}\n", self.risk_assessment));
+        );
+        let _ = writeln!(out, "  Action        : {}", self.action_description);
+        let _ = writeln!(out, "  Risk          : {}", self.risk_assessment);
         out.push_str(&self.guardrail_report);
-        out.push_str(&format!(
-            "  Would Fire    : {}\n",
+        let _ = writeln!(out, "  Would Fire    : {}",
             if self.would_fire { "YES" } else { "NO" }
-        ));
+        );
         out.push_str("╚══ DRY-RUN ONLY — no cluster state was modified ══\n");
         out
     }
@@ -111,10 +111,10 @@ pub async fn simulate_policy(
     let risk_assessment = assess_risk(action_expr, &snapshot);
 
     let result = SimulationResult {
-        policy_id: policy_id.to_string(),
+        policy_id: policy_id.to_owned(),
         condition_met,
         condition_description: condition_desc,
-        action_description: action_expr.to_string(),
+        action_description: action_expr.to_owned(),
         guardrails_pass,
         guardrail_report,
         would_fire,
@@ -145,7 +145,7 @@ pub fn simulate_local_policy(policy: &Policy, mode: OutputMode) -> String {
         guardrails_pass,
         guardrail_report,
         would_fire: false,
-        risk_assessment: "Unknown (no live cluster data)".to_string(),
+        risk_assessment: "Unknown (no live cluster data)".to_owned(),
     };
 
     result.render(mode)
@@ -161,12 +161,12 @@ async fn evaluate_condition_live(client: &DbClient, condition_expr: &str) -> (bo
             .await
             .ok()
             .and_then(|(rows, _)| rows.into_iter().next())
-            .and_then(|r| r.get(0).map(|v| v.to_string()))
-            .unwrap_or_else(|| "readwrite".to_string());
+            .and_then(|r| r.get(0).map(std::string::ToString::to_string))
+            .unwrap_or_else(|| "readwrite".to_owned());
         let met = mode == "readonly";
         return (
             met,
-            format!("cluster_mode = '{}' (readonly: {})", mode, met),
+            format!("cluster_mode = '{mode}' (readonly: {met})"),
         );
     }
 
@@ -177,18 +177,17 @@ async fn evaluate_condition_live(client: &DbClient, condition_expr: &str) -> (bo
             .await
             .ok()
             .and_then(|(rows, _)| rows.into_iter().next())
-            .and_then(|r| r.get(0).map(|v| v.to_string()))
-            .unwrap_or_else(|| "0".to_string());
+            .and_then(|r| r.get(0).map(std::string::ToString::to_string))
+            .unwrap_or_else(|| "0".to_owned());
         let n: u32 = count.parse().unwrap_or(0);
-        return (n > 0, format!("in-doubt transactions: {}", n));
+        return (n > 0, format!("in-doubt transactions: {n}"));
     }
 
     // Generic: return not-evaluable
     (
         false,
         format!(
-            "'{}' (live evaluation not available for this condition type)",
-            condition_expr
+            "'{condition_expr}' (live evaluation not available for this condition type)"
         ),
     )
 }
@@ -200,8 +199,8 @@ async fn get_cluster_snapshot(client: &DbClient, _policy_id: &str) -> ClusterSna
         .await
         .ok()
         .and_then(|(rows, _)| rows.into_iter().next())
-        .and_then(|r| r.get(0).map(|v| v.to_string()))
-        .unwrap_or_else(|| "unknown".to_string());
+        .and_then(|r| r.get(0).map(std::string::ToString::to_string))
+        .unwrap_or_else(|| "unknown".to_owned());
 
     ClusterSnapshot {
         health,
@@ -214,15 +213,15 @@ async fn get_cluster_snapshot(client: &DbClient, _policy_id: &str) -> ClusterSna
 fn assess_risk(action_expr: &str, _snapshot: &ClusterSnapshot) -> String {
     let lower = action_expr.to_lowercase();
     if lower.contains("drain") || lower.contains("move_shard") {
-        "MEDIUM — leader transition may cause brief latency spike".to_string()
+        "MEDIUM — leader transition may cause brief latency spike".to_owned()
     } else if lower.contains("readonly") {
-        "HIGH — write transactions will be rejected".to_string()
+        "HIGH — write transactions will be rejected".to_owned()
     } else if lower.contains("alert") {
-        "LOW — alert emission only, no cluster state change".to_string()
+        "LOW — alert emission only, no cluster state change".to_owned()
     } else if lower.contains("human_approval") {
-        "LOW — automation blocked, human intervention required".to_string()
+        "LOW — automation blocked, human intervention required".to_owned()
     } else {
-        "UNKNOWN".to_string()
+        "UNKNOWN".to_owned()
     }
 }
 
@@ -241,11 +240,10 @@ fn simulate_not_found(policy_id: &str, mode: OutputMode) -> String {
             s
         }
         _ => format!(
-            "╔══ SIMULATION: policy '{}' ══\n\
-             Policy '{}' not found in falcon.policies.\n\
+            "╔══ SIMULATION: policy '{policy_id}' ══\n\
+             Policy '{policy_id}' not found in falcon.policies.\n\
              Use \\policy create to define it first.\n\
-             ╚══ DRY-RUN ONLY — no cluster state was modified ══\n",
-            policy_id, policy_id
+             ╚══ DRY-RUN ONLY — no cluster state was modified ══\n"
         ),
     }
 }

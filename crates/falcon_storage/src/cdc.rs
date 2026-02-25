@@ -176,7 +176,7 @@ impl CdcManager {
             .values()
             .any(|s| s.name.eq_ignore_ascii_case(name))
         {
-            return Err(format!("replication slot '{}' already exists", name));
+            return Err(format!("replication slot '{name}' already exists"));
         }
 
         let id = SlotId(self.next_slot_id);
@@ -189,7 +189,7 @@ impl CdcManager {
         let current_lsn = CdcLsn(self.next_lsn.load(Ordering::Relaxed).saturating_sub(1));
         let slot = ReplicationSlot {
             id,
-            name: name.to_string(),
+            name: name.to_owned(),
             confirmed_flush_lsn: current_lsn,
             restart_lsn: current_lsn,
             active: false,
@@ -210,16 +210,16 @@ impl CdcManager {
             .iter()
             .find(|(_, s)| s.name.eq_ignore_ascii_case(name))
             .map(|(id, _)| *id)
-            .ok_or_else(|| format!("replication slot '{}' not found", name))?;
+            .ok_or_else(|| format!("replication slot '{name}' not found"))?;
 
         let slot = self.slots.get(&id).ok_or("slot not found")?;
         if slot.active {
-            return Err(format!("cannot drop active replication slot '{}'", name));
+            return Err(format!("cannot drop active replication slot '{name}'"));
         }
 
         self.slots
             .remove(&id)
-            .ok_or_else(|| "slot not found".to_string())
+            .ok_or_else(|| "slot not found".to_owned())
     }
 
     /// Emit a change event into the buffer.
@@ -251,7 +251,7 @@ impl CdcManager {
             txn_id,
             op: ChangeOp::Insert,
             table_id: Some(table_id),
-            table_name: Some(table_name.to_string()),
+            table_name: Some(table_name.to_owned()),
             timestamp_ms: now_ms(),
             new_row: Some(row),
             old_row: None,
@@ -276,7 +276,7 @@ impl CdcManager {
             txn_id,
             op: ChangeOp::Update,
             table_id: Some(table_id),
-            table_name: Some(table_name.to_string()),
+            table_name: Some(table_name.to_owned()),
             timestamp_ms: now_ms(),
             new_row: Some(new_row),
             old_row,
@@ -300,7 +300,7 @@ impl CdcManager {
             txn_id,
             op: ChangeOp::Delete,
             table_id: Some(table_id),
-            table_name: Some(table_name.to_string()),
+            table_name: Some(table_name.to_owned()),
             timestamp_ms: now_ms(),
             new_row: None,
             old_row,
@@ -338,14 +338,9 @@ impl CdcManager {
             .filter(|e| e.lsn > slot.confirmed_flush_lsn)
             .filter(|e| {
                 // Apply table filter
-                if let Some(ref filter) = slot.table_filter {
-                    match e.table_id {
-                        Some(tid) => filter.contains(&tid),
-                        None => slot.include_tx_markers, // tx markers pass if enabled
-                    }
-                } else {
-                    true
-                }
+                slot.table_filter.as_ref().is_none_or(|filter| {
+                    e.table_id.map_or(slot.include_tx_markers, |tid| filter.contains(&tid))
+                })
             })
             .filter(|e| {
                 // Filter tx markers
@@ -367,7 +362,7 @@ impl CdcManager {
         let slot = self
             .slots
             .get_mut(&slot_id)
-            .ok_or_else(|| "slot not found".to_string())?;
+            .ok_or_else(|| "slot not found".to_owned())?;
         if confirmed_lsn > slot.confirmed_flush_lsn {
             slot.confirmed_flush_lsn = confirmed_lsn;
         }
@@ -379,9 +374,9 @@ impl CdcManager {
         let slot = self
             .slots
             .get_mut(&slot_id)
-            .ok_or_else(|| "slot not found".to_string())?;
+            .ok_or_else(|| "slot not found".to_owned())?;
         if slot.active {
-            return Err("slot already active".to_string());
+            return Err("slot already active".to_owned());
         }
         slot.active = true;
         Ok(())
@@ -403,7 +398,7 @@ impl CdcManager {
         let slot = self
             .slots
             .get_mut(&slot_id)
-            .ok_or_else(|| "slot not found".to_string())?;
+            .ok_or_else(|| "slot not found".to_owned())?;
         slot.table_filter = Some(tables);
         Ok(())
     }

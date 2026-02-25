@@ -17,7 +17,7 @@ impl EventsCmd {
         let lower = s.to_lowercase();
         let mut parts = s.splitn(2, char::is_whitespace);
         let verb = parts.next().unwrap_or("").to_lowercase();
-        let rest = parts.next().unwrap_or("").trim().to_string();
+        let rest = parts.next().unwrap_or("").trim().to_owned();
 
         match verb.as_str() {
             "tail" => Self::Tail,
@@ -64,8 +64,7 @@ async fn events_list(client: &DbClient, mode: OutputMode) -> Result<String> {
 
         if fb_rows.is_empty() {
             return Ok(
-                "No events found. (falcon.events view not present or no events recorded)\n"
-                    .to_string(),
+                "No events found. (falcon.events view not present or no events recorded)\n".to_owned(),
             );
         }
         return Ok(format_rows_as_string(&fb_rows, mode, "Events"));
@@ -87,7 +86,7 @@ async fn events_tail(client: &DbClient, mode: OutputMode) -> Result<String> {
         .unwrap_or_else(|_| (Vec::new(), String::new()));
 
     if rows.is_empty() {
-        return Ok("No recent events. (falcon.events view not present or empty)\n".to_string());
+        return Ok("No recent events. (falcon.events view not present or empty)\n".to_owned());
     }
 
     Ok(format_rows_as_string(&rows, mode, "Recent Events (tail)"))
@@ -95,7 +94,7 @@ async fn events_tail(client: &DbClient, mode: OutputMode) -> Result<String> {
 
 async fn events_replay(client: &DbClient, event_id: &str, mode: OutputMode) -> Result<String> {
     if event_id.is_empty() {
-        return Ok("Usage: \\events replay <event_id>\n".to_string());
+        return Ok("Usage: \\events replay <event_id>\n".to_owned());
     }
 
     // Fetch the event
@@ -112,7 +111,7 @@ async fn events_replay(client: &DbClient, event_id: &str, mode: OutputMode) -> R
         .unwrap_or_else(|_| (Vec::new(), String::new()));
 
     if rows.is_empty() {
-        return Ok(format!("Event '{}' not found.\n", event_id));
+        return Ok(format!("Event '{event_id}' not found.\n"));
     }
 
     // Record the replay in audit log
@@ -122,17 +121,15 @@ async fn events_replay(client: &DbClient, event_id: &str, mode: OutputMode) -> R
     );
     let replay_result = client.query_simple(&replay_sql).await;
 
-    let event_out = format_rows_as_string(&rows, mode, &format!("Event {}", event_id));
+    let event_out = format_rows_as_string(&rows, mode, &format!("Event {event_id}"));
 
     match replay_result {
         Ok(_) => Ok(format!(
-            "{}\nEvent '{}' replayed and logged to audit trail.\n",
-            event_out, event_id
+            "{event_out}\nEvent '{event_id}' replayed and logged to audit trail.\n"
         )),
         Err(_) => Ok(format!(
-            "{}\nEvent '{}' fetched. \
-             (falcon.admin_replay_event() not available — replay not logged)\n",
-            event_out, event_id
+            "{event_out}\nEvent '{event_id}' fetched. \
+             (falcon.admin_replay_event() not available — replay not logged)\n"
         )),
     }
 }

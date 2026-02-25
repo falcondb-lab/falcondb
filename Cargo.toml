@@ -76,6 +76,10 @@ prost = "0.13"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 md-5 = "0.10"
 sha2 = "0.10"
+hmac = "0.12"
+pbkdf2 = "0.12"
+aes-gcm = "0.10"
+rand = "0.8"
 
 # CLI
 clap = { version = "4", features = ["derive"] }

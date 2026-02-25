@@ -16,9 +16,9 @@ pub fn parse_policy_create(arg: &str) -> Result<Policy> {
     let scope_str = kv
         .get("scope")
         .cloned()
-        .unwrap_or_else(|| "cluster".to_string());
+        .unwrap_or_else(|| "cluster".to_owned());
     let scope = PolicyScope::parse(&scope_str).ok_or_else(|| {
-        anyhow::anyhow!("Unknown scope '{}'. Use: cluster, shard, node", scope_str)
+        anyhow::anyhow!("Unknown scope '{scope_str}'. Use: cluster, shard, node")
     })?;
 
     let condition_str = require_key(&kv, "condition")?;
@@ -30,7 +30,7 @@ pub fn parse_policy_create(arg: &str) -> Result<Policy> {
     let severity = kv
         .get("severity")
         .cloned()
-        .unwrap_or_else(|| "warning".to_string());
+        .unwrap_or_else(|| "warning".to_owned());
 
     let max_frequency = kv
         .get("max_frequency")
@@ -47,17 +47,16 @@ pub fn parse_policy_create(arg: &str) -> Result<Policy> {
     let risk_ceiling_str = kv
         .get("risk_ceiling")
         .cloned()
-        .unwrap_or_else(|| "MEDIUM".to_string());
+        .unwrap_or_else(|| "MEDIUM".to_owned());
     let risk_ceiling = RiskCeiling::parse(&risk_ceiling_str).ok_or_else(|| {
         anyhow::anyhow!(
-            "Unknown risk_ceiling '{}'. Use: LOW, MEDIUM, HIGH",
-            risk_ceiling_str
+            "Unknown risk_ceiling '{risk_ceiling_str}'. Use: LOW, MEDIUM, HIGH"
         )
     })?;
     let health_prerequisite = kv
         .get("health_prereq")
         .cloned()
-        .unwrap_or_else(|| "healthy".to_string());
+        .unwrap_or_else(|| "healthy".to_owned());
 
     Ok(Policy {
         id,
@@ -74,7 +73,7 @@ pub fn parse_policy_create(arg: &str) -> Result<Policy> {
             health_prerequisite,
         },
         severity,
-        created_by: "operator".to_string(),
+        created_by: "operator".to_owned(),
         created_at: chrono_now(),
         last_evaluated_at: None,
     })
@@ -85,35 +84,34 @@ fn parse_condition(s: &str) -> Result<Condition> {
     if let Some(rest) = lower.strip_prefix("node_unavailable_secs=") {
         let n = rest
             .parse::<u64>()
-            .map_err(|_| anyhow::anyhow!("Invalid seconds in condition: {}", s))?;
+            .map_err(|_| anyhow::anyhow!("Invalid seconds in condition: {s}"))?;
         return Ok(Condition::NodeUnavailableForSecs(n));
     }
     if let Some(rest) = lower.strip_prefix("wal_lag_bytes=") {
         let n = rest
             .parse::<u64>()
-            .map_err(|_| anyhow::anyhow!("Invalid bytes in condition: {}", s))?;
+            .map_err(|_| anyhow::anyhow!("Invalid bytes in condition: {s}"))?;
         return Ok(Condition::WalLagExceedsBytes(n));
     }
     if let Some(rest) = lower.strip_prefix("memory_pct=") {
         let n = rest
             .parse::<u8>()
-            .map_err(|_| anyhow::anyhow!("Invalid pct in condition: {}", s))?;
+            .map_err(|_| anyhow::anyhow!("Invalid pct in condition: {s}"))?;
         return Ok(Condition::MemoryPressureExceedsPct(n));
     }
     if let Some(rest) = lower.strip_prefix("in_doubt_txns=") {
         let n = rest
             .parse::<u32>()
-            .map_err(|_| anyhow::anyhow!("Invalid count in condition: {}", s))?;
+            .map_err(|_| anyhow::anyhow!("Invalid count in condition: {s}"))?;
         return Ok(Condition::InDoubtTransactionsExceed(n));
     }
     match lower.as_str() {
         "shard_leader_unavailable" => Ok(Condition::ShardLeaderUnavailable),
         "cluster_readonly" => Ok(Condition::ClusterInReadonlyMode),
         _ => bail!(
-            "Unknown condition '{}'. Supported: node_unavailable_secs=N, \
+            "Unknown condition '{s}'. Supported: node_unavailable_secs=N, \
              wal_lag_bytes=N, memory_pct=N, in_doubt_txns=N, \
-             shard_leader_unavailable, cluster_readonly",
-            s
+             shard_leader_unavailable, cluster_readonly"
         ),
     }
 }
@@ -121,7 +119,7 @@ fn parse_condition(s: &str) -> Result<Condition> {
 fn parse_action(s: &str) -> Result<Action> {
     let lower = s.trim().to_lowercase();
     if let Some(rest) = lower.strip_prefix("drain_node=") {
-        return Ok(Action::DrainNode(rest.trim().to_string()));
+        return Ok(Action::DrainNode(rest.trim().to_owned()));
     }
     if let Some(rest) = lower.strip_prefix("move_shard=") {
         // format: move_shard=<shard_id>:<target_node>
@@ -130,21 +128,20 @@ fn parse_action(s: &str) -> Result<Action> {
             bail!("move_shard format: move_shard=<shard_id>:<target_node>");
         }
         return Ok(Action::MoveShardLeader {
-            shard_id: parts[0].trim().to_string(),
-            target_node: parts[1].trim().to_string(),
+            shard_id: parts[0].trim().to_owned(),
+            target_node: parts[1].trim().to_owned(),
         });
     }
     if let Some(rest) = lower.strip_prefix("alert=") {
-        return Ok(Action::EmitAlert(rest.trim().to_string()));
+        return Ok(Action::EmitAlert(rest.trim().to_owned()));
     }
     match lower.as_str() {
         "set_cluster_readonly" => Ok(Action::SetClusterReadonly),
         "require_human_approval" => Ok(Action::RequireHumanApproval),
         _ => bail!(
-            "Unknown action '{}'. Supported: drain_node=<node>, \
+            "Unknown action '{s}'. Supported: drain_node=<node>, \
              move_shard=<shard>:<node>, set_cluster_readonly, \
-             alert=<message>, require_human_approval",
-            s
+             alert=<message>, require_human_approval"
         ),
     }
 }
@@ -164,7 +161,7 @@ fn parse_kv_pairs(s: &str) -> std::collections::HashMap<String, String> {
 
         // Value: quoted or space-terminated
         let value = if rest.starts_with('"') {
-            let end = rest[1..].find('"').map(|p| p + 1).unwrap_or(rest.len() - 1);
+            let end = rest[1..].find('"').map_or(rest.len() - 1, |p| p + 1);
             let v = rest[1..end].to_string();
             rest = rest[end + 1..].trim_start();
             v
@@ -185,15 +182,13 @@ fn parse_kv_pairs(s: &str) -> std::collections::HashMap<String, String> {
 fn require_key(kv: &std::collections::HashMap<String, String>, key: &str) -> Result<String> {
     kv.get(key)
         .cloned()
-        .ok_or_else(|| anyhow::anyhow!("Missing required field '{}' in \\policy create", key))
+        .ok_or_else(|| anyhow::anyhow!("Missing required field '{key}' in \\policy create"))
 }
 
 fn chrono_now() -> String {
     // Use a simple timestamp without chrono dependency
     std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| format!("unix:{}", d.as_secs()))
-        .unwrap_or_else(|_| "unknown".to_string())
+        .duration_since(std::time::UNIX_EPOCH).map_or_else(|_| "unknown".to_owned(), |d| format!("unix:{}", d.as_secs()))
 }
 
 #[cfg(test)]

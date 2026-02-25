@@ -50,23 +50,21 @@ impl NotificationHub {
     /// will see it (0 if nobody is listening).
     pub fn notify(&self, channel: &str, sender_pid: i32, payload: &str) -> usize {
         let channels = self.channels.lock();
-        if let Some(state) = channels.get(channel) {
+        channels.get(channel).map_or(0, |state| {
             let msg = Notification {
-                channel: channel.to_string(),
+                channel: channel.to_owned(),
                 sender_pid,
-                payload: payload.to_string(),
+                payload: payload.to_owned(),
             };
             state.tx.send(msg).unwrap_or(0)
-        } else {
-            0
-        }
+        })
     }
 
     /// Subscribe to a channel. Returns a Receiver that will yield future
     /// notifications. If the channel doesn't exist yet, it is created.
     pub fn listen(&self, channel: &str) -> broadcast::Receiver<Notification> {
         let mut channels = self.channels.lock();
-        let state = channels.entry(channel.to_string()).or_insert_with(|| {
+        let state = channels.entry(channel.to_owned()).or_insert_with(|| {
             let (tx, _) = broadcast::channel(CHANNEL_CAPACITY);
             ChannelState { tx }
         });
@@ -114,8 +112,8 @@ impl SessionNotifications {
             return; // already listening
         }
         let rx = hub.listen(channel);
-        self.subscriptions.insert(channel.to_string(), rx);
-        self.channels.insert(channel.to_string());
+        self.subscriptions.insert(channel.to_owned(), rx);
+        self.channels.insert(channel.to_owned());
     }
 
     /// Unsubscribe from a channel.
@@ -142,12 +140,12 @@ impl SessionNotifications {
             loop {
                 match rx.try_recv() {
                     Ok(notif) => pending.push(notif),
-                    Err(broadcast::error::TryRecvError::Empty) => break,
+                    Err(broadcast::error::TryRecvError::Empty)
+                    | Err(broadcast::error::TryRecvError::Closed) => break,
                     Err(broadcast::error::TryRecvError::Lagged(n)) => {
                         tracing::warn!("Notification receiver lagged by {} messages", n);
                         // Continue draining what's left
                     }
-                    Err(broadcast::error::TryRecvError::Closed) => break,
                 }
             }
         }
@@ -161,7 +159,7 @@ impl SessionNotifications {
 
     /// List of channels we're listening on.
     pub fn listening_channels(&self) -> Vec<&str> {
-        self.channels.iter().map(|s| s.as_str()).collect()
+        self.channels.iter().map(std::string::String::as_str).collect()
     }
 }
 

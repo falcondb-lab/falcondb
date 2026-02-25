@@ -442,10 +442,10 @@ impl ConfigStore {
             .unwrap_or_default()
             .as_secs();
         let entry = ConfigEntry {
-            key: key.to_string(),
-            value: value.to_string(),
+            key: key.to_owned(),
+            value: value.to_owned(),
             version,
-            updated_by: updated_by.to_string(),
+            updated_by: updated_by.to_owned(),
             updated_at: now,
         };
         // Record in history
@@ -456,7 +456,7 @@ impl ConfigStore {
             }
             hist.push_back(entry.clone());
         }
-        self.entries.write().insert(key.to_string(), entry);
+        self.entries.write().insert(key.to_owned(), entry);
         version
     }
 
@@ -546,9 +546,9 @@ pub enum MetadataOperation {
 impl fmt::Display for MetadataOperation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Put { key, .. } => write!(f, "PUT {}", key),
-            Self::Delete { key } => write!(f, "DELETE {}", key),
-            Self::CAS { key, .. } => write!(f, "CAS {}", key),
+            Self::Put { key, .. } => write!(f, "PUT {key}"),
+            Self::Delete { key } => write!(f, "DELETE {key}"),
+            Self::CAS { key, .. } => write!(f, "CAS {key}"),
         }
     }
 }
@@ -631,17 +631,17 @@ impl ConsistentMetadataStore {
             id: idx,
             domain: domain.clone(),
             operation: MetadataOperation::Put {
-                key: key.to_string(),
-                value: value.to_string(),
+                key: key.to_owned(),
+                value: value.to_owned(),
             },
-            issued_by: issued_by.to_string(),
+            issued_by: issued_by.to_owned(),
             timestamp: now,
         };
         // Apply to state machine
         {
             let mut domains = self.domains.write();
             let store = domains.entry(domain).or_default();
-            store.insert(key.to_string(), value.to_string());
+            store.insert(key.to_owned(), value.to_owned());
         }
         // Append to committed log
         {
@@ -671,12 +671,12 @@ impl ConsistentMetadataStore {
         let mut domains = self.domains.write();
         let store = domains.entry(domain).or_default();
         let current = store.get(key).cloned();
-        let expected_str = expected.map(|s| s.to_string());
+        let expected_str = expected.map(std::string::ToString::to_string);
         if current != expected_str {
             self.metrics.cas_failures.fetch_add(1, Ordering::Relaxed);
             return MetadataWriteResult::CasFailed { current };
         }
-        store.insert(key.to_string(), new_value.to_string());
+        store.insert(key.to_owned(), new_value.to_owned());
         let idx = self.log_index.fetch_add(1, Ordering::SeqCst) + 1;
         self.metrics.writes.fetch_add(1, Ordering::Relaxed);
         MetadataWriteResult::Ok { version: idx }
@@ -711,10 +711,8 @@ impl ConsistentMetadataStore {
         key: &str,
         consistency: ReadConsistency,
     ) -> Option<String> {
-        if let ReadConsistency::Leader = consistency {
-            if !self.is_leader.load(Ordering::SeqCst) {
-                return None; // Caller should retry on leader
-            }
+        if consistency == ReadConsistency::Leader && !self.is_leader.load(Ordering::SeqCst) {
+            return None; // Caller should retry on leader
         }
         self.metrics.reads.fetch_add(1, Ordering::Relaxed);
         let domains = self.domains.read();
@@ -933,17 +931,17 @@ pub enum ControlPlaneCommand {
 impl fmt::Display for ControlPlaneCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::DrainNode(id) => write!(f, "DRAIN {:?}", id),
+            Self::DrainNode(id) => write!(f, "DRAIN {id:?}"),
             Self::JoinNode { node_id, address } =>
-                write!(f, "JOIN {:?} at {}", node_id, address),
+                write!(f, "JOIN {node_id:?} at {address}"),
             Self::UpgradeNode { node_id, target_version } =>
-                write!(f, "UPGRADE {:?} to {}", node_id, target_version),
+                write!(f, "UPGRADE {node_id:?} to {target_version}"),
             Self::RebalanceShard { shard_id, from, to } =>
-                write!(f, "REBALANCE shard {} {:?}→{:?}", shard_id, from, to),
+                write!(f, "REBALANCE shard {shard_id} {from:?}→{to:?}"),
             Self::SetConfig { key, value } =>
-                write!(f, "CONFIG {}={}", key, value),
+                write!(f, "CONFIG {key}={value}"),
             Self::ForceLeaderElection { shard_id } =>
-                write!(f, "FORCE_ELECTION shard {}", shard_id),
+                write!(f, "FORCE_ELECTION shard {shard_id}"),
         }
     }
 }

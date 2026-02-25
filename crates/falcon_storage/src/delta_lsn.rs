@@ -62,7 +62,7 @@ pub fn decode_varint(buf: &[u8]) -> Option<(u64, usize)> {
     let mut shift: u32 = 0;
     for (i, &byte) in buf.iter().enumerate() {
         if shift >= 64 { return None; } // overflow
-        value |= ((byte & 0x7F) as u64) << shift;
+        value |= u64::from(byte & 0x7F) << shift;
         if byte & 0x80 == 0 {
             return Some((value, i + 1));
         }
@@ -231,7 +231,7 @@ impl RecordFrame {
     fn compute_crc(data: &[u8]) -> u32 {
         let mut hash: u32 = 5381;
         for &b in data {
-            hash = hash.wrapping_mul(33).wrapping_add(b as u32);
+            hash = hash.wrapping_mul(33).wrapping_add(u32::from(b));
         }
         hash
     }
@@ -436,15 +436,15 @@ impl fmt::Display for DeltaStreamError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::CrcMismatch { frame_index, expected, actual } =>
-                write!(f, "CRC mismatch at frame {}: expected {:#x}, got {:#x}", frame_index, expected, actual),
+                write!(f, "CRC mismatch at frame {frame_index}: expected {expected:#x}, got {actual:#x}"),
             Self::TruncatedFrame { frame_index } =>
-                write!(f, "truncated frame at index {}", frame_index),
+                write!(f, "truncated frame at index {frame_index}"),
             Self::InvalidVarint { frame_index } =>
-                write!(f, "invalid varint at frame {}", frame_index),
+                write!(f, "invalid varint at frame {frame_index}"),
             Self::VersionMismatch { expected, actual } =>
-                write!(f, "protocol version mismatch: expected {}, got {}", expected, actual),
+                write!(f, "protocol version mismatch: expected {expected}, got {actual}"),
             Self::SegmentBoundary { segment_id, offset } =>
-                write!(f, "segment boundary error: seg={}, offset={}", segment_id, offset),
+                write!(f, "segment boundary error: seg={segment_id}, offset={offset}"),
         }
     }
 }
@@ -462,11 +462,11 @@ pub enum DeltaRecoveryAction {
 
 pub const fn decide_delta_recovery(error: &DeltaStreamError) -> DeltaRecoveryAction {
     match error {
-        DeltaStreamError::CrcMismatch { .. } => DeltaRecoveryAction::RetryFromLastGood,
-        DeltaStreamError::TruncatedFrame { .. } => DeltaRecoveryAction::RetryFromLastGood,
-        DeltaStreamError::InvalidVarint { .. } => DeltaRecoveryAction::DiscardAndRollback,
+        DeltaStreamError::CrcMismatch { .. }
+        | DeltaStreamError::TruncatedFrame { .. } => DeltaRecoveryAction::RetryFromLastGood,
+        DeltaStreamError::InvalidVarint { .. }
+        | DeltaStreamError::SegmentBoundary { .. } => DeltaRecoveryAction::DiscardAndRollback,
         DeltaStreamError::VersionMismatch { .. } => DeltaRecoveryAction::Abort,
-        DeltaStreamError::SegmentBoundary { .. } => DeltaRecoveryAction::DiscardAndRollback,
     }
 }
 

@@ -93,7 +93,7 @@ impl QueryHandler {
                     self.flush_txn_stats();
                 }
                 vec![BackendMessage::CommandComplete {
-                    tag: format!("COPY {}", rows_affected),
+                    tag: format!("COPY {rows_affected}"),
                 }]
             }
             Err(e) => {

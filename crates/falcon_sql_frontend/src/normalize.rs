@@ -329,7 +329,7 @@ fn eval_constant_binop(left: &Datum, op: BinOp, right: &Datum) -> Option<Datum> 
         }
         BinOp::StringConcat => {
             if let (Datum::Text(a), Datum::Text(b)) = (left, right) {
-                Some(Datum::Text(format!("{}{}", a, b)))
+                Some(Datum::Text(format!("{a}{b}")))
             } else {
                 None
             }
@@ -351,10 +351,10 @@ fn eval_arith(
         (Datum::Int32(a), Datum::Int32(b)) => Some(Datum::Int32(i32_op(*a, *b))),
         (Datum::Int64(a), Datum::Int64(b)) => Some(Datum::Int64(i64_op(*a, *b))),
         (Datum::Float64(a), Datum::Float64(b)) => Some(Datum::Float64(f64_op(*a, *b))),
-        (Datum::Int32(a), Datum::Int64(b)) => Some(Datum::Int64(i64_op(*a as i64, *b))),
-        (Datum::Int64(a), Datum::Int32(b)) => Some(Datum::Int64(i64_op(*a, *b as i64))),
-        (Datum::Int32(a), Datum::Float64(b)) => Some(Datum::Float64(f64_op(*a as f64, *b))),
-        (Datum::Float64(a), Datum::Int32(b)) => Some(Datum::Float64(f64_op(*a, *b as f64))),
+        (Datum::Int32(a), Datum::Int64(b)) => Some(Datum::Int64(i64_op(i64::from(*a), *b))),
+        (Datum::Int64(a), Datum::Int32(b)) => Some(Datum::Int64(i64_op(*a, i64::from(*b)))),
+        (Datum::Int32(a), Datum::Float64(b)) => Some(Datum::Float64(f64_op(f64::from(*a), *b))),
+        (Datum::Float64(a), Datum::Int32(b)) => Some(Datum::Float64(f64_op(*a, f64::from(*b)))),
         (Datum::Int64(a), Datum::Float64(b)) => Some(Datum::Float64(f64_op(*a as f64, *b))),
         (Datum::Float64(a), Datum::Int64(b)) => Some(Datum::Float64(f64_op(*a, *b as f64))),
         _ => None,
@@ -677,7 +677,7 @@ fn infer_function_param_types(func: &ScalarFunc, args: &[BoundExpr], out: &mut P
         // String functions: all args are text
         Upper | Lower | Trim | Ltrim | Rtrim | Length | OctetLength | Concat | ConcatWs
         | Replace | Repeat | Reverse | Left | Right | Lpad | Rpad | Md5 | Sha256 | Initcap
-        | Translate | Encode | Decode | StartsWith => {
+        | Translate | Encode | Decode | StartsWith | Position => {
             for a in args {
                 if let BoundExpr::Parameter(p) = a {
                     out.entry(*p).or_insert(DataType::Text);
@@ -692,14 +692,6 @@ fn infer_function_param_types(func: &ScalarFunc, args: &[BoundExpr], out: &mut P
             for a in args.iter().skip(1) {
                 if let BoundExpr::Parameter(p) = a {
                     out.entry(*p).or_insert(DataType::Int32);
-                }
-            }
-        }
-        // Position: (text, text) → int
-        Position => {
-            for a in args {
-                if let BoundExpr::Parameter(p) = a {
-                    out.entry(*p).or_insert(DataType::Text);
                 }
             }
         }
@@ -867,7 +859,9 @@ pub fn expr_has_volatile(expr: &BoundExpr) -> bool {
         BoundExpr::Function { func, args } => {
             is_volatile(func) || args.iter().any(expr_has_volatile)
         }
-        BoundExpr::BinaryOp { left, right, .. } => {
+        BoundExpr::BinaryOp { left, right, .. }
+        | BoundExpr::AnyOp { left, right, .. }
+        | BoundExpr::AllOp { left, right, .. } => {
             expr_has_volatile(left) || expr_has_volatile(right)
         }
         BoundExpr::Not(inner)
@@ -876,9 +870,9 @@ pub fn expr_has_volatile(expr: &BoundExpr) -> bool {
         | BoundExpr::Cast { expr: inner, .. } => expr_has_volatile(inner),
         BoundExpr::Like {
             expr: inner,
-            pattern,
+            pattern: right,
             ..
-        } => expr_has_volatile(inner) || expr_has_volatile(pattern),
+        } => expr_has_volatile(inner) || expr_has_volatile(right),
         BoundExpr::Between {
             expr: inner,
             low,
@@ -904,9 +898,6 @@ pub fn expr_has_volatile(expr: &BoundExpr) -> bool {
         }
         BoundExpr::ArrayIndex { array, index } => {
             expr_has_volatile(array) || expr_has_volatile(index)
-        }
-        BoundExpr::AnyOp { left, right, .. } | BoundExpr::AllOp { left, right, .. } => {
-            expr_has_volatile(left) || expr_has_volatile(right)
         }
         BoundExpr::ArraySlice {
             array,

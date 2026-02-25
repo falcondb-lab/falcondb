@@ -274,7 +274,7 @@ impl ScaleOutLifecycle {
 
     /// Mark as failed with an error message.
     pub fn fail(&mut self, reason: &str, event_log: &ClusterEventLog) {
-        self.error = Some(reason.to_string());
+        self.error = Some(reason.to_owned());
         let _ = self.transition(ScaleOutState::Failed, event_log);
     }
 
@@ -388,7 +388,7 @@ impl ScaleInLifecycle {
     }
 
     pub fn fail(&mut self, reason: &str, event_log: &ClusterEventLog) {
-        self.error = Some(reason.to_string());
+        self.error = Some(reason.to_owned());
         let _ = self.transition(ScaleInState::Failed, event_log);
     }
 
@@ -562,8 +562,7 @@ impl ClusterAdmin {
             "idle",
             "planned",
             format!(
-                "Rebalance plan generated: {} tasks, {} rows to move",
-                num_tasks, total_rows
+                "Rebalance plan generated: {num_tasks} tasks, {total_rows} rows to move"
             ),
         );
     }
@@ -577,7 +576,7 @@ impl ClusterAdmin {
             u64::MAX,
             "planned",
             "executing",
-            format!("Rebalance apply started: {} tasks", num_tasks),
+            format!("Rebalance apply started: {num_tasks} tasks"),
         );
     }
 

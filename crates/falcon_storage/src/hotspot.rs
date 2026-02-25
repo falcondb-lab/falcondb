@@ -96,7 +96,7 @@ impl HotspotDetector {
     /// Record a table access.
     pub fn record_table_access(&self, table_name: &str) {
         self.table_counters
-            .entry(table_name.to_string())
+            .entry(table_name.to_owned())
             .or_insert_with(AccessCounter::new)
             .increment();
     }
@@ -114,7 +114,7 @@ impl HotspotDetector {
             .unwrap_or(0);
 
         // Shard hotspots
-        for entry in self.shard_counters.iter() {
+        for entry in &self.shard_counters {
             let count = entry.value().get();
             if count >= self.config.shard_threshold {
                 let severity = if max_shard_count > 0 {
@@ -145,7 +145,7 @@ impl HotspotDetector {
             .max()
             .unwrap_or(0);
 
-        for entry in self.table_counters.iter() {
+        for entry in &self.table_counters {
             let count = entry.value().get();
             if count >= self.config.table_threshold {
                 let severity = if max_table_count > 0 {
@@ -177,10 +177,10 @@ impl HotspotDetector {
 
     /// Reset all counters (start a new detection window).
     pub fn reset_window(&self) {
-        for entry in self.shard_counters.iter() {
+        for entry in &self.shard_counters {
             entry.value().reset();
         }
-        for entry in self.table_counters.iter() {
+        for entry in &self.table_counters {
             entry.value().reset();
         }
     }

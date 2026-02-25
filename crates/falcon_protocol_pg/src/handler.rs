@@ -418,7 +418,7 @@ impl QueryHandler {
 
         Some(BoundInsert {
             table_id: schema.id,
-            table_name: table_name.to_string(),
+            table_name: table_name.to_owned(),
             schema,
             columns: col_indices,
             rows,
@@ -467,17 +467,17 @@ impl QueryHandler {
         match result {
             Ok(ExecutionResult::Dml { rows_affected, tag }) => {
                 let cmd_tag = match tag.as_str() {
-                    "INSERT" => format!("INSERT 0 {}", rows_affected),
-                    "UPDATE" => format!("UPDATE {}", rows_affected),
-                    "DELETE" => format!("DELETE {}", rows_affected),
-                    _ => format!("{} {}", tag, rows_affected),
+                    "INSERT" => format!("INSERT 0 {rows_affected}"),
+                    "UPDATE" => format!("UPDATE {rows_affected}"),
+                    "DELETE" => format!("DELETE {rows_affected}"),
+                    _ => format!("{tag} {rows_affected}"),
                 };
                 messages.push(BackendMessage::CommandComplete { tag: cmd_tag });
             }
             Ok(other) => {
                 // Unexpected result type for fast-path; shouldn't happen
                 messages.push(BackendMessage::CommandComplete {
-                    tag: format!("{:?}", other),
+                    tag: format!("{other:?}"),
                 });
             }
             Err(e) => {
@@ -625,7 +625,7 @@ impl QueryHandler {
                                         // Commit succeeded locally but replication timed out —
                                         // report as warning, not error (data is durable on primary).
                                         messages.push(BackendMessage::NoticeResponse {
-                                            message: format!("sync replication timeout: {}", e),
+                                            message: format!("sync replication timeout: {e}"),
                                         });
                                     }
                                 }
@@ -746,16 +746,13 @@ impl QueryHandler {
                     false
                 };
 
-                let txn_ref = match session.txn.as_ref() {
-                    Some(t) => t,
-                    None => {
-                        messages.push(BackendMessage::ErrorResponse {
-                            severity: "ERROR".into(),
-                            code: "25P01".into(),
-                            message: "no active transaction for COPY TO".into(),
-                        });
-                        continue;
-                    }
+                let txn_ref = if let Some(t) = session.txn.as_ref() { t } else {
+                    messages.push(BackendMessage::ErrorResponse {
+                        severity: "ERROR".into(),
+                        code: "25P01".into(),
+                        message: "no active transaction for COPY TO".into(),
+                    });
+                    continue;
                 };
                 let result = self.executor.exec_copy_to(
                     *table_id,
@@ -785,7 +782,7 @@ impl QueryHandler {
                         }
                         messages.push(BackendMessage::CopyDone);
                         messages.push(BackendMessage::CommandComplete {
-                            tag: format!("COPY {}", row_count),
+                            tag: format!("COPY {row_count}"),
                         });
                     }
                     Err(e) => {
@@ -834,16 +831,13 @@ impl QueryHandler {
                     false
                 };
 
-                let txn_ref = match session.txn.as_ref() {
-                    Some(t) => t,
-                    None => {
-                        messages.push(BackendMessage::ErrorResponse {
-                            severity: "ERROR".into(),
-                            code: "25P01".into(),
-                            message: "no active transaction for COPY TO (query)".into(),
-                        });
-                        continue;
-                    }
+                let txn_ref = if let Some(t) = session.txn.as_ref() { t } else {
+                    messages.push(BackendMessage::ErrorResponse {
+                        severity: "ERROR".into(),
+                        code: "25P01".into(),
+                        message: "no active transaction for COPY TO (query)".into(),
+                    });
+                    continue;
                 };
                 let result = self.executor.exec_copy_query_to(
                     query,
@@ -871,7 +865,7 @@ impl QueryHandler {
                         }
                         messages.push(BackendMessage::CopyDone);
                         messages.push(BackendMessage::CommandComplete {
-                            tag: format!("COPY {}", row_count),
+                            tag: format!("COPY {row_count}"),
                         });
                     }
                     Err(e) => {
@@ -988,20 +982,20 @@ impl QueryHandler {
                             let row_count = rows.len();
                             for row in rows {
                                 let values: Vec<Option<String>> =
-                                    row.values.iter().map(|d| d.to_pg_text()).collect();
+                                    row.values.iter().map(falcon_common::datum::Datum::to_pg_text).collect();
                                 messages.push(BackendMessage::DataRow { values });
                             }
 
                             messages.push(BackendMessage::CommandComplete {
-                                tag: format!("SELECT {}", row_count),
+                                tag: format!("SELECT {row_count}"),
                             });
                         }
                         ExecutionResult::Dml { rows_affected, tag } => {
                             let cmd_tag = match tag.as_str() {
-                                "INSERT" => format!("INSERT 0 {}", rows_affected),
-                                "UPDATE" => format!("UPDATE {}", rows_affected),
-                                "DELETE" => format!("DELETE {}", rows_affected),
-                                _ => format!("{} {}", tag, rows_affected),
+                                "INSERT" => format!("INSERT 0 {rows_affected}"),
+                                "UPDATE" => format!("UPDATE {rows_affected}"),
+                                "DELETE" => format!("DELETE {rows_affected}"),
+                                _ => format!("{tag} {rows_affected}"),
                             };
                             messages.push(BackendMessage::CommandComplete { tag: cmd_tag });
                         }
@@ -1102,7 +1096,7 @@ impl QueryHandler {
             messages.push(BackendMessage::DataRow { values: row });
         }
         messages.push(BackendMessage::CommandComplete {
-            tag: format!("SELECT {}", row_count),
+            tag: format!("SELECT {row_count}"),
         });
         messages
     }
@@ -1390,19 +1384,19 @@ impl QueryHandler {
                         let row_count = rows.len();
                         for row in rows {
                             let values: Vec<Option<String>> =
-                                row.values.iter().map(|d| d.to_pg_text()).collect();
+                                row.values.iter().map(falcon_common::datum::Datum::to_pg_text).collect();
                             messages.push(BackendMessage::DataRow { values });
                         }
                         messages.push(BackendMessage::CommandComplete {
-                            tag: format!("SELECT {}", row_count),
+                            tag: format!("SELECT {row_count}"),
                         });
                     }
                     ExecutionResult::Dml { rows_affected, tag } => {
                         let cmd_tag = match tag.as_str() {
-                            "INSERT" => format!("INSERT 0 {}", rows_affected),
-                            "UPDATE" => format!("UPDATE {}", rows_affected),
-                            "DELETE" => format!("DELETE {}", rows_affected),
-                            _ => format!("{} {}", tag, rows_affected),
+                            "INSERT" => format!("INSERT 0 {rows_affected}"),
+                            "UPDATE" => format!("UPDATE {rows_affected}"),
+                            "DELETE" => format!("DELETE {rows_affected}"),
+                            _ => format!("{tag} {rows_affected}"),
                         };
                         messages.push(BackendMessage::CommandComplete { tag: cmd_tag });
                     }
@@ -1474,8 +1468,7 @@ impl QueryHandler {
                 BoundExpr::Literal(d) => d.data_type().unwrap_or(DataType::Text),
                 BoundExpr::ColumnRef(idx) => cols
                     .get(*idx)
-                    .map(|c| c.data_type.clone())
-                    .unwrap_or(DataType::Text),
+                    .map_or(DataType::Text, |c| c.data_type.clone()),
                 BoundExpr::BinaryOp { left, op, right } => {
                     match op {
                         // Comparison / logical → Boolean
@@ -1498,14 +1491,15 @@ impl QueryHandler {
                             promote_numeric(lt, rt)
                         }
                         // String concat
-                        BinOp::StringConcat => DataType::Text,
+                        BinOp::StringConcat
+                        | BinOp::JsonArrowText
+                        | BinOp::JsonHashArrowText => DataType::Text,
                         // JSONB operators → Jsonb (or Text for ->>/#>>)
                         BinOp::JsonArrow
                         | BinOp::JsonHashArrow
                         | BinOp::JsonContains
                         | BinOp::JsonContainedBy
                         | BinOp::JsonExists => DataType::Jsonb,
-                        BinOp::JsonArrowText | BinOp::JsonHashArrowText => DataType::Text,
                     }
                 }
                 BoundExpr::Not(_)
@@ -1534,10 +1528,8 @@ impl QueryHandler {
                 }
                 BoundExpr::Coalesce(exprs) => exprs
                     .first()
-                    .map(|e| infer_expr_type(e, cols))
-                    .unwrap_or(DataType::Text),
+                    .map_or(DataType::Text, |e| infer_expr_type(e, cols)),
                 BoundExpr::Function { func, args } => infer_func_type(func, args, cols),
-                BoundExpr::ScalarSubquery(_) => DataType::Text, // best-effort
                 BoundExpr::AggregateExpr { func, arg, .. } => {
                     let input_ty = arg.as_ref().map(|a| infer_expr_type(a, cols));
                     infer_agg_return_type(func, input_ty)
@@ -1552,8 +1544,7 @@ impl QueryHandler {
                 }
                 BoundExpr::OuterColumnRef(idx) => cols
                     .get(*idx)
-                    .map(|c| c.data_type.clone())
-                    .unwrap_or(DataType::Text),
+                    .map_or(DataType::Text, |c| c.data_type.clone()),
                 BoundExpr::SequenceNextval(_)
                 | BoundExpr::SequenceCurrval(_)
                 | BoundExpr::SequenceSetval(_, _) => DataType::Int64,
@@ -1577,7 +1568,6 @@ impl QueryHandler {
                 "BIGINT" | "INT8" => DataType::Int64,
                 "FLOAT" | "FLOAT8" | "DOUBLE" | "DOUBLE PRECISION" => DataType::Float64,
                 "BOOL" | "BOOLEAN" => DataType::Boolean,
-                "TEXT" | "VARCHAR" | "CHAR" | "CHARACTER VARYING" => DataType::Text,
                 "TIMESTAMP" | "TIMESTAMP WITHOUT TIME ZONE" => DataType::Timestamp,
                 "DATE" => DataType::Date,
                 "JSONB" => DataType::Jsonb,
@@ -1674,10 +1664,10 @@ impl QueryHandler {
                 | ScalarFunc::Cosh
                 | ScalarFunc::Tanh => DataType::Float64,
                 // Date/time
-                ScalarFunc::Now => DataType::Timestamp,
+                ScalarFunc::Now
+                | ScalarFunc::DateTrunc => DataType::Timestamp,
                 ScalarFunc::CurrentDate => DataType::Date,
                 ScalarFunc::CurrentTime => DataType::Time,
-                ScalarFunc::DateTrunc => DataType::Timestamp,
                 // Bool
                 ScalarFunc::StartsWith
                 | ScalarFunc::EndsWith
@@ -1700,17 +1690,14 @@ impl QueryHandler {
                 // Pass-through: Greatest/Least inherit from first arg
                 ScalarFunc::Greatest | ScalarFunc::Least => args
                     .first()
-                    .map(|a| infer_expr_type(a, cols))
-                    .unwrap_or(DataType::Text),
+                    .map_or(DataType::Text, |a| infer_expr_type(a, cols)),
                 // Array mutation returns array
                 ScalarFunc::ArrayAppend
                 | ScalarFunc::ArrayPrepend
                 | ScalarFunc::ArrayRemove
                 | ScalarFunc::ArrayReplace
                 | ScalarFunc::ArrayCat => args
-                    .first()
-                    .map(|a| infer_expr_type(a, cols))
-                    .unwrap_or(DataType::Array(Box::new(DataType::Text))),
+                    .first().map_or_else(|| DataType::Array(Box::new(DataType::Text)), |a| infer_expr_type(a, cols)),
                 // Catch-all for remaining scalar functions — default to Text
                 _ => DataType::Text,
             }
@@ -1723,13 +1710,13 @@ impl QueryHandler {
                     Some(DataType::Float64) => DataType::Float64,
                     _ => DataType::Int64, // SUM promotes int types to bigint
                 },
-                AggFunc::Avg => DataType::Float64,
                 AggFunc::Min | AggFunc::Max => input_ty.unwrap_or(DataType::Text),
                 AggFunc::StringAgg(_) => DataType::Text,
                 AggFunc::BoolAnd | AggFunc::BoolOr => DataType::Boolean,
                 AggFunc::ArrayAgg => DataType::Array(Box::new(input_ty.unwrap_or(DataType::Text))),
                 // Statistical aggregates always return Float64
-                AggFunc::StddevPop
+                AggFunc::Avg
+                | AggFunc::StddevPop
                 | AggFunc::StddevSamp
                 | AggFunc::VarPop
                 | AggFunc::VarSamp
@@ -1873,8 +1860,7 @@ impl QueryHandler {
         } = err
         {
             message = format!(
-                "{} HINT: leader={}, retry_after={}ms",
-                message, hint, retry_after_ms
+                "{message} HINT: leader={hint}, retry_after={retry_after_ms}ms"
             );
         }
         BackendMessage::ErrorResponse {
@@ -1920,8 +1906,8 @@ fn classification_from_routing_hint(hint: &falcon_planner::TxnRoutingHint) -> Tx
 /// Returns the value if found, None otherwise.
 pub(crate) fn extract_where_eq(sql: &str, column: &str) -> Option<String> {
     // Look for patterns like: column = 'value' or column='value'
-    let pattern = format!("{} = '", column);
-    let pattern2 = format!("{}='", column);
+    let pattern = format!("{column} = '");
+    let pattern2 = format!("{column}='");
     let start = sql
         .find(&pattern)
         .map(|i| i + pattern.len())
@@ -1981,7 +1967,7 @@ pub(crate) fn parse_set_command(sql: &str) -> Option<(String, String)> {
         .trim()
         .trim_matches('\'')
         .trim_matches('"');
-    Some((name.to_string(), value.to_string()))
+    Some((name.to_owned(), value.to_owned()))
 }
 
 /// Parse `PREPARE name [(type, ...)] AS query`.
@@ -1997,15 +1983,11 @@ pub(crate) fn parse_prepare_statement(sql: &str) -> Option<(String, String)> {
         .trim_end_matches(';')
         .trim();
     // before_as is "name" or "name(type, ...)"
-    let name = if let Some(paren) = before_as.find('(') {
-        before_as[..paren].trim()
-    } else {
-        before_as.trim()
-    };
+    let name = before_as.find('(').map_or_else(|| before_as.trim(), |paren| before_as[..paren].trim());
     if name.is_empty() || query.is_empty() {
         return None;
     }
-    Some((name.to_string(), query.to_string()))
+    Some((name.to_owned(), query.to_owned()))
 }
 
 /// Parse `EXECUTE name [(param, ...)]`.
@@ -2018,13 +2000,14 @@ pub(crate) fn parse_execute_statement(sql: &str) -> Option<(String, Vec<Option<V
         .trim();
     let rest = rest.trim_end_matches(';').trim();
     // Split name from optional (params)
-    let (name, params_str) = if let Some(paren_pos) = rest.find('(') {
-        let name = rest[..paren_pos].trim();
-        let params_raw = rest[paren_pos + 1..].trim_end_matches(')').trim();
-        (name, Some(params_raw))
-    } else {
-        (rest.trim(), None)
-    };
+    let (name, params_str) = rest.find('(').map_or_else(
+        || (rest.trim(), None),
+        |paren_pos| {
+            let name = rest[..paren_pos].trim();
+            let params_raw = rest[paren_pos + 1..].trim_end_matches(')').trim();
+            (name, Some(params_raw))
+        },
+    );
     if name.is_empty() {
         return None;
     }
@@ -2080,7 +2063,7 @@ fn split_params(s: &str) -> Vec<String> {
 /// Substitute `$1`, `$2`, ... placeholders with parameter values (for SQL-level EXECUTE).
 pub(crate) fn bind_params(sql: &str, param_values: &[Option<Vec<u8>>]) -> String {
     if param_values.is_empty() {
-        return sql.to_string();
+        return sql.to_owned();
     }
     let mut result = String::with_capacity(sql.len() + param_values.len() * 8);
     let bytes = sql.as_bytes();

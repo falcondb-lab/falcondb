@@ -98,12 +98,9 @@ pub fn target_shard_from_datums(
         return Some(ShardId(0));
     }
 
-    match schema.sharding_policy {
-        ShardingPolicy::Reference => None,
-        _ => {
-            let hash = compute_shard_hash_from_datums(datums);
-            Some(ShardId(hash % num_shards))
-        }
+    if schema.sharding_policy == ShardingPolicy::Reference { None } else {
+        let hash = compute_shard_hash_from_datums(datums);
+        Some(ShardId(hash % num_shards))
     }
 }
 

@@ -48,7 +48,7 @@ impl super::DistributedQueryEngine {
             *self
                 .last_scatter_stats
                 .lock()
-                .unwrap_or_else(|p| p.into_inner()) = ScatterStats {
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = ScatterStats {
                 shards_participated: 1,
                 total_rows_gathered: row_count,
                 per_shard_latency_us: vec![(single_shard.0, elapsed)],
@@ -77,7 +77,7 @@ impl super::DistributedQueryEngine {
             if self.engine.shard(sid).is_none() {
                 return Err(FalconError::internal_bug(
                     "E-QE-013",
-                    format!("Shard {:?} not found", sid),
+                    format!("Shard {sid:?} not found"),
                     "exec_dist_plan pre-validation",
                 ));
             }
@@ -99,8 +99,7 @@ impl super::DistributedQueryEngine {
                         if cancelled_ref.load(Ordering::Relaxed) {
                             return Err(FalconError::Transient {
                                 reason: format!(
-                                    "DistPlan cancelled before shard {:?} started",
-                                    shard_id,
+                                    "DistPlan cancelled before shard {shard_id:?} started",
                                 ),
                                 retry_after_ms: 50,
                             });
@@ -124,7 +123,7 @@ impl super::DistributedQueryEngine {
                                 {
                                     let pair = std::sync::Mutex::new(false);
                                     let cvar = std::sync::Condvar::new();
-                                    let guard = pair.lock().unwrap_or_else(|e| e.into_inner());
+                                    let guard = pair.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                                     let _ = cvar
                                         .wait_timeout(guard, std::time::Duration::from_millis(5));
                                 }
@@ -168,7 +167,7 @@ impl super::DistributedQueryEngine {
                                     return Err(FalconError::internal_bug(
                                         "E-QE-014",
                                         "DistPlan subplan must return Query result",
-                                        format!("shard {:?}", shard_id),
+                                        format!("shard {shard_id:?}"),
                                     ));
                                 }
                                 Err(e) => {
@@ -186,8 +185,7 @@ impl super::DistributedQueryEngine {
 
                         Err(last_err.unwrap_or_else(|| {
                             FalconError::Internal(format!(
-                                "Shard {:?} failed after {} attempts",
-                                shard_id, max_attempts
+                                "Shard {shard_id:?} failed after {max_attempts} attempts"
                             ))
                         }))
                     })
@@ -217,7 +215,7 @@ impl super::DistributedQueryEngine {
                 Err(e) => {
                     let sid = target_shards.get(i).copied().unwrap_or(ShardId(i as u64));
                     tracing::warn!("Shard {:?} failed during scatter: {}", sid, e);
-                    failed_shards.push((sid, format!("{}", e)));
+                    failed_shards.push((sid, format!("{e}")));
                 }
             }
         }
@@ -467,7 +465,7 @@ impl super::DistributedQueryEngine {
                                 Datum::Float64(*s as f64 / *c as f64)
                             }
                             (Datum::Int32(s), Datum::Int64(c)) => {
-                                Datum::Float64(*s as f64 / *c as f64)
+                                Datum::Float64(f64::from(*s) / *c as f64)
                             }
                             (Datum::Float64(s), Datum::Int64(c)) => Datum::Float64(s / *c as f64),
                             _ => Datum::Null,
@@ -541,7 +539,7 @@ impl super::DistributedQueryEngine {
 
         let failed_shard_ids: Vec<u64> = failed_shards.iter().map(|(sid, _)| sid.0).collect();
         let merge_labels = if let DistGather::TwoPhaseAgg { agg_merges, .. } = gather {
-            agg_merges.iter().map(|m| m.to_string()).collect()
+            agg_merges.iter().map(std::string::ToString::to_string).collect()
         } else {
             vec![]
         };

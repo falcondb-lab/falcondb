@@ -89,8 +89,8 @@ impl TwoPhaseCoordinator {
             let shard = self.engine.shard(shard_id).ok_or_else(|| {
                 FalconError::internal_bug(
                     "E-2PC-001",
-                    format!("Shard {:?} not found during 2PC prepare", shard_id),
-                    format!("target_shards={:?}", target_shards),
+                    format!("Shard {shard_id:?} not found during 2PC prepare"),
+                    format!("target_shards={target_shards:?}"),
                 )
             })?;
 
@@ -134,16 +134,13 @@ impl TwoPhaseCoordinator {
         if all_prepared {
             // All shards prepared — commit all.
             for p in &participants {
-                let shard = match self.engine.shard(p.shard_id) {
-                    Some(s) => s,
-                    None => {
-                        tracing::error!(
-                            "2PC commit: shard {:?} not found — skipping commit for txn {}",
-                            p.shard_id,
-                            p.txn_id
-                        );
-                        continue;
-                    }
+                let shard = if let Some(s) = self.engine.shard(p.shard_id) { s } else {
+                    tracing::error!(
+                        "2PC commit: shard {:?} not found — skipping commit for txn {}",
+                        p.shard_id,
+                        p.txn_id
+                    );
+                    continue;
                 };
                 if let Err(e) = shard.txn_mgr.commit(p.txn_id) {
                     // In production, this would be logged to a recovery journal.
@@ -295,7 +292,7 @@ impl HardenedTwoPhaseCoordinator {
                     shard_count: target_shards.len(),
                     latency,
                     retry: None,
-                    abort_reason: Some(format!("admission rejected: {}", e)),
+                    abort_reason: Some(format!("admission rejected: {e}")),
                     timeout_phase: None,
                     failure_class: Some(FailureClass::Transient),
                 });
@@ -404,7 +401,7 @@ impl HardenedTwoPhaseCoordinator {
                 // so the thread yields properly and doesn't block shutdown.
                 let pair = std::sync::Mutex::new(false);
                 let cvar = std::sync::Condvar::new();
-                let guard = pair.lock().unwrap_or_else(|e| e.into_inner());
+                let guard = pair.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let _ = cvar.wait_timeout(guard, backoff);
             }
         }
@@ -452,8 +449,7 @@ impl HardenedTwoPhaseCoordinator {
                 latency.prepare_wal_us = prepare_start.elapsed().as_micros() as u64;
                 return Err(FalconError::Transient {
                     reason: format!(
-                        "2PC total timeout exceeded during prepare (shard {:?})",
-                        shard_id
+                        "2PC total timeout exceeded during prepare (shard {shard_id:?})"
                     ),
                     retry_after_ms: 100,
                 });
@@ -462,8 +458,8 @@ impl HardenedTwoPhaseCoordinator {
             let shard = self.engine.shard(shard_id).ok_or_else(|| {
                 FalconError::internal_bug(
                     "E-2PC-002",
-                    format!("Shard {:?} not found during hardened 2PC prepare", shard_id),
-                    format!("target_shards={:?}", target_shards),
+                    format!("Shard {shard_id:?} not found during hardened 2PC prepare"),
+                    format!("target_shards={target_shards:?}"),
                 )
             })?;
 
@@ -527,15 +523,12 @@ impl HardenedTwoPhaseCoordinator {
 
         if all_prepared {
             for p in &participants {
-                let shard = match self.engine.shard(p.shard_id) {
-                    Some(s) => s,
-                    None => {
-                        tracing::error!(
-                            "2PC hardened commit: shard {:?} not found — skipping",
-                            p.shard_id
-                        );
-                        continue;
-                    }
+                let shard = if let Some(s) = self.engine.shard(p.shard_id) { s } else {
+                    tracing::error!(
+                        "2PC hardened commit: shard {:?} not found — skipping",
+                        p.shard_id
+                    );
+                    continue;
                 };
                 if let Err(e) = shard.txn_mgr.commit(p.txn_id) {
                     tracing::error!(

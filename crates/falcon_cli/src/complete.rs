@@ -109,8 +109,7 @@ impl Completer for FsqlHelper {
         // Find the start of the current word
         let word_start = prefix
             .rfind(|c: char| c.is_whitespace())
-            .map(|i| i + 1)
-            .unwrap_or(0);
+            .map_or(0, |i| i + 1);
         let word = &prefix[word_start..];
 
         debug!("Completing word: {:?}", word);
@@ -122,8 +121,8 @@ impl Completer for FsqlHelper {
             for &cmd in META_COMMANDS {
                 if cmd.to_lowercase().starts_with(&word.to_lowercase()) {
                     candidates.push(Pair {
-                        display: cmd.to_string(),
-                        replacement: cmd.to_string(),
+                        display: cmd.to_owned(),
+                        replacement: cmd.to_owned(),
                     });
                 }
             }
@@ -132,8 +131,8 @@ impl Completer for FsqlHelper {
             for &kw in SQL_KEYWORDS {
                 if kw.to_lowercase().starts_with(&word.to_lowercase()) {
                     candidates.push(Pair {
-                        display: kw.to_string(),
-                        replacement: kw.to_string(),
+                        display: kw.to_owned(),
+                        replacement: kw.to_owned(),
                     });
                 }
             }

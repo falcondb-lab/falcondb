@@ -61,7 +61,7 @@ pub async fn run_repl(client: &mut DbClient, args: &Args) -> Result<()> {
                 client.user, client.host, client.port, client.dbname
             )
         } else {
-            "fsql ...> ".to_string()
+            "fsql ...> ".to_owned()
         };
 
         let line = match rl.readline(&prompt) {
@@ -79,7 +79,7 @@ pub async fn run_repl(client: &mut DbClient, args: &Args) -> Result<()> {
                 break;
             }
             Err(e) => {
-                eprintln!("Input error: {}", e);
+                eprintln!("Input error: {e}");
                 break;
             }
         };
@@ -97,7 +97,7 @@ pub async fn run_repl(client: &mut DbClient, args: &Args) -> Result<()> {
             if let Some(cmd) = parse_meta(trimmed) {
                 match execute_meta(&cmd, client).await? {
                     MetaResult::Quit => break,
-                    MetaResult::Output(s) => print!("{}", s),
+                    MetaResult::Output(s) => print!("{s}"),
                     MetaResult::ToggleExpanded => {
                         expanded = !expanded;
                         println!(
@@ -114,11 +114,11 @@ pub async fn run_repl(client: &mut DbClient, args: &Args) -> Result<()> {
                             let timer = timing.maybe_start();
                             match run_export(client, &cmd).await {
                                 Ok(n) => println!("Exported {} rows to '{}'.", n, cmd.file),
-                                Err(e) => eprintln!("ERROR (EXPORT): {:#}", e),
+                                Err(e) => eprintln!("ERROR (EXPORT): {e:#}"),
                             }
                             timing.maybe_print(timer);
                         }
-                        Err(e) => eprintln!("ERROR (EXPORT): {:#}", e),
+                        Err(e) => eprintln!("ERROR (EXPORT): {e:#}"),
                     },
                     MetaResult::Import(line) => match parse_import(&line) {
                         Ok(cmd) => {
@@ -128,11 +128,11 @@ pub async fn run_repl(client: &mut DbClient, args: &Args) -> Result<()> {
                                     "Import complete: {} total, {} inserted, {} failed.",
                                     s.total, s.inserted, s.failed
                                 ),
-                                Err(e) => eprintln!("ERROR (IMPORT): {:#}", e),
+                                Err(e) => eprintln!("ERROR (IMPORT): {e:#}"),
                             }
                             timing.maybe_print(timer);
                         }
-                        Err(e) => eprintln!("ERROR (IMPORT): {:#}", e),
+                        Err(e) => eprintln!("ERROR (IMPORT): {e:#}"),
                     },
                     MetaResult::Cluster(arg) => {
                         let mode = effective_mode(args, expanded);
@@ -156,7 +156,7 @@ pub async fn run_repl(client: &mut DbClient, args: &Args) -> Result<()> {
                         };
                         match out {
                             Ok(s) => print_with_pager(&s, false),
-                            Err(e) => eprintln!("ERROR (\\cluster): {:#}", e),
+                            Err(e) => eprintln!("ERROR (\\cluster): {e:#}"),
                         }
                         timing.maybe_print(timer);
                     }
@@ -170,7 +170,7 @@ pub async fn run_repl(client: &mut DbClient, args: &Args) -> Result<()> {
                                         match resolution {
                                             Some(res) => apply_txn_resolve(client, &txn_id, &res, true).await
                                                 .map(|r| r.render()),
-                                            None => Ok("Specify resolution: \\txn resolve <id> commit|abort\n".to_string()),
+                                            None => Ok("Specify resolution: \\txn resolve <id> commit|abort\n".to_owned()),
                                         }
                                     } else {
                                         plan_txn_resolve(client, &txn_id, mode).await
@@ -184,7 +184,7 @@ pub async fn run_repl(client: &mut DbClient, args: &Args) -> Result<()> {
                         };
                         match out {
                             Ok(s) => print_with_pager(&s, false),
-                            Err(e) => eprintln!("ERROR (\\txn): {:#}", e),
+                            Err(e) => eprintln!("ERROR (\\txn): {e:#}"),
                         }
                         timing.maybe_print(timer);
                     }
@@ -194,7 +194,7 @@ pub async fn run_repl(client: &mut DbClient, args: &Args) -> Result<()> {
                         let timer = timing.maybe_start();
                         match run_consistency(client, &sub, mode).await {
                             Ok(out) => print_with_pager(&out, false),
-                            Err(e) => eprintln!("ERROR (\\consistency): {:#}", e),
+                            Err(e) => eprintln!("ERROR (\\consistency): {e:#}"),
                         }
                         timing.maybe_print(timer);
                     }
@@ -226,7 +226,7 @@ pub async fn run_repl(client: &mut DbClient, args: &Args) -> Result<()> {
                         };
                         match out {
                             Ok(s) => print_with_pager(&s, false),
-                            Err(e) => eprintln!("ERROR (\\node): {:#}", e),
+                            Err(e) => eprintln!("ERROR (\\node): {e:#}"),
                         }
                         timing.maybe_print(timer);
                     }
@@ -236,7 +236,7 @@ pub async fn run_repl(client: &mut DbClient, args: &Args) -> Result<()> {
                         let timer = timing.maybe_start();
                         match run_failover(client, &sub, mode).await {
                             Ok(out) => print_with_pager(&out, false),
-                            Err(e) => eprintln!("ERROR (\\failover): {:#}", e),
+                            Err(e) => eprintln!("ERROR (\\failover): {e:#}"),
                         }
                         timing.maybe_print(timer);
                     }
@@ -258,7 +258,7 @@ pub async fn run_repl(client: &mut DbClient, args: &Args) -> Result<()> {
                         };
                         match result {
                             Ok(s) => print_with_pager(&s, false),
-                            Err(e) => eprintln!("ERROR (\\shard): {:#}", e),
+                            Err(e) => eprintln!("ERROR (\\shard): {e:#}"),
                         }
                         timing.maybe_print(timer);
                     }
@@ -268,7 +268,7 @@ pub async fn run_repl(client: &mut DbClient, args: &Args) -> Result<()> {
                         let timer = timing.maybe_start();
                         match run_audit(client, &sub, mode).await {
                             Ok(out) => print_with_pager(&out, false),
-                            Err(e) => eprintln!("ERROR (\\audit): {:#}", e),
+                            Err(e) => eprintln!("ERROR (\\audit): {e:#}"),
                         }
                         timing.maybe_print(timer);
                     }
@@ -278,9 +278,9 @@ pub async fn run_repl(client: &mut DbClient, args: &Args) -> Result<()> {
                         match PolicyCmd::parse(&arg) {
                             Ok(cmd) => match run_policy(client, &cmd, mode, args.apply).await {
                                 Ok(out) => print_with_pager(&out, false),
-                                Err(e) => eprintln!("ERROR (\\policy): {:#}", e),
+                                Err(e) => eprintln!("ERROR (\\policy): {e:#}"),
                             },
-                            Err(e) => eprintln!("ERROR (\\policy): {:#}", e),
+                            Err(e) => eprintln!("ERROR (\\policy): {e:#}"),
                         }
                         timing.maybe_print(timer);
                     }
@@ -290,7 +290,7 @@ pub async fn run_repl(client: &mut DbClient, args: &Args) -> Result<()> {
                         let timer = timing.maybe_start();
                         match run_automation(client, &sub, mode).await {
                             Ok(out) => print_with_pager(&out, false),
-                            Err(e) => eprintln!("ERROR (\\automation): {:#}", e),
+                            Err(e) => eprintln!("ERROR (\\automation): {e:#}"),
                         }
                         timing.maybe_print(timer);
                     }
@@ -304,7 +304,7 @@ pub async fn run_repl(client: &mut DbClient, args: &Args) -> Result<()> {
                                     maybe_wrap_machine(&out, r"\integration", true, args);
                                 print_with_pager(&final_out, false);
                             }
-                            Err(e) => eprintln!("ERROR (\\integration): {:#}", e),
+                            Err(e) => eprintln!("ERROR (\\integration): {e:#}"),
                         }
                         timing.maybe_print(timer);
                     }
@@ -317,7 +317,7 @@ pub async fn run_repl(client: &mut DbClient, args: &Args) -> Result<()> {
                                 let final_out = maybe_wrap_machine(&out, r"\events", true, args);
                                 print_with_pager(&final_out, false);
                             }
-                            Err(e) => eprintln!("ERROR (\\events): {:#}", e),
+                            Err(e) => eprintln!("ERROR (\\events): {e:#}"),
                         }
                         timing.maybe_print(timer);
                     }
@@ -333,9 +333,9 @@ pub async fn run_repl(client: &mut DbClient, args: &Args) -> Result<()> {
                         {
                             Ok(new_client) => {
                                 *client = new_client;
-                                println!("You are now connected to database \"{}\".", dbname);
+                                println!("You are now connected to database \"{dbname}\".");
                             }
-                            Err(e) => eprintln!("ERROR: {}", e),
+                            Err(e) => eprintln!("ERROR: {e}"),
                         }
                     }
                 }
@@ -351,7 +351,7 @@ pub async fn run_repl(client: &mut DbClient, args: &Args) -> Result<()> {
 
         // Execute when we see a terminating semicolon
         if trimmed.ends_with(';') {
-            let sql = buffer.trim().to_string();
+            let sql = buffer.trim().to_owned();
             buffer.clear();
 
             let mode = effective_mode(args, expanded);
@@ -359,7 +359,7 @@ pub async fn run_repl(client: &mut DbClient, args: &Args) -> Result<()> {
 
             let timer = timing.maybe_start();
             if let Err(e) = run_statement(client, &sql, mode, args.tuples_only).await {
-                eprintln!("ERROR: {}", e);
+                eprintln!("ERROR: {e}");
             }
             timing.maybe_print(timer);
         }
@@ -384,7 +384,7 @@ fn maybe_wrap_machine(output: &str, command: &str, success: bool, args: &Args) -
             &identity.source,
         )
     } else {
-        output.to_string()
+        output.to_owned()
     }
 }
 
@@ -400,8 +400,8 @@ fn parse_shard_move_arg(arg: &str) -> anyhow::Result<(String, String)> {
     let to_pos = lower_rest
         .find(" to ")
         .ok_or_else(|| anyhow::anyhow!("Usage: \\shard move <shard_id> to <node_id>"))?;
-    let shard_id = rest[..to_pos].trim().to_string();
-    let target_node = rest[to_pos + 4..].trim().to_string();
+    let shard_id = rest[..to_pos].trim().to_owned();
+    let target_node = rest[to_pos + 4..].trim().to_owned();
     if shard_id.is_empty() || target_node.is_empty() {
         anyhow::bail!("Usage: \\shard move <shard_id> to <node_id>");
     }

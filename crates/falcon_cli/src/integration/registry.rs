@@ -55,7 +55,7 @@ impl IntegrationCmd {
         match verb.as_str() {
             "add" => {
                 let kind = rest.first().copied().unwrap_or("").to_lowercase();
-                let endpoint = rest.get(1).copied().unwrap_or("").to_string();
+                let endpoint = rest.get(1).copied().unwrap_or("").to_owned();
                 if kind == "webhook" {
                     Self::AddWebhook(endpoint)
                 } else {
@@ -63,15 +63,15 @@ impl IntegrationCmd {
                 }
             }
             "remove" | "delete" => {
-                let id = rest.first().copied().unwrap_or("").to_string();
+                let id = rest.first().copied().unwrap_or("").to_owned();
                 Self::Remove(id)
             }
             "disable" => {
-                let id = rest.first().copied().unwrap_or("").to_string();
+                let id = rest.first().copied().unwrap_or("").to_owned();
                 Self::Disable(id)
             }
             "enable" => {
-                let id = rest.first().copied().unwrap_or("").to_string();
+                let id = rest.first().copied().unwrap_or("").to_owned();
                 Self::Enable(id)
             }
             _ => {
@@ -107,8 +107,7 @@ async fn integration_list(client: &DbClient, mode: OutputMode) -> Result<String>
 
     if rows.is_empty() {
         return Ok("No integrations registered. \
-             Use \\integration add webhook <url> to register one.\n"
-            .to_string());
+             Use \\integration add webhook <url> to register one.\n".to_owned());
     }
 
     Ok(format_rows_as_string(&rows, mode, "Integrations"))
@@ -120,7 +119,7 @@ async fn integration_add_webhook(
     _mode: OutputMode,
 ) -> Result<String> {
     if url.is_empty() {
-        return Ok("Usage: \\integration add webhook <url>\n".to_string());
+        return Ok("Usage: \\integration add webhook <url>\n".to_owned());
     }
 
     let sql = format!(
@@ -133,25 +132,23 @@ async fn integration_add_webhook(
                 .0
                 .into_iter()
                 .next()
-                .and_then(|r| r.get(0).map(|v| v.to_string()))
-                .unwrap_or_else(|| "unknown".to_string());
+                .and_then(|r| r.get(0).map(std::string::ToString::to_string))
+                .unwrap_or_else(|| "unknown".to_owned());
             Ok(format!(
-                "Webhook integration registered (id: {}).\n\
-                 Events will be delivered to: {}\n",
-                id, url
+                "Webhook integration registered (id: {id}).\n\
+                 Events will be delivered to: {url}\n"
             ))
         }
         Err(e) => Ok(format!(
-            "Integration registration rejected: {}\n\
-             (falcon.admin_register_integration() may not be available)\n",
-            e
+            "Integration registration rejected: {e}\n\
+             (falcon.admin_register_integration() may not be available)\n"
         )),
     }
 }
 
 async fn integration_remove(client: &DbClient, id: &str, _mode: OutputMode) -> Result<String> {
     if id.is_empty() {
-        return Ok("Usage: \\integration remove <integration_id>\n".to_string());
+        return Ok("Usage: \\integration remove <integration_id>\n".to_owned());
     }
 
     let sql = format!(
@@ -159,8 +156,8 @@ async fn integration_remove(client: &DbClient, id: &str, _mode: OutputMode) -> R
         id.replace('\'', "''")
     );
     match client.query_simple(&sql).await {
-        Ok(_) => Ok(format!("Integration '{}' removed.\n", id)),
-        Err(e) => Ok(format!("Integration removal rejected: {}\n", e)),
+        Ok(_) => Ok(format!("Integration '{id}' removed.\n")),
+        Err(e) => Ok(format!("Integration removal rejected: {e}\n")),
     }
 }
 
@@ -188,7 +185,7 @@ async fn integration_set_enabled(
             id,
             if enabled { "enabled" } else { "disabled" }
         )),
-        Err(e) => Ok(format!("Integration update rejected: {}\n", e)),
+        Err(e) => Ok(format!("Integration update rejected: {e}\n")),
     }
 }
 

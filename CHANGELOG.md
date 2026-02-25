@@ -7,6 +7,43 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased] — TDE, Docker, Linux Packaging
+
+### Added — Transparent Data Encryption (TDE)
+
+- **Real AES-256-GCM encryption** in `falcon_storage::encryption` — replaces XOR stub.
+  - `KeyManager`: PBKDF2-HMAC-SHA256 master key derivation (600k iterations),
+    DEK generation/wrap/unwrap, master key rotation with DEK re-wrap.
+  - `EncryptionKey`: CSPRNG key generation via OS entropy (`getrandom`).
+  - `encrypt_block` / `decrypt_block`: per-block AES-256-GCM with random 12-byte nonces.
+  - `encrypt_block_with_nonce` / `decrypt_block_with_nonce`: deterministic nonce variant
+    for WAL records keyed by LSN.
+  - `TdeError` with `DekNotFound`, `DecryptionFailed`, `EncryptionFailed` variants.
+  - 23 unit tests covering roundtrip, tamper detection, key isolation, rotation, edge cases.
+- **WAL encryption integration** — `WalEncryption` cached cipher context.
+  - `WalWriter::set_encryption()` enables transparent per-record encryption on write.
+  - `WalReader::read_all_encrypted()` / `read_from_segment_encrypted()` for decryption on read.
+  - On-disk format unchanged: `[len:4][crc:4][payload]` where payload is
+    `nonce(12) || ciphertext+tag` when TDE is active.
+  - 5 WAL encryption tests: roundtrip, wrong-key rejection, no-decryption rejection,
+    segment rotation, full KeyManager integration.
+- **New crate dependencies**: `aes-gcm 0.10`, `rand 0.8`, `pbkdf2 0.12`, `hmac 0.12`.
+
+### Added — Docker & Linux Packaging
+
+- **`Dockerfile`** — multi-stage build (rust:1.75-bookworm builder + debian:bookworm-slim runtime).
+  - Dependency caching layer, stripped release binaries, non-root `falcondb` user.
+- **`docker-compose.yml`** — standalone + optional primary/replica cluster profiles.
+- **`docker/falcon.toml`** — container-optimized default config.
+- **`scripts/build_linux_dist.sh`** — Linux tarball builder with systemd unit, install script.
+- **`.dockerignore`** — excludes target/, .git/, benchmarks/results/.
+
+### Added — Documentation
+
+- **`docs/INDEX.md`** — comprehensive documentation index organizing 90+ files by topic.
+
+---
+
 ## [Unreleased] — Public Reproducible Benchmark Matrix (4 Engines × 5 Workloads)
 
 ### Added — Benchmark Infrastructure

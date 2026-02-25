@@ -445,7 +445,7 @@ impl InDoubtResolver {
                     error = %e,
                     "failed to spawn background thread — node DEGRADED"
                 );
-                FalconError::Internal(format!("failed to spawn in-doubt resolver thread: {}", e))
+                FalconError::Internal(format!("failed to spawn in-doubt resolver thread: {e}"))
             })?;
 
         Ok(InDoubtResolverHandle {
@@ -603,7 +603,7 @@ impl InDoubtResolver {
 
         let mut aborted = 0;
         for txn_id in stuck_ids {
-            if let Ok(true) = self.admin_force_abort(txn_id) {
+            if matches!(self.admin_force_abort(txn_id), Ok(true)) {
                 aborted += 1;
             }
         }

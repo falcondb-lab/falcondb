@@ -55,8 +55,8 @@ impl WalChunk {
     /// Build a WalChunk from a slice of LsnWalRecords.
     /// Computes a CRC32 checksum over the LSN sequence for integrity.
     pub fn from_records(shard_id: ShardId, records: Vec<LsnWalRecord>) -> Self {
-        let start_lsn = records.first().map(|r| r.lsn).unwrap_or(0);
-        let end_lsn = records.last().map(|r| r.lsn).unwrap_or(0);
+        let start_lsn = records.first().map_or(0, |r| r.lsn);
+        let end_lsn = records.last().map_or(0, |r| r.lsn);
         let checksum = Self::compute_checksum(&records);
         Self {
             shard_id,
@@ -78,7 +78,7 @@ impl WalChunk {
             // Simple CRC over LSN bytes — sufficient for integrity detection.
             let bytes = rec.lsn.to_le_bytes();
             for &b in &bytes {
-                crc = crc.wrapping_mul(31).wrapping_add(b as u32);
+                crc = crc.wrapping_mul(31).wrapping_add(u32::from(b));
             }
         }
         crc
@@ -212,7 +212,7 @@ impl ChannelTransport {
         self.sender
             .lock()
             .send(chunk)
-            .map_err(|e| FalconError::Internal(format!("Channel send error: {}", e)))
+            .map_err(|e| FalconError::Internal(format!("Channel send error: {e}")))
     }
 
     /// Get the acked LSN for a replica.
@@ -239,7 +239,7 @@ impl ReplicationTransport for ChannelTransport {
             Err(std::sync::mpsc::TryRecvError::Empty) => {
                 Ok(WalChunk::from_records(self.shard_id, vec![]))
             }
-            Err(e) => Err(FalconError::Internal(format!("Channel recv error: {}", e))),
+            Err(e) => Err(FalconError::Internal(format!("Channel recv error: {e}"))),
         }
     }
 
@@ -328,6 +328,7 @@ pub struct LsnWalRecord {
 const DEFAULT_REPLICATION_LOG_CAPACITY: usize = 128 * 1024;
 
 /// The replication log: an ordered sequence of (LSN, WalRecord).
+///
 /// Primary appends; replicas read from their last applied LSN.
 /// Includes a `Notify` for push-based streaming: `subscribe_wal` holds
 /// the gRPC stream open and wakes when new records are appended.
@@ -442,6 +443,6 @@ impl ReplicationLog {
 
     /// Minimum LSN still held in the log (0 if empty).
     pub fn min_lsn(&self) -> u64 {
-        self.records.lock().first().map(|r| r.lsn).unwrap_or(0)
+        self.records.lock().first().map_or(0, |r| r.lsn)
     }
 }

@@ -40,7 +40,7 @@ pub struct LockMetrics {
 impl LockMetrics {
     fn new(name: &str) -> Self {
         Self {
-            name: name.to_string(),
+            name: name.to_owned(),
             read_acquires: AtomicU64::new(0),
             write_acquires: AtomicU64::new(0),
             contentions: AtomicU64::new(0),
@@ -134,14 +134,14 @@ impl<T> InstrumentedRwLock<T> {
 
     pub fn read(&self) -> RwLockReadGuard<'_, T> {
         let start = Instant::now();
-        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self.inner.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         self.metrics.record_read(start.elapsed());
         guard
     }
 
     pub fn write(&self) -> RwLockWriteGuard<'_, T> {
         let start = Instant::now();
-        let guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        let guard = self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         self.metrics.record_write(start.elapsed());
         guard
     }
@@ -171,7 +171,7 @@ impl<T> InstrumentedMutex<T> {
 
     pub fn lock(&self) -> MutexGuard<'_, T> {
         let start = Instant::now();
-        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         self.metrics.record_write(start.elapsed());
         guard
     }

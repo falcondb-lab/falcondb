@@ -110,14 +110,14 @@ impl Executor {
                         }
                         if !matched {
                             let left_width =
-                                combined_rows.first().map(|r| r.values.len()).unwrap_or(0);
+                                combined_rows.first().map_or(0, |r| r.values.len());
                             let null_left = OwnedRow::new(vec![Datum::Null; left_width]);
                             new_combined.push(self.merge_rows(&null_left, right_row));
                         }
                     }
                 }
                 JoinType::FullOuter => {
-                    let left_width = combined_rows.first().map(|r| r.values.len()).unwrap_or(0);
+                    let left_width = combined_rows.first().map_or(0, |r| r.values.len());
                     let mut right_matched = vec![false; right_data.len()];
                     for left_row in &combined_rows {
                         let mut left_matched = false;
@@ -271,7 +271,7 @@ impl Executor {
                 };
 
             // Extract equi-join key column indices from the condition
-            let left_width = combined_rows.first().map(|r| r.values.len()).unwrap_or(0);
+            let left_width = combined_rows.first().map_or(0, |r| r.values.len());
             let key_pairs = Self::extract_equi_key_pairs(join.condition.as_ref(), left_width);
 
             let mut new_combined = Vec::new();
@@ -620,7 +620,7 @@ impl Executor {
                         .collect()
                 };
 
-            let left_width = combined_rows.first().map(|r| r.values.len()).unwrap_or(0);
+            let left_width = combined_rows.first().map_or(0, |r| r.values.len());
             let key_pairs = Self::extract_equi_key_pairs(join.condition.as_ref(), left_width);
 
             let mut new_combined = Vec::new();

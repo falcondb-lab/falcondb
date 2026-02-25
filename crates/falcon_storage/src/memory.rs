@@ -194,7 +194,7 @@ impl MemoryTracker {
     }
 
     /// Create a tracker with no limits (backpressure disabled).
-    pub fn unlimited() -> Self {
+    pub const fn unlimited() -> Self {
         Self::new(MemoryBudget::unlimited())
     }
 
@@ -211,9 +211,7 @@ impl MemoryTracker {
         let prev = self.mvcc_bytes.fetch_sub(bytes as i64, Ordering::Relaxed);
         debug_assert!(
             prev >= bytes as i64,
-            "mvcc_bytes underflow: prev={}, sub={}",
-            prev,
-            bytes
+            "mvcc_bytes underflow: prev={prev}, sub={bytes}"
         );
         self.check_pressure_transition();
     }
@@ -231,9 +229,7 @@ impl MemoryTracker {
         let prev = self.index_bytes.fetch_sub(bytes as i64, Ordering::Relaxed);
         debug_assert!(
             prev >= bytes as i64,
-            "index_bytes underflow: prev={}, sub={}",
-            prev,
-            bytes
+            "index_bytes underflow: prev={prev}, sub={bytes}"
         );
         self.check_pressure_transition();
     }
@@ -254,9 +250,7 @@ impl MemoryTracker {
             .fetch_sub(bytes as i64, Ordering::Relaxed);
         debug_assert!(
             prev >= bytes as i64,
-            "write_buffer_bytes underflow: prev={}, sub={}",
-            prev,
-            bytes
+            "write_buffer_bytes underflow: prev={prev}, sub={bytes}"
         );
         self.check_pressure_transition();
     }

@@ -1,0 +1,72 @@
+# ============================================================================
+# FalconDB — Docker Compose
+# ============================================================================
+#
+# Quick start:
+#   docker compose up -d
+#
+# Connect:
+#   psql -h 127.0.0.1 -p 5443 -U falcon
+#
+# Cluster (primary + replica):
+#   docker compose --profile cluster up -d
+
+services:
+  falcondb:
+    build: .
+    image: falcondb:latest
+    container_name: falcondb
+    ports:
+      - "5443:5443"   # PostgreSQL wire protocol
+      - "8080:8080"   # Admin / health-check HTTP
+    volumes:
+      - falcondb-data:/var/lib/falcondb
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # ── Optional: Primary + Replica cluster ──────────────────────────────────
+
+  primary:
+    build: .
+    image: falcondb:latest
+    container_name: falcondb-primary
+    profiles: ["cluster"]
+    ports:
+      - "5443:5443"
+      - "8080:8080"
+      - "50051:50051"
+    volumes:
+      - falcondb-primary-data:/var/lib/falcondb
+    environment:
+      - FALCON_ROLE=primary
+    command: ["--config", "/etc/falcondb/falcon.toml"]
+    restart: unless-stopped
+
+  replica:
+    build: .
+    image: falcondb:latest
+    container_name: falcondb-replica
+    profiles: ["cluster"]
+    ports:
+      - "5444:5443"
+      - "8081:8080"
+    volumes:
+      - falcondb-replica-data:/var/lib/falcondb
+    environment:
+      - FALCON_ROLE=replica
+      - FALCON_PRIMARY_ENDPOINT=http://primary:50051
+    command: ["--config", "/etc/falcondb/falcon.toml"]
+    depends_on:
+      primary:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  falcondb-data:
+  falcondb-primary-data:
+  falcondb-replica-data:

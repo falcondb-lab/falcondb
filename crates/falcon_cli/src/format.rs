@@ -11,5 +11,5 @@ pub enum OutputMode {
 
 /// Format a command tag for display.
 pub fn format_command_tag(tag: &str) -> String {
-    tag.to_string()
+    tag.to_owned()
 }

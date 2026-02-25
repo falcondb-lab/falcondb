@@ -64,9 +64,8 @@ pub async fn plan_txn_resolve(
 
         if fb_rows.is_empty() {
             bail!(
-                "Transaction '{}' not found in in-doubt transactions. \
-                 Only prepared/in-doubt transactions may be resolved.",
-                txn_id
+                "Transaction '{txn_id}' not found in in-doubt transactions. \
+                 Only prepared/in-doubt transactions may be resolved."
             );
         }
 
@@ -76,7 +75,7 @@ pub async fn plan_txn_resolve(
         let cp = row.get(3).unwrap_or("unknown");
         let elapsed = row.get(4).unwrap_or("unknown");
 
-        let plan = PlanOutput::new(format!("txn resolve {}", txn_id), RiskLevel::High)
+        let plan = PlanOutput::new(format!("txn resolve {txn_id}"), RiskLevel::High)
             .field("Transaction ID", txn_id)
             .field("State", state)
             .field("Shards Involved", shards)
@@ -95,7 +94,7 @@ pub async fn plan_txn_resolve(
     let cp = row.get(3).unwrap_or("unknown");
     let elapsed = row.get(4).unwrap_or("unknown");
 
-    let plan = PlanOutput::new(format!("txn resolve {}", txn_id), RiskLevel::High)
+    let plan = PlanOutput::new(format!("txn resolve {txn_id}"), RiskLevel::High)
         .field("Transaction ID", txn_id)
         .field("State", state)
         .field("Shards Involved", shards)
@@ -115,7 +114,7 @@ pub async fn apply_txn_resolve(
     resolution: &TxnResolution,
     apply: bool,
 ) -> Result<ApplyResult> {
-    require_apply(apply, &format!("txn resolve {}", txn_id))?;
+    require_apply(apply, &format!("txn resolve {txn_id}"))?;
 
     let sql = match resolution {
         TxnResolution::Commit => format!(
@@ -130,7 +129,7 @@ pub async fn apply_txn_resolve(
 
     match client.query_simple(&sql).await {
         Ok(_) => Ok(ApplyResult::success(
-            format!("txn resolve {}", txn_id),
+            format!("txn resolve {txn_id}"),
             format!(
                 "Transaction '{}' has been {}ed. Audit record created.",
                 txn_id,
@@ -138,8 +137,8 @@ pub async fn apply_txn_resolve(
             ),
         )),
         Err(e) => Ok(ApplyResult::rejected(
-            format!("txn resolve {}", txn_id),
-            format!("Server rejected resolution: {}", e),
+            format!("txn resolve {txn_id}"),
+            format!("Server rejected resolution: {e}"),
         )),
     }
 }
@@ -148,7 +147,7 @@ pub async fn apply_txn_resolve(
 pub fn parse_txn_resolve_arg(arg: &str) -> Result<(String, Option<TxnResolution>)> {
     let parts: Vec<&str> = arg.trim().splitn(3, char::is_whitespace).collect();
     // parts[0] = "resolve", parts[1] = txn_id, parts[2] = optional resolution
-    let txn_id = parts.get(1).copied().unwrap_or("").trim().to_string();
+    let txn_id = parts.get(1).copied().unwrap_or("").trim().to_owned();
     if txn_id.is_empty() {
         bail!("Usage: \\txn resolve <txn_id> [commit|abort]");
     }

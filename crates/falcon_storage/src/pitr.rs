@@ -57,10 +57,10 @@ impl fmt::Display for RecoveryTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Latest => write!(f, "latest"),
-            Self::Time(ms) => write!(f, "time:{}", ms),
-            Self::Lsn(lsn) => write!(f, "lsn:{}", lsn),
-            Self::Xid(xid) => write!(f, "xid:{}", xid),
-            Self::RestorePoint(name) => write!(f, "restore_point:{}", name),
+            Self::Time(ms) => write!(f, "time:{ms}"),
+            Self::Lsn(lsn) => write!(f, "lsn:{lsn}"),
+            Self::Xid(xid) => write!(f, "xid:{xid}"),
+            Self::RestorePoint(name) => write!(f, "restore_point:{name}"),
         }
     }
 }
@@ -204,7 +204,7 @@ impl WalArchiver {
 
         let archive_path = self.archive_dir.join(filename);
         let segment = ArchivedSegment {
-            filename: filename.to_string(),
+            filename: filename.to_owned(),
             start_lsn,
             end_lsn,
             earliest_time_ms: now_ms,
@@ -222,7 +222,7 @@ impl WalArchiver {
     /// Create a named restore point.
     pub fn create_restore_point(&mut self, name: &str, lsn: Lsn) -> RestorePoint {
         let rp = RestorePoint {
-            name: name.to_string(),
+            name: name.to_owned(),
             lsn,
             created_at_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -267,9 +267,8 @@ impl WalArchiver {
     ) -> Vec<&ArchivedSegment> {
         let start = base_backup.start_lsn;
         let end = match target {
-            RecoveryTarget::Latest => Lsn::MAX,
             RecoveryTarget::Lsn(lsn) => *lsn,
-            _ => Lsn::MAX, // for time/xid targets, we need to scan all and stop when matched
+            _ => Lsn::MAX, // for time/xid/latest targets, scan all and stop when matched
         };
 
         self.segments
@@ -386,11 +385,11 @@ impl RecoveryExecutor {
     /// Check if the recovery target has been reached.
     pub fn target_reached(&self, record_lsn: Lsn, record_time_ms: u64, record_xid: u64) -> bool {
         match &self.target {
-            RecoveryTarget::Latest => false, // never stop early
             RecoveryTarget::Lsn(target) => record_lsn >= *target,
             RecoveryTarget::Time(target_ms) => record_time_ms >= *target_ms,
             RecoveryTarget::Xid(target_xid) => record_xid >= *target_xid,
-            RecoveryTarget::RestorePoint(_) => false, // handled separately
+            RecoveryTarget::Latest
+            | RecoveryTarget::RestorePoint(_) => false, // never stop early; restore points handled separately
         }
     }
 

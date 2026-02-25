@@ -521,15 +521,14 @@ pub enum ElectionError {
 impl fmt::Display for ElectionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ShardNotFound(s) => write!(f, "shard {} not found", s),
-            Self::NotElecting(s) => write!(f, "shard {} not in election", s),
-            Self::Timeout(s) => write!(f, "election for shard {} timed out", s),
+            Self::ShardNotFound(s) => write!(f, "shard {s} not found"),
+            Self::NotElecting(s) => write!(f, "shard {s} not in election"),
+            Self::Timeout(s) => write!(f, "election for shard {s} timed out"),
             Self::NoQuorum { shard_id, have, need } =>
-                write!(f, "shard {}: no quorum ({}/{})", shard_id, have, need),
-            Self::NoCandidates(s) => write!(f, "shard {}: no candidates", s),
+                write!(f, "shard {shard_id}: no quorum ({have}/{need})"),
+            Self::NoCandidates(s) => write!(f, "shard {s}: no candidates"),
             Self::SplitBrain { shard_id, existing_leader, new_leader } =>
-                write!(f, "shard {}: split-brain detected (existing={:?}, new={:?})",
-                    shard_id, existing_leader, new_leader),
+                write!(f, "shard {shard_id}: split-brain detected (existing={existing_leader:?}, new={new_leader:?})"),
         }
     }
 }
@@ -836,7 +835,7 @@ impl fmt::Display for UpgradeNodeState {
             Self::Upgrading => write!(f, "UPGRADING"),
             Self::Rejoining => write!(f, "REJOINING"),
             Self::Complete => write!(f, "COMPLETE"),
-            Self::Failed(r) => write!(f, "FAILED: {}", r),
+            Self::Failed(r) => write!(f, "FAILED: {r}"),
         }
     }
 }
@@ -885,7 +884,7 @@ impl RollingUpgradeCoordinator {
     }
 
     /// Check protocol version compatibility.
-    pub fn check_compatibility(&self) -> bool {
+    pub const fn check_compatibility(&self) -> bool {
         self.current_protocol.is_compatible(&self.target_protocol)
     }
 
@@ -1055,7 +1054,7 @@ impl fmt::Display for JoinPhase {
             Self::Syncing => write!(f, "SYNCING"),
             Self::Ready => write!(f, "READY"),
             Self::Active => write!(f, "ACTIVE"),
-            Self::Failed(r) => write!(f, "FAILED: {}", r),
+            Self::Failed(r) => write!(f, "FAILED: {r}"),
         }
     }
 }
@@ -1158,8 +1157,7 @@ impl NodeLifecycleCoordinator {
     /// Check if a node is fully drained.
     pub fn is_drained(&self, node_id: NodeId) -> bool {
         self.drains.read().get(&node_id)
-            .map(|s| s.phase == DrainPhase::Drained)
-            .unwrap_or(false)
+            .is_some_and(|s| s.phase == DrainPhase::Drained)
     }
 
     /// Get drain state.
@@ -1588,8 +1586,8 @@ impl fmt::Display for OpsCommand {
         match self {
             Self::ClusterStatus => write!(f, "cluster status"),
             Self::ClusterHealth => write!(f, "cluster health"),
-            Self::NodeDrain(id) => write!(f, "node drain {:?}", id),
-            Self::NodeJoin(id) => write!(f, "node join {:?}", id),
+            Self::NodeDrain(id) => write!(f, "node drain {id:?}"),
+            Self::NodeJoin(id) => write!(f, "node join {id:?}"),
             Self::UpgradePlan => write!(f, "upgrade plan"),
             Self::UpgradeApply => write!(f, "upgrade apply"),
         }
@@ -1670,31 +1668,31 @@ pub enum OpsEventType {
 impl fmt::Display for OpsEventType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NodeUp(id) => write!(f, "NODE_UP {:?}", id),
-            Self::NodeDown(id) => write!(f, "NODE_DOWN {:?}", id),
-            Self::NodeSuspect(id) => write!(f, "NODE_SUSPECT {:?}", id),
+            Self::NodeUp(id) => write!(f, "NODE_UP {id:?}"),
+            Self::NodeDown(id) => write!(f, "NODE_DOWN {id:?}"),
+            Self::NodeSuspect(id) => write!(f, "NODE_SUSPECT {id:?}"),
             Self::LeaderElected { shard_id, leader, term } =>
-                write!(f, "LEADER_ELECTED shard={} leader={:?} term={}", shard_id, leader, term),
+                write!(f, "LEADER_ELECTED shard={shard_id} leader={leader:?} term={term}"),
             Self::LeaderLost { shard_id, old_leader } =>
-                write!(f, "LEADER_LOST shard={} old_leader={:?}", shard_id, old_leader),
-            Self::DrainStarted(id) => write!(f, "DRAIN_STARTED {:?}", id),
-            Self::DrainCompleted(id) => write!(f, "DRAIN_COMPLETED {:?}", id),
-            Self::JoinStarted(id) => write!(f, "JOIN_STARTED {:?}", id),
-            Self::JoinCompleted(id) => write!(f, "JOIN_COMPLETED {:?}", id),
+                write!(f, "LEADER_LOST shard={shard_id} old_leader={old_leader:?}"),
+            Self::DrainStarted(id) => write!(f, "DRAIN_STARTED {id:?}"),
+            Self::DrainCompleted(id) => write!(f, "DRAIN_COMPLETED {id:?}"),
+            Self::JoinStarted(id) => write!(f, "JOIN_STARTED {id:?}"),
+            Self::JoinCompleted(id) => write!(f, "JOIN_COMPLETED {id:?}"),
             Self::UpgradeStarted { target_version } =>
-                write!(f, "UPGRADE_STARTED target={}", target_version),
+                write!(f, "UPGRADE_STARTED target={target_version}"),
             Self::UpgradeNodeComplete { node_id, version } =>
-                write!(f, "UPGRADE_NODE_COMPLETE {:?} v={}", node_id, version),
+                write!(f, "UPGRADE_NODE_COMPLETE {node_id:?} v={version}"),
             Self::UpgradeComplete { version } =>
-                write!(f, "UPGRADE_COMPLETE v={}", version),
+                write!(f, "UPGRADE_COMPLETE v={version}"),
             Self::ConfigChanged { key, old_value, new_value } =>
-                write!(f, "CONFIG_CHANGED {}={}->{}", key, old_value, new_value),
+                write!(f, "CONFIG_CHANGED {key}={old_value}->{new_value}"),
             Self::BackpressureChanged { old_level, new_level } =>
-                write!(f, "BACKPRESSURE_CHANGED {}→{}", old_level, new_level),
+                write!(f, "BACKPRESSURE_CHANGED {old_level}→{new_level}"),
             Self::CatchUpStarted { node_id, shard_id, strategy } =>
-                write!(f, "CATCHUP_STARTED {:?} shard={} strategy={}", node_id, shard_id, strategy),
+                write!(f, "CATCHUP_STARTED {node_id:?} shard={shard_id} strategy={strategy}"),
             Self::CatchUpCompleted { node_id, shard_id } =>
-                write!(f, "CATCHUP_COMPLETED {:?} shard={}", node_id, shard_id),
+                write!(f, "CATCHUP_COMPLETED {node_id:?} shard={shard_id}"),
         }
     }
 }
@@ -1735,7 +1733,7 @@ impl OpsAuditLog {
             id,
             timestamp,
             event_type,
-            initiator: initiator.to_string(),
+            initiator: initiator.to_owned(),
         };
         let mut events = self.events.lock();
         if events.len() >= self.capacity {

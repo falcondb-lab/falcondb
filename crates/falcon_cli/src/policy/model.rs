@@ -77,17 +77,17 @@ impl Condition {
     pub fn description(&self) -> String {
         match self {
             Self::NodeUnavailableForSecs(n) => {
-                format!("node unavailable for {} seconds", n)
+                format!("node unavailable for {n} seconds")
             }
-            Self::ShardLeaderUnavailable => "shard leader unavailable".to_string(),
-            Self::WalLagExceedsBytes(b) => format!("WAL lag exceeds {} bytes", b),
+            Self::ShardLeaderUnavailable => "shard leader unavailable".to_owned(),
+            Self::WalLagExceedsBytes(b) => format!("WAL lag exceeds {b} bytes"),
             Self::MemoryPressureExceedsPct(p) => {
-                format!("memory pressure exceeds {}%", p)
+                format!("memory pressure exceeds {p}%")
             }
             Self::InDoubtTransactionsExceed(n) => {
-                format!("in-doubt transactions exceed {}", n)
+                format!("in-doubt transactions exceed {n}")
             }
-            Self::ClusterInReadonlyMode => "cluster is in readonly mode".to_string(),
+            Self::ClusterInReadonlyMode => "cluster is in readonly mode".to_owned(),
         }
     }
 }
@@ -108,16 +108,16 @@ pub enum Action {
 impl Action {
     pub fn description(&self) -> String {
         match self {
-            Self::DrainNode(node) => format!("drain node '{}'", node),
+            Self::DrainNode(node) => format!("drain node '{node}'"),
             Self::MoveShardLeader {
                 shard_id,
                 target_node,
             } => {
-                format!("move shard '{}' leader to '{}'", shard_id, target_node)
+                format!("move shard '{shard_id}' leader to '{target_node}'")
             }
-            Self::SetClusterReadonly => "set cluster to readonly mode".to_string(),
-            Self::EmitAlert(msg) => format!("emit alert: {}", msg),
-            Self::RequireHumanApproval => "require human approval (block automation)".to_string(),
+            Self::SetClusterReadonly => "set cluster to readonly mode".to_owned(),
+            Self::EmitAlert(msg) => format!("emit alert: {msg}"),
+            Self::RequireHumanApproval => "require human approval (block automation)".to_owned(),
         }
     }
 }
@@ -169,7 +169,7 @@ impl Default for Guardrail {
         Self {
             max_frequency: 3,
             time_window_secs: 3600,
-            health_prerequisite: "healthy".to_string(),
+            health_prerequisite: "healthy".to_owned(),
             risk_ceiling: RiskCeiling::Medium,
             cooldown_secs: 300,
         }
@@ -204,7 +204,7 @@ impl Policy {
             self.severity.clone(),
             self.last_evaluated_at
                 .clone()
-                .unwrap_or_else(|| "never".to_string()),
+                .unwrap_or_else(|| "never".to_owned()),
         ]
     }
 }

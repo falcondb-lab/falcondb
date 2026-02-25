@@ -172,7 +172,7 @@ impl MigrationPlan {
     pub fn estimated_duration_display(&self) -> String {
         let ms = self.estimated_duration_ms();
         if ms < 1_000 {
-            format!("{}ms", ms)
+            format!("{ms}ms")
         } else if ms < 60_000 {
             format!("{:.1}s", ms as f64 / 1_000.0)
         } else {
@@ -379,42 +379,30 @@ impl ShardMigrator {
         status.phase = MigrationPhase::CopyingRows;
         status.started_at = Some(Instant::now());
 
-        let source = match engine.shard(task.source_shard) {
-            Some(s) => s,
-            None => {
-                status.phase = MigrationPhase::Failed;
-                status.error = Some(format!("Source shard {:?} not found", task.source_shard));
-                return status;
-            }
+        let source = if let Some(s) = engine.shard(task.source_shard) { s } else {
+            status.phase = MigrationPhase::Failed;
+            status.error = Some(format!("Source shard {:?} not found", task.source_shard));
+            return status;
         };
-        let target = match engine.shard(task.target_shard) {
-            Some(s) => s,
-            None => {
-                status.phase = MigrationPhase::Failed;
-                status.error = Some(format!("Target shard {:?} not found", task.target_shard));
-                return status;
-            }
+        let target = if let Some(s) = engine.shard(task.target_shard) { s } else {
+            status.phase = MigrationPhase::Failed;
+            status.error = Some(format!("Target shard {:?} not found", task.target_shard));
+            return status;
         };
 
         // Find the table on source shard
         let catalog = source.storage.catalog_snapshot();
-        let table_schema = match catalog.find_table(&task.table_name) {
-            Some(s) => s.clone(),
-            None => {
-                status.phase = MigrationPhase::Failed;
-                status.error = Some(format!("Table '{}' not found on source", task.table_name));
-                return status;
-            }
+        let table_schema = if let Some(s) = catalog.find_table(&task.table_name) { s.clone() } else {
+            status.phase = MigrationPhase::Failed;
+            status.error = Some(format!("Table '{}' not found on source", task.table_name));
+            return status;
         };
 
         let table_id = table_schema.id;
-        let source_table = match source.storage.get_table(table_id) {
-            Some(t) => t,
-            None => {
-                status.phase = MigrationPhase::Failed;
-                status.error = Some("Table data not found on source shard".to_string());
-                return status;
-            }
+        let source_table = if let Some(t) = source.storage.get_table(table_id) { t } else {
+            status.phase = MigrationPhase::Failed;
+            status.error = Some("Table data not found on source shard".to_owned());
+            return status;
         };
 
         // Collect primary keys that should be migrated.
@@ -428,7 +416,7 @@ impl ShardMigrator {
             falcon_common::datum::OwnedRow,
         )> = Vec::new();
 
-        for entry in source_table.data.iter() {
+        for entry in &source_table.data {
             if migrated_rows >= task.rows_to_move {
                 break;
             }
@@ -507,7 +495,7 @@ impl ShardMigrator {
                 target
                     .storage
                     .create_table(schema.clone())
-                    .map_err(|e| format!("Failed to create table on target: {}", e))?;
+                    .map_err(|e| format!("Failed to create table on target: {e}"))?;
             }
         }
 
@@ -516,7 +504,7 @@ impl ShardMigrator {
             target
                 .storage
                 .insert_row(table_id, pk.clone(), row.clone())
-                .map_err(|e| format!("Failed to insert on target: {}", e))?;
+                .map_err(|e| format!("Failed to insert on target: {e}"))?;
         }
 
         // Delete from source shard
@@ -524,7 +512,7 @@ impl ShardMigrator {
             source
                 .storage
                 .delete_row(table_id, pk)
-                .map_err(|e| format!("Failed to delete from source: {}", e))?;
+                .map_err(|e| format!("Failed to delete from source: {e}"))?;
         }
 
         Ok(())
@@ -645,9 +633,9 @@ impl ShardRebalancer {
 
         // Cooldown check
         {
-            let status = self.status.lock().unwrap_or_else(|p| p.into_inner());
+            let status = self.status.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(last_run) = status.last_run {
-                if last_run.elapsed().as_millis() < self.config.cooldown_ms as u128 {
+                if last_run.elapsed().as_millis() < u128::from(self.config.cooldown_ms) {
                     self.running.store(false, Ordering::SeqCst);
                     return 0;
                 }
@@ -712,7 +700,7 @@ impl ShardRebalancer {
         plan: Option<MigrationPlan>,
         statuses: Vec<MigrationStatus>,
     ) {
-        let mut status = self.status.lock().unwrap_or_else(|p| p.into_inner());
+        let mut status = self.status.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         status.last_run = Some(Instant::now());
         if let Some(s) = snapshot {
             status.last_snapshot = Some(s);
@@ -734,7 +722,7 @@ impl ShardRebalancer {
     pub fn status(&self) -> RebalancerStatus {
         self.status
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
@@ -828,7 +816,7 @@ impl RebalanceRunner {
         let interval = std::time::Duration::from_millis(config.check_interval_ms);
 
         let join_handle = std::thread::Builder::new()
-            .name("falcon-rebalancer".to_string())
+            .name("falcon-rebalancer".to_owned())
             .spawn(move || {
                 tracing::info!(
                     "RebalanceRunner started (interval={}ms)",
@@ -851,7 +839,7 @@ impl RebalanceRunner {
                     error = %e,
                     "failed to spawn background thread — node DEGRADED"
                 );
-                FalconError::Internal(format!("failed to spawn rebalancer thread: {}", e))
+                FalconError::Internal(format!("failed to spawn rebalancer thread: {e}"))
             })?;
 
         Ok(RebalanceRunnerHandle {
@@ -893,8 +881,7 @@ impl ShardLoadDetailed {
                     let rc = shard
                         .storage
                         .get_table(ts.id)
-                        .map(|t| t.row_count_approx() as u64)
-                        .unwrap_or(0);
+                        .map_or(0, |t| t.row_count_approx() as u64);
                     total += rc;
                     tables.push(TableLoad {
                         table_name: ts.name.clone(),

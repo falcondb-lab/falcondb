@@ -1,3 +1,4 @@
+#![allow(clippy::format_push_string)] // bench CLI output formatting
 //! Falcon YCSB-style benchmark harness.
 //!
 //! Runs configurable workloads against the in-memory storage engine and
@@ -208,7 +209,7 @@ impl Rng {
         self.0 ^= self.0 << 17;
         self.0
     }
-    fn next_pct(&mut self) -> u8 {
+    const fn next_pct(&mut self) -> u8 {
         (self.next_u64() % 100) as u8
     }
 }
@@ -237,7 +238,7 @@ fn run_workload(args: &Args, force_all_global: bool, label: &str) -> BenchResult
         let txn = mgr.begin(isolation);
         let row = OwnedRow::new(vec![
             Datum::Int64(i as i64),
-            Datum::Text(format!("value_{}", i)),
+            Datum::Text(format!("value_{i}")),
         ]);
         storage.insert(table_id, row, txn.txn_id).unwrap();
         mgr.commit(txn.txn_id).unwrap();
@@ -293,11 +294,8 @@ fn run_workload(args: &Args, force_all_global: bool, label: &str) -> BenchResult
                     }
                 }
             }
-            match mgr.commit(txn.txn_id) {
-                Ok(_) => {}
-                Err(_) => {
-                    // OCC or constraint failure — expected under contention
-                }
+            if mgr.commit(txn.txn_id).is_err() {
+                // OCC or constraint failure — expected under contention
             }
         }
     }
@@ -313,7 +311,7 @@ fn run_workload(args: &Args, force_all_global: bool, label: &str) -> BenchResult
     let stats = mgr.stats_snapshot();
 
     BenchResult {
-        label: label.to_string(),
+        label: label.to_owned(),
         ops: args.ops,
         elapsed_ms,
         tps,
@@ -472,8 +470,7 @@ fn run_scaleout(args: &Args) {
 
     println!("Running scatter/gather scale-out benchmark...");
     println!(
-        "  ops/round: {}  records: {}\n",
-        ops_per_round, record_count
+        "  ops/round: {ops_per_round}  records: {record_count}\n"
     );
 
     if args.export == "csv" {
@@ -495,7 +492,7 @@ fn run_scaleout(args: &Args) {
             let txn = shard.txn_mgr.begin(isolation);
             let row = OwnedRow::new(vec![
                 Datum::Int64(i as i64),
-                Datum::Text(format!("value_{}", i)),
+                Datum::Text(format!("value_{i}")),
             ]);
             shard.storage.insert(TableId(1), row, txn.txn_id).unwrap();
             shard.txn_mgr.commit(txn.txn_id).unwrap();
@@ -638,15 +635,7 @@ fn run_scaleout(args: &Args) {
         match args.export.as_str() {
             "csv" => {
                 println!(
-                    "{},{},{},{:.1},{},{},{},{}",
-                    n_shards,
-                    ops_per_round,
-                    elapsed_ms,
-                    tps,
-                    total_sg_us,
-                    max_sub_us,
-                    gather_us,
-                    total_rows,
+                    "{n_shards},{ops_per_round},{elapsed_ms},{tps:.1},{total_sg_us},{max_sub_us},{gather_us},{total_rows}",
                 );
             }
             "json" => {
@@ -663,9 +652,7 @@ fn run_scaleout(args: &Args) {
             }
             _ => {
                 println!(
-                    "  {:>2} shards │ {:>8} ops │ {:>6} ms │ {:>10.1} TPS │ sg_total={:>8}µs max_sub={:>6}µs gather={:>6}µs",
-                    n_shards, ops_per_round, elapsed_ms, tps,
-                    total_sg_us, max_sub_us, gather_us,
+                    "  {n_shards:>2} shards │ {ops_per_round:>8} ops │ {elapsed_ms:>6} ms │ {tps:>10.1} TPS │ sg_total={total_sg_us:>8}µs max_sub={max_sub_us:>6}µs gather={gather_us:>6}µs",
                 );
             }
         }
@@ -686,8 +673,7 @@ fn run_scaleout(args: &Args) {
             if cur_tps < prev_tps * 0.95 {
                 // Allow 5% tolerance for noise
                 eprintln!(
-                    "SCALE-OUT WARNING: TPS dropped from {:.1} ({} shards) to {:.1} ({} shards)",
-                    prev_tps, prev_shards, cur_tps, cur_shards
+                    "SCALE-OUT WARNING: TPS dropped from {prev_tps:.1} ({prev_shards} shards) to {cur_tps:.1} ({cur_shards} shards)"
                 );
                 monotonic = false;
             }
@@ -717,7 +703,7 @@ fn run_failover_bench(args: &Args) {
     for i in 0..record_count {
         let row = OwnedRow::new(vec![
             Datum::Int64(i as i64),
-            Datum::Text(format!("value_{}", i)),
+            Datum::Text(format!("value_{i}")),
         ]);
         let txn_id = TxnId(i + 1);
         let ts = Timestamp((i + 1) * 10);
@@ -818,16 +804,13 @@ fn run_failover_bench(args: &Args) {
         "csv" => {
             println!("phase,ops,elapsed_ms,tps,p50_ns,p95_ns,p99_ns,failover_ms,data_intact");
             println!(
-                "before,{},{},{:.1},{},{},{},0,true",
-                ops_half, elapsed_before_ms, tps_before, bp50, bp95, bp99
+                "before,{ops_half},{elapsed_before_ms},{tps_before:.1},{bp50},{bp95},{bp99},0,true"
             );
             println!(
-                "failover,0,{},0,0,0,0,{},{}",
-                failover_ms, failover_ms, data_intact
+                "failover,0,{failover_ms},0,0,0,0,{failover_ms},{data_intact}"
             );
             println!(
-                "after,{},{},{:.1},{},{},{},0,{}",
-                ops_half, elapsed_after_ms, tps_after, ap50, ap95, ap99, data_intact
+                "after,{ops_half},{elapsed_after_ms},{tps_after:.1},{ap50},{ap95},{ap99},0,{data_intact}"
             );
         }
         "json" => {
@@ -845,21 +828,21 @@ fn run_failover_bench(args: &Args) {
             println!("  FAILOVER BENCHMARK");
             println!("═══════════════════════════════════════════════");
             println!("  ─── Before Failover ───");
-            println!("  Ops:     {}  TPS: {:.1}", ops_half, tps_before);
-            println!("  Latency: p50={}ns  p95={}ns  p99={}ns", bp50, bp95, bp99);
+            println!("  Ops:     {ops_half}  TPS: {tps_before:.1}");
+            println!("  Latency: p50={bp50}ns  p95={bp95}ns  p99={bp99}ns");
             println!("  ─── Failover ───");
-            println!("  Duration:      {} ms", failover_ms);
+            println!("  Duration:      {failover_ms} ms");
             println!("  Promote count: {}", metrics.promote_count);
             println!("  ─── After Failover ───");
-            println!("  Ops:     {}  TPS: {:.1}", ops_half, tps_after);
-            println!("  Latency: p50={}ns  p95={}ns  p99={}ns", ap50, ap95, ap99);
+            println!("  Ops:     {ops_half}  TPS: {tps_after:.1}");
+            println!("  Latency: p50={ap50}ns  p95={ap95}ns  p99={ap99}ns");
             println!("  ─── Data Integrity ───");
             println!(
                 "  Rows after failover: {} (expected {})",
                 rows.len(),
                 record_count
             );
-            println!("  Data intact:         {}", data_intact);
+            println!("  Data intact:         {data_intact}");
             println!();
         }
     }
@@ -1137,18 +1120,18 @@ fn run_tpcb(args: &Args) {
             println!("═══════════════════════════════════════════════");
             println!("  TPC-B (pgbench) Benchmark");
             println!("═══════════════════════════════════════════════");
-            println!("  Scale factor:      {}", scale);
-            println!("  Accounts:          {}", n_accounts);
+            println!("  Scale factor:      {scale}");
+            println!("  Accounts:          {n_accounts}");
             println!("  Operations:        {}", args.ops);
-            println!("  Elapsed:           {} ms", elapsed_ms);
-            println!("  TPS:               {:.1}", tps);
-            println!("  Committed:         {}", committed);
-            println!("  Aborted:           {}", aborted);
+            println!("  Elapsed:           {elapsed_ms} ms");
+            println!("  TPS:               {tps:.1}");
+            println!("  Committed:         {committed}");
+            println!("  Aborted:           {aborted}");
             println!("  ─── Latency (µs) ───");
-            println!("  P50:    {:>8}", p50);
-            println!("  P95:    {:>8}", p95);
-            println!("  P99:    {:>8}", p99);
-            println!("  Max:    {:>8}", max);
+            println!("  P50:    {p50:>8}");
+            println!("  P95:    {p95:>8}");
+            println!("  P99:    {p99:>8}");
+            println!("  Max:    {max:>8}");
             println!("  ─── Backpressure ───");
             println!("  Rejections:        {}", stats.admission_rejections);
             println!();
@@ -1399,7 +1382,7 @@ fn check_baseline(r: &BenchResult, args: &Args) -> bool {
     let baseline: PerfBaseline = match serde_json::from_str(&data) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("ERROR: Cannot parse baseline file: {}", e);
+            eprintln!("ERROR: Cannot parse baseline file: {e}");
             return false;
         }
     };
@@ -1407,7 +1390,7 @@ fn check_baseline(r: &BenchResult, args: &Args) -> bool {
     let mut passed = true;
 
     // TPS regression check
-    let tps_floor = baseline.tps * (1.0 - args.tps_threshold_pct as f64 / 100.0);
+    let tps_floor = baseline.tps * (1.0 - f64::from(args.tps_threshold_pct) / 100.0);
     if r.tps < tps_floor {
         eprintln!(
             "PERF REGRESSION: TPS {:.1} < baseline floor {:.1} (baseline={:.1}, threshold=-{}%)",
@@ -1422,7 +1405,7 @@ fn check_baseline(r: &BenchResult, args: &Args) -> bool {
     }
 
     // P99 regression check
-    let p99_ceiling = baseline.all_p99_us as f64 * (1.0 + args.p99_threshold_pct as f64 / 100.0);
+    let p99_ceiling = baseline.all_p99_us as f64 * (1.0 + f64::from(args.p99_threshold_pct) / 100.0);
     let current_p99 = r.stats.latency.all.p99_us;
     if current_p99 as f64 > p99_ceiling {
         eprintln!(
@@ -1442,14 +1425,12 @@ fn check_baseline(r: &BenchResult, args: &Args) -> bool {
     let sp99 = r.stats.latency.slow_path.p99_us;
     if fp99 > 0 && sp99 > 0 && fp99 > sp99 {
         eprintln!(
-            "INVARIANT VIOLATION: fast-path P99 ({}µs) > slow-path P99 ({}µs)",
-            fp99, sp99
+            "INVARIANT VIOLATION: fast-path P99 ({fp99}µs) > slow-path P99 ({sp99}µs)"
         );
         passed = false;
     } else if fp99 > 0 && sp99 > 0 {
         println!(
-            "INVARIANT OK: fast-path P99 ({}µs) <= slow-path P99 ({}µs)",
-            fp99, sp99
+            "INVARIANT OK: fast-path P99 ({fp99}µs) <= slow-path P99 ({sp99}µs)"
         );
     }
 
@@ -1499,8 +1480,8 @@ fn run_long_run(args: &Args) {
     println!("═══════════════════════════════════════════════");
     println!("  LONG-RUN STRESS TEST");
     println!("═══════════════════════════════════════════════");
-    println!("  Target duration:   {:?}", target_duration);
-    println!("  Sample interval:   {:?}", sample_interval);
+    println!("  Target duration:   {target_duration:?}");
+    println!("  Sample interval:   {sample_interval:?}");
     println!("  Seed:              {}", args.seed);
     println!("  Shards:            {}", args.shards);
     println!("  Record count:      {}", args.record_count);
@@ -1517,7 +1498,7 @@ fn run_long_run(args: &Args) {
         let txn = mgr.begin(isolation);
         let row = OwnedRow::new(vec![
             Datum::Int64(i as i64),
-            Datum::Text(format!("value_{}", i)),
+            Datum::Text(format!("value_{i}")),
         ]);
         storage.insert(table_id, row, txn.txn_id).unwrap();
         mgr.commit(txn.txn_id).unwrap();
@@ -1774,7 +1755,7 @@ fn split_sql(input: &str) -> Vec<String> {
         }
         // statement terminator
         if ch == ';' {
-            let s = cur.trim().to_string();
+            let s = cur.trim().to_owned();
             if !s.is_empty() {
                 stmts.push(s);
             }
@@ -1785,7 +1766,7 @@ fn split_sql(input: &str) -> Vec<String> {
         cur.push(ch);
         i += 1;
     }
-    let s = cur.trim().to_string();
+    let s = cur.trim().to_owned();
     if !s.is_empty() {
         stmts.push(s);
     }
@@ -1824,12 +1805,11 @@ fn run_bulk_bench(args: &Args) {
                 "WARN: --bulk-sslmode '{}' is not a valid libpq value; using 'require' instead.",
                 args.bulk_sslmode
             );
-            "require".to_string()
+            "require".to_owned()
         }
         other => {
             eprintln!(
-                "ERROR: Invalid --bulk-sslmode '{}'. Valid values: disable | allow | prefer | require | verify-ca | verify-full",
-                other
+                "ERROR: Invalid --bulk-sslmode '{other}'. Valid values: disable | allow | prefer | require | verify-ca | verify-full"
             );
             std::process::exit(1);
         }
@@ -1841,7 +1821,7 @@ fn run_bulk_bench(args: &Args) {
             args.bulk_host, args.bulk_port, args.bulk_user, args.bulk_dbname, sslmode
         );
         if !password.is_empty() {
-            s.push_str(&format!(" password={}", password));
+            s.push_str(&format!(" password={password}"));
         }
         if args.bulk_connect_timeout > 0 {
             s.push_str(&format!(" connect_timeout={}", args.bulk_connect_timeout));
@@ -1869,7 +1849,7 @@ fn run_bulk_bench(args: &Args) {
         // Drive the connection in the background
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                eprintln!("Connection error: {}", e);
+                eprintln!("Connection error: {e}");
             }
         });
 
@@ -1878,7 +1858,7 @@ fn run_bulk_bench(args: &Args) {
         println!("═══════════════════════════════════════════════════════");
         println!("  File:              {}", args.bulk_file);
         println!("  Server:            {}:{}", args.bulk_host, args.bulk_port);
-        println!("  Total statements:  {}", total_stmts);
+        println!("  Total statements:  {total_stmts}");
         println!("  Progress interval: every {} statements", args.bulk_progress_interval);
         println!("───────────────────────────────────────────────────────");
 
@@ -2007,23 +1987,23 @@ fn run_bulk_bench(args: &Args) {
                 println!("───────────────────────────────────────────────────────");
                 println!("  RESULTS");
                 println!("───────────────────────────────────────────────────────");
-                println!("  Total statements:  {}", total_stmts);
-                println!("  DML statements:    {}", dml_count);
-                println!("  DDL statements:    {}", ddl_count);
-                println!("  Rows affected:     {}", rows_affected);
-                println!("  Errors:            {}", errors);
-                println!("  Elapsed:           {} ms", elapsed_ms);
-                println!("  Stmt/s:            {:.1}", tps);
-                println!("  Rows/s:            {:.1}", rows_per_sec);
+                println!("  Total statements:  {total_stmts}");
+                println!("  DML statements:    {dml_count}");
+                println!("  DDL statements:    {ddl_count}");
+                println!("  Rows affected:     {rows_affected}");
+                println!("  Errors:            {errors}");
+                println!("  Elapsed:           {elapsed_ms} ms");
+                println!("  Stmt/s:            {tps:.1}");
+                println!("  Rows/s:            {rows_per_sec:.1}");
                 println!("  ─── Per-Statement Latency (µs) ───");
-                println!("  Avg:    {:>8}", avg);
-                println!("  P50:    {:>8}", p50);
-                println!("  P95:    {:>8}", p95);
-                println!("  P99:    {:>8}", p99);
-                println!("  Max:    {:>8}", max);
+                println!("  Avg:    {avg:>8}");
+                println!("  P50:    {p50:>8}");
+                println!("  P95:    {p95:>8}");
+                println!("  P99:    {p99:>8}");
+                println!("  Max:    {max:>8}");
                 println!("═══════════════════════════════════════════════════════");
                 if errors > 0 {
-                    println!("  WARNING: {} statement(s) failed.", errors);
+                    println!("  WARNING: {errors} statement(s) failed.");
                 } else {
                     println!("  All statements executed successfully.");
                 }
@@ -2080,8 +2060,8 @@ fn main() {
             println!("═══════════════════════════════════════════════");
             println!("  COMPARISON SUMMARY");
             println!("═══════════════════════════════════════════════");
-            println!("  TPS ratio (ON/OFF):     {:.2}x", tps_ratio);
-            println!("  p50 latency ratio:      {:.2}x", speedup);
+            println!("  TPS ratio (ON/OFF):     {tps_ratio:.2}x");
+            println!("  p50 latency ratio:      {speedup:.2}x");
             println!("  Fast-path commits (ON): {}", on.stats.fast_path_commits);
             println!("  Slow-path commits (ON): {}", on.stats.slow_path_commits);
         }

@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use crate::client::DbClient;
 use crate::format::{format_command_tag, OutputMode};
 use crate::pager::print_with_pager;
@@ -36,11 +38,10 @@ pub async fn run_statement(
             let mut s = format_table_simple(&rows);
             if !tuples_only {
                 let count = rows.len();
-                s.push_str(&format!(
-                    "({} row{})\n",
+                let _ = writeln!(s, "({} row{})",
                     count,
                     if count == 1 { "" } else { "s" }
-                ));
+                );
             }
             s
         }
@@ -49,11 +50,10 @@ pub async fn run_statement(
             let mut s = format_expanded_str(&rows);
             if !tuples_only {
                 let count = rows.len();
-                s.push_str(&format!(
-                    "({} row{})\n",
+                let _ = writeln!(s, "({} row{})",
                     count,
                     if count == 1 { "" } else { "s" }
-                ));
+                );
             }
             s
         }
@@ -83,21 +83,19 @@ pub fn format_rows_as_string(
         OutputMode::Expanded => {
             let mut s = format_expanded_str(rows);
             let count = rows.len();
-            s.push_str(&format!(
-                "({} row{})\n",
+            let _ = writeln!(s, "({} row{})",
                 count,
                 if count == 1 { "" } else { "s" }
-            ));
+            );
             s
         }
         OutputMode::Table => {
             let mut s = format_table_simple(rows);
             let count = rows.len();
-            s.push_str(&format!(
-                "({} row{})\n",
+            let _ = writeln!(s, "({} row{})",
                 count,
                 if count == 1 { "" } else { "s" }
-            ));
+            );
             s
         }
     }
@@ -112,7 +110,7 @@ fn get_col_names(rows: &[tokio_postgres::SimpleQueryRow]) -> Vec<String> {
     rows[0]
         .columns()
         .iter()
-        .map(|c| c.name().to_string())
+        .map(|c| c.name().to_owned())
         .collect()
 }
 
@@ -126,7 +124,7 @@ fn format_table_simple(rows: &[tokio_postgres::SimpleQueryRow]) -> String {
     let mut out = String::new();
 
     // Compute column widths
-    let mut widths: Vec<usize> = cols.iter().map(|c| c.len()).collect();
+    let mut widths: Vec<usize> = cols.iter().map(std::string::String::len).collect();
     for row in rows {
         for (i, w) in widths.iter_mut().enumerate() {
             *w = (*w).max(get_val(row, i).len());
@@ -139,18 +137,18 @@ fn format_table_simple(rows: &[tokio_postgres::SimpleQueryRow]) -> String {
         .enumerate()
         .map(|(i, c)| format!("{:<width$}", c, width = widths[i]))
         .collect();
-    out.push_str(&format!(" {} \n", header.join(" | ")));
+    let _ = writeln!(out, " {} ", header.join(" | "));
 
     // Separator
     let sep: Vec<String> = widths.iter().map(|w| "-".repeat(*w + 2)).collect();
-    out.push_str(&format!("{}\n", sep.join("+")));
+    let _ = writeln!(out, "{}", sep.join("+"));
 
     // Rows
     for row in rows {
         let cells: Vec<String> = (0..ncols)
             .map(|i| format!("{:<width$}", get_val(row, i), width = widths[i]))
             .collect();
-        out.push_str(&format!(" {} \n", cells.join(" | ")));
+        let _ = writeln!(out, " {} ", cells.join(" | "));
     }
     out
 }
@@ -172,23 +170,18 @@ fn format_tuples_only_str(rows: &[tokio_postgres::SimpleQueryRow]) -> String {
 
 fn format_expanded_str(rows: &[tokio_postgres::SimpleQueryRow]) -> String {
     let cols = get_col_names(rows);
-    let col_width = cols.iter().map(|c| c.len()).max().unwrap_or(0);
+    let col_width = cols.iter().map(std::string::String::len).max().unwrap_or(0);
     let mut out = String::new();
     for (ridx, row) in rows.iter().enumerate() {
-        out.push_str(&format!("-[ RECORD {} ]\n", ridx + 1));
+        let _ = writeln!(out, "-[ RECORD {} ]", ridx + 1);
         for (cidx, col) in cols.iter().enumerate() {
             let val = get_val(row, cidx);
             let display_val = if val == "NULL" {
-                "NULL".to_string()
+                "NULL".to_owned()
             } else {
-                val.to_string()
+                val.to_owned()
             };
-            out.push_str(&format!(
-                "{:<width$} | {}\n",
-                col,
-                display_val,
-                width = col_width
-            ));
+            let _ = writeln!(out, "{col:<col_width$} | {display_val}");
         }
     }
     out
@@ -210,7 +203,7 @@ fn format_csv_str(rows: &[tokio_postgres::SimpleQueryRow]) -> String {
                 if v.contains(',') || v.contains('"') || v.contains('\n') {
                     format!("\"{}\"", v.replace('"', "\"\""))
                 } else {
-                    v.to_string()
+                    v.to_owned()
                 }
             })
             .collect();
@@ -231,7 +224,7 @@ fn format_json_str(rows: &[tokio_postgres::SimpleQueryRow]) -> String {
             for (i, col) in cols.iter().enumerate() {
                 map.insert(
                     col.clone(),
-                    serde_json::Value::String(get_val(row, i).to_string()),
+                    serde_json::Value::String(get_val(row, i).to_owned()),
                 );
             }
             serde_json::Value::Object(map)

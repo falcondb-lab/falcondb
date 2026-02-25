@@ -42,10 +42,10 @@ pub fn quote_field(value: &str, opts: &CsvOptions) -> String {
         value.contains(d) || value.contains(q) || value.contains('\n') || value.contains('\r');
 
     if needs_quoting {
-        let escaped = value.replace(q, &format!("{}{}", q, q));
-        format!("{}{}{}", q, escaped, q)
+        let escaped = value.replace(q, &format!("{q}{q}"));
+        format!("{q}{escaped}{q}")
     } else {
-        value.to_string()
+        value.to_owned()
     }
 }
 

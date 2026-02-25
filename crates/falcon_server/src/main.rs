@@ -137,27 +137,27 @@ async fn main() -> Result<()> {
             match action {
                 ServiceAction::Install => {
                     service::commands::install(&cli.config)
-                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
                 }
                 ServiceAction::Uninstall => {
                     service::commands::uninstall()
-                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
                 }
                 ServiceAction::Start => {
                     service::commands::start()
-                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
                 }
                 ServiceAction::Stop => {
                     service::commands::stop()
-                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
                 }
                 ServiceAction::Restart => {
                     service::commands::restart()
-                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
                 }
                 ServiceAction::Status => {
                     service::commands::status()
-                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
                 }
                 ServiceAction::Dispatch => {
                     // Service mode: initialize file logger, then dispatch to SCM
@@ -175,7 +175,7 @@ async fn main() -> Result<()> {
                     #[cfg(windows)]
                     {
                         service::windows::scm::dispatch()
-                            .map_err(|e| anyhow::anyhow!("Service dispatch failed: {}", e))?;
+                            .map_err(|e| anyhow::anyhow!("Service dispatch failed: {e}"))?;
                     }
                     #[cfg(not(windows))]
                     {
@@ -201,7 +201,7 @@ async fn main() -> Result<()> {
         // ── Status ──
         Some(Command::Status) => {
             service::commands::status()
-                .map_err(|e| anyhow::anyhow!("{}", e))?;
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
             Ok(())
         }
 
@@ -219,11 +219,11 @@ async fn main() -> Result<()> {
                             println!("Config version: {} (current)", falcon_common::config::CURRENT_CONFIG_VERSION);
                         }
                         falcon_server::config_migrate::ConfigVersionStatus::NeedsMigration { from, to } => {
-                            println!("Config version: {} (needs migration to {})", from, to);
+                            println!("Config version: {from} (needs migration to {to})");
                             println!("Run: falcon config migrate --config {}", cli.config);
                         }
                         falcon_server::config_migrate::ConfigVersionStatus::TooNew { found, max_supported } => {
-                            eprintln!("Config version {} is newer than supported (max: {})", found, max_supported);
+                            eprintln!("Config version {found} is newer than supported (max: {max_supported})");
                         }
                     }
                 }
@@ -253,8 +253,8 @@ async fn run_console(cli: Cli) -> Result<()> {
     if cli.print_default_config {
         let default_config = FalconConfig::default();
         let toml_str = toml::to_string_pretty(&default_config)
-            .unwrap_or_else(|e| format!("# failed to serialize default config: {}", e));
-        println!("{}", toml_str);
+            .unwrap_or_else(|e| format!("# failed to serialize default config: {e}"));
+        println!("{toml_str}");
         return Ok(());
     }
 
@@ -281,12 +281,12 @@ async fn run_console(cli: Cli) -> Result<()> {
 pub async fn run_server(config_path: String, external_coordinator: Option<ShutdownCoordinator>) -> Result<()> {
     let cli = Cli {
         command: None,
-        config: config_path.to_string(),
+        config: config_path.clone(),
         pg_addr: None,
         data_dir: None,
         no_wal: false,
         shards: 1,
-        metrics_addr: "0.0.0.0:9090".to_string(),
+        metrics_addr: "0.0.0.0:9090".to_owned(),
         role: None,
         primary_endpoint: None,
         grpc_addr: None,
@@ -581,7 +581,7 @@ async fn run_server_inner(
 
             let grpc_addr_parsed: std::net::SocketAddr = grpc_addr
                 .parse()
-                .map_err(|e| anyhow::anyhow!("Invalid grpc_listen_addr '{}': {}", grpc_addr, e))?;
+                .map_err(|e| anyhow::anyhow!("Invalid grpc_listen_addr '{grpc_addr}': {e}"))?;
 
             // Wire gRPC server with graceful shutdown via CancellationToken.
             // The JoinHandle is captured and awaited during ordered teardown.
@@ -722,7 +722,7 @@ async fn run_server_inner(
             drain_timeout,
         )
         .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // ═══════════════════════════════════════════════════════════════════
     // Ordered teardown — await ALL server JoinHandles, flush WAL
@@ -780,8 +780,7 @@ fn parse_node_role(s: &str) -> Result<NodeRole, String> {
         "replica" => Ok(NodeRole::Replica),
         "analytics" => Ok(NodeRole::Analytics),
         _ => Err(format!(
-            "Invalid role '{}': expected standalone, primary, replica, or analytics",
-            s
+            "Invalid role '{s}': expected standalone, primary, replica, or analytics"
         )),
     }
 }
@@ -793,9 +792,7 @@ fn print_version() {
     println!("  Config schema: v{}", falcon_common::config::CURRENT_CONFIG_VERSION);
     println!("  Build target:  {}", std::env::consts::ARCH);
     println!("  OS:            {}", std::env::consts::OS);
-    println!("  Exe:           {}", std::env::current_exe()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "unknown".into()));
+    println!("  Exe:           {}", std::env::current_exe().map_or_else(|_| "unknown".into(), |p| p.display().to_string()));
 }
 
 /// Returns the version string for use by other modules (e.g., startup banner).
@@ -863,20 +860,17 @@ fn run_purge(skip_confirm: bool) {
 }
 
 fn load_config(path: &str) -> FalconConfig {
-    match std::fs::read_to_string(path) {
-        Ok(content) => match toml::from_str(&content) {
-            Ok(config) => {
-                tracing::info!("Loaded config from {}", path);
-                config
-            }
-            Err(e) => {
-                tracing::warn!("Failed to parse config {}: {}, using defaults", path, e);
-                FalconConfig::default()
-            }
-        },
-        Err(_) => {
-            tracing::info!("Config file {} not found, using defaults", path);
+    if let Ok(content) = std::fs::read_to_string(path) { match toml::from_str(&content) {
+        Ok(config) => {
+            tracing::info!("Loaded config from {}", path);
+            config
+        }
+        Err(e) => {
+            tracing::warn!("Failed to parse config {}: {}, using defaults", path, e);
             FalconConfig::default()
         }
+    } } else {
+        tracing::info!("Config file {} not found, using defaults", path);
+        FalconConfig::default()
     }
 }

@@ -49,7 +49,7 @@ impl Datum {
                 // Infer element type from the first non-null element.
                 let elem_type = elems
                     .iter()
-                    .find_map(|d| d.data_type())
+                    .find_map(Self::data_type)
                     .unwrap_or(DataType::Text); // default to Text for empty/all-null arrays
                 Some(DataType::Array(Box::new(elem_type)))
             }
@@ -70,7 +70,6 @@ impl Datum {
     pub const fn as_bool(&self) -> Option<bool> {
         match self {
             Self::Boolean(b) => Some(*b),
-            Self::Null => None,
             _ => None,
         }
     }
@@ -85,10 +84,10 @@ impl Datum {
 
     pub fn as_f64(&self) -> Option<f64> {
         match self {
-            Self::Int32(v) => Some(*v as f64),
+            Self::Int32(v) => Some(f64::from(*v)),
             Self::Int64(v) => Some(*v as f64),
             Self::Float64(v) => Some(*v),
-            Self::Decimal(m, s) => Some(*m as f64 / 10f64.powi(*s as i32)),
+            Self::Decimal(m, s) => Some(*m as f64 / 10f64.powi(i32::from(*s))),
             _ => None,
         }
     }
@@ -112,40 +111,38 @@ impl Datum {
             Self::Timestamp(us) => {
                 let secs = us / 1_000_000;
                 let nsecs = ((us % 1_000_000) * 1000) as u32;
-                if let Some(dt) = chrono::DateTime::from_timestamp(secs, nsecs) {
-                    Some(dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                } else {
-                    Some(us.to_string())
-                }
+                Some(chrono::DateTime::from_timestamp(secs, nsecs).map_or_else(
+                    || us.to_string(),
+                    |dt| dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+                ))
             }
             Self::Date(days) => {
                 // SAFETY: 1970-01-01 is always a valid date — unwrap_or fallback is unreachable.
                 let epoch =
                     chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap_or(chrono::NaiveDate::MIN);
-                if let Some(d) = epoch.checked_add_signed(chrono::Duration::days(*days as i64)) {
-                    Some(d.format("%Y-%m-%d").to_string())
-                } else {
-                    Some(days.to_string())
-                }
+                Some(epoch.checked_add_signed(chrono::Duration::days(i64::from(*days))).map_or_else(
+                    || days.to_string(),
+                    |d| d.format("%Y-%m-%d").to_string(),
+                ))
             }
             Self::Array(elems) => {
                 let inner: Vec<String> = elems
                     .iter()
                     .map(|d| match d {
-                        Self::Text(s) => format!("\"{}\"", s),
-                        Self::Null => "NULL".to_string(),
-                        other => format!("{}", other),
+                        Self::Text(s) => format!("\"{s}\""),
+                        Self::Null => "NULL".to_owned(),
+                        other => format!("{other}"),
                     })
                     .collect();
                 Some(format!("{{{}}}", inner.join(",")))
             }
             Self::Jsonb(v) => Some(v.to_string()),
             Self::Decimal(m, s) => Some(decimal_to_string(*m, *s)),
-            Self::Time(_) | Self::Interval(_, _, _) | Self::Uuid(_) => Some(format!("{}", self)),
+            Self::Time(_) | Self::Interval(_, _, _) | Self::Uuid(_) => Some(format!("{self}")),
             Self::Bytea(bytes) => {
                 // PG hex format: \x followed by hex-encoded bytes
-                let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-                Some(format!("\\x{}", hex))
+                let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+                Some(format!("\\x{hex}"))
             }
         }
     }
@@ -153,22 +150,22 @@ impl Datum {
     /// Try to add two datums (for SUM aggregation).
     pub fn add(&self, other: &Self) -> Option<Self> {
         match (self, other) {
-            (Self::Int32(a), Self::Int32(b)) => Some(Self::Int64(*a as i64 + *b as i64)),
+            (Self::Int32(a), Self::Int32(b)) => Some(Self::Int64(i64::from(*a) + i64::from(*b))),
             (Self::Int64(a), Self::Int64(b)) => Some(Self::Int64(a + b)),
-            (Self::Int64(a), Self::Int32(b)) => Some(Self::Int64(a + *b as i64)),
-            (Self::Int32(a), Self::Int64(b)) => Some(Self::Int64(*a as i64 + b)),
+            (Self::Int64(a), Self::Int32(b)) => Some(Self::Int64(a + i64::from(*b))),
+            (Self::Int32(a), Self::Int64(b)) => Some(Self::Int64(i64::from(*a) + b)),
             (Self::Float64(a), Self::Float64(b)) => Some(Self::Float64(a + b)),
             (Self::Float64(a), Self::Int64(b)) => Some(Self::Float64(a + *b as f64)),
-            (Self::Float64(a), Self::Int32(b)) => Some(Self::Float64(a + *b as f64)),
+            (Self::Float64(a), Self::Int32(b)) => Some(Self::Float64(a + f64::from(*b))),
             (Self::Decimal(a, sa), Self::Decimal(b, sb)) => Some(decimal_add(*a, *sa, *b, *sb)),
             (Self::Decimal(a, sa), Self::Int64(b)) => Some(decimal_add(
                 *a,
                 *sa,
-                *b as i128 * 10i128.pow(*sa as u32),
+                i128::from(*b) * 10i128.pow(u32::from(*sa)),
                 *sa,
             )),
             (Self::Int64(a), Self::Decimal(b, sb)) => Some(decimal_add(
-                *a as i128 * 10i128.pow(*sb as u32),
+                i128::from(*a) * 10i128.pow(u32::from(*sb)),
                 *sb,
                 *b,
                 *sb,
@@ -183,13 +180,11 @@ impl Datum {
         if s.is_empty() {
             return None;
         }
-        let (int_part, frac_part) = if let Some(dot_pos) = s.find('.') {
+        let (int_part, frac_part) = s.find('.').map_or((s, ""), |dot_pos| {
             (&s[..dot_pos], &s[dot_pos + 1..])
-        } else {
-            (s, "")
-        };
+        });
         let scale = frac_part.len() as u8;
-        let combined = format!("{}{}", int_part, frac_part);
+        let combined = format!("{int_part}{frac_part}");
         let mantissa: i128 = combined.parse().ok()?;
         Some(Self::Decimal(mantissa, scale))
     }
@@ -199,19 +194,19 @@ impl fmt::Display for Datum {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Null => write!(f, "NULL"),
-            Self::Boolean(b) => write!(f, "{}", b),
-            Self::Int32(v) => write!(f, "{}", v),
-            Self::Int64(v) => write!(f, "{}", v),
-            Self::Float64(v) => write!(f, "{}", v),
-            Self::Text(s) => write!(f, "{}", s),
-            Self::Timestamp(us) => write!(f, "{}", us),
+            Self::Boolean(b) => write!(f, "{b}"),
+            Self::Int32(v) => write!(f, "{v}"),
+            Self::Int64(v) => write!(f, "{v}"),
+            Self::Float64(v) => write!(f, "{v}"),
+            Self::Text(s) => write!(f, "{s}"),
+            Self::Timestamp(us) => write!(f, "{us}"),
             Self::Date(days) => {
                 let epoch =
                     chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap_or(chrono::NaiveDate::MIN);
-                if let Some(d) = epoch.checked_add_signed(chrono::Duration::days(*days as i64)) {
+                if let Some(d) = epoch.checked_add_signed(chrono::Duration::days(i64::from(*days))) {
                     write!(f, "{}", d.format("%Y-%m-%d"))
                 } else {
-                    write!(f, "{}", days)
+                    write!(f, "{days}")
                 }
             }
             Self::Array(elems) => {
@@ -220,11 +215,11 @@ impl fmt::Display for Datum {
                     if i > 0 {
                         write!(f, ",")?;
                     }
-                    write!(f, "{}", d)?;
+                    write!(f, "{d}")?;
                 }
                 write!(f, "}}")
             }
-            Self::Jsonb(v) => write!(f, "{}", v),
+            Self::Jsonb(v) => write!(f, "{v}"),
             Self::Decimal(m, s) => write!(f, "{}", decimal_to_string(*m, *s)),
             Self::Time(us) => {
                 let total_secs = *us / 1_000_000;
@@ -233,9 +228,9 @@ impl fmt::Display for Datum {
                 let s = total_secs % 60;
                 let frac = *us % 1_000_000;
                 if frac == 0 {
-                    write!(f, "{:02}:{:02}:{:02}", h, m, s)
+                    write!(f, "{h:02}:{m:02}:{s:02}")
                 } else {
-                    write!(f, "{:02}:{:02}:{:02}.{:06}", h, m, s, frac)
+                    write!(f, "{h:02}:{m:02}:{s:02}.{frac:06}")
                 }
             }
             Self::Interval(months, days, us) => {
@@ -267,7 +262,7 @@ impl fmt::Display for Datum {
                     let m = (total_secs % 3600) / 60;
                     let s = total_secs % 60;
                     let sign = if *us < 0 { "-" } else { "" };
-                    parts.push(format!("{}{:02}:{:02}:{:02}", sign, h, m, s));
+                    parts.push(format!("{sign}{h:02}:{m:02}:{s:02}"));
                 }
                 write!(f, "{}", parts.join(" "))
             }
@@ -282,7 +277,7 @@ impl fmt::Display for Datum {
             Self::Bytea(bytes) => {
                 write!(f, "\\x")?;
                 for b in bytes {
-                    write!(f, "{:02x}", b)?;
+                    write!(f, "{b:02x}")?;
                 }
                 Ok(())
             }
@@ -297,12 +292,12 @@ impl PartialEq for Datum {
             (Self::Boolean(a), Self::Boolean(b)) => a == b,
             (Self::Int32(a), Self::Int32(b)) => a == b,
             (Self::Int64(a), Self::Int64(b)) => a == b,
-            (Self::Int32(a), Self::Int64(b)) => (*a as i64) == *b,
-            (Self::Int64(a), Self::Int32(b)) => *a == (*b as i64),
+            (Self::Int32(a), Self::Int64(b)) => i64::from(*a) == *b,
+            (Self::Int64(a), Self::Int32(b)) => *a == i64::from(*b),
             (Self::Float64(a), Self::Float64(b)) => a == b,
-            (Self::Float64(a), Self::Int32(b)) => *a == (*b as f64),
+            (Self::Float64(a), Self::Int32(b)) => *a == f64::from(*b),
             (Self::Float64(a), Self::Int64(b)) => *a == (*b as f64),
-            (Self::Int32(a), Self::Float64(b)) => (*a as f64) == *b,
+            (Self::Int32(a), Self::Float64(b)) => f64::from(*a) == *b,
             (Self::Int64(a), Self::Float64(b)) => (*a as f64) == *b,
             (Self::Text(a), Self::Text(b)) => a == b,
             (Self::Timestamp(a), Self::Timestamp(b)) => a == b,
@@ -320,11 +315,11 @@ impl PartialEq for Datum {
                 }
             }
             (Self::Decimal(a, sa), Self::Int64(b)) => {
-                let bm = *b as i128 * 10i128.pow(*sa as u32);
+                let bm = i128::from(*b) * 10i128.pow(u32::from(*sa));
                 *a == bm
             }
             (Self::Int64(a), Self::Decimal(b, sb)) => {
-                let am = *a as i128 * 10i128.pow(*sb as u32);
+                let am = i128::from(*a) * 10i128.pow(u32::from(*sb));
                 am == *b
             }
             (Self::Time(a), Self::Time(b)) => a == b,
@@ -354,7 +349,7 @@ impl Hash for Datum {
             // Int32 and Int64 share tag 2, both hash as i64
             Self::Int32(v) => {
                 2u8.hash(state);
-                (*v as i64).hash(state);
+                i64::from(*v).hash(state);
             }
             Self::Int64(v) => {
                 2u8.hash(state);
@@ -424,12 +419,12 @@ impl PartialOrd for Datum {
             (Self::Boolean(a), Self::Boolean(b)) => a.partial_cmp(b),
             (Self::Int32(a), Self::Int32(b)) => a.partial_cmp(b),
             (Self::Int64(a), Self::Int64(b)) => a.partial_cmp(b),
-            (Self::Int32(a), Self::Int64(b)) => (*a as i64).partial_cmp(b),
-            (Self::Int64(a), Self::Int32(b)) => a.partial_cmp(&(*b as i64)),
+            (Self::Int32(a), Self::Int64(b)) => i64::from(*a).partial_cmp(b),
+            (Self::Int64(a), Self::Int32(b)) => a.partial_cmp(&i64::from(*b)),
             (Self::Float64(a), Self::Float64(b)) => a.partial_cmp(b),
-            (Self::Float64(a), Self::Int32(b)) => a.partial_cmp(&(*b as f64)),
+            (Self::Float64(a), Self::Int32(b)) => a.partial_cmp(&f64::from(*b)),
             (Self::Float64(a), Self::Int64(b)) => a.partial_cmp(&(*b as f64)),
-            (Self::Int32(a), Self::Float64(b)) => (*a as f64).partial_cmp(b),
+            (Self::Int32(a), Self::Float64(b)) => f64::from(*a).partial_cmp(b),
             (Self::Int64(a), Self::Float64(b)) => (*a as f64).partial_cmp(b),
             (Self::Text(a), Self::Text(b)) => a.partial_cmp(b),
             (Self::Timestamp(a), Self::Timestamp(b)) => a.partial_cmp(b),
@@ -439,19 +434,19 @@ impl PartialOrd for Datum {
                 na.partial_cmp(&nb)
             }
             (Self::Decimal(a, sa), Self::Int64(b)) => {
-                let bm = *b as i128 * 10i128.pow(*sa as u32);
+                let bm = i128::from(*b) * 10i128.pow(u32::from(*sa));
                 a.partial_cmp(&bm)
             }
             (Self::Int64(a), Self::Decimal(b, sb)) => {
-                let am = *a as i128 * 10i128.pow(*sb as u32);
+                let am = i128::from(*a) * 10i128.pow(u32::from(*sb));
                 am.partial_cmp(b)
             }
             (Self::Decimal(a, sa), Self::Float64(b)) => {
-                let af = *a as f64 / 10f64.powi(*sa as i32);
+                let af = *a as f64 / 10f64.powi(i32::from(*sa));
                 af.partial_cmp(b)
             }
             (Self::Float64(a), Self::Decimal(b, sb)) => {
-                let bf = *b as f64 / 10f64.powi(*sb as i32);
+                let bf = *b as f64 / 10f64.powi(i32::from(*sb));
                 a.partial_cmp(&bf)
             }
             (Self::Time(a), Self::Time(b)) => a.partial_cmp(b),
@@ -509,7 +504,7 @@ impl fmt::Display for OwnedRow {
             if i > 0 {
                 write!(f, ", ")?;
             }
-            write!(f, "{}", v)?;
+            write!(f, "{v}")?;
         }
         write!(f, ")")
     }
@@ -533,10 +528,10 @@ pub fn decimal_to_string(mantissa: i128, scale: u8) -> String {
         format!("0.{}{}", "0".repeat(zeros), s)
     } else {
         let (int_part, frac_part) = s.split_at(s.len() - scale);
-        format!("{}.{}", int_part, frac_part)
+        format!("{int_part}.{frac_part}")
     };
     if negative {
-        format!("-{}", result)
+        format!("-{result}")
     } else {
         result
     }
@@ -593,7 +588,7 @@ pub fn decimal_div(a: i128, sa: u8, b: i128, sb: u8, result_scale: u8) -> Option
     }
     // Scale up numerator to get desired precision
     let target_scale = result_scale.max(sa).max(sb);
-    let extra = (target_scale as u32) + (sb as u32) - (sa as u32);
+    let extra = u32::from(target_scale) + u32::from(sb) - u32::from(sa);
     let scaled_a = a * 10i128.pow(extra);
     Some(Datum::Decimal(scaled_a / b, target_scale))
 }

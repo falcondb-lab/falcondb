@@ -3,7 +3,7 @@ use falcon_common::error::ExecutionError;
 use falcon_sql_frontend::types::ScalarFunc;
 
 /// Dispatch a regex-domain scalar function.
-pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionError> {
+pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionError> {
     match func {
         ScalarFunc::RegexpReplace => {
             // REGEXP_REPLACE(source, pattern, replacement [, flags])
@@ -39,7 +39,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                 _ => String::new(),
             };
             let re = regex::Regex::new(&pattern)
-                .map_err(|e| ExecutionError::TypeError(format!("Invalid regex: {}", e)))?;
+                .map_err(|e| ExecutionError::TypeError(format!("Invalid regex: {e}")))?;
             let result = if flags.contains('g') {
                 re.replace_all(&source, replacement.as_str()).to_string()
             } else {
@@ -68,31 +68,22 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                 }
             };
             let re = regex::Regex::new(&pattern)
-                .map_err(|e| ExecutionError::TypeError(format!("Invalid regex: {}", e)))?;
-            match re.captures(&source) {
-                Some(caps) => {
+                .map_err(|e| ExecutionError::TypeError(format!("Invalid regex: {e}")))?;
+            re.captures(&source).map_or(Ok(Datum::Null), |caps| {
                     let matches: Vec<Datum> = caps
                         .iter()
                         .skip(1)
-                        .map(|m| match m {
-                            Some(mat) => Datum::Text(mat.as_str().to_string()),
-                            None => Datum::Null,
-                        })
+                        .map(|m| m.map_or(Datum::Null, |mat| Datum::Text(mat.as_str().to_owned())))
                         .collect();
                     if matches.is_empty() {
                         // No capture groups; return full match
                         Ok(Datum::Array(vec![Datum::Text(
-                            match caps.get(0) {
-                                Some(m) => m.as_str().to_string(),
-                                None => String::new(),
-                            },
+                            caps.get(0).map_or_else(String::new, |m| m.as_str().to_owned()),
                         )]))
                     } else {
                         Ok(Datum::Array(matches))
                     }
-                }
-                None => Ok(Datum::Null),
-            }
+            })
         }
         ScalarFunc::RegexpCount => {
             // REGEXP_COUNT(string, pattern [, flags])
@@ -115,7 +106,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                 }
             };
             let re = regex::Regex::new(&pattern)
-                .map_err(|e| ExecutionError::TypeError(format!("Invalid regex: {}", e)))?;
+                .map_err(|e| ExecutionError::TypeError(format!("Invalid regex: {e}")))?;
             Ok(Datum::Int64(re.find_iter(&source).count() as i64))
         }
         ScalarFunc::RegexpSubstr => {
@@ -139,11 +130,8 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                 }
             };
             let re = regex::Regex::new(&pattern)
-                .map_err(|e| ExecutionError::TypeError(format!("Invalid regex: {}", e)))?;
-            match re.find(&source) {
-                Some(m) => Ok(Datum::Text(m.as_str().to_string())),
-                None => Ok(Datum::Null),
-            }
+                .map_err(|e| ExecutionError::TypeError(format!("Invalid regex: {e}")))?;
+            Ok(re.find(&source).map_or(Datum::Null, |m| Datum::Text(m.as_str().to_owned())))
         }
         ScalarFunc::RegexpSplitToArray => {
             // REGEXP_SPLIT_TO_ARRAY(string, pattern) → split string by regex into array
@@ -166,16 +154,15 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                 }
             };
             let re = regex::Regex::new(&pattern)
-                .map_err(|e| ExecutionError::TypeError(format!("Invalid regex: {}", e)))?;
+                .map_err(|e| ExecutionError::TypeError(format!("Invalid regex: {e}")))?;
             let parts: Vec<Datum> = re
                 .split(&source)
-                .map(|s| Datum::Text(s.to_string()))
+                .map(|s| Datum::Text(s.to_owned()))
                 .collect();
             Ok(Datum::Array(parts))
         }
         _ => Err(ExecutionError::TypeError(format!(
-            "Not a regex function: {:?}",
-            func
+            "Not a regex function: {func:?}"
         ))),
     }
 }

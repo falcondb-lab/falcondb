@@ -76,8 +76,7 @@ impl QueryHandler {
                     return Some(self.single_row_result(
                         vec![("checkpoint", 25, -1)],
                         vec![vec![Some(format!(
-                            "OK segment={} rows={}",
-                            segment_id, row_count
+                            "OK segment={segment_id} rows={row_count}"
                         ))]],
                     ));
                 }
@@ -85,7 +84,7 @@ impl QueryHandler {
                     return Some(vec![BackendMessage::ErrorResponse {
                         severity: "ERROR".into(),
                         code: "XX000".into(),
-                        message: format!("CHECKPOINT failed: {}", e),
+                        message: format!("CHECKPOINT failed: {e}"),
                     }]);
                 }
             }
@@ -150,7 +149,7 @@ impl QueryHandler {
 
         // USE database — switch session to a different database
         if sql_lower.starts_with("use ") {
-            let db_name = sql_lower.trim_start_matches("use ").trim().to_string();
+            let db_name = sql_lower.trim_start_matches("use ").trim().to_owned();
             if db_name.is_empty() {
                 return Some(vec![BackendMessage::ErrorResponse {
                     severity: "ERROR".into(),
@@ -171,7 +170,7 @@ impl QueryHandler {
                 return Some(vec![BackendMessage::ErrorResponse {
                     severity: "ERROR".into(),
                     code: "3D000".into(),
-                    message: format!("database \"{}\" does not exist", db_name),
+                    message: format!("database \"{db_name}\" does not exist"),
                 }]);
             }
         }
@@ -180,9 +179,9 @@ impl QueryHandler {
         if sql_lower.starts_with("drop database ") {
             let rest = sql_lower.trim_start_matches("drop database ").trim();
             let (if_exists, db_name) = if rest.starts_with("if exists ") {
-                (true, rest.trim_start_matches("if exists ").trim().to_string())
+                (true, rest.trim_start_matches("if exists ").trim().to_owned())
             } else {
-                (false, rest.to_string())
+                (false, rest.to_owned())
             };
             if db_name.is_empty() {
                 return Some(vec![BackendMessage::ErrorResponse {
@@ -206,7 +205,7 @@ impl QueryHandler {
                     return Some(vec![BackendMessage::ErrorResponse {
                         severity: "ERROR".into(),
                         code: "3D000".into(),
-                        message: format!("{}", e),
+                        message: format!("{e}"),
                     }]);
                 }
             }
@@ -234,15 +233,14 @@ impl QueryHandler {
             }
 
             // Look up GUC variable from session, with hardcoded fallbacks
-            let value = if let Some(v) = session.get_guc(param) {
-                v.to_string()
-            } else {
-                match param {
+            let value = session.get_guc(param).map_or_else(
+                || match param {
                     "transaction_isolation" => "read committed".into(),
                     "max_identifier_length" => "63".into(),
-                    _ => "".into(),
-                }
-            };
+                    _ => String::new(),
+                },
+                std::string::ToString::to_string,
+            );
             return Some(self.single_row_result(vec![(param, 25, -1)], vec![vec![Some(value)]]));
         }
 
@@ -288,7 +286,7 @@ impl QueryHandler {
                     return Some(vec![BackendMessage::ErrorResponse {
                         severity: "ERROR".into(),
                         code: "26000".into(),
-                        message: format!("prepared statement \"{}\" does not exist", name),
+                        message: format!("prepared statement \"{name}\" does not exist"),
                     }]);
                 };
                 // Execute the bound SQL through the normal query path
@@ -349,8 +347,7 @@ impl QueryHandler {
                 .trim_start_matches("listen ")
                 .trim()
                 .trim_end_matches(';')
-                .trim()
-                .to_string();
+                .trim().to_owned();
             if !channel.is_empty() {
                 session
                     .notifications
@@ -389,13 +386,14 @@ impl QueryHandler {
                 .trim_end_matches(';')
                 .trim();
             // rest is now "channel" or "channel, 'payload'"
-            let (channel, payload) = if let Some(comma_pos) = rest.find(',') {
-                let ch = rest[..comma_pos].trim().to_lowercase();
-                let pl = rest[comma_pos + 1..].trim().trim_matches('\'').to_string();
-                (ch, pl)
-            } else {
-                (rest.trim().to_lowercase(), String::new())
-            };
+            let (channel, payload) = rest.find(',').map_or_else(
+                || (rest.trim().to_lowercase(), String::new()),
+                |comma_pos| {
+                    let ch = rest[..comma_pos].trim().to_lowercase();
+                    let pl = rest[comma_pos + 1..].trim().trim_matches('\'').to_owned();
+                    (ch, pl)
+                },
+            );
             if !channel.is_empty() {
                 session
                     .notification_hub
@@ -442,8 +440,7 @@ impl QueryHandler {
     fn handle_savepoint(&self, sql_lower: &str, session: &mut PgSession) -> Vec<BackendMessage> {
         let name = sql_lower
             .trim_start_matches("savepoint ")
-            .trim()
-            .to_string();
+            .trim().to_owned();
         if !session.in_transaction() {
             return vec![BackendMessage::ErrorResponse {
                 severity: "ERROR".into(),
@@ -492,7 +489,7 @@ impl QueryHandler {
             vec![BackendMessage::ErrorResponse {
                 severity: "ERROR".into(),
                 code: "3B001".into(),
-                message: format!("savepoint \"{}\" does not exist", name),
+                message: format!("savepoint \"{name}\" does not exist"),
             }]
         }
     }
@@ -513,7 +510,7 @@ impl QueryHandler {
             vec![BackendMessage::ErrorResponse {
                 severity: "ERROR".into(),
                 code: "3B001".into(),
-                message: format!("savepoint \"{}\" does not exist", name),
+                message: format!("savepoint \"{name}\" does not exist"),
             }]
         }
     }
@@ -530,7 +527,7 @@ impl QueryHandler {
                 message: "CREATE TENANT requires a tenant name".into(),
             }];
         }
-        let tenant_name = parts[0].to_string();
+        let tenant_name = parts[0].to_owned();
         let mut max_qps = 0u64;
         let mut max_storage_bytes = 0u64;
         let mut i = 1;
@@ -555,13 +552,13 @@ impl QueryHandler {
         config.quota.max_storage_bytes = max_storage_bytes;
         if self.tenant_registry.register_tenant(config) {
             vec![BackendMessage::CommandComplete {
-                tag: format!("CREATE TENANT {}", tenant_name),
+                tag: format!("CREATE TENANT {tenant_name}"),
             }]
         } else {
             vec![BackendMessage::ErrorResponse {
                 severity: "ERROR".into(),
                 code: "42710".into(),
-                message: format!("tenant \"{}\" already exists", tenant_name),
+                message: format!("tenant \"{tenant_name}\" already exists"),
             }]
         }
     }
@@ -569,26 +566,25 @@ impl QueryHandler {
     fn handle_drop_tenant(&self, sql_lower: &str) -> Vec<BackendMessage> {
         let tenant_name = sql_lower
             .trim_start_matches("drop tenant ")
-            .trim()
-            .to_string();
+            .trim().to_owned();
         let found = self.tenant_registry.tenant_ids().into_iter().find(|tid| {
             self.tenant_registry
                 .get_config(*tid)
-                .map(|c| c.name == tenant_name)
-                .unwrap_or(false)
+                .is_some_and(|c| c.name == tenant_name)
         });
-        if let Some(tid) = found {
-            self.tenant_registry.remove_tenant(tid);
-            vec![BackendMessage::CommandComplete {
-                tag: format!("DROP TENANT {}", tenant_name),
-            }]
-        } else {
-            vec![BackendMessage::ErrorResponse {
+        found.map_or_else(
+            || vec![BackendMessage::ErrorResponse {
                 severity: "ERROR".into(),
                 code: "42704".into(),
-                message: format!("tenant \"{}\" does not exist", tenant_name),
-            }]
-        }
+                message: format!("tenant \"{tenant_name}\" does not exist"),
+            }],
+            |tid| {
+                self.tenant_registry.remove_tenant(tid);
+                vec![BackendMessage::CommandComplete {
+                    tag: format!("DROP TENANT {tenant_name}"),
+                }]
+            },
+        )
     }
 
     // ── Cursor helpers ──
@@ -611,7 +607,7 @@ impl QueryHandler {
             }];
         }
 
-        let cursor_name = parts[0].trim_end_matches(" no scroll").trim().to_string();
+        let cursor_name = parts[0].trim_end_matches(" no scroll").trim().to_owned();
         let with_hold = parts[1].contains("with hold");
 
         // Extract the FOR query
@@ -637,7 +633,7 @@ impl QueryHandler {
         let declare_prefix_len = "declare ".len();
         let query_start = declare_prefix_len + for_idx + " for ".len();
         let query = if query_start < sql.len() {
-            sql[query_start..].trim().trim_end_matches(';').to_string()
+            sql[query_start..].trim().trim_end_matches(';').to_owned()
         } else {
             return vec![BackendMessage::ErrorResponse {
                 severity: "ERROR".into(),
@@ -688,18 +684,18 @@ impl QueryHandler {
     > {
         let catalog = self.storage.get_catalog();
         let mut binder = Binder::new(catalog);
-        let stmts = parse_sql(query).map_err(|e| format!("parse error: {}", e))?;
+        let stmts = parse_sql(query).map_err(|e| format!("parse error: {e}"))?;
         if stmts.is_empty() {
             return Err("empty query".into());
         }
         let bound = binder
             .bind(&stmts[0])
-            .map_err(|e| format!("bind error: {}", e))?;
-        let plan = Planner::plan(&bound).map_err(|e| format!("plan error: {}", e))?;
+            .map_err(|e| format!("bind error: {e}"))?;
+        let plan = Planner::plan(&bound).map_err(|e| format!("plan error: {e}"))?;
         let result = self
             .executor
             .execute(&plan, txn)
-            .map_err(|e| format!("exec error: {}", e))?;
+            .map_err(|e| format!("exec error: {e}"))?;
         match result {
             falcon_executor::ExecutionResult::Query { columns, rows } => Ok((columns, rows)),
             _ => Err("DECLARE CURSOR requires a SELECT query".into()),
@@ -719,7 +715,7 @@ impl QueryHandler {
                 return vec![BackendMessage::ErrorResponse {
                     severity: "ERROR".into(),
                     code: "34000".into(),
-                    message: format!("cursor \"{}\" does not exist", cursor_name),
+                    message: format!("cursor \"{cursor_name}\" does not exist"),
                 }]
             }
         };
@@ -756,7 +752,7 @@ impl QueryHandler {
                     if d.is_null() {
                         None
                     } else {
-                        Some(format!("{}", d))
+                        Some(format!("{d}"))
                     }
                 })
                 .collect();
@@ -764,7 +760,7 @@ impl QueryHandler {
         }
 
         msgs.push(BackendMessage::CommandComplete {
-            tag: format!("FETCH {}", fetched),
+            tag: format!("FETCH {fetched}"),
         });
         msgs
     }
@@ -773,26 +769,26 @@ impl QueryHandler {
     fn parse_fetch_args(rest: &str) -> (usize, String) {
         let tokens: Vec<&str> = rest.split_whitespace().collect();
         match tokens.len() {
-            1 => (1, tokens[0].to_string()),
+            1 => (1, tokens[0].to_owned()),
             2 => {
                 if tokens[0] == "from"
                     || tokens[0] == "in"
                     || tokens[0] == "next"
                     || tokens[0] == "forward"
                 {
-                    (1, tokens[1].to_string())
+                    (1, tokens[1].to_owned())
                 } else if tokens[0] == "all" {
-                    (usize::MAX, tokens[1].to_string())
+                    (usize::MAX, tokens[1].to_owned())
                 } else if let Ok(n) = tokens[0].parse::<usize>() {
-                    (n, tokens[1].to_string())
+                    (n, tokens[1].to_owned())
                 } else {
-                    (1, tokens[0].to_string())
+                    (1, tokens[0].to_owned())
                 }
             }
             3.. => {
                 // Try: count FROM name / FORWARD count FROM name / NEXT FROM name
                 let first = tokens[0];
-                let last_token = tokens.last().copied().unwrap_or("").to_string();
+                let last_token = tokens.last().copied().unwrap_or("").to_owned();
                 if first == "next" || first == "forward" {
                     let count = tokens
                         .get(1)
@@ -843,7 +839,7 @@ impl QueryHandler {
         }
 
         if i < tokens.len() {
-            cursor_name = tokens[i].to_string();
+            cursor_name = tokens[i].to_owned();
         }
 
         (count, cursor_name, backward)
@@ -881,14 +877,14 @@ impl QueryHandler {
                     cursor.stream.advance(count)
                 };
                 vec![BackendMessage::CommandComplete {
-                    tag: format!("MOVE {}", moved),
+                    tag: format!("MOVE {moved}"),
                 }]
             }
             None => {
                 vec![BackendMessage::ErrorResponse {
                     severity: "ERROR".into(),
                     code: "34000".into(),
-                    message: format!("cursor \"{}\" does not exist", cursor_name),
+                    message: format!("cursor \"{cursor_name}\" does not exist"),
                 }]
             }
         }

@@ -1,8 +1,9 @@
+use chrono::NaiveDate;
 use falcon_common::datum::Datum;
 use falcon_common::error::ExecutionError;
 use falcon_sql_frontend::types::ScalarFunc;
 
-pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Option<Result<Datum, ExecutionError>> {
+pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Option<Result<Datum, ExecutionError>> {
     match func {
         ScalarFunc::MakeInterval
         | ScalarFunc::DateDiff
@@ -27,7 +28,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             // MAKE_INTERVAL(years, months, days, hours, mins, secs)  → text interval
             let years = match args.first() {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 Some(Datum::Null) | None => 0,
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -37,33 +38,28 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             };
             let months = match args.get(1) {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
-                Some(Datum::Null) | None => 0,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 _ => 0,
             };
             let days = match args.get(2) {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
-                Some(Datum::Null) | None => 0,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 _ => 0,
             };
             let hours = match args.get(3) {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
-                Some(Datum::Null) | None => 0,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 _ => 0,
             };
             let mins = match args.get(4) {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
-                Some(Datum::Null) | None => 0,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 _ => 0,
             };
             let secs = match args.get(5) {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 Some(Datum::Float64(n)) => *n as i64,
-                Some(Datum::Null) | None => 0,
                 _ => 0,
             };
             let mut parts = Vec::new();
@@ -88,14 +84,14 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                     if days.abs() != 1 { "s" } else { "" }
                 ));
             }
-            parts.push(format!("{:02}:{:02}:{:02}", hours, mins, secs));
+            parts.push(format!("{hours:02}:{mins:02}:{secs:02}"));
             Ok(Datum::Text(parts.join(" ")))
         }
         ScalarFunc::DateDiff => {
             // DATE_DIFF(timestamp1, timestamp2)  → difference in days
             let ts1 = match args.first() {
                 Some(Datum::Timestamp(t)) => *t,
-                Some(Datum::Date(d)) => *d as i64 * 86400 * 1_000_000,
+                Some(Datum::Date(d)) => i64::from(*d) * 86400 * 1_000_000,
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -105,7 +101,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             };
             let ts2 = match args.get(1) {
                 Some(Datum::Timestamp(t)) => *t,
-                Some(Datum::Date(d)) => *d as i64 * 86400 * 1_000_000,
+                Some(Datum::Date(d)) => i64::from(*d) * 86400 * 1_000_000,
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -140,15 +136,14 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let _fmt = match args.get(1) {
                 Some(Datum::Text(s)) => s.clone(),
                 Some(Datum::Null) => return Ok(Datum::Null),
-                _ => "YYYY-MM-DD".to_string(),
+                _ => "YYYY-MM-DD".to_owned(),
             };
             // Try common formats
-            use chrono::NaiveDate;
             let date = NaiveDate::parse_from_str(&text, "%Y-%m-%d")
                 .or_else(|_| NaiveDate::parse_from_str(&text, "%m/%d/%Y"))
                 .or_else(|_| NaiveDate::parse_from_str(&text, "%d-%m-%Y"))
                 .or_else(|_| NaiveDate::parse_from_str(&text, "%Y%m%d"))
-                .map_err(|e| ExecutionError::TypeError(format!("TO_DATE parse error: {}", e)))?;
+                .map_err(|e| ExecutionError::TypeError(format!("TO_DATE parse error: {e}")))?;
             let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)
                 .unwrap_or_else(|| NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or(NaiveDate::MIN));
             let days = (date - epoch).num_days() as i32;
@@ -158,7 +153,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             // DATE_ADD(timestamp/date, days)  → same type + days
             let days_to_add = match args.get(1) {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 Some(Datum::Float64(n)) => *n as i64,
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("DATE_ADD requires days".into())),
@@ -178,7 +173,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             // DATE_SUBTRACT(timestamp/date, days)  → same type - days
             let days_to_sub = match args.get(1) {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 Some(Datum::Float64(n)) => *n as i64,
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
@@ -201,13 +196,13 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
         ScalarFunc::ClockTimestamp => {
             // CLOCK_TIMESTAMP()  → current timestamp (real-time clock)
             let now = chrono::Utc::now();
-            let us = now.timestamp() * 1_000_000 + now.timestamp_subsec_micros() as i64;
+            let us = now.timestamp() * 1_000_000 + i64::from(now.timestamp_subsec_micros());
             Ok(Datum::Timestamp(us))
         }
         ScalarFunc::StatementTimestamp => {
             // STATEMENT_TIMESTAMP()  → same as NOW() for us (statement start time)
             let now = chrono::Utc::now();
-            let us = now.timestamp() * 1_000_000 + now.timestamp_subsec_micros() as i64;
+            let us = now.timestamp() * 1_000_000 + i64::from(now.timestamp_subsec_micros());
             Ok(Datum::Timestamp(us))
         }
         ScalarFunc::Timeofday => {
@@ -237,9 +232,8 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("MAKE_DATE requires day".into())),
             };
-            use chrono::NaiveDate;
             let date = NaiveDate::from_ymd_opt(year, month, day).ok_or_else(|| {
-                ExecutionError::TypeError(format!("Invalid date: {}-{}-{}", year, month, day))
+                ExecutionError::TypeError(format!("Invalid date: {year}-{month}-{day}"))
             })?;
             let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)
                 .unwrap_or_else(|| NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or(NaiveDate::MIN));
@@ -309,7 +303,6 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                     ))
                 }
             };
-            use chrono::NaiveDate;
             let date = NaiveDate::from_ymd_opt(year, month, day)
                 .ok_or_else(|| ExecutionError::TypeError("Invalid date".into()))?;
             let dt = date
@@ -323,7 +316,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let epoch = match args.first() {
                 Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
-                Some(Datum::Int32(n)) => *n as f64,
+                Some(Datum::Int32(n)) => f64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -339,7 +332,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             // AGE(timestamp1, timestamp2)  → interval ts1 - ts2 (like PG: first - second)
             let ts1_us = match args.first() {
                 Some(Datum::Timestamp(t)) => *t,
-                Some(Datum::Date(d)) => *d as i64 * 86400 * 1_000_000,
+                Some(Datum::Date(d)) => i64::from(*d) * 86400 * 1_000_000,
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -350,7 +343,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let ts2_us: i64 = if args.len() > 1 {
                 match args.get(1) {
                     Some(Datum::Timestamp(t)) => *t,
-                    Some(Datum::Date(d)) => *d as i64 * 86400 * 1_000_000,
+                    Some(Datum::Date(d)) => i64::from(*d) * 86400 * 1_000_000,
                     Some(Datum::Null) => return Ok(Datum::Null),
                     _ => {
                         return Err(ExecutionError::TypeError(
@@ -361,7 +354,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             } else {
                 // now in microseconds since epoch
                 let now = chrono::Utc::now();
-                now.timestamp() * 1_000_000 + now.timestamp_subsec_micros() as i64
+                now.timestamp() * 1_000_000 + i64::from(now.timestamp_subsec_micros())
             };
             let diff_us = ts1_us - ts2_us;
             let total_secs = diff_us.abs() / 1_000_000;
@@ -392,7 +385,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             if d > 0 {
                 parts.push(format!("{} day{}", d, if d != 1 { "s" } else { "" }));
             }
-            parts.push(format!("{:02}:{:02}:{:02}", hours, mins, secs));
+            parts.push(format!("{hours:02}:{mins:02}:{secs:02}"));
             Ok(Datum::Text(format!("{}{}", sign, parts.join(" "))))
         }
         _ => unreachable!("dispatch_inner called with unhandled variant"),

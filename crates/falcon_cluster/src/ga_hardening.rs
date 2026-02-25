@@ -89,17 +89,17 @@ impl fmt::Display for RecoveryAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::WalReplay { records_replayed, from_lsn, to_lsn } =>
-                write!(f, "WAL_REPLAY(records={}, lsn={}..{})", records_replayed, from_lsn, to_lsn),
+                write!(f, "WAL_REPLAY(records={records_replayed}, lsn={from_lsn}..{to_lsn})"),
             Self::ColdSegmentRebuild { segments_rebuilt } =>
-                write!(f, "COLD_REBUILD(segments={})", segments_rebuilt),
+                write!(f, "COLD_REBUILD(segments={segments_rebuilt})"),
             Self::ReplicationResume { from_lsn } =>
-                write!(f, "REPL_RESUME(from_lsn={})", from_lsn),
+                write!(f, "REPL_RESUME(from_lsn={from_lsn})"),
             Self::CheckpointRestore { checkpoint_lsn } =>
-                write!(f, "CHECKPOINT(lsn={})", checkpoint_lsn),
+                write!(f, "CHECKPOINT(lsn={checkpoint_lsn})"),
             Self::InDoubtTxnResolution { committed, aborted } =>
-                write!(f, "INDOUBT(committed={}, aborted={})", committed, aborted),
+                write!(f, "INDOUBT(committed={committed}, aborted={aborted})"),
             Self::IndexRebuild { indexes_rebuilt } =>
-                write!(f, "INDEX_REBUILD(count={})", indexes_rebuilt),
+                write!(f, "INDEX_REBUILD(count={indexes_rebuilt})"),
             Self::None => write!(f, "NONE"),
         }
     }
@@ -202,38 +202,31 @@ impl CrashHardeningCoordinator {
 
     /// Detect how the previous instance terminated.
     pub fn detect_previous_shutdown(&self) -> ShutdownType {
-        match &self.shutdown_sentinel_path {
-            Some(path) => {
-                if std::path::Path::new(path).exists() {
-                    ShutdownType::Clean
-                } else {
-                    ShutdownType::Crash
-                }
+        self.shutdown_sentinel_path.as_ref().map_or(ShutdownType::Unknown, |path| {
+            if std::path::Path::new(path).exists() {
+                ShutdownType::Clean
+            } else {
+                ShutdownType::Crash
             }
-            None => ShutdownType::Unknown,
-        }
+        })
     }
 
     /// Write the shutdown sentinel (called during graceful shutdown).
     pub fn write_shutdown_sentinel(&self) -> bool {
-        if let Some(ref path) = self.shutdown_sentinel_path {
+        self.shutdown_sentinel_path.as_ref().is_some_and(|path| {
             std::fs::write(path, b"CLEAN_SHUTDOWN").is_ok()
-        } else {
-            false
-        }
+        })
     }
 
     /// Remove the sentinel on startup (so crash on next run is detectable).
     pub fn clear_shutdown_sentinel(&self) -> bool {
-        if let Some(ref path) = self.shutdown_sentinel_path {
+        self.shutdown_sentinel_path.as_ref().is_none_or(|path| {
             if std::path::Path::new(path).exists() {
                 std::fs::remove_file(path).is_ok()
             } else {
                 true
             }
-        } else {
-            true
-        }
+        })
     }
 
     /// Register a component in INIT state.
@@ -415,7 +408,7 @@ impl ConfigRollbackManager {
     fn compute_checksum(key: &str, value: &str) -> u64 {
         let mut h: u64 = 5381;
         for b in key.bytes().chain(value.bytes()) {
-            h = h.wrapping_mul(33).wrapping_add(b as u64);
+            h = h.wrapping_mul(33).wrapping_add(u64::from(b));
         }
         h
     }
@@ -430,15 +423,15 @@ impl ConfigRollbackManager {
             .as_secs();
         let entry = VersionedConfig {
             version,
-            key: key.to_string(),
-            value: value.to_string(),
+            key: key.to_owned(),
+            value: value.to_owned(),
             checksum,
             applied_at: now,
-            applied_by: applied_by.to_string(),
+            applied_by: applied_by.to_owned(),
             rollout_state: RolloutState::Staged,
         };
         let mut hist = self.history.write();
-        let h = hist.entry(key.to_string()).or_default();
+        let h = hist.entry(key.to_owned()).or_default();
         if h.len() >= self.max_history {
             h.remove(0);
         }
@@ -459,7 +452,7 @@ impl ConfigRollbackManager {
                     return false;
                 }
                 entry.rollout_state = RolloutState::Applied;
-                self.current.write().insert(key.to_string(), entry.clone());
+                self.current.write().insert(key.to_owned(), entry.clone());
                 self.metrics.changes_applied.fetch_add(1, Ordering::Relaxed);
                 return true;
             }
@@ -482,7 +475,7 @@ impl ConfigRollbackManager {
                 let mut restored = target.clone();
                 restored.rollout_state = RolloutState::RolledBack;
                 drop(hist);
-                self.current.write().insert(key.to_string(), restored);
+                self.current.write().insert(key.to_owned(), restored);
                 self.metrics.rollbacks_executed.fetch_add(1, Ordering::Relaxed);
                 return true;
             }
@@ -539,7 +532,7 @@ impl ConfigRollbackManager {
             if let Some(entry) = entries.iter_mut().find(|e| e.version == version) {
                 entry.rollout_state = new_state;
                 if new_state == RolloutState::Applied {
-                    self.current.write().insert(key.to_string(), entry.clone());
+                    self.current.write().insert(key.to_owned(), entry.clone());
                     self.metrics.changes_applied.fetch_add(1, Ordering::Relaxed);
                 }
                 return true;
@@ -658,7 +651,7 @@ impl ResourceLeakDetector {
     pub fn analyze(&self, resource: LeakResourceType) -> LeakDetectionResult {
         let snaps = self.snapshots.lock();
         let mut points: Vec<(f64, f64)> = Vec::new();
-        let first_ts = snaps.front().map(|s| s.timestamp).unwrap_or(0) as f64;
+        let first_ts = snaps.front().map_or(0, |s| s.timestamp) as f64;
 
         for snap in snaps.iter() {
             if let Some(&val) = snap.values.get(&resource) {
@@ -672,8 +665,8 @@ impl ResourceLeakDetector {
                 resource,
                 is_leaking: false,
                 growth_rate_per_hour: 0.0,
-                current_value: points.last().map(|p| p.1 as i64).unwrap_or(0),
-                baseline_value: points.first().map(|p| p.1 as i64).unwrap_or(0),
+                current_value: points.last().map_or(0, |p| p.1 as i64),
+                baseline_value: points.first().map_or(0, |p| p.1 as i64),
                 samples: points.len(),
                 confidence: 0.0,
             };
@@ -684,8 +677,8 @@ impl ResourceLeakDetector {
         for &(x, y) in &points {
             sx += x; sy += y; sxy += x * y; sxx += x * x;
         }
-        let denom = n * sxx - sx * sx;
-        let slope = if denom.abs() < 1e-10 { 0.0 } else { (n * sxy - sx * sy) / denom };
+        let denom = n.mul_add(sxx, -(sx * sx));
+        let slope = if denom.abs() < 1e-10 { 0.0 } else { n.mul_add(sxy, -(sx * sy)) / denom };
 
         // R² for confidence
         let y_mean = sy / n;
@@ -708,8 +701,8 @@ impl ResourceLeakDetector {
             resource,
             is_leaking,
             growth_rate_per_hour: slope,
-            current_value: points.last().map(|p| p.1 as i64).unwrap_or(0),
-            baseline_value: points.first().map(|p| p.1 as i64).unwrap_or(0),
+            current_value: points.last().map_or(0, |p| p.1 as i64),
+            baseline_value: points.first().map_or(0, |p| p.1 as i64),
             samples: points.len(),
             confidence: r_squared,
         }
@@ -883,7 +876,7 @@ impl LatencyGuardrailEngine {
             let samples = self.samples.read();
             if let Some(q) = samples.get(&path) {
                 if q.len() >= 10 {
-                    let mut sorted: Vec<u64> = q.iter().cloned().collect();
+                    let mut sorted: Vec<u64> = q.iter().copied().collect();
                     sorted.sort_unstable();
                     let p99_idx = ((sorted.len() as f64 * 0.99).ceil() as usize).min(sorted.len()) - 1;
                     let p999_idx = ((sorted.len() as f64 * 0.999).ceil() as usize).min(sorted.len()) - 1;
@@ -953,7 +946,7 @@ impl LatencyGuardrailEngine {
         let samples = self.samples.read();
         let q = samples.get(&path)?;
         if q.len() < 2 { return None; }
-        let mut sorted: Vec<u64> = q.iter().cloned().collect();
+        let mut sorted: Vec<u64> = q.iter().copied().collect();
         sorted.sort_unstable();
         let p50 = sorted[sorted.len() / 2];
         let p99 = sorted[((sorted.len() as f64 * 0.99).ceil() as usize).min(sorted.len()) - 1];
@@ -1032,7 +1025,7 @@ impl fmt::Display for ThrottleDecision {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Allow => write!(f, "ALLOW"),
-            Self::Throttle(ms) => write!(f, "THROTTLE({}ms)", ms),
+            Self::Throttle(ms) => write!(f, "THROTTLE({ms}ms)"),
             Self::Reject => write!(f, "REJECT"),
         }
     }
@@ -1094,12 +1087,9 @@ impl BgTaskIsolator {
     /// Request permission to perform an operation.
     pub fn request(&self, task_type: BgTaskType, io_bytes: u64) -> ThrottleDecision {
         let quotas = self.quotas.read();
-        let quota = match quotas.get(&task_type) {
-            Some(q) => q,
-            None => {
-                self.metrics.requests_allowed.fetch_add(1, Ordering::Relaxed);
-                return ThrottleDecision::Allow;
-            }
+        let quota = if let Some(q) = quotas.get(&task_type) { q } else {
+            self.metrics.requests_allowed.fetch_add(1, Ordering::Relaxed);
+            return ThrottleDecision::Allow;
         };
 
         let usage = self.usage.read();

@@ -291,83 +291,76 @@ impl FalconError {
     pub const fn kind(&self) -> ErrorKind {
         match self {
             // User-facing errors (bad input, SQL errors, permission)
-            Self::Sql(_) => ErrorKind::UserError,
-            Self::ReadOnly(_) => ErrorKind::UserError,
-            Self::Protocol(ProtocolError::AuthFailed) => ErrorKind::UserError,
-            Self::Protocol(ProtocolError::InvalidMessage(_)) => ErrorKind::UserError,
-            Self::Execution(ExecutionError::TypeError(_)) => ErrorKind::UserError,
-            Self::Execution(ExecutionError::DivisionByZero) => ErrorKind::UserError,
-            Self::Execution(ExecutionError::ParamMissing(_)) => ErrorKind::UserError,
-            Self::Execution(ExecutionError::ParamTypeMismatch { .. }) => {
-                ErrorKind::UserError
-            }
-            Self::Execution(ExecutionError::InsufficientPrivilege(_)) => {
-                ErrorKind::UserError
-            }
-            Self::Execution(ExecutionError::GovernorAbort(_)) => ErrorKind::UserError,
-            Self::Execution(ExecutionError::ResourceExhausted(_)) => ErrorKind::UserError,
-            Self::Execution(ExecutionError::CheckConstraintViolation(_)) => {
-                ErrorKind::UserError
-            }
-            Self::Storage(StorageError::TableNotFound(_)) => ErrorKind::UserError,
-            Self::Storage(StorageError::TableAlreadyExists(_)) => ErrorKind::UserError,
-            Self::Storage(StorageError::DatabaseAlreadyExists(_)) => ErrorKind::UserError,
-            Self::Storage(StorageError::DatabaseNotFound(_)) => ErrorKind::UserError,
-            Self::Storage(StorageError::DuplicateKey) => ErrorKind::UserError,
-            Self::Storage(StorageError::UniqueViolation { .. }) => ErrorKind::UserError,
-            Self::Txn(TxnError::ConstraintViolation(_, _)) => ErrorKind::UserError,
+            Self::Sql(_)
+            | Self::ReadOnly(_)
+            | Self::Protocol(ProtocolError::AuthFailed)
+            | Self::Protocol(ProtocolError::InvalidMessage(_))
+            | Self::Execution(ExecutionError::TypeError(_))
+            | Self::Execution(ExecutionError::DivisionByZero)
+            | Self::Execution(ExecutionError::ParamMissing(_))
+            | Self::Execution(ExecutionError::ParamTypeMismatch { .. })
+            | Self::Execution(ExecutionError::InsufficientPrivilege(_))
+            | Self::Execution(ExecutionError::GovernorAbort(_))
+            | Self::Execution(ExecutionError::ResourceExhausted(_))
+            | Self::Execution(ExecutionError::CheckConstraintViolation(_))
+            | Self::Storage(StorageError::TableNotFound(_))
+            | Self::Storage(StorageError::TableAlreadyExists(_))
+            | Self::Storage(StorageError::DatabaseAlreadyExists(_))
+            | Self::Storage(StorageError::DatabaseNotFound(_))
+            | Self::Storage(StorageError::DuplicateKey)
+            | Self::Storage(StorageError::UniqueViolation { .. })
+            | Self::Txn(TxnError::ConstraintViolation(_, _)) => ErrorKind::UserError,
 
             // Retryable errors (write conflict, leader change, epoch mismatch)
-            Self::Retryable { .. } => ErrorKind::Retryable,
-            Self::Txn(TxnError::WriteConflict(_)) => ErrorKind::Retryable,
-            Self::Txn(TxnError::SerializationConflict(_)) => ErrorKind::Retryable,
-            Self::Txn(TxnError::Aborted(_)) => ErrorKind::Retryable,
-            Self::Storage(StorageError::SerializationFailure) => ErrorKind::Retryable,
-            Self::Cluster(ClusterError::NotLeader) => ErrorKind::Retryable,
+            Self::Retryable { .. }
+            | Self::Txn(TxnError::WriteConflict(_))
+            | Self::Txn(TxnError::SerializationConflict(_))
+            | Self::Txn(TxnError::Aborted(_))
+            | Self::Storage(StorageError::SerializationFailure)
+            | Self::Cluster(ClusterError::NotLeader) => ErrorKind::Retryable,
 
             // Transient errors (timeout, resource exhaustion, backpressure)
-            Self::Transient { .. } => ErrorKind::Transient,
-            Self::Txn(TxnError::Timeout) => ErrorKind::Transient,
-            Self::Txn(TxnError::MemoryPressure(_)) => ErrorKind::Transient,
-            Self::Txn(TxnError::MemoryLimitExceeded(_)) => ErrorKind::Transient,
-            Self::Txn(TxnError::WalBacklogExceeded(_)) => ErrorKind::Transient,
-            Self::Txn(TxnError::ReplicationLagExceeded(_)) => ErrorKind::Transient,
-            Self::Storage(StorageError::MemoryPressure { .. }) => ErrorKind::Transient,
-            Self::Storage(StorageError::MemoryLimitExceeded { .. }) => ErrorKind::Transient,
-            Self::Protocol(ProtocolError::Io(_)) => ErrorKind::Transient,
-            Self::Protocol(ProtocolError::ConnectionClosed) => ErrorKind::Transient,
+            Self::Transient { .. }
+            | Self::Txn(TxnError::Timeout)
+            | Self::Txn(TxnError::MemoryPressure(_))
+            | Self::Txn(TxnError::MemoryLimitExceeded(_))
+            | Self::Txn(TxnError::WalBacklogExceeded(_))
+            | Self::Txn(TxnError::ReplicationLagExceeded(_))
+            | Self::Storage(StorageError::MemoryPressure { .. })
+            | Self::Storage(StorageError::MemoryLimitExceeded { .. })
+            | Self::Protocol(ProtocolError::Io(_))
+            | Self::Protocol(ProtocolError::ConnectionClosed) => ErrorKind::Transient,
 
             // Everything else is an internal bug
-            Self::InternalBug { .. } => ErrorKind::InternalBug,
             _ => ErrorKind::InternalBug,
         }
     }
 
     /// Returns true if the client should retry this operation.
-    pub fn is_retryable(&self) -> bool {
+    pub const fn is_retryable(&self) -> bool {
         matches!(self.kind(), ErrorKind::Retryable)
     }
 
     /// Returns true if this is a user/input error (4xx equivalent).
-    pub fn is_user_error(&self) -> bool {
+    pub const fn is_user_error(&self) -> bool {
         matches!(self.kind(), ErrorKind::UserError)
     }
 
     /// Returns true if this is a transient resource/backpressure error.
-    pub fn is_transient(&self) -> bool {
+    pub const fn is_transient(&self) -> bool {
         matches!(self.kind(), ErrorKind::Transient)
     }
 
     /// Returns true if this is an internal bug that should never occur.
-    pub fn is_internal_bug(&self) -> bool {
+    pub const fn is_internal_bug(&self) -> bool {
         matches!(self.kind(), ErrorKind::InternalBug)
     }
 
     /// Suggested retry delay in milliseconds (0 = retry immediately).
     pub const fn retry_after_ms(&self) -> u64 {
         match self {
-            Self::Retryable { retry_after_ms, .. } => *retry_after_ms,
-            Self::Transient { retry_after_ms, .. } => *retry_after_ms,
+            Self::Retryable { retry_after_ms, .. }
+            | Self::Transient { retry_after_ms, .. } => *retry_after_ms,
             Self::Txn(TxnError::Timeout) => 100,
             Self::Txn(TxnError::MemoryPressure(_)) => 50,
             Self::Txn(TxnError::WalBacklogExceeded(_)) => 200,
@@ -380,25 +373,27 @@ impl FalconError {
     pub const fn pg_sqlstate(&self) -> &'static str {
         match self {
             Self::Sql(SqlError::Parse(_)) => "42601", // syntax_error
-            Self::Sql(SqlError::UnknownTable(_)) => "42P01", // undefined_table
+            Self::Sql(SqlError::UnknownTable(_))
+            | Self::Storage(StorageError::TableNotFound(_)) => "42P01", // undefined_table
             Self::Sql(SqlError::UnknownColumn(_)) => "42703", // undefined_column
             Self::Sql(SqlError::TypeMismatch { .. }) => "42804", // datatype_mismatch
             Self::Sql(SqlError::Unsupported(_)) => "0A000", // feature_not_supported
             Self::Sql(SqlError::AmbiguousColumn(_)) => "42702", // ambiguous_column
             Self::Sql(_) => "42000", // syntax_error_or_access_rule_violation
-            Self::Storage(StorageError::TableNotFound(_)) => "42P01",
             Self::Storage(StorageError::TableAlreadyExists(_)) => "42P07", // duplicate_table
-            Self::Storage(StorageError::DuplicateKey) => "23505", // unique_violation
-            Self::Storage(StorageError::UniqueViolation { .. }) => "23505",
-            Self::Storage(StorageError::SerializationFailure) => "40001", // serialization_failure
-            Self::Storage(StorageError::MemoryPressure { .. }) => "53200", // out_of_memory
-            Self::Storage(StorageError::MemoryLimitExceeded { .. }) => "53200",
-            Self::Txn(TxnError::WriteConflict(_)) => "40001",
-            Self::Txn(TxnError::SerializationConflict(_)) => "40001",
+            Self::Storage(StorageError::DuplicateKey)
+            | Self::Storage(StorageError::UniqueViolation { .. }) => "23505", // unique_violation
+            Self::Storage(StorageError::SerializationFailure)
+            | Self::Txn(TxnError::WriteConflict(_))
+            | Self::Txn(TxnError::SerializationConflict(_))
+            | Self::Retryable { .. } => "40001", // serialization_failure
+            Self::Storage(StorageError::MemoryPressure { .. })
+            | Self::Storage(StorageError::MemoryLimitExceeded { .. })
+            | Self::Txn(TxnError::MemoryPressure(_))
+            | Self::Txn(TxnError::MemoryLimitExceeded(_)) => "53200", // out_of_memory
             Self::Txn(TxnError::ConstraintViolation(_, _)) => "23000", // integrity_constraint_violation
-            Self::Txn(TxnError::Timeout) => "57014",                   // query_canceled
-            Self::Txn(TxnError::MemoryPressure(_)) => "53200",
-            Self::Txn(TxnError::MemoryLimitExceeded(_)) => "53200",
+            Self::Txn(TxnError::Timeout)
+            | Self::Execution(ExecutionError::GovernorAbort(_)) => "57014", // query_canceled
             Self::Txn(TxnError::WalBacklogExceeded(_)) => "53300", // too_many_connections (reuse)
             Self::Txn(TxnError::ReplicationLagExceeded(_)) => "57P03", // cannot_connect_now
             Self::ReadOnly(_) => "25006", // read_only_sql_transaction
@@ -408,23 +403,19 @@ impl FalconError {
             Self::Execution(ExecutionError::DivisionByZero) => "22012", // division_by_zero
             Self::Execution(ExecutionError::TypeError(_)) => "22000",   // data_exception
             Self::Execution(ExecutionError::InsufficientPrivilege(_)) => "42501", // insufficient_privilege
-            Self::Execution(ExecutionError::GovernorAbort(_)) => "57014", // query_canceled
-            Self::Execution(ExecutionError::ResourceExhausted(_)) => "53000", // insufficient_resources
+            Self::Execution(ExecutionError::ResourceExhausted(_))
+            | Self::Transient { .. } => "53000", // insufficient_resources
             Self::Execution(ExecutionError::CheckConstraintViolation(_)) => "23514", // check_violation
-            Self::Retryable { .. } => "40001",
-            Self::Transient { .. } => "53000", // insufficient_resources
-            Self::InternalBug { .. } => "XX000", // internal_error
-            Self::Internal(_) => "XX000",
-            _ => "XX000",
+            _ => "XX000", // internal_error
         }
     }
 
     /// Map to a PostgreSQL severity string.
-    pub fn pg_severity(&self) -> &'static str {
+    pub const fn pg_severity(&self) -> &'static str {
         match self.kind() {
-            ErrorKind::UserError => "ERROR",
-            ErrorKind::Retryable => "ERROR",
-            ErrorKind::Transient => "ERROR",
+            ErrorKind::UserError
+            | ErrorKind::Retryable
+            | ErrorKind::Transient => "ERROR",
             ErrorKind::InternalBug => "FATAL",
         }
     }
@@ -610,16 +601,15 @@ impl FalconError {
     const fn affected_component(&self) -> &'static str {
         match self {
             Self::Storage(_) => "storage",
-            Self::Txn(_) => "txn",
+            Self::Txn(_) | Self::ReadOnly(_) => "txn",
             Self::Sql(_) => "sql",
             Self::Protocol(_) => "protocol",
             Self::Execution(_) => "executor",
-            Self::Cluster(_) => "cluster",
-            Self::Retryable { .. } => "cluster",
+            Self::Cluster(_)
+            | Self::Retryable { .. } => "cluster",
             Self::Transient { .. } => "resource",
-            Self::InternalBug { .. } => "internal",
-            Self::Internal(_) => "internal",
-            Self::ReadOnly(_) => "txn",
+            Self::InternalBug { .. }
+            | Self::Internal(_) => "internal",
         }
     }
 

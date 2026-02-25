@@ -9,7 +9,7 @@
 //! - **Admin Console API**: structured endpoints for web UI
 
 use std::collections::{HashMap, VecDeque};
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime};
 
@@ -34,8 +34,8 @@ pub enum RebalanceTrigger {
 impl fmt::Display for RebalanceTrigger {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NodeJoined(id) => write!(f, "NODE_JOINED({:?})", id),
-            Self::NodeLeft(id) => write!(f, "NODE_LEFT({:?})", id),
+            Self::NodeJoined(id) => write!(f, "NODE_JOINED({id:?})"),
+            Self::NodeLeft(id) => write!(f, "NODE_LEFT({id:?})"),
             Self::Manual => write!(f, "MANUAL"),
             Self::LoadImbalance => write!(f, "LOAD_IMBALANCE"),
             Self::Scheduled => write!(f, "SCHEDULED"),
@@ -153,7 +153,7 @@ impl AutoRebalancer {
         if available_nodes.is_empty() {
             return Vec::new();
         }
-        let total_shards: usize = assignments.values().map(|v| v.len()).sum();
+        let total_shards: usize = assignments.values().map(std::vec::Vec::len).sum();
         let ideal = (total_shards as f64 / available_nodes.len() as f64).ceil() as usize;
 
         let mut overloaded: Vec<(NodeId, Vec<u64>)> = Vec::new();
@@ -443,7 +443,7 @@ impl CapacityPlanner {
         let mut sum_xy = 0.0f64;
         let mut sum_xx = 0.0f64;
 
-        for s in samples.iter() {
+        for s in samples {
             let x = (s.timestamp as f64 - first_ts) / 3600.0; // hours
             let y = s.value;
             sum_x += x;
@@ -452,18 +452,18 @@ impl CapacityPlanner {
             sum_xx += x * x;
         }
 
-        let denom = n * sum_xx - sum_x * sum_x;
+        let denom = n.mul_add(sum_xx, -(sum_x * sum_x));
         let (a, b) = if denom.abs() < 1e-10 {
             (sum_y / n, 0.0)
         } else {
-            let b = (n * sum_xy - sum_x * sum_y) / denom;
-            let a = (sum_y - b * sum_x) / n;
+            let b = n.mul_add(sum_xy, -(sum_x * sum_y)) / denom;
+            let a = b.mul_add(-sum_x, sum_y) / n;
             (a, b)
         };
 
         let last = samples.back().unwrap();
         let current_x = (last.timestamp as f64 - first_ts) / 3600.0;
-        let predicted_value = a + b * (current_x + horizon_hours);
+        let predicted_value = b.mul_add(current_x + horizon_hours, a);
         let time_to_exhaustion = if b > 1e-10 {
             let remaining = capacity - last.value;
             if remaining > 0.0 { Some(remaining / b) } else { Some(0.0) }
@@ -488,7 +488,7 @@ impl CapacityPlanner {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let resources: Vec<ResourceType> = self.series.read().keys().cloned().collect();
+        let resources: Vec<ResourceType> = self.series.read().keys().copied().collect();
         let mut alerts = Vec::new();
 
         for resource in resources {
@@ -730,7 +730,7 @@ impl SloEngine {
             }
             SloMetricType::ReplicationLag => {
                 // Use max of window
-                window_samples.iter().cloned().fold(0.0_f64, f64::max)
+                window_samples.iter().copied().fold(0.0_f64, f64::max)
             }
             SloMetricType::ErrorRate => {
                 let errors: f64 = window_samples.iter().filter(|v| **v > 0.0).count() as f64;
@@ -749,22 +749,14 @@ impl SloEngine {
         let evals = self.evaluations.read();
         let mut out = String::new();
         for e in evals.iter() {
-            out.push_str(&format!(
-                "falcon_slo_actual{{slo_id=\"{}\",metric=\"{}\"}} {:.6}\n",
-                e.slo_id, e.metric, e.actual
-            ));
-            out.push_str(&format!(
-                "falcon_slo_target{{slo_id=\"{}\",metric=\"{}\"}} {:.6}\n",
-                e.slo_id, e.metric, e.target
-            ));
-            out.push_str(&format!(
-                "falcon_slo_met{{slo_id=\"{}\",metric=\"{}\"}} {}\n",
-                e.slo_id, e.metric, if e.met { 1 } else { 0 }
-            ));
-            out.push_str(&format!(
-                "falcon_slo_error_budget{{slo_id=\"{}\",metric=\"{}\"}} {:.6}\n",
-                e.slo_id, e.metric, e.error_budget_remaining
-            ));
+            let _ = writeln!(out, "falcon_slo_actual{{slo_id=\"{}\",metric=\"{}\"}} {:.6}",
+                e.slo_id, e.metric, e.actual);
+            let _ = writeln!(out, "falcon_slo_target{{slo_id=\"{}\",metric=\"{}\"}} {:.6}",
+                e.slo_id, e.metric, e.target);
+            let _ = writeln!(out, "falcon_slo_met{{slo_id=\"{}\",metric=\"{}\"}} {}",
+                e.slo_id, e.metric, i32::from(e.met));
+            let _ = writeln!(out, "falcon_slo_error_budget{{slo_id=\"{}\",metric=\"{}\"}} {:.6}",
+                e.slo_id, e.metric, e.error_budget_remaining);
         }
         out
     }
@@ -816,14 +808,14 @@ pub enum TimelineEventType {
 impl fmt::Display for TimelineEventType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NodeFailure(id) => write!(f, "NODE_FAILURE({:?})", id),
+            Self::NodeFailure(id) => write!(f, "NODE_FAILURE({id:?})"),
             Self::LeaderChange { shard_id, new, .. } =>
-                write!(f, "LEADER_CHANGE(shard={}, new={:?})", shard_id, new),
-            Self::OpsAction(a) => write!(f, "OPS({})", a),
-            Self::MetricAnomaly { metric, .. } => write!(f, "ANOMALY({})", metric),
-            Self::SloBreached(id) => write!(f, "SLO_BREACH({})", id),
-            Self::BackupCompleted(id) => write!(f, "BACKUP_OK({})", id),
-            Self::ConfigChange { key } => write!(f, "CONFIG({})", key),
+                write!(f, "LEADER_CHANGE(shard={shard_id}, new={new:?})"),
+            Self::OpsAction(a) => write!(f, "OPS({a})"),
+            Self::MetricAnomaly { metric, .. } => write!(f, "ANOMALY({metric})"),
+            Self::SloBreached(id) => write!(f, "SLO_BREACH({id})"),
+            Self::BackupCompleted(id) => write!(f, "BACKUP_OK({id})"),
+            Self::ConfigChange { key } => write!(f, "CONFIG({key})"),
             Self::RebalanceStarted => write!(f, "REBALANCE_START"),
             Self::RebalanceCompleted => write!(f, "REBALANCE_DONE"),
         }
@@ -904,7 +896,7 @@ impl IncidentTimeline {
             timestamp: ts,
             event_type,
             severity,
-            description: description.to_string(),
+            description: description.to_owned(),
             incident_id: None,
         };
         let mut events = self.events.lock();
@@ -930,7 +922,7 @@ impl IncidentTimeline {
             .as_secs();
         let incident = Incident {
             id,
-            title: title.to_string(),
+            title: title.to_owned(),
             severity,
             started_at: ts,
             resolved_at: None,
@@ -960,8 +952,8 @@ impl IncidentTimeline {
         let mut incidents = self.incidents.write();
         if let Some(inc) = incidents.iter_mut().find(|i| i.id == incident_id) {
             inc.resolved_at = Some(ts);
-            inc.root_cause = Some(root_cause.to_string());
-            inc.impact = Some(impact.to_string());
+            inc.root_cause = Some(root_cause.to_owned());
+            inc.impact = Some(impact.to_owned());
             self.metrics.incidents_resolved.fetch_add(1, Ordering::Relaxed);
             true
         } else {
@@ -1055,17 +1047,17 @@ impl fmt::Display for AdminEndpoint {
         match self {
             Self::ClusterOverview => write!(f, "/admin/cluster"),
             Self::NodeList => write!(f, "/admin/nodes"),
-            Self::NodeDetail(id) => write!(f, "/admin/nodes/{:?}", id),
+            Self::NodeDetail(id) => write!(f, "/admin/nodes/{id:?}"),
             Self::ShardMap => write!(f, "/admin/shards"),
-            Self::ShardDetail(id) => write!(f, "/admin/shards/{}", id),
+            Self::ShardDetail(id) => write!(f, "/admin/shards/{id}"),
             Self::RebalanceStatus => write!(f, "/admin/rebalance"),
             Self::BackupList => write!(f, "/admin/backups"),
-            Self::BackupDetail(id) => write!(f, "/admin/backups/{}", id),
+            Self::BackupDetail(id) => write!(f, "/admin/backups/{id}"),
             Self::RestoreList => write!(f, "/admin/restores"),
             Self::SloStatus => write!(f, "/admin/slo"),
             Self::AuditLog => write!(f, "/admin/audit"),
             Self::IncidentList => write!(f, "/admin/incidents"),
-            Self::IncidentDetail(id) => write!(f, "/admin/incidents/{}", id),
+            Self::IncidentDetail(id) => write!(f, "/admin/incidents/{id}"),
             Self::CapacityForecast => write!(f, "/admin/capacity"),
             Self::ConfigList => write!(f, "/admin/config"),
         }

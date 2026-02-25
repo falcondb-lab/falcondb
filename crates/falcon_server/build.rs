@@ -12,15 +12,13 @@ fn main() {
         .args(["rev-parse", "--short=8", "HEAD"])
         .output()
         .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+        .filter(|o| o.status.success()).map_or_else(|| "unknown".to_owned(), |o| String::from_utf8_lossy(&o.stdout).trim().to_owned());
 
     // Build timestamp (UTC, second precision)
     let build_time = chrono_free_utc_now();
 
-    println!("cargo:rustc-env=FALCONDB_GIT_HASH={}", git_hash);
-    println!("cargo:rustc-env=FALCONDB_BUILD_TIME={}", build_time);
+    println!("cargo:rustc-env=FALCONDB_GIT_HASH={git_hash}");
+    println!("cargo:rustc-env=FALCONDB_BUILD_TIME={build_time}");
     // Rerun only when HEAD changes or Cargo.toml changes
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../Cargo.toml");
@@ -43,8 +41,7 @@ fn chrono_free_utc_now() -> String {
     // Compute year/month/day from days since epoch (1970-01-01)
     let (year, month, day) = days_to_ymd(days_since_epoch);
     format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        year, month, day, hours, minutes, seconds
+        "{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z"
     )
 }
 

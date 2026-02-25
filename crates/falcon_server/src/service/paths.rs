@@ -22,7 +22,7 @@ pub const SERVICE_DESCRIPTION: &str =
 /// Root directory under ProgramData for service mode.
 pub fn program_data_root() -> PathBuf {
     let base = std::env::var("ProgramData")
-        .unwrap_or_else(|_| r"C:\ProgramData".to_string());
+        .unwrap_or_else(|_| r"C:\ProgramData".to_owned());
     PathBuf::from(base).join("FalconDB")
 }
 
@@ -54,7 +54,7 @@ pub fn service_certs_dir() -> PathBuf {
 /// Install directory: C:\Program Files\FalconDB\
 pub fn program_files_root() -> PathBuf {
     let base = std::env::var("ProgramFiles")
-        .unwrap_or_else(|_| r"C:\Program Files".to_string());
+        .unwrap_or_else(|_| r"C:\Program Files".to_owned());
     PathBuf::from(base).join("FalconDB")
 }
 

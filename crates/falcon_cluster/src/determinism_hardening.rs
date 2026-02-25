@@ -302,22 +302,22 @@ pub enum RejectReason {
 
 impl TxnTerminalState {
     /// PG SQLSTATE code for this terminal state.
-    pub fn sqlstate(&self) -> &'static str {
+    pub const fn sqlstate(&self) -> &'static str {
         match self {
             Self::Committed { .. } => "00000",
-            Self::AbortedRetryable { reason } => reason.sqlstate(),
-            Self::AbortedNonRetryable { reason } => reason.sqlstate(),
+            Self::AbortedRetryable { reason }
+            | Self::AbortedNonRetryable { reason } => reason.sqlstate(),
             Self::Rejected { reason } => reason.sqlstate(),
             Self::Indeterminate { .. } => "08006", // connection_failure
         }
     }
 
     /// Retry policy for this terminal state.
-    pub fn retry_policy(&self) -> RetryPolicy {
+    pub const fn retry_policy(&self) -> RetryPolicy {
         match self {
-            Self::Committed { .. } => RetryPolicy::NoRetry,
+            Self::Committed { .. }
+            | Self::AbortedNonRetryable { .. } => RetryPolicy::NoRetry,
             Self::AbortedRetryable { .. } => RetryPolicy::RetryAfter(0),
-            Self::AbortedNonRetryable { .. } => RetryPolicy::NoRetry,
             Self::Rejected { reason } => reason.retry_policy(),
             Self::Indeterminate { .. } => RetryPolicy::ExponentialBackoff {
                 base_ms: 100,
@@ -332,13 +332,13 @@ impl TxnTerminalState {
             Self::Committed { .. } => ErrorKind::UserError, // not an error
             Self::AbortedRetryable { .. } => ErrorKind::Retryable,
             Self::AbortedNonRetryable { reason } => match reason {
-                AbortReason::ConstraintViolation(_) => ErrorKind::UserError,
-                AbortReason::ReadOnlyViolation => ErrorKind::UserError,
-                AbortReason::ExplicitRollback => ErrorKind::UserError,
+                AbortReason::ConstraintViolation(_)
+                | AbortReason::ReadOnlyViolation
+                | AbortReason::ExplicitRollback => ErrorKind::UserError,
                 _ => ErrorKind::Retryable,
             },
-            Self::Rejected { .. } => ErrorKind::Transient,
-            Self::Indeterminate { .. } => ErrorKind::Transient,
+            Self::Rejected { .. }
+            | Self::Indeterminate { .. } => ErrorKind::Transient,
         }
     }
 
@@ -350,11 +350,11 @@ impl TxnTerminalState {
     /// Human-readable client message.
     pub fn client_message(&self) -> String {
         match self {
-            Self::Committed { commit_ts } => format!("COMMIT (ts={})", commit_ts),
+            Self::Committed { commit_ts } => format!("COMMIT (ts={commit_ts})"),
             Self::AbortedRetryable { reason } => format!("ABORT (retryable): {}", reason.description()),
             Self::AbortedNonRetryable { reason } => format!("ABORT: {}", reason.description()),
             Self::Rejected { reason } => format!("REJECTED: {}", reason.description()),
-            Self::Indeterminate { reason } => format!("INDETERMINATE: {}", reason),
+            Self::Indeterminate { reason } => format!("INDETERMINATE: {reason}"),
         }
     }
 }
@@ -362,15 +362,15 @@ impl TxnTerminalState {
 impl AbortReason {
     pub const fn sqlstate(&self) -> &'static str {
         match self {
-            Self::SerializationConflict => "40001",
+            Self::SerializationConflict
+            | Self::FailoverAbort => "40001",
             Self::Deadlock => "40P01",
             Self::ConstraintViolation(_) => "23000",
             Self::Timeout => "57014",
             Self::ExplicitRollback => "40000",
-            Self::FailoverAbort => "40001",
             Self::ReadOnlyViolation => "25006",
-            Self::StorageError(_) => "XX000",
-            Self::InvariantViolation(_) => "XX000",
+            Self::StorageError(_)
+            | Self::InvariantViolation(_) => "XX000",
         }
     }
 
@@ -378,13 +378,13 @@ impl AbortReason {
         match self {
             Self::SerializationConflict => "serialization conflict (write-write or OCC)".into(),
             Self::Deadlock => "deadlock detected".into(),
-            Self::ConstraintViolation(d) => format!("constraint violation: {}", d),
+            Self::ConstraintViolation(d) => format!("constraint violation: {d}"),
             Self::Timeout => "transaction timeout exceeded".into(),
             Self::ExplicitRollback => "explicit ROLLBACK".into(),
             Self::FailoverAbort => "aborted due to leader failover".into(),
             Self::ReadOnlyViolation => "read-only transaction attempted a write".into(),
-            Self::StorageError(e) => format!("storage error: {}", e),
-            Self::InvariantViolation(e) => format!("invariant violation: {}", e),
+            Self::StorageError(e) => format!("storage error: {e}"),
+            Self::InvariantViolation(e) => format!("invariant violation: {e}"),
         }
     }
 }
@@ -393,14 +393,14 @@ impl RejectReason {
     pub const fn sqlstate(&self) -> &'static str {
         match self {
             Self::MemoryExhausted => "53200",
-            Self::WalBacklogExceeded => "53300",
-            Self::ReplicationLagExceeded => "57P03",
-            Self::ConnectionLimitReached => "53300",
-            Self::QueryConcurrencyExceeded => "53300",
-            Self::WriteConcurrencyExceeded(_) => "53300",
-            Self::CrossShardConcurrencyExceeded => "53300",
-            Self::DdlConcurrencyExceeded => "53300",
-            Self::CircuitBreakerOpen(_) => "57P03",
+            Self::WalBacklogExceeded
+            | Self::ConnectionLimitReached
+            | Self::QueryConcurrencyExceeded
+            | Self::WriteConcurrencyExceeded(_)
+            | Self::CrossShardConcurrencyExceeded
+            | Self::DdlConcurrencyExceeded => "53300",
+            Self::ReplicationLagExceeded
+            | Self::CircuitBreakerOpen(_) => "57P03",
             Self::NodeNotAcceptingWrites => "25006",
         }
     }
@@ -408,13 +408,13 @@ impl RejectReason {
     pub const fn retry_policy(&self) -> RetryPolicy {
         match self {
             Self::MemoryExhausted => RetryPolicy::ExponentialBackoff { base_ms: 100, max_ms: 5000 },
-            Self::WalBacklogExceeded => RetryPolicy::RetryAfter(200),
             Self::ReplicationLagExceeded => RetryPolicy::RetryAfter(500),
+            Self::WalBacklogExceeded
+            | Self::DdlConcurrencyExceeded => RetryPolicy::RetryAfter(200),
             Self::ConnectionLimitReached => RetryPolicy::ExponentialBackoff { base_ms: 50, max_ms: 2000 },
-            Self::QueryConcurrencyExceeded => RetryPolicy::RetryAfter(50),
-            Self::WriteConcurrencyExceeded(_) => RetryPolicy::RetryAfter(50),
+            Self::QueryConcurrencyExceeded
+            | Self::WriteConcurrencyExceeded(_) => RetryPolicy::RetryAfter(50),
             Self::CrossShardConcurrencyExceeded => RetryPolicy::RetryAfter(100),
-            Self::DdlConcurrencyExceeded => RetryPolicy::RetryAfter(200),
             Self::CircuitBreakerOpen(_) => RetryPolicy::RetryOnDifferentNode { retry_after_ms: 1000 },
             Self::NodeNotAcceptingWrites => RetryPolicy::RetryOnDifferentNode { retry_after_ms: 500 },
         }
@@ -427,10 +427,10 @@ impl RejectReason {
             Self::ReplicationLagExceeded => "replication lag exceeded admission threshold".into(),
             Self::ConnectionLimitReached => "connection limit reached".into(),
             Self::QueryConcurrencyExceeded => "query concurrency limit reached".into(),
-            Self::WriteConcurrencyExceeded(s) => format!("write concurrency limit on shard {}", s),
+            Self::WriteConcurrencyExceeded(s) => format!("write concurrency limit on shard {s}"),
             Self::CrossShardConcurrencyExceeded => "cross-shard txn concurrency exceeded".into(),
             Self::DdlConcurrencyExceeded => "DDL concurrency limit reached".into(),
-            Self::CircuitBreakerOpen(s) => format!("circuit breaker open on shard {}", s),
+            Self::CircuitBreakerOpen(s) => format!("circuit breaker open on shard {s}"),
             Self::NodeNotAcceptingWrites => "node is in drain or read-only mode".into(),
         }
     }

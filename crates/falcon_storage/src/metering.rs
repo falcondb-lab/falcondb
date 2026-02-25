@@ -97,7 +97,7 @@ impl std::fmt::Display for ThrottleAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Allow => write!(f, "allow"),
-            Self::Delay { delay_ms } => write!(f, "delay({}ms)", delay_ms),
+            Self::Delay { delay_ms } => write!(f, "delay({delay_ms}ms)"),
             Self::Reject => write!(f, "reject"),
         }
     }

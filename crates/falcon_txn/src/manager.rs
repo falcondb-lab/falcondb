@@ -268,18 +268,13 @@ impl TxnHandle {
         if self.timeout_ms == 0 {
             return false;
         }
-        if let Some(begin) = self.begin_instant {
-            begin.elapsed().as_millis() as u64 >= self.timeout_ms
-        } else {
-            false
-        }
+        self.begin_instant.is_some_and(|begin| begin.elapsed().as_millis() as u64 >= self.timeout_ms)
     }
 
     /// Elapsed time since transaction began, in milliseconds.
     pub fn elapsed_ms(&self) -> u64 {
         self.begin_instant
-            .map(|b| b.elapsed().as_millis() as u64)
-            .unwrap_or(0)
+            .map_or(0, |b| b.elapsed().as_millis() as u64)
     }
 
     /// Derive a lightweight TxnContext for cross-layer enforcement.
@@ -1064,8 +1059,7 @@ impl TxnManager {
             );
             if let Err(e) = self.storage.commit_txn(txn_id, commit_ts, TxnType::Local) {
                 let latency_us = entry_begin_instant
-                    .map(|i| i.elapsed().as_micros() as u64)
-                    .unwrap_or(0);
+                    .map_or(0, |i| i.elapsed().as_micros() as u64);
                 self.record_completed(TxnRecord {
                     txn_id,
                     txn_type: TxnType::Local,
@@ -1074,7 +1068,7 @@ impl TxnManager {
                     start_ts,
                     commit_ts: None,
                     commit_latency_us: latency_us,
-                    outcome: TxnOutcome::Aborted(format!("{}", e)),
+                    outcome: TxnOutcome::Aborted(format!("{e}")),
                     degraded: was_degraded,
                     trace_id,
                     occ_retry_count,
@@ -1111,8 +1105,7 @@ impl TxnManager {
             );
 
             let latency_us = entry_begin_instant
-                .map(|i| i.elapsed().as_micros() as u64)
-                .unwrap_or(0);
+                .map_or(0, |i| i.elapsed().as_micros() as u64);
             self.record_completed(TxnRecord {
                 txn_id,
                 txn_type: TxnType::Local,
@@ -1176,8 +1169,7 @@ impl TxnManager {
 
         if let Err(e) = self.storage.commit_txn(txn_id, commit_ts, TxnType::Global) {
             let latency_us = entry_begin_instant
-                .map(|i| i.elapsed().as_micros() as u64)
-                .unwrap_or(0);
+                .map_or(0, |i| i.elapsed().as_micros() as u64);
             self.record_completed(TxnRecord {
                 txn_id,
                 txn_type: TxnType::Global,
@@ -1186,7 +1178,7 @@ impl TxnManager {
                 start_ts,
                 commit_ts: None,
                 commit_latency_us: latency_us,
-                outcome: TxnOutcome::Aborted(format!("{}", e)),
+                outcome: TxnOutcome::Aborted(format!("{e}")),
                 degraded: was_degraded,
                 trace_id,
                 occ_retry_count,
@@ -1202,8 +1194,7 @@ impl TxnManager {
         }
 
         let latency_us = entry_begin_instant
-            .map(|i| i.elapsed().as_micros() as u64)
-            .unwrap_or(0);
+            .map_or(0, |i| i.elapsed().as_micros() as u64);
         self.record_completed(TxnRecord {
             txn_id,
             txn_type: TxnType::Global,
@@ -1297,8 +1288,7 @@ impl TxnManager {
         let _ = self.storage.abort_txn(txn_id, txn_type);
 
         let latency_us = begin_instant
-            .map(|i| i.elapsed().as_micros() as u64)
-            .unwrap_or(0);
+            .map_or(0, |i| i.elapsed().as_micros() as u64);
         self.record_completed(TxnRecord {
             txn_id,
             txn_type: txn_type_snap,
@@ -1307,7 +1297,7 @@ impl TxnManager {
             start_ts,
             commit_ts: None,
             commit_latency_us: latency_us,
-            outcome: TxnOutcome::Aborted(reason.to_string()),
+            outcome: TxnOutcome::Aborted(reason.to_owned()),
             degraded,
             trace_id,
             occ_retry_count,
@@ -1333,7 +1323,7 @@ impl TxnManager {
             .iter()
             .map(|e| e.value().start_ts)
             .min()
-            .unwrap_or(self.current_ts())
+            .unwrap_or_else(|| self.current_ts())
     }
 
     /// Age of the longest-running active transaction in microseconds.
@@ -1436,8 +1426,7 @@ impl TxnManager {
                 let age = e
                     .value()
                     .begin_instant
-                    .map(|i| i.elapsed().as_micros() as u64)
-                    .unwrap_or(0);
+                    .map_or(0, |i| i.elapsed().as_micros() as u64);
                 if age >= threshold_us {
                     Some((e.value().txn_id, age, e.value().state, e.value().txn_type))
                 } else {
@@ -1493,8 +1482,7 @@ impl TxnManager {
                 TxnError::ConstraintViolation(
                     txn_id,
                     format!(
-                        "unique constraint on column {}: duplicate key {}",
-                        column_idx, index_key_hex,
+                        "unique constraint on column {column_idx}: duplicate key {index_key_hex}",
                     ),
                 )
             }

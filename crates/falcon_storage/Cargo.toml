@@ -35,6 +35,11 @@ xxhash-rust.workspace = true
 lz4_flex.workspace = true
 zstd.workspace = true
 falcon_segment_codec.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+pbkdf2.workspace = true
+aes-gcm.workspace = true
+rand.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = [

@@ -159,7 +159,7 @@ fn decode_block(block: &[u8]) -> Result<Vec<u8>, StorageError> {
         CompressionCodec::None => Ok(compressed_data[..compressed_len].to_vec()),
         CompressionCodec::Lz4 => {
             lz4_flex::decompress_size_prepended(&compressed_data[..compressed_len])
-                .map_err(|e| StorageError::ColdStore(format!("LZ4 decompress error: {}", e)))
+                .map_err(|e| StorageError::ColdStore(format!("LZ4 decompress error: {e}")))
         }
     }
 }
@@ -174,7 +174,7 @@ fn serialize_row(row: &OwnedRow) -> Vec<u8> {
 
 fn deserialize_row(data: &[u8]) -> Result<OwnedRow, StorageError> {
     bincode::deserialize(data)
-        .map_err(|e| StorageError::ColdStore(format!("row deserialize error: {}", e)))
+        .map_err(|e| StorageError::ColdStore(format!("row deserialize error: {e}")))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -636,8 +636,8 @@ impl StringInternPool {
         }
         let mut strings = self.strings.write();
         let id = InternId(strings.len() as u32);
-        strings.push(s.to_string());
-        map.insert(s.to_string(), id);
+        strings.push(s.to_owned());
+        map.insert(s.to_owned(), id);
         self.misses.fetch_add(1, Ordering::Relaxed);
         id
     }

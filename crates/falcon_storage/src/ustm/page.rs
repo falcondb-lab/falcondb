@@ -354,7 +354,7 @@ pub fn fast_hash_pk(pk: &[u8]) -> u32 {
     // FNV-1a 32-bit hash — fast, no allocation, good distribution.
     let mut h: u32 = 0x811c_9dc5;
     for &b in pk {
-        h ^= b as u32;
+        h ^= u32::from(b);
         h = h.wrapping_mul(0x0100_0193);
     }
     h

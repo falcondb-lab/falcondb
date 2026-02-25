@@ -240,7 +240,7 @@ pub fn process_bytes(
                     sqlstate: *b"08P01",
                     retryable: false,
                     server_epoch: server.config.epoch,
-                    message: format!("protocol error: {}", e),
+                    message: format!("protocol error: {e}"),
                 });
                 let encoded = encode_message(&err_msg);
                 output.extend_from_slice(&encoded);

@@ -34,12 +34,10 @@ impl DbClient {
     ) -> Result<Self> {
         let conn_str = match password {
             Some(pwd) if !pwd.is_empty() => format!(
-                "host={} port={} user={} dbname={} password={}",
-                host, port, user, dbname, pwd
+                "host={host} port={port} user={user} dbname={dbname} password={pwd}"
             ),
             _ => format!(
-                "host={} port={} user={} dbname={}",
-                host, port, user, dbname
+                "host={host} port={port} user={user} dbname={dbname}"
             ),
         };
         debug!(
@@ -49,7 +47,7 @@ impl DbClient {
 
         let (client, connection) = tokio_postgres::connect(&conn_str, NoTls)
             .await
-            .with_context(|| format!("Failed to connect to {}:{}/{}", host, port, dbname))?;
+            .with_context(|| format!("Failed to connect to {host}:{port}/{dbname}"))?;
 
         // Spawn the connection driver
         tokio::spawn(async move {
@@ -60,10 +58,10 @@ impl DbClient {
 
         Ok(Self {
             client,
-            host: host.to_string(),
+            host: host.to_owned(),
             port,
-            user: user.to_string(),
-            dbname: dbname.to_string(),
+            user: user.to_owned(),
+            dbname: dbname.to_owned(),
         })
     }
 
@@ -76,7 +74,7 @@ impl DbClient {
             .client
             .simple_query(sql)
             .await
-            .with_context(|| format!("Failed to execute: {}", sql))?;
+            .with_context(|| format!("Failed to execute: {sql}"))?;
 
         let mut rows = Vec::new();
         let mut tag = String::new();
@@ -85,7 +83,7 @@ impl DbClient {
             match msg {
                 tokio_postgres::SimpleQueryMessage::Row(r) => rows.push(r),
                 tokio_postgres::SimpleQueryMessage::CommandComplete(n) => {
-                    tag = format!("{} rows", n);
+                    tag = format!("{n} rows");
                 }
                 _ => {}
             }

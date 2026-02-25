@@ -3,7 +3,7 @@ use falcon_common::error::ExecutionError;
 use falcon_sql_frontend::types::ScalarFunc;
 
 /// Dispatch a core array-domain scalar function.
-pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionError> {
+pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionError> {
     match func {
         ScalarFunc::ArrayLength | ScalarFunc::Cardinality => match args.first() {
             Some(Datum::Array(arr)) => Ok(Datum::Int64(arr.len() as i64)),
@@ -125,7 +125,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             let delim = match args.get(1) {
                 Some(Datum::Text(s)) => s.clone(),
                 Some(Datum::Null) => return Ok(Datum::Null),
-                Some(other) => format!("{}", other),
+                Some(other) => format!("{other}"),
                 None => {
                     return Err(ExecutionError::TypeError(
                         "ARRAY_TO_STRING requires delimiter".into(),
@@ -135,7 +135,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             let null_str = args.get(2).and_then(|d| match d {
                 Datum::Text(s) => Some(s.clone()),
                 Datum::Null => None,
-                other => Some(format!("{}", other)),
+                other => Some(format!("{other}")),
             });
             let parts: Vec<String> = arr
                 .iter()
@@ -143,7 +143,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                     if v.is_null() {
                         null_str.clone()
                     } else {
-                        Some(format!("{}", v))
+                        Some(format!("{v}"))
                     }
                 })
                 .collect();
@@ -162,7 +162,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             let delim = match args.get(1) {
                 Some(Datum::Text(d)) => d.clone(),
                 Some(Datum::Null) => return Ok(Datum::Array(vec![Datum::Text(s)])),
-                Some(other) => format!("{}", other),
+                Some(other) => format!("{other}"),
                 None => {
                     return Err(ExecutionError::TypeError(
                         "STRING_TO_ARRAY requires delimiter".into(),
@@ -176,15 +176,10 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             let parts: Vec<Datum> = s
                 .split(&delim)
                 .map(|part| {
-                    if let Some(ref ns) = null_str {
-                        if part == ns {
-                            Datum::Null
-                        } else {
-                            Datum::Text(part.to_string())
-                        }
-                    } else {
-                        Datum::Text(part.to_string())
-                    }
+                    null_str.as_ref().map_or_else(
+                        || Datum::Text(part.to_owned()),
+                        |ns| if part == ns { Datum::Null } else { Datum::Text(part.to_owned()) },
+                    )
                 })
                 .collect();
             Ok(Datum::Array(parts))
@@ -228,7 +223,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                 }
             };
             if arr.is_empty() {
-                Ok(Datum::Text("[]".to_string()))
+                Ok(Datum::Text("[]".to_owned()))
             } else {
                 Ok(Datum::Text(format!("[1:{}]", arr.len())))
             }
@@ -260,7 +255,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             let mut seen = Vec::new();
             let mut result = Vec::new();
             for item in arr {
-                let key = format!("{:?}", item);
+                let key = format!("{item:?}");
                 if !seen.contains(&key) {
                     seen.push(key);
                     result.push(item);
@@ -279,7 +274,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                 }
             };
             let mut sorted = arr;
-            sorted.sort_by(|a, b| format!("{}", a).cmp(&format!("{}", b)));
+            sorted.sort_by(|a, b| format!("{a}").cmp(&format!("{b}")));
             Ok(Datum::Array(sorted))
         }
         ScalarFunc::ArrayContains => {
@@ -305,7 +300,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             }
             let found = arr
                 .iter()
-                .any(|item| format!("{:?}", item) == format!("{:?}", elem));
+                .any(|item| format!("{item:?}") == format!("{elem:?}"));
             Ok(Datum::Boolean(found))
         }
         ScalarFunc::ArrayOverlap => {
@@ -328,14 +323,13 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                 }
             };
             let overlap = arr1.iter().any(|item1| {
-                let k1 = format!("{:?}", item1);
-                arr2.iter().any(|item2| format!("{:?}", item2) == k1)
+                let k1 = format!("{item1:?}");
+                arr2.iter().any(|item2| format!("{item2:?}") == k1)
             });
             Ok(Datum::Boolean(overlap))
         }
         _ => Err(ExecutionError::TypeError(format!(
-            "Not a core array function: {:?}",
-            func
+            "Not a core array function: {func:?}"
         ))),
     }
 }

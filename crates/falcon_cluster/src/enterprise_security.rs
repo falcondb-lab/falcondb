@@ -81,9 +81,9 @@ pub enum AuthnResult {
 impl fmt::Display for AuthnResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Success { user_id, .. } => write!(f, "SUCCESS user_id={}", user_id),
-            Self::Failed { reason } => write!(f, "FAILED: {}", reason),
-            Self::Locked { remaining_secs } => write!(f, "LOCKED {}s", remaining_secs),
+            Self::Success { user_id, .. } => write!(f, "SUCCESS user_id={user_id}"),
+            Self::Failed { reason } => write!(f, "FAILED: {reason}"),
+            Self::Locked { remaining_secs } => write!(f, "LOCKED {remaining_secs}s"),
             Self::CredentialExpired => write!(f, "EXPIRED"),
         }
     }
@@ -143,7 +143,7 @@ impl AuthnManager {
         let cred = StoredCredential {
             user_id,
             credential_type: CredentialType::Password,
-            credential_hash: password_hash.to_string(),
+            credential_hash: password_hash.to_owned(),
             created_at: now,
             expires_at: None,
             last_used_at: None,
@@ -151,7 +151,7 @@ impl AuthnManager {
         };
         let user = UserRecord {
             user_id,
-            username: username.to_string(),
+            username: username.to_owned(),
             credentials: vec![cred],
             is_active: true,
             created_at: now,
@@ -160,7 +160,7 @@ impl AuthnManager {
             locked_until: None,
         };
         self.users.write().insert(user_id, user);
-        self.username_index.write().insert(username.to_string(), user_id);
+        self.username_index.write().insert(username.to_owned(), user_id);
         user_id
     }
 
@@ -175,7 +175,7 @@ impl AuthnManager {
             user.credentials.push(StoredCredential {
                 user_id,
                 credential_type: CredentialType::Token,
-                credential_hash: token_hash.to_string(),
+                credential_hash: token_hash.to_owned(),
                 created_at: now,
                 expires_at,
                 last_used_at: None,
@@ -198,7 +198,7 @@ impl AuthnManager {
             user.credentials.push(StoredCredential {
                 user_id,
                 credential_type: CredentialType::MtlsCertificate,
-                credential_hash: cert_fingerprint.to_string(),
+                credential_hash: cert_fingerprint.to_owned(),
                 created_at: now,
                 expires_at: None,
                 last_used_at: None,
@@ -221,26 +221,20 @@ impl AuthnManager {
         // Look up user
         let user_id = {
             let idx = self.username_index.read();
-            match idx.get(&request.username) {
-                Some(id) => *id,
-                None => {
-                    self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
-                    return AuthnResult::Failed {
-                        reason: "user not found".into(),
-                    };
-                }
-            }
-        };
-
-        let mut users = self.users.write();
-        let user = match users.get_mut(&user_id) {
-            Some(u) => u,
-            None => {
+            if let Some(id) = idx.get(&request.username) { *id } else {
                 self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
                 return AuthnResult::Failed {
                     reason: "user not found".into(),
                 };
             }
+        };
+
+        let mut users = self.users.write();
+        let user = if let Some(u) = users.get_mut(&user_id) { u } else {
+            self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
+            return AuthnResult::Failed {
+                reason: "user not found".into(),
+            };
         };
 
         // Check lockout
@@ -269,36 +263,33 @@ impl AuthnManager {
                 && !c.is_revoked
         });
 
-        match matched {
-            Some(cred) => {
-                // Check expiration
-                if let Some(exp) = cred.expires_at {
-                    if now > exp {
-                        self.metrics.credential_expirations.fetch_add(1, Ordering::Relaxed);
-                        return AuthnResult::CredentialExpired;
-                    }
-                }
-                cred.last_used_at = Some(now);
-                user.last_login_at = Some(now);
-                user.failed_login_count = 0;
-                self.metrics.auth_successes.fetch_add(1, Ordering::Relaxed);
-                // Generate session token (simplified — in production use JWT)
-                let session = format!("session-{}-{}", user_id, now);
-                AuthnResult::Success {
-                    user_id,
-                    session_token: session,
+        if let Some(cred) = matched {
+            // Check expiration
+            if let Some(exp) = cred.expires_at {
+                if now > exp {
+                    self.metrics.credential_expirations.fetch_add(1, Ordering::Relaxed);
+                    return AuthnResult::CredentialExpired;
                 }
             }
-            None => {
-                user.failed_login_count += 1;
-                if user.failed_login_count >= self.lockout_threshold {
-                    user.locked_until = Some(now + self.lockout_duration_secs);
-                    self.metrics.auth_lockouts.fetch_add(1, Ordering::Relaxed);
-                }
-                self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
-                AuthnResult::Failed {
-                    reason: "invalid credentials".into(),
-                }
+            cred.last_used_at = Some(now);
+            user.last_login_at = Some(now);
+            user.failed_login_count = 0;
+            self.metrics.auth_successes.fetch_add(1, Ordering::Relaxed);
+            // Generate session token (simplified — in production use JWT)
+            let session = format!("session-{user_id}-{now}");
+            AuthnResult::Success {
+                user_id,
+                session_token: session,
+            }
+        } else {
+            user.failed_login_count += 1;
+            if user.failed_login_count >= self.lockout_threshold {
+                user.locked_until = Some(now + self.lockout_duration_secs);
+                self.metrics.auth_lockouts.fetch_add(1, Ordering::Relaxed);
+            }
+            self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
+            AuthnResult::Failed {
+                reason: "invalid credentials".into(),
             }
         }
     }
@@ -474,9 +465,9 @@ impl EnterpriseRbac {
         self.grants.write().push(RbacGrant {
             role_id,
             scope,
-            resource: resource.to_string(),
+            resource: resource.to_owned(),
             permission,
-            granted_by: granted_by.to_string(),
+            granted_by: granted_by.to_owned(),
             granted_at: now,
         });
         self.metrics.grants_count.fetch_add(1, Ordering::Relaxed);
@@ -538,7 +529,7 @@ impl EnterpriseRbac {
             RbacCheckResult::Denied {
                 scope,
                 permission: permission.to_string(),
-                resource: resource.to_string(),
+                resource: resource.to_owned(),
             }
         }
     }
@@ -659,10 +650,10 @@ impl CertificateManager {
 
         let new_record = CertificateRecord {
             link_type,
-            cert_path: new_cert_path.to_string(),
-            key_path: new_key_path.to_string(),
+            cert_path: new_cert_path.to_owned(),
+            key_path: new_key_path.to_owned(),
             ca_path: None,
-            fingerprint: new_fingerprint.to_string(),
+            fingerprint: new_fingerprint.to_owned(),
             not_before,
             not_after,
             loaded_at: now,
@@ -675,7 +666,7 @@ impl CertificateManager {
         let event = CertRotationEvent {
             link_type,
             old_fingerprint,
-            new_fingerprint: new_fingerprint.to_string(),
+            new_fingerprint: new_fingerprint.to_owned(),
             rotated_at: now,
             success: true,
             error: None,
@@ -742,11 +733,11 @@ pub enum BackupTarget {
 impl fmt::Display for BackupTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Local { path } => write!(f, "local:{}", path),
+            Self::Local { path } => write!(f, "local:{path}"),
             Self::S3 { bucket, prefix, region } =>
-                write!(f, "s3://{}/{} ({})", bucket, prefix, region),
+                write!(f, "s3://{bucket}/{prefix} ({region})"),
             Self::Oss { bucket, prefix, endpoint } =>
-                write!(f, "oss://{}/{} ({})", bucket, prefix, endpoint),
+                write!(f, "oss://{bucket}/{prefix} ({endpoint})"),
         }
     }
 }
@@ -785,7 +776,7 @@ impl fmt::Display for BackupJobStatus {
             Self::Scheduled => write!(f, "SCHEDULED"),
             Self::Running => write!(f, "RUNNING"),
             Self::Completed => write!(f, "COMPLETED"),
-            Self::Failed(e) => write!(f, "FAILED: {}", e),
+            Self::Failed(e) => write!(f, "FAILED: {e}"),
             Self::Cancelled => write!(f, "CANCELLED"),
         }
     }
@@ -898,7 +889,7 @@ impl BackupOrchestrator {
             wal_start_lsn: 0,
             wal_end_lsn: 0,
             checksum: 0,
-            initiated_by: initiated_by.to_string(),
+            initiated_by: initiated_by.to_owned(),
         };
         self.backup_jobs.write().push(job);
         self.metrics.backups_started.fetch_add(1, Ordering::Relaxed);
@@ -955,7 +946,7 @@ impl BackupOrchestrator {
     pub fn fail_backup(&self, job_id: u64, error: &str) -> bool {
         let mut jobs = self.backup_jobs.write();
         if let Some(job) = jobs.iter_mut().find(|j| j.job_id == job_id) {
-            job.status = BackupJobStatus::Failed(error.to_string());
+            job.status = BackupJobStatus::Failed(error.to_owned());
             self.metrics.backups_failed.fetch_add(1, Ordering::Relaxed);
             true
         } else {
@@ -1131,8 +1122,8 @@ impl EnterpriseAuditLog {
             events: Mutex::new(VecDeque::with_capacity(capacity)),
             capacity,
             next_id: AtomicU64::new(1),
-            hmac_key: hmac_key.to_string(),
-            last_hash: Mutex::new("genesis".to_string()),
+            hmac_key: hmac_key.to_owned(),
+            last_hash: Mutex::new("genesis".to_owned()),
             metrics: EnterpriseAuditMetrics::default(),
         }
     }
@@ -1143,9 +1134,9 @@ impl EnterpriseAuditLog {
         let input = format!("{}{}{}", self.hmac_key, prev_hash, event_str);
         let mut h: u64 = 5381;
         for b in input.bytes() {
-            h = h.wrapping_mul(33).wrapping_add(b as u64);
+            h = h.wrapping_mul(33).wrapping_add(u64::from(b));
         }
-        format!("{:016x}", h)
+        format!("{h:016x}")
     }
 
     /// Record an audit event.
@@ -1167,8 +1158,7 @@ impl EnterpriseAuditLog {
             .unwrap_or_default()
             .as_secs();
         let event_str = format!(
-            "{}|{}|{}|{}|{}|{}|{}|{}",
-            id, timestamp, category, actor, action, resource, outcome, details
+            "{id}|{timestamp}|{category}|{actor}|{action}|{resource}|{outcome}|{details}"
         );
         // Hold both locks to guarantee hash-chain order matches event order.
         let mut events = self.events.lock();
@@ -1184,12 +1174,12 @@ impl EnterpriseAuditLog {
             timestamp,
             category,
             severity,
-            actor: actor.to_string(),
-            source_ip: source_ip.to_string(),
-            action: action.to_string(),
-            resource: resource.to_string(),
-            outcome: outcome.to_string(),
-            details: details.to_string(),
+            actor: actor.to_owned(),
+            source_ip: source_ip.to_owned(),
+            action: action.to_owned(),
+            resource: resource.to_owned(),
+            outcome: outcome.to_owned(),
+            details: details.to_owned(),
             integrity_hash: hash,
         };
 
@@ -1204,7 +1194,7 @@ impl EnterpriseAuditLog {
     pub fn verify_integrity(&self) -> bool {
         self.metrics.integrity_checks.fetch_add(1, Ordering::Relaxed);
         let events = self.events.lock();
-        let mut prev_hash = "genesis".to_string();
+        let mut prev_hash = "genesis".to_owned();
         for event in events.iter() {
             let event_str = format!(
                 "{}|{}|{}|{}|{}|{}|{}|{}",

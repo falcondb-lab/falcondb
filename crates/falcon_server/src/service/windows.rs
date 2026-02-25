@@ -60,7 +60,7 @@ pub mod scm {
 
     /// Set the config path before dispatching to SCM.
     pub fn set_config_path(path: &str) {
-        let _ = CONFIG_PATH.set(path.to_string());
+        let _ = CONFIG_PATH.set(path.to_owned());
     }
 
     /// Entry point: register with SCM and block until service exits.

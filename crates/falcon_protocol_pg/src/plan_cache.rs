@@ -139,7 +139,7 @@ impl PlanCache {
 
     /// Get cache statistics.
     pub fn stats(&self) -> PlanCacheStats {
-        let inner = self.inner.read().unwrap_or_else(|p| p.into_inner());
+        let inner = self.inner.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         let total = inner.hits + inner.misses;
         PlanCacheStats {
             entries: inner.entries.len(),

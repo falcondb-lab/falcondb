@@ -38,7 +38,7 @@ pub fn wrap_machine_output(
         // Plain text — wrap as lines array
         let lines: Vec<Value> = output
             .lines()
-            .map(|l| Value::String(l.to_string()))
+            .map(|l| Value::String(l.to_owned()))
             .collect();
         json!({ "text": lines })
     });
@@ -104,16 +104,16 @@ impl Identity {
     /// Resolve identity from CLI flags or environment variables.
     pub fn resolve(operator_flag: Option<&str>, source_flag: Option<&str>) -> Self {
         let operator = operator_flag
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .or_else(|| std::env::var("FSQL_OPERATOR").ok())
             .or_else(|| std::env::var("USER").ok())
             .or_else(|| std::env::var("USERNAME").ok())
-            .unwrap_or_else(|| "unknown".to_string());
+            .unwrap_or_else(|| "unknown".to_owned());
 
         let source = source_flag
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .or_else(|| std::env::var("FSQL_SOURCE").ok())
-            .unwrap_or_else(|| "human".to_string());
+            .unwrap_or_else(|| "human".to_owned());
 
         Self { operator, source }
     }

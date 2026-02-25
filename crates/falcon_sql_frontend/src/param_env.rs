@@ -61,8 +61,8 @@ impl ParamEnv {
                 } else {
                     Err(SqlError::ParamTypeConflict {
                         index,
-                        expected: format!("{:?}", expected),
-                        got: format!("{:?}", existing),
+                        expected: format!("{expected:?}"),
+                        got: format!("{existing:?}"),
                     })
                 }
             }
@@ -111,8 +111,8 @@ const fn promote_types(a: &DataType, b: &DataType) -> Option<DataType> {
     match (a, b) {
         // Integer promotions
         (Int32, Int64) | (Int64, Int32) => Some(Int64),
-        (Int32, Float64) | (Float64, Int32) => Some(Float64),
-        (Int64, Float64) | (Float64, Int64) => Some(Float64),
+        (Int32, Float64) | (Float64, Int32)
+        | (Int64, Float64) | (Float64, Int64) => Some(Float64),
         // Text is flexible — any type can be text-ified
         (Text, _) | (_, Text) => Some(Text),
         _ => None,

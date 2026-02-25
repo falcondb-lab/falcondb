@@ -139,7 +139,7 @@ impl IocpFile {
     fn check_inflight(&self, bytes: u64) -> Result<(), IoError> {
         if self.config.max_inflight_ops > 0 {
             let ops = self.inflight_ops.load(Ordering::Relaxed);
-            if ops >= self.config.max_inflight_ops as u64 {
+            if ops >= u64::from(self.config.max_inflight_ops) {
                 return Err(IoError::new(
                     IoErrorKind::Timeout,
                     format!("inflight ops limit: {} >= {}", ops, self.config.max_inflight_ops),
@@ -195,11 +195,6 @@ impl AsyncFile for IocpFile {
             // If this write is contiguous with the write buffer, coalesce
             if offset == inner.write_pos && inner.write_buf.len() + buf.len() <= 64 * 1024 {
                 inner.write_buf.extend_from_slice(buf);
-                inner.write_pos = offset + buf.len() as u64;
-                if inner.write_pos > inner.file_size {
-                    inner.file_size = inner.write_pos;
-                }
-                Ok(buf.len())
             } else {
                 // Flush existing buffer first, then write directly
                 Self::flush_write_buf(&mut inner)?;
@@ -208,12 +203,12 @@ impl AsyncFile for IocpFile {
                     .seek(SeekFrom::Start(offset))
                     .map_err(IoError::from_io)?;
                 inner.file.write_all(buf).map_err(IoError::from_io)?;
-                inner.write_pos = offset + buf.len() as u64;
-                if inner.write_pos > inner.file_size {
-                    inner.file_size = inner.write_pos;
-                }
-                Ok(buf.len())
             }
+            inner.write_pos = offset + buf.len() as u64;
+            if inner.write_pos > inner.file_size {
+                inner.file_size = inner.write_pos;
+            }
+            Ok(buf.len())
         };
 
         let latency_us = start.elapsed().as_micros() as u64;

@@ -25,18 +25,18 @@ pub async fn plan_shard_move(
         .and_then(|(rows, _)| rows.into_iter().next())
         .map(|r| {
             (
-                r.get(0).unwrap_or("unknown").to_string(),
-                r.get(1).unwrap_or("unknown").to_string(),
-                r.get(2).unwrap_or("unknown").to_string(),
-                r.get(3).unwrap_or("unknown").to_string(),
+                r.get(0).unwrap_or("unknown").to_owned(),
+                r.get(1).unwrap_or("unknown").to_owned(),
+                r.get(2).unwrap_or("unknown").to_owned(),
+                r.get(3).unwrap_or("unknown").to_owned(),
             )
         })
         .unwrap_or_else(|| {
             (
-                "unknown".to_string(),
-                "unknown".to_string(),
-                "unknown".to_string(),
-                "unknown".to_string(),
+                "unknown".to_owned(),
+                "unknown".to_owned(),
+                "unknown".to_owned(),
+                "unknown".to_owned(),
             )
         });
 
@@ -46,7 +46,7 @@ pub async fn plan_shard_move(
         _ => RiskLevel::Medium,
     };
 
-    let mut plan = PlanOutput::new(format!("shard move {} to {}", shard_id, target_node), risk)
+    let mut plan = PlanOutput::new(format!("shard move {shard_id} to {target_node}"), risk)
         .field("Shard ID", shard_id)
         .field("Current Leader", &current_leader)
         .field("Target Leader", target_node)
@@ -60,14 +60,12 @@ pub async fn plan_shard_move(
 
     if shard_state == "recovering" || shard_state == "rebalancing" {
         plan = plan.warn(format!(
-            "Shard '{}' is currently in state '{}' — moving now is HIGH RISK",
-            shard_id, shard_state
+            "Shard '{shard_id}' is currently in state '{shard_state}' — moving now is HIGH RISK"
         ));
     }
     if current_leader == target_node {
         plan = plan.warn(format!(
-            "Target node '{}' is already the leader for shard '{}'",
-            target_node, shard_id
+            "Target node '{target_node}' is already the leader for shard '{shard_id}'"
         ));
     }
 
@@ -83,7 +81,7 @@ pub async fn apply_shard_move(
 ) -> Result<ApplyResult> {
     require_apply(
         apply,
-        &format!("shard move {} to {}", shard_id, target_node),
+        &format!("shard move {shard_id} to {target_node}"),
     )?;
 
     let sql = format!(
@@ -93,15 +91,14 @@ pub async fn apply_shard_move(
     );
     match client.query_simple(&sql).await {
         Ok(_) => Ok(ApplyResult::success(
-            format!("shard move {} to {}", shard_id, target_node),
+            format!("shard move {shard_id} to {target_node}"),
             format!(
-                "Shard '{}' leader transition to '{}' initiated.",
-                shard_id, target_node
+                "Shard '{shard_id}' leader transition to '{target_node}' initiated."
             ),
         )),
         Err(e) => Ok(ApplyResult::rejected(
-            format!("shard move {} to {}", shard_id, target_node),
-            format!("Server rejected shard move: {}", e),
+            format!("shard move {shard_id} to {target_node}"),
+            format!("Server rejected shard move: {e}"),
         )),
     }
 }

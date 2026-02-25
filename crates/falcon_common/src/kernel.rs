@@ -73,8 +73,7 @@ impl TxnLatencyBreakdown {
         phases
             .iter()
             .max_by_key(|p| p.1)
-            .map(|p| p.0)
-            .unwrap_or("unknown")
+            .map_or("unknown", |p| p.0)
     }
 
     /// Format as a compact waterfall string: `phase=Xus|phase=Yus|...`

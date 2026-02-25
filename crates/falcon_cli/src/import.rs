@@ -117,20 +117,17 @@ pub async fn run_import(client: &DbClient, cmd: &ImportCmd) -> Result<ImportSumm
 
         summary.total += 1;
 
-        let fields = match parse_csv_line(&raw, &cmd.opts) {
-            Some(f) => f,
-            None => {
-                let msg = format!(
-                    "IMPORT: malformed CSV at line {} in '{}'",
-                    line_num, cmd.file
-                );
-                if cmd.on_error_stop {
-                    bail!("{}", msg);
-                }
-                eprintln!("ERROR: {}", msg);
-                summary.failed += 1;
-                continue;
+        let fields = if let Some(f) = parse_csv_line(&raw, &cmd.opts) { f } else {
+            let msg = format!(
+                "IMPORT: malformed CSV at line {} in '{}'",
+                line_num, cmd.file
+            );
+            if cmd.on_error_stop {
+                bail!("{msg}");
             }
+            eprintln!("ERROR: {msg}");
+            summary.failed += 1;
+            continue;
         };
 
         if fields.len() != ncols {
@@ -141,9 +138,9 @@ pub async fn run_import(client: &DbClient, cmd: &ImportCmd) -> Result<ImportSumm
                 fields.len()
             );
             if cmd.on_error_stop {
-                bail!("{}", msg);
+                bail!("{msg}");
             }
-            eprintln!("ERROR: {}", msg);
+            eprintln!("ERROR: {msg}");
             summary.failed += 1;
             continue;
         }
@@ -219,7 +216,7 @@ async fn flush_batch(
             .iter()
             .map(|v| {
                 if !opts.null_as.is_empty() && v == &opts.null_as {
-                    "NULL".to_string()
+                    "NULL".to_owned()
                 } else {
                     format!("'{}'", v.replace('\'', "''"))
                 }
@@ -235,11 +232,11 @@ async fn flush_batch(
         );
 
         if let Err(e) = client.query_simple(&sql).await {
-            let msg = format!("IMPORT: INSERT failed: {}", e);
+            let msg = format!("IMPORT: INSERT failed: {e}");
             if on_error_stop {
-                bail!("{}", msg);
+                bail!("{msg}");
             }
-            eprintln!("ERROR: {}", msg);
+            eprintln!("ERROR: {msg}");
             failed += 1;
         } else {
             inserted += 1;
@@ -261,11 +258,11 @@ async fn get_table_columns(client: &DbClient, table: &str) -> Result<Vec<String>
         .await
         .context("IMPORT: failed to query column names")?;
     if rows.is_empty() {
-        bail!("IMPORT: table '{}' not found or has no columns.", table);
+        bail!("IMPORT: table '{table}' not found or has no columns.");
     }
     Ok(rows
         .iter()
-        .map(|r| r.get(0).unwrap_or("").to_string())
+        .map(|r| r.get(0).unwrap_or("").to_owned())
         .collect())
 }
 
@@ -335,7 +332,7 @@ fn parse_options(
             s = s[10..].trim();
             let (tok, rest) = parse_token(s)?;
             opts.delimiter = crate::csv::parse_delimiter(&tok)
-                .ok_or_else(|| anyhow::anyhow!("IMPORT: invalid delimiter '{}'", tok))?;
+                .ok_or_else(|| anyhow::anyhow!("IMPORT: invalid delimiter '{tok}'"))?;
             s = rest;
         } else if upper.starts_with("NULL AS ") {
             s = s[8..].trim();
@@ -346,13 +343,13 @@ fn parse_options(
             s = s[6..].trim();
             let (tok, rest) = parse_token(s)?;
             opts.quote = crate::csv::parse_delimiter(&tok)
-                .ok_or_else(|| anyhow::anyhow!("IMPORT: invalid QUOTE char '{}'", tok))?;
+                .ok_or_else(|| anyhow::anyhow!("IMPORT: invalid QUOTE char '{tok}'"))?;
             s = rest;
         } else if upper.starts_with("ESCAPE ") {
             s = s[7..].trim();
             let (tok, rest) = parse_token(s)?;
             opts.escape = crate::csv::parse_delimiter(&tok)
-                .ok_or_else(|| anyhow::anyhow!("IMPORT: invalid ESCAPE char '{}'", tok))?;
+                .ok_or_else(|| anyhow::anyhow!("IMPORT: invalid ESCAPE char '{tok}'"))?;
             s = rest;
         } else if upper.starts_with("ENCODING ") {
             s = s[9..].trim();
@@ -363,7 +360,7 @@ fn parse_options(
             let (tok, rest) = parse_token(s)?;
             *batch_size = tok
                 .parse::<usize>()
-                .with_context(|| format!("IMPORT: invalid BATCH SIZE '{}'", tok))?;
+                .with_context(|| format!("IMPORT: invalid BATCH SIZE '{tok}'"))?;
             s = rest;
         } else if upper.starts_with("ON ERROR STOP") {
             *on_error_stop = true;
@@ -372,7 +369,7 @@ fn parse_options(
             *on_error_stop = false;
             s = s[17..].trim();
         } else {
-            bail!("IMPORT: unknown option near '{}'", s);
+            bail!("IMPORT: unknown option near '{s}'");
         }
     }
     Ok(())
@@ -383,7 +380,7 @@ fn strip_outer_quotes(s: &str) -> String {
     if (s.starts_with('\'') && s.ends_with('\'')) || (s.starts_with('"') && s.ends_with('"')) {
         s[1..s.len() - 1].to_string()
     } else {
-        s.to_string()
+        s.to_owned()
     }
 }
 

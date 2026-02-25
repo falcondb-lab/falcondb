@@ -110,11 +110,11 @@ impl fmt::Display for LogicalRange {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Wal { start_lsn, end_lsn } =>
-                write!(f, "WAL[{}..{})", start_lsn, end_lsn),
+                write!(f, "WAL[{start_lsn}..{end_lsn})"),
             Self::Cold { table_id, shard_id, .. } =>
-                write!(f, "COLD[table={},shard={}]", table_id, shard_id),
+                write!(f, "COLD[table={table_id},shard={shard_id}]"),
             Self::Snapshot { snapshot_id, chunk_index } =>
-                write!(f, "SNAP[id={},chunk={}]", snapshot_id, chunk_index),
+                write!(f, "SNAP[id={snapshot_id},chunk={chunk_index}]"),
         }
     }
 }
@@ -239,12 +239,12 @@ impl UnifiedSegmentHeader {
     /// Compute CRC32 of header fields.
     pub fn compute_checksum(&self) -> u32 {
         let mut hash: u32 = 5381;
-        for b in self.magic.to_le_bytes() { hash = hash.wrapping_mul(33).wrapping_add(b as u32); }
-        for b in self.version.to_le_bytes() { hash = hash.wrapping_mul(33).wrapping_add(b as u32); }
+        for b in self.magic.to_le_bytes() { hash = hash.wrapping_mul(33).wrapping_add(u32::from(b)); }
+        for b in self.version.to_le_bytes() { hash = hash.wrapping_mul(33).wrapping_add(u32::from(b)); }
         hash = hash.wrapping_mul(33).wrapping_add(self.kind as u32);
-        for b in self.segment_id.to_le_bytes() { hash = hash.wrapping_mul(33).wrapping_add(b as u32); }
-        for b in self.segment_size.to_le_bytes() { hash = hash.wrapping_mul(33).wrapping_add(b as u32); }
-        for b in (self.codec as u8 as u32).to_le_bytes() { hash = hash.wrapping_mul(33).wrapping_add(b as u32); }
+        for b in self.segment_id.to_le_bytes() { hash = hash.wrapping_mul(33).wrapping_add(u32::from(b)); }
+        for b in self.segment_size.to_le_bytes() { hash = hash.wrapping_mul(33).wrapping_add(u32::from(b)); }
+        for b in u32::from(self.codec as u8).to_le_bytes() { hash = hash.wrapping_mul(33).wrapping_add(u32::from(b)); }
         hash
     }
 
@@ -567,13 +567,13 @@ pub enum SegmentStoreError {
 impl fmt::Display for SegmentStoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotFound { segment_id } => write!(f, "segment {} not found", segment_id),
-            Self::AlreadyExists { segment_id } => write!(f, "segment {} already exists", segment_id),
+            Self::NotFound { segment_id } => write!(f, "segment {segment_id} not found"),
+            Self::AlreadyExists { segment_id } => write!(f, "segment {segment_id} already exists"),
             Self::ReadOutOfBounds { segment_id, offset, len } =>
-                write!(f, "read out of bounds: seg={} off={} len={}", segment_id, offset, len),
-            Self::AlreadySealed { segment_id } => write!(f, "segment {} already sealed", segment_id),
-            Self::ChecksumMismatch { segment_id } => write!(f, "checksum mismatch: segment {}", segment_id),
-            Self::IoError(msg) => write!(f, "IO error: {}", msg),
+                write!(f, "read out of bounds: seg={segment_id} off={offset} len={len}"),
+            Self::AlreadySealed { segment_id } => write!(f, "segment {segment_id} already sealed"),
+            Self::ChecksumMismatch { segment_id } => write!(f, "checksum mismatch: segment {segment_id}"),
+            Self::IoError(msg) => write!(f, "IO error: {msg}"),
         }
     }
 }
@@ -796,7 +796,7 @@ pub struct StreamChunk {
 impl StreamChunk {
     pub fn compute_crc(data: &[u8]) -> u32 {
         let mut hash: u32 = 5381;
-        for &b in data { hash = hash.wrapping_mul(33).wrapping_add(b as u32); }
+        for &b in data { hash = hash.wrapping_mul(33).wrapping_add(u32::from(b)); }
         hash
     }
 
@@ -1024,7 +1024,7 @@ impl RecoveryCoordinator {
     }
 
     /// Start recovery from empty (bootstrap from leader).
-    pub fn new_empty() -> Self {
+    pub const fn new_empty() -> Self {
         Self::new(Manifest::new())
     }
 

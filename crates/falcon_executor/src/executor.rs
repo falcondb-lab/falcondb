@@ -150,8 +150,7 @@ impl Executor {
     fn reject_if_read_only(&self, op: &str) -> Result<(), FalconError> {
         if self.read_only {
             Err(FalconError::ReadOnly(format!(
-                "cannot execute {} on a read-only replica",
-                op
+                "cannot execute {op} on a read-only replica"
             )))
         } else {
             Ok(())
@@ -181,7 +180,7 @@ impl Executor {
             (Some(c), Some(m)) => (c, m),
             _ => return Ok(()), // RBAC not configured — allow all
         };
-        let catalog = catalog.read().unwrap_or_else(|p| p.into_inner());
+        let catalog = catalog.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         // Superuser bypasses all privilege checks
         if let Some(role) = catalog.get_role(self.current_role) {
             if role.is_superuser {
@@ -201,16 +200,16 @@ impl Executor {
         let object_id = {
             let mut h: u64 = 5381;
             for b in object_name.bytes() {
-                h = h.wrapping_mul(33).wrapping_add(b as u64);
+                h = h.wrapping_mul(33).wrapping_add(u64::from(b));
             }
             h
         };
         let object_ref = ObjectRef {
             object_type,
             object_id,
-            object_name: object_name.to_string(),
+            object_name: object_name.to_owned(),
         };
-        let manager = manager.read().unwrap_or_else(|p| p.into_inner());
+        let manager = manager.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         match manager.check_privilege(&effective_roles, privilege, &object_ref) {
             PrivilegeCheckResult::Allowed => Ok(()),
             PrivilegeCheckResult::Denied {
@@ -219,9 +218,7 @@ impl Executor {
                 object,
             } => {
                 let role_name = catalog
-                    .get_role(self.current_role)
-                    .map(|r| r.name.clone())
-                    .unwrap_or_else(|| format!("role_id_{}", self.current_role.0));
+                    .get_role(self.current_role).map_or_else(|| format!("role_id_{}", self.current_role.0), |r| r.name.clone());
                 tracing::warn!(
                     role_id = self.current_role.0,
                     role_name = %role_name,
@@ -233,8 +230,7 @@ impl Executor {
                 );
                 Err(FalconError::Execution(
                     ExecutionError::InsufficientPrivilege(format!(
-                        "permission denied for {} on {}: role {} lacks {:?}",
-                        object_type, object, role, privilege
+                        "permission denied for {object_type} on {object}: role {role} lacks {privilege:?}"
                     )),
                 ))
             }
@@ -245,8 +241,7 @@ impl Executor {
     fn reject_if_txn_read_only(txn: &falcon_txn::TxnHandle, op: &str) -> Result<(), FalconError> {
         if txn.read_only {
             Err(FalconError::ReadOnly(format!(
-                "cannot execute {} in a read-only transaction",
-                op
+                "cannot execute {op} in a read-only transaction"
             )))
         } else {
             Ok(())
@@ -294,13 +289,13 @@ impl Executor {
                 self.reject_if_read_only("CREATE DATABASE")?;
                 match self.storage.create_database(name, "falcon") {
                     Ok(_oid) => Ok(ExecutionResult::Ddl {
-                        message: "CREATE DATABASE".to_string(),
+                        message: "CREATE DATABASE".to_owned(),
                     }),
                     Err(falcon_common::error::StorageError::DatabaseAlreadyExists(_))
                         if *if_not_exists =>
                     {
                         Ok(ExecutionResult::Ddl {
-                            message: "CREATE DATABASE".to_string(),
+                            message: "CREATE DATABASE".to_owned(),
                         })
                     }
                     Err(e) => Err(e.into()),
@@ -313,13 +308,13 @@ impl Executor {
                 self.reject_if_read_only("DROP DATABASE")?;
                 match self.storage.drop_database(name) {
                     Ok(()) => Ok(ExecutionResult::Ddl {
-                        message: "DROP DATABASE".to_string(),
+                        message: "DROP DATABASE".to_owned(),
                     }),
                     Err(falcon_common::error::StorageError::DatabaseNotFound(_))
                         if *if_exists =>
                     {
                         Ok(ExecutionResult::Ddl {
-                            message: "DROP DATABASE".to_string(),
+                            message: "DROP DATABASE".to_owned(),
                         })
                     }
                     Err(e) => Err(e.into()),
@@ -332,13 +327,13 @@ impl Executor {
                 self.reject_if_read_only("CREATE SCHEMA")?;
                 match self.storage.create_schema(name, "falcon") {
                     Ok(()) => Ok(ExecutionResult::Ddl {
-                        message: "CREATE SCHEMA".to_string(),
+                        message: "CREATE SCHEMA".to_owned(),
                     }),
                     Err(falcon_common::error::StorageError::SchemaAlreadyExists(_))
                         if *if_not_exists =>
                     {
                         Ok(ExecutionResult::Ddl {
-                            message: "CREATE SCHEMA".to_string(),
+                            message: "CREATE SCHEMA".to_owned(),
                         })
                     }
                     Err(e) => Err(e.into()),
@@ -351,13 +346,13 @@ impl Executor {
                 self.reject_if_read_only("DROP SCHEMA")?;
                 match self.storage.drop_schema(name) {
                     Ok(()) => Ok(ExecutionResult::Ddl {
-                        message: "DROP SCHEMA".to_string(),
+                        message: "DROP SCHEMA".to_owned(),
                     }),
                     Err(falcon_common::error::StorageError::SchemaNotFound(_))
                         if *if_exists =>
                     {
                         Ok(ExecutionResult::Ddl {
-                            message: "DROP SCHEMA".to_string(),
+                            message: "DROP SCHEMA".to_owned(),
                         })
                     }
                     Err(e) => Err(e.into()),
@@ -381,7 +376,7 @@ impl Executor {
                     password.clone(),
                 ) {
                     Ok(_id) => Ok(ExecutionResult::Ddl {
-                        message: "CREATE ROLE".to_string(),
+                        message: "CREATE ROLE".to_owned(),
                     }),
                     Err(e) => Err(e.into()),
                 }
@@ -393,13 +388,13 @@ impl Executor {
                 self.reject_if_read_only("DROP ROLE")?;
                 match self.storage.drop_role(name) {
                     Ok(()) => Ok(ExecutionResult::Ddl {
-                        message: "DROP ROLE".to_string(),
+                        message: "DROP ROLE".to_owned(),
                     }),
                     Err(falcon_common::error::StorageError::RoleNotFound(_))
                         if *if_exists =>
                     {
                         Ok(ExecutionResult::Ddl {
-                            message: "DROP ROLE".to_string(),
+                            message: "DROP ROLE".to_owned(),
                         })
                     }
                     Err(e) => Err(e.into()),
@@ -423,7 +418,7 @@ impl Executor {
                     *can_create_role,
                 )?;
                 Ok(ExecutionResult::Ddl {
-                    message: "ALTER ROLE".to_string(),
+                    message: "ALTER ROLE".to_owned(),
                 })
             }
             PhysicalPlan::Grant {
@@ -435,7 +430,7 @@ impl Executor {
                 self.reject_if_read_only("GRANT")?;
                 self.storage.grant_privilege(grantee, privilege, object_type, object_name, "falcon")?;
                 Ok(ExecutionResult::Ddl {
-                    message: "GRANT".to_string(),
+                    message: "GRANT".to_owned(),
                 })
             }
             PhysicalPlan::Revoke {
@@ -447,18 +442,18 @@ impl Executor {
                 self.reject_if_read_only("REVOKE")?;
                 self.storage.revoke_privilege(grantee, privilege, object_type, object_name)?;
                 Ok(ExecutionResult::Ddl {
-                    message: "REVOKE".to_string(),
+                    message: "REVOKE".to_owned(),
                 })
             }
             PhysicalPlan::ShowRoles => {
                 let catalog = self.storage.get_catalog();
                 let roles = catalog.list_role_entries();
                 let columns = vec![
-                    ("role_name".to_string(), DataType::Text),
-                    ("can_login".to_string(), DataType::Boolean),
-                    ("is_superuser".to_string(), DataType::Boolean),
-                    ("can_create_db".to_string(), DataType::Boolean),
-                    ("can_create_role".to_string(), DataType::Boolean),
+                    ("role_name".to_owned(), DataType::Text),
+                    ("can_login".to_owned(), DataType::Boolean),
+                    ("is_superuser".to_owned(), DataType::Boolean),
+                    ("can_create_db".to_owned(), DataType::Boolean),
+                    ("can_create_role".to_owned(), DataType::Boolean),
                 ];
                 let mut rows = Vec::new();
                 for r in roles {
@@ -476,8 +471,8 @@ impl Executor {
                 let catalog = self.storage.get_catalog();
                 let schemas = catalog.list_schemas();
                 let columns = vec![
-                    ("schema_name".to_string(), DataType::Text),
-                    ("owner".to_string(), DataType::Text),
+                    ("schema_name".to_owned(), DataType::Text),
+                    ("owner".to_owned(), DataType::Text),
                 ];
                 let mut rows = Vec::new();
                 for s in schemas {
@@ -493,17 +488,15 @@ impl Executor {
                 let grants = catalog.list_grants();
                 let roles = catalog.list_role_entries();
                 let columns = vec![
-                    ("grantee".to_string(), DataType::Text),
-                    ("privilege".to_string(), DataType::Text),
-                    ("object_type".to_string(), DataType::Text),
-                    ("object_name".to_string(), DataType::Text),
+                    ("grantee".to_owned(), DataType::Text),
+                    ("privilege".to_owned(), DataType::Text),
+                    ("object_type".to_owned(), DataType::Text),
+                    ("object_name".to_owned(), DataType::Text),
                 ];
                 let mut rows = Vec::new();
                 for g in grants {
                     let grantee_name = roles.iter()
-                        .find(|r| r.id == g.grantee_id)
-                        .map(|r| r.name.clone())
-                        .unwrap_or_else(|| format!("id_{}", g.grantee_id));
+                        .find(|r| r.id == g.grantee_id).map_or_else(|| format!("id_{}", g.grantee_id), |r| r.name.clone());
                     if let Some(ref filter) = role_name {
                         if grantee_name.to_lowercase() != filter.to_lowercase() {
                             continue;
@@ -550,7 +543,7 @@ impl Executor {
             } => {
                 self.reject_if_read_only("INSERT")?;
                 self.check_privilege(Privilege::Insert, ObjectType::Table, &schema.name)?;
-                let txn = txn.ok_or(FalconError::Internal(
+                let txn = txn.ok_or_else(|| FalconError::Internal(
                     "INSERT requires active transaction".into(),
                 ))?;
                 Self::reject_if_txn_read_only(txn, "INSERT")?;
@@ -579,7 +572,7 @@ impl Executor {
             } => {
                 self.reject_if_read_only("UPDATE")?;
                 self.check_privilege(Privilege::Update, ObjectType::Table, &schema.name)?;
-                let txn = txn.ok_or(FalconError::Internal(
+                let txn = txn.ok_or_else(|| FalconError::Internal(
                     "UPDATE requires active transaction".into(),
                 ))?;
                 Self::reject_if_txn_read_only(txn, "UPDATE")?;
@@ -603,7 +596,7 @@ impl Executor {
             } => {
                 self.reject_if_read_only("DELETE")?;
                 self.check_privilege(Privilege::Delete, ObjectType::Table, &schema.name)?;
-                let txn = txn.ok_or(FalconError::Internal(
+                let txn = txn.ok_or_else(|| FalconError::Internal(
                     "DELETE requires active transaction".into(),
                 ))?;
                 Self::reject_if_txn_read_only(txn, "DELETE")?;
@@ -635,7 +628,7 @@ impl Executor {
                 virtual_rows,
             } => {
                 self.check_privilege(Privilege::Select, ObjectType::Table, &schema.name)?;
-                let txn = txn.ok_or(FalconError::Internal(
+                let txn = txn.ok_or_else(|| FalconError::Internal(
                     "SELECT requires active transaction".into(),
                 ))?;
                 // Materialize CTEs
@@ -681,7 +674,7 @@ impl Executor {
                 unions,
                 virtual_rows,
             } => {
-                let txn = txn.ok_or(FalconError::Internal(
+                let txn = txn.ok_or_else(|| FalconError::Internal(
                     "SELECT requires active transaction".into(),
                 ))?;
                 let cte_data = self.materialize_ctes(ctes, txn)?;
@@ -724,7 +717,7 @@ impl Executor {
                 ctes,
                 unions,
             } => {
-                let txn = txn.ok_or(FalconError::Internal(
+                let txn = txn.ok_or_else(|| FalconError::Internal(
                     "SELECT requires active transaction".into(),
                 ))?;
                 let cte_data = self.materialize_ctes(ctes, txn)?;
@@ -763,7 +756,7 @@ impl Executor {
                 ctes,
                 unions,
             } => {
-                let txn = txn.ok_or(FalconError::Internal(
+                let txn = txn.ok_or_else(|| FalconError::Internal(
                     "SELECT requires active transaction".into(),
                 ))?;
                 let cte_data = self.materialize_ctes(ctes, txn)?;
@@ -802,7 +795,7 @@ impl Executor {
                 ctes,
                 unions,
             } => {
-                let txn = txn.ok_or(FalconError::Internal(
+                let txn = txn.ok_or_else(|| FalconError::Internal(
                     "SELECT requires active transaction".into(),
                 ))?;
                 let cte_data = self.materialize_ctes(ctes, txn)?;
@@ -882,7 +875,7 @@ impl Executor {
                         .create_named_index(index_name, table_name, col_idx, *unique)?;
                 }
                 Ok(ExecutionResult::Ddl {
-                    message: format!("CREATE INDEX {}", index_name),
+                    message: format!("CREATE INDEX {index_name}"),
                 })
             }
             PhysicalPlan::CreateView {
@@ -893,21 +886,21 @@ impl Executor {
                 self.reject_if_read_only("CREATE VIEW")?;
                 self.storage.create_view(name, query_sql, *or_replace)?;
                 Ok(ExecutionResult::Ddl {
-                    message: format!("CREATE VIEW {}", name),
+                    message: format!("CREATE VIEW {name}"),
                 })
             }
             PhysicalPlan::DropView { name, if_exists } => {
                 self.reject_if_read_only("DROP VIEW")?;
                 self.storage.drop_view(name, *if_exists)?;
                 Ok(ExecutionResult::Ddl {
-                    message: format!("DROP VIEW {}", name),
+                    message: format!("DROP VIEW {name}"),
                 })
             }
             PhysicalPlan::DropIndex { index_name } => {
                 self.reject_if_read_only("DROP INDEX")?;
                 self.storage.drop_index(index_name)?;
                 Ok(ExecutionResult::Ddl {
-                    message: format!("DROP INDEX {}", index_name),
+                    message: format!("DROP INDEX {index_name}"),
                 })
             }
             PhysicalPlan::Begin | PhysicalPlan::Commit | PhysicalPlan::Rollback => {
@@ -1003,8 +996,7 @@ impl Executor {
                 let active = self
                     .active_connections
                     .as_ref()
-                    .map(|a| a.load(std::sync::atomic::Ordering::Relaxed))
-                    .unwrap_or(0);
+                    .map_or(0, |a| a.load(std::sync::atomic::Ordering::Relaxed));
                 let columns = vec![
                     ("metric".into(), DataType::Text),
                     ("value".into(), DataType::Text),
@@ -1087,16 +1079,16 @@ impl Executor {
                             Datum::Text(
                                 cs.min_value
                                     .as_ref()
-                                    .map(|d| format!("{}", d))
+                                    .map(|d| format!("{d}"))
                                     .unwrap_or_default(),
                             ),
                             Datum::Text(
                                 cs.max_value
                                     .as_ref()
-                                    .map(|d| format!("{}", d))
+                                    .map(|d| format!("{d}"))
                                     .unwrap_or_default(),
                             ),
-                            Datum::Int64(cs.avg_width as i64),
+                            Datum::Int64(i64::from(cs.avg_width)),
                         ]));
                     }
                 }
@@ -1108,17 +1100,17 @@ impl Executor {
                     .create_sequence(name, *start)
                     .map_err(FalconError::Storage)?;
                 Ok(ExecutionResult::Ddl {
-                    message: format!("CREATE SEQUENCE {}", name),
+                    message: format!("CREATE SEQUENCE {name}"),
                 })
             }
             PhysicalPlan::DropSequence { name, if_exists } => {
                 self.reject_if_read_only("DROP SEQUENCE")?;
                 match self.storage.drop_sequence(name) {
                     Ok(_) => Ok(ExecutionResult::Ddl {
-                        message: format!("DROP SEQUENCE {}", name),
+                        message: format!("DROP SEQUENCE {name}"),
                     }),
                     Err(_) if *if_exists => Ok(ExecutionResult::Ddl {
-                        message: format!("DROP SEQUENCE IF EXISTS {}", name),
+                        message: format!("DROP SEQUENCE IF EXISTS {name}"),
                     }),
                     Err(e) => Err(FalconError::Storage(e)),
                 }
@@ -1135,17 +1127,8 @@ impl Executor {
                     .collect();
                 Ok(ExecutionResult::Query { columns, rows })
             }
-            PhysicalPlan::ShowTenants => Ok(ExecutionResult::Query {
-                columns: vec![
-                    ("metric".into(), DataType::Text),
-                    ("value".into(), DataType::Text),
-                ],
-                rows: vec![OwnedRow::new(vec![
-                    Datum::Text("tenant_count".into()),
-                    Datum::Text("0".into()),
-                ])],
-            }),
-            PhysicalPlan::ShowTenantUsage => Ok(ExecutionResult::Query {
+            PhysicalPlan::ShowTenants
+            | PhysicalPlan::ShowTenantUsage => Ok(ExecutionResult::Query {
                 columns: vec![
                     ("metric".into(), DataType::Text),
                     ("value".into(), DataType::Text),
@@ -1160,10 +1143,10 @@ impl Executor {
                 max_qps: _,
                 max_storage_bytes: _,
             } => Ok(ExecutionResult::Ddl {
-                message: format!("CREATE TENANT {}", name),
+                message: format!("CREATE TENANT {name}"),
             }),
             PhysicalPlan::DropTenant { name } => Ok(ExecutionResult::Ddl {
-                message: format!("DROP TENANT {}", name),
+                message: format!("DROP TENANT {name}"),
             }),
             PhysicalPlan::CopyFrom { .. } => {
                 // CopyFrom is handled specially by the protocol layer.
@@ -1183,7 +1166,7 @@ impl Executor {
                 quote,
                 escape,
             } => {
-                let txn = txn.ok_or(FalconError::Internal(
+                let txn = txn.ok_or_else(|| FalconError::Internal(
                     "COPY TO requires active transaction".into(),
                 ))?;
                 self.exec_copy_to(
@@ -1208,7 +1191,7 @@ impl Executor {
                 quote,
                 escape,
             } => {
-                let txn = txn.ok_or(FalconError::Internal(
+                let txn = txn.ok_or_else(|| FalconError::Internal(
                     "COPY TO requires active transaction".into(),
                 ))?;
                 self.exec_copy_query_to(
@@ -1258,12 +1241,12 @@ impl Executor {
     ) -> Result<ExecutionResult, FalconError> {
         match self.storage.drop_table(table_name) {
             Ok(_) => Ok(ExecutionResult::Ddl {
-                message: format!("DROP TABLE {}", table_name),
+                message: format!("DROP TABLE {table_name}"),
             }),
             Err(e) if if_exists => {
                 // IF EXISTS — silently succeed
                 Ok(ExecutionResult::Ddl {
-                    message: format!("DROP TABLE IF EXISTS {} (not found)", table_name),
+                    message: format!("DROP TABLE IF EXISTS {table_name} (not found)"),
                 })
             }
             Err(e) => Err(e.into()),
@@ -1287,17 +1270,17 @@ impl Executor {
                 }
                 AlterTableOp::DropColumn(col_name) => {
                     let id = self.storage.alter_table_drop_column(table_name, col_name)?;
-                    (id, format!("DROP COLUMN {}", col_name))
+                    (id, format!("DROP COLUMN {col_name}"))
                 }
                 AlterTableOp::RenameColumn { old_name, new_name } => {
                     let id = self
                         .storage
                         .alter_table_rename_column(table_name, old_name, new_name)?;
-                    (id, format!("RENAME COLUMN {} TO {}", old_name, new_name))
+                    (id, format!("RENAME COLUMN {old_name} TO {new_name}"))
                 }
                 AlterTableOp::RenameTable { new_name } => {
                     let id = self.storage.alter_table_rename(table_name, new_name)?;
-                    (id, format!("RENAME TO {}", new_name))
+                    (id, format!("RENAME TO {new_name}"))
                 }
                 AlterTableOp::AlterColumnType {
                     column_name,
@@ -1310,20 +1293,20 @@ impl Executor {
                     )?;
                     (
                         id,
-                        format!("ALTER COLUMN {} TYPE {}", column_name, new_type),
+                        format!("ALTER COLUMN {column_name} TYPE {new_type}"),
                     )
                 }
                 AlterTableOp::AlterColumnSetNotNull { column_name } => {
                     let id = self
                         .storage
                         .alter_table_set_not_null(table_name, column_name)?;
-                    (id, format!("ALTER COLUMN {} SET NOT NULL", column_name))
+                    (id, format!("ALTER COLUMN {column_name} SET NOT NULL"))
                 }
                 AlterTableOp::AlterColumnDropNotNull { column_name } => {
                     let id = self
                         .storage
                         .alter_table_drop_not_null(table_name, column_name)?;
-                    (id, format!("ALTER COLUMN {} DROP NOT NULL", column_name))
+                    (id, format!("ALTER COLUMN {column_name} DROP NOT NULL"))
                 }
                 AlterTableOp::AlterColumnSetDefault {
                     column_name,
@@ -1339,13 +1322,13 @@ impl Executor {
                         column_name,
                         default_val,
                     )?;
-                    (id, format!("ALTER COLUMN {} SET DEFAULT", column_name))
+                    (id, format!("ALTER COLUMN {column_name} SET DEFAULT"))
                 }
                 AlterTableOp::AlterColumnDropDefault { column_name } => {
                     let id = self
                         .storage
                         .alter_table_drop_default(table_name, column_name)?;
-                    (id, format!("ALTER COLUMN {} DROP DEFAULT", column_name))
+                    (id, format!("ALTER COLUMN {column_name} DROP DEFAULT"))
                 }
             };
             ddl_ids.push(ddl_id);
@@ -1353,7 +1336,7 @@ impl Executor {
         }
         let ids_str = ddl_ids
             .iter()
-            .map(|id| id.to_string())
+            .map(std::string::ToString::to_string)
             .collect::<Vec<_>>()
             .join(",");
         Ok(ExecutionResult::Ddl {
@@ -1413,8 +1396,7 @@ impl Executor {
                     .unwrap_or_else(|| {
                         self.storage
                             .get_table(*table_id)
-                            .map(|t| t.row_count_approx() as f64)
-                            .unwrap_or(1000.0)
+                            .map_or(1000.0, |t| t.row_count_approx() as f64)
                     });
                 let mut est_rows = base_rows;
                 // Apply filter selectivity
@@ -1450,22 +1432,22 @@ impl Executor {
                     .collect();
                 lines.push(format!("{}  Output: {}", pad, cols.join(", ")));
                 if let Some(f) = filter {
-                    lines.push(format!("{}  Filter: {:?}", pad, f));
+                    lines.push(format!("{pad}  Filter: {f:?}"));
                 }
                 if !group_by.is_empty() {
-                    lines.push(format!("{}  Group By: {:?}", pad, group_by));
+                    lines.push(format!("{pad}  Group By: {group_by:?}"));
                 }
                 if !order_by.is_empty() {
                     lines.push(format!("{}  Sort Key: {} column(s)", pad, order_by.len()));
                 }
                 if let Some(l) = limit {
-                    lines.push(format!("{}  Limit: {}", pad, l));
+                    lines.push(format!("{pad}  Limit: {l}"));
                 }
                 if let Some(o) = offset {
-                    lines.push(format!("{}  Offset: {}", pad, o));
+                    lines.push(format!("{pad}  Offset: {o}"));
                 }
                 if !matches!(distinct, DistinctMode::None) {
-                    lines.push(format!("{}  Distinct: {:?}", pad, distinct));
+                    lines.push(format!("{pad}  Distinct: {distinct:?}"));
                 }
                 if !unions.is_empty() {
                     lines.push(format!(
@@ -1497,8 +1479,7 @@ impl Executor {
                     .unwrap_or_else(|| {
                         self.storage
                             .get_table(*table_id)
-                            .map(|t| t.row_count_approx() as f64)
-                            .unwrap_or(1000.0)
+                            .map_or(1000.0, |t| t.row_count_approx() as f64)
                     });
                 let est_rows = (base_rows * 0.01).max(1.0);
                 let startup_cost = 0.0_f64;
@@ -1506,8 +1487,7 @@ impl Executor {
                 let col_name = schema
                     .columns
                     .get(*index_col)
-                    .map(|c| c.name.as_str())
-                    .unwrap_or("?");
+                    .map_or("?", |c| c.name.as_str());
                 let mut lines = vec![format!(
                     "{}Index Scan using {} on {}  (cost={:.2}..{:.2} rows={} width={})",
                     pad,
@@ -1519,8 +1499,7 @@ impl Executor {
                     schema.columns.len() * 8
                 )];
                 lines.push(format!(
-                    "{}  Index Cond: ({} = {:?})",
-                    pad, col_name, index_value
+                    "{pad}  Index Cond: ({col_name} = {index_value:?})"
                 ));
                 let cols: Vec<String> = projections
                     .iter()
@@ -1533,19 +1512,19 @@ impl Executor {
                     .collect();
                 lines.push(format!("{}  Output: {}", pad, cols.join(", ")));
                 if let Some(f) = filter {
-                    lines.push(format!("{}  Filter: {:?}", pad, f));
+                    lines.push(format!("{pad}  Filter: {f:?}"));
                 }
                 if !order_by.is_empty() {
                     lines.push(format!("{}  Sort Key: {} column(s)", pad, order_by.len()));
                 }
                 if let Some(l) = limit {
-                    lines.push(format!("{}  Limit: {}", pad, l));
+                    lines.push(format!("{pad}  Limit: {l}"));
                 }
                 if let Some(o) = offset {
-                    lines.push(format!("{}  Offset: {}", pad, o));
+                    lines.push(format!("{pad}  Offset: {o}"));
                 }
                 if !matches!(distinct, DistinctMode::None) {
-                    lines.push(format!("{}  Distinct: {:?}", pad, distinct));
+                    lines.push(format!("{pad}  Distinct: {distinct:?}"));
                 }
                 if !unions.is_empty() {
                     lines.push(format!(
@@ -1612,8 +1591,7 @@ impl Executor {
                     .unwrap_or_else(|| {
                         self.storage
                             .get_table(*left_table_id)
-                            .map(|t| t.row_count_approx() as f64)
-                            .unwrap_or(1000.0)
+                            .map_or(1000.0, |t| t.row_count_approx() as f64)
                     });
                 // Estimate join output rows
                 let mut est_rows = left_rows;
@@ -1675,19 +1653,19 @@ impl Executor {
                     .collect();
                 lines.push(format!("{}  Output: {}", pad, cols.join(", ")));
                 if let Some(f) = filter {
-                    lines.push(format!("{}  Filter: {:?}", pad, f));
+                    lines.push(format!("{pad}  Filter: {f:?}"));
                 }
                 if !order_by.is_empty() {
                     lines.push(format!("{}  Sort Key: {} column(s)", pad, order_by.len()));
                 }
                 if let Some(l) = limit {
-                    lines.push(format!("{}  Limit: {}", pad, l));
+                    lines.push(format!("{pad}  Limit: {l}"));
                 }
                 if let Some(o) = offset {
-                    lines.push(format!("{}  Offset: {}", pad, o));
+                    lines.push(format!("{pad}  Offset: {o}"));
                 }
                 if !matches!(distinct, DistinctMode::None) {
-                    lines.push(format!("{}  Distinct: {:?}", pad, distinct));
+                    lines.push(format!("{pad}  Distinct: {distinct:?}"));
                 }
                 if !unions.is_empty() {
                     lines.push(format!(
@@ -1737,7 +1715,7 @@ impl Executor {
                     cols.join(", ")
                 )];
                 if let Some(f) = filter {
-                    lines.push(format!("{}  Filter: {:?}", pad, f));
+                    lines.push(format!("{pad}  Filter: {f:?}"));
                 }
                 if !returning.is_empty() {
                     lines.push(format!("{}  Returning: {} column(s)", pad, returning.len()));
@@ -1752,7 +1730,7 @@ impl Executor {
             } => {
                 let mut lines = vec![format!("{}Delete on {}", pad, schema.name)];
                 if let Some(f) = filter {
-                    lines.push(format!("{}  Filter: {:?}", pad, f));
+                    lines.push(format!("{pad}  Filter: {f:?}"));
                 }
                 if !returning.is_empty() {
                     lines.push(format!("{}  Returning: {} column(s)", pad, returning.len()));

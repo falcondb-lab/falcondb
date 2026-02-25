@@ -106,7 +106,7 @@ fn read_string_u16(buf: &mut &[u8], field: &str) -> Result<String> {
     let len = read_u16(buf)? as usize;
     let bytes = read_bytes(buf, len)?;
     String::from_utf8(bytes).map_err(|e| NativeProtocolError::InvalidUtf8 {
-        field: field.to_string(),
+        field: field.to_owned(),
         source: e,
     })
 }
@@ -115,7 +115,7 @@ fn read_string_u32(buf: &mut &[u8], field: &str) -> Result<String> {
     let len = read_u32(buf)? as usize;
     let bytes = read_bytes(buf, len)?;
     String::from_utf8(bytes).map_err(|e| NativeProtocolError::InvalidUtf8 {
-        field: field.to_string(),
+        field: field.to_owned(),
         source: e,
     })
 }
@@ -158,15 +158,15 @@ fn encode_value(out: &mut BytesMut, v: &EncodedValue) {
         EncodedValue::Int32(i) => out.put_i32_le(*i),
         EncodedValue::Int64(i) => out.put_i64_le(*i),
         EncodedValue::Float64(f) => out.put_f64_le(*f),
-        EncodedValue::Text(s) => write_string_u32(out, s),
-        EncodedValue::Timestamp(t) => out.put_i64_le(*t),
+        EncodedValue::Text(s)
+        | EncodedValue::Jsonb(s) => write_string_u32(out, s),
+        EncodedValue::Timestamp(t)
+        | EncodedValue::Time(t) => out.put_i64_le(*t),
         EncodedValue::Date(d) => out.put_i32_le(*d),
-        EncodedValue::Jsonb(s) => write_string_u32(out, s),
         EncodedValue::Decimal(mantissa, scale) => {
             out.put_u8(*scale);
             out.put_slice(&mantissa.to_le_bytes());
         }
-        EncodedValue::Time(t) => out.put_i64_le(*t),
         EncodedValue::Interval(months, days, us) => {
             out.put_i32_le(*months);
             out.put_i32_le(*days);
@@ -229,8 +229,7 @@ fn decode_value(buf: &mut &[u8], type_id: u8) -> Result<EncodedValue> {
             Ok(EncodedValue::Array(elem_type, elems))
         }
         _ => Err(NativeProtocolError::Corruption(format!(
-            "unknown type_id: 0x{:02x}",
-            type_id
+            "unknown type_id: 0x{type_id:02x}"
         ))),
     }
 }
@@ -341,7 +340,6 @@ fn encode_payload(msg: &Message) -> BytesMut {
             out.put_u8(a.auth_method);
             out.put_slice(&a.credential);
         }
-        Message::AuthOk => {}
         Message::AuthFail(msg_str) => {
             write_string_u16(&mut out, msg_str);
         }
@@ -402,7 +400,8 @@ fn encode_payload(msg: &Message) -> BytesMut {
                 None => out.put_u8(0),
             }
         }
-        Message::Ping
+        Message::AuthOk
+        | Message::Ping
         | Message::Pong
         | Message::Disconnect
         | Message::DisconnectAck
@@ -673,7 +672,7 @@ pub fn datum_to_encoded(d: &Datum) -> EncodedValue {
         Datum::Bytea(b) => EncodedValue::Bytea(b.clone()),
         Datum::Array(elems) => {
             let encoded: Vec<EncodedValue> = elems.iter().map(datum_to_encoded).collect();
-            let elem_type = encoded.first().map(value_type_id).unwrap_or(TYPE_NULL);
+            let elem_type = encoded.first().map_or(TYPE_NULL, value_type_id);
             EncodedValue::Array(elem_type, encoded)
         }
     }

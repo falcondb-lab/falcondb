@@ -212,7 +212,7 @@ impl GroupCommitSyncer {
                     error = %e,
                     "failed to spawn background thread — node DEGRADED"
                 );
-                StorageError::Wal(format!("failed to spawn group-commit syncer: {}", e))
+                StorageError::Wal(format!("failed to spawn group-commit syncer: {e}"))
             })
     }
 
@@ -227,7 +227,7 @@ impl GroupCommitSyncer {
         // Notify syncer that there's work and get our sequence number
         let my_lsn = {
             let (lock, cvar) = &*self.state;
-            let mut state = lock.lock().unwrap_or_else(|p| p.into_inner());
+            let mut state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             state.pending_count += 1;
             let seq = self.next_lsn.fetch_add(1, Ordering::Relaxed);
             cvar.notify_one();
@@ -237,7 +237,7 @@ impl GroupCommitSyncer {
                 let timeout = Duration::from_micros(self.config.flush_interval_us * 10);
                 let result = cvar
                     .wait_timeout(state, timeout)
-                    .unwrap_or_else(|p| p.into_inner());
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 state = result.0;
             }
             seq
@@ -268,7 +268,7 @@ impl GroupCommitSyncer {
         let lsn = self.wal.append(record)?;
         {
             let (lock, cvar) = &*self.state;
-            let mut state = lock.lock().unwrap_or_else(|p| p.into_inner());
+            let mut state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             state.pending_count += 1;
             self.next_lsn.fetch_add(1, Ordering::Relaxed);
             cvar.notify_one();
@@ -302,13 +302,13 @@ impl GroupCommitSyncer {
 
             let should_flush = {
                 let (lock, cvar) = &*self.state;
-                let state = lock.lock().unwrap_or_else(|p| p.into_inner());
+                let state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
                 if state.pending_count == 0 {
                     // Wait for work
                     let result = cvar
                         .wait_timeout(state, flush_interval)
-                        .unwrap_or_else(|p| p.into_inner());
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     let state = result.0;
                     state.pending_count > 0
                 } else if state.pending_count >= self.config.max_batch_size {
@@ -338,7 +338,7 @@ impl GroupCommitSyncer {
         // Snapshot pending count under lock, then flush outside lock
         let (batch_size, lsn_snapshot) = {
             let (lock, _) = &*self.state;
-            let state = lock.lock().unwrap_or_else(|p| p.into_inner());
+            let state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             (state.pending_count, self.next_lsn.load(Ordering::Relaxed))
         };
 
@@ -355,7 +355,7 @@ impl GroupCommitSyncer {
 
         {
             let (lock, cvar) = &*self.state;
-            let mut state = lock.lock().unwrap_or_else(|p| p.into_inner());
+            let mut state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             // Advance fsynced_lsn past all LSNs that were pending
             state.fsynced_lsn = lsn_snapshot;
             state.pending_count = state.pending_count.saturating_sub(batch_size);

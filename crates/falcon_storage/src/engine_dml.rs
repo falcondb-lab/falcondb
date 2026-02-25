@@ -22,7 +22,7 @@ use super::engine::StorageEngine;
 fn ustm_page_id(table_id: TableId, pk: &PrimaryKey) -> PageId {
     // Combine table_id (upper 32 bits) with a hash of the PK (lower 32 bits)
     let pk_hash = crate::ustm::page::fast_hash_pk(pk);
-    PageId(table_id.0 << 32 | pk_hash as u64)
+    PageId(table_id.0 << 32 | u64::from(pk_hash))
 }
 
 /// Derive a USTM PageId for a table-level page (DDL / scan).

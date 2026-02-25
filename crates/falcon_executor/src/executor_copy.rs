@@ -28,8 +28,7 @@ impl Executor {
     ) -> Result<ExecutionResult, FalconError> {
         let text = String::from_utf8(data.to_vec()).map_err(|e| {
             FalconError::Execution(ExecutionError::TypeError(format!(
-                "Invalid UTF-8 in COPY data: {}",
-                e
+                "Invalid UTF-8 in COPY data: {e}"
             )))
         })?;
 
@@ -145,7 +144,7 @@ impl Executor {
             } else {
                 header_fields.join(&delimiter.to_string())
             };
-            output_lines.push(format!("{}\n", line).into_bytes());
+            output_lines.push(format!("{line}\n").into_bytes());
         }
 
         for row in &rows {
@@ -154,7 +153,7 @@ impl Executor {
                 .iter()
                 .map(|datum| {
                     if datum.is_null() {
-                        null_string.to_string()
+                        null_string.to_owned()
                     } else {
                         datum_to_text(datum)
                     }
@@ -166,7 +165,7 @@ impl Executor {
             } else {
                 fields.join(&delimiter.to_string())
             };
-            output_lines.push(format!("{}\n", line).into_bytes());
+            output_lines.push(format!("{line}\n").into_bytes());
         }
 
         let result_columns = vec![("copy_data".into(), DataType::Text)];
@@ -218,7 +217,7 @@ impl Executor {
             } else {
                 header_fields.join(&delimiter.to_string())
             };
-            output_lines.push(format!("{}\n", line).into_bytes());
+            output_lines.push(format!("{line}\n").into_bytes());
         }
 
         for row in &rows {
@@ -227,7 +226,7 @@ impl Executor {
                 .map(|&i| {
                     let datum = &row.1.values[i];
                     if datum.is_null() {
-                        null_string.to_string()
+                        null_string.to_owned()
                     } else {
                         datum_to_text(datum)
                     }
@@ -239,7 +238,7 @@ impl Executor {
             } else {
                 fields.join(&delimiter.to_string())
             };
-            output_lines.push(format!("{}\n", line).into_bytes());
+            output_lines.push(format!("{line}\n").into_bytes());
         }
 
         // Return the formatted lines as a special Query result.
@@ -264,7 +263,7 @@ impl Executor {
 
 /// Parse a text-format line (tab-delimited by default).
 fn parse_text_line(line: &str, delimiter: char) -> Vec<String> {
-    line.split(delimiter).map(|s| s.to_string()).collect()
+    line.split(delimiter).map(std::string::ToString::to_string).collect()
 }
 
 /// Parse a CSV-format line with quoting support.
@@ -304,8 +303,8 @@ fn format_csv_line(fields: &[String], delimiter: char, quote: char, escape: char
         .iter()
         .map(|f| {
             if f.contains(delimiter) || f.contains(quote) || f.contains('\n') || f.contains('\r') {
-                let escaped = f.replace(quote, &format!("{}{}", escape, quote));
-                format!("{}{}{}", quote, escaped, quote)
+                let escaped = f.replace(quote, &format!("{escape}{quote}"));
+                format!("{quote}{escaped}{quote}")
             } else {
                 f.clone()
             }
@@ -320,34 +319,34 @@ fn parse_datum(field: &str, data_type: &DataType) -> Result<Datum, String> {
         DataType::Int32 => field
             .parse::<i32>()
             .map(Datum::Int32)
-            .map_err(|e| format!("Cannot parse '{}' as INT: {}", field, e)),
+            .map_err(|e| format!("Cannot parse '{field}' as INT: {e}")),
         DataType::Int64 => field
             .parse::<i64>()
             .map(Datum::Int64)
-            .map_err(|e| format!("Cannot parse '{}' as BIGINT: {}", field, e)),
+            .map_err(|e| format!("Cannot parse '{field}' as BIGINT: {e}")),
         DataType::Float64 => field
             .parse::<f64>()
             .map(Datum::Float64)
-            .map_err(|e| format!("Cannot parse '{}' as FLOAT: {}", field, e)),
+            .map_err(|e| format!("Cannot parse '{field}' as FLOAT: {e}")),
         DataType::Boolean => match field.to_lowercase().as_str() {
             "t" | "true" | "1" | "yes" | "on" => Ok(Datum::Boolean(true)),
             "f" | "false" | "0" | "no" | "off" => Ok(Datum::Boolean(false)),
-            _ => Err(format!("Cannot parse '{}' as BOOLEAN", field)),
+            _ => Err(format!("Cannot parse '{field}' as BOOLEAN")),
         },
-        DataType::Text => Ok(Datum::Text(field.to_string())),
+        DataType::Text => Ok(Datum::Text(field.to_owned())),
         DataType::Timestamp => {
             use chrono::NaiveDateTime;
             let dt = NaiveDateTime::parse_from_str(field, "%Y-%m-%d %H:%M:%S")
                 .or_else(|_| NaiveDateTime::parse_from_str(field, "%Y-%m-%d %H:%M:%S%.f"))
                 .or_else(|_| NaiveDateTime::parse_from_str(field, "%Y-%m-%dT%H:%M:%S"))
                 .or_else(|_| NaiveDateTime::parse_from_str(field, "%Y-%m-%dT%H:%M:%S%.f"))
-                .map_err(|e| format!("Cannot parse '{}' as TIMESTAMP: {}", field, e))?;
+                .map_err(|e| format!("Cannot parse '{field}' as TIMESTAMP: {e}"))?;
             Ok(Datum::Timestamp(dt.and_utc().timestamp_micros()))
         }
         DataType::Date => {
             use chrono::NaiveDate;
             let date = NaiveDate::parse_from_str(field, "%Y-%m-%d")
-                .map_err(|e| format!("Cannot parse '{}' as DATE: {}", field, e))?;
+                .map_err(|e| format!("Cannot parse '{field}' as DATE: {e}"))?;
             let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)
                 .unwrap_or_else(|| NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or(NaiveDate::MIN));
             let days = (date - epoch).num_days() as i32;
@@ -355,7 +354,7 @@ fn parse_datum(field: &str, data_type: &DataType) -> Result<Datum, String> {
         }
         DataType::Jsonb => {
             let v: serde_json::Value = serde_json::from_str(field)
-                .map_err(|e| format!("Cannot parse '{}' as JSONB: {}", field, e))?;
+                .map_err(|e| format!("Cannot parse '{field}' as JSONB: {e}"))?;
             Ok(Datum::Jsonb(v))
         }
         DataType::Array(_) => {
@@ -368,31 +367,31 @@ fn parse_datum(field: &str, data_type: &DataType) -> Result<Datum, String> {
                 }
                 let elements: Vec<Datum> = inner
                     .split(',')
-                    .map(|s| Datum::Text(s.trim().to_string()))
+                    .map(|s| Datum::Text(s.trim().to_owned()))
                     .collect();
                 Ok(Datum::Array(elements))
             } else {
-                Err(format!("Cannot parse '{}' as ARRAY", field))
+                Err(format!("Cannot parse '{field}' as ARRAY"))
             }
         }
         DataType::Decimal(_, _) => Datum::parse_decimal(field)
-            .ok_or_else(|| format!("Cannot parse '{}' as DECIMAL", field)),
+            .ok_or_else(|| format!("Cannot parse '{field}' as DECIMAL")),
         DataType::Time => {
             // Parse HH:MM:SS or HH:MM:SS.ffffff
             let parts: Vec<&str> = field.split(':').collect();
             if parts.len() < 3 {
-                return Err(format!("Cannot parse '{}' as TIME", field));
+                return Err(format!("Cannot parse '{field}' as TIME"));
             }
             let h: i64 = parts[0]
                 .parse()
-                .map_err(|_| format!("Cannot parse '{}' as TIME", field))?;
+                .map_err(|_| format!("Cannot parse '{field}' as TIME"))?;
             let m: i64 = parts[1]
                 .parse()
-                .map_err(|_| format!("Cannot parse '{}' as TIME", field))?;
+                .map_err(|_| format!("Cannot parse '{field}' as TIME"))?;
             let sec_parts: Vec<&str> = parts[2].split('.').collect();
             let s: i64 = sec_parts[0]
                 .parse()
-                .map_err(|_| format!("Cannot parse '{}' as TIME", field))?;
+                .map_err(|_| format!("Cannot parse '{field}' as TIME"))?;
             let frac: i64 = if sec_parts.len() > 1 {
                 let f = sec_parts[1];
                 let padded = format!("{:0<6}", &f[..f.len().min(6)]);
@@ -406,15 +405,15 @@ fn parse_datum(field: &str, data_type: &DataType) -> Result<Datum, String> {
         }
         DataType::Interval => {
             // Simplified: just store as text-parsed microseconds
-            Ok(Datum::Text(field.to_string()))
+            Ok(Datum::Text(field.to_owned()))
         }
         DataType::Uuid => {
-            let hex: String = field.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+            let hex: String = field.chars().filter(char::is_ascii_hexdigit).collect();
             if hex.len() != 32 {
-                return Err(format!("Cannot parse '{}' as UUID", field));
+                return Err(format!("Cannot parse '{field}' as UUID"));
             }
             let v = u128::from_str_radix(&hex, 16)
-                .map_err(|e| format!("Cannot parse '{}' as UUID: {}", field, e))?;
+                .map_err(|e| format!("Cannot parse '{field}' as UUID: {e}"))?;
             Ok(Datum::Uuid(v))
         }
         DataType::Bytea => {
@@ -424,7 +423,7 @@ fn parse_datum(field: &str, data_type: &DataType) -> Result<Datum, String> {
                 .step_by(2)
                 .map(|i| u8::from_str_radix(&hex_str[i..i + 2.min(hex_str.len())], 16))
                 .collect::<Result<Vec<u8>, _>>()
-                .map_err(|e| format!("Cannot parse '{}' as BYTEA: {}", field, e))?;
+                .map_err(|e| format!("Cannot parse '{field}' as BYTEA: {e}"))?;
             Ok(Datum::Bytea(bytes))
         }
     }
@@ -437,25 +436,23 @@ fn datum_to_text(datum: &Datum) -> String {
         Datum::Int32(v) => v.to_string(),
         Datum::Int64(v) => v.to_string(),
         Datum::Float64(v) => v.to_string(),
-        Datum::Boolean(v) => if *v { "t" } else { "f" }.to_string(),
+        Datum::Boolean(v) => if *v { "t" } else { "f" }.to_owned(),
         Datum::Text(s) => s.clone(),
         Datum::Timestamp(us) => {
             let secs = us / 1_000_000;
             let nsecs = ((us % 1_000_000) * 1000) as u32;
-            if let Some(dt) = chrono::DateTime::from_timestamp(secs, nsecs) {
-                dt.format("%Y-%m-%d %H:%M:%S").to_string()
-            } else {
-                us.to_string()
-            }
+            chrono::DateTime::from_timestamp(secs, nsecs).map_or_else(
+                || us.to_string(),
+                |dt| dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+            )
         }
         Datum::Date(days) => {
             let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
                 .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or(chrono::NaiveDate::MIN));
-            if let Some(date) = epoch.checked_add_signed(chrono::Duration::days(*days as i64)) {
-                date.format("%Y-%m-%d").to_string()
-            } else {
-                days.to_string()
-            }
+            epoch.checked_add_signed(chrono::Duration::days(i64::from(*days))).map_or_else(
+                || days.to_string(),
+                |date| date.format("%Y-%m-%d").to_string(),
+            )
         }
         Datum::Jsonb(v) => v.to_string(),
         Datum::Array(elements) => {
@@ -463,10 +460,10 @@ fn datum_to_text(datum: &Datum) -> String {
             format!("{{{}}}", inner.join(","))
         }
         Datum::Decimal(m, s) => falcon_common::datum::decimal_to_string(*m, *s),
-        Datum::Time(_) | Datum::Interval(_, _, _) | Datum::Uuid(_) => format!("{}", datum),
+        Datum::Time(_) | Datum::Interval(_, _, _) | Datum::Uuid(_) => format!("{datum}"),
         Datum::Bytea(bytes) => {
-            let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-            format!("\\x{}", hex)
+            let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            format!("\\x{hex}")
         }
     }
 }

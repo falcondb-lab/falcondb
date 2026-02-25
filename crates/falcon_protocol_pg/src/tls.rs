@@ -111,7 +111,7 @@ fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, TlsSetupError
     })?;
     let mut reader = io::BufReader::new(file);
     let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut reader)
-        .filter_map(|r| r.ok())
+        .filter_map(std::result::Result::ok)
         .collect();
     if certs.is_empty() {
         return Err(TlsSetupError::CertLoad {
@@ -181,12 +181,12 @@ impl std::fmt::Display for TlsSetupError {
         match self {
             Self::NotEnabled => write!(f, "TLS is not enabled"),
             Self::CertLoad { path, error } => {
-                write!(f, "failed to load TLS certificate from {:?}: {}", path, error)
+                write!(f, "failed to load TLS certificate from {path:?}: {error}")
             }
             Self::KeyLoad { path, error } => {
-                write!(f, "failed to load TLS private key from {:?}: {}", path, error)
+                write!(f, "failed to load TLS private key from {path:?}: {error}")
             }
-            Self::RustlsConfig(e) => write!(f, "TLS configuration error: {}", e),
+            Self::RustlsConfig(e) => write!(f, "TLS configuration error: {e}"),
         }
     }
 }

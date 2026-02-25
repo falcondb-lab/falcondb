@@ -85,9 +85,9 @@ impl fmt::Display for ColdBlockEncoding {
 
 fn compute_block_crc(encoding: u8, payload: &[u8]) -> u32 {
     let mut hash: u32 = 5381;
-    hash = hash.wrapping_mul(33).wrapping_add(encoding as u32);
+    hash = hash.wrapping_mul(33).wrapping_add(u32::from(encoding));
     for &b in payload {
-        hash = hash.wrapping_mul(33).wrapping_add(b as u32);
+        hash = hash.wrapping_mul(33).wrapping_add(u32::from(b));
     }
     hash
 }
@@ -244,7 +244,7 @@ impl ColdCompactor {
         self.metrics.bytes_original.fetch_add(original_bytes, Ordering::Relaxed);
         self.metrics.bytes_compressed.fetch_add(compressed_bytes, Ordering::Relaxed);
         self.metrics.rows_compacted.fetch_add(rows.len() as u64, Ordering::Relaxed);
-        self.metrics.blocks_written.fetch_add(block_count as u64, Ordering::Relaxed);
+        self.metrics.blocks_written.fetch_add(u64::from(block_count), Ordering::Relaxed);
 
         Ok(result)
     }
@@ -302,7 +302,7 @@ pub struct ManifestSsot {
 }
 
 impl ManifestSsot {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             manifest: Manifest::new(),
             snapshot_pinned: BTreeSet::new(),
@@ -541,7 +541,7 @@ impl BootstrapCoordinator {
             }
         } else {
             self.phase = BootstrapPhase::Failed;
-            self.error = Some("No manifest available".to_string());
+            self.error = Some("No manifest available".to_owned());
         }
     }
 
@@ -567,12 +567,9 @@ impl BootstrapCoordinator {
         if let Some(ref manifest) = self.manifest {
             let mut all_ok = true;
             for seg_id in manifest.all_segment_ids() {
-                match store.verify_segment(seg_id) {
-                    Ok(true) => { self.segments_verified += 1; }
-                    _ => {
-                        all_ok = false;
-                        self.failed_segments.push(seg_id);
-                    }
+                if let Ok(true) = store.verify_segment(seg_id) { self.segments_verified += 1; } else {
+                    all_ok = false;
+                    self.failed_segments.push(seg_id);
                 }
             }
             if all_ok {
@@ -596,7 +593,7 @@ impl BootstrapCoordinator {
     /// Mark as failed with reason.
     pub fn mark_failed(&mut self, reason: &str) {
         self.phase = BootstrapPhase::Failed;
-        self.error = Some(reason.to_string());
+        self.error = Some(reason.to_owned());
         self.metrics.bootstrap_failed.fetch_add(1, Ordering::Relaxed);
     }
 

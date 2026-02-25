@@ -265,12 +265,12 @@ impl PgSession {
 
     /// Get a GUC variable value.
     pub fn get_guc(&self, name: &str) -> Option<&str> {
-        self.guc_vars.get(&name.to_lowercase()).map(|s| s.as_str())
+        self.guc_vars.get(&name.to_lowercase()).map(std::string::String::as_str)
     }
 
     /// Set a GUC variable value.
     pub fn set_guc(&mut self, name: &str, value: &str) {
-        self.guc_vars.insert(name.to_lowercase(), value.to_string());
+        self.guc_vars.insert(name.to_lowercase(), value.to_owned());
     }
 
     /// Reset a GUC variable to its default value.

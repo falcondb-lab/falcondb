@@ -114,7 +114,7 @@ impl IoScheduler {
             // Calculate how long to wait for enough tokens
             let deficit = bytes - state.tokens;
             let wait_us = if self.refill_rate > 0 {
-                (deficit as u128 * 1_000_000) / self.refill_rate as u128
+                (u128::from(deficit) * 1_000_000) / u128::from(self.refill_rate)
             } else {
                 1_000_000 // 1 second fallback
             };
@@ -151,7 +151,7 @@ impl IoScheduler {
     fn refill(&self, state: &mut IoState) {
         let now = Instant::now();
         let elapsed = now.duration_since(state.last_refill);
-        let new_tokens = (elapsed.as_micros() * self.refill_rate as u128 / 1_000_000) as u64;
+        let new_tokens = (elapsed.as_micros() * u128::from(self.refill_rate) / 1_000_000) as u64;
         if new_tokens > 0 {
             state.tokens = (state.tokens + new_tokens).min(self.capacity);
             state.last_refill = now;

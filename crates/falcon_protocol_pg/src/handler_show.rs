@@ -66,7 +66,7 @@ impl QueryHandler {
         }
     }
 
-    fn show_falcon_txn(&self, session: &mut PgSession) -> Vec<BackendMessage> {
+    fn show_falcon_txn(&self, session: &PgSession) -> Vec<BackendMessage> {
         let value = if let Some(ref txn) = session.txn {
             if let Some(observed) = self.txn_mgr.get_txn(txn.txn_id) {
                 format!(
@@ -90,11 +90,10 @@ impl QueryHandler {
     }
 
     fn show_falcon_txn_stats(&self) -> Vec<BackendMessage> {
-        let stats = if let Some(ref dist) = self.dist_engine {
-            dist.aggregate_txn_stats()
-        } else {
-            self.txn_mgr.stats_snapshot()
-        };
+        let stats = self.dist_engine.as_ref().map_or_else(
+            || self.txn_mgr.stats_snapshot(),
+            |dist| dist.aggregate_txn_stats(),
+        );
         let rows = vec![
             vec![
                 Some("total_committed".into()),
@@ -230,7 +229,7 @@ impl QueryHandler {
                     Some(r.commit_latency_us.to_string()),
                     Some(match &r.outcome {
                         falcon_txn::TxnOutcome::Committed => "committed".into(),
-                        falcon_txn::TxnOutcome::Aborted(reason) => format!("aborted: {}", reason),
+                        falcon_txn::TxnOutcome::Aborted(reason) => format!("aborted: {reason}"),
                     }),
                     Some(r.degraded.to_string()),
                 ]
@@ -393,7 +392,7 @@ impl QueryHandler {
         let pressure = self.storage.pressure_state();
         let budget = self.storage.memory_tracker().budget();
         let ratio_str = if snap.pressure_ratio.is_nan() {
-            "N/A".to_string()
+            "N/A".to_owned()
         } else {
             format!("{:.4}", snap.pressure_ratio)
         };
@@ -455,9 +454,8 @@ impl QueryHandler {
                         .per_shard_row_count
                         .iter()
                         .find(|(s, _)| s == sid)
-                        .map(|(_, c)| *c)
-                        .unwrap_or(0);
-                    format!("{}:{}us/{}rows", sid, lat, rows)
+                        .map_or(0, |(_, c)| *c);
+                    format!("{sid}:{lat}us/{rows}rows")
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -480,7 +478,7 @@ impl QueryHandler {
                 ],
                 vec![
                     Some("per_shard_detail".into()),
-                    Some(format!("[{}]", shard_detail)),
+                    Some(format!("[{shard_detail}]")),
                 ],
                 vec![
                     Some("total_latency_us".into()),
@@ -947,7 +945,7 @@ impl QueryHandler {
         let rows = vec![
             vec![Some("mode".into()), Some(mode.into())],
             vec![Some("shard_count".into()), Some(shard_count.to_string())],
-            vec![Some("shard_ids".into()), Some(format!("[{}]", shard_list))],
+            vec![Some("shard_ids".into()), Some(format!("[{shard_list}]"))],
             vec![
                 Some("insert_routing".into()),
                 Some("PK hash (shard_for_key)".into()),
@@ -999,9 +997,9 @@ impl QueryHandler {
             let rows = vec![vec![
                 Some("0".into()),
                 Some("(single-shard mode)".into()),
-                Some("".into()),
-                Some("".into()),
-                Some("".into()),
+                Some(String::new()),
+                Some(String::new()),
+                Some(String::new()),
             ]];
             self.single_row_result(
                 vec![
@@ -1053,8 +1051,8 @@ impl QueryHandler {
                 vec![vec![
                     Some("0".into()),
                     Some("(single-node)".into()),
-                    Some("".into()),
-                    Some("".into()),
+                    Some(String::new()),
+                    Some(String::new()),
                 ]],
             )
         }
@@ -1194,8 +1192,8 @@ impl QueryHandler {
         ];
         for (i, record) in slow_txns.iter().enumerate().take(50) {
             let outcome_str = match &record.outcome {
-                falcon_txn::manager::TxnOutcome::Committed => "committed".to_string(),
-                falcon_txn::manager::TxnOutcome::Aborted(reason) => format!("aborted({})", reason),
+                falcon_txn::manager::TxnOutcome::Committed => "committed".to_owned(),
+                falcon_txn::manager::TxnOutcome::Aborted(reason) => format!("aborted({reason})"),
             };
             rows.push(vec![
                 Some(format!("txn_{}", i + 1)),
@@ -1541,7 +1539,7 @@ impl QueryHandler {
         let inputs = falcon_common::kernel::AdmissionInputs::default();
         let decision = falcon_common::kernel::AdmissionController::evaluate(&inputs);
         let rows = vec![
-            vec![Some("decision".into()), Some(format!("{:?}", decision))],
+            vec![Some("decision".into()), Some(format!("{decision:?}"))],
             vec![
                 Some("queue_length".into()),
                 Some(inputs.queue_length.to_string()),
@@ -1719,14 +1717,14 @@ impl QueryHandler {
                 ],
                 vec![vec![
                     Some("(no events)".into()),
-                    Some("".into()),
-                    Some("".into()),
-                    Some("".into()),
-                    Some("".into()),
-                    Some("".into()),
-                    Some("".into()),
-                    Some("".into()),
-                    Some("".into()),
+                    Some(String::new()),
+                    Some(String::new()),
+                    Some(String::new()),
+                    Some(String::new()),
+                    Some(String::new()),
+                    Some(String::new()),
+                    Some(String::new()),
+                    Some(String::new()),
                 ]],
             );
         }
@@ -1774,10 +1772,10 @@ impl QueryHandler {
         if rows.is_empty() {
             rows.push(vec![
                 Some("(none)".into()),
-                Some("".into()),
-                Some("".into()),
-                Some("".into()),
-                Some("".into()),
+                Some(String::new()),
+                Some(String::new()),
+                Some(String::new()),
+                Some(String::new()),
             ]);
         }
 
@@ -1804,19 +1802,19 @@ impl QueryHandler {
             let mut rows: Vec<Vec<Option<String>>> = Vec::new();
             rows.push(vec![
                 Some("summary".into()),
-                Some("".into()),
-                Some("".into()),
+                Some(String::new()),
+                Some(String::new()),
                 Some(format!("{} tasks", plan.tasks.len())),
                 Some(format!("{} rows", plan.total_rows_to_move())),
                 Some(plan.estimated_duration_display()),
             ]);
             rows.push(vec![
                 Some("imbalance_ratio".into()),
-                Some("".into()),
-                Some("".into()),
+                Some(String::new()),
+                Some(String::new()),
                 Some(format!("{:.3}", snapshot.imbalance_ratio())),
                 Some(format!("{} total rows", snapshot.total_rows())),
-                Some("".into()),
+                Some(String::new()),
             ]);
 
             for task in &plan.tasks {
@@ -1836,11 +1834,11 @@ impl QueryHandler {
             if plan.tasks.is_empty() {
                 rows.push(vec![
                     Some("(balanced)".into()),
-                    Some("".into()),
-                    Some("".into()),
+                    Some(String::new()),
+                    Some(String::new()),
                     Some("no moves needed".into()),
-                    Some("".into()),
-                    Some("".into()),
+                    Some(String::new()),
+                    Some(String::new()),
                 ]);
             }
 
@@ -1894,13 +1892,12 @@ impl QueryHandler {
                     Ok(()) => Some(self.single_row_result(
                         vec![("result", 25, -1)],
                         vec![vec![Some(format!(
-                            "Scale-out initiated for node {}",
-                            node_id
+                            "Scale-out initiated for node {node_id}"
                         ))]],
                     )),
                     Err(e) => Some(self.single_row_result(
                         vec![("result", 25, -1)],
-                        vec![vec![Some(format!("ERROR: {}", e))]],
+                        vec![vec![Some(format!("ERROR: {e}"))]],
                     )),
                 }
             }
@@ -1922,13 +1919,12 @@ impl QueryHandler {
                     Ok(()) => Some(self.single_row_result(
                         vec![("result", 25, -1)],
                         vec![vec![Some(format!(
-                            "Scale-in initiated for node {}",
-                            node_id
+                            "Scale-in initiated for node {node_id}"
                         ))]],
                     )),
                     Err(e) => Some(self.single_row_result(
                         vec![("result", 25, -1)],
-                        vec![vec![Some(format!("ERROR: {}", e))]],
+                        vec![vec![Some(format!("ERROR: {e}"))]],
                     )),
                 }
             }
@@ -1951,8 +1947,7 @@ impl QueryHandler {
                 Some(self.single_row_result(
                     vec![("result", 25, -1)],
                     vec![vec![Some(format!(
-                        "Leader promotion requested for shard {} (will execute on next failover cycle)",
-                        shard_id
+                        "Leader promotion requested for shard {shard_id} (will execute on next failover cycle)"
                     ))]],
                 ))
             }
@@ -2421,7 +2416,7 @@ impl QueryHandler {
             .iter()
             .map(|(cmd, desc, since)| {
                 vec![
-                    Some(format!("SHOW {}", cmd)),
+                    Some(format!("SHOW {cmd}")),
                     Some(desc.to_string()),
                     Some(since.to_string()),
                 ]

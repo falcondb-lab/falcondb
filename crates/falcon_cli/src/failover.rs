@@ -16,7 +16,7 @@ impl FailoverCmd {
         let s = arg.trim();
         let lower = s.to_lowercase();
         if lower.starts_with("simulate") {
-            let node = s[8..].trim().to_string();
+            let node = s[8..].trim().to_owned();
             return Self::Simulate(node);
         }
         match lower.as_str() {
@@ -67,7 +67,7 @@ async fn failover_simulate(client: &DbClient, node_id: &str, mode: OutputMode) -
     use crate::manage::plan::{PlanOutput, RiskLevel};
 
     if node_id.is_empty() {
-        return Ok("Usage: \\failover simulate <node_id>\n".to_string());
+        return Ok("Usage: \\failover simulate <node_id>\n".to_owned());
     }
 
     // Query shards affected by losing this node
@@ -84,7 +84,7 @@ async fn failover_simulate(client: &DbClient, node_id: &str, mode: OutputMode) -
         .unwrap_or_else(|_| (Vec::new(), String::new()));
 
     let affected_shards = if shard_rows.is_empty() {
-        "unknown (falcon.shards view not available)".to_string()
+        "unknown (falcon.shards view not available)".to_owned()
     } else {
         shard_rows
             .iter()
@@ -100,10 +100,10 @@ async fn failover_simulate(client: &DbClient, node_id: &str, mode: OutputMode) -
         .await
         .ok()
         .and_then(|(rows, _)| rows.into_iter().next())
-        .and_then(|r| r.get(0).map(|v| v.to_string()))
-        .unwrap_or_else(|| "unknown".to_string());
+        .and_then(|r| r.get(0).map(std::string::ToString::to_string))
+        .unwrap_or_else(|| "unknown".to_owned());
 
-    let plan = PlanOutput::new(format!("failover simulate {}", node_id), RiskLevel::Low)
+    let plan = PlanOutput::new(format!("failover simulate {node_id}"), RiskLevel::Low)
         .field("Simulated Node", node_id)
         .field("Affected Shards", &affected_shards)
         .field("Replica Count", &replica_count)
@@ -130,8 +130,7 @@ async fn failover_history(client: &DbClient, mode: OutputMode) -> Result<String>
 
     if rows.is_empty() {
         return Ok("No failover history available. \
-                   (falcon.failover_history view not present or no events recorded)\n"
-            .to_string());
+                   (falcon.failover_history view not present or no events recorded)\n".to_owned());
     }
 
     Ok(format_rows_as_string(&rows, mode, "Failover History"))

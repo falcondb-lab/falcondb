@@ -372,9 +372,7 @@ pub async fn run_health_server(
     };
 
     let port = listener
-        .local_addr()
-        .map(|a| a.port().to_string())
-        .unwrap_or_else(|_| "unknown".to_string());
+        .local_addr().map_or_else(|_| "unknown".to_owned(), |a| a.port().to_string());
 
     tokio::pin!(shutdown);
 
@@ -442,7 +440,7 @@ async fn handle_health_request(
                 );
                 ("200 OK", body)
             } else {
-                let body = r#"{"live":false,"reason":"fatal error"}"#.to_string();
+                let body = r#"{"live":false,"reason":"fatal error"}"#.to_owned();
                 ("503 Service Unavailable", body)
             }
         }
@@ -498,13 +496,11 @@ async fn handle_health_request(
 
             // v1.0.6: gateway metrics from dist engine (if available)
             let (gw_inflight, gw_forwarded, gw_rejected, gw_local, gw_fwd_total) =
-                if let Some(ref de) = state.dist_engine {
+                state.dist_engine.as_ref().map_or((0, 0, 0, 0, 0), |de| {
                     let snap = de.gateway_metrics_snapshot();
                     let (inflight, forwarded) = de.admission_snapshot();
                     (inflight, forwarded, snap.reject_total, snap.local_exec_total, snap.forward_total)
-                } else {
-                    (0, 0, 0, 0, 0)
-                };
+                });
 
             // v1.0.7: cold store / memory tiering metrics
             let hot_bytes = state.storage.memory_hot_bytes();
@@ -595,7 +591,7 @@ async fn handle_health_request(
             ("200 OK", body)
         }
         _ => {
-            let body = r#"{"error":"not found"}"#.to_string();
+            let body = r#"{"error":"not found"}"#.to_owned();
             ("404 Not Found", body)
         }
     };

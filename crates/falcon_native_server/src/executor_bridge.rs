@@ -65,7 +65,7 @@ impl ExecutorBridge {
                     ERR_SYNTAX_ERROR,
                     *b"42601",
                     false,
-                    &format!("{}", e),
+                    &format!("{e}"),
                 ));
             }
         };
@@ -90,7 +90,7 @@ impl ExecutorBridge {
                     ERR_SYNTAX_ERROR,
                     *b"42000",
                     false,
-                    &format!("{}", e),
+                    &format!("{e}"),
                 ));
             }
         };
@@ -104,7 +104,7 @@ impl ExecutorBridge {
                     ERR_INTERNAL_ERROR,
                     *b"XX000",
                     false,
-                    &format!("{}", e),
+                    &format!("{e}"),
                 ));
             }
         };
@@ -136,7 +136,7 @@ impl ExecutorBridge {
             Ok(exec_result) => Ok(self.execution_result_to_response(req.request_id, exec_result)),
             Err(e) => {
                 let (code, sqlstate, retryable) = classify_execution_error(&e);
-                Err(self.make_error(req.request_id, code, sqlstate, retryable, &format!("{}", e)))
+                Err(self.make_error(req.request_id, code, sqlstate, retryable, &format!("{e}")))
             }
         }
     }
@@ -186,7 +186,7 @@ impl ExecutorBridge {
                             ERR_SYNTAX_ERROR,
                             *b"42601",
                             false,
-                            &format!("row {}: {}", i, e),
+                            &format!("row {i}: {e}"),
                         ));
                     }
                     if !continue_on_error {
@@ -215,7 +215,7 @@ impl ExecutorBridge {
                             ERR_SYNTAX_ERROR,
                             *b"42000",
                             false,
-                            &format!("row {}: {}", i, e),
+                            &format!("row {i}: {e}"),
                         ));
                     }
                     if !continue_on_error {
@@ -236,7 +236,7 @@ impl ExecutorBridge {
                             ERR_INTERNAL_ERROR,
                             *b"XX000",
                             false,
-                            &format!("row {}: {}", i, e),
+                            &format!("row {i}: {e}"),
                         ));
                     }
                     if !continue_on_error {
@@ -251,7 +251,7 @@ impl ExecutorBridge {
                     let _ = self.txn_mgr.commit(txn.txn_id);
                     match exec_result {
                         ExecutionResult::Dml { rows_affected, .. } => {
-                            counts.push(rows_affected as i64)
+                            counts.push(rows_affected as i64);
                         }
                         _ => counts.push(1),
                     }
@@ -266,7 +266,7 @@ impl ExecutorBridge {
                             code,
                             sqlstate,
                             retryable,
-                            &format!("row {}: {}", i, e),
+                            &format!("row {i}: {e}"),
                         ));
                     }
                     if !continue_on_error {
@@ -373,7 +373,7 @@ impl ExecutorBridge {
             sqlstate,
             retryable,
             server_epoch: self.config.epoch,
-            message: message.to_string(),
+            message: message.to_owned(),
         }
     }
 }

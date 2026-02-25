@@ -191,7 +191,7 @@ impl AsyncWalMetricsSnapshot {
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn segment_filename(segment_id: u64) -> String {
-    format!("falcon_{:06}.wal", segment_id)
+    format!("falcon_{segment_id:06}.wal")
 }
 
 impl AsyncWalWriter {
@@ -297,7 +297,7 @@ impl AsyncWalWriter {
         // Update sync state
         {
             let (lock, cvar) = &*self.sync_state;
-            let mut state = lock.lock().unwrap_or_else(|p| p.into_inner());
+            let mut state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             state.pending_count += 1;
             state.pending_bytes += record_size as u64;
             cvar.notify_one();
@@ -329,7 +329,7 @@ impl AsyncWalWriter {
         // Snapshot pending state
         let (batch_count, batch_bytes) = {
             let (lock, _) = &*self.sync_state;
-            let state = lock.lock().unwrap_or_else(|p| p.into_inner());
+            let state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             (state.pending_count, state.pending_bytes)
         };
 
@@ -345,7 +345,7 @@ impl AsyncWalWriter {
         // Update sync state — notify all waiters
         {
             let (lock, cvar) = &*self.sync_state;
-            let mut state = lock.lock().unwrap_or_else(|p| p.into_inner());
+            let mut state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let current_lsn = self.lsn.load(Ordering::SeqCst);
             state.synced_lsn = current_lsn;
             state.pending_count = 0;
@@ -410,17 +410,14 @@ impl AsyncWalWriter {
                 max_batch_bytes, ..
             } => {
                 let (lock, _) = &*self.sync_state;
-                let state = lock.lock().unwrap_or_else(|p| p.into_inner());
+                let state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if state.pending_bytes >= *max_batch_bytes {
                     drop(state);
                     self.flush_durable(FlushReason::BatchFull)?;
                 }
             }
-            FlushPolicy::Explicit => {
-                // Do nothing — caller must flush explicitly
-            }
-            FlushPolicy::Periodic { .. } => {
-                // Handled by the background syncer thread, not here
+            FlushPolicy::Explicit | FlushPolicy::Periodic { .. } => {
+                // Explicit: caller must flush; Periodic: handled by background syncer
             }
         }
         Ok(())
@@ -435,7 +432,7 @@ impl AsyncWalWriter {
         std::thread::Builder::new()
             .name("falcon-async-wal-syncer".into())
             .spawn(move || writer.syncer_loop())
-            .map_err(|e| IoError::internal(format!("spawn syncer: {}", e)))
+            .map_err(|e| IoError::internal(format!("spawn syncer: {e}")))
     }
 
     fn syncer_loop(&self) {
@@ -460,13 +457,13 @@ impl AsyncWalWriter {
 
             let should_flush = {
                 let (lock, cvar) = &*self.sync_state;
-                let state = lock.lock().unwrap_or_else(|p| p.into_inner());
+                let state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
                 if state.pending_count == 0 {
                     // Wait for work
                     let result = cvar
                         .wait_timeout(state, flush_interval)
-                        .unwrap_or_else(|p| p.into_inner());
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     result.0.pending_count > 0
                 } else {
                     // Wait a short interval to coalesce more writes

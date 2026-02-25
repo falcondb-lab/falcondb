@@ -195,7 +195,7 @@ impl TokenBucket {
             {
                 let pair = std::sync::Mutex::new(false);
                 let cvar = std::sync::Condvar::new();
-                let guard = pair.lock().unwrap_or_else(|e| e.into_inner());
+                let guard = pair.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let _ = cvar.wait_timeout(guard, Duration::from_millis(wait_ms));
             }
         }
@@ -264,8 +264,7 @@ impl std::fmt::Display for TokenBucketError {
             } => {
                 write!(
                     f,
-                    "token bucket timeout: waited {}ms for {} tokens",
-                    waited_ms, tokens_needed
+                    "token bucket timeout: waited {waited_ms}ms for {tokens_needed} tokens"
                 )
             }
             Self::Paused => write!(f, "token bucket paused by operator"),

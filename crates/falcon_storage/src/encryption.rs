@@ -1,20 +1,21 @@
-//! # Module Status: STUB — not on the production OLTP write path.
-//! Do NOT reference from planner/executor/txn for production workloads.
-//!
 //! Transparent Data Encryption (TDE) — at-rest encryption for WAL and data files.
 //!
 //! Architecture:
-//! - **Master Key**: Derived from a user-provided passphrase via PBKDF2-HMAC-SHA256.
-//! - **Data Encryption Keys (DEKs)**: Per-table / per-WAL-segment AES-256 keys,
-//!   encrypted (wrapped) by the master key.
-//! - **Encryption**: AES-256-CTR stream cipher with per-block nonces for data pages;
-//!   HMAC-SHA256 for authentication.
+//! - **Master Key**: Derived from a user-provided passphrase via PBKDF2-HMAC-SHA256
+//!   (600 000 iterations, 16-byte random salt).
+//! - **Data Encryption Keys (DEKs)**: Per-scope AES-256 keys, wrapped (encrypted)
+//!   by the master key using AES-256-GCM.
+//! - **Data encryption**: AES-256-GCM authenticated encryption with 12-byte random
+//!   nonces per block. Every ciphertext carries a 16-byte authentication tag.
 //! - **Key Rotation**: New DEK generated on rotation; old DEKs retained for reads
 //!   until all data is re-encrypted.
 //!
 //! This module provides the key management and encrypt/decrypt primitives.
-//! The WAL writer and SST writer call into this layer transparently.
+//! The WAL writer and page writer call into this layer transparently.
 
+use aes_gcm::aead::{Aead, KeyInit, OsRng};
+use aes_gcm::{Aes256Gcm, Nonce};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -22,19 +23,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Length of AES-256 key in bytes.
 pub const AES256_KEY_LEN: usize = 32;
-/// Length of nonce/IV for CTR mode.
-pub const NONCE_LEN: usize = 16;
-/// Length of HMAC-SHA256 tag.
-pub const HMAC_TAG_LEN: usize = 32;
-/// PBKDF2 iteration count (OWASP recommendation).
+/// Length of AES-GCM nonce (96 bits per NIST recommendation).
+pub const NONCE_LEN: usize = 12;
+/// Length of AES-GCM authentication tag.
+pub const GCM_TAG_LEN: usize = 16;
+/// PBKDF2 iteration count (OWASP 2023 recommendation for HMAC-SHA256).
 pub const PBKDF2_ITERATIONS: u32 = 600_000;
 /// Salt length for PBKDF2.
 pub const SALT_LEN: usize = 16;
 
 /// A 256-bit encryption key.
+///
+/// In production builds, key bytes should be zeroized on drop (via the `zeroize`
+/// crate). Simplified here to avoid an extra dependency.
 #[derive(Clone)]
 pub struct EncryptionKey {
-    /// Raw key bytes (zeroized on drop in production; simplified here).
     bytes: [u8; AES256_KEY_LEN],
 }
 
@@ -44,59 +47,22 @@ impl EncryptionKey {
         Self { bytes }
     }
 
-    /// Generate a random key using the system CSPRNG.
+    /// Generate a random key using the OS CSPRNG.
     pub fn generate() -> Self {
         let mut bytes = [0u8; AES256_KEY_LEN];
-        // Use a simple deterministic source for reproducibility in tests;
-        // in production this would use OsRng.
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let seed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        // Simple PRNG seeded from system time (NOT cryptographically secure;
-        // production would use `ring::rand` or `getrandom`).
-        let mut state = seed as u64;
-        for chunk in bytes.chunks_mut(8) {
-            state = state
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            let b = state.to_le_bytes();
-            for (i, byte) in chunk.iter_mut().enumerate() {
-                if i < b.len() {
-                    *byte = b[i];
-                }
-            }
-        }
+        OsRng.fill_bytes(&mut bytes);
         Self { bytes }
     }
 
     /// Derive a key from a passphrase using PBKDF2-HMAC-SHA256.
     pub fn derive_from_passphrase(passphrase: &str, salt: &[u8; SALT_LEN]) -> Self {
-        // Simplified PBKDF2 (in production, use `ring::pbkdf2` or `argon2`).
         let mut key = [0u8; AES256_KEY_LEN];
-        let pass_bytes = passphrase.as_bytes();
-        // HMAC-SHA256 based derivation (simplified)
-        let mut state = [0u8; 32];
-        for (i, b) in pass_bytes.iter().enumerate() {
-            state[i % 32] ^= b;
-        }
-        for (i, b) in salt.iter().enumerate() {
-            state[(i + 16) % 32] ^= b;
-        }
-        // Iterate to strengthen
-        for _ in 0..PBKDF2_ITERATIONS.min(10_000) {
-            // Simplified mixing (real impl uses HMAC-SHA256)
-            let mut next = [0u8; 32];
-            for i in 0..32 {
-                next[i] = state[i]
-                    .wrapping_mul(state[(i + 7) % 32].wrapping_add(1))
-                    .wrapping_add(state[(i + 13) % 32])
-                    .wrapping_add(i as u8);
-            }
-            state = next;
-        }
-        key.copy_from_slice(&state);
+        pbkdf2::pbkdf2_hmac::<sha2::Sha256>(
+            passphrase.as_bytes(),
+            salt,
+            PBKDF2_ITERATIONS,
+            &mut key,
+        );
         Self { bytes: key }
     }
 
@@ -125,7 +91,7 @@ impl fmt::Display for DekId {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WrappedDek {
     pub id: DekId,
-    /// The DEK encrypted by the master key.
+    /// The DEK encrypted by the master key (AES-256-GCM ciphertext + tag).
     pub ciphertext: Vec<u8>,
     /// Nonce used for wrapping.
     pub nonce: [u8; NONCE_LEN],
@@ -150,14 +116,42 @@ impl fmt::Display for EncryptionScope {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Wal => write!(f, "wal"),
-            Self::Table(id) => write!(f, "table_{}", id),
-            Self::Sst(id) => write!(f, "sst_{}", id),
+            Self::Table(id) => write!(f, "table_{id}"),
+            Self::Sst(id) => write!(f, "sst_{id}"),
             Self::Backup => write!(f, "backup"),
         }
     }
 }
 
+/// TDE error kinds.
+#[derive(Debug)]
+pub enum TdeError {
+    /// DEK not found in the key manager.
+    DekNotFound(DekId),
+    /// AES-GCM decryption failed (tampered ciphertext or wrong key).
+    DecryptionFailed,
+    /// AES-GCM encryption failed (should not happen with valid keys).
+    EncryptionFailed,
+}
+
+impl fmt::Display for TdeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DekNotFound(id) => write!(f, "DEK {id} not found"),
+            Self::DecryptionFailed => write!(f, "AES-256-GCM decryption failed (auth tag mismatch)"),
+            Self::EncryptionFailed => write!(f, "AES-256-GCM encryption failed"),
+        }
+    }
+}
+
+impl std::error::Error for TdeError {}
+
 /// TDE Key Manager — manages the master key and all DEKs.
+///
+/// All cryptographic operations use:
+/// - AES-256-GCM for encryption (AEAD — authenticated encryption with associated data)
+/// - PBKDF2-HMAC-SHA256 for master key derivation
+/// - OS CSPRNG (`getrandom`) for key and nonce generation
 pub struct KeyManager {
     /// The master key (derived from passphrase or loaded from keystore).
     master_key: EncryptionKey,
@@ -187,8 +181,22 @@ impl KeyManager {
     }
 
     /// Create a new key manager with encryption enabled.
+    /// Derives the master key from the passphrase using PBKDF2-HMAC-SHA256.
     pub fn new(passphrase: &str) -> Self {
         let salt = Self::generate_salt();
+        let master_key = EncryptionKey::derive_from_passphrase(passphrase, &salt);
+        Self {
+            master_key,
+            wrapped_deks: HashMap::new(),
+            active_deks: HashMap::new(),
+            next_dek_id: AtomicU64::new(1),
+            salt,
+            enabled: true,
+        }
+    }
+
+    /// Restore a key manager from a known salt (e.g., loaded from config/keyfile).
+    pub fn from_salt(passphrase: &str, salt: [u8; SALT_LEN]) -> Self {
         let master_key = EncryptionKey::derive_from_passphrase(passphrase, &salt);
         Self {
             master_key,
@@ -205,14 +213,23 @@ impl KeyManager {
         self.enabled
     }
 
+    /// Get the salt used for master key derivation.
+    pub const fn salt(&self) -> &[u8; SALT_LEN] {
+        &self.salt
+    }
+
     /// Generate a new DEK for a scope. Wraps it with the master key and stores it.
     pub fn generate_dek(&mut self, scope: EncryptionScope) -> DekId {
         let dek = EncryptionKey::generate();
         let id = DekId(self.next_dek_id.fetch_add(1, Ordering::Relaxed));
 
-        // Wrap (encrypt) the DEK with the master key
+        // Wrap (encrypt) the DEK with the master key using AES-256-GCM
         let nonce = Self::generate_nonce();
-        let ciphertext = Self::xor_encrypt(dek.as_bytes(), self.master_key.as_bytes(), &nonce);
+        let cipher = Aes256Gcm::new(self.master_key.as_bytes().into());
+        let gcm_nonce = Nonce::from_slice(&nonce);
+        let ciphertext = cipher
+            .encrypt(gcm_nonce, dek.as_bytes().as_ref())
+            .expect("AES-256-GCM encryption of DEK must not fail with valid key");
 
         // Deactivate previous DEK for this scope
         if let Some(prev_id) = self.active_deks.get(&scope) {
@@ -239,18 +256,21 @@ impl KeyManager {
     }
 
     /// Unwrap (decrypt) a DEK using the master key.
-    pub fn unwrap_dek(&self, dek_id: DekId) -> Option<EncryptionKey> {
-        let wrapped = self.wrapped_deks.get(&dek_id)?;
-        let decrypted = Self::xor_encrypt(
-            &wrapped.ciphertext,
-            self.master_key.as_bytes(),
-            &wrapped.nonce,
-        );
+    pub fn unwrap_dek(&self, dek_id: DekId) -> Result<EncryptionKey, TdeError> {
+        let wrapped = self
+            .wrapped_deks
+            .get(&dek_id)
+            .ok_or(TdeError::DekNotFound(dek_id))?;
+        let cipher = Aes256Gcm::new(self.master_key.as_bytes().into());
+        let gcm_nonce = Nonce::from_slice(&wrapped.nonce);
+        let decrypted = cipher
+            .decrypt(gcm_nonce, wrapped.ciphertext.as_ref())
+            .map_err(|_| TdeError::DecryptionFailed)?;
         let mut key_bytes = [0u8; AES256_KEY_LEN];
         if decrypted.len() >= AES256_KEY_LEN {
             key_bytes.copy_from_slice(&decrypted[..AES256_KEY_LEN]);
         }
-        Some(EncryptionKey::from_bytes(key_bytes))
+        Ok(EncryptionKey::from_bytes(key_bytes))
     }
 
     /// Get the active DEK ID for a scope.
@@ -258,28 +278,69 @@ impl KeyManager {
         self.active_deks.get(&scope).copied()
     }
 
-    /// Encrypt a data block using a DEK.
-    pub fn encrypt_block(
+    /// Encrypt a data block using a DEK. Returns `nonce || ciphertext+tag`.
+    ///
+    /// The caller stores the returned bytes as-is; to decrypt, pass them to
+    /// `decrypt_block` which splits the nonce prefix automatically.
+    pub fn encrypt_block(&self, dek_id: DekId, plaintext: &[u8]) -> Result<Vec<u8>, TdeError> {
+        let dek = self.unwrap_dek(dek_id)?;
+        let cipher = Aes256Gcm::new(dek.as_bytes().into());
+        let nonce_bytes = Self::generate_nonce();
+        let gcm_nonce = Nonce::from_slice(&nonce_bytes);
+        let ciphertext = cipher
+            .encrypt(gcm_nonce, plaintext)
+            .map_err(|_| TdeError::EncryptionFailed)?;
+        // Prepend nonce so decrypt_block can recover it
+        let mut out = Vec::with_capacity(NONCE_LEN + ciphertext.len());
+        out.extend_from_slice(&nonce_bytes);
+        out.extend_from_slice(&ciphertext);
+        Ok(out)
+    }
+
+    /// Decrypt a data block previously produced by `encrypt_block`.
+    /// Input format: `nonce (12 bytes) || ciphertext+tag`.
+    pub fn decrypt_block(&self, dek_id: DekId, encrypted: &[u8]) -> Result<Vec<u8>, TdeError> {
+        if encrypted.len() < NONCE_LEN + GCM_TAG_LEN {
+            return Err(TdeError::DecryptionFailed);
+        }
+        let (nonce_bytes, ciphertext) = encrypted.split_at(NONCE_LEN);
+        let dek = self.unwrap_dek(dek_id)?;
+        let cipher = Aes256Gcm::new(dek.as_bytes().into());
+        let gcm_nonce = Nonce::from_slice(nonce_bytes);
+        cipher
+            .decrypt(gcm_nonce, ciphertext)
+            .map_err(|_| TdeError::DecryptionFailed)
+    }
+
+    /// Encrypt a data block with caller-supplied nonce (for WAL records where
+    /// the nonce is derived from LSN to allow deterministic re-encryption).
+    pub fn encrypt_block_with_nonce(
         &self,
         dek_id: DekId,
         plaintext: &[u8],
-        block_nonce: &[u8; NONCE_LEN],
-    ) -> Option<Vec<u8>> {
+        nonce: &[u8; NONCE_LEN],
+    ) -> Result<Vec<u8>, TdeError> {
         let dek = self.unwrap_dek(dek_id)?;
-        let ciphertext = Self::xor_encrypt(plaintext, dek.as_bytes(), block_nonce);
-        Some(ciphertext)
+        let cipher = Aes256Gcm::new(dek.as_bytes().into());
+        let gcm_nonce = Nonce::from_slice(nonce);
+        cipher
+            .encrypt(gcm_nonce, plaintext)
+            .map_err(|_| TdeError::EncryptionFailed)
     }
 
-    /// Decrypt a data block using a DEK.
-    pub fn decrypt_block(
+    /// Decrypt a data block with caller-supplied nonce.
+    pub fn decrypt_block_with_nonce(
         &self,
         dek_id: DekId,
         ciphertext: &[u8],
-        block_nonce: &[u8; NONCE_LEN],
-    ) -> Option<Vec<u8>> {
+        nonce: &[u8; NONCE_LEN],
+    ) -> Result<Vec<u8>, TdeError> {
         let dek = self.unwrap_dek(dek_id)?;
-        let plaintext = Self::xor_encrypt(ciphertext, dek.as_bytes(), block_nonce);
-        Some(plaintext)
+        let cipher = Aes256Gcm::new(dek.as_bytes().into());
+        let gcm_nonce = Nonce::from_slice(nonce);
+        cipher
+            .decrypt(gcm_nonce, ciphertext)
+            .map_err(|_| TdeError::DecryptionFailed)
     }
 
     /// Rotate the master key. Re-wraps all existing DEKs with the new master key.
@@ -287,7 +348,7 @@ impl KeyManager {
         // Unwrap all DEKs with old master key
         let mut raw_deks: Vec<(DekId, EncryptionKey)> = Vec::new();
         for id in self.wrapped_deks.keys() {
-            if let Some(dek) = self.unwrap_dek(*id) {
+            if let Ok(dek) = self.unwrap_dek(*id) {
                 raw_deks.push((*id, dek));
             }
         }
@@ -295,11 +356,15 @@ impl KeyManager {
         // Derive new master key
         let new_salt = Self::generate_salt();
         let new_master = EncryptionKey::derive_from_passphrase(new_passphrase, &new_salt);
+        let cipher = Aes256Gcm::new(new_master.as_bytes().into());
 
         // Re-wrap all DEKs with new master key
         for (id, dek) in &raw_deks {
             let nonce = Self::generate_nonce();
-            let ciphertext = Self::xor_encrypt(dek.as_bytes(), new_master.as_bytes(), &nonce);
+            let gcm_nonce = Nonce::from_slice(&nonce);
+            let ciphertext = cipher
+                .encrypt(gcm_nonce, dek.as_bytes().as_ref())
+                .expect("Re-wrap must not fail with valid key");
             if let Some(wrapped) = self.wrapped_deks.get_mut(id) {
                 wrapped.ciphertext = ciphertext;
                 wrapped.nonce = nonce;
@@ -322,44 +387,15 @@ impl KeyManager {
 
     // ── Internal helpers ──
 
-    /// XOR-based stream cipher (simplified AES-256-CTR).
-    /// In production, use `aes::Aes256Ctr` from the `aes` crate.
-    fn xor_encrypt(data: &[u8], key: &[u8; AES256_KEY_LEN], nonce: &[u8; NONCE_LEN]) -> Vec<u8> {
-        let mut output = vec![0u8; data.len()];
-        let mut keystream_block = [0u8; 32];
-
-        for (chunk_idx, chunk) in data.chunks(32).enumerate() {
-            // Generate keystream block from key + nonce + counter
-            for i in 0..32 {
-                keystream_block[i] =
-                    key[i] ^ nonce[i % NONCE_LEN] ^ ((chunk_idx as u8).wrapping_add(i as u8));
-            }
-            // Mix further
-            for i in 0..32 {
-                keystream_block[i] = keystream_block[i]
-                    .wrapping_mul(keystream_block[(i + 7) % 32].wrapping_add(1))
-                    .wrapping_add(keystream_block[(i + 13) % 32]);
-            }
-            // XOR
-            let offset = chunk_idx * 32;
-            for (i, &byte) in chunk.iter().enumerate() {
-                output[offset + i] = byte ^ keystream_block[i];
-            }
-        }
-        output
-    }
-
     fn generate_salt() -> [u8; SALT_LEN] {
-        let key = EncryptionKey::generate();
         let mut salt = [0u8; SALT_LEN];
-        salt.copy_from_slice(&key.as_bytes()[..SALT_LEN]);
+        OsRng.fill_bytes(&mut salt);
         salt
     }
 
     fn generate_nonce() -> [u8; NONCE_LEN] {
-        let key = EncryptionKey::generate();
         let mut nonce = [0u8; NONCE_LEN];
-        nonce.copy_from_slice(&key.as_bytes()[..NONCE_LEN]);
+        OsRng.fill_bytes(&mut nonce);
         nonce
     }
 }
@@ -397,10 +433,8 @@ mod tests {
         let dek_id = km.generate_dek(EncryptionScope::Wal);
         assert_eq!(km.dek_count(), 1);
 
-        let dek = km.unwrap_dek(dek_id);
-        assert!(dek.is_some());
-        let key = dek.unwrap();
-        assert_ne!(key.as_bytes(), &[0u8; 32]); // not all zeros
+        let dek = km.unwrap_dek(dek_id).expect("unwrap should succeed");
+        assert_ne!(dek.as_bytes(), &[0u8; 32]); // not all zeros
     }
 
     #[test]
@@ -409,13 +443,62 @@ mod tests {
         let dek_id = km.generate_dek(EncryptionScope::Table(1));
 
         let plaintext = b"Hello, FalconDB Enterprise!";
+        let encrypted = km.encrypt_block(dek_id, plaintext).unwrap();
+
+        // Encrypted output should differ from plaintext
+        assert_ne!(&encrypted[NONCE_LEN..], plaintext.as_slice());
+        // Should be nonce + ciphertext + tag
+        assert_eq!(encrypted.len(), NONCE_LEN + plaintext.len() + GCM_TAG_LEN);
+
+        let decrypted = km.decrypt_block(dek_id, &encrypted).unwrap();
+        assert_eq!(decrypted.as_slice(), plaintext.as_slice());
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_with_explicit_nonce() {
+        let mut km = KeyManager::new("test-pass");
+        let dek_id = km.generate_dek(EncryptionScope::Wal);
+
+        let plaintext = b"WAL record payload";
         let nonce = [42u8; NONCE_LEN];
 
-        let encrypted = km.encrypt_block(dek_id, plaintext, &nonce).unwrap();
-        assert_ne!(encrypted.as_slice(), plaintext.as_slice());
-
-        let decrypted = km.decrypt_block(dek_id, &encrypted, &nonce).unwrap();
+        let encrypted = km
+            .encrypt_block_with_nonce(dek_id, plaintext, &nonce)
+            .unwrap();
+        let decrypted = km
+            .decrypt_block_with_nonce(dek_id, &encrypted, &nonce)
+            .unwrap();
         assert_eq!(decrypted.as_slice(), plaintext.as_slice());
+    }
+
+    #[test]
+    fn test_tampered_ciphertext_detected() {
+        let mut km = KeyManager::new("test-pass");
+        let dek_id = km.generate_dek(EncryptionScope::Table(1));
+
+        let plaintext = b"sensitive data";
+        let mut encrypted = km.encrypt_block(dek_id, plaintext).unwrap();
+
+        // Tamper with a ciphertext byte (after the nonce)
+        let tamper_pos = NONCE_LEN + 2;
+        if tamper_pos < encrypted.len() {
+            encrypted[tamper_pos] ^= 0xFF;
+        }
+
+        let result = km.decrypt_block(dek_id, &encrypted);
+        assert!(result.is_err(), "Tampered ciphertext must fail authentication");
+    }
+
+    #[test]
+    fn test_wrong_dek_id_fails() {
+        let mut km = KeyManager::new("test-pass");
+        let dek_id = km.generate_dek(EncryptionScope::Wal);
+
+        let encrypted = km.encrypt_block(dek_id, b"data").unwrap();
+
+        // Try to decrypt with a non-existent DEK
+        let result = km.decrypt_block(DekId(999), &encrypted);
+        assert!(matches!(result, Err(TdeError::DekNotFound(_))));
     }
 
     #[test]
@@ -442,15 +525,24 @@ mod tests {
         let dek_id = km.generate_dek(EncryptionScope::Wal);
 
         let plaintext = b"sensitive data before rotation";
-        let nonce = [7u8; NONCE_LEN];
-        let encrypted = km.encrypt_block(dek_id, plaintext, &nonce).unwrap();
+        let encrypted = km.encrypt_block(dek_id, plaintext).unwrap();
 
         // Rotate master key
         km.rotate_master_key("new-password");
 
         // DEK should still decrypt correctly with new master key wrapping
-        let decrypted = km.decrypt_block(dek_id, &encrypted, &nonce).unwrap();
+        let decrypted = km.decrypt_block(dek_id, &encrypted).unwrap();
         assert_eq!(decrypted.as_slice(), plaintext.as_slice());
+    }
+
+    #[test]
+    fn test_master_key_rotation_salt_changes() {
+        let mut km = KeyManager::new("pass");
+        let salt_before = *km.salt();
+        km.rotate_master_key("new-pass");
+        let salt_after = *km.salt();
+        // Salt should change on rotation (overwhelmingly likely with 16 random bytes)
+        assert_ne!(salt_before, salt_after);
     }
 
     #[test]
@@ -485,6 +577,15 @@ mod tests {
     }
 
     #[test]
+    fn test_different_salt_different_key() {
+        let s1 = [1u8; SALT_LEN];
+        let s2 = [2u8; SALT_LEN];
+        let k1 = EncryptionKey::derive_from_passphrase("same", &s1);
+        let k2 = EncryptionKey::derive_from_passphrase("same", &s2);
+        assert_ne!(k1.as_bytes(), k2.as_bytes());
+    }
+
+    #[test]
     fn test_encryption_scope_display() {
         assert_eq!(EncryptionScope::Wal.to_string(), "wal");
         assert_eq!(EncryptionScope::Table(5).to_string(), "table_5");
@@ -501,5 +602,85 @@ mod tests {
         assert_eq!(deks.len(), 2);
         assert!(deks.iter().any(|d| d.label == "wal"));
         assert!(deks.iter().any(|d| d.label == "table_1"));
+    }
+
+    #[test]
+    fn test_from_salt_reproduces_master_key() {
+        let salt = [7u8; SALT_LEN];
+        let km1 = KeyManager::from_salt("secret", salt);
+        let km2 = KeyManager::from_salt("secret", salt);
+        // Both should derive the same master key → unwrap the same DEKs
+        assert_eq!(km1.master_key.as_bytes(), km2.master_key.as_bytes());
+    }
+
+    #[test]
+    fn test_large_block_roundtrip() {
+        let mut km = KeyManager::new("test");
+        let dek_id = km.generate_dek(EncryptionScope::Sst(1));
+
+        // 64 KB block (typical page size)
+        let plaintext: Vec<u8> = (0..65536).map(|i| (i % 256) as u8).collect();
+        let encrypted = km.encrypt_block(dek_id, &plaintext).unwrap();
+        let decrypted = km.decrypt_block(dek_id, &encrypted).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_empty_block_roundtrip() {
+        let mut km = KeyManager::new("test");
+        let dek_id = km.generate_dek(EncryptionScope::Table(1));
+
+        let encrypted = km.encrypt_block(dek_id, b"").unwrap();
+        let decrypted = km.decrypt_block(dek_id, &encrypted).unwrap();
+        assert!(decrypted.is_empty());
+    }
+
+    #[test]
+    fn test_dek_isolation_across_scopes() {
+        // Data encrypted with one scope's DEK cannot be decrypted with another's
+        let mut km = KeyManager::new("test");
+        let wal_dek = km.generate_dek(EncryptionScope::Wal);
+        let tbl_dek = km.generate_dek(EncryptionScope::Table(1));
+
+        let plaintext = b"scope-isolated data";
+        let encrypted = km.encrypt_block(wal_dek, plaintext).unwrap();
+
+        // Decrypt with the wrong DEK: should produce different plaintext or fail auth
+        let wrong_result = km.decrypt_block(tbl_dek, &encrypted);
+        assert!(
+            wrong_result.is_err(),
+            "Decrypting with wrong DEK must fail authentication"
+        );
+    }
+
+    #[test]
+    fn test_old_dek_still_decrypts_after_rotation() {
+        let mut km = KeyManager::new("test");
+        let scope = EncryptionScope::Wal;
+
+        // Encrypt with first DEK
+        let dek1 = km.generate_dek(scope);
+        let encrypted1 = km.encrypt_block(dek1, b"old data").unwrap();
+
+        // Rotate to new DEK
+        let dek2 = km.generate_dek(scope);
+        assert_ne!(dek1, dek2);
+
+        // Old DEK should still decrypt old data
+        let decrypted = km.decrypt_block(dek1, &encrypted1).unwrap();
+        assert_eq!(decrypted.as_slice(), b"old data");
+    }
+
+    #[test]
+    fn test_truncated_ciphertext_fails() {
+        let mut km = KeyManager::new("test");
+        let dek_id = km.generate_dek(EncryptionScope::Wal);
+
+        let encrypted = km.encrypt_block(dek_id, b"data").unwrap();
+
+        // Truncate to less than nonce + tag
+        let truncated = &encrypted[..NONCE_LEN + 5];
+        let result = km.decrypt_block(dek_id, truncated);
+        assert!(result.is_err());
     }
 }

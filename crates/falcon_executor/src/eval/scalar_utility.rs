@@ -3,7 +3,7 @@ use falcon_common::error::ExecutionError;
 use falcon_sql_frontend::types::ScalarFunc;
 
 /// Dispatch a utility-domain scalar function.
-pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionError> {
+pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionError> {
     match func {
         ScalarFunc::PgTypeof => {
             let type_name = match args.first() {
@@ -21,16 +21,15 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                 Some(Datum::Interval(_, _, _)) => "interval",
                 Some(Datum::Uuid(_)) => "uuid",
                 Some(Datum::Bytea(_)) => "bytea",
-                Some(Datum::Null) => "unknown",
-                None => "unknown",
+                Some(Datum::Null) | None => "unknown",
             };
-            Ok(Datum::Text(type_name.to_string()))
+            Ok(Datum::Text(type_name.to_owned()))
         }
         ScalarFunc::ToNumber => {
             let s = match args.first() {
                 Some(Datum::Text(s)) => s.clone(),
                 Some(Datum::Null) => return Ok(Datum::Null),
-                Some(Datum::Int32(n)) => return Ok(Datum::Float64(*n as f64)),
+                Some(Datum::Int32(n)) => return Ok(Datum::Float64(f64::from(*n))),
                 Some(Datum::Int64(n)) => return Ok(Datum::Float64(*n as f64)),
                 Some(Datum::Float64(_)) => return Ok(args[0].clone()),
                 _ => return Err(ExecutionError::TypeError("TO_NUMBER requires text".into())),
@@ -42,7 +41,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             cleaned
                 .parse::<f64>()
                 .map(Datum::Float64)
-                .map_err(|_| ExecutionError::TypeError(format!("Cannot convert '{}' to number", s)))
+                .map_err(|_| ExecutionError::TypeError(format!("Cannot convert '{s}' to number")))
         }
         ScalarFunc::Random => {
             use std::collections::hash_map::DefaultHasher;
@@ -84,8 +83,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             Ok(Datum::Int64(count as i64))
         }
         _ => Err(ExecutionError::TypeError(format!(
-            "Not a utility function: {:?}",
-            func
+            "Not a utility function: {func:?}"
         ))),
     }
 }

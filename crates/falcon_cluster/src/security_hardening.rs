@@ -91,7 +91,7 @@ impl AuthRateLimiter {
         self.total_checks.fetch_add(1, Ordering::Relaxed);
         let mut sources = self.sources.lock();
         let state = sources
-            .entry(source.to_string())
+            .entry(source.to_owned())
             .or_insert_with(AuthSourceState::new);
         let now = Instant::now();
 
@@ -122,7 +122,7 @@ impl AuthRateLimiter {
         self.total_failures_recorded.fetch_add(1, Ordering::Relaxed);
         let mut sources = self.sources.lock();
         let state = sources
-            .entry(source.to_string())
+            .entry(source.to_owned())
             .or_insert_with(AuthSourceState::new);
         let now = Instant::now();
 
@@ -268,11 +268,11 @@ impl PasswordPolicy {
             ));
         }
 
-        if self.config.require_uppercase && !password.chars().any(|c| c.is_uppercase()) {
+        if self.config.require_uppercase && !password.chars().any(char::is_uppercase) {
             reasons.push("Password must contain at least one uppercase letter".into());
         }
 
-        if self.config.require_lowercase && !password.chars().any(|c| c.is_lowercase()) {
+        if self.config.require_lowercase && !password.chars().any(char::is_lowercase) {
             reasons.push("Password must contain at least one lowercase letter".into());
         }
 
@@ -306,7 +306,7 @@ impl PasswordPolicy {
             .unwrap_or_default()
             .as_millis() as u64;
         let age_ms = now_ms.saturating_sub(last_changed_epoch_ms);
-        let max_age_ms = self.config.max_age_days as u64 * 86_400_000;
+        let max_age_ms = u64::from(self.config.max_age_days) * 86_400_000;
         age_ms > max_age_ms
     }
 
@@ -470,7 +470,7 @@ impl SqlFirewall {
             if sql_upper.contains(&pattern_upper) {
                 self.total_blocked.fetch_add(1, Ordering::Relaxed);
                 return SqlFirewallResult::Blocked {
-                    reason: format!("Blocked by custom pattern: {}", pattern),
+                    reason: format!("Blocked by custom pattern: {pattern}"),
                 };
             }
         }
@@ -485,8 +485,7 @@ impl SqlFirewall {
         for pat in &tautology_patterns {
             if sql_upper.contains(pat) {
                 return Some(format!(
-                    "SQL injection pattern detected: tautology ({})",
-                    pat
+                    "SQL injection pattern detected: tautology ({pat})"
                 ));
             }
         }
@@ -537,7 +536,7 @@ impl SqlFirewall {
             ("LOAD ", "LOAD is restricted to superusers"),
         ];
         for (pattern, reason) in &dangerous {
-            if sql_upper.starts_with(pattern) || sql_upper.contains(&format!(" {}", pattern)) {
+            if sql_upper.starts_with(pattern) || sql_upper.contains(&format!(" {pattern}")) {
                 return Some(reason.to_string());
             }
         }

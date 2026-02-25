@@ -734,7 +734,7 @@ impl FailoverDamper {
             timestamp: now,
             shard_id,
             suppressed: true,
-            reason: reason.to_string(),
+            reason: reason.to_owned(),
         });
         self.gc_history(&mut history, now);
     }

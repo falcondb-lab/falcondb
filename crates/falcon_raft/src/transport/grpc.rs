@@ -127,7 +127,7 @@ impl GrpcTransport {
         let start = Instant::now();
         let result = tokio::time::timeout(
             Duration::from_millis(
-                self.config.snapshot_chunk_timeout_ms * chunk_index.max(1) as u64,
+                self.config.snapshot_chunk_timeout_ms * u64::from(chunk_index.max(1)),
             ),
             client.stream_snapshot(tonic::Request::new(stream)),
         )
@@ -180,8 +180,7 @@ impl GrpcTransport {
             if let Some(conn) = conns.get_mut(&peer_id) {
                 if !conn.circuit_breaker.allow_request() {
                     return Err(TransportError::Unreachable(format!(
-                        "circuit breaker open for peer {}",
-                        peer_id
+                        "circuit breaker open for peer {peer_id}"
                     )));
                 }
             }
@@ -206,8 +205,7 @@ impl GrpcTransport {
             Ok(Ok(resp)) => Ok(resp.into_inner().data),
             Ok(Err(status)) => Err(grpc_status_to_transport_error(status)),
             Err(_) => Err(TransportError::Timeout(format!(
-                "{:?} to peer {} timed out",
-                rpc_type, peer_id
+                "{rpc_type:?} to peer {peer_id} timed out"
             ))),
         };
 
@@ -241,17 +239,17 @@ impl GrpcTransport {
             .read()
             .get(&peer_id)
             .cloned()
-            .ok_or_else(|| TransportError::Unreachable(format!("peer {} not registered", peer_id)))?;
+            .ok_or_else(|| TransportError::Unreachable(format!("peer {peer_id} not registered")))?;
 
-        let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{}", addr))
-            .map_err(|e| TransportError::Internal(format!("invalid addr {}: {}", addr, e)))?
+        let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+            .map_err(|e| TransportError::Internal(format!("invalid addr {addr}: {e}")))?
             .connect_timeout(self.config.connect_timeout())
             .timeout(self.config.request_timeout());
 
         let channel = endpoint
             .connect()
             .await
-            .map_err(|e| TransportError::Unreachable(format!("connect to {}: {}", addr, e)))?;
+            .map_err(|e| TransportError::Unreachable(format!("connect to {addr}: {e}")))?;
 
         let client = RaftTransportClient::new(channel);
         conns.insert(
@@ -313,17 +311,17 @@ impl RpcType {
 fn grpc_status_to_transport_error(status: tonic::Status) -> TransportError {
     match status.code() {
         tonic::Code::Unavailable | tonic::Code::Aborted => {
-            TransportError::Unreachable(status.message().to_string())
+            TransportError::Unreachable(status.message().to_owned())
         }
-        tonic::Code::DeadlineExceeded => TransportError::Timeout(status.message().to_string()),
+        tonic::Code::DeadlineExceeded => TransportError::Timeout(status.message().to_owned()),
         tonic::Code::ResourceExhausted => TransportError::PayloadTooLarge {
             size: 0,
             max: 0,
         },
         tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => {
-            TransportError::RemoteRejected(status.message().to_string())
+            TransportError::RemoteRejected(status.message().to_owned())
         }
-        tonic::Code::Unimplemented => TransportError::Unsupported(status.message().to_string()),
+        tonic::Code::Unimplemented => TransportError::Unsupported(status.message().to_owned()),
         _ => TransportError::Internal(format!("{}: {}", status.code(), status.message())),
     }
 }
@@ -337,7 +335,7 @@ pub fn crc32_fast_pub(data: &[u8]) -> u32 {
 pub(crate) fn crc32_fast(data: &[u8]) -> u32 {
     let mut hash: u32 = 0xFFFFFFFF;
     for &byte in data {
-        hash ^= byte as u32;
+        hash ^= u32::from(byte);
         for _ in 0..8 {
             if hash & 1 != 0 {
                 hash = (hash >> 1) ^ 0xEDB88320;

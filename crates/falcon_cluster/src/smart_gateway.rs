@@ -177,7 +177,7 @@ impl GatewayError {
     pub fn not_leader(shard_id: u64, epoch: u64, leader_hint: Option<String>) -> Self {
         Self {
             code: GatewayErrorCode::NotLeader,
-            message: format!("Shard {} leader changed at epoch {}", shard_id, epoch),
+            message: format!("Shard {shard_id} leader changed at epoch {epoch}"),
             leader_hint,
             retry_after_ms: Some(0),
             epoch,
@@ -188,7 +188,7 @@ impl GatewayError {
     pub fn no_route(shard_id: u64, epoch: u64) -> Self {
         Self {
             code: GatewayErrorCode::NoRoute,
-            message: format!("No route to shard {} at epoch {}", shard_id, epoch),
+            message: format!("No route to shard {shard_id} at epoch {epoch}"),
             leader_hint: None,
             retry_after_ms: Some(100),
             epoch,
@@ -199,7 +199,7 @@ impl GatewayError {
     pub fn overloaded(reason: &str) -> Self {
         Self {
             code: GatewayErrorCode::Overloaded,
-            message: format!("Gateway overloaded: {}", reason),
+            message: format!("Gateway overloaded: {reason}"),
             leader_hint: None,
             retry_after_ms: Some(500),
             epoch: 0,
@@ -210,7 +210,7 @@ impl GatewayError {
     pub fn timeout(shard_id: u64, elapsed_ms: u64) -> Self {
         Self {
             code: GatewayErrorCode::Timeout,
-            message: format!("Request to shard {} timed out after {}ms", shard_id, elapsed_ms),
+            message: format!("Request to shard {shard_id} timed out after {elapsed_ms}ms"),
             leader_hint: None,
             retry_after_ms: Some(200),
             epoch: 0,
@@ -270,7 +270,7 @@ impl JdbcConnectionUrl {
     pub fn parse(url: &str) -> Result<Self, String> {
         let stripped = url
             .strip_prefix("jdbc:falcondb://")
-            .ok_or_else(|| format!("URL must start with 'jdbc:falcondb://': {}", url))?;
+            .ok_or_else(|| format!("URL must start with 'jdbc:falcondb://': {url}"))?;
 
         // Split off query params
         let (path_part, params) = if let Some(idx) = stripped.find('?') {
@@ -279,8 +279,8 @@ impl JdbcConnectionUrl {
                 .split('&')
                 .filter_map(|kv| {
                     let mut parts = kv.splitn(2, '=');
-                    let key = parts.next()?.to_string();
-                    let val = parts.next().unwrap_or("").to_string();
+                    let key = parts.next()?.to_owned();
+                    let val = parts.next().unwrap_or("").to_owned();
                     Some((key, val))
                 })
                 .collect();
@@ -293,7 +293,7 @@ impl JdbcConnectionUrl {
         let (hosts_str, database) = if let Some(idx) = path_part.find('/') {
             (&path_part[..idx], path_part[idx + 1..].to_string())
         } else {
-            (path_part, "falcon".to_string())
+            (path_part, "falcon".to_owned())
         };
 
         // Parse host:port pairs
@@ -305,11 +305,11 @@ impl JdbcConnectionUrl {
                     let host = hp[..colon].to_string();
                     let port = hp[colon + 1..]
                         .parse::<u16>()
-                        .map_err(|_| format!("Invalid port in '{}'", hp))?;
+                        .map_err(|_| format!("Invalid port in '{hp}'"))?;
                     Ok(HostPort { host, port })
                 } else {
                     Ok(HostPort {
-                        host: hp.to_string(),
+                        host: hp.to_owned(),
                         port: 5443, // Default FalconDB port
                     })
                 }
@@ -317,7 +317,7 @@ impl JdbcConnectionUrl {
             .collect::<Result<Vec<_>, String>>()?;
 
         if seeds.is_empty() {
-            return Err("At least one host is required".to_string());
+            return Err("At least one host is required".to_owned());
         }
 
         Ok(Self {
@@ -329,13 +329,13 @@ impl JdbcConnectionUrl {
 
     /// Format back to JDBC URL string.
     pub fn to_url(&self) -> String {
-        let hosts: Vec<String> = self.seeds.iter().map(|s| s.to_string()).collect();
+        let hosts: Vec<String> = self.seeds.iter().map(std::string::ToString::to_string).collect();
         let mut url = format!("jdbc:falcondb://{}/{}", hosts.join(","), self.database);
         if !self.params.is_empty() {
             let params: Vec<String> = self
                 .params
                 .iter()
-                .map(|(k, v)| format!("{}={}", k, v))
+                .map(|(k, v)| format!("{k}={v}"))
                 .collect();
             url.push('?');
             url.push_str(&params.join("&"));
@@ -445,7 +445,7 @@ impl TopologyCache {
 
     /// Register or update a node in the directory.
     pub fn register_node(&self, node_id: NodeId, address: String, role: GatewayRole) {
-        let mut dir = self.node_directory.write().unwrap_or_else(|p| p.into_inner());
+        let mut dir = self.node_directory.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         dir.insert(
             node_id.0,
             NodeInfo {
@@ -460,7 +460,7 @@ impl TopologyCache {
 
     /// Mark a node as dead.
     pub fn mark_node_dead(&self, node_id: NodeId) {
-        let mut dir = self.node_directory.write().unwrap_or_else(|p| p.into_inner());
+        let mut dir = self.node_directory.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(info) = dir.get_mut(&node_id.0) {
             info.is_alive = false;
         }
@@ -468,7 +468,7 @@ impl TopologyCache {
 
     /// Mark a node as alive (heartbeat received).
     pub fn mark_node_alive(&self, node_id: NodeId) {
-        let mut dir = self.node_directory.write().unwrap_or_else(|p| p.into_inner());
+        let mut dir = self.node_directory.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(info) = dir.get_mut(&node_id.0) {
             info.is_alive = true;
             info.last_heartbeat = Instant::now();
@@ -482,13 +482,12 @@ impl TopologyCache {
         leader_node: NodeId,
         leader_addr: String,
     ) -> u64 {
-        let mut entries = self.entries.write().unwrap_or_else(|p| p.into_inner());
+        let mut entries = self.entries.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         let current_epoch = self.epoch.load(Ordering::Acquire);
 
         let changed = entries
             .get(&shard_id.0)
-            .map(|e| e.leader_node != leader_node)
-            .unwrap_or(true);
+            .is_none_or(|e| e.leader_node != leader_node);
 
         let epoch = if changed {
             self.metrics.leader_changes.fetch_add(1, Ordering::Relaxed);
@@ -516,29 +515,26 @@ impl TopologyCache {
 
     /// Look up the leader for a shard.
     pub fn get_leader(&self, shard_id: ShardId) -> Option<TopologyEntry> {
-        let entries = self.entries.read().unwrap_or_else(|p| p.into_inner());
-        match entries.get(&shard_id.0) {
-            Some(entry) => {
-                self.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
-                Some(entry.clone())
-            }
-            None => {
-                self.metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
-                None
-            }
+        let entries = self.entries.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = entries.get(&shard_id.0) {
+            self.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
+            Some(entry.clone())
+        } else {
+            self.metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
+            None
         }
     }
 
     /// Invalidate a shard's leader entry (e.g., after a NOT_LEADER error).
     pub fn invalidate(&self, shard_id: ShardId) {
-        let mut entries = self.entries.write().unwrap_or_else(|p| p.into_inner());
+        let mut entries = self.entries.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         entries.remove(&shard_id.0);
         self.metrics.invalidations.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Invalidate all entries for a given node (node crash).
     pub fn invalidate_node(&self, node_id: NodeId) {
-        let mut entries = self.entries.write().unwrap_or_else(|p| p.into_inner());
+        let mut entries = self.entries.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         let before = entries.len();
         entries.retain(|_, v| v.leader_node != node_id);
         let removed = before - entries.len();
@@ -552,26 +548,26 @@ impl TopologyCache {
 
     /// Get a snapshot of the node directory.
     pub fn node_directory_snapshot(&self) -> Vec<NodeInfo> {
-        let dir = self.node_directory.read().unwrap_or_else(|p| p.into_inner());
+        let dir = self.node_directory.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         dir.values().cloned().collect()
     }
 
     /// Get node address by ID.
     pub fn node_address(&self, node_id: NodeId) -> Option<String> {
-        let dir = self.node_directory.read().unwrap_or_else(|p| p.into_inner());
+        let dir = self.node_directory.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         dir.get(&node_id.0).map(|n| n.address.clone())
     }
 
     /// Check if a node is alive.
     pub fn is_node_alive(&self, node_id: NodeId) -> bool {
-        let dir = self.node_directory.read().unwrap_or_else(|p| p.into_inner());
-        dir.get(&node_id.0).map(|n| n.is_alive).unwrap_or(false)
+        let dir = self.node_directory.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        dir.get(&node_id.0).is_some_and(|n| n.is_alive)
     }
 
     /// Metrics snapshot.
     pub fn metrics_snapshot(&self) -> TopologyCacheMetricsSnapshot {
-        let entries = self.entries.read().unwrap_or_else(|p| p.into_inner());
-        let dir = self.node_directory.read().unwrap_or_else(|p| p.into_inner());
+        let entries = self.entries.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = self.node_directory.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         let hits = self.metrics.cache_hits.load(Ordering::Relaxed);
         let misses = self.metrics.cache_misses.load(Ordering::Relaxed);
         let total = hits + misses;
@@ -1010,7 +1006,7 @@ impl SeedGatewayList {
     }
 
     /// Report a failure. Returns true if failover occurred.
-    pub fn report_failure(&mut self) -> bool {
+    pub const fn report_failure(&mut self) -> bool {
         self.consecutive_failures += 1;
         if self.consecutive_failures >= self.max_failures_before_switch {
             self.failover();
@@ -1171,8 +1167,7 @@ impl WalMode {
     pub const fn recommended_sync_mode(&self) -> &'static str {
         match self {
             Self::Auto | Self::Posix => "fdatasync",
-            Self::WinAsync => "fsync",
-            Self::RawExperimental => "fsync",
+            Self::WinAsync | Self::RawExperimental => "fsync",
         }
     }
 

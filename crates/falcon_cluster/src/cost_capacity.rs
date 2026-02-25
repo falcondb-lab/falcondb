@@ -5,7 +5,7 @@
 //! and previews impact before every change.
 
 use std::collections::{HashMap, VecDeque};
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
@@ -234,17 +234,17 @@ impl fmt::Display for Recommendation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ScaleOut { add_nodes, reason } =>
-                write!(f, "SCALE_OUT(+{} nodes: {})", add_nodes, reason),
+                write!(f, "SCALE_OUT(+{add_nodes} nodes: {reason})"),
             Self::IncreaseCompression { suggested_profile, .. } =>
-                write!(f, "COMPRESS(→{})", suggested_profile),
+                write!(f, "COMPRESS(→{suggested_profile})"),
             Self::WalGc { suggested_gc_threshold_mb } =>
-                write!(f, "WAL_GC(threshold={}MB)", suggested_gc_threshold_mb),
+                write!(f, "WAL_GC(threshold={suggested_gc_threshold_mb}MB)"),
             Self::ColdCompaction { estimated_savings_mb } =>
-                write!(f, "COLD_COMPACT(save ~{}MB)", estimated_savings_mb),
+                write!(f, "COLD_COMPACT(save ~{estimated_savings_mb}MB)"),
             Self::ShardRebalance { overloaded_nodes } =>
-                write!(f, "REBALANCE(overloaded={:?})", overloaded_nodes),
+                write!(f, "REBALANCE(overloaded={overloaded_nodes:?})"),
             Self::ConnectionPoolResize { suggested, .. } =>
-                write!(f, "RESIZE_POOL(→{})", suggested),
+                write!(f, "RESIZE_POOL(→{suggested})"),
         }
     }
 }
@@ -364,14 +364,14 @@ impl CapacityGuardV2 {
                 PressureType::WalGrowthTooFast,
                 CapacityGuardSeverity::Urgent,
                 Recommendation::WalGc { suggested_gc_threshold_mb: max_wal_bytes / 2 / (1024 * 1024) },
-                format!("WAL fills in {:.1}h at current rate", hours_to_fill),
+                format!("WAL fills in {hours_to_fill:.1}h at current rate"),
             ))
         } else if hours_to_fill < 24.0 {
             Some(self.create_alert(
                 PressureType::WalGrowthTooFast,
                 CapacityGuardSeverity::Warning,
                 Recommendation::WalGc { suggested_gc_threshold_mb: max_wal_bytes / 3 / (1024 * 1024) },
-                format!("WAL fills in {:.1}h at current rate", hours_to_fill),
+                format!("WAL fills in {hours_to_fill:.1}h at current rate"),
             ))
         } else {
             None
@@ -390,7 +390,7 @@ impl CapacityGuardV2 {
                 PressureType::ColdSegmentBloat,
                 CapacityGuardSeverity::Advisory,
                 Recommendation::ColdCompaction { estimated_savings_mb: (uncompressed_bytes / 5) / (1024 * 1024) },
-                format!("Cold compression ratio {:.2} — consider recompaction", ratio),
+                format!("Cold compression ratio {ratio:.2} — consider recompaction"),
             ))
         } else {
             None
@@ -622,11 +622,11 @@ impl PostmortemGenerator {
             .as_secs();
         let dp = DecisionPoint {
             id, timestamp: ts,
-            decision: decision.to_string(),
-            reason: reason.to_string(),
-            trigger_metric: trigger_metric.to_string(),
+            decision: decision.to_owned(),
+            reason: reason.to_owned(),
+            trigger_metric: trigger_metric.to_owned(),
             trigger_value, threshold,
-            action_taken: action_taken.to_string(),
+            action_taken: action_taken.to_owned(),
             outcome: String::new(),
         };
         let mut dps = self.decision_points.lock();
@@ -651,11 +651,11 @@ impl PostmortemGenerator {
         let id = self.next_decision_id.fetch_add(1, Ordering::Relaxed);
         let dp = DecisionPoint {
             id, timestamp,
-            decision: decision.to_string(),
-            reason: reason.to_string(),
-            trigger_metric: trigger_metric.to_string(),
+            decision: decision.to_owned(),
+            reason: reason.to_owned(),
+            trigger_metric: trigger_metric.to_owned(),
             trigger_value, threshold,
-            action_taken: action_taken.to_string(),
+            action_taken: action_taken.to_owned(),
             outcome: String::new(),
         };
         let mut dps = self.decision_points.lock();
@@ -669,7 +669,7 @@ impl PostmortemGenerator {
     pub fn update_outcome(&self, decision_id: u64, outcome: &str) {
         let mut dps = self.decision_points.lock();
         if let Some(dp) = dps.iter_mut().find(|d| d.id == decision_id) {
-            dp.outcome = outcome.to_string();
+            dp.outcome = outcome.to_owned();
         }
     }
 
@@ -685,7 +685,7 @@ impl PostmortemGenerator {
     /// Record a metric sample with explicit timestamp.
     pub fn record_metric_at(&self, name: &str, value: f64, timestamp: u64) {
         let mut snaps = self.metric_snapshots.write();
-        let q = snaps.entry(name.to_string())
+        let q = snaps.entry(name.to_owned())
             .or_insert_with(|| VecDeque::with_capacity(self.max_metric_samples));
         if q.len() >= self.max_metric_samples { q.pop_front(); }
         q.push_back((timestamp, value));
@@ -739,7 +739,7 @@ impl PostmortemGenerator {
 
         PostmortemReport {
             incident_id,
-            title: title.to_string(),
+            title: title.to_owned(),
             generated_at: now,
             window_start,
             window_end,
@@ -755,39 +755,39 @@ impl PostmortemGenerator {
     /// Export a report as formatted text (for `falconctl postmortem export`).
     pub fn export_text(report: &PostmortemReport) -> String {
         let mut out = String::new();
-        out.push_str(&format!("=== POSTMORTEM: {} ===\n", report.title));
-        out.push_str(&format!("Incident ID: {}\n", report.incident_id));
-        out.push_str(&format!("Window: {} — {}\n", report.window_start, report.window_end));
-        out.push_str(&format!("Generated: {}\n\n", report.generated_at));
+        let _ = writeln!(out, "=== POSTMORTEM: {} ===", report.title);
+        let _ = writeln!(out, "Incident ID: {}", report.incident_id);
+        let _ = writeln!(out, "Window: {} — {}", report.window_start, report.window_end);
+        let _ = writeln!(out, "Generated: {}\n", report.generated_at);
 
         out.push_str("--- TIMELINE ---\n");
         for entry in &report.timeline {
-            out.push_str(&format!("[{}] [{}] {} — {}\n",
-                entry.timestamp, entry.severity, entry.event_type, entry.description));
+            let _ = writeln!(out, "[{}] [{}] {} — {}",
+                entry.timestamp, entry.severity, entry.event_type, entry.description);
         }
 
         out.push_str("\n--- METRIC CHANGES ---\n");
         for mc in &report.metric_changes {
-            out.push_str(&format!("{}: {:.2} → {:.2} ({:+.1}%)\n",
-                mc.metric_name, mc.before, mc.after, mc.delta_pct));
+            let _ = writeln!(out, "{}: {:.2} → {:.2} ({:+.1}%)",
+                mc.metric_name, mc.before, mc.after, mc.delta_pct);
         }
 
         out.push_str("\n--- DECISION POINTS ---\n");
         for dp in &report.decision_points {
-            out.push_str(&format!("[{}] {}: {} (trigger: {}={:.2} > {:.2}) → {}\n",
+            let _ = writeln!(out, "[{}] {}: {} (trigger: {}={:.2} > {:.2}) → {}",
                 dp.timestamp, dp.decision, dp.reason,
                 dp.trigger_metric, dp.trigger_value, dp.threshold,
-                dp.action_taken));
+                dp.action_taken);
             if !dp.outcome.is_empty() {
-                out.push_str(&format!("  Outcome: {}\n", dp.outcome));
+                let _ = writeln!(out, "  Outcome: {}", dp.outcome);
             }
         }
 
         if let Some(ref rc) = report.root_cause {
-            out.push_str(&format!("\n--- ROOT CAUSE ---\n{}\n", rc));
+            let _ = write!(out, "\n--- ROOT CAUSE ---\n{rc}\n");
         }
         if let Some(ref impact) = report.impact_summary {
-            out.push_str(&format!("\n--- IMPACT ---\n{}\n", impact));
+            let _ = write!(out, "\n--- IMPACT ---\n{impact}\n");
         }
         out
     }
@@ -897,17 +897,17 @@ impl fmt::Display for ProposedChange {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::IncreaseCompression { from, to } =>
-                write!(f, "compression: {} → {}", from, to),
+                write!(f, "compression: {from} → {to}"),
             Self::AddNode { node_count } =>
-                write!(f, "add {} node(s)", node_count),
+                write!(f, "add {node_count} node(s)"),
             Self::RemoveNode { node_id } =>
-                write!(f, "remove node {:?}", node_id),
+                write!(f, "remove node {node_id:?}"),
             Self::ChangeReplicationFactor { from, to } =>
-                write!(f, "replication: {} → {}", from, to),
+                write!(f, "replication: {from} → {to}"),
             Self::ResizeConnectionPool { from, to } =>
-                write!(f, "pool: {} → {}", from, to),
+                write!(f, "pool: {from} → {to}"),
             Self::AdjustWalGc { new_threshold_mb } =>
-                write!(f, "WAL GC threshold → {}MB", new_threshold_mb),
+                write!(f, "WAL GC threshold → {new_threshold_mb}MB"),
             Self::EnableColdCompaction =>
                 write!(f, "enable cold compaction"),
         }
@@ -980,13 +980,12 @@ impl ChangeImpactPreview {
                 ImpactEstimate {
                     change: change.to_string(),
                     cpu_delta_pct: 5.0,
-                    memory_delta_bytes: -((1024 * 1024 * 100) as i64), // -100MB cold
-                    storage_delta_bytes: -((1024 * 1024 * 500) as i64),
+                    memory_delta_bytes: -i64::from(1024 * 1024 * 100), // -100MB cold
+                    storage_delta_bytes: -i64::from(1024 * 1024 * 500),
                     latency_p99_delta_us: 200, // slight increase on read
                     guardrail_ok: true,
                     summary: format!(
-                        "Compression {} → {}: +5% CPU (compactor), -100MB cold memory, -500MB storage, p99 +0.2ms (guardrail OK)",
-                        from, to
+                        "Compression {from} → {to}: +5% CPU (compactor), -100MB cold memory, -500MB storage, p99 +0.2ms (guardrail OK)"
                     ),
                     risk: ImpactRisk::Low,
                 }
@@ -1000,8 +999,7 @@ impl ChangeImpactPreview {
                     latency_p99_delta_us: -500, // improvement from lower per-node load
                     guardrail_ok: true,
                     summary: format!(
-                        "Add {} node(s): triggers shard rebalance, ~10min migration, p99 improves ~0.5ms",
-                        node_count
+                        "Add {node_count} node(s): triggers shard rebalance, ~10min migration, p99 improves ~0.5ms"
                     ),
                     risk: ImpactRisk::Medium,
                 }
@@ -1015,14 +1013,13 @@ impl ChangeImpactPreview {
                     latency_p99_delta_us: 1000,
                     guardrail_ok: false, // removing node may breach guardrails
                     summary: format!(
-                        "Remove {:?}: +10% CPU on remaining, p99 +1ms, guardrail may breach during migration",
-                        node_id
+                        "Remove {node_id:?}: +10% CPU on remaining, p99 +1ms, guardrail may breach during migration"
                     ),
                     risk: ImpactRisk::High,
                 }
             }
             ProposedChange::ChangeReplicationFactor { from, to } => {
-                let repl_delta = *to as i64 - *from as i64;
+                let repl_delta = i64::from(*to) - i64::from(*from);
                 ImpactEstimate {
                     change: change.to_string(),
                     cpu_delta_pct: repl_delta as f64 * 3.0,
@@ -1044,12 +1041,12 @@ impl ChangeImpactPreview {
                 ImpactEstimate {
                     change: change.to_string(),
                     cpu_delta_pct: 0.0,
-                    memory_delta_bytes: (*to as i64 - *from as i64) * 2 * 1024 * 1024,
+                    memory_delta_bytes: (i64::from(*to) - i64::from(*from)) * 2 * 1024 * 1024,
                     storage_delta_bytes: 0,
                     latency_p99_delta_us: 0,
                     guardrail_ok: true,
                     summary: format!("Pool {} → {}: {}MB memory delta", from, to,
-                        (*to as i64 - *from as i64) * 2),
+                        (i64::from(*to) - i64::from(*from)) * 2),
                     risk: ImpactRisk::Low,
                 }
             }
@@ -1083,15 +1080,15 @@ impl ChangeImpactPreview {
     /// Format impact for CLI display.
     pub fn format_impact(estimate: &ImpactEstimate) -> String {
         let mut out = String::new();
-        out.push_str(&format!("Change: {}\n", estimate.change));
+        let _ = writeln!(out, "Change: {}", estimate.change);
         out.push_str("Impact:\n");
-        out.push_str(&format!("  CPU:     {:+.1}%\n", estimate.cpu_delta_pct));
-        out.push_str(&format!("  Memory:  {:+}B\n", estimate.memory_delta_bytes));
-        out.push_str(&format!("  Storage: {:+}B\n", estimate.storage_delta_bytes));
-        out.push_str(&format!("  p99:     {:+}us\n", estimate.latency_p99_delta_us));
-        out.push_str(&format!("  Guardrail: {}\n", if estimate.guardrail_ok { "OK" } else { "AT RISK" }));
-        out.push_str(&format!("  Risk:    {}\n", estimate.risk));
-        out.push_str(&format!("  Summary: {}\n", estimate.summary));
+        let _ = writeln!(out, "  CPU:     {:+.1}%", estimate.cpu_delta_pct);
+        let _ = writeln!(out, "  Memory:  {:+}B", estimate.memory_delta_bytes);
+        let _ = writeln!(out, "  Storage: {:+}B", estimate.storage_delta_bytes);
+        let _ = writeln!(out, "  p99:     {:+}us", estimate.latency_p99_delta_us);
+        let _ = writeln!(out, "  Guardrail: {}", if estimate.guardrail_ok { "OK" } else { "AT RISK" });
+        let _ = writeln!(out, "  Risk:    {}", estimate.risk);
+        let _ = writeln!(out, "  Summary: {}", estimate.summary);
         out
     }
 }

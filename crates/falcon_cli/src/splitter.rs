@@ -85,7 +85,7 @@ pub fn split_statements(input: &str) -> Vec<String> {
 
         // statement terminator
         if ch == ';' {
-            let stmt = current.trim().to_string();
+            let stmt = current.trim().to_owned();
             if !stmt.is_empty() {
                 statements.push(stmt);
             }
@@ -99,7 +99,7 @@ pub fn split_statements(input: &str) -> Vec<String> {
     }
 
     // trailing statement without terminator
-    let stmt = current.trim().to_string();
+    let stmt = current.trim().to_owned();
     if !stmt.is_empty() {
         statements.push(stmt);
     }

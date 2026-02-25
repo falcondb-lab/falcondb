@@ -4,7 +4,7 @@ use falcon_sql_frontend::types::ScalarFunc;
 use serde_json::Value as JsonValue;
 
 /// Dispatch a JSONB-domain scalar function.
-pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionError> {
+pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionError> {
     match func {
         ScalarFunc::JsonbBuildObject => {
             if !args.len().is_multiple_of(2) {
@@ -17,7 +17,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                 let key = match &chunk[0] {
                     Datum::Text(s) => s.clone(),
                     Datum::Null => return Ok(Datum::Null),
-                    other => format!("{}", other),
+                    other => format!("{other}"),
                 };
                 let val = datum_to_json_value(&chunk[1]);
                 map.insert(key, val);
@@ -38,7 +38,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                 JsonValue::Array(_) => "array",
                 JsonValue::Object(_) => "object",
             };
-            Ok(Datum::Text(type_name.to_string()))
+            Ok(Datum::Text(type_name.to_owned()))
         }
         ScalarFunc::JsonbArrayLength => {
             let json = require_jsonb(args, 0, "jsonb_array_length")?;
@@ -57,7 +57,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                 let key = match arg {
                     Datum::Text(s) => s.clone(),
                     Datum::Null => return Ok(Datum::Null),
-                    other => format!("{}", other),
+                    other => format!("{other}"),
                 };
                 json = match json {
                     JsonValue::Object(ref map) => match map.get(&key) {
@@ -132,7 +132,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             let mut json = require_jsonb(args, 0, "jsonb_delete_key")?;
             let key = match args.get(1) {
                 Some(Datum::Text(s)) => s.clone(),
-                Some(other) => format!("{}", other),
+                Some(other) => format!("{other}"),
                 None => return Ok(Datum::Jsonb(json)),
             };
             match &mut json {
@@ -153,7 +153,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                     .iter()
                     .map(|d| match d {
                         Datum::Text(s) => s.clone(),
-                        other => format!("{}", other),
+                        other => format!("{other}"),
                     })
                     .collect::<Vec<_>>(),
                 _ => return Ok(Datum::Jsonb(json)),
@@ -167,7 +167,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                     .iter()
                     .map(|d| match d {
                         Datum::Text(s) => s.clone(),
-                        other => format!("{}", other),
+                        other => format!("{other}"),
                     })
                     .collect::<Vec<_>>(),
                 _ => return Ok(Datum::Jsonb(json)),
@@ -175,7 +175,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             let new_val = match args.get(2) {
                 Some(Datum::Jsonb(v)) => v.clone(),
                 Some(Datum::Text(s)) => {
-                    serde_json::from_str(s).unwrap_or(JsonValue::String(s.clone()))
+                    serde_json::from_str(s).unwrap_or_else(|_| JsonValue::String(s.clone()))
                 }
                 Some(d) => datum_to_json_value(d),
                 None => JsonValue::Null,
@@ -230,14 +230,10 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
         }
         ScalarFunc::RowToJson => {
             // Simple: convert the first argument to JSON
-            match args.first() {
-                Some(d) => Ok(Datum::Jsonb(datum_to_json_value(d))),
-                None => Ok(Datum::Null),
-            }
+            Ok(args.first().map_or(Datum::Null, |d| Datum::Jsonb(datum_to_json_value(d))))
         }
         _ => Err(ExecutionError::TypeError(format!(
-            "Unknown JSONB function: {:?}",
-            func
+            "Unknown JSONB function: {func:?}"
         ))),
     }
 }
@@ -248,11 +244,10 @@ fn require_jsonb(args: &[Datum], idx: usize, func_name: &str) -> Result<JsonValu
     match args.get(idx) {
         Some(Datum::Jsonb(v)) => Ok(v.clone()),
         Some(Datum::Text(s)) => serde_json::from_str(s)
-            .map_err(|e| ExecutionError::TypeError(format!("{}: invalid JSON: {}", func_name, e))),
+            .map_err(|e| ExecutionError::TypeError(format!("{func_name}: invalid JSON: {e}"))),
         Some(Datum::Null) => Ok(JsonValue::Null),
         _ => Err(ExecutionError::TypeError(format!(
-            "{} requires JSONB argument at position {}",
-            func_name, idx
+            "{func_name} requires JSONB argument at position {idx}"
         ))),
     }
 }
@@ -264,33 +259,30 @@ fn datum_to_json_value(d: &Datum) -> JsonValue {
         Datum::Int32(n) => JsonValue::Number((*n).into()),
         Datum::Int64(n) => JsonValue::Number((*n).into()),
         Datum::Float64(f) => serde_json::Number::from_f64(*f)
-            .map(JsonValue::Number)
-            .unwrap_or(JsonValue::Null),
+            .map_or(JsonValue::Null, JsonValue::Number),
         Datum::Text(s) => JsonValue::String(s.clone()),
         Datum::Timestamp(us) => JsonValue::Number((*us).into()),
         Datum::Date(days) => {
             let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
                 .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or(chrono::NaiveDate::MIN));
-            if let Some(d) = epoch.checked_add_signed(chrono::Duration::days(*days as i64)) {
-                JsonValue::String(d.format("%Y-%m-%d").to_string())
-            } else {
-                JsonValue::Number((*days).into())
-            }
+            epoch.checked_add_signed(chrono::Duration::days(i64::from(*days))).map_or_else(
+                || JsonValue::Number((*days).into()),
+                |d| JsonValue::String(d.format("%Y-%m-%d").to_string()),
+            )
         }
         Datum::Array(arr) => JsonValue::Array(arr.iter().map(datum_to_json_value).collect()),
         Datum::Jsonb(v) => v.clone(),
         Datum::Decimal(m, s) => {
-            let f = *m as f64 / 10f64.powi(*s as i32);
+            let f = *m as f64 / 10f64.powi(i32::from(*s));
             serde_json::Number::from_f64(f)
-                .map(JsonValue::Number)
-                .unwrap_or(JsonValue::Null)
+                .map_or(JsonValue::Null, JsonValue::Number)
         }
         Datum::Time(_) | Datum::Interval(_, _, _) | Datum::Uuid(_) => {
-            JsonValue::String(format!("{}", d))
+            JsonValue::String(format!("{d}"))
         }
         Datum::Bytea(bytes) => {
-            let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-            JsonValue::String(format!("\\x{}", hex))
+            let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            JsonValue::String(format!("\\x{hex}"))
         }
     }
 }

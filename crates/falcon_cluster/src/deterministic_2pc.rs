@@ -280,11 +280,11 @@ impl std::fmt::Display for TimeoutResult {
             Self::SoftTimeout {
                 elapsed_ms,
                 budget_ms,
-            } => write!(f, "soft_timeout({}ms/{}ms)", elapsed_ms, budget_ms),
+            } => write!(f, "soft_timeout({elapsed_ms}ms/{budget_ms}ms)"),
             Self::HardTimeout {
                 elapsed_ms,
                 budget_ms,
-            } => write!(f, "hard_timeout({}ms/{}ms)", elapsed_ms, budget_ms),
+            } => write!(f, "hard_timeout({elapsed_ms}ms/{budget_ms}ms)"),
             Self::ShardTimeout {
                 shard_id,
                 elapsed_us,

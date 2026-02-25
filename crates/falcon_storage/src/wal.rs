@@ -23,7 +23,7 @@
 //! - Replication stream emitting records not yet WAL-durable → phantom commits
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufWriter, Read, Write};
+use std::io::{BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -32,6 +32,84 @@ use falcon_common::error::StorageError;
 use falcon_common::types::{TableId, Timestamp, TxnId};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WAL Encryption — transparent per-record AES-256-GCM encryption
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Cached encryption context for WAL records.
+///
+/// Holds the unwrapped AES-256-GCM cipher derived from a DEK so that
+/// per-record encrypt/decrypt avoids repeated `KeyManager::unwrap_dek` calls.
+///
+/// When present in `WalWriter`, every serialized record is encrypted before
+/// being written. The on-disk format stays `[len:4][crc:4][payload:len]`
+/// where `payload` = `nonce(12) || ciphertext+tag` instead of raw bincode.
+pub struct WalEncryption {
+    cipher: aes_gcm::Aes256Gcm,
+}
+
+impl WalEncryption {
+    /// Create from an unwrapped DEK's raw key bytes.
+    pub fn from_key(key: &crate::encryption::EncryptionKey) -> Self {
+        use aes_gcm::KeyInit;
+        Self {
+            cipher: aes_gcm::Aes256Gcm::new(key.as_bytes().into()),
+        }
+    }
+
+    /// Create from a `KeyManager` + `DekId`. Returns `None` if the DEK
+    /// cannot be unwrapped (wrong master key, missing DEK, etc.).
+    pub fn from_key_manager(
+        km: &crate::encryption::KeyManager,
+        dek_id: crate::encryption::DekId,
+    ) -> Option<Self> {
+        let key = km.unwrap_dek(dek_id).ok()?;
+        Some(Self::from_key(&key))
+    }
+
+    /// Encrypt `plaintext` → `nonce(12) || ciphertext+tag`.
+    fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, StorageError> {
+        use aes_gcm::aead::{Aead, OsRng};
+        use rand::RngCore;
+
+        let mut nonce_bytes = [0u8; crate::encryption::NONCE_LEN];
+        OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce = aes_gcm::Nonce::from_slice(&nonce_bytes);
+
+        let ciphertext = self
+            .cipher
+            .encrypt(nonce, plaintext)
+            .map_err(|_| StorageError::Wal("TDE: AES-256-GCM encryption failed".into()))?;
+
+        let mut out = Vec::with_capacity(crate::encryption::NONCE_LEN + ciphertext.len());
+        out.extend_from_slice(&nonce_bytes);
+        out.extend_from_slice(&ciphertext);
+        Ok(out)
+    }
+
+    /// Decrypt `nonce(12) || ciphertext+tag` → plaintext.
+    fn decrypt(&self, encrypted: &[u8]) -> Result<Vec<u8>, StorageError> {
+        use aes_gcm::aead::Aead;
+
+        if encrypted.len() < crate::encryption::NONCE_LEN + crate::encryption::GCM_TAG_LEN {
+            return Err(StorageError::Wal(
+                "TDE: encrypted WAL record too short".into(),
+            ));
+        }
+        let (nonce_bytes, ciphertext) = encrypted.split_at(crate::encryption::NONCE_LEN);
+        let nonce = aes_gcm::Nonce::from_slice(nonce_bytes);
+        self.cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|_| StorageError::Wal("TDE: AES-256-GCM decryption failed (auth mismatch)".into()))
+    }
+}
+
+impl std::fmt::Debug for WalEncryption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "WalEncryption(AES-256-GCM)")
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // WAL Device Trait — abstraction over the durable storage backend
@@ -157,7 +235,6 @@ impl WalDevice for WalDeviceFile {
         let inner = self.inner.lock();
         let seg_path = inner.dir.join(segment_filename(inner.current_segment));
         let mut file = File::open(&seg_path)?;
-        use std::io::Seek;
         file.seek(std::io::SeekFrom::Start(offset))?;
         let mut buf = vec![0u8; len];
         file.read_exact(&mut buf)?;
@@ -213,6 +290,7 @@ fn find_latest_segment_in(dir: &Path) -> Option<u64> {
 }
 
 /// WAL format version for compatibility checks during online upgrades.
+///
 /// Increment this when the WalRecord enum changes in a backward-incompatible way.
 /// v3: Added WalRecord::CreateIndex and WalRecord::DropIndex variants.
 pub const WAL_FORMAT_VERSION: u32 = 3;
@@ -372,6 +450,9 @@ pub struct WalWriter {
     max_segment_size: u64,
     /// Group commit: buffer up to this many records before flushing.
     group_commit_size: usize,
+    /// Optional TDE encryption context. When `Some`, every record's serialized
+    /// payload is encrypted with AES-256-GCM before being written to disk.
+    encryption: Option<WalEncryption>,
 }
 
 struct WalWriterInner {
@@ -395,7 +476,7 @@ const DEFAULT_SEGMENT_SIZE: u64 = 64 * 1024 * 1024;
 const DEFAULT_GROUP_COMMIT_SIZE: usize = 32;
 
 pub fn segment_filename(segment_id: u64) -> String {
-    format!("falcon_{:06}.wal", segment_id)
+    format!("falcon_{segment_id:06}.wal")
 }
 
 impl WalWriter {
@@ -458,7 +539,19 @@ impl WalWriter {
             sync_mode,
             max_segment_size,
             group_commit_size,
+            encryption: None,
         })
+    }
+
+    /// Enable TDE for this WAL writer. All subsequent `append` calls will
+    /// encrypt the serialized record payload with AES-256-GCM.
+    pub fn set_encryption(&mut self, enc: WalEncryption) {
+        self.encryption = Some(enc);
+    }
+
+    /// Whether WAL encryption is currently active.
+    pub const fn is_encrypted(&self) -> bool {
+        self.encryption.is_some()
     }
 
     fn find_latest_segment(dir: &Path) -> Option<u64> {
@@ -479,9 +572,20 @@ impl WalWriter {
 
     /// Append a record to the WAL. Returns the LSN.
     /// Group commit: if pending records reach the threshold, auto-flush.
+    ///
+    /// When TDE is enabled (`set_encryption`), the serialized payload is
+    /// encrypted with AES-256-GCM before being written. The on-disk format
+    /// is unchanged: `[len:4][crc:4][payload:len]`, but `payload` contains
+    /// `nonce(12) || ciphertext+tag` instead of raw bincode.
     pub fn append(&self, record: &WalRecord) -> Result<u64, StorageError> {
-        let data =
+        let raw =
             bincode::serialize(record).map_err(|e| StorageError::Serialization(e.to_string()))?;
+
+        // Optionally encrypt the serialized payload
+        let data = match &self.encryption {
+            Some(enc) => enc.encrypt(&raw)?,
+            None => raw,
+        };
 
         let lsn = self.lsn.fetch_add(1, Ordering::Relaxed);
         let checksum = crc32fast::hash(&data);
@@ -601,6 +705,16 @@ impl WalReader {
     /// Read records from WAL segments starting at `from_segment_id`.
     /// Used for checkpoint-based recovery (skip segments before checkpoint).
     pub fn read_from_segment(&self, from_segment_id: u64) -> Result<Vec<WalRecord>, StorageError> {
+        self.read_from_segment_encrypted(from_segment_id, None)
+    }
+
+    /// Read records from WAL segments starting at `from_segment_id`,
+    /// decrypting with the given `WalEncryption` context if provided.
+    pub fn read_from_segment_encrypted(
+        &self,
+        from_segment_id: u64,
+        encryption: Option<&WalEncryption>,
+    ) -> Result<Vec<WalRecord>, StorageError> {
         let mut records = Vec::new();
         let mut segment_ids = Vec::new();
         if let Ok(entries) = fs::read_dir(&self.dir) {
@@ -622,7 +736,7 @@ impl WalReader {
             let seg_path = self.dir.join(segment_filename(seg_id));
             if seg_path.exists() {
                 let data = fs::read(&seg_path)?;
-                Self::parse_records(&data, &mut records);
+                Self::parse_records_encrypted(&data, &mut records, encryption)?;
             }
         }
 
@@ -631,13 +745,21 @@ impl WalReader {
 
     /// Read all records from all WAL segments (and legacy single file).
     pub fn read_all(&self) -> Result<Vec<WalRecord>, StorageError> {
+        self.read_all_encrypted(None)
+    }
+
+    /// Read all records, decrypting with the given `WalEncryption` context if provided.
+    pub fn read_all_encrypted(
+        &self,
+        encryption: Option<&WalEncryption>,
+    ) -> Result<Vec<WalRecord>, StorageError> {
         let mut records = Vec::new();
 
         // Try legacy single-file WAL first
         let legacy_path = self.dir.join("falcon.wal");
         if legacy_path.exists() {
             let data = fs::read(&legacy_path)?;
-            Self::parse_records(&data, &mut records);
+            Self::parse_records_encrypted(&data, &mut records, encryption)?;
         }
 
         // Read segmented WAL files in order
@@ -659,23 +781,29 @@ impl WalReader {
             let seg_path = self.dir.join(segment_filename(seg_id));
             if seg_path.exists() {
                 let data = fs::read(&seg_path)?;
-                Self::parse_records(&data, &mut records);
+                Self::parse_records_encrypted(&data, &mut records, encryption)?;
             }
         }
 
         Ok(records)
     }
 
-    /// Parse WAL records from raw bytes, appending to the output vector.
-    /// Automatically detects and skips the segment header (WAL_MAGIC + version).
-    fn parse_records(data: &[u8], records: &mut Vec<WalRecord>) {
-        let mut pos = 0;
-
+    /// Parse WAL records from raw bytes with optional TDE decryption.
+    ///
+    /// When `encryption` is `Some`, each record's on-disk payload is decrypted
+    /// (AES-256-GCM) before bincode deserialization.
+    fn parse_records_encrypted(
+        data: &[u8],
+        records: &mut Vec<WalRecord>,
+        encryption: Option<&WalEncryption>,
+    ) -> Result<(), StorageError> {
         // Skip segment header if present (magic + format version = 8 bytes)
-        if data.len() >= WAL_SEGMENT_HEADER_SIZE && &data[0..4] == WAL_MAGIC.as_slice() {
+        let mut pos = if data.len() >= WAL_SEGMENT_HEADER_SIZE && &data[0..4] == WAL_MAGIC.as_slice() {
             let _format_version = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-            pos = WAL_SEGMENT_HEADER_SIZE;
-        }
+            WAL_SEGMENT_HEADER_SIZE
+        } else {
+            0
+        };
         while pos + 8 <= data.len() {
             let len = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
                 as usize;
@@ -698,7 +826,19 @@ impl WalReader {
                 break;
             }
 
-            match bincode::deserialize::<WalRecord>(record_data) {
+            // Decrypt if TDE is active, otherwise use raw bytes
+            let payload = match encryption {
+                Some(enc) => match enc.decrypt(record_data) {
+                    Ok(plain) => plain,
+                    Err(e) => {
+                        tracing::warn!("WAL TDE decryption error at position {}: {}", pos, e);
+                        break;
+                    }
+                },
+                None => record_data.to_vec(),
+            };
+
+            match bincode::deserialize::<WalRecord>(&payload) {
                 Ok(record) => records.push(record),
                 Err(e) => {
                     tracing::warn!("WAL deserialization error at position {}: {}", pos, e);
@@ -707,6 +847,7 @@ impl WalReader {
             }
             pos += len;
         }
+        Ok(())
     }
 }
 

@@ -65,8 +65,8 @@ impl DistributedExecutor {
             if self.engine.shard(sid).is_none() {
                 return Err(FalconError::internal_bug(
                     "E-SCATTER-001",
-                    format!("Shard {:?} not found during pre-validation", sid),
-                    format!("target_shards={:?}", target_shards),
+                    format!("Shard {sid:?} not found during pre-validation"),
+                    format!("target_shards={target_shards:?}"),
                 ));
             }
         }
@@ -81,7 +81,7 @@ impl DistributedExecutor {
                         let shard = engine.shard(shard_id).ok_or_else(|| {
                             FalconError::internal_bug(
                                 "E-SCATTER-002",
-                                format!("Shard {:?} disappeared during execution", shard_id),
+                                format!("Shard {shard_id:?} disappeared during execution"),
                                 "shard was validated before spawn but missing at execution time",
                             )
                         })?;
@@ -95,7 +95,7 @@ impl DistributedExecutor {
                                 {
                                     let pair = std::sync::Mutex::new(false);
                                     let cvar = std::sync::Condvar::new();
-                                    let guard = pair.lock().unwrap_or_else(|e| e.into_inner());
+                                    let guard = pair.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                                     let _ = cvar.wait_timeout(guard, Duration::from_millis(5));
                                 }
                             }
@@ -140,8 +140,7 @@ impl DistributedExecutor {
 
                         Err(last_err.unwrap_or_else(|| {
                             FalconError::Internal(format!(
-                                "Shard {:?} failed after {} attempts",
-                                shard_id, max_attempts
+                                "Shard {shard_id:?} failed after {max_attempts} attempts"
                             ))
                         }))
                     })
@@ -177,7 +176,7 @@ impl DistributedExecutor {
                 Err(e) => {
                     let sid = target_shards.get(i).copied().unwrap_or(ShardId(i as u64));
                     tracing::warn!("Shard {:?} failed during scatter: {}", sid, e);
-                    failed_shards.push((sid, format!("{}", e)));
+                    failed_shards.push((sid, format!("{e}")));
                 }
             }
         }
@@ -394,7 +393,7 @@ impl DistributedExecutor {
                 let mut merged = merge_two_phase_agg(&shard_results, group_by_indices, agg_merges);
                 // Apply AVG fixups: row[sum_idx] = row[sum_idx] / row[count_idx]
                 for row in &mut merged {
-                    for &(sum_idx, count_idx) in avg_fixups.iter() {
+                    for &(sum_idx, count_idx) in avg_fixups {
                         let sum_val = row.values.get(sum_idx).cloned().unwrap_or(Datum::Null);
                         let count_val = row.values.get(count_idx).cloned().unwrap_or(Datum::Null);
                         let avg = match (&sum_val, &count_val) {
@@ -403,7 +402,7 @@ impl DistributedExecutor {
                                 Datum::Float64(*s as f64 / *c as f64)
                             }
                             (Datum::Int32(s), Datum::Int64(c)) => {
-                                Datum::Float64(*s as f64 / *c as f64)
+                                Datum::Float64(f64::from(*s) / *c as f64)
                             }
                             (Datum::Float64(s), Datum::Int64(c)) => Datum::Float64(s / *c as f64),
                             _ => Datum::Null,
@@ -424,7 +423,7 @@ impl DistributedExecutor {
                 // Apply post-merge ORDER BY
                 if !order_by.is_empty() {
                     merged.sort_by(|a, b| {
-                        for &(col_idx, ascending) in order_by.iter() {
+                        for &(col_idx, ascending) in order_by {
                             let va = a.values.get(col_idx);
                             let vb = b.values.get(col_idx);
                             let ord = compare_datums(va, vb);

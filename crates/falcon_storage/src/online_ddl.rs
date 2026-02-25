@@ -80,13 +80,13 @@ impl std::fmt::Display for DdlOpKind {
                 column_name,
                 ..
             } => {
-                write!(f, "ADD COLUMN {}.{}", table_name, column_name)
+                write!(f, "ADD COLUMN {table_name}.{column_name}")
             }
             Self::DropColumn {
                 table_name,
                 column_name,
             } => {
-                write!(f, "DROP COLUMN {}.{}", table_name, column_name)
+                write!(f, "DROP COLUMN {table_name}.{column_name}")
             }
             Self::ChangeColumnType {
                 table_name,
@@ -95,12 +95,11 @@ impl std::fmt::Display for DdlOpKind {
             } => {
                 write!(
                     f,
-                    "ALTER COLUMN {}.{} TYPE {}",
-                    table_name, column_name, new_type
+                    "ALTER COLUMN {table_name}.{column_name} TYPE {new_type}"
                 )
             }
             Self::MetadataOnly { description } => {
-                write!(f, "{}", description)
+                write!(f, "{description}")
             }
         }
     }
@@ -215,7 +214,7 @@ impl OnlineDdlManager {
     pub fn register(&self, table_id: TableId, kind: DdlOpKind) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let op = DdlOperation::new(id, table_id, kind);
-        let mut ops = self.operations.lock().unwrap_or_else(|p| p.into_inner());
+        let mut ops = self.operations.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         ops.insert(id, op);
         self.gc_completed(&mut ops);
         id
@@ -226,7 +225,7 @@ impl OnlineDdlManager {
         if let Some(op) = self
             .operations
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get_mut(&id)
         {
             op.start();
@@ -238,7 +237,7 @@ impl OnlineDdlManager {
         if let Some(op) = self
             .operations
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get_mut(&id)
         {
             op.begin_backfill(total_rows);
@@ -250,7 +249,7 @@ impl OnlineDdlManager {
         if let Some(op) = self
             .operations
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get_mut(&id)
         {
             op.record_progress(rows);
@@ -262,7 +261,7 @@ impl OnlineDdlManager {
         if let Some(op) = self
             .operations
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get_mut(&id)
         {
             op.complete();
@@ -280,7 +279,7 @@ impl OnlineDdlManager {
         if let Some(op) = self
             .operations
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get_mut(&id)
         {
             op.fail(error.clone());
@@ -292,7 +291,7 @@ impl OnlineDdlManager {
     pub fn get(&self, id: u64) -> Option<DdlOperation> {
         self.operations
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&id)
             .cloned()
     }
@@ -301,7 +300,7 @@ impl OnlineDdlManager {
     pub fn list_active(&self) -> Vec<DdlOperation> {
         self.operations
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
             .filter(|op| op.phase != DdlPhase::Completed && op.phase != DdlPhase::Failed)
             .cloned()
@@ -312,7 +311,7 @@ impl OnlineDdlManager {
     pub fn list_all(&self) -> Vec<DdlOperation> {
         self.operations
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
             .cloned()
             .collect()

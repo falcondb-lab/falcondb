@@ -1,9 +1,12 @@
+use std::fmt::Write as _;
+
 use falcon_common::datum::Datum;
 use falcon_common::error::ExecutionError;
 use falcon_sql_frontend::types::ScalarFunc;
 
 /// Dispatch a string-domain scalar function.
-pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionError> {
+#[inline]
+pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionError> {
     match func {
         ScalarFunc::Upper => match args.first() {
             Some(Datum::Text(s)) => Ok(Datum::Text(s.to_uppercase())),
@@ -42,16 +45,17 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                 Some(Datum::Int64(n)) => (*n as usize).saturating_sub(1),
                 _ => 0,
             };
-            let chars: Vec<char> = s.chars().collect();
-            if start >= chars.len() {
+            // Avoid Vec<char>: find byte offset of char at `start` via char_indices.
+            let byte_start = s.char_indices().nth(start).map(|(i, _)| i).unwrap_or(s.len());
+            if byte_start >= s.len() {
                 return Ok(Datum::Text(String::new()));
             }
-            let len = match args.get(2) {
-                Some(Datum::Int32(n)) => *n as usize,
-                Some(Datum::Int64(n)) => *n as usize,
-                _ => chars.len() - start,
+            let tail = &s[byte_start..];
+            let result: String = match args.get(2) {
+                Some(Datum::Int32(n)) => tail.chars().take(*n as usize).collect(),
+                Some(Datum::Int64(n)) => tail.chars().take(*n as usize).collect(),
+                _ => tail.to_owned(),
             };
-            let result: String = chars[start..].iter().take(len).collect();
             Ok(Datum::Text(result))
         }
         ScalarFunc::Concat => {
@@ -59,12 +63,12 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             for arg in args {
                 match arg {
                     Datum::Text(s) => result.push_str(s),
-                    Datum::Int32(n) => result.push_str(&n.to_string()),
-                    Datum::Int64(n) => result.push_str(&n.to_string()),
-                    Datum::Float64(f) => result.push_str(&f.to_string()),
-                    Datum::Boolean(b) => result.push_str(&b.to_string()),
+                    Datum::Int32(n) => { let _ = write!(result, "{n}"); }
+                    Datum::Int64(n) => { let _ = write!(result, "{n}"); }
+                    Datum::Float64(f) => { let _ = write!(result, "{f}"); }
+                    Datum::Boolean(b) => { let _ = write!(result, "{b}"); }
                     Datum::Null => {} // NULL is skipped in CONCAT
-                    _ => result.push_str(&format!("{}", arg)),
+                    _ => { let _ = write!(result, "{arg}"); }
                 }
             }
             Ok(Datum::Text(result))
@@ -72,7 +76,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
         ScalarFunc::ConcatWs => {
             // CONCAT_WS(separator, val1, val2, ...) — concat with separator, skipping NULLs
             let sep = match args.first() {
-                Some(Datum::Text(s)) => s.clone(),
+                Some(Datum::Text(s)) => s.as_str(),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -80,59 +84,71 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                     ))
                 }
             };
-            let parts: Vec<String> = args[1..]
-                .iter()
-                .filter(|d| !d.is_null())
-                .map(|d| format!("{}", d))
-                .collect();
-            Ok(Datum::Text(parts.join(&sep)))
+            // Avoid intermediate Vec<String>: write directly into result buffer.
+            let mut result = String::new();
+            let mut first = true;
+            for arg in &args[1..] {
+                if arg.is_null() { continue; }
+                if !first { result.push_str(sep); }
+                first = false;
+                match arg {
+                    Datum::Text(s) => result.push_str(s),
+                    _ => { let _ = write!(result, "{arg}"); }
+                }
+            }
+            Ok(Datum::Text(result))
         }
         ScalarFunc::Trim => match args.first() {
-            Some(Datum::Text(s)) => Ok(Datum::Text(s.trim().to_string())),
+            Some(Datum::Text(s)) => Ok(Datum::Text(s.trim().to_owned())),
             Some(Datum::Null) | None => Ok(Datum::Null),
             _ => Err(ExecutionError::TypeError(
                 "TRIM requires text argument".into(),
             )),
         },
         ScalarFunc::Btrim => {
+            // Borrow &str directly — avoid clone before trim.
             let s = match args.first() {
-                Some(Datum::Text(s)) => s.clone(),
+                Some(Datum::Text(s)) => s.as_str(),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("BTRIM requires text".into())),
             };
-            let chars: Vec<char> = match args.get(1) {
-                Some(Datum::Text(c)) => c.chars().collect(),
-                _ => vec![' '],
+            let result = match args.get(1) {
+                Some(Datum::Text(c)) => {
+                    let chars: Vec<char> = c.chars().collect();
+                    s.trim_matches(|ch: char| chars.contains(&ch)).to_owned()
+                }
+                _ => s.trim().to_owned(),
             };
-            let result = s.trim_matches(|c: char| chars.contains(&c)).to_string();
             Ok(Datum::Text(result))
         }
         ScalarFunc::Ltrim => {
             let s = match args.first() {
-                Some(Datum::Text(s)) => s.clone(),
+                Some(Datum::Text(s)) => s.as_str(),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("LTRIM requires text".into())),
             };
-            let chars: Vec<char> = match args.get(1) {
-                Some(Datum::Text(c)) => c.chars().collect(),
-                _ => vec![' '],
+            let result = match args.get(1) {
+                Some(Datum::Text(c)) => {
+                    let chars: Vec<char> = c.chars().collect();
+                    s.trim_start_matches(|ch: char| chars.contains(&ch)).to_owned()
+                }
+                _ => s.trim_start().to_owned(),
             };
-            let result = s
-                .trim_start_matches(|c: char| chars.contains(&c))
-                .to_string();
             Ok(Datum::Text(result))
         }
         ScalarFunc::Rtrim => {
             let s = match args.first() {
-                Some(Datum::Text(s)) => s.clone(),
+                Some(Datum::Text(s)) => s.as_str(),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("RTRIM requires text".into())),
             };
-            let chars: Vec<char> = match args.get(1) {
-                Some(Datum::Text(c)) => c.chars().collect(),
-                _ => vec![' '],
+            let result = match args.get(1) {
+                Some(Datum::Text(c)) => {
+                    let chars: Vec<char> = c.chars().collect();
+                    s.trim_end_matches(|ch: char| chars.contains(&ch)).to_owned()
+                }
+                _ => s.trim_end().to_owned(),
             };
-            let result = s.trim_end_matches(|c: char| chars.contains(&c)).to_string();
             Ok(Datum::Text(result))
         }
         ScalarFunc::Replace => {
@@ -184,10 +200,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                     ))
                 }
             };
-            match haystack.find(needle) {
-                Some(pos) => Ok(Datum::Int32((pos + 1) as i32)),
-                None => Ok(Datum::Int32(0)),
-            }
+            Ok(Datum::Int32(haystack.find(needle).map_or(0, |pos| (pos + 1) as i32)))
         }
         ScalarFunc::Lpad => {
             let s = match args.first() {
@@ -211,7 +224,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             };
             let fill = match args.get(2) {
                 Some(Datum::Text(f)) => f.clone(),
-                None => " ".to_string(),
+                None => " ".to_owned(),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("LPAD fill must be text".into())),
             };
@@ -220,12 +233,13 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                 Ok(Datum::Text(s.chars().take(len).collect()))
             } else {
                 let needed = len - char_len;
-                let fill_chars: Vec<char> = fill.chars().collect();
-                let mut pad = String::new();
-                for i in 0..needed {
-                    pad.push(fill_chars[i % fill_chars.len()]);
-                }
-                Ok(Datum::Text(format!("{}{}", pad, s)))
+                // Use cycle() iterator — avoids allocating fill_chars Vec.
+                let fill_iter = fill.chars().cycle().take(needed);
+                let pad: String = fill_iter.collect();
+                let mut result = String::with_capacity(pad.len() + s.len());
+                result.push_str(&pad);
+                result.push_str(&s);
+                Ok(Datum::Text(result))
             }
         }
         ScalarFunc::Rpad => {
@@ -250,7 +264,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             };
             let fill = match args.get(2) {
                 Some(Datum::Text(f)) => f.clone(),
-                None => " ".to_string(),
+                None => " ".to_owned(),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("RPAD fill must be text".into())),
             };
@@ -259,11 +273,8 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                 Ok(Datum::Text(s.chars().take(len).collect()))
             } else {
                 let needed = len - char_len;
-                let fill_chars: Vec<char> = fill.chars().collect();
                 let mut result = s;
-                for i in 0..needed {
-                    result.push(fill_chars[i % fill_chars.len()]);
-                }
+                result.extend(fill.chars().cycle().take(needed));
                 Ok(Datum::Text(result))
             }
         }
@@ -283,7 +294,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
         }
         ScalarFunc::Right => {
             let s = match args.first() {
-                Some(Datum::Text(s)) => s.clone(),
+                Some(Datum::Text(s)) => s.as_str(),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("RIGHT requires text".into())),
             };
@@ -293,9 +304,11 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("RIGHT requires integer".into())),
             };
-            let chars: Vec<char> = s.chars().collect();
-            let start = if n >= chars.len() { 0 } else { chars.len() - n };
-            Ok(Datum::Text(chars[start..].iter().collect()))
+            // Avoid Vec<char>: count chars, find byte offset of skip point.
+            let char_count = s.chars().count();
+            let skip = char_count.saturating_sub(n);
+            let byte_start = s.char_indices().nth(skip).map(|(i, _)| i).unwrap_or(0);
+            Ok(Datum::Text(s[byte_start..].to_owned()))
         }
         ScalarFunc::Repeat => {
             let s = match args.first() {
@@ -321,11 +334,11 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
         }
         ScalarFunc::Initcap => {
             let s = match args.first() {
-                Some(Datum::Text(s)) => s.clone(),
+                Some(Datum::Text(s)) => s.as_str(),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("INITCAP requires text".into())),
             };
-            let mut result = String::new();
+            let mut result = String::with_capacity(s.len());
             let mut capitalize_next = true;
             for c in s.chars() {
                 if c.is_alphanumeric() {
@@ -371,15 +384,10 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             let result: String = s
                 .chars()
                 .filter_map(|c| {
-                    if let Some(pos) = from_chars.iter().position(|&fc| fc == c) {
-                        if pos < to_chars.len() {
-                            Some(to_chars[pos])
-                        } else {
-                            None
-                        }
-                    } else {
-                        Some(c)
-                    }
+                    from_chars.iter().position(|&fc| fc == c).map_or(
+                        Some(c),
+                        |pos| if pos < to_chars.len() { Some(to_chars[pos]) } else { None },
+                    )
                 })
                 .collect();
             Ok(Datum::Text(result))
@@ -414,7 +422,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             if field == 0 || field > parts.len() {
                 Ok(Datum::Text(String::new()))
             } else {
-                Ok(Datum::Text(parts[field - 1].to_string()))
+                Ok(Datum::Text(parts[field - 1].to_owned()))
             }
         }
         ScalarFunc::Overlay => {
@@ -511,28 +519,22 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             match char::from_u32(code) {
                 Some(c) => Ok(Datum::Text(c.to_string())),
                 None => Err(ExecutionError::TypeError(format!(
-                    "CHR: invalid code point {}",
-                    code
+                    "CHR: invalid code point {code}"
                 ))),
             }
         }
-        ScalarFunc::Ascii => {
-            let s = match args.first() {
-                Some(Datum::Text(s)) => s.clone(),
-                Some(Datum::Null) => return Ok(Datum::Null),
-                _ => return Err(ExecutionError::TypeError("ASCII requires text".into())),
-            };
-            match s.chars().next() {
-                Some(c) => Ok(Datum::Int32(c as i32)),
-                None => Ok(Datum::Int32(0)),
-            }
-        }
+        ScalarFunc::Ascii => match args.first() {
+            Some(Datum::Text(s)) => Ok(Datum::Int32(
+                s.chars().next().map_or(0, |c| c as i32),
+            )),
+            Some(Datum::Null) => Ok(Datum::Null),
+            _ => Err(ExecutionError::TypeError("ASCII requires text".into())),
+        },
         ScalarFunc::QuoteLiteral => {
             let s = match args.first() {
                 Some(Datum::Text(s)) => s.clone(),
-                Some(Datum::Null) => return Ok(Datum::Null),
-                Some(other) => format!("{}", other),
-                None => return Ok(Datum::Null),
+                Some(Datum::Null) | None => return Ok(Datum::Null),
+                Some(other) => format!("{other}"),
             };
             Ok(Datum::Text(format!("'{}'", s.replace('\'', "''"))))
         }
@@ -549,10 +551,9 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             Ok(Datum::Text(format!("\"{}\"", s.replace('"', "\"\""))))
         }
         ScalarFunc::QuoteNullable => match args.first() {
-            Some(Datum::Null) => Ok(Datum::Text("NULL".to_string())),
+            Some(Datum::Null) | None => Ok(Datum::Text("NULL".to_owned())),
             Some(Datum::Text(s)) => Ok(Datum::Text(format!("'{}'", s.replace('\'', "''")))),
-            Some(other) => Ok(Datum::Text(format!("'{}'", other))),
-            None => Ok(Datum::Text("NULL".to_string())),
+            Some(other) => Ok(Datum::Text(format!("'{other}'"))),
         },
         ScalarFunc::BitLength => match args.first() {
             Some(Datum::Text(s)) => Ok(Datum::Int64((s.len() * 8) as i64)),
@@ -567,8 +568,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             )),
         },
         _ => Err(ExecutionError::TypeError(format!(
-            "Not a string function: {:?}",
-            func
+            "Not a string function: {func:?}"
         ))),
     }
 }

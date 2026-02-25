@@ -71,7 +71,7 @@ impl super::DistributedQueryEngine {
         let shard = self.engine.shard(shard_id).ok_or_else(|| {
             FalconError::internal_bug(
                 "E-QE-003",
-                format!("Shard {:?} not found", shard_id),
+                format!("Shard {shard_id:?} not found"),
                 "execute_on_shard dispatch",
             )
         })?;
@@ -194,7 +194,7 @@ impl super::DistributedQueryEngine {
     }
 
     /// Check if (col_expr, val_expr) is (ColumnRef(pk_col_idx), Literal(int)).
-    fn match_pk_eq(
+    const fn match_pk_eq(
         &self,
         pk_col_idx: usize,
         col_expr: &falcon_sql_frontend::types::BoundExpr,
@@ -236,7 +236,7 @@ impl super::DistributedQueryEngine {
     }
 
     /// Extract an integer key from a bound expression (literal only).
-    pub(crate) fn extract_int_key(&self, expr: &BoundExpr) -> Option<i64> {
+    pub(crate) const fn extract_int_key(&self, expr: &BoundExpr) -> Option<i64> {
         match expr {
             BoundExpr::Literal(Datum::Int32(v)) => Some(*v as i64),
             BoundExpr::Literal(Datum::Int64(v)) => Some(*v),

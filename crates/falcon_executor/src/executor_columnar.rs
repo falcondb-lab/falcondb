@@ -124,17 +124,14 @@ impl Executor {
                     let col_name = if alias.is_empty() {
                         schema
                             .columns
-                            .get(*col_idx)
-                            .map(|c| c.name.clone())
-                            .unwrap_or_else(|| format!("col{}", col_idx))
+                            .get(*col_idx).map_or_else(|| format!("col{col_idx}"), |c| c.name.clone())
                     } else {
                         alias.clone()
                     };
                     let data_type = schema
                         .columns
                         .get(*col_idx)
-                        .map(|c| c.data_type.clone())
-                        .unwrap_or(DataType::Text);
+                        .map_or(DataType::Text, |c| c.data_type.clone());
                     columns.push((col_name, data_type));
 
                     // For non-aggregate projections in a pure-agg context, return first value.
@@ -147,7 +144,7 @@ impl Executor {
 
                 BoundProjection::Expr(expr, alias) => {
                     let col_name = if alias.is_empty() {
-                        "?column?".to_string()
+                        "?column?".to_owned()
                     } else {
                         alias.clone()
                     };

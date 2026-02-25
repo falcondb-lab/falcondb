@@ -21,8 +21,8 @@ pub(crate) fn cmp_datum(a: &Datum, b: &Datum) -> std::cmp::Ordering {
         (_, Datum::Null) => std::cmp::Ordering::Greater,
         (Datum::Int32(x), Datum::Int32(y)) => x.cmp(y),
         (Datum::Int64(x), Datum::Int64(y)) => x.cmp(y),
-        (Datum::Int32(x), Datum::Int64(y)) => (*x as i64).cmp(y),
-        (Datum::Int64(x), Datum::Int32(y)) => x.cmp(&(*y as i64)),
+        (Datum::Int32(x), Datum::Int64(y)) => i64::from(*x).cmp(y),
+        (Datum::Int64(x), Datum::Int32(y)) => x.cmp(&i64::from(*y)),
         (Datum::Float64(x), Datum::Float64(y)) => {
             x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
         }
@@ -33,9 +33,9 @@ pub(crate) fn cmp_datum(a: &Datum, b: &Datum) -> std::cmp::Ordering {
             .partial_cmp(y)
             .unwrap_or(std::cmp::Ordering::Equal),
         (Datum::Float64(x), Datum::Int32(y)) => x
-            .partial_cmp(&(*y as f64))
+            .partial_cmp(&f64::from(*y))
             .unwrap_or(std::cmp::Ordering::Equal),
-        (Datum::Int32(x), Datum::Float64(y)) => (*x as f64)
+        (Datum::Int32(x), Datum::Float64(y)) => f64::from(*x)
             .partial_cmp(y)
             .unwrap_or(std::cmp::Ordering::Equal),
         (Datum::Text(x), Datum::Text(y)) => x.cmp(y),
@@ -133,7 +133,7 @@ pub fn merge_two_phase_agg(
                                 let incoming = row.values.get(*idx).cloned().unwrap_or(Datum::Null);
                                 let merged = match (&existing, &incoming) {
                                     (Datum::Text(a), Datum::Text(b)) => {
-                                        Datum::Text(format!("{}{}{}", a, sep, b))
+                                        Datum::Text(format!("{a}{sep}{b}"))
                                     }
                                     (Datum::Null, other) | (other, Datum::Null) => other.clone(),
                                     _ => existing,
@@ -151,7 +151,6 @@ pub fn merge_two_phase_agg(
                                         Datum::Array(a)
                                     }
                                     (Datum::Null, other) => other.clone(),
-                                    (other, Datum::Null) => other,
                                     (other, _) => other,
                                 };
                                 if let Some(val) = entry.get_mut(*idx) {
@@ -172,7 +171,6 @@ pub fn merge_two_phase_agg(
                                         Datum::Array(a)
                                     }
                                     (Datum::Null, other) => other.clone(),
-                                    (other, Datum::Null) => other,
                                     (other, _) => other,
                                 };
                                 if let Some(val) = entry.get_mut(*idx) {
@@ -190,11 +188,11 @@ pub fn merge_two_phase_agg(
     let distinct_fixups: Vec<(&AggMerge, usize)> = agg_merges
         .iter()
         .filter_map(|m| match m {
-            AggMerge::CountDistinct(idx) => Some((m, *idx)),
-            AggMerge::SumDistinct(idx) => Some((m, *idx)),
-            AggMerge::AvgDistinct(idx) => Some((m, *idx)),
-            AggMerge::StringAggDistinct(idx, _) => Some((m, *idx)),
-            AggMerge::ArrayAggDistinct(idx) => Some((m, *idx)),
+            AggMerge::CountDistinct(idx)
+            | AggMerge::SumDistinct(idx)
+            | AggMerge::AvgDistinct(idx)
+            | AggMerge::StringAggDistinct(idx, _)
+            | AggMerge::ArrayAggDistinct(idx) => Some((m, *idx)),
             _ => None,
         })
         .collect();
@@ -234,7 +232,7 @@ pub fn merge_two_phase_agg(
                                     sum = datum_add(&sum, val);
                                 }
                                 let sum_f64 = match &sum {
-                                    Datum::Int32(v) => *v as f64,
+                                    Datum::Int32(v) => f64::from(*v),
                                     Datum::Int64(v) => *v as f64,
                                     Datum::Float64(v) => *v,
                                     _ => 0.0,
@@ -247,7 +245,7 @@ pub fn merge_two_phase_agg(
                                 Datum::Null
                             } else {
                                 let parts: Vec<String> =
-                                    unique_vals.iter().map(|d| format!("{}", d)).collect();
+                                    unique_vals.iter().map(|d| format!("{d}")).collect();
                                 Datum::Text(parts.join(sep))
                             }
                         }
@@ -260,7 +258,7 @@ pub fn merge_two_phase_agg(
                         }
                         _ => unreachable!(),
                     };
-                } else if let Some(Datum::Null) = row.values.get(idx) {
+                } else if matches!(row.values.get(idx), Some(Datum::Null)) {
                     row.values[idx] = match merge {
                         AggMerge::SumDistinct(_)
                         | AggMerge::AvgDistinct(_)
@@ -314,7 +312,7 @@ pub(crate) fn encode_group_key(group_by_indices: &[usize], values: &[Datum]) -> 
             }
             Datum::Array(arr) => {
                 key.push(7);
-                let s = format!("{:?}", arr);
+                let s = format!("{arr:?}");
                 key.extend_from_slice(&(s.len() as u32).to_be_bytes());
                 key.extend_from_slice(s.as_bytes());
             }
@@ -356,15 +354,15 @@ pub(crate) fn encode_group_key(group_by_indices: &[usize], values: &[Datum]) -> 
 /// Add two Datum values (for SUM/COUNT merge).
 pub(crate) fn datum_add(a: &Datum, b: &Datum) -> Datum {
     match (a, b) {
-        (Datum::Int32(x), Datum::Int32(y)) => Datum::Int64(*x as i64 + *y as i64),
+        (Datum::Int32(x), Datum::Int32(y)) => Datum::Int64(i64::from(*x) + i64::from(*y)),
         (Datum::Int64(x), Datum::Int64(y)) => Datum::Int64(x + y),
-        (Datum::Int32(x), Datum::Int64(y)) => Datum::Int64(*x as i64 + y),
-        (Datum::Int64(x), Datum::Int32(y)) => Datum::Int64(x + *y as i64),
+        (Datum::Int32(x), Datum::Int64(y)) => Datum::Int64(i64::from(*x) + y),
+        (Datum::Int64(x), Datum::Int32(y)) => Datum::Int64(x + i64::from(*y)),
         (Datum::Float64(x), Datum::Float64(y)) => Datum::Float64(x + y),
         (Datum::Float64(x), Datum::Int64(y)) => Datum::Float64(x + *y as f64),
         (Datum::Int64(x), Datum::Float64(y)) => Datum::Float64(*x as f64 + y),
-        (Datum::Float64(x), Datum::Int32(y)) => Datum::Float64(x + *y as f64),
-        (Datum::Int32(x), Datum::Float64(y)) => Datum::Float64(*x as f64 + y),
+        (Datum::Float64(x), Datum::Int32(y)) => Datum::Float64(x + f64::from(*y)),
+        (Datum::Int32(x), Datum::Float64(y)) => Datum::Float64(f64::from(*x) + y),
         (Datum::Null, other) | (other, Datum::Null) => other.clone(),
         _ => a.clone(),
     }

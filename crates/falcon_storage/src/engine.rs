@@ -516,7 +516,7 @@ impl StorageEngine {
             disk_tables: DashMap::new(),
             #[cfg(feature = "lsm")]
             lsm_tables: DashMap::new(),
-            data_dir: wal_dir.map(|d| d.to_path_buf()),
+            data_dir: wal_dir.map(std::path::Path::to_path_buf),
             catalog: RwLock::new(Catalog::new()),
             wal,
             txn_write_sets: DashMap::new(),
@@ -891,8 +891,7 @@ impl StorageEngine {
     pub fn write_set_snapshot(&self, txn_id: TxnId) -> usize {
         self.txn_write_sets
             .get(&txn_id)
-            .map(|ws| ws.len())
-            .unwrap_or(0)
+            .map_or(0, |ws| ws.len())
     }
 
     /// Rollback all writes performed after `snapshot_len` for the given transaction.
@@ -924,8 +923,7 @@ impl StorageEngine {
     pub fn read_set_snapshot(&self, txn_id: TxnId) -> usize {
         self.txn_read_sets
             .get(&txn_id)
-            .map(|rs| rs.len())
-            .unwrap_or(0)
+            .map_or(0, |rs| rs.len())
     }
 
     pub(crate) fn apply_commit_to_write_set(
@@ -1346,7 +1344,7 @@ impl StorageEngine {
             ..Default::default()
         };
 
-        for table_ref in self.tables.iter() {
+        for table_ref in &self.tables {
             let memtable = table_ref.value();
             let table_result = crate::gc::sweep_memtable(memtable, watermark, config, stats);
             aggregate.chains_inspected += table_result.chains_inspected;
@@ -1389,7 +1387,7 @@ impl StorageEngine {
     }
 
     /// Set the memory budget (e.g. from config at startup).
-    pub fn set_memory_budget(&mut self, budget: MemoryBudget) {
+    pub const fn set_memory_budget(&mut self, budget: MemoryBudget) {
         self.memory_tracker = MemoryTracker::new(budget);
     }
 
@@ -1419,7 +1417,7 @@ impl StorageEngine {
         let dummy_txn = TxnId(0);
         let mut table_data = Vec::new();
         let mut total_rows = 0;
-        for table_ref in self.tables.iter() {
+        for table_ref in &self.tables {
             let table_id = *table_ref.key();
             let memtable = table_ref.value();
             let rows: Vec<(Vec<u8>, OwnedRow)> = memtable.scan(dummy_txn, read_ts);
@@ -1466,17 +1464,16 @@ impl StorageEngine {
         let read_ts = Timestamp(u64::MAX - 1);
         let dummy_txn = TxnId(0);
         let mut table_data = Vec::new();
-        for table_ref in self.tables.iter() {
+        for table_ref in &self.tables {
             let table_id = *table_ref.key();
             let memtable = table_ref.value();
             let rows: Vec<(Vec<u8>, OwnedRow)> = memtable.scan(dummy_txn, read_ts);
             table_data.push((table_id, rows));
         }
 
-        let (segment_id, lsn) = match self.wal.as_ref() {
-            Some(wal) => (wal.current_segment_id(), wal.current_lsn()),
-            None => (0, 0),
-        };
+        let (segment_id, lsn) = self.wal.as_ref().map_or((0, 0), |wal| {
+            (wal.current_segment_id(), wal.current_lsn())
+        });
 
         CheckpointData {
             catalog,
@@ -1596,8 +1593,13 @@ impl StorageEngine {
             }
 
             match record {
-                WalRecord::BeginTxn { .. } => {
-                    // Begin markers are metadata-only for replay.
+                WalRecord::BeginTxn { .. }
+                | WalRecord::PrepareTxn { .. }
+                | WalRecord::Checkpoint { .. }
+                | WalRecord::CoordinatorPrepare { .. }
+                | WalRecord::CoordinatorCommit { .. }
+                | WalRecord::CoordinatorAbort { .. } => {
+                    // Metadata-only / no-op records during replay.
                 }
                 WalRecord::CreateDatabase { name, owner } => {
                     let mut catalog = engine.catalog.write();
@@ -1793,7 +1795,7 @@ impl StorageEngine {
                                             .iter_mut()
                                             .find(|c| c.name.to_lowercase() == lower)
                                         {
-                                            col.name = new_name.to_string();
+                                            col.name = new_name.to_owned();
                                         }
                                     }
                                 }
@@ -1951,22 +1953,6 @@ impl StorageEngine {
                     let mut catalog = engine.catalog.write();
                     let _ = catalog.revoke_role_membership(member, group);
                 }
-                WalRecord::PrepareTxn { .. } => {
-                    // Prepared but not committed records remain invisible after recovery.
-                }
-                WalRecord::Checkpoint { .. } => {
-                    // Additional checkpoint markers are no-ops during replay.
-                }
-                WalRecord::CoordinatorPrepare { .. } => {
-                    // P0-3: Coordinator prepare record — used for crash recovery resolution.
-                    // During replay, these are informational only.
-                }
-                WalRecord::CoordinatorCommit { .. } => {
-                    // P0-3: Coordinator commit decision — participant shards should commit.
-                }
-                WalRecord::CoordinatorAbort { .. } => {
-                    // P0-3: Coordinator abort decision — participant shards should abort.
-                }
             }
         }
 
@@ -1984,7 +1970,7 @@ impl StorageEngine {
         }
 
         // Rebuild secondary indexes from recovered data.
-        for entry in engine.tables.iter() {
+        for entry in &engine.tables {
             entry.value().rebuild_secondary_indexes();
         }
 
@@ -2018,11 +2004,10 @@ pub(crate) fn datatype_to_cast_target(dt: &falcon_common::types::DataType) -> St
         DataType::Int32 => "int".into(),
         DataType::Int64 => "bigint".into(),
         DataType::Float64 => "float8".into(),
-        DataType::Text => "text".into(),
+        DataType::Text | DataType::Array(_) => "text".into(),
         DataType::Timestamp => "timestamp".into(),
         DataType::Date => "date".into(),
         DataType::Jsonb => "jsonb".into(),
-        DataType::Array(_) => "text".into(),
         DataType::Decimal(_, _) => "numeric".into(),
         DataType::Time => "time".into(),
         DataType::Interval => "interval".into(),

@@ -99,7 +99,7 @@ impl<E: QueryExecutor> ShardRouterServer<E> {
     ) -> Result<HeartbeatResponse, Status> {
         Ok(HeartbeatResponse {
             node_id: self.node_id.0,
-            status: "active".to_string(),
+            status: "active".to_owned(),
         })
     }
 }

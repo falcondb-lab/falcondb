@@ -211,12 +211,12 @@ pub fn resolve_scalar_func(name: &str) -> Option<ScalarFunc> {
         _ => {
             // Pattern-based resolution for generated extended functions
             if name.starts_with("ARRAY_MATRIX_") {
-                return Some(ScalarFunc::ArrayMatrixFunc(name.to_string()));
+                return Some(ScalarFunc::ArrayMatrixFunc(name.to_owned()));
             }
             if let Some(stem) = name.strip_suffix("_ENCODE") {
                 if stem.starts_with("STRING_") {
                     return Some(ScalarFunc::StringEncodingFunc {
-                        name: stem.to_string(),
+                        name: stem.to_owned(),
                         encode: true,
                     });
                 }
@@ -224,7 +224,7 @@ pub fn resolve_scalar_func(name: &str) -> Option<ScalarFunc> {
             if let Some(stem) = name.strip_suffix("_DECODE") {
                 if stem.starts_with("STRING_") {
                     return Some(ScalarFunc::StringEncodingFunc {
-                        name: stem.to_string(),
+                        name: stem.to_owned(),
                         encode: false,
                     });
                 }

@@ -38,7 +38,7 @@ pub fn schema_to_ddl(schema: &TableSchema) -> String {
         if i > 0 {
             ddl.push_str(",\n");
         }
-        ddl.push_str(&format!("  \"{}\" {}", col.name, col.data_type.pg_type_name()));
+        let _ = write!(ddl, "  \"{}\" {}", col.name, col.data_type.pg_type_name());
 
         if col.is_serial {
             // SERIAL columns use auto-increment; DDL is already typed
@@ -47,7 +47,7 @@ pub fn schema_to_ddl(schema: &TableSchema) -> String {
             ddl.push_str(" NOT NULL");
         }
         if let Some(ref default) = col.default_value {
-            let _ = write!(ddl, " DEFAULT {}", default);
+            let _ = write!(ddl, " DEFAULT {default}");
         }
     }
 
@@ -57,7 +57,7 @@ pub fn schema_to_ddl(schema: &TableSchema) -> String {
             .iter()
             .map(|&idx| format!("\"{}\"", schema.columns[idx].name))
             .collect();
-        ddl.push_str(&format!(",\n  PRIMARY KEY ({})", pk_cols.join(", ")));
+        let _ = write!(ddl, ",\n  PRIMARY KEY ({})", pk_cols.join(", "));
     }
 
     for uc in &schema.unique_constraints {
@@ -65,7 +65,7 @@ pub fn schema_to_ddl(schema: &TableSchema) -> String {
             .iter()
             .map(|&idx| format!("\"{}\"", schema.columns[idx].name))
             .collect();
-        ddl.push_str(&format!(",\n  UNIQUE ({})", cols.join(", ")));
+        let _ = write!(ddl, ",\n  UNIQUE ({})", cols.join(", "));
     }
 
     ddl.push_str("\n);");
@@ -125,7 +125,7 @@ fn datum_to_sql_literal(datum: &Datum, _col: &ColumnDef) -> String {
                     "'-Infinity'::float8".into()
                 }
             } else {
-                format!("{}", v)
+                format!("{v}")
             }
         }
         Datum::Text(s) => format!("'{}'", s.replace('\'', "''")),
@@ -133,9 +133,9 @@ fn datum_to_sql_literal(datum: &Datum, _col: &ColumnDef) -> String {
         Datum::Decimal(val, scale) => {
             // Format decimal: mantissa / 10^scale
             if *scale == 0 {
-                format!("{}", val)
+                format!("{val}")
             } else {
-                let divisor = 10i128.pow(*scale as u32);
+                let divisor = 10i128.pow(u32::from(*scale));
                 let whole = val / divisor;
                 let frac = (val % divisor).unsigned_abs();
                 format!("{}.{:0>width$}", whole, frac, width = *scale as usize)
@@ -143,18 +143,18 @@ fn datum_to_sql_literal(datum: &Datum, _col: &ColumnDef) -> String {
         }
         Datum::Date(d) => {
             // days since epoch -> date string
-            format!("'{}'::date", d)
+            format!("'{d}'::date")
         }
         Datum::Timestamp(ts) => {
             // microseconds since epoch
-            format!("'{}'::timestamp", ts)
+            format!("'{ts}'::timestamp")
         }
         Datum::Time(t) => {
             // microseconds since midnight
-            format!("'{}'::time", t)
+            format!("'{t}'::time")
         }
         Datum::Interval(months, days, usecs) => {
-            format!("'{} months {} days {} usecs'::interval", months, days, usecs)
+            format!("'{months} months {days} days {usecs} usecs'::interval")
         }
         Datum::Uuid(u) => {
             let bytes = u.to_be_bytes();
@@ -169,7 +169,7 @@ fn datum_to_sql_literal(datum: &Datum, _col: &ColumnDef) -> String {
         }
         Datum::Jsonb(j) => {
             let s = j.to_string().replace('\'', "''");
-            format!("'{}'::jsonb", s)
+            format!("'{s}'::jsonb")
         }
         Datum::Array(arr) => {
             let elements: Vec<String> = arr
@@ -186,7 +186,7 @@ fn datum_to_sql_literal(datum: &Datum, _col: &ColumnDef) -> String {
 
 /// Simple hex encoding for bytea.
 fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Compute a simple CRC32 checksum of SQL text.
@@ -194,7 +194,7 @@ pub fn compute_checksum(statements: &[String]) -> u32 {
     let mut hash: u32 = 0;
     for stmt in statements {
         for byte in stmt.bytes() {
-            hash = hash.wrapping_mul(31).wrapping_add(byte as u32);
+            hash = hash.wrapping_mul(31).wrapping_add(u32::from(byte));
         }
     }
     hash

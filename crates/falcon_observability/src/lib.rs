@@ -48,13 +48,13 @@ pub fn init_metrics(listen_addr: &str) -> Result<(), Box<dyn std::error::Error>>
 
 /// Record common database metrics.
 pub fn record_query_metrics(duration_us: u64, query_type: &str, success: bool) {
-    metrics::counter!("falcon_queries_total", "type" => query_type.to_string(), "success" => success.to_string()).increment(1);
-    metrics::histogram!("falcon_query_duration_us", "type" => query_type.to_string())
+    metrics::counter!("falcon_queries_total", "type" => query_type.to_owned(), "success" => success.to_string()).increment(1);
+    metrics::histogram!("falcon_query_duration_us", "type" => query_type.to_owned())
         .record(duration_us as f64);
 }
 
 pub fn record_txn_metrics(action: &str) {
-    metrics::counter!("falcon_txn_total", "action" => action.to_string()).increment(1);
+    metrics::counter!("falcon_txn_total", "action" => action.to_owned()).increment(1);
 }
 
 pub fn record_active_connections(count: usize) {
@@ -97,14 +97,15 @@ pub fn record_memory_metrics(
 // Prepared Statement / Extended Query Protocol metrics
 // ---------------------------------------------------------------------------
 
-/// Record an extended-query-protocol operation (Parse, Bind, Execute, Describe, Close).
+/// Record an extended-query-protocol operation.
+///
 /// `op` should be one of: "parse", "bind", "execute", "describe", "close".
 /// `path` indicates execution path: "plan" (plan-based) or "legacy" (text-substitution).
 pub fn record_prepared_stmt_op(op: &str, path: &str) {
     metrics::counter!(
         "falcon_prepared_stmt_ops_total",
-        "op" => op.to_string(),
-        "path" => path.to_string()
+        "op" => op.to_owned(),
+        "path" => path.to_owned()
     )
     .increment(1);
 }
@@ -114,7 +115,7 @@ pub fn record_prepared_stmt_op(op: &str, path: &str) {
 pub fn record_prepared_stmt_sql_cmd(cmd: &str) {
     metrics::counter!(
         "falcon_prepared_stmt_sql_cmds_total",
-        "cmd" => cmd.to_string()
+        "cmd" => cmd.to_owned()
     )
     .increment(1);
 }
@@ -173,12 +174,12 @@ pub fn record_tenant_metrics(
     quota_exceeded_count: u64,
 ) {
     let tid = tenant_id.to_string();
-    metrics::gauge!("falcon_tenant_active_txns", "tenant_id" => tid.clone(), "tenant_name" => tenant_name.to_string()).set(active_txns as f64);
-    metrics::gauge!("falcon_tenant_memory_bytes", "tenant_id" => tid.clone(), "tenant_name" => tenant_name.to_string()).set(memory_bytes as f64);
-    metrics::gauge!("falcon_tenant_qps", "tenant_id" => tid.clone(), "tenant_name" => tenant_name.to_string()).set(current_qps);
-    metrics::gauge!("falcon_tenant_txns_committed", "tenant_id" => tid.clone(), "tenant_name" => tenant_name.to_string()).set(txns_committed as f64);
-    metrics::gauge!("falcon_tenant_txns_aborted", "tenant_id" => tid.clone(), "tenant_name" => tenant_name.to_string()).set(txns_aborted as f64);
-    metrics::gauge!("falcon_tenant_quota_exceeded", "tenant_id" => tid, "tenant_name" => tenant_name.to_string()).set(quota_exceeded_count as f64);
+    metrics::gauge!("falcon_tenant_active_txns", "tenant_id" => tid.clone(), "tenant_name" => tenant_name.to_owned()).set(f64::from(active_txns));
+    metrics::gauge!("falcon_tenant_memory_bytes", "tenant_id" => tid.clone(), "tenant_name" => tenant_name.to_owned()).set(memory_bytes as f64);
+    metrics::gauge!("falcon_tenant_qps", "tenant_id" => tid.clone(), "tenant_name" => tenant_name.to_owned()).set(current_qps);
+    metrics::gauge!("falcon_tenant_txns_committed", "tenant_id" => tid.clone(), "tenant_name" => tenant_name.to_owned()).set(txns_committed as f64);
+    metrics::gauge!("falcon_tenant_txns_aborted", "tenant_id" => tid.clone(), "tenant_name" => tenant_name.to_owned()).set(txns_aborted as f64);
+    metrics::gauge!("falcon_tenant_quota_exceeded", "tenant_id" => tid, "tenant_name" => tenant_name.to_owned()).set(quota_exceeded_count as f64);
 }
 
 /// Record WAL stability metrics (P1-2 / P2-6).
@@ -281,7 +282,7 @@ pub fn record_health_metrics(
     component_count: usize,
     recommendation_count: usize,
 ) {
-    metrics::gauge!("falcon_health_overall_score").set(overall_score as f64);
+    metrics::gauge!("falcon_health_overall_score").set(f64::from(overall_score));
     metrics::gauge!("falcon_health_component_count").set(component_count as f64);
     metrics::gauge!("falcon_health_recommendation_count").set(recommendation_count as f64);
 }
@@ -372,7 +373,7 @@ pub fn record_token_bucket_metrics(
     total_rejected: u64,
     total_wait_us: u64,
 ) {
-    let n = name.to_string();
+    let n = name.to_owned();
     metrics::gauge!("falcon_token_bucket_rate_per_sec", "bucket" => n.clone())
         .set(rate_per_sec as f64);
     metrics::gauge!("falcon_token_bucket_burst", "bucket" => n.clone()).set(burst as f64);
@@ -495,8 +496,8 @@ pub fn record_security_hardening_metrics(
 
 /// Record version and compatibility metrics for Prometheus.
 pub fn record_compat_metrics(wal_format_version: u32, snapshot_format_version: u32) {
-    metrics::gauge!("falcon_compat_wal_format_version").set(wal_format_version as f64);
-    metrics::gauge!("falcon_compat_snapshot_format_version").set(snapshot_format_version as f64);
+    metrics::gauge!("falcon_compat_wal_format_version").set(f64::from(wal_format_version));
+    metrics::gauge!("falcon_compat_snapshot_format_version").set(f64::from(snapshot_format_version));
 }
 
 /// Record transaction fast-path / slow-path statistics from a TxnStatsSnapshot.
@@ -526,7 +527,7 @@ pub fn record_txn_stats(
 pub fn record_bg_task_failed(task_name: &str) {
     metrics::counter!(
         "falcon_bg_task_failed_total",
-        "task" => task_name.to_string()
+        "task" => task_name.to_owned()
     )
     .increment(1);
 }
@@ -561,9 +562,9 @@ pub fn record_txn_terminal_state(
 ) {
     metrics::counter!(
         "falcon_txn_terminal_total",
-        "type" => terminal_type.to_string(),
-        "reason" => reason.to_string(),
-        "sqlstate" => sqlstate.to_string()
+        "type" => terminal_type.to_owned(),
+        "reason" => reason.to_owned(),
+        "sqlstate" => sqlstate.to_owned()
     )
     .increment(1);
 }
@@ -572,8 +573,8 @@ pub fn record_txn_terminal_state(
 pub fn record_admission_rejection(resource_name: &str, sqlstate: &str) {
     metrics::counter!(
         "falcon_admission_rejection_total",
-        "resource" => resource_name.to_string(),
-        "sqlstate" => sqlstate.to_string()
+        "resource" => resource_name.to_owned(),
+        "sqlstate" => sqlstate.to_owned()
     )
     .increment(1);
 }
@@ -582,12 +583,12 @@ pub fn record_admission_rejection(resource_name: &str, sqlstate: &str) {
 pub fn record_failover_recovery_duration_ms(duration_ms: u64, outcome: &str) {
     metrics::histogram!(
         "falcon_failover_recovery_duration_ms",
-        "outcome" => outcome.to_string()
+        "outcome" => outcome.to_owned()
     )
     .record(duration_ms as f64);
     metrics::counter!(
         "falcon_failover_recovery_total",
-        "outcome" => outcome.to_string()
+        "outcome" => outcome.to_owned()
     )
     .increment(1);
 }
@@ -601,7 +602,7 @@ pub fn record_queue_depth_metrics(
     total_enqueued: u64,
     total_rejected: u64,
 ) {
-    let n = queue_name.to_string();
+    let n = queue_name.to_owned();
     metrics::gauge!("falcon_queue_depth", "queue" => n.clone()).set(depth as f64);
     metrics::gauge!("falcon_queue_capacity", "queue" => n.clone()).set(capacity as f64);
     metrics::gauge!("falcon_queue_peak", "queue" => n.clone()).set(peak as f64);
@@ -650,8 +651,8 @@ pub fn record_sla_admission_metrics(
 pub fn record_sla_rejection(signal: &str, txn_class: &str) {
     metrics::counter!(
         "falcon_sla_rejection_total",
-        "signal" => signal.to_string(),
-        "txn_class" => txn_class.to_string()
+        "signal" => signal.to_owned(),
+        "txn_class" => txn_class.to_owned()
     )
     .increment(1);
 }
@@ -720,12 +721,12 @@ pub fn record_dist_query_network_metrics(
 pub fn record_lock_contention(lock_name: &str, wait_us: u64) {
     metrics::counter!(
         "falcon_lock_contention_total",
-        "lock" => lock_name.to_string()
+        "lock" => lock_name.to_owned()
     )
     .increment(1);
     metrics::histogram!(
         "falcon_lock_wait_us",
-        "lock" => lock_name.to_string()
+        "lock" => lock_name.to_owned()
     )
     .record(wait_us as f64);
 }

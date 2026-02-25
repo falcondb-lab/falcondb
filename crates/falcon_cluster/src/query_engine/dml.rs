@@ -61,7 +61,7 @@ impl super::DistributedQueryEngine {
         let shard = self.engine.shard(shard_id).ok_or_else(|| {
             FalconError::internal_bug(
                 "E-QE-010",
-                format!("Shard {:?} not found", shard_id),
+                format!("Shard {shard_id:?} not found"),
                 "exec_dml_autocommit",
             )
         })?;
@@ -128,8 +128,7 @@ impl super::DistributedQueryEngine {
             let target = pk_col_idx
                 .and_then(|idx| row.get(idx))
                 .and_then(|expr| self.extract_int_key(expr))
-                .map(|key| self.engine.shard_for_key(key))
-                .unwrap_or(ShardId(0));
+                .map_or(ShardId(0), |key| self.engine.shard_for_key(key));
             shard_rows.entry(target).or_default().push(row.clone());
         }
 
@@ -140,10 +139,10 @@ impl super::DistributedQueryEngine {
                 let shard_plan = PhysicalPlan::Insert {
                     table_id,
                     schema: schema.clone(),
-                    columns: columns.to_vec(),
+                    columns: columns.clone(),
                     rows: shard_row_batch,
                     source_select: None,
-                    returning: returning.to_vec(),
+                    returning: returning.clone(),
                     on_conflict: on_conflict.clone(),
                 };
                 (shard_id, shard_plan)
@@ -169,7 +168,7 @@ impl super::DistributedQueryEngine {
                             let shard = engine.shard(sid).ok_or_else(|| {
                                 FalconError::internal_bug(
                                     "E-QE-012",
-                                    format!("Shard {:?} not found", sid),
+                                    format!("Shard {sid:?} not found"),
                                     "exec_insert_split parallel",
                                 )
                             })?;
@@ -222,7 +221,7 @@ impl super::DistributedQueryEngine {
                     succeeded += 1;
                 }
                 Ok(other) => return Ok(other),
-                Err(e) => errors.push(format!("shard {:?}: {}", sid, e)),
+                Err(e) => errors.push(format!("shard {sid:?}: {e}")),
             }
         }
 
@@ -358,8 +357,8 @@ impl super::DistributedQueryEngine {
             }
         }
         let columns = vec![
-            ("metric".to_string(), DataType::Text),
-            ("value".to_string(), DataType::Int64),
+            ("metric".to_owned(), DataType::Text),
+            ("value".to_owned(), DataType::Int64),
         ];
         let rows = vec![
             OwnedRow::new(vec![
@@ -400,7 +399,7 @@ impl super::DistributedQueryEngine {
                                     shard_id,
                                     Err(FalconError::internal_bug(
                                         "E-QE-004",
-                                        format!("DML dispatch: shard {} not found", shard_id),
+                                        format!("DML dispatch: shard {shard_id} not found"),
                                         "execute_dml_on_shards",
                                     )),
                                 )
@@ -478,7 +477,7 @@ impl super::DistributedQueryEngine {
                 Ok(_) => {
                     succeeded += 1;
                 }
-                Err(e) => errors.push(format!("shard {}: {}", shard_id, e)),
+                Err(e) => errors.push(format!("shard {shard_id}: {e}")),
             }
         }
 

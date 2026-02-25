@@ -116,19 +116,11 @@ impl DataType {
     pub const fn type_len(&self) -> i16 {
         match self {
             Self::Boolean => 1,
-            Self::Int32 => 4,
-            Self::Int64 => 8,
-            Self::Float64 => 8,
-            Self::Text => -1,
-            Self::Timestamp => 8,
-            Self::Date => 4,
-            Self::Array(_) => -1,
-            Self::Jsonb => -1,
-            Self::Decimal(_, _) => -1, // variable length
-            Self::Time => 8,
-            Self::Interval => 16,
-            Self::Uuid => 16,
-            Self::Bytea => -1, // variable length
+            Self::Int32 | Self::Date => 4,
+            Self::Int64 | Self::Float64 | Self::Timestamp | Self::Time => 8,
+            Self::Interval | Self::Uuid => 16,
+            Self::Text | Self::Array(_) | Self::Jsonb
+            | Self::Decimal(_, _) | Self::Bytea => -1, // variable length
         }
     }
 
@@ -209,10 +201,8 @@ impl DataType {
     /// Datetime precision for information_schema.columns (None if not temporal).
     pub const fn datetime_precision(&self) -> Option<i32> {
         match self {
-            Self::Timestamp => Some(6),
+            Self::Timestamp | Self::Time | Self::Interval => Some(6),
             Self::Date => Some(0),
-            Self::Time => Some(6),
-            Self::Interval => Some(6),
             _ => None,
         }
     }
@@ -248,9 +238,9 @@ impl fmt::Display for DataType {
             Self::Text => write!(f, "TEXT"),
             Self::Timestamp => write!(f, "TIMESTAMP"),
             Self::Date => write!(f, "DATE"),
-            Self::Array(inner) => write!(f, "{}[]", inner),
+            Self::Array(inner) => write!(f, "{inner}[]"),
             Self::Jsonb => write!(f, "JSONB"),
-            Self::Decimal(p, s) => write!(f, "DECIMAL({},{})", p, s),
+            Self::Decimal(p, s) => write!(f, "DECIMAL({p},{s})"),
             Self::Time => write!(f, "TIME"),
             Self::Interval => write!(f, "INTERVAL"),
             Self::Uuid => write!(f, "UUID"),

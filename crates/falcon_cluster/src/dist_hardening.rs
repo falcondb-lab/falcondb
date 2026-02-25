@@ -57,16 +57,16 @@ impl std::fmt::Display for PreFlightRejectReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ReplicaLagTooHigh { lag, max } => {
-                write!(f, "replica lag {} exceeds max {}", lag, max)
+                write!(f, "replica lag {lag} exceeds max {max}")
             }
             Self::InsufficientQuorum { healthy, required } => {
-                write!(f, "only {} healthy replicas, need {}", healthy, required)
+                write!(f, "only {healthy} healthy replicas, need {required}")
             }
             Self::CooldownActive { remaining_ms } => {
-                write!(f, "cooldown active, {}ms remaining", remaining_ms)
+                write!(f, "cooldown active, {remaining_ms}ms remaining")
             }
             Self::StaleEpoch { current, requested } => {
-                write!(f, "stale epoch: current={}, requested={}", current, requested)
+                write!(f, "stale epoch: current={current}, requested={requested}")
             }
             Self::NoCandidateAvailable => write!(f, "no candidate replica available"),
             Self::PrimaryNotFailed => write!(f, "primary is not actually failed"),
@@ -433,7 +433,7 @@ impl AutoRestartSupervisor {
     /// Register a task for auto-restart monitoring.
     pub fn register(&self, name: &str) {
         let state = RestartableTaskState {
-            name: name.to_string(),
+            name: name.to_owned(),
             restart_count: 0,
             max_restarts: self.config.max_restarts,
             last_failure: None,
@@ -442,7 +442,7 @@ impl AutoRestartSupervisor {
             is_permanently_failed: false,
             last_started_at: None,
         };
-        self.tasks.write().insert(name.to_string(), state);
+        self.tasks.write().insert(name.to_owned(), state);
         self.metrics.lock().tasks_monitored = self.tasks.read().len();
     }
 
@@ -744,8 +744,7 @@ impl HealthCheckHysteresis {
         self.nodes
             .read()
             .get(&node_id)
-            .map(|n| n.status)
-            .unwrap_or(DebouncedHealth::Healthy)
+            .map_or(DebouncedHealth::Healthy, |n| n.status)
     }
 
     /// Get state of a specific node.
@@ -860,8 +859,7 @@ impl PromotionSafetyGuard {
         let target = self.target_lsn.load(Ordering::SeqCst);
         if candidate_lsn < target {
             let msg = format!(
-                "candidate LSN {} < target LSN {} — catch-up incomplete",
-                candidate_lsn, target
+                "candidate LSN {candidate_lsn} < target LSN {target} — catch-up incomplete"
             );
             tracing::error!(msg = %msg, "promotion safety guard: CATCH-UP FAILED");
             return Err(msg);
@@ -901,7 +899,7 @@ impl PromotionSafetyGuard {
         *self.current_step.lock() = PromotionStep::RolledBack;
         let mut m = self.metrics.lock();
         m.promotions_rolled_back += 1;
-        m.rollback_reasons.push(reason.to_string());
+        m.rollback_reasons.push(reason.to_owned());
 
         tracing::error!(
             failed_at_step = %step,

@@ -100,23 +100,22 @@ impl BgTaskSupervisor {
     pub fn register(&self, name: &str, role: &str, criticality: TaskCriticality) {
         let now = Instant::now();
         let info = TaskInfo {
-            name: name.to_string(),
-            role: role.to_string(),
+            name: name.to_owned(),
+            role: role.to_owned(),
             criticality,
             state: TaskState::Starting,
             registered_at: now,
             last_state_change: now,
             failure_reason: None,
         };
-        let mut tasks = self.tasks.write().unwrap_or_else(|e| e.into_inner());
-        tasks.insert(name.to_string(), info);
+        self.tasks.write().unwrap_or_else(std::sync::PoisonError::into_inner).insert(name.to_owned(), info);
         self.total_registered.fetch_add(1, Ordering::Relaxed);
         tracing::info!(task = name, role, ?criticality, "bg task registered");
     }
 
     /// Report that a task is now running.
     pub fn report_running(&self, name: &str) {
-        let mut tasks = self.tasks.write().unwrap_or_else(|e| e.into_inner());
+        let mut tasks = self.tasks.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(info) = tasks.get_mut(name) {
             info.state = TaskState::Running;
             info.last_state_change = Instant::now();
@@ -126,12 +125,12 @@ impl BgTaskSupervisor {
 
     /// Report that a task has failed.
     pub fn report_failed(&self, name: &str, reason: &str) {
-        let mut tasks = self.tasks.write().unwrap_or_else(|e| e.into_inner());
+        let mut tasks = self.tasks.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(info) = tasks.get_mut(name) {
             let was = info.state;
             info.state = TaskState::Failed;
             info.last_state_change = Instant::now();
-            info.failure_reason = Some(reason.to_string());
+            info.failure_reason = Some(reason.to_owned());
 
             if info.criticality == TaskCriticality::Critical {
                 tracing::error!(
@@ -154,7 +153,7 @@ impl BgTaskSupervisor {
 
     /// Report that a task has stopped gracefully.
     pub fn report_stopped(&self, name: &str) {
-        let mut tasks = self.tasks.write().unwrap_or_else(|e| e.into_inner());
+        let mut tasks = self.tasks.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(info) = tasks.get_mut(name) {
             info.state = TaskState::Stopped;
             info.last_state_change = Instant::now();
@@ -164,13 +163,13 @@ impl BgTaskSupervisor {
 
     /// Unregister a task (e.g. on clean shutdown).
     pub fn unregister(&self, name: &str) {
-        let mut tasks = self.tasks.write().unwrap_or_else(|e| e.into_inner());
+        let mut tasks = self.tasks.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         tasks.remove(name);
     }
 
     /// Compute current node health.
     pub fn node_health(&self) -> NodeHealth {
-        let tasks = self.tasks.read().unwrap_or_else(|e| e.into_inner());
+        let tasks = self.tasks.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         for info in tasks.values() {
             if info.criticality == TaskCriticality::Critical && info.state == TaskState::Failed {
                 return NodeHealth::Degraded;
@@ -181,13 +180,13 @@ impl BgTaskSupervisor {
 
     /// Get the state of a specific task.
     pub fn task_state(&self, name: &str) -> Option<TaskState> {
-        let tasks = self.tasks.read().unwrap_or_else(|e| e.into_inner());
+        let tasks = self.tasks.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         tasks.get(name).map(|i| i.state)
     }
 
     /// Full observability snapshot.
     pub fn snapshot(&self) -> SupervisorSnapshot {
-        let tasks = self.tasks.read().unwrap_or_else(|e| e.into_inner());
+        let tasks = self.tasks.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut critical_failures = 0;
         let mut task_list = Vec::with_capacity(tasks.len());
         for info in tasks.values() {
@@ -196,6 +195,7 @@ impl BgTaskSupervisor {
             }
             task_list.push(info.clone());
         }
+        drop(tasks);
         // Sort by name for stable output
         task_list.sort_by(|a, b| a.name.cmp(&b.name));
         SupervisorSnapshot {
@@ -212,7 +212,7 @@ impl BgTaskSupervisor {
 
     /// Number of currently registered tasks.
     pub fn task_count(&self) -> usize {
-        self.tasks.read().unwrap_or_else(|e| e.into_inner()).len()
+        self.tasks.read().unwrap_or_else(std::sync::PoisonError::into_inner).len()
     }
 }
 

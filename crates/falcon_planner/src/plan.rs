@@ -427,24 +427,23 @@ pub enum DistAggMerge {
 impl std::fmt::Display for DistAggMerge {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Sum(i) => write!(f, "SUM(col{})", i),
-            Self::Count(i) => write!(f, "COUNT(col{})", i),
-            Self::Min(i) => write!(f, "MIN(col{})", i),
-            Self::Max(i) => write!(f, "MAX(col{})", i),
-            Self::BoolAnd(i) => write!(f, "BOOL_AND(col{})", i),
-            Self::BoolOr(i) => write!(f, "BOOL_OR(col{})", i),
-            Self::StringAgg(i, sep) => write!(f, "STRING_AGG(col{}, '{}')", i, sep),
-            Self::ArrayAgg(i) => write!(f, "ARRAY_AGG(col{})", i),
-            Self::CountDistinct(i) => write!(f, "COUNT(DISTINCT col{}) [collect-dedup]", i),
-            Self::SumDistinct(i) => write!(f, "SUM(DISTINCT col{}) [collect-dedup]", i),
-            Self::AvgDistinct(i) => write!(f, "AVG(DISTINCT col{}) [collect-dedup]", i),
+            Self::Sum(i) => write!(f, "SUM(col{i})"),
+            Self::Count(i) => write!(f, "COUNT(col{i})"),
+            Self::Min(i) => write!(f, "MIN(col{i})"),
+            Self::Max(i) => write!(f, "MAX(col{i})"),
+            Self::BoolAnd(i) => write!(f, "BOOL_AND(col{i})"),
+            Self::BoolOr(i) => write!(f, "BOOL_OR(col{i})"),
+            Self::StringAgg(i, sep) => write!(f, "STRING_AGG(col{i}, '{sep}')"),
+            Self::ArrayAgg(i) => write!(f, "ARRAY_AGG(col{i})"),
+            Self::CountDistinct(i) => write!(f, "COUNT(DISTINCT col{i}) [collect-dedup]"),
+            Self::SumDistinct(i) => write!(f, "SUM(DISTINCT col{i}) [collect-dedup]"),
+            Self::AvgDistinct(i) => write!(f, "AVG(DISTINCT col{i}) [collect-dedup]"),
             Self::StringAggDistinct(i, sep) => write!(
                 f,
-                "STRING_AGG(DISTINCT col{}, '{}') [collect-dedup]",
-                i, sep
+                "STRING_AGG(DISTINCT col{i}, '{sep}') [collect-dedup]"
             ),
             Self::ArrayAggDistinct(i) => {
-                write!(f, "ARRAY_AGG(DISTINCT col{}) [collect-dedup]", i)
+                write!(f, "ARRAY_AGG(DISTINCT col{i}) [collect-dedup]")
             }
         }
     }

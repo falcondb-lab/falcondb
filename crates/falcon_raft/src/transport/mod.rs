@@ -45,15 +45,15 @@ pub enum TransportError {
 impl fmt::Display for TransportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unreachable(s) => write!(f, "unreachable: {}", s),
-            Self::Timeout(s) => write!(f, "timeout: {}", s),
-            Self::ConnectionReset(s) => write!(f, "connection_reset: {}", s),
-            Self::RemoteRejected(s) => write!(f, "remote_rejected: {}", s),
+            Self::Unreachable(s) => write!(f, "unreachable: {s}"),
+            Self::Timeout(s) => write!(f, "timeout: {s}"),
+            Self::ConnectionReset(s) => write!(f, "connection_reset: {s}"),
+            Self::RemoteRejected(s) => write!(f, "remote_rejected: {s}"),
             Self::PayloadTooLarge { size, max } => {
-                write!(f, "payload_too_large: {} > {}", size, max)
+                write!(f, "payload_too_large: {size} > {max}")
             }
-            Self::Unsupported(s) => write!(f, "unsupported: {}", s),
-            Self::Internal(s) => write!(f, "internal: {}", s),
+            Self::Unsupported(s) => write!(f, "unsupported: {s}"),
+            Self::Internal(s) => write!(f, "internal: {s}"),
         }
     }
 }
@@ -72,12 +72,13 @@ impl TransportError {
     /// Suggested retry policy for this error.
     pub const fn retry_policy(&self) -> RetryPolicy {
         match self {
-            Self::Timeout(_) | Self::ConnectionReset(_) => RetryPolicy::ExponentialBackoff,
-            Self::Unreachable(_) => RetryPolicy::ExponentialBackoff,
-            Self::RemoteRejected(_) => RetryPolicy::NoRetry,
-            Self::PayloadTooLarge { .. } => RetryPolicy::NoRetry,
-            Self::Unsupported(_) => RetryPolicy::NoRetry,
-            Self::Internal(_) => RetryPolicy::NoRetry,
+            Self::Timeout(_)
+            | Self::ConnectionReset(_)
+            | Self::Unreachable(_) => RetryPolicy::ExponentialBackoff,
+            Self::RemoteRejected(_)
+            | Self::PayloadTooLarge { .. }
+            | Self::Unsupported(_)
+            | Self::Internal(_) => RetryPolicy::NoRetry,
         }
     }
 
@@ -247,7 +248,7 @@ impl PeerCircuitBreaker {
     /// Check if the circuit allows a request.
     pub fn allow_request(&mut self) -> bool {
         match self.state {
-            CircuitState::Closed => true,
+            CircuitState::Closed | CircuitState::HalfOpen => true,
             CircuitState::Open => {
                 if let Some(opened) = self.opened_at {
                     if opened.elapsed() >= Duration::from_millis(self.config.open_duration_ms) {
@@ -261,7 +262,6 @@ impl PeerCircuitBreaker {
                     false
                 }
             }
-            CircuitState::HalfOpen => true, // allow probes
         }
     }
 

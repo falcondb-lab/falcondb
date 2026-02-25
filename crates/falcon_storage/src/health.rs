@@ -167,13 +167,13 @@ impl HealthScorer {
         });
 
         // Weighted average
-        let overall = (mem_score as f64 * 0.20
-            + wal_score as f64 * 0.15
-            + repl_score as f64 * 0.15
-            + txn_score as f64 * 0.20
-            + gc_score as f64 * 0.10
-            + storage_score as f64 * 0.10
-            + conn_score as f64 * 0.10) as u32;
+        let overall = f64::from(mem_score)
+            .mul_add(0.20, f64::from(wal_score)
+            .mul_add(0.15, f64::from(repl_score)
+            .mul_add(0.15, f64::from(txn_score)
+            .mul_add(0.20, f64::from(gc_score)
+            .mul_add(0.10, f64::from(storage_score)
+            .mul_add(0.10, f64::from(conn_score) * 0.10)))))) as u32;
 
         let overall = overall.min(100);
 
@@ -217,8 +217,7 @@ impl HealthScorer {
         };
         if score < 70 {
             recs.push(format!(
-                "WAL backlog is {}MB. Check replication consumers.",
-                backlog_mb
+                "WAL backlog is {backlog_mb}MB. Check replication consumers."
             ));
         }
         score
@@ -237,8 +236,7 @@ impl HealthScorer {
         };
         if score < 70 {
             recs.push(format!(
-                "Replication lag is {}ms. Check replica health.",
-                lag_ms
+                "Replication lag is {lag_ms}ms. Check replica health."
             ));
         }
         score
@@ -367,20 +365,18 @@ impl CapacityPredictor {
 
         let recommendation = match days_until_full {
             Some(d) if d < 7 => format!(
-                "CRITICAL: {} will be exhausted in ~{} days. Immediate action required.",
-                resource, d
+                "CRITICAL: {resource} will be exhausted in ~{d} days. Immediate action required."
             ),
             Some(d) if d < 30 => format!(
-                "WARNING: {} will be exhausted in ~{} days. Plan capacity expansion.",
-                resource, d
+                "WARNING: {resource} will be exhausted in ~{d} days. Plan capacity expansion."
             ),
-            Some(d) => format!("{} has ~{} days of capacity remaining.", resource, d),
+            Some(d) => format!("{resource} has ~{d} days of capacity remaining."),
             None if utilization > 0.9 => format!(
                 "{} is at {:.0}% utilization with no growth trend.",
                 resource,
                 utilization * 100.0
             ),
-            None => format!("{} capacity is healthy.", resource),
+            None => format!("{resource} capacity is healthy."),
         };
 
         CapacityPrediction {

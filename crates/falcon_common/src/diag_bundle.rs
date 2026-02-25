@@ -188,7 +188,7 @@ impl DiagBundle {
     /// Serialize to a pretty-printed JSON string.
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self)
-            .unwrap_or_else(|e| format!("{{\"error\": \"serialization failed: {}\"}}", e))
+            .unwrap_or_else(|e| format!("{{\"error\": \"serialization failed: {e}\"}}"))
     }
 
     /// Write bundle to a file. Returns the path written.

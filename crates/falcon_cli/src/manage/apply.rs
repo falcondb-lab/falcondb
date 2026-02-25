@@ -67,9 +67,8 @@ impl ApplyResult {
 pub fn require_apply(apply: bool, command: &str) -> Result<()> {
     if !apply {
         bail!(
-            "Management command '{}' is in PLAN mode.\n\
-             Re-run with --apply to execute (add --yes to skip confirmation).",
-            command
+            "Management command '{command}' is in PLAN mode.\n\
+             Re-run with --apply to execute (add --yes to skip confirmation)."
         );
     }
     Ok(())

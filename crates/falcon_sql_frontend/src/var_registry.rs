@@ -46,14 +46,14 @@ impl VarRegistry {
 
     /// Register an exact-match variable handler.
     pub fn register(&mut self, name: &str, handler: VarHandler) {
-        self.exact.insert(name.to_string(), handler);
+        self.exact.insert(name.to_owned(), handler);
     }
 
     /// Register a prefix-match variable handler.
     /// When a variable name starts with `prefix`, the handler is called with
     /// the remaining suffix.
     pub fn register_prefix(&mut self, prefix: &str, handler: VarHandler) {
-        self.prefixes.push((prefix.to_string(), handler));
+        self.prefixes.push((prefix.to_owned(), handler));
     }
 
     /// Resolve a variable name to a `BoundStatement`, if registered.
@@ -73,7 +73,7 @@ impl VarRegistry {
 
     /// List all registered exact-match variable names (sorted).
     pub fn list_variables(&self) -> Vec<&str> {
-        let mut names: Vec<&str> = self.exact.keys().map(|s| s.as_str()).collect();
+        let mut names: Vec<&str> = self.exact.keys().map(std::string::String::as_str).collect();
         names.sort();
         names
     }
@@ -127,7 +127,7 @@ impl VarRegistry {
         reg.register_prefix(
             "falcon_table_stats_",
             Box::new(|suffix| {
-                let tname = suffix.unwrap_or("").to_string();
+                let tname = suffix.unwrap_or("").to_owned();
                 BoundStatement::ShowTableStats {
                     table_name: Some(tname),
                 }

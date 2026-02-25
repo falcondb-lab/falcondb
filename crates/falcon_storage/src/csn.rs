@@ -368,10 +368,7 @@ impl CsnSnapshot {
         if !row_csn.is_committed() {
             return false;
         }
-        match self.csn_map.get(&shard_id) {
-            Some(snap_csn) => row_csn <= *snap_csn,
-            None => false, // shard not in snapshot
-        }
+        self.csn_map.get(&shard_id).is_some_and(|snap_csn| row_csn <= *snap_csn)
     }
 
     /// Number of shards in this snapshot.

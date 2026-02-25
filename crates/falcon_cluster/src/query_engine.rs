@@ -90,7 +90,7 @@ impl DistributedQueryEngine {
     pub fn last_scatter_stats(&self) -> ScatterStats {
         self.last_scatter_stats
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
@@ -120,14 +120,14 @@ impl DistributedQueryEngine {
                     let engine = &self.engine;
                     s.spawn(move || {
                         let start = Instant::now();
-                        match engine.shard(sid) {
-                            Some(shard) => {
+                        engine.shard(sid).map_or(
+                            (sid, false, start.elapsed().as_micros() as u64),
+                            |shard| {
                                 let txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
                                 let _ = shard.txn_mgr.commit(txn.txn_id);
                                 (sid, true, start.elapsed().as_micros() as u64)
-                            }
-                            None => (sid, false, start.elapsed().as_micros() as u64),
-                        }
+                            },
+                        )
                     })
                 })
                 .collect();
@@ -363,7 +363,7 @@ impl DistributedQueryEngine {
 
     /// Get the rebalancer status (SHOW falcon.rebalance_status).
     /// Returns a default status if no rebalancer is attached.
-    pub fn rebalance_status(&self) -> crate::rebalancer::RebalancerStatus {
+    pub const fn rebalance_status(&self) -> crate::rebalancer::RebalancerStatus {
         // The DistributedQueryEngine doesn't own the rebalancer directly,
         // so return a default status. The actual rebalancer status is
         // exposed via the RebalanceRunnerHandle or ShardRebalancer.
@@ -404,22 +404,19 @@ impl DistributedQueryEngine {
 
         for task in &plan.tasks {
             let status = migrator.execute_task(task, &self.engine);
-            match status.phase {
-                crate::rebalancer::MigrationPhase::Completed => {
-                    completed += 1;
-                    rows_migrated += status.rows_migrated;
-                }
-                _ => {
-                    failed += 1;
-                    if let Some(ref err) = status.error {
-                        tracing::warn!(
-                            "Rebalance task failed: {:?} → {:?} ({}): {}",
-                            task.source_shard,
-                            task.target_shard,
-                            task.table_name,
-                            err
-                        );
-                    }
+            if status.phase == crate::rebalancer::MigrationPhase::Completed {
+                completed += 1;
+                rows_migrated += status.rows_migrated;
+            } else {
+                failed += 1;
+                if let Some(ref err) = status.error {
+                    tracing::warn!(
+                        "Rebalance task failed: {:?} → {:?} ({}): {}",
+                        task.source_shard,
+                        task.target_shard,
+                        task.table_name,
+                        err
+                    );
                 }
             }
         }
@@ -428,12 +425,12 @@ impl DistributedQueryEngine {
     }
 
     /// Access the underlying two-phase coordinator for multi-shard writes.
-    pub fn two_phase_coordinator(&self) -> &TwoPhaseCoordinator {
+    pub const fn two_phase_coordinator(&self) -> &TwoPhaseCoordinator {
         &self.two_pc
     }
 
     /// Access the underlying distributed executor for closure-based scatter/gather.
-    pub fn distributed_executor(&self) -> &DistributedExecutor {
+    pub const fn distributed_executor(&self) -> &DistributedExecutor {
         &self.dist_exec
     }
 

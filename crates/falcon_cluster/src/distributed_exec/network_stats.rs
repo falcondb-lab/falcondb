@@ -84,18 +84,13 @@ fn estimate_datum_wire_bytes(d: &Datum) -> u64 {
     match d {
         Datum::Null => 1,
         Datum::Boolean(_) => 2,
-        Datum::Int32(_) => 5,
-        Datum::Int64(_) => 9,
-        Datum::Float64(_) => 9,
+        Datum::Int32(_) | Datum::Date(_) => 5,
+        Datum::Int64(_) | Datum::Float64(_)
+        | Datum::Time(_) | Datum::Timestamp(_) => 9,
         Datum::Text(s) => 5 + s.len() as u64,
         Datum::Bytea(b) => 5 + b.len() as u64,
-        Datum::Date(_) => 5,
-        Datum::Time(_) => 9,
-        Datum::Timestamp(_) => 9,
-        Datum::Interval(_, _, _) => 17,
-        Datum::Uuid(_) => 17,
+        Datum::Interval(_, _, _) | Datum::Uuid(_) | Datum::Decimal(_, _) => 17,
         Datum::Jsonb(v) => 5 + v.to_string().len() as u64,
-        Datum::Decimal(_, _) => 17,
         Datum::Array(a) => {
             5 + a.iter().map(estimate_datum_wire_bytes).sum::<u64>()
         }

@@ -36,13 +36,12 @@ impl StorageEngine {
             .map_err(StorageError::DatabaseAlreadyExists)?;
         let oid = catalog
             .find_database(name)
-            .map(|db| db.oid)
-            .unwrap_or(0);
+            .map_or(0, |db| db.oid);
         drop(catalog);
 
         self.append_wal(&WalRecord::CreateDatabase {
-            name: name.to_string(),
-            owner: owner.to_string(),
+            name: name.to_owned(),
+            owner: owner.to_owned(),
         })?;
 
         tracing::info!("Created database '{}' (oid={})", name, oid);
@@ -57,7 +56,7 @@ impl StorageEngine {
         drop(catalog);
 
         self.append_wal(&WalRecord::DropDatabase {
-            name: name.to_string(),
+            name: name.to_owned(),
         })?;
 
         tracing::info!("Dropped database '{}'", name);
@@ -74,8 +73,8 @@ impl StorageEngine {
         drop(catalog);
 
         self.append_wal(&WalRecord::CreateSchema {
-            name: name.to_string(),
-            owner: owner.to_string(),
+            name: name.to_owned(),
+            owner: owner.to_owned(),
         })?;
 
         tracing::info!("Created schema '{}'", name);
@@ -90,7 +89,7 @@ impl StorageEngine {
         drop(catalog);
 
         self.append_wal(&WalRecord::DropSchema {
-            name: name.to_string(),
+            name: name.to_owned(),
         })?;
 
         tracing::info!("Dropped schema '{}'", name);
@@ -115,7 +114,7 @@ impl StorageEngine {
         drop(catalog);
 
         self.append_wal(&WalRecord::CreateRole {
-            name: name.to_string(),
+            name: name.to_owned(),
             can_login,
             is_superuser,
             can_create_db,
@@ -135,7 +134,7 @@ impl StorageEngine {
         drop(catalog);
 
         self.append_wal(&WalRecord::DropRole {
-            name: name.to_string(),
+            name: name.to_owned(),
         })?;
 
         tracing::info!("Dropped role '{}'", name);
@@ -175,7 +174,7 @@ impl StorageEngine {
         }).unwrap_or_default();
 
         self.append_wal(&WalRecord::AlterRole {
-            name: name.to_string(),
+            name: name.to_owned(),
             options_json: opts_json,
         })?;
 
@@ -200,11 +199,11 @@ impl StorageEngine {
         drop(catalog);
 
         self.append_wal(&WalRecord::GrantPrivilege {
-            grantee: grantee.to_string(),
-            privilege: privilege.to_string(),
-            object_type: object_type.to_string(),
-            object_name: object_name.to_string(),
-            grantor: grantor.to_string(),
+            grantee: grantee.to_owned(),
+            privilege: privilege.to_owned(),
+            object_type: object_type.to_owned(),
+            object_name: object_name.to_owned(),
+            grantor: grantor.to_owned(),
         })?;
 
         tracing::info!("GRANT {} ON {} {} TO {}", privilege, object_type, object_name, grantee);
@@ -225,10 +224,10 @@ impl StorageEngine {
         drop(catalog);
 
         self.append_wal(&WalRecord::RevokePrivilege {
-            grantee: grantee.to_string(),
-            privilege: privilege.to_string(),
-            object_type: object_type.to_string(),
-            object_name: object_name.to_string(),
+            grantee: grantee.to_owned(),
+            privilege: privilege.to_owned(),
+            object_type: object_type.to_owned(),
+            object_name: object_name.to_owned(),
         })?;
 
         tracing::info!("REVOKE {} ON {} {} FROM {}", privilege, object_type, object_name, grantee);
@@ -247,8 +246,8 @@ impl StorageEngine {
         drop(catalog);
 
         self.append_wal(&WalRecord::GrantRole {
-            member: member.to_string(),
-            group: group.to_string(),
+            member: member.to_owned(),
+            group: group.to_owned(),
         })?;
 
         tracing::info!("GRANT role '{}' TO '{}'", group, member);
@@ -267,8 +266,8 @@ impl StorageEngine {
         drop(catalog);
 
         self.append_wal(&WalRecord::RevokeRole {
-            member: member.to_string(),
-            group: group.to_string(),
+            member: member.to_owned(),
+            group: group.to_owned(),
         })?;
 
         tracing::info!("REVOKE role '{}' FROM '{}'", group, member);
@@ -402,7 +401,7 @@ impl StorageEngine {
         let _meta_page_id = meta_page_id; // reserved for USTM integration
 
         self.append_wal(&WalRecord::DropTable {
-            table_name: name.to_string(),
+            table_name: name.to_owned(),
         })?;
 
         catalog.drop_table(name);
@@ -487,7 +486,7 @@ impl StorageEngine {
         }
 
         self.append_wal(&WalRecord::TruncateTable {
-            table_name: name.to_string(),
+            table_name: name.to_owned(),
         })?;
         Ok(())
     }
@@ -505,25 +504,24 @@ impl StorageEngine {
             if or_replace {
                 catalog.drop_view(name);
             } else {
-                return Err(StorageError::TableAlreadyExists(format!("view '{}'", name)));
+                return Err(StorageError::TableAlreadyExists(format!("view '{name}'")));
             }
         }
         // Also reject if a table with the same name exists
         if catalog.find_table(name).is_some() {
             return Err(StorageError::TableAlreadyExists(format!(
-                "relation '{}' already exists as a table",
-                name
+                "relation '{name}' already exists as a table"
             )));
         }
         catalog.add_view(falcon_common::schema::ViewDef {
-            name: name.to_string(),
-            query_sql: query_sql.to_string(),
+            name: name.to_owned(),
+            query_sql: query_sql.to_owned(),
         });
         drop(catalog);
 
         self.append_wal(&WalRecord::CreateView {
-            name: name.to_string(),
-            query_sql: query_sql.to_string(),
+            name: name.to_owned(),
+            query_sql: query_sql.to_owned(),
         })?;
         Ok(())
     }
@@ -540,7 +538,7 @@ impl StorageEngine {
         drop(catalog);
 
         self.append_wal(&WalRecord::DropView {
-            name: name.to_string(),
+            name: name.to_owned(),
         })?;
         Ok(())
     }
@@ -569,7 +567,7 @@ impl StorageEngine {
         let ddl_id = self.online_ddl.register(
             table_id,
             DdlOpKind::AddColumn {
-                table_name: table_name.to_string(),
+                table_name: table_name.to_owned(),
                 column_name: col.name.clone(),
                 has_default,
             },
@@ -579,8 +577,8 @@ impl StorageEngine {
         let col_json =
             serde_json::to_string(&col).map_err(|e| StorageError::Serialization(e.to_string()))?;
         self.append_wal(&WalRecord::AlterTable {
-            table_name: table_name.to_string(),
-            operation_json: format!(r#"{{"op":"add_column","column":{}}}"#, col_json),
+            table_name: table_name.to_owned(),
+            operation_json: format!(r#"{{"op":"add_column","column":{col_json}}}"#),
         })?;
 
         // Backfill existing rows with default value if needed
@@ -594,7 +592,7 @@ impl StorageEngine {
                 let total = memtable.data.len() as u64;
                 self.online_ddl.begin_backfill(ddl_id, total);
                 let mut batch_count = 0u64;
-                for entry in memtable.data.iter() {
+                for entry in &memtable.data {
                     let chain = entry.value();
                     if let Some(row) = chain.read_latest() {
                         let mut values = row.values.clone();
@@ -640,7 +638,7 @@ impl StorageEngine {
             .iter()
             .position(|c| c.name.to_lowercase() == lower)
             .ok_or_else(|| {
-                StorageError::Serialization(format!("Column not found: {}", col_name))
+                StorageError::Serialization(format!("Column not found: {col_name}"))
             })?;
         // Don't allow dropping PK columns
         if schema.primary_key_columns.contains(&idx) {
@@ -668,15 +666,15 @@ impl StorageEngine {
         let ddl_id = self.online_ddl.register(
             table_id,
             DdlOpKind::DropColumn {
-                table_name: table_name.to_string(),
-                column_name: col_name.to_string(),
+                table_name: table_name.to_owned(),
+                column_name: col_name.to_owned(),
             },
         );
         self.online_ddl.start(ddl_id);
 
         self.append_wal(&WalRecord::AlterTable {
-            table_name: table_name.to_string(),
-            operation_json: format!(r#"{{"op":"drop_column","column_name":"{}"}}"#, col_name),
+            table_name: table_name.to_owned(),
+            operation_json: format!(r#"{{"op":"drop_column","column_name":"{col_name}"}}"#),
         })?;
 
         self.online_ddl.complete(ddl_id);
@@ -700,24 +698,23 @@ impl StorageEngine {
             .iter_mut()
             .find(|c| c.name.to_lowercase() == lower)
             .ok_or_else(|| {
-                StorageError::Serialization(format!("Column not found: {}", old_name))
+                StorageError::Serialization(format!("Column not found: {old_name}"))
             })?;
-        col.name = new_name.to_string();
+        col.name = new_name.to_owned();
         drop(catalog);
 
         let ddl_id = self.online_ddl.register(
             table_id,
             DdlOpKind::MetadataOnly {
-                description: format!("RENAME COLUMN {} TO {}", old_name, new_name),
+                description: format!("RENAME COLUMN {old_name} TO {new_name}"),
             },
         );
         self.online_ddl.start(ddl_id);
 
         self.append_wal(&WalRecord::AlterTable {
-            table_name: table_name.to_string(),
+            table_name: table_name.to_owned(),
             operation_json: format!(
-                r#"{{"op":"rename_column","old_name":"{}","new_name":"{}"}}"#,
-                old_name, new_name
+                r#"{{"op":"rename_column","old_name":"{old_name}","new_name":"{new_name}"}}"#
             ),
         })?;
 
@@ -729,7 +726,7 @@ impl StorageEngine {
         let mut catalog = self.catalog.write();
         // Check new name doesn't already exist
         if catalog.find_table(new_name).is_some() {
-            return Err(StorageError::TableAlreadyExists(new_name.to_string()));
+            return Err(StorageError::TableAlreadyExists(new_name.to_owned()));
         }
         let table_id = catalog
             .find_table(old_name)
@@ -741,14 +738,14 @@ impl StorageEngine {
         let ddl_id = self.online_ddl.register(
             table_id,
             DdlOpKind::MetadataOnly {
-                description: format!("RENAME TABLE {} TO {}", old_name, new_name),
+                description: format!("RENAME TABLE {old_name} TO {new_name}"),
             },
         );
         self.online_ddl.start(ddl_id);
 
         self.append_wal(&WalRecord::AlterTable {
-            table_name: old_name.to_string(),
-            operation_json: format!(r#"{{"op":"rename_table","new_name":"{}"}}"#, new_name),
+            table_name: old_name.to_owned(),
+            operation_json: format!(r#"{{"op":"rename_table","new_name":"{new_name}"}}"#),
         })?;
 
         self.online_ddl.complete(ddl_id);
@@ -773,7 +770,7 @@ impl StorageEngine {
             .iter()
             .position(|c| c.name.to_lowercase() == lower)
             .ok_or_else(|| {
-                StorageError::Serialization(format!("Column not found: {}", col_name))
+                StorageError::Serialization(format!("Column not found: {col_name}"))
             })?;
         let table_id = schema.id;
         let cast_target = datatype_to_cast_target(&new_type);
@@ -783,9 +780,9 @@ impl StorageEngine {
         let ddl_id = self.online_ddl.register(
             table_id,
             DdlOpKind::ChangeColumnType {
-                table_name: table_name.to_string(),
-                column_name: col_name.to_string(),
-                new_type: format!("{}", new_type),
+                table_name: table_name.to_owned(),
+                column_name: col_name.to_owned(),
+                new_type: format!("{new_type}"),
             },
         );
         self.online_ddl.start(ddl_id);
@@ -796,7 +793,7 @@ impl StorageEngine {
             let total = memtable.data.len() as u64;
             self.online_ddl.begin_backfill(ddl_id, total);
             let mut batch_count = 0u64;
-            for entry in memtable.data.iter() {
+            for entry in &memtable.data {
                 let chain = entry.value();
                 if let Some(row) = chain.read_latest() {
                     let mut values = row.values.clone();
@@ -804,7 +801,7 @@ impl StorageEngine {
                         match crate::eval_cast_datum(values[col_idx].clone(), &cast_target) {
                             Ok(casted) => values[col_idx] = casted,
                             Err(e) => {
-                                let err_msg = format!("Type conversion failed: {}", e);
+                                let err_msg = format!("Type conversion failed: {e}");
                                 self.online_ddl.fail(ddl_id, err_msg.clone());
                                 return Err(StorageError::Serialization(err_msg));
                             }
@@ -846,7 +843,7 @@ impl StorageEngine {
             .iter_mut()
             .find(|c| c.name.to_lowercase() == lower)
             .ok_or_else(|| {
-                StorageError::Serialization(format!("Column not found: {}", col_name))
+                StorageError::Serialization(format!("Column not found: {col_name}"))
             })?;
         col.nullable = false;
         drop(catalog);
@@ -854,7 +851,7 @@ impl StorageEngine {
         let ddl_id = self.online_ddl.register(
             table_id,
             DdlOpKind::MetadataOnly {
-                description: format!("SET NOT NULL {}.{}", table_name, col_name),
+                description: format!("SET NOT NULL {table_name}.{col_name}"),
             },
         );
         self.online_ddl.start(ddl_id);
@@ -879,7 +876,7 @@ impl StorageEngine {
             .iter_mut()
             .find(|c| c.name.to_lowercase() == lower)
             .ok_or_else(|| {
-                StorageError::Serialization(format!("Column not found: {}", col_name))
+                StorageError::Serialization(format!("Column not found: {col_name}"))
             })?;
         col.nullable = true;
         drop(catalog);
@@ -887,7 +884,7 @@ impl StorageEngine {
         let ddl_id = self.online_ddl.register(
             table_id,
             DdlOpKind::MetadataOnly {
-                description: format!("DROP NOT NULL {}.{}", table_name, col_name),
+                description: format!("DROP NOT NULL {table_name}.{col_name}"),
             },
         );
         self.online_ddl.start(ddl_id);
@@ -913,7 +910,7 @@ impl StorageEngine {
             .iter_mut()
             .find(|c| c.name.to_lowercase() == lower)
             .ok_or_else(|| {
-                StorageError::Serialization(format!("Column not found: {}", col_name))
+                StorageError::Serialization(format!("Column not found: {col_name}"))
             })?;
         col.default_value = Some(default_val);
         drop(catalog);
@@ -921,7 +918,7 @@ impl StorageEngine {
         let ddl_id = self.online_ddl.register(
             table_id,
             DdlOpKind::MetadataOnly {
-                description: format!("SET DEFAULT {}.{}", table_name, col_name),
+                description: format!("SET DEFAULT {table_name}.{col_name}"),
             },
         );
         self.online_ddl.start(ddl_id);
@@ -946,7 +943,7 @@ impl StorageEngine {
             .iter_mut()
             .find(|c| c.name.to_lowercase() == lower)
             .ok_or_else(|| {
-                StorageError::Serialization(format!("Column not found: {}", col_name))
+                StorageError::Serialization(format!("Column not found: {col_name}"))
             })?;
         col.default_value = None;
         drop(catalog);
@@ -954,7 +951,7 @@ impl StorageEngine {
         let ddl_id = self.online_ddl.register(
             table_id,
             DdlOpKind::MetadataOnly {
-                description: format!("DROP DEFAULT {}.{}", table_name, col_name),
+                description: format!("DROP DEFAULT {table_name}.{col_name}"),
             },
         );
         self.online_ddl.start(ddl_id);
@@ -999,15 +996,15 @@ impl StorageEngine {
             index_name.to_lowercase(),
             IndexMeta {
                 table_id,
-                table_name: table_name.to_string(),
+                table_name: table_name.to_owned(),
                 column_idx,
                 unique,
             },
         );
 
         self.append_wal(&WalRecord::CreateIndex {
-            index_name: index_name.to_string(),
-            table_name: table_name.to_string(),
+            index_name: index_name.to_owned(),
+            table_name: table_name.to_owned(),
             column_idx,
             unique,
         })?;
@@ -1018,7 +1015,7 @@ impl StorageEngine {
     pub fn drop_index(&self, index_name: &str) -> Result<(), StorageError> {
         let key = index_name.to_lowercase();
         let (_, meta) = self.index_registry.remove(&key).ok_or_else(|| {
-            StorageError::Serialization(format!("index \"{}\" does not exist", index_name))
+            StorageError::Serialization(format!("index \"{index_name}\" does not exist"))
         })?;
 
         if let Some(table_ref) = self.tables.get(&meta.table_id) {
@@ -1028,7 +1025,7 @@ impl StorageEngine {
         }
 
         self.append_wal(&WalRecord::DropIndex {
-            index_name: index_name.to_string(),
+            index_name: index_name.to_owned(),
             table_name: meta.table_name.clone(),
             column_idx: meta.column_idx,
         })?;
@@ -1105,7 +1102,7 @@ impl StorageEngine {
             index_name.to_lowercase(),
             IndexMeta {
                 table_id,
-                table_name: table_name.to_string(),
+                table_name: table_name.to_owned(),
                 column_idx: *column_indices.first().unwrap_or(&0),
                 unique,
             },
@@ -1145,7 +1142,7 @@ impl StorageEngine {
             index_name.to_lowercase(),
             IndexMeta {
                 table_id,
-                table_name: table_name.to_string(),
+                table_name: table_name.to_owned(),
                 column_idx: *column_indices.first().unwrap_or(&0),
                 unique,
             },
@@ -1180,7 +1177,7 @@ impl StorageEngine {
             index_name.to_lowercase(),
             IndexMeta {
                 table_id,
-                table_name: table_name.to_string(),
+                table_name: table_name.to_owned(),
                 column_idx,
                 unique: false,
             },
@@ -1196,7 +1193,7 @@ impl StorageEngine {
         unique: bool,
     ) -> Result<(), StorageError> {
         let mut seen_keys: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
-        for entry in memtable.data.iter() {
+        for entry in &memtable.data {
             let pk = entry.key().clone();
             let chain = entry.value();
             if let Some(row) = chain.read_latest() {
@@ -1226,13 +1223,13 @@ impl StorageEngine {
 
     pub fn create_sequence(&self, name: &str, start: i64) -> Result<(), StorageError> {
         if self.sequences.contains_key(name) {
-            return Err(StorageError::TableAlreadyExists(name.to_string()));
+            return Err(StorageError::TableAlreadyExists(name.to_owned()));
         }
         self.sequences
-            .insert(name.to_string(), AtomicI64::new(start - 1));
+            .insert(name.to_owned(), AtomicI64::new(start - 1));
 
         self.append_wal(&WalRecord::CreateSequence {
-            name: name.to_string(),
+            name: name.to_owned(),
             start,
         })?;
         Ok(())
@@ -1244,7 +1241,7 @@ impl StorageEngine {
             .ok_or(StorageError::TableNotFound(TableId(0)))?;
 
         self.append_wal(&WalRecord::DropSequence {
-            name: name.to_string(),
+            name: name.to_owned(),
         })?;
         Ok(())
     }
@@ -1277,7 +1274,7 @@ impl StorageEngine {
         entry.value().store(value, AtomicOrdering::SeqCst);
 
         self.append_wal(&WalRecord::SetSequenceValue {
-            name: name.to_string(),
+            name: name.to_owned(),
             value,
         })?;
         Ok(value)

@@ -30,7 +30,7 @@ use falcon_storage::structured_lsn::{
 fn compute_crc32(data: &[u8]) -> u32 {
     let mut hash: u32 = 5381;
     for &b in data {
-        hash = hash.wrapping_mul(33).wrapping_add(b as u32);
+        hash = hash.wrapping_mul(33).wrapping_add(u32::from(b));
     }
     hash
 }
@@ -245,7 +245,7 @@ impl fmt::Display for ReplicationPath {
             Self::SegmentStreaming { segments_to_send } =>
                 write!(f, "SEGMENT_STREAMING({} segments)", segments_to_send.len()),
             Self::TailStreaming { segment_id, from_offset } =>
-                write!(f, "TAIL_STREAMING(seg={}, offset={})", segment_id, from_offset),
+                write!(f, "TAIL_STREAMING(seg={segment_id}, offset={from_offset})"),
             Self::AlreadyCaughtUp => write!(f, "CAUGHT_UP"),
         }
     }
@@ -806,7 +806,7 @@ impl BackpressureSender {
     /// Check if we can send another chunk.
     pub fn can_send(&self) -> bool {
         !self.cancelled.load(Ordering::Relaxed)
-            && self.inflight.load(Ordering::Relaxed) < self.max_inflight as u64
+            && self.inflight.load(Ordering::Relaxed) < u64::from(self.max_inflight)
     }
 
     /// Mark a chunk as sent (increases inflight count).
@@ -887,17 +887,17 @@ impl fmt::Display for StreamingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ChecksumMismatch { segment_id, offset } =>
-                write!(f, "checksum mismatch: segment={}, offset={}", segment_id, offset),
+                write!(f, "checksum mismatch: segment={segment_id}, offset={offset}"),
             Self::DiskFull { node_id } =>
-                write!(f, "disk full on node {}", node_id),
+                write!(f, "disk full on node {node_id}"),
             Self::NetworkInterrupted { reason } =>
-                write!(f, "network interrupted: {}", reason),
+                write!(f, "network interrupted: {reason}"),
             Self::LeaderChanged { old_leader, new_leader } =>
-                write!(f, "leader changed: {} → {}", old_leader, new_leader),
+                write!(f, "leader changed: {old_leader} → {new_leader}"),
             Self::SegmentNotFound { segment_id } =>
-                write!(f, "segment {} not found", segment_id),
+                write!(f, "segment {segment_id} not found"),
             Self::UnknownFollower { node_id } =>
-                write!(f, "unknown follower: node {}", node_id),
+                write!(f, "unknown follower: node {node_id}"),
         }
     }
 }
@@ -918,10 +918,10 @@ pub const fn decide_recovery(error: &StreamingError) -> ErrorRecoveryAction {
     match error {
         StreamingError::ChecksumMismatch { .. } => ErrorRecoveryAction::RetryChunk,
         StreamingError::DiskFull { .. } => ErrorRecoveryAction::Abort,
-        StreamingError::NetworkInterrupted { .. } => ErrorRecoveryAction::RetryFromLastSealed,
-        StreamingError::LeaderChanged { .. } => ErrorRecoveryAction::RetryFromLastSealed,
-        StreamingError::SegmentNotFound { .. } => ErrorRecoveryAction::RetryFromLastSealed,
-        StreamingError::UnknownFollower { .. } => ErrorRecoveryAction::RetryFromLastSealed,
+        StreamingError::NetworkInterrupted { .. }
+        | StreamingError::LeaderChanged { .. }
+        | StreamingError::SegmentNotFound { .. }
+        | StreamingError::UnknownFollower { .. } => ErrorRecoveryAction::RetryFromLastSealed,
     }
 }
 

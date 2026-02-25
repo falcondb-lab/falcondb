@@ -2,7 +2,7 @@ use falcon_common::datum::Datum;
 use falcon_common::error::ExecutionError;
 use falcon_sql_frontend::types::ScalarFunc;
 
-pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionError> {
+pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionError> {
     if let Some(r) = super::scalar_array_ext::dispatch(func, args) {
         return r;
     }
@@ -20,8 +20,7 @@ pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Execu
             dispatch_string_encoding(name, *encode, args)
         }
         _ => Err(ExecutionError::Internal(format!(
-            "Unimplemented scalar function: {:?}",
-            func
+            "Unimplemented scalar function: {func:?}"
         ))),
     }
 }
@@ -55,8 +54,8 @@ fn compute_operation(op: &str, suffix: u32, slice: &[f64]) -> Result<f64, Execut
     match op {
         "RMS_RANGE" | "RANGE" => {
             // Range: max - min
-            let min = slice.iter().cloned().fold(f64::INFINITY, f64::min);
-            let max = slice.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let min = slice.iter().copied().fold(f64::INFINITY, f64::min);
+            let max = slice.iter().copied().fold(f64::NEG_INFINITY, f64::max);
             Ok(max - min)
         }
         "ABS_NORM" => {
@@ -91,8 +90,8 @@ fn compute_operation(op: &str, suffix: u32, slice: &[f64]) -> Result<f64, Execut
             if logs.is_empty() {
                 return Ok(0.0);
             }
-            let min = logs.iter().cloned().fold(f64::INFINITY, f64::min);
-            let max = logs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let min = logs.iter().copied().fold(f64::INFINITY, f64::min);
+            let max = logs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
             Ok(max - min)
         }
         "LOG_NORM" => {
@@ -112,8 +111,8 @@ fn compute_operation(op: &str, suffix: u32, slice: &[f64]) -> Result<f64, Execut
         "ABS_RANGE" => {
             // Range of |v|: max(|v|) - min(|v|)
             let abs_vals: Vec<f64> = slice.iter().map(|v| v.abs()).collect();
-            let min = abs_vals.iter().cloned().fold(f64::INFINITY, f64::min);
-            let max = abs_vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let min = abs_vals.iter().copied().fold(f64::INFINITY, f64::min);
+            let max = abs_vals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
             Ok(max - min)
         }
         "RMS_NORM" => {
@@ -137,8 +136,7 @@ fn compute_operation(op: &str, suffix: u32, slice: &[f64]) -> Result<f64, Execut
             Ok(variance.sqrt())
         }
         _ => Err(ExecutionError::Internal(format!(
-            "Unknown array matrix operation: {}",
-            op
+            "Unknown array matrix operation: {op}"
         ))),
     }
 }
@@ -147,7 +145,7 @@ fn dispatch_array_matrix(name: &str, args: &[Datum]) -> Result<Datum, ExecutionE
     // Parse: ARRAY_MATRIX_{ROW|COLUMN}_{operation}{suffix}
     let rest = name
         .strip_prefix("ARRAY_MATRIX_")
-        .ok_or_else(|| ExecutionError::Internal(format!("Invalid array matrix func: {}", name)))?;
+        .ok_or_else(|| ExecutionError::Internal(format!("Invalid array matrix func: {name}")))?;
 
     let (is_row, op_part) = if let Some(r) = rest.strip_prefix("ROW_") {
         (true, r)
@@ -155,8 +153,7 @@ fn dispatch_array_matrix(name: &str, args: &[Datum]) -> Result<Datum, ExecutionE
         (false, r)
     } else {
         return Err(ExecutionError::Internal(format!(
-            "Invalid array matrix func: {}",
-            name
+            "Invalid array matrix func: {name}"
         )));
     };
 
@@ -171,8 +168,7 @@ fn dispatch_array_matrix(name: &str, args: &[Datum]) -> Result<Datum, ExecutionE
         Some(Datum::Null) => return Ok(Datum::Null),
         _ => {
             return Err(ExecutionError::TypeError(format!(
-                "{} requires array as first arg",
-                name
+                "{name} requires array as first arg"
             )))
         }
     };
@@ -181,7 +177,7 @@ fn dispatch_array_matrix(name: &str, args: &[Datum]) -> Result<Datum, ExecutionE
         .iter()
         .map(|d| match d {
             Datum::Int64(n) => *n as f64,
-            Datum::Int32(n) => *n as f64,
+            Datum::Int32(n) => f64::from(*n),
             Datum::Float64(f) => *f,
             _ => 0.0,
         })
@@ -192,8 +188,7 @@ fn dispatch_array_matrix(name: &str, args: &[Datum]) -> Result<Datum, ExecutionE
         Some(Datum::Int32(n)) => *n as usize,
         _ => {
             return Err(ExecutionError::TypeError(format!(
-                "{} requires rows as second arg",
-                name
+                "{name} requires rows as second arg"
             )))
         }
     };
@@ -202,8 +197,7 @@ fn dispatch_array_matrix(name: &str, args: &[Datum]) -> Result<Datum, ExecutionE
         Some(Datum::Int32(n)) => *n as usize,
         _ => {
             return Err(ExecutionError::TypeError(format!(
-                "{} requires cols as third arg",
-                name
+                "{name} requires cols as third arg"
             )))
         }
     };
@@ -212,8 +206,7 @@ fn dispatch_array_matrix(name: &str, args: &[Datum]) -> Result<Datum, ExecutionE
         Some(Datum::Int32(n)) => *n as usize,
         _ => {
             return Err(ExecutionError::TypeError(format!(
-                "{} requires index as fourth arg",
-                name
+                "{name} requires index as fourth arg"
             )))
         }
     };
@@ -384,10 +377,10 @@ fn string_encode(delimiter: char, args: &[Datum]) -> Result<Datum, ExecutionErro
             Datum::Text(s) => {
                 // Escape backslashes and the delimiter
                 s.replace('\\', "\\\\")
-                    .replace(delimiter, &format!("\\{}", delimiter))
+                    .replace(delimiter, &format!("\\{delimiter}"))
             }
             Datum::Null => String::new(),
-            other => format!("{}", other),
+            other => format!("{other}"),
         })
         .collect();
     Ok(Datum::Text(parts.join(&delimiter.to_string())))
@@ -432,10 +425,7 @@ fn string_decode(delimiter: char, args: &[Datum]) -> Result<Datum, ExecutionErro
     }
     fields.push(current);
 
-    match fields.get(idx) {
-        Some(s) => Ok(Datum::Text(s.clone())),
-        None => Ok(Datum::Null),
-    }
+    Ok(fields.get(idx).map_or(Datum::Null, |s| Datum::Text(s.clone())))
 }
 
 fn dispatch_string_encoding(

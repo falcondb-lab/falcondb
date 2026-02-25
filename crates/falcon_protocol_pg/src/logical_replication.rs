@@ -46,7 +46,7 @@ pub enum ReplicationResult {
 fn format_lsn(lsn: u64) -> String {
     let hi = (lsn >> 32) as u32;
     let lo = lsn as u32;
-    format!("{:X}/{:08X}", hi, lo)
+    format!("{hi:X}/{lo:08X}")
 }
 
 /// Parse a PG-style "X/XXXXXXXX" LSN string back to u64.
@@ -97,12 +97,11 @@ pub fn handle_replication_command(sql: &str, storage: &Arc<StorageEngine>) -> Re
     // SHOW and SELECT are also allowed on replication connections
     if upper.starts_with("SHOW") || upper.starts_with("SELECT") {
         return ReplicationResult::Error(
-            "regular queries on replication connections are forwarded to the normal handler"
-                .to_string(),
+            "regular queries on replication connections are forwarded to the normal handler".to_owned(),
         );
     }
 
-    ReplicationResult::Error(format!("unrecognized replication command: {}", trimmed))
+    ReplicationResult::Error(format!("unrecognized replication command: {trimmed}"))
 }
 
 /// IDENTIFY_SYSTEM — returns system info.
@@ -151,10 +150,10 @@ fn handle_identify_system(storage: &Arc<StorageEngine>) -> ReplicationResult {
     ];
 
     let row = vec![
-        Some("falcondb".to_string()),  // systemid
-        Some("1".to_string()),         // timeline
+        Some("falcondb".to_owned()),  // systemid
+        Some("1".to_owned()),         // timeline
         Some(format_lsn(current_lsn)), // xlogpos
-        Some("falcon".to_string()),    // dbname
+        Some("falcon".to_owned()),    // dbname
     ];
 
     ReplicationResult::Messages(vec![
@@ -187,7 +186,7 @@ fn handle_create_replication_slot(sql: &str, storage: &Arc<StorageEngine>) -> Re
     match cdc.create_slot(slot_name) {
         Ok(slot_id) => {
             let slot = cdc.list_slots().into_iter().find(|s| s.id == slot_id);
-            let consistent_point = slot.map(|s| s.confirmed_flush_lsn.0).unwrap_or(0);
+            let consistent_point = slot.map_or(0, |s| s.confirmed_flush_lsn.0);
             drop(cdc);
 
             let fields = vec![
@@ -230,10 +229,10 @@ fn handle_create_replication_slot(sql: &str, storage: &Arc<StorageEngine>) -> Re
             ];
 
             let row = vec![
-                Some(slot_name.to_string()),
+                Some(slot_name.to_owned()),
                 Some(format_lsn(consistent_point)),
                 None, // snapshot_name (not supported)
-                Some(DEFAULT_PLUGIN.to_string()),
+                Some(DEFAULT_PLUGIN.to_owned()),
             ];
 
             ReplicationResult::Messages(vec![
@@ -298,8 +297,7 @@ fn handle_start_replication(sql: &str, storage: &Arc<StorageEngine>) -> Replicat
         Some(s) => s.id,
         None => {
             return ReplicationResult::Error(format!(
-                "replication slot \"{}\" does not exist",
-                slot_name
+                "replication slot \"{slot_name}\" does not exist"
             ));
         }
     };
@@ -310,7 +308,7 @@ fn handle_start_replication(sql: &str, storage: &Arc<StorageEngine>) -> Replicat
     drop(cdc);
 
     ReplicationResult::StartStreaming {
-        slot_name: slot_name.to_string(),
+        slot_name: slot_name.to_owned(),
         start_lsn,
     }
 }
@@ -337,7 +335,7 @@ pub fn encode_change_event_text(event: &ChangeEvent) -> String {
                 .as_ref()
                 .map(|r| format_row_values(&r.values))
                 .unwrap_or_default();
-            format!("table public.{}: INSERT: {}", table, row_str)
+            format!("table public.{table}: INSERT: {row_str}")
         }
         ChangeOp::Update => {
             let table = event.table_name.as_deref().unwrap_or("unknown");
@@ -346,16 +344,16 @@ pub fn encode_change_event_text(event: &ChangeEvent) -> String {
                 .as_ref()
                 .map(|r| format_row_values(&r.values))
                 .unwrap_or_default();
-            format!("table public.{}: UPDATE: {}", table, row_str)
+            format!("table public.{table}: UPDATE: {row_str}")
         }
         ChangeOp::Delete => {
             let table = event.table_name.as_deref().unwrap_or("unknown");
             let pk_str = event.pk_values.as_deref().unwrap_or("(unknown pk)");
-            format!("table public.{}: DELETE: {}", table, pk_str)
+            format!("table public.{table}: DELETE: {pk_str}")
         }
         ChangeOp::Ddl => {
             let ddl = event.ddl_text.as_deref().unwrap_or("(unknown DDL)");
-            format!("DDL: {}", ddl)
+            format!("DDL: {ddl}")
         }
     }
 }
@@ -366,17 +364,17 @@ fn format_row_values(row: &[falcon_common::datum::Datum]) -> String {
     row.iter()
         .enumerate()
         .map(|(i, d)| {
-            let col = format!("col{}", i);
+            let col = format!("col{i}");
             match d {
-                Datum::Null => format!("{}[null]:null", col),
-                Datum::Boolean(b) => format!("{}[boolean]:{}", col, b),
-                Datum::Int32(v) => format!("{}[integer]:{}", col, v),
-                Datum::Int64(v) => format!("{}[bigint]:{}", col, v),
-                Datum::Float64(v) => format!("{}[double precision]:{}", col, v),
-                Datum::Text(s) => format!("{}[text]:'{}'", col, s),
-                Datum::Timestamp(t) => format!("{}[timestamp]:{}", col, t),
-                Datum::Date(d) => format!("{}[date]:{}", col, d),
-                _ => format!("{}[unknown]:{}", col, d),
+                Datum::Null => format!("{col}[null]:null"),
+                Datum::Boolean(b) => format!("{col}[boolean]:{b}"),
+                Datum::Int32(v) => format!("{col}[integer]:{v}"),
+                Datum::Int64(v) => format!("{col}[bigint]:{v}"),
+                Datum::Float64(v) => format!("{col}[double precision]:{v}"),
+                Datum::Text(s) => format!("{col}[text]:'{s}'"),
+                Datum::Timestamp(t) => format!("{col}[timestamp]:{t}"),
+                Datum::Date(d) => format!("{col}[date]:{d}"),
+                _ => format!("{col}[unknown]:{d}"),
             }
         })
         .collect::<Vec<_>>()
@@ -465,8 +463,7 @@ impl StandbyStatusUpdate {
 pub fn is_replication_connection(params: &std::collections::HashMap<String, String>) -> bool {
     params
         .get("replication")
-        .map(|v| v.eq_ignore_ascii_case("database") || v.eq_ignore_ascii_case("true") || v == "1")
-        .unwrap_or(false)
+        .is_some_and(|v| v.eq_ignore_ascii_case("database") || v.eq_ignore_ascii_case("true") || v == "1")
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

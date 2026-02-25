@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use crate::format::OutputMode;
 use serde_json::{json, Value};
 
@@ -88,8 +90,8 @@ impl PlanOutput {
     fn render_table(&self) -> String {
         let mut out = String::new();
 
-        out.push_str(&format!("╔══ PLAN: {} ══\n", self.command));
-        out.push_str(&format!("  Risk Level : {}\n", self.risk));
+        let _ = writeln!(out, "╔══ PLAN: {} ══", self.command);
+        let _ = writeln!(out, "  Risk Level : {}", self.risk);
 
         if !self.fields.is_empty() {
             let label_width = self
@@ -100,17 +102,16 @@ impl PlanOutput {
                 .unwrap_or(0)
                 .max(12);
             for f in &self.fields {
-                out.push_str(&format!(
-                    "  {:<width$} : {}\n",
+                let _ = writeln!(out, "  {:<width$} : {}",
                     f.label,
                     f.value,
                     width = label_width
-                ));
+                );
             }
         }
 
         for w in &self.warnings {
-            out.push_str(&format!("  ⚠  WARNING : {}\n", w));
+            let _ = writeln!(out, "  ⚠  WARNING : {w}");
         }
 
         if self.requires_apply {

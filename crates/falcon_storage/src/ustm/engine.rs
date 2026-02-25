@@ -75,9 +75,9 @@ pub enum UstmError {
 impl std::fmt::Display for UstmError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ZoneError(e) => write!(f, "zone error: {}", e),
-            Self::IoError(e) => write!(f, "I/O error: {}", e),
-            Self::PageNotFound(pid) => write!(f, "page not found: {}", pid),
+            Self::ZoneError(e) => write!(f, "zone error: {e}"),
+            Self::IoError(e) => write!(f, "I/O error: {e}"),
+            Self::PageNotFound(pid) => write!(f, "page not found: {pid}"),
             Self::Shutdown => write!(f, "engine is shut down"),
         }
     }
@@ -241,8 +241,8 @@ impl UstmEngine {
     /// Fetch a page and return a PinGuard (page stays resident until guard drops).
     pub fn fetch_pinned(&self, page_id: PageId, priority: AccessPriority) -> Result<PinGuard, UstmError> {
         match self.fetch(page_id, priority) {
-            FetchResult::Hit(h) => Ok(PinGuard::new(h)),
-            FetchResult::Loaded(h) => Ok(PinGuard::new(h)),
+            FetchResult::Hit(h)
+            | FetchResult::Loaded(h) => Ok(PinGuard::new(h)),
             FetchResult::Error(e) => Err(e),
         }
     }

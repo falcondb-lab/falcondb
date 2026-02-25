@@ -126,7 +126,7 @@ impl IoError {
                 IoErrorKind::Internal
             }
         };
-        Self::with_source(kind, format!("{}", e), e)
+        Self::with_source(kind, format!("{e}"), e)
     }
 }
 

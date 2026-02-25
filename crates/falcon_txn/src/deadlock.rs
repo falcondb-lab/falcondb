@@ -102,12 +102,9 @@ impl WaitForGraph {
                     }
                 } else if in_stack.contains(&holder) {
                     // Found a cycle — extract it from path
-                    let cycle_start = match path.iter().position(|&t| t == holder) {
-                        Some(pos) => pos,
-                        None => {
-                            tracing::error!("BUG: holder {:?} in in_stack but not in path", holder);
-                            return None;
-                        }
+                    let cycle_start = if let Some(pos) = path.iter().position(|&t| t == holder) { pos } else {
+                        tracing::error!("BUG: holder {:?} in in_stack but not in path", holder);
+                        return None;
                     };
                     return Some(path[cycle_start..].to_vec());
                 }
@@ -133,7 +130,7 @@ impl WaitForGraph {
     /// Number of edges in the graph (for diagnostics).
     pub fn edge_count(&self) -> usize {
         let edges = self.edges.lock();
-        edges.values().map(|s| s.len()).sum()
+        edges.values().map(std::collections::HashSet::len).sum()
     }
 }
 

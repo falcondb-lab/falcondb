@@ -388,8 +388,7 @@ impl HAReplicaGroup {
             SplitBrainVerdict::Allowed => Ok(()),
             SplitBrainVerdict::Rejected { writer_epoch, current_epoch, writer_node } => {
                 Err(FalconError::Internal(format!(
-                    "split-brain rejected: writer node {} epoch {} < current epoch {}",
-                    writer_node, writer_epoch, current_epoch
+                    "split-brain rejected: writer node {writer_node} epoch {writer_epoch} < current epoch {current_epoch}"
                 )))
             }
         }
@@ -415,8 +414,7 @@ impl HAReplicaGroup {
         let best_idx = self.detector.best_replica_for_promotion();
         let candidate_lsn = best_idx
             .and_then(|i| self.inner.replicas.get(i))
-            .map(|r| r.current_lsn())
-            .unwrap_or(0);
+            .map_or(0, |r| r.current_lsn());
 
         // Pre-flight checks
         let input = PreFlightInput {
@@ -428,7 +426,7 @@ impl HAReplicaGroup {
             primary_is_failed: self.detector.is_primary_failed(),
         };
         self.pre_flight.check(&input).map_err(|reason| {
-            FalconError::Internal(format!("failover pre-flight rejected: {}", reason))
+            FalconError::Internal(format!("failover pre-flight rejected: {reason}"))
         })?;
 
         let best_idx = best_idx.unwrap(); // safe: pre-flight checks candidate_idx
@@ -444,7 +442,7 @@ impl HAReplicaGroup {
         if let Err(e) = self.inner.catch_up_replica(best_idx) {
             // ROLLBACK: unfence old primary
             self.inner.primary.unfence();
-            self.promotion_guard.rollback(&format!("catch-up failed: {}", e));
+            self.promotion_guard.rollback(&format!("catch-up failed: {e}"));
             return Err(e);
         }
 
@@ -464,7 +462,7 @@ impl HAReplicaGroup {
         // Step 4: Swap roles
         {
             let replica = self.inner.replicas.get(best_idx).ok_or_else(|| {
-                FalconError::Internal(format!("Replica index {} out of range", best_idx))
+                FalconError::Internal(format!("Replica index {best_idx} out of range"))
             })?;
 
             {
@@ -515,8 +513,7 @@ impl HAReplicaGroup {
             .inner
             .replicas
             .get(replica_idx)
-            .map(|r| r.current_lsn())
-            .unwrap_or(0);
+            .map_or(0, |r| r.current_lsn());
         self.detector
             .record_replica_heartbeat(replica_idx, applied_lsn, primary_lsn);
     }
@@ -823,7 +820,7 @@ impl FailoverOrchestrator {
         let metrics_clone = metrics.clone();
 
         let join_handle = std::thread::Builder::new()
-            .name("falcon-failover-orchestrator".to_string())
+            .name("falcon-failover-orchestrator".to_owned())
             .spawn(move || {
                 tracing::info!(
                     "FailoverOrchestrator started (interval={}ms)",
@@ -890,8 +887,7 @@ impl FailoverOrchestrator {
                     "failed to spawn background thread — node DEGRADED"
                 );
                 FalconError::Internal(format!(
-                    "failed to spawn failover orchestrator thread: {}",
-                    e
+                    "failed to spawn failover orchestrator thread: {e}"
                 ))
             })?;
 
@@ -967,8 +963,7 @@ impl SyncReplicationWaiter {
 
             if start.elapsed() > timeout {
                 return Err(FalconError::Internal(format!(
-                    "Sync replication timeout: {}/{} replicas acked LSN {} within {:?}",
-                    acked, required, commit_lsn, timeout,
+                    "Sync replication timeout: {acked}/{required} replicas acked LSN {commit_lsn} within {timeout:?}",
                 )));
             }
 
@@ -976,7 +971,7 @@ impl SyncReplicationWaiter {
             // The condvar is never notified, so this always times out after
             // poll_interval — but it yields the thread properly and is
             // interruptible by the OS scheduler (unlike a busy-spin).
-            let guard = pair.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = pair.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let _ = cvar.wait_timeout(guard, poll_interval);
         }
     }

@@ -58,21 +58,20 @@ pub fn migrate_config(toml_text: &str) -> Result<MigrationResult, String> {
 
     if from_version > CURRENT_CONFIG_VERSION {
         return Err(format!(
-            "Config version {} is newer than supported version {}. Cannot downgrade.",
-            from_version, CURRENT_CONFIG_VERSION
+            "Config version {from_version} is newer than supported version {CURRENT_CONFIG_VERSION}. Cannot downgrade."
         ));
     }
 
     if from_version == CURRENT_CONFIG_VERSION {
         return Ok(MigrationResult {
-            content: toml_text.to_string(),
+            content: toml_text.to_owned(),
             from_version,
             to_version: CURRENT_CONFIG_VERSION,
             steps: vec!["Already at current version — no migration needed.".into()],
         });
     }
 
-    let mut content = toml_text.to_string();
+    let mut content = toml_text.to_owned();
     let mut steps = Vec::new();
 
     // Apply migrations sequentially
@@ -131,7 +130,7 @@ pub fn migrate_config_file(path: &std::path::Path) -> Result<MigrationResult, St
 
     // Write migrated config
     std::fs::write(path, &result.content)
-        .map_err(|e| format!("Failed to write migrated config: {}", e))?;
+        .map_err(|e| format!("Failed to write migrated config: {e}"))?;
 
     Ok(result)
 }
@@ -140,44 +139,43 @@ pub fn migrate_config_file(path: &std::path::Path) -> Result<MigrationResult, St
 pub fn run_config_migrate(config_path: &str) {
     let path = std::path::Path::new(config_path);
     if !path.exists() {
-        eprintln!("ERROR: Config file not found: {}", config_path);
+        eprintln!("ERROR: Config file not found: {config_path}");
         std::process::exit(1);
     }
 
     println!("FalconDB Config Migration");
     println!("=========================");
-    println!("  File: {}", config_path);
+    println!("  File: {config_path}");
 
     match check_config_version(
         &std::fs::read_to_string(path).unwrap_or_default(),
     ) {
         ConfigVersionStatus::Current => {
-            println!("  Status: Already at version {} (current)", CURRENT_CONFIG_VERSION);
+            println!("  Status: Already at version {CURRENT_CONFIG_VERSION} (current)");
             println!("  No migration needed.");
         }
         ConfigVersionStatus::NeedsMigration { from, to } => {
-            println!("  Current version: {}", from);
-            println!("  Target version:  {}", to);
+            println!("  Current version: {from}");
+            println!("  Target version:  {to}");
             println!();
 
             match migrate_config_file(path) {
                 Ok(result) => {
                     println!("  Migration successful!");
-                    println!("  Backup:  {}.bak", config_path);
+                    println!("  Backup:  {config_path}.bak");
                     for step in &result.steps {
-                        println!("    - {}", step);
+                        println!("    - {step}");
                     }
                 }
                 Err(e) => {
-                    eprintln!("  ERROR: {}", e);
+                    eprintln!("  ERROR: {e}");
                     std::process::exit(1);
                 }
             }
         }
         ConfigVersionStatus::TooNew { found, max_supported } => {
             eprintln!(
-                "  ERROR: Config version {} is newer than this build supports (max: {}).",
-                found, max_supported
+                "  ERROR: Config version {found} is newer than this build supports (max: {max_supported})."
             );
             eprintln!("  Upgrade FalconDB to a newer version, or restore from backup.");
             std::process::exit(1);
@@ -207,9 +205,9 @@ fn set_version(toml_text: &str, version: u32) -> String {
         .map(|line| {
             if line.trim().starts_with("config_version") {
                 found = true;
-                format!("config_version = {}", version)
+                format!("config_version = {version}")
             } else {
-                line.to_string()
+                line.to_owned()
             }
         })
         .collect();
@@ -218,13 +216,13 @@ fn set_version(toml_text: &str, version: u32) -> String {
         lines.join("\n")
     } else {
         // Prepend config_version at the top
-        format!("config_version = {}\n{}", version, toml_text)
+        format!("config_version = {version}\n{toml_text}")
     }
 }
 
 fn migrate_v0_to_v1(content: &str) -> String {
     // v0→v1: Just add config_version = 1 (handled by set_version at end)
-    content.to_string()
+    content.to_owned()
 }
 
 fn migrate_v1_to_v2(content: &str) -> String {
@@ -236,7 +234,7 @@ fn migrate_v1_to_v2(content: &str) -> String {
 
 fn migrate_v2_to_v3(content: &str) -> String {
     // v2→v3: Add new fields with defaults if missing
-    let mut result = content.to_string();
+    let mut result = content.to_owned();
     if !content.contains("shutdown_drain_timeout_secs") {
         // Add under [server] section
         result = result.replace(
@@ -249,7 +247,7 @@ fn migrate_v2_to_v3(content: &str) -> String {
 
 fn migrate_v3_to_v4(content: &str) -> String {
     // v3→v4: Add compression_profile, wal_mode, [gateway] section
-    let mut result = content.to_string();
+    let mut result = content.to_owned();
     if !content.contains("compression_profile") {
         result.push_str("\n# Added by migration v3→v4\ncompression_profile = \"balanced\"\n");
     }

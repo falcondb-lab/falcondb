@@ -349,10 +349,9 @@ impl std::fmt::Display for ZoneError {
                 requested,
             } => write!(
                 f,
-                "Hot zone full: used={}B, capacity={}B, requested={}B",
-                used, capacity, requested
+                "Hot zone full: used={used}B, capacity={capacity}B, requested={requested}B"
             ),
-            Self::PageNotFound(pid) => write!(f, "Page not found: {}", pid),
+            Self::PageNotFound(pid) => write!(f, "Page not found: {pid}"),
         }
     }
 }

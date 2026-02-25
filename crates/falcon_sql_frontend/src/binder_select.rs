@@ -258,10 +258,10 @@ impl Binder {
 
         if select.from.is_empty() {
             // No FROM — virtual single-row "dual" table
-            table_name = "__dual__".to_string();
+            table_name = "__dual__".to_owned();
             left_schema = TableSchema {
                 id: TableId(0),
-                name: "__dual__".to_string(),
+                name: "__dual__".to_owned(),
                 columns: vec![],
                 primary_key_columns: vec![],
                 next_serial_values: std::collections::HashMap::new(),
@@ -289,13 +289,9 @@ impl Binder {
                 for proj in &derived_select.projections[..derived_select.visible_projection_count] {
                     let (col_name, data_type) = match proj {
                         BoundProjection::Column(idx, alias) => {
-                            if alias.is_empty() {
-                                let col = &derived_select.schema.columns[*idx];
-                                (col.name.clone(), col.data_type.clone())
-                            } else {
-                                let col = &derived_select.schema.columns[*idx];
-                                (alias.clone(), col.data_type.clone())
-                            }
+                            let col = &derived_select.schema.columns[*idx];
+                            let name = if alias.is_empty() { col.name.clone() } else { alias.clone() };
+                            (name, col.data_type.clone())
                         }
                         BoundProjection::Aggregate(_, _, a, _, _) => (a.clone(), DataType::Int64),
                         BoundProjection::Expr(_, a) => (a.clone(), DataType::Text),
@@ -346,7 +342,7 @@ impl Binder {
                     let tvf_alias = alias
                         .as_ref()
                         .map(|a| a.name.value.clone())
-                        .unwrap_or_else(|| "generate_series".to_string());
+                        .unwrap_or_else(|| "generate_series".to_owned());
                     let tvf_table_id = TableId(3_000_000 + bound_ctes.len() as u64);
 
                     // Parse arguments
@@ -379,7 +375,7 @@ impl Binder {
                         name: tvf_alias.clone(),
                         columns: vec![falcon_common::schema::ColumnDef {
                             id: ColumnId(0),
-                            name: "generate_series".to_string(),
+                            name: "generate_series".to_owned(),
                             data_type: DataType::Int64,
                             nullable: false,
                             is_primary_key: false,
@@ -465,7 +461,7 @@ impl Binder {
                     let unnest_alias = alias
                         .as_ref()
                         .map(|a| a.name.value.clone())
-                        .unwrap_or_else(|| "unnest".to_string());
+                        .unwrap_or_else(|| "unnest".to_owned());
                     let unnest_table_id = TableId(3_000_000 + bound_ctes.len() as u64);
 
                     let ast::TableFunctionArgs { args: fn_args, .. } = args;
@@ -498,7 +494,6 @@ impl Binder {
                             Datum::Int64(_) => DataType::Int64,
                             Datum::Float64(_) => DataType::Float64,
                             Datum::Boolean(_) => DataType::Boolean,
-                            Datum::Text(_) => DataType::Text,
                             _ => DataType::Text,
                         })
                         .unwrap_or(DataType::Text);
@@ -508,7 +503,7 @@ impl Binder {
                         name: unnest_alias.clone(),
                         columns: vec![falcon_common::schema::ColumnDef {
                             id: ColumnId(0),
-                            name: "unnest".to_string(),
+                            name: "unnest".to_owned(),
                             data_type: elem_type,
                             nullable: true,
                             is_primary_key: false,
@@ -560,8 +555,7 @@ impl Binder {
                     alias_map.insert(unnest_alias.to_lowercase(), (unnest_alias.clone(), 0));
                 } else {
                     return Err(SqlError::Unsupported(format!(
-                        "Table function: {}",
-                        func_name
+                        "Table function: {func_name}"
                     )));
                 }
             } else if let ast::TableFactor::UNNEST {
@@ -572,7 +566,7 @@ impl Binder {
                 let unnest_alias = alias
                     .as_ref()
                     .map(|a| a.name.value.clone())
-                    .unwrap_or_else(|| "unnest".to_string());
+                    .unwrap_or_else(|| "unnest".to_owned());
                 let unnest_table_id = TableId(3_000_000 + bound_ctes.len() as u64);
 
                 if array_exprs.is_empty() {
@@ -595,7 +589,6 @@ impl Binder {
                         Datum::Int64(_) => DataType::Int64,
                         Datum::Float64(_) => DataType::Float64,
                         Datum::Boolean(_) => DataType::Boolean,
-                        Datum::Text(_) => DataType::Text,
                         _ => DataType::Text,
                     })
                     .unwrap_or(DataType::Text);
@@ -605,7 +598,7 @@ impl Binder {
                     name: unnest_alias.clone(),
                     columns: vec![falcon_common::schema::ColumnDef {
                         id: ColumnId(0),
-                        name: "unnest".to_string(),
+                        name: "unnest".to_owned(),
                         data_type: elem_type,
                         nullable: true,
                         is_primary_key: false,
@@ -795,13 +788,9 @@ impl Binder {
                 for proj in &d_select.projections[..d_select.visible_projection_count] {
                     let (col_name, data_type) = match proj {
                         BoundProjection::Column(idx, a) => {
-                            if a.is_empty() {
-                                let col = &d_select.schema.columns[*idx];
-                                (col.name.clone(), col.data_type.clone())
-                            } else {
-                                let col = &d_select.schema.columns[*idx];
-                                (a.clone(), col.data_type.clone())
-                            }
+                            let col = &d_select.schema.columns[*idx];
+                            let name = if a.is_empty() { col.name.clone() } else { a.clone() };
+                            (name, col.data_type.clone())
                         }
                         BoundProjection::Aggregate(_, _, a, _, _) => (a.clone(), DataType::Int64),
                         BoundProjection::Expr(_, a) => (a.clone(), DataType::Text),
@@ -985,7 +974,6 @@ impl Binder {
                         }
                     }
                 }
-                ast::JoinOperator::CrossJoin => None,
                 _ => None,
             };
 
@@ -1064,7 +1052,7 @@ impl Binder {
                     match &mut bound {
                         BoundProjection::Column(_, ref mut a) => *a = alias.value.clone(),
                         BoundProjection::Aggregate(_, _, ref mut a, _, _) => {
-                            *a = alias.value.clone()
+                            *a = alias.value.clone();
                         }
                         BoundProjection::Expr(_, ref mut a) => *a = alias.value.clone(),
                         BoundProjection::Window(ref mut wf) => wf.alias = alias.value.clone(),
@@ -1133,12 +1121,10 @@ impl Binder {
                         BoundProjection::Column(idx, _) => {
                             group_by.push(*idx);
                         }
-                        BoundProjection::Expr(_, _) => {
-                            // Expression projection — use its position as group key
-                            // (it will be evaluated during grouping)
-                        }
-                        BoundProjection::Aggregate(..) | BoundProjection::Window(..) => {
-                            // Skip aggregates and window functions
+                        BoundProjection::Expr(_, _)
+                        | BoundProjection::Aggregate(..)
+                        | BoundProjection::Window(..) => {
+                            // Expression/aggregate/window — not a simple column group key
                         }
                     }
                 }
@@ -1268,7 +1254,7 @@ impl Binder {
                                 // Add as hidden projection and group by its index
                                 let idx = projections.len();
                                 projections
-                                    .push(BoundProjection::Expr(bound, format!("{}", other)));
+                                    .push(BoundProjection::Expr(bound, format!("{other}")));
                                 group_by.push(idx);
                             }
                         }
@@ -1414,7 +1400,7 @@ impl Binder {
                     Ok(*col_idx)
                 } else {
                     let idx = projections.len();
-                    projections.push(BoundProjection::Expr(bound, format!("{}", other)));
+                    projections.push(BoundProjection::Expr(bound, format!("{other}")));
                     Ok(idx)
                 }
             }
@@ -1458,7 +1444,7 @@ impl Binder {
                         schema.columns[*idx].name.clone(),
                     ))
                 } else {
-                    Ok(BoundProjection::Expr(bound, format!("{}", expr)))
+                    Ok(BoundProjection::Expr(bound, format!("{expr}")))
                 }
             }
             Expr::Function(func) if func.over.is_some() => {
@@ -1477,31 +1463,31 @@ impl Binder {
                     }
                     "LAG" => {
                         let idx =
-                            col_idx.ok_or(SqlError::Unsupported("LAG requires column".into()))?;
+                            col_idx.ok_or_else(|| SqlError::Unsupported("LAG requires column".into()))?;
                         let offset = self.extract_int_arg(func, 1)?.unwrap_or(1);
                         WindowFunc::Lag(idx, offset)
                     }
                     "LEAD" => {
                         let idx =
-                            col_idx.ok_or(SqlError::Unsupported("LEAD requires column".into()))?;
+                            col_idx.ok_or_else(|| SqlError::Unsupported("LEAD requires column".into()))?;
                         let offset = self.extract_int_arg(func, 1)?.unwrap_or(1);
                         WindowFunc::Lead(idx, offset)
                     }
                     "FIRST_VALUE" => {
                         let idx = col_idx
-                            .ok_or(SqlError::Unsupported("FIRST_VALUE requires column".into()))?;
+                            .ok_or_else(|| SqlError::Unsupported("FIRST_VALUE requires column".into()))?;
                         WindowFunc::FirstValue(idx)
                     }
                     "LAST_VALUE" => {
                         let idx = col_idx
-                            .ok_or(SqlError::Unsupported("LAST_VALUE requires column".into()))?;
+                            .ok_or_else(|| SqlError::Unsupported("LAST_VALUE requires column".into()))?;
                         WindowFunc::LastValue(idx)
                     }
                     "PERCENT_RANK" => WindowFunc::PercentRank,
                     "CUME_DIST" => WindowFunc::CumeDist,
                     "NTH_VALUE" => {
                         let idx = col_idx
-                            .ok_or(SqlError::Unsupported("NTH_VALUE requires column".into()))?;
+                            .ok_or_else(|| SqlError::Unsupported("NTH_VALUE requires column".into()))?;
                         let n = self.extract_int_arg(func, 1)?.unwrap_or(1);
                         WindowFunc::NthValue(idx, n)
                     }
@@ -1512,8 +1498,7 @@ impl Binder {
                     "MAX" => WindowFunc::Agg(AggFunc::Max, col_idx),
                     _ => {
                         return Err(SqlError::Unsupported(format!(
-                            "Window function: {}",
-                            func_name
+                            "Window function: {func_name}"
                         )))
                     }
                 };
@@ -1525,7 +1510,7 @@ impl Binder {
                         let name = ident.value.to_lowercase();
                         let spec = named_windows
                             .get(&name)
-                            .ok_or_else(|| SqlError::UnknownColumn(format!("window '{}'", name)))?;
+                            .ok_or_else(|| SqlError::UnknownColumn(format!("window '{name}'")))?;
                         std::borrow::Cow::Owned(spec.clone())
                     }
                 };
@@ -1596,7 +1581,7 @@ impl Binder {
                     WindowFrame::default()
                 };
 
-                let alias = format!("{}", expr);
+                let alias = format!("{expr}");
                 Ok(BoundProjection::Window(BoundWindowFunc {
                     func: window_func,
                     partition_by,
@@ -1631,13 +1616,13 @@ impl Binder {
                             {
                                 s.clone()
                             } else {
-                                ",".to_string()
+                                ",".to_owned()
                             };
                             let is_distinct = matches!(
                                 args.duplicate_treatment,
                                 Some(ast::DuplicateTreatment::Distinct)
                             );
-                            let alias = format!("string_agg({})", func);
+                            let alias = format!("string_agg({func})");
                             let bound_filter =
                                 self.bind_agg_filter(&func.filter, schema, aliases)?;
                             return Ok(BoundProjection::Aggregate(
@@ -1690,7 +1675,7 @@ impl Binder {
                     _ => {
                         // Not an aggregate — delegate to bind_expr (handles COALESCE, NULLIF, etc.)
                         let bound = self.bind_expr_full(expr, schema, aliases, outer_schema)?;
-                        return Ok(BoundProjection::Expr(bound, format!("{}", expr)));
+                        return Ok(BoundProjection::Expr(bound, format!("{expr}")));
                     }
                 };
 
@@ -1700,11 +1685,8 @@ impl Binder {
                             args.duplicate_treatment,
                             Some(ast::DuplicateTreatment::Distinct)
                         );
-                        let bound_arg = if args.args.is_empty() {
-                            None // COUNT(*)
-                        } else if let Some(ast::FunctionArg::Unnamed(
-                            ast::FunctionArgExpr::Wildcard,
-                        )) = args.args.first()
+                        let bound_arg = if args.args.is_empty()
+                            || matches!(args.args.first(), Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Wildcard)))
                         {
                             None // COUNT(*)
                         } else if let Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(
@@ -1741,7 +1723,7 @@ impl Binder {
             }
             _ => {
                 let bound = self.bind_expr_full(expr, schema, aliases, outer_schema)?;
-                Ok(BoundProjection::Expr(bound, format!("{}", expr)))
+                Ok(BoundProjection::Expr(bound, format!("{expr}")))
             }
         }
     }
@@ -1839,7 +1821,7 @@ impl Binder {
 
         let schema = TableSchema {
             id: dummy_table_id,
-            name: "__values__".to_string(),
+            name: "__values__".to_owned(),
             columns,
             primary_key_columns: vec![],
             next_serial_values: std::collections::HashMap::new(),
@@ -1878,7 +1860,7 @@ impl Binder {
 
         Ok(BoundSelect {
             table_id: dummy_table_id,
-            table_name: "__values__".to_string(),
+            table_name: "__values__".to_owned(),
             schema,
             projections,
             visible_projection_count,
@@ -1916,11 +1898,11 @@ impl Binder {
             Expr::UnaryOp {
                 op: ast::UnaryOperator::Plus,
                 expr: inner,
-            } => self.bind_value_expr(inner),
-            Expr::Nested(inner) => self.bind_value_expr(inner),
+            }
+            | Expr::Nested(inner) => self.bind_value_expr(inner),
             Expr::TypedString { data_type, value } => {
                 // e.g. DATE '2024-01-01', TIMESTAMP '...'
-                let target = format!("{}", data_type).to_lowercase();
+                let target = format!("{data_type}").to_lowercase();
                 Self::parse_typed_datum(value, &target)
             }
             Expr::Cast {
@@ -1929,7 +1911,7 @@ impl Binder {
                 ..
             } => {
                 let val = self.bind_value_expr(cast_expr)?;
-                let target = format!("{}", data_type).to_lowercase();
+                let target = format!("{data_type}").to_lowercase();
                 match &val {
                     Datum::Text(s) => Self::parse_typed_datum(s, &target),
                     Datum::Int32(n)
@@ -1938,10 +1920,10 @@ impl Binder {
                             || target.contains("real")
                             || target.contains("numeric") =>
                     {
-                        Ok(Datum::Float64(*n as f64))
+                        Ok(Datum::Float64(f64::from(*n)))
                     }
                     Datum::Int32(n) if target.contains("bigint") || target.contains("int8") => {
-                        Ok(Datum::Int64(*n as i64))
+                        Ok(Datum::Int64(i64::from(*n)))
                     }
                     Datum::Int64(n)
                         if target.contains("int")
@@ -1969,8 +1951,7 @@ impl Binder {
             Expr::Function(func) => {
                 let name = func.name.to_string().to_uppercase();
                 Err(SqlError::Unsupported(format!(
-                    "Function '{}' in VALUES clause (use INSERT ... SELECT instead)",
-                    name
+                    "Function '{name}' in VALUES clause (use INSERT ... SELECT instead)"
                 )))
             }
             _ => Err(SqlError::Unsupported(
@@ -2003,24 +1984,23 @@ impl Binder {
             }
             // Mixed int/float promotion
             (Datum::Int32(a), _, Datum::Float64(_)) => {
-                Self::eval_const_binop(&Datum::Float64(*a as f64), op, right)
+                Self::eval_const_binop(&Datum::Float64(f64::from(*a)), op, right)
             }
             (Datum::Float64(_), _, Datum::Int32(b)) => {
-                Self::eval_const_binop(left, op, &Datum::Float64(*b as f64))
+                Self::eval_const_binop(left, op, &Datum::Float64(f64::from(*b)))
             }
             (Datum::Int32(a), _, Datum::Int64(_)) => {
-                Self::eval_const_binop(&Datum::Int64(*a as i64), op, right)
+                Self::eval_const_binop(&Datum::Int64(i64::from(*a)), op, right)
             }
             (Datum::Int64(_), _, Datum::Int32(b)) => {
-                Self::eval_const_binop(left, op, &Datum::Int64(*b as i64))
+                Self::eval_const_binop(left, op, &Datum::Int64(i64::from(*b)))
             }
             // String concat
             (Datum::Text(a), StringConcat, Datum::Text(b)) => {
-                Ok(Datum::Text(format!("{}{}", a, b)))
+                Ok(Datum::Text(format!("{a}{b}")))
             }
             _ => Err(SqlError::Unsupported(format!(
-                "Constant binary op {:?} in VALUES",
-                op
+                "Constant binary op {op:?} in VALUES"
             ))),
         }
     }
@@ -2033,15 +2013,15 @@ impl Binder {
             match value.to_lowercase().as_str() {
                 "true" | "t" | "1" | "yes" | "on" => Ok(Datum::Boolean(true)),
                 "false" | "f" | "0" | "no" | "off" => Ok(Datum::Boolean(false)),
-                _ => Err(SqlError::Parse(format!("Invalid BOOLEAN: '{}'", value))),
+                _ => Err(SqlError::Parse(format!("Invalid BOOLEAN: '{value}'"))),
             }
         } else if target.contains("int") {
             let n: i64 = value
                 .parse()
-                .map_err(|_| SqlError::Parse(format!("Invalid INT: '{}'", value)))?;
+                .map_err(|_| SqlError::Parse(format!("Invalid INT: '{value}'")))?;
             if target.contains("bigint") || target.contains("int8") {
                 Ok(Datum::Int64(n))
-            } else if n >= i32::MIN as i64 && n <= i32::MAX as i64 {
+            } else if n >= i64::from(i32::MIN) && n <= i64::from(i32::MAX) {
                 Ok(Datum::Int32(n as i32))
             } else {
                 Ok(Datum::Int64(n))
@@ -2054,12 +2034,12 @@ impl Binder {
         {
             let f: f64 = value
                 .parse()
-                .map_err(|_| SqlError::Parse(format!("Invalid FLOAT: '{}'", value)))?;
+                .map_err(|_| SqlError::Parse(format!("Invalid FLOAT: '{value}'")))?;
             Ok(Datum::Float64(f))
         } else {
             // For date, timestamp, text, and other types: keep as text.
             // The executor's CAST logic will handle the conversion at runtime.
-            Ok(Datum::Text(value.to_string()))
+            Ok(Datum::Text(value.to_owned()))
         }
     }
 
@@ -2067,7 +2047,7 @@ impl Binder {
         match v {
             Value::Number(n, _) => {
                 if let Ok(i) = n.parse::<i64>() {
-                    if i >= i32::MIN as i64 && i <= i32::MAX as i64 {
+                    if i >= i64::from(i32::MIN) && i <= i64::from(i32::MAX) {
                         Ok(Datum::Int32(i as i32))
                     } else {
                         Ok(Datum::Int64(i))
@@ -2075,7 +2055,7 @@ impl Binder {
                 } else if let Ok(f) = n.parse::<f64>() {
                     Ok(Datum::Float64(f))
                 } else {
-                    Err(SqlError::Parse(format!("Cannot parse number: {}", n)))
+                    Err(SqlError::Parse(format!("Cannot parse number: {n}")))
                 }
             }
             Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => {
@@ -2084,8 +2064,7 @@ impl Binder {
             Value::Boolean(b) => Ok(Datum::Boolean(*b)),
             Value::Null => Ok(Datum::Null),
             _ => Err(SqlError::Unsupported(format!(
-                "Value type in VALUES: {:?}",
-                v
+                "Value type in VALUES: {v:?}"
             ))),
         }
     }
@@ -2176,7 +2155,7 @@ impl Binder {
             _ => {
                 // Complex expression in ORDER BY — bind it and add as hidden projection
                 let bound = self.bind_expr_with_aliases(expr, schema, aliases)?;
-                let alias = format!("{}", expr);
+                let alias = format!("{expr}");
                 let idx = projections.len();
                 projections.push(BoundProjection::Expr(bound, alias));
                 Ok(idx)
@@ -2191,7 +2170,7 @@ impl Binder {
         match expr {
             Expr::Value(Value::Number(n, _)) => n
                 .parse::<usize>()
-                .map_err(|_| SqlError::Parse(format!("Invalid {}", label))),
+                .map_err(|_| SqlError::Parse(format!("Invalid {label}"))),
             Expr::Value(Value::Null) => {
                 // LIMIT NULL means no limit (treat as very large)
                 Ok(usize::MAX)
@@ -2199,8 +2178,8 @@ impl Binder {
             Expr::UnaryOp {
                 op: ast::UnaryOperator::Plus,
                 expr: inner,
-            } => Self::eval_limit_offset_expr(inner, label),
-            Expr::Nested(inner) => Self::eval_limit_offset_expr(inner, label),
+            }
+            | Expr::Nested(inner) => Self::eval_limit_offset_expr(inner, label),
             Expr::Cast {
                 expr: inner,
                 data_type,
@@ -2208,7 +2187,7 @@ impl Binder {
             } => {
                 // CAST(expr AS INT) — evaluate inner then check it's numeric
                 let val = Self::eval_limit_offset_expr(inner, label)?;
-                let type_str = format!("{}", data_type).to_uppercase();
+                let type_str = format!("{data_type}").to_uppercase();
                 if type_str.contains("INT")
                     || type_str.contains("BIGINT")
                     || type_str.contains("NUMERIC")
@@ -2216,8 +2195,7 @@ impl Binder {
                     Ok(val)
                 } else {
                     Err(SqlError::Parse(format!(
-                        "{} CAST to non-integer type: {}",
-                        label, data_type
+                        "{label} CAST to non-integer type: {data_type}"
                     )))
                 }
             }
@@ -2230,20 +2208,18 @@ impl Binder {
                     ast::BinaryOperator::Multiply => Ok(l.saturating_mul(r)),
                     ast::BinaryOperator::Divide => {
                         if r == 0 {
-                            Err(SqlError::Parse(format!("Division by zero in {}", label)))
+                            Err(SqlError::Parse(format!("Division by zero in {label}")))
                         } else {
                             Ok(l / r)
                         }
                     }
                     _ => Err(SqlError::Parse(format!(
-                        "{} expression contains unsupported operator",
-                        label
+                        "{label} expression contains unsupported operator"
                     ))),
                 }
             }
             _ => Err(SqlError::Parse(format!(
-                "{} must be a constant expression",
-                label
+                "{label} must be a constant expression"
             ))),
         }
     }
@@ -2311,12 +2287,12 @@ impl Binder {
                     let an = a
                         .values
                         .get(2)
-                        .map(|d| format!("{}", d))
+                        .map(|d| format!("{d}"))
                         .unwrap_or_default();
                     let bn = b
                         .values
                         .get(2)
-                        .map(|d| format!("{}", d))
+                        .map(|d| format!("{d}"))
                         .unwrap_or_default();
                     an.cmp(&bn)
                 });
@@ -2349,7 +2325,7 @@ impl Binder {
                                 Datum::Text(if col.nullable { "YES" } else { "NO" }.into()),
                                 col.default_value
                                     .clone()
-                                    .map(|d| Datum::Text(format!("{}", d)))
+                                    .map(|d| Datum::Text(format!("{d}")))
                                     .unwrap_or(Datum::Null),
                             ]));
                         }
@@ -2524,7 +2500,7 @@ impl Binder {
     fn vt_col(idx: u32, name: &str, data_type: DataType) -> falcon_common::schema::ColumnDef {
         falcon_common::schema::ColumnDef {
             id: ColumnId(idx),
-            name: name.to_string(),
+            name: name.to_owned(),
             data_type,
             nullable: true,
             is_primary_key: false,

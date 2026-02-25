@@ -40,8 +40,8 @@ pub async fn plan_cluster_mode(
         .await
         .ok()
         .and_then(|(rows, _)| rows.into_iter().next())
-        .and_then(|r| r.get(0).map(|v| v.to_string()))
-        .unwrap_or_else(|| "readwrite".to_string());
+        .and_then(|r| r.get(0).map(std::string::ToString::to_string))
+        .unwrap_or_else(|| "readwrite".to_owned());
 
     // Count active writers
     let writers_sql = "SELECT count(*) FROM falcon.active_transactions \
@@ -51,8 +51,8 @@ pub async fn plan_cluster_mode(
         .await
         .ok()
         .and_then(|(rows, _)| rows.into_iter().next())
-        .and_then(|r| r.get(0).map(|v| v.to_string()))
-        .unwrap_or_else(|| "unknown".to_string());
+        .and_then(|r| r.get(0).map(std::string::ToString::to_string))
+        .unwrap_or_else(|| "unknown".to_owned());
 
     let risk = match mode_target {
         ClusterMode::ReadOnly => RiskLevel::High,
@@ -75,14 +75,12 @@ pub async fn plan_cluster_mode(
     if *mode_target == ClusterMode::ReadOnly && active_writers != "0" && active_writers != "unknown"
     {
         plan = plan.warn(format!(
-            "{} active write transaction(s) will be blocked when mode switches",
-            active_writers
+            "{active_writers} active write transaction(s) will be blocked when mode switches"
         ));
     }
     if current_mode == mode_target.as_str() {
         plan = plan.warn(format!(
-            "Cluster is already in '{}' mode — this is a no-op",
-            current_mode
+            "Cluster is already in '{current_mode}' mode — this is a no-op"
         ));
     }
 
@@ -108,7 +106,7 @@ pub async fn apply_cluster_mode(
         )),
         Err(e) => Ok(ApplyResult::rejected(
             format!("cluster mode {}", mode_target.as_str()),
-            format!("Server rejected mode change: {}", e),
+            format!("Server rejected mode change: {e}"),
         )),
     }
 }
@@ -119,8 +117,7 @@ pub fn parse_cluster_mode_arg(arg: &str) -> Result<ClusterMode> {
     let target = parts.get(1).copied().unwrap_or("").trim();
     ClusterMode::parse(target).ok_or_else(|| {
         anyhow::anyhow!(
-            "Unknown cluster mode '{}'. Use 'readonly' or 'readwrite'.",
-            target
+            "Unknown cluster mode '{target}'. Use 'readonly' or 'readwrite'."
         )
     })
 }

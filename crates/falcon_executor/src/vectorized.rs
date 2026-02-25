@@ -39,7 +39,7 @@ pub enum ColumnVector {
 
 impl ColumnVector {
     /// Whether the column is empty.
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
@@ -134,7 +134,7 @@ impl ColumnVector {
                             nulls.push(false);
                         }
                         Datum::Int32(v) => {
-                            values.push(*v as i64);
+                            values.push(i64::from(*v));
                             nulls.push(false);
                         }
                         Datum::Null => {
@@ -156,7 +156,7 @@ impl ColumnVector {
                             nulls.push(false);
                         }
                         Datum::Int32(v) => {
-                            values.push(*v as f64);
+                            values.push(f64::from(*v));
                             nulls.push(false);
                         }
                         Datum::Int64(v) => {
@@ -258,7 +258,7 @@ impl RecordBatch {
     /// Build a RecordBatch directly from pre-computed column vectors (columnar scan path).
     /// Each element of `columns` is a Vec<Datum> for one column; all must have equal length.
     pub fn from_columns(columns: Vec<Vec<Datum>>) -> Self {
-        let num_rows = columns.first().map(|c| c.len()).unwrap_or(0);
+        let num_rows = columns.first().map_or(0, std::vec::Vec::len);
         let col_vecs = columns
             .iter()
             .map(|c| ColumnVector::from_datums(c))
@@ -287,10 +287,7 @@ impl RecordBatch {
 
     /// Return active row indices.
     pub fn active_indices(&self) -> Vec<usize> {
-        match &self.selection {
-            Some(sel) => sel.clone(),
-            None => (0..self.num_rows).collect(),
-        }
+        self.selection.as_ref().map_or_else(|| (0..self.num_rows).collect(), Clone::clone)
     }
 
     /// Number of active (non-filtered) rows.
@@ -384,7 +381,7 @@ fn vectorized_compare(
             }
         }
         (ColumnVector::Int64s { values, nulls }, Datum::Int32(lit)) => {
-            let lit64 = *lit as i64;
+            let lit64 = i64::from(*lit);
             for &idx in indices {
                 if nulls[idx] {
                     continue;
@@ -399,7 +396,7 @@ fn vectorized_compare(
                 if nulls[idx] {
                     continue;
                 }
-                if int_cmp(values[idx] as i64, *lit as i64, op) {
+                if int_cmp(i64::from(values[idx]), i64::from(*lit), op) {
                     out.push(idx);
                 }
             }
@@ -479,13 +476,10 @@ fn str_cmp(a: &str, b: &str, op: BinOp) -> bool {
 }
 
 fn datum_cmp(a: &Datum, b: &Datum, op: BinOp) -> bool {
-    match (a.as_f64(), b.as_f64()) {
-        (Some(af), Some(bf)) => float_cmp(af, bf, op),
-        _ => {
-            let sa = format!("{}", a);
-            let sb = format!("{}", b);
-            str_cmp(&sa, &sb, op)
-        }
+    if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) { float_cmp(af, bf, op) } else {
+        let sa = format!("{a}");
+        let sb = format!("{b}");
+        str_cmp(&sa, &sb, op)
     }
 }
 
@@ -516,8 +510,7 @@ pub fn vectorized_aggregate(
         AggFunc::VarPop => vectorized_variance(col, indices, true),
         AggFunc::VarSamp => vectorized_variance(col, indices, false),
         _ => Err(ExecutionError::TypeError(format!(
-            "Vectorized aggregate not supported for {:?}",
-            func
+            "Vectorized aggregate not supported for {func:?}"
         ))),
     }
 }
@@ -544,7 +537,7 @@ fn vectorized_sum(col: &ColumnVector, indices: &[usize]) -> Result<Datum, Execut
             let mut has_value = false;
             for &idx in indices {
                 if !nulls[idx] {
-                    sum += values[idx] as i64;
+                    sum += i64::from(values[idx]);
                     has_value = true;
                 }
             }
@@ -647,7 +640,7 @@ fn vectorized_min(col: &ColumnVector, indices: &[usize]) -> Result<Datum, Execut
                     min = Some(min.map_or(values[idx], |m: i64| m.min(values[idx])));
                 }
             }
-            Ok(min.map(Datum::Int64).unwrap_or(Datum::Null))
+            Ok(min.map_or(Datum::Null, Datum::Int64))
         }
         ColumnVector::Float64s { values, nulls } => {
             let mut min: Option<f64> = None;
@@ -656,7 +649,7 @@ fn vectorized_min(col: &ColumnVector, indices: &[usize]) -> Result<Datum, Execut
                     min = Some(min.map_or(values[idx], |m: f64| m.min(values[idx])));
                 }
             }
-            Ok(min.map(Datum::Float64).unwrap_or(Datum::Null))
+            Ok(min.map_or(Datum::Null, Datum::Float64))
         }
         _ => {
             let mut result = Datum::Null;
@@ -683,7 +676,7 @@ fn vectorized_max(col: &ColumnVector, indices: &[usize]) -> Result<Datum, Execut
                     max = Some(max.map_or(values[idx], |m: i64| m.max(values[idx])));
                 }
             }
-            Ok(max.map(Datum::Int64).unwrap_or(Datum::Null))
+            Ok(max.map_or(Datum::Null, Datum::Int64))
         }
         ColumnVector::Float64s { values, nulls } => {
             let mut max: Option<f64> = None;
@@ -692,7 +685,7 @@ fn vectorized_max(col: &ColumnVector, indices: &[usize]) -> Result<Datum, Execut
                     max = Some(max.map_or(values[idx], |m: f64| m.max(values[idx])));
                 }
             }
-            Ok(max.map(Datum::Float64).unwrap_or(Datum::Null))
+            Ok(max.map_or(Datum::Null, Datum::Float64))
         }
         _ => {
             let mut result = Datum::Null;
@@ -817,8 +810,9 @@ fn vectorized_variance(
 // Vectorized projection
 // ---------------------------------------------------------------------------
 
-/// Apply projections to a RecordBatch, producing a new batch with only the
-/// projected columns. Handles Column, Expr (constant-only), and Aggregate refs.
+/// Apply projections to a RecordBatch, producing a new batch.
+///
+/// Handles Column, Expr (constant-only), and Aggregate refs.
 /// Complex expression projections fall back to row-at-a-time.
 pub fn vectorized_project(
     batch: &RecordBatch,
@@ -1079,8 +1073,8 @@ fn datum_equal(a: &Datum, b: &Datum) -> bool {
         (Datum::Boolean(x), Datum::Boolean(y)) => x == y,
         (Datum::Int32(x), Datum::Int32(y)) => x == y,
         (Datum::Int64(x), Datum::Int64(y)) => x == y,
-        (Datum::Int32(x), Datum::Int64(y)) => (*x as i64) == *y,
-        (Datum::Int64(x), Datum::Int32(y)) => *x == (*y as i64),
+        (Datum::Int32(x), Datum::Int64(y)) => i64::from(*x) == *y,
+        (Datum::Int64(x), Datum::Int32(y)) => *x == i64::from(*y),
         (Datum::Float64(x), Datum::Float64(y)) => x.to_bits() == y.to_bits(),
         (Datum::Text(x), Datum::Text(y)) => x == y,
         (Datum::Timestamp(x), Datum::Timestamp(y)) => x == y,
@@ -1174,8 +1168,8 @@ fn cmp_datum_values(a: &Datum, b: &Datum) -> std::cmp::Ordering {
     match (a, b) {
         (Datum::Int32(x), Datum::Int32(y)) => x.cmp(y),
         (Datum::Int64(x), Datum::Int64(y)) => x.cmp(y),
-        (Datum::Int32(x), Datum::Int64(y)) => (*x as i64).cmp(y),
-        (Datum::Int64(x), Datum::Int32(y)) => x.cmp(&(*y as i64)),
+        (Datum::Int32(x), Datum::Int64(y)) => i64::from(*x).cmp(y),
+        (Datum::Int64(x), Datum::Int32(y)) => x.cmp(&i64::from(*y)),
         (Datum::Float64(x), Datum::Float64(y)) => {
             x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
         }
@@ -1184,8 +1178,8 @@ fn cmp_datum_values(a: &Datum, b: &Datum) -> std::cmp::Ordering {
         (Datum::Timestamp(x), Datum::Timestamp(y)) => x.cmp(y),
         (Datum::Date(x), Datum::Date(y)) => x.cmp(y),
         _ => {
-            let sa = format!("{}", a);
-            let sb = format!("{}", b);
+            let sa = format!("{a}");
+            let sb = format!("{b}");
             sa.cmp(&sb)
         }
     }

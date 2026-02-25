@@ -56,7 +56,7 @@ use txn::{run_txn, TxnCmd};
 #[tokio::main]
 async fn main() {
     if let Err(e) = run().await {
-        eprintln!("fsql: error: {:#}", e);
+        eprintln!("fsql: error: {e:#}");
         process::exit(1);
     }
 }
@@ -101,7 +101,7 @@ async fn run() -> Result<()> {
     } else if let Some(path) = args.file.as_deref() {
         debug!("Mode: -f {}", path);
         let sql =
-            std::fs::read_to_string(path).with_context(|| format!("Cannot read file: {}", path))?;
+            std::fs::read_to_string(path).with_context(|| format!("Cannot read file: {path}"))?;
         let stmts = split_statements(&sql);
         run_statements(
             &client,
@@ -139,7 +139,7 @@ fn script_wrap_machine(
             &identity.source,
         )
     } else {
-        output.to_string()
+        output.to_owned()
     }
 }
 
@@ -153,8 +153,8 @@ fn parse_shard_move_arg_script(arg: &str) -> anyhow::Result<(String, String)> {
     let to_pos = lower_rest
         .find(" to ")
         .ok_or_else(|| anyhow::anyhow!("Usage: \\shard move <shard_id> to <node_id>"))?;
-    let shard_id = rest[..to_pos].trim().to_string();
-    let target_node = rest[to_pos + 4..].trim().to_string();
+    let shard_id = rest[..to_pos].trim().to_owned();
+    let target_node = rest[to_pos + 4..].trim().to_owned();
     if shard_id.is_empty() || target_node.is_empty() {
         anyhow::bail!("Usage: \\shard move <shard_id> to <node_id>");
     }
@@ -182,14 +182,14 @@ async fn run_statements(
                     Ok(exp_cmd) => match run_export(client, &exp_cmd).await {
                         Ok(n) => println!("Exported {} rows to '{}'.", n, exp_cmd.file),
                         Err(e) => {
-                            eprintln!("ERROR (EXPORT): {:#}", e);
+                            eprintln!("ERROR (EXPORT): {e:#}");
                             if on_error_stop {
                                 process::exit(3);
                             }
                         }
                     },
                     Err(e) => {
-                        eprintln!("ERROR (EXPORT): {:#}", e);
+                        eprintln!("ERROR (EXPORT): {e:#}");
                         if on_error_stop {
                             process::exit(3);
                         }
@@ -202,14 +202,14 @@ async fn run_statements(
                             s.total, s.inserted, s.failed
                         ),
                         Err(e) => {
-                            eprintln!("ERROR (IMPORT): {:#}", e);
+                            eprintln!("ERROR (IMPORT): {e:#}");
                             if on_error_stop {
                                 process::exit(3);
                             }
                         }
                     },
                     Err(e) => {
-                        eprintln!("ERROR (IMPORT): {:#}", e);
+                        eprintln!("ERROR (IMPORT): {e:#}");
                         if on_error_stop {
                             process::exit(3);
                         }
@@ -236,7 +236,7 @@ async fn run_statements(
                     match out {
                         Ok(s) => print_with_pager(&s, false),
                         Err(e) => {
-                            eprintln!("ERROR (\\cluster): {:#}", e);
+                            eprintln!("ERROR (\\cluster): {e:#}");
                             if on_error_stop {
                                 process::exit(3);
                             }
@@ -253,8 +253,7 @@ async fn run_statements(
                                             .await
                                             .map(|r| r.render()),
                                         None => Ok(
-                                            "Specify resolution: \\txn resolve <id> commit|abort\n"
-                                                .to_string(),
+                                            "Specify resolution: \\txn resolve <id> commit|abort\n".to_owned(),
                                         ),
                                     }
                                 } else {
@@ -270,7 +269,7 @@ async fn run_statements(
                     match out {
                         Ok(s) => print_with_pager(&s, false),
                         Err(e) => {
-                            eprintln!("ERROR (\\txn): {:#}", e);
+                            eprintln!("ERROR (\\txn): {e:#}");
                             if on_error_stop {
                                 process::exit(3);
                             }
@@ -282,7 +281,7 @@ async fn run_statements(
                     match run_consistency(client, &sub, mode).await {
                         Ok(out) => print_with_pager(&out, false),
                         Err(e) => {
-                            eprintln!("ERROR (\\consistency): {:#}", e);
+                            eprintln!("ERROR (\\consistency): {e:#}");
                             if on_error_stop {
                                 process::exit(3);
                             }
@@ -316,7 +315,7 @@ async fn run_statements(
                     match out {
                         Ok(s) => print_with_pager(&s, false),
                         Err(e) => {
-                            eprintln!("ERROR (\\node): {:#}", e);
+                            eprintln!("ERROR (\\node): {e:#}");
                             if on_error_stop {
                                 process::exit(3);
                             }
@@ -328,7 +327,7 @@ async fn run_statements(
                     match run_failover(client, &sub, mode).await {
                         Ok(out) => print_with_pager(&out, false),
                         Err(e) => {
-                            eprintln!("ERROR (\\failover): {:#}", e);
+                            eprintln!("ERROR (\\failover): {e:#}");
                             if on_error_stop {
                                 process::exit(3);
                             }
@@ -352,7 +351,7 @@ async fn run_statements(
                     match result {
                         Ok(s) => print_with_pager(&s, false),
                         Err(e) => {
-                            eprintln!("ERROR (\\shard): {:#}", e);
+                            eprintln!("ERROR (\\shard): {e:#}");
                             if on_error_stop {
                                 process::exit(3);
                             }
@@ -364,7 +363,7 @@ async fn run_statements(
                     match run_audit(client, &sub, mode).await {
                         Ok(out) => print_with_pager(&out, false),
                         Err(e) => {
-                            eprintln!("ERROR (\\audit): {:#}", e);
+                            eprintln!("ERROR (\\audit): {e:#}");
                             if on_error_stop {
                                 process::exit(3);
                             }
@@ -385,7 +384,7 @@ async fn run_statements(
                             print_with_pager(&final_out, false);
                         }
                         Err(e) => {
-                            let msg = format!("{:#}", e);
+                            let msg = format!("{e:#}");
                             if cli_mode.is_machine() {
                                 print!(
                                     "{}",
@@ -397,7 +396,7 @@ async fn run_statements(
                                     )
                                 );
                             } else {
-                                eprintln!("ERROR (\\integration): {}", msg);
+                                eprintln!("ERROR (\\integration): {msg}");
                             }
                             if on_error_stop {
                                 process::exit(3);
@@ -414,7 +413,7 @@ async fn run_statements(
                             print_with_pager(&final_out, false);
                         }
                         Err(e) => {
-                            let msg = format!("{:#}", e);
+                            let msg = format!("{e:#}");
                             if cli_mode.is_machine() {
                                 print!(
                                     "{}",
@@ -426,7 +425,7 @@ async fn run_statements(
                                     )
                                 );
                             } else {
-                                eprintln!("ERROR (\\events): {}", msg);
+                                eprintln!("ERROR (\\events): {msg}");
                             }
                             if on_error_stop {
                                 process::exit(3);
@@ -438,14 +437,14 @@ async fn run_statements(
                     Ok(cmd) => match run_policy(client, &cmd, mode, apply).await {
                         Ok(out) => print_with_pager(&out, false),
                         Err(e) => {
-                            eprintln!("ERROR (\\policy): {:#}", e);
+                            eprintln!("ERROR (\\policy): {e:#}");
                             if on_error_stop {
                                 process::exit(3);
                             }
                         }
                     },
                     Err(e) => {
-                        eprintln!("ERROR (\\policy): {:#}", e);
+                        eprintln!("ERROR (\\policy): {e:#}");
                         if on_error_stop {
                             process::exit(3);
                         }
@@ -456,7 +455,7 @@ async fn run_statements(
                     match run_automation(client, &sub, mode).await {
                         Ok(out) => print_with_pager(&out, false),
                         Err(e) => {
-                            eprintln!("ERROR (\\automation): {:#}", e);
+                            eprintln!("ERROR (\\automation): {e:#}");
                             if on_error_stop {
                                 process::exit(3);
                             }
@@ -467,9 +466,9 @@ async fn run_statements(
                 | MetaCommand::DescribeTable(_)
                 | MetaCommand::ListDatabases => {
                     match meta::execute_meta(&cmd, client).await {
-                        Ok(meta::MetaResult::Output(s)) => print!("{}", s),
+                        Ok(meta::MetaResult::Output(s)) => print!("{s}"),
                         Ok(_) => {}
-                        Err(e) => eprintln!("ERROR: {:#}", e),
+                        Err(e) => eprintln!("ERROR: {e:#}"),
                     }
                 }
                 // Other meta-commands are silently skipped in script mode
@@ -479,7 +478,7 @@ async fn run_statements(
             continue;
         }
         if let Err(e) = run_statement(client, stmt, mode, tuples_only).await {
-            eprintln!("ERROR: {:#}", e);
+            eprintln!("ERROR: {e:#}");
             if on_error_stop {
                 process::exit(3);
             }

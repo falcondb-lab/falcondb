@@ -264,34 +264,34 @@ impl RlsPolicyManager {
         if perm_exprs.is_empty() && permissive.is_empty() {
             // No policies at all — depends on whether RLS is enabled
             if self.is_rls_enabled(table_id) {
-                return Some("false".to_string()); // RLS on but no policies → block all
+                return Some("false".to_owned()); // RLS on but no policies → block all
             }
             return None; // RLS off → no filter
         }
 
         if perm_exprs.is_empty() {
             // Permissive policies exist but none have USING → block all
-            return Some("false".to_string());
+            return Some("false".to_owned());
         }
 
         let mut parts = Vec::new();
 
         // OR-combine permissive
         if perm_exprs.len() == 1 {
-            parts.push(perm_exprs[0].to_string());
+            parts.push(perm_exprs[0].to_owned());
         } else {
             let combined = perm_exprs
                 .iter()
-                .map(|e| format!("({})", e))
+                .map(|e| format!("({e})"))
                 .collect::<Vec<_>>()
                 .join(" OR ");
-            parts.push(format!("({})", combined));
+            parts.push(format!("({combined})"));
         }
 
         // AND-combine restrictive
         for policy in &restrictive {
             if let Some(expr) = &policy.using_expr {
-                parts.push(format!("({})", expr));
+                parts.push(format!("({expr})"));
             }
         }
 
@@ -314,31 +314,31 @@ impl RlsPolicyManager {
 
         if perm_exprs.is_empty() && permissive.is_empty() {
             if self.is_rls_enabled(table_id) {
-                return Some("false".to_string());
+                return Some("false".to_owned());
             }
             return None;
         }
 
         if perm_exprs.is_empty() {
-            return Some("false".to_string());
+            return Some("false".to_owned());
         }
 
         let mut parts = Vec::new();
 
         if perm_exprs.len() == 1 {
-            parts.push(perm_exprs[0].to_string());
+            parts.push(perm_exprs[0].to_owned());
         } else {
             let combined = perm_exprs
                 .iter()
-                .map(|e| format!("({})", e))
+                .map(|e| format!("({e})"))
                 .collect::<Vec<_>>()
                 .join(" OR ");
-            parts.push(format!("({})", combined));
+            parts.push(format!("({combined})"));
         }
 
         for policy in &restrictive {
             if let Some(expr) = policy.effective_check_expr() {
-                parts.push(format!("({})", expr));
+                parts.push(format!("({expr})"));
             }
         }
 

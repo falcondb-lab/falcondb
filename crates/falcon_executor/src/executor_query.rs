@@ -35,8 +35,8 @@ impl Executor {
                 right,
             } => {
                 let (col_idx, datum) = match (left.as_ref(), right.as_ref()) {
-                    (BoundExpr::ColumnRef(idx), BoundExpr::Literal(d)) => (*idx, d),
-                    (BoundExpr::Literal(d), BoundExpr::ColumnRef(idx)) => (*idx, d),
+                    (BoundExpr::ColumnRef(idx), BoundExpr::Literal(d))
+                    | (BoundExpr::Literal(d), BoundExpr::ColumnRef(idx)) => (*idx, d),
                     _ => return None,
                 };
                 if col_idx == pk_col {
@@ -59,8 +59,8 @@ impl Executor {
                 } = left.as_ref()
                 {
                     let extracted = match (ll.as_ref(), lr.as_ref()) {
-                        (BoundExpr::ColumnRef(idx), BoundExpr::Literal(d)) => Some((*idx, d)),
-                        (BoundExpr::Literal(d), BoundExpr::ColumnRef(idx)) => Some((*idx, d)),
+                        (BoundExpr::ColumnRef(idx), BoundExpr::Literal(d))
+                        | (BoundExpr::Literal(d), BoundExpr::ColumnRef(idx)) => Some((*idx, d)),
                         _ => None,
                     };
                     if let Some((col_idx, datum)) = extracted {
@@ -78,8 +78,8 @@ impl Executor {
                 } = right.as_ref()
                 {
                     let extracted = match (rl.as_ref(), rr.as_ref()) {
-                        (BoundExpr::ColumnRef(idx), BoundExpr::Literal(d)) => Some((*idx, d)),
-                        (BoundExpr::Literal(d), BoundExpr::ColumnRef(idx)) => Some((*idx, d)),
+                        (BoundExpr::ColumnRef(idx), BoundExpr::Literal(d))
+                        | (BoundExpr::Literal(d), BoundExpr::ColumnRef(idx)) => Some((*idx, d)),
                         _ => None,
                     };
                     if let Some((col_idx, datum)) = extracted {
@@ -119,8 +119,8 @@ impl Executor {
                 right,
             } => {
                 let (col_idx, datum) = match (left.as_ref(), right.as_ref()) {
-                    (BoundExpr::ColumnRef(idx), BoundExpr::Literal(d)) => (*idx, d),
-                    (BoundExpr::Literal(d), BoundExpr::ColumnRef(idx)) => (*idx, d),
+                    (BoundExpr::ColumnRef(idx), BoundExpr::Literal(d))
+                    | (BoundExpr::Literal(d), BoundExpr::ColumnRef(idx)) => (*idx, d),
                     _ => return None,
                 };
                 if indexed_cols.iter().any(|(c, _)| *c == col_idx) {
@@ -144,8 +144,8 @@ impl Executor {
                 } = left.as_ref()
                 {
                     let extracted = match (ll.as_ref(), lr.as_ref()) {
-                        (BoundExpr::ColumnRef(idx), BoundExpr::Literal(d)) => Some((*idx, d)),
-                        (BoundExpr::Literal(d), BoundExpr::ColumnRef(idx)) => Some((*idx, d)),
+                        (BoundExpr::ColumnRef(idx), BoundExpr::Literal(d))
+                        | (BoundExpr::Literal(d), BoundExpr::ColumnRef(idx)) => Some((*idx, d)),
                         _ => None,
                     };
                     if let Some((col_idx, datum)) = extracted {
@@ -163,8 +163,8 @@ impl Executor {
                 } = right.as_ref()
                 {
                     let extracted = match (rl.as_ref(), rr.as_ref()) {
-                        (BoundExpr::ColumnRef(idx), BoundExpr::Literal(d)) => Some((*idx, d)),
-                        (BoundExpr::Literal(d), BoundExpr::ColumnRef(idx)) => Some((*idx, d)),
+                        (BoundExpr::ColumnRef(idx), BoundExpr::Literal(d))
+                        | (BoundExpr::Literal(d), BoundExpr::ColumnRef(idx)) => Some((*idx, d)),
                         _ => None,
                     };
                     if let Some((col_idx, datum)) = extracted {
@@ -718,24 +718,72 @@ impl Executor {
             );
         }
 
-        // Filter — choose execution strategy based on data size and query shape.
+        // Project — handle correlated subqueries in projections
+        let projs_have_correlated = projections.iter().any(|p| match p {
+            BoundProjection::Expr(e, _) => Self::expr_has_outer_ref(e),
+            _ => false,
+        });
+
+        let mut columns = self.resolve_output_columns(projections, schema);
+
+        // Early-limit capacity hint: if no ORDER BY/DISTINCT/window, we know the max output size.
+        let capacity_hint = match (
+            order_by.is_empty() && matches!(distinct, DistinctMode::None) && !has_window,
+            limit,
+            offset,
+        ) {
+            (true, Some(lim), Some(off)) => (lim + off).min(raw_rows.len()),
+            (true, Some(lim), None) => lim.min(raw_rows.len()),
+            _ => raw_rows.len(),
+        };
+
+        // Effective row limit for early cutoff (only when no sort/distinct/window).
+        let early_limit = if order_by.is_empty() && matches!(distinct, DistinctMode::None) && !has_window {
+            limit.map(|l| l + offset.unwrap_or(0))
+        } else {
+            None
+        };
+
+        // ── Single-pass filter + project ──
+        // For the common non-window path we avoid materialising a separate `filtered` Vec:
+        // filter and project are fused in one loop, eliminating the intermediate allocation.
+        // Window functions still need a `filtered` reference Vec for frame computation.
         let mut filtered: Vec<&OwnedRow> = Vec::new();
+        let mut result_rows: Vec<OwnedRow> = Vec::with_capacity(capacity_hint);
+
         if let Some(ref f) = mat_filter {
             if filter_has_correlated_sub {
                 // Correlated subquery: must re-materialise per row (no parallel/vectorized)
                 for (_pk, row) in &raw_rows {
+                    if let Some(max) = early_limit {
+                        if result_rows.len() >= max { break; }
+                    }
                     let row_filter = self.materialize_correlated(f, row, txn)?;
                     if ExprEngine::eval_filter(&row_filter, row).map_err(FalconError::Execution)? {
-                        filtered.push(row);
+                        if has_window { filtered.push(row); }
+                        if projs_have_correlated {
+                            result_rows.push(self.project_row_correlated(row, projections, txn)?);
+                        } else {
+                            result_rows.push(self.project_row(row, projections)?);
+                        }
                     }
                 }
             } else if self.parallel_config.should_parallelize(raw_rows.len())
                 && is_vectorizable(projections, mat_filter.as_ref())
             {
-                // ── Parallel filter path ──
+                // ── Parallel filter path — project after gather ──
                 let matched = parallel_filter(&raw_rows, f, &self.parallel_config);
                 for idx in matched {
-                    filtered.push(&raw_rows[idx].1);
+                    if let Some(max) = early_limit {
+                        if result_rows.len() >= max { break; }
+                    }
+                    let row = &raw_rows[idx].1;
+                    if has_window { filtered.push(row); }
+                    if projs_have_correlated {
+                        result_rows.push(self.project_row_correlated(row, projections, txn)?);
+                    } else {
+                        result_rows.push(self.project_row(row, projections)?);
+                    }
                 }
             } else if raw_rows.len() >= 256 && is_vectorizable(projections, mat_filter.as_ref()) {
                 // ── Vectorized filter path (single-threaded, batched) ──
@@ -744,44 +792,51 @@ impl Executor {
                 let mut batch = RecordBatch::from_rows(&rows_only, num_cols);
                 vectorized_filter(&mut batch, f);
                 for idx in batch.active_indices() {
-                    filtered.push(&raw_rows[idx].1);
+                    if let Some(max) = early_limit {
+                        if result_rows.len() >= max { break; }
+                    }
+                    let row = &raw_rows[idx].1;
+                    if has_window { filtered.push(row); }
+                    if projs_have_correlated {
+                        result_rows.push(self.project_row_correlated(row, projections, txn)?);
+                    } else {
+                        result_rows.push(self.project_row(row, projections)?);
+                    }
                 }
             } else {
-                // ── Row-at-a-time filter (small data) ──
+                // ── Row-at-a-time filter+project (small data, fused single pass) ──
                 for (_pk, row) in &raw_rows {
+                    if let Some(max) = early_limit {
+                        if result_rows.len() >= max { break; }
+                    }
                     if ExprEngine::eval_filter(f, row).map_err(FalconError::Execution)? {
-                        filtered.push(row);
+                        if has_window { filtered.push(row); }
+                        if projs_have_correlated {
+                            result_rows.push(self.project_row_correlated(row, projections, txn)?);
+                        } else {
+                            result_rows.push(self.project_row(row, projections)?);
+                        }
                     }
                 }
             }
         } else {
-            // No filter — all rows pass
+            // No filter — project all rows
             for (_pk, row) in &raw_rows {
-                filtered.push(row);
-            }
-        }
-
-        // Project — handle correlated subqueries in projections
-        let projs_have_correlated = projections.iter().any(|p| match p {
-            BoundProjection::Expr(e, _) => Self::expr_has_outer_ref(e),
-            _ => false,
-        });
-
-        let mut columns = self.resolve_output_columns(projections, schema);
-        let mut result_rows: Vec<OwnedRow> = Vec::new();
-        for row in &filtered {
-            if projs_have_correlated {
-                let projected = self.project_row_correlated(row, projections, txn)?;
-                result_rows.push(projected);
-            } else {
-                let projected = self.project_row(row, projections)?;
-                result_rows.push(projected);
+                if let Some(max) = early_limit {
+                    if result_rows.len() >= max { break; }
+                }
+                if has_window { filtered.push(row); }
+                if projs_have_correlated {
+                    result_rows.push(self.project_row_correlated(row, projections, txn)?);
+                } else {
+                    result_rows.push(self.project_row(row, projections)?);
+                }
             }
         }
 
         // Compute window functions and inject values
         if has_window {
-            self.compute_window_functions(&filtered, projections, &mut result_rows)?;
+            self.compute_window_functions(&filtered, projections, &mut result_rows)?
         }
 
         // Order by (must happen before DISTINCT ON so we keep the right row per group)
@@ -822,17 +877,13 @@ impl Executor {
         OwnedRow::new(values)
     }
 
-    /// Remove duplicate rows in-place using string-based comparison.
+    /// Remove duplicate rows in-place using a HashSet for O(n) deduplication.
     pub(crate) fn dedup_rows(&self, rows: &mut Vec<OwnedRow>) {
-        let mut seen: Vec<Vec<String>> = Vec::new();
+        let mut seen: std::collections::HashSet<Vec<String>> =
+            std::collections::HashSet::with_capacity(rows.len());
         rows.retain(|row| {
-            let key: Vec<String> = row.values.iter().map(|d| format!("{}", d)).collect();
-            if seen.contains(&key) {
-                false
-            } else {
-                seen.push(key);
-                true
-            }
+            let key: Vec<String> = row.values.iter().map(|d| format!("{d}")).collect();
+            seen.insert(key)
         });
     }
 
@@ -842,18 +893,14 @@ impl Executor {
             DistinctMode::None => {}
             DistinctMode::All => self.dedup_rows(rows),
             DistinctMode::On(indices) => {
-                let mut seen: Vec<Vec<String>> = Vec::new();
+                let mut seen: std::collections::HashSet<Vec<String>> =
+                    std::collections::HashSet::with_capacity(rows.len());
                 rows.retain(|row| {
                     let key: Vec<String> = indices
                         .iter()
-                        .map(|&i| row.get(i).map(|d| format!("{}", d)).unwrap_or_default())
+                        .map(|&i| row.get(i).map(|d| format!("{d}")).unwrap_or_default())
                         .collect();
-                    if seen.contains(&key) {
-                        false
-                    } else {
-                        seen.push(key);
-                        true
-                    }
+                    seen.insert(key)
                 });
             }
         }
@@ -862,6 +909,7 @@ impl Executor {
     /// Project a row with correlated subquery support.
     /// For expression projections containing OuterColumnRef, substitute with
     /// current row values and materialize subqueries per-row.
+    #[inline]
     pub(crate) fn project_row_correlated(
         &self,
         row: &OwnedRow,
@@ -886,10 +934,8 @@ impl Executor {
                         values.push(val);
                     }
                 }
-                BoundProjection::Aggregate(..) => {
-                    values.push(Datum::Null);
-                }
-                BoundProjection::Window(..) => {
+                BoundProjection::Aggregate(..)
+                | BoundProjection::Window(..) => {
                     values.push(Datum::Null);
                 }
             }
@@ -897,6 +943,7 @@ impl Executor {
         Ok(OwnedRow::new(values))
     }
 
+    #[inline]
     pub(crate) fn project_row(
         &self,
         row: &OwnedRow,
@@ -926,6 +973,7 @@ impl Executor {
     }
 
     /// Evaluate an expression, handling sequence functions via storage.
+    #[inline]
     pub(crate) fn eval_expr_with_sequences(
         &self,
         expr: &BoundExpr,

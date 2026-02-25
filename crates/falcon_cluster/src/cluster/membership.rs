@@ -196,16 +196,16 @@ pub enum MembershipError {
 impl std::fmt::Display for MembershipError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NodeAlreadyExists(id) => write!(f, "node {} already in cluster", id),
-            Self::NodeNotFound(id) => write!(f, "node {} not found", id),
+            Self::NodeAlreadyExists(id) => write!(f, "node {id} already in cluster"),
+            Self::NodeNotFound(id) => write!(f, "node {id} not found"),
             Self::InvalidTransition(id, from, to) => {
-                write!(f, "node {}: invalid transition {} → {}", id, from, to)
+                write!(f, "node {id}: invalid transition {from} → {to}")
             }
             Self::QuorumNotMet { have, need } => {
-                write!(f, "quorum not met: have {}, need {}", have, need)
+                write!(f, "quorum not met: have {have}, need {need}")
             }
             Self::EpochMismatch { expected, got } => {
-                write!(f, "epoch mismatch: expected {}, got {}", expected, got)
+                write!(f, "epoch mismatch: expected {expected}, got {got}")
             }
         }
     }
@@ -446,11 +446,10 @@ impl MembershipManager {
     /// Get a snapshot of the current membership.
     pub fn get_view(&self) -> MembershipView {
         let members = self.members.read();
-        let quorum_nodes: Vec<_> = members
+        let quorum_size = members
             .values()
             .filter(|m| m.state.counts_for_quorum())
-            .collect();
-        let quorum_size = quorum_nodes.len();
+            .count();
         // Quorum threshold is based on total membership (including Dead/Leaving),
         // so losing nodes actually reduces quorum availability.
         let total_members = members.len();

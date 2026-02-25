@@ -94,8 +94,8 @@ impl ConsistencyVerifier {
             check_type: VerificationType::StateHash,
             passed,
             scope: scope.into(),
-            computed_hash: format!("{:016x}", computed),
-            expected_hash: Some(format!("{:016x}", expected_hash)),
+            computed_hash: format!("{computed:016x}"),
+            expected_hash: Some(format!("{expected_hash:016x}")),
             checked_at: now_unix,
             error: if passed {
                 None
@@ -120,8 +120,8 @@ impl ConsistencyVerifier {
             check_type: VerificationType::WalReplayChecksum,
             passed,
             scope: segment_id.into(),
-            computed_hash: format!("{:016x}", computed_checksum),
-            expected_hash: Some(format!("{:016x}", expected_checksum)),
+            computed_hash: format!("{computed_checksum:016x}"),
+            expected_hash: Some(format!("{expected_checksum:016x}")),
             checked_at: now_unix,
             error: if passed {
                 None
@@ -146,8 +146,8 @@ impl ConsistencyVerifier {
             check_type: VerificationType::RangeHash,
             passed,
             scope: range_desc.into(),
-            computed_hash: format!("{:016x}", local_hash),
-            expected_hash: Some(format!("{:016x}", replica_hash)),
+            computed_hash: format!("{local_hash:016x}"),
+            expected_hash: Some(format!("{replica_hash:016x}")),
             checked_at: now_unix,
             error: if passed {
                 None

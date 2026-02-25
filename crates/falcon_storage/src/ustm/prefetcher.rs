@@ -198,7 +198,7 @@ impl Prefetcher {
             let req = PrefetchRequest {
                 page_id,
                 file_path: file_path.clone(),
-                offset: page_id.0 * page_size as u64,
+                offset: page_id.0 * u64::from(page_size),
                 length: page_size,
                 deadline_ns: seq,
                 priority_score,

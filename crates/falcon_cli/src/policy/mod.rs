@@ -67,8 +67,7 @@ impl PolicyCmd {
             }
             "audit" => Ok(Self::Audit(rest)),
             _ => bail!(
-                "Unknown \\policy sub-command '{}'. Try: list, show, create, enable, disable, delete, simulate, audit",
-                lower
+                "Unknown \\policy sub-command '{lower}'. Try: list, show, create, enable, disable, delete, simulate, audit"
             ),
         }
     }
@@ -77,7 +76,7 @@ impl PolicyCmd {
 fn split_verb(s: &str) -> (String, String) {
     let mut parts = s.splitn(2, char::is_whitespace);
     let verb = parts.next().unwrap_or("").to_lowercase();
-    let rest = parts.next().unwrap_or("").trim().to_string();
+    let rest = parts.next().unwrap_or("").trim().to_owned();
     (verb, rest)
 }
 
@@ -112,7 +111,7 @@ async fn policy_list(client: &DbClient, mode: OutputMode) -> Result<String> {
         .unwrap_or_else(|_| (Vec::new(), String::new()));
 
     if rows.is_empty() {
-        return Ok("No policies defined. Use \\policy create to define one.\n".to_string());
+        return Ok("No policies defined. Use \\policy create to define one.\n".to_owned());
     }
 
     Ok(format_rows_as_string(&rows, mode, "Policies"))
@@ -133,13 +132,13 @@ async fn policy_show(client: &DbClient, policy_id: &str, mode: OutputMode) -> Re
         .unwrap_or_else(|_| (Vec::new(), String::new()));
 
     if rows.is_empty() {
-        return Ok(format!("Policy '{}' not found.\n", policy_id));
+        return Ok(format!("Policy '{policy_id}' not found.\n"));
     }
 
     Ok(format_rows_as_string(
         &rows,
         mode,
-        &format!("Policy {}", policy_id),
+        &format!("Policy {policy_id}"),
     ))
 }
 
@@ -237,12 +236,12 @@ async fn policy_set_status(
             policy_id,
             status.as_str()
         )),
-        Err(e) => Ok(format!("Policy status update rejected: {}\n", e)),
+        Err(e) => Ok(format!("Policy status update rejected: {e}\n")),
     }
 }
 
 async fn policy_delete(client: &DbClient, policy_id: &str, apply: bool) -> Result<String> {
-    let cmd_name = format!("policy delete {}", policy_id);
+    let cmd_name = format!("policy delete {policy_id}");
 
     let plan = PlanOutput::new(&cmd_name, RiskLevel::Medium)
         .field("Policy ID", policy_id)
@@ -261,10 +260,9 @@ async fn policy_delete(client: &DbClient, policy_id: &str, apply: bool) -> Resul
     );
     match client.query_simple(&sql).await {
         Ok(_) => Ok(format!(
-            "Policy '{}' deleted. Audit records preserved.\n",
-            policy_id
+            "Policy '{policy_id}' deleted. Audit records preserved.\n"
         )),
-        Err(e) => Ok(format!("Policy deletion rejected: {}\n", e)),
+        Err(e) => Ok(format!("Policy deletion rejected: {e}\n")),
     }
 }
 
@@ -275,8 +273,7 @@ async fn policy_audit(client: &DbClient, policy_id: &str, mode: OutputMode) -> R
          FROM falcon.audit_log \
          WHERE command_issued LIKE '%policy%' \
          ORDER BY event_time DESC \
-         LIMIT 50"
-            .to_string()
+         LIMIT 50".to_owned()
     } else {
         format!(
             "SELECT event_time, policy_id, trigger_type, condition_snapshot, \
@@ -308,7 +305,7 @@ async fn policy_audit(client: &DbClient, policy_id: &str, mode: OutputMode) -> R
     Ok(format_rows_as_string(
         &rows,
         mode,
-        &format!("Policy Audit: {}", policy_id),
+        &format!("Policy Audit: {policy_id}"),
     ))
 }
 

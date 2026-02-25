@@ -1,10 +1,12 @@
 #![allow(clippy::needless_range_loop)]
 
+use std::time::SystemTime;
+
 use falcon_common::datum::Datum;
 use falcon_common::error::ExecutionError;
 use falcon_sql_frontend::types::ScalarFunc;
 
-pub(crate) fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Option<Result<Datum, ExecutionError>> {
+pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Option<Result<Datum, ExecutionError>> {
     match func {
         ScalarFunc::ArrayEvery
         | ScalarFunc::ArraySome
@@ -87,16 +89,13 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             for d in &arr {
                 let v = match d {
                     Datum::Int64(n) => *n as f64,
-                    Datum::Int32(n) => *n as f64,
+                    Datum::Int32(n) => f64::from(*n),
                     Datum::Float64(n) => *n,
                     _ => continue,
                 };
                 min = Some(min.map_or(v, |m: f64| m.min(v)));
             }
-            match min {
-                Some(v) => Ok(Datum::Float64(v)),
-                None => Ok(Datum::Null),
-            }
+            Ok(min.map_or(Datum::Null, Datum::Float64))
         }
         ScalarFunc::ArrayMax => {
             let arr = match args.first() {
@@ -108,16 +107,13 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             for d in &arr {
                 let v = match d {
                     Datum::Int64(n) => *n as f64,
-                    Datum::Int32(n) => *n as f64,
+                    Datum::Int32(n) => f64::from(*n),
                     Datum::Float64(n) => *n,
                     _ => continue,
                 };
                 max = Some(max.map_or(v, |m: f64| m.max(v)));
             }
-            match max {
-                Some(v) => Ok(Datum::Float64(v)),
-                None => Ok(Datum::Null),
-            }
+            Ok(max.map_or(Datum::Null, Datum::Float64))
         }
         ScalarFunc::ArraySum => {
             let arr = match args.first() {
@@ -129,7 +125,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             for d in &arr {
                 match d {
                     Datum::Int64(n) => sum += *n as f64,
-                    Datum::Int32(n) => sum += *n as f64,
+                    Datum::Int32(n) => sum += f64::from(*n),
                     Datum::Float64(n) => sum += n,
                     _ => {}
                 }
@@ -151,7 +147,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                         count += 1;
                     }
                     Datum::Int32(n) => {
-                        sum += *n as f64;
+                        sum += f64::from(*n);
                         count += 1;
                     }
                     Datum::Float64(n) => {
@@ -180,7 +176,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let mut seen = std::collections::HashSet::new();
             let mut result = Vec::new();
             for d in &arr {
-                let key = format!("{}", d);
+                let key = format!("{d}");
                 if seen.insert(key) {
                     result.push(d.clone());
                 }
@@ -226,7 +222,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             }
             let n = match args.get(1) {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -261,7 +257,6 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 }
             };
             let n = n.min(arr.len());
-            use std::time::SystemTime;
             let seed = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -286,7 +281,6 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                     ))
                 }
             };
-            use std::time::SystemTime;
             let seed = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -303,7 +297,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
         ScalarFunc::ArrayGenerate => {
             let start = match args.first() {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -313,7 +307,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             };
             let stop = match args.get(1) {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -323,7 +317,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             };
             let step = match args.get(2) {
                 Some(Datum::Int64(n)) => *n,
-                Some(Datum::Int32(n)) => *n as i64,
+                Some(Datum::Int32(n)) => i64::from(*n),
                 None => {
                     if start <= stop {
                         1
@@ -361,17 +355,17 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
         ScalarFunc::ArrayToJson => {
             fn datum_to_json(d: &Datum) -> String {
                 match d {
-                    Datum::Null => "null".to_string(),
+                    Datum::Null => "null".to_owned(),
                     Datum::Boolean(b) => {
                         if *b {
-                            "true".to_string()
+                            "true".to_owned()
                         } else {
-                            "false".to_string()
+                            "false".to_owned()
                         }
                     }
                     Datum::Int32(n) => n.to_string(),
                     Datum::Int64(n) => n.to_string(),
-                    Datum::Float64(n) => format!("{}", n),
+                    Datum::Float64(n) => format!("{n}"),
                     Datum::Text(s) => {
                         format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
                     }
@@ -381,7 +375,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                         if let Some(dt) = chrono::DateTime::from_timestamp(secs, nsecs) {
                             format!("\"{}\"", dt.format("%Y-%m-%dT%H:%M:%S"))
                         } else {
-                            format!("{}", us)
+                            format!("{us}")
                         }
                     }
                     Datum::Array(arr) => {
@@ -392,16 +386,16 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                         let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
                             .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or(chrono::NaiveDate::MIN));
                         if let Some(d) =
-                            epoch.checked_add_signed(chrono::Duration::days(*days as i64))
+                            epoch.checked_add_signed(chrono::Duration::days(i64::from(*days)))
                         {
                             format!("\"{}\"", d.format("%Y-%m-%d"))
                         } else {
-                            format!("{}", days)
+                            format!("{days}")
                         }
                     }
                     Datum::Jsonb(v) => v.to_string(),
                     Datum::Decimal(m, s) => falcon_common::datum::decimal_to_string(*m, *s),
-                    other => format!("\"{}\"", other),
+                    other => format!("\"{other}\""),
                 }
             }
             match args.first() {
@@ -433,11 +427,11 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                     ))
                 }
             };
-            let target = format!("{}", elem);
+            let target = format!("{elem}");
             let positions: Vec<Datum> = arr
                 .iter()
                 .enumerate()
-                .filter(|(_, d)| format!("{}", d) == target)
+                .filter(|(_, d)| format!("{d}") == target)
                 .map(|(i, _)| Datum::Int64((i + 1) as i64))
                 .collect();
             Ok(Datum::Array(positions))
@@ -534,10 +528,10 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                     ))
                 }
             };
-            let arr2_keys: Vec<String> = arr2.iter().map(|d| format!("{:?}", d)).collect();
+            let arr2_keys: Vec<String> = arr2.iter().map(|d| format!("{d:?}")).collect();
             let result: Vec<Datum> = arr1
                 .into_iter()
-                .filter(|item| arr2_keys.contains(&format!("{:?}", item)))
+                .filter(|item| arr2_keys.contains(&format!("{item:?}")))
                 .collect();
             Ok(Datum::Array(result))
         }
@@ -560,10 +554,10 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                     ))
                 }
             };
-            let arr2_keys: Vec<String> = arr2.iter().map(|d| format!("{:?}", d)).collect();
+            let arr2_keys: Vec<String> = arr2.iter().map(|d| format!("{d:?}")).collect();
             let result: Vec<Datum> = arr1
                 .into_iter()
-                .filter(|item| !arr2_keys.contains(&format!("{:?}", item)))
+                .filter(|item| !arr2_keys.contains(&format!("{item:?}")))
                 .collect();
             Ok(Datum::Array(result))
         }

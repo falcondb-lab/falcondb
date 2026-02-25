@@ -1,6 +1,6 @@
 use falcon_common::datum::{Datum, OwnedRow};
 use falcon_common::error::ExecutionError;
-use falcon_sql_frontend::types::{BoundExpr, ScalarFunc};
+use falcon_sql_frontend::types::{AggFunc, BoundExpr, ScalarFunc};
 
 use super::binary_ops::eval_binary_op;
 use super::cast::eval_cast;
@@ -141,6 +141,7 @@ fn try_dispatch_domain(func: &ScalarFunc, args: &[Datum]) -> Option<Result<Datum
 }
 
 /// Substitute parameter placeholders with concrete Datum values.
+///
 /// Rewrites the expression tree, replacing `BoundExpr::Parameter(idx)` with
 /// `BoundExpr::Literal(params[idx-1])`. Returns an error if a param is missing.
 pub fn substitute_params_expr(
@@ -454,10 +455,7 @@ pub fn eval_expr_with_params(
                     }
                 }
             }
-            match else_result {
-                Some(e) => eval_expr_with_params(e, row, params),
-                None => Ok(Datum::Null),
-            }
+            else_result.as_ref().map_or(Ok(Datum::Null), |e| eval_expr_with_params(e, row, params))
         }
         BoundExpr::Coalesce(args) => {
             for arg in args {
@@ -528,8 +526,7 @@ pub fn eval_expr_with_params(
             // Parameters are 1-indexed: $1 -> params[0]
             if params.is_empty() {
                 return Err(ExecutionError::TypeError(format!(
-                    "Parameter ${} must be bound before execution",
-                    idx
+                    "Parameter ${idx} must be bound before execution"
                 )));
             }
             let i = idx.checked_sub(1).ok_or(ExecutionError::ParamMissing(0))?;
@@ -627,7 +624,7 @@ pub fn eval_expr_with_params(
                         Some(e) => {
                             let v = eval_expr_with_params(e, row, params)?;
                             match v {
-                                Datum::Int32(i) => i as i64,
+                                Datum::Int32(i) => i64::from(i),
                                 Datum::Int64(i) => i,
                                 Datum::Null => return Ok(Datum::Null),
                                 _ => {
@@ -643,7 +640,7 @@ pub fn eval_expr_with_params(
                         Some(e) => {
                             let v = eval_expr_with_params(e, row, params)?;
                             match v {
-                                Datum::Int32(i) => i as i64,
+                                Datum::Int32(i) => i64::from(i),
                                 Datum::Int64(i) => i,
                                 Datum::Null => return Ok(Datum::Null),
                                 _ => {
@@ -733,6 +730,7 @@ pub fn eval_filter_with_params(
 }
 
 /// Evaluate a HAVING expression that may contain inline AggregateExpr nodes.
+///
 /// For each AggregateExpr, compute the aggregate over group_rows.
 /// For other nodes, evaluate against the first row of the group (representative).
 pub fn eval_having_expr(
@@ -764,14 +762,13 @@ pub fn eval_having_expr(
                     if v.is_null() {
                         continue;
                     }
-                    let key = format!("{}", v);
+                    let key = format!("{v}");
                     if seen.insert(key) {
                         vals.push(v);
                     }
                 }
                 Ok(vals)
             };
-            use falcon_sql_frontend::types::AggFunc;
             match func {
                 AggFunc::Count => {
                     if let Some(e) = arg {
@@ -787,7 +784,7 @@ pub fn eval_having_expr(
                 AggFunc::Sum => {
                     let e = arg
                         .as_ref()
-                        .ok_or(ExecutionError::TypeError("SUM requires arg".into()))?;
+                        .ok_or_else(|| ExecutionError::TypeError("SUM requires arg".into()))?;
                     let vals = if *distinct {
                         distinct_vals(e)?
                     } else {
@@ -806,7 +803,7 @@ pub fn eval_having_expr(
                 AggFunc::Avg => {
                     let e = arg
                         .as_ref()
-                        .ok_or(ExecutionError::TypeError("AVG requires arg".into()))?;
+                        .ok_or_else(|| ExecutionError::TypeError("AVG requires arg".into()))?;
                     let vals = if *distinct {
                         distinct_vals(e)?
                     } else {
@@ -829,21 +826,21 @@ pub fn eval_having_expr(
                 AggFunc::Min => {
                     let e = arg
                         .as_ref()
-                        .ok_or(ExecutionError::TypeError("MIN requires arg".into()))?;
+                        .ok_or_else(|| ExecutionError::TypeError("MIN requires arg".into()))?;
                     let vals = eval_all(e)?;
                     Ok(vals.into_iter().min().unwrap_or(Datum::Null))
                 }
                 AggFunc::Max => {
                     let e = arg
                         .as_ref()
-                        .ok_or(ExecutionError::TypeError("MAX requires arg".into()))?;
+                        .ok_or_else(|| ExecutionError::TypeError("MAX requires arg".into()))?;
                     let vals = eval_all(e)?;
                     Ok(vals.into_iter().max().unwrap_or(Datum::Null))
                 }
                 AggFunc::BoolAnd => {
                     let e = arg
                         .as_ref()
-                        .ok_or(ExecutionError::TypeError("BOOL_AND requires arg".into()))?;
+                        .ok_or_else(|| ExecutionError::TypeError("BOOL_AND requires arg".into()))?;
                     let vals = eval_all(e)?;
                     if vals.is_empty() {
                         Ok(Datum::Null)
@@ -856,7 +853,7 @@ pub fn eval_having_expr(
                 AggFunc::BoolOr => {
                     let e = arg
                         .as_ref()
-                        .ok_or(ExecutionError::TypeError("BOOL_OR requires arg".into()))?;
+                        .ok_or_else(|| ExecutionError::TypeError("BOOL_OR requires arg".into()))?;
                     let vals = eval_all(e)?;
                     if vals.is_empty() {
                         Ok(Datum::Null)
@@ -869,14 +866,14 @@ pub fn eval_having_expr(
                 AggFunc::StringAgg(sep) => {
                     let e = arg
                         .as_ref()
-                        .ok_or(ExecutionError::TypeError("STRING_AGG requires arg".into()))?;
+                        .ok_or_else(|| ExecutionError::TypeError("STRING_AGG requires arg".into()))?;
                     let vals = eval_all(e)?;
                     if vals.is_empty() {
                         Ok(Datum::Null)
                     } else {
                         Ok(Datum::Text(
                             vals.iter()
-                                .map(|v| format!("{}", v))
+                                .map(|v| format!("{v}"))
                                 .collect::<Vec<_>>()
                                 .join(sep),
                         ))
@@ -885,7 +882,7 @@ pub fn eval_having_expr(
                 AggFunc::ArrayAgg => {
                     let e = arg
                         .as_ref()
-                        .ok_or(ExecutionError::TypeError("ARRAY_AGG requires arg".into()))?;
+                        .ok_or_else(|| ExecutionError::TypeError("ARRAY_AGG requires arg".into()))?;
                     let vals = if *distinct {
                         distinct_vals(e)?
                     } else {
@@ -899,7 +896,7 @@ pub fn eval_having_expr(
                 }
                 // Statistical aggregates in HAVING — compute inline
                 AggFunc::VarPop | AggFunc::VarSamp | AggFunc::StddevPop | AggFunc::StddevSamp => {
-                    let e = arg.as_ref().ok_or(ExecutionError::TypeError(
+                    let e = arg.as_ref().ok_or_else(|| ExecutionError::TypeError(
                         "Statistical aggregate requires arg".into(),
                     ))?;
                     let vals = if *distinct {
@@ -907,7 +904,7 @@ pub fn eval_having_expr(
                     } else {
                         eval_all(e)?
                     };
-                    let floats: Vec<f64> = vals.iter().filter_map(|v| v.as_f64()).collect();
+                    let floats: Vec<f64> = vals.iter().filter_map(falcon_common::datum::Datum::as_f64).collect();
                     let n = floats.len();
                     if n == 0 {
                         return Ok(Datum::Null);
@@ -933,14 +930,14 @@ pub fn eval_having_expr(
                 AggFunc::Mode => {
                     let e = arg
                         .as_ref()
-                        .ok_or(ExecutionError::TypeError("MODE requires arg".into()))?;
+                        .ok_or_else(|| ExecutionError::TypeError("MODE requires arg".into()))?;
                     let vals = eval_all(e)?;
                     if vals.is_empty() {
                         return Ok(Datum::Null);
                     }
                     let mut freq: Vec<(String, usize, Datum)> = Vec::new();
                     for v in vals {
-                        let key = format!("{}", v);
+                        let key = format!("{v}");
                         if let Some(entry) = freq.iter_mut().find(|(k, _, _)| *k == key) {
                             entry.1 += 1;
                         } else {
@@ -951,13 +948,12 @@ pub fn eval_having_expr(
                     Ok(freq
                         .into_iter()
                         .next()
-                        .map(|(_, _, v)| v)
-                        .unwrap_or(Datum::Null))
+                        .map_or(Datum::Null, |(_, _, v)| v))
                 }
                 AggFunc::BitAndAgg => {
                     let e = arg
                         .as_ref()
-                        .ok_or(ExecutionError::TypeError("BIT_AND requires arg".into()))?;
+                        .ok_or_else(|| ExecutionError::TypeError("BIT_AND requires arg".into()))?;
                     let vals = eval_all(e)?;
                     if vals.is_empty() {
                         return Ok(Datum::Null);
@@ -968,12 +964,12 @@ pub fn eval_having_expr(
                             r = Some(r.map_or(i, |acc| acc & i));
                         }
                     }
-                    Ok(r.map(Datum::Int64).unwrap_or(Datum::Null))
+                    Ok(r.map_or(Datum::Null, Datum::Int64))
                 }
                 AggFunc::BitOrAgg => {
                     let e = arg
                         .as_ref()
-                        .ok_or(ExecutionError::TypeError("BIT_OR requires arg".into()))?;
+                        .ok_or_else(|| ExecutionError::TypeError("BIT_OR requires arg".into()))?;
                     let vals = eval_all(e)?;
                     if vals.is_empty() {
                         return Ok(Datum::Null);
@@ -989,7 +985,7 @@ pub fn eval_having_expr(
                 AggFunc::BitXorAgg => {
                     let e = arg
                         .as_ref()
-                        .ok_or(ExecutionError::TypeError("BIT_XOR requires arg".into()))?;
+                        .ok_or_else(|| ExecutionError::TypeError("BIT_XOR requires arg".into()))?;
                     let vals = eval_all(e)?;
                     if vals.is_empty() {
                         return Ok(Datum::Null);
@@ -1013,18 +1009,11 @@ pub fn eval_having_expr(
         }
         BoundExpr::Not(inner) => {
             let val = eval_having_expr(inner, group_rows)?;
-            match val.as_bool() {
-                Some(b) => Ok(Datum::Boolean(!b)),
-                None => Ok(Datum::Null),
-            }
+            Ok(val.as_bool().map_or(Datum::Null, |b| Datum::Boolean(!b)))
         }
         // For non-aggregate expressions, evaluate against first row
         _ => {
-            if let Some(row) = group_rows.first() {
-                eval_expr(expr, row)
-            } else {
-                Ok(Datum::Null)
-            }
+            group_rows.first().map_or(Ok(Datum::Null), |row| eval_expr(expr, row))
         }
     }
 }

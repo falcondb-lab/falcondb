@@ -37,7 +37,7 @@ pub struct ParallelConfig {
 impl Default for ParallelConfig {
     fn default() -> Self {
         let cpus = std::thread::available_parallelism()
-            .map(|n| n.get())
+            .map(std::num::NonZero::get)
             .unwrap_or(4);
         Self {
             max_threads: cpus,
@@ -202,7 +202,7 @@ impl PartialAggState {
             let combined_mean = combined_sum / combined_count as f64;
             let combined_m2 = self.m2
                 + other.m2
-                + delta * delta * (self.count as f64 * other.count as f64 / combined_count as f64);
+                + (delta * delta).mul_add(self.count as f64 * other.count as f64 / combined_count as f64, 0.0);
             self.m2 = combined_m2;
             self.mean = combined_mean;
         }
@@ -234,8 +234,8 @@ impl PartialAggState {
                     Datum::Float64(self.sum / self.count as f64)
                 }
             }
-            AggFunc::Min => self.min.map(Datum::Float64).unwrap_or(Datum::Null),
-            AggFunc::Max => self.max.map(Datum::Float64).unwrap_or(Datum::Null),
+            AggFunc::Min => self.min.map_or(Datum::Null, Datum::Float64),
+            AggFunc::Max => self.max.map_or(Datum::Null, Datum::Float64),
             AggFunc::VarPop => {
                 if self.count == 0 {
                     Datum::Null
@@ -308,11 +308,11 @@ pub fn parallel_grouped_aggregate(
                         .map(|&idx| {
                             row.values
                                 .get(idx)
-                                .map(|d| format!("{}", d))
+                                .map(|d| format!("{d}"))
                                 .unwrap_or_default()
                         })
                         .collect();
-                    let val = row.values.get(agg_col_idx).and_then(|d| d.as_f64());
+                    let val = row.values.get(agg_col_idx).and_then(falcon_common::datum::Datum::as_f64);
                     let state = local_map.entry(key).or_default();
                     state.update(val, row);
                 }
@@ -346,11 +346,11 @@ fn single_thread_aggregate(
             .map(|&idx| {
                 row.values
                     .get(idx)
-                    .map(|d| format!("{}", d))
+                    .map(|d| format!("{d}"))
                     .unwrap_or_default()
             })
             .collect();
-        let val = row.values.get(agg_col_idx).and_then(|d| d.as_f64());
+        let val = row.values.get(agg_col_idx).and_then(falcon_common::datum::Datum::as_f64);
         map.entry(key).or_default().update(val, row);
     }
     map
@@ -366,7 +366,7 @@ pub fn partition_rows<T: Clone>(rows: &[T], num_partitions: usize) -> Vec<Vec<T>
         return vec![rows.to_vec()];
     }
     let chunk_size = rows.len().div_ceil(num_partitions);
-    rows.chunks(chunk_size).map(|c| c.to_vec()).collect()
+    rows.chunks(chunk_size).map(<[T]>::to_vec).collect()
 }
 
 // ---------------------------------------------------------------------------

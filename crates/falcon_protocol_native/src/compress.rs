@@ -96,7 +96,7 @@ pub fn decompress_payload(
             }
             let compressed = &data[4..];
             lz4_decompress(compressed, uncompressed_size).map_err(|e| {
-                NativeProtocolError::Corruption(format!("LZ4 decompression failed: {}", e))
+                NativeProtocolError::Corruption(format!("LZ4 decompression failed: {e}"))
             })
         }
     }
@@ -127,7 +127,7 @@ pub fn decode_compressed_payload(tag_and_payload: &[u8]) -> Result<Vec<u8>, Nati
     }
     let tag = tag_and_payload[0];
     let algo = CompressionAlgo::from_byte(tag).ok_or_else(|| {
-        NativeProtocolError::Corruption(format!("unknown compression tag: 0x{:02x}", tag))
+        NativeProtocolError::Corruption(format!("unknown compression tag: 0x{tag:02x}"))
     })?;
     decompress_payload(&tag_and_payload[1..], algo)
 }

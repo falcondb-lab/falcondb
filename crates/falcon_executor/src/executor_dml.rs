@@ -134,7 +134,7 @@ impl Executor {
                         .map(|&idx| existing_row.values[idx].clone())
                         .collect();
                     // Skip rows with NULL in unique columns
-                    if key.iter().any(|v| v.is_null()) {
+                    if key.iter().any(falcon_common::datum::Datum::is_null) {
                         continue;
                     }
                     existing_set.insert(key);
@@ -146,7 +146,7 @@ impl Executor {
                         .iter()
                         .map(|&idx| new_row.values[idx].clone())
                         .collect();
-                    if key.iter().any(|v| v.is_null()) {
+                    if key.iter().any(falcon_common::datum::Datum::is_null) {
                         continue;
                     }
                     if !existing_set.insert(key) {
@@ -201,7 +201,7 @@ impl Executor {
                 for new_row in &built_rows {
                     let fk_vals: Vec<Datum> =
                         fk.columns.iter().map(|&idx| new_row.values[idx].clone()).collect();
-                    if fk_vals.iter().any(|v| v.is_null()) {
+                    if fk_vals.iter().any(falcon_common::datum::Datum::is_null) {
                         continue;
                     }
                     if !fk_set.contains(&fk_vals) {
@@ -315,7 +315,7 @@ impl Executor {
                             .filter_map(|(_, row)| {
                                 let key: Vec<Datum> =
                                     uniq_cols.iter().map(|&idx| row.values[idx].clone()).collect();
-                                if key.iter().any(|v| v.is_null()) {
+                                if key.iter().any(falcon_common::datum::Datum::is_null) {
                                     None
                                 } else {
                                     Some(key)
@@ -340,7 +340,7 @@ impl Executor {
             // Enforce UNIQUE constraints (using pre-built HashSets)
             for (set_idx, uniq_cols) in schema.unique_constraints.iter().enumerate() {
                 let key: Vec<Datum> = uniq_cols.iter().map(|&idx| values[idx].clone()).collect();
-                if key.iter().any(|v| v.is_null()) {
+                if key.iter().any(falcon_common::datum::Datum::is_null) {
                     continue;
                 }
                 if !unique_sets[set_idx].insert(key) {
@@ -358,7 +358,7 @@ impl Executor {
             // Enforce FOREIGN KEY constraints (using pre-built HashSets)
             for (fk_cols, fk_set) in &fk_lookup {
                 let fk_vals: Vec<Datum> = fk_cols.iter().map(|&idx| values[idx].clone()).collect();
-                if fk_vals.iter().any(|v| v.is_null()) {
+                if fk_vals.iter().any(falcon_common::datum::Datum::is_null) {
                     continue;
                 }
                 if !fk_set.contains(&fk_vals) {
@@ -451,8 +451,7 @@ impl Executor {
                         schema
                             .columns
                             .get(*idx)
-                            .map(|c| c.data_type.clone())
-                            .unwrap_or(DataType::Text)
+                            .map_or(DataType::Text, |c| c.data_type.clone())
                     } else {
                         DataType::Text
                     };
@@ -699,8 +698,7 @@ impl Executor {
                         schema
                             .columns
                             .get(*idx)
-                            .map(|c| c.data_type.clone())
-                            .unwrap_or(DataType::Text)
+                            .map_or(DataType::Text, |c| c.data_type.clone())
                     } else {
                         DataType::Text
                     };
@@ -786,8 +784,7 @@ impl Executor {
                         schema
                             .columns
                             .get(*idx)
-                            .map(|c| c.data_type.clone())
-                            .unwrap_or(DataType::Text)
+                            .map_or(DataType::Text, |c| c.data_type.clone())
                     } else {
                         DataType::Text
                     };
@@ -1102,8 +1099,7 @@ impl Executor {
                         schema
                             .columns
                             .get(*idx)
-                            .map(|c| c.data_type.clone())
-                            .unwrap_or(DataType::Text)
+                            .map_or(DataType::Text, |c| c.data_type.clone())
                     } else {
                         DataType::Text
                     };
@@ -1187,8 +1183,7 @@ impl Executor {
                         schema
                             .columns
                             .get(*idx)
-                            .map(|c| c.data_type.clone())
-                            .unwrap_or(DataType::Text)
+                            .map_or(DataType::Text, |c| c.data_type.clone())
                     } else {
                         DataType::Text
                     };

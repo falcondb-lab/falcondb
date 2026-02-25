@@ -16,7 +16,7 @@ impl TxnCmd {
         match arg.trim().to_lowercase().as_str() {
             "active" | "" => Self::Active,
             "prepared" => Self::Prepared,
-            other => Self::Detail(other.to_string()),
+            other => Self::Detail(other.to_owned()),
         }
     }
 }
@@ -54,7 +54,7 @@ async fn txn_active(client: &DbClient, mode: OutputMode) -> Result<String> {
                         ORDER BY xact_start";
         let (fb_rows, _) = client.query_simple(fallback).await?;
         if fb_rows.is_empty() {
-            return Ok("No active transactions.\n".to_string());
+            return Ok("No active transactions.\n".to_owned());
         }
         return Ok(format_rows_as_string(&fb_rows, mode, "Active Transactions"));
     }
@@ -81,7 +81,7 @@ async fn txn_prepared(client: &DbClient, mode: OutputMode) -> Result<String> {
                         ORDER BY prepared";
         let (fb_rows, _) = client.query_simple(fallback).await?;
         if fb_rows.is_empty() {
-            return Ok("No prepared (in-doubt) transactions.\n".to_string());
+            return Ok("No prepared (in-doubt) transactions.\n".to_owned());
         }
         return Ok(format_rows_as_string(
             &fb_rows,
@@ -117,19 +117,19 @@ async fn txn_detail(client: &DbClient, txn_id: &str, mode: OutputMode) -> Result
         );
         let (fb_rows, _) = client.query_simple(&fallback).await?;
         if fb_rows.is_empty() {
-            return Ok(format!("Transaction '{}' not found.\n", txn_id));
+            return Ok(format!("Transaction '{txn_id}' not found.\n"));
         }
         return Ok(format_rows_as_string(
             &fb_rows,
             mode,
-            &format!("Transaction {}", txn_id),
+            &format!("Transaction {txn_id}"),
         ));
     }
 
     Ok(format_rows_as_string(
         &rows,
         mode,
-        &format!("Transaction {}", txn_id),
+        &format!("Transaction {txn_id}"),
     ))
 }
 
