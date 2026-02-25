@@ -333,13 +333,13 @@ Client → Connection Permit → Query Permit → Write Permit → DDL Permit
 ### Trait Boundaries
 - `StorageEngine` — pluggable storage backend
 - `TxnManager` — transaction lifecycle
-- `Consensus` — pluggable consensus (Raft stub)
+- `Consensus` — pluggable consensus (stub only — NOT on production path)
 - `ReplicationTransport` — in-process / gRPC transport
 - `Executor` — plan execution
 
 ### Deductions (-0.5)
 - `falcon_cluster` at 973KB / 40 files is the largest crate — could benefit from splitting
-- `falcon_raft` is still a stub (single-node only)
+- `falcon_raft` is a stub (single-node only, NOT on production path)
 
 ---
 
@@ -384,7 +384,7 @@ Client → Connection Permit → Query Permit → Write Permit → DDL Permit
 | v0.9.0 (Release Eng) | 1,410 | +140 |
 | v1.0 Phase 1 (LSM) | 1,917 | +507 |
 | v1.0 Phase 2 (SQL/RBAC) | 1,976 | +59 |
-| v2.0 Phase 3 (Enterprise) | 2,056 | +80 |
+| v1.0 Phase 3 (Enterprise) | 2,056 | +80 |
 | Storage Hardening | 2,117 | +61 |
 | Distributed Hardening | 2,179 | +62 |
 | **Native Protocol + JDBC** | **2,239** | **+60** |

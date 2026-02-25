@@ -120,7 +120,7 @@ impl fmt::Display for CommitPolicy {
 
 impl CommitPolicy {
     /// Returns true if this policy requires local WAL fsync.
-    pub fn requires_local_fsync(&self) -> bool {
+    pub const fn requires_local_fsync(&self) -> bool {
         matches!(
             self,
             Self::LocalWalSync | Self::PrimaryPlusReplicaAck { .. }
@@ -128,7 +128,7 @@ impl CommitPolicy {
     }
 
     /// Returns true if this policy requires replica acknowledgement.
-    pub fn requires_replica_ack(&self) -> bool {
+    pub const fn requires_replica_ack(&self) -> bool {
         matches!(
             self,
             Self::PrimaryPlusReplicaAck { .. } | Self::RaftMajority
@@ -136,7 +136,7 @@ impl CommitPolicy {
     }
 
     /// Returns the minimum number of replica ACKs required (0 for local-only).
-    pub fn required_replica_acks(&self) -> u32 {
+    pub const fn required_replica_acks(&self) -> u32 {
         match self {
             Self::PrimaryPlusReplicaAck { required_acks } => *required_acks,
             Self::RaftMajority => 1, // simplified; actual majority is N/2+1
@@ -145,7 +145,7 @@ impl CommitPolicy {
     }
 
     /// Describes what the client may lose after a crash under this policy.
-    pub fn crash_loss_description(&self) -> &'static str {
+    pub const fn crash_loss_description(&self) -> &'static str {
         match self {
             Self::LocalWalSync => "No data loss on primary crash (WAL is fsync'd)",
             Self::PrimaryWalOnly => "May lose up to flush_interval_us of recent commits",
@@ -157,7 +157,7 @@ impl CommitPolicy {
     }
 
     /// Whether failover may produce duplicate commits under this policy.
-    pub fn allows_duplicate_after_failover(&self) -> bool {
+    pub const fn allows_duplicate_after_failover(&self) -> bool {
         // Only PrimaryWalOnly can produce duplicates: the primary may have
         // ACK'd the client but the WAL was not replicated before crash.
         // After failover, the client may retry and the new primary has no
@@ -201,7 +201,7 @@ pub enum CommitOutcome {
 }
 
 impl CommitOutcome {
-    pub fn txn_id(&self) -> TxnId {
+    pub const fn txn_id(&self) -> TxnId {
         match self {
             Self::Committed { txn_id, .. } => *txn_id,
             Self::Aborted { txn_id, .. } => *txn_id,
@@ -209,11 +209,11 @@ impl CommitOutcome {
         }
     }
 
-    pub fn is_committed(&self) -> bool {
+    pub const fn is_committed(&self) -> bool {
         matches!(self, Self::Committed { .. })
     }
 
-    pub fn is_indeterminate(&self) -> bool {
+    pub const fn is_indeterminate(&self) -> bool {
         matches!(self, Self::Indeterminate { .. })
     }
 }
@@ -304,7 +304,7 @@ pub enum CrashPoint {
 
 impl CrashPoint {
     /// Whether a transaction at this crash point MUST survive recovery.
-    pub fn must_survive_recovery(&self, policy: &CommitPolicy) -> bool {
+    pub const fn must_survive_recovery(&self, policy: &CommitPolicy) -> bool {
         match self {
             Self::BeforeWalWrite => false,
             Self::AfterWalWriteBeforeCommit => false,
@@ -324,7 +324,7 @@ impl CrashPoint {
     }
 
     /// Whether the client may have received an ACK for this crash point.
-    pub fn client_may_have_ack(&self) -> bool {
+    pub const fn client_may_have_ack(&self) -> bool {
         matches!(
             self,
             Self::AfterAckBeforeReplication | Self::AfterReplicationAck
@@ -527,7 +527,7 @@ pub enum CrossShardInvariant {
 
 impl CrossShardInvariant {
     /// Human-readable description of this invariant.
-    pub fn description(&self) -> &'static str {
+    pub const fn description(&self) -> &'static str {
         match self {
             Self::Atomicity => cross_shard_invariants::XS_1_ATOMICITY,
             Self::AtMostOnceCommit => cross_shard_invariants::XS_2_AT_MOST_ONCE,
@@ -779,7 +779,7 @@ pub struct CommitPointEntry {
 }
 
 impl CommitPointEntry {
-    fn new(txn_id: TxnId) -> Self {
+    const fn new(txn_id: TxnId) -> Self {
         Self {
             txn_id,
             logical_us: None,
@@ -789,7 +789,7 @@ impl CommitPointEntry {
     }
 
     /// Lag between logical commit and durable commit (µs).
-    pub fn logical_to_durable_us(&self) -> Option<u64> {
+    pub const fn logical_to_durable_us(&self) -> Option<u64> {
         match (self.logical_us, self.durable_us) {
             (Some(l), Some(d)) => Some(d.saturating_sub(l)),
             _ => None,
@@ -797,7 +797,7 @@ impl CommitPointEntry {
     }
 
     /// Lag between durable commit and client-visible commit (µs).
-    pub fn durable_to_visible_us(&self) -> Option<u64> {
+    pub const fn durable_to_visible_us(&self) -> Option<u64> {
         match (self.durable_us, self.visible_us) {
             (Some(d), Some(v)) => Some(v.saturating_sub(d)),
             _ => None,
@@ -805,7 +805,7 @@ impl CommitPointEntry {
     }
 
     /// Total lag from logical to visible (µs).
-    pub fn total_us(&self) -> Option<u64> {
+    pub const fn total_us(&self) -> Option<u64> {
         match (self.logical_us, self.visible_us) {
             (Some(l), Some(v)) => Some(v.saturating_sub(l)),
             _ => None,
@@ -819,9 +819,9 @@ impl fmt::Display for CommitPointEntry {
             f,
             "txn={} L={} D={} V={}",
             self.txn_id.0,
-            self.logical_us.map_or("-".to_string(), |v| v.to_string()),
-            self.durable_us.map_or("-".to_string(), |v| v.to_string()),
-            self.visible_us.map_or("-".to_string(), |v| v.to_string()),
+            self.logical_us.map_or_else(|| "-".to_string(), |v| v.to_string()),
+            self.durable_us.map_or_else(|| "-".to_string(), |v| v.to_string()),
+            self.visible_us.map_or_else(|| "-".to_string(), |v| v.to_string()),
         )
     }
 }
@@ -896,10 +896,12 @@ impl CommitPointTracker {
 
     /// Get a commit point entry for a specific transaction.
     pub fn get(&self, txn_id: TxnId) -> Option<CommitPointEntry> {
-        let idx = self.index.read().unwrap_or_else(|p| p.into_inner());
-        let pos = idx.get(&txn_id)?;
+        let pos = {
+            let idx = self.index.read().unwrap_or_else(|p| p.into_inner());
+            *idx.get(&txn_id)?
+        };
         let entries = self.entries.read().unwrap_or_else(|p| p.into_inner());
-        entries.get(*pos).cloned()
+        entries.get(pos).cloned()
     }
 
     /// Compute aggregate lag statistics from all tracked entries.
@@ -925,6 +927,7 @@ impl CommitPointTracker {
         d2v_samples.sort_unstable();
 
         let count = entries.len() as u64;
+        drop(entries);
         let avg_l2d = if l2d_samples.is_empty() {
             0
         } else {
@@ -997,6 +1000,7 @@ impl CommitPointTracker {
 
         let pos = entries.len();
         entries.push_back(CommitPointEntry::new(txn_id));
+        drop(entries);
         idx.insert(txn_id, pos);
     }
 }

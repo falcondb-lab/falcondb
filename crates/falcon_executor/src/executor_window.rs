@@ -268,7 +268,7 @@ impl Executor {
     }
 
     /// Resolve the starting row index for a window frame given the current position.
-    fn resolve_frame_start(frame: &WindowFrame, pos: usize, _partition_len: usize) -> usize {
+    const fn resolve_frame_start(frame: &WindowFrame, pos: usize, _partition_len: usize) -> usize {
         match &frame.start {
             WindowFrameBound::UnboundedPreceding => 0,
             WindowFrameBound::CurrentRow => pos,

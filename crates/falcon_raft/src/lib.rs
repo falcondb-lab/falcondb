@@ -109,7 +109,7 @@ impl RaftNode {
         Ok(())
     }
 
-    pub fn inner(&self) -> &Raft<TypeConfig> {
+    pub const fn inner(&self) -> &Raft<TypeConfig> {
         &self.raft
     }
 
@@ -347,7 +347,7 @@ impl RaftGroup {
         Ok(())
     }
 
-    pub fn node_count(&self) -> usize {
+    pub const fn node_count(&self) -> usize {
         self.node_ids.len()
     }
     pub fn node_ids(&self) -> &[u64] {

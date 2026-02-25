@@ -41,7 +41,7 @@ impl Default for QueryLimits {
 
 impl QueryLimits {
     /// No limits (for internal/admin queries).
-    pub fn unlimited() -> Self {
+    pub const fn unlimited() -> Self {
         Self {
             max_rows: 0,
             max_result_bytes: 0,
@@ -51,7 +51,7 @@ impl QueryLimits {
     }
 
     /// Strict limits for untrusted/external queries.
-    pub fn strict() -> Self {
+    pub const fn strict() -> Self {
         Self {
             max_rows: 100_000,
             max_result_bytes: 64 * 1024 * 1024,  // 64MB
@@ -308,7 +308,7 @@ impl QueryGovernor {
 
 impl From<GovernorAbortReason> for FalconError {
     fn from(reason: GovernorAbortReason) -> Self {
-        FalconError::Execution(falcon_common::error::ExecutionError::GovernorAbort(
+        Self::Execution(falcon_common::error::ExecutionError::GovernorAbort(
             reason.to_string(),
         ))
     }

@@ -828,7 +828,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                     ))
                 }
             };
-            let mut result = fmt.clone();
+            let mut result = fmt;
             for (i, arg) in args[1..].iter().enumerate() {
                 let placeholder = format!("%{}", i + 1);
                 let val_str = format!("{}", arg);

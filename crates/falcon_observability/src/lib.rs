@@ -178,7 +178,7 @@ pub fn record_tenant_metrics(
     metrics::gauge!("falcon_tenant_qps", "tenant_id" => tid.clone(), "tenant_name" => tenant_name.to_string()).set(current_qps);
     metrics::gauge!("falcon_tenant_txns_committed", "tenant_id" => tid.clone(), "tenant_name" => tenant_name.to_string()).set(txns_committed as f64);
     metrics::gauge!("falcon_tenant_txns_aborted", "tenant_id" => tid.clone(), "tenant_name" => tenant_name.to_string()).set(txns_aborted as f64);
-    metrics::gauge!("falcon_tenant_quota_exceeded", "tenant_id" => tid.clone(), "tenant_name" => tenant_name.to_string()).set(quota_exceeded_count as f64);
+    metrics::gauge!("falcon_tenant_quota_exceeded", "tenant_id" => tid, "tenant_name" => tenant_name.to_string()).set(quota_exceeded_count as f64);
 }
 
 /// Record WAL stability metrics (P1-2 / P2-6).

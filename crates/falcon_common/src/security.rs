@@ -182,7 +182,7 @@ pub enum PrivilegeCheckResult {
 }
 
 impl PrivilegeCheckResult {
-    pub fn is_allowed(&self) -> bool {
+    pub const fn is_allowed(&self) -> bool {
         matches!(self, Self::Allowed)
     }
 }
@@ -503,7 +503,7 @@ impl PrivilegeManager {
     }
 
     /// Total number of active grants.
-    pub fn grant_count(&self) -> usize {
+    pub const fn grant_count(&self) -> usize {
         self.grants.len()
     }
 }
@@ -550,7 +550,7 @@ impl TxnPriority {
     }
 
     /// Whether this priority can preempt the given priority.
-    pub fn can_preempt(self, other: Self) -> bool {
+    pub const fn can_preempt(self, other: Self) -> bool {
         (self as u8) > (other as u8)
     }
 }

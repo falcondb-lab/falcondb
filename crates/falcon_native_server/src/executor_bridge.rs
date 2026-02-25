@@ -284,7 +284,7 @@ impl ExecutorBridge {
     }
 
     /// Verify authentication credentials.
-    pub fn authenticate(&self, user: &str, credential: &[u8]) -> bool {
+    pub const fn authenticate(&self, user: &str, credential: &[u8]) -> bool {
         // Minimal auth: accept any non-empty password for now.
         // In production, this would check against a user catalog.
         !user.is_empty() && !credential.is_empty()
@@ -378,7 +378,7 @@ impl ExecutorBridge {
     }
 }
 
-fn classify_execution_error(e: &falcon_common::error::FalconError) -> (u32, [u8; 5], bool) {
+const fn classify_execution_error(e: &falcon_common::error::FalconError) -> (u32, [u8; 5], bool) {
     use falcon_common::error::FalconError;
     match e {
         FalconError::Sql(_) => (ERR_SYNTAX_ERROR, *b"42000", false),

@@ -35,9 +35,9 @@ pub enum CommitPolicy {
 impl From<DurabilityPolicy> for CommitPolicy {
     fn from(dp: DurabilityPolicy) -> Self {
         match dp {
-            DurabilityPolicy::LocalFsync => CommitPolicy::LocalDurable,
-            DurabilityPolicy::QuorumAck => CommitPolicy::QuorumVisible,
-            DurabilityPolicy::AllAck => CommitPolicy::ReplicaDurable,
+            DurabilityPolicy::LocalFsync => Self::LocalDurable,
+            DurabilityPolicy::QuorumAck => Self::QuorumVisible,
+            DurabilityPolicy::AllAck => Self::ReplicaDurable,
         }
     }
 }
@@ -101,7 +101,7 @@ pub struct GroupCommitStats {
 }
 
 impl GroupCommitStats {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             fsyncs: AtomicU64::new(0),
             records_synced: AtomicU64::new(0),
@@ -159,6 +159,8 @@ pub struct GroupCommitSyncer {
     next_lsn: AtomicU64,
     /// Unflushed bytes in the ring buffer (written but not yet fsynced).
     pending_bytes: AtomicU64,
+    /// Atomic mirror of SyncerState::fsynced_lsn for lock-free reads.
+    atomic_fsynced_lsn: AtomicU64,
 }
 
 impl GroupCommitSyncer {
@@ -179,15 +181,15 @@ impl GroupCommitSyncer {
             shutdown: Arc::new(AtomicBool::new(false)),
             next_lsn: AtomicU64::new(1),
             pending_bytes: AtomicU64::new(0),
+            atomic_fsynced_lsn: AtomicU64::new(0),
         });
         syncer
     }
 
     /// Returns the LSN that has been durably fsynced.
+    /// Lock-free read via atomic mirror — safe for observability and replication.
     pub fn flushed_lsn(&self) -> u64 {
-        let (lock, _) = &*self.state;
-        let state = lock.lock().unwrap_or_else(|p| p.into_inner());
-        state.fsynced_lsn
+        self.atomic_fsynced_lsn.load(Ordering::Acquire)
     }
 
     /// Returns the number of bytes written but not yet fsynced (WAL backlog).
@@ -227,7 +229,7 @@ impl GroupCommitSyncer {
             let (lock, cvar) = &*self.state;
             let mut state = lock.lock().unwrap_or_else(|p| p.into_inner());
             state.pending_count += 1;
-            let seq = self.next_lsn.fetch_add(1, Ordering::SeqCst);
+            let seq = self.next_lsn.fetch_add(1, Ordering::Relaxed);
             cvar.notify_one();
 
             // Wait until our LSN is fsynced
@@ -268,7 +270,7 @@ impl GroupCommitSyncer {
             let (lock, cvar) = &*self.state;
             let mut state = lock.lock().unwrap_or_else(|p| p.into_inner());
             state.pending_count += 1;
-            self.next_lsn.fetch_add(1, Ordering::SeqCst);
+            self.next_lsn.fetch_add(1, Ordering::Relaxed);
             cvar.notify_one();
         }
         Ok(lsn)
@@ -337,7 +339,7 @@ impl GroupCommitSyncer {
         let (batch_size, lsn_snapshot) = {
             let (lock, _) = &*self.state;
             let state = lock.lock().unwrap_or_else(|p| p.into_inner());
-            (state.pending_count, self.next_lsn.load(Ordering::SeqCst))
+            (state.pending_count, self.next_lsn.load(Ordering::Relaxed))
         };
 
         if batch_size == 0 {
@@ -357,6 +359,8 @@ impl GroupCommitSyncer {
             // Advance fsynced_lsn past all LSNs that were pending
             state.fsynced_lsn = lsn_snapshot;
             state.pending_count = state.pending_count.saturating_sub(batch_size);
+            // Update atomic mirror before notifying waiters (Release ensures visibility).
+            self.atomic_fsynced_lsn.store(lsn_snapshot, Ordering::Release);
             cvar.notify_all();
         }
 

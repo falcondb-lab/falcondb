@@ -30,11 +30,11 @@ pub enum PressureState {
 }
 
 impl PressureState {
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
-            PressureState::Normal => "normal",
-            PressureState::Pressure => "pressure",
-            PressureState::Critical => "critical",
+            Self::Normal => "normal",
+            Self::Pressure => "pressure",
+            Self::Critical => "critical",
         }
     }
 }
@@ -60,7 +60,7 @@ impl MemoryBudget {
     /// Create a budget with the given limits.
     /// If `soft_limit` is 0 or `hard_limit` is 0, backpressure is effectively disabled
     /// (the corresponding threshold will never be reached).
-    pub fn new(soft_limit: u64, hard_limit: u64) -> Self {
+    pub const fn new(soft_limit: u64, hard_limit: u64) -> Self {
         Self {
             soft_limit,
             hard_limit,
@@ -69,7 +69,7 @@ impl MemoryBudget {
     }
 
     /// No limits — backpressure disabled.
-    pub fn unlimited() -> Self {
+    pub const fn unlimited() -> Self {
         Self {
             soft_limit: 0,
             hard_limit: 0,
@@ -78,7 +78,7 @@ impl MemoryBudget {
     }
 
     /// Evaluate pressure state for a given usage level.
-    pub fn evaluate(&self, used_bytes: u64) -> PressureState {
+    pub const fn evaluate(&self, used_bytes: u64) -> PressureState {
         if !self.enabled {
             return PressureState::Normal;
         }
@@ -176,7 +176,7 @@ pub struct MemoryTracker {
 
 impl MemoryTracker {
     /// Create a new tracker with the given budget.
-    pub fn new(budget: MemoryBudget) -> Self {
+    pub const fn new(budget: MemoryBudget) -> Self {
         Self {
             mvcc_bytes: AtomicI64::new(0),
             index_bytes: AtomicI64::new(0),
@@ -352,12 +352,12 @@ impl MemoryTracker {
     }
 
     /// Whether backpressure is enabled.
-    pub fn is_enabled(&self) -> bool {
+    pub const fn is_enabled(&self) -> bool {
         self.budget.enabled
     }
 
     /// Get a reference to the budget.
-    pub fn budget(&self) -> &MemoryBudget {
+    pub const fn budget(&self) -> &MemoryBudget {
         &self.budget
     }
 
@@ -449,7 +449,7 @@ impl MemoryTracker {
 
     // ── Pressure state transition logging ──
 
-    fn pressure_state_from_u8(v: u8) -> PressureState {
+    const fn pressure_state_from_u8(v: u8) -> PressureState {
         match v {
             1 => PressureState::Pressure,
             2 => PressureState::Critical,
@@ -534,7 +534,7 @@ pub enum BackpressureLevel {
 }
 
 impl BackpressureLevel {
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::None => "none",
             Self::Soft => "soft",
@@ -609,7 +609,7 @@ pub struct GlobalMemoryGovernor {
 }
 
 impl GlobalMemoryGovernor {
-    pub fn new(config: GovernorConfig) -> Self {
+    pub const fn new(config: GovernorConfig) -> Self {
         Self {
             config,
             total_used: AtomicU64::new(0),
@@ -749,7 +749,7 @@ impl GlobalMemoryGovernor {
         std::time::Duration::from_micros(delay_us as u64)
     }
 
-    fn level_from_u8(v: u8) -> BackpressureLevel {
+    const fn level_from_u8(v: u8) -> BackpressureLevel {
         match v {
             1 => BackpressureLevel::Soft,
             2 => BackpressureLevel::Hard,

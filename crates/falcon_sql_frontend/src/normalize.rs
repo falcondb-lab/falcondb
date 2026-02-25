@@ -716,14 +716,14 @@ fn infer_function_param_types(func: &ScalarFunc, args: &[BoundExpr], out: &mut P
     }
 }
 
-fn is_arithmetic(op: BinOp) -> bool {
+const fn is_arithmetic(op: BinOp) -> bool {
     matches!(
         op,
         BinOp::Plus | BinOp::Minus | BinOp::Multiply | BinOp::Divide | BinOp::Modulo
     )
 }
 
-fn is_comparison(op: BinOp) -> bool {
+const fn is_comparison(op: BinOp) -> bool {
     matches!(
         op,
         BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq
@@ -844,7 +844,7 @@ pub fn extract_equality_sets(expr: &BoundExpr) -> Vec<EqualitySet> {
 ///
 /// These must NOT participate in shard key inference because their
 /// results are non-deterministic and differ between nodes.
-pub fn is_volatile(func: &ScalarFunc) -> bool {
+pub const fn is_volatile(func: &ScalarFunc) -> bool {
     matches!(
         func,
         ScalarFunc::Random

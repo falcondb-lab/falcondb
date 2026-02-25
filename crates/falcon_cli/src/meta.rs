@@ -2,7 +2,7 @@ use crate::client::DbClient;
 use anyhow::Result;
 
 /// Result of parsing a meta-command line.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum MetaCommand {
     Quit,
     Help,

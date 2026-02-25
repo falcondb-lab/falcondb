@@ -1,14 +1,14 @@
 use crate::policy::model::{Guardrail, RiskCeiling};
 
 /// Result of evaluating a guardrail.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuardrailVerdict {
     Pass,
     Blocked(String),
 }
 
 impl GuardrailVerdict {
-    pub fn is_pass(&self) -> bool {
+    pub const fn is_pass(&self) -> bool {
         matches!(self, Self::Pass)
     }
 

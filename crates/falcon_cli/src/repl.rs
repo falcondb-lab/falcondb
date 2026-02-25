@@ -243,11 +243,7 @@ pub async fn run_repl(client: &mut DbClient, args: &Args) -> Result<()> {
                     MetaResult::Shard(arg) => {
                         let mode = effective_mode(args, expanded);
                         let timer = timing.maybe_start();
-                        let out = parse_shard_move_arg(&arg).and_then(|(shard_id, target_node)| {
-                            // Return a future — we need to block on it
-                            // Use a local async block via Box::pin
-                            Ok((shard_id, target_node))
-                        });
+                        let out = parse_shard_move_arg(&arg);
                         let result = match out {
                             Ok((shard_id, target_node)) => {
                                 if args.apply {
@@ -412,7 +408,7 @@ fn parse_shard_move_arg(arg: &str) -> anyhow::Result<(String, String)> {
     Ok((shard_id, target_node))
 }
 
-pub fn effective_mode(args: &Args, expanded: bool) -> OutputMode {
+pub const fn effective_mode(args: &Args, expanded: bool) -> OutputMode {
     if args.tuples_only {
         OutputMode::TuplesOnly
     } else if args.csv {

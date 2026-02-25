@@ -850,7 +850,7 @@ impl QueryHandler {
     }
 
     /// Map DataType to PG OID and type_len for cursor column descriptions.
-    fn data_type_to_pg_oid(dt: &falcon_common::types::DataType) -> (i32, i16) {
+    const fn data_type_to_pg_oid(dt: &falcon_common::types::DataType) -> (i32, i16) {
         use falcon_common::types::DataType;
         match dt {
             DataType::Int32 => (23, 4),            // int4

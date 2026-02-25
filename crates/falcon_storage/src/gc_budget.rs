@@ -194,12 +194,12 @@ pub fn sweep_memtable_budgeted(
 
     for entry in table.data.iter() {
         // Time budget check (every 64 keys to amortize syscall cost)
-        if processed % 64 == 0 && processed > 0 {
-            if start.elapsed() >= max_time {
-                result.budget_exhausted = true;
-                result.inner.keys_skipped += table.data.len() as u64 - processed;
-                break;
-            }
+        if processed.is_multiple_of(64) && processed > 0
+            && start.elapsed() >= max_time
+        {
+            result.budget_exhausted = true;
+            result.inner.keys_skipped += table.data.len() as u64 - processed;
+            break;
         }
 
         // Key budget check
@@ -266,7 +266,7 @@ pub struct GcBudgetMetrics {
 }
 
 impl GcBudgetMetrics {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             time_budget_hits: AtomicU64::new(0),
             key_budget_hits: AtomicU64::new(0),

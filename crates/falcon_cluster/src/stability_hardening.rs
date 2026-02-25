@@ -39,7 +39,7 @@ pub enum StateOrdinal {
 }
 
 impl StateOrdinal {
-    fn rank(self) -> u8 {
+    const fn rank(self) -> u8 {
         match self {
             Self::Active => 0,
             Self::Prepared => 1,
@@ -71,7 +71,7 @@ impl StateOrdinal {
         }
     }
 
-    pub fn is_terminal(self) -> bool {
+    pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Committed | Self::Aborted)
     }
 }
@@ -963,8 +963,8 @@ impl DefensiveValidator {
         m.total_checks += 1;
 
         // Commit and Abort are only valid after Begin or Prepare
-        if incoming == ProtocolPhase::Commit || incoming == ProtocolPhase::Abort {
-            if current < ProtocolPhase::Begin {
+        if (incoming == ProtocolPhase::Commit || incoming == ProtocolPhase::Abort)
+            && current < ProtocolPhase::Begin {
                 m.rejections += 1;
                 m.invalid_phase_ordering += 1;
                 return Err(TxnError::InvariantViolation(
@@ -975,7 +975,6 @@ impl DefensiveValidator {
                     ),
                 ));
             }
-        }
 
         // Prepare only valid after Begin/Execute
         if incoming == ProtocolPhase::Prepare && current < ProtocolPhase::Begin {
@@ -1079,7 +1078,7 @@ impl TxnOutcomeJournal {
         Self::with_capacity(50_000)
     }
 
-    pub fn with_capacity(cap: usize) -> Self {
+    pub const fn with_capacity(cap: usize) -> Self {
         Self {
             entries: Mutex::new(Vec::new()),
             max_entries: cap,

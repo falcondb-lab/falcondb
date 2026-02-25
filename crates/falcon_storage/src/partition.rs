@@ -58,7 +58,7 @@ pub struct RangeBound {
 }
 
 impl RangeBound {
-    pub fn new(lower: Option<Datum>, upper: Option<Datum>) -> Self {
+    pub const fn new(lower: Option<Datum>, upper: Option<Datum>) -> Self {
         Self { lower, upper }
     }
 
@@ -83,7 +83,7 @@ pub struct ListBound {
 }
 
 impl ListBound {
-    pub fn new(values: Vec<Datum>) -> Self {
+    pub const fn new(values: Vec<Datum>) -> Self {
         Self { values }
     }
 

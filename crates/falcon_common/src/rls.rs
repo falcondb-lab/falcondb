@@ -47,8 +47,8 @@ impl fmt::Display for PolicyCommand {
 }
 
 impl PolicyCommand {
-    pub fn matches(&self, cmd: PolicyCommand) -> bool {
-        *self == PolicyCommand::All || *self == cmd
+    pub fn matches(&self, cmd: Self) -> bool {
+        *self == Self::All || *self == cmd
     }
 }
 

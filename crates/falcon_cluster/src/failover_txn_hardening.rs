@@ -635,7 +635,7 @@ impl FailoverDamper {
         Self::with_config(FailoverDamperConfig::default())
     }
 
-    pub fn with_config(config: FailoverDamperConfig) -> Self {
+    pub const fn with_config(config: FailoverDamperConfig) -> Self {
         Self {
             config,
             history: Mutex::new(Vec::new()),

@@ -6,7 +6,7 @@ pub enum PolicyStatus {
 }
 
 impl PolicyStatus {
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Enabled => "enabled",
             Self::Disabled => "disabled",
@@ -38,7 +38,7 @@ pub enum PolicyScope {
 }
 
 impl PolicyScope {
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Cluster => "cluster",
             Self::Shard => "shard",
@@ -63,7 +63,7 @@ impl std::fmt::Display for PolicyScope {
 }
 
 /// Supported trigger conditions (v0.6).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Condition {
     NodeUnavailableForSecs(u64),
     ShardLeaderUnavailable,
@@ -93,7 +93,7 @@ impl Condition {
 }
 
 /// Supported automated actions (v0.6).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     DrainNode(String),
     MoveShardLeader {
@@ -131,7 +131,7 @@ pub enum RiskCeiling {
 }
 
 impl RiskCeiling {
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Low => "LOW",
             Self::Medium => "MEDIUM",

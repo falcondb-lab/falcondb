@@ -84,7 +84,7 @@ impl CodecPolicy {
     }
 
     /// Get the default codec for a segment kind.
-    pub fn default_codec(&self, kind: SegmentKind) -> SegmentCodec {
+    pub const fn default_codec(&self, kind: SegmentKind) -> SegmentCodec {
         match kind {
             SegmentKind::Wal => self.wal_segment_codec,
             SegmentKind::Cold => self.cold_segment_codec,
@@ -93,7 +93,7 @@ impl CodecPolicy {
     }
 
     /// Get the zstd level for a segment kind.
-    pub fn zstd_level(&self, kind: SegmentKind) -> i32 {
+    pub const fn zstd_level(&self, kind: SegmentKind) -> i32 {
         match kind {
             SegmentKind::Wal => 1,
             SegmentKind::Cold => self.zstd_cold_level,
@@ -151,7 +151,7 @@ pub struct ZstdSegmentMeta {
 }
 
 impl ZstdSegmentMeta {
-    pub fn new(level: i32) -> Self {
+    pub const fn new(level: i32) -> Self {
         Self {
             codec: SegmentCodec::Zstd,
             codec_level: level,
@@ -163,7 +163,7 @@ impl ZstdSegmentMeta {
         }
     }
 
-    pub fn with_dictionary(mut self, dict_id: u64, dict_checksum: u32) -> Self {
+    pub const fn with_dictionary(mut self, dict_id: u64, dict_checksum: u32) -> Self {
         self.dictionary_id = dict_id;
         self.dictionary_checksum = dict_checksum;
         self
@@ -229,7 +229,7 @@ fn djb2_crc(data: &[u8]) -> u32 {
 
 impl ZstdBlock {
     /// Wire format size.
-    pub fn wire_size(&self) -> usize {
+    pub const fn wire_size(&self) -> usize {
         4 + 4 + 1 + self.compressed_data.len() + 4 // u32+u32+u8+data+crc
     }
 
@@ -388,7 +388,7 @@ pub fn write_zstd_cold_segment(
     let mut meta = ZstdSegmentMeta::new(level);
     if dict_id > 0 {
         meta.dictionary_id = dict_id;
-        meta.dictionary_checksum = dict.map(|d| djb2_crc(d)).unwrap_or(0);
+        meta.dictionary_checksum = dict.map(djb2_crc).unwrap_or(0);
     }
 
     // Write block count first so reader knows when to stop
@@ -397,7 +397,7 @@ pub fn write_zstd_cold_segment(
 
     for row in rows {
         let block = zstd_compress_block(row, level, dict)
-            .map_err(|e| SegmentStoreError::IoError(e))?;
+            .map_err(SegmentStoreError::IoError)?;
         meta.uncompressed_bytes += row.len() as u64;
         meta.compressed_bytes += block.compressed_data.len() as u64;
         meta.block_count += 1;
@@ -816,8 +816,8 @@ impl DecompressCache {
         }
 
         let mut entries = self.entries.lock();
-        if !entries.contains_key(&key) {
-            entries.insert(key, data);
+        if let std::collections::hash_map::Entry::Vacant(e) = entries.entry(key) {
+            e.insert(data);
             self.used_bytes.fetch_add(data_len, Ordering::Relaxed);
             self.metrics.bytes_cached.fetch_add(data_len, Ordering::Relaxed);
             self.order.lock().push_back(key);
@@ -1129,7 +1129,7 @@ pub struct SegmentCodecInfo {
 /// List segments filtered by codec.
 pub fn list_segments_by_codec(manifest: &Manifest, codec: Option<SegmentCodec>) -> Vec<SegmentCodecInfo> {
     manifest.segments.values()
-        .filter(|e| codec.map_or(true, |c| e.codec == c))
+        .filter(|e| codec.is_none_or(|c| e.codec == c))
         .map(|e| SegmentCodecInfo {
             segment_id: e.segment_id,
             kind: e.kind,

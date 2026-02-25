@@ -12,7 +12,7 @@ type Result<T> = std::result::Result<T, NativeProtocolError>;
 
 // ── Helper: read/write primitives ────────────────────────────────────────
 
-fn ensure(buf: &[u8], need: usize, ctx: &str) -> Result<()> {
+const fn ensure(buf: &[u8], need: usize, ctx: &str) -> Result<()> {
     if buf.len() < need {
         return Err(NativeProtocolError::Truncated {
             expected: need,
@@ -235,7 +235,7 @@ fn decode_value(buf: &mut &[u8], type_id: u8) -> Result<EncodedValue> {
     }
 }
 
-fn value_type_id(v: &EncodedValue) -> u8 {
+const fn value_type_id(v: &EncodedValue) -> u8 {
     match v {
         EncodedValue::Null => TYPE_NULL,
         EncodedValue::Boolean(_) => TYPE_BOOLEAN,
@@ -257,7 +257,7 @@ fn value_type_id(v: &EncodedValue) -> u8 {
 
 // ── Null bitmap helpers ──────────────────────────────────────────────────
 
-fn null_bitmap_size(num_cols: usize) -> usize {
+const fn null_bitmap_size(num_cols: usize) -> usize {
     num_cols.div_ceil(8)
 }
 
@@ -703,7 +703,7 @@ pub fn encoded_to_datum(v: &EncodedValue) -> Datum {
 }
 
 /// Convert a `DataType` to a native protocol type_id.
-pub fn datatype_to_type_id(dt: &DataType) -> u8 {
+pub const fn datatype_to_type_id(dt: &DataType) -> u8 {
     match dt {
         DataType::Boolean => TYPE_BOOLEAN,
         DataType::Int32 => TYPE_INT32,

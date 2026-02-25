@@ -73,6 +73,12 @@ impl std::fmt::Display for ShutdownReason {
     }
 }
 
+impl Default for ShutdownCoordinator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ShutdownCoordinator {
     /// Create a new coordinator (call once in main).
     pub fn new() -> Self {
@@ -83,7 +89,7 @@ impl ShutdownCoordinator {
     }
 
     /// Get the underlying `CancellationToken` for use in `tokio::select!`.
-    pub fn token(&self) -> &CancellationToken {
+    pub const fn token(&self) -> &CancellationToken {
         &self.token
     }
 

@@ -10,7 +10,7 @@ pub enum RiskLevel {
 }
 
 impl RiskLevel {
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Low => "LOW",
             Self::Medium => "MEDIUM",
@@ -72,7 +72,7 @@ impl PlanOutput {
         self
     }
 
-    pub fn no_apply(mut self) -> Self {
+    pub const fn no_apply(mut self) -> Self {
         self.requires_apply = false;
         self
     }

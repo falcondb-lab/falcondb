@@ -71,18 +71,18 @@ impl NativeSession {
     }
 
     /// Mark session as authenticated.
-    pub fn on_auth_ok(&mut self, negotiated_features: u64) {
+    pub const fn on_auth_ok(&mut self, negotiated_features: u64) {
         self.state = SessionState::Authenticated;
         self.negotiated_features = negotiated_features;
     }
 
     /// Transition to Ready state (after auth).
-    pub fn set_ready(&mut self) {
+    pub const fn set_ready(&mut self) {
         self.state = SessionState::Ready;
     }
 
     /// Mark session as disconnected.
-    pub fn disconnect(&mut self) {
+    pub const fn disconnect(&mut self) {
         self.state = SessionState::Disconnected;
     }
 

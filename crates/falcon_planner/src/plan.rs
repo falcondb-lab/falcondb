@@ -21,7 +21,7 @@ pub struct TxnRoutingHint {
 }
 
 impl TxnRoutingHint {
-    pub fn planned_txn_type(&self) -> PlannedTxnType {
+    pub const fn planned_txn_type(&self) -> PlannedTxnType {
         if self.single_shard_proven && self.involved_shards.len() <= 1 {
             PlannedTxnType::Local
         } else {
@@ -181,9 +181,9 @@ pub enum PhysicalPlan {
         unions: Vec<(BoundSelect, SetOpKind, bool)>,
     },
     /// EXPLAIN: wraps another plan to show its structure
-    Explain(Box<PhysicalPlan>),
+    Explain(Box<Self>),
     /// EXPLAIN ANALYZE: executes the inner plan and shows actual metrics
-    ExplainAnalyze(Box<PhysicalPlan>),
+    ExplainAnalyze(Box<Self>),
     /// TRUNCATE TABLE
     Truncate {
         table_name: String,
@@ -258,6 +258,61 @@ pub enum PhysicalPlan {
     DropTenant {
         name: String,
     },
+    /// DDL: create schema
+    CreateSchema {
+        name: String,
+        if_not_exists: bool,
+    },
+    /// DDL: drop schema
+    DropSchema {
+        name: String,
+        if_exists: bool,
+    },
+    /// DDL: create role
+    CreateRole {
+        name: String,
+        can_login: bool,
+        is_superuser: bool,
+        can_create_db: bool,
+        can_create_role: bool,
+        password: Option<String>,
+    },
+    /// DDL: drop role
+    DropRole {
+        name: String,
+        if_exists: bool,
+    },
+    /// DDL: alter role
+    AlterRole {
+        name: String,
+        password: Option<Option<String>>,
+        can_login: Option<bool>,
+        is_superuser: Option<bool>,
+        can_create_db: Option<bool>,
+        can_create_role: Option<bool>,
+    },
+    /// DCL: grant privilege
+    Grant {
+        privilege: String,
+        object_type: String,
+        object_name: String,
+        grantee: String,
+    },
+    /// DCL: revoke privilege
+    Revoke {
+        privilege: String,
+        object_type: String,
+        object_name: String,
+        grantee: String,
+    },
+    /// SHOW roles
+    ShowRoles,
+    /// SHOW schemas
+    ShowSchemas,
+    /// SHOW grants
+    ShowGrants {
+        role_name: Option<String>,
+    },
     /// COPY table FROM STDIN — bulk import
     CopyFrom {
         table_id: TableId,
@@ -284,7 +339,7 @@ pub enum PhysicalPlan {
     },
     /// COPY (query) TO STDOUT — export query results
     CopyQueryTo {
-        query: Box<PhysicalPlan>,
+        query: Box<Self>,
         csv: bool,
         delimiter: char,
         header: bool,
@@ -297,7 +352,7 @@ pub enum PhysicalPlan {
     /// DistributedExecutor for parallel execution + merge.
     DistPlan {
         /// The local subplan to execute on each shard.
-        subplan: Box<PhysicalPlan>,
+        subplan: Box<Self>,
         /// Target shard IDs for scatter.
         target_shards: Vec<ShardId>,
         /// How to merge results from shards.
@@ -372,23 +427,23 @@ pub enum DistAggMerge {
 impl std::fmt::Display for DistAggMerge {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DistAggMerge::Sum(i) => write!(f, "SUM(col{})", i),
-            DistAggMerge::Count(i) => write!(f, "COUNT(col{})", i),
-            DistAggMerge::Min(i) => write!(f, "MIN(col{})", i),
-            DistAggMerge::Max(i) => write!(f, "MAX(col{})", i),
-            DistAggMerge::BoolAnd(i) => write!(f, "BOOL_AND(col{})", i),
-            DistAggMerge::BoolOr(i) => write!(f, "BOOL_OR(col{})", i),
-            DistAggMerge::StringAgg(i, sep) => write!(f, "STRING_AGG(col{}, '{}')", i, sep),
-            DistAggMerge::ArrayAgg(i) => write!(f, "ARRAY_AGG(col{})", i),
-            DistAggMerge::CountDistinct(i) => write!(f, "COUNT(DISTINCT col{}) [collect-dedup]", i),
-            DistAggMerge::SumDistinct(i) => write!(f, "SUM(DISTINCT col{}) [collect-dedup]", i),
-            DistAggMerge::AvgDistinct(i) => write!(f, "AVG(DISTINCT col{}) [collect-dedup]", i),
-            DistAggMerge::StringAggDistinct(i, sep) => write!(
+            Self::Sum(i) => write!(f, "SUM(col{})", i),
+            Self::Count(i) => write!(f, "COUNT(col{})", i),
+            Self::Min(i) => write!(f, "MIN(col{})", i),
+            Self::Max(i) => write!(f, "MAX(col{})", i),
+            Self::BoolAnd(i) => write!(f, "BOOL_AND(col{})", i),
+            Self::BoolOr(i) => write!(f, "BOOL_OR(col{})", i),
+            Self::StringAgg(i, sep) => write!(f, "STRING_AGG(col{}, '{}')", i, sep),
+            Self::ArrayAgg(i) => write!(f, "ARRAY_AGG(col{})", i),
+            Self::CountDistinct(i) => write!(f, "COUNT(DISTINCT col{}) [collect-dedup]", i),
+            Self::SumDistinct(i) => write!(f, "SUM(DISTINCT col{}) [collect-dedup]", i),
+            Self::AvgDistinct(i) => write!(f, "AVG(DISTINCT col{}) [collect-dedup]", i),
+            Self::StringAggDistinct(i, sep) => write!(
                 f,
                 "STRING_AGG(DISTINCT col{}, '{}') [collect-dedup]",
                 i, sep
             ),
-            DistAggMerge::ArrayAggDistinct(i) => {
+            Self::ArrayAggDistinct(i) => {
                 write!(f, "ARRAY_AGG(DISTINCT col{}) [collect-dedup]", i)
             }
         }
@@ -407,7 +462,7 @@ impl PhysicalPlan {
         let reason;
 
         match self {
-            PhysicalPlan::Insert {
+            Self::Insert {
                 table_id,
                 source_select,
                 ..
@@ -422,17 +477,17 @@ impl PhysicalPlan {
                     reason = format!("single-table INSERT on table_id={}", table_id.0);
                 }
             }
-            PhysicalPlan::Update { table_id, .. } => {
+            Self::Update { table_id, .. } => {
                 table_ids.insert(*table_id);
                 single_shard_proven = true;
                 reason = format!("single-table UPDATE on table_id={}", table_id.0);
             }
-            PhysicalPlan::Delete { table_id, .. } => {
+            Self::Delete { table_id, .. } => {
                 table_ids.insert(*table_id);
                 single_shard_proven = true;
                 reason = format!("single-table DELETE on table_id={}", table_id.0);
             }
-            PhysicalPlan::SeqScan {
+            Self::SeqScan {
                 table_id,
                 unions,
                 ctes,
@@ -453,21 +508,21 @@ impl PhysicalPlan {
                     reason = format!("SeqScan on table_id={} with unions/CTEs", table_id.0);
                 }
             }
-            PhysicalPlan::NestedLoopJoin {
+            Self::NestedLoopJoin {
                 left_table_id,
                 joins,
                 ctes,
                 unions,
                 ..
             }
-            | PhysicalPlan::HashJoin {
+            | Self::HashJoin {
                 left_table_id,
                 joins,
                 ctes,
                 unions,
                 ..
             }
-            | PhysicalPlan::MergeSortJoin {
+            | Self::MergeSortJoin {
                 left_table_id,
                 joins,
                 ctes,
@@ -487,10 +542,10 @@ impl PhysicalPlan {
                 single_shard_proven = false;
                 reason = format!("multi-table join ({} tables)", table_ids.len());
             }
-            PhysicalPlan::Explain(inner) | PhysicalPlan::ExplainAnalyze(inner) => {
+            Self::Explain(inner) | Self::ExplainAnalyze(inner) => {
                 return inner.routing_hint();
             }
-            PhysicalPlan::DistPlan { target_shards, .. } => {
+            Self::DistPlan { target_shards, .. } => {
                 return TxnRoutingHint {
                     involved_shards: target_shards.clone(),
                     single_shard_proven: target_shards.len() <= 1,
@@ -534,7 +589,7 @@ fn collect_select_table_ids(select: &BoundSelect, out: &mut HashSet<TableId>) {
     }
 }
 
-fn shard_for_table(table_id: TableId) -> ShardId {
+const fn shard_for_table(table_id: TableId) -> ShardId {
     // Deterministic planner-side affinity hint.
     // Actual distributed routing can replace this with cluster shard-map lookup.
     ShardId(table_id.0 % 1024)

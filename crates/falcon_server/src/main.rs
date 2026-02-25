@@ -168,7 +168,7 @@ async fn main() -> Result<()> {
 
                     // Register the server runner so the SCM callback can invoke it
                     service::windows::set_server_runner(Box::new(|config_path, coord| {
-                        Box::pin(run_server(config_path.clone(), coord))
+                        Box::pin(run_server(config_path, coord))
                     }));
 
                     service::windows::scm::set_config_path(&cli.config);
@@ -559,7 +559,7 @@ async fn run_server_inner(
     // ═══════════════════════════════════════════════════════════════════
     // Shutdown Protocol — single CancellationToken as root primitive
     // ═══════════════════════════════════════════════════════════════════
-    let coordinator = external_coordinator.unwrap_or_else(ShutdownCoordinator::new);
+    let coordinator = external_coordinator.unwrap_or_default();
 
     // Role-based replication startup
     let mut replica_runner_handle: Option<falcon_cluster::ReplicaRunnerHandle> = None;

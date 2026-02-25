@@ -185,7 +185,7 @@ impl Default for TxnClassificationHints {
 }
 
 /// Classify a transaction based on hints.
-pub fn classify_txn(hints: &TxnClassificationHints) -> TxnClass {
+pub const fn classify_txn(hints: &TxnClassificationHints) -> TxnClass {
     if hints.is_system {
         return TxnClass::System;
     }
@@ -552,6 +552,7 @@ impl SlaAdmissionController {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn do_reject(
         &self,
         class: TxnClass,
@@ -602,12 +603,11 @@ impl SlaAdmissionController {
             .unwrap_or_default()
             .as_secs();
         let prev = self.rate_cap_epoch.load(Ordering::Relaxed);
-        if now_sec > prev {
-            if self.rate_cap_epoch.compare_exchange(prev, now_sec, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+        if now_sec > prev
+            && self.rate_cap_epoch.compare_exchange(prev, now_sec, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
                 self.accepted_this_sec.store(0, Ordering::Relaxed);
                 self.rejected_this_sec.store(0, Ordering::Relaxed);
             }
-        }
     }
 }
 
@@ -633,7 +633,7 @@ impl std::fmt::Debug for SlaPermit {
 
 impl SlaPermit {
     /// Get the transaction class.
-    pub fn class(&self) -> TxnClass {
+    pub const fn class(&self) -> TxnClass {
         self.class
     }
 

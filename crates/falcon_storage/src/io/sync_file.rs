@@ -36,6 +36,7 @@ impl SyncFileBackend {
     pub fn open(path: PathBuf, config: AsyncFileConfig) -> Result<Self, IoError> {
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&path)

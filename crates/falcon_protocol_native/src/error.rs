@@ -38,7 +38,7 @@ pub enum NativeProtocolError {
 
 impl NativeProtocolError {
     /// Whether this error indicates the connection should be retried.
-    pub fn is_retryable(&self) -> bool {
-        matches!(self, NativeProtocolError::Io(_))
+    pub const fn is_retryable(&self) -> bool {
+        matches!(self, Self::Io(_))
     }
 }

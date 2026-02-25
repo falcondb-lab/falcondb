@@ -13,8 +13,8 @@ pub enum BoundStatement {
     Update(BoundUpdate),
     Delete(BoundDelete),
     Select(BoundSelect),
-    Explain(Box<BoundStatement>),
-    ExplainAnalyze(Box<BoundStatement>),
+    Explain(Box<Self>),
+    ExplainAnalyze(Box<Self>),
     Truncate {
         table_name: String,
     },
@@ -82,6 +82,61 @@ pub enum BoundStatement {
     DropDatabase {
         name: String,
         if_exists: bool,
+    },
+    /// DDL: CREATE SCHEMA
+    CreateSchema {
+        name: String,
+        if_not_exists: bool,
+    },
+    /// DDL: DROP SCHEMA
+    DropSchema {
+        name: String,
+        if_exists: bool,
+    },
+    /// DDL: CREATE ROLE / CREATE USER
+    CreateRole {
+        name: String,
+        can_login: bool,
+        is_superuser: bool,
+        can_create_db: bool,
+        can_create_role: bool,
+        password: Option<String>,
+    },
+    /// DDL: DROP ROLE / DROP USER
+    DropRole {
+        name: String,
+        if_exists: bool,
+    },
+    /// DDL: ALTER ROLE / ALTER USER
+    AlterRole {
+        name: String,
+        password: Option<Option<String>>,
+        can_login: Option<bool>,
+        is_superuser: Option<bool>,
+        can_create_db: Option<bool>,
+        can_create_role: Option<bool>,
+    },
+    /// DCL: GRANT privilege ON object TO role
+    Grant {
+        privilege: String,
+        object_type: String,
+        object_name: String,
+        grantee: String,
+    },
+    /// DCL: REVOKE privilege ON object FROM role
+    Revoke {
+        privilege: String,
+        object_type: String,
+        object_name: String,
+        grantee: String,
+    },
+    /// SHOW: list roles
+    ShowRoles,
+    /// SHOW: list schemas
+    ShowSchemas,
+    /// SHOW: list grants
+    ShowGrants {
+        role_name: Option<String>,
     },
     /// COPY table FROM STDIN
     CopyFrom {
@@ -260,13 +315,13 @@ pub struct BoundSelect {
     /// CTEs (WITH ... AS)
     pub ctes: Vec<BoundCte>,
     /// Set operations (UNION/INTERSECT/EXCEPT [ALL])
-    pub unions: Vec<(BoundSelect, SetOpKind, bool)>,
+    pub unions: Vec<(Self, SetOpKind, bool)>,
     /// Inline virtual rows (for GENERATE_SERIES etc.)
     pub virtual_rows: Vec<falcon_common::datum::OwnedRow>,
 }
 
 /// How DISTINCT is applied to a SELECT.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DistinctMode {
     /// No deduplication.
     None,
@@ -378,7 +433,7 @@ pub enum WindowFunc {
 }
 
 /// Window frame boundary specification.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WindowFrameBound {
     /// UNBOUNDED PRECEDING
     UnboundedPreceding,
@@ -393,7 +448,7 @@ pub enum WindowFrameBound {
 }
 
 /// Window frame mode.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WindowFrameMode {
     Rows,
     Range,
@@ -423,7 +478,7 @@ impl Default for WindowFrame {
 impl WindowFrame {
     /// Default frame when ORDER BY is present but no explicit frame:
     /// RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-    pub fn default_with_order_by() -> Self {
+    pub const fn default_with_order_by() -> Self {
         Self {
             mode: WindowFrameMode::Range,
             start: WindowFrameBound::UnboundedPreceding,
@@ -682,65 +737,65 @@ pub enum BoundExpr {
     ColumnRef(usize),
     /// Binary operation.
     BinaryOp {
-        left: Box<BoundExpr>,
+        left: Box<Self>,
         op: BinOp,
-        right: Box<BoundExpr>,
+        right: Box<Self>,
     },
     /// Unary NOT.
-    Not(Box<BoundExpr>),
+    Not(Box<Self>),
     /// IS NULL check.
-    IsNull(Box<BoundExpr>),
+    IsNull(Box<Self>),
     /// IS NOT NULL check.
-    IsNotNull(Box<BoundExpr>),
+    IsNotNull(Box<Self>),
     /// IS NOT DISTINCT FROM (NULL-safe equality).
     IsNotDistinctFrom {
-        left: Box<BoundExpr>,
-        right: Box<BoundExpr>,
+        left: Box<Self>,
+        right: Box<Self>,
     },
     /// LIKE / ILIKE pattern match.
     Like {
-        expr: Box<BoundExpr>,
-        pattern: Box<BoundExpr>,
+        expr: Box<Self>,
+        pattern: Box<Self>,
         negated: bool,
         case_insensitive: bool,
     },
     /// BETWEEN low AND high.
     Between {
-        expr: Box<BoundExpr>,
-        low: Box<BoundExpr>,
-        high: Box<BoundExpr>,
+        expr: Box<Self>,
+        low: Box<Self>,
+        high: Box<Self>,
         negated: bool,
     },
     /// IN (list).
     InList {
-        expr: Box<BoundExpr>,
-        list: Vec<BoundExpr>,
+        expr: Box<Self>,
+        list: Vec<Self>,
         negated: bool,
     },
     /// CAST(expr AS type) — target stored as string for simplicity.
     Cast {
-        expr: Box<BoundExpr>,
+        expr: Box<Self>,
         target_type: String,
     },
     /// CASE WHEN ... THEN ... ELSE ... END
     Case {
-        operand: Option<Box<BoundExpr>>,
-        conditions: Vec<BoundExpr>,
-        results: Vec<BoundExpr>,
-        else_result: Option<Box<BoundExpr>>,
+        operand: Option<Box<Self>>,
+        conditions: Vec<Self>,
+        results: Vec<Self>,
+        else_result: Option<Box<Self>>,
     },
     /// COALESCE(a, b, ...)
-    Coalesce(Vec<BoundExpr>),
+    Coalesce(Vec<Self>),
     /// Scalar function call: UPPER, LOWER, LENGTH, SUBSTRING, CONCAT
     Function {
         func: ScalarFunc,
-        args: Vec<BoundExpr>,
+        args: Vec<Self>,
     },
     /// Scalar subquery — returns a single value: `(SELECT MAX(id) FROM t)`.
     ScalarSubquery(Box<BoundSelect>),
     /// IN subquery: `expr IN (SELECT col FROM t)`.
     InSubquery {
-        expr: Box<BoundExpr>,
+        expr: Box<Self>,
         subquery: Box<BoundSelect>,
         negated: bool,
     },
@@ -752,15 +807,15 @@ pub enum BoundExpr {
     /// Inline aggregate in HAVING expressions: evaluated per-group.
     AggregateExpr {
         func: AggFunc,
-        arg: Option<Box<BoundExpr>>,
+        arg: Option<Box<Self>>,
         distinct: bool,
     },
     /// ARRAY literal: ARRAY[1, 2, 3]
-    ArrayLiteral(Vec<BoundExpr>),
+    ArrayLiteral(Vec<Self>),
     /// Array subscript: arr[index] (1-indexed)
     ArrayIndex {
-        array: Box<BoundExpr>,
-        index: Box<BoundExpr>,
+        array: Box<Self>,
+        index: Box<Self>,
     },
     /// Reference to a column in the outer query (correlated subquery).
     /// The usize is the column index in the outer query's schema.
@@ -776,21 +831,21 @@ pub enum BoundExpr {
     Parameter(usize),
     /// expr op ANY(array_or_subquery) — true if comparison holds for any element.
     AnyOp {
-        left: Box<BoundExpr>,
+        left: Box<Self>,
         compare_op: BinOp,
-        right: Box<BoundExpr>,
+        right: Box<Self>,
     },
     /// expr op ALL(array_or_subquery) — true if comparison holds for all elements.
     AllOp {
-        left: Box<BoundExpr>,
+        left: Box<Self>,
         compare_op: BinOp,
-        right: Box<BoundExpr>,
+        right: Box<Self>,
     },
     /// Array slice: arr[lower:upper] (1-indexed, inclusive bounds, PostgreSQL semantics).
     ArraySlice {
-        array: Box<BoundExpr>,
-        lower: Option<Box<BoundExpr>>,
-        upper: Option<Box<BoundExpr>>,
+        array: Box<Self>,
+        lower: Option<Box<Self>>,
+        upper: Option<Box<Self>>,
     },
     /// GROUPING(col1, col2, ...) — returns bitmask indicating which columns are
     /// super-aggregate NULLs in a GROUPING SETS / CUBE / ROLLUP result.

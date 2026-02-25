@@ -28,20 +28,20 @@ pub enum LogicalPlan {
     // ── Unary relational operators ──────────────────────────────────
     /// Selection (WHERE / HAVING).
     Filter {
-        input: Box<LogicalPlan>,
+        input: Box<Self>,
         predicate: BoundExpr,
     },
 
     /// Projection (SELECT-list).
     Project {
-        input: Box<LogicalPlan>,
+        input: Box<Self>,
         projections: Vec<BoundProjection>,
         visible_count: usize,
     },
 
     /// Aggregation (GROUP BY + aggregate functions).
     Aggregate {
-        input: Box<LogicalPlan>,
+        input: Box<Self>,
         group_by: Vec<usize>,
         grouping_sets: Vec<Vec<usize>>,
         projections: Vec<BoundProjection>,
@@ -51,42 +51,42 @@ pub enum LogicalPlan {
 
     /// Sort (ORDER BY).
     Sort {
-        input: Box<LogicalPlan>,
+        input: Box<Self>,
         order_by: Vec<BoundOrderBy>,
     },
 
     /// Limit + Offset.
     Limit {
-        input: Box<LogicalPlan>,
+        input: Box<Self>,
         limit: Option<usize>,
         offset: Option<usize>,
     },
 
     /// DISTINCT elimination.
     Distinct {
-        input: Box<LogicalPlan>,
+        input: Box<Self>,
         mode: DistinctMode,
     },
 
     // ── Binary relational operators ─────────────────────────────────
     /// Join (all join types — physical strategy chosen later).
     Join {
-        left: Box<LogicalPlan>,
-        right: Box<LogicalPlan>,
+        left: Box<Self>,
+        right: Box<Self>,
         join_info: BoundJoin,
     },
 
     /// Multi-way join (preserves original join list for reordering).
     MultiJoin {
-        base: Box<LogicalPlan>,
+        base: Box<Self>,
         joins: Vec<BoundJoin>,
     },
 
     // ── Set operations ──────────────────────────────────────────────
     /// UNION / INTERSECT / EXCEPT
     SetOp {
-        left: Box<LogicalPlan>,
-        right: Box<LogicalPlan>,
+        left: Box<Self>,
+        right: Box<Self>,
         kind: SetOpKind,
         /// true = ALL (no dedup)
         all: bool,
@@ -96,7 +96,7 @@ pub enum LogicalPlan {
     /// WITH (common table expressions) wrapping an inner query.
     WithCtes {
         ctes: Vec<BoundCte>,
-        input: Box<LogicalPlan>,
+        input: Box<Self>,
     },
 
     // ── DML (pass-through to physical) ──────────────────────────────
@@ -171,8 +171,8 @@ pub enum LogicalPlan {
     },
 
     // ── Utility / Session ───────────────────────────────────────────
-    Explain(Box<LogicalPlan>),
-    ExplainAnalyze(Box<LogicalPlan>),
+    Explain(Box<Self>),
+    ExplainAnalyze(Box<Self>),
     Begin,
     Commit,
     Rollback,
@@ -223,7 +223,7 @@ pub enum LogicalPlan {
         escape: char,
     },
     CopyQueryTo {
-        query: Box<LogicalPlan>,
+        query: Box<Self>,
         csv: bool,
         delimiter: char,
         header: bool,
@@ -249,19 +249,19 @@ impl LogicalPlan {
                 ))
             }
             // ── DDL ─────────────────────────────────────────────────
-            BoundStatement::CreateTable(ct) => Ok(LogicalPlan::CreateTable {
+            BoundStatement::CreateTable(ct) => Ok(Self::CreateTable {
                 schema: ct.schema.clone(),
                 if_not_exists: ct.if_not_exists,
             }),
-            BoundStatement::DropTable(dt) => Ok(LogicalPlan::DropTable {
+            BoundStatement::DropTable(dt) => Ok(Self::DropTable {
                 table_name: dt.table_name.clone(),
                 if_exists: dt.if_exists,
             }),
-            BoundStatement::AlterTable(alt) => Ok(LogicalPlan::AlterTable {
+            BoundStatement::AlterTable(alt) => Ok(Self::AlterTable {
                 table_name: alt.table_name.clone(),
                 ops: alt.ops.clone(),
             }),
-            BoundStatement::Truncate { table_name } => Ok(LogicalPlan::Truncate {
+            BoundStatement::Truncate { table_name } => Ok(Self::Truncate {
                 table_name: table_name.clone(),
             }),
             BoundStatement::CreateIndex {
@@ -269,39 +269,39 @@ impl LogicalPlan {
                 table_name,
                 column_indices,
                 unique,
-            } => Ok(LogicalPlan::CreateIndex {
+            } => Ok(Self::CreateIndex {
                 index_name: index_name.clone(),
                 table_name: table_name.clone(),
                 column_indices: column_indices.clone(),
                 unique: *unique,
             }),
-            BoundStatement::DropIndex { index_name } => Ok(LogicalPlan::DropIndex {
+            BoundStatement::DropIndex { index_name } => Ok(Self::DropIndex {
                 index_name: index_name.clone(),
             }),
             BoundStatement::CreateView {
                 name,
                 query_sql,
                 or_replace,
-            } => Ok(LogicalPlan::CreateView {
+            } => Ok(Self::CreateView {
                 name: name.clone(),
                 query_sql: query_sql.clone(),
                 or_replace: *or_replace,
             }),
-            BoundStatement::DropView { name, if_exists } => Ok(LogicalPlan::DropView {
+            BoundStatement::DropView { name, if_exists } => Ok(Self::DropView {
                 name: name.clone(),
                 if_exists: *if_exists,
             }),
-            BoundStatement::CreateSequence { name, start } => Ok(LogicalPlan::CreateSequence {
+            BoundStatement::CreateSequence { name, start } => Ok(Self::CreateSequence {
                 name: name.clone(),
                 start: *start,
             }),
-            BoundStatement::DropSequence { name, if_exists } => Ok(LogicalPlan::DropSequence {
+            BoundStatement::DropSequence { name, if_exists } => Ok(Self::DropSequence {
                 name: name.clone(),
                 if_exists: *if_exists,
             }),
 
             // ── DML ─────────────────────────────────────────────────
-            BoundStatement::Insert(ins) => Ok(LogicalPlan::Insert {
+            BoundStatement::Insert(ins) => Ok(Self::Insert {
                 table_id: ins.table_id,
                 schema: ins.schema.clone(),
                 columns: ins.columns.clone(),
@@ -310,7 +310,7 @@ impl LogicalPlan {
                 returning: ins.returning.clone(),
                 on_conflict: ins.on_conflict.clone(),
             }),
-            BoundStatement::Update(upd) => Ok(LogicalPlan::Update {
+            BoundStatement::Update(upd) => Ok(Self::Update {
                 table_id: upd.table_id,
                 schema: upd.schema.clone(),
                 assignments: upd.assignments.clone(),
@@ -318,7 +318,7 @@ impl LogicalPlan {
                 returning: upd.returning.clone(),
                 from_table: upd.from_table.clone(),
             }),
-            BoundStatement::Delete(del) => Ok(LogicalPlan::Delete {
+            BoundStatement::Delete(del) => Ok(Self::Delete {
                 table_id: del.table_id,
                 schema: del.schema.clone(),
                 filter: del.filter.clone(),
@@ -332,42 +332,42 @@ impl LogicalPlan {
             // ── EXPLAIN ──────────────────────────────────────────────
             BoundStatement::Explain(inner) => {
                 let inner_plan = Self::from_bound(inner)?;
-                Ok(LogicalPlan::Explain(Box::new(inner_plan)))
+                Ok(Self::Explain(Box::new(inner_plan)))
             }
             BoundStatement::ExplainAnalyze(inner) => {
                 let inner_plan = Self::from_bound(inner)?;
-                Ok(LogicalPlan::ExplainAnalyze(Box::new(inner_plan)))
+                Ok(Self::ExplainAnalyze(Box::new(inner_plan)))
             }
 
             // ── Session / Utility ────────────────────────────────────
-            BoundStatement::Begin => Ok(LogicalPlan::Begin),
-            BoundStatement::Commit => Ok(LogicalPlan::Commit),
-            BoundStatement::Rollback => Ok(LogicalPlan::Rollback),
-            BoundStatement::ShowTxnStats => Ok(LogicalPlan::ShowTxnStats),
-            BoundStatement::ShowNodeRole => Ok(LogicalPlan::ShowNodeRole),
-            BoundStatement::ShowWalStats => Ok(LogicalPlan::ShowWalStats),
-            BoundStatement::ShowConnections => Ok(LogicalPlan::ShowConnections),
-            BoundStatement::RunGc => Ok(LogicalPlan::RunGc),
-            BoundStatement::Analyze { table_name } => Ok(LogicalPlan::Analyze {
+            BoundStatement::Begin => Ok(Self::Begin),
+            BoundStatement::Commit => Ok(Self::Commit),
+            BoundStatement::Rollback => Ok(Self::Rollback),
+            BoundStatement::ShowTxnStats => Ok(Self::ShowTxnStats),
+            BoundStatement::ShowNodeRole => Ok(Self::ShowNodeRole),
+            BoundStatement::ShowWalStats => Ok(Self::ShowWalStats),
+            BoundStatement::ShowConnections => Ok(Self::ShowConnections),
+            BoundStatement::RunGc => Ok(Self::RunGc),
+            BoundStatement::Analyze { table_name } => Ok(Self::Analyze {
                 table_name: table_name.clone(),
             }),
-            BoundStatement::ShowTableStats { table_name } => Ok(LogicalPlan::ShowTableStats {
+            BoundStatement::ShowTableStats { table_name } => Ok(Self::ShowTableStats {
                 table_name: table_name.clone(),
             }),
-            BoundStatement::ShowSequences => Ok(LogicalPlan::ShowSequences),
-            BoundStatement::ShowTenants => Ok(LogicalPlan::ShowTenants),
-            BoundStatement::ShowTenantUsage => Ok(LogicalPlan::ShowTenantUsage),
+            BoundStatement::ShowSequences => Ok(Self::ShowSequences),
+            BoundStatement::ShowTenants => Ok(Self::ShowTenants),
+            BoundStatement::ShowTenantUsage => Ok(Self::ShowTenantUsage),
             BoundStatement::CreateTenant {
                 name,
                 max_qps,
                 max_storage_bytes,
-            } => Ok(LogicalPlan::CreateTenant {
+            } => Ok(Self::CreateTenant {
                 name: name.clone(),
                 max_qps: *max_qps,
                 max_storage_bytes: *max_storage_bytes,
             }),
             BoundStatement::DropTenant { name } => {
-                Ok(LogicalPlan::DropTenant { name: name.clone() })
+                Ok(Self::DropTenant { name: name.clone() })
             }
 
             // ── COPY ─────────────────────────────────────────────────
@@ -381,7 +381,7 @@ impl LogicalPlan {
                 null_string,
                 quote,
                 escape,
-            } => Ok(LogicalPlan::CopyFrom {
+            } => Ok(Self::CopyFrom {
                 table_id: *table_id,
                 schema: schema.clone(),
                 columns: columns.clone(),
@@ -402,7 +402,7 @@ impl LogicalPlan {
                 null_string,
                 quote,
                 escape,
-            } => Ok(LogicalPlan::CopyTo {
+            } => Ok(Self::CopyTo {
                 table_id: *table_id,
                 schema: schema.clone(),
                 columns: columns.clone(),
@@ -423,7 +423,7 @@ impl LogicalPlan {
                 escape,
             } => {
                 let inner = Self::from_bound_select(query);
-                Ok(LogicalPlan::CopyQueryTo {
+                Ok(Self::CopyQueryTo {
                     query: Box::new(inner),
                     csv: *csv,
                     delimiter: *delimiter,
@@ -433,6 +433,21 @@ impl LogicalPlan {
                     escape: *escape,
                 })
             }
+            // ── Schema / Role / Grant DDL (pass-through to legacy planner) ──
+            BoundStatement::CreateSchema { .. }
+            | BoundStatement::DropSchema { .. }
+            | BoundStatement::CreateRole { .. }
+            | BoundStatement::DropRole { .. }
+            | BoundStatement::AlterRole { .. }
+            | BoundStatement::Grant { .. }
+            | BoundStatement::Revoke { .. }
+            | BoundStatement::ShowRoles
+            | BoundStatement::ShowSchemas
+            | BoundStatement::ShowGrants { .. } => {
+                Err(falcon_common::error::SqlError::Unsupported(
+                    "Schema/Role/Grant DDL uses legacy planner path".into(),
+                ))
+            }
         }
     }
 
@@ -440,9 +455,9 @@ impl LogicalPlan {
     ///
     /// The decomposition follows relational algebra:
     ///   Scan → [CTEs] → [Join] → [Filter] → [Aggregate] → [Distinct] → [Sort] → [Limit] → Project
-    fn from_bound_select(sel: &BoundSelect) -> LogicalPlan {
+    fn from_bound_select(sel: &BoundSelect) -> Self {
         // 1. Base scan
-        let mut plan = LogicalPlan::Scan {
+        let mut plan = Self::Scan {
             table_id: sel.table_id,
             schema: sel.schema.clone(),
             virtual_rows: sel.virtual_rows.clone(),
@@ -453,7 +468,7 @@ impl LogicalPlan {
 
         // 2. CTEs
         if !sel.ctes.is_empty() {
-            plan = LogicalPlan::WithCtes {
+            plan = Self::WithCtes {
                 ctes: sel.ctes.clone(),
                 input: Box::new(plan),
             };
@@ -461,7 +476,7 @@ impl LogicalPlan {
 
         // 3. Joins
         if !sel.joins.is_empty() {
-            plan = LogicalPlan::MultiJoin {
+            plan = Self::MultiJoin {
                 base: Box::new(plan),
                 joins: sel.joins.clone(),
             };
@@ -469,7 +484,7 @@ impl LogicalPlan {
 
         // 4. Filter (WHERE)
         if let Some(ref filter) = sel.filter {
-            plan = LogicalPlan::Filter {
+            plan = Self::Filter {
                 input: Box::new(plan),
                 predicate: filter.clone(),
             };
@@ -483,7 +498,7 @@ impl LogicalPlan {
                 .iter()
                 .any(|p| matches!(p, BoundProjection::Aggregate(..)));
         if has_agg {
-            plan = LogicalPlan::Aggregate {
+            plan = Self::Aggregate {
                 input: Box::new(plan),
                 group_by: sel.group_by.clone(),
                 grouping_sets: sel.grouping_sets.clone(),
@@ -495,7 +510,7 @@ impl LogicalPlan {
 
         // 6. DISTINCT
         if !matches!(sel.distinct, DistinctMode::None) {
-            plan = LogicalPlan::Distinct {
+            plan = Self::Distinct {
                 input: Box::new(plan),
                 mode: sel.distinct.clone(),
             };
@@ -503,7 +518,7 @@ impl LogicalPlan {
 
         // 7. Sort (ORDER BY)
         if !sel.order_by.is_empty() {
-            plan = LogicalPlan::Sort {
+            plan = Self::Sort {
                 input: Box::new(plan),
                 order_by: sel.order_by.clone(),
             };
@@ -511,7 +526,7 @@ impl LogicalPlan {
 
         // 8. Limit / Offset
         if sel.limit.is_some() || sel.offset.is_some() {
-            plan = LogicalPlan::Limit {
+            plan = Self::Limit {
                 input: Box::new(plan),
                 limit: sel.limit,
                 offset: sel.offset,
@@ -520,7 +535,7 @@ impl LogicalPlan {
 
         // 9. Projection (if no aggregate already carries projections)
         if !has_agg {
-            plan = LogicalPlan::Project {
+            plan = Self::Project {
                 input: Box::new(plan),
                 projections: sel.projections.clone(),
                 visible_count: sel.visible_projection_count,
@@ -530,7 +545,7 @@ impl LogicalPlan {
         // 10. UNIONs
         for (union_sel, kind, all) in &sel.unions {
             let right = Self::from_bound_select(union_sel);
-            plan = LogicalPlan::SetOp {
+            plan = Self::SetOp {
                 left: Box::new(plan),
                 right: Box::new(right),
                 kind: *kind,

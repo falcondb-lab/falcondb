@@ -438,7 +438,7 @@ impl ConfigRollbackManager {
             rollout_state: RolloutState::Staged,
         };
         let mut hist = self.history.write();
-        let h = hist.entry(key.to_string()).or_insert_with(Vec::new);
+        let h = hist.entry(key.to_string()).or_default();
         if h.len() >= self.max_history {
             h.remove(0);
         }
@@ -879,7 +879,7 @@ impl LatencyGuardrailEngine {
 
         // Check percentiles (only periodically, every 100 samples)
         let sample_count = self.metrics.samples_recorded.load(Ordering::Relaxed);
-        if sample_count % 100 == 0 {
+        if sample_count.is_multiple_of(100) {
             let samples = self.samples.read();
             if let Some(q) = samples.get(&path) {
                 if q.len() >= 10 {
@@ -1053,6 +1053,12 @@ pub struct BgIsolatorMetrics {
     pub requests_throttled: AtomicU64,
     pub requests_rejected: AtomicU64,
     pub dynamic_reductions: AtomicU64,
+}
+
+impl Default for BgTaskIsolator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BgTaskIsolator {

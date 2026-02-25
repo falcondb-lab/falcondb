@@ -4,7 +4,7 @@ use crate::manage::apply::{require_apply, ApplyResult};
 use crate::manage::plan::{PlanOutput, RiskLevel};
 use anyhow::{bail, Result};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TxnResolution {
     Commit,
     Abort,
@@ -19,7 +19,7 @@ impl TxnResolution {
         }
     }
 
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Commit => "commit",
             Self::Abort => "abort",
@@ -152,7 +152,7 @@ pub fn parse_txn_resolve_arg(arg: &str) -> Result<(String, Option<TxnResolution>
     if txn_id.is_empty() {
         bail!("Usage: \\txn resolve <txn_id> [commit|abort]");
     }
-    let resolution = parts.get(2).copied().and_then(|s| TxnResolution::parse(s));
+    let resolution = parts.get(2).copied().and_then(TxnResolution::parse);
     Ok((txn_id, resolution))
 }
 

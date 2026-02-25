@@ -36,7 +36,7 @@ pub enum Tier {
 }
 
 impl Tier {
-    pub fn from_u8(v: u8) -> Self {
+    pub const fn from_u8(v: u8) -> Self {
         match v {
             0 => Self::Hot,
             1 => Self::Warm,
@@ -68,7 +68,7 @@ pub enum AccessPriority {
 }
 
 impl AccessPriority {
-    pub fn from_u8(v: u8) -> Self {
+    pub const fn from_u8(v: u8) -> Self {
         match v {
             0 => Self::Prefetched,
             1 => Self::Cold,
@@ -91,7 +91,7 @@ pub struct PageData {
 }
 
 impl PageData {
-    pub fn new(buf: Vec<u8>) -> Self {
+    pub const fn new(buf: Vec<u8>) -> Self {
         Self { buf }
     }
 
@@ -112,12 +112,12 @@ impl PageData {
     }
 
     #[inline]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.buf.len()
     }
 
     #[inline]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.buf.is_empty()
     }
 }
@@ -156,7 +156,7 @@ pub struct PageHandle {
 }
 
 impl PageHandle {
-    pub fn new(page_id: PageId, priority: AccessPriority) -> Self {
+    pub const fn new(page_id: PageId, priority: AccessPriority) -> Self {
         Self {
             page_id,
             tier: AtomicU8::new(Tier::Cold as u8),

@@ -36,7 +36,7 @@ impl Pager {
         match cmd.spawn() {
             Ok(mut child) => {
                 let stdin = child.stdin.take()?;
-                Some(Pager { child, stdin })
+                Some(Self { child, stdin })
             }
             Err(e) => {
                 debug!("Could not spawn pager '{}': {}", pager_cmd, e);
@@ -58,7 +58,7 @@ impl Pager {
 }
 
 /// Returns true if stdout is connected to a terminal.
-pub fn stdout_is_tty() -> bool {
+pub const fn stdout_is_tty() -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;

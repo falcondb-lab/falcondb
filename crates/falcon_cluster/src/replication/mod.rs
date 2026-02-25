@@ -58,7 +58,7 @@ impl Default for ReplicationMetrics {
 }
 
 impl ReplicationMetrics {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             promote_count: AtomicU64::new(0),
             last_failover_time_ms: AtomicU64::new(0),

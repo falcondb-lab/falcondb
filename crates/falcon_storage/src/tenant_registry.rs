@@ -89,7 +89,7 @@ pub enum QuotaCheckResult {
 }
 
 impl QuotaCheckResult {
-    pub fn is_allowed(&self) -> bool {
+    pub const fn is_allowed(&self) -> bool {
         matches!(self, Self::Allowed)
     }
 }

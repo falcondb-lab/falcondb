@@ -4,7 +4,7 @@ use crate::manage::apply::{require_apply, ApplyResult};
 use crate::manage::plan::{PlanOutput, RiskLevel};
 use anyhow::Result;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClusterMode {
     ReadOnly,
     ReadWrite,
@@ -19,7 +19,7 @@ impl ClusterMode {
         }
     }
 
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::ReadOnly => "readonly",
             Self::ReadWrite => "readwrite",

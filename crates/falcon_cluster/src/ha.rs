@@ -43,6 +43,10 @@ use falcon_common::shutdown::ShutdownSignal;
 use falcon_common::types::{NodeId, ShardId};
 use falcon_storage::engine::StorageEngine;
 
+use crate::dist_hardening::{
+    FailoverPreFlight, PreFlightConfig, PreFlightInput,
+    PromotionSafetyGuard, SplitBrainDetector, WriteEpochCheck, SplitBrainVerdict,
+};
 use crate::replication::promote::ShardReplicaGroup;
 use crate::replication::replica_state::{ReplicaNode, ReplicaRole};
 use crate::replication::wal_stream::ReplicationLog;
@@ -301,6 +305,12 @@ pub struct HAReplicaGroup {
     pub config: HAConfig,
     /// Last failover time (for cooldown enforcement).
     pub last_failover: Mutex<Option<Instant>>,
+    /// Split-brain detector: rejects stale-epoch writes.
+    pub split_brain_detector: SplitBrainDetector,
+    /// Pre-flight checker: blocks unsafe promotions.
+    pub pre_flight: FailoverPreFlight,
+    /// Promotion safety guard: ensures atomic-or-rollback promotion.
+    pub promotion_guard: PromotionSafetyGuard,
 }
 
 impl HAReplicaGroup {
@@ -337,10 +347,19 @@ impl HAReplicaGroup {
 
         let detector = FailureDetector::new(config.clone(), num_replicas);
 
+        let pre_flight_config = PreFlightConfig {
+            max_promotion_lag: config.max_promotion_lag,
+            min_post_promotion_replicas: 0,
+            cooldown: config.failover_cooldown,
+        };
+
         Ok(Self {
             inner,
             epoch: AtomicU64::new(1),
             detector,
+            split_brain_detector: SplitBrainDetector::new(1),
+            pre_flight: FailoverPreFlight::new(pre_flight_config),
+            promotion_guard: PromotionSafetyGuard::new(),
             config,
             last_failover: Mutex::new(None),
         })
@@ -359,6 +378,134 @@ impl HAReplicaGroup {
     /// Validate that a write request has a valid epoch (not stale).
     pub fn validate_epoch(&self, request_epoch: u64) -> bool {
         request_epoch >= self.current_epoch()
+    }
+
+    /// Validate a write using the split-brain detector.
+    /// Returns `Ok(())` if the write epoch is current, or `Err` if stale.
+    pub fn check_write_epoch(&self, writer_epoch: u64, writer_node: u64) -> Result<(), FalconError> {
+        let check = WriteEpochCheck { writer_epoch, writer_node };
+        match self.split_brain_detector.check_write(&check) {
+            SplitBrainVerdict::Allowed => Ok(()),
+            SplitBrainVerdict::Rejected { writer_epoch, current_epoch, writer_node } => {
+                Err(FalconError::Internal(format!(
+                    "split-brain rejected: writer node {} epoch {} < current epoch {}",
+                    writer_node, writer_epoch, current_epoch
+                )))
+            }
+        }
+    }
+
+    /// Hardened promotion: runs pre-flight checks, uses promotion safety guard,
+    /// and updates the split-brain detector on success.
+    ///
+    /// This is the production-grade replacement for `promote_best()`, which
+    /// is retained for backward compatibility.
+    pub fn hardened_promote_best(&mut self) -> Result<usize, FalconError> {
+        // Evaluate current health (updates primary failed status)
+        self.detector.evaluate();
+
+        // Update health data from actual LSNs
+        let primary_lsn = self.inner.log.current_lsn();
+        for (i, replica) in self.inner.replicas.iter().enumerate() {
+            self.detector
+                .record_replica_heartbeat(i, replica.current_lsn(), primary_lsn);
+        }
+
+        // Find best candidate
+        let best_idx = self.detector.best_replica_for_promotion();
+        let candidate_lsn = best_idx
+            .and_then(|i| self.inner.replicas.get(i))
+            .map(|r| r.current_lsn())
+            .unwrap_or(0);
+
+        // Pre-flight checks
+        let input = PreFlightInput {
+            current_epoch: self.current_epoch(),
+            candidate_idx: best_idx,
+            candidate_lsn,
+            primary_lsn,
+            healthy_replicas: self.detector.healthy_replica_count(),
+            primary_is_failed: self.detector.is_primary_failed(),
+        };
+        self.pre_flight.check(&input).map_err(|reason| {
+            FalconError::Internal(format!("failover pre-flight rejected: {}", reason))
+        })?;
+
+        let best_idx = best_idx.unwrap(); // safe: pre-flight checks candidate_idx
+
+        // Begin promotion with safety guard
+        self.promotion_guard.begin(primary_lsn);
+
+        // Step 1: Fence old primary
+        self.inner.primary.fence();
+        self.promotion_guard.record_fenced();
+
+        // Step 2: Catch up candidate
+        if let Err(e) = self.inner.catch_up_replica(best_idx) {
+            // ROLLBACK: unfence old primary
+            self.inner.primary.unfence();
+            self.promotion_guard.rollback(&format!("catch-up failed: {}", e));
+            return Err(e);
+        }
+
+        let caught_up_lsn = self.inner.replicas[best_idx].current_lsn();
+        if self.promotion_guard.record_caught_up(caught_up_lsn).is_err() {
+            // ROLLBACK: unfence old primary
+            self.inner.primary.unfence();
+            self.promotion_guard.rollback("candidate did not reach target LSN");
+            return Err(FalconError::Internal(
+                "promotion aborted: candidate replica did not reach target LSN".into(),
+            ));
+        }
+
+        // Step 3: Bump epoch BEFORE role swap
+        let new_epoch = self.bump_epoch();
+
+        // Step 4: Swap roles
+        {
+            let replica = self.inner.replicas.get(best_idx).ok_or_else(|| {
+                FalconError::Internal(format!("Replica index {} out of range", best_idx))
+            })?;
+
+            {
+                let mut old_role = self.inner.primary.role.write();
+                *old_role = ReplicaRole::Replica;
+            }
+            {
+                let mut new_role = replica.role.write();
+                *new_role = ReplicaRole::Primary;
+            }
+
+            let new_primary = Arc::clone(replica);
+            let old_primary = Arc::clone(&self.inner.primary);
+            self.inner.replicas[best_idx] = old_primary;
+            self.inner.primary = new_primary;
+        }
+        self.promotion_guard.record_roles_swapped();
+
+        // Step 5: Unfence new primary
+        self.inner.primary.unfence();
+        self.promotion_guard.record_unfenced();
+        self.promotion_guard.complete();
+
+        // Update split-brain detector epoch
+        self.split_brain_detector.advance_epoch(new_epoch);
+
+        // Record failover completion
+        self.pre_flight.record_failover_complete();
+        *self.last_failover.lock() = Some(Instant::now());
+
+        // Record metrics
+        self.inner.metrics.promote_count.fetch_add(1, Ordering::SeqCst);
+
+        tracing::info!(
+            shard = ?self.inner.shard_id,
+            new_epoch = new_epoch,
+            promoted_replica = best_idx,
+            "hardened promotion complete"
+        );
+
+        Ok(best_idx)
     }
 
     /// Record a heartbeat from a replica.
@@ -766,7 +913,7 @@ pub struct SyncReplicationWaiter {
 }
 
 impl SyncReplicationWaiter {
-    pub fn new(config: HAConfig) -> Self {
+    pub const fn new(config: HAConfig) -> Self {
         Self { config }
     }
 

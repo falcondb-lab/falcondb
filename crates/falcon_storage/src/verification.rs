@@ -57,7 +57,7 @@ pub struct ConsistencyVerifier {
 }
 
 impl ConsistencyVerifier {
-    pub fn new(config: VerifierConfig) -> Self {
+    pub const fn new(config: VerifierConfig) -> Self {
         Self {
             config,
             results: Mutex::new(Vec::new()),
@@ -227,7 +227,7 @@ impl ConsistencyVerifier {
     }
 
     /// Config access.
-    pub fn config(&self) -> &VerifierConfig {
+    pub const fn config(&self) -> &VerifierConfig {
         &self.config
     }
 }

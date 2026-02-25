@@ -441,6 +441,12 @@ pub struct RbacMetrics {
     pub denials: AtomicU64,
 }
 
+impl Default for EnterpriseRbac {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EnterpriseRbac {
     pub fn new() -> Self {
         let mut su = HashSet::new();
@@ -1143,6 +1149,7 @@ impl EnterpriseAuditLog {
     }
 
     /// Record an audit event.
+    #[allow(clippy::too_many_arguments)]
     pub fn record(
         &self,
         category: AuditCategory,

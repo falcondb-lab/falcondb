@@ -80,13 +80,13 @@ impl RequestContext {
     }
 
     /// Set the transaction ID.
-    pub fn with_txn_id(mut self, txn_id: u64) -> Self {
+    pub const fn with_txn_id(mut self, txn_id: u64) -> Self {
         self.txn_id = txn_id;
         self
     }
 
     /// Set the shard ID.
-    pub fn with_shard_id(mut self, shard_id: u64) -> Self {
+    pub const fn with_shard_id(mut self, shard_id: u64) -> Self {
         self.shard_id = shard_id;
         self
     }
@@ -185,7 +185,7 @@ impl StageLatency {
     }
 
     /// Returns true if this query is "slow" (total > threshold_ms).
-    pub fn is_slow(&self, threshold_ms: u64) -> bool {
+    pub const fn is_slow(&self, threshold_ms: u64) -> bool {
         self.total_us > threshold_ms * 1000
     }
 }
@@ -204,12 +204,12 @@ pub enum RecoveryPhase {
 impl std::fmt::Display for RecoveryPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RecoveryPhase::LoadMetadata => write!(f, "load_metadata"),
-            RecoveryPhase::ReplayWal => write!(f, "replay_wal"),
-            RecoveryPhase::RebuildIndexes => write!(f, "rebuild_indexes"),
-            RecoveryPhase::OpenForReads => write!(f, "open_for_reads"),
-            RecoveryPhase::OpenForWrites => write!(f, "open_for_writes"),
-            RecoveryPhase::Complete => write!(f, "complete"),
+            Self::LoadMetadata => write!(f, "load_metadata"),
+            Self::ReplayWal => write!(f, "replay_wal"),
+            Self::RebuildIndexes => write!(f, "rebuild_indexes"),
+            Self::OpenForReads => write!(f, "open_for_reads"),
+            Self::OpenForWrites => write!(f, "open_for_writes"),
+            Self::Complete => write!(f, "complete"),
         }
     }
 }
@@ -266,7 +266,7 @@ impl RecoveryTracker {
         );
     }
 
-    pub fn current_phase(&self) -> RecoveryPhase {
+    pub const fn current_phase(&self) -> RecoveryPhase {
         self.phase
     }
 

@@ -13,7 +13,7 @@ pub struct ColumnStoreTable {
 }
 
 impl ColumnStoreTable {
-    pub fn new(schema: TableSchema) -> Self {
+    pub const fn new(schema: TableSchema) -> Self {
         Self { schema }
     }
     pub fn insert(&self, _txn_id: TxnId, _row: OwnedRow) {

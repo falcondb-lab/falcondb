@@ -14,11 +14,72 @@ use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::time::Instant;
 
 use falcon_common::config::SpillConfig;
 use falcon_common::datum::{Datum, OwnedRow};
 use falcon_common::error::FalconError;
 use falcon_sql_frontend::types::BoundOrderBy;
+
+/// Observable metrics for disk-spill operations.
+///
+/// All counters are cumulative across the lifetime of the `ExternalSorter`.
+/// Thread-safe (atomic).
+#[derive(Debug)]
+pub struct SpillMetrics {
+    /// Number of sort operations that spilled to disk.
+    pub spill_count: AtomicU64,
+    /// Number of sort operations completed entirely in memory.
+    pub in_memory_count: AtomicU64,
+    /// Total number of sorted runs written to disk.
+    pub runs_created: AtomicU64,
+    /// Total bytes written to spill files.
+    pub bytes_spilled: AtomicU64,
+    /// Total bytes read back from spill files.
+    pub bytes_read_back: AtomicU64,
+    /// Cumulative spill duration in microseconds (write + merge + read-back).
+    pub spill_duration_us: AtomicU64,
+}
+
+impl SpillMetrics {
+    pub const fn new() -> Self {
+        Self {
+            spill_count: AtomicU64::new(0),
+            in_memory_count: AtomicU64::new(0),
+            runs_created: AtomicU64::new(0),
+            bytes_spilled: AtomicU64::new(0),
+            bytes_read_back: AtomicU64::new(0),
+            spill_duration_us: AtomicU64::new(0),
+        }
+    }
+
+    /// Snapshot for observability / SHOW / Prometheus.
+    pub fn snapshot(&self) -> SpillMetricsSnapshot {
+        SpillMetricsSnapshot {
+            spill_count: self.spill_count.load(AtomicOrdering::Relaxed),
+            in_memory_count: self.in_memory_count.load(AtomicOrdering::Relaxed),
+            runs_created: self.runs_created.load(AtomicOrdering::Relaxed),
+            bytes_spilled: self.bytes_spilled.load(AtomicOrdering::Relaxed),
+            bytes_read_back: self.bytes_read_back.load(AtomicOrdering::Relaxed),
+            spill_duration_us: self.spill_duration_us.load(AtomicOrdering::Relaxed),
+        }
+    }
+}
+
+impl Default for SpillMetrics {
+    fn default() -> Self { Self::new() }
+}
+
+/// Immutable snapshot of spill metrics.
+#[derive(Debug, Clone, Default)]
+pub struct SpillMetricsSnapshot {
+    pub spill_count: u64,
+    pub in_memory_count: u64,
+    pub runs_created: u64,
+    pub bytes_spilled: u64,
+    pub bytes_read_back: u64,
+    pub spill_duration_us: u64,
+}
 
 /// Comparator closure type for ordering rows.
 type RowCmp = Box<dyn Fn(&OwnedRow, &OwnedRow) -> Ordering + Send>;
@@ -47,6 +108,8 @@ pub struct ExternalSorter {
     temp_dir: PathBuf,
     /// K-way merge fan-in.
     fan_in: usize,
+    /// Observable metrics.
+    pub metrics: SpillMetrics,
 }
 
 impl ExternalSorter {
@@ -65,6 +128,7 @@ impl ExternalSorter {
             threshold: config.memory_rows_threshold,
             temp_dir,
             fan_in: config.merge_fan_in.max(2),
+            metrics: SpillMetrics::new(),
         })
     }
 
@@ -83,14 +147,19 @@ impl ExternalSorter {
         if rows.len() <= self.threshold {
             let cmp = make_comparator(order_by);
             rows.sort_by(|a, b| cmp(a, b));
+            self.metrics.in_memory_count.fetch_add(1, AtomicOrdering::Relaxed);
             return Ok(());
         }
 
         // External merge sort: split into sorted runs on disk, then merge
+        let spill_start = Instant::now();
         let run_dir = self.create_run_dir()?;
         let result = self.external_merge_sort(rows, order_by, &run_dir);
         // Always clean up temp files
         let _ = fs::remove_dir_all(&run_dir);
+        let elapsed_us = spill_start.elapsed().as_micros() as u64;
+        self.metrics.spill_duration_us.fetch_add(elapsed_us, AtomicOrdering::Relaxed);
+        self.metrics.spill_count.fetch_add(1, AtomicOrdering::Relaxed);
         result
     }
 
@@ -113,7 +182,9 @@ impl ExternalSorter {
         for (i, mut chunk) in chunks.into_iter().enumerate() {
             chunk.sort_by(|a, b| cmp(a, b));
             let path = run_dir.join(format!("run_{:06}.bin", i));
-            write_run(&path, &chunk)?;
+            let bytes_written = write_run(&path, &chunk)?;
+            self.metrics.bytes_spilled.fetch_add(bytes_written, AtomicOrdering::Relaxed);
+            self.metrics.runs_created.fetch_add(1, AtomicOrdering::Relaxed);
             run_paths.push(path);
         }
 
@@ -141,7 +212,9 @@ impl ExternalSorter {
 
         // Phase 3: Read final sorted run back into memory
         if let Some(final_path) = run_paths.first() {
-            *rows = read_run(final_path)?;
+            let (loaded, bytes_read) = read_run_tracked(final_path)?;
+            self.metrics.bytes_read_back.fetch_add(bytes_read, AtomicOrdering::Relaxed);
+            *rows = loaded;
         }
 
         Ok(())
@@ -167,11 +240,13 @@ impl ExternalSorter {
 
 /// Write a sorted run of rows to a binary file.
 /// Format: [row_count: u64] then for each row [byte_len: u32][bincode bytes].
-fn write_run(path: &Path, rows: &[OwnedRow]) -> Result<(), FalconError> {
+/// Returns total bytes written.
+fn write_run(path: &Path, rows: &[OwnedRow]) -> Result<u64, FalconError> {
     let file = File::create(path).map_err(|e| {
         FalconError::Internal(format!("Failed to create spill file {:?}: {}", path, e))
     })?;
     let mut w = BufWriter::new(file);
+    let mut total_bytes: u64 = 8; // row_count header
 
     w.write_all(&(rows.len() as u64).to_le_bytes())
         .map_err(io_err)?;
@@ -181,23 +256,40 @@ fn write_run(path: &Path, rows: &[OwnedRow]) -> Result<(), FalconError> {
         w.write_all(&(bytes.len() as u32).to_le_bytes())
             .map_err(io_err)?;
         w.write_all(&bytes).map_err(io_err)?;
+        total_bytes += 4 + bytes.len() as u64;
     }
     w.flush().map_err(io_err)?;
-    Ok(())
+    Ok(total_bytes)
 }
 
 /// Read an entire sorted run from a binary file.
+#[allow(dead_code)]
 fn read_run(path: &Path) -> Result<Vec<OwnedRow>, FalconError> {
+    let (rows, _) = read_run_tracked(path)?;
+    Ok(rows)
+}
+
+/// Read an entire sorted run, tracking bytes read.
+fn read_run_tracked(path: &Path) -> Result<(Vec<OwnedRow>, u64), FalconError> {
     let file = File::open(path).map_err(|e| {
         FalconError::Internal(format!("Failed to open spill file {:?}: {}", path, e))
     })?;
     let mut r = BufReader::new(file);
     let count = read_u64(&mut r)?;
     let mut rows = Vec::with_capacity(count as usize);
+    let mut total_bytes: u64 = 8;
     for _ in 0..count {
-        rows.push(read_one_row(&mut r)?);
+        let mut len_buf = [0u8; 4];
+        r.read_exact(&mut len_buf).map_err(io_err)?;
+        let len = u32::from_le_bytes(len_buf) as usize;
+        let mut data = vec![0u8; len];
+        r.read_exact(&mut data).map_err(io_err)?;
+        let row: OwnedRow = bincode::deserialize(&data)
+            .map_err(|e| FalconError::Internal(format!("Spill deserialization error: {}", e)))?;
+        rows.push(row);
+        total_bytes += 4 + len as u64;
     }
-    Ok(rows)
+    Ok((rows, total_bytes))
 }
 
 /// A streaming reader for a sorted run file (reads one row at a time).
@@ -424,6 +516,7 @@ mod tests {
             memory_rows_threshold: 3,
             temp_dir: String::new(),
             merge_fan_in: 2,
+            ..Default::default()
         };
         let sorter = ExternalSorter::from_config(&config).unwrap();
         let mut rows = make_rows(&[10, 7, 3, 8, 1, 6, 9, 2, 5, 4]);
@@ -437,6 +530,7 @@ mod tests {
             memory_rows_threshold: 4,
             temp_dir: String::new(),
             merge_fan_in: 2,
+            ..Default::default()
         };
         let sorter = ExternalSorter::from_config(&config).unwrap();
         let mut rows = make_rows(&[1, 5, 3, 7, 2, 8, 4, 6]);
@@ -451,6 +545,7 @@ mod tests {
             memory_rows_threshold: 5,
             temp_dir: String::new(),
             merge_fan_in: 4,
+            ..Default::default()
         };
         let sorter = ExternalSorter::from_config(&config).unwrap();
         let mut rows = make_rows(&[5, 3, 1, 4, 2]);
@@ -464,6 +559,7 @@ mod tests {
             memory_rows_threshold: 0,
             temp_dir: String::new(),
             merge_fan_in: 16,
+            ..Default::default()
         };
         assert!(ExternalSorter::from_config(&config).is_none());
     }
@@ -474,6 +570,7 @@ mod tests {
             memory_rows_threshold: 2,
             temp_dir: String::new(),
             merge_fan_in: 2,
+            ..Default::default()
         };
         let sorter = ExternalSorter::from_config(&config).unwrap();
         let mut rows = make_rows(&[3, 1, 2]);

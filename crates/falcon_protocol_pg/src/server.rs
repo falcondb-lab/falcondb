@@ -146,12 +146,12 @@ impl PgServer {
     }
 
     /// Whether TLS is configured and available.
-    pub fn tls_enabled(&self) -> bool {
+    pub const fn tls_enabled(&self) -> bool {
         self.tls_acceptor.is_some()
     }
 
     /// Whether TLS is required (plaintext rejected).
-    pub fn tls_required(&self) -> bool {
+    pub const fn tls_required(&self) -> bool {
         self.tls_config.require
     }
 
@@ -188,17 +188,17 @@ impl PgServer {
     }
 
     /// Set the maximum number of concurrent connections (0 = unlimited).
-    pub fn set_max_connections(&mut self, max: usize) {
+    pub const fn set_max_connections(&mut self, max: usize) {
         self.max_connections = max;
     }
 
     /// Set the default statement timeout for new sessions (0 = no timeout).
-    pub fn set_default_statement_timeout_ms(&mut self, ms: u64) {
+    pub const fn set_default_statement_timeout_ms(&mut self, ms: u64) {
         self.default_statement_timeout_ms = ms;
     }
 
     /// Set the connection idle timeout (0 = no timeout).
-    pub fn set_idle_timeout_ms(&mut self, ms: u64) {
+    pub const fn set_idle_timeout_ms(&mut self, ms: u64) {
         self.idle_timeout_ms = ms;
     }
 
@@ -508,7 +508,7 @@ async fn handle_connection_with_timeout(
                     match acceptor.accept(raw_stream).await {
                         Ok(tls_stream) => {
                             tracing::info!("TLS handshake completed (session {})", session_id);
-                            break crate::tls::PgStream::Tls(tls_stream);
+                            break crate::tls::PgStream::Tls(Box::new(tls_stream));
                         }
                         Err(e) => {
                             tracing::error!(
@@ -638,7 +638,30 @@ async fn handle_connection_with_timeout(
                     }
                 }
 
-                // Username check (if configured)
+                // Catalog-based user validation: check if user exists and can login.
+                // Look up the role in the catalog.
+                let catalog = handler.storage.get_catalog();
+                let catalog_role = catalog.find_role_by_name(&session.user);
+                let catalog_password: Option<String> = catalog_role
+                    .and_then(|r| r.password_hash.clone());
+                let catalog_can_login = catalog_role.map(|r| r.can_login).unwrap_or(true);
+                let catalog_is_superuser = catalog_role.map(|r| r.is_superuser).unwrap_or(false);
+
+                // If a role exists in the catalog but cannot login, reject immediately.
+                if catalog_role.is_some() && !catalog_can_login {
+                    let msg = BackendMessage::ErrorResponse {
+                        severity: "FATAL".into(),
+                        code: "28000".into(),
+                        message: format!(
+                            "role \"{}\" is not permitted to log in",
+                            session.user
+                        ),
+                    };
+                    send_message(&mut stream, &msg).await?;
+                    return Ok(());
+                }
+
+                // Username check (if configured via auth_config)
                 if !auth_config.username.is_empty() && session.user != auth_config.username {
                     let msg = BackendMessage::ErrorResponse {
                         severity: "FATAL".into(),
@@ -651,6 +674,14 @@ async fn handle_connection_with_timeout(
                     send_message(&mut stream, &msg).await?;
                     return Ok(());
                 }
+
+                // Determine the effective password for authentication.
+                // Catalog password takes priority if set; otherwise fall back to auth_config.
+                let effective_password = catalog_password
+                    .unwrap_or_else(|| auth_config.password.clone());
+
+                // Set is_superuser parameter based on catalog lookup
+                drop(catalog);
 
                 // Authentication handshake based on configured method
                 match auth_config.method {
@@ -679,7 +710,7 @@ async fn handle_connection_with_timeout(
                             }
                         };
 
-                        if password != auth_config.password {
+                        if password != effective_password {
                             let msg = BackendMessage::ErrorResponse {
                                 severity: "FATAL".into(),
                                 code: "28P01".into(),
@@ -726,7 +757,7 @@ async fn handle_connection_with_timeout(
                         use md5::Digest;
                         let inner = {
                             let mut hasher = md5::Md5::new();
-                            hasher.update(auth_config.password.as_bytes());
+                            hasher.update(effective_password.as_bytes());
                             hasher.update(session.user.as_bytes());
                             format!("{:x}", hasher.finalize())
                         };
@@ -849,7 +880,7 @@ async fn handle_connection_with_timeout(
 
                         // Derive keys using PBKDF2-HMAC-SHA256
                         let salted_password =
-                            pbkdf2_sha256(auth_config.password.as_bytes(), &salt_bytes, iterations);
+                            pbkdf2_sha256(effective_password.as_bytes(), &salt_bytes, iterations);
 
                         let client_key = hmac_sha256(&salted_password, b"Client Key");
                         let stored_key = {
@@ -934,7 +965,7 @@ async fn handle_connection_with_timeout(
                     ("integer_datetimes", "on".into()),
                     ("standard_conforming_strings", "on".into()),
                     ("TimeZone", timezone),
-                    ("is_superuser", "on".into()),
+                    ("is_superuser", if catalog_is_superuser { "on" } else { "off" }.into()),
                     ("session_authorization", session.user.clone()),
                     ("IntervalStyle", "postgres".into()),
                     ("application_name", app_name),
@@ -3088,6 +3119,7 @@ mod tests {
             statement_timeout_ms: 5000,
             idle_timeout_ms: 60000,
             shutdown_drain_timeout_secs: 60,
+            slow_txn_threshold_us: 100_000,
             auth: AuthConfig::default(),
             tls: TlsConfig::default(),
         };

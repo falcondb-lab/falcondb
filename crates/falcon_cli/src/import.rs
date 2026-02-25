@@ -301,12 +301,12 @@ fn parse_token(s: &str) -> Result<(String, &str)> {
     if s.is_empty() {
         bail!("IMPORT: expected a value");
     }
-    if s.starts_with('\'') {
-        let end = s[1..]
+    if let Some(after_quote) = s.strip_prefix('\'') {
+        let end = after_quote
             .find('\'')
             .ok_or_else(|| anyhow::anyhow!("IMPORT: unclosed quote"))?;
-        let token = s[1..end + 1].to_string();
-        let rest = s[end + 2..].trim_start();
+        let token = after_quote[..end].to_string();
+        let rest = after_quote[end + 1..].trim_start();
         Ok((token, rest))
     } else {
         let end = s.find(char::is_whitespace).unwrap_or(s.len());

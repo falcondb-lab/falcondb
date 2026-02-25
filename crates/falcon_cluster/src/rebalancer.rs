@@ -155,7 +155,7 @@ pub struct MigrationPlan {
 }
 
 impl MigrationPlan {
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.tasks.is_empty()
     }
 
@@ -189,7 +189,7 @@ pub struct RebalancePlanner {
 }
 
 impl RebalancePlanner {
-    pub fn new(config: RebalancerConfig) -> Self {
+    pub const fn new(config: RebalancerConfig) -> Self {
         Self { config }
     }
 
@@ -326,10 +326,10 @@ pub enum MigrationPhase {
 impl std::fmt::Display for MigrationPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MigrationPhase::Pending => write!(f, "pending"),
-            MigrationPhase::CopyingRows => write!(f, "copying_rows"),
-            MigrationPhase::Completed => write!(f, "completed"),
-            MigrationPhase::Failed => write!(f, "failed"),
+            Self::Pending => write!(f, "pending"),
+            Self::CopyingRows => write!(f, "copying_rows"),
+            Self::Completed => write!(f, "completed"),
+            Self::Failed => write!(f, "failed"),
         }
     }
 }
@@ -346,7 +346,7 @@ pub struct MigrationStatus {
 }
 
 impl MigrationStatus {
-    fn new(task: MigrationTask) -> Self {
+    const fn new(task: MigrationTask) -> Self {
         Self {
             task,
             phase: MigrationPhase::Pending,
@@ -369,7 +369,7 @@ pub struct ShardMigrator {
 }
 
 impl ShardMigrator {
-    pub fn new(config: RebalancerConfig) -> Self {
+    pub const fn new(config: RebalancerConfig) -> Self {
         Self { config }
     }
 
@@ -749,7 +749,7 @@ impl ShardRebalancer {
     }
 
     /// Get the configuration.
-    pub fn config(&self) -> &RebalancerConfig {
+    pub const fn config(&self) -> &RebalancerConfig {
         &self.config
     }
 }
@@ -881,7 +881,7 @@ pub struct ShardLoadDetailed {
 
 impl ShardLoadDetailed {
     /// Collect detailed load from a ShardedEngine.
-    pub fn collect_all(engine: &ShardedEngine) -> Vec<ShardLoadDetailed> {
+    pub fn collect_all(engine: &ShardedEngine) -> Vec<Self> {
         engine
             .all_shards()
             .iter()
@@ -901,7 +901,7 @@ impl ShardLoadDetailed {
                         row_count: rc,
                     });
                 }
-                ShardLoadDetailed {
+                Self {
                     shard_id: shard.shard_id,
                     total_row_count: total,
                     table_count: tables.len() as u64,
@@ -915,7 +915,7 @@ impl ShardLoadDetailed {
 // -- Helpers ---------------------------------------------------------------
 
 /// Extract an i64 from a Datum (for PK hashing).
-fn datum_to_i64(d: &falcon_common::datum::Datum) -> Option<i64> {
+const fn datum_to_i64(d: &falcon_common::datum::Datum) -> Option<i64> {
     use falcon_common::datum::Datum;
     match d {
         Datum::Int32(v) => Some(*v as i64),

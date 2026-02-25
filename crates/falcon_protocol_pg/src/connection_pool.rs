@@ -77,7 +77,7 @@ struct PoolStatsInner {
 }
 
 impl PoolStatsInner {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             total_checkouts: AtomicU64::new(0),
             total_returns: AtomicU64::new(0),
@@ -109,7 +109,7 @@ pub struct PooledHandler {
 
 impl PooledHandler {
     /// Access the handler.
-    pub fn handler(&self) -> &QueryHandler {
+    pub const fn handler(&self) -> &QueryHandler {
         &self.handler
     }
 
@@ -271,12 +271,12 @@ impl ConnectionPool {
     }
 
     /// Get the shared plan cache (for observability).
-    pub fn plan_cache(&self) -> &Arc<PlanCache> {
+    pub const fn plan_cache(&self) -> &Arc<PlanCache> {
         &self.plan_cache
     }
 
     /// Get the shared slow query log (for observability).
-    pub fn slow_query_log(&self) -> &Arc<SlowQueryLog> {
+    pub const fn slow_query_log(&self) -> &Arc<SlowQueryLog> {
         &self.slow_query_log
     }
 

@@ -343,7 +343,7 @@ pub enum ZoneError {
 impl std::fmt::Display for ZoneError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ZoneError::HotZoneFull {
+            Self::HotZoneFull {
                 used,
                 capacity,
                 requested,
@@ -352,7 +352,7 @@ impl std::fmt::Display for ZoneError {
                 "Hot zone full: used={}B, capacity={}B, requested={}B",
                 used, capacity, requested
             ),
-            ZoneError::PageNotFound(pid) => write!(f, "Page not found: {}", pid),
+            Self::PageNotFound(pid) => write!(f, "Page not found: {}", pid),
         }
     }
 }

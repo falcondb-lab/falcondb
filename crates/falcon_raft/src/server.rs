@@ -59,7 +59,7 @@ pub struct RaftTransportService {
 }
 
 impl RaftTransportService {
-    pub fn new(local: Arc<LocalRaftHandle>) -> Self {
+    pub const fn new(local: Arc<LocalRaftHandle>) -> Self {
         Self { local }
     }
 }

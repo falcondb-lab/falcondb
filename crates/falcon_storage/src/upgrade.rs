@@ -35,7 +35,7 @@ pub struct VersionHeader {
 
 impl VersionHeader {
     /// Create a header reflecting the current software version.
-    pub fn current() -> Self {
+    pub const fn current() -> Self {
         Self {
             major: FALCON_VERSION_MAJOR,
             minor: FALCON_VERSION_MINOR,
@@ -63,7 +63,7 @@ pub enum CompatibilityResult {
 }
 
 impl CompatibilityResult {
-    pub fn is_compatible(&self) -> bool {
+    pub const fn is_compatible(&self) -> bool {
         !matches!(self, Self::Incompatible(_))
     }
 }

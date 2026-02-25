@@ -19,23 +19,23 @@
   <img src="https://img.shields.io/badge/license-Apache--2.0-green" alt="License" />
 </p>
 
-> English | **[简体中文](README_zh.md)**
+> **English** | [简体中文](README_zh.md) | [Español](README_es.md) | [Français](README_fr.md) | [한국어](README_ko.md) | [日本語](README_ja.md) | [Deutsch](README_de.md) | [العربية](README_ar.md) | [Italiano](README_it.md) | [Bahasa Melayu](README_ms.md) | [Português](README_pt.md)
 
 <!-- Version: sourced from workspace Cargo.toml [workspace.package] version -->
 <!-- Do NOT hardcode version numbers anywhere else. See docs/versioning.md -->
 
 > FalconDB is a **PG-compatible, distributed, memory-first OLTP database** with
-> deterministic transaction semantics. Benchmarked against SingleStore (OLTP)
-> and VoltDB.
+> deterministic transaction semantics. Benchmarked against PostgreSQL, VoltDB,
+> and SingleStore — see **[Benchmark Matrix](benchmarks/README.md)**.
 >
 > - ✅ **Low latency** — single-shard fast-path commits bypass 2PC entirely
 > - ✅ **Scan performance** — fused streaming aggregates, zero-copy MVCC iteration, near-PG parity on 1M rows
 > - ✅ **Stability** — p99 bounded, abort rate < 1%, reproducible benchmarks
 > - ✅ **Provable consistency** — MVCC/OCC under Snapshot Isolation, CI-verified ACID
 > - ✅ **Operability** — 50+ SHOW commands, Prometheus metrics, failover CI gate
-> - ✅ **Determinism** — hardened state machine, bounded in-doubt, idempotent retry (v1.0.3)
+> - ✅ **Determinism** — hardened state machine, bounded in-doubt, idempotent retry
 > - ❌ Not HTAP — no analytical workloads
-> - ❌ Not full PG — [see unsupported list below](#v10-not-supported)
+> - ❌ Not full PG — [see unsupported list below](#not-supported)
 
 FalconDB provides stable OLTP, fast/slow-path transactions, WAL-based
 primary–replica replication with gRPC streaming, promote/failover, MVCC
@@ -85,9 +85,9 @@ See [docs/protocol_compatibility.md](docs/protocol_compatibility.md) for full te
 | **Functions** | 500+ scalar functions (string, math, date/time, crypto, JSON, array) |
 | **Observability** | SHOW falcon.*, EXPLAIN, EXPLAIN ANALYZE, CHECKPOINT, ANALYZE TABLE |
 
-### <a id="v10-not-supported"></a>v1.0 Not Supported
+### <a id="not-supported"></a>Not Supported (v1.2)
 
-The following features are **explicitly out of scope** for v1.0.
+The following features are **explicitly out of scope** for v1.2.
 Attempting to use them returns a clear `ErrorResponse` with the appropriate SQLSTATE code.
 
 | Feature | Error Code | Error Message |
@@ -102,15 +102,15 @@ Attempting to use them returns a clear `ErrorResponse` with the appropriate SQLS
 | Automatic rebalancing | — | Manual shard split only |
 | Custom types (beyond JSONB) | `0A000` | `custom types are not supported` |
 
-> **v1.0 Scope Guard**: HTAP, ColumnStore, Raft strong-consistency replication,
-> disk tier/spill, and online DDL are all either `feature = "off"` or stub-only.
-> See [docs/v1.0_scope.md](docs/v1.0_scope.md) for the full isolation checklist.
+> **Scope Guard**: HTAP, ColumnStore, disk tier/spill, and online DDL are all
+> either `feature = "off"` or stub-only. Raft consensus is a single-node stub
+> (NOT on the production path). See [docs/v1.0_scope.md](docs/v1.0_scope.md) for the full scope checklist.
 
 ### Planned — NOT Implemented (P2 roadmap, no code on default build path)
 
 | Feature | Module Status | Notes |
 |---------|:------------:|-------|
-| Raft consensus replication | — | Not started; current replication is WAL-shipping + gRPC |
+| Raft consensus replication | STUB | `falcon_raft` is a single-node no-op stub. Not on production path. No target milestone |
 | Disk spill / tiered storage | STUB | `disk_rowstore.rs`, `columnstore.rs` — code exists but not on production path |
 | LSM-tree storage engine | EXPERIMENTAL | `lsm/` — compile-gated, not default; USTM-integrated for both Rowstore and LSM |
 | Online DDL (non-blocking ALTER) | STUB | `online_ddl.rs` — state machine scaffolding only |
@@ -799,7 +799,7 @@ Core PG-compatible functions including: `UPPER`, `LOWER`, `LENGTH`, `SUBSTRING`,
 | `falcon_protocol_pg` | PostgreSQL wire protocol codec + TCP server |
 | `falcon_protocol_native` | FalconDB native binary protocol — encode/decode, compression, type mapping |
 | `falcon_native_server` | Native protocol server — session management, executor bridge, nonce anti-replay |
-| `falcon_raft` | Consensus trait + single-node stub |
+| `falcon_raft` | Consensus stub (NOT on production path — single-node no-op) |
 | `falcon_cluster` | Shard map, replication, failover, scatter/gather, epoch, migration, supervisor, stability hardening, failover×txn test matrix |
 | `falcon_observability` | Metrics (Prometheus), structured logging, tracing |
 | `falcon_server` | Main binary, wires all components |
@@ -930,7 +930,7 @@ cargo run -p falcon_server -- --print-default-config > falcon.toml
 | **v0.9** ✅ | Production candidate: security hardening, WAL versioning, wire compat, config compat | Released |
 | **v1.0 Phase 1** ✅ | LSM kernel: disk-backed OLTP, MVCC encoding, idempotency, TPC-B benchmark | 1,917 tests |
 | **v1.0 Phase 2** ✅ | SQL completeness: DECIMAL, composite indexes, RBAC, txn READ ONLY, governor v2 | 1,976 tests |
-| **v2.0 Phase 3** ✅ | Enterprise: RLS, TDE, partitioning, PITR, CDC | 2,056 tests |
+| **v1.0 Phase 3** ✅ | Enterprise: RLS, TDE, partitioning, PITR, CDC | 2,056 tests |
 | **Storage Hardening** ✅ | WAL recovery, compaction scheduler, memory budget, GC safepoint, fault injection | 2,261 tests |
 | **Distributed Hardening** ✅ | Epoch fencing, leader lease, shard migration, cross-shard throttle, supervisor | +62 tests |
 | **Native Protocol** ✅ | FalconDB native binary protocol, Java JDBC driver, compression, HA failover | 2,239 tests |
@@ -945,9 +945,9 @@ See [docs/roadmap.md](docs/roadmap.md) for detailed acceptance criteria per mile
 
 ### RPO / RTO
 
-FalconDB supports three durability policies: `local-fsync` (default, RPO > 0 possible),
-`quorum-ack` (RPO = 0 with quorum), and `all-ack` (strongest, highest latency).
-See [docs/rpo_rto.md](docs/rpo_rto.md) for full RPO/RTO analysis and recommendations.
+FalconDB supports two production durability policies: `local-fsync` (default, RPO > 0 possible)
+and `sync-replica` (primary waits for replica WAL ack, RPO ≈ 0). Quorum-based policies are
+defined in code but require Raft (not implemented). See [docs/rpo_rto.md](docs/rpo_rto.md) for details.
 
 ---
 
@@ -973,7 +973,7 @@ See [docs/rpo_rto.md](docs/rpo_rto.md) for full RPO/RTO analysis and recommendat
 | [docs/native_protocol.md](docs/native_protocol.md) | FalconDB native binary protocol specification |
 | [docs/native_protocol_compat.md](docs/native_protocol_compat.md) | Native protocol version negotiation and feature flags |
 | [docs/perf_testing.md](docs/perf_testing.md) | Performance testing methodology and CI gates |
-| [CHANGELOG.md](CHANGELOG.md) | Semantic versioning changelog (v0.1–v1.0.3) |
+| [CHANGELOG.md](CHANGELOG.md) | Semantic versioning changelog (v0.1–v1.2) |
 
 ---
 
@@ -996,7 +996,7 @@ cargo test -p falcon_txn              # 103 tests (txn lifecycle, OCC, stats, RE
 cargo test -p falcon_planner          # 89 tests (routing hints, distributed wrapping, shard key inference)
 cargo test -p falcon_protocol_native  # 39 tests (native protocol codec, compression, type mapping)
 cargo test -p falcon_native_server    # 28 tests (server, session, executor bridge, nonce anti-replay)
-cargo test -p falcon_raft             # 12 tests (consensus trait, single-node stub)
+cargo test -p falcon_raft             # 12 tests (consensus stub — NOT on production path)
 
 # Lint
 cargo clippy --workspace       # must be 0 warnings

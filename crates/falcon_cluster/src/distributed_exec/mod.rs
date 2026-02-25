@@ -153,7 +153,7 @@ pub enum GatherStrategy {
 impl std::fmt::Debug for GatherStrategy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            GatherStrategy::Union {
+            Self::Union {
                 distinct,
                 limit,
                 offset,
@@ -163,7 +163,7 @@ impl std::fmt::Debug for GatherStrategy {
                 .field("limit", limit)
                 .field("offset", offset)
                 .finish(),
-            GatherStrategy::OrderByLimit {
+            Self::OrderByLimit {
                 sort_columns,
                 limit,
                 offset,
@@ -173,7 +173,7 @@ impl std::fmt::Debug for GatherStrategy {
                 .field("limit", limit)
                 .field("offset", offset)
                 .finish(),
-            GatherStrategy::TwoPhaseAgg {
+            Self::TwoPhaseAgg {
                 group_by_indices,
                 agg_merges,
                 avg_fixups,

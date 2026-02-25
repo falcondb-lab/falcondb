@@ -51,6 +51,8 @@ pub struct Executor {
     max_connections: usize,
     /// External sorter for spill-to-disk ORDER BY (None = pure in-memory).
     pub(crate) external_sorter: Option<ExternalSorter>,
+    /// Maximum groups allowed in hash aggregation (0 = unlimited).
+    pub(crate) hash_agg_group_limit: usize,
     /// Parallel execution configuration.
     pub(crate) parallel_config: ParallelConfig,
     /// RBAC: role catalog for inheritance resolution.
@@ -70,6 +72,7 @@ impl Executor {
             active_connections: None,
             max_connections: 0,
             external_sorter: None,
+            hash_agg_group_limit: 0,
             parallel_config: ParallelConfig::default(),
             role_catalog: None,
             privilege_manager: None,
@@ -86,6 +89,7 @@ impl Executor {
             active_connections: None,
             max_connections: 0,
             external_sorter: None,
+            hash_agg_group_limit: 0,
             parallel_config: ParallelConfig::default(),
             role_catalog: None,
             privilege_manager: None,
@@ -106,12 +110,12 @@ impl Executor {
     }
 
     /// Set the current session role.
-    pub fn set_current_role(&mut self, role_id: RoleId) {
+    pub const fn set_current_role(&mut self, role_id: RoleId) {
         self.current_role = role_id;
     }
 
     /// Configure parallel execution.
-    pub fn set_parallel_config(&mut self, config: ParallelConfig) {
+    pub const fn set_parallel_config(&mut self, config: ParallelConfig) {
         self.parallel_config = config;
     }
 
@@ -122,17 +126,23 @@ impl Executor {
     }
 
     /// Whether this executor is in read-only mode.
-    pub fn is_read_only(&self) -> bool {
+    pub const fn is_read_only(&self) -> bool {
         self.read_only
     }
 
     /// Configure spill-to-disk from SpillConfig.
     pub fn set_spill_config(&mut self, config: &SpillConfig) {
         self.external_sorter = ExternalSorter::from_config(config);
+        self.hash_agg_group_limit = config.hash_agg_group_limit;
+    }
+
+    /// Get the spill metrics snapshot (None if spill is disabled).
+    pub fn spill_metrics(&self) -> Option<crate::external_sort::SpillMetricsSnapshot> {
+        self.external_sorter.as_ref().map(|s| s.metrics.snapshot())
     }
 
     /// Set read-only mode (e.g. after failover role change).
-    pub fn set_read_only(&mut self, read_only: bool) {
+    pub const fn set_read_only(&mut self, read_only: bool) {
         self.read_only = read_only;
     }
 
@@ -284,13 +294,13 @@ impl Executor {
                 self.reject_if_read_only("CREATE DATABASE")?;
                 match self.storage.create_database(name, "falcon") {
                     Ok(_oid) => Ok(ExecutionResult::Ddl {
-                        message: format!("CREATE DATABASE"),
+                        message: "CREATE DATABASE".to_string(),
                     }),
                     Err(falcon_common::error::StorageError::DatabaseAlreadyExists(_))
                         if *if_not_exists =>
                     {
                         Ok(ExecutionResult::Ddl {
-                            message: format!("CREATE DATABASE"),
+                            message: "CREATE DATABASE".to_string(),
                         })
                     }
                     Err(e) => Err(e.into()),
@@ -303,17 +313,210 @@ impl Executor {
                 self.reject_if_read_only("DROP DATABASE")?;
                 match self.storage.drop_database(name) {
                     Ok(()) => Ok(ExecutionResult::Ddl {
-                        message: format!("DROP DATABASE"),
+                        message: "DROP DATABASE".to_string(),
                     }),
                     Err(falcon_common::error::StorageError::DatabaseNotFound(_))
                         if *if_exists =>
                     {
                         Ok(ExecutionResult::Ddl {
-                            message: format!("DROP DATABASE"),
+                            message: "DROP DATABASE".to_string(),
                         })
                     }
                     Err(e) => Err(e.into()),
                 }
+            }
+            PhysicalPlan::CreateSchema {
+                name,
+                if_not_exists,
+            } => {
+                self.reject_if_read_only("CREATE SCHEMA")?;
+                match self.storage.create_schema(name, "falcon") {
+                    Ok(()) => Ok(ExecutionResult::Ddl {
+                        message: "CREATE SCHEMA".to_string(),
+                    }),
+                    Err(falcon_common::error::StorageError::SchemaAlreadyExists(_))
+                        if *if_not_exists =>
+                    {
+                        Ok(ExecutionResult::Ddl {
+                            message: "CREATE SCHEMA".to_string(),
+                        })
+                    }
+                    Err(e) => Err(e.into()),
+                }
+            }
+            PhysicalPlan::DropSchema {
+                name,
+                if_exists,
+            } => {
+                self.reject_if_read_only("DROP SCHEMA")?;
+                match self.storage.drop_schema(name) {
+                    Ok(()) => Ok(ExecutionResult::Ddl {
+                        message: "DROP SCHEMA".to_string(),
+                    }),
+                    Err(falcon_common::error::StorageError::SchemaNotFound(_))
+                        if *if_exists =>
+                    {
+                        Ok(ExecutionResult::Ddl {
+                            message: "DROP SCHEMA".to_string(),
+                        })
+                    }
+                    Err(e) => Err(e.into()),
+                }
+            }
+            PhysicalPlan::CreateRole {
+                name,
+                can_login,
+                is_superuser,
+                can_create_db,
+                can_create_role,
+                password,
+            } => {
+                self.reject_if_read_only("CREATE ROLE")?;
+                match self.storage.create_role(
+                    name,
+                    *can_login,
+                    *is_superuser,
+                    *can_create_db,
+                    *can_create_role,
+                    password.clone(),
+                ) {
+                    Ok(_id) => Ok(ExecutionResult::Ddl {
+                        message: "CREATE ROLE".to_string(),
+                    }),
+                    Err(e) => Err(e.into()),
+                }
+            }
+            PhysicalPlan::DropRole {
+                name,
+                if_exists,
+            } => {
+                self.reject_if_read_only("DROP ROLE")?;
+                match self.storage.drop_role(name) {
+                    Ok(()) => Ok(ExecutionResult::Ddl {
+                        message: "DROP ROLE".to_string(),
+                    }),
+                    Err(falcon_common::error::StorageError::RoleNotFound(_))
+                        if *if_exists =>
+                    {
+                        Ok(ExecutionResult::Ddl {
+                            message: "DROP ROLE".to_string(),
+                        })
+                    }
+                    Err(e) => Err(e.into()),
+                }
+            }
+            PhysicalPlan::AlterRole {
+                name,
+                password,
+                can_login,
+                is_superuser,
+                can_create_db,
+                can_create_role,
+            } => {
+                self.reject_if_read_only("ALTER ROLE")?;
+                self.storage.alter_role(
+                    name,
+                    password.clone(),
+                    *can_login,
+                    *is_superuser,
+                    *can_create_db,
+                    *can_create_role,
+                )?;
+                Ok(ExecutionResult::Ddl {
+                    message: "ALTER ROLE".to_string(),
+                })
+            }
+            PhysicalPlan::Grant {
+                privilege,
+                object_type,
+                object_name,
+                grantee,
+            } => {
+                self.reject_if_read_only("GRANT")?;
+                self.storage.grant_privilege(grantee, privilege, object_type, object_name, "falcon")?;
+                Ok(ExecutionResult::Ddl {
+                    message: "GRANT".to_string(),
+                })
+            }
+            PhysicalPlan::Revoke {
+                privilege,
+                object_type,
+                object_name,
+                grantee,
+            } => {
+                self.reject_if_read_only("REVOKE")?;
+                self.storage.revoke_privilege(grantee, privilege, object_type, object_name)?;
+                Ok(ExecutionResult::Ddl {
+                    message: "REVOKE".to_string(),
+                })
+            }
+            PhysicalPlan::ShowRoles => {
+                let catalog = self.storage.get_catalog();
+                let roles = catalog.list_role_entries();
+                let columns = vec![
+                    ("role_name".to_string(), DataType::Text),
+                    ("can_login".to_string(), DataType::Boolean),
+                    ("is_superuser".to_string(), DataType::Boolean),
+                    ("can_create_db".to_string(), DataType::Boolean),
+                    ("can_create_role".to_string(), DataType::Boolean),
+                ];
+                let mut rows = Vec::new();
+                for r in roles {
+                    rows.push(OwnedRow::new(vec![
+                        Datum::Text(r.name.clone()),
+                        Datum::Boolean(r.can_login),
+                        Datum::Boolean(r.is_superuser),
+                        Datum::Boolean(r.can_create_db),
+                        Datum::Boolean(r.can_create_role),
+                    ]));
+                }
+                Ok(ExecutionResult::Query { columns, rows })
+            }
+            PhysicalPlan::ShowSchemas => {
+                let catalog = self.storage.get_catalog();
+                let schemas = catalog.list_schemas();
+                let columns = vec![
+                    ("schema_name".to_string(), DataType::Text),
+                    ("owner".to_string(), DataType::Text),
+                ];
+                let mut rows = Vec::new();
+                for s in schemas {
+                    rows.push(OwnedRow::new(vec![
+                        Datum::Text(s.name.clone()),
+                        Datum::Text(s.owner.clone()),
+                    ]));
+                }
+                Ok(ExecutionResult::Query { columns, rows })
+            }
+            PhysicalPlan::ShowGrants { role_name } => {
+                let catalog = self.storage.get_catalog();
+                let grants = catalog.list_grants();
+                let roles = catalog.list_role_entries();
+                let columns = vec![
+                    ("grantee".to_string(), DataType::Text),
+                    ("privilege".to_string(), DataType::Text),
+                    ("object_type".to_string(), DataType::Text),
+                    ("object_name".to_string(), DataType::Text),
+                ];
+                let mut rows = Vec::new();
+                for g in grants {
+                    let grantee_name = roles.iter()
+                        .find(|r| r.id == g.grantee_id)
+                        .map(|r| r.name.clone())
+                        .unwrap_or_else(|| format!("id_{}", g.grantee_id));
+                    if let Some(ref filter) = role_name {
+                        if grantee_name.to_lowercase() != filter.to_lowercase() {
+                            continue;
+                        }
+                    }
+                    rows.push(OwnedRow::new(vec![
+                        Datum::Text(grantee_name),
+                        Datum::Text(g.privilege.clone()),
+                        Datum::Text(g.object_type.clone()),
+                        Datum::Text(g.object_name.clone()),
+                    ]));
+                }
+                Ok(ExecutionResult::Query { columns, rows })
             }
             PhysicalPlan::CreateTable {
                 schema,
@@ -1672,6 +1875,9 @@ impl Executor {
                 )];
                 lines.extend(self.format_plan(subplan, indent + 1));
                 lines
+            }
+            _ => {
+                vec![format!("{}DDL/DCL statement (no plan detail)", pad)]
             }
         }
     }

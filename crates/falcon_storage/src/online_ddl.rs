@@ -41,11 +41,11 @@ pub enum DdlPhase {
 impl std::fmt::Display for DdlPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DdlPhase::Pending => write!(f, "pending"),
-            DdlPhase::Running => write!(f, "running"),
-            DdlPhase::Backfilling => write!(f, "backfilling"),
-            DdlPhase::Completed => write!(f, "completed"),
-            DdlPhase::Failed => write!(f, "failed"),
+            Self::Pending => write!(f, "pending"),
+            Self::Running => write!(f, "running"),
+            Self::Backfilling => write!(f, "backfilling"),
+            Self::Completed => write!(f, "completed"),
+            Self::Failed => write!(f, "failed"),
         }
     }
 }
@@ -75,20 +75,20 @@ pub enum DdlOpKind {
 impl std::fmt::Display for DdlOpKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DdlOpKind::AddColumn {
+            Self::AddColumn {
                 table_name,
                 column_name,
                 ..
             } => {
                 write!(f, "ADD COLUMN {}.{}", table_name, column_name)
             }
-            DdlOpKind::DropColumn {
+            Self::DropColumn {
                 table_name,
                 column_name,
             } => {
                 write!(f, "DROP COLUMN {}.{}", table_name, column_name)
             }
-            DdlOpKind::ChangeColumnType {
+            Self::ChangeColumnType {
                 table_name,
                 column_name,
                 new_type,
@@ -99,7 +99,7 @@ impl std::fmt::Display for DdlOpKind {
                     table_name, column_name, new_type
                 )
             }
-            DdlOpKind::MetadataOnly { description } => {
+            Self::MetadataOnly { description } => {
                 write!(f, "{}", description)
             }
         }
@@ -124,7 +124,7 @@ pub struct DdlOperation {
 }
 
 impl DdlOperation {
-    fn new(id: u64, table_id: TableId, kind: DdlOpKind) -> Self {
+    const fn new(id: u64, table_id: TableId, kind: DdlOpKind) -> Self {
         Self {
             id,
             kind,
@@ -145,14 +145,14 @@ impl DdlOperation {
     }
 
     /// Advance to Backfilling phase.
-    pub fn begin_backfill(&mut self, total_rows: u64) {
+    pub const fn begin_backfill(&mut self, total_rows: u64) {
         self.phase = DdlPhase::Backfilling;
         self.rows_total = total_rows;
         self.rows_processed = 0;
     }
 
     /// Record backfill progress.
-    pub fn record_progress(&mut self, rows: u64) {
+    pub const fn record_progress(&mut self, rows: u64) {
         self.rows_processed += rows;
     }
 
@@ -170,7 +170,7 @@ impl DdlOperation {
     }
 
     /// Whether the operation needs background backfill.
-    pub fn needs_backfill(&self) -> bool {
+    pub const fn needs_backfill(&self) -> bool {
         matches!(
             self.kind,
             DdlOpKind::AddColumn {

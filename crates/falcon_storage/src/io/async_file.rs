@@ -261,7 +261,7 @@ pub enum FlushReason {
 }
 
 impl FlushReason {
-    pub fn label(&self) -> &'static str {
+    pub const fn label(&self) -> &'static str {
         match self {
             Self::BatchFull => "batch_full",
             Self::Timer => "timer",
@@ -389,7 +389,7 @@ pub struct IoMetricsSnapshot {
 
 impl IoMetricsSnapshot {
     /// Average flush latency in microseconds.
-    pub fn avg_flush_latency_us(&self) -> u64 {
+    pub const fn avg_flush_latency_us(&self) -> u64 {
         if self.flush_ops == 0 {
             0
         } else {
@@ -398,7 +398,7 @@ impl IoMetricsSnapshot {
     }
 
     /// Average write latency in microseconds.
-    pub fn avg_write_latency_us(&self) -> u64 {
+    pub const fn avg_write_latency_us(&self) -> u64 {
         if self.write_ops == 0 {
             0
         } else {

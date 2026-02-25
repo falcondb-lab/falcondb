@@ -7,6 +7,169 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased] — Public Reproducible Benchmark Matrix (4 Engines × 5 Workloads)
+
+### Added — Benchmark Infrastructure
+
+- **4-engine benchmark matrix**: FalconDB vs PostgreSQL vs VoltDB vs SingleStore
+  on identical hardware, identical workloads, identical measurement methodology.
+- **3 new workloads**:
+  - W3: Analytic range scan (`COUNT/SUM/AVG` over 10% of rows)
+  - W4: Hot-key contention (10 hot keys, all threads competing)
+  - W5: Batch insert throughput (single-row INSERT into append table)
+- **VoltDB config**: `benchmarks/voltdb/deployment.xml` + `run.sh` (sync cmd log,
+  partitioned tables, PG-wire on port 5444).
+- **SingleStore config**: `benchmarks/singlestore/singlestore.cnf` + `run.sh`
+  (Docker or native, rowstore tables, MySQL wire).
+- **`scripts/run_matrix.sh`** — unified orchestrator: auto-detects installed
+  engines, runs all workloads × 4 concurrency levels, generates Markdown matrix
+  report. Supports `--quick`, `--engines`, `--workloads` flags.
+- **Engine-specific schemas**: `setup_voltdb.sql` (partitioned), `setup_singlestore.sql`
+  (rowstore + stored-proc data load), `setup_batch.sql` (W5 table).
+- **Fair-comparison disclosure** in README and RESULTS: per-engine architecture,
+  expected advantages, known caveats.
+
+### Changed
+
+- **`benchmarks/README.md`** — rewritten for 4-engine methodology, installation
+  guides, configuration parity table, fair-comparison policy.
+- **`benchmarks/RESULTS.md`** — expanded to 4-engine × 5-workload matrix template
+  with per-workload descriptions and engine characteristics table.
+
+---
+
+## [Unreleased] — Distributed & Failover Hardening ("无脑稳")
+
+### Added — Production-Grade Failover Guards
+
+- **`crates/falcon_cluster/src/dist_hardening.rs`** — 5 hardening components:
+  - `FailoverPreFlight` — 5-point pre-promotion checklist (lag, quorum, cooldown,
+    epoch, candidate). Blocks unsafe promotions.
+  - `SplitBrainDetector` — epoch-based stale-write rejection with event history.
+    Prevents two nodes serving writes simultaneously after partition heal.
+  - `AutoRestartSupervisor` — bounded auto-restart for bg tasks with exponential
+    backoff (1s→60s cap), permanent failure after max restarts, success reset.
+  - `HealthCheckHysteresis` — debounced health transitions (suspect=2, fail=5,
+    recover=3 consecutive). Prevents false-positive failovers.
+  - `PromotionSafetyGuard` — atomic-or-rollback promotion protocol. If any step
+    fails, old primary is unfenced (no total write outage).
+- **`HAReplicaGroup::hardened_promote_best()`** — production-grade promotion
+  wiring pre-flight + safety guard + split-brain detector + `evaluate()`.
+- **`HAReplicaGroup::check_write_epoch()`** — split-brain write validation.
+- **`docs/distributed_hardening.md`** — architecture, forbidden states, test map.
+- **`crates/falcon_cluster/tests/dist_hardening_integration.rs`** — 20 integration
+  tests (DH-01 through DH-19 + evidence summary).
+
+### Changed
+
+- **`falcon_cluster/src/ha.rs`** — `HAReplicaGroup` gains `split_brain_detector`,
+  `pre_flight`, `promotion_guard` fields; `hardened_promote_best()` calls
+  `detector.evaluate()` for accurate primary-failed detection.
+- **`falcon_cluster/src/lib.rs`** — exports all `dist_hardening` types.
+
+---
+
+## [Unreleased] — Disk Spill & Memory Pressure Hardening
+
+### Added — Production-Grade Spill Infrastructure
+
+- **`SpillMetrics`** in `external_sort.rs` — 6 observable counters:
+  `spill_count`, `in_memory_count`, `runs_created`, `bytes_spilled`,
+  `bytes_read_back`, `spill_duration_us`. Exposed via `Executor::spill_metrics()`.
+- **`SpillConfig`** production defaults — `memory_rows_threshold=500K`,
+  `hash_agg_group_limit=1M`, `pressure_spill_trigger="soft"`.
+- **Hash aggregation group limit** — rejects at configurable group count with
+  `ExecutionError::ResourceExhausted` (SQLSTATE `53000`).
+- **`docs/memory_pressure_spill.md`** — production strategy document covering
+  3-tier defense (sort spill, agg guard, governor backpressure), forbidden states,
+  client error contract, and architecture diagram.
+- **`crates/falcon_executor/tests/spill_pressure.rs`** — 18 integration tests:
+  SP-1 through SP-17 + evidence summary covering sort metrics, data integrity,
+  agg limits, pressure transitions, governor backpressure, and cleanup.
+
+### Changed
+
+- **`falcon_common/src/config.rs`** — `SpillConfig` expanded with serde defaults,
+  `hash_agg_group_limit`, and `pressure_spill_trigger` fields.
+- **`falcon_common/src/error.rs`** — added `ExecutionError::ResourceExhausted`
+  variant with SQLSTATE `53000` and `ErrorKind::UserError` classification.
+- **`falcon_executor/src/executor.rs`** — added `hash_agg_group_limit` field,
+  `spill_metrics()` public method.
+- **`falcon_executor/src/executor_aggregate.rs`** — hash aggregation group count
+  guard wired into `map_reduce_visible` GROUP BY path.
+
+---
+
+## [Unreleased] — Failover × In-Flight Txn Determinism Hardening
+
+### Added — Stronger Failover Evidence (P0-2b)
+
+- **`crates/falcon_cluster/tests/failover_determinism.rs`** — 6 new FDE tests:
+  - FDE-1: Commit-phase-at-crash → recovery outcome (FC-1, FC-2, FC-3)
+  - FDE-2: OCC write conflict during active failover (no phantom, no duplication)
+  - FDE-3: Network partition write isolation (0 leaks, no split-brain)
+  - FDE-4: In-doubt TTL bounded resolution (5 cycles × 10 txns, 0 remaining)
+  - FDE-5: Idempotent WAL replay under double-delivery (FC-4)
+  - FDE-SUMMARY: Combined evidence matrix for external audit
+
+### Added — Quantified Partition + Write Conflict SLA
+
+- **`docs/failover_partition_sla.md`** — normative SLA document:
+  - 10 quantified guarantees (SLA-1 through SLA-10)
+  - 8 forbidden states with test evidence
+  - Network partition write isolation proof
+  - OCC conflict retry contract (SQLSTATE `40001`, retry 50 ms)
+  - RPO/RTO tables by commit policy
+  - Client-side JDBC/PG driver behavior contract
+  - Configuration reference (9 parameters)
+
+### Changed — Documentation Updates
+
+- **`docs/failover_behavior.md`** — added FDE test coverage table + SLA cross-reference
+- **`docs/failover_determinism_report.md`** — added FDE evidence section, updated
+  source code table, expanded conclusion with partition/conflict/replay guarantees
+
+---
+
+## [Unreleased] — GA Release Gate
+
+> **Theme**: Formal verification that FalconDB meets all P0 requirements for a
+> stable GA release: transaction correctness, WAL durability, failover behavior,
+> memory safety, and restart safety.
+
+### Added — GA Automated Tests
+
+- **`crates/falcon_storage/tests/ga_release_gate.rs`** — 19 integration tests:
+  - P0-1: Transaction correctness (4 tests) — ACK=Durable, No Phantom Commit,
+    At-most-once Commit, Terminal States from WAL
+  - P0-2: WAL durability & crash recovery (7 tests) — Crash points 1/2/3,
+    idempotent replay (7×), multi-table interleaved recovery, update/delete
+    recovery, checkpoint+delta recovery
+  - P0-3: Failover behavior (2 tests) — only committed survive, new leader
+    accepts writes
+  - P0-4: Memory safety (3 tests) — pressure states, tracker accounting,
+    global governor 4-tier backpressure
+  - P0-5: Restart safety (3 tests) — clean shutdown+restart, 5 crash-restart
+    cycles, DDL survives restart
+
+### Added — GA Documentation
+
+- **`docs/crash_point_matrix.md`** — normative crash point behavior matrix with
+  5 commit crash points, 3 abort/in-flight scenarios, DDL and checkpoint crash
+  points, and 5 formal invariants
+- **`docs/failover_behavior.md`** — normative failover transaction behavior with
+  6 invariants, per-policy RPO table, failover sequence, client behavior guide,
+  and admission control during failover
+- **`docs/ga_sql_boundary.md`** — complete SQL whitelist (DML, query features,
+  DDL, DCL, transaction control, constraints, data types, protocol) and
+  not-supported list with SQLSTATE `0A000` for every unsupported feature
+- **`docs/ga_release_checklist.md`** — unified GA release gate checklist
+
+### Added — GA CI Gate
+
+- **`scripts/ci_ga_release_gate.sh`** — unified Go/No-Go gate script covering
+  all P0/P1 gates plus build, clippy, full test suite, and pre-existing gates
+
 ## [1.2.0] — Commercial-Grade Readiness (P0 + P1 + P2) + Segment-Level Zstd Compression
 
 > **Theme**: FalconDB advances from "technically strong" to "industry-positioned, commercially credible".
@@ -1013,7 +1176,7 @@ Safe for rolling upgrade from v1.0.0. No rollback required for clients.
 - **Fast-path metrics verification**: `fast_path_commits` / `slow_path_commits` exposed in txn_stats (1 test)
 - **v1.0 release CI gate**: `scripts/ci_v1_release_gate.sh` — unified Go/No-Go gate (20+ sub-gates)
 - **v1.0 scope documentation**: `docs/v1.0_scope.md` — full 7-section commercial checklist with verification matrix
-- **README "v1.0 Not Supported" table**: 9 features with SQLSTATE codes and error messages
+- **README "Not Supported" table**: 9 features with SQLSTATE codes and error messages
 
 ### Added — v1.0 Isolation Module (B1–B10, ~135 tests)
 - B1: Explicit `TxnState::try_transition()` state machine with `TransitionResult` and `InvalidTransition` error (28 tests)
@@ -1026,7 +1189,7 @@ Safe for rolling upgrade from v1.0.0. No rollback required for clients.
 - B10: CI isolation gate script (`scripts/ci_isolation_gate.sh`)
 - Documentation: `docs/v1.0_scope.md` — full checklist with test counts and locations
 
-### Added — v2.0 Phase 3: Enterprise Edition Features
+### Added — v1.0 Phase 3: Enterprise Edition Features
 - Row-Level Security (RLS): `RlsPolicyManager` with permissive/restrictive policies, role-scoped targeting, superuser bypass (`falcon_common::rls`, 15 tests)
 - Transparent Data Encryption (TDE): `KeyManager` with PBKDF2 key derivation, DEK lifecycle, master key rotation (`falcon_storage::encryption`, 11 tests)
 - Table Partitioning: Range/Hash/List strategies with routing, pruning, attach/detach (`falcon_storage::partition`, 10 tests)

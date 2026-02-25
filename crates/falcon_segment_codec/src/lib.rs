@@ -36,7 +36,7 @@ pub enum CodecId {
 }
 
 impl CodecId {
-    pub fn from_u8(v: u8) -> Option<Self> {
+    pub const fn from_u8(v: u8) -> Option<Self> {
         match v {
             0 => Some(Self::None),
             1 => Some(Self::Lz4),
@@ -97,7 +97,7 @@ impl CodecPolicy {
     }
 
     /// Default codec for a segment kind.
-    pub fn default_codec(&self, kind: SegmentKind) -> CodecId {
+    pub const fn default_codec(&self, kind: SegmentKind) -> CodecId {
         match kind {
             SegmentKind::Wal => self.wal_codec,
             SegmentKind::Cold => self.cold_codec,
@@ -219,12 +219,12 @@ impl fmt::Debug for ZstdBlockCodec {
 
 impl ZstdBlockCodec {
     /// Create a new codec without dictionary.
-    pub fn new(config: ZstdCodecConfig) -> Self {
+    pub const fn new(config: ZstdCodecConfig) -> Self {
         Self { config, dict_data: None }
     }
 
     /// Create a new codec with a pre-loaded dictionary.
-    pub fn with_dictionary(config: ZstdCodecConfig, dict_data: Vec<u8>) -> Self {
+    pub const fn with_dictionary(config: ZstdCodecConfig, dict_data: Vec<u8>) -> Self {
         Self { config, dict_data: Some(dict_data) }
     }
 
@@ -507,7 +507,7 @@ impl CompressedBlock {
     }
 
     /// Total wire size (header + data).
-    pub fn wire_size(&self) -> usize {
+    pub const fn wire_size(&self) -> usize {
         BLOCK_HEADER_SIZE + self.data.len()
     }
 
@@ -542,7 +542,7 @@ pub struct ZstdSegmentMeta {
 }
 
 impl ZstdSegmentMeta {
-    pub fn new(level: i32) -> Self {
+    pub const fn new(level: i32) -> Self {
         Self {
             codec_id: CodecId::Zstd,
             codec_level: level,
@@ -554,7 +554,7 @@ impl ZstdSegmentMeta {
         }
     }
 
-    pub fn with_dictionary(mut self, dict_id: u64, dict_checksum: u32) -> Self {
+    pub const fn with_dictionary(mut self, dict_id: u64, dict_checksum: u32) -> Self {
         self.dictionary_id = dict_id;
         self.dictionary_checksum = dict_checksum;
         self
@@ -800,8 +800,8 @@ impl DecompressCache {
             }
         }
         let mut entries = self.entries.lock();
-        if !entries.contains_key(&key) {
-            entries.insert(key, data);
+        if let std::collections::hash_map::Entry::Vacant(e) = entries.entry(key) {
+            e.insert(data);
             self.used_bytes.fetch_add(data_len, Ordering::Relaxed);
             self.order.lock().push_back(key);
         }
@@ -1034,7 +1034,7 @@ pub fn zstd_version() -> u32 {
 }
 
 /// Report libzstd version string.
-pub fn zstd_version_string() -> &'static str {
+pub const fn zstd_version_string() -> &'static str {
     // zstd_safe doesn't expose version_string directly, derive from number
     // Format: major*10000 + minor*100 + patch
     // We'll just return the numeric version as a fallback

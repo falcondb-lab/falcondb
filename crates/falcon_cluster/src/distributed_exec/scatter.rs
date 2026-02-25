@@ -35,13 +35,13 @@ impl DistributedExecutor {
     }
 
     /// Set the failure policy (Strict or BestEffort).
-    pub fn with_failure_policy(mut self, policy: FailurePolicy) -> Self {
+    pub const fn with_failure_policy(mut self, policy: FailurePolicy) -> Self {
         self.failure_policy = policy;
         self
     }
 
     /// Set gather-phase resource limits.
-    pub fn with_gather_limits(mut self, limits: GatherLimits) -> Self {
+    pub const fn with_gather_limits(mut self, limits: GatherLimits) -> Self {
         self.gather_limits = limits;
         self
     }

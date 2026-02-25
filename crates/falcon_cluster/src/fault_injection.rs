@@ -375,9 +375,9 @@ pub enum JitterMode {
 impl std::fmt::Display for JitterMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            JitterMode::Cpu => write!(f, "cpu"),
-            JitterMode::Io => write!(f, "io"),
-            JitterMode::Both => write!(f, "both"),
+            Self::Cpu => write!(f, "cpu"),
+            Self::Io => write!(f, "io"),
+            Self::Both => write!(f, "both"),
         }
     }
 }
@@ -397,7 +397,7 @@ pub struct JitterConfig {
 
 impl JitterConfig {
     /// Disabled jitter (no-op).
-    pub fn disabled() -> Self {
+    pub const fn disabled() -> Self {
         Self {
             enabled: false,
             base_us: 0,
@@ -407,7 +407,7 @@ impl JitterConfig {
     }
 
     /// Light jitter: 100-500µs spikes (simulates normal variance).
-    pub fn light() -> Self {
+    pub const fn light() -> Self {
         Self {
             enabled: true,
             base_us: 100,
@@ -417,7 +417,7 @@ impl JitterConfig {
     }
 
     /// Heavy jitter: 1-10ms spikes (simulates GC pauses, IO stalls).
-    pub fn heavy() -> Self {
+    pub const fn heavy() -> Self {
         Self {
             enabled: true,
             base_us: 1_000,
@@ -427,7 +427,7 @@ impl JitterConfig {
     }
 
     /// CPU-only jitter (simulates CPU contention).
-    pub fn cpu_only(base_us: u64, amplitude_us: u64) -> Self {
+    pub const fn cpu_only(base_us: u64, amplitude_us: u64) -> Self {
         Self {
             enabled: true,
             base_us,
@@ -437,7 +437,7 @@ impl JitterConfig {
     }
 
     /// IO-only jitter (simulates disk latency spikes).
-    pub fn io_only(base_us: u64, amplitude_us: u64) -> Self {
+    pub const fn io_only(base_us: u64, amplitude_us: u64) -> Self {
         Self {
             enabled: true,
             base_us,
@@ -546,7 +546,7 @@ pub struct ChaosRunner {
 }
 
 impl ChaosRunner {
-    pub fn new(injector: Arc<FaultInjector>) -> Self {
+    pub const fn new(injector: Arc<FaultInjector>) -> Self {
         Self { injector }
     }
 

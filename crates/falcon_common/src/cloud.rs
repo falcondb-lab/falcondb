@@ -230,7 +230,7 @@ impl CrossRegionConfig {
     }
 
     /// Number of total regions.
-    pub fn region_count(&self) -> usize {
+    pub const fn region_count(&self) -> usize {
         1 + self.replica_regions.len()
     }
 }

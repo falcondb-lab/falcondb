@@ -97,7 +97,7 @@ pub struct FaultInjector {
 }
 
 impl FaultInjector {
-    pub fn new(config: FaultConfig) -> Self {
+    pub const fn new(config: FaultConfig) -> Self {
         Self {
             config: RwLock::new(config),
             counter: AtomicU64::new(0),
@@ -231,7 +231,7 @@ impl FaultInjector {
 }
 
 /// Fault decision for a single message.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FaultDecision {
     /// Pass the message through unchanged.
     Pass,
@@ -251,7 +251,7 @@ pub struct FaultMetrics {
 }
 
 impl FaultMetrics {
-    pub fn total(&self) -> u64 {
+    pub const fn total(&self) -> u64 {
         self.messages_dropped + self.messages_delayed + self.messages_partitioned + self.messages_passed
     }
 
@@ -266,10 +266,10 @@ impl FaultMetrics {
 }
 
 /// Simple non-cryptographic hash for deterministic pseudo-random decisions.
-fn simple_hash(n: u64) -> u64 {
+const fn simple_hash(n: u64) -> u64 {
     let mut x = n;
     x = x.wrapping_mul(0x517cc1b727220a95);
-    x = (x >> 32) | (x << 32);
+    x = x.rotate_left(32);
     x = x.wrapping_mul(0x6c62272e07bb0142);
     x ^= x >> 33;
     x

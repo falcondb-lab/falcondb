@@ -653,7 +653,7 @@ impl ReplicaCatchUpCoordinator {
     }
 
     /// Classify a replica's lag and determine catch-up strategy.
-    pub fn classify_lag(&self, leader_lsn: u64, replica_lsn: u64) -> ReplicaLagClass {
+    pub const fn classify_lag(&self, leader_lsn: u64, replica_lsn: u64) -> ReplicaLagClass {
         let lag = leader_lsn.saturating_sub(replica_lsn);
         if lag == 0 {
             ReplicaLagClass::CaughtUp
@@ -779,13 +779,13 @@ pub struct ProtocolVersion {
 }
 
 impl ProtocolVersion {
-    pub fn new(major: u32, minor: u32) -> Self {
+    pub const fn new(major: u32, minor: u32) -> Self {
         Self { major, minor }
     }
 
     /// Check if two versions are compatible for rolling upgrade.
     /// Rule: same major, minor within 1 step.
-    pub fn is_compatible(&self, other: &Self) -> bool {
+    pub const fn is_compatible(&self, other: &Self) -> bool {
         self.major == other.major && (self.minor as i32 - other.minor as i32).unsigned_abs() <= 1
     }
 }
@@ -1084,6 +1084,12 @@ pub struct LifecycleMetrics {
     pub joins_started: AtomicU64,
     pub joins_completed: AtomicU64,
     pub shards_transferred: AtomicU64,
+}
+
+impl Default for NodeLifecycleCoordinator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl NodeLifecycleCoordinator {

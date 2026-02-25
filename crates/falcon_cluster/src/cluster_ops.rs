@@ -35,12 +35,12 @@ pub enum EventCategory {
 impl std::fmt::Display for EventCategory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EventCategory::ScaleOut => write!(f, "scale_out"),
-            EventCategory::ScaleIn => write!(f, "scale_in"),
-            EventCategory::Rebalance => write!(f, "rebalance"),
-            EventCategory::LeaderTransfer => write!(f, "leader_transfer"),
-            EventCategory::Failover => write!(f, "failover"),
-            EventCategory::Membership => write!(f, "membership"),
+            Self::ScaleOut => write!(f, "scale_out"),
+            Self::ScaleIn => write!(f, "scale_in"),
+            Self::Rebalance => write!(f, "rebalance"),
+            Self::LeaderTransfer => write!(f, "leader_transfer"),
+            Self::Failover => write!(f, "failover"),
+            Self::Membership => write!(f, "membership"),
         }
     }
 }
@@ -56,9 +56,9 @@ pub enum EventSeverity {
 impl std::fmt::Display for EventSeverity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EventSeverity::Info => write!(f, "info"),
-            EventSeverity::Warn => write!(f, "warn"),
-            EventSeverity::Error => write!(f, "error"),
+            Self::Info => write!(f, "info"),
+            Self::Warn => write!(f, "warn"),
+            Self::Error => write!(f, "error"),
         }
     }
 }
@@ -189,13 +189,13 @@ pub enum ScaleOutState {
 impl std::fmt::Display for ScaleOutState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ScaleOutState::Joining => write!(f, "joining"),
-            ScaleOutState::CatchingUp => write!(f, "catching_up"),
-            ScaleOutState::ServingReads => write!(f, "serving_reads"),
-            ScaleOutState::ServingWrites => write!(f, "serving_writes"),
-            ScaleOutState::Rebalancing => write!(f, "rebalancing"),
-            ScaleOutState::Active => write!(f, "active"),
-            ScaleOutState::Failed => write!(f, "failed"),
+            Self::Joining => write!(f, "joining"),
+            Self::CatchingUp => write!(f, "catching_up"),
+            Self::ServingReads => write!(f, "serving_reads"),
+            Self::ServingWrites => write!(f, "serving_writes"),
+            Self::Rebalancing => write!(f, "rebalancing"),
+            Self::Active => write!(f, "active"),
+            Self::Failed => write!(f, "failed"),
         }
     }
 }
@@ -283,7 +283,7 @@ impl ScaleOutLifecycle {
         self.started_at.elapsed()
     }
 
-    pub fn is_terminal(&self) -> bool {
+    pub const fn is_terminal(&self) -> bool {
         matches!(self.state, ScaleOutState::Active | ScaleOutState::Failed)
     }
 }
@@ -308,11 +308,11 @@ pub enum ScaleInState {
 impl std::fmt::Display for ScaleInState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ScaleInState::Draining => write!(f, "draining"),
-            ScaleInState::MovingLeadership => write!(f, "moving_leadership"),
-            ScaleInState::MovingData => write!(f, "moving_data"),
-            ScaleInState::Removed => write!(f, "removed"),
-            ScaleInState::Failed => write!(f, "failed"),
+            Self::Draining => write!(f, "draining"),
+            Self::MovingLeadership => write!(f, "moving_leadership"),
+            Self::MovingData => write!(f, "moving_data"),
+            Self::Removed => write!(f, "removed"),
+            Self::Failed => write!(f, "failed"),
         }
     }
 }
@@ -396,7 +396,7 @@ impl ScaleInLifecycle {
         self.started_at.elapsed()
     }
 
-    pub fn is_terminal(&self) -> bool {
+    pub const fn is_terminal(&self) -> bool {
         matches!(self.state, ScaleInState::Removed | ScaleInState::Failed)
     }
 }
@@ -423,7 +423,7 @@ impl ClusterAdmin {
     }
 
     /// Get the event log.
-    pub fn event_log(&self) -> &Arc<ClusterEventLog> {
+    pub const fn event_log(&self) -> &Arc<ClusterEventLog> {
         &self.event_log
     }
 
@@ -630,9 +630,9 @@ pub enum NodeOperationalMode {
 impl std::fmt::Display for NodeOperationalMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            NodeOperationalMode::Normal => write!(f, "normal"),
-            NodeOperationalMode::ReadOnly => write!(f, "read_only"),
-            NodeOperationalMode::Drain => write!(f, "drain"),
+            Self::Normal => write!(f, "normal"),
+            Self::ReadOnly => write!(f, "read_only"),
+            Self::Drain => write!(f, "drain"),
         }
     }
 }

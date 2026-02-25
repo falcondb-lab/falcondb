@@ -18,8 +18,6 @@
 //! barrier. We do NOT use `FILE_FLAG_WRITE_THROUGH` by default because it
 //! prevents write coalescing in the OS buffer cache.
 
-#![cfg(target_os = "windows")]
-
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -134,7 +132,7 @@ impl IocpFile {
     }
 
     /// Get a reference to the I/O metrics.
-    pub fn io_metrics(&self) -> &Arc<IoMetrics> {
+    pub const fn io_metrics(&self) -> &Arc<IoMetrics> {
         &self.metrics
     }
 

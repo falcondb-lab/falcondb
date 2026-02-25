@@ -73,7 +73,7 @@ pub struct ShardRouterServer<E: QueryExecutor> {
 }
 
 impl<E: QueryExecutor> ShardRouterServer<E> {
-    pub fn new(executor: E, node_id: NodeId) -> Self {
+    pub const fn new(executor: E, node_id: NodeId) -> Self {
         Self { executor, node_id }
     }
 

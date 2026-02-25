@@ -41,7 +41,7 @@ pub enum SegmentKind {
 }
 
 impl SegmentKind {
-    pub fn from_u8(v: u8) -> Option<Self> {
+    pub const fn from_u8(v: u8) -> Option<Self> {
         match v {
             0 => Some(Self::Wal),
             1 => Some(Self::Cold),
@@ -71,7 +71,7 @@ pub enum SegmentCodec {
 }
 
 impl SegmentCodec {
-    pub fn from_u8(v: u8) -> Option<Self> {
+    pub const fn from_u8(v: u8) -> Option<Self> {
         match v {
             0 => Some(Self::None),
             1 => Some(Self::Lz4),
@@ -408,7 +408,7 @@ pub struct ManifestDelta {
 
 impl Manifest {
     /// Create an empty manifest at epoch 0.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             epoch: 0,
             segments: BTreeMap::new(),
@@ -619,7 +619,7 @@ impl SegmentStore {
         }
         let body = header.to_bytes(); // starts with header bytes
         segs.insert(id, SegmentData {
-            header: header.clone(),
+            header,
             body,
             sealed: false,
         });
@@ -1013,7 +1013,7 @@ pub struct RecoveryCoordinator {
 
 impl RecoveryCoordinator {
     /// Start recovery from a manifest.
-    pub fn new(manifest: Manifest) -> Self {
+    pub const fn new(manifest: Manifest) -> Self {
         Self {
             phase: RecoveryPhase::LoadManifest,
             manifest,
@@ -1029,7 +1029,7 @@ impl RecoveryCoordinator {
     }
 
     /// Phase 1: Load manifest (already done in constructor). Advance to verify.
-    pub fn advance_to_verify(&mut self) {
+    pub const fn advance_to_verify(&mut self) {
         self.phase = RecoveryPhase::VerifySegments;
     }
 
@@ -1064,12 +1064,12 @@ impl RecoveryCoordinator {
     }
 
     /// Phase 4: After WAL tail replay, ready to serve.
-    pub fn mark_ready(&mut self) {
+    pub const fn mark_ready(&mut self) {
         self.phase = RecoveryPhase::Ready;
     }
 
     /// Mark as failed.
-    pub fn mark_failed(&mut self) {
+    pub const fn mark_failed(&mut self) {
         self.phase = RecoveryPhase::Failed;
     }
 

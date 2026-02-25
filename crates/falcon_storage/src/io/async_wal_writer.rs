@@ -169,7 +169,7 @@ pub struct AsyncWalMetricsSnapshot {
 }
 
 impl AsyncWalMetricsSnapshot {
-    pub fn avg_sync_latency_us(&self) -> u64 {
+    pub const fn avg_sync_latency_us(&self) -> u64 {
         if self.sync_count == 0 {
             0
         } else {
@@ -540,12 +540,12 @@ impl AsyncWalWriter {
     }
 
     /// I/O metrics.
-    pub fn io_metrics(&self) -> &Arc<IoMetrics> {
+    pub const fn io_metrics(&self) -> &Arc<IoMetrics> {
         &self.metrics
     }
 
     /// WAL-specific metrics.
-    pub fn wal_metrics(&self) -> &Arc<AsyncWalMetrics> {
+    pub const fn wal_metrics(&self) -> &Arc<AsyncWalMetrics> {
         &self.wal_metrics
     }
 

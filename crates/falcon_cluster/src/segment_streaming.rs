@@ -119,7 +119,7 @@ impl fmt::Display for FollowerPhase {
 
 impl FollowerState {
     /// Create a new follower state (empty node, no data).
-    pub fn new_empty(node_id: NodeId) -> Self {
+    pub const fn new_empty(node_id: NodeId) -> Self {
         Self {
             node_id,
             local_last_lsn: StructuredLsn::ZERO,
@@ -131,7 +131,7 @@ impl FollowerState {
     }
 
     /// Create a follower state from a recovered position.
-    pub fn from_recovered(
+    pub const fn from_recovered(
         node_id: NodeId,
         last_lsn: StructuredLsn,
         sealed_segments: BTreeSet<u64>,
@@ -158,7 +158,7 @@ impl FollowerState {
     }
 
     /// Update tail position (within the active segment).
-    pub fn advance_tail(&mut self, new_offset: u64) {
+    pub const fn advance_tail(&mut self, new_offset: u64) {
         if new_offset > self.local_segment_offset {
             self.local_segment_offset = new_offset;
             self.local_last_lsn = StructuredLsn::new(self.local_segment_id, new_offset);
@@ -263,7 +263,7 @@ pub struct LeaderState {
 }
 
 impl LeaderState {
-    pub fn new(current_segment_id: u64, current_offset: u64) -> Self {
+    pub const fn new(current_segment_id: u64, current_offset: u64) -> Self {
         Self {
             current_segment_id,
             current_offset,
@@ -370,7 +370,7 @@ pub struct SegmentChunkIterator {
 
 impl SegmentChunkIterator {
     /// Create an iterator over a segment's data.
-    pub fn new(segment_id: u64, data: Vec<u8>, last_valid_offset: u64, chunk_size: u64) -> Self {
+    pub const fn new(segment_id: u64, data: Vec<u8>, last_valid_offset: u64, chunk_size: u64) -> Self {
         Self {
             segment_id,
             data,
@@ -381,12 +381,12 @@ impl SegmentChunkIterator {
     }
 
     /// Total bytes that will be streamed.
-    pub fn total_bytes(&self) -> u64 {
+    pub const fn total_bytes(&self) -> u64 {
         self.last_valid_offset
     }
 
     /// Bytes already produced.
-    pub fn bytes_produced(&self) -> u64 {
+    pub const fn bytes_produced(&self) -> u64 {
         self.current_offset
     }
 }
@@ -461,7 +461,7 @@ impl TailBatch {
     }
 
     /// The LSN at the end of this batch.
-    pub fn end_lsn(&self) -> StructuredLsn {
+    pub const fn end_lsn(&self) -> StructuredLsn {
         StructuredLsn::new(self.segment_id, self.from_offset + self.data.len() as u64)
     }
 }
@@ -794,7 +794,7 @@ pub struct BackpressureSender {
 }
 
 impl BackpressureSender {
-    pub fn new(max_inflight: u32) -> Self {
+    pub const fn new(max_inflight: u32) -> Self {
         Self {
             max_inflight,
             inflight: AtomicU64::new(0),
@@ -914,7 +914,7 @@ pub enum ErrorRecoveryAction {
 }
 
 /// Decide recovery action based on error type.
-pub fn decide_recovery(error: &StreamingError) -> ErrorRecoveryAction {
+pub const fn decide_recovery(error: &StreamingError) -> ErrorRecoveryAction {
     match error {
         StreamingError::ChecksumMismatch { .. } => ErrorRecoveryAction::RetryChunk,
         StreamingError::DiskFull { .. } => ErrorRecoveryAction::Abort,

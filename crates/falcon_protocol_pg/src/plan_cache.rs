@@ -165,7 +165,7 @@ fn normalize_sql(sql: &str) -> String {
 }
 
 /// Only cache SELECT/INSERT/UPDATE/DELETE plans, not DDL/txn control.
-fn is_cacheable(plan: &PhysicalPlan) -> bool {
+const fn is_cacheable(plan: &PhysicalPlan) -> bool {
     matches!(
         plan,
         PhysicalPlan::SeqScan { .. }

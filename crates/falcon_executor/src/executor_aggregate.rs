@@ -34,12 +34,12 @@ enum ProjAccum {
 }
 
 impl ProjAccum {
-    fn new_count_star() -> Self {
-        ProjAccum::CountStar(0)
+    const fn new_count_star() -> Self {
+        Self::CountStar(0)
     }
 
     fn new_agg(func: &AggFunc) -> Self {
-        ProjAccum::Agg {
+        Self::Agg {
             func: func.clone(),
             count: 0,
             sum_i: 0,
@@ -51,16 +51,16 @@ impl ProjAccum {
         }
     }
 
-    fn feed_count_star(&mut self) {
-        if let ProjAccum::CountStar(n) = self {
+    const fn feed_count_star(&mut self) {
+        if let Self::CountStar(n) = self {
             *n += 1;
         }
     }
 
     fn feed_value(&mut self, val: &Datum) {
         match self {
-            ProjAccum::CountStar(n) => *n += 1,
-            ProjAccum::Agg {
+            Self::CountStar(n) => *n += 1,
+            Self::Agg {
                 func,
                 count,
                 sum_i,
@@ -133,16 +133,16 @@ impl ProjAccum {
                     _ => {}
                 }
             }
-            ProjAccum::FirstVal(_) => {}
+            Self::FirstVal(_) => {}
         }
     }
 
     /// Merge two partial accumulators (used by parallel map-reduce aggregation).
     fn merge(self, other: Self) -> Self {
         match (self, other) {
-            (ProjAccum::CountStar(a), ProjAccum::CountStar(b)) => ProjAccum::CountStar(a + b),
+            (Self::CountStar(a), Self::CountStar(b)) => Self::CountStar(a + b),
             (
-                ProjAccum::Agg {
+                Self::Agg {
                     func,
                     count: c1,
                     sum_i: s1,
@@ -152,7 +152,7 @@ impl ProjAccum {
                     min_val: mn1,
                     max_val: mx1,
                 },
-                ProjAccum::Agg {
+                Self::Agg {
                     count: c2,
                     sum_i: s2,
                     sum_f: sf2,
@@ -162,7 +162,7 @@ impl ProjAccum {
                     max_val: mx2,
                     ..
                 },
-            ) => ProjAccum::Agg {
+            ) => Self::Agg {
                 func,
                 count: c1 + c2,
                 sum_i: s1 + s2,
@@ -180,15 +180,15 @@ impl ProjAccum {
                     (Some(a), Some(b)) => Some(if a > b { a } else { b }),
                 },
             },
-            (a @ ProjAccum::FirstVal(_), ProjAccum::FirstVal(_)) => a,
+            (a @ Self::FirstVal(_), Self::FirstVal(_)) => a,
             (a, _) => a,
         }
     }
 
     fn result(&self) -> Datum {
         match self {
-            ProjAccum::CountStar(n) => Datum::Int64(*n),
-            ProjAccum::Agg {
+            Self::CountStar(n) => Datum::Int64(*n),
+            Self::Agg {
                 func,
                 count,
                 sum_i,
@@ -222,7 +222,7 @@ impl ProjAccum {
                 AggFunc::Max => max_val.clone().unwrap_or(Datum::Null),
                 _ => Datum::Null,
             },
-            ProjAccum::FirstVal(d) => d.clone(),
+            Self::FirstVal(d) => d.clone(),
         }
     }
 }
@@ -438,8 +438,10 @@ impl Executor {
             groups: HashMap<Vec<u8>, (Vec<ProjAccum>, bool)>,
             key_buf: Vec<u8>,
             error: Option<FalconError>,
+            group_limit: usize,
         }
         let mat_filter_ref = &mat_filter;
+        let group_limit = self.hash_agg_group_limit;
         let result = self.storage.map_reduce_visible(
             table_id,
             txn.txn_id,
@@ -448,6 +450,7 @@ impl Executor {
                 groups: HashMap::new(),
                 key_buf: Vec::with_capacity(32),
                 error: None,
+                group_limit,
             },
             |state, row| {
                 if state.error.is_some() {
@@ -469,6 +472,18 @@ impl Executor {
                     if let Some(entry) = state.groups.get_mut(state.key_buf.as_slice()) {
                         entry
                     } else {
+                        // Check group count limit before inserting a new group
+                        if state.group_limit > 0 && state.groups.len() >= state.group_limit {
+                            state.error = Some(FalconError::Execution(
+                                ExecutionError::ResourceExhausted(format!(
+                                    "hash aggregation group limit exceeded: {} groups (limit: {}). \
+                                     Reduce cardinality or increase falcon.spill.hash_agg_group_limit",
+                                    state.groups.len(),
+                                    state.group_limit,
+                                )),
+                            ));
+                            return;
+                        }
                         let a = Self::create_accums(projections);
                         state.groups.insert(state.key_buf.clone(), (a, true));
                         state.groups.get_mut(state.key_buf.as_slice()).unwrap()
@@ -513,7 +528,7 @@ impl Executor {
 
         // Convert groups to result rows
         let mut result_rows: Vec<OwnedRow> = Vec::with_capacity(groups.len());
-        for (_key, (accums, _)) in &groups {
+        for (accums, _) in groups.values() {
             let values: Vec<Datum> = accums.iter().map(|a| a.result()).collect();
             result_rows.push(OwnedRow::new(values));
         }

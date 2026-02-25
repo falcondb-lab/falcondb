@@ -715,7 +715,7 @@ impl CheckpointStreamer {
     }
 
     /// Number of chunks.
-    pub fn num_chunks(&self) -> usize {
+    pub const fn num_chunks(&self) -> usize {
         self.chunks.len()
     }
 
@@ -797,7 +797,7 @@ impl CheckpointAssembler {
     }
 
     /// The LSN at which the checkpoint was taken.
-    pub fn checkpoint_lsn(&self) -> u64 {
+    pub const fn checkpoint_lsn(&self) -> u64 {
         self.checkpoint_lsn
     }
 }

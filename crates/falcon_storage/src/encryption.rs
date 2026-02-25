@@ -40,7 +40,7 @@ pub struct EncryptionKey {
 
 impl EncryptionKey {
     /// Create a key from raw bytes.
-    pub fn from_bytes(bytes: [u8; AES256_KEY_LEN]) -> Self {
+    pub const fn from_bytes(bytes: [u8; AES256_KEY_LEN]) -> Self {
         Self { bytes }
     }
 
@@ -100,7 +100,7 @@ impl EncryptionKey {
         Self { bytes: key }
     }
 
-    pub fn as_bytes(&self) -> &[u8; AES256_KEY_LEN] {
+    pub const fn as_bytes(&self) -> &[u8; AES256_KEY_LEN] {
         &self.bytes
     }
 }
@@ -201,7 +201,7 @@ impl KeyManager {
     }
 
     /// Whether encryption is enabled.
-    pub fn is_enabled(&self) -> bool {
+    pub const fn is_enabled(&self) -> bool {
         self.enabled
     }
 

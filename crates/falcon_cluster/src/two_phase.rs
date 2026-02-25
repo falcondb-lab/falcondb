@@ -51,7 +51,7 @@ pub struct TwoPhaseCoordinator {
 }
 
 impl TwoPhaseCoordinator {
-    pub fn new(engine: Arc<ShardedEngine>, timeout: Duration) -> Self {
+    pub const fn new(engine: Arc<ShardedEngine>, timeout: Duration) -> Self {
         Self { engine, timeout }
     }
 

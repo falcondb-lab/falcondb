@@ -36,7 +36,7 @@ pub struct TenantQuota {
 
 impl TenantQuota {
     /// Returns true if all quotas are unlimited (no enforcement).
-    pub fn is_unlimited(&self) -> bool {
+    pub const fn is_unlimited(&self) -> bool {
         self.max_qps == 0
             && self.max_memory_bytes == 0
             && self.max_concurrent_txns == 0
@@ -85,7 +85,7 @@ impl TenantConfig {
     pub fn new(tenant_id: TenantId, name: String) -> Self {
         Self {
             tenant_id,
-            name: name.clone(),
+            name,
             status: TenantStatus::Active,
             quota: TenantQuota::default(),
             default_schema: format!("tenant_{}", tenant_id.0),

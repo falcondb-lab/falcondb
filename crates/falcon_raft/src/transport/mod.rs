@@ -62,7 +62,7 @@ impl std::error::Error for TransportError {}
 
 impl TransportError {
     /// Whether this error is retryable.
-    pub fn is_retryable(&self) -> bool {
+    pub const fn is_retryable(&self) -> bool {
         matches!(
             self,
             Self::Unreachable(_) | Self::Timeout(_) | Self::ConnectionReset(_)
@@ -70,7 +70,7 @@ impl TransportError {
     }
 
     /// Suggested retry policy for this error.
-    pub fn retry_policy(&self) -> RetryPolicy {
+    pub const fn retry_policy(&self) -> RetryPolicy {
         match self {
             Self::Timeout(_) | Self::ConnectionReset(_) => RetryPolicy::ExponentialBackoff,
             Self::Unreachable(_) => RetryPolicy::ExponentialBackoff,
@@ -82,7 +82,7 @@ impl TransportError {
     }
 
     /// Metric label for this error category.
-    pub fn label(&self) -> &'static str {
+    pub const fn label(&self) -> &'static str {
         match self {
             Self::Unreachable(_) => "unreachable",
             Self::Timeout(_) => "timeout",
@@ -145,13 +145,13 @@ impl Default for RaftTransportConfig {
 }
 
 impl RaftTransportConfig {
-    pub fn connect_timeout(&self) -> Duration {
+    pub const fn connect_timeout(&self) -> Duration {
         Duration::from_millis(self.connect_timeout_ms)
     }
-    pub fn request_timeout(&self) -> Duration {
+    pub const fn request_timeout(&self) -> Duration {
         Duration::from_millis(self.request_timeout_ms)
     }
-    pub fn snapshot_chunk_timeout(&self) -> Duration {
+    pub const fn snapshot_chunk_timeout(&self) -> Duration {
         Duration::from_millis(self.snapshot_chunk_timeout_ms)
     }
 }
@@ -233,7 +233,7 @@ pub struct PeerCircuitBreaker {
 }
 
 impl PeerCircuitBreaker {
-    pub fn new(config: CircuitBreakerConfig) -> Self {
+    pub const fn new(config: CircuitBreakerConfig) -> Self {
         Self {
             config,
             state: CircuitState::Closed,
@@ -266,7 +266,7 @@ impl PeerCircuitBreaker {
     }
 
     /// Record a successful RPC.
-    pub fn record_success(&mut self) {
+    pub const fn record_success(&mut self) {
         self.consecutive_failures = 0;
         match self.state {
             CircuitState::HalfOpen => {
@@ -286,20 +286,19 @@ impl PeerCircuitBreaker {
     pub fn record_failure(&mut self) {
         self.consecutive_successes = 0;
         self.consecutive_failures += 1;
-        if self.consecutive_failures >= self.config.failure_threshold {
-            if self.state != CircuitState::Open {
+        if self.consecutive_failures >= self.config.failure_threshold
+            && self.state != CircuitState::Open {
                 self.state = CircuitState::Open;
                 self.opened_at = Some(std::time::Instant::now());
                 self.total_trips += 1;
             }
-        }
     }
 
-    pub fn state(&self) -> CircuitState {
+    pub const fn state(&self) -> CircuitState {
         self.state
     }
 
-    pub fn total_trips(&self) -> u64 {
+    pub const fn total_trips(&self) -> u64 {
         self.total_trips
     }
 }

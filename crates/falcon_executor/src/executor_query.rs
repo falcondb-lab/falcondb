@@ -405,8 +405,38 @@ impl Executor {
             );
         }
 
+        let projs_have_correlated = projections.iter().any(|p| match p {
+            BoundProjection::Expr(e, _) => Self::expr_has_outer_ref(e),
+            _ => false,
+        });
+
+        // Early-limit capacity hint: if no ORDER BY/DISTINCT/window, we know the max output size.
+        let capacity_hint = match (order_by.is_empty() && matches!(distinct, DistinctMode::None) && !has_window, limit, offset) {
+            (true, Some(lim), Some(off)) => lim + off,
+            (true, Some(lim), None) => lim,
+            _ => raw_rows.len(),
+        };
+
+        let mut columns = self.resolve_output_columns(projections, schema);
+        // For window functions we still need the filtered row references.
         let mut filtered: Vec<&OwnedRow> = Vec::new();
+        let mut result_rows: Vec<OwnedRow> = Vec::with_capacity(capacity_hint.min(raw_rows.len()));
+
+        // Effective row limit for early cutoff (only when no sort/distinct/window).
+        let early_limit = if order_by.is_empty() && matches!(distinct, DistinctMode::None) && !has_window {
+            limit.map(|l| l + offset.unwrap_or(0))
+        } else {
+            None
+        };
+
         for (_pk, row) in &raw_rows {
+            // Early cutoff: stop scanning once we have enough rows.
+            if let Some(max) = early_limit {
+                if result_rows.len() >= max {
+                    break;
+                }
+            }
+
             if let Some(ref f) = mat_filter {
                 if filter_has_correlated_sub {
                     let row_filter = self.materialize_correlated(f, row, txn)?;
@@ -421,17 +451,12 @@ impl Executor {
                     continue;
                 }
             }
-            filtered.push(row);
-        }
 
-        let projs_have_correlated = projections.iter().any(|p| match p {
-            BoundProjection::Expr(e, _) => Self::expr_has_outer_ref(e),
-            _ => false,
-        });
+            if has_window {
+                filtered.push(row);
+            }
 
-        let mut columns = self.resolve_output_columns(projections, schema);
-        let mut result_rows: Vec<OwnedRow> = Vec::new();
-        for row in &filtered {
+            // Project immediately (single-pass filter+project).
             if projs_have_correlated {
                 result_rows.push(self.project_row_correlated(row, projections, txn)?);
             } else {
@@ -553,7 +578,7 @@ impl Executor {
             && virtual_rows.is_empty()
             && table_id != TableId(0)
             && cte_data.get(&table_id).is_none()
-            && !filter.is_some_and(|f| Self::expr_has_outer_ref(f))
+            && !filter.is_some_and(Self::expr_has_outer_ref)
             && Self::is_fused_eligible(projections, grouping_sets, having)
         {
             return self.exec_fused_aggregate(

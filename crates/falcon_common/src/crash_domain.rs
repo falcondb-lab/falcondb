@@ -104,9 +104,9 @@ pub fn install_panic_hook() {
 
         // Store in ring buffer
         let event = PanicEvent {
-            message: message.clone(),
-            location: location.clone(),
-            thread_name: thread_name.clone(),
+            message,
+            location,
+            thread_name,
             occurred_at_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()

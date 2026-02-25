@@ -6,13 +6,13 @@ use crate::runner::format_rows_as_string;
 use anyhow::Result;
 
 /// Type of integration endpoint.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IntegrationType {
     Webhook,
 }
 
 impl IntegrationType {
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         "webhook"
     }
 
@@ -35,7 +35,7 @@ pub struct Integration {
 }
 
 /// Sub-command for \integration.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IntegrationCmd {
     List,
     AddWebhook(String),
@@ -54,7 +54,7 @@ impl IntegrationCmd {
 
         match verb.as_str() {
             "add" => {
-                let kind = rest.get(0).copied().unwrap_or("").to_lowercase();
+                let kind = rest.first().copied().unwrap_or("").to_lowercase();
                 let endpoint = rest.get(1).copied().unwrap_or("").to_string();
                 if kind == "webhook" {
                     Self::AddWebhook(endpoint)
@@ -63,15 +63,15 @@ impl IntegrationCmd {
                 }
             }
             "remove" | "delete" => {
-                let id = rest.get(0).copied().unwrap_or("").to_string();
+                let id = rest.first().copied().unwrap_or("").to_string();
                 Self::Remove(id)
             }
             "disable" => {
-                let id = rest.get(0).copied().unwrap_or("").to_string();
+                let id = rest.first().copied().unwrap_or("").to_string();
                 Self::Disable(id)
             }
             "enable" => {
-                let id = rest.get(0).copied().unwrap_or("").to_string();
+                let id = rest.first().copied().unwrap_or("").to_string();
                 Self::Enable(id)
             }
             _ => {

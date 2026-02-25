@@ -4,7 +4,7 @@ use crate::runner::format_rows_as_string;
 use anyhow::Result;
 
 /// Sub-command for \audit.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuditCmd {
     Recent,
     Detail(String),

@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::datum::Datum;
+use crate::security::{Role, RoleCatalog, RoleId, SUPERUSER_ROLE_ID};
+use crate::tenant::SYSTEM_TENANT_ID;
 use crate::types::{ColumnId, DataType, TableId};
 
 /// Sharding policy for a table in a distributed cluster.
@@ -139,7 +141,7 @@ impl TableSchema {
     }
 
     /// Number of columns.
-    pub fn num_columns(&self) -> usize {
+    pub const fn num_columns(&self) -> usize {
         self.columns.len()
     }
 
@@ -185,10 +187,42 @@ pub struct ViewDef {
     pub query_sql: String,
 }
 
-/// In-memory catalog: all known tables and views.
-/// Thread-safe via external synchronization (DashMap in storage).
+/// A schema (namespace) entry in the catalog.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaEntry {
+    /// Schema name (case-preserving, lookup is case-insensitive).
+    pub name: String,
+    /// Owner role name.
+    pub owner: String,
+}
+
+/// Serializable role entry for WAL/checkpoint persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoleEntry {
+    pub id: u64,
+    pub name: String,
+    pub can_login: bool,
+    pub is_superuser: bool,
+    pub can_create_db: bool,
+    pub can_create_role: bool,
+    pub password_hash: Option<String>,
+    pub member_of: Vec<u64>,
+}
+
+/// Serializable grant entry for WAL/checkpoint persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrantEntryCompact {
+    pub grantee_id: u64,
+    pub privilege: String,
+    pub object_type: String,
+    pub object_name: String,
+    pub grantor_id: u64,
+}
+
+/// In-memory catalog: all known tables, views, schemas, roles, and privileges.
+/// Thread-safe via external synchronization (RwLock in storage).
 /// Tables are stored in a HashMap keyed by lowercase table name for O(1) lookup.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Catalog {
     tables: HashMap<String, TableSchema>,
     next_table_id: u64,
@@ -198,6 +232,21 @@ pub struct Catalog {
     databases: Vec<DatabaseEntry>,
     #[serde(default = "Catalog::default_next_db_oid")]
     next_database_oid: u32,
+    /// Schemas (namespaces). Default: "public".
+    #[serde(default = "Catalog::default_schemas")]
+    schemas: Vec<SchemaEntry>,
+    /// Serializable role entries (rebuilt into RoleCatalog on load).
+    #[serde(default = "Catalog::default_role_entries")]
+    role_entries: Vec<RoleEntry>,
+    /// Next role ID counter.
+    #[serde(default = "Catalog::default_next_role_id")]
+    next_role_id: u64,
+    /// Serializable grant entries.
+    #[serde(default)]
+    grant_entries: Vec<GrantEntryCompact>,
+    /// In-memory role catalog (not serialized — rebuilt from role_entries).
+    #[serde(skip)]
+    role_catalog: Option<RoleCatalog>,
 }
 
 impl Catalog {
@@ -210,21 +259,95 @@ impl Catalog {
         }]
     }
 
-    fn default_next_db_oid() -> u32 {
+    const fn default_next_db_oid() -> u32 {
         2
     }
 
+    fn default_schemas() -> Vec<SchemaEntry> {
+        vec![
+            SchemaEntry { name: "public".to_string(), owner: "falcon".to_string() },
+            SchemaEntry { name: "pg_catalog".to_string(), owner: "falcon".to_string() },
+            SchemaEntry { name: "information_schema".to_string(), owner: "falcon".to_string() },
+        ]
+    }
+
+    fn default_role_entries() -> Vec<RoleEntry> {
+        vec![RoleEntry {
+            id: 0,
+            name: "falcon".to_string(),
+            can_login: true,
+            is_superuser: true,
+            can_create_db: true,
+            can_create_role: true,
+            password_hash: None,
+            member_of: Vec::new(),
+        }]
+    }
+
+    const fn default_next_role_id() -> u64 {
+        1
+    }
+
     pub fn new() -> Self {
-        Self {
+        let mut catalog = Self {
             tables: HashMap::new(),
             next_table_id: 1,
             views: Vec::new(),
             databases: Self::default_databases(),
             next_database_oid: 2,
+            schemas: Self::default_schemas(),
+            role_entries: Self::default_role_entries(),
+            next_role_id: 1,
+            grant_entries: Vec::new(),
+            role_catalog: None,
+        };
+        catalog.rebuild_role_catalog();
+        catalog
+    }
+
+    /// Rebuild the in-memory RoleCatalog from serialized role_entries.
+    fn rebuild_role_catalog(&mut self) {
+        use std::collections::HashSet;
+        let mut rc = RoleCatalog::new();
+        // RoleCatalog::new() already adds superuser. Remove it first to avoid duplicates.
+        rc.remove_role(SUPERUSER_ROLE_ID);
+        for entry in &self.role_entries {
+            let mut role = Role::new_user(
+                RoleId(entry.id),
+                entry.name.clone(),
+                SYSTEM_TENANT_ID,
+            );
+            role.can_login = entry.can_login;
+            role.is_superuser = entry.is_superuser;
+            role.can_create_db = entry.can_create_db;
+            role.can_create_role = entry.can_create_role;
+            role.password_hash = entry.password_hash.clone();
+            role.member_of = entry.member_of.iter().map(|&id| RoleId(id)).collect::<HashSet<_>>();
+            rc.add_role(role);
+        }
+        self.role_catalog = Some(rc);
+    }
+
+    /// Ensure role_catalog is initialized (called after deserialization).
+    pub fn ensure_role_catalog(&mut self) {
+        if self.role_catalog.is_none() {
+            self.rebuild_role_catalog();
         }
     }
 
-    pub fn next_table_id(&mut self) -> TableId {
+    /// Get a reference to the in-memory role catalog.
+    pub fn role_catalog(&mut self) -> &RoleCatalog {
+        self.ensure_role_catalog();
+        self.role_catalog.as_ref().unwrap()
+    }
+
+    /// Get a mutable reference to the in-memory role catalog.
+    pub fn role_catalog_mut(&mut self) -> &mut RoleCatalog {
+        self.ensure_role_catalog();
+        self.role_catalog.as_mut().unwrap()
+    }
+
+    pub const fn next_table_id(&mut self) -> TableId {
         let id = TableId(self.next_table_id);
         self.next_table_id += 1;
         id
@@ -276,7 +399,7 @@ impl Catalog {
     }
 
     /// Direct access to the underlying table map (for iteration by ID, etc.)
-    pub fn tables_map(&self) -> &HashMap<String, TableSchema> {
+    pub const fn tables_map(&self) -> &HashMap<String, TableSchema> {
         &self.tables
     }
 
@@ -341,5 +464,289 @@ impl Catalog {
 
     pub fn list_databases(&self) -> &[DatabaseEntry] {
         &self.databases
+    }
+
+    // ── Schema management ──
+
+    pub fn create_schema(&mut self, name: &str, owner: &str) -> Result<(), String> {
+        let lower = name.to_lowercase();
+        if self.schemas.iter().any(|s| s.name.to_lowercase() == lower) {
+            return Err(format!("schema \"{}\" already exists", name));
+        }
+        self.schemas.push(SchemaEntry {
+            name: name.to_string(),
+            owner: owner.to_string(),
+        });
+        Ok(())
+    }
+
+    pub fn drop_schema(&mut self, name: &str) -> Result<(), String> {
+        let lower = name.to_lowercase();
+        if lower == "public" || lower == "pg_catalog" || lower == "information_schema" {
+            return Err(format!("cannot drop built-in schema \"{}\"", name));
+        }
+        let len_before = self.schemas.len();
+        self.schemas.retain(|s| s.name.to_lowercase() != lower);
+        if self.schemas.len() < len_before {
+            Ok(())
+        } else {
+            Err(format!("schema \"{}\" does not exist", name))
+        }
+    }
+
+    pub fn find_schema(&self, name: &str) -> Option<&SchemaEntry> {
+        let lower = name.to_lowercase();
+        self.schemas.iter().find(|s| s.name.to_lowercase() == lower)
+    }
+
+    pub fn list_schemas(&self) -> &[SchemaEntry] {
+        &self.schemas
+    }
+
+    /// Resolve a potentially schema-qualified table name.
+    /// If name contains '.', treat left part as schema prefix and strip it.
+    pub fn resolve_table_name(&self, name: &str) -> String {
+        if let Some(dot_pos) = name.find('.') {
+            name[dot_pos + 1..].to_string()
+        } else {
+            name.to_string()
+        }
+    }
+
+    // ── Role management ──
+
+    pub fn create_role(
+        &mut self,
+        name: &str,
+        can_login: bool,
+        is_superuser: bool,
+        can_create_db: bool,
+        can_create_role: bool,
+        password: Option<String>,
+    ) -> Result<u64, String> {
+        let lower = name.to_lowercase();
+        if self.role_entries.iter().any(|r| r.name.to_lowercase() == lower) {
+            return Err(format!("role \"{}\" already exists", name));
+        }
+        let id = self.next_role_id;
+        self.next_role_id += 1;
+        self.role_entries.push(RoleEntry {
+            id,
+            name: name.to_string(),
+            can_login,
+            is_superuser,
+            can_create_db,
+            can_create_role,
+            password_hash: password,
+            member_of: Vec::new(),
+        });
+        self.rebuild_role_catalog();
+        Ok(id)
+    }
+
+    pub fn drop_role(&mut self, name: &str) -> Result<(), String> {
+        let lower = name.to_lowercase();
+        if lower == "falcon" {
+            return Err("cannot drop the superuser role \"falcon\"".to_string());
+        }
+        let len_before = self.role_entries.len();
+        if let Some(entry) = self.role_entries.iter().find(|r| r.name.to_lowercase() == lower) {
+            let role_id = entry.id;
+            self.grant_entries.retain(|g| g.grantee_id != role_id && g.grantor_id != role_id);
+            for r in &mut self.role_entries {
+                r.member_of.retain(|&id| id != role_id);
+            }
+        }
+        self.role_entries.retain(|r| r.name.to_lowercase() != lower);
+        if self.role_entries.len() < len_before {
+            self.rebuild_role_catalog();
+            Ok(())
+        } else {
+            Err(format!("role \"{}\" does not exist", name))
+        }
+    }
+
+    pub fn alter_role(
+        &mut self,
+        name: &str,
+        password: Option<Option<String>>,
+        can_login: Option<bool>,
+        is_superuser: Option<bool>,
+        can_create_db: Option<bool>,
+        can_create_role: Option<bool>,
+    ) -> Result<(), String> {
+        let lower = name.to_lowercase();
+        let entry = self.role_entries.iter_mut()
+            .find(|r| r.name.to_lowercase() == lower)
+            .ok_or_else(|| format!("role \"{}\" does not exist", name))?;
+        if let Some(pw) = password {
+            entry.password_hash = pw;
+        }
+        if let Some(v) = can_login {
+            entry.can_login = v;
+        }
+        if let Some(v) = is_superuser {
+            entry.is_superuser = v;
+        }
+        if let Some(v) = can_create_db {
+            entry.can_create_db = v;
+        }
+        if let Some(v) = can_create_role {
+            entry.can_create_role = v;
+        }
+        self.rebuild_role_catalog();
+        Ok(())
+    }
+
+    pub fn find_role_by_name(&self, name: &str) -> Option<&RoleEntry> {
+        let lower = name.to_lowercase();
+        self.role_entries.iter().find(|r| r.name.to_lowercase() == lower)
+    }
+
+    pub fn list_role_entries(&self) -> &[RoleEntry] {
+        &self.role_entries
+    }
+
+    // ── Privilege management ──
+
+    pub fn grant_privilege(
+        &mut self,
+        grantee_name: &str,
+        privilege: &str,
+        object_type: &str,
+        object_name: &str,
+        grantor_name: &str,
+    ) -> Result<(), String> {
+        let grantee = self.find_role_by_name(grantee_name)
+            .ok_or_else(|| format!("role \"{}\" does not exist", grantee_name))?;
+        let grantee_id = grantee.id;
+        let grantor = self.find_role_by_name(grantor_name)
+            .ok_or_else(|| format!("role \"{}\" does not exist", grantor_name))?;
+        let grantor_id = grantor.id;
+
+        let exists = self.grant_entries.iter().any(|g| {
+            g.grantee_id == grantee_id
+                && g.privilege == privilege
+                && g.object_type == object_type
+                && g.object_name.to_lowercase() == object_name.to_lowercase()
+        });
+        if !exists {
+            self.grant_entries.push(GrantEntryCompact {
+                grantee_id,
+                privilege: privilege.to_string(),
+                object_type: object_type.to_string(),
+                object_name: object_name.to_string(),
+                grantor_id,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn revoke_privilege(
+        &mut self,
+        grantee_name: &str,
+        privilege: &str,
+        object_type: &str,
+        object_name: &str,
+    ) -> Result<(), String> {
+        let grantee = self.find_role_by_name(grantee_name)
+            .ok_or_else(|| format!("role \"{}\" does not exist", grantee_name))?;
+        let grantee_id = grantee.id;
+        self.grant_entries.retain(|g| {
+            !(g.grantee_id == grantee_id
+                && g.privilege == privilege
+                && g.object_type == object_type
+                && g.object_name.to_lowercase() == object_name.to_lowercase())
+        });
+        Ok(())
+    }
+
+    /// Grant role membership: make `member_name` a member of `group_name`.
+    pub fn grant_role_membership(&mut self, member_name: &str, group_name: &str) -> Result<(), String> {
+        let member_lower = member_name.to_lowercase();
+        let group_lower = group_name.to_lowercase();
+        let group_entry = self.role_entries.iter()
+            .find(|r| r.name.to_lowercase() == group_lower)
+            .ok_or_else(|| format!("role \"{}\" does not exist", group_name))?;
+        let group_id = group_entry.id;
+
+        let member_entry = self.role_entries.iter_mut()
+            .find(|r| r.name.to_lowercase() == member_lower)
+            .ok_or_else(|| format!("role \"{}\" does not exist", member_name))?;
+        if !member_entry.member_of.contains(&group_id) {
+            member_entry.member_of.push(group_id);
+        }
+        self.rebuild_role_catalog();
+        Ok(())
+    }
+
+    /// Revoke role membership.
+    pub fn revoke_role_membership(&mut self, member_name: &str, group_name: &str) -> Result<(), String> {
+        let member_lower = member_name.to_lowercase();
+        let group_lower = group_name.to_lowercase();
+        let group_entry = self.role_entries.iter()
+            .find(|r| r.name.to_lowercase() == group_lower)
+            .ok_or_else(|| format!("role \"{}\" does not exist", group_name))?;
+        let group_id = group_entry.id;
+
+        let member_entry = self.role_entries.iter_mut()
+            .find(|r| r.name.to_lowercase() == member_lower)
+            .ok_or_else(|| format!("role \"{}\" does not exist", member_name))?;
+        member_entry.member_of.retain(|&id| id != group_id);
+        self.rebuild_role_catalog();
+        Ok(())
+    }
+
+    pub fn list_grants(&self) -> &[GrantEntryCompact] {
+        &self.grant_entries
+    }
+
+    /// Check if a role has a specific privilege on an object.
+    /// Superusers bypass all checks.
+    pub fn check_privilege(
+        &mut self,
+        role_name: &str,
+        privilege: &str,
+        object_type: &str,
+        object_name: &str,
+    ) -> bool {
+        let lower = role_name.to_lowercase();
+        let entry = match self.role_entries.iter().find(|r| r.name.to_lowercase() == lower) {
+            Some(e) => e,
+            None => return false,
+        };
+        if entry.is_superuser {
+            return true;
+        }
+        let role_id = entry.id;
+
+        self.ensure_role_catalog();
+        let rc = self.role_catalog.as_ref().unwrap();
+        let effective = rc.effective_roles(RoleId(role_id));
+        let effective_ids: Vec<u64> = effective.iter().map(|r| r.0).collect();
+
+        let obj_lower = object_name.to_lowercase();
+        let priv_upper = privilege.to_uppercase();
+        for g in &self.grant_entries {
+            if !effective_ids.contains(&g.grantee_id) {
+                continue;
+            }
+            if g.object_type.to_uppercase() != object_type.to_uppercase() {
+                continue;
+            }
+            if g.object_name.to_lowercase() != obj_lower {
+                continue;
+            }
+            if g.privilege.to_uppercase() == priv_upper || g.privilege.to_uppercase() == "ALL" {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+impl Default for Catalog {
+    fn default() -> Self {
+        Self::new()
     }
 }

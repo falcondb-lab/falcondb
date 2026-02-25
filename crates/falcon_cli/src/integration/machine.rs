@@ -2,7 +2,9 @@ use serde_json::{json, Value};
 
 /// Output mode for the CLI.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub enum CliMode {
+    #[default]
     Interactive,
     Machine,
 }
@@ -16,16 +18,11 @@ impl CliMode {
         }
     }
 
-    pub fn is_machine(&self) -> bool {
+    pub const fn is_machine(&self) -> bool {
         matches!(self, Self::Machine)
     }
 }
 
-impl Default for CliMode {
-    fn default() -> Self {
-        Self::Interactive
-    }
-}
 
 /// Wrap any string output in a machine-mode JSON envelope.
 /// In machine mode all output is JSON with a stable schema.

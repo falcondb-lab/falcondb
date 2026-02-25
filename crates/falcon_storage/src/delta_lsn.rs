@@ -88,7 +88,7 @@ pub enum ProtocolVersion {
 }
 
 impl ProtocolVersion {
-    pub fn from_u8(v: u8) -> Option<Self> {
+    pub const fn from_u8(v: u8) -> Option<Self> {
         match v {
             0 => Some(Self::V0FullLsn),
             1 => Some(Self::V1DeltaLsn),
@@ -96,7 +96,7 @@ impl ProtocolVersion {
         }
     }
 
-    pub fn as_u8(self) -> u8 {
+    pub const fn as_u8(self) -> u8 {
         self as u8
     }
 }
@@ -158,7 +158,7 @@ pub struct ReplicateSegmentHeader {
 pub const STREAM_HEADER_SIZE: usize = 25;
 
 impl ReplicateSegmentHeader {
-    pub fn new(
+    pub const fn new(
         version: ProtocolVersion,
         segment_id: u64,
         base_offset: u64,
@@ -311,7 +311,7 @@ pub struct DeltaStreamEncoder {
 
 impl DeltaStreamEncoder {
     /// Create a new encoder for a segment stream.
-    pub fn new(header: ReplicateSegmentHeader) -> Self {
+    pub const fn new(header: ReplicateSegmentHeader) -> Self {
         Self {
             current_offset: header.base_offset,
             header,
@@ -342,9 +342,9 @@ impl DeltaStreamEncoder {
     }
 
     /// Total frames encoded.
-    pub fn frames_encoded(&self) -> u64 { self.frames_encoded }
+    pub const fn frames_encoded(&self) -> u64 { self.frames_encoded }
     /// Total bytes in the encoded stream (excluding header).
-    pub fn bytes_encoded(&self) -> u64 { self.bytes_encoded }
+    pub const fn bytes_encoded(&self) -> u64 { self.bytes_encoded }
 }
 
 /// Decodes a delta-encoded byte stream back to absolute offsets + payloads.
@@ -369,7 +369,7 @@ pub struct DecodedRecord {
 
 impl DeltaStreamDecoder {
     /// Create a decoder from a stream header.
-    pub fn new(header: ReplicateSegmentHeader) -> Self {
+    pub const fn new(header: ReplicateSegmentHeader) -> Self {
         Self {
             current_offset: header.base_offset,
             header,
@@ -410,7 +410,7 @@ impl DeltaStreamDecoder {
     }
 
     /// Total frames decoded.
-    pub fn frames_decoded(&self) -> u64 { self.frames_decoded }
+    pub const fn frames_decoded(&self) -> u64 { self.frames_decoded }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -460,7 +460,7 @@ pub enum DeltaRecoveryAction {
     Abort,
 }
 
-pub fn decide_delta_recovery(error: &DeltaStreamError) -> DeltaRecoveryAction {
+pub const fn decide_delta_recovery(error: &DeltaStreamError) -> DeltaRecoveryAction {
     match error {
         DeltaStreamError::CrcMismatch { .. } => DeltaRecoveryAction::RetryFromLastGood,
         DeltaStreamError::TruncatedFrame { .. } => DeltaRecoveryAction::RetryFromLastGood,

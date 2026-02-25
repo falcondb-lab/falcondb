@@ -551,12 +551,12 @@ impl StorageEngine {
     }
 
     /// Set the node role. Must be called before any DML.
-    pub fn set_node_role(&mut self, role: NodeRole) {
+    pub const fn set_node_role(&mut self, role: NodeRole) {
         self.node_role = role;
     }
 
     /// Current node role.
-    pub fn node_role(&self) -> NodeRole {
+    pub const fn node_role(&self) -> NodeRole {
         self.node_role
     }
 
@@ -574,19 +574,19 @@ impl StorageEngine {
 
     /// Set the write-path enforcement level.
     /// Call this after `set_node_role` to configure production enforcement.
-    pub fn set_write_path_enforcement(&mut self, enforcement: WritePathEnforcement) {
+    pub const fn set_write_path_enforcement(&mut self, enforcement: WritePathEnforcement) {
         self.write_path_enforcement = enforcement;
     }
 
     /// Set whether LSM tables sync every write to disk.
     /// false = WAL provides crash recovery (faster bulk insert).
     /// true  = every LSM write is fsynced (extra durability).
-    pub fn set_lsm_sync_writes(&mut self, sync: bool) {
+    pub const fn set_lsm_sync_writes(&mut self, sync: bool) {
         self.lsm_sync_writes = sync;
     }
 
     /// Current write-path enforcement level.
-    pub fn write_path_enforcement(&self) -> WritePathEnforcement {
+    pub const fn write_path_enforcement(&self) -> WritePathEnforcement {
         self.write_path_enforcement
     }
 
@@ -800,7 +800,7 @@ impl StorageEngine {
     }
 
     /// Access the online DDL manager for status queries.
-    pub fn online_ddl(&self) -> &OnlineDdlManager {
+    pub const fn online_ddl(&self) -> &OnlineDdlManager {
         &self.online_ddl
     }
 
@@ -810,17 +810,17 @@ impl StorageEngine {
     }
 
     /// Check whether WAL is enabled for this engine.
-    pub fn is_wal_enabled(&self) -> bool {
+    pub const fn is_wal_enabled(&self) -> bool {
         self.wal.is_some()
     }
 
     /// Access the replica ack tracker for updating/querying replica timestamps.
-    pub fn replica_ack_tracker(&self) -> &ReplicaAckTracker {
+    pub const fn replica_ack_tracker(&self) -> &ReplicaAckTracker {
         &self.replica_ack_tracker
     }
 
     /// Set GC configuration.
-    pub fn set_gc_config(&mut self, config: crate::gc::GcConfig) {
+    pub const fn set_gc_config(&mut self, config: crate::gc::GcConfig) {
         self.gc_config = config;
     }
 
@@ -830,7 +830,7 @@ impl StorageEngine {
     }
 
     /// Get a reference to the internal GC stats (for use by GcRunner).
-    pub fn gc_stats_snapshot_ref(&self) -> &crate::gc::GcStats {
+    pub const fn gc_stats_snapshot_ref(&self) -> &crate::gc::GcStats {
         &self.gc_stats
     }
 
@@ -1374,7 +1374,7 @@ impl StorageEngine {
     // ── Memory Backpressure ─────────────────────────────────────────
 
     /// Get a reference to the shard-local memory tracker.
-    pub fn memory_tracker(&self) -> &MemoryTracker {
+    pub const fn memory_tracker(&self) -> &MemoryTracker {
         &self.memory_tracker
     }
 
@@ -1872,6 +1872,84 @@ impl StorageEngine {
                             indexes.retain(|idx| idx.column_idx != *column_idx);
                         }
                     }
+                }
+                WalRecord::CreateSchema { name, owner } => {
+                    let mut catalog = engine.catalog.write();
+                    let _ = catalog.create_schema(name, owner);
+                }
+                WalRecord::DropSchema { name } => {
+                    let mut catalog = engine.catalog.write();
+                    let _ = catalog.drop_schema(name);
+                }
+                WalRecord::CreateRole {
+                    name,
+                    can_login,
+                    is_superuser,
+                    can_create_db,
+                    can_create_role,
+                    password_hash,
+                } => {
+                    let mut catalog = engine.catalog.write();
+                    let _ = catalog.create_role(
+                        name,
+                        *can_login,
+                        *is_superuser,
+                        *can_create_db,
+                        *can_create_role,
+                        password_hash.clone(),
+                    );
+                }
+                WalRecord::DropRole { name } => {
+                    let mut catalog = engine.catalog.write();
+                    let _ = catalog.drop_role(name);
+                }
+                WalRecord::AlterRole { name, options_json } => {
+                    #[derive(serde::Deserialize)]
+                    struct AlterOpts {
+                        password: Option<Option<String>>,
+                        can_login: Option<bool>,
+                        is_superuser: Option<bool>,
+                        can_create_db: Option<bool>,
+                        can_create_role: Option<bool>,
+                    }
+                    if let Ok(opts) = serde_json::from_str::<AlterOpts>(options_json) {
+                        let mut catalog = engine.catalog.write();
+                        let _ = catalog.alter_role(
+                            name,
+                            opts.password,
+                            opts.can_login,
+                            opts.is_superuser,
+                            opts.can_create_db,
+                            opts.can_create_role,
+                        );
+                    }
+                }
+                WalRecord::GrantPrivilege {
+                    grantee,
+                    privilege,
+                    object_type,
+                    object_name,
+                    grantor,
+                } => {
+                    let mut catalog = engine.catalog.write();
+                    let _ = catalog.grant_privilege(grantee, privilege, object_type, object_name, grantor);
+                }
+                WalRecord::RevokePrivilege {
+                    grantee,
+                    privilege,
+                    object_type,
+                    object_name,
+                } => {
+                    let mut catalog = engine.catalog.write();
+                    let _ = catalog.revoke_privilege(grantee, privilege, object_type, object_name);
+                }
+                WalRecord::GrantRole { member, group } => {
+                    let mut catalog = engine.catalog.write();
+                    let _ = catalog.grant_role_membership(member, group);
+                }
+                WalRecord::RevokeRole { member, group } => {
+                    let mut catalog = engine.catalog.write();
+                    let _ = catalog.revoke_role_membership(member, group);
                 }
                 WalRecord::PrepareTxn { .. } => {
                     // Prepared but not committed records remain invisible after recovery.

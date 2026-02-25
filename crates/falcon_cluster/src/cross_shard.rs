@@ -57,7 +57,7 @@ pub struct CrossShardLatencyBreakdown {
 
 impl CrossShardLatencyBreakdown {
     /// Compute total from phases (for validation).
-    pub fn computed_total(&self) -> u64 {
+    pub const fn computed_total(&self) -> u64 {
         self.coord_queue_us
             + self.route_plan_us
             + self.read_phase_us
@@ -330,7 +330,7 @@ pub enum FailureClass {
 
 impl FailureClass {
     /// Classify a FalconError into a FailureClass.
-    pub fn classify(err: &falcon_common::error::FalconError) -> Self {
+    pub const fn classify(err: &falcon_common::error::FalconError) -> Self {
         use falcon_common::error::*;
         match err {
             // Conflicts → retry with backoff
@@ -361,7 +361,7 @@ impl FailureClass {
     }
 
     /// Whether this failure class is retryable.
-    pub fn is_retryable(&self) -> bool {
+    pub const fn is_retryable(&self) -> bool {
         matches!(self, Self::Transient | Self::Conflict)
     }
 }
@@ -461,7 +461,7 @@ pub struct CircuitBreaker {
 }
 
 impl CircuitBreaker {
-    pub fn new(failure_threshold: u64, recovery_timeout: Duration) -> Self {
+    pub const fn new(failure_threshold: u64, recovery_timeout: Duration) -> Self {
         Self {
             state: Mutex::new(CircuitState::Closed),
             consecutive_failures: AtomicU64::new(0),
@@ -989,7 +989,7 @@ struct ShardSlowPathState {
 }
 
 impl ShardSlowPathState {
-    fn new(limit: u64) -> Self {
+    const fn new(limit: u64) -> Self {
         Self {
             inflight: AtomicU64::new(0),
             limit: AtomicU64::new(limit),

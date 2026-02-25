@@ -39,8 +39,8 @@ pub enum CoordinatorDecision {
 impl std::fmt::Display for CoordinatorDecision {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CoordinatorDecision::Commit => write!(f, "commit"),
-            CoordinatorDecision::Abort => write!(f, "abort"),
+            Self::Commit => write!(f, "commit"),
+            Self::Abort => write!(f, "abort"),
         }
     }
 }
@@ -276,16 +276,16 @@ pub enum TimeoutResult {
 impl std::fmt::Display for TimeoutResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TimeoutResult::Ok => write!(f, "ok"),
-            TimeoutResult::SoftTimeout {
+            Self::Ok => write!(f, "ok"),
+            Self::SoftTimeout {
                 elapsed_ms,
                 budget_ms,
             } => write!(f, "soft_timeout({}ms/{}ms)", elapsed_ms, budget_ms),
-            TimeoutResult::HardTimeout {
+            Self::HardTimeout {
                 elapsed_ms,
                 budget_ms,
             } => write!(f, "hard_timeout({}ms/{}ms)", elapsed_ms, budget_ms),
-            TimeoutResult::ShardTimeout {
+            Self::ShardTimeout {
                 shard_id,
                 elapsed_us,
                 budget_us,
@@ -361,7 +361,7 @@ impl LayeredTimeoutController {
     }
 
     /// Get the configuration.
-    pub fn config(&self) -> &LayeredTimeoutConfig {
+    pub const fn config(&self) -> &LayeredTimeoutConfig {
         &self.config
     }
 
@@ -415,9 +415,9 @@ pub enum SlowShardPolicy {
 impl std::fmt::Display for SlowShardPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SlowShardPolicy::FastAbort => write!(f, "fast_abort"),
-            SlowShardPolicy::HedgedRequest => write!(f, "hedged_request"),
-            SlowShardPolicy::Wait => write!(f, "wait"),
+            Self::FastAbort => write!(f, "fast_abort"),
+            Self::HedgedRequest => write!(f, "hedged_request"),
+            Self::Wait => write!(f, "wait"),
         }
     }
 }
@@ -582,7 +582,7 @@ impl SlowShardTracker {
     }
 
     /// Get the current policy.
-    pub fn policy(&self) -> SlowShardPolicy {
+    pub const fn policy(&self) -> SlowShardPolicy {
         self.config.policy
     }
 

@@ -40,15 +40,15 @@ pub enum GatewayRole {
 }
 
 impl GatewayRole {
-    pub fn accepts_client_connections(&self) -> bool {
+    pub const fn accepts_client_connections(&self) -> bool {
         matches!(self, Self::DedicatedGateway | Self::SmartGateway)
     }
 
-    pub fn owns_shards(&self) -> bool {
+    pub const fn owns_shards(&self) -> bool {
         matches!(self, Self::SmartGateway | Self::ComputeOnly)
     }
 
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::DedicatedGateway => "dedicated_gateway",
             Self::SmartGateway => "smart_gateway",
@@ -75,7 +75,7 @@ pub enum ClusterTopology {
 }
 
 impl ClusterTopology {
-    pub fn recommend(node_count: usize) -> Self {
+    pub const fn recommend(node_count: usize) -> Self {
         match node_count {
             0..=3 => Self::Small,
             4..=8 => Self::Medium,
@@ -83,7 +83,7 @@ impl ClusterTopology {
         }
     }
 
-    pub fn description(&self) -> &'static str {
+    pub const fn description(&self) -> &'static str {
         match self {
             Self::Small => "All nodes act as SmartGateway (routes + computes)",
             Self::Medium => "All SmartGateway; consider 1-2 DedicatedGateway for isolation",
@@ -114,13 +114,13 @@ pub enum GatewayErrorCode {
 
 impl GatewayErrorCode {
     /// Whether the client should retry this error.
-    pub fn is_retryable(&self) -> bool {
+    pub const fn is_retryable(&self) -> bool {
         !matches!(self, Self::Fatal)
     }
 
     /// Recommended retry delay in milliseconds.
     /// 0 = retry immediately, None = do not retry.
-    pub fn retry_delay_ms(&self) -> Option<u64> {
+    pub const fn retry_delay_ms(&self) -> Option<u64> {
         match self {
             Self::NotLeader => Some(0),       // Immediate retry with new leader
             Self::NoRoute => Some(100),       // Short delay, topology may be updating
@@ -131,7 +131,7 @@ impl GatewayErrorCode {
     }
 
     /// SQLSTATE-compatible error code string.
-    pub fn sqlstate(&self) -> &'static str {
+    pub const fn sqlstate(&self) -> &'static str {
         match self {
             Self::NotLeader => "FD001",    // FalconDB-specific: leader changed
             Self::NoRoute => "FD002",      // FalconDB-specific: no route
@@ -141,7 +141,7 @@ impl GatewayErrorCode {
         }
     }
 
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::NotLeader => "NOT_LEADER",
             Self::NoRoute => "NO_ROUTE",
@@ -218,7 +218,7 @@ impl GatewayError {
         }
     }
 
-    pub fn fatal(message: String) -> Self {
+    pub const fn fatal(message: String) -> Self {
         Self {
             code: GatewayErrorCode::Fatal,
             message,
@@ -613,7 +613,7 @@ pub enum RequestClassification {
 }
 
 impl RequestClassification {
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::LocalExec => "LOCAL_EXEC",
             Self::ForwardToLeader => "FORWARD_TO_LEADER",
@@ -1005,7 +1005,7 @@ impl SeedGatewayList {
     }
 
     /// Report a successful operation — resets failure counter.
-    pub fn report_success(&mut self) {
+    pub const fn report_success(&mut self) {
         self.consecutive_failures = 0;
     }
 
@@ -1021,18 +1021,18 @@ impl SeedGatewayList {
     }
 
     /// Switch to the next gateway in the seed list.
-    pub fn failover(&mut self) {
+    pub const fn failover(&mut self) {
         self.active_index = (self.active_index + 1) % self.seeds.len();
         self.consecutive_failures = 0;
     }
 
     /// Number of seed gateways.
-    pub fn seed_count(&self) -> usize {
+    pub const fn seed_count(&self) -> usize {
         self.seeds.len()
     }
 
     /// Whether we've cycled through all seeds without success.
-    pub fn all_seeds_exhausted(&self, total_failures: u32) -> bool {
+    pub const fn all_seeds_exhausted(&self, total_failures: u32) -> bool {
         total_failures >= (self.seeds.len() as u32 * self.max_failures_before_switch)
     }
 }
@@ -1062,7 +1062,7 @@ impl CompressionProfile {
         }
     }
 
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Off => "off",
             Self::Balanced => "balanced",
@@ -1071,7 +1071,7 @@ impl CompressionProfile {
     }
 
     /// Cold migration min_version_age (timestamp units).
-    pub fn min_version_age(&self) -> u64 {
+    pub const fn min_version_age(&self) -> u64 {
         match self {
             Self::Off => u64::MAX, // Never migrate
             Self::Balanced => 300, // ~5 minutes
@@ -1080,12 +1080,12 @@ impl CompressionProfile {
     }
 
     /// Compression enabled?
-    pub fn compression_enabled(&self) -> bool {
+    pub const fn compression_enabled(&self) -> bool {
         !matches!(self, Self::Off)
     }
 
     /// Compression codec.
-    pub fn codec(&self) -> &'static str {
+    pub const fn codec(&self) -> &'static str {
         match self {
             Self::Off => "none",
             Self::Balanced | Self::Aggressive => "lz4",
@@ -1093,7 +1093,7 @@ impl CompressionProfile {
     }
 
     /// Block cache capacity in bytes.
-    pub fn block_cache_capacity(&self) -> u64 {
+    pub const fn block_cache_capacity(&self) -> u64 {
         match self {
             Self::Off => 0,
             Self::Balanced => 16 * 1024 * 1024,      // 16 MB
@@ -1102,7 +1102,7 @@ impl CompressionProfile {
     }
 
     /// Compactor batch size.
-    pub fn compactor_batch_size(&self) -> usize {
+    pub const fn compactor_batch_size(&self) -> usize {
         match self {
             Self::Off => 0,
             Self::Balanced => 1000,
@@ -1111,7 +1111,7 @@ impl CompressionProfile {
     }
 
     /// Compactor interval in milliseconds.
-    pub fn compactor_interval_ms(&self) -> u64 {
+    pub const fn compactor_interval_ms(&self) -> u64 {
         match self {
             Self::Off => 0,
             Self::Balanced => 5000,
@@ -1153,7 +1153,7 @@ impl WalMode {
         }
     }
 
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Auto => "auto",
             Self::Posix => "posix",
@@ -1163,12 +1163,12 @@ impl WalMode {
     }
 
     /// Whether this mode is production-ready.
-    pub fn is_stable(&self) -> bool {
+    pub const fn is_stable(&self) -> bool {
         matches!(self, Self::Auto | Self::Posix | Self::WinAsync)
     }
 
     /// Recommended sync mode for this backend.
-    pub fn recommended_sync_mode(&self) -> &'static str {
+    pub const fn recommended_sync_mode(&self) -> &'static str {
         match self {
             Self::Auto | Self::Posix => "fdatasync",
             Self::WinAsync => "fsync",
@@ -1177,7 +1177,7 @@ impl WalMode {
     }
 
     /// Risk level description.
-    pub fn risk_description(&self) -> &'static str {
+    pub const fn risk_description(&self) -> &'static str {
         match self {
             Self::Auto => "Low — system selects the safest available backend",
             Self::Posix => "Low — standard file I/O, works everywhere",
@@ -1187,7 +1187,7 @@ impl WalMode {
     }
 
     /// Auto-detect the best WAL mode for the current platform.
-    pub fn auto_detect() -> Self {
+    pub const fn auto_detect() -> Self {
         if cfg!(windows) {
             Self::WinAsync
         } else {

@@ -17,6 +17,7 @@ pub mod fault_injection;
 pub mod grpc_transport;
 pub mod ha;
 pub mod indoubt_resolver;
+pub mod gateway;
 pub mod query_engine;
 pub mod rebalancer;
 pub mod replication;
@@ -37,6 +38,7 @@ pub mod segment_streaming;
 pub mod self_healing;
 pub mod smart_gateway;
 pub mod two_phase;
+pub mod dist_hardening;
 
 /// Protobuf types and tonic client/server for WAL replication.
 /// Re-exported from the `falcon_proto` crate (generated at build time).
@@ -201,3 +203,11 @@ pub use cost_capacity::{
     Recommendation, ShardCost, TableCost, UnifiedAuditEvent,
 };
 pub use two_phase::TwoPhaseCoordinator;
+pub use dist_hardening::{
+    AutoRestartConfig, AutoRestartMetrics, AutoRestartSupervisor, DebouncedHealth,
+    FailoverPreFlight, HealthCheckHysteresis, HysteresisConfig, HysteresisMetrics,
+    NodeHysteresisState, PreFlightConfig, PreFlightInput, PreFlightMetrics,
+    PreFlightRejectReason, PromotionSafetyGuard, PromotionSafetyMetrics, PromotionStep,
+    RestartableTaskState, SplitBrainDetector, SplitBrainEvent, SplitBrainMetrics,
+    SplitBrainVerdict, WriteEpochCheck,
+};

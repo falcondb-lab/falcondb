@@ -85,7 +85,7 @@ impl ParamEnv {
     }
 
     /// Number of parameters seen so far.
-    pub fn param_count(&self) -> usize {
+    pub const fn param_count(&self) -> usize {
         self.param_types.len()
     }
 
@@ -106,7 +106,7 @@ impl ParamEnv {
 
 /// Minimal type promotion lattice for parameter unification.
 /// Returns the promoted type if two types are compatible, None if conflict.
-fn promote_types(a: &DataType, b: &DataType) -> Option<DataType> {
+const fn promote_types(a: &DataType, b: &DataType) -> Option<DataType> {
     use DataType::*;
     match (a, b) {
         // Integer promotions

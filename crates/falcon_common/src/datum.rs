@@ -18,7 +18,7 @@ pub enum Datum {
     Text(String),
     Timestamp(i64),    // microseconds since Unix epoch
     Date(i32),         // days since Unix epoch (1970-01-01)
-    Array(Vec<Datum>), // PostgreSQL-style array
+    Array(Vec<Self>), // PostgreSQL-style array
     Jsonb(JsonValue),  // JSONB stored as serde_json::Value
     /// Fixed-point decimal for financial precision: mantissa × 10^(-scale).
     /// e.g. Decimal(12345, 2) = 123.45
@@ -37,15 +37,15 @@ pub enum Datum {
 impl Datum {
     pub fn data_type(&self) -> Option<DataType> {
         match self {
-            Datum::Null => None,
-            Datum::Boolean(_) => Some(DataType::Boolean),
-            Datum::Int32(_) => Some(DataType::Int32),
-            Datum::Int64(_) => Some(DataType::Int64),
-            Datum::Float64(_) => Some(DataType::Float64),
-            Datum::Text(_) => Some(DataType::Text),
-            Datum::Timestamp(_) => Some(DataType::Timestamp),
-            Datum::Date(_) => Some(DataType::Date),
-            Datum::Array(elems) => {
+            Self::Null => None,
+            Self::Boolean(_) => Some(DataType::Boolean),
+            Self::Int32(_) => Some(DataType::Int32),
+            Self::Int64(_) => Some(DataType::Int64),
+            Self::Float64(_) => Some(DataType::Float64),
+            Self::Text(_) => Some(DataType::Text),
+            Self::Timestamp(_) => Some(DataType::Timestamp),
+            Self::Date(_) => Some(DataType::Date),
+            Self::Array(elems) => {
                 // Infer element type from the first non-null element.
                 let elem_type = elems
                     .iter()
@@ -53,49 +53,49 @@ impl Datum {
                     .unwrap_or(DataType::Text); // default to Text for empty/all-null arrays
                 Some(DataType::Array(Box::new(elem_type)))
             }
-            Datum::Jsonb(_) => Some(DataType::Jsonb),
-            Datum::Decimal(_, scale) => Some(DataType::Decimal(38, *scale)),
-            Datum::Time(_) => Some(DataType::Time),
-            Datum::Interval(_, _, _) => Some(DataType::Interval),
-            Datum::Uuid(_) => Some(DataType::Uuid),
-            Datum::Bytea(_) => Some(DataType::Bytea),
+            Self::Jsonb(_) => Some(DataType::Jsonb),
+            Self::Decimal(_, scale) => Some(DataType::Decimal(38, *scale)),
+            Self::Time(_) => Some(DataType::Time),
+            Self::Interval(_, _, _) => Some(DataType::Interval),
+            Self::Uuid(_) => Some(DataType::Uuid),
+            Self::Bytea(_) => Some(DataType::Bytea),
         }
     }
 
-    pub fn is_null(&self) -> bool {
-        matches!(self, Datum::Null)
+    pub const fn is_null(&self) -> bool {
+        matches!(self, Self::Null)
     }
 
     /// Coerce to boolean for WHERE clause evaluation.
-    pub fn as_bool(&self) -> Option<bool> {
+    pub const fn as_bool(&self) -> Option<bool> {
         match self {
-            Datum::Boolean(b) => Some(*b),
-            Datum::Null => None,
+            Self::Boolean(b) => Some(*b),
+            Self::Null => None,
             _ => None,
         }
     }
 
-    pub fn as_i64(&self) -> Option<i64> {
+    pub const fn as_i64(&self) -> Option<i64> {
         match self {
-            Datum::Int32(v) => Some(*v as i64),
-            Datum::Int64(v) => Some(*v),
+            Self::Int32(v) => Some(*v as i64),
+            Self::Int64(v) => Some(*v),
             _ => None,
         }
     }
 
     pub fn as_f64(&self) -> Option<f64> {
         match self {
-            Datum::Int32(v) => Some(*v as f64),
-            Datum::Int64(v) => Some(*v as f64),
-            Datum::Float64(v) => Some(*v),
-            Datum::Decimal(m, s) => Some(*m as f64 / 10f64.powi(*s as i32)),
+            Self::Int32(v) => Some(*v as f64),
+            Self::Int64(v) => Some(*v as f64),
+            Self::Float64(v) => Some(*v),
+            Self::Decimal(m, s) => Some(*m as f64 / 10f64.powi(*s as i32)),
             _ => None,
         }
     }
 
-    pub fn as_str(&self) -> Option<&str> {
+    pub const fn as_str(&self) -> Option<&str> {
         match self {
-            Datum::Text(s) => Some(s.as_str()),
+            Self::Text(s) => Some(s.as_str()),
             _ => None,
         }
     }
@@ -103,13 +103,13 @@ impl Datum {
     /// Encode to PG text format.
     pub fn to_pg_text(&self) -> Option<String> {
         match self {
-            Datum::Null => None,
-            Datum::Boolean(b) => Some(if *b { "t".into() } else { "f".into() }),
-            Datum::Int32(v) => Some(v.to_string()),
-            Datum::Int64(v) => Some(v.to_string()),
-            Datum::Float64(v) => Some(v.to_string()),
-            Datum::Text(s) => Some(s.clone()),
-            Datum::Timestamp(us) => {
+            Self::Null => None,
+            Self::Boolean(b) => Some(if *b { "t".into() } else { "f".into() }),
+            Self::Int32(v) => Some(v.to_string()),
+            Self::Int64(v) => Some(v.to_string()),
+            Self::Float64(v) => Some(v.to_string()),
+            Self::Text(s) => Some(s.clone()),
+            Self::Timestamp(us) => {
                 let secs = us / 1_000_000;
                 let nsecs = ((us % 1_000_000) * 1000) as u32;
                 if let Some(dt) = chrono::DateTime::from_timestamp(secs, nsecs) {
@@ -118,7 +118,7 @@ impl Datum {
                     Some(us.to_string())
                 }
             }
-            Datum::Date(days) => {
+            Self::Date(days) => {
                 // SAFETY: 1970-01-01 is always a valid date — unwrap_or fallback is unreachable.
                 let epoch =
                     chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap_or(chrono::NaiveDate::MIN);
@@ -128,21 +128,21 @@ impl Datum {
                     Some(days.to_string())
                 }
             }
-            Datum::Array(elems) => {
+            Self::Array(elems) => {
                 let inner: Vec<String> = elems
                     .iter()
                     .map(|d| match d {
-                        Datum::Text(s) => format!("\"{}\"", s),
-                        Datum::Null => "NULL".to_string(),
+                        Self::Text(s) => format!("\"{}\"", s),
+                        Self::Null => "NULL".to_string(),
                         other => format!("{}", other),
                     })
                     .collect();
                 Some(format!("{{{}}}", inner.join(",")))
             }
-            Datum::Jsonb(v) => Some(v.to_string()),
-            Datum::Decimal(m, s) => Some(decimal_to_string(*m, *s)),
-            Datum::Time(_) | Datum::Interval(_, _, _) | Datum::Uuid(_) => Some(format!("{}", self)),
-            Datum::Bytea(bytes) => {
+            Self::Jsonb(v) => Some(v.to_string()),
+            Self::Decimal(m, s) => Some(decimal_to_string(*m, *s)),
+            Self::Time(_) | Self::Interval(_, _, _) | Self::Uuid(_) => Some(format!("{}", self)),
+            Self::Bytea(bytes) => {
                 // PG hex format: \x followed by hex-encoded bytes
                 let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
                 Some(format!("\\x{}", hex))
@@ -151,23 +151,23 @@ impl Datum {
     }
 
     /// Try to add two datums (for SUM aggregation).
-    pub fn add(&self, other: &Datum) -> Option<Datum> {
+    pub fn add(&self, other: &Self) -> Option<Self> {
         match (self, other) {
-            (Datum::Int32(a), Datum::Int32(b)) => Some(Datum::Int64(*a as i64 + *b as i64)),
-            (Datum::Int64(a), Datum::Int64(b)) => Some(Datum::Int64(a + b)),
-            (Datum::Int64(a), Datum::Int32(b)) => Some(Datum::Int64(a + *b as i64)),
-            (Datum::Int32(a), Datum::Int64(b)) => Some(Datum::Int64(*a as i64 + b)),
-            (Datum::Float64(a), Datum::Float64(b)) => Some(Datum::Float64(a + b)),
-            (Datum::Float64(a), Datum::Int64(b)) => Some(Datum::Float64(a + *b as f64)),
-            (Datum::Float64(a), Datum::Int32(b)) => Some(Datum::Float64(a + *b as f64)),
-            (Datum::Decimal(a, sa), Datum::Decimal(b, sb)) => Some(decimal_add(*a, *sa, *b, *sb)),
-            (Datum::Decimal(a, sa), Datum::Int64(b)) => Some(decimal_add(
+            (Self::Int32(a), Self::Int32(b)) => Some(Self::Int64(*a as i64 + *b as i64)),
+            (Self::Int64(a), Self::Int64(b)) => Some(Self::Int64(a + b)),
+            (Self::Int64(a), Self::Int32(b)) => Some(Self::Int64(a + *b as i64)),
+            (Self::Int32(a), Self::Int64(b)) => Some(Self::Int64(*a as i64 + b)),
+            (Self::Float64(a), Self::Float64(b)) => Some(Self::Float64(a + b)),
+            (Self::Float64(a), Self::Int64(b)) => Some(Self::Float64(a + *b as f64)),
+            (Self::Float64(a), Self::Int32(b)) => Some(Self::Float64(a + *b as f64)),
+            (Self::Decimal(a, sa), Self::Decimal(b, sb)) => Some(decimal_add(*a, *sa, *b, *sb)),
+            (Self::Decimal(a, sa), Self::Int64(b)) => Some(decimal_add(
                 *a,
                 *sa,
                 *b as i128 * 10i128.pow(*sa as u32),
                 *sa,
             )),
-            (Datum::Int64(a), Datum::Decimal(b, sb)) => Some(decimal_add(
+            (Self::Int64(a), Self::Decimal(b, sb)) => Some(decimal_add(
                 *a as i128 * 10i128.pow(*sb as u32),
                 *sb,
                 *b,
@@ -178,7 +178,7 @@ impl Datum {
     }
 
     /// Create a Decimal from a string like "123.45" or "-0.001".
-    pub fn parse_decimal(s: &str) -> Option<Datum> {
+    pub fn parse_decimal(s: &str) -> Option<Self> {
         let s = s.trim();
         if s.is_empty() {
             return None;
@@ -191,21 +191,21 @@ impl Datum {
         let scale = frac_part.len() as u8;
         let combined = format!("{}{}", int_part, frac_part);
         let mantissa: i128 = combined.parse().ok()?;
-        Some(Datum::Decimal(mantissa, scale))
+        Some(Self::Decimal(mantissa, scale))
     }
 }
 
 impl fmt::Display for Datum {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Datum::Null => write!(f, "NULL"),
-            Datum::Boolean(b) => write!(f, "{}", b),
-            Datum::Int32(v) => write!(f, "{}", v),
-            Datum::Int64(v) => write!(f, "{}", v),
-            Datum::Float64(v) => write!(f, "{}", v),
-            Datum::Text(s) => write!(f, "{}", s),
-            Datum::Timestamp(us) => write!(f, "{}", us),
-            Datum::Date(days) => {
+            Self::Null => write!(f, "NULL"),
+            Self::Boolean(b) => write!(f, "{}", b),
+            Self::Int32(v) => write!(f, "{}", v),
+            Self::Int64(v) => write!(f, "{}", v),
+            Self::Float64(v) => write!(f, "{}", v),
+            Self::Text(s) => write!(f, "{}", s),
+            Self::Timestamp(us) => write!(f, "{}", us),
+            Self::Date(days) => {
                 let epoch =
                     chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap_or(chrono::NaiveDate::MIN);
                 if let Some(d) = epoch.checked_add_signed(chrono::Duration::days(*days as i64)) {
@@ -214,7 +214,7 @@ impl fmt::Display for Datum {
                     write!(f, "{}", days)
                 }
             }
-            Datum::Array(elems) => {
+            Self::Array(elems) => {
                 write!(f, "{{")?;
                 for (i, d) in elems.iter().enumerate() {
                     if i > 0 {
@@ -224,9 +224,9 @@ impl fmt::Display for Datum {
                 }
                 write!(f, "}}")
             }
-            Datum::Jsonb(v) => write!(f, "{}", v),
-            Datum::Decimal(m, s) => write!(f, "{}", decimal_to_string(*m, *s)),
-            Datum::Time(us) => {
+            Self::Jsonb(v) => write!(f, "{}", v),
+            Self::Decimal(m, s) => write!(f, "{}", decimal_to_string(*m, *s)),
+            Self::Time(us) => {
                 let total_secs = *us / 1_000_000;
                 let h = total_secs / 3600;
                 let m = (total_secs % 3600) / 60;
@@ -238,7 +238,7 @@ impl fmt::Display for Datum {
                     write!(f, "{:02}:{:02}:{:02}.{:06}", h, m, s, frac)
                 }
             }
-            Datum::Interval(months, days, us) => {
+            Self::Interval(months, days, us) => {
                 let mut parts = Vec::new();
                 if *months != 0 {
                     let y = *months / 12;
@@ -271,7 +271,7 @@ impl fmt::Display for Datum {
                 }
                 write!(f, "{}", parts.join(" "))
             }
-            Datum::Uuid(v) => {
+            Self::Uuid(v) => {
                 let bytes = v.to_be_bytes();
                 write!(f, "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
                     bytes[0], bytes[1], bytes[2], bytes[3],
@@ -279,7 +279,7 @@ impl fmt::Display for Datum {
                     bytes[8], bytes[9], bytes[10], bytes[11],
                     bytes[12], bytes[13], bytes[14], bytes[15])
             }
-            Datum::Bytea(bytes) => {
+            Self::Bytea(bytes) => {
                 write!(f, "\\x")?;
                 for b in bytes {
                     write!(f, "{:02x}", b)?;
@@ -293,25 +293,25 @@ impl fmt::Display for Datum {
 impl PartialEq for Datum {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Datum::Null, Datum::Null) => false, // NULL != NULL in SQL
-            (Datum::Boolean(a), Datum::Boolean(b)) => a == b,
-            (Datum::Int32(a), Datum::Int32(b)) => a == b,
-            (Datum::Int64(a), Datum::Int64(b)) => a == b,
-            (Datum::Int32(a), Datum::Int64(b)) => (*a as i64) == *b,
-            (Datum::Int64(a), Datum::Int32(b)) => *a == (*b as i64),
-            (Datum::Float64(a), Datum::Float64(b)) => a == b,
-            (Datum::Float64(a), Datum::Int32(b)) => *a == (*b as f64),
-            (Datum::Float64(a), Datum::Int64(b)) => *a == (*b as f64),
-            (Datum::Int32(a), Datum::Float64(b)) => (*a as f64) == *b,
-            (Datum::Int64(a), Datum::Float64(b)) => (*a as f64) == *b,
-            (Datum::Text(a), Datum::Text(b)) => a == b,
-            (Datum::Timestamp(a), Datum::Timestamp(b)) => a == b,
-            (Datum::Date(a), Datum::Date(b)) => a == b,
-            (Datum::Array(a), Datum::Array(b)) => {
+            (Self::Null, Self::Null) => false, // NULL != NULL in SQL
+            (Self::Boolean(a), Self::Boolean(b)) => a == b,
+            (Self::Int32(a), Self::Int32(b)) => a == b,
+            (Self::Int64(a), Self::Int64(b)) => a == b,
+            (Self::Int32(a), Self::Int64(b)) => (*a as i64) == *b,
+            (Self::Int64(a), Self::Int32(b)) => *a == (*b as i64),
+            (Self::Float64(a), Self::Float64(b)) => a == b,
+            (Self::Float64(a), Self::Int32(b)) => *a == (*b as f64),
+            (Self::Float64(a), Self::Int64(b)) => *a == (*b as f64),
+            (Self::Int32(a), Self::Float64(b)) => (*a as f64) == *b,
+            (Self::Int64(a), Self::Float64(b)) => (*a as f64) == *b,
+            (Self::Text(a), Self::Text(b)) => a == b,
+            (Self::Timestamp(a), Self::Timestamp(b)) => a == b,
+            (Self::Date(a), Self::Date(b)) => a == b,
+            (Self::Array(a), Self::Array(b)) => {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x == y)
             }
-            (Datum::Jsonb(a), Datum::Jsonb(b)) => a == b,
-            (Datum::Decimal(a, sa), Datum::Decimal(b, sb)) => {
+            (Self::Jsonb(a), Self::Jsonb(b)) => a == b,
+            (Self::Decimal(a, sa), Self::Decimal(b, sb)) => {
                 if sa == sb {
                     a == b
                 } else {
@@ -319,19 +319,19 @@ impl PartialEq for Datum {
                     na == nb
                 }
             }
-            (Datum::Decimal(a, sa), Datum::Int64(b)) => {
+            (Self::Decimal(a, sa), Self::Int64(b)) => {
                 let bm = *b as i128 * 10i128.pow(*sa as u32);
                 *a == bm
             }
-            (Datum::Int64(a), Datum::Decimal(b, sb)) => {
+            (Self::Int64(a), Self::Decimal(b, sb)) => {
                 let am = *a as i128 * 10i128.pow(*sb as u32);
                 am == *b
             }
-            (Datum::Time(a), Datum::Time(b)) => a == b,
-            (Datum::Interval(am, ad, aus), Datum::Interval(bm, bd, bus)) => {
+            (Self::Time(a), Self::Time(b)) => a == b,
+            (Self::Interval(am, ad, aus), Self::Interval(bm, bd, bus)) => {
                 am == bm && ad == bd && aus == bus
             }
-            (Datum::Uuid(a), Datum::Uuid(b)) => a == b,
+            (Self::Uuid(a), Self::Uuid(b)) => a == b,
             _ => false,
         }
     }
@@ -344,71 +344,71 @@ impl Hash for Datum {
         // Use explicit type tags (NOT mem::discriminant) to ensure cross-type
         // equality consistency: Int32(x) == Int64(x) must produce the same hash.
         match self {
-            Datum::Null => {
+            Self::Null => {
                 0u8.hash(state);
             }
-            Datum::Boolean(b) => {
+            Self::Boolean(b) => {
                 1u8.hash(state);
                 b.hash(state);
             }
             // Int32 and Int64 share tag 2, both hash as i64
-            Datum::Int32(v) => {
+            Self::Int32(v) => {
                 2u8.hash(state);
                 (*v as i64).hash(state);
             }
-            Datum::Int64(v) => {
+            Self::Int64(v) => {
                 2u8.hash(state);
                 v.hash(state);
             }
-            Datum::Float64(v) => {
+            Self::Float64(v) => {
                 3u8.hash(state);
                 v.to_bits().hash(state);
             }
-            Datum::Text(s) => {
+            Self::Text(s) => {
                 4u8.hash(state);
                 s.hash(state);
             }
-            Datum::Timestamp(us) => {
+            Self::Timestamp(us) => {
                 5u8.hash(state);
                 us.hash(state);
             }
-            Datum::Date(days) => {
+            Self::Date(days) => {
                 8u8.hash(state);
                 days.hash(state);
             }
-            Datum::Array(elems) => {
+            Self::Array(elems) => {
                 6u8.hash(state);
                 elems.len().hash(state);
                 for e in elems {
                     e.hash(state);
                 }
             }
-            Datum::Jsonb(v) => {
+            Self::Jsonb(v) => {
                 7u8.hash(state);
                 v.to_string().hash(state);
             }
-            Datum::Decimal(m, s) => {
+            Self::Decimal(m, s) => {
                 9u8.hash(state);
                 // Normalize: remove trailing zeros for consistent hashing
                 let (nm, ns) = decimal_trim(*m, *s);
                 nm.hash(state);
                 ns.hash(state);
             }
-            Datum::Time(us) => {
+            Self::Time(us) => {
                 10u8.hash(state);
                 us.hash(state);
             }
-            Datum::Interval(months, days, us) => {
+            Self::Interval(months, days, us) => {
                 11u8.hash(state);
                 months.hash(state);
                 days.hash(state);
                 us.hash(state);
             }
-            Datum::Uuid(v) => {
+            Self::Uuid(v) => {
                 12u8.hash(state);
                 v.hash(state);
             }
-            Datum::Bytea(bytes) => {
+            Self::Bytea(bytes) => {
                 13u8.hash(state);
                 bytes.hash(state);
             }
@@ -420,42 +420,42 @@ impl Hash for Datum {
 impl PartialOrd for Datum {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         match (self, other) {
-            (Datum::Null, _) | (_, Datum::Null) => None,
-            (Datum::Boolean(a), Datum::Boolean(b)) => a.partial_cmp(b),
-            (Datum::Int32(a), Datum::Int32(b)) => a.partial_cmp(b),
-            (Datum::Int64(a), Datum::Int64(b)) => a.partial_cmp(b),
-            (Datum::Int32(a), Datum::Int64(b)) => (*a as i64).partial_cmp(b),
-            (Datum::Int64(a), Datum::Int32(b)) => a.partial_cmp(&(*b as i64)),
-            (Datum::Float64(a), Datum::Float64(b)) => a.partial_cmp(b),
-            (Datum::Float64(a), Datum::Int32(b)) => a.partial_cmp(&(*b as f64)),
-            (Datum::Float64(a), Datum::Int64(b)) => a.partial_cmp(&(*b as f64)),
-            (Datum::Int32(a), Datum::Float64(b)) => (*a as f64).partial_cmp(b),
-            (Datum::Int64(a), Datum::Float64(b)) => (*a as f64).partial_cmp(b),
-            (Datum::Text(a), Datum::Text(b)) => a.partial_cmp(b),
-            (Datum::Timestamp(a), Datum::Timestamp(b)) => a.partial_cmp(b),
-            (Datum::Date(a), Datum::Date(b)) => a.partial_cmp(b),
-            (Datum::Decimal(a, sa), Datum::Decimal(b, sb)) => {
+            (Self::Null, _) | (_, Self::Null) => None,
+            (Self::Boolean(a), Self::Boolean(b)) => a.partial_cmp(b),
+            (Self::Int32(a), Self::Int32(b)) => a.partial_cmp(b),
+            (Self::Int64(a), Self::Int64(b)) => a.partial_cmp(b),
+            (Self::Int32(a), Self::Int64(b)) => (*a as i64).partial_cmp(b),
+            (Self::Int64(a), Self::Int32(b)) => a.partial_cmp(&(*b as i64)),
+            (Self::Float64(a), Self::Float64(b)) => a.partial_cmp(b),
+            (Self::Float64(a), Self::Int32(b)) => a.partial_cmp(&(*b as f64)),
+            (Self::Float64(a), Self::Int64(b)) => a.partial_cmp(&(*b as f64)),
+            (Self::Int32(a), Self::Float64(b)) => (*a as f64).partial_cmp(b),
+            (Self::Int64(a), Self::Float64(b)) => (*a as f64).partial_cmp(b),
+            (Self::Text(a), Self::Text(b)) => a.partial_cmp(b),
+            (Self::Timestamp(a), Self::Timestamp(b)) => a.partial_cmp(b),
+            (Self::Date(a), Self::Date(b)) => a.partial_cmp(b),
+            (Self::Decimal(a, sa), Self::Decimal(b, sb)) => {
                 let (na, nb) = decimal_normalize(*a, *sa, *b, *sb);
                 na.partial_cmp(&nb)
             }
-            (Datum::Decimal(a, sa), Datum::Int64(b)) => {
+            (Self::Decimal(a, sa), Self::Int64(b)) => {
                 let bm = *b as i128 * 10i128.pow(*sa as u32);
                 a.partial_cmp(&bm)
             }
-            (Datum::Int64(a), Datum::Decimal(b, sb)) => {
+            (Self::Int64(a), Self::Decimal(b, sb)) => {
                 let am = *a as i128 * 10i128.pow(*sb as u32);
                 am.partial_cmp(b)
             }
-            (Datum::Decimal(a, sa), Datum::Float64(b)) => {
+            (Self::Decimal(a, sa), Self::Float64(b)) => {
                 let af = *a as f64 / 10f64.powi(*sa as i32);
                 af.partial_cmp(b)
             }
-            (Datum::Float64(a), Datum::Decimal(b, sb)) => {
+            (Self::Float64(a), Self::Decimal(b, sb)) => {
                 let bf = *b as f64 / 10f64.powi(*sb as i32);
                 a.partial_cmp(&bf)
             }
-            (Datum::Time(a), Datum::Time(b)) => a.partial_cmp(b),
-            (Datum::Interval(am, ad, aus), Datum::Interval(bm, bd, bus)) => {
+            (Self::Time(a), Self::Time(b)) => a.partial_cmp(b),
+            (Self::Interval(am, ad, aus), Self::Interval(bm, bd, bus)) => {
                 // Compare by total: months first, then days, then microseconds
                 match am.cmp(bm) {
                     Ordering::Equal => match ad.cmp(bd) {
@@ -465,8 +465,8 @@ impl PartialOrd for Datum {
                     o => Some(o),
                 }
             }
-            (Datum::Uuid(a), Datum::Uuid(b)) => a.partial_cmp(b),
-            (Datum::Array(_), Datum::Array(_)) => None, // arrays not orderable
+            (Self::Uuid(a), Self::Uuid(b)) => a.partial_cmp(b),
+            (Self::Array(_), Self::Array(_)) => None, // arrays not orderable
             _ => None,
         }
     }
@@ -479,13 +479,13 @@ impl Ord for Datum {
 }
 
 /// A row is an ordered list of datums.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnedRow {
     pub values: Vec<Datum>,
 }
 
 impl OwnedRow {
-    pub fn new(values: Vec<Datum>) -> Self {
+    pub const fn new(values: Vec<Datum>) -> Self {
         Self { values }
     }
 
@@ -493,11 +493,11 @@ impl OwnedRow {
         self.values.get(idx)
     }
 
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.values.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.values.is_empty()
     }
 }
@@ -543,7 +543,7 @@ pub fn decimal_to_string(mantissa: i128, scale: u8) -> String {
 }
 
 /// Normalize two decimals to the same scale, returning (a_normalized, b_normalized).
-fn decimal_normalize(a: i128, sa: u8, b: i128, sb: u8) -> (i128, i128) {
+const fn decimal_normalize(a: i128, sa: u8, b: i128, sb: u8) -> (i128, i128) {
     if sa == sb {
         (a, b)
     } else if sa > sb {
@@ -563,7 +563,7 @@ fn decimal_add(a: i128, sa: u8, b: i128, sb: u8) -> Datum {
 }
 
 /// Remove trailing zeros from a decimal for canonical form.
-fn decimal_trim(mut mantissa: i128, mut scale: u8) -> (i128, u8) {
+const fn decimal_trim(mut mantissa: i128, mut scale: u8) -> (i128, u8) {
     if mantissa == 0 {
         return (0, 0);
     }
@@ -582,7 +582,7 @@ pub fn decimal_sub(a: i128, sa: u8, b: i128, sb: u8) -> Datum {
 }
 
 /// Multiply two decimals.
-pub fn decimal_mul(a: i128, sa: u8, b: i128, sb: u8) -> Datum {
+pub const fn decimal_mul(a: i128, sa: u8, b: i128, sb: u8) -> Datum {
     Datum::Decimal(a * b, sa + sb)
 }
 

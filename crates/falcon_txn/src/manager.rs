@@ -64,7 +64,7 @@ impl TxnClassification {
         }
     }
 
-    pub fn global(shards: Vec<ShardId>, mode: SlowPathMode) -> Self {
+    pub const fn global(shards: Vec<ShardId>, mode: SlowPathMode) -> Self {
         Self {
             txn_type: TxnType::Global,
             involved_shards: shards,
@@ -122,7 +122,7 @@ impl TxnState {
     /// - `Err(InvalidTransition)` if the transition is illegal.
     pub fn try_transition(
         &mut self,
-        target: TxnState,
+        target: Self,
         txn_id: TxnId,
     ) -> Result<TransitionResult, TxnError> {
         use TxnState::*;
@@ -200,22 +200,22 @@ pub struct TxnExecSummary {
 }
 
 impl TxnExecSummary {
-    pub fn record_read(&mut self, count: u64) {
+    pub const fn record_read(&mut self, count: u64) {
         self.rows_read += count;
     }
-    pub fn record_insert(&mut self, count: u64) {
+    pub const fn record_insert(&mut self, count: u64) {
         self.rows_inserted += count;
         self.rows_written += count;
     }
-    pub fn record_update(&mut self, count: u64) {
+    pub const fn record_update(&mut self, count: u64) {
         self.rows_updated += count;
         self.rows_written += count;
     }
-    pub fn record_delete(&mut self, count: u64) {
+    pub const fn record_delete(&mut self, count: u64) {
         self.rows_deleted += count;
         self.rows_written += count;
     }
-    pub fn record_statement(&mut self) {
+    pub const fn record_statement(&mut self) {
         self.statement_count += 1;
     }
 }
@@ -255,7 +255,7 @@ impl TxnHandle {
     /// Read timestamp for this transaction.
     /// Under Read Committed, each statement gets a fresh read_ts (latest committed).
     /// Under Snapshot Isolation, read_ts is fixed at start_ts.
-    pub fn read_ts(&self, current_ts: Timestamp) -> Timestamp {
+    pub const fn read_ts(&self, current_ts: Timestamp) -> Timestamp {
         match self.isolation {
             IsolationLevel::ReadCommitted => current_ts,
             IsolationLevel::SnapshotIsolation | IsolationLevel::Serializable => self.start_ts,
@@ -425,7 +425,7 @@ struct LatencyRecorder {
 }
 
 impl LatencyRecorder {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             fast_path: Vec::new(),
             slow_path: Vec::new(),
@@ -510,7 +510,7 @@ impl LatencyRecorder {
         }
     }
 
-    fn compute_sla_violations(&self) -> SlaViolationStats {
+    const fn compute_sla_violations(&self) -> SlaViolationStats {
         SlaViolationStats {
             high_priority_violations: self.sla_high_violations,
             normal_priority_violations: self.sla_normal_violations,
@@ -566,7 +566,7 @@ struct TxnStatsCollector {
 }
 
 impl TxnStatsCollector {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             total_committed: AtomicU64::new(0),
             fast_path_commits: AtomicU64::new(0),
@@ -1080,7 +1080,7 @@ impl TxnManager {
                     occ_retry_count,
                     tenant_id,
                     priority,
-                    latency_breakdown: latency_breakdown.clone(),
+                    latency_breakdown,
                 });
                 if matches!(e, StorageError::UniqueViolation { .. }) {
                     self.stats.record_constraint_violation();
@@ -1127,7 +1127,7 @@ impl TxnManager {
                 occ_retry_count,
                 tenant_id,
                 priority,
-                latency_breakdown: latency_breakdown.clone(),
+                latency_breakdown,
             });
             self.active_txns.remove(&txn_id);
             self.stats.record_fast_commit();
@@ -1192,7 +1192,7 @@ impl TxnManager {
                 occ_retry_count,
                 tenant_id,
                 priority,
-                latency_breakdown: latency_breakdown.clone(),
+                latency_breakdown,
             });
             if matches!(e, StorageError::UniqueViolation { .. }) {
                 self.stats.record_constraint_violation();
@@ -1218,7 +1218,7 @@ impl TxnManager {
             occ_retry_count,
             tenant_id,
             priority,
-            latency_breakdown: latency_breakdown.clone(),
+            latency_breakdown,
         });
         // CP-D: storage confirmed — WAL durable for global txn.
         tracing::debug!(
@@ -1471,7 +1471,7 @@ impl TxnManager {
     }
 
     /// Access the underlying storage engine (for wiring GcRunner etc.).
-    pub fn storage(&self) -> &Arc<StorageEngine> {
+    pub const fn storage(&self) -> &Arc<StorageEngine> {
         &self.storage
     }
 

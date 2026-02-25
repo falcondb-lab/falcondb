@@ -44,7 +44,7 @@ impl ColumnVector {
     }
 
     /// Number of logical rows.
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         match self {
             Self::Booleans { values, .. } => values.len(),
             Self::Int32s { values, .. } => values.len(),
@@ -248,7 +248,7 @@ impl RecordBatch {
             .map(|col| ColumnVector::from_datums(col))
             .collect();
 
-        RecordBatch {
+        Self {
             columns,
             num_rows,
             selection: None,
@@ -263,7 +263,7 @@ impl RecordBatch {
             .iter()
             .map(|c| ColumnVector::from_datums(c))
             .collect();
-        RecordBatch {
+        Self {
             columns: col_vecs,
             num_rows,
             selection: None,
@@ -294,7 +294,7 @@ impl RecordBatch {
     }
 
     /// Number of active (non-filtered) rows.
-    pub fn active_count(&self) -> usize {
+    pub const fn active_count(&self) -> usize {
         match &self.selection {
             Some(sel) => sel.len(),
             None => self.num_rows,
@@ -440,7 +440,7 @@ fn vectorized_compare(
 }
 
 #[inline(always)]
-fn int_cmp(a: i64, b: i64, op: BinOp) -> bool {
+const fn int_cmp(a: i64, b: i64, op: BinOp) -> bool {
     match op {
         BinOp::Eq => a == b,
         BinOp::NotEq => a != b,
@@ -1139,7 +1139,7 @@ pub struct VecSortKey {
 
 impl VecSortKey {
     /// Build from BoundOrderBy.
-    pub fn from_order_by(ob: &BoundOrderBy) -> Self {
+    pub const fn from_order_by(ob: &BoundOrderBy) -> Self {
         Self {
             col_idx: ob.column_idx,
             descending: !ob.asc,

@@ -178,7 +178,7 @@ pub struct ReplicaRunner {
 }
 
 impl ReplicaRunner {
-    pub fn new(config: ReplicaRunnerConfig, storage: Arc<StorageEngine>) -> Self {
+    pub const fn new(config: ReplicaRunnerConfig, storage: Arc<StorageEngine>) -> Self {
         Self { config, storage }
     }
 

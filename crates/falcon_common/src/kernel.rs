@@ -45,7 +45,7 @@ pub struct TxnLatencyBreakdown {
 
 impl TxnLatencyBreakdown {
     /// Total end-to-end latency (sum of all phases).
-    pub fn total_us(&self) -> u64 {
+    pub const fn total_us(&self) -> u64 {
         self.parse_bind_us
             + self.routing_us
             + self.execution_us

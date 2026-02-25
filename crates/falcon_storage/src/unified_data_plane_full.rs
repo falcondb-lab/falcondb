@@ -55,7 +55,7 @@ pub enum ColdBlockEncoding {
 }
 
 impl ColdBlockEncoding {
-    pub fn from_u8(v: u8) -> Option<Self> {
+    pub const fn from_u8(v: u8) -> Option<Self> {
         match v {
             0 => Some(Self::Raw),
             1 => Some(Self::Lz4),
@@ -134,7 +134,7 @@ impl ColdBlock {
     }
 
     /// Wire size in bytes.
-    pub fn wire_size(&self) -> usize {
+    pub const fn wire_size(&self) -> usize {
         4 + 1 + self.payload.len() + 4
     }
 }
@@ -312,7 +312,7 @@ impl ManifestSsot {
         }
     }
 
-    pub fn from_manifest(m: Manifest) -> Self {
+    pub const fn from_manifest(m: Manifest) -> Self {
         Self {
             manifest: m,
             snapshot_pinned: BTreeSet::new(),

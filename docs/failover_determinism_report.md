@@ -139,10 +139,31 @@ evidence/failover/
 
 | File | Description |
 |------|-------------|
-| `crates/falcon_cluster/tests/failover_determinism.rs` | 9 matrix tests + full summary |
+| `crates/falcon_cluster/tests/failover_determinism.rs` | 9 matrix tests + 5 FDE evidence tests + summary |
+| `crates/falcon_cluster/src/failover_txn_tests.rs` | 16 failover × txn state-machine tests (SS/XS/CH/ID) |
+| `crates/falcon_cluster/src/failover_txn_hardening.rs` | Coordinator, in-doubt TTL, damper, blocked-txn guard |
+| `crates/falcon_cluster/src/determinism_hardening.rs` | CommitPhase, TxnTerminalState, failover invariant validator |
 | `scripts/run_failover_matrix.sh` | One-click matrix runner |
 | `scripts/failover_exercise.rs` | Interactive failover exercise |
 | `scripts/ci_failover_gate.sh` | CI failover gate (existing) |
+
+## Extended Evidence: FDE Tests (P0-2b)
+
+The original 9-cell matrix proves data consistency across fault × load combinations.
+The FDE tests provide **stronger, more specific** evidence:
+
+| Test | Property | Invariants |
+|------|----------|------------|
+| FDE-1 | Commit-phase-at-crash determines recovery outcome | FC-1, FC-2, FC-3 |
+| FDE-2 | OCC write conflict during failover → no phantom, no duplication | Atomicity |
+| FDE-3 | Network partition writes invisible on new primary | No split-brain |
+| FDE-4 | In-doubt resolution bounded (5 cycles × 10 txns → 0 remaining) | I5, bounded time |
+| FDE-5 | Double-shipped WAL replay produces identical state | FC-4 (idempotency) |
+
+**Combined evidence**: 9 matrix + 5 FDE + 16 state-machine = **30 failover determinism tests**.
+
+> **See also**: [`docs/failover_partition_sla.md`](failover_partition_sla.md) for the
+> quantified external SLA covering partition + write conflict + in-doubt bounds.
 
 ## Conclusion
 
@@ -150,5 +171,10 @@ FalconDB's failover behavior is **deterministic and provable**:
 
 - Every transaction has exactly one classifiable outcome
 - No transaction is silently lost or silently committed
+- Commit phase at crash determines recovery outcome (FC-1 through FC-4)
+- Network partition writes are never visible on the promoted replica
+- In-doubt transactions resolve within bounded time (≤ 60 s default TTL)
+- OCC conflicts during failover produce deterministic, classifiable errors
+- WAL replay is idempotent under double-delivery
 - The evidence is reproducible via automated scripts
 - CI nightly runs the reduced matrix on every merge to main

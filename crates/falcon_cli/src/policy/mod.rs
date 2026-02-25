@@ -15,7 +15,7 @@ use crate::runner::format_rows_as_string;
 use anyhow::{bail, Result};
 
 /// Sub-command for \policy.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyCmd {
     List,
     Show(String),
@@ -156,13 +156,13 @@ async fn policy_create(
         .field("Policy ID", &policy.id)
         .field("Description", &policy.description)
         .field("Scope", policy.scope.as_str())
-        .field("Condition", &policy.condition.description())
-        .field("Action", &policy.action.description())
+        .field("Condition", policy.condition.description())
+        .field("Action", policy.action.description())
         .field("Severity", &policy.severity)
         .field("Initial Status", "disabled (must be explicitly enabled)")
         .field(
             "Guardrail",
-            &format!(
+            format!(
                 "max_frequency={} time_window={}s cooldown={}s risk_ceiling={}",
                 policy.guardrail.max_frequency,
                 policy.guardrail.time_window_secs,

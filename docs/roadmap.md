@@ -186,7 +186,7 @@ cargo test --workspace
 | **v1.0 Phase 1** | ✅ Done | LSM kernel — 1,917 tests, disk-backed OLTP, MVCC encoding, idempotency |
 | **v1.0 Phase 2** | ✅ Done | SQL completeness — 1,976 tests, DECIMAL, composite indexes, RBAC, txn control |
 | **1.0.0-rc.1** | ✅ Done | Version aligned, code audit fixes, e2e evidence, RBAC enforcement matrix |
-| **v2.0 Phase 3** | ✅ Done | Enterprise — 2,056 tests, RLS, TDE, partitioning, PITR, CDC |
+| **v1.0 Phase 3** | ✅ Done | Enterprise — 2,056 tests, RLS, TDE, partitioning, PITR, CDC |
 | **Storage Hardening** | ✅ Done | 7 modules, 61 tests — WAL recovery, compaction, memory budget, GC safepoint, fault injection |
 | **Distributed Hardening** | ✅ Done | 6 modules, 62 tests — epoch fencing, leader lease, migration, throttle, supervisor |
 | **Native Protocol** | ✅ Done | 2,239 tests — binary protocol, JDBC driver, compression, HA failover |
@@ -672,7 +672,7 @@ cargo test -p falcon_storage --lib -- memtable::index_tests
 
 ---
 
-## v2.0 — Phase 3: Enterprise Edition Features ✅
+## v1.0 — Phase 3: Enterprise Edition Features ✅
 
 **Status**: Implemented
 

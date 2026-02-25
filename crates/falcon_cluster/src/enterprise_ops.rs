@@ -496,11 +496,11 @@ impl CapacityPlanner {
                 let level = if forecast.utilization > 0.95 {
                     CapacityAlertLevel::Critical
                 } else if forecast.utilization > 0.85
-                    || forecast.time_to_exhaustion_hours.map_or(false, |t| t < 24.0)
+                    || forecast.time_to_exhaustion_hours.is_some_and(|t| t < 24.0)
                 {
                     CapacityAlertLevel::Warning
                 } else if forecast.utilization > 0.7
-                    || forecast.time_to_exhaustion_hours.map_or(false, |t| t < 72.0)
+                    || forecast.time_to_exhaustion_hours.is_some_and(|t| t < 72.0)
                 {
                     CapacityAlertLevel::Watch
                 } else {
@@ -685,7 +685,7 @@ impl SloEngine {
                 target: slo.target,
                 actual,
                 met,
-                error_budget_remaining: error_budget.max(0.0).min(1.0),
+                error_budget_remaining: error_budget.clamp(0.0, 1.0),
                 window_secs: slo.window_secs,
                 evaluated_at: now,
             });
@@ -1121,6 +1121,12 @@ pub struct AdminApiRouter {
     registered_endpoints: Vec<AdminEndpoint>,
 }
 
+impl Default for AdminApiRouter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AdminApiRouter {
     pub fn new() -> Self {
         Self {
@@ -1144,7 +1150,7 @@ impl AdminApiRouter {
         &self.registered_endpoints
     }
 
-    pub fn endpoint_count(&self) -> usize {
+    pub const fn endpoint_count(&self) -> usize {
         self.registered_endpoints.len()
     }
 }

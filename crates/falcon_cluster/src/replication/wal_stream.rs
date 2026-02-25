@@ -85,7 +85,7 @@ impl WalChunk {
     }
 
     /// Create an empty WalChunk for a given shard (no records).
-    pub fn empty(shard_id: ShardId) -> Self {
+    pub const fn empty(shard_id: ShardId) -> Self {
         Self {
             shard_id,
             start_lsn: 0,
@@ -95,11 +95,11 @@ impl WalChunk {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.records.is_empty()
     }
 
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.records.len()
     }
 }
@@ -394,7 +394,7 @@ impl ReplicationLog {
     }
 
     /// Maximum capacity of this log.
-    pub fn max_capacity(&self) -> usize {
+    pub const fn max_capacity(&self) -> usize {
         self.max_capacity
     }
 

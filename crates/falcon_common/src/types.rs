@@ -28,11 +28,11 @@ pub struct TxnId(pub u64);
 pub struct Timestamp(pub u64);
 
 impl Timestamp {
-    pub const MIN: Timestamp = Timestamp(0);
-    pub const MAX: Timestamp = Timestamp(u64::MAX);
+    pub const MIN: Self = Self(0);
+    pub const MAX: Self = Self(u64::MAX);
 
-    pub fn next(self) -> Timestamp {
-        Timestamp(self.0 + 1)
+    pub const fn next(self) -> Self {
+        Self(self.0 + 1)
     }
 }
 
@@ -76,7 +76,7 @@ pub enum DataType {
     Text,
     Timestamp,
     Date,
-    Array(Box<DataType>),
+    Array(Box<Self>),
     Jsonb,
     /// Fixed-point decimal: Decimal(precision, scale).
     /// precision = total significant digits (max 38), scale = digits after decimal point.
@@ -93,147 +93,147 @@ pub enum DataType {
 
 impl DataType {
     /// Return the PG OID for this type.
-    pub fn pg_oid(&self) -> i32 {
+    pub const fn pg_oid(&self) -> i32 {
         match self {
-            DataType::Boolean => 16,
-            DataType::Int32 => 23,
-            DataType::Int64 => 20,
-            DataType::Float64 => 701,
-            DataType::Text => 25,
-            DataType::Timestamp => 1114,
-            DataType::Date => 1082,
-            DataType::Array(_) => 2277,      // anyarray OID
-            DataType::Jsonb => 3802,         // jsonb OID
-            DataType::Decimal(_, _) => 1700, // numeric OID
-            DataType::Time => 1083,
-            DataType::Interval => 1186,
-            DataType::Uuid => 2950,
-            DataType::Bytea => 17, // bytea OID
+            Self::Boolean => 16,
+            Self::Int32 => 23,
+            Self::Int64 => 20,
+            Self::Float64 => 701,
+            Self::Text => 25,
+            Self::Timestamp => 1114,
+            Self::Date => 1082,
+            Self::Array(_) => 2277,      // anyarray OID
+            Self::Jsonb => 3802,         // jsonb OID
+            Self::Decimal(_, _) => 1700, // numeric OID
+            Self::Time => 1083,
+            Self::Interval => 1186,
+            Self::Uuid => 2950,
+            Self::Bytea => 17, // bytea OID
         }
     }
 
     /// Byte size hint (-1 for variable length).
-    pub fn type_len(&self) -> i16 {
+    pub const fn type_len(&self) -> i16 {
         match self {
-            DataType::Boolean => 1,
-            DataType::Int32 => 4,
-            DataType::Int64 => 8,
-            DataType::Float64 => 8,
-            DataType::Text => -1,
-            DataType::Timestamp => 8,
-            DataType::Date => 4,
-            DataType::Array(_) => -1,
-            DataType::Jsonb => -1,
-            DataType::Decimal(_, _) => -1, // variable length
-            DataType::Time => 8,
-            DataType::Interval => 16,
-            DataType::Uuid => 16,
-            DataType::Bytea => -1, // variable length
+            Self::Boolean => 1,
+            Self::Int32 => 4,
+            Self::Int64 => 8,
+            Self::Float64 => 8,
+            Self::Text => -1,
+            Self::Timestamp => 8,
+            Self::Date => 4,
+            Self::Array(_) => -1,
+            Self::Jsonb => -1,
+            Self::Decimal(_, _) => -1, // variable length
+            Self::Time => 8,
+            Self::Interval => 16,
+            Self::Uuid => 16,
+            Self::Bytea => -1, // variable length
         }
     }
 
     /// PG type OID for pg_catalog.pg_type compatibility.
     pub fn pg_type_oid(&self) -> i32 {
         match self {
-            DataType::Boolean => 16,
-            DataType::Int32 => 23,
-            DataType::Int64 => 20,
-            DataType::Float64 => 701,
-            DataType::Text => 25,
-            DataType::Timestamp => 1114,
-            DataType::Date => 1082,
-            DataType::Array(inner) => match inner.as_ref() {
-                DataType::Int32 => 1007,
-                DataType::Int64 => 1016,
-                DataType::Text => 1009,
-                DataType::Float64 => 1022,
-                DataType::Boolean => 1000,
+            Self::Boolean => 16,
+            Self::Int32 => 23,
+            Self::Int64 => 20,
+            Self::Float64 => 701,
+            Self::Text => 25,
+            Self::Timestamp => 1114,
+            Self::Date => 1082,
+            Self::Array(inner) => match inner.as_ref() {
+                Self::Int32 => 1007,
+                Self::Int64 => 1016,
+                Self::Text => 1009,
+                Self::Float64 => 1022,
+                Self::Boolean => 1000,
                 _ => 2277, // anyarray
             },
-            DataType::Jsonb => 3802,
-            DataType::Decimal(_, _) => 1700, // numeric
-            DataType::Time => 1083,
-            DataType::Interval => 1186,
-            DataType::Uuid => 2950,
-            DataType::Bytea => 17,
+            Self::Jsonb => 3802,
+            Self::Decimal(_, _) => 1700, // numeric
+            Self::Time => 1083,
+            Self::Interval => 1186,
+            Self::Uuid => 2950,
+            Self::Bytea => 17,
         }
     }
 
     /// PG internal short type name (udt_name) for information_schema.columns.
     pub fn pg_udt_name(&self) -> &'static str {
         match self {
-            DataType::Boolean => "bool",
-            DataType::Int32 => "int4",
-            DataType::Int64 => "int8",
-            DataType::Float64 => "float8",
-            DataType::Text => "text",
-            DataType::Timestamp => "timestamp",
-            DataType::Date => "date",
-            DataType::Array(inner) => match inner.as_ref() {
-                DataType::Int32 => "_int4",
-                DataType::Int64 => "_int8",
-                DataType::Text => "_text",
-                DataType::Float64 => "_float8",
-                DataType::Boolean => "_bool",
+            Self::Boolean => "bool",
+            Self::Int32 => "int4",
+            Self::Int64 => "int8",
+            Self::Float64 => "float8",
+            Self::Text => "text",
+            Self::Timestamp => "timestamp",
+            Self::Date => "date",
+            Self::Array(inner) => match inner.as_ref() {
+                Self::Int32 => "_int4",
+                Self::Int64 => "_int8",
+                Self::Text => "_text",
+                Self::Float64 => "_float8",
+                Self::Boolean => "_bool",
                 _ => "anyarray",
             },
-            DataType::Jsonb => "jsonb",
-            DataType::Decimal(_, _) => "numeric",
-            DataType::Time => "time",
-            DataType::Interval => "interval",
-            DataType::Uuid => "uuid",
-            DataType::Bytea => "bytea",
+            Self::Jsonb => "jsonb",
+            Self::Decimal(_, _) => "numeric",
+            Self::Time => "time",
+            Self::Interval => "interval",
+            Self::Uuid => "uuid",
+            Self::Bytea => "bytea",
         }
     }
 
     /// Numeric precision for information_schema.columns (None if not numeric).
-    pub fn numeric_precision(&self) -> Option<i32> {
+    pub const fn numeric_precision(&self) -> Option<i32> {
         match self {
-            DataType::Int32 => Some(32),
-            DataType::Int64 => Some(64),
-            DataType::Float64 => Some(53),
-            DataType::Decimal(p, _) => Some(*p as i32),
+            Self::Int32 => Some(32),
+            Self::Int64 => Some(64),
+            Self::Float64 => Some(53),
+            Self::Decimal(p, _) => Some(*p as i32),
             _ => None,
         }
     }
 
     /// Numeric scale for information_schema.columns (None if not numeric).
-    pub fn numeric_scale(&self) -> Option<i32> {
+    pub const fn numeric_scale(&self) -> Option<i32> {
         match self {
-            DataType::Int32 | DataType::Int64 => Some(0),
-            DataType::Decimal(_, s) => Some(*s as i32),
+            Self::Int32 | Self::Int64 => Some(0),
+            Self::Decimal(_, s) => Some(*s as i32),
             _ => None,
         }
     }
 
     /// Datetime precision for information_schema.columns (None if not temporal).
-    pub fn datetime_precision(&self) -> Option<i32> {
+    pub const fn datetime_precision(&self) -> Option<i32> {
         match self {
-            DataType::Timestamp => Some(6),
-            DataType::Date => Some(0),
-            DataType::Time => Some(6),
-            DataType::Interval => Some(6),
+            Self::Timestamp => Some(6),
+            Self::Date => Some(0),
+            Self::Time => Some(6),
+            Self::Interval => Some(6),
             _ => None,
         }
     }
 
     /// PG-compatible type name for information_schema.columns.data_type.
-    pub fn pg_type_name(&self) -> &'static str {
+    pub const fn pg_type_name(&self) -> &'static str {
         match self {
-            DataType::Boolean => "boolean",
-            DataType::Int32 => "integer",
-            DataType::Int64 => "bigint",
-            DataType::Float64 => "double precision",
-            DataType::Text => "text",
-            DataType::Timestamp => "timestamp without time zone",
-            DataType::Date => "date",
-            DataType::Array(_) => "ARRAY",
-            DataType::Jsonb => "jsonb",
-            DataType::Decimal(_, _) => "numeric",
-            DataType::Time => "time without time zone",
-            DataType::Interval => "interval",
-            DataType::Uuid => "uuid",
-            DataType::Bytea => "bytea",
+            Self::Boolean => "boolean",
+            Self::Int32 => "integer",
+            Self::Int64 => "bigint",
+            Self::Float64 => "double precision",
+            Self::Text => "text",
+            Self::Timestamp => "timestamp without time zone",
+            Self::Date => "date",
+            Self::Array(_) => "ARRAY",
+            Self::Jsonb => "jsonb",
+            Self::Decimal(_, _) => "numeric",
+            Self::Time => "time without time zone",
+            Self::Interval => "interval",
+            Self::Uuid => "uuid",
+            Self::Bytea => "bytea",
         }
     }
 }
@@ -241,20 +241,20 @@ impl DataType {
 impl fmt::Display for DataType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DataType::Boolean => write!(f, "BOOLEAN"),
-            DataType::Int32 => write!(f, "INT"),
-            DataType::Int64 => write!(f, "BIGINT"),
-            DataType::Float64 => write!(f, "FLOAT8"),
-            DataType::Text => write!(f, "TEXT"),
-            DataType::Timestamp => write!(f, "TIMESTAMP"),
-            DataType::Date => write!(f, "DATE"),
-            DataType::Array(inner) => write!(f, "{}[]", inner),
-            DataType::Jsonb => write!(f, "JSONB"),
-            DataType::Decimal(p, s) => write!(f, "DECIMAL({},{})", p, s),
-            DataType::Time => write!(f, "TIME"),
-            DataType::Interval => write!(f, "INTERVAL"),
-            DataType::Uuid => write!(f, "UUID"),
-            DataType::Bytea => write!(f, "BYTEA"),
+            Self::Boolean => write!(f, "BOOLEAN"),
+            Self::Int32 => write!(f, "INT"),
+            Self::Int64 => write!(f, "BIGINT"),
+            Self::Float64 => write!(f, "FLOAT8"),
+            Self::Text => write!(f, "TEXT"),
+            Self::Timestamp => write!(f, "TIMESTAMP"),
+            Self::Date => write!(f, "DATE"),
+            Self::Array(inner) => write!(f, "{}[]", inner),
+            Self::Jsonb => write!(f, "JSONB"),
+            Self::Decimal(p, s) => write!(f, "DECIMAL({},{})", p, s),
+            Self::Time => write!(f, "TIME"),
+            Self::Interval => write!(f, "INTERVAL"),
+            Self::Uuid => write!(f, "UUID"),
+            Self::Bytea => write!(f, "BYTEA"),
         }
     }
 }
@@ -310,7 +310,7 @@ impl TxnContext {
     }
 
     /// Build a global-txn context (multiple shards, slow path).
-    pub fn global(txn_id: TxnId, shards: Vec<ShardId>, start_ts: Timestamp) -> Self {
+    pub const fn global(txn_id: TxnId, shards: Vec<ShardId>, start_ts: Timestamp) -> Self {
         Self {
             txn_id,
             txn_type: TxnType::Global,

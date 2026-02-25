@@ -190,7 +190,7 @@ impl QueryHandler {
     }
 
     /// Set the commit policy for durability guarantees.
-    pub fn set_commit_policy(&mut self, policy: CommitPolicy) {
+    pub const fn set_commit_policy(&mut self, policy: CommitPolicy) {
         self.commit_policy = policy;
     }
 
@@ -216,7 +216,7 @@ impl QueryHandler {
     }
 
     /// Get a reference to the slow query log.
-    pub fn slow_query_log(&self) -> &Arc<SlowQueryLog> {
+    pub const fn slow_query_log(&self) -> &Arc<SlowQueryLog> {
         &self.slow_query_log
     }
 
@@ -316,6 +316,7 @@ impl QueryHandler {
             pos += 1;
 
             let mut vals = Vec::with_capacity(ncols);
+            #[allow(clippy::needless_range_loop)]
             for vi in 0..ncols {
                 // Skip whitespace
                 while pos < len && bytes[pos] == b' ' { pos += 1; }
@@ -548,7 +549,8 @@ impl QueryHandler {
 
                 // Fast path for INSERT: skip row_counts/indexed_cols (unused)
                 // and use owned planning to avoid cloning the rows vector.
-                let p = if let BoundStatement::Insert(ins) = bound {
+                
+                if let BoundStatement::Insert(ins) = bound {
                     match Planner::plan_insert_owned(ins) {
                         Ok(p) => Planner::wrap_distributed(p, &self.cluster_shard_ids),
                         Err(e) => {
@@ -572,8 +574,7 @@ impl QueryHandler {
                         self.plan_cache.put(sql, p.clone());
                     }
                     p
-                };
-                p
+                }
             };
 
             let routing_hint = plan.routing_hint();
@@ -1359,14 +1360,10 @@ impl QueryHandler {
             false
         };
 
-        // Execute with parameter substitution
+        // Execute with parameter substitution — route through dist_engine when available
         let query_start = std::time::Instant::now();
-        let result = if params.is_empty() {
-            if let Some(dist) = &self.dist_engine {
-                dist.execute(plan, session.txn.as_ref())
-            } else {
-                self.executor.execute(plan, session.txn.as_ref())
-            }
+        let result = if let Some(dist) = &self.dist_engine {
+            dist.execute_with_params(plan, session.txn.as_ref(), params)
         } else {
             self.executor
                 .execute_with_params(plan, session.txn.as_ref(), params)
@@ -1442,7 +1439,7 @@ impl QueryHandler {
     }
 
     /// Map a Falcon DataType to a PostgreSQL type OID.
-    pub fn datatype_to_oid(&self, dt: Option<&falcon_common::types::DataType>) -> i32 {
+    pub const fn datatype_to_oid(&self, dt: Option<&falcon_common::types::DataType>) -> i32 {
         use falcon_common::types::DataType;
         match dt {
             Some(DataType::Int32) => 23,           // INT4

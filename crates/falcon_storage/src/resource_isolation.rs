@@ -202,7 +202,7 @@ impl<'a> Drop for CpuSlotGuard<'a> {
 }
 
 impl CpuScheduler {
-    pub fn new(max_concurrent: u64) -> Self {
+    pub const fn new(max_concurrent: u64) -> Self {
         Self {
             inflight: AtomicU64::new(0),
             max_concurrent,
@@ -229,7 +229,7 @@ impl CpuScheduler {
     }
 
     /// Dynamically adjust the max concurrent limit.
-    pub fn set_max_concurrent(&self, _max: u64) {
+    pub const fn set_max_concurrent(&self, _max: u64) {
         // Note: max_concurrent is not AtomicU64 for simplicity,
         // but the inflight check is always against the fixed limit.
         // For dynamic adjustment, use ResourceIsolator::adjust_for_load.

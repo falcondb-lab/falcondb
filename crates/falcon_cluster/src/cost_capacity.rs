@@ -637,6 +637,7 @@ impl PostmortemGenerator {
     }
 
     /// Record a decision point with explicit timestamp.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_decision_at(
         &self,
         decision: &str,
@@ -843,6 +844,12 @@ pub struct AdminConsoleV2 {
     endpoints: Vec<AdminV2Endpoint>,
 }
 
+impl Default for AdminConsoleV2 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AdminConsoleV2 {
     pub fn new() -> Self {
         Self {
@@ -865,7 +872,7 @@ impl AdminConsoleV2 {
         &self.endpoints
     }
 
-    pub fn endpoint_count(&self) -> usize {
+    pub const fn endpoint_count(&self) -> usize {
         self.endpoints.len()
     }
 }
@@ -952,6 +959,12 @@ pub struct ChangeImpactPreview {
 #[derive(Debug, Default)]
 pub struct ChangeImpactMetrics {
     pub previews_computed: AtomicU64,
+}
+
+impl Default for ChangeImpactPreview {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ChangeImpactPreview {

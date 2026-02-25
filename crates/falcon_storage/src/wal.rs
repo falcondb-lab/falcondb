@@ -305,6 +305,45 @@ pub enum WalRecord {
     },
     /// DDL: truncate table.
     TruncateTable { table_name: String },
+    /// DDL: create schema.
+    CreateSchema { name: String, owner: String },
+    /// DDL: drop schema.
+    DropSchema { name: String },
+    /// DDL: create role.
+    CreateRole {
+        name: String,
+        can_login: bool,
+        is_superuser: bool,
+        can_create_db: bool,
+        can_create_role: bool,
+        password_hash: Option<String>,
+    },
+    /// DDL: drop role.
+    DropRole { name: String },
+    /// DDL: alter role.
+    AlterRole {
+        name: String,
+        options_json: String,
+    },
+    /// DCL: grant privilege.
+    GrantPrivilege {
+        grantee: String,
+        privilege: String,
+        object_type: String,
+        object_name: String,
+        grantor: String,
+    },
+    /// DCL: revoke privilege.
+    RevokePrivilege {
+        grantee: String,
+        privilege: String,
+        object_type: String,
+        object_name: String,
+    },
+    /// DCL: grant role membership.
+    GrantRole { member: String, group: String },
+    /// DCL: revoke role membership.
+    RevokeRole { member: String, group: String },
     /// Checkpoint marker.
     Checkpoint { timestamp: Timestamp },
     /// P0-3: Coordinator decision record for 2PC crash recovery.
@@ -444,7 +483,7 @@ impl WalWriter {
         let data =
             bincode::serialize(record).map_err(|e| StorageError::Serialization(e.to_string()))?;
 
-        let lsn = self.lsn.fetch_add(1, Ordering::SeqCst);
+        let lsn = self.lsn.fetch_add(1, Ordering::Relaxed);
         let checksum = crc32fast::hash(&data);
         let len = data.len() as u32;
         let record_size = 8 + data.len() as u64; // header + data
@@ -457,8 +496,11 @@ impl WalWriter {
         }
 
         // Record format: [len:4][checksum:4][data:len]
-        inner.writer.write_all(&len.to_le_bytes())?;
-        inner.writer.write_all(&checksum.to_le_bytes())?;
+        // Merge header into a single stack-allocated write to reduce BufWriter calls.
+        let mut header = [0u8; 8];
+        header[..4].copy_from_slice(&len.to_le_bytes());
+        header[4..].copy_from_slice(&checksum.to_le_bytes());
+        inner.writer.write_all(&header)?;
         inner.writer.write_all(&data)?;
         inner.current_segment_size += record_size;
         inner.pending_count += 1;
@@ -716,11 +758,11 @@ impl CheckpointData {
 pub struct NullWal;
 
 impl NullWal {
-    pub fn append(&self, _record: &WalRecord) -> Result<u64, StorageError> {
+    pub const fn append(&self, _record: &WalRecord) -> Result<u64, StorageError> {
         Ok(0)
     }
 
-    pub fn flush(&self) -> Result<(), StorageError> {
+    pub const fn flush(&self) -> Result<(), StorageError> {
         Ok(())
     }
 }

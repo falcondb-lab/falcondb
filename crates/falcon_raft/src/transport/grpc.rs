@@ -63,7 +63,7 @@ impl GrpcTransport {
     }
 
     /// Get metrics reference.
-    pub fn metrics(&self) -> &Arc<TransportMetrics> {
+    pub const fn metrics(&self) -> &Arc<TransportMetrics> {
         &self.metrics
     }
 
@@ -264,7 +264,7 @@ impl GrpcTransport {
         Ok(client)
     }
 
-    fn check_payload_size(&self, size: usize) -> Result<(), TransportError> {
+    const fn check_payload_size(&self, size: usize) -> Result<(), TransportError> {
         if size > self.config.max_rpc_payload_bytes {
             return Err(TransportError::PayloadTooLarge {
                 size,
@@ -299,7 +299,7 @@ pub enum RpcType {
 }
 
 impl RpcType {
-    pub fn from_u8(v: u8) -> Option<Self> {
+    pub const fn from_u8(v: u8) -> Option<Self> {
         match v {
             1 => Some(Self::AppendEntries),
             2 => Some(Self::RequestVote),

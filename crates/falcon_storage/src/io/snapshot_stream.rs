@@ -124,7 +124,7 @@ impl SnapshotReader {
     }
 
     /// Total file size.
-    pub fn total_size(&self) -> u64 {
+    pub const fn total_size(&self) -> u64 {
         self.file_size
     }
 

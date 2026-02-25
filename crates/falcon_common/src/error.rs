@@ -86,6 +86,18 @@ pub enum StorageError {
     #[error("Database not found: {0}")]
     DatabaseNotFound(String),
 
+    #[error("Role already exists: {0}")]
+    RoleAlreadyExists(String),
+
+    #[error("Role not found: {0}")]
+    RoleNotFound(String),
+
+    #[error("Schema already exists: {0}")]
+    SchemaAlreadyExists(String),
+
+    #[error("Schema not found: {0}")]
+    SchemaNotFound(String),
+
     #[error("Key not found")]
     KeyNotFound,
 
@@ -251,6 +263,9 @@ pub enum ExecutionError {
 
     #[error("Query governor abort: {0}")]
     GovernorAbort(String),
+
+    #[error("Resource exhausted: {0}")]
+    ResourceExhausted(String),
 }
 
 /// Cluster / metadata errors.
@@ -273,56 +288,57 @@ pub enum ClusterError {
 
 impl FalconError {
     /// Classify this error for retry/escalation decisions.
-    pub fn kind(&self) -> ErrorKind {
+    pub const fn kind(&self) -> ErrorKind {
         match self {
             // User-facing errors (bad input, SQL errors, permission)
-            FalconError::Sql(_) => ErrorKind::UserError,
-            FalconError::ReadOnly(_) => ErrorKind::UserError,
-            FalconError::Protocol(ProtocolError::AuthFailed) => ErrorKind::UserError,
-            FalconError::Protocol(ProtocolError::InvalidMessage(_)) => ErrorKind::UserError,
-            FalconError::Execution(ExecutionError::TypeError(_)) => ErrorKind::UserError,
-            FalconError::Execution(ExecutionError::DivisionByZero) => ErrorKind::UserError,
-            FalconError::Execution(ExecutionError::ParamMissing(_)) => ErrorKind::UserError,
-            FalconError::Execution(ExecutionError::ParamTypeMismatch { .. }) => {
+            Self::Sql(_) => ErrorKind::UserError,
+            Self::ReadOnly(_) => ErrorKind::UserError,
+            Self::Protocol(ProtocolError::AuthFailed) => ErrorKind::UserError,
+            Self::Protocol(ProtocolError::InvalidMessage(_)) => ErrorKind::UserError,
+            Self::Execution(ExecutionError::TypeError(_)) => ErrorKind::UserError,
+            Self::Execution(ExecutionError::DivisionByZero) => ErrorKind::UserError,
+            Self::Execution(ExecutionError::ParamMissing(_)) => ErrorKind::UserError,
+            Self::Execution(ExecutionError::ParamTypeMismatch { .. }) => {
                 ErrorKind::UserError
             }
-            FalconError::Execution(ExecutionError::InsufficientPrivilege(_)) => {
+            Self::Execution(ExecutionError::InsufficientPrivilege(_)) => {
                 ErrorKind::UserError
             }
-            FalconError::Execution(ExecutionError::GovernorAbort(_)) => ErrorKind::UserError,
-            FalconError::Execution(ExecutionError::CheckConstraintViolation(_)) => {
+            Self::Execution(ExecutionError::GovernorAbort(_)) => ErrorKind::UserError,
+            Self::Execution(ExecutionError::ResourceExhausted(_)) => ErrorKind::UserError,
+            Self::Execution(ExecutionError::CheckConstraintViolation(_)) => {
                 ErrorKind::UserError
             }
-            FalconError::Storage(StorageError::TableNotFound(_)) => ErrorKind::UserError,
-            FalconError::Storage(StorageError::TableAlreadyExists(_)) => ErrorKind::UserError,
-            FalconError::Storage(StorageError::DatabaseAlreadyExists(_)) => ErrorKind::UserError,
-            FalconError::Storage(StorageError::DatabaseNotFound(_)) => ErrorKind::UserError,
-            FalconError::Storage(StorageError::DuplicateKey) => ErrorKind::UserError,
-            FalconError::Storage(StorageError::UniqueViolation { .. }) => ErrorKind::UserError,
-            FalconError::Txn(TxnError::ConstraintViolation(_, _)) => ErrorKind::UserError,
+            Self::Storage(StorageError::TableNotFound(_)) => ErrorKind::UserError,
+            Self::Storage(StorageError::TableAlreadyExists(_)) => ErrorKind::UserError,
+            Self::Storage(StorageError::DatabaseAlreadyExists(_)) => ErrorKind::UserError,
+            Self::Storage(StorageError::DatabaseNotFound(_)) => ErrorKind::UserError,
+            Self::Storage(StorageError::DuplicateKey) => ErrorKind::UserError,
+            Self::Storage(StorageError::UniqueViolation { .. }) => ErrorKind::UserError,
+            Self::Txn(TxnError::ConstraintViolation(_, _)) => ErrorKind::UserError,
 
             // Retryable errors (write conflict, leader change, epoch mismatch)
-            FalconError::Retryable { .. } => ErrorKind::Retryable,
-            FalconError::Txn(TxnError::WriteConflict(_)) => ErrorKind::Retryable,
-            FalconError::Txn(TxnError::SerializationConflict(_)) => ErrorKind::Retryable,
-            FalconError::Txn(TxnError::Aborted(_)) => ErrorKind::Retryable,
-            FalconError::Storage(StorageError::SerializationFailure) => ErrorKind::Retryable,
-            FalconError::Cluster(ClusterError::NotLeader) => ErrorKind::Retryable,
+            Self::Retryable { .. } => ErrorKind::Retryable,
+            Self::Txn(TxnError::WriteConflict(_)) => ErrorKind::Retryable,
+            Self::Txn(TxnError::SerializationConflict(_)) => ErrorKind::Retryable,
+            Self::Txn(TxnError::Aborted(_)) => ErrorKind::Retryable,
+            Self::Storage(StorageError::SerializationFailure) => ErrorKind::Retryable,
+            Self::Cluster(ClusterError::NotLeader) => ErrorKind::Retryable,
 
             // Transient errors (timeout, resource exhaustion, backpressure)
-            FalconError::Transient { .. } => ErrorKind::Transient,
-            FalconError::Txn(TxnError::Timeout) => ErrorKind::Transient,
-            FalconError::Txn(TxnError::MemoryPressure(_)) => ErrorKind::Transient,
-            FalconError::Txn(TxnError::MemoryLimitExceeded(_)) => ErrorKind::Transient,
-            FalconError::Txn(TxnError::WalBacklogExceeded(_)) => ErrorKind::Transient,
-            FalconError::Txn(TxnError::ReplicationLagExceeded(_)) => ErrorKind::Transient,
-            FalconError::Storage(StorageError::MemoryPressure { .. }) => ErrorKind::Transient,
-            FalconError::Storage(StorageError::MemoryLimitExceeded { .. }) => ErrorKind::Transient,
-            FalconError::Protocol(ProtocolError::Io(_)) => ErrorKind::Transient,
-            FalconError::Protocol(ProtocolError::ConnectionClosed) => ErrorKind::Transient,
+            Self::Transient { .. } => ErrorKind::Transient,
+            Self::Txn(TxnError::Timeout) => ErrorKind::Transient,
+            Self::Txn(TxnError::MemoryPressure(_)) => ErrorKind::Transient,
+            Self::Txn(TxnError::MemoryLimitExceeded(_)) => ErrorKind::Transient,
+            Self::Txn(TxnError::WalBacklogExceeded(_)) => ErrorKind::Transient,
+            Self::Txn(TxnError::ReplicationLagExceeded(_)) => ErrorKind::Transient,
+            Self::Storage(StorageError::MemoryPressure { .. }) => ErrorKind::Transient,
+            Self::Storage(StorageError::MemoryLimitExceeded { .. }) => ErrorKind::Transient,
+            Self::Protocol(ProtocolError::Io(_)) => ErrorKind::Transient,
+            Self::Protocol(ProtocolError::ConnectionClosed) => ErrorKind::Transient,
 
             // Everything else is an internal bug
-            FalconError::InternalBug { .. } => ErrorKind::InternalBug,
+            Self::InternalBug { .. } => ErrorKind::InternalBug,
             _ => ErrorKind::InternalBug,
         }
     }
@@ -348,56 +364,57 @@ impl FalconError {
     }
 
     /// Suggested retry delay in milliseconds (0 = retry immediately).
-    pub fn retry_after_ms(&self) -> u64 {
+    pub const fn retry_after_ms(&self) -> u64 {
         match self {
-            FalconError::Retryable { retry_after_ms, .. } => *retry_after_ms,
-            FalconError::Transient { retry_after_ms, .. } => *retry_after_ms,
-            FalconError::Txn(TxnError::Timeout) => 100,
-            FalconError::Txn(TxnError::MemoryPressure(_)) => 50,
-            FalconError::Txn(TxnError::WalBacklogExceeded(_)) => 200,
-            FalconError::Txn(TxnError::ReplicationLagExceeded(_)) => 500,
+            Self::Retryable { retry_after_ms, .. } => *retry_after_ms,
+            Self::Transient { retry_after_ms, .. } => *retry_after_ms,
+            Self::Txn(TxnError::Timeout) => 100,
+            Self::Txn(TxnError::MemoryPressure(_)) => 50,
+            Self::Txn(TxnError::WalBacklogExceeded(_)) => 200,
+            Self::Txn(TxnError::ReplicationLagExceeded(_)) => 500,
             _ => 0,
         }
     }
 
     /// Map to a PostgreSQL SQLSTATE code.
-    pub fn pg_sqlstate(&self) -> &'static str {
+    pub const fn pg_sqlstate(&self) -> &'static str {
         match self {
-            FalconError::Sql(SqlError::Parse(_)) => "42601", // syntax_error
-            FalconError::Sql(SqlError::UnknownTable(_)) => "42P01", // undefined_table
-            FalconError::Sql(SqlError::UnknownColumn(_)) => "42703", // undefined_column
-            FalconError::Sql(SqlError::TypeMismatch { .. }) => "42804", // datatype_mismatch
-            FalconError::Sql(SqlError::Unsupported(_)) => "0A000", // feature_not_supported
-            FalconError::Sql(SqlError::AmbiguousColumn(_)) => "42702", // ambiguous_column
-            FalconError::Sql(_) => "42000", // syntax_error_or_access_rule_violation
-            FalconError::Storage(StorageError::TableNotFound(_)) => "42P01",
-            FalconError::Storage(StorageError::TableAlreadyExists(_)) => "42P07", // duplicate_table
-            FalconError::Storage(StorageError::DuplicateKey) => "23505", // unique_violation
-            FalconError::Storage(StorageError::UniqueViolation { .. }) => "23505",
-            FalconError::Storage(StorageError::SerializationFailure) => "40001", // serialization_failure
-            FalconError::Storage(StorageError::MemoryPressure { .. }) => "53200", // out_of_memory
-            FalconError::Storage(StorageError::MemoryLimitExceeded { .. }) => "53200",
-            FalconError::Txn(TxnError::WriteConflict(_)) => "40001",
-            FalconError::Txn(TxnError::SerializationConflict(_)) => "40001",
-            FalconError::Txn(TxnError::ConstraintViolation(_, _)) => "23000", // integrity_constraint_violation
-            FalconError::Txn(TxnError::Timeout) => "57014",                   // query_canceled
-            FalconError::Txn(TxnError::MemoryPressure(_)) => "53200",
-            FalconError::Txn(TxnError::MemoryLimitExceeded(_)) => "53200",
-            FalconError::Txn(TxnError::WalBacklogExceeded(_)) => "53300", // too_many_connections (reuse)
-            FalconError::Txn(TxnError::ReplicationLagExceeded(_)) => "57P03", // cannot_connect_now
-            FalconError::ReadOnly(_) => "25006", // read_only_sql_transaction
-            FalconError::Protocol(ProtocolError::AuthFailed) => "28P01", // invalid_password
-            FalconError::Protocol(ProtocolError::InvalidMessage(_)) => "08P01", // protocol_violation
-            FalconError::Protocol(ProtocolError::ConnectionClosed) => "08006", // connection_failure
-            FalconError::Execution(ExecutionError::DivisionByZero) => "22012", // division_by_zero
-            FalconError::Execution(ExecutionError::TypeError(_)) => "22000",   // data_exception
-            FalconError::Execution(ExecutionError::InsufficientPrivilege(_)) => "42501", // insufficient_privilege
-            FalconError::Execution(ExecutionError::GovernorAbort(_)) => "57014", // query_canceled
-            FalconError::Execution(ExecutionError::CheckConstraintViolation(_)) => "23514", // check_violation
-            FalconError::Retryable { .. } => "40001",
-            FalconError::Transient { .. } => "53000", // insufficient_resources
-            FalconError::InternalBug { .. } => "XX000", // internal_error
-            FalconError::Internal(_) => "XX000",
+            Self::Sql(SqlError::Parse(_)) => "42601", // syntax_error
+            Self::Sql(SqlError::UnknownTable(_)) => "42P01", // undefined_table
+            Self::Sql(SqlError::UnknownColumn(_)) => "42703", // undefined_column
+            Self::Sql(SqlError::TypeMismatch { .. }) => "42804", // datatype_mismatch
+            Self::Sql(SqlError::Unsupported(_)) => "0A000", // feature_not_supported
+            Self::Sql(SqlError::AmbiguousColumn(_)) => "42702", // ambiguous_column
+            Self::Sql(_) => "42000", // syntax_error_or_access_rule_violation
+            Self::Storage(StorageError::TableNotFound(_)) => "42P01",
+            Self::Storage(StorageError::TableAlreadyExists(_)) => "42P07", // duplicate_table
+            Self::Storage(StorageError::DuplicateKey) => "23505", // unique_violation
+            Self::Storage(StorageError::UniqueViolation { .. }) => "23505",
+            Self::Storage(StorageError::SerializationFailure) => "40001", // serialization_failure
+            Self::Storage(StorageError::MemoryPressure { .. }) => "53200", // out_of_memory
+            Self::Storage(StorageError::MemoryLimitExceeded { .. }) => "53200",
+            Self::Txn(TxnError::WriteConflict(_)) => "40001",
+            Self::Txn(TxnError::SerializationConflict(_)) => "40001",
+            Self::Txn(TxnError::ConstraintViolation(_, _)) => "23000", // integrity_constraint_violation
+            Self::Txn(TxnError::Timeout) => "57014",                   // query_canceled
+            Self::Txn(TxnError::MemoryPressure(_)) => "53200",
+            Self::Txn(TxnError::MemoryLimitExceeded(_)) => "53200",
+            Self::Txn(TxnError::WalBacklogExceeded(_)) => "53300", // too_many_connections (reuse)
+            Self::Txn(TxnError::ReplicationLagExceeded(_)) => "57P03", // cannot_connect_now
+            Self::ReadOnly(_) => "25006", // read_only_sql_transaction
+            Self::Protocol(ProtocolError::AuthFailed) => "28P01", // invalid_password
+            Self::Protocol(ProtocolError::InvalidMessage(_)) => "08P01", // protocol_violation
+            Self::Protocol(ProtocolError::ConnectionClosed) => "08006", // connection_failure
+            Self::Execution(ExecutionError::DivisionByZero) => "22012", // division_by_zero
+            Self::Execution(ExecutionError::TypeError(_)) => "22000",   // data_exception
+            Self::Execution(ExecutionError::InsufficientPrivilege(_)) => "42501", // insufficient_privilege
+            Self::Execution(ExecutionError::GovernorAbort(_)) => "57014", // query_canceled
+            Self::Execution(ExecutionError::ResourceExhausted(_)) => "53000", // insufficient_resources
+            Self::Execution(ExecutionError::CheckConstraintViolation(_)) => "23514", // check_violation
+            Self::Retryable { .. } => "40001",
+            Self::Transient { .. } => "53000", // insufficient_resources
+            Self::InternalBug { .. } => "XX000", // internal_error
+            Self::Internal(_) => "XX000",
             _ => "XX000",
         }
     }
@@ -420,7 +437,7 @@ impl FalconError {
         leader_hint: Option<String>,
         retry_after_ms: u64,
     ) -> Self {
-        FalconError::Retryable {
+        Self::Retryable {
             reason: reason.into(),
             shard_id,
             epoch,
@@ -431,7 +448,7 @@ impl FalconError {
 
     /// Construct a transient backpressure error.
     pub fn transient(reason: impl Into<String>, retry_after_ms: u64) -> Self {
-        FalconError::Transient {
+        Self::Transient {
             reason: reason.into(),
             retry_after_ms,
         }
@@ -443,7 +460,7 @@ impl FalconError {
         message: impl Into<String>,
         debug_context: impl Into<String>,
     ) -> Self {
-        FalconError::InternalBug {
+        Self::InternalBug {
             error_code,
             message: message.into(),
             debug_context: debug_context.into(),
@@ -459,37 +476,37 @@ impl FalconError {
     pub fn with_context(self, ctx: impl Into<String>) -> Self {
         let ctx = ctx.into();
         match self {
-            FalconError::Internal(msg) => FalconError::Internal(format!("{ctx}: {msg}")),
-            FalconError::Retryable {
+            Self::Internal(msg) => Self::Internal(format!("{ctx}: {msg}")),
+            Self::Retryable {
                 reason,
                 shard_id,
                 epoch,
                 leader_hint,
                 retry_after_ms,
-            } => FalconError::Retryable {
+            } => Self::Retryable {
                 reason: format!("{ctx}: {reason}"),
                 shard_id,
                 epoch,
                 leader_hint,
                 retry_after_ms,
             },
-            FalconError::Transient {
+            Self::Transient {
                 reason,
                 retry_after_ms,
-            } => FalconError::Transient {
+            } => Self::Transient {
                 reason: format!("{ctx}: {reason}"),
                 retry_after_ms,
             },
-            FalconError::InternalBug {
+            Self::InternalBug {
                 error_code,
                 message,
                 debug_context,
-            } => FalconError::InternalBug {
+            } => Self::InternalBug {
                 error_code,
                 message: format!("{ctx}: {message}"),
                 debug_context,
             },
-            other => FalconError::Internal(format!("{ctx}: {other}")),
+            other => Self::Internal(format!("{ctx}: {other}")),
         }
     }
 
@@ -504,7 +521,7 @@ impl FalconError {
             rctx.request_id, rctx.session_id, rctx.query_id, rctx.txn_id, rctx.shard_id
         );
         match self {
-            FalconError::InternalBug {
+            Self::InternalBug {
                 error_code,
                 message,
                 debug_context,
@@ -514,33 +531,33 @@ impl FalconError {
                 } else {
                     format!("{debug_context} | {tag}")
                 };
-                FalconError::InternalBug {
+                Self::InternalBug {
                     error_code,
                     message,
                     debug_context: dc,
                 }
             }
-            FalconError::Retryable {
+            Self::Retryable {
                 reason,
                 shard_id,
                 epoch,
                 leader_hint,
                 retry_after_ms,
-            } => FalconError::Retryable {
+            } => Self::Retryable {
                 reason: format!("{reason} [{tag}]"),
                 shard_id,
                 epoch,
                 leader_hint,
                 retry_after_ms,
             },
-            FalconError::Transient {
+            Self::Transient {
                 reason,
                 retry_after_ms,
-            } => FalconError::Transient {
+            } => Self::Transient {
                 reason: format!("{reason} [{tag}]"),
                 retry_after_ms,
             },
-            FalconError::Internal(msg) => FalconError::Internal(format!("{msg} [{tag}]")),
+            Self::Internal(msg) => Self::Internal(format!("{msg} [{tag}]")),
             other => other.with_context(tag),
         }
     }
@@ -548,13 +565,13 @@ impl FalconError {
     /// Set `leader_hint` on a `Retryable` error. No-op for other variants.
     pub fn with_leader_hint(self, hint: impl Into<String>) -> Self {
         match self {
-            FalconError::Retryable {
+            Self::Retryable {
                 reason,
                 shard_id,
                 epoch,
                 retry_after_ms,
                 ..
-            } => FalconError::Retryable {
+            } => Self::Retryable {
                 reason,
                 shard_id,
                 epoch,
@@ -569,7 +586,7 @@ impl FalconError {
     /// Must be called for every Fatal error before returning to the client.
     /// Log format is stable across patch versions.
     pub fn log_if_fatal(&self) {
-        if let FalconError::InternalBug {
+        if let Self::InternalBug {
             error_code,
             message,
             debug_context,
@@ -590,26 +607,26 @@ impl FalconError {
     }
 
     /// Identify the affected component for structured logging.
-    fn affected_component(&self) -> &'static str {
+    const fn affected_component(&self) -> &'static str {
         match self {
-            FalconError::Storage(_) => "storage",
-            FalconError::Txn(_) => "txn",
-            FalconError::Sql(_) => "sql",
-            FalconError::Protocol(_) => "protocol",
-            FalconError::Execution(_) => "executor",
-            FalconError::Cluster(_) => "cluster",
-            FalconError::Retryable { .. } => "cluster",
-            FalconError::Transient { .. } => "resource",
-            FalconError::InternalBug { .. } => "internal",
-            FalconError::Internal(_) => "internal",
-            FalconError::ReadOnly(_) => "txn",
+            Self::Storage(_) => "storage",
+            Self::Txn(_) => "txn",
+            Self::Sql(_) => "sql",
+            Self::Protocol(_) => "protocol",
+            Self::Execution(_) => "executor",
+            Self::Cluster(_) => "cluster",
+            Self::Retryable { .. } => "cluster",
+            Self::Transient { .. } => "resource",
+            Self::InternalBug { .. } => "internal",
+            Self::Internal(_) => "internal",
+            Self::ReadOnly(_) => "txn",
         }
     }
 
     /// Set `debug_context` on an `InternalBug` error. No-op for other variants.
     pub fn with_debug_context(self, ctx: impl Into<String>) -> Self {
         match self {
-            FalconError::InternalBug {
+            Self::InternalBug {
                 error_code,
                 message,
                 debug_context,
@@ -620,7 +637,7 @@ impl FalconError {
                 } else {
                     format!("{debug_context} | {dc}")
                 };
-                FalconError::InternalBug {
+                Self::InternalBug {
                     error_code,
                     message,
                     debug_context: dc,

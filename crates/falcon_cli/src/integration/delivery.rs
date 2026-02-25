@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 /// Status of a webhook delivery attempt.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeliveryStatus {
     Pending,
     Delivered,
@@ -10,7 +10,7 @@ pub enum DeliveryStatus {
 }
 
 impl DeliveryStatus {
-    pub fn as_str(&self) -> &str {
+    pub const fn as_str(&self) -> &str {
         match self {
             Self::Pending => "pending",
             Self::Delivered => "delivered",
@@ -78,7 +78,7 @@ impl DeliveryRecord {
         self.status = DeliveryStatus::Retrying(self.attempt_count + 1);
     }
 
-    pub fn should_retry(&self, max_attempts: u32) -> bool {
+    pub const fn should_retry(&self, max_attempts: u32) -> bool {
         self.attempt_count < max_attempts
             && matches!(
                 self.status,

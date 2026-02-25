@@ -43,7 +43,7 @@ pub enum CompressionCodec {
 }
 
 impl CompressionCodec {
-    pub fn from_u8(v: u8) -> Option<Self> {
+    pub const fn from_u8(v: u8) -> Option<Self> {
         match v {
             0 => Some(Self::None),
             1 => Some(Self::Lz4),
@@ -51,7 +51,7 @@ impl CompressionCodec {
         }
     }
 
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::None => "none",
             Self::Lz4 => "lz4",
@@ -196,7 +196,7 @@ impl Segment {
         }
     }
 
-    fn remaining(&self) -> u64 {
+    const fn remaining(&self) -> u64 {
         self.max_size.saturating_sub(self.data.len() as u64)
     }
 
@@ -329,7 +329,7 @@ pub struct ColdStoreMetrics {
 }
 
 impl ColdStoreMetrics {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             cold_bytes: AtomicU64::new(0),
             cold_original_bytes: AtomicU64::new(0),
@@ -520,7 +520,7 @@ impl ColdStore {
     }
 
     /// Get the current config.
-    pub fn config(&self) -> &ColdStoreConfig {
+    pub const fn config(&self) -> &ColdStoreConfig {
         &self.config
     }
 

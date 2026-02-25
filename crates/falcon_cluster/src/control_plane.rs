@@ -418,6 +418,12 @@ pub struct ConfigStore {
     history_capacity: usize,
 }
 
+impl Default for ConfigStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConfigStore {
     pub fn new() -> Self {
         Self {
@@ -634,7 +640,7 @@ impl ConsistentMetadataStore {
         // Apply to state machine
         {
             let mut domains = self.domains.write();
-            let store = domains.entry(domain).or_insert_with(BTreeMap::new);
+            let store = domains.entry(domain).or_default();
             store.insert(key.to_string(), value.to_string());
         }
         // Append to committed log
@@ -663,7 +669,7 @@ impl ConsistentMetadataStore {
         }
         self.metrics.cas_attempts.fetch_add(1, Ordering::Relaxed);
         let mut domains = self.domains.write();
-        let store = domains.entry(domain.clone()).or_insert_with(BTreeMap::new);
+        let store = domains.entry(domain).or_default();
         let current = store.get(key).cloned();
         let expected_str = expected.map(|s| s.to_string());
         if current != expected_str {
@@ -794,6 +800,12 @@ pub struct PlacementMetrics {
     pub leaders_changed: AtomicU64,
     pub replicas_added: AtomicU64,
     pub replicas_removed: AtomicU64,
+}
+
+impl Default for ShardPlacementManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ShardPlacementManager {
@@ -957,6 +969,12 @@ pub struct DispatcherMetrics {
     pub commands_accepted: AtomicU64,
     pub commands_rejected: AtomicU64,
     pub commands_completed: AtomicU64,
+}
+
+impl Default for CommandDispatcher {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CommandDispatcher {

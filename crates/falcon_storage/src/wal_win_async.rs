@@ -430,7 +430,7 @@ mod inner {
     }
 
     /// Check if the system supports IOCP (always true on Windows NT+).
-    pub fn iocp_available() -> bool {
+    pub const fn iocp_available() -> bool {
         true
     }
 

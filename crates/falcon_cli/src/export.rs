@@ -112,7 +112,7 @@ pub async fn run_export(client: &DbClient, cmd: &ExportCmd) -> Result<u64> {
         let fields: Vec<String> = (0..ncols)
             .map(|i| {
                 let v = row.get(i).unwrap_or("");
-                if v == "" && !cmd.opts.null_as.is_empty() {
+                if v.is_empty() && !cmd.opts.null_as.is_empty() {
                     // We can't distinguish NULL from empty string via SimpleQueryRow,
                     // so we use the raw value as-is (NULL comes as None → "")
                     cmd.opts.null_as.clone()
@@ -166,13 +166,13 @@ fn parse_token(s: &str) -> Result<(String, &str)> {
     if s.is_empty() {
         bail!("EXPORT: expected a file path");
     }
-    if s.starts_with('\'') {
+    if let Some(after_quote) = s.strip_prefix('\'') {
         // Quoted path
-        let end = s[1..]
+        let end = after_quote
             .find('\'')
             .ok_or_else(|| anyhow::anyhow!("EXPORT: unclosed quote in file path"))?;
-        let token = s[1..end + 1].to_string();
-        let rest = s[end + 2..].trim_start();
+        let token = after_quote[..end].to_string();
+        let rest = after_quote[end + 1..].trim_start();
         Ok((token, rest))
     } else {
         // Unquoted — up to next whitespace

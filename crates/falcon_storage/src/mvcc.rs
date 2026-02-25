@@ -18,7 +18,7 @@ pub struct Version {
     /// The row data (None = tombstone / deleted).
     pub data: Option<OwnedRow>,
     /// Link to the previous (older) version (RwLock for safe GC truncation).
-    prev: RwLock<Option<Arc<Version>>>,
+    prev: RwLock<Option<Arc<Self>>>,
 }
 
 impl std::fmt::Debug for Version {
@@ -47,7 +47,7 @@ impl Version {
 
     /// Get a clone of the prev pointer.
     #[inline]
-    pub fn get_prev(&self) -> Option<Arc<Version>> {
+    pub fn get_prev(&self) -> Option<Arc<Self>> {
         self.prev.read().clone()
     }
 
@@ -78,7 +78,7 @@ pub struct VersionChain {
 }
 
 impl VersionChain {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             head: RwLock::new(None),
             fast_commit_ts: AtomicU64::new(0),
@@ -102,7 +102,14 @@ impl VersionChain {
 
     /// Find the visible version for a given read timestamp under Read Committed.
     /// Returns the latest committed version with commit_ts <= read_ts.
+    #[inline]
     pub fn read_committed(&self, read_ts: Timestamp) -> Option<OwnedRow> {
+        // Ultra-fast path: single committed non-tombstone version.
+        let fcts = self.fast_commit_ts.load(Ordering::Acquire);
+        if fcts > 0 && Timestamp(fcts) <= read_ts {
+            let head = self.head.read();
+            return head.as_ref().and_then(|ver| ver.data.clone());
+        }
         let head = self.head.read();
         // Fast path: check head version without Arc clone
         if let Some(ref ver) = *head {
@@ -124,6 +131,7 @@ impl VersionChain {
     }
 
     /// Find the visible version for a specific transaction (sees own writes).
+    #[inline]
     pub fn read_for_txn(&self, txn_id: TxnId, read_ts: Timestamp) -> Option<OwnedRow> {
         let head = self.head.read();
         // Fast path: check head version without Arc clone
@@ -168,36 +176,30 @@ impl VersionChain {
     ) -> (Option<OwnedRow>, Option<OwnedRow>) {
         let head = self.head.read();
         let mut new_data: Option<OwnedRow> = None;
+        let mut old_data: Option<OwnedRow> = None;
         let mut found = false;
+        // Single-pass: commit this txn's versions AND find the prior committed version.
         let mut current = head.clone();
         while let Some(ver) = current {
-            if ver.created_by == txn_id && ver.get_commit_ts().0 == 0 {
-                ver.set_commit_ts(commit_ts);
-                if !found {
-                    new_data = ver.data.clone();
-                    found = true;
+            if ver.created_by == txn_id {
+                if ver.get_commit_ts().0 == 0 {
+                    ver.set_commit_ts(commit_ts);
+                    if !found {
+                        new_data = ver.data.clone();
+                        found = true;
+                    }
+                }
+            } else if old_data.is_none() {
+                // First non-txn version after our versions = the prior committed head
+                let cts = ver.get_commit_ts();
+                if cts.0 > 0 && cts != Timestamp::MAX {
+                    old_data = ver.data.clone();
                 }
             }
             current = ver.get_prev();
         }
         if !found {
             return (None, None);
-        }
-        // Find the prior committed version (first committed version that is not this txn's)
-        let mut old_data: Option<OwnedRow> = None;
-        let mut current = head.clone();
-        while let Some(ver) = current {
-            let cts = ver.get_commit_ts();
-            if cts.0 > 0 && cts != Timestamp::MAX && ver.created_by != txn_id {
-                old_data = ver.data.clone();
-                break;
-            }
-            // Skip this txn's own versions (just committed or previously committed)
-            if ver.created_by == txn_id {
-                current = ver.get_prev();
-                continue;
-            }
-            current = ver.get_prev();
         }
         // Enable fast_commit_ts when this is a single-version non-tombstone chain
         // (common case: fresh INSERT commit with no prior versions).
@@ -312,6 +314,7 @@ impl VersionChain {
     }
 
     /// Check if a key has an uncommitted write by another transaction.
+    #[inline]
     pub fn has_write_conflict(&self, txn_id: TxnId) -> bool {
         let head = self.head.read();
         if let Some(ref ver) = *head {
@@ -397,6 +400,7 @@ impl VersionChain {
 
     /// Check if a non-tombstone version is visible to the given txn/read_ts.
     /// Same logic as read_for_txn but avoids cloning the row data.
+    #[inline]
     pub fn is_visible(&self, txn_id: TxnId, read_ts: Timestamp) -> bool {
         // Ultra-fast path: single committed non-tombstone version.
         // Avoids RwLock acquire + Arc<Version> pointer chase (2 fewer cache misses).
@@ -432,12 +436,25 @@ impl VersionChain {
 
     /// Call closure with reference to visible row data (avoids clone).
     /// Returns None if no visible version or if it's a tombstone.
+    #[inline]
     pub fn with_visible_data<R>(
         &self,
         txn_id: TxnId,
         read_ts: Timestamp,
         f: impl FnOnce(&OwnedRow) -> R,
     ) -> Option<R> {
+        // Ultra-fast path: single committed non-tombstone version (most common after INSERT).
+        // fast_commit_ts is set by commit_and_report() only when chain has exactly 1 version.
+        // If set and visible to read_ts, we can still need the head lock to get row data,
+        // but we skip the version chain traversal entirely.
+        let fcts = self.fast_commit_ts.load(Ordering::Acquire);
+        if fcts > 0 && Timestamp(fcts) <= read_ts {
+            let head = self.head.read();
+            if let Some(ref ver) = *head {
+                return ver.data.as_ref().map(f);
+            }
+            return None;
+        }
         let head = self.head.read();
         // Fast path: check head version without Arc clone
         if let Some(ref ver) = *head {
@@ -452,11 +469,11 @@ impl VersionChain {
             let mut current = ver.get_prev();
             while let Some(ver) = current {
                 if ver.created_by == txn_id {
-                    return ver.data.as_ref().map(|row| f(row));
+                    return ver.data.as_ref().map(f);
                 }
                 let cts = ver.get_commit_ts();
                 if cts.0 > 0 && cts <= read_ts {
-                    return ver.data.as_ref().map(|row| f(row));
+                    return ver.data.as_ref().map(f);
                 }
                 current = ver.get_prev();
             }

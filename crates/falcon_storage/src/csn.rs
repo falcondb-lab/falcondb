@@ -104,7 +104,7 @@ pub struct CsnGenerator {
 
 impl CsnGenerator {
     /// Create a new generator starting at CSN 1.
-    pub fn new(shard_id: ShardId) -> Self {
+    pub const fn new(shard_id: ShardId) -> Self {
         Self {
             shard_id,
             next_csn: AtomicU64::new(1),
@@ -112,7 +112,7 @@ impl CsnGenerator {
     }
 
     /// Create a generator resuming from a recovered CSN.
-    pub fn from_recovered(shard_id: ShardId, last_committed_csn: Csn) -> Self {
+    pub const fn from_recovered(shard_id: ShardId, last_committed_csn: Csn) -> Self {
         Self {
             shard_id,
             next_csn: AtomicU64::new(last_committed_csn.0 + 1),
@@ -143,7 +143,7 @@ impl CsnGenerator {
 
     /// Shard ID.
     #[inline]
-    pub fn shard_id(&self) -> ShardId {
+    pub const fn shard_id(&self) -> ShardId {
         self.shard_id
     }
 
@@ -173,7 +173,7 @@ pub struct CommitRecord {
 }
 
 impl CommitRecord {
-    pub fn new(txn_id: TxnId, commit_csn: Csn, commit_lsn: StructuredLsn) -> Self {
+    pub const fn new(txn_id: TxnId, commit_csn: Csn, commit_lsn: StructuredLsn) -> Self {
         Self { txn_id, commit_csn, commit_lsn }
     }
 
@@ -564,12 +564,12 @@ impl CommitCoordinator {
     }
 
     /// Get the underlying commit table.
-    pub fn commit_table(&self) -> &CommitTable {
+    pub const fn commit_table(&self) -> &CommitTable {
         &self.commit_table
     }
 
     /// Get the CSN generator.
-    pub fn csn_generator(&self) -> &CsnGenerator {
+    pub const fn csn_generator(&self) -> &CsnGenerator {
         &self.csn_gen
     }
 

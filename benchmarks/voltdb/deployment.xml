@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  FalconDB Benchmark — VoltDB deployment configuration
+  Fair-comparison tuning against FalconDB / PG / SingleStore.
+
+  VoltDB is an in-memory, shared-nothing NewSQL database.
+  This config mirrors the memory allocation and durability
+  settings of the other engines as closely as possible.
+-->
+<deployment>
+    <cluster hostcount="1" sitesperhost="8" kfactor="0" />
+
+    <!-- Memory: 2 GB to match PG shared_buffers and FalconDB memory budget -->
+    <systemsettings>
+        <temptables maxsize="256" />
+        <snapshot priority="6" />
+        <resourcemonitor>
+            <memorylimit size="80" />
+        </resourcemonitor>
+    </systemsettings>
+
+    <!-- Command logging = WAL equivalent; synchronous for fair durability -->
+    <commandlog enabled="true" synchronous="true" logsize="1024">
+        <frequency time="200" transactions="1000" />
+    </commandlog>
+
+    <!-- Snapshot: periodic, every 5 min (like PG checkpoint_timeout) -->
+    <snapshot enabled="true" frequency="5m" prefix="bench" retain="2" />
+
+    <!-- HTTP admin port -->
+    <httpd enabled="true">
+        <jsonapi enabled="true" />
+    </httpd>
+
+    <!-- Security off for benchmarks -->
+    <security enabled="false" />
+</deployment>

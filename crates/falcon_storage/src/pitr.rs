@@ -34,8 +34,8 @@ impl fmt::Display for Lsn {
 }
 
 impl Lsn {
-    pub const ZERO: Lsn = Lsn(0);
-    pub const MAX: Lsn = Lsn(u64::MAX);
+    pub const ZERO: Self = Self(0);
+    pub const MAX: Self = Self(u64::MAX);
 }
 
 /// Recovery target specification.
@@ -172,7 +172,7 @@ impl WalArchiver {
     }
 
     /// Create a disabled archiver (archiving off).
-    pub fn disabled() -> Self {
+    pub const fn disabled() -> Self {
         Self {
             archive_dir: PathBuf::new(),
             segments: BTreeMap::new(),
@@ -185,7 +185,7 @@ impl WalArchiver {
     }
 
     /// Whether archiving is enabled.
-    pub fn is_enabled(&self) -> bool {
+    pub const fn is_enabled(&self) -> bool {
         self.enabled
     }
 
@@ -321,12 +321,12 @@ impl WalArchiver {
     }
 
     /// Total number of archived segments.
-    pub fn segment_count(&self) -> u64 {
+    pub const fn segment_count(&self) -> u64 {
         self.segments_archived
     }
 
     /// Total archived bytes.
-    pub fn total_bytes(&self) -> u64 {
+    pub const fn total_bytes(&self) -> u64 {
         self.bytes_archived
     }
 
@@ -373,13 +373,13 @@ impl RecoveryExecutor {
     }
 
     /// Record progress after replaying a WAL record.
-    pub fn record_replayed(&mut self, lsn: Lsn) {
+    pub const fn record_replayed(&mut self, lsn: Lsn) {
         self.records_replayed += 1;
         self.current_lsn = lsn;
     }
 
     /// Record progress after completing a WAL segment.
-    pub fn segment_completed(&mut self) {
+    pub const fn segment_completed(&mut self) {
         self.segments_replayed += 1;
     }
 
@@ -417,7 +417,7 @@ impl RecoveryExecutor {
     }
 
     /// Whether recovery is still in progress.
-    pub fn is_in_progress(&self) -> bool {
+    pub const fn is_in_progress(&self) -> bool {
         matches!(self.status, RecoveryStatus::InProgress { .. })
     }
 }

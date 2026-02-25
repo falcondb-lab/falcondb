@@ -183,6 +183,61 @@ pub fn apply_wal_record_to_engine(
         WalRecord::DropIndex { index_name, .. } => {
             let _ = engine.drop_index(index_name);
         }
+        WalRecord::CreateSchema { name, owner } => {
+            let _ = engine.create_schema(name, owner);
+        }
+        WalRecord::DropSchema { name } => {
+            let _ = engine.drop_schema(name);
+        }
+        WalRecord::CreateRole {
+            name,
+            can_login,
+            is_superuser,
+            can_create_db,
+            can_create_role,
+            password_hash,
+        } => {
+            let _ = engine.create_role(name, *can_login, *is_superuser, *can_create_db, *can_create_role, password_hash.clone());
+        }
+        WalRecord::DropRole { name } => {
+            let _ = engine.drop_role(name);
+        }
+        WalRecord::AlterRole { name, options_json } => {
+            #[derive(serde::Deserialize)]
+            struct AlterOpts {
+                password: Option<Option<String>>,
+                can_login: Option<bool>,
+                is_superuser: Option<bool>,
+                can_create_db: Option<bool>,
+                can_create_role: Option<bool>,
+            }
+            if let Ok(opts) = serde_json::from_str::<AlterOpts>(options_json) {
+                let _ = engine.alter_role(name, opts.password, opts.can_login, opts.is_superuser, opts.can_create_db, opts.can_create_role);
+            }
+        }
+        WalRecord::GrantPrivilege {
+            grantee,
+            privilege,
+            object_type,
+            object_name,
+            grantor,
+        } => {
+            let _ = engine.grant_privilege(grantee, privilege, object_type, object_name, grantor);
+        }
+        WalRecord::RevokePrivilege {
+            grantee,
+            privilege,
+            object_type,
+            object_name,
+        } => {
+            let _ = engine.revoke_privilege(grantee, privilege, object_type, object_name);
+        }
+        WalRecord::GrantRole { member, group } => {
+            let _ = engine.grant_role_membership(member, group);
+        }
+        WalRecord::RevokeRole { member, group } => {
+            let _ = engine.revoke_role_membership(member, group);
+        }
         WalRecord::Checkpoint { .. } => {
             // No-op for replica replay.
         }

@@ -93,7 +93,7 @@ pub struct Param {
 }
 
 /// Client handshake initiation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientHello {
     pub version_major: u16,
     pub version_minor: u16,
@@ -106,7 +106,7 @@ pub struct ClientHello {
 }
 
 /// Server handshake response.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerHello {
     pub version_major: u16,
     pub version_minor: u16,
@@ -158,7 +158,7 @@ pub enum EncodedValue {
     Interval(i32, i32, i64),
     Uuid(u128),
     Bytea(Vec<u8>),
-    Array(u8, Vec<EncodedValue>),
+    Array(u8, Vec<Self>),
 }
 
 /// A row of encoded values.
@@ -209,7 +209,7 @@ pub struct BatchRequest {
 }
 
 /// Batch insert response.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BatchResponse {
     pub request_id: u64,
     pub counts: Vec<i64>,
@@ -240,25 +240,25 @@ pub enum Message {
 
 impl Message {
     /// Return the message type tag byte.
-    pub fn msg_type(&self) -> u8 {
+    pub const fn msg_type(&self) -> u8 {
         match self {
-            Message::ClientHello(_) => MSG_CLIENT_HELLO,
-            Message::ServerHello(_) => MSG_SERVER_HELLO,
-            Message::AuthRequest(_) => MSG_AUTH_REQUEST,
-            Message::AuthResponse(_) => MSG_AUTH_RESPONSE,
-            Message::AuthOk => MSG_AUTH_OK,
-            Message::AuthFail(_) => MSG_AUTH_FAIL,
-            Message::QueryRequest(_) => MSG_QUERY_REQUEST,
-            Message::QueryResponse(_) => MSG_QUERY_RESPONSE,
-            Message::ErrorResponse(_) => MSG_ERROR_RESPONSE,
-            Message::BatchRequest(_) => MSG_BATCH_REQUEST,
-            Message::BatchResponse(_) => MSG_BATCH_RESPONSE,
-            Message::Ping => MSG_PING,
-            Message::Pong => MSG_PONG,
-            Message::Disconnect => MSG_DISCONNECT,
-            Message::DisconnectAck => MSG_DISCONNECT_ACK,
-            Message::StartTls => MSG_START_TLS,
-            Message::StartTlsAck => MSG_START_TLS_ACK,
+            Self::ClientHello(_) => MSG_CLIENT_HELLO,
+            Self::ServerHello(_) => MSG_SERVER_HELLO,
+            Self::AuthRequest(_) => MSG_AUTH_REQUEST,
+            Self::AuthResponse(_) => MSG_AUTH_RESPONSE,
+            Self::AuthOk => MSG_AUTH_OK,
+            Self::AuthFail(_) => MSG_AUTH_FAIL,
+            Self::QueryRequest(_) => MSG_QUERY_REQUEST,
+            Self::QueryResponse(_) => MSG_QUERY_RESPONSE,
+            Self::ErrorResponse(_) => MSG_ERROR_RESPONSE,
+            Self::BatchRequest(_) => MSG_BATCH_REQUEST,
+            Self::BatchResponse(_) => MSG_BATCH_RESPONSE,
+            Self::Ping => MSG_PING,
+            Self::Pong => MSG_PONG,
+            Self::Disconnect => MSG_DISCONNECT,
+            Self::DisconnectAck => MSG_DISCONNECT_ACK,
+            Self::StartTls => MSG_START_TLS,
+            Self::StartTlsAck => MSG_START_TLS_ACK,
         }
     }
 }

@@ -199,10 +199,10 @@ fn isolation_from_str(s: &str) -> IsolationLevel {
 struct Rng(u64);
 
 impl Rng {
-    fn new(seed: u64) -> Self {
+    const fn new(seed: u64) -> Self {
         Self(if seed == 0 { 1 } else { seed })
     }
-    fn next_u64(&mut self) -> u64 {
+    const fn next_u64(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;

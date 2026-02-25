@@ -90,12 +90,12 @@ impl Router {
     }
 
     /// Get the shard map.
-    pub fn shard_map(&self) -> &ShardMap {
+    pub const fn shard_map(&self) -> &ShardMap {
         &self.shard_map
     }
 
     /// Get the client for remote forwarding.
-    pub fn client(&self) -> &ShardRouterClient {
+    pub const fn client(&self) -> &ShardRouterClient {
         &self.client
     }
 

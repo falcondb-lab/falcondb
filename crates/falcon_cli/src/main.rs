@@ -161,6 +161,7 @@ fn parse_shard_move_arg_script(arg: &str) -> anyhow::Result<(String, String)> {
     Ok((shard_id, target_node))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_statements(
     client: &DbClient,
     stmts: &[String],
@@ -335,8 +336,7 @@ async fn run_statements(
                     }
                 }
                 MetaCommand::Shard(arg) => {
-                    let out = parse_shard_move_arg_script(&arg)
-                        .and_then(|(shard_id, target_node)| Ok((shard_id, target_node)));
+                    let out = parse_shard_move_arg_script(&arg);
                     let result = match out {
                         Ok((shard_id, target_node)) => {
                             if apply {
@@ -488,7 +488,7 @@ async fn run_statements(
     Ok(())
 }
 
-fn effective_mode(args: &Args) -> OutputMode {
+const fn effective_mode(args: &Args) -> OutputMode {
     if args.tuples_only {
         OutputMode::TuplesOnly
     } else if args.csv {

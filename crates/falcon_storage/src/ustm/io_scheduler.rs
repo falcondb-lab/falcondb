@@ -63,11 +63,11 @@ pub enum IoError {
 impl std::fmt::Display for IoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            IoError::NotFound(s) => write!(f, "not found: {}", s),
-            IoError::PermissionDenied(s) => write!(f, "permission denied: {}", s),
-            IoError::Io(s) => write!(f, "I/O error: {}", s),
-            IoError::RateLimited => write!(f, "rate limited"),
-            IoError::Cancelled => write!(f, "cancelled"),
+            Self::NotFound(s) => write!(f, "not found: {}", s),
+            Self::PermissionDenied(s) => write!(f, "permission denied: {}", s),
+            Self::Io(s) => write!(f, "I/O error: {}", s),
+            Self::RateLimited => write!(f, "rate limited"),
+            Self::Cancelled => write!(f, "cancelled"),
         }
     }
 }

@@ -51,22 +51,22 @@ pub enum NodeState {
 
 impl NodeState {
     /// Whether this node should receive new write traffic.
-    pub fn accepts_writes(&self) -> bool {
+    pub const fn accepts_writes(&self) -> bool {
         matches!(self, Self::Active)
     }
 
     /// Whether this node should receive new read traffic.
-    pub fn accepts_reads(&self) -> bool {
+    pub const fn accepts_reads(&self) -> bool {
         matches!(self, Self::Active | Self::Draining)
     }
 
     /// Whether this node counts toward quorum.
-    pub fn counts_for_quorum(&self) -> bool {
+    pub const fn counts_for_quorum(&self) -> bool {
         matches!(self, Self::Active | Self::Draining)
     }
 
     /// Whether the transition from `self` to `target` is valid.
-    pub fn can_transition_to(&self, target: NodeState) -> bool {
+    pub const fn can_transition_to(&self, target: Self) -> bool {
         use NodeState::*;
         matches!(
             (*self, target),
@@ -100,8 +100,10 @@ impl std::fmt::Display for NodeState {
 
 /// Capacity/role hint for a node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum NodeRole {
     /// Can be elected coordinator; accepts reads and writes.
+    #[default]
     Primary,
     /// Read-only replica; receives replicated data.
     Replica,
@@ -109,11 +111,6 @@ pub enum NodeRole {
     Witness,
 }
 
-impl Default for NodeRole {
-    fn default() -> Self {
-        Self::Primary
-    }
-}
 
 /// Full information about a cluster member.
 #[derive(Debug, Clone)]

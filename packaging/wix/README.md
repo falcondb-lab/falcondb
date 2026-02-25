@@ -16,12 +16,12 @@
 cargo build --release --bin falcon
 
 # 2. Stage distribution files
-.\scripts\stage_windows_dist.ps1 -Version 1.0.0
+.\scripts\stage_windows_dist.ps1 -Version 1.2.0
 
 # 3. Build MSI
-.\packaging\wix\build.ps1 -Version 1.0.0
+.\packaging\wix\build.ps1 -Version 1.2.0
 
-# Output: dist\windows\FalconDB-1.0.0-x64.msi
+# Output: dist\windows\FalconDB-1.2.0-x64.msi
 ```
 
 ## Project Structure
@@ -70,19 +70,19 @@ C:\ProgramData\FalconDB\
 ### Interactive
 
 ```powershell
-msiexec /i FalconDB-1.0.0-x64.msi /l*v install.log
+msiexec /i FalconDB-1.2.0-x64.msi /l*v install.log
 ```
 
 ### Silent
 
 ```powershell
-msiexec /i FalconDB-1.0.0-x64.msi /qn /l*v silent.log
+msiexec /i FalconDB-1.2.0-x64.msi /qn /l*v silent.log
 ```
 
 ### Silent with custom options
 
 ```powershell
-msiexec /i FalconDB-1.0.0-x64.msi /qn /l*v silent.log ^
+msiexec /i FalconDB-1.2.0-x64.msi /qn /l*v silent.log ^
     INSTALLFOLDER="D:\FalconDB" ^
     ADD_FIREWALL_RULES=0
 ```
@@ -96,13 +96,13 @@ msiexec /i FalconDB-1.0.0-x64.msi /qn /l*v silent.log ^
 #   3. Install new Program Files
 #   4. Preserve ProgramData (conf, data, logs)
 #   5. Start FalconDB service
-msiexec /i FalconDB-1.1.0-x64.msi /l*v upgrade.log
+msiexec /i FalconDB-1.3.0-x64.msi /l*v upgrade.log
 ```
 
 ## Uninstall
 
 ```powershell
-msiexec /x FalconDB-1.0.0-x64.msi /l*v uninstall.log
+msiexec /x FalconDB-1.2.0-x64.msi /l*v uninstall.log
 ```
 
 **After uninstall:**
@@ -133,13 +133,13 @@ Get-Service FalconDB       # PowerShell alternative
 ```powershell
 # With PFX certificate
 .\packaging\wix\sign.ps1 `
-    -MsiPath dist\windows\FalconDB-1.0.0-x64.msi `
+    -MsiPath dist\windows\FalconDB-1.2.0-x64.msi `
     -PfxPath certs\codesign.pfx `
     -PfxPassword $env:PFX_PASSWORD
 
 # With certificate store thumbprint
 .\packaging\wix\sign.ps1 `
-    -MsiPath dist\windows\FalconDB-1.0.0-x64.msi `
+    -MsiPath dist\windows\FalconDB-1.2.0-x64.msi `
     -Thumbprint "AABBCCDD..."
 ```
 
@@ -178,9 +178,9 @@ Get-Service FalconDB       # PowerShell alternative
 
 | Step | Verify |
 |------|--------|
-| Install v1.0.0 | Service running |
+| Install v1.2.0 | Service running |
 | Modify `falcon.toml` | Add a comment line |
-| Install v1.1.0 | Service running, `falcon.toml` unchanged |
+| Install v1.3.0 | Service running, `falcon.toml` unchanged |
 | Check data dir | Files preserved |
 | Check ports | 5443 + 8080 available |
 

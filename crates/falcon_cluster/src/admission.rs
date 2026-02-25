@@ -511,7 +511,7 @@ impl MemoryBudget {
     }
 
     /// Budget limit in bytes.
-    pub fn budget_bytes(&self) -> u64 {
+    pub const fn budget_bytes(&self) -> u64 {
         self.budget_bytes
     }
 

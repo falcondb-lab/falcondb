@@ -4,7 +4,7 @@ use crate::runner::format_rows_as_string;
 use anyhow::Result;
 
 /// Sub-command for \automation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AutomationCmd {
     Status,
     Events,

@@ -280,7 +280,7 @@ pub struct PhysicalPosition {
 /// The offset in the LSN is a *data offset* (starting after the segment
 /// header). The file offset adds `SEGMENT_HEADER_SIZE`.
 #[inline]
-pub fn lsn_to_physical(lsn: StructuredLsn) -> PhysicalPosition {
+pub const fn lsn_to_physical(lsn: StructuredLsn) -> PhysicalPosition {
     PhysicalPosition {
         segment_id: lsn.segment_id(),
         file_offset: SEGMENT_HEADER_SIZE + lsn.offset(),
@@ -289,7 +289,7 @@ pub fn lsn_to_physical(lsn: StructuredLsn) -> PhysicalPosition {
 
 /// Reconstruct an LSN from a physical position.
 #[inline]
-pub fn physical_to_lsn(segment_id: u64, file_offset: u64) -> StructuredLsn {
+pub const fn physical_to_lsn(segment_id: u64, file_offset: u64) -> StructuredLsn {
     let data_offset = file_offset.saturating_sub(SEGMENT_HEADER_SIZE);
     StructuredLsn::new(segment_id, data_offset)
 }
@@ -316,19 +316,19 @@ pub struct Reservation {
 impl Reservation {
     /// Total bytes in this reservation.
     #[inline]
-    pub fn size(&self) -> u64 {
+    pub const fn size(&self) -> u64 {
         self.limit_lsn.raw() - self.base_lsn.raw()
     }
 
     /// Check if a byte count fits in this reservation starting at `current`.
     #[inline]
-    pub fn fits(&self, current: StructuredLsn, bytes: u64) -> bool {
+    pub const fn fits(&self, current: StructuredLsn, bytes: u64) -> bool {
         current.raw() + bytes <= self.limit_lsn.raw()
     }
 
     /// Whether this reservation has been fully consumed.
     #[inline]
-    pub fn is_exhausted(&self, current: StructuredLsn) -> bool {
+    pub const fn is_exhausted(&self, current: StructuredLsn) -> bool {
         current.raw() >= self.limit_lsn.raw()
     }
 }
@@ -366,7 +366,7 @@ impl LsnAllocatorConfig {
         assert!(self.default_reservation_bytes > 0, "default_reservation_bytes must be > 0");
         assert!(self.default_reservation_bytes <= self.segment_size,
             "default_reservation_bytes must be <= segment_size");
-        assert!(self.segment_size % self.record_alignment == 0,
+        assert!(self.segment_size.is_multiple_of(self.record_alignment),
             "segment_size must be a multiple of record_alignment");
     }
 }
@@ -447,7 +447,7 @@ pub enum ReserveResult {
 
 impl ReserveResult {
     /// Get the reservation regardless of whether rollover occurred.
-    pub fn reservation(&self) -> &Reservation {
+    pub const fn reservation(&self) -> &Reservation {
         match self {
             Self::Ok(r) => r,
             Self::OkWithRollover { reservation, .. } => reservation,
@@ -455,7 +455,7 @@ impl ReserveResult {
     }
 
     /// Whether a segment rollover was triggered.
-    pub fn had_rollover(&self) -> bool {
+    pub const fn had_rollover(&self) -> bool {
         matches!(self, Self::OkWithRollover { .. })
     }
 }
@@ -621,7 +621,7 @@ impl LsnAllocator {
 
     /// Align a byte count up to the configured record alignment.
     #[inline]
-    fn align_up(&self, bytes: u64) -> u64 {
+    const fn align_up(&self, bytes: u64) -> u64 {
         let mask = self.config.record_alignment - 1;
         (bytes + mask) & !mask
     }
@@ -645,7 +645,7 @@ pub struct WriterCursor {
 
 impl WriterCursor {
     /// Create a cursor from a reservation.
-    pub fn new(reservation: Reservation) -> Self {
+    pub const fn new(reservation: Reservation) -> Self {
         Self {
             current: reservation.base_lsn,
             reservation,
@@ -669,7 +669,7 @@ impl WriterCursor {
 
     /// Remaining bytes in the current reservation.
     #[inline]
-    pub fn remaining(&self) -> u64 {
+    pub const fn remaining(&self) -> u64 {
         self.reservation.limit_lsn.raw().saturating_sub(self.current.raw())
     }
 
@@ -681,18 +681,18 @@ impl WriterCursor {
 
     /// The current write position.
     #[inline]
-    pub fn position(&self) -> StructuredLsn {
+    pub const fn position(&self) -> StructuredLsn {
         self.current
     }
 
     /// The reservation this cursor is operating within.
     #[inline]
-    pub fn reservation(&self) -> &Reservation {
+    pub const fn reservation(&self) -> &Reservation {
         &self.reservation
     }
 
     /// Replace the reservation with a new one (after re-reserving).
-    pub fn reset(&mut self, reservation: Reservation) {
+    pub const fn reset(&mut self, reservation: Reservation) {
         self.current = reservation.base_lsn;
         self.reservation = reservation;
     }
@@ -743,7 +743,7 @@ pub fn decode_record_header(data: &[u8]) -> Option<(u32, u16, u32)> {
 
 /// Compute the total on-disk size of a record (header + payload), aligned.
 #[inline]
-pub fn aligned_record_size(payload_len: u64, alignment: u64) -> u64 {
+pub const fn aligned_record_size(payload_len: u64, alignment: u64) -> u64 {
     let raw = RECORD_FRAME_HEADER_SIZE + payload_len;
     let mask = alignment - 1;
     (raw + mask) & !mask

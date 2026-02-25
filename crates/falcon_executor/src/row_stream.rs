@@ -37,7 +37,7 @@ pub struct ChunkedRows {
 
 impl ChunkedRows {
     /// Create from a fully materialized result set.
-    pub fn new(columns: Vec<(String, DataType)>, rows: Vec<OwnedRow>) -> Self {
+    pub const fn new(columns: Vec<(String, DataType)>, rows: Vec<OwnedRow>) -> Self {
         Self {
             rows,
             position: 0,
@@ -46,7 +46,7 @@ impl ChunkedRows {
     }
 
     /// Create an empty stream.
-    pub fn empty() -> Self {
+    pub const fn empty() -> Self {
         Self {
             rows: Vec::new(),
             position: 0,
@@ -74,22 +74,22 @@ impl ChunkedRows {
     }
 
     /// Whether all rows have been consumed.
-    pub fn is_exhausted(&self) -> bool {
+    pub const fn is_exhausted(&self) -> bool {
         self.position >= self.rows.len()
     }
 
     /// Current position (number of rows already fetched).
-    pub fn position(&self) -> usize {
+    pub const fn position(&self) -> usize {
         self.position
     }
 
     /// Total number of rows in the stream.
-    pub fn total_rows(&self) -> usize {
+    pub const fn total_rows(&self) -> usize {
         self.rows.len()
     }
 
     /// Remaining rows.
-    pub fn remaining(&self) -> usize {
+    pub const fn remaining(&self) -> usize {
         self.rows.len().saturating_sub(self.position)
     }
 
@@ -109,7 +109,7 @@ impl ChunkedRows {
     }
 
     /// Reset to beginning.
-    pub fn rewind(&mut self) {
+    pub const fn rewind(&mut self) {
         self.position = 0;
     }
 
@@ -148,7 +148,7 @@ pub struct CursorStream {
 
 impl CursorStream {
     /// Create a deferred cursor (query not yet executed).
-    pub fn new_deferred(query: String, with_hold: bool) -> Self {
+    pub const fn new_deferred(query: String, with_hold: bool) -> Self {
         Self {
             query,
             columns: Vec::new(),
@@ -172,7 +172,7 @@ impl CursorStream {
     }
 
     /// Whether the query has been executed.
-    pub fn is_executed(&self) -> bool {
+    pub const fn is_executed(&self) -> bool {
         self.inner.is_some()
     }
 
@@ -182,7 +182,7 @@ impl CursorStream {
     }
 
     /// Whether this cursor is holdable.
-    pub fn with_hold(&self) -> bool {
+    pub const fn with_hold(&self) -> bool {
         self.with_hold
     }
 
@@ -208,7 +208,7 @@ impl CursorStream {
 
     /// Whether all rows have been consumed.
     pub fn is_exhausted(&self) -> bool {
-        self.inner.as_ref().map_or(false, |i| i.is_exhausted())
+        self.inner.as_ref().is_some_and(|i| i.is_exhausted())
     }
 
     /// Current position.

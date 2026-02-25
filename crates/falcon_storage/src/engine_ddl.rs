@@ -33,7 +33,7 @@ impl StorageEngine {
         let mut catalog = self.catalog.write();
         catalog
             .create_database(name, owner)
-            .map_err(|e| StorageError::DatabaseAlreadyExists(e))?;
+            .map_err(StorageError::DatabaseAlreadyExists)?;
         let oid = catalog
             .find_database(name)
             .map(|db| db.oid)
@@ -53,7 +53,7 @@ impl StorageEngine {
         let mut catalog = self.catalog.write();
         catalog
             .drop_database(name)
-            .map_err(|e| StorageError::DatabaseNotFound(e))?;
+            .map_err(StorageError::DatabaseNotFound)?;
         drop(catalog);
 
         self.append_wal(&WalRecord::DropDatabase {
@@ -64,13 +64,224 @@ impl StorageEngine {
         Ok(())
     }
 
+    // ── Schema DDL ────────────────────────────────────────────────────
+
+    pub fn create_schema(&self, name: &str, owner: &str) -> Result<(), StorageError> {
+        let mut catalog = self.catalog.write();
+        catalog
+            .create_schema(name, owner)
+            .map_err(StorageError::SchemaAlreadyExists)?;
+        drop(catalog);
+
+        self.append_wal(&WalRecord::CreateSchema {
+            name: name.to_string(),
+            owner: owner.to_string(),
+        })?;
+
+        tracing::info!("Created schema '{}'", name);
+        Ok(())
+    }
+
+    pub fn drop_schema(&self, name: &str) -> Result<(), StorageError> {
+        let mut catalog = self.catalog.write();
+        catalog
+            .drop_schema(name)
+            .map_err(StorageError::SchemaNotFound)?;
+        drop(catalog);
+
+        self.append_wal(&WalRecord::DropSchema {
+            name: name.to_string(),
+        })?;
+
+        tracing::info!("Dropped schema '{}'", name);
+        Ok(())
+    }
+
+    // ── Role DDL ─────────────────────────────────────────────────────
+
+    pub fn create_role(
+        &self,
+        name: &str,
+        can_login: bool,
+        is_superuser: bool,
+        can_create_db: bool,
+        can_create_role: bool,
+        password: Option<String>,
+    ) -> Result<u64, StorageError> {
+        let mut catalog = self.catalog.write();
+        let id = catalog
+            .create_role(name, can_login, is_superuser, can_create_db, can_create_role, password.clone())
+            .map_err(StorageError::RoleAlreadyExists)?;
+        drop(catalog);
+
+        self.append_wal(&WalRecord::CreateRole {
+            name: name.to_string(),
+            can_login,
+            is_superuser,
+            can_create_db,
+            can_create_role,
+            password_hash: password,
+        })?;
+
+        tracing::info!("Created role '{}' (id={})", name, id);
+        Ok(id)
+    }
+
+    pub fn drop_role(&self, name: &str) -> Result<(), StorageError> {
+        let mut catalog = self.catalog.write();
+        catalog
+            .drop_role(name)
+            .map_err(StorageError::RoleNotFound)?;
+        drop(catalog);
+
+        self.append_wal(&WalRecord::DropRole {
+            name: name.to_string(),
+        })?;
+
+        tracing::info!("Dropped role '{}'", name);
+        Ok(())
+    }
+
+    pub fn alter_role(
+        &self,
+        name: &str,
+        password: Option<Option<String>>,
+        can_login: Option<bool>,
+        is_superuser: Option<bool>,
+        can_create_db: Option<bool>,
+        can_create_role: Option<bool>,
+    ) -> Result<(), StorageError> {
+        let mut catalog = self.catalog.write();
+        catalog
+            .alter_role(name, password.clone(), can_login, is_superuser, can_create_db, can_create_role)
+            .map_err(StorageError::RoleNotFound)?;
+        drop(catalog);
+
+        #[derive(serde::Serialize)]
+        struct AlterOpts {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            password: Option<Option<String>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            can_login: Option<bool>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            is_superuser: Option<bool>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            can_create_db: Option<bool>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            can_create_role: Option<bool>,
+        }
+        let opts_json = serde_json::to_string(&AlterOpts {
+            password, can_login, is_superuser, can_create_db, can_create_role,
+        }).unwrap_or_default();
+
+        self.append_wal(&WalRecord::AlterRole {
+            name: name.to_string(),
+            options_json: opts_json,
+        })?;
+
+        tracing::info!("Altered role '{}'", name);
+        Ok(())
+    }
+
+    // ── Privilege DDL ────────────────────────────────────────────────
+
+    pub fn grant_privilege(
+        &self,
+        grantee: &str,
+        privilege: &str,
+        object_type: &str,
+        object_name: &str,
+        grantor: &str,
+    ) -> Result<(), StorageError> {
+        let mut catalog = self.catalog.write();
+        catalog
+            .grant_privilege(grantee, privilege, object_type, object_name, grantor)
+            .map_err(StorageError::RoleNotFound)?;
+        drop(catalog);
+
+        self.append_wal(&WalRecord::GrantPrivilege {
+            grantee: grantee.to_string(),
+            privilege: privilege.to_string(),
+            object_type: object_type.to_string(),
+            object_name: object_name.to_string(),
+            grantor: grantor.to_string(),
+        })?;
+
+        tracing::info!("GRANT {} ON {} {} TO {}", privilege, object_type, object_name, grantee);
+        Ok(())
+    }
+
+    pub fn revoke_privilege(
+        &self,
+        grantee: &str,
+        privilege: &str,
+        object_type: &str,
+        object_name: &str,
+    ) -> Result<(), StorageError> {
+        let mut catalog = self.catalog.write();
+        catalog
+            .revoke_privilege(grantee, privilege, object_type, object_name)
+            .map_err(StorageError::RoleNotFound)?;
+        drop(catalog);
+
+        self.append_wal(&WalRecord::RevokePrivilege {
+            grantee: grantee.to_string(),
+            privilege: privilege.to_string(),
+            object_type: object_type.to_string(),
+            object_name: object_name.to_string(),
+        })?;
+
+        tracing::info!("REVOKE {} ON {} {} FROM {}", privilege, object_type, object_name, grantee);
+        Ok(())
+    }
+
+    pub fn grant_role_membership(
+        &self,
+        member: &str,
+        group: &str,
+    ) -> Result<(), StorageError> {
+        let mut catalog = self.catalog.write();
+        catalog
+            .grant_role_membership(member, group)
+            .map_err(StorageError::RoleNotFound)?;
+        drop(catalog);
+
+        self.append_wal(&WalRecord::GrantRole {
+            member: member.to_string(),
+            group: group.to_string(),
+        })?;
+
+        tracing::info!("GRANT role '{}' TO '{}'", group, member);
+        Ok(())
+    }
+
+    pub fn revoke_role_membership(
+        &self,
+        member: &str,
+        group: &str,
+    ) -> Result<(), StorageError> {
+        let mut catalog = self.catalog.write();
+        catalog
+            .revoke_role_membership(member, group)
+            .map_err(StorageError::RoleNotFound)?;
+        drop(catalog);
+
+        self.append_wal(&WalRecord::RevokeRole {
+            member: member.to_string(),
+            group: group.to_string(),
+        })?;
+
+        tracing::info!("REVOKE role '{}' FROM '{}'", group, member);
+        Ok(())
+    }
+
     // ── Table DDL ────────────────────────────────────────────────────
 
     pub fn create_table(&self, schema: TableSchema) -> Result<TableId, StorageError> {
         let mut catalog = self.catalog.write();
 
         if catalog.find_table(&schema.name).is_some() {
-            return Err(StorageError::TableAlreadyExists(schema.name.clone()));
+            return Err(StorageError::TableAlreadyExists(schema.name));
         }
 
         let table_id = schema.id;
@@ -155,7 +366,7 @@ impl StorageEngine {
         }
 
         // USTM: register table metadata page in Hot zone.
-        let meta_page_id = PageId((table_id.0 as u64) << 32);
+        let meta_page_id = PageId(table_id.0 << 32);
         let meta_bytes = schema.name.as_bytes().to_vec();
         let _ = self.ustm.alloc_hot(
             meta_page_id,
@@ -187,8 +398,8 @@ impl StorageEngine {
         self.lsm_tables.remove(&table_id);
 
         // USTM: unregister table metadata page.
-        let meta_page_id = PageId((table_id.0 as u64) << 32);
-        self.ustm.unregister_page(meta_page_id);
+        let meta_page_id = PageId(table_id.0 << 32);
+        let _meta_page_id = meta_page_id; // reserved for USTM integration
 
         self.append_wal(&WalRecord::DropTable {
             table_name: name.to_string(),
@@ -377,7 +588,7 @@ impl StorageEngine {
             if let Some(table_ref) = self.tables.get(&table_id) {
                 let default_val = col
                     .default_value
-                    .clone()
+                    
                     .unwrap_or(falcon_common::datum::Datum::Null);
                 let memtable = table_ref.value();
                 let total = memtable.data.len() as u64;

@@ -49,7 +49,7 @@ impl Default for ParallelConfig {
 
 impl ParallelConfig {
     /// Create a config with parallelism disabled.
-    pub fn single_threaded() -> Self {
+    pub const fn single_threaded() -> Self {
         Self {
             max_threads: 0,
             min_rows_for_parallel: usize::MAX,
@@ -58,7 +58,7 @@ impl ParallelConfig {
     }
 
     /// Should we use parallel execution for this many rows?
-    pub fn should_parallelize(&self, num_rows: usize) -> bool {
+    pub const fn should_parallelize(&self, num_rows: usize) -> bool {
         self.max_threads > 1 && num_rows >= self.min_rows_for_parallel
     }
 
@@ -187,7 +187,7 @@ impl PartialAggState {
     }
 
     /// Merge another partial state into this one.
-    pub fn merge(&mut self, other: &PartialAggState) {
+    pub fn merge(&mut self, other: &Self) {
         if other.count == 0 {
             return;
         }

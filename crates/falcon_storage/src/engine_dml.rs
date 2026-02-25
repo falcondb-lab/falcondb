@@ -22,13 +22,13 @@ use super::engine::StorageEngine;
 fn ustm_page_id(table_id: TableId, pk: &PrimaryKey) -> PageId {
     // Combine table_id (upper 32 bits) with a hash of the PK (lower 32 bits)
     let pk_hash = crate::ustm::page::fast_hash_pk(pk);
-    PageId((table_id.0 as u64) << 32 | pk_hash as u64)
+    PageId(table_id.0 << 32 | pk_hash as u64)
 }
 
 /// Derive a USTM PageId for a table-level page (DDL / scan).
 #[inline]
-fn ustm_table_page_id(table_id: TableId, page_seq: u32) -> PageId {
-    PageId((table_id.0 as u64) << 32 | page_seq as u64)
+const fn ustm_table_page_id(table_id: TableId, page_seq: u32) -> PageId {
+    PageId(table_id.0 << 32 | page_seq as u64)
 }
 
 impl StorageEngine {
@@ -146,7 +146,7 @@ impl StorageEngine {
             .ok_or(StorageError::TableNotFound(table_id))?;
 
         // Batch memory tracking
-        let total_bytes: u64 = rows.iter().map(|r| crate::mvcc::estimate_row_bytes(r)).sum();
+        let total_bytes: u64 = rows.iter().map(crate::mvcc::estimate_row_bytes).sum();
         self.memory_tracker.alloc_write_buffer(total_bytes);
 
         // Pre-track bytes so commit can skip estimate_write_set_bytes re-scan

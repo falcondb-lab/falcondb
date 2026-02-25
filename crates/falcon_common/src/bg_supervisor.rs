@@ -32,10 +32,10 @@ pub enum TaskState {
 impl std::fmt::Display for TaskState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TaskState::Starting => write!(f, "STARTING"),
-            TaskState::Running => write!(f, "RUNNING"),
-            TaskState::Failed => write!(f, "FAILED"),
-            TaskState::Stopped => write!(f, "STOPPED"),
+            Self::Starting => write!(f, "STARTING"),
+            Self::Running => write!(f, "RUNNING"),
+            Self::Failed => write!(f, "FAILED"),
+            Self::Stopped => write!(f, "STOPPED"),
         }
     }
 }
@@ -64,8 +64,8 @@ pub enum NodeHealth {
 impl std::fmt::Display for NodeHealth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            NodeHealth::Healthy => write!(f, "HEALTHY"),
-            NodeHealth::Degraded => write!(f, "DEGRADED"),
+            Self::Healthy => write!(f, "HEALTHY"),
+            Self::Degraded => write!(f, "DEGRADED"),
         }
     }
 }

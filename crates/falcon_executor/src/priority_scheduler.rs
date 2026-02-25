@@ -42,9 +42,9 @@ pub enum QueryPriority {
 impl std::fmt::Display for QueryPriority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            QueryPriority::Low => write!(f, "low"),
-            QueryPriority::Normal => write!(f, "normal"),
-            QueryPriority::High => write!(f, "high"),
+            Self::Low => write!(f, "low"),
+            Self::Normal => write!(f, "normal"),
+            Self::High => write!(f, "high"),
         }
     }
 }
@@ -56,11 +56,11 @@ impl QueryPriority {
     /// - Simple SELECT / INSERT / UPDATE / DELETE → High
     pub fn classify(sql: &str, is_ddl: bool, is_rebalance: bool) -> Self {
         if is_rebalance || is_ddl {
-            return QueryPriority::Low;
+            return Self::Low;
         }
         let sql_lower = sql.to_lowercase();
         if sql_lower.contains("copy ") || sql_lower.contains("backfill") {
-            return QueryPriority::Low;
+            return Self::Low;
         }
         // Heuristic: joins, subqueries, aggregations → Normal
         if sql_lower.contains(" join ")
@@ -69,9 +69,9 @@ impl QueryPriority {
             || sql_lower.contains("having ")
             || sql_lower.contains("union ")
         {
-            return QueryPriority::Normal;
+            return Self::Normal;
         }
-        QueryPriority::High
+        Self::High
     }
 }
 
@@ -118,7 +118,7 @@ struct LaneState {
 }
 
 impl LaneState {
-    fn new(max_concurrency: usize) -> Self {
+    const fn new(max_concurrency: usize) -> Self {
         Self {
             active: AtomicUsize::new(0),
             max_concurrency,
@@ -304,7 +304,7 @@ impl<'a> std::fmt::Debug for SchedulerGuard<'a> {
 }
 
 impl<'a> SchedulerGuard<'a> {
-    pub fn priority(&self) -> QueryPriority {
+    pub const fn priority(&self) -> QueryPriority {
         self.priority
     }
 }

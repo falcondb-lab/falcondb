@@ -102,7 +102,7 @@ impl Default for GcStats {
 }
 
 impl GcStats {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             total_sweeps: AtomicU64::new(0),
             total_reclaimed_versions: AtomicU64::new(0),
@@ -529,7 +529,7 @@ impl Drop for ReadViewGuard {
 
 impl ReadViewGuard {
     /// The view ID of this guard.
-    pub fn view_id(&self) -> u64 {
+    pub const fn view_id(&self) -> u64 {
         self.view_id
     }
 }

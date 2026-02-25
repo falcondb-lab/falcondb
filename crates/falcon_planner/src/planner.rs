@@ -141,11 +141,11 @@ impl Planner {
                 }
             }
             BoundStatement::Explain(inner) => {
-                let inner_plan = Planner::plan(inner)?;
+                let inner_plan = Self::plan(inner)?;
                 Ok(PhysicalPlan::Explain(Box::new(inner_plan)))
             }
             BoundStatement::ExplainAnalyze(inner) => {
-                let inner_plan = Planner::plan(inner)?;
+                let inner_plan = Self::plan(inner)?;
                 Ok(PhysicalPlan::ExplainAnalyze(Box::new(inner_plan)))
             }
             BoundStatement::Truncate { table_name } => Ok(PhysicalPlan::Truncate {
@@ -215,6 +215,79 @@ impl Planner {
             BoundStatement::DropTenant { name } => {
                 Ok(PhysicalPlan::DropTenant { name: name.clone() })
             }
+            BoundStatement::CreateSchema { name, if_not_exists } => {
+                Ok(PhysicalPlan::CreateSchema {
+                    name: name.clone(),
+                    if_not_exists: *if_not_exists,
+                })
+            }
+            BoundStatement::DropSchema { name, if_exists } => {
+                Ok(PhysicalPlan::DropSchema {
+                    name: name.clone(),
+                    if_exists: *if_exists,
+                })
+            }
+            BoundStatement::CreateRole {
+                name,
+                can_login,
+                is_superuser,
+                can_create_db,
+                can_create_role,
+                password,
+            } => Ok(PhysicalPlan::CreateRole {
+                name: name.clone(),
+                can_login: *can_login,
+                is_superuser: *is_superuser,
+                can_create_db: *can_create_db,
+                can_create_role: *can_create_role,
+                password: password.clone(),
+            }),
+            BoundStatement::DropRole { name, if_exists } => Ok(PhysicalPlan::DropRole {
+                name: name.clone(),
+                if_exists: *if_exists,
+            }),
+            BoundStatement::AlterRole {
+                name,
+                password,
+                can_login,
+                is_superuser,
+                can_create_db,
+                can_create_role,
+            } => Ok(PhysicalPlan::AlterRole {
+                name: name.clone(),
+                password: password.clone(),
+                can_login: *can_login,
+                is_superuser: *is_superuser,
+                can_create_db: *can_create_db,
+                can_create_role: *can_create_role,
+            }),
+            BoundStatement::Grant {
+                privilege,
+                object_type,
+                object_name,
+                grantee,
+            } => Ok(PhysicalPlan::Grant {
+                privilege: privilege.clone(),
+                object_type: object_type.clone(),
+                object_name: object_name.clone(),
+                grantee: grantee.clone(),
+            }),
+            BoundStatement::Revoke {
+                privilege,
+                object_type,
+                object_name,
+                grantee,
+            } => Ok(PhysicalPlan::Revoke {
+                privilege: privilege.clone(),
+                object_type: object_type.clone(),
+                object_name: object_name.clone(),
+                grantee: grantee.clone(),
+            }),
+            BoundStatement::ShowRoles => Ok(PhysicalPlan::ShowRoles),
+            BoundStatement::ShowSchemas => Ok(PhysicalPlan::ShowSchemas),
+            BoundStatement::ShowGrants { role_name } => Ok(PhysicalPlan::ShowGrants {
+                role_name: role_name.clone(),
+            }),
             BoundStatement::CopyFrom {
                 table_id,
                 schema,
@@ -513,7 +586,7 @@ impl Planner {
 
     /// Adjust the subplan for distributed execution: strip OFFSET (applied at
     /// gather), and push `limit + offset` so each shard returns enough rows.
-    fn adjust_subplan_for_offset(
+    const fn adjust_subplan_for_offset(
         mut plan: PhysicalPlan,
         limit: Option<usize>,
         offset: Option<usize>,

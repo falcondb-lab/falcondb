@@ -44,7 +44,7 @@ impl Default for TokenBucketConfig {
 
 impl TokenBucketConfig {
     /// Configuration for rebalance operations (moderate rate).
-    pub fn rebalance() -> Self {
+    pub const fn rebalance() -> Self {
         Self {
             rate_per_sec: 5_000,
             burst: 20_000,
@@ -53,7 +53,7 @@ impl TokenBucketConfig {
     }
 
     /// Configuration for DDL propagation (low rate, protect OLTP).
-    pub fn ddl() -> Self {
+    pub const fn ddl() -> Self {
         Self {
             rate_per_sec: 1_000,
             burst: 5_000,
@@ -62,7 +62,7 @@ impl TokenBucketConfig {
     }
 
     /// Configuration for backfill (high rate, bulk data load).
-    pub fn backfill() -> Self {
+    pub const fn backfill() -> Self {
         Self {
             rate_per_sec: 50_000,
             burst: 200_000,
@@ -71,7 +71,7 @@ impl TokenBucketConfig {
     }
 
     /// Unlimited (no throttling).
-    pub fn unlimited() -> Self {
+    pub const fn unlimited() -> Self {
         Self {
             rate_per_sec: u64::MAX / 2,
             burst: u64::MAX / 2,
@@ -223,7 +223,7 @@ impl TokenBucket {
     }
 
     /// Update the rate at runtime.
-    pub fn set_rate(&self, rate_per_sec: u64) {
+    pub const fn set_rate(&self, rate_per_sec: u64) {
         // We can't mutate config directly, but we can refill first
         // and then the new rate will take effect on next refill.
         // For a proper implementation, we'd need interior mutability on config.
@@ -258,7 +258,7 @@ pub enum TokenBucketError {
 impl std::fmt::Display for TokenBucketError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TokenBucketError::Timeout {
+            Self::Timeout {
                 waited_ms,
                 tokens_needed,
             } => {
@@ -268,7 +268,7 @@ impl std::fmt::Display for TokenBucketError {
                     waited_ms, tokens_needed
                 )
             }
-            TokenBucketError::Paused => write!(f, "token bucket paused by operator"),
+            Self::Paused => write!(f, "token bucket paused by operator"),
         }
     }
 }

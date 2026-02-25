@@ -35,9 +35,9 @@ pub enum BreakerState {
 impl std::fmt::Display for BreakerState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BreakerState::Closed => write!(f, "closed"),
-            BreakerState::Open => write!(f, "open"),
-            BreakerState::HalfOpen => write!(f, "half_open"),
+            Self::Closed => write!(f, "closed"),
+            Self::Open => write!(f, "open"),
+            Self::HalfOpen => write!(f, "half_open"),
         }
     }
 }

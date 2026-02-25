@@ -150,7 +150,7 @@ impl FeatureGate {
     }
 
     /// Get the current edition.
-    pub fn edition(&self) -> EditionTier {
+    pub const fn edition(&self) -> EditionTier {
         self.edition
     }
 
@@ -160,7 +160,7 @@ impl FeatureGate {
     }
 
     /// Minimum edition required for a feature.
-    pub fn minimum_edition(feature: Feature) -> EditionTier {
+    pub const fn minimum_edition(feature: Feature) -> EditionTier {
         match feature {
             Feature::BasicTransaction
             | Feature::BasicSQL
@@ -225,7 +225,7 @@ impl LicenseInfo {
     }
 
     /// Create an enterprise license.
-    pub fn enterprise(
+    pub const fn enterprise(
         org: String,
         key: String,
         expires_at: u64,
@@ -244,17 +244,17 @@ impl LicenseInfo {
     }
 
     /// Check if the license has expired (relative to a unix timestamp).
-    pub fn is_expired(&self, now_unix: u64) -> bool {
+    pub const fn is_expired(&self, now_unix: u64) -> bool {
         self.expires_at > 0 && now_unix > self.expires_at
     }
 
     /// Check if adding a node would exceed the license limit.
-    pub fn can_add_node(&self, current_nodes: u32) -> bool {
+    pub const fn can_add_node(&self, current_nodes: u32) -> bool {
         self.max_nodes == 0 || current_nodes < self.max_nodes
     }
 
     /// Check if adding a tenant would exceed the license limit.
-    pub fn can_add_tenant(&self, current_tenants: u32) -> bool {
+    pub const fn can_add_tenant(&self, current_tenants: u32) -> bool {
         self.max_tenants == 0 || current_tenants < self.max_tenants
     }
 }

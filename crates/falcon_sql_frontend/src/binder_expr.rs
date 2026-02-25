@@ -899,7 +899,7 @@ impl Binder {
 }
 
 /// Map a Datum value to its corresponding DataType.
-fn datum_to_datatype(datum: &Datum) -> Option<DataType> {
+const fn datum_to_datatype(datum: &Datum) -> Option<DataType> {
     match datum {
         Datum::Int32(_) => Some(DataType::Int32),
         Datum::Int64(_) => Some(DataType::Int64),

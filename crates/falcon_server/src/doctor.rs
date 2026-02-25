@@ -208,7 +208,7 @@ pub fn run_doctor(config_path: &str) {
 
         let wal_test_dir = crate::service::paths::service_data_dir();
         let check_dir = if wal_test_dir.exists() {
-            wal_test_dir.clone()
+            wal_test_dir
         } else {
             std::env::temp_dir()
         };

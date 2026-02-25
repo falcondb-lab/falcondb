@@ -337,7 +337,7 @@ impl HealthState {
         self.start_time.elapsed().as_secs()
     }
 
-    fn role_str(&self) -> &'static str {
+    const fn role_str(&self) -> &'static str {
         match self.role {
             NodeRole::Primary => "primary",
             NodeRole::Replica => "replica",

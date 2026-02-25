@@ -75,23 +75,23 @@ pub enum UstmError {
 impl std::fmt::Display for UstmError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            UstmError::ZoneError(e) => write!(f, "zone error: {}", e),
-            UstmError::IoError(e) => write!(f, "I/O error: {}", e),
-            UstmError::PageNotFound(pid) => write!(f, "page not found: {}", pid),
-            UstmError::Shutdown => write!(f, "engine is shut down"),
+            Self::ZoneError(e) => write!(f, "zone error: {}", e),
+            Self::IoError(e) => write!(f, "I/O error: {}", e),
+            Self::PageNotFound(pid) => write!(f, "page not found: {}", pid),
+            Self::Shutdown => write!(f, "engine is shut down"),
         }
     }
 }
 
 impl From<ZoneError> for UstmError {
     fn from(e: ZoneError) -> Self {
-        UstmError::ZoneError(e)
+        Self::ZoneError(e)
     }
 }
 
 impl From<IoError> for UstmError {
     fn from(e: IoError) -> Self {
-        UstmError::IoError(e.to_string())
+        Self::IoError(e.to_string())
     }
 }
 
@@ -339,17 +339,17 @@ impl UstmEngine {
     }
 
     /// Get zone manager reference (for advanced introspection).
-    pub fn zone_manager(&self) -> &ZoneManager {
+    pub const fn zone_manager(&self) -> &ZoneManager {
         &self.zones
     }
 
     /// Get I/O scheduler reference.
-    pub fn io_scheduler(&self) -> &Arc<IoScheduler> {
+    pub const fn io_scheduler(&self) -> &Arc<IoScheduler> {
         &self.io_scheduler
     }
 
     /// Get prefetcher reference.
-    pub fn prefetcher(&self) -> &Arc<Prefetcher> {
+    pub const fn prefetcher(&self) -> &Arc<Prefetcher> {
         &self.prefetcher
     }
 }

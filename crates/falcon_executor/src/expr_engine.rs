@@ -35,7 +35,7 @@ impl CompiledExpr {
         ExprEngine::eval_row(&self.expr, row)
     }
 
-    pub fn as_expr(&self) -> &BoundExpr {
+    pub const fn as_expr(&self) -> &BoundExpr {
         &self.expr
     }
 }

@@ -58,7 +58,7 @@ struct AuthSourceState {
 }
 
 impl AuthSourceState {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             failures: Vec::new(),
             locked_until: None,
@@ -234,8 +234,8 @@ pub enum PasswordValidation {
 }
 
 impl PasswordValidation {
-    pub fn is_valid(&self) -> bool {
-        matches!(self, PasswordValidation::Valid)
+    pub const fn is_valid(&self) -> bool {
+        matches!(self, Self::Valid)
     }
 }
 
@@ -247,7 +247,7 @@ pub struct PasswordPolicy {
 }
 
 impl PasswordPolicy {
-    pub fn new(config: PasswordPolicyConfig) -> Self {
+    pub const fn new(config: PasswordPolicyConfig) -> Self {
         Self {
             config,
             total_checks: AtomicU64::new(0),
@@ -381,8 +381,8 @@ pub enum SqlFirewallResult {
 }
 
 impl SqlFirewallResult {
-    pub fn is_allowed(&self) -> bool {
-        matches!(self, SqlFirewallResult::Allowed)
+    pub const fn is_allowed(&self) -> bool {
+        matches!(self, Self::Allowed)
     }
 }
 
@@ -398,7 +398,7 @@ pub struct SqlFirewall {
 }
 
 impl SqlFirewall {
-    pub fn new(config: SqlFirewallConfig) -> Self {
+    pub const fn new(config: SqlFirewallConfig) -> Self {
         Self {
             config,
             total_checks: AtomicU64::new(0),

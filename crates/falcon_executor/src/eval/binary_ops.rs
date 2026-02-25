@@ -134,7 +134,7 @@ fn eval_arithmetic(
     }
 }
 
-fn eval_and_null(left: &Datum, right: &Datum) -> Result<Datum, ExecutionError> {
+const fn eval_and_null(left: &Datum, right: &Datum) -> Result<Datum, ExecutionError> {
     if let Some(false) = left.as_bool() {
         return Ok(Datum::Boolean(false));
     }
@@ -144,7 +144,7 @@ fn eval_and_null(left: &Datum, right: &Datum) -> Result<Datum, ExecutionError> {
     Ok(Datum::Null)
 }
 
-fn eval_or_null(left: &Datum, right: &Datum) -> Result<Datum, ExecutionError> {
+const fn eval_or_null(left: &Datum, right: &Datum) -> Result<Datum, ExecutionError> {
     if let Some(true) = left.as_bool() {
         return Ok(Datum::Boolean(true));
     }

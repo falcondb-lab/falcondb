@@ -164,7 +164,7 @@ impl CdcManager {
     }
 
     /// Whether CDC is enabled.
-    pub fn is_enabled(&self) -> bool {
+    pub const fn is_enabled(&self) -> bool {
         self.enabled
     }
 

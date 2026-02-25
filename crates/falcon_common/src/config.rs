@@ -33,7 +33,7 @@ pub struct FalconConfig {
     pub gateway: GatewayConfig,
 }
 
-fn default_config_version() -> u32 { CURRENT_CONFIG_VERSION }
+const fn default_config_version() -> u32 { CURRENT_CONFIG_VERSION }
 
 /// GC configuration section in falcon.toml.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,9 +52,9 @@ pub struct GcSectionConfig {
     pub min_chain_length: usize,
 }
 
-fn default_true() -> bool { true }
-fn default_gc_interval() -> u64 { 1000 }
-fn default_min_chain_length() -> usize { 2 }
+const fn default_true() -> bool { true }
+const fn default_gc_interval() -> u64 { 1000 }
+const fn default_min_chain_length() -> usize { 2 }
 
 impl Default for GcSectionConfig {
     fn default() -> Self {
@@ -114,7 +114,7 @@ pub struct TlsConfig {
 
 impl TlsConfig {
     /// Returns true when both cert and key paths are configured.
-    pub fn is_enabled(&self) -> bool {
+    pub const fn is_enabled(&self) -> bool {
         !self.cert_path.is_empty() && !self.key_path.is_empty()
     }
 }
@@ -149,16 +149,16 @@ pub struct AuthConfig {
     pub username: String,
 }
 
-fn default_shutdown_drain_timeout_secs() -> u64 {
+const fn default_shutdown_drain_timeout_secs() -> u64 {
     30
 }
 
-fn default_slow_txn_threshold_us() -> u64 {
+const fn default_slow_txn_threshold_us() -> u64 {
     100_000 // 100ms
 }
 
 fn default_wal_backend() -> String { "file".to_string() }
-fn default_group_commit_window_us() -> u64 { 200 }
+const fn default_group_commit_window_us() -> u64 { 200 }
 fn default_compression_profile() -> String { "balanced".to_string() }
 fn default_wal_mode() -> String { "auto".to_string() }
 
@@ -231,20 +231,43 @@ pub struct WalConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpillConfig {
     /// Maximum number of rows to hold in memory before spilling to disk.
-    /// 0 = never spill (pure in-memory, the default for small workloads).
+    /// 0 = never spill (pure in-memory).
+    /// Default: 500_000 rows — production workloads should always have a bound.
+    #[serde(default = "default_spill_memory_rows_threshold")]
     pub memory_rows_threshold: usize,
     /// Temporary directory for spill files. Uses system temp dir if empty.
+    #[serde(default)]
     pub temp_dir: String,
     /// Maximum number of sorted runs to merge at once (k-way merge fan-in).
+    #[serde(default = "default_spill_merge_fan_in")]
     pub merge_fan_in: usize,
+    /// Maximum number of groups in a hash aggregation before rejecting.
+    /// Prevents OOM from unbounded GROUP BY on high-cardinality columns.
+    /// 0 = unlimited (not recommended for production).
+    /// Default: 1_000_000 groups.
+    #[serde(default = "default_hash_agg_group_limit")]
+    pub hash_agg_group_limit: usize,
+    /// When memory pressure is at or above this level, the sort spill threshold
+    /// is automatically halved to reduce memory consumption.
+    /// Values: "soft", "hard", "emergency", "none" (disable reactive spill).
+    /// Default: "soft" — start spilling earlier when memory is under pressure.
+    #[serde(default = "default_pressure_spill_trigger")]
+    pub pressure_spill_trigger: String,
 }
+
+const fn default_spill_memory_rows_threshold() -> usize { 500_000 }
+const fn default_spill_merge_fan_in() -> usize { 16 }
+const fn default_hash_agg_group_limit() -> usize { 1_000_000 }
+fn default_pressure_spill_trigger() -> String { "soft".to_string() }
 
 impl Default for SpillConfig {
     fn default() -> Self {
         Self {
-            memory_rows_threshold: 0,
+            memory_rows_threshold: default_spill_memory_rows_threshold(),
             temp_dir: String::new(),
-            merge_fan_in: 16,
+            merge_fan_in: default_spill_merge_fan_in(),
+            hash_agg_group_limit: default_hash_agg_group_limit(),
+            pressure_spill_trigger: default_pressure_spill_trigger(),
         }
     }
 }
@@ -301,14 +324,14 @@ pub enum NodeRole {
 
 impl NodeRole {
     /// Returns true if this role is allowed to serve write transactions.
-    pub fn is_writable(&self) -> bool {
-        matches!(self, NodeRole::Primary | NodeRole::Standalone)
+    pub const fn is_writable(&self) -> bool {
+        matches!(self, Self::Primary | Self::Standalone)
     }
 
     /// Returns true if columnstore / analytical storage paths are permitted.
     /// Primary nodes must never touch columnar storage on the write path.
-    pub fn allows_columnstore(&self) -> bool {
-        matches!(self, NodeRole::Analytics | NodeRole::Standalone)
+    pub const fn allows_columnstore(&self) -> bool {
+        matches!(self, Self::Analytics | Self::Standalone)
     }
 }
 
@@ -510,8 +533,8 @@ pub struct GatewayConfig {
 }
 
 fn default_gateway_role() -> String { "smart_gateway".to_string() }
-fn default_forward_timeout_ms() -> u64 { 5000 }
-fn default_topology_staleness_secs() -> u64 { 30 }
+const fn default_forward_timeout_ms() -> u64 { 5000 }
+const fn default_topology_staleness_secs() -> u64 { 30 }
 
 impl Default for GatewayConfig {
     fn default() -> Self {
@@ -599,7 +622,7 @@ pub struct DeprecatedFieldReport {
 }
 
 impl DeprecatedFieldReport {
-    pub fn has_warnings(&self) -> bool {
+    pub const fn has_warnings(&self) -> bool {
         !self.warnings.is_empty()
     }
 }

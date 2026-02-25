@@ -39,7 +39,7 @@ pub fn check_config_version(toml_text: &str) -> ConfigVersionStatus {
 }
 
 /// Config version status.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ConfigVersionStatus {
     /// Config is at current version — no action needed.
     Current,

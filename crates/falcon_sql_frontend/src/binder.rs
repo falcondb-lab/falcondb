@@ -161,6 +161,15 @@ impl Binder {
                         if_exists: *if_exists,
                     })
                 }
+                ast::ObjectType::Role => {
+                    let name = names
+                        .first()
+                        .ok_or_else(|| SqlError::Parse("DROP ROLE requires a name".into()))?;
+                    Ok(BoundStatement::DropRole {
+                        name: name.to_string(),
+                        if_exists: *if_exists,
+                    })
+                }
                 _ => Err(SqlError::Unsupported(format!("DROP {:?}", object_type))),
             },
             Statement::AlterTable {
@@ -291,6 +300,163 @@ impl Binder {
                 legacy_options,
                 ..
             } => self.bind_copy(source, *to, target, options, legacy_options),
+            Statement::CreateRole {
+                names,
+                login,
+                superuser,
+                create_db,
+                create_role,
+                password,
+                ..
+            } => {
+                let name = names
+                    .first()
+                    .map(|n| n.to_string())
+                    .unwrap_or_default();
+                let pw = match password {
+                    Some(ast::Password::Password(expr)) => Some(format!("{}", expr)),
+                    _ => None,
+                };
+                Ok(BoundStatement::CreateRole {
+                    name,
+                    can_login: login.unwrap_or(false),
+                    is_superuser: superuser.unwrap_or(false),
+                    can_create_db: create_db.unwrap_or(false),
+                    can_create_role: create_role.unwrap_or(false),
+                    password: pw,
+                })
+            }
+            Statement::AlterRole { name, operation, .. } => {
+                let role_name = name.value.clone();
+                let mut pwd: Option<Option<String>> = None;
+                let mut al_login: Option<bool> = None;
+                let mut al_superuser: Option<bool> = None;
+                let mut al_createdb: Option<bool> = None;
+                let mut al_createrole: Option<bool> = None;
+                if let ast::AlterRoleOperation::RenameRole { .. } = operation {
+                    return Err(SqlError::Unsupported("ALTER ROLE RENAME".into()));
+                }
+                if let ast::AlterRoleOperation::WithOptions { options } = operation {
+                    for opt in options {
+                        match opt {
+                            ast::RoleOption::Login(b) => al_login = Some(*b),
+                            ast::RoleOption::SuperUser(b) => al_superuser = Some(*b),
+                            ast::RoleOption::CreateDB(b) => al_createdb = Some(*b),
+                            ast::RoleOption::CreateRole(b) => al_createrole = Some(*b),
+                            ast::RoleOption::Password(p) => {
+                                pwd = Some(match p {
+                                    ast::Password::Password(expr) => Some(format!("{}", expr)),
+                                    ast::Password::NullPassword => None,
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Ok(BoundStatement::AlterRole {
+                    name: role_name,
+                    password: pwd,
+                    can_login: al_login,
+                    is_superuser: al_superuser,
+                    can_create_db: al_createdb,
+                    can_create_role: al_createrole,
+                })
+            }
+            Statement::Grant {
+                privileges,
+                objects,
+                grantees,
+                ..
+            } => {
+                let priv_str = match privileges {
+                    ast::Privileges::All { .. } => "ALL".to_string(),
+                    ast::Privileges::Actions(actions) => {
+                        actions.iter().map(|a| format!("{}", a)).collect::<Vec<_>>().join(", ")
+                    }
+                };
+                let (obj_type, obj_name) = match objects {
+                    ast::GrantObjects::Tables(names) => {
+                        let name = names.first().map(|n| n.to_string()).unwrap_or_default();
+                        ("TABLE".to_string(), name)
+                    }
+                    ast::GrantObjects::Schemas(names) => {
+                        let name = names.first().map(|n| n.to_string()).unwrap_or_default();
+                        ("SCHEMA".to_string(), name)
+                    }
+                    ast::GrantObjects::Sequences(names) => {
+                        let name = names.first().map(|n| n.to_string()).unwrap_or_default();
+                        ("SEQUENCE".to_string(), name)
+                    }
+                    ast::GrantObjects::AllTablesInSchema { schemas } => {
+                        let name = schemas.first().map(|n| n.to_string()).unwrap_or_default();
+                        ("SCHEMA".to_string(), name)
+                    }
+                    _ => {
+                        return Err(SqlError::Unsupported("GRANT on this object type".into()));
+                    }
+                };
+                let grantee = grantees
+                    .first()
+                    .map(|g| g.value.clone())
+                    .unwrap_or_default();
+                Ok(BoundStatement::Grant {
+                    privilege: priv_str,
+                    object_type: obj_type,
+                    object_name: obj_name,
+                    grantee,
+                })
+            }
+            Statement::Revoke {
+                privileges,
+                objects,
+                grantees,
+                ..
+            } => {
+                let priv_str = match privileges {
+                    ast::Privileges::All { .. } => "ALL".to_string(),
+                    ast::Privileges::Actions(actions) => {
+                        actions.iter().map(|a| format!("{}", a)).collect::<Vec<_>>().join(", ")
+                    }
+                };
+                let (obj_type, obj_name) = match objects {
+                    ast::GrantObjects::Tables(names) => {
+                        let name = names.first().map(|n| n.to_string()).unwrap_or_default();
+                        ("TABLE".to_string(), name)
+                    }
+                    ast::GrantObjects::Schemas(names) => {
+                        let name = names.first().map(|n| n.to_string()).unwrap_or_default();
+                        ("SCHEMA".to_string(), name)
+                    }
+                    ast::GrantObjects::Sequences(names) => {
+                        let name = names.first().map(|n| n.to_string()).unwrap_or_default();
+                        ("SEQUENCE".to_string(), name)
+                    }
+                    ast::GrantObjects::AllTablesInSchema { schemas } => {
+                        let name = schemas.first().map(|n| n.to_string()).unwrap_or_default();
+                        ("SCHEMA".to_string(), name)
+                    }
+                    _ => {
+                        return Err(SqlError::Unsupported("REVOKE on this object type".into()));
+                    }
+                };
+                let grantee = grantees
+                    .first()
+                    .map(|g| g.value.clone())
+                    .unwrap_or_default();
+                Ok(BoundStatement::Revoke {
+                    privilege: priv_str,
+                    object_type: obj_type,
+                    object_name: obj_name,
+                    grantee,
+                })
+            }
+            Statement::CreateSchema { schema_name, if_not_exists, .. } => {
+                let name = schema_name.to_string();
+                Ok(BoundStatement::CreateSchema {
+                    name,
+                    if_not_exists: *if_not_exists,
+                })
+            }
             _ => Err(SqlError::Unsupported(format!(
                 "Statement type: {:?}",
                 std::mem::discriminant(stmt)
@@ -1233,7 +1399,7 @@ impl Binder {
         }
     }
 
-    fn resolve_fk_action(
+    const fn resolve_fk_action(
         action: &Option<ast::ReferentialAction>,
     ) -> falcon_common::schema::FkAction {
         match action {
@@ -1438,7 +1604,7 @@ impl Binder {
             )));
         }
 
-        let mut inner_binder = Binder::new(self.catalog.clone());
+        let mut inner_binder = Self::new(self.catalog.clone());
         let bound = inner_binder.bind(&stmts[0])?;
 
         let view_select = match bound {

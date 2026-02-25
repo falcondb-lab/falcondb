@@ -117,7 +117,7 @@ impl DiagBundleBuilder {
         self
     }
 
-    pub fn inflight(mut self, i: InflightSnapshot) -> Self {
+    pub const fn inflight(mut self, i: InflightSnapshot) -> Self {
         self.inflight = Some(i);
         self
     }

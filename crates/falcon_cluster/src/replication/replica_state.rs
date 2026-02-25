@@ -25,7 +25,7 @@ pub struct ReplicaNode {
 }
 
 impl ReplicaNode {
-    pub fn new_primary(storage: Arc<StorageEngine>) -> Self {
+    pub const fn new_primary(storage: Arc<StorageEngine>) -> Self {
         Self {
             role: RwLock::new(ReplicaRole::Primary),
             storage,
@@ -34,7 +34,7 @@ impl ReplicaNode {
         }
     }
 
-    pub fn new_replica(storage: Arc<StorageEngine>) -> Self {
+    pub const fn new_replica(storage: Arc<StorageEngine>) -> Self {
         Self {
             role: RwLock::new(ReplicaRole::Replica),
             storage,

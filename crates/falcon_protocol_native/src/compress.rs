@@ -30,7 +30,7 @@ pub enum CompressionAlgo {
 }
 
 impl CompressionAlgo {
-    pub fn from_byte(b: u8) -> Option<Self> {
+    pub const fn from_byte(b: u8) -> Option<Self> {
         match b {
             0x00 => Some(Self::None),
             0x01 => Some(Self::Lz4),
@@ -205,7 +205,7 @@ fn lz4_decompress(input: &[u8], expected_size: usize) -> Result<Vec<u8>, String>
 // ── Negotiation helper ───────────────────────────────────────────────
 
 /// Determine the compression algorithm from negotiated feature flags.
-pub fn negotiated_compression(features: u64) -> CompressionAlgo {
+pub const fn negotiated_compression(features: u64) -> CompressionAlgo {
     use crate::types::FEATURE_COMPRESSION_LZ4;
     if features & FEATURE_COMPRESSION_LZ4 != 0 {
         CompressionAlgo::Lz4

@@ -1,37 +1,85 @@
-# FalconDB vs PostgreSQL — Benchmark Results
+# FalconDB Benchmark Matrix — 4-Engine OLTP Comparison
 
-> **Version**: <!-- auto-filled by run_all.sh -->
+> **Version**: <!-- auto-filled by run_matrix.sh -->
 > **Date**: <!-- auto-filled -->
 > **Hardware**: <!-- auto-filled from environment capture -->
+> **Engines**: FalconDB · PostgreSQL · VoltDB · SingleStore
 
 ## How to Read This Document
 
-- All numbers are from the **same machine**, same OS, same memory allocation
-- FalconDB and PostgreSQL configs are in `falcondb/config.toml` and `postgresql/postgresql.conf`
-- Raw data is in `results/` — every number here can be traced back to a file
+- All numbers are from the **same machine**, same OS, same memory allocation (2 GB)
+- Each engine's config is in its own directory under `benchmarks/`
+- Raw data is in `results/matrix_<timestamp>/` — every number can be traced to a file
+- `—` means the engine was not installed or the run failed
+
+---
 
 ## W1: Single-Table OLTP (70% SELECT, 20% UPDATE, 10% INSERT)
 
-| Threads | FalconDB TPS | PG TPS | FalconDB p99 (ms) | PG p99 (ms) | Ratio |
-|---------|-------------|--------|-------------------|-------------|-------|
-| 1 | — | — | — | — | — |
-| 4 | — | — | — | — | — |
-| 8 | — | — | — | — | — |
-| 16 | — | — | — | — | — |
+Point-lookup and point-update workload. Tests index lookup speed and
+basic concurrency control overhead.
+
+| Threads | FalconDB TPS | PG TPS | VoltDB TPS | SingleStore TPS | FalconDB p99 | PG p99 | VoltDB p99 | SS p99 |
+|---------|-------------|--------|------------|-----------------|-------------|--------|------------|--------|
+| 1       | —           | —      | —          | —               | —           | —      | —          | —      |
+| 4       | —           | —      | —          | —               | —           | —      | —          | —      |
+| 8       | —           | —      | —          | —               | —           | —      | —          | —      |
+| 16      | —           | —      | —          | —               | —           | —      | —          | —      |
 
 ## W2: Multi-Table Transaction (BEGIN → SELECT → INSERT → UPDATE × 2 → COMMIT)
 
-| Threads | FalconDB TPS | PG TPS | FalconDB p99 (ms) | PG p99 (ms) | Ratio |
-|---------|-------------|--------|-------------------|-------------|-------|
-| 1 | — | — | — | — | — |
-| 4 | — | — | — | — | — |
-| 8 | — | — | — | — | — |
-| 16 | — | — | — | — | — |
+Full ACID transaction spanning two tables. Tests transaction coordinator
+overhead, lock granularity, and WAL write amplification.
+
+| Threads | FalconDB TPS | PG TPS | VoltDB TPS | SingleStore TPS | FalconDB p99 | PG p99 | VoltDB p99 | SS p99 |
+|---------|-------------|--------|------------|-----------------|-------------|--------|------------|--------|
+| 1       | —           | —      | —          | —               | —           | —      | —          | —      |
+| 4       | —           | —      | —          | —               | —           | —      | —          | —      |
+| 8       | —           | —      | —          | —               | —           | —      | —          | —      |
+| 16      | —           | —      | —          | —               | —           | —      | —          | —      |
+
+## W3: Analytic Range Scan (COUNT/SUM/AVG over 10% of rows)
+
+Aggregate query over a range of 10K rows. Tests scan throughput,
+column-vs-row storage trade-offs, and aggregation execution speed.
+
+| Threads | FalconDB TPS | PG TPS | VoltDB TPS | SingleStore TPS | FalconDB p99 | PG p99 | VoltDB p99 | SS p99 |
+|---------|-------------|--------|------------|-----------------|-------------|--------|------------|--------|
+| 1       | —           | —      | —          | —               | —           | —      | —          | —      |
+| 4       | —           | —      | —          | —               | —           | —      | —          | —      |
+| 8       | —           | —      | —          | —               | —           | —      | —          | —      |
+| 16      | —           | —      | —          | —               | —           | —      | —          | —      |
+
+## W4: Hot-Key Contention (10 hot keys, all threads competing)
+
+All threads UPDATE the same 10 rows. Tests lock/latch contention,
+MVCC retry cost, and abort rate under extreme skew.
+
+| Threads | FalconDB TPS | PG TPS | VoltDB TPS | SingleStore TPS | FalconDB p99 | PG p99 | VoltDB p99 | SS p99 |
+|---------|-------------|--------|------------|-----------------|-------------|--------|------------|--------|
+| 1       | —           | —      | —          | —               | —           | —      | —          | —      |
+| 4       | —           | —      | —          | —               | —           | —      | —          | —      |
+| 8       | —           | —      | —          | —               | —           | —      | —          | —      |
+| 16      | —           | —      | —          | —               | —           | —      | —          | —      |
+
+## W5: Batch Insert Throughput (single-row INSERT into append table)
+
+Sustained INSERT into a fresh table. Tests WAL write speed, index
+maintenance overhead, and memory allocation throughput.
+
+| Threads | FalconDB TPS | PG TPS | VoltDB TPS | SingleStore TPS | FalconDB p99 | PG p99 | VoltDB p99 | SS p99 |
+|---------|-------------|--------|------------|-----------------|-------------|--------|------------|--------|
+| 1       | —           | —      | —          | —               | —           | —      | —          | —      |
+| 4       | —           | —      | —          | —               | —           | —      | —          | —      |
+| 8       | —           | —      | —          | —               | —           | —      | —          | —      |
+| 16      | —           | —      | —          | —               | —           | —      | —          | —      |
+
+---
 
 ## Environment
 
 ```
-OS:     <!-- from results/environment_*.txt -->
+OS:     <!-- from results/matrix_*/environment.txt -->
 CPU:    <!-- cores, model -->
 Memory: <!-- total RAM -->
 Disk:   <!-- SSD type -->
@@ -39,26 +87,51 @@ Disk:   <!-- SSD type -->
 
 ## Configuration Parity
 
-| Parameter | FalconDB | PostgreSQL |
-|-----------|----------|------------|
-| Memory allocation | 2 GB | shared_buffers = 2GB |
-| WAL sync | fdatasync | wal_sync_method = fdatasync |
-| Connections | 100 | max_connections = 100 |
-| Compression | Off | N/A |
+All engines configured for **fair single-node comparison**:
 
-## Known Limitations
+| Parameter          | FalconDB     | PostgreSQL           | VoltDB                  | SingleStore           |
+|--------------------|-------------|----------------------|-------------------------|-----------------------|
+| Memory allocation  | 2 GB        | shared_buffers = 2GB | cluster: 2GB            | max_memory = 2048 MB  |
+| WAL / durability   | fdatasync   | wal_sync_method      | sync command log        | sync_permissions = ON |
+| Max connections     | 100         | 100                  | N/A (partitioned)       | 100                   |
+| Storage model      | In-memory   | Disk (buffered)      | In-memory               | Rowstore (in-memory)  |
+| Replication         | Off         | Off                  | k=0 (no replication)    | redundancy_level = 1  |
 
-1. FalconDB is memory-first — advantages are expected for in-memory workloads
-2. FalconDB SQL coverage is limited (no JOINs in benchmarks)
-3. Single-node only; distributed benchmarks planned for v2.0
-4. Results are hardware-dependent — run on your own hardware to verify
+## Engine Characteristics (Fair-Comparison Disclosure)
+
+| Engine      | Architecture    | Storage          | Concurrency Model     | Expected Advantage            |
+|-------------|----------------|------------------|-----------------------|-------------------------------|
+| FalconDB    | Single-node    | In-memory + WAL  | MVCC (snapshot)       | Low-latency point ops         |
+| PostgreSQL  | Single-node    | Disk + buffer    | MVCC (SSI)            | Mature optimizer, broad SQL   |
+| VoltDB      | Partitioned    | In-memory        | Deterministic serial  | Partition-local throughput    |
+| SingleStore | Distributed    | Rowstore + col.  | MVCC (lock-free reads)| Scan/analytic throughput      |
+
+## Known Caveats
+
+1. **FalconDB** is memory-first — advantages are expected for in-memory workloads
+2. **VoltDB** uses deterministic execution — partition-local ops avoid locking but
+   cross-partition transactions are expensive (W2 may underperform)
+3. **SingleStore** rowstore tables are used for OLTP fairness; columnstore would
+   benefit W3 (analytic scan) significantly
+4. **PostgreSQL** is disk-based; sufficient shared_buffers ensure data fits in memory
+5. All results are **single-node only** — distributed topologies not tested here
+6. Results are **hardware-dependent** — run on your own hardware to verify
 
 ## Reproduction
 
 ```bash
-# Quick (10s per test):
-./benchmarks/scripts/run_all.sh --quick
+# Full matrix (60s per run, ~80 runs → ~80 min with 4 engines):
+./benchmarks/scripts/run_matrix.sh
 
-# Full (60s per test):
+# Quick mode (10s per run → ~14 min):
+./benchmarks/scripts/run_matrix.sh --quick
+
+# Subset of engines:
+./benchmarks/scripts/run_matrix.sh --engines falcondb,postgresql
+
+# Subset of workloads:
+./benchmarks/scripts/run_matrix.sh --workloads w1,w2,w4
+
+# Original 2-engine comparison (backward compatible):
 ./benchmarks/scripts/run_all.sh
 ```

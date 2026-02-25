@@ -79,12 +79,12 @@ pub enum RetryPolicy {
 
 impl RetryPolicy {
     /// Whether the client should retry at all.
-    pub fn should_retry(&self) -> bool {
+    pub const fn should_retry(&self) -> bool {
         !matches!(self, Self::NoRetry)
     }
 
     /// Suggested initial retry delay in milliseconds.
-    pub fn initial_delay_ms(&self) -> u64 {
+    pub const fn initial_delay_ms(&self) -> u64 {
         match self {
             Self::NoRetry => 0,
             Self::RetryAfter(ms) => *ms,
@@ -327,7 +327,7 @@ impl TxnTerminalState {
     }
 
     /// Error kind classification.
-    pub fn error_kind(&self) -> ErrorKind {
+    pub const fn error_kind(&self) -> ErrorKind {
         match self {
             Self::Committed { .. } => ErrorKind::UserError, // not an error
             Self::AbortedRetryable { .. } => ErrorKind::Retryable,
@@ -343,7 +343,7 @@ impl TxnTerminalState {
     }
 
     /// Whether the transaction is in a definitive terminal state.
-    pub fn is_terminal(&self) -> bool {
+    pub const fn is_terminal(&self) -> bool {
         !matches!(self, Self::Indeterminate { .. })
     }
 
@@ -360,7 +360,7 @@ impl TxnTerminalState {
 }
 
 impl AbortReason {
-    pub fn sqlstate(&self) -> &'static str {
+    pub const fn sqlstate(&self) -> &'static str {
         match self {
             Self::SerializationConflict => "40001",
             Self::Deadlock => "40P01",
@@ -390,7 +390,7 @@ impl AbortReason {
 }
 
 impl RejectReason {
-    pub fn sqlstate(&self) -> &'static str {
+    pub const fn sqlstate(&self) -> &'static str {
         match self {
             Self::MemoryExhausted => "53200",
             Self::WalBacklogExceeded => "53300",
@@ -405,7 +405,7 @@ impl RejectReason {
         }
     }
 
-    pub fn retry_policy(&self) -> RetryPolicy {
+    pub const fn retry_policy(&self) -> RetryPolicy {
         match self {
             Self::MemoryExhausted => RetryPolicy::ExponentialBackoff { base_ms: 100, max_ms: 5000 },
             Self::WalBacklogExceeded => RetryPolicy::RetryAfter(200),
@@ -560,7 +560,7 @@ pub enum FailoverExpectedOutcome {
 
 impl CommitPhase {
     /// Determine expected recovery outcome for a crash at this phase.
-    pub fn expected_recovery(&self, local_fsync_required: bool) -> FailoverExpectedOutcome {
+    pub const fn expected_recovery(&self, local_fsync_required: bool) -> FailoverExpectedOutcome {
         match self {
             Self::Active => FailoverExpectedOutcome::MustBeRolledBack,
             Self::WalLogged => {
@@ -636,7 +636,7 @@ pub struct QueueDepthGuard {
 }
 
 impl QueueDepthGuard {
-    pub fn new(name: &'static str, hard_capacity: u64) -> Self {
+    pub const fn new(name: &'static str, hard_capacity: u64) -> Self {
         Self {
             name,
             current_depth: AtomicU64::new(0),
@@ -682,7 +682,7 @@ impl QueueDepthGuard {
     }
 
     /// Hard capacity.
-    pub fn capacity(&self) -> u64 {
+    pub const fn capacity(&self) -> u64 {
         self.hard_capacity
     }
 
@@ -702,7 +702,7 @@ impl QueueDepthGuard {
     }
 
     /// Queue name.
-    pub fn name(&self) -> &'static str {
+    pub const fn name(&self) -> &'static str {
         self.name
     }
 
@@ -758,6 +758,12 @@ pub struct DeterministicRejectPolicy {
     total: AtomicU64,
 }
 
+impl Default for DeterministicRejectPolicy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DeterministicRejectPolicy {
     pub fn new() -> Self {
         let mut map = HashMap::new();
@@ -811,6 +817,12 @@ pub struct IdempotentReplayValidator {
     duplicate_replays: AtomicU64,
     /// Count of violations (non-idempotent replay detected).
     violations: AtomicU64,
+}
+
+impl Default for IdempotentReplayValidator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl IdempotentReplayValidator {

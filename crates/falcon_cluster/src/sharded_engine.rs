@@ -61,7 +61,7 @@ impl ShardedEngine {
     }
 
     /// Number of shards.
-    pub fn num_shards(&self) -> u64 {
+    pub const fn num_shards(&self) -> u64 {
         self.num_shards
     }
 

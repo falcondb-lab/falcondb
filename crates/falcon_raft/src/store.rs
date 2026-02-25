@@ -40,7 +40,7 @@ struct LogStoreInner {
 }
 
 impl LogStoreInner {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             vote: None,
             log: BTreeMap::new(),
@@ -270,7 +270,7 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
     }
 
     async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
-        StateMachine {
+        Self {
             last_applied: self.last_applied,
             last_membership: self.last_membership.clone(),
             data: self.data.clone(),

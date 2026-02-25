@@ -214,21 +214,21 @@ impl PgSession {
     }
 
     /// PG transaction status indicator byte for ReadyForQuery.
-    pub fn txn_status_byte(&self) -> u8 {
+    pub const fn txn_status_byte(&self) -> u8 {
         match &self.txn {
             None => b'I',    // idle
             Some(_) => b'T', // in transaction
         }
     }
 
-    pub fn in_transaction(&self) -> bool {
+    pub const fn in_transaction(&self) -> bool {
         self.txn.is_some()
     }
 
     /// Move session state out for use in a spawn_blocking closure.
     /// The original session retains its id and timeout but loses txn/prepared state.
-    pub fn take_for_timeout(&mut self) -> PgSession {
-        PgSession {
+    pub fn take_for_timeout(&mut self) -> Self {
+        Self {
             id: self.id,
             database: self.database.clone(),
             user: self.user.clone(),
@@ -251,7 +251,7 @@ impl PgSession {
     }
 
     /// Restore session state after a spawn_blocking closure returns.
-    pub fn restore_from_timeout(&mut self, other: PgSession) {
+    pub fn restore_from_timeout(&mut self, other: Self) {
         self.txn = other.txn;
         self.autocommit = other.autocommit;
         self.prepared_statements = other.prepared_statements;

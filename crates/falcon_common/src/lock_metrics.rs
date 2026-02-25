@@ -146,7 +146,7 @@ impl<T> InstrumentedRwLock<T> {
         guard
     }
 
-    pub fn metrics(&self) -> &LockMetrics {
+    pub const fn metrics(&self) -> &LockMetrics {
         &self.metrics
     }
 
@@ -176,7 +176,7 @@ impl<T> InstrumentedMutex<T> {
         guard
     }
 
-    pub fn metrics(&self) -> &LockMetrics {
+    pub const fn metrics(&self) -> &LockMetrics {
         &self.metrics
     }
 

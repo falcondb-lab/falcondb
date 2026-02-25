@@ -200,7 +200,7 @@ impl std::error::Error for TlsSetupError {}
 /// A connection stream that can be either plaintext TCP or TLS-wrapped.
 pub enum PgStream {
     Plain(TcpStream),
-    Tls(tokio_rustls::server::TlsStream<TcpStream>),
+    Tls(Box<tokio_rustls::server::TlsStream<TcpStream>>),
 }
 
 impl AsyncRead for PgStream {
@@ -210,8 +210,8 @@ impl AsyncRead for PgStream {
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<io::Result<()>> {
         match self.get_mut() {
-            PgStream::Plain(s) => std::pin::Pin::new(s).poll_read(cx, buf),
-            PgStream::Tls(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+            Self::Plain(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+            Self::Tls(s) => std::pin::Pin::new(s).poll_read(cx, buf),
         }
     }
 }
@@ -223,8 +223,8 @@ impl AsyncWrite for PgStream {
         buf: &[u8],
     ) -> std::task::Poll<io::Result<usize>> {
         match self.get_mut() {
-            PgStream::Plain(s) => std::pin::Pin::new(s).poll_write(cx, buf),
-            PgStream::Tls(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+            Self::Plain(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+            Self::Tls(s) => std::pin::Pin::new(s).poll_write(cx, buf),
         }
     }
 
@@ -233,8 +233,8 @@ impl AsyncWrite for PgStream {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<io::Result<()>> {
         match self.get_mut() {
-            PgStream::Plain(s) => std::pin::Pin::new(s).poll_flush(cx),
-            PgStream::Tls(s) => std::pin::Pin::new(s).poll_flush(cx),
+            Self::Plain(s) => std::pin::Pin::new(s).poll_flush(cx),
+            Self::Tls(s) => std::pin::Pin::new(s).poll_flush(cx),
         }
     }
 
@@ -243,15 +243,15 @@ impl AsyncWrite for PgStream {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<io::Result<()>> {
         match self.get_mut() {
-            PgStream::Plain(s) => std::pin::Pin::new(s).poll_shutdown(cx),
-            PgStream::Tls(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+            Self::Plain(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+            Self::Tls(s) => std::pin::Pin::new(s).poll_shutdown(cx),
         }
     }
 }
 
 impl PgStream {
     /// Whether this stream is TLS-encrypted.
-    pub fn is_tls(&self) -> bool {
+    pub const fn is_tls(&self) -> bool {
         matches!(self, Self::Tls(_))
     }
 }

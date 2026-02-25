@@ -381,6 +381,17 @@ pub fn substitute_params_plan(
             unions: subst_unions(unions, params)?,
         }),
 
+        // ── Distributed ──
+        PhysicalPlan::DistPlan {
+            subplan,
+            target_shards,
+            gather,
+        } => Ok(PhysicalPlan::DistPlan {
+            subplan: Box::new(substitute_params_plan(subplan, params)?),
+            target_shards: target_shards.clone(),
+            gather: gather.clone(),
+        }),
+
         // ── Wrappers ──
         PhysicalPlan::Explain(inner) => Ok(PhysicalPlan::Explain(Box::new(
             substitute_params_plan(inner, params)?,

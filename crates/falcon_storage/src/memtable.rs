@@ -209,7 +209,7 @@ pub struct SecondaryIndex {
 }
 
 impl SecondaryIndex {
-    pub fn new(column_idx: usize) -> Self {
+    pub const fn new(column_idx: usize) -> Self {
         Self {
             column_idx,
             column_indices: vec![],
@@ -220,7 +220,7 @@ impl SecondaryIndex {
         }
     }
 
-    pub fn new_unique(column_idx: usize) -> Self {
+    pub const fn new_unique(column_idx: usize) -> Self {
         Self {
             column_idx,
             column_indices: vec![],
@@ -258,7 +258,7 @@ impl SecondaryIndex {
     }
 
     /// Create a prefix index (truncates key to prefix_len bytes).
-    pub fn new_prefix(column_idx: usize, prefix_len: usize) -> Self {
+    pub const fn new_prefix(column_idx: usize, prefix_len: usize) -> Self {
         Self {
             column_idx,
             column_indices: vec![],
@@ -270,7 +270,7 @@ impl SecondaryIndex {
     }
 
     /// Returns true if this is a composite (multi-column) index.
-    pub fn is_composite(&self) -> bool {
+    pub const fn is_composite(&self) -> bool {
         self.column_indices.len() > 1
     }
 
@@ -381,7 +381,7 @@ impl MemTable {
         }
     }
 
-    pub fn table_id(&self) -> TableId {
+    pub const fn table_id(&self) -> TableId {
         self.schema.id
     }
 
@@ -398,20 +398,25 @@ impl MemTable {
         // Check unique index constraints against committed index (read-only check)
         self.check_unique_indexes(&pk, &row)?;
 
-        // Check for existing key (duplicate key detection)
-        if let Some(chain) = self.data.get(&pk) {
-            if chain.has_write_conflict(txn_id) {
-                return Err(falcon_common::error::StorageError::DuplicateKey);
+        // Use entry() to avoid double DashMap lookup (get + insert → single shard lock).
+        let entry = self.data.entry(pk.clone());
+        match entry {
+            dashmap::mapref::entry::Entry::Occupied(e) => {
+                let chain = e.get();
+                if chain.has_write_conflict(txn_id) {
+                    return Err(falcon_common::error::StorageError::DuplicateKey);
+                }
+                if chain.has_live_version(txn_id) {
+                    return Err(falcon_common::error::StorageError::DuplicateKey);
+                }
+                chain.prepend(txn_id, Some(row));
+                self.gc_candidates.fetch_add(1, AtomicOrdering::Relaxed);
             }
-            if chain.has_live_version(txn_id) {
-                return Err(falcon_common::error::StorageError::DuplicateKey);
+            dashmap::mapref::entry::Entry::Vacant(e) => {
+                let chain = Arc::new(VersionChain::new());
+                chain.prepend(txn_id, Some(row));
+                e.insert(chain);
             }
-            chain.prepend(txn_id, Some(row));
-            self.gc_candidates.fetch_add(1, AtomicOrdering::Relaxed);
-        } else {
-            let chain = Arc::new(VersionChain::new());
-            chain.prepend(txn_id, Some(row));
-            self.data.insert(pk.clone(), chain);
         }
 
         Ok(pk)
@@ -484,6 +489,7 @@ impl MemTable {
     ///          processes rows via `map`, then all partial results are merged via `reduce`.
     ///
     /// Falls back to sequential for small tables (< 50K rows).
+    #[allow(clippy::redundant_closure)]
     pub fn map_reduce_visible<T, Init, Map, Reduce>(
         &self,
         txn_id: TxnId,
@@ -518,7 +524,7 @@ impl MemTable {
             .map(|n| n.get())
             .unwrap_or(4)
             .min(8);
-        let chunk_size = (chains.len() + num_threads - 1) / num_threads;
+        let chunk_size = chains.len().div_ceil(num_threads);
 
         std::thread::scope(|s| {
             let handles: Vec<_> = chains
@@ -538,11 +544,9 @@ impl MemTable {
                 })
                 .collect();
 
-            handles
-                .into_iter()
-                .map(|h| h.join().unwrap())
-                .reduce(|a, b| reduce(a, b))
-                .unwrap_or_else(|| init())
+            let results: Vec<T> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+            let merged = results.into_iter().reduce(|a, b| reduce(a, b));
+            merged.unwrap_or_else(|| init())
         })
     }
 
@@ -766,26 +770,24 @@ impl MemTable {
                         SimpleAggOp::Min => {
                             if let Some(ci) = col_opt {
                                 let d = &row.values[*ci];
-                                if !matches!(d, Datum::Null) {
-                                    if mins[i].is_none()
+                                if !matches!(d, Datum::Null)
+                                    && (mins[i].is_none()
                                         || d.partial_cmp(mins[i].as_ref().unwrap())
-                                            == Some(std::cmp::Ordering::Less)
-                                    {
-                                        mins[i] = Some(d.clone());
-                                    }
+                                            == Some(std::cmp::Ordering::Less))
+                                {
+                                    mins[i] = Some(d.clone());
                                 }
                             }
                         }
                         SimpleAggOp::Max => {
                             if let Some(ci) = col_opt {
                                 let d = &row.values[*ci];
-                                if !matches!(d, Datum::Null) {
-                                    if maxs[i].is_none()
+                                if !matches!(d, Datum::Null)
+                                    && (maxs[i].is_none()
                                         || d.partial_cmp(maxs[i].as_ref().unwrap())
-                                            == Some(std::cmp::Ordering::Greater)
-                                    {
-                                        maxs[i] = Some(d.clone());
-                                    }
+                                            == Some(std::cmp::Ordering::Greater))
+                                {
+                                    maxs[i] = Some(d.clone());
                                 }
                             }
                         }

@@ -134,7 +134,7 @@ pub struct CumulativeNetworkMetrics {
 }
 
 impl CumulativeNetworkMetrics {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             total_bytes_in: AtomicU64::new(0),
             total_bytes_out: AtomicU64::new(0),

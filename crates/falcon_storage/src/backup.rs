@@ -167,7 +167,7 @@ pub struct BackupManager {
 }
 
 impl BackupManager {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             next_backup_id: AtomicU64::new(1),
             history: Mutex::new(Vec::new()),

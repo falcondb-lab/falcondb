@@ -123,17 +123,18 @@ Future (M2+): disaggregate into dedicated compute / storage / meta roles.
 | **Dependencies** | `common` |
 | **Replaceable** | Entire engine (RocksDB adapter, FoundationDB adapter); index impl (BTree, SkipList, ART) |
 
-### 2.7 `raft` — Consensus (stub)
+### 2.7 `raft` — Consensus (stub — NOT on production path)
+
+> **⚠️ This crate is a single-node stub. It is NOT used in any production data path.**
+> FalconDB’s replication is WAL-shipping over gRPC (see §5.5). Raft is a future exploration placeholder only.
 
 | Item | Detail |
 |------|--------|
-| **Responsibility** | Consensus trait + single-node stub. M1 uses WAL-based replication instead of Raft for primary–replica shipping |
-| **Input** | Proposals (mutations) from txn layer |
-| **Output** | Committed log entries applied to storage state machine |
-| **Core types** | `RaftNode`, `RaftGroup`, `LogEntry`, `StateMachine` trait |
-| **Dependencies** | `common`, network transport |
-| **Replaceable** | Raft impl (`openraft` vs `raft-rs`); transport (TCP, gRPC, QUIC) |
-| **Open-source reuse** | `openraft` (MIT) — pure-logic Raft, bring-your-own transport/storage |
+| **Responsibility** | Consensus trait definition + single-node no-op stub |
+| **Production status** | **Not used.** All RPCs return `Unreachable("single-node mode")` |
+| **Core types** | `RaftNode` (stub), `LogEntry`, `StateMachine` trait |
+| **Dependencies** | `common` |
+| **Future** | May be implemented for automatic leader election in ≥3-node deployments; not scheduled |
 
 ### 2.8 `cluster` — Cluster, Replication & Distributed Execution
 
@@ -180,7 +181,7 @@ Future (M2+): disaggregate into dedicated compute / storage / meta roles.
 | **Transactions** | `BEGIN`, `COMMIT`, `ROLLBACK`; Read Committed isolation |
 | **Storage** | In-memory row store; hash index on PK; BTreeMap secondary index; `CREATE INDEX` with backfill |
 | **Persistence** | WAL (segmented 64MB, group commit, purge); crash recovery |
-| **Distribution** | Hash sharding on PK; per-shard Raft via openraft 0.9 (`RaftLogStorage`, `RaftStateMachine`, `RaftSnapshotBuilder`, `RaftNetwork`); single-node `RaftNode` with propose+apply; single-shard txn only |
+| **Distribution** | Hash sharding on PK; WAL-shipping replication over gRPC (`ReplicationTransport`, `WalChunk`); single-shard fast-path + cross-shard 2PC slow-path |
 | **Observability** | Prometheus metrics endpoint; structured logging; basic trace IDs |
 | **Admin** | Health check endpoint; node list; shard map query |
 
@@ -200,7 +201,7 @@ Future (M2+): disaggregate into dedicated compute / storage / meta roles.
 |--------|-----------|---------|-----|------|-------------------|
 | **PG Wire** | `pgwire` 0.25+ | MIT | Full PG message codec, auth, TLS-ready | API churn | Wrap in `PgCodec` trait; if replaced, only adapter changes |
 | **SQL Parser** | `sqlparser-rs` 0.50+ | Apache-2.0 | Battle-tested PG dialect, active community | Missing some PG syntax | Use as-is via `Parser::parse_sql(PostgreSqlDialect)`; extend AST for custom needs |
-| **Raft** | `openraft` 0.10+ | MIT | Pure-logic Raft, no runtime coupling, async-native | Complex generics | Implement `RaftStorage`, `RaftNetwork` traits; wrap in `ConsensusEngine` trait for future swap |
+| **Raft** | `openraft` 0.10+ | MIT | Pure-logic Raft, no runtime coupling, async-native | Complex generics | **Stub only — not on production path.** Single-node no-op. Reserved for future ≥3-node automatic leader election |
 | **Async Runtime** | `tokio` 1.x | MIT | De-facto standard; io_uring via tokio-uring later | Lock-in | All async code uses `tokio`; sync boundaries via `spawn_blocking` |
 | **RPC** | `tonic` (gRPC) | MIT | Mature, codegen, streaming, HTTP/2 | Overhead for internal msgs | Define `Transport` trait; MVP uses tonic; can swap to custom TCP later |
 | **Serialization** | `prost` + `bincode` | Apache-2.0 / MIT | Protobuf for RPC; bincode for internal fast serde | — | `Codec` trait abstracts serialization |
@@ -220,22 +221,15 @@ Future (M2+): disaggregate into dedicated compute / storage / meta roles.
 
 ## 5. Transaction & Consistency Design
 
-### 5.1 Route A: Per-Shard Strong Consistency + Cross-Shard 2PC
+### 5.1 Design Alternatives Considered (historical, NOT implemented)
 
-- Each shard is a Raft group → linearizable writes within shard
-- Cross-shard: coordinator runs 2PC (prepare on each shard-leader, then commit/abort)
-- Pros: Conceptually simple
-- Cons: 2PC latency (2 extra RTTs), coordinator failure handling complex
+> The following two routes were evaluated during the design phase but **neither is implemented**.
+> They are retained here for architectural context only.
 
-### 5.2 Route B: Per-Shard Raft + Txn Coordinator with Retryable Commit
+- **Route A (Per-Shard Raft + 2PC)**: Each shard as a Raft group → linearizable writes, cross-shard 2PC. Rejected: 2PC latency overhead, complex coordinator failure handling.
+- **Route B (Per-Shard Raft + Txn Coordinator)**: Raft per shard, coordinator with timestamps and parallel prepare. Rejected: significant engineering cost with marginal benefit over WAL-shipping for current deployment model.
 
-- Each shard Raft for replication
-- Txn coordinator assigns timestamps, tracks write-set, drives parallel prepare
-- If coordinator crashes, txn times out → client retries
-- Pros: Better latency (parallel prepare), cleaner failure model
-- Cons: More engineering
-
-### 5.3 M1 Decision: **Fast-Path + Slow-Path with OCC**
+### 5.2 Implemented: Fast-Path + Slow-Path with OCC
 
 - **LocalTxn (fast-path)**: single-shard transactions commit with OCC validation under Snapshot Isolation. No 2PC overhead. `TxnContext.txn_path = Fast`.
 - **GlobalTxn (slow-path)**: cross-shard transactions use XA-2PC (prepare → commit). `TxnContext.txn_path = Slow`.
@@ -255,11 +249,11 @@ Future (M2+): disaggregate into dedicated compute / storage / meta roles.
 - **Background runner**: `GcRunner` thread with configurable interval and batch size
 - **Observability**: `SHOW falcon.gc_stats` exposes safepoint, reclaimed versions/bytes, chain stats
 
-### 5.5 Replication — Architecture Decision: WAL Shipping (primary path) vs Raft (future)
+### 5.5 Replication — WAL Shipping over gRPC
 
-FalconDB has **two replication mechanisms** that coexist intentionally:
+FalconDB uses **WAL-shipping replication** as its sole production replication mechanism.
 
-#### WAL Shipping (current primary path — M1/M2)
+#### WAL Shipping (production path)
 
 ```
 Primary ──WAL chunks──▶ Replica(s)
@@ -274,18 +268,10 @@ Primary ──WAL chunks──▶ Replica(s)
 - **Promote/failover**: 5-step fencing protocol (fence → catch-up → swap → unfence → update shard map).
 - **Status**: **fully implemented and tested** (9/9 `m2_multinode_e2e` tests pass).
 
-#### Raft (`falcon_raft` crate — future path, M4+)
-
-```
-[future] Per-shard Raft group ──AppendEntries──▶ Followers
-         (openraft, bring-your-own transport)
-```
-
-- **Current state**: single-node stub only. `RaftNetwork` returns `Unreachable("single-node mode")` for all RPCs.
-- **Why it exists**: placeholder for future strong-consistency per-shard consensus (linearizable reads, automatic leader election).
-- **Why WAL shipping is used instead**: WAL shipping is simpler, lower latency (no leader election overhead), and sufficient for primary-replica HA. Raft adds value only when you need automatic leader election across ≥3 nodes without a separate orchestrator.
-- **Migration path**: when Raft is implemented, `ReplicationTransport` will be backed by Raft `AppendEntries` instead of direct WAL streaming. The storage engine and executor layers are unaffected.
-- **Do not confuse**: WAL shipping replicas are **not** Raft followers. They apply WAL records directly to `StorageEngine` via `apply_wal_record_to_engine()`.
+> **⚠️ Hard boundary**: The `falcon_raft` crate is a single-node stub. It is **NOT** used in any
+> production data path. WAL-shipping replicas are **not** Raft followers. They apply WAL records
+> directly to `StorageEngine` via `apply_wal_record_to_engine()`. Raft-based replication is not
+> scheduled and has no target milestone.
 
 #### Cancel Request Implementation
 
@@ -322,7 +308,7 @@ falcon/
 │   ├── falcon_protocol_pg/      (PG wire protocol, SHOW command handling)
 │   ├── falcon_protocol_native/  (native binary protocol codec, compression, type mapping)
 │   ├── falcon_native_server/    (native protocol server, session, executor bridge, nonce)
-│   ├── falcon_raft/             (Raft consensus stub via openraft)
+│   ├── falcon_raft/             (consensus stub — NOT on production path)
 │   ├── falcon_proto/            (protobuf definitions + tonic codegen)
 │   ├── falcon_cluster/          (replication, failover, scatter/gather, epoch, migration, supervisor)
 │   ├── falcon_observability/    (metrics, tracing, logging setup)
@@ -360,7 +346,7 @@ pub trait TxnManager: Send + Sync + 'static {
     async fn abort(&self, txn: TxnHandle) -> Result<()>;
 }
 
-// Consensus — pluggable consensus
+// Consensus — pluggable consensus (stub only — NOT on production path)
 #[async_trait]
 pub trait Consensus: Send + Sync + 'static {
     async fn propose(&self, shard: ShardId, entry: LogEntry) -> Result<()>;
@@ -387,7 +373,7 @@ pub trait Executor: Send + Sync + 'static {
 - Runtime: `tokio` multi-threaded
 - All I/O (network, WAL fsync) is async
 - CPU-bound work (parsing, planning): synchronous, wrapped in `spawn_blocking` only if measurably slow
-- Raft ticking: dedicated `tokio::time::interval` task per group
+- Replication streaming: long-lived gRPC streams managed by `tokio` tasks
 
 ---
 
@@ -404,7 +390,7 @@ pub trait Executor: Send + Sync + 'static {
 | Mixed (50/50 R/W) QPS | ≥ 120K |
 | Memory per 1M rows (8 cols, avg 100B) | < 500MB |
 
-### 7.2 Cluster Targets (3-Node, Raft-Replicated)
+### 7.2 Cluster Targets (3-Node, WAL-Replicated)
 
 | Metric | Target |
 |--------|--------|
@@ -416,7 +402,7 @@ pub trait Executor: Send + Sync + 'static {
 
 - **YCSB**: Workloads A (50/50), B (95/5), C (100% read), F (read-modify-write) — MVP uses A+C
 - **TPC-C**: Deferred to P3 (requires JOIN)
-- **Custom micro-benchmarks**: PG protocol throughput, Raft commit latency, WAL fsync latency
+- **Custom micro-benchmarks**: PG protocol throughput, replication lag, WAL fsync latency
 
 ### 7.4 Hotspot Handling (MVP)
 
@@ -438,23 +424,25 @@ pub trait Executor: Send + Sync + 'static {
 | **Benchmark** | YCSB workloads, fast vs slow path, scale-out, failover impact | `falcon_bench` |
 | **Data integrity** | Crash-recovery, WAL replay, GC+promote combined correctness | Automated tests |
 
-### 8.2 Test Counts (2,239 tests)
+### 8.2 Test Counts (3,654 tests)
 
 | Crate | Tests | Coverage |
 |-------|-------|----------|
-| `falcon_cluster` | 485 | Replication, failover, scatter/gather, GC, admission, cluster ops, circuit breaker, 2PC, token bucket, epoch, leader lease, migration, throttle, supervisor |
-| `falcon_storage` | 417 | MVCC, WAL, GC, indexes, OCC, 2PC recovery, LSM engine, TDE, partitioning, PITR, CDC, recovery, compaction scheduler, memory budget, GC safepoint, fault injection |
-| `falcon_server` (integration) | 372 | Full SQL end-to-end (sql_basic 21, sql_conflict 46, sql_coverage 15, sql_dml 33, sql_extensions 58, sql_functions 19, sql_generated 131, txn_local 33, main 16) |
-| `falcon_common` | 246 | Config validation, node role, datum types (incl. Decimal), schema, error hierarchy, RBAC, RLS, security, consistency |
-| `falcon_protocol_pg` | 180 | SHOW commands, error paths, txn lifecycle, statement timeout, PgServer config, idle timeout, information_schema, views, plan cache |
-| `falcon_executor` | 162 | Operator execution, expression evaluation, window functions, subqueries, governor v2, priority scheduler, RBAC enforcement |
-| `falcon_sql_frontend` | 148 | Parsing, binding, analysis, view expansion, ALTER TABLE rename, predicate normalization, param inference |
+| `falcon_cluster` | 1,057 | Replication, failover, scatter/gather, GC, admission, cluster ops, circuit breaker, 2PC, token bucket, epoch, leader lease, migration, throttle, supervisor, control plane, enterprise security, enterprise ops, determinism hardening |
+| `falcon_storage` | 776 | MVCC, WAL, GC, indexes, OCC, SI litmus, DDL concurrency, recovery, checkpoints, secondary indexes, write sets, WAL observers, columnstore, disk rowstore |
+| `falcon_server` (integration) | 421 | Full SQL end-to-end, config migration, service management, CLI subcommands |
+| `falcon_common` | 254 | Config validation, node role, datum types (incl. Decimal), schema, error hierarchy, RBAC, RLS, security, consistency |
+| `falcon_protocol_pg` | 240 | SHOW commands, error paths, txn lifecycle, statement timeout, PgServer config, idle timeout, information_schema, views, plan cache |
+| `falcon_cli` | 201 | SQL splitter, CSV parsing, meta-command parsing, timing, history, completions, cluster/node/txn/failover/policy commands, export/import |
+| `falcon_executor` | 192 | Operator execution, expression evaluation, window functions, subqueries, governor v2, priority scheduler, RBAC enforcement |
+| `falcon_sql_frontend` | 149 | Parsing, binding, analysis, view expansion, ALTER TABLE rename, predicate normalization, param inference |
+| `falcon_txn` | 103 | Txn lifecycle, OCC, stats, history, deadlock detection, READ ONLY mode, timeout, exec summary |
 | `falcon_planner` | 89 | Plan generation, routing hints, distributed wrapping, view/DDL plans, cost model |
-| `falcon_txn` | 61 | Txn lifecycle, OCC, stats, history, deadlock detection, READ ONLY mode, timeout, exec summary |
+| `falcon_raft` | 53 | Raft log store, state machine, propose/apply, snapshot, membership |
+| `falcon_segment_codec` | 53 | Segment encoding/decoding, compression, checksums |
 | `falcon_protocol_native` | 39 | Native binary protocol codec, compression (LZ4), type mapping, golden vectors |
 | `falcon_native_server` | 28 | Native protocol server, session state machine, executor bridge, nonce anti-replay |
-| `falcon_raft` | 12 | Raft log store, state machine, propose/apply |
-| **Total** | **2,239** (passing) | `cargo clippy --workspace`: 0 warnings |
+| **Total** | **3,654** (passing) | `cargo clippy --workspace`: 0 warnings |
 
 ### 8.3 Acceptance Criteria (M1)
 

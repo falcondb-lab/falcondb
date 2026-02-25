@@ -8,7 +8,7 @@ pub struct ApplyResult {
     pub message: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum ApplyOutcome {
     Success,
@@ -17,7 +17,7 @@ pub enum ApplyOutcome {
 }
 
 impl ApplyOutcome {
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Success => "success",
             Self::Aborted => "aborted",
