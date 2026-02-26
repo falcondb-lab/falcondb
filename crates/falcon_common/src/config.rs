@@ -31,9 +31,129 @@ pub struct FalconConfig {
     /// v1.0.8: Gateway configuration.
     #[serde(default)]
     pub gateway: GatewayConfig,
+    /// v1.2.0: Production safety mode. When enabled, startup validates that
+    /// the configuration meets minimum safety requirements for production use.
+    #[serde(default)]
+    pub production_safety: ProductionSafetyConfig,
 }
 
 const fn default_config_version() -> u32 { CURRENT_CONFIG_VERSION }
+
+/// Production Safety Mode configuration.
+///
+/// When `enforce = true`, FalconDB validates all safety properties at startup
+/// and **refuses to start** if any are violated. When `enforce = false` (default),
+/// violations are logged as WARN but startup proceeds.
+///
+/// This is FalconDB's "no foot-guns in production" guard rail.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProductionSafetyConfig {
+    /// Enable production safety enforcement. Default: false (warn only).
+    #[serde(default)]
+    pub enforce: bool,
+}
+
+impl Default for ProductionSafetyConfig {
+    fn default() -> Self {
+        Self { enforce: false }
+    }
+}
+
+/// A single production safety check result.
+#[derive(Debug, Clone)]
+pub struct SafetyViolation {
+    /// Short identifier (e.g. "PS-1").
+    pub id: &'static str,
+    /// Human-readable description of the violation.
+    pub message: String,
+    /// Severity: "CRITICAL" (blocks startup in enforce mode) or "WARN".
+    pub severity: &'static str,
+}
+
+/// Validate a FalconConfig against production safety rules.
+/// Returns a list of violations (empty = all checks pass).
+pub fn validate_production_safety(config: &FalconConfig) -> Vec<SafetyViolation> {
+    let mut violations = Vec::new();
+
+    // PS-1: WAL must be enabled
+    if !config.storage.wal_enabled {
+        violations.push(SafetyViolation {
+            id: "PS-1",
+            message: "WAL is disabled (storage.wal_enabled=false). \
+                      Data will not survive crashes. \
+                      The Deterministic Commit Guarantee (DCG) is void.".into(),
+            severity: "CRITICAL",
+        });
+    }
+
+    // PS-2: WAL sync mode must be fsync or fdatasync (not "none")
+    if config.wal.sync_mode == "none" {
+        violations.push(SafetyViolation {
+            id: "PS-2",
+            message: "WAL sync_mode is 'none'. \
+                      Committed data may be lost on crash. \
+                      Set wal.sync_mode = 'fsync' or 'fdatasync'.".into(),
+            severity: "CRITICAL",
+        });
+    }
+
+    // PS-3: Authentication should not be Trust in production
+    if config.server.auth.method == AuthMethod::Trust {
+        violations.push(SafetyViolation {
+            id: "PS-3",
+            message: "Authentication method is 'trust' (no password required). \
+                      Any client can connect and modify data. \
+                      Set server.auth.method = 'scram-sha-256'.".into(),
+            severity: "CRITICAL",
+        });
+    }
+
+    // PS-4: Memory limits should be configured
+    if config.memory.shard_hard_limit_bytes == 0 {
+        violations.push(SafetyViolation {
+            id: "PS-4",
+            message: "No memory hard limit configured (memory.shard_hard_limit_bytes=0). \
+                      Unbounded memory usage may cause OOM kill. \
+                      Set a hard limit appropriate for your hardware.".into(),
+            severity: "WARN",
+        });
+    }
+
+    // PS-5: Statement timeout should be set
+    if config.server.statement_timeout_ms == 0 {
+        violations.push(SafetyViolation {
+            id: "PS-5",
+            message: "No statement timeout configured (server.statement_timeout_ms=0). \
+                      Runaway queries may hold locks indefinitely. \
+                      Set a timeout (e.g. 30000 for 30s).".into(),
+            severity: "WARN",
+        });
+    }
+
+    // PS-6: TLS should be enabled in production
+    if config.server.tls.cert_path.is_empty() || config.server.tls.key_path.is_empty() {
+        violations.push(SafetyViolation {
+            id: "PS-6",
+            message: "TLS is not configured. \
+                      Client connections are unencrypted. \
+                      Set server.tls.cert_path and server.tls.key_path.".into(),
+            severity: "WARN",
+        });
+    }
+
+    // PS-7: Shutdown drain timeout should be > 0
+    if config.server.shutdown_drain_timeout_secs == 0 {
+        violations.push(SafetyViolation {
+            id: "PS-7",
+            message: "Shutdown drain timeout is 0. \
+                      Active connections will be killed immediately on shutdown. \
+                      Set server.shutdown_drain_timeout_secs >= 10.".into(),
+            severity: "WARN",
+        });
+    }
+
+    violations
+}
 
 /// GC configuration section in falcon.toml.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -591,6 +711,7 @@ impl Default for FalconConfig {
             compression_profile: default_compression_profile(),
             wal_mode: default_wal_mode(),
             gateway: GatewayConfig::default(),
+            production_safety: ProductionSafetyConfig::default(),
         }
     }
 }

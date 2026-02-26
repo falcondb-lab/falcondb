@@ -16,6 +16,10 @@ pub mod async_wal_writer;
 pub mod sync_file;
 #[cfg(target_os = "windows")]
 pub mod windows_iocp;
+#[cfg(target_os = "linux")]
+pub mod linux_platform;
+#[cfg(all(target_os = "linux", feature = "io_uring"))]
+pub mod linux_io_uring;
 
 pub mod snapshot_stream;
 
@@ -24,8 +28,10 @@ pub use sync_file::SyncFileBackend;
 
 /// Create the appropriate `AsyncFile` backend for this platform.
 ///
-/// On Windows with `async_io = true`, returns the IOCP backend.
-/// Otherwise returns the synchronous fallback.
+/// Selection order:
+/// 1. Windows + async_io=true → IOCP backend
+/// 2. Linux + io_uring feature + async_io=true → io_uring backend
+/// 3. Fallback → synchronous file backend
 pub fn create_async_file(
     path: std::path::PathBuf,
     config: AsyncFileConfig,
@@ -34,6 +40,17 @@ pub fn create_async_file(
     {
         if config.async_io_enabled {
             return windows_iocp::IocpFile::open(path, config).map(|f| Box::new(f) as Box<dyn AsyncFile>);
+        }
+    }
+    #[cfg(all(target_os = "linux", feature = "io_uring"))]
+    {
+        if config.async_io_enabled {
+            match linux_io_uring::IoUringFile::open(path.clone(), config.clone()) {
+                Ok(f) => return Ok(Box::new(f) as Box<dyn AsyncFile>),
+                Err(e) => {
+                    tracing::warn!("io_uring backend failed, falling back to sync: {}", e);
+                }
+            }
         }
     }
     SyncFileBackend::open(path, config).map(|f| Box::new(f) as Box<dyn AsyncFile>)

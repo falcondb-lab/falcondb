@@ -286,7 +286,7 @@ impl SecondaryIndex {
     /// Encode a composite key from a row.
     pub fn encode_key(&self, row: &OwnedRow) -> Vec<u8> {
         let cols = self.key_columns();
-        let mut buf = Vec::new();
+        let mut buf = Vec::with_capacity(cols.len() * 8);
         for &col_idx in cols {
             let datum = row.get(col_idx).unwrap_or(&Datum::Null);
             encode_datum_to_bytes(datum, &mut buf);

@@ -1,5 +1,20 @@
 # FalconDB — PG-Compatible Distributed In-Memory OLTP
 
+## 0. Core Property: Deterministic Commit Guarantee (DCG)
+
+> **If FalconDB returns "committed", that transaction will survive any single-node crash,
+> any failover, and any recovery — with zero exceptions.**
+
+The **Deterministic Commit Guarantee** is enforced by the commit point model (§1 in
+`falcon_common::consistency`): a client ACK is never sent before the WAL is durable under
+the active commit policy. The four commit phases — **WAL Logged → WAL Durable → Visible →
+Acknowledged** — are strictly forward-only; any regression attempt is rejected as an
+`InvariantViolation`.
+
+- Evidence: [docs/consistency_evidence_map.md](docs/consistency_evidence_map.md)
+- Timing diagram: [docs/commit_sequence.md](docs/commit_sequence.md)
+- Non-goals: [docs/non_goals.md](docs/non_goals.md)
+
 ## 1. Architecture Overview
 
 ### 1.1 Data Flow (Happy Path: SELECT)

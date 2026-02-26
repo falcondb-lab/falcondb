@@ -325,6 +325,63 @@ async fn run_server_inner(
 
     tracing::info!("Config: {:?}", config);
 
+    // ── Production Safety Mode ──
+    let safety_violations = falcon_common::config::validate_production_safety(&config);
+    if !safety_violations.is_empty() {
+        let critical_count = safety_violations.iter().filter(|v| v.severity == "CRITICAL").count();
+        for v in &safety_violations {
+            if v.severity == "CRITICAL" {
+                tracing::error!(id = v.id, "[Production Safety] {}: {}", v.id, v.message);
+            } else {
+                tracing::warn!(id = v.id, "[Production Safety] {}: {}", v.id, v.message);
+            }
+        }
+        if config.production_safety.enforce && critical_count > 0 {
+            anyhow::bail!(
+                "Production safety mode is enabled and {} CRITICAL violation(s) detected. \
+                 Fix the configuration or set production_safety.enforce = false to proceed. \
+                 See docs/production_safety.md for details.",
+                critical_count
+            );
+        } else if critical_count > 0 {
+            tracing::warn!(
+                "[Production Safety] {} CRITICAL violation(s) detected but enforce=false — proceeding anyway. \
+                 Set [production_safety] enforce = true to block unsafe startups.",
+                critical_count
+            );
+        }
+    } else {
+        tracing::info!("[Production Safety] All checks passed");
+    }
+
+    // ── Linux Platform Detection ──
+    #[cfg(target_os = "linux")]
+    {
+        let data_path = std::path::Path::new(&config.storage.data_dir);
+        let report = falcon_storage::io::linux_platform::detect_platform(data_path);
+        tracing::info!(
+            kernel = %report.kernel.release,
+            filesystem = %report.filesystem,
+            block_device = %report.block_device,
+            numa_nodes = report.numa.node_count,
+            cpus = report.numa.cpu_count,
+            "[Platform] Linux environment detected"
+        );
+        for adv in &report.advisories {
+            match adv.severity {
+                falcon_storage::io::linux_platform::AdvisorySeverity::Critical => {
+                    tracing::error!(id = %adv.id, "[Platform] {}: {} → {}", adv.id, adv.message, adv.recommendation);
+                }
+                falcon_storage::io::linux_platform::AdvisorySeverity::Warn => {
+                    tracing::warn!(id = %adv.id, "[Platform] {}: {} → {}", adv.id, adv.message, adv.recommendation);
+                }
+                falcon_storage::io::linux_platform::AdvisorySeverity::Info => {
+                    tracing::info!(id = %adv.id, "[Platform] {}: {}", adv.id, adv.message);
+                }
+            }
+        }
+    }
+
     // Expose node role to SHOW falcon.node_role via env var
     std::env::set_var(
         "FALCON_NODE_ROLE",

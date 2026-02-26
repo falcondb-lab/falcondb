@@ -160,66 +160,10 @@ impl Executor {
             combined_rows = new_combined;
         }
 
-        // Apply WHERE filter
-        let mut filtered: Vec<OwnedRow> = Vec::new();
-        for row in combined_rows {
-            if let Some(ref f) = mat_filter {
-                if !ExprEngine::eval_filter(f, &row).map_err(FalconError::Execution)? {
-                    continue;
-                }
-            }
-            filtered.push(row);
-        }
-
-        // Check if this is a window function query
-        let has_window = projections
-            .iter()
-            .any(|p| matches!(p, BoundProjection::Window(..)));
-
-        // Project
-        let mut columns = self.resolve_output_columns(projections, combined_schema);
-        let filtered_refs: Vec<&OwnedRow> = filtered.iter().collect();
-        let mut result_rows: Vec<OwnedRow> = Vec::new();
-        for row in &filtered {
-            let projected = self.project_row(row, projections)?;
-            result_rows.push(projected);
-        }
-
-        // Compute window functions and inject values
-        if has_window {
-            self.compute_window_functions(&filtered_refs, projections, &mut result_rows)?;
-        }
-
-        // Distinct
-        self.apply_distinct(distinct, &mut result_rows);
-
-        // Order by
-        crate::external_sort::sort_rows(&mut result_rows, order_by, self.external_sorter.as_ref())?;
-
-        // Offset + Limit
-        if let Some(off) = offset {
-            if off < result_rows.len() {
-                result_rows = result_rows.split_off(off);
-            } else {
-                result_rows.clear();
-            }
-        }
-        if let Some(lim) = limit {
-            result_rows.truncate(lim);
-        }
-
-        // Strip hidden ORDER BY columns
-        if visible_projection_count < projections.len() {
-            for row in &mut result_rows {
-                row.values.truncate(visible_projection_count);
-            }
-            columns.truncate(visible_projection_count);
-        }
-
-        Ok(ExecutionResult::Query {
-            columns,
-            rows: result_rows,
-        })
+        self.finish_join_pipeline(
+            combined_rows, mat_filter, projections, visible_projection_count,
+            combined_schema, distinct, order_by, limit, offset,
+        )
     }
 
     /// Hash join: build a hash table on the right side of each join,
@@ -360,24 +304,33 @@ impl Executor {
                     }
                 }
             } else {
-                // Build hash table on right side, keyed by equi-join columns
-                let mut hash_table: HashMap<Vec<Datum>, Vec<usize>> = HashMap::new();
+                // Derive column-index slices for encode_join_key_into.
+                // (col_idx, _unused_bool) — we reuse the same helper for both sides.
+                let right_key_cols: Vec<(usize, bool)> =
+                    key_pairs.iter().map(|(_, rc)| (*rc, false)).collect();
+                let left_key_cols: Vec<(usize, bool)> =
+                    key_pairs.iter().map(|(lc, _)| (*lc, false)).collect();
+
+                // Build hash table on right side using byte-encoded keys.
+                // One Vec<u8> per distinct right key — no Datum cloning.
+                let mut hash_table: HashMap<Vec<u8>, Vec<usize>> =
+                    HashMap::with_capacity(right_data.len());
+                let mut key_buf = Vec::with_capacity(key_pairs.len() * 9);
                 for (ri, right_row) in right_data.iter().enumerate() {
-                    let key: Vec<Datum> = key_pairs
-                        .iter()
-                        .map(|(_, rc)| right_row.get(*rc).cloned().unwrap_or(Datum::Null))
-                        .collect();
-                    hash_table.entry(key).or_default().push(ri);
+                    key_buf.clear();
+                    Self::encode_join_key_into(right_row, &right_key_cols, &mut key_buf);
+                    hash_table.entry(key_buf.clone()).or_default().push(ri);
                 }
+
+                // Probe buffer: reused across all left rows — zero alloc per probe.
+                let mut probe_buf = Vec::with_capacity(key_pairs.len() * 9);
 
                 match join.join_type {
                     JoinType::Inner => {
                         for left_row in &combined_rows {
-                            let probe_key: Vec<Datum> = key_pairs
-                                .iter()
-                                .map(|(lc, _)| left_row.get(*lc).cloned().unwrap_or(Datum::Null))
-                                .collect();
-                            if let Some(indices) = hash_table.get(&probe_key) {
+                            probe_buf.clear();
+                            Self::encode_join_key_into(left_row, &left_key_cols, &mut probe_buf);
+                            if let Some(indices) = hash_table.get(probe_buf.as_slice()) {
                                 for &ri in indices {
                                     let merged = self.merge_rows(left_row, &right_data[ri]);
                                     // Check full condition (may have non-equi parts via AND)
@@ -395,12 +348,10 @@ impl Executor {
                     }
                     JoinType::Left => {
                         for left_row in &combined_rows {
-                            let probe_key: Vec<Datum> = key_pairs
-                                .iter()
-                                .map(|(lc, _)| left_row.get(*lc).cloned().unwrap_or(Datum::Null))
-                                .collect();
+                            probe_buf.clear();
+                            Self::encode_join_key_into(left_row, &left_key_cols, &mut probe_buf);
                             let mut matched = false;
-                            if let Some(indices) = hash_table.get(&probe_key) {
+                            if let Some(indices) = hash_table.get(probe_buf.as_slice()) {
                                 for &ri in indices {
                                     let merged = self.merge_rows(left_row, &right_data[ri]);
                                     if let Some(ref cond) = join.condition {
@@ -425,21 +376,18 @@ impl Executor {
                     }
                     JoinType::Right => {
                         // Build hash table on LEFT side for right join
-                        let mut left_hash: HashMap<Vec<Datum>, Vec<usize>> = HashMap::new();
+                        let mut left_hash: HashMap<Vec<u8>, Vec<usize>> =
+                            HashMap::with_capacity(combined_rows.len());
                         for (li, left_row) in combined_rows.iter().enumerate() {
-                            let key: Vec<Datum> = key_pairs
-                                .iter()
-                                .map(|(lc, _)| left_row.get(*lc).cloned().unwrap_or(Datum::Null))
-                                .collect();
-                            left_hash.entry(key).or_default().push(li);
+                            key_buf.clear();
+                            Self::encode_join_key_into(left_row, &left_key_cols, &mut key_buf);
+                            left_hash.entry(key_buf.clone()).or_default().push(li);
                         }
                         for right_row in &right_data {
-                            let probe_key: Vec<Datum> = key_pairs
-                                .iter()
-                                .map(|(_, rc)| right_row.get(*rc).cloned().unwrap_or(Datum::Null))
-                                .collect();
+                            probe_buf.clear();
+                            Self::encode_join_key_into(right_row, &right_key_cols, &mut probe_buf);
                             let mut matched = false;
-                            if let Some(indices) = left_hash.get(&probe_key) {
+                            if let Some(indices) = left_hash.get(probe_buf.as_slice()) {
                                 for &li in indices {
                                     let merged = self.merge_rows(&combined_rows[li], right_row);
                                     if let Some(ref cond) = join.condition {
@@ -463,12 +411,10 @@ impl Executor {
                         // Probe right hash table with left rows, track matched right rows
                         let mut right_matched = vec![false; right_data.len()];
                         for left_row in &combined_rows {
-                            let probe_key: Vec<Datum> = key_pairs
-                                .iter()
-                                .map(|(lc, _)| left_row.get(*lc).cloned().unwrap_or(Datum::Null))
-                                .collect();
+                            probe_buf.clear();
+                            Self::encode_join_key_into(left_row, &left_key_cols, &mut probe_buf);
                             let mut left_matched = false;
-                            if let Some(indices) = hash_table.get(&probe_key) {
+                            if let Some(indices) = hash_table.get(probe_buf.as_slice()) {
                                 for &ri in indices {
                                     let merged = self.merge_rows(left_row, &right_data[ri]);
                                     if let Some(ref cond) = join.condition {
@@ -512,66 +458,10 @@ impl Executor {
             combined_rows = new_combined;
         }
 
-        // Apply WHERE filter
-        let mut filtered: Vec<OwnedRow> = Vec::new();
-        for row in combined_rows {
-            if let Some(ref f) = mat_filter {
-                if !ExprEngine::eval_filter(f, &row).map_err(FalconError::Execution)? {
-                    continue;
-                }
-            }
-            filtered.push(row);
-        }
-
-        // Check if this is a window function query
-        let has_window = projections
-            .iter()
-            .any(|p| matches!(p, BoundProjection::Window(..)));
-
-        // Project
-        let mut columns = self.resolve_output_columns(projections, combined_schema);
-        let filtered_refs: Vec<&OwnedRow> = filtered.iter().collect();
-        let mut result_rows: Vec<OwnedRow> = Vec::new();
-        for row in &filtered {
-            let projected = self.project_row(row, projections)?;
-            result_rows.push(projected);
-        }
-
-        // Compute window functions and inject values
-        if has_window {
-            self.compute_window_functions(&filtered_refs, projections, &mut result_rows)?;
-        }
-
-        // Distinct
-        self.apply_distinct(distinct, &mut result_rows);
-
-        // Order by
-        crate::external_sort::sort_rows(&mut result_rows, order_by, self.external_sorter.as_ref())?;
-
-        // Offset + Limit
-        if let Some(off) = offset {
-            if off < result_rows.len() {
-                result_rows = result_rows.split_off(off);
-            } else {
-                result_rows.clear();
-            }
-        }
-        if let Some(lim) = limit {
-            result_rows.truncate(lim);
-        }
-
-        // Strip hidden ORDER BY columns
-        if visible_projection_count < projections.len() {
-            for row in &mut result_rows {
-                row.values.truncate(visible_projection_count);
-            }
-            columns.truncate(visible_projection_count);
-        }
-
-        Ok(ExecutionResult::Query {
-            columns,
-            rows: result_rows,
-        })
+        self.finish_join_pipeline(
+            combined_rows, mat_filter, projections, visible_projection_count,
+            combined_schema, distinct, order_by, limit, offset,
+        )
     }
 
     /// Sort-merge join: sort both sides on join key, then merge.
@@ -760,8 +650,29 @@ impl Executor {
             combined_rows = new_combined;
         }
 
+        self.finish_join_pipeline(
+            combined_rows, mat_filter, projections, visible_projection_count,
+            combined_schema, distinct, order_by, limit, offset,
+        )
+    }
+
+    /// Shared post-join pipeline: filter → project → window → distinct → sort → offset/limit → strip.
+    /// Called by all three join strategies (nested-loop, hash, merge-sort) to avoid duplication.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_join_pipeline(
+        &self,
+        combined_rows: Vec<OwnedRow>,
+        mat_filter: Option<BoundExpr>,
+        projections: &[BoundProjection],
+        visible_projection_count: usize,
+        combined_schema: &falcon_common::schema::TableSchema,
+        distinct: &DistinctMode,
+        order_by: &[BoundOrderBy],
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> Result<ExecutionResult, FalconError> {
         // Apply WHERE filter
-        let mut filtered: Vec<OwnedRow> = Vec::new();
+        let mut filtered: Vec<OwnedRow> = Vec::with_capacity(combined_rows.len());
         for row in combined_rows {
             if let Some(ref f) = mat_filter {
                 if !ExprEngine::eval_filter(f, &row).map_err(FalconError::Execution)? {
@@ -771,32 +682,25 @@ impl Executor {
             filtered.push(row);
         }
 
-        // Check if this is a window function query
         let has_window = projections
             .iter()
             .any(|p| matches!(p, BoundProjection::Window(..)));
 
-        // Project
         let mut columns = self.resolve_output_columns(projections, combined_schema);
         let filtered_refs: Vec<&OwnedRow> = filtered.iter().collect();
-        let mut result_rows: Vec<OwnedRow> = Vec::new();
+        let mut result_rows: Vec<OwnedRow> = Vec::with_capacity(filtered.len());
         for row in &filtered {
-            let projected = self.project_row(row, projections)?;
-            result_rows.push(projected);
+            result_rows.push(self.project_row(row, projections)?);
         }
 
-        // Compute window functions and inject values
         if has_window {
             self.compute_window_functions(&filtered_refs, projections, &mut result_rows)?;
         }
 
-        // Distinct
         self.apply_distinct(distinct, &mut result_rows);
 
-        // Order by
         crate::external_sort::sort_rows(&mut result_rows, order_by, self.external_sorter.as_ref())?;
 
-        // Offset + Limit
         if let Some(off) = offset {
             if off < result_rows.len() {
                 result_rows = result_rows.split_off(off);
@@ -808,7 +712,6 @@ impl Executor {
             result_rows.truncate(lim);
         }
 
-        // Strip hidden ORDER BY columns
         if visible_projection_count < projections.len() {
             for row in &mut result_rows {
                 row.values.truncate(visible_projection_count);
@@ -893,6 +796,81 @@ impl Executor {
                 Self::collect_equi_pairs(right, left_width, pairs);
             }
             _ => {}
+        }
+    }
+
+    /// Encode join key columns from `row` into `buf` (appending, not clearing).
+    /// Uses a compact binary format: tag byte + fixed-width payload per datum variant.
+    /// This allows the caller to `clear()` and reuse `buf` across rows, achieving
+    /// zero heap allocations on the probe side of a hash join.
+    #[inline]
+    fn encode_join_key_into(row: &OwnedRow, col_indices: &[(usize, bool)], buf: &mut Vec<u8>) {
+        for &(col, _) in col_indices {
+            match row.get(col).unwrap_or(&Datum::Null) {
+                Datum::Null => buf.push(0x00),
+                Datum::Boolean(v) => {
+                    buf.push(0x01);
+                    buf.push(*v as u8);
+                }
+                Datum::Int32(v) => {
+                    buf.push(0x02);
+                    buf.extend_from_slice(&v.to_be_bytes());
+                }
+                Datum::Int64(v) => {
+                    buf.push(0x03);
+                    buf.extend_from_slice(&v.to_be_bytes());
+                }
+                Datum::Float64(v) => {
+                    buf.push(0x04);
+                    // Normalize -0.0 → 0.0 for consistent hashing
+                    let bits = if *v == 0.0 { 0u64 } else { v.to_bits() };
+                    buf.extend_from_slice(&bits.to_be_bytes());
+                }
+                Datum::Text(s) => {
+                    buf.push(0x05);
+                    buf.extend_from_slice(&(s.len() as u32).to_be_bytes());
+                    buf.extend_from_slice(s.as_bytes());
+                }
+                Datum::Timestamp(v) => {
+                    buf.push(0x06);
+                    buf.extend_from_slice(&v.to_be_bytes());
+                }
+                Datum::Date(v) => {
+                    buf.push(0x07);
+                    buf.extend_from_slice(&v.to_be_bytes());
+                }
+                Datum::Time(v) => {
+                    buf.push(0x08);
+                    buf.extend_from_slice(&v.to_be_bytes());
+                }
+                Datum::Decimal(m, s) => {
+                    buf.push(0x09);
+                    buf.extend_from_slice(&m.to_be_bytes());
+                    buf.push(*s);
+                }
+                Datum::Uuid(v) => {
+                    buf.push(0x0A);
+                    buf.extend_from_slice(&v.to_be_bytes());
+                }
+                Datum::Bytea(b) => {
+                    buf.push(0x0B);
+                    buf.extend_from_slice(&(b.len() as u32).to_be_bytes());
+                    buf.extend_from_slice(b);
+                }
+                Datum::Interval(months, days, us) => {
+                    buf.push(0x0D);
+                    buf.extend_from_slice(&months.to_be_bytes());
+                    buf.extend_from_slice(&days.to_be_bytes());
+                    buf.extend_from_slice(&us.to_be_bytes());
+                }
+                Datum::Array(_) | Datum::Jsonb(_) => {
+                    // Rare in join keys: fall back to debug repr for correctness
+                    buf.push(0x0C);
+                    let s = format!("{:?}", row.get(col).unwrap_or(&Datum::Null));
+                    buf.extend_from_slice(&(s.len() as u32).to_be_bytes());
+                    buf.extend_from_slice(s.as_bytes());
+                }
+            }
         }
     }
 }

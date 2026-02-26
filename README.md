@@ -41,6 +41,19 @@ FalconDB provides stable OLTP, fast/slow-path transactions, WAL-based
 primary–replica replication with gRPC streaming, promote/failover, MVCC
 garbage collection, and reproducible benchmarks.
 
+### Deterministic Commit Guarantee (DCG)
+
+> **If FalconDB returns "committed", that transaction will survive any single-node crash,
+> any failover, and any recovery — with zero exceptions.**
+
+This is FalconDB's core engineering property, called the **Deterministic Commit Guarantee (DCG)**.
+It is not a configuration option — it is the default behavior under the `LocalWalSync` commit policy.
+
+- **Formal definition**: [docs/consistency_evidence_map.md](docs/consistency_evidence_map.md)
+- **How it works**: [docs/commit_sequence.md](docs/commit_sequence.md)
+- **What we don't do**: [docs/non_goals.md](docs/non_goals.md)
+- **Performance cost**: [docs/benchmarks/v1.0_baseline.md](docs/benchmarks/v1.0_baseline.md)
+
 ### Supported Platforms
 
 | Platform | Build | Test | Status |

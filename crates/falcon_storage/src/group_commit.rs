@@ -292,6 +292,7 @@ impl GroupCommitSyncer {
     fn syncer_loop(&self) {
         let flush_interval = Duration::from_micros(self.config.flush_interval_us);
         let coalesce_window = Duration::from_micros(self.config.group_commit_window_us);
+        let (lock, cvar) = &*self.state;
 
         loop {
             if self.shutdown.load(Ordering::Relaxed) {
@@ -301,24 +302,26 @@ impl GroupCommitSyncer {
             }
 
             let should_flush = {
-                let (lock, cvar) = &*self.state;
                 let state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
                 if state.pending_count == 0 {
-                    // Wait for work
+                    // Idle: wait for work or flush_interval timeout.
+                    // Condvar releases the lock while sleeping — other threads can append freely.
                     let result = cvar
                         .wait_timeout(state, flush_interval)
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let state = result.0;
-                    state.pending_count > 0
+                    result.0.pending_count > 0
                 } else if state.pending_count >= self.config.max_batch_size {
-                    true // Batch is full, flush immediately
+                    true // Batch full — flush immediately, no coalescing delay
                 } else if self.config.group_commit_window_us > 0 {
-                    // Coalescing window: wait a short interval to accumulate
-                    // more records, reducing fsync rate and improving throughput.
-                    drop(state);
-                    std::thread::sleep(coalesce_window);
-                    true
+                    // Coalescing window: release the lock and wait via condvar so that:
+                    // a) additional appenders can enqueue without blocking,
+                    // b) a shutdown signal or batch-full wakeup cuts the wait early.
+                    let result = cvar
+                        .wait_timeout(state, coalesce_window)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    // Flush if there is anything pending after the window
+                    result.0.pending_count > 0
                 } else {
                     // No coalescing window: flush immediately
                     true

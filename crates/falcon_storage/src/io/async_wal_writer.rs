@@ -89,6 +89,9 @@ pub struct AsyncWalWriter {
     metrics: Arc<IoMetrics>,
     /// WAL-specific metrics.
     wal_metrics: Arc<AsyncWalMetrics>,
+    /// Lock-free mirror of SyncState::pending_bytes for flush policy check.
+    /// Avoids acquiring sync_state mutex on every append just to read pending_bytes.
+    pending_bytes_atomic: AtomicU64,
 }
 
 struct WalWriterInner {
@@ -237,6 +240,7 @@ impl AsyncWalWriter {
             shutdown: Arc::new(AtomicBool::new(false)),
             metrics: Arc::new(IoMetrics::new()),
             wal_metrics: Arc::new(AsyncWalMetrics::new()),
+            pending_bytes_atomic: AtomicU64::new(0),
         })
     }
 
@@ -276,11 +280,12 @@ impl AsyncWalWriter {
         let len = data.len() as u32;
 
         // Record format: [len:4][checksum:4][data:len]
+        // Use a stack-allocated 8-byte header instead of a heap-allocated Vec
+        // to avoid one malloc per WAL append (hot path in every commit).
         let record_size = 8 + data.len();
-        let mut record_buf = Vec::with_capacity(record_size);
-        record_buf.extend_from_slice(&len.to_le_bytes());
-        record_buf.extend_from_slice(&checksum.to_le_bytes());
-        record_buf.extend_from_slice(data);
+        let mut header = [0u8; 8];
+        header[..4].copy_from_slice(&len.to_le_bytes());
+        header[4..].copy_from_slice(&checksum.to_le_bytes());
 
         {
             let mut inner = self.inner.lock();
@@ -290,16 +295,18 @@ impl AsyncWalWriter {
                 self.rotate_segment(&mut inner)?;
             }
 
-            inner.file.write_at(inner.write_offset, &record_buf)?;
+            inner.file.write_at(inner.write_offset, &header)?;
+            inner.file.write_at(inner.write_offset + 8, data)?;
             inner.write_offset += record_size as u64;
         }
 
-        // Update sync state
+        // Update sync state and atomic mirror
+        let new_pending = self.pending_bytes_atomic.fetch_add(record_size as u64, Ordering::Relaxed) + record_size as u64;
         {
             let (lock, cvar) = &*self.sync_state;
             let mut state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             state.pending_count += 1;
-            state.pending_bytes += record_size as u64;
+            state.pending_bytes = new_pending;
             cvar.notify_one();
         }
 
@@ -350,6 +357,8 @@ impl AsyncWalWriter {
             state.synced_lsn = current_lsn;
             state.pending_count = 0;
             state.pending_bytes = 0;
+            // Reset atomic mirror — all pending bytes are now durable.
+            self.pending_bytes_atomic.store(0, Ordering::Relaxed);
             cvar.notify_all();
         }
 
@@ -404,15 +413,14 @@ impl AsyncWalWriter {
     }
 
     /// Check if the flush policy triggers a sync.
+    #[inline]
     fn maybe_flush_by_policy(&self) -> Result<(), IoError> {
         match &self.config.flush_policy {
             FlushPolicy::GroupCommit {
                 max_batch_bytes, ..
             } => {
-                let (lock, _) = &*self.sync_state;
-                let state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                if state.pending_bytes >= *max_batch_bytes {
-                    drop(state);
+                // Lock-free read via atomic mirror — avoids mutex acquisition on every append.
+                if self.pending_bytes_atomic.load(Ordering::Relaxed) >= *max_batch_bytes {
                     self.flush_durable(FlushReason::BatchFull)?;
                 }
             }
