@@ -38,7 +38,9 @@ pub mod segment_streaming;
 pub mod self_healing;
 pub mod smart_gateway;
 pub mod two_phase;
+pub mod client_discovery;
 pub mod dist_hardening;
+pub mod distributed_enhancements;
 
 /// Protobuf types and tonic client/server for WAL replication.
 /// Re-exported from the `falcon_proto` crate (generated at build time).
@@ -210,4 +212,22 @@ pub use dist_hardening::{
     PreFlightRejectReason, PromotionSafetyGuard, PromotionSafetyMetrics, PromotionStep,
     RestartableTaskState, SplitBrainDetector, SplitBrainEvent, SplitBrainMetrics,
     SplitBrainVerdict, WriteEpochCheck,
+};
+pub use client_discovery::{
+    ClientConnectionManager, ClientRoutingMetrics, ClientRoutingTable,
+    ConnectionManagerConfig, ConnectionManagerMetrics, ConnectionState,
+    NodeDirectoryEntry, NotLeaderRedirector, ProviderMetrics, RedirectOutcome,
+    RedirectorConfig, RedirectorMetrics, ShardRouteEntry, SubscriptionId,
+    SubscriptionMetrics, TopologyChangeEvent, TopologyChangeType,
+    TopologyProvider, TopologySnapshot, TopologySubscriptionManager,
+};
+pub use distributed_enhancements::{
+    ClusterHealthStatus, ClusterStatusBuilder, ClusterStatusView, CommitPolicy,
+    FailoverAuditEvent, FailoverRunbook, FailoverStage, FailoverVerificationReport,
+    IdempotencyMetrics, InvariantCheckResult, InvariantResult, MemberState,
+    MemberTransition, MembershipLifecycle, MigrationMetrics as ShardMigrationMetrics,
+    ParticipantDecision, ParticipantIdempotencyRegistry, ReplicationInvariantGate,
+    ReplicationInvariantMetrics, ShardMigrationCoordinator, ShardMigrationSummary,
+    ShardMigrationPhase, ShardMigrationTask, TwoPcRecoveryCoordinator, TwoPcRecoveryMetrics,
+    TwoPhasePhase,
 };

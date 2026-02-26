@@ -14,8 +14,12 @@ use crate::parallel::parallel_filter;
 use crate::vectorized::{is_vectorizable, vectorized_filter, RecordBatch};
 
 impl Executor {
-    /// Try to detect a PK point lookup: `WHERE pk_col = literal` for single-column PKs.
-    /// Returns (encoded_pk, remaining_filter) if successful.
+    /// Try to detect a PK point lookup from the filter expression.
+    /// Supports both single-column and composite (multi-column) PKs.
+    ///
+    /// Flattens AND conjuncts and extracts `pk_col = literal` for each PK column.
+    /// If all PK columns are matched, returns the encoded composite key and any
+    /// remaining non-PK conjuncts as a residual filter.
     pub(crate) fn try_pk_point_lookup(
         &self,
         filter: Option<&BoundExpr>,
@@ -23,75 +27,93 @@ impl Executor {
     ) -> Option<(Vec<u8>, Option<BoundExpr>)> {
         let f = filter?;
         let pk_cols = &schema.primary_key_columns;
-        if pk_cols.len() != 1 {
-            return None; // only single-column PKs for now
+        if pk_cols.is_empty() {
+            return None;
         }
-        let pk_col = pk_cols[0];
 
-        match f {
-            BoundExpr::BinaryOp {
-                left,
-                op: BinOp::Eq,
-                right,
-            } => {
-                let (col_idx, datum) = match (left.as_ref(), right.as_ref()) {
-                    (BoundExpr::ColumnRef(idx), BoundExpr::Literal(d))
-                    | (BoundExpr::Literal(d), BoundExpr::ColumnRef(idx)) => (*idx, d),
-                    _ => return None,
-                };
-                if col_idx == pk_col {
-                    let pk = encode_pk_from_datums(&[datum]);
-                    Some((pk, None))
-                } else {
-                    None
-                }
-            }
-            BoundExpr::BinaryOp {
-                left,
-                op: BinOp::And,
-                right,
-            } => {
-                // Try left side
-                if let BoundExpr::BinaryOp {
-                    left: ll,
-                    op: BinOp::Eq,
-                    right: lr,
-                } = left.as_ref()
-                {
-                    let extracted = match (ll.as_ref(), lr.as_ref()) {
-                        (BoundExpr::ColumnRef(idx), BoundExpr::Literal(d))
-                        | (BoundExpr::Literal(d), BoundExpr::ColumnRef(idx)) => Some((*idx, d)),
-                        _ => None,
-                    };
-                    if let Some((col_idx, datum)) = extracted {
-                        if col_idx == pk_col {
-                            let pk = encode_pk_from_datums(&[datum]);
-                            return Some((pk, Some(*right.clone())));
-                        }
+        // Flatten AND tree into a list of conjuncts.
+        let mut conjuncts: Vec<&BoundExpr> = Vec::new();
+        Self::flatten_and(f, &mut conjuncts);
+
+        // For each PK column, find a matching `col = literal` conjunct.
+        // pk_datums[i] = datum for pk_cols[i], matched_indices = which conjuncts were consumed.
+        let mut pk_datums: Vec<Option<&Datum>> = vec![None; pk_cols.len()];
+        let mut matched_indices: Vec<bool> = vec![false; conjuncts.len()];
+
+        for (ci, conj) in conjuncts.iter().enumerate() {
+            if let Some((col_idx, datum)) = Self::try_extract_eq_literal(conj) {
+                // Check if this column is one of the PK columns
+                if let Some(pk_pos) = pk_cols.iter().position(|&c| c == col_idx) {
+                    if pk_datums[pk_pos].is_none() {
+                        pk_datums[pk_pos] = Some(datum);
+                        matched_indices[ci] = true;
                     }
                 }
-                // Try right side
-                if let BoundExpr::BinaryOp {
-                    left: rl,
-                    op: BinOp::Eq,
-                    right: rr,
-                } = right.as_ref()
-                {
-                    let extracted = match (rl.as_ref(), rr.as_ref()) {
-                        (BoundExpr::ColumnRef(idx), BoundExpr::Literal(d))
-                        | (BoundExpr::Literal(d), BoundExpr::ColumnRef(idx)) => Some((*idx, d)),
-                        _ => None,
-                    };
-                    if let Some((col_idx, datum)) = extracted {
-                        if col_idx == pk_col {
-                            let pk = encode_pk_from_datums(&[datum]);
-                            return Some((pk, Some(*left.clone())));
-                        }
-                    }
-                }
-                None
             }
-            _ => None,
+        }
+
+        // All PK columns must be matched
+        if pk_datums.iter().any(|d| d.is_none()) {
+            return None;
+        }
+
+        // Encode composite PK in column order
+        let datum_refs: Vec<&Datum> = pk_datums.into_iter().map(|d| d.unwrap()).collect();
+        let pk = encode_pk_from_datums(&datum_refs);
+
+        // Build residual filter from unmatched conjuncts
+        let remaining: Vec<BoundExpr> = conjuncts
+            .iter()
+            .zip(matched_indices.iter())
+            .filter(|(_, &matched)| !matched)
+            .map(|(&conj, _)| conj.clone())
+            .collect();
+
+        let residual = Self::conjoin(remaining);
+        Some((pk, residual))
+    }
+
+    /// Flatten a tree of AND expressions into a flat list of conjuncts.
+    fn flatten_and<'a>(expr: &'a BoundExpr, out: &mut Vec<&'a BoundExpr>) {
+        match expr {
+            BoundExpr::BinaryOp { left, op: BinOp::And, right } => {
+                Self::flatten_and(left, out);
+                Self::flatten_and(right, out);
+            }
+            other => out.push(other),
+        }
+    }
+
+    /// Try to extract `col_idx = literal` from a simple equality expression.
+    fn try_extract_eq_literal(expr: &BoundExpr) -> Option<(usize, &Datum)> {
+        if let BoundExpr::BinaryOp { left, op: BinOp::Eq, right } = expr {
+            match (left.as_ref(), right.as_ref()) {
+                (BoundExpr::ColumnRef(idx), BoundExpr::Literal(d))
+                | (BoundExpr::Literal(d), BoundExpr::ColumnRef(idx)) => Some((*idx, d)),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Re-join a list of conjuncts into a single AND expression.
+    /// Returns None for empty lists.
+    fn conjoin(mut exprs: Vec<BoundExpr>) -> Option<BoundExpr> {
+        match exprs.len() {
+            0 => None,
+            1 => Some(exprs.pop().unwrap()),
+            _ => {
+                let mut acc = exprs.pop().unwrap();
+                while let Some(e) = exprs.pop() {
+                    acc = BoundExpr::BinaryOp {
+                        left: Box::new(e),
+                        op: BinOp::And,
+                        right: Box::new(acc),
+                    };
+                }
+                Some(acc)
+            }
         }
     }
 
@@ -473,7 +495,7 @@ impl Executor {
 
         if let Some(off) = offset {
             if off < result_rows.len() {
-                result_rows = result_rows.split_off(off);
+                result_rows.drain(..off);
             } else {
                 result_rows.clear();
             }
@@ -788,8 +810,7 @@ impl Executor {
             } else if raw_rows.len() >= 256 && is_vectorizable(projections, mat_filter.as_ref()) {
                 // ── Vectorized filter path (single-threaded, batched) ──
                 let num_cols = schema.columns.len();
-                let rows_only: Vec<OwnedRow> = raw_rows.iter().map(|(_, r)| r.clone()).collect();
-                let mut batch = RecordBatch::from_rows(&rows_only, num_cols);
+                let mut batch = RecordBatch::from_row_pairs(&raw_rows, num_cols);
                 vectorized_filter(&mut batch, f);
                 for idx in batch.active_indices() {
                     if let Some(max) = early_limit {
@@ -848,7 +869,7 @@ impl Executor {
         // Offset + Limit
         if let Some(off) = offset {
             if off < result_rows.len() {
-                result_rows = result_rows.split_off(off);
+                result_rows.drain(..off);
             } else {
                 result_rows.clear();
             }
@@ -872,18 +893,24 @@ impl Executor {
     }
 
     pub(crate) fn merge_rows(&self, left: &OwnedRow, right: &OwnedRow) -> OwnedRow {
-        let mut values = left.values.clone();
-        values.extend(right.values.iter().cloned());
+        let mut values = Vec::with_capacity(left.values.len() + right.values.len());
+        values.extend_from_slice(&left.values);
+        values.extend_from_slice(&right.values);
         OwnedRow::new(values)
     }
 
-    /// Remove duplicate rows in-place using a HashSet for O(n) deduplication.
+    /// Remove duplicate rows in-place using a HashSet with byte-encoded keys.
+    /// Uses compact binary encoding instead of `format!("{d}")` string keys,
+    /// eliminating all per-row String allocations.
     pub(crate) fn dedup_rows(&self, rows: &mut Vec<OwnedRow>) {
-        let mut seen: std::collections::HashSet<Vec<String>> =
+        let ncols = rows.first().map_or(0, |r| r.values.len());
+        let all_cols: Vec<usize> = (0..ncols).collect();
+        let mut seen: std::collections::HashSet<Vec<u8>> =
             std::collections::HashSet::with_capacity(rows.len());
+        let mut buf = Vec::with_capacity(64);
         rows.retain(|row| {
-            let key: Vec<String> = row.values.iter().map(|d| format!("{d}")).collect();
-            seen.insert(key)
+            crate::executor_aggregate::encode_group_key(&mut buf, row, &all_cols);
+            seen.insert(buf.clone())
         });
     }
 
@@ -893,14 +920,12 @@ impl Executor {
             DistinctMode::None => {}
             DistinctMode::All => self.dedup_rows(rows),
             DistinctMode::On(indices) => {
-                let mut seen: std::collections::HashSet<Vec<String>> =
+                let mut seen: std::collections::HashSet<Vec<u8>> =
                     std::collections::HashSet::with_capacity(rows.len());
+                let mut buf = Vec::with_capacity(64);
                 rows.retain(|row| {
-                    let key: Vec<String> = indices
-                        .iter()
-                        .map(|&i| row.get(i).map(|d| format!("{d}")).unwrap_or_default())
-                        .collect();
-                    seen.insert(key)
+                    crate::executor_aggregate::encode_group_key(&mut buf, row, indices);
+                    seen.insert(buf.clone())
                 });
             }
         }

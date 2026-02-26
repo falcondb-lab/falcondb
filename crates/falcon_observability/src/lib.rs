@@ -717,6 +717,146 @@ pub fn record_dist_query_network_metrics(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Distributed cluster metrics (P2 Observability)
+// ---------------------------------------------------------------------------
+
+/// Record smart gateway routing metrics.
+pub fn record_gateway_routing_metrics(
+    local_exec: u64,
+    forward_to_leader: u64,
+    reject_overloaded: u64,
+    reject_no_route: u64,
+    inflight: u64,
+    forwarded: u64,
+    forward_failed: u64,
+    client_connects: u64,
+    client_failovers: u64,
+) {
+    metrics::gauge!("falcon_gateway_local_exec_total").set(local_exec as f64);
+    metrics::gauge!("falcon_gateway_forward_total").set(forward_to_leader as f64);
+    metrics::gauge!("falcon_gateway_reject_overloaded_total").set(reject_overloaded as f64);
+    metrics::gauge!("falcon_gateway_reject_no_route_total").set(reject_no_route as f64);
+    metrics::gauge!("falcon_gateway_inflight").set(inflight as f64);
+    metrics::gauge!("falcon_gateway_forwarded").set(forwarded as f64);
+    metrics::gauge!("falcon_gateway_forward_failed_total").set(forward_failed as f64);
+    metrics::gauge!("falcon_gateway_client_connects_total").set(client_connects as f64);
+    metrics::gauge!("falcon_gateway_client_failovers_total").set(client_failovers as f64);
+}
+
+/// Record topology cache metrics.
+pub fn record_topology_cache_metrics(
+    cache_hits: u64,
+    cache_misses: u64,
+    epoch_bumps: u64,
+    invalidations: u64,
+    leader_changes: u64,
+    current_epoch: u64,
+) {
+    metrics::gauge!("falcon_topology_cache_hits").set(cache_hits as f64);
+    metrics::gauge!("falcon_topology_cache_misses").set(cache_misses as f64);
+    metrics::gauge!("falcon_topology_epoch_bumps").set(epoch_bumps as f64);
+    metrics::gauge!("falcon_topology_invalidations").set(invalidations as f64);
+    metrics::gauge!("falcon_topology_leader_changes").set(leader_changes as f64);
+    metrics::gauge!("falcon_topology_current_epoch").set(current_epoch as f64);
+}
+
+/// Record client discovery subscription metrics.
+pub fn record_discovery_subscription_metrics(
+    active_subscriptions: u64,
+    total_subscriptions: u64,
+    events_published: u64,
+    events_delivered: u64,
+    events_dropped: u64,
+    evictions: u64,
+) {
+    metrics::gauge!("falcon_discovery_active_subscriptions").set(active_subscriptions as f64);
+    metrics::gauge!("falcon_discovery_total_subscriptions").set(total_subscriptions as f64);
+    metrics::gauge!("falcon_discovery_events_published").set(events_published as f64);
+    metrics::gauge!("falcon_discovery_events_delivered").set(events_delivered as f64);
+    metrics::gauge!("falcon_discovery_events_dropped").set(events_dropped as f64);
+    metrics::gauge!("falcon_discovery_evictions").set(evictions as f64);
+}
+
+/// Record client connection manager metrics.
+pub fn record_client_connection_metrics(
+    failovers: u64,
+    total_connects: u64,
+    total_connect_failures: u64,
+    health_checks: u64,
+    health_check_failures: u64,
+) {
+    metrics::gauge!("falcon_client_conn_failovers_total").set(failovers as f64);
+    metrics::gauge!("falcon_client_conn_connects_total").set(total_connects as f64);
+    metrics::gauge!("falcon_client_conn_failures_total").set(total_connect_failures as f64);
+    metrics::gauge!("falcon_client_conn_health_checks_total").set(health_checks as f64);
+    metrics::gauge!("falcon_client_conn_health_failures_total").set(health_check_failures as f64);
+}
+
+/// Record NOT_LEADER redirector metrics.
+pub fn record_redirector_metrics(
+    redirect_attempts: u64,
+    redirect_successes: u64,
+    budget_exhaustions: u64,
+    leader_hints_applied: u64,
+) {
+    metrics::gauge!("falcon_redirector_attempts_total").set(redirect_attempts as f64);
+    metrics::gauge!("falcon_redirector_successes_total").set(redirect_successes as f64);
+    metrics::gauge!("falcon_redirector_budget_exhausted_total").set(budget_exhaustions as f64);
+    metrics::gauge!("falcon_redirector_hints_applied_total").set(leader_hints_applied as f64);
+}
+
+/// Record epoch fencing metrics at storage layer.
+pub fn record_epoch_fence_metrics(
+    current_epoch: u64,
+    total_checks: u64,
+    total_rejections: u64,
+    total_accepted: u64,
+) {
+    metrics::gauge!("falcon_epoch_fence_current").set(current_epoch as f64);
+    metrics::gauge!("falcon_epoch_fence_checks_total").set(total_checks as f64);
+    metrics::gauge!("falcon_epoch_fence_rejections_total").set(total_rejections as f64);
+    metrics::gauge!("falcon_epoch_fence_accepted_total").set(total_accepted as f64);
+}
+
+/// Record shard migration metrics.
+pub fn record_shard_migration_metrics(
+    active_migrations: u64,
+    completed_migrations: u64,
+    failed_migrations: u64,
+    rolled_back: u64,
+    bytes_transferred: u64,
+) {
+    metrics::gauge!("falcon_shard_migration_active").set(active_migrations as f64);
+    metrics::gauge!("falcon_shard_migration_completed_total").set(completed_migrations as f64);
+    metrics::gauge!("falcon_shard_migration_failed_total").set(failed_migrations as f64);
+    metrics::gauge!("falcon_shard_migration_rolled_back_total").set(rolled_back as f64);
+    metrics::gauge!("falcon_shard_migration_bytes_total").set(bytes_transferred as f64);
+}
+
+/// Record cluster health summary metrics.
+pub fn record_cluster_health_metrics(
+    health_status: &str,
+    total_nodes: u64,
+    alive_nodes: u64,
+    total_shards: u64,
+    shards_with_leader: u64,
+    replication_lag_max_ms: u64,
+) {
+    let status_num = match health_status {
+        "healthy" => 0.0,
+        "degraded" => 1.0,
+        "critical" => 2.0,
+        _ => 3.0,
+    };
+    metrics::gauge!("falcon_cluster_health_status").set(status_num);
+    metrics::gauge!("falcon_cluster_total_nodes").set(total_nodes as f64);
+    metrics::gauge!("falcon_cluster_alive_nodes").set(alive_nodes as f64);
+    metrics::gauge!("falcon_cluster_total_shards").set(total_shards as f64);
+    metrics::gauge!("falcon_cluster_shards_with_leader").set(shards_with_leader as f64);
+    metrics::gauge!("falcon_cluster_replication_lag_max_ms").set(replication_lag_max_ms as f64);
+}
+
 /// Record lock contention event for a named lock/structure.
 pub fn record_lock_contention(lock_name: &str, wait_us: u64) {
     metrics::counter!(

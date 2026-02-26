@@ -325,6 +325,10 @@ impl Executor {
                 // Probe buffer: reused across all left rows — zero alloc per probe.
                 let mut probe_buf = Vec::with_capacity(key_pairs.len() * 9);
 
+                // For pure equi-joins (all conjuncts are col=col), hash key match
+                // already guarantees the condition — skip redundant eval_filter.
+                let pure_equi = Self::is_pure_equi_join(join.condition.as_ref(), left_width);
+
                 match join.join_type {
                     JoinType::Inner => {
                         for left_row in &combined_rows {
@@ -333,12 +337,13 @@ impl Executor {
                             if let Some(indices) = hash_table.get(probe_buf.as_slice()) {
                                 for &ri in indices {
                                     let merged = self.merge_rows(left_row, &right_data[ri]);
-                                    // Check full condition (may have non-equi parts via AND)
-                                    if let Some(ref cond) = join.condition {
-                                        if !ExprEngine::eval_filter(cond, &merged)
-                                            .map_err(FalconError::Execution)?
-                                        {
-                                            continue;
+                                    if !pure_equi {
+                                        if let Some(ref cond) = join.condition {
+                                            if !ExprEngine::eval_filter(cond, &merged)
+                                                .map_err(FalconError::Execution)?
+                                            {
+                                                continue;
+                                            }
                                         }
                                     }
                                     new_combined.push(merged);
@@ -354,11 +359,13 @@ impl Executor {
                             if let Some(indices) = hash_table.get(probe_buf.as_slice()) {
                                 for &ri in indices {
                                     let merged = self.merge_rows(left_row, &right_data[ri]);
-                                    if let Some(ref cond) = join.condition {
-                                        if !ExprEngine::eval_filter(cond, &merged)
-                                            .map_err(FalconError::Execution)?
-                                        {
-                                            continue;
+                                    if !pure_equi {
+                                        if let Some(ref cond) = join.condition {
+                                            if !ExprEngine::eval_filter(cond, &merged)
+                                                .map_err(FalconError::Execution)?
+                                            {
+                                                continue;
+                                            }
                                         }
                                     }
                                     matched = true;
@@ -390,11 +397,13 @@ impl Executor {
                             if let Some(indices) = left_hash.get(probe_buf.as_slice()) {
                                 for &li in indices {
                                     let merged = self.merge_rows(&combined_rows[li], right_row);
-                                    if let Some(ref cond) = join.condition {
-                                        if !ExprEngine::eval_filter(cond, &merged)
-                                            .map_err(FalconError::Execution)?
-                                        {
-                                            continue;
+                                    if !pure_equi {
+                                        if let Some(ref cond) = join.condition {
+                                            if !ExprEngine::eval_filter(cond, &merged)
+                                                .map_err(FalconError::Execution)?
+                                            {
+                                                continue;
+                                            }
                                         }
                                     }
                                     matched = true;
@@ -417,11 +426,13 @@ impl Executor {
                             if let Some(indices) = hash_table.get(probe_buf.as_slice()) {
                                 for &ri in indices {
                                     let merged = self.merge_rows(left_row, &right_data[ri]);
-                                    if let Some(ref cond) = join.condition {
-                                        if !ExprEngine::eval_filter(cond, &merged)
-                                            .map_err(FalconError::Execution)?
-                                        {
-                                            continue;
+                                    if !pure_equi {
+                                        if let Some(ref cond) = join.condition {
+                                            if !ExprEngine::eval_filter(cond, &merged)
+                                                .map_err(FalconError::Execution)?
+                                            {
+                                                continue;
+                                            }
                                         }
                                     }
                                     left_matched = true;
@@ -562,39 +573,39 @@ impl Executor {
                 }
             } else {
                 // Sort-merge join for equi INNER joins
-                // Sort left side by join key columns
-                let mut left_sorted: Vec<(Vec<Datum>, usize)> = combined_rows
-                    .iter()
-                    .enumerate()
-                    .map(|(i, row)| {
-                        let key: Vec<Datum> = key_pairs
-                            .iter()
-                            .map(|(lc, _)| row.get(*lc).cloned().unwrap_or(Datum::Null))
-                            .collect();
-                        (key, i)
-                    })
-                    .collect();
-                left_sorted.sort_by(|a, b| Self::cmp_datum_keys(&a.0, &b.0));
+                // Use byte-encoded keys to avoid per-row Datum cloning.
+                let left_key_cols: Vec<(usize, bool)> =
+                    key_pairs.iter().map(|(lc, _)| (*lc, false)).collect();
+                let right_key_cols: Vec<(usize, bool)> =
+                    key_pairs.iter().map(|(_, rc)| (*rc, false)).collect();
 
-                // Sort right side by join key columns
-                let mut right_sorted: Vec<(Vec<Datum>, usize)> = right_data
-                    .iter()
-                    .enumerate()
-                    .map(|(i, row)| {
-                        let key: Vec<Datum> = key_pairs
-                            .iter()
-                            .map(|(_, rc)| row.get(*rc).cloned().unwrap_or(Datum::Null))
-                            .collect();
-                        (key, i)
-                    })
-                    .collect();
-                right_sorted.sort_by(|a, b| Self::cmp_datum_keys(&a.0, &b.0));
+                // Build (byte_key, original_index) for left side
+                let mut left_sorted: Vec<(Vec<u8>, usize)> = Vec::with_capacity(combined_rows.len());
+                let mut kb = Vec::with_capacity(key_pairs.len() * 9);
+                for (i, row) in combined_rows.iter().enumerate() {
+                    kb.clear();
+                    Self::encode_join_key_into(row, &left_key_cols, &mut kb);
+                    left_sorted.push((kb.clone(), i));
+                }
+                left_sorted.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+
+                // Build (byte_key, original_index) for right side
+                let mut right_sorted: Vec<(Vec<u8>, usize)> = Vec::with_capacity(right_data.len());
+                for (i, row) in right_data.iter().enumerate() {
+                    kb.clear();
+                    Self::encode_join_key_into(row, &right_key_cols, &mut kb);
+                    right_sorted.push((kb.clone(), i));
+                }
+                right_sorted.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+
+                // For pure equi-joins, skip redundant filter eval
+                let pure_equi_merge = Self::is_pure_equi_join(join.condition.as_ref(), left_width);
 
                 // Merge pass
                 let mut li = 0;
                 let mut ri = 0;
                 while li < left_sorted.len() && ri < right_sorted.len() {
-                    let cmp = Self::cmp_datum_keys(&left_sorted[li].0, &right_sorted[ri].0);
+                    let cmp = left_sorted[li].0.cmp(&right_sorted[ri].0);
                     match cmp {
                         std::cmp::Ordering::Less => {
                             li += 1;
@@ -604,22 +615,16 @@ impl Executor {
                         }
                         std::cmp::Ordering::Equal => {
                             // Find all left rows with this key
-                            let left_key = left_sorted[li].0.clone();
-                            let mut left_group_end = li;
+                            let mut left_group_end = li + 1;
                             while left_group_end < left_sorted.len()
-                                && Self::cmp_datum_keys(&left_sorted[left_group_end].0, &left_key)
-                                    == std::cmp::Ordering::Equal
+                                && left_sorted[left_group_end].0 == left_sorted[li].0
                             {
                                 left_group_end += 1;
                             }
                             // Find all right rows with this key
-                            let right_key = right_sorted[ri].0.clone();
-                            let mut right_group_end = ri;
+                            let mut right_group_end = ri + 1;
                             while right_group_end < right_sorted.len()
-                                && Self::cmp_datum_keys(
-                                    &right_sorted[right_group_end].0,
-                                    &right_key,
-                                ) == std::cmp::Ordering::Equal
+                                && right_sorted[right_group_end].0 == right_sorted[ri].0
                             {
                                 right_group_end += 1;
                             }
@@ -630,11 +635,13 @@ impl Executor {
                                         &combined_rows[left_sorted[l].1],
                                         &right_data[right_sorted[r].1],
                                     );
-                                    if let Some(ref cond) = join.condition {
-                                        if !ExprEngine::eval_filter(cond, &merged)
-                                            .map_err(FalconError::Execution)?
-                                        {
-                                            continue;
+                                    if !pure_equi_merge {
+                                        if let Some(ref cond) = join.condition {
+                                            if !ExprEngine::eval_filter(cond, &merged)
+                                                .map_err(FalconError::Execution)?
+                                            {
+                                                continue;
+                                            }
                                         }
                                     }
                                     new_combined.push(merged);
@@ -703,7 +710,7 @@ impl Executor {
 
         if let Some(off) = offset {
             if off < result_rows.len() {
-                result_rows = result_rows.split_off(off);
+                result_rows.drain(..off);
             } else {
                 result_rows.clear();
             }
@@ -797,6 +804,24 @@ impl Executor {
             }
             _ => {}
         }
+    }
+
+    /// Returns true if the join condition consists entirely of equi-join
+    /// column pairs (col_a = col_b AND col_c = col_d ...) with no residual
+    /// non-equi predicates. When true, a hash-key match is sufficient and
+    /// we can skip re-evaluating the full condition on the merged row.
+    fn is_pure_equi_join(condition: Option<&BoundExpr>, left_width: usize) -> bool {
+        fn count_leaf_conjuncts(expr: &BoundExpr) -> usize {
+            match expr {
+                BoundExpr::BinaryOp { op: BinOp::And, left, right, .. } => {
+                    count_leaf_conjuncts(left) + count_leaf_conjuncts(right)
+                }
+                _ => 1,
+            }
+        }
+        let Some(cond) = condition else { return true };
+        let pairs = Self::extract_equi_key_pairs(Some(cond), left_width);
+        !pairs.is_empty() && pairs.len() == count_leaf_conjuncts(cond)
     }
 
     /// Encode join key columns from `row` into `buf` (appending, not clearing).

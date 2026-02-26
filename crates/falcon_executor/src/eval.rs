@@ -1,6 +1,6 @@
 use falcon_common::datum::{Datum, OwnedRow};
 use falcon_common::error::ExecutionError;
-use falcon_sql_frontend::types::{AggFunc, BoundExpr, ScalarFunc};
+use falcon_sql_frontend::types::{AggFunc, BinOp, BoundExpr, ScalarFunc};
 
 use super::binary_ops::eval_binary_op;
 use super::cast::eval_cast;
@@ -411,17 +411,40 @@ pub fn eval_expr_with_params(
             if val.is_null() {
                 return Ok(Datum::Null);
             }
-            let mut found = false;
-            for item in list {
-                let item_val = eval_expr_with_params(item, row, params)?;
-                if item_val.is_null() {
-                    continue;
+            // Fast path: if all list items are literals, skip per-item eval.
+            let all_literals = list.iter().all(|e| matches!(e, BoundExpr::Literal(_)));
+            let found = if all_literals && list.len() >= 16 {
+                // Large literal list: O(1) HashSet lookup
+                use std::collections::HashSet;
+                let set: HashSet<&Datum> = list
+                    .iter()
+                    .filter_map(|e| match e {
+                        BoundExpr::Literal(d) if !d.is_null() => Some(d),
+                        _ => None,
+                    })
+                    .collect();
+                set.contains(&val)
+            } else if all_literals {
+                // Small literal list: direct comparison, no eval overhead
+                list.iter().any(|e| match e {
+                    BoundExpr::Literal(d) if !d.is_null() => *d == val,
+                    _ => false,
+                })
+            } else {
+                // General case: evaluate each expression
+                let mut found = false;
+                for item in list {
+                    let item_val = eval_expr_with_params(item, row, params)?;
+                    if item_val.is_null() {
+                        continue;
+                    }
+                    if val == item_val {
+                        found = true;
+                        break;
+                    }
                 }
-                if val == item_val {
-                    found = true;
-                    break;
-                }
-            }
+                found
+            };
             Ok(Datum::Boolean(if *negated { !found } else { found }))
         }
         BoundExpr::Cast { expr, target_type } => {
@@ -714,9 +737,91 @@ fn like_match_inner(s: &[char], p: &[char]) -> bool {
 }
 
 /// Evaluate a filter expression and return true if the row passes.
+///
+/// Uses a specialized fast path for common patterns (`col op literal`,
+/// `AND`, `OR`, `NOT`, `IsNull`, `IsNotNull`) that borrows directly from
+/// the expression tree and row, avoiding per-row `Datum::clone()`.
+/// Falls back to the general `eval_expr` path for complex expressions.
 pub fn eval_filter(expr: &BoundExpr, row: &OwnedRow) -> Result<bool, ExecutionError> {
-    let result = eval_expr(expr, row)?;
-    Ok(result.as_bool().unwrap_or(false))
+    match expr {
+        // AND: short-circuit without allocating Datum
+        BoundExpr::BinaryOp { left, op: BinOp::And, right } => {
+            Ok(eval_filter(left, row)? && eval_filter(right, row)?)
+        }
+        // OR: short-circuit without allocating Datum
+        BoundExpr::BinaryOp { left, op: BinOp::Or, right } => {
+            Ok(eval_filter(left, row)? || eval_filter(right, row)?)
+        }
+        // col <cmp> literal / literal <cmp> col — borrow both sides, zero clone
+        BoundExpr::BinaryOp { left, op, right }
+            if matches!(op, BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq) =>
+        {
+            let (lref, rref) = match (left.as_ref(), right.as_ref()) {
+                (BoundExpr::ColumnRef(li), BoundExpr::Literal(rd)) => {
+                    let ld = row.get(*li).unwrap_or(&Datum::Null);
+                    (ld, rd)
+                }
+                (BoundExpr::Literal(ld), BoundExpr::ColumnRef(ri)) => {
+                    let rd = row.get(*ri).unwrap_or(&Datum::Null);
+                    (ld, rd)
+                }
+                (BoundExpr::ColumnRef(li), BoundExpr::ColumnRef(ri)) => {
+                    let ld = row.get(*li).unwrap_or(&Datum::Null);
+                    let rd = row.get(*ri).unwrap_or(&Datum::Null);
+                    (ld, rd)
+                }
+                _ => {
+                    // Complex operands — fall back to general path
+                    let result = eval_expr(expr, row)?;
+                    return Ok(result.as_bool().unwrap_or(false));
+                }
+            };
+            if lref.is_null() || rref.is_null() {
+                return Ok(false); // NULL comparisons are false in filter context
+            }
+            // Only use direct comparison when both sides are the same type.
+            // Mixed types (e.g. Date vs Text) need the coercion in eval_binary_op.
+            if std::mem::discriminant(lref) != std::mem::discriminant(rref) {
+                let result = eval_binary_op(lref, *op, rref)?;
+                return Ok(result.as_bool().unwrap_or(false));
+            }
+            Ok(match op {
+                BinOp::Eq => lref == rref,
+                BinOp::NotEq => lref != rref,
+                BinOp::Lt => lref < rref,
+                BinOp::LtEq => lref <= rref,
+                BinOp::Gt => lref > rref,
+                BinOp::GtEq => lref >= rref,
+                _ => unreachable!(),
+            })
+        }
+        // NOT
+        BoundExpr::Not(inner) => Ok(!eval_filter(inner, row)?),
+        // IS NULL / IS NOT NULL — borrow, no clone
+        BoundExpr::IsNull(inner) => {
+            if let BoundExpr::ColumnRef(idx) = inner.as_ref() {
+                Ok(row.get(*idx).map_or(true, Datum::is_null))
+            } else {
+                let val = eval_expr(inner, row)?;
+                Ok(val.is_null())
+            }
+        }
+        BoundExpr::IsNotNull(inner) => {
+            if let BoundExpr::ColumnRef(idx) = inner.as_ref() {
+                Ok(row.get(*idx).map_or(false, |d| !d.is_null()))
+            } else {
+                let val = eval_expr(inner, row)?;
+                Ok(!val.is_null())
+            }
+        }
+        // Literal boolean (e.g. constant-folded TRUE/FALSE)
+        BoundExpr::Literal(Datum::Boolean(b)) => Ok(*b),
+        // General fallback
+        _ => {
+            let result = eval_expr(expr, row)?;
+            Ok(result.as_bool().unwrap_or(false))
+        }
+    }
 }
 
 /// Evaluate a filter expression with parameter values.

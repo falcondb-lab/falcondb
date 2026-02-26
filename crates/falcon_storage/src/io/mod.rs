@@ -13,6 +13,7 @@
 
 pub mod async_file;
 pub mod async_wal_writer;
+pub mod epoch_fence;
 pub mod sync_file;
 #[cfg(target_os = "windows")]
 pub mod windows_iocp;

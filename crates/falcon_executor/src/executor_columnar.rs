@@ -170,7 +170,7 @@ impl Executor {
 
         if let Some(off) = offset {
             if off < rows.len() {
-                rows = rows.split_off(off);
+                rows.drain(..off);
             } else {
                 rows.clear();
             }

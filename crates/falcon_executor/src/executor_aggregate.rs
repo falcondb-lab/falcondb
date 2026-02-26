@@ -227,7 +227,7 @@ impl ProjAccum {
 }
 
 /// Encode group key from row into a reusable buffer (avoids per-row allocation).
-fn encode_group_key(buf: &mut Vec<u8>, row: &OwnedRow, group_cols: &[usize]) {
+pub(crate) fn encode_group_key(buf: &mut Vec<u8>, row: &OwnedRow, group_cols: &[usize]) {
     buf.clear();
     for &col_idx in group_cols {
         let datum = row.get(col_idx).unwrap_or(&Datum::Null);
@@ -545,7 +545,7 @@ impl Executor {
         // OFFSET + LIMIT
         if let Some(off) = offset {
             if off < result_rows.len() {
-                result_rows = result_rows.split_off(off);
+                result_rows.drain(..off);
             } else {
                 result_rows.clear();
             }
@@ -629,12 +629,7 @@ impl Executor {
                 .map(|&col_idx| row.get(col_idx).cloned().unwrap_or(Datum::Null))
                 .collect();
 
-            if let Some(pos) = groups.iter().position(|(k, _)| {
-                k.len() == key.len()
-                    && k.iter()
-                        .zip(key.iter())
-                        .all(|(a, b)| format!("{a}") == format!("{b}"))
-            }) {
+            if let Some(pos) = groups.iter().position(|(k, _)| k == &key) {
                 groups[pos].1.push(i);
             } else {
                 groups.push((key, vec![i]));
@@ -678,22 +673,21 @@ impl Executor {
 
         // DISTINCT
         if !matches!(distinct, DistinctMode::None) {
-            let mut seen = std::collections::HashSet::new();
+            let ncols = result_rows.first().map_or(0, |r| r.values.len());
+            let all_cols: Vec<usize> = (0..ncols).collect();
+            let mut seen: std::collections::HashSet<Vec<u8>> =
+                std::collections::HashSet::with_capacity(result_rows.len());
+            let mut buf = Vec::with_capacity(64);
             result_rows.retain(|row| {
-                let key = row
-                    .values
-                    .iter()
-                    .map(|d| format!("{d}"))
-                    .collect::<Vec<_>>()
-                    .join("\0");
-                seen.insert(key)
+                encode_group_key(&mut buf, row, &all_cols);
+                seen.insert(buf.clone())
             });
         }
 
         // Offset
         if let Some(off) = offset {
             if off < result_rows.len() {
-                result_rows = result_rows.split_off(off);
+                result_rows.drain(..off);
             } else {
                 result_rows.clear();
             }
@@ -744,12 +738,7 @@ impl Executor {
                 .map(|&col_idx| row.get(col_idx).cloned().unwrap_or(Datum::Null))
                 .collect();
 
-            if let Some(pos) = groups.iter().position(|(k, _)| {
-                k.len() == key.len()
-                    && k.iter()
-                        .zip(key.iter())
-                        .all(|(a, b)| format!("{a}") == format!("{b}"))
-            }) {
+            if let Some(pos) = groups.iter().position(|(k, _)| k == &key) {
                 groups[pos].1.push(i);
             } else {
                 groups.push((key, vec![i]));

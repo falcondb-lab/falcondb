@@ -26,6 +26,7 @@ pub struct OptimizerConfig {
     pub subquery_decorrelation: bool,
     pub join_strategy_selection: bool,
     pub constant_folding: bool,
+    pub common_subexpr_elimination: bool,
 }
 
 impl Default for OptimizerConfig {
@@ -38,6 +39,7 @@ impl Default for OptimizerConfig {
             subquery_decorrelation: true,
             join_strategy_selection: true,
             constant_folding: true,
+            common_subexpr_elimination: true,
         }
     }
 }
@@ -58,6 +60,9 @@ pub fn optimize(plan: LogicalPlan, ctx: &OptimizerContext<'_>) -> LogicalPlan {
     // `AND false` / `OR true` remove whole subtrees early.
     if ctx.config.constant_folding {
         plan = rule_constant_fold(plan);
+    }
+    if ctx.config.common_subexpr_elimination {
+        plan = rule_common_subexpr_elimination(plan);
     }
     if ctx.config.predicate_pushdown {
         plan = rule_predicate_pushdown(plan);
@@ -1484,6 +1489,138 @@ fn fold_expr(expr: BoundExpr) -> BoundExpr {
         },
         // Leaf nodes: nothing to fold
         other => other,
+    }
+}
+
+// ── Rule 8: Common Subexpression Elimination ────────────────────────────
+
+/// Walk the plan tree and eliminate duplicate sub-expressions:
+///
+/// - **Filter**: flatten AND conjuncts, deduplicate identical predicates.
+///   `WHERE a > 5 AND b < 10 AND a > 5` → `WHERE a > 5 AND b < 10`
+///
+/// - Recurse into child nodes.
+fn rule_common_subexpr_elimination(plan: LogicalPlan) -> LogicalPlan {
+    match plan {
+        LogicalPlan::Filter { input, predicate } => {
+            let input = Box::new(rule_common_subexpr_elimination(*input));
+            let deduped = dedup_conjuncts(predicate);
+            match deduped {
+                // All conjuncts were duplicates of each other → tautology or single pred
+                Some(pred) => LogicalPlan::Filter { input, predicate: pred },
+                // Should not happen (split_conjuncts always returns ≥1), but be safe
+                None => *input,
+            }
+        }
+        LogicalPlan::Project { input, projections, visible_count } => {
+            LogicalPlan::Project {
+                input: Box::new(rule_common_subexpr_elimination(*input)),
+                projections,
+                visible_count,
+            }
+        }
+        LogicalPlan::Aggregate { input, group_by, grouping_sets, projections, visible_count, having } => {
+            let having = having.and_then(|h| dedup_conjuncts(h));
+            LogicalPlan::Aggregate {
+                input: Box::new(rule_common_subexpr_elimination(*input)),
+                group_by, grouping_sets, projections, visible_count, having,
+            }
+        }
+        LogicalPlan::Sort { input, order_by } => LogicalPlan::Sort {
+            input: Box::new(rule_common_subexpr_elimination(*input)),
+            order_by,
+        },
+        LogicalPlan::Limit { input, limit, offset } => LogicalPlan::Limit {
+            input: Box::new(rule_common_subexpr_elimination(*input)),
+            limit, offset,
+        },
+        LogicalPlan::Distinct { input, mode } => LogicalPlan::Distinct {
+            input: Box::new(rule_common_subexpr_elimination(*input)),
+            mode,
+        },
+        LogicalPlan::MultiJoin { base, joins } => LogicalPlan::MultiJoin {
+            base: Box::new(rule_common_subexpr_elimination(*base)),
+            joins,
+        },
+        LogicalPlan::Join { left, right, join_info } => LogicalPlan::Join {
+            left: Box::new(rule_common_subexpr_elimination(*left)),
+            right: Box::new(rule_common_subexpr_elimination(*right)),
+            join_info,
+        },
+        LogicalPlan::SetOp { left, right, kind, all } => LogicalPlan::SetOp {
+            left: Box::new(rule_common_subexpr_elimination(*left)),
+            right: Box::new(rule_common_subexpr_elimination(*right)),
+            kind, all,
+        },
+        LogicalPlan::WithCtes { ctes, input } => LogicalPlan::WithCtes {
+            ctes,
+            input: Box::new(rule_common_subexpr_elimination(*input)),
+        },
+        LogicalPlan::Explain(inner) => {
+            LogicalPlan::Explain(Box::new(rule_common_subexpr_elimination(*inner)))
+        }
+        LogicalPlan::ExplainAnalyze(inner) => {
+            LogicalPlan::ExplainAnalyze(Box::new(rule_common_subexpr_elimination(*inner)))
+        }
+        LogicalPlan::CopyQueryTo { query, csv, delimiter, header, null_string, quote, escape } => {
+            LogicalPlan::CopyQueryTo {
+                query: Box::new(rule_common_subexpr_elimination(*query)),
+                csv, delimiter, header, null_string, quote, escape,
+            }
+        }
+        other => other,
+    }
+}
+
+/// Split an AND expression into conjuncts, deduplicate by structural equality,
+/// and recombine. Returns None only if the input was somehow empty.
+fn dedup_conjuncts(predicate: BoundExpr) -> Option<BoundExpr> {
+    let conjuncts = split_conjuncts(predicate);
+    // Deduplicate: keep first occurrence of each structurally-equal conjunct.
+    let mut seen: Vec<&BoundExpr> = Vec::with_capacity(conjuncts.len());
+    let mut unique: Vec<BoundExpr> = Vec::with_capacity(conjuncts.len());
+    for conj in &conjuncts {
+        if !seen.iter().any(|s| expr_structurally_eq(s, conj)) {
+            seen.push(conj);
+            unique.push(conj.clone());
+        }
+    }
+    if unique.is_empty() {
+        None
+    } else {
+        Some(combine_conjuncts(unique))
+    }
+}
+
+/// Structural equality check for BoundExpr (ignoring Box addresses).
+fn expr_structurally_eq(a: &BoundExpr, b: &BoundExpr) -> bool {
+    match (a, b) {
+        (BoundExpr::Literal(la), BoundExpr::Literal(lb)) => la == lb,
+        (BoundExpr::ColumnRef(ia), BoundExpr::ColumnRef(ib)) => ia == ib,
+        (BoundExpr::OuterColumnRef(ia), BoundExpr::OuterColumnRef(ib)) => ia == ib,
+        (BoundExpr::Parameter(ia), BoundExpr::Parameter(ib)) => ia == ib,
+        (
+            BoundExpr::BinaryOp { left: la, op: oa, right: ra },
+            BoundExpr::BinaryOp { left: lb, op: ob, right: rb },
+        ) => oa == ob && expr_structurally_eq(la, lb) && expr_structurally_eq(ra, rb),
+        (BoundExpr::Not(a_inner), BoundExpr::Not(b_inner)) => {
+            expr_structurally_eq(a_inner, b_inner)
+        }
+        (BoundExpr::IsNull(ai), BoundExpr::IsNull(bi)) => expr_structurally_eq(ai, bi),
+        (BoundExpr::IsNotNull(ai), BoundExpr::IsNotNull(bi)) => expr_structurally_eq(ai, bi),
+        (
+            BoundExpr::Cast { expr: ea, target_type: ta },
+            BoundExpr::Cast { expr: eb, target_type: tb },
+        ) => ta == tb && expr_structurally_eq(ea, eb),
+        (
+            BoundExpr::Function { func: fa, args: aa },
+            BoundExpr::Function { func: fb, args: ab },
+        ) => {
+            std::mem::discriminant(fa) == std::mem::discriminant(fb)
+                && aa.len() == ab.len()
+                && aa.iter().zip(ab.iter()).all(|(x, y)| expr_structurally_eq(x, y))
+        }
+        _ => false, // Different variants → not equal
     }
 }
 

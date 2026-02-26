@@ -1,0 +1,56 @@
+name: Nightly Chaos Tests
+
+on:
+  schedule:
+    - cron: '0 3 * * *'  # 03:00 UTC daily
+  workflow_dispatch:       # manual trigger
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  distributed-chaos:
+    name: Distributed Chaos Suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build all test binaries
+        run: cargo test --workspace --no-run
+
+      - name: P0-1 Epoch fencing chaos
+        run: cargo test -p falcon_cluster --test distributed_enhancements_integration test_p01 -- --nocapture
+
+      - name: P0-2 Replication invariant matrix
+        run: cargo test -p falcon_cluster --test distributed_enhancements_integration test_p02 -- --nocapture
+
+      - name: P0-3 Failover gameday drill
+        run: cargo test -p falcon_cluster --test distributed_enhancements_integration test_p03 -- --nocapture
+
+      - name: P0-4 2PC crash injection
+        run: cargo test -p falcon_cluster --test distributed_enhancements_integration test_p04 -- --nocapture
+
+      - name: P1-1 Membership lifecycle
+        run: cargo test -p falcon_cluster --test distributed_enhancements_integration test_p11 -- --nocapture
+
+      - name: P1-2 Shard migration bounded disruption
+        run: cargo test -p falcon_cluster --test distributed_enhancements_integration test_p12 -- --nocapture
+
+      - name: P1-3 Cluster status observability
+        run: cargo test -p falcon_cluster --test distributed_enhancements_integration test_p13 -- --nocapture
+
+      - name: E2E full distributed lifecycle
+        run: cargo test -p falcon_cluster --test distributed_enhancements_integration test_e2e -- --nocapture
+
+      - name: Failover determinism 3x3 matrix
+        run: cargo test -p falcon_cluster --test failover_determinism -- --nocapture
+
+      - name: Enterprise compliance suite
+        run: cargo test -p falcon_cluster --test enterprise_compliance -- --nocapture
+
+      - name: Existing chaos gate
+        run: chmod +x scripts/ci_distributed_chaos.sh && ./scripts/ci_distributed_chaos.sh || true

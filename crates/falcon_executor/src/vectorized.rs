@@ -255,6 +255,33 @@ impl RecordBatch {
         }
     }
 
+    /// Build a RecordBatch from scan result pairs `(pk_bytes, row)` without
+    /// cloning the rows into an intermediate `Vec<OwnedRow>` first.
+    /// Eliminates one full-table clone on the vectorized filter path.
+    pub fn from_row_pairs(pairs: &[(Vec<u8>, OwnedRow)], num_cols: usize) -> Self {
+        let num_rows = pairs.len();
+        let mut col_data: Vec<Vec<Datum>> = (0..num_cols)
+            .map(|_| Vec::with_capacity(num_rows))
+            .collect();
+
+        for (_, row) in pairs {
+            for (col_idx, col) in col_data.iter_mut().enumerate() {
+                col.push(row.values.get(col_idx).cloned().unwrap_or(Datum::Null));
+            }
+        }
+
+        let columns: Vec<ColumnVector> = col_data
+            .iter()
+            .map(|col| ColumnVector::from_datums(col))
+            .collect();
+
+        Self {
+            columns,
+            num_rows,
+            selection: None,
+        }
+    }
+
     /// Build a RecordBatch directly from pre-computed column vectors (columnar scan path).
     /// Each element of `columns` is a Vec<Datum> for one column; all must have equal length.
     pub fn from_columns(columns: Vec<Vec<Datum>>) -> Self {

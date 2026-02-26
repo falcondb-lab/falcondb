@@ -11,7 +11,6 @@
 //! thread.  Results are merged on the coordinator thread.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use falcon_common::datum::{Datum, OwnedRow};
 use falcon_sql_frontend::types::*;
@@ -96,34 +95,40 @@ pub fn parallel_filter(
     }
 
     let chunk_size = n.div_ceil(num_threads);
-    let filter_arc = Arc::new(filter.clone());
-    let rows_arc = Arc::new(rows.to_vec());
 
-    let handles: Vec<_> = (0..num_threads)
-        .map(|t| {
-            let f = filter_arc.clone();
-            let r = rows_arc.clone();
-            let start = t * chunk_size;
-            let end = (start + chunk_size).min(n);
-            std::thread::spawn(move || {
-                let mut matched = Vec::new();
-                for i in start..end {
-                    if ExprEngine::eval_filter(&f, &r[i].1).unwrap_or(false) {
-                        matched.push(i);
+    // Use scoped threads to borrow `rows` and `filter` directly —
+    // eliminates the Arc<rows.to_vec()> full-table clone.
+    let mut partials: Vec<Vec<usize>> = Vec::with_capacity(num_threads);
+    std::thread::scope(|s| {
+        let handles: Vec<_> = (0..num_threads)
+            .map(|t| {
+                let start = t * chunk_size;
+                let end = (start + chunk_size).min(n);
+                s.spawn(move || {
+                    let mut matched = Vec::new();
+                    for i in start..end {
+                        if ExprEngine::eval_filter(filter, &rows[i].1).unwrap_or(false) {
+                            matched.push(i);
+                        }
                     }
-                }
-                matched
+                    matched
+                })
             })
-        })
-        .collect();
+            .collect();
 
-    let mut result = Vec::new();
-    for h in handles {
-        if let Ok(indices) = h.join() {
-            result.extend(indices);
+        for h in handles {
+            if let Ok(indices) = h.join() {
+                partials.push(indices);
+            }
         }
+    });
+
+    // Partials are already in order by chunk; flatten preserves global order.
+    let total: usize = partials.iter().map(|p| p.len()).sum();
+    let mut result = Vec::with_capacity(total);
+    for part in partials {
+        result.extend(part);
     }
-    result.sort_unstable();
     result
 }
 
@@ -131,8 +136,9 @@ pub fn parallel_filter(
 // Parallel aggregate
 // ---------------------------------------------------------------------------
 
-/// Group key: a vector of string representations of group-by columns.
-type GroupKey = Vec<String>;
+/// Group key: byte-encoded representation of group-by column values.
+/// Uses compact binary encoding instead of String formatting.
+type GroupKey = Vec<u8>;
 
 /// Partial aggregate state for a single group.
 #[derive(Debug, Clone)]
@@ -290,44 +296,42 @@ pub fn parallel_grouped_aggregate(
     }
 
     let chunk_size = n.div_ceil(num_threads);
-    let rows_arc = Arc::new(rows.to_vec());
-    let group_by_arc = Arc::new(group_by.to_vec());
 
-    let handles: Vec<_> = (0..num_threads)
-        .map(|t| {
-            let r = rows_arc.clone();
-            let gb = group_by_arc.clone();
-            let start = t * chunk_size;
-            let end = (start + chunk_size).min(n);
-            std::thread::spawn(move || {
-                let mut local_map: HashMap<GroupKey, PartialAggState> = HashMap::new();
-                for i in start..end {
-                    let row = &r[i].1;
-                    let key: GroupKey = gb
-                        .iter()
-                        .map(|&idx| {
-                            row.values
-                                .get(idx)
-                                .map(|d| format!("{d}"))
-                                .unwrap_or_default()
-                        })
-                        .collect();
-                    let val = row.values.get(agg_col_idx).and_then(falcon_common::datum::Datum::as_f64);
-                    let state = local_map.entry(key).or_default();
-                    state.update(val, row);
-                }
-                local_map
+    // Use scoped threads to borrow `rows` and `group_by` directly —
+    // eliminates Arc<rows.to_vec()> full-table clone.
+    let mut partials: Vec<HashMap<GroupKey, PartialAggState>> = Vec::with_capacity(num_threads);
+    std::thread::scope(|s| {
+        let handles: Vec<_> = (0..num_threads)
+            .map(|t| {
+                let start = t * chunk_size;
+                let end = (start + chunk_size).min(n);
+                s.spawn(move || {
+                    let mut local_map: HashMap<GroupKey, PartialAggState> = HashMap::new();
+                    let mut key_buf = Vec::with_capacity(64);
+                    for i in start..end {
+                        let row = &rows[i].1;
+                        crate::executor_aggregate::encode_group_key(&mut key_buf, row, group_by);
+                        let val = row.values.get(agg_col_idx).and_then(falcon_common::datum::Datum::as_f64);
+                        let state = local_map.entry(key_buf.clone()).or_default();
+                        state.update(val, row);
+                    }
+                    local_map
+                })
             })
-        })
-        .collect();
+            .collect();
+
+        for h in handles {
+            if let Ok(local_map) = h.join() {
+                partials.push(local_map);
+            }
+        }
+    });
 
     // Merge phase
     let mut global_map: HashMap<GroupKey, PartialAggState> = HashMap::new();
-    for h in handles {
-        if let Ok(local_map) = h.join() {
-            for (key, partial) in local_map {
-                global_map.entry(key).or_default().merge(&partial);
-            }
+    for local_map in partials {
+        for (key, partial) in local_map {
+            global_map.entry(key).or_default().merge(&partial);
         }
     }
     global_map
@@ -340,18 +344,11 @@ fn single_thread_aggregate(
     _agg_func: &AggFunc,
 ) -> HashMap<GroupKey, PartialAggState> {
     let mut map: HashMap<GroupKey, PartialAggState> = HashMap::new();
+    let mut key_buf = Vec::with_capacity(64);
     for (_pk, row) in rows {
-        let key: GroupKey = group_by
-            .iter()
-            .map(|&idx| {
-                row.values
-                    .get(idx)
-                    .map(|d| format!("{d}"))
-                    .unwrap_or_default()
-            })
-            .collect();
+        crate::executor_aggregate::encode_group_key(&mut key_buf, row, group_by);
         let val = row.values.get(agg_col_idx).and_then(falcon_common::datum::Datum::as_f64);
-        map.entry(key).or_default().update(val, row);
+        map.entry(key_buf.clone()).or_default().update(val, row);
     }
     map
 }

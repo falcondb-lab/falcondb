@@ -19,13 +19,10 @@ impl Executor {
                 // Build partition groups: partition_key -> vec of row indices
                 let mut partitions: std::collections::HashMap<Vec<u8>, Vec<usize>> =
                     std::collections::HashMap::new();
+                let mut buf = Vec::with_capacity(64);
                 for (i, row) in source_rows.iter().enumerate() {
-                    let mut key = Vec::new();
-                    for &col in &wf.partition_by {
-                        let datum = row.get(col).unwrap_or(&Datum::Null);
-                        key.extend_from_slice(&format!("{datum:?}|").into_bytes());
-                    }
-                    partitions.entry(key).or_default().push(i);
+                    crate::executor_aggregate::encode_group_key(&mut buf, row, &wf.partition_by);
+                    partitions.entry(buf.clone()).or_default().push(i);
                 }
 
                 // For each partition, sort by window ORDER BY and compute values

@@ -78,22 +78,40 @@ impl Executor {
                 }
                 SetOpKind::Intersect => {
                     // Keep only rows present in both sides
-                    let right_set: std::collections::HashSet<String> = right_rows
+                    let ncols = right_rows.first().map_or(0, |r| r.values.len());
+                    let all_cols: Vec<usize> = (0..ncols).collect();
+                    let mut buf = Vec::with_capacity(64);
+                    let right_set: std::collections::HashSet<Vec<u8>> = right_rows
                         .iter()
-                        .map(|r| format!("{:?}", r.values))
+                        .map(|r| {
+                            crate::executor_aggregate::encode_group_key(&mut buf, r, &all_cols);
+                            buf.clone()
+                        })
                         .collect();
-                    all_rows.retain(|r| right_set.contains(&format!("{:?}", r.values)));
+                    all_rows.retain(|r| {
+                        crate::executor_aggregate::encode_group_key(&mut buf, r, &all_cols);
+                        right_set.contains(&buf)
+                    });
                     if !is_all {
                         self.dedup_rows(&mut all_rows);
                     }
                 }
                 SetOpKind::Except => {
                     // Remove rows that appear in the right side
-                    let right_set: std::collections::HashSet<String> = right_rows
+                    let ncols = right_rows.first().map_or(0, |r| r.values.len());
+                    let all_cols: Vec<usize> = (0..ncols).collect();
+                    let mut buf = Vec::with_capacity(64);
+                    let right_set: std::collections::HashSet<Vec<u8>> = right_rows
                         .iter()
-                        .map(|r| format!("{:?}", r.values))
+                        .map(|r| {
+                            crate::executor_aggregate::encode_group_key(&mut buf, r, &all_cols);
+                            buf.clone()
+                        })
                         .collect();
-                    all_rows.retain(|r| !right_set.contains(&format!("{:?}", r.values)));
+                    all_rows.retain(|r| {
+                        crate::executor_aggregate::encode_group_key(&mut buf, r, &all_cols);
+                        !right_set.contains(&buf)
+                    });
                     if !is_all {
                         self.dedup_rows(&mut all_rows);
                     }

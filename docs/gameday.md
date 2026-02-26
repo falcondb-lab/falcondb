@@ -26,6 +26,11 @@
 | GD-5 | [Memory Pressure](#gd-5-memory-pressure) | Backpressure, OOM prevention | 10 min | Low |
 | GD-6 | [Slow Replica / Replication Lag](#gd-6-slow-replica) | Lag monitoring, admission throttling | 5 min | Low |
 | GD-7 | [Concurrent Failover Stress](#gd-7-concurrent-failover-stress) | Multi-failover data integrity | 15 min | Low |
+| GD-8 | [Epoch Fencing at Storage Barrier](#gd-8-epoch-fencing-at-storage-barrier) | Split-brain prevention at WAL layer | 5 min | Low |
+| GD-9 | [Replication Invariant Verification](#gd-9-replication-invariant-verification) | Prefix property, no-phantom, visibility | 5 min | Low |
+| GD-10 | [Failover Runbook Auto-Verification](#gd-10-failover-runbook-with-auto-verification) | Formalized failover stages + report | 5 min | Low |
+| GD-11 | [Cross-Shard 2PC Crash Recovery](#gd-11-cross-shard-2pc-crash-recovery) | 2PC deterministic recovery | 5 min | Low |
+| GD-12 | [Membership Lifecycle + Migration](#gd-12-membership-lifecycle--shard-migration) | Join/drain/replace, bounded migration | 5 min | Low |
 
 ---
 
@@ -348,6 +353,142 @@ bash scripts/run_failover_matrix.sh
 
 ---
 
+## GD-8: Epoch Fencing at Storage Barrier
+
+**What this tests**: Stale-epoch writes are deterministically rejected at the WAL write barrier after promotion.
+
+### Steps
+
+```bash
+# Automated test (recommended):
+cargo test -p falcon_cluster --test distributed_enhancements_integration test_p01_stale_leader -- --nocapture
+cargo test -p falcon_cluster --test distributed_enhancements_integration test_p01_network_partition -- --nocapture
+
+# Manual drill:
+# 1. Start primary (epoch 5) + replica
+# 2. Insert baseline data
+# 3. Partition the primary (iptables / netsh)
+# 4. Promote replica (new epoch 6)
+# 5. Heal partition — old primary attempts writes
+# 6. Verify: old primary writes rejected (check logs for "EPOCH FENCE: stale-epoch WAL write rejected")
+# 7. Verify: new primary has no duplicate rows from old primary
+```
+
+### Expected Result
+
+| Check | Expected |
+|-------|----------|
+| Stale-epoch writes | **100% rejected** at storage barrier |
+| New primary data | No double-writes, no phantom rows |
+| Metrics | `epoch_fence_rejections > 0` on old primary |
+| Log entries | `EPOCH FENCE: stale-epoch WAL write rejected` |
+
+---
+
+## GD-9: Replication Invariant Verification
+
+**What this tests**: Prefix property, no-phantom commits, and visibility binding under all commit policies.
+
+### Steps
+
+```bash
+# Run the full policy × crashpoint matrix:
+cargo test -p falcon_cluster --test distributed_enhancements_integration test_p02 -- --nocapture
+
+# This covers:
+# - CommitPolicy::Local / Quorum / All
+# - Crash at: after_primary_commit, during_replication, after_replica_ack
+# - Promotion safety: new primary commit set ⊆ old primary commit set
+```
+
+### Expected Result
+
+| Check | Expected |
+|-------|----------|
+| Prefix property | `committed(replica) ⊆ committed(primary)` — all 9 matrix cells green |
+| No phantom commits | Replica never exposes uncommitted LSN |
+| Visibility | Bound to commit policy (local=0 acks, quorum=majority, all=all) |
+| Promotion safety | New primary LSN ≤ old primary LSN |
+
+---
+
+## GD-10: Failover Runbook with Auto-Verification
+
+**What this tests**: Formalized failover stages produce a machine-readable verification report.
+
+### Steps
+
+```bash
+# Run the full gameday failover drill:
+cargo test -p falcon_cluster --test distributed_enhancements_integration test_p03_gameday_failover_drill -- --nocapture
+
+# This simulates:
+# detect_failure → freeze_writes → seal_epoch → catch_up → promote → reopen → verify → complete
+# and generates a FailoverVerificationReport with invariant checks.
+```
+
+### Expected Result
+
+| Check | Expected |
+|-------|----------|
+| Report `passed` | **true** |
+| All invariants | Green (prefix, no-phantom, promotion safety, visibility) |
+| Audit trail | ≥ 14 events (enter + complete for each of 7 stages + complete) |
+| Stage durations | All recorded in microseconds |
+| Failure reason | **None** |
+
+---
+
+## GD-11: Cross-Shard 2PC Crash Recovery
+
+**What this tests**: Coordinator recovers to deterministic outcome after crash at each 2PC phase.
+
+### Steps
+
+```bash
+# Run crash injection at every 2PC phase:
+cargo test -p falcon_cluster --test distributed_enhancements_integration test_p04 -- --nocapture
+
+# Phases tested:
+# PrePrepare → Preparing → DecisionPending → Applying → Applied
+# Each crash results in deterministic recovery (abort or commit).
+# Participant idempotency ensures at-most-once semantics.
+```
+
+### Expected Result
+
+| Check | Expected |
+|-------|----------|
+| Recovery at each phase | Deterministic outcome (commit or abort) |
+| Participant idempotency | Duplicate applies detected and skipped |
+| Recovery failures | **Zero** |
+
+---
+
+## GD-12: Membership Lifecycle + Shard Migration
+
+**What this tests**: Node join/drain/replace and shard migration with bounded disruption.
+
+### Steps
+
+```bash
+# Run lifecycle and migration tests:
+cargo test -p falcon_cluster --test distributed_enhancements_integration test_p11 -- --nocapture
+cargo test -p falcon_cluster --test distributed_enhancements_integration test_p12 -- --nocapture
+```
+
+### Expected Result
+
+| Check | Expected |
+|-------|----------|
+| Node states | Joining → Active → Draining → Removed (all valid transitions) |
+| Drain complete | Only when inflight=0 and shards=0 |
+| Migration phases | Planning → Freeze → Snapshot → CatchUp → SwitchRouting → Verify → Complete |
+| Invariants during migration | Prefix property holds throughout |
+| Migration rollback | Clean rollback on error |
+
+---
+
 ## Post-Drill Checklist
 
 After each drill, verify these invariants:
@@ -372,6 +513,11 @@ After each drill, verify these invariants:
 | GD-5 (memory pressure) | Monthly | Staging |
 | GD-6 (slow replica) | Monthly | Staging |
 | GD-7 (multi-failover) | Every release | CI (automated) |
+| GD-8 (epoch fencing) | Every release | CI (automated) |
+| GD-9 (replication invariants) | Every release | CI (automated) |
+| GD-10 (failover runbook) | Every release | CI (automated) |
+| GD-11 (2PC crash recovery) | Every release | CI (automated) |
+| GD-12 (membership + migration) | Every release | CI (automated) |
 
 ---
 

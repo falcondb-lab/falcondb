@@ -146,7 +146,7 @@ impl ExternalSorter {
         // If data fits in memory, just sort in place
         if rows.len() <= self.threshold {
             let cmp = make_comparator(order_by);
-            rows.sort_by(|a, b| cmp(a, b));
+            rows.sort_unstable_by(|a, b| cmp(a, b));
             self.metrics.in_memory_count.fetch_add(1, AtomicOrdering::Relaxed);
             return Ok(());
         }
@@ -172,20 +172,21 @@ impl ExternalSorter {
     ) -> Result<(), FalconError> {
         let cmp = make_comparator(order_by);
 
-        // Phase 1: Create sorted runs
+        // Phase 1: Create sorted runs — drain chunks from the owned Vec
+        // to avoid cloning rows (zero-copy move).
         let mut run_paths = Vec::new();
-        let chunks: Vec<Vec<OwnedRow>> = std::mem::take(rows)
-            .chunks(self.threshold)
-            .map(<[falcon_common::datum::OwnedRow]>::to_vec)
-            .collect();
-
-        for (i, mut chunk) in chunks.into_iter().enumerate() {
-            chunk.sort_by(|a, b| cmp(a, b));
-            let path = run_dir.join(format!("run_{i:06}.bin"));
+        let mut owned = std::mem::take(rows);
+        let mut run_idx = 0usize;
+        while !owned.is_empty() {
+            let drain_end = self.threshold.min(owned.len());
+            let mut chunk: Vec<OwnedRow> = owned.drain(..drain_end).collect();
+            chunk.sort_unstable_by(|a, b| cmp(a, b));
+            let path = run_dir.join(format!("run_{run_idx:06}.bin"));
             let bytes_written = write_run(&path, &chunk)?;
             self.metrics.bytes_spilled.fetch_add(bytes_written, AtomicOrdering::Relaxed);
             self.metrics.runs_created.fetch_add(1, AtomicOrdering::Relaxed);
             run_paths.push(path);
+            run_idx += 1;
         }
 
         // Phase 2: Multi-pass merge until we have a single run
@@ -451,7 +452,7 @@ pub fn sort_rows(
     } else {
         // Pure in-memory sort (default path)
         let cmp = make_comparator(order_by);
-        rows.sort_by(|a, b| cmp(a, b));
+        rows.sort_unstable_by(|a, b| cmp(a, b));
         Ok(())
     }
 }

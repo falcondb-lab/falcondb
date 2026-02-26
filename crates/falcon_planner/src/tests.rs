@@ -1498,6 +1498,7 @@ mod planner_tests {
             subquery_decorrelation: false,
             join_strategy_selection: false,
             constant_folding: false,
+            common_subexpr_elimination: false,
         };
         let stats = TableRowCounts::new();
         let indexes = IndexedColumns::new();
