@@ -68,4 +68,35 @@ public class FalconDriverTest {
         assertEquals(1, driver.getMinorVersion());
         assertFalse(driver.jdbcCompliant());
     }
+
+    @Test
+    public void testParseUrlWithSsl() throws Exception {
+        FalconDriver.ParsedUrl p = FalconDriver.parseUrl(
+            "jdbc:falcondb://host/db?ssl=true&sslTrustAll=true");
+        assertEquals("true", p.params.get("ssl"));
+        assertEquals("true", p.params.get("sslTrustAll"));
+    }
+
+    @Test
+    public void testParseUrlSslDefault() throws Exception {
+        FalconDriver.ParsedUrl p = FalconDriver.parseUrl(
+            "jdbc:falcondb://host/db");
+        assertNull(p.params.get("ssl"));
+        assertNull(p.params.get("sslTrustAll"));
+    }
+
+    @Test
+    public void testPropertyInfoIncludesSsl() {
+        FalconDriver driver = new FalconDriver();
+        java.sql.DriverPropertyInfo[] props = driver.getPropertyInfo(
+            "jdbc:falcondb://host/db", new java.util.Properties());
+        boolean foundSsl = false;
+        boolean foundSslTrustAll = false;
+        for (java.sql.DriverPropertyInfo pi : props) {
+            if ("ssl".equals(pi.name)) foundSsl = true;
+            if ("sslTrustAll".equals(pi.name)) foundSslTrustAll = true;
+        }
+        assertTrue("ssl property should be listed", foundSsl);
+        assertTrue("sslTrustAll property should be listed", foundSslTrustAll);
+    }
 }

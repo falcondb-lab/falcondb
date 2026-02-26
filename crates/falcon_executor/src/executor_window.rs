@@ -18,7 +18,7 @@ impl Executor {
             if let BoundProjection::Window(wf) = proj {
                 // Build partition groups: partition_key -> vec of row indices
                 let mut partitions: std::collections::HashMap<Vec<u8>, Vec<usize>> =
-                    std::collections::HashMap::new();
+                    std::collections::HashMap::with_capacity(source_rows.len().min(256));
                 let mut buf = Vec::with_capacity(64);
                 for (i, row) in source_rows.iter().enumerate() {
                     crate::executor_aggregate::encode_group_key(&mut buf, row, &wf.partition_by);
@@ -29,7 +29,7 @@ impl Executor {
                 for (_key, mut indices) in partitions {
                     // Sort partition rows by ORDER BY
                     if !wf.order_by.is_empty() {
-                        indices.sort_by(|&a, &b| {
+                        indices.sort_unstable_by(|&a, &b| {
                             for ob in &wf.order_by {
                                 let av = source_rows[a].get(ob.column_idx).unwrap_or(&Datum::Null);
                                 let bv = source_rows[b].get(ob.column_idx).unwrap_or(&Datum::Null);

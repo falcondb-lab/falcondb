@@ -1436,8 +1436,10 @@ impl QueryHandler {
     pub const fn datatype_to_oid(&self, dt: Option<&falcon_common::types::DataType>) -> i32 {
         use falcon_common::types::DataType;
         match dt {
+            Some(DataType::Int16) => 21,           // INT2
             Some(DataType::Int32) => 23,           // INT4
             Some(DataType::Int64) => 20,           // INT8
+            Some(DataType::Float32) => 700,        // FLOAT4
             Some(DataType::Float64) => 701,        // FLOAT8
             Some(DataType::Boolean) => 16,         // BOOL
             Some(DataType::Text) => 25,            // TEXT
@@ -2102,6 +2104,66 @@ pub(crate) fn bind_params(sql: &str, param_values: &[Option<Vec<u8>>]) -> String
         i += 1;
     }
     result
+}
+
+/// Convert SQL-level EXECUTE text parameters to typed `Datum` values.
+///
+/// Uses inferred type hints from the prepared statement to parse text
+/// values into the correct Datum variant, matching the behavior of the
+/// extended query protocol's `decode_param_value`.
+pub(crate) fn text_params_to_datum(
+    params: &[Option<Vec<u8>>],
+    type_hints: &[Option<falcon_common::types::DataType>],
+) -> Vec<Datum> {
+    use falcon_common::types::DataType;
+
+    params
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let hint = type_hints.get(i).and_then(|t| t.as_ref());
+            let bytes = match p {
+                Some(b) => b,
+                None => return Datum::Null,
+            };
+            let s = String::from_utf8_lossy(bytes);
+            match hint {
+                Some(DataType::Int16) => s
+                    .parse::<i16>()
+                    .map_or_else(|_| Datum::Text(s.into_owned()), |v| Datum::Int32(v as i32)),
+                Some(DataType::Int32) => s
+                    .parse::<i32>()
+                    .map_or_else(|_| Datum::Text(s.into_owned()), Datum::Int32),
+                Some(DataType::Int64) => s
+                    .parse::<i64>()
+                    .map_or_else(|_| Datum::Text(s.into_owned()), Datum::Int64),
+                Some(DataType::Float32) => s
+                    .parse::<f32>()
+                    .map_or_else(|_| Datum::Text(s.into_owned()), |v| Datum::Float64(v as f64)),
+                Some(DataType::Float64) => s
+                    .parse::<f64>()
+                    .map_or_else(|_| Datum::Text(s.into_owned()), Datum::Float64),
+                Some(DataType::Boolean) => match s.to_lowercase().as_str() {
+                    "t" | "true" | "1" | "yes" | "on" => Datum::Boolean(true),
+                    "f" | "false" | "0" | "no" | "off" => Datum::Boolean(false),
+                    _ => Datum::Text(s.into_owned()),
+                },
+                Some(DataType::Decimal(_, _)) => {
+                    Datum::parse_decimal(&s).unwrap_or_else(|| Datum::Text(s.into_owned()))
+                }
+                _ => {
+                    // No hint or text-like types: try integer, float, text
+                    if let Ok(i) = s.parse::<i64>() {
+                        Datum::Int64(i)
+                    } else if let Ok(f) = s.parse::<f64>() {
+                        Datum::Float64(f)
+                    } else {
+                        Datum::Text(s.into_owned())
+                    }
+                }
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -4622,5 +4684,410 @@ mod tests {
         let (handler, mut session) = setup_handler();
         let msgs = handler.handle_query("SHOW falcon.replication_stats", &mut session);
         assert!(!msgs.is_empty());
+    }
+
+    // ── SQL-level PREPARE / EXECUTE / DEALLOCATE tests ──────────────────
+
+    #[test]
+    fn test_sql_prepare_execute_select() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query(
+            "CREATE TABLE sql_ps1 (id INT PRIMARY KEY, name TEXT)",
+            &mut session,
+        );
+        handler.handle_query("INSERT INTO sql_ps1 VALUES (1, 'alice')", &mut session);
+        handler.handle_query("INSERT INTO sql_ps1 VALUES (2, 'bob')", &mut session);
+
+        // PREPARE
+        let msgs = handler.handle_query(
+            "PREPARE my_select AS SELECT * FROM sql_ps1 WHERE id = $1",
+            &mut session,
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, BackendMessage::CommandComplete { tag } if tag == "PREPARE")),
+            "PREPARE should return CommandComplete"
+        );
+        assert!(
+            session.prepared_statements.contains_key("my_select"),
+            "prepared statement should be stored in session"
+        );
+
+        // Verify plan was created (plan-based path)
+        let ps = session.prepared_statements.get("my_select").unwrap();
+        assert!(ps.plan.is_some(), "SQL PREPARE should create a plan");
+        assert_eq!(ps.inferred_param_types.len(), 1, "should infer 1 param");
+
+        // EXECUTE with param
+        let msgs = handler.handle_query("EXECUTE my_select(1)", &mut session);
+        let rows = extract_data_rows(&msgs);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][1], Some("alice".into()));
+    }
+
+    #[test]
+    fn test_sql_prepare_execute_insert() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query(
+            "CREATE TABLE sql_ps2 (id INT PRIMARY KEY, val TEXT)",
+            &mut session,
+        );
+
+        let msgs = handler.handle_query(
+            "PREPARE my_insert AS INSERT INTO sql_ps2 VALUES ($1, $2)",
+            &mut session,
+        );
+        assert!(msgs.iter().any(
+            |m| matches!(m, BackendMessage::CommandComplete { tag } if tag == "PREPARE")
+        ));
+
+        // Execute the prepared insert
+        let msgs = handler.handle_query("EXECUTE my_insert(1, 'hello')", &mut session);
+        let has_complete = msgs.iter().any(|m| matches!(m, BackendMessage::CommandComplete { .. }));
+        assert!(has_complete, "EXECUTE INSERT should return CommandComplete");
+
+        // Verify data was inserted
+        let msgs = handler.handle_query("SELECT * FROM sql_ps2", &mut session);
+        let rows = extract_data_rows(&msgs);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], Some("1".into()));
+        assert_eq!(rows[0][1], Some("hello".into()));
+    }
+
+    #[test]
+    fn test_sql_prepare_execute_no_params() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query(
+            "CREATE TABLE sql_ps3 (id INT PRIMARY KEY, v TEXT)",
+            &mut session,
+        );
+        handler.handle_query("INSERT INTO sql_ps3 VALUES (1, 'x')", &mut session);
+
+        handler.handle_query(
+            "PREPARE all_rows AS SELECT * FROM sql_ps3",
+            &mut session,
+        );
+        let msgs = handler.handle_query("EXECUTE all_rows", &mut session);
+        let rows = extract_data_rows(&msgs);
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn test_sql_execute_nonexistent() {
+        let (handler, mut session) = setup_handler();
+        let msgs = handler.handle_query("EXECUTE ghost_stmt(1)", &mut session);
+        let has_error = msgs.iter().any(|m| {
+            matches!(m, BackendMessage::ErrorResponse { code, .. } if code == "26000")
+        });
+        assert!(has_error, "EXECUTE on nonexistent stmt should return SQLSTATE 26000");
+    }
+
+    #[test]
+    fn test_sql_deallocate_specific() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query(
+            "CREATE TABLE sql_dealloc (id INT PRIMARY KEY)",
+            &mut session,
+        );
+        handler.handle_query(
+            "PREPARE stmt_a AS SELECT * FROM sql_dealloc",
+            &mut session,
+        );
+        handler.handle_query(
+            "PREPARE stmt_b AS SELECT * FROM sql_dealloc",
+            &mut session,
+        );
+        assert_eq!(session.prepared_statements.len(), 2);
+
+        handler.handle_query("DEALLOCATE stmt_a", &mut session);
+        assert_eq!(session.prepared_statements.len(), 1);
+        assert!(!session.prepared_statements.contains_key("stmt_a"));
+        assert!(session.prepared_statements.contains_key("stmt_b"));
+    }
+
+    #[test]
+    fn test_sql_deallocate_all() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query(
+            "CREATE TABLE sql_dealloc2 (id INT PRIMARY KEY)",
+            &mut session,
+        );
+        handler.handle_query(
+            "PREPARE s1 AS SELECT * FROM sql_dealloc2",
+            &mut session,
+        );
+        handler.handle_query(
+            "PREPARE s2 AS SELECT * FROM sql_dealloc2",
+            &mut session,
+        );
+        assert_eq!(session.prepared_statements.len(), 2);
+
+        handler.handle_query("DEALLOCATE ALL", &mut session);
+        assert!(session.prepared_statements.is_empty());
+    }
+
+    #[test]
+    fn test_sql_discard_all_clears_prepared() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query(
+            "CREATE TABLE sql_discard (id INT PRIMARY KEY)",
+            &mut session,
+        );
+        handler.handle_query(
+            "PREPARE disc_stmt AS SELECT * FROM sql_discard",
+            &mut session,
+        );
+        assert!(!session.prepared_statements.is_empty());
+
+        handler.handle_query("DISCARD ALL", &mut session);
+        assert!(session.prepared_statements.is_empty());
+    }
+
+    #[test]
+    fn test_sql_prepare_with_type_hints() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query(
+            "CREATE TABLE sql_typed (id INT PRIMARY KEY, v TEXT)",
+            &mut session,
+        );
+
+        // PREPARE with explicit type list (types are informational, query is planned)
+        let msgs = handler.handle_query(
+            "PREPARE typed_q(int, text) AS SELECT * FROM sql_typed WHERE id = $1",
+            &mut session,
+        );
+        assert!(msgs.iter().any(
+            |m| matches!(m, BackendMessage::CommandComplete { tag } if tag == "PREPARE")
+        ));
+        assert!(session.prepared_statements.contains_key("typed_q"));
+    }
+
+    #[test]
+    fn test_sql_prepare_invalid_syntax() {
+        let (handler, mut session) = setup_handler();
+        let msgs = handler.handle_query("PREPARE", &mut session);
+        let has_error = msgs
+            .iter()
+            .any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
+        assert!(has_error, "bare PREPARE should be an error");
+    }
+
+    // ── Helper function unit tests ──────────────────────────────────────
+
+    #[test]
+    fn test_parse_prepare_statement_basic() {
+        let result = parse_prepare_statement("PREPARE foo AS SELECT 1");
+        assert!(result.is_some());
+        let (name, query) = result.unwrap();
+        assert_eq!(name, "foo");
+        assert_eq!(query, "SELECT 1");
+    }
+
+    #[test]
+    fn test_parse_prepare_statement_with_types() {
+        let result = parse_prepare_statement("PREPARE bar(int, text) AS INSERT INTO t VALUES ($1, $2)");
+        assert!(result.is_some());
+        let (name, query) = result.unwrap();
+        assert_eq!(name, "bar");
+        assert_eq!(query, "INSERT INTO t VALUES ($1, $2)");
+    }
+
+    #[test]
+    fn test_parse_prepare_statement_case_insensitive() {
+        let result = parse_prepare_statement("prepare MyStmt as SELECT * FROM t");
+        assert!(result.is_some());
+        let (name, _query) = result.unwrap();
+        assert_eq!(name, "mystmt");
+    }
+
+    #[test]
+    fn test_parse_execute_statement_no_params() {
+        let result = parse_execute_statement("EXECUTE foo");
+        assert!(result.is_some());
+        let (name, params) = result.unwrap();
+        assert_eq!(name, "foo");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_parse_execute_statement_with_params() {
+        let result = parse_execute_statement("EXECUTE foo(1, 'hello', NULL)");
+        assert!(result.is_some());
+        let (name, params) = result.unwrap();
+        assert_eq!(name, "foo");
+        assert_eq!(params.len(), 3);
+        assert_eq!(params[0], Some(b"1".to_vec()));
+        assert_eq!(params[1], Some(b"hello".to_vec()));
+        assert!(params[2].is_none()); // NULL
+    }
+
+    #[test]
+    fn test_bind_params_substitution() {
+        let result = bind_params("SELECT * FROM t WHERE id = $1 AND name = $2", &[
+            Some(b"42".to_vec()),
+            Some(b"alice".to_vec()),
+        ]);
+        assert_eq!(result, "SELECT * FROM t WHERE id = '42' AND name = 'alice'");
+    }
+
+    #[test]
+    fn test_bind_params_null() {
+        let result = bind_params("INSERT INTO t VALUES ($1, $2)", &[
+            Some(b"1".to_vec()),
+            None,
+        ]);
+        assert_eq!(result, "INSERT INTO t VALUES ('1', NULL)");
+    }
+
+    #[test]
+    fn test_bind_params_no_params() {
+        let result = bind_params("SELECT 1", &[]);
+        assert_eq!(result, "SELECT 1");
+    }
+
+    #[test]
+    fn test_text_params_to_datum_typed() {
+        use falcon_common::types::DataType;
+        let params = vec![
+            Some(b"42".to_vec()),
+            Some(b"hello".to_vec()),
+            None,
+        ];
+        let hints = vec![
+            Some(DataType::Int32),
+            Some(DataType::Text),
+            Some(DataType::Int32),
+        ];
+        let datums = text_params_to_datum(&params, &hints);
+        assert_eq!(datums.len(), 3);
+        assert_eq!(datums[0], Datum::Int32(42));
+        assert_eq!(datums[1], Datum::Text("hello".into()));
+        assert!(matches!(datums[2], Datum::Null), "None param should produce Datum::Null");
+    }
+
+    #[test]
+    fn test_text_params_to_datum_no_hints() {
+        let params = vec![Some(b"123".to_vec()), Some(b"abc".to_vec())];
+        let hints: Vec<Option<falcon_common::types::DataType>> = vec![];
+        let datums = text_params_to_datum(&params, &hints);
+        assert_eq!(datums[0], Datum::Int64(123)); // inferred as integer
+        assert_eq!(datums[1], Datum::Text("abc".into())); // inferred as text
+    }
+
+    #[test]
+    fn test_text_params_to_datum_boolean() {
+        use falcon_common::types::DataType;
+        let params = vec![Some(b"true".to_vec()), Some(b"false".to_vec())];
+        let hints = vec![Some(DataType::Boolean), Some(DataType::Boolean)];
+        let datums = text_params_to_datum(&params, &hints);
+        assert_eq!(datums[0], Datum::Boolean(true));
+        assert_eq!(datums[1], Datum::Boolean(false));
+    }
+
+    // ── SMALLINT / REAL data type tests ─────────────────────────────────
+
+    #[test]
+    fn test_smallint_create_insert_select() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query(
+            "CREATE TABLE si_t (id SMALLINT PRIMARY KEY, val SMALLINT)",
+            &mut session,
+        );
+        handler.handle_query("INSERT INTO si_t VALUES (1, 100)", &mut session);
+        handler.handle_query("INSERT INTO si_t VALUES (2, -32000)", &mut session);
+
+        let msgs = handler.handle_query("SELECT * FROM si_t ORDER BY id", &mut session);
+        let rows = extract_data_rows(&msgs);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0], Some("1".into()));
+        assert_eq!(rows[0][1], Some("100".into()));
+        assert_eq!(rows[1][1], Some("-32000".into()));
+    }
+
+    #[test]
+    fn test_real_create_insert_select() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query(
+            "CREATE TABLE real_t (id INT PRIMARY KEY, val REAL)",
+            &mut session,
+        );
+        handler.handle_query("INSERT INTO real_t VALUES (1, 3.14)", &mut session);
+        handler.handle_query("INSERT INTO real_t VALUES (2, -0.5)", &mut session);
+
+        let msgs = handler.handle_query("SELECT * FROM real_t ORDER BY id", &mut session);
+        let rows = extract_data_rows(&msgs);
+        assert_eq!(rows.len(), 2);
+        // REAL is stored as Float64 internally, values should round-trip
+        assert!(rows[0][1].as_ref().unwrap().starts_with("3.14"));
+        assert!(rows[1][1].as_ref().unwrap().starts_with("-0.5"));
+    }
+
+    #[test]
+    fn test_smallint_cast() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query(
+            "CREATE TABLE cast_si (id INT PRIMARY KEY, v TEXT)",
+            &mut session,
+        );
+        handler.handle_query("INSERT INTO cast_si VALUES (1, '42')", &mut session);
+
+        let msgs = handler.handle_query(
+            "SELECT CAST(v AS SMALLINT) FROM cast_si WHERE id = 1",
+            &mut session,
+        );
+        let rows = extract_data_rows(&msgs);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], Some("42".into()));
+    }
+
+    #[test]
+    fn test_real_cast() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query(
+            "CREATE TABLE cast_re (id INT PRIMARY KEY, v TEXT)",
+            &mut session,
+        );
+        handler.handle_query("INSERT INTO cast_re VALUES (1, '2.718')", &mut session);
+
+        let msgs = handler.handle_query(
+            "SELECT CAST(v AS REAL) FROM cast_re WHERE id = 1",
+            &mut session,
+        );
+        let rows = extract_data_rows(&msgs);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0][0].as_ref().unwrap().starts_with("2.718"));
+    }
+
+    #[test]
+    fn test_mixed_int_types_table() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query(
+            "CREATE TABLE mixed_int (a SMALLINT, b INT, c BIGINT)",
+            &mut session,
+        );
+        handler.handle_query("INSERT INTO mixed_int VALUES (1, 100000, 9999999999)", &mut session);
+
+        let msgs = handler.handle_query("SELECT * FROM mixed_int", &mut session);
+        let rows = extract_data_rows(&msgs);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], Some("1".into()));
+        assert_eq!(rows[0][1], Some("100000".into()));
+        assert_eq!(rows[0][2], Some("9999999999".into()));
+    }
+
+    #[test]
+    fn test_mixed_float_types_table() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query(
+            "CREATE TABLE mixed_float (a REAL, b FLOAT8)",
+            &mut session,
+        );
+        handler.handle_query("INSERT INTO mixed_float VALUES (1.5, 2.5)", &mut session);
+
+        let msgs = handler.handle_query("SELECT * FROM mixed_float", &mut session);
+        let rows = extract_data_rows(&msgs);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0][0].as_ref().unwrap().starts_with("1.5"));
+        assert!(rows[0][1].as_ref().unwrap().starts_with("2.5"));
     }
 }

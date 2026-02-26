@@ -316,6 +316,10 @@ fn format_csv_line(fields: &[String], delimiter: char, quote: char, escape: char
 /// Parse a text field into a Datum based on column type.
 fn parse_datum(field: &str, data_type: &DataType) -> Result<Datum, String> {
     match data_type {
+        DataType::Int16 => field
+            .parse::<i16>()
+            .map(|v| Datum::Int32(v as i32))
+            .map_err(|e| format!("Cannot parse '{field}' as SMALLINT: {e}")),
         DataType::Int32 => field
             .parse::<i32>()
             .map(Datum::Int32)
@@ -324,6 +328,10 @@ fn parse_datum(field: &str, data_type: &DataType) -> Result<Datum, String> {
             .parse::<i64>()
             .map(Datum::Int64)
             .map_err(|e| format!("Cannot parse '{field}' as BIGINT: {e}")),
+        DataType::Float32 => field
+            .parse::<f32>()
+            .map(|v| Datum::Float64(v as f64))
+            .map_err(|e| format!("Cannot parse '{field}' as REAL: {e}")),
         DataType::Float64 => field
             .parse::<f64>()
             .map(Datum::Float64)

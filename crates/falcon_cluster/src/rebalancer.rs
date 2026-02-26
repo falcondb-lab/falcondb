@@ -585,6 +585,20 @@ impl RebalancerStatus {
     }
 }
 
+/// Point-in-time metrics snapshot for Prometheus export.
+#[derive(Debug, Clone)]
+pub struct RebalancerMetrics {
+    pub runs_completed: u64,
+    pub total_rows_migrated: u64,
+    pub is_running: bool,
+    pub is_paused: bool,
+    pub last_imbalance_ratio: f64,
+    pub last_completed_tasks: usize,
+    pub last_failed_tasks: usize,
+    pub last_duration_ms: u64,
+    pub shard_move_rate: f64,
+}
+
 /// The top-level automatic shard rebalancer.
 ///
 /// Call `check_and_rebalance()` periodically (e.g. from a background task)
@@ -596,6 +610,8 @@ pub struct ShardRebalancer {
     status: Mutex<RebalancerStatus>,
     /// Prevents concurrent rebalance runs.
     running: AtomicBool,
+    /// SLA-safe pause: when true, rebalance cycles are skipped.
+    paused: AtomicBool,
     runs_completed: AtomicU64,
     total_rows_migrated: AtomicU64,
 }
@@ -617,6 +633,7 @@ impl ShardRebalancer {
                 total_rows_migrated: 0,
             }),
             running: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
             runs_completed: AtomicU64::new(0),
             total_rows_migrated: AtomicU64::new(0),
         }
@@ -625,6 +642,12 @@ impl ShardRebalancer {
     /// Check shard loads and trigger rebalancing if needed.
     /// Returns the number of rows migrated (0 if no action taken).
     pub fn check_and_rebalance(&self, engine: &ShardedEngine) -> u64 {
+        // SLA-safe pause check
+        if self.paused.load(Ordering::Relaxed) {
+            tracing::debug!("Rebalancer paused, skipping");
+            return 0;
+        }
+
         // Prevent concurrent runs
         if self.running.swap(true, Ordering::SeqCst) {
             tracing::debug!("Rebalancer already running, skipping");
@@ -739,6 +762,39 @@ impl ShardRebalancer {
     /// Get the configuration.
     pub const fn config(&self) -> &RebalancerConfig {
         &self.config
+    }
+
+    /// Pause the rebalancer (SLA-safe: current migration completes, no new ones start).
+    pub fn pause(&self) {
+        self.paused.store(true, Ordering::SeqCst);
+        tracing::info!("Rebalancer paused");
+    }
+
+    /// Resume the rebalancer after a pause.
+    pub fn resume(&self) {
+        self.paused.store(false, Ordering::SeqCst);
+        tracing::info!("Rebalancer resumed");
+    }
+
+    /// Check if the rebalancer is currently paused.
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    /// Export current rebalancer metrics as a snapshot for Prometheus integration.
+    pub fn metrics_snapshot(&self) -> RebalancerMetrics {
+        let status = self.status.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        RebalancerMetrics {
+            runs_completed: self.runs_completed.load(Ordering::Relaxed),
+            total_rows_migrated: self.total_rows_migrated.load(Ordering::Relaxed),
+            is_running: self.running.load(Ordering::Relaxed),
+            is_paused: self.paused.load(Ordering::Relaxed),
+            last_imbalance_ratio: status.last_snapshot.as_ref().map_or(0.0, |s| s.imbalance_ratio()),
+            last_completed_tasks: status.completed_tasks(),
+            last_failed_tasks: status.failed_tasks(),
+            last_duration_ms: status.last_rebalance_duration_ms(),
+            shard_move_rate: status.shard_move_rate(),
+        }
     }
 }
 
@@ -1327,5 +1383,70 @@ mod tests {
             created_at: Instant::now(),
         };
         assert_eq!(plan3.estimated_duration_display(), "2.0m");
+    }
+
+    #[test]
+    fn test_pause_prevents_rebalance() {
+        let engine = ShardedEngine::new(2);
+        let schema = make_test_schema();
+        engine.create_table_all(&schema).unwrap();
+
+        // Insert skewed data into shard 0
+        let shard0 = engine.shard(ShardId(0)).unwrap();
+        for i in 0..200 {
+            let row = OwnedRow::new(vec![Datum::Int64(i), Datum::Text(format!("u{}", i))]);
+            let pk = encode_pk_from_datums(&[&Datum::Int64(i)]);
+            shard0.storage.insert_row(TableId(1), pk, row).unwrap();
+        }
+
+        let config = RebalancerConfig {
+            imbalance_threshold: 1.25,
+            batch_size: 64,
+            min_donor_rows: 10,
+            cooldown_ms: 0,
+        };
+        let rebalancer = ShardRebalancer::new(config);
+
+        // Pause before rebalance
+        rebalancer.pause();
+        assert!(rebalancer.is_paused());
+        let migrated = rebalancer.check_and_rebalance(&engine);
+        assert_eq!(migrated, 0, "Paused rebalancer should not migrate rows");
+        assert_eq!(rebalancer.runs_completed(), 0);
+
+        // Resume and rebalance
+        rebalancer.resume();
+        assert!(!rebalancer.is_paused());
+        let migrated = rebalancer.check_and_rebalance(&engine);
+        assert!(migrated > 0 || rebalancer.runs_completed() > 0);
+    }
+
+    #[test]
+    fn test_metrics_snapshot() {
+        let engine = ShardedEngine::new(2);
+        let schema = make_test_schema();
+        engine.create_table_all(&schema).unwrap();
+
+        let shard0 = engine.shard(ShardId(0)).unwrap();
+        for i in 0..200 {
+            let row = OwnedRow::new(vec![Datum::Int64(i), Datum::Text(format!("u{}", i))]);
+            let pk = encode_pk_from_datums(&[&Datum::Int64(i)]);
+            shard0.storage.insert_row(TableId(1), pk, row).unwrap();
+        }
+
+        let config = RebalancerConfig {
+            imbalance_threshold: 1.25,
+            batch_size: 64,
+            min_donor_rows: 10,
+            cooldown_ms: 0,
+        };
+        let rebalancer = ShardRebalancer::new(config);
+        rebalancer.check_and_rebalance(&engine);
+
+        let metrics = rebalancer.metrics_snapshot();
+        assert_eq!(metrics.runs_completed, 1);
+        assert!(!metrics.is_running);
+        assert!(!metrics.is_paused);
+        assert!(metrics.last_imbalance_ratio > 1.0);
     }
 }

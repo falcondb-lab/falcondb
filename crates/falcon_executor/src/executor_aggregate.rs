@@ -621,25 +621,30 @@ impl Executor {
             });
         }
 
-        // GROUP BY: build groups using a Vec-based approach (key = group column values)
-        let mut groups: Vec<(Vec<Datum>, Vec<usize>)> = Vec::new(); // (key_datums, row_indices)
+        // GROUP BY: build groups using HashMap with byte-encoded keys — O(n)
+        // instead of the previous O(n*g) Vec-based linear scan.
+        let mut group_map: HashMap<Vec<u8>, Vec<usize>> =
+            HashMap::with_capacity(filtered.len().min(1024));
+        // Insertion-order keys so iteration order is deterministic.
+        let mut group_order: Vec<Vec<u8>> = Vec::new();
+        let mut key_buf = Vec::with_capacity(64);
         for (i, row) in filtered.iter().enumerate() {
-            let key: Vec<Datum> = group_by
-                .iter()
-                .map(|&col_idx| row.get(col_idx).cloned().unwrap_or(Datum::Null))
-                .collect();
-
-            if let Some(pos) = groups.iter().position(|(k, _)| k == &key) {
-                groups[pos].1.push(i);
+            encode_group_key(&mut key_buf, row, group_by);
+            if let Some(indices) = group_map.get_mut(key_buf.as_slice()) {
+                indices.push(i);
             } else {
-                groups.push((key, vec![i]));
+                group_map.insert(key_buf.clone(), vec![i]);
+                group_order.push(key_buf.clone());
             }
         }
 
-        // Compute aggregates per group
-        let mut result_rows: Vec<OwnedRow> = Vec::new();
-        for (_key, indices) in &groups {
-            let group_rows: Vec<&OwnedRow> = indices.iter().map(|&i| filtered[i]).collect();
+        // Compute aggregates per group — reuse a single Vec buffer across groups
+        let mut result_rows: Vec<OwnedRow> = Vec::with_capacity(group_order.len());
+        let mut group_rows: Vec<&OwnedRow> = Vec::new();
+        for gkey in &group_order {
+            let indices = &group_map[gkey];
+            group_rows.clear();
+            group_rows.extend(indices.iter().map(|&i| filtered[i]));
             let row_values = self.compute_group_row(projections, &group_rows)?;
             let result_row = OwnedRow::new(row_values);
 

@@ -7,7 +7,7 @@ use crate::session::PgSession;
 
 use super::handler::{
     bind_params, parse_execute_statement, parse_prepare_statement, parse_set_command,
-    parse_set_log_min_duration, QueryHandler,
+    parse_set_log_min_duration, text_params_to_datum, QueryHandler,
 };
 
 impl QueryHandler {
@@ -252,14 +252,24 @@ impl QueryHandler {
         // PREPARE name [(type, ...)] AS query
         if sql_lower.starts_with("prepare ") {
             if let Some((name, query)) = parse_prepare_statement(sql) {
+                // Try plan-based path (same as extended query Parse)
+                let (plan, inferred_param_types, row_desc) =
+                    match self.prepare_statement(&query) {
+                        Ok((p, ipt, rd)) => (Some(p), ipt, rd),
+                        Err(_) => (None, vec![], vec![]),
+                    };
+                let param_types = inferred_param_types
+                    .iter()
+                    .map(|t| self.datatype_to_oid(t.as_ref()))
+                    .collect();
                 session.prepared_statements.insert(
                     name,
                     crate::session::PreparedStatement {
                         query,
-                        param_types: vec![],
-                        plan: None,
-                        inferred_param_types: vec![],
-                        row_desc: vec![],
+                        param_types,
+                        plan,
+                        inferred_param_types,
+                        row_desc,
                     },
                 );
                 falcon_observability::record_prepared_stmt_sql_cmd("prepare");
@@ -280,17 +290,26 @@ impl QueryHandler {
         // EXECUTE name [(param, ...)]
         if sql_lower.starts_with("execute ") {
             if let Some((name, params)) = parse_execute_statement(sql) {
-                let bound = if let Some(ps) = session.prepared_statements.get(&name) {
-                    bind_params(&ps.query, &params)
-                } else {
-                    return Some(vec![BackendMessage::ErrorResponse {
-                        severity: "ERROR".into(),
-                        code: "26000".into(),
-                        message: format!("prepared statement \"{name}\" does not exist"),
-                    }]);
+                // Look up the prepared statement
+                let ps = match session.prepared_statements.get(&name) {
+                    Some(ps) => ps.clone(),
+                    None => {
+                        return Some(vec![BackendMessage::ErrorResponse {
+                            severity: "ERROR".into(),
+                            code: "26000".into(),
+                            message: format!("prepared statement \"{name}\" does not exist"),
+                        }]);
+                    }
                 };
-                // Execute the bound SQL through the normal query path
                 falcon_observability::record_prepared_stmt_sql_cmd("execute");
+                // Plan-based path: convert text params to typed Datum, execute plan
+                if let Some(ref plan) = ps.plan {
+                    let datum_params =
+                        text_params_to_datum(&params, &ps.inferred_param_types);
+                    return Some(self.execute_plan(plan, &datum_params, session));
+                }
+                // Legacy fallback: text substitution
+                let bound = bind_params(&ps.query, &params);
                 return Some(self.handle_query(&bound, session));
             }
         }

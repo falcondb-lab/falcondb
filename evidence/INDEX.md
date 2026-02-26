@@ -192,6 +192,47 @@ git commit -m "evidence: v$(grep -m1 '^version' Cargo.toml | sed 's/.*\"\(.*\)\"
 
 ---
 
+## v1.2 Evidence Categories
+
+### E13: v1.2 Performance Baseline (`evidence/benchmarks/`)
+
+| Artifact | Description | Source |
+|----------|-------------|--------|
+| `v1.2_baseline_*.md` | v1.2 performance baseline snapshot | `docs/benchmarks/v1.2_baseline.md` |
+| `v1.2_w1_*.txt` | W1 single-shard OLTP raw pgbench output | `benchmarks/scripts/run_workload.sh` |
+| `v1.2_w2_*.txt` | W2 cross-shard raw pgbench output | `benchmarks/scripts/run_workload.sh` |
+| `v1.2_w4_groupby_*.txt` | W4 GROUP BY benchmark (new in v1.2) | `benchmarks/scripts/run_workload.sh` |
+| `v1.2_w5_vectorized_*.txt` | W5 vectorized comparison benchmark (new in v1.2) | `benchmarks/scripts/run_workload.sh` |
+
+**Claim**: v1.2 executor optimizations (HashMap GROUP BY, byte-encoded keys, direct Datum comparison) produce measurable improvement over v1.0 baseline.
+
+**Verification**: `benchmarks/scripts/run_all.sh` + compare against `docs/benchmarks/v1.0_baseline.md`
+
+**Report**: `docs/benchmarks/v1.2_baseline.md`
+
+### E14: OS Platform Tuning (`docs/os/`)
+
+| Artifact | Description | Source |
+|----------|-------------|--------|
+| `linux_ubuntu_24_04.md` | Ubuntu 24.04 LTS tuning guide | `docs/os/linux_ubuntu_24_04.md` |
+| `rhel_9.md` | RHEL 9 / Rocky Linux 9 tuning guide | `docs/os/rhel_9.md` |
+| `windows_server_2022.md` | Windows Server 2022 tuning guide | `docs/os/windows_server_2022.md` |
+
+**Claim**: FalconDB provides platform-specific tuning for all three supported OS families, covering I/O, memory, scheduling, networking, and security.
+
+### E15: Cluster Observability (`docs/observability/`)
+
+| Artifact | Description | Source |
+|----------|-------------|--------|
+| `segment_streaming_metrics` | 7 Prometheus metrics for replication | `falcon_observability::record_segment_streaming_metrics` |
+| `rebalancer_metrics` | 9 Prometheus metrics for shard rebalancing | `falcon_observability::record_rebalancer_metrics` |
+| `grafana_dashboard.json` | Grafana dashboard for cluster | `docs/observability/grafana_dashboard.json` |
+| `alerting_rules.yml` | 25 Prometheus alerting rules | `docs/observability/alerting_rules.yml` |
+
+**Claim**: All cluster components (replication, rebalancing, gateway, discovery) emit Prometheus metrics. Grafana dashboard and alerting rules are provided.
+
+---
+
 ## Completeness Checklist
 
 | # | Requirement | Status | Artifact |

@@ -37,6 +37,9 @@ public class FalconPreparedStatement extends FalconStatement implements Prepared
     @Override
     public ResultSet executeQuery() throws SQLException {
         checkClosed();
+        if (conn.getNativeConnection().supportsBinaryParams()) {
+            return executeWithBinaryParams();
+        }
         String bound = bindParameters();
         return super.executeQuery(bound);
     }
@@ -44,6 +47,18 @@ public class FalconPreparedStatement extends FalconStatement implements Prepared
     @Override
     public int executeUpdate() throws SQLException {
         checkClosed();
+        if (conn.getNativeConnection().supportsBinaryParams()) {
+            try {
+                NativeConnection.QueryResult result =
+                    conn.getNativeConnection().executeQueryWithParams(
+                        sql, columnTypes, currentParams, conn.getSessionFlags());
+                currentResultSet = null;
+                updateCount = result.rowsAffected;
+                return (int) result.rowsAffected;
+            } catch (Exception e) {
+                throw wrapException(e);
+            }
+        }
         String bound = bindParameters();
         return super.executeUpdate(bound);
     }
@@ -51,8 +66,39 @@ public class FalconPreparedStatement extends FalconStatement implements Prepared
     @Override
     public boolean execute() throws SQLException {
         checkClosed();
+        if (conn.getNativeConnection().supportsBinaryParams()) {
+            try {
+                NativeConnection.QueryResult result =
+                    conn.getNativeConnection().executeQueryWithParams(
+                        sql, columnTypes, currentParams, conn.getSessionFlags());
+                if (result.columns != null && result.columns.length > 0 && !result.rows.isEmpty()) {
+                    currentResultSet = new FalconResultSet(result);
+                    updateCount = -1;
+                    return true;
+                } else {
+                    currentResultSet = null;
+                    updateCount = result.rowsAffected;
+                    return false;
+                }
+            } catch (Exception e) {
+                throw wrapException(e);
+            }
+        }
         String bound = bindParameters();
         return super.execute(bound);
+    }
+
+    private ResultSet executeWithBinaryParams() throws SQLException {
+        try {
+            NativeConnection.QueryResult result =
+                conn.getNativeConnection().executeQueryWithParams(
+                    sql, columnTypes, currentParams, conn.getSessionFlags());
+            currentResultSet = new FalconResultSet(result);
+            updateCount = -1;
+            return currentResultSet;
+        } catch (Exception e) {
+            throw wrapException(e);
+        }
     }
 
     @Override
@@ -72,6 +118,24 @@ public class FalconPreparedStatement extends FalconStatement implements Prepared
         checkClosed();
         if (batchParams.isEmpty()) return new int[0];
         try {
+            // Use native batch protocol if supported
+            if (conn.getNativeConnection().supportsBatchIngest()) {
+                NativeConnection.BatchResult br =
+                    conn.getNativeConnection().executeBatch(
+                        sql, columnTypes, batchParams, conn.getSessionFlags());
+                batchParams.clear();
+                if (br.error != null) {
+                    throw new io.falcondb.jdbc.protocol.FalconSQLException(
+                        br.error.message, br.error.sqlstate,
+                        br.error.errorCode, br.error.retryable);
+                }
+                int[] results = new int[br.counts.length];
+                for (int i = 0; i < br.counts.length; i++) {
+                    results[i] = (int) br.counts[i];
+                }
+                return results;
+            }
+            // Fallback: individual queries
             int[] results = new int[batchParams.size()];
             for (int i = 0; i < batchParams.size(); i++) {
                 currentParams = batchParams.get(i);

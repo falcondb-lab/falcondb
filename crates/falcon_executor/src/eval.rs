@@ -373,8 +373,12 @@ pub fn eval_expr_with_params(
             case_insensitive,
         } => {
             let val = eval_expr_with_params(expr, row, params)?;
-            let pat_val = eval_expr_with_params(pattern, row, params)?;
-            match (&val, &pat_val) {
+            // Fast path: literal pattern — avoid re-evaluating + re-lowering per row
+            let pat_val = match pattern.as_ref() {
+                BoundExpr::Literal(d) => std::borrow::Cow::Borrowed(d),
+                _ => std::borrow::Cow::Owned(eval_expr_with_params(pattern, row, params)?),
+            };
+            match (&val, pat_val.as_ref()) {
                 (Datum::Text(s), Datum::Text(p)) => {
                     let matched = if *case_insensitive {
                         like_match(&s.to_lowercase(), &p.to_lowercase())
@@ -412,20 +416,10 @@ pub fn eval_expr_with_params(
                 return Ok(Datum::Null);
             }
             // Fast path: if all list items are literals, skip per-item eval.
+            // Use direct comparison with early exit — faster than rebuilding
+            // a HashSet on every row for typical list sizes.
             let all_literals = list.iter().all(|e| matches!(e, BoundExpr::Literal(_)));
-            let found = if all_literals && list.len() >= 16 {
-                // Large literal list: O(1) HashSet lookup
-                use std::collections::HashSet;
-                let set: HashSet<&Datum> = list
-                    .iter()
-                    .filter_map(|e| match e {
-                        BoundExpr::Literal(d) if !d.is_null() => Some(d),
-                        _ => None,
-                    })
-                    .collect();
-                set.contains(&val)
-            } else if all_literals {
-                // Small literal list: direct comparison, no eval overhead
+            let found = if all_literals {
                 list.iter().any(|e| match e {
                     BoundExpr::Literal(d) if !d.is_null() => *d == val,
                     _ => false,
@@ -709,31 +703,103 @@ fn eval_scalar_func(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Executio
     super::scalar_ext::dispatch(func, args)
 }
 
-/// SQL LIKE pattern matching: % matches any sequence, _ matches single char.
-fn like_match(s: &str, pattern: &str) -> bool {
-    let s_chars: Vec<char> = s.chars().collect();
-    let p_chars: Vec<char> = pattern.chars().collect();
-    like_match_inner(&s_chars, &p_chars)
+/// Byte-encode a single Datum into `buf` for dedup/hashing purposes.
+/// Uses tag-byte + fixed-width payload — no String allocation.
+pub(crate) fn encode_datum_key(buf: &mut Vec<u8>, datum: &Datum) {
+    match datum {
+        Datum::Null => buf.push(0),
+        Datum::Boolean(b) => { buf.push(1); buf.push(u8::from(*b)); }
+        Datum::Int32(v) => { buf.push(2); buf.extend_from_slice(&v.to_le_bytes()); }
+        Datum::Int64(v) => { buf.push(3); buf.extend_from_slice(&v.to_le_bytes()); }
+        Datum::Float64(v) => { buf.push(4); buf.extend_from_slice(&v.to_le_bytes()); }
+        Datum::Text(s) => { buf.push(5); buf.extend_from_slice(s.as_bytes()); buf.push(0); }
+        Datum::Timestamp(v) => { buf.push(6); buf.extend_from_slice(&v.to_le_bytes()); }
+        Datum::Date(v) => { buf.push(7); buf.extend_from_slice(&v.to_le_bytes()); }
+        Datum::Time(v) => { buf.push(8); buf.extend_from_slice(&v.to_le_bytes()); }
+        Datum::Decimal(m, s) => { buf.push(9); buf.extend_from_slice(&m.to_le_bytes()); buf.push(*s); }
+        Datum::Uuid(v) => { buf.push(10); buf.extend_from_slice(&v.to_le_bytes()); }
+        Datum::Bytea(b) => { buf.push(11); buf.extend_from_slice(&(b.len() as u32).to_le_bytes()); buf.extend_from_slice(b); }
+        Datum::Interval(mo, d, us) => { buf.push(12); buf.extend_from_slice(&mo.to_le_bytes()); buf.extend_from_slice(&d.to_le_bytes()); buf.extend_from_slice(&us.to_le_bytes()); }
+        other => { buf.push(255); buf.extend_from_slice(format!("{other}").as_bytes()); buf.push(0); }
+    }
 }
 
-fn like_match_inner(s: &[char], p: &[char]) -> bool {
-    if p.is_empty() {
-        return s.is_empty();
-    }
-    if p[0] == '%' {
-        // % matches zero or more characters
-        for i in 0..=s.len() {
-            if like_match_inner(&s[i..], &p[1..]) {
-                return true;
+/// SQL LIKE pattern matching: % matches any sequence, _ matches single char.
+/// Works directly on `&str` slices — no `Vec<char>` allocation.
+/// Uses an iterative two-pointer approach with backtracking for `%`,
+/// which is O(n*m) worst case but avoids exponential recursion.
+fn like_match(s: &str, pattern: &str) -> bool {
+    let sb = s.as_bytes();
+    let pb = pattern.as_bytes();
+    let slen = sb.len();
+    let plen = pb.len();
+
+    // Fast path: pure ASCII (no multi-byte chars) — work on bytes directly
+    if s.is_ascii() && pattern.is_ascii() {
+        let mut si = 0usize;
+        let mut pi = 0usize;
+        let mut star_p = usize::MAX; // position after last '%' in pattern
+        let mut star_s = 0usize; // position in s when last '%' was seen
+
+        while si < slen {
+            if pi < plen && (pb[pi] == b'_' || pb[pi] == sb[si]) {
+                si += 1;
+                pi += 1;
+            } else if pi < plen && pb[pi] == b'%' {
+                star_p = pi + 1;
+                star_s = si;
+                pi += 1;
+            } else if star_p != usize::MAX {
+                // Backtrack: advance the match start for the last '%'
+                star_s += 1;
+                si = star_s;
+                pi = star_p;
+            } else {
+                return false;
             }
         }
-        false
-    } else if p[0] == '_' {
-        // _ matches exactly one character
-        !s.is_empty() && like_match_inner(&s[1..], &p[1..])
-    } else {
-        !s.is_empty() && s[0] == p[0] && like_match_inner(&s[1..], &p[1..])
+        // Consume trailing '%' in pattern
+        while pi < plen && pb[pi] == b'%' {
+            pi += 1;
+        }
+        return pi == plen;
     }
+
+    // Unicode fallback: collect chars (rare path)
+    let s_chars: Vec<char> = s.chars().collect();
+    let p_chars: Vec<char> = pattern.chars().collect();
+    like_match_chars(&s_chars, &p_chars)
+}
+
+/// Unicode-aware LIKE matching on char slices (fallback for non-ASCII).
+fn like_match_chars(s: &[char], p: &[char]) -> bool {
+    let slen = s.len();
+    let plen = p.len();
+    let mut si = 0usize;
+    let mut pi = 0usize;
+    let mut star_p = usize::MAX;
+    let mut star_s = 0usize;
+
+    while si < slen {
+        if pi < plen && (p[pi] == '_' || p[pi] == s[si]) {
+            si += 1;
+            pi += 1;
+        } else if pi < plen && p[pi] == '%' {
+            star_p = pi + 1;
+            star_s = si;
+            pi += 1;
+        } else if star_p != usize::MAX {
+            star_s += 1;
+            si = star_s;
+            pi = star_p;
+        } else {
+            return false;
+        }
+    }
+    while pi < plen && p[pi] == '%' {
+        pi += 1;
+    }
+    pi == plen
 }
 
 /// Evaluate a filter expression and return true if the row passes.
@@ -814,6 +880,25 @@ pub fn eval_filter(expr: &BoundExpr, row: &OwnedRow) -> Result<bool, ExecutionEr
                 Ok(!val.is_null())
             }
         }
+        // IN list: col IN (lit, lit, ...) — borrow column value, compare against literal refs
+        BoundExpr::InList { expr, list, negated }
+            if matches!(expr.as_ref(), BoundExpr::ColumnRef(_))
+                && list.iter().all(|e| matches!(e, BoundExpr::Literal(_))) =>
+        {
+            let col_idx = match expr.as_ref() {
+                BoundExpr::ColumnRef(i) => *i,
+                _ => unreachable!(),
+            };
+            let val = row.get(col_idx).unwrap_or(&Datum::Null);
+            if val.is_null() {
+                return Ok(false);
+            }
+            let found = list.iter().any(|e| match e {
+                BoundExpr::Literal(d) if !d.is_null() => d == val,
+                _ => false,
+            });
+            Ok(if *negated { !found } else { found })
+        }
         // Literal boolean (e.g. constant-folded TRUE/FALSE)
         BoundExpr::Literal(Datum::Boolean(b)) => Ok(*b),
         // General fallback
@@ -860,15 +945,19 @@ pub fn eval_having_expr(
                 Ok(vals)
             };
             let distinct_vals = |e: &BoundExpr| -> Result<Vec<Datum>, ExecutionError> {
-                let mut seen = std::collections::HashSet::new();
+                let mut seen: std::collections::HashSet<Vec<u8>> =
+                    std::collections::HashSet::new();
                 let mut vals = Vec::new();
+                let mut key_buf = Vec::with_capacity(32);
                 for row in group_rows {
                     let v = eval_expr(e, row)?;
                     if v.is_null() {
                         continue;
                     }
-                    let key = format!("{v}");
-                    if seen.insert(key) {
+                    // Byte-encode the datum for dedup — avoids format!() String allocation
+                    key_buf.clear();
+                    encode_datum_key(&mut key_buf, &v);
+                    if seen.insert(key_buf.clone()) {
                         vals.push(v);
                     }
                 }

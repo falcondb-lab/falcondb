@@ -705,8 +705,10 @@ pub fn encoded_to_datum(v: &EncodedValue) -> Datum {
 pub const fn datatype_to_type_id(dt: &DataType) -> u8 {
     match dt {
         DataType::Boolean => TYPE_BOOLEAN,
+        DataType::Int16 => TYPE_INT32,   // widened to INT32 on the wire
         DataType::Int32 => TYPE_INT32,
         DataType::Int64 => TYPE_INT64,
+        DataType::Float32 => TYPE_FLOAT64, // widened to FLOAT64 on the wire
         DataType::Float64 => TYPE_FLOAT64,
         DataType::Text => TYPE_TEXT,
         DataType::Timestamp => TYPE_TIMESTAMP,

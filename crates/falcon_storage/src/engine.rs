@@ -2001,8 +2001,10 @@ pub(crate) fn datatype_to_cast_target(dt: &falcon_common::types::DataType) -> St
     use falcon_common::types::DataType;
     match dt {
         DataType::Boolean => "boolean".into(),
+        DataType::Int16 => "smallint".into(),
         DataType::Int32 => "int".into(),
         DataType::Int64 => "bigint".into(),
+        DataType::Float32 => "real".into(),
         DataType::Float64 => "float8".into(),
         DataType::Text | DataType::Array(_) => "text".into(),
         DataType::Timestamp => "timestamp".into(),

@@ -306,7 +306,8 @@ pub fn parallel_grouped_aggregate(
                 let start = t * chunk_size;
                 let end = (start + chunk_size).min(n);
                 s.spawn(move || {
-                    let mut local_map: HashMap<GroupKey, PartialAggState> = HashMap::new();
+                    let mut local_map: HashMap<GroupKey, PartialAggState> =
+                        HashMap::with_capacity((end - start) / 4 + 1);
                     let mut key_buf = Vec::with_capacity(64);
                     for i in start..end {
                         let row = &rows[i].1;
@@ -328,7 +329,8 @@ pub fn parallel_grouped_aggregate(
     });
 
     // Merge phase
-    let mut global_map: HashMap<GroupKey, PartialAggState> = HashMap::new();
+    let mut global_map: HashMap<GroupKey, PartialAggState> =
+        HashMap::with_capacity(partials.iter().map(HashMap::len).sum());
     for local_map in partials {
         for (key, partial) in local_map {
             global_map.entry(key).or_default().merge(&partial);
@@ -343,7 +345,8 @@ fn single_thread_aggregate(
     agg_col_idx: usize,
     _agg_func: &AggFunc,
 ) -> HashMap<GroupKey, PartialAggState> {
-    let mut map: HashMap<GroupKey, PartialAggState> = HashMap::new();
+    let mut map: HashMap<GroupKey, PartialAggState> =
+        HashMap::with_capacity(rows.len() / 4 + 1);
     let mut key_buf = Vec::with_capacity(64);
     for (_pk, row) in rows {
         crate::executor_aggregate::encode_group_key(&mut key_buf, row, group_by);

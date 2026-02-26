@@ -812,7 +812,7 @@ impl Executor {
                 let num_cols = schema.columns.len();
                 let mut batch = RecordBatch::from_row_pairs(&raw_rows, num_cols);
                 vectorized_filter(&mut batch, f);
-                for idx in batch.active_indices() {
+                for &idx in &*batch.active_indices() {
                     if let Some(max) = early_limit {
                         if result_rows.len() >= max { break; }
                     }
@@ -897,6 +897,22 @@ impl Executor {
         values.extend_from_slice(&left.values);
         values.extend_from_slice(&right.values);
         OwnedRow::new(values)
+    }
+
+    /// Fill `buf` with the merged row values (left ++ right), reusing the buffer
+    /// across calls to avoid per-match Vec allocation. Returns an OwnedRow that
+    /// takes ownership of `buf`'s contents; caller must reclaim via `row.values`.
+    #[inline]
+    pub(crate) fn merge_rows_into(
+        &self,
+        left: &OwnedRow,
+        right: &OwnedRow,
+        buf: &mut Vec<Datum>,
+    ) -> OwnedRow {
+        buf.clear();
+        buf.extend_from_slice(&left.values);
+        buf.extend_from_slice(&right.values);
+        OwnedRow::new(std::mem::take(buf))
     }
 
     /// Remove duplicate rows in-place using a HashSet with byte-encoded keys.

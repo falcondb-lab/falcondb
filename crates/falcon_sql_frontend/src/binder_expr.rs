@@ -902,10 +902,11 @@ const fn datum_to_datatype(datum: &Datum) -> Option<DataType> {
 /// Parse a CAST target type string into a DataType.
 fn parse_target_type(target: &str) -> Option<DataType> {
     match target.to_lowercase().as_str() {
+        "smallint" | "int2" => Some(DataType::Int16),
         "int" | "integer" | "int4" => Some(DataType::Int32),
         "bigint" | "int8" => Some(DataType::Int64),
-        "float" | "double precision" | "float8"
-        | "real" | "float4" => Some(DataType::Float64),
+        "real" | "float4" => Some(DataType::Float32),
+        "float" | "double precision" | "float8" => Some(DataType::Float64),
         "text" | "varchar" | "character varying" => Some(DataType::Text),
         "boolean" | "bool" => Some(DataType::Boolean),
         "timestamp" | "timestamp without time zone" => Some(DataType::Timestamp),

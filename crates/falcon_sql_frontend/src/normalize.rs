@@ -653,9 +653,11 @@ fn infer_from_literal_param(lit_side: &BoundExpr, param_side: &BoundExpr, out: &
 fn parse_cast_target(target: &str) -> Option<DataType> {
     let t = target.to_lowercase();
     match t.as_str() {
+        "smallint" | "int2" => Some(DataType::Int16),
         "int" | "int4" | "integer" => Some(DataType::Int32),
         "bigint" | "int8" => Some(DataType::Int64),
-        "float" | "float8" | "double precision" | "double" | "real" | "numeric" | "decimal" => {
+        "real" | "float4" => Some(DataType::Float32),
+        "float" | "float8" | "double precision" | "double" | "numeric" | "decimal" => {
             Some(DataType::Float64)
         }
         "text" | "varchar" | "char" | "character varying" | "character" | "bpchar" => {

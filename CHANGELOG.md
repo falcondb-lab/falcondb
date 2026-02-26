@@ -7,6 +7,85 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.0.0] — GA Release
+
+### Added — SQL Compatibility
+
+- **SQL-level PREPARE/EXECUTE/DEALLOCATE** — plan-based execution path using
+  `prepare_statement()` for physical plan generation and typed parameter inference.
+  `text_params_to_datum` helper converts SQL EXECUTE text params to typed Datum values.
+  Falls back to legacy text substitution when planning is unavailable.
+- **SMALLINT (INT2) data type** — `DataType::Int16` across schema, DDL, parser, PG OID (21),
+  wire protocol (text + binary decode), COPY, CAST. Runtime values widened to `Datum::Int32`.
+- **REAL (FLOAT4) data type** — `DataType::Float32` across schema, DDL, parser, PG OID (700),
+  wire protocol (text + binary decode), COPY, CAST. Runtime values widened to `Datum::Float64`.
+
+### Added — Linux Packaging
+
+- **`packaging/systemd/falcondb.service`** — production-hardened systemd unit with
+  `ProtectSystem=strict`, `PrivateDevices`, `OOMScoreAdjust=-900`, journald logging.
+- **Debian packaging** — `packaging/debian/` (control, postinst, prerm, conffiles) +
+  `scripts/build_deb.sh` builder. Creates `falcondb` system user, enables systemd service.
+- **RPM packaging** — `packaging/rpm/falcondb.spec` + `scripts/build_rpm.sh` builder.
+  Pre-install user creation, `%systemd_post`/`%systemd_preun` macros.
+- **`docs/INSTALL_LINUX.md`** — installation guide for .deb, .rpm, and tarball methods.
+
+### Changed — Release Pipeline
+
+- **`.github/workflows/release.yml`** — Linux build job now produces .tar.gz, .deb, and .rpm
+  artifacts via dedicated build scripts. All three uploaded to GitHub Releases.
+
+---
+
+## [Unreleased] — OS Tuning, Executor Performance, Cluster Observability, v1.2 Benchmark
+
+### Added — OS Platform Tuning Guides
+
+- **`docs/os/windows_server_2022.md`** — Windows Server 2022 production tuning guide
+  covering IOCP WAL backend, NTFS/ReFS selection, Large Pages, antivirus exclusions,
+  Windows Service deployment, TCP/RSS tuning, ACL security, and monitoring checklist.
+- **`docs/os/rhel_9.md`** — RHEL 9 / Rocky Linux 9 production tuning guide covering
+  io_uring (with RHEL 9.3+ unprivileged restrictions), XFS/ext4 tuning, NUMA binding,
+  jemalloc/THP, tuned profile, systemd/cgroup v2 service unit, BBR congestion control,
+  SELinux integration, and firewalld service definition.
+
+### Changed — Executor Performance
+
+- **`vectorized.rs`**: `datum_cmp` now delegates to `cmp_datum_values` instead of
+  double `format!()` allocation. `cmp_datum_values` extended with direct comparisons
+  for `Time`, `Decimal` (scale-normalized), `Uuid`, `Bytea`, `Interval` (total µs
+  approximation), and `Null`. `format!()` fallback now only fires for `Array`/`Jsonb`
+  or genuinely rare cross-type comparisons.
+
+### Added — Cluster Enhancements
+
+- **`rebalancer.rs`**: `ShardRebalancer` gains SLA-safe `pause()`/`resume()`/`is_paused()`
+  — paused state skips rebalance cycles without interrupting in-flight migrations.
+  New `metrics_snapshot()` returns `RebalancerMetrics` for Prometheus integration.
+- **`RebalancerMetrics`** struct: runs_completed, total_rows_migrated, is_running,
+  is_paused, last_imbalance_ratio, completed/failed tasks, duration, move rate.
+- 2 new tests: `test_pause_prevents_rebalance`, `test_metrics_snapshot`.
+- `RebalancerMetrics` exported from `falcon_cluster::lib.rs`.
+
+### Added — Observability
+
+- **`falcon_observability`**: `record_segment_streaming_metrics()` — 7 Prometheus
+  gauges for segment replication (handshakes, segments streamed, bytes, checksums,
+  rollbacks, snapshots).
+- **`falcon_observability`**: `record_rebalancer_metrics()` — 9 Prometheus gauges
+  for shard rebalancing (runs, rows migrated, running/paused state, imbalance ratio,
+  task counts, duration, move rate).
+
+### Added — Benchmarks & Evidence
+
+- **`docs/benchmarks/v1.2_baseline.md`** — v1.2 performance baseline with 5 workloads
+  (W1–W5), v1.0→v1.2 delta comparison, optimization summary table, and monitoring
+  section referencing new Prometheus metrics.
+- **`evidence/INDEX.md`** — E13 (v1.2 baseline), E14 (OS tuning guides), E15 (cluster
+  observability) evidence categories added.
+
+---
+
 ## [Unreleased] — TDE, Docker, Linux Packaging
 
 ### Added — Transparent Data Encryption (TDE)

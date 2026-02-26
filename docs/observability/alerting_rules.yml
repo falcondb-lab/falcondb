@@ -200,6 +200,40 @@ groups:
           summary: "2PC hard timeouts occurring"
           description: "Cross-shard transactions are hitting hard timeouts. Check participant health."
 
+  # ── Rebalancer ─────────────────────────────────────────────────────────
+  - name: falcondb_rebalancer
+    interval: 30s
+    rules:
+      - alert: RebalancerImbalanceHigh
+        expr: falcon_rebalancer_imbalance_ratio > 2.0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Shard imbalance ratio >2.0 for 10m"
+          description: "Shard load imbalance ratio is {{ $value }}. Rebalancer may be paused or unable to migrate."
+
+      - alert: RebalancerTasksFailing
+        expr: falcon_rebalancer_failed_tasks > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rebalancer migration tasks failing"
+          description: "{{ $value }} migration tasks have failed. Check source/target shard health."
+
+  # ── Replication Streaming ──────────────────────────────────────────────
+  - name: falcondb_repl_streaming
+    interval: 30s
+    rules:
+      - alert: ReplicationChecksumFailures
+        expr: increase(falcon_repl_checksum_failures_total[10m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Replication segment checksum failures detected"
+          description: "Checksum failures indicate data corruption during replication. Investigate immediately."
+
   # ── Memory ──────────────────────────────────────────────────────────────
   - name: falcondb_memory
     interval: 15s

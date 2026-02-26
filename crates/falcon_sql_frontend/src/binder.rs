@@ -1406,10 +1406,10 @@ impl Binder {
     pub(crate) fn resolve_data_type(&self, dt: &ast::DataType) -> Result<DataType, SqlError> {
         match dt {
             ast::DataType::Boolean | ast::DataType::Bool => Ok(DataType::Boolean),
-            ast::DataType::Int(None) | ast::DataType::Integer(None) | ast::DataType::Int4(_)
-            | ast::DataType::SmallInt(None)
+            ast::DataType::SmallInt(None)
             | ast::DataType::Int2(_)
-            | ast::DataType::TinyInt(_)
+            | ast::DataType::TinyInt(_) => Ok(DataType::Int16),
+            ast::DataType::Int(None) | ast::DataType::Integer(None) | ast::DataType::Int4(_)
             | ast::DataType::Regclass => Ok(DataType::Int32),
             ast::DataType::BigInt(None) | ast::DataType::Int8(_)
             | ast::DataType::UnsignedTinyInt(_)
@@ -1418,14 +1418,14 @@ impl Binder {
             | ast::DataType::UnsignedInteger(_)
             | ast::DataType::UnsignedBigInt(_)
             | ast::DataType::UnsignedInt8(_) => Ok(DataType::Int64),
+            ast::DataType::Real
+            | ast::DataType::Float4 => Ok(DataType::Float32),
             ast::DataType::Float8
             | ast::DataType::Float(None)
             | ast::DataType::DoublePrecision
             | ast::DataType::Double
             | ast::DataType::Numeric(_)
-            | ast::DataType::Decimal(_)
-            | ast::DataType::Real
-            | ast::DataType::Float4 => Ok(DataType::Float64),
+            | ast::DataType::Decimal(_) => Ok(DataType::Float64),
             ast::DataType::Text
             | ast::DataType::Varchar(_)
             | ast::DataType::CharVarying(_)
@@ -1458,12 +1458,12 @@ impl Binder {
                     "uuid" | "bytea" | "inet" | "cidr" | "macaddr"
                     | "name" | "varchar" | "character varying" | "bpchar"
                     | "interval" => Ok(DataType::Text),
+                    "int2" | "smallint" => Ok(DataType::Int16),
                     "oid" | "regclass" | "regtype"
-                    | "int2" | "smallint"
                     | "int4" | "integer" | "int" => Ok(DataType::Int32),
                     "int8" | "bigint" => Ok(DataType::Int64),
-                    "money" | "float4" | "real"
-                    | "float8" | "double precision"
+                    "float4" | "real" => Ok(DataType::Float32),
+                    "money" | "float8" | "double precision"
                     | "numeric" | "decimal" => Ok(DataType::Float64),
                     "timestamp" | "timestamptz" => Ok(DataType::Timestamp),
                     _ => Err(SqlError::Unsupported(format!("Data type: {type_name}"))),

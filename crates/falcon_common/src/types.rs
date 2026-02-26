@@ -70,8 +70,12 @@ impl fmt::Display for NodeId {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DataType {
     Boolean,
+    /// SMALLINT / INT2: 2-byte signed integer.
+    Int16,
     Int32,
     Int64,
+    /// REAL / FLOAT4: single-precision IEEE 754 float.
+    Float32,
     Float64,
     Text,
     Timestamp,
@@ -96,8 +100,10 @@ impl DataType {
     pub const fn pg_oid(&self) -> i32 {
         match self {
             Self::Boolean => 16,
+            Self::Int16 => 21,
             Self::Int32 => 23,
             Self::Int64 => 20,
+            Self::Float32 => 700,
             Self::Float64 => 701,
             Self::Text => 25,
             Self::Timestamp => 1114,
@@ -116,7 +122,8 @@ impl DataType {
     pub const fn type_len(&self) -> i16 {
         match self {
             Self::Boolean => 1,
-            Self::Int32 | Self::Date => 4,
+            Self::Int16 => 2,
+            Self::Int32 | Self::Float32 | Self::Date => 4,
             Self::Int64 | Self::Float64 | Self::Timestamp | Self::Time => 8,
             Self::Interval | Self::Uuid => 16,
             Self::Text | Self::Array(_) | Self::Jsonb
@@ -128,16 +135,20 @@ impl DataType {
     pub fn pg_type_oid(&self) -> i32 {
         match self {
             Self::Boolean => 16,
+            Self::Int16 => 21,
             Self::Int32 => 23,
             Self::Int64 => 20,
+            Self::Float32 => 700,
             Self::Float64 => 701,
             Self::Text => 25,
             Self::Timestamp => 1114,
             Self::Date => 1082,
             Self::Array(inner) => match inner.as_ref() {
+                Self::Int16 => 1005,
                 Self::Int32 => 1007,
                 Self::Int64 => 1016,
                 Self::Text => 1009,
+                Self::Float32 => 1021,
                 Self::Float64 => 1022,
                 Self::Boolean => 1000,
                 _ => 2277, // anyarray
@@ -155,16 +166,20 @@ impl DataType {
     pub fn pg_udt_name(&self) -> &'static str {
         match self {
             Self::Boolean => "bool",
+            Self::Int16 => "int2",
             Self::Int32 => "int4",
             Self::Int64 => "int8",
+            Self::Float32 => "float4",
             Self::Float64 => "float8",
             Self::Text => "text",
             Self::Timestamp => "timestamp",
             Self::Date => "date",
             Self::Array(inner) => match inner.as_ref() {
+                Self::Int16 => "_int2",
                 Self::Int32 => "_int4",
                 Self::Int64 => "_int8",
                 Self::Text => "_text",
+                Self::Float32 => "_float4",
                 Self::Float64 => "_float8",
                 Self::Boolean => "_bool",
                 _ => "anyarray",
@@ -181,8 +196,10 @@ impl DataType {
     /// Numeric precision for information_schema.columns (None if not numeric).
     pub const fn numeric_precision(&self) -> Option<i32> {
         match self {
+            Self::Int16 => Some(16),
             Self::Int32 => Some(32),
             Self::Int64 => Some(64),
+            Self::Float32 => Some(24),
             Self::Float64 => Some(53),
             Self::Decimal(p, _) => Some(*p as i32),
             _ => None,
@@ -192,7 +209,7 @@ impl DataType {
     /// Numeric scale for information_schema.columns (None if not numeric).
     pub const fn numeric_scale(&self) -> Option<i32> {
         match self {
-            Self::Int32 | Self::Int64 => Some(0),
+            Self::Int16 | Self::Int32 | Self::Int64 => Some(0),
             Self::Decimal(_, s) => Some(*s as i32),
             _ => None,
         }
@@ -211,8 +228,10 @@ impl DataType {
     pub const fn pg_type_name(&self) -> &'static str {
         match self {
             Self::Boolean => "boolean",
+            Self::Int16 => "smallint",
             Self::Int32 => "integer",
             Self::Int64 => "bigint",
+            Self::Float32 => "real",
             Self::Float64 => "double precision",
             Self::Text => "text",
             Self::Timestamp => "timestamp without time zone",
@@ -232,8 +251,10 @@ impl fmt::Display for DataType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Boolean => write!(f, "BOOLEAN"),
+            Self::Int16 => write!(f, "SMALLINT"),
             Self::Int32 => write!(f, "INT"),
             Self::Int64 => write!(f, "BIGINT"),
+            Self::Float32 => write!(f, "REAL"),
             Self::Float64 => write!(f, "FLOAT8"),
             Self::Text => write!(f, "TEXT"),
             Self::Timestamp => write!(f, "TIMESTAMP"),

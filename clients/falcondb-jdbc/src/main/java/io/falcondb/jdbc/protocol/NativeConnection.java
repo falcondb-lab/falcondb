@@ -6,6 +6,12 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicLong;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSocket;
+import javax.net.ssl.SSLSocketFactory;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
+import java.security.cert.X509Certificate;
 
 import static io.falcondb.jdbc.protocol.WireFormat.*;
 
@@ -15,9 +21,9 @@ import static io.falcondb.jdbc.protocol.WireFormat.*;
  */
 public class NativeConnection implements Closeable {
 
-    private final Socket socket;
-    private final OutputStream out;
-    private final InputStream in;
+    private Socket socket;
+    private OutputStream out;
+    private InputStream in;
     private final AtomicLong requestIdSeq = new AtomicLong(1);
 
     private long serverEpoch;
@@ -25,26 +31,40 @@ public class NativeConnection implements Closeable {
     private long negotiatedFeatures;
     private boolean authenticated;
     private boolean closed;
+    private boolean sslActive;
 
     public NativeConnection(String host, int port, String database, String user,
                             String password, int connectTimeoutMs) throws IOException {
+        this(host, port, database, user, password, connectTimeoutMs, false, false);
+    }
+
+    public NativeConnection(String host, int port, String database, String user,
+                            String password, int connectTimeoutMs,
+                            boolean sslEnabled, boolean sslTrustAll) throws IOException {
         this.socket = new Socket();
         socket.connect(new InetSocketAddress(host, port), connectTimeoutMs);
         socket.setTcpNoDelay(true);
         this.out = new BufferedOutputStream(socket.getOutputStream(), 65536);
         this.in = new BufferedInputStream(socket.getInputStream(), 65536);
 
-        handshake(database, user);
+        handshake(database, user, sslEnabled);
+
+        if (sslEnabled && (negotiatedFeatures & FEATURE_TLS) != 0) {
+            upgradeTls(host, port, sslTrustAll);
+        }
+
         authenticate(password);
     }
 
-    private void handshake(String database, String user) throws IOException {
+    private void handshake(String database, String user, boolean sslRequested) throws IOException {
         ByteArrayOutputStream payload = new ByteArrayOutputStream(256);
         // version
         writeU16(payload, 0); // major
         writeU16(payload, 1); // minor
         // feature flags
-        writeU64(payload, FEATURE_BATCH_INGEST | FEATURE_PIPELINE | FEATURE_EPOCH_FENCING | FEATURE_BINARY_PARAMS);
+        long features = FEATURE_BATCH_INGEST | FEATURE_PIPELINE | FEATURE_EPOCH_FENCING | FEATURE_BINARY_PARAMS;
+        if (sslRequested) features |= FEATURE_TLS;
+        writeU64(payload, features);
         // client_name
         writeStringU16(payload, "falcondb-jdbc/0.1");
         // database
@@ -128,13 +148,31 @@ public class NativeConnection implements Closeable {
      * Execute a SQL query and return the parsed response.
      */
     public QueryResult executeQuery(String sql, int sessionFlags) throws IOException {
+        return executeQueryWithParams(sql, null, null, sessionFlags);
+    }
+
+    /**
+     * Execute a SQL query with typed parameters.
+     * Uses server-side parameter binding when FEATURE_BINARY_PARAMS is negotiated.
+     */
+    public QueryResult executeQueryWithParams(String sql, byte[] paramTypes,
+                                               Object[] paramValues,
+                                               int sessionFlags) throws IOException {
         long reqId = requestIdSeq.getAndIncrement();
 
         ByteArrayOutputStream payload = new ByteArrayOutputStream(256);
         writeU64(payload, reqId);
         writeU64(payload, serverEpoch);
         writeStringU32(payload, sql);
-        writeU16(payload, 0); // no params
+
+        boolean hasParams = paramTypes != null && paramValues != null && paramTypes.length > 0;
+        if (hasParams && (negotiatedFeatures & FEATURE_BINARY_PARAMS) != 0) {
+            writeU16(payload, paramTypes.length);
+            payload.write(paramTypes);
+            encodeRow(payload, paramTypes, paramValues);
+        } else {
+            writeU16(payload, 0);
+        }
         writeU32(payload, sessionFlags);
 
         writeFrame(out, MSG_QUERY_REQUEST, payload.toByteArray());
@@ -214,6 +252,39 @@ public class NativeConnection implements Closeable {
     public long getServerEpoch() { return serverEpoch; }
     public long getServerNodeId() { return serverNodeId; }
     public long getNegotiatedFeatures() { return negotiatedFeatures; }
+    public boolean isSslActive() { return sslActive; }
+    public boolean supportsBinaryParams() { return (negotiatedFeatures & FEATURE_BINARY_PARAMS) != 0; }
+    public boolean supportsBatchIngest() { return (negotiatedFeatures & FEATURE_BATCH_INGEST) != 0; }
+
+    /**
+     * Upgrade the plain TCP socket to TLS.
+     */
+    private void upgradeTls(String host, int port, boolean trustAll) throws IOException {
+        try {
+            SSLSocketFactory factory;
+            if (trustAll) {
+                SSLContext ctx = SSLContext.getInstance("TLS");
+                ctx.init(null, new TrustManager[]{ new X509TrustManager() {
+                    public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+                    public void checkClientTrusted(X509Certificate[] c, String a) {}
+                    public void checkServerTrusted(X509Certificate[] c, String a) {}
+                }}, new java.security.SecureRandom());
+                factory = ctx.getSocketFactory();
+            } else {
+                factory = (SSLSocketFactory) SSLSocketFactory.getDefault();
+            }
+            SSLSocket sslSocket = (SSLSocket) factory.createSocket(
+                socket, host, port, true);
+            sslSocket.setUseClientMode(true);
+            sslSocket.startHandshake();
+            this.socket = sslSocket;
+            this.out = new BufferedOutputStream(sslSocket.getOutputStream(), 65536);
+            this.in = new BufferedInputStream(sslSocket.getInputStream(), 65536);
+            this.sslActive = true;
+        } catch (Exception e) {
+            throw new IOException("TLS upgrade failed: " + e.getMessage(), e);
+        }
+    }
 
     // ── Internal helpers ─────────────────────────────────────────────
 

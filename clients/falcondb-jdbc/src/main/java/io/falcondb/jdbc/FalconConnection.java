@@ -23,7 +23,14 @@ public class FalconConnection implements Connection {
 
     FalconConnection(String host, int port, String database,
                      String user, String password, int connectTimeoutMs) throws Exception {
-        this.nativeConn = new NativeConnection(host, port, database, user, password, connectTimeoutMs);
+        this(host, port, database, user, password, connectTimeoutMs, false, false);
+    }
+
+    FalconConnection(String host, int port, String database,
+                     String user, String password, int connectTimeoutMs,
+                     boolean sslEnabled, boolean sslTrustAll) throws Exception {
+        this.nativeConn = new NativeConnection(host, port, database, user, password,
+                                               connectTimeoutMs, sslEnabled, sslTrustAll);
         this.catalog = database;
         this.schema = "public";
     }

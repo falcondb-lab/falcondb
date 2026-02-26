@@ -1,0 +1,19 @@
+Package: falcondb
+Version: ${VERSION}
+Section: database
+Priority: optional
+Architecture: amd64
+Maintainer: FalconDB Team <team@falcondb.io>
+Description: FalconDB — High-performance distributed SQL database
+ FalconDB is a PostgreSQL wire-compatible distributed database engine
+ designed for high throughput, low latency OLTP workloads with strong
+ consistency guarantees.
+ .
+ Features:
+  - PostgreSQL wire protocol (psql, JDBC, any PG driver)
+  - MVCC with snapshot isolation and serializable modes
+  - Automatic sharding with cross-shard transactions
+  - WAL-based crash recovery and streaming replication
+  - Built-in connection pooling and prepared statement caching
+Depends: libc6 (>= 2.17), adduser
+Homepage: https://github.com/falcondb/falcondb

@@ -2119,10 +2119,14 @@ fn decode_param_value(
     let s = text.as_ref();
 
     match type_hint {
+        Some(DataType::Int16) => s
+            .parse::<i16>().map_or_else(|_| Datum::Text(s.to_owned()), |v| Datum::Int32(v as i32)),
         Some(DataType::Int32) => s
             .parse::<i32>().map_or_else(|_| Datum::Text(s.to_owned()), Datum::Int32),
         Some(DataType::Int64) => s
             .parse::<i64>().map_or_else(|_| Datum::Text(s.to_owned()), Datum::Int64),
+        Some(DataType::Float32) => s
+            .parse::<f32>().map_or_else(|_| Datum::Text(s.to_owned()), |v| Datum::Float64(v as f64)),
         Some(DataType::Float64) => s
             .parse::<f64>().map_or_else(|_| Datum::Text(s.to_owned()), Datum::Float64),
         Some(DataType::Boolean) => match s.to_lowercase().as_str() {
@@ -2205,6 +2209,15 @@ fn decode_param_value_binary(
     };
 
     match type_hint {
+        Some(DataType::Int16) => {
+            if bytes.len() == 2 {
+                let v = i16::from_be_bytes([bytes[0], bytes[1]]);
+                Datum::Int32(v as i32)
+            } else {
+                let s = String::from_utf8_lossy(bytes);
+                s.parse::<i16>().map_or_else(|_| Datum::Text(s.into_owned()), |v| Datum::Int32(v as i32))
+            }
+        }
         Some(DataType::Int32) => {
             if bytes.len() == 4 {
                 let v = i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
@@ -2228,6 +2241,15 @@ fn decode_param_value_binary(
             } else {
                 let s = String::from_utf8_lossy(bytes);
                 s.parse::<i64>().map_or_else(|_| Datum::Text(s.into_owned()), Datum::Int64)
+            }
+        }
+        Some(DataType::Float32) => {
+            if bytes.len() == 4 {
+                let v = f32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                Datum::Float64(f64::from(v))
+            } else {
+                let s = String::from_utf8_lossy(bytes);
+                s.parse::<f32>().map_or_else(|_| Datum::Text(s.into_owned()), |v| Datum::Float64(v as f64))
             }
         }
         Some(DataType::Float64) => {

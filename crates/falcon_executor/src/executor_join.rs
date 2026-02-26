@@ -329,6 +329,12 @@ impl Executor {
                 // already guarantees the condition — skip redundant eval_filter.
                 let pure_equi = Self::is_pure_equi_join(join.condition.as_ref(), left_width);
 
+                // Reusable buffer for merge_rows_into — avoids per-match Vec allocation
+                // when rows are rejected by non-equi filter.
+                let merge_width = combined_rows.first().map_or(0, |r| r.values.len())
+                    + right_data.first().map_or(0, |r| r.values.len());
+                let mut merge_buf: Vec<Datum> = Vec::with_capacity(merge_width);
+
                 match join.join_type {
                     JoinType::Inner => {
                         for left_row in &combined_rows {
@@ -336,17 +342,21 @@ impl Executor {
                             Self::encode_join_key_into(left_row, &left_key_cols, &mut probe_buf);
                             if let Some(indices) = hash_table.get(probe_buf.as_slice()) {
                                 for &ri in indices {
-                                    let merged = self.merge_rows(left_row, &right_data[ri]);
                                     if !pure_equi {
+                                        let merged = self.merge_rows_into(left_row, &right_data[ri], &mut merge_buf);
                                         if let Some(ref cond) = join.condition {
                                             if !ExprEngine::eval_filter(cond, &merged)
                                                 .map_err(FalconError::Execution)?
                                             {
+                                                // Reclaim buffer from rejected row
+                                                merge_buf = merged.values;
                                                 continue;
                                             }
                                         }
+                                        new_combined.push(merged);
+                                    } else {
+                                        new_combined.push(self.merge_rows(left_row, &right_data[ri]));
                                     }
-                                    new_combined.push(merged);
                                 }
                             }
                         }

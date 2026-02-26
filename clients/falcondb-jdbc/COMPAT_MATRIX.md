@@ -1,6 +1,6 @@
 # FalconDB JDBC Driver — Compatibility Matrix
 
-## Driver Version: 0.1.0-SNAPSHOT
+## Driver Version: 0.2.0-SNAPSHOT
 
 ### Protocol Compatibility
 
@@ -12,10 +12,10 @@
 | Disconnect | ✅ | ✅ |
 | Batch Ingest | ❌ | ✅ |
 | Epoch Fencing | ❌ | ✅ |
-| Binary Params | ❌ | ✅ |
+| Binary Params | ❌ | ✅ (server-side binding) |
 | Pipeline | ❌ | ✅ (client-side) |
 | Compression (LZ4) | ❌ | ❌ (planned) |
-| TLS | ❌ | ❌ (planned) |
+| TLS | ❌ | ✅ (`ssl=true`) |
 
 ### JDBC Interface Coverage
 
@@ -24,11 +24,11 @@
 | `java.sql.Driver` | ✅ Full | URL parsing, SPI registration |
 | `java.sql.Connection` | ✅ Core | `createStatement`, `prepareStatement`, `commit`, `rollback`, `close`, `isValid` |
 | `java.sql.Statement` | ✅ Core | `executeQuery`, `executeUpdate`, `execute` |
-| `java.sql.PreparedStatement` | ✅ Core | Client-side parameter binding, `executeBatch` |
+| `java.sql.PreparedStatement` | ✅ Core | Server-side binary params (v1), client-side fallback (v0), native batch protocol |
 | `java.sql.ResultSet` | ✅ Core | Forward-only, read-only, all getter types |
 | `java.sql.ResultSetMetaData` | ✅ Full | Column name, type, nullable, precision, scale |
 | `javax.sql.DataSource` | ✅ Full | HikariCP-compatible properties |
-| `java.sql.DatabaseMetaData` | ❌ | Not yet implemented |
+| `java.sql.DatabaseMetaData` | ✅ Core | getTables, getColumns, getPrimaryKeys, getIndexInfo, getSchemas, getCatalogs |
 | `java.sql.CallableStatement` | ❌ | Not supported |
 | `java.sql.Savepoint` | ❌ | Not yet implemented |
 
@@ -41,7 +41,7 @@
 | `Connection.setNetworkTimeout()` | ✅ |
 | `DataSource.getConnection()` | ✅ |
 | `DataSource.getConnection(user, pass)` | ✅ |
-| Connection pool properties | ✅ `host`, `port`, `database`, `user`, `password`, `connectTimeout` |
+| Connection pool properties | ✅ `host`, `port`, `database`, `user`, `password`, `connectTimeout`, `ssl`, `sslTrustAll` |
 
 ### HA / Failover
 
@@ -79,8 +79,8 @@
 
 ### Known Limitations
 
-1. **Client-side parameter binding**: Parameters are bound by string substitution, not server-side prepared statements. SQL injection risk if used incorrectly — always use `PreparedStatement`.
+1. **Parameter binding**: With protocol v1 (minor=1), parameters are sent as typed binary values to the server. With protocol v0, parameters are bound client-side by string substitution — always use `PreparedStatement`.
 2. **No streaming ResultSet**: All rows are materialized in memory.
-3. **No DatabaseMetaData**: Schema introspection not yet available.
+3. **Limited DatabaseMetaData**: Core schema introspection (tables, columns, keys, indexes) is available; some advanced metadata methods return empty result sets.
 4. **No LOB support**: BLOB/CLOB not supported; use BYTEA/TEXT instead.
 5. **Forward-only ResultSet**: No scrollable or updatable result sets.

@@ -8,6 +8,8 @@
 //! The vectorized path is used for full-table scans and aggregations where
 //! batch processing amortises per-row overhead and enables SIMD-friendly loops.
 
+use std::borrow::Cow;
+
 use falcon_common::datum::{Datum, OwnedRow};
 use falcon_common::error::ExecutionError;
 use falcon_sql_frontend::types::*;
@@ -55,7 +57,7 @@ impl ColumnVector {
         }
     }
 
-    /// Get value at index as a Datum.
+    /// Get value at index as a Datum (clones Text/Mixed).
     pub fn get_datum(&self, idx: usize) -> Datum {
         match self {
             Self::Booleans { values, nulls } => {
@@ -94,6 +96,18 @@ impl ColumnVector {
                 }
             }
             Self::Mixed(v) => v[idx].clone(),
+        }
+    }
+
+    /// Get a zero-copy reference to the value at `idx`.
+    /// For Mixed columns this returns `Cow::Borrowed`, avoiding a Datum clone.
+    /// For typed columns (primitives + Text), this returns `Cow::Owned` which
+    /// is still cheaper than `get_datum` for Text because callers that only
+    /// need `&Datum` can use `&*cow` without moving.
+    pub fn get_datum_ref(&self, idx: usize) -> Cow<'_, Datum> {
+        match self {
+            Self::Mixed(v) => Cow::Borrowed(&v[idx]),
+            _ => Cow::Owned(self.get_datum(idx)),
         }
     }
 
@@ -302,7 +316,7 @@ impl RecordBatch {
         let indices = self.active_indices();
         let num_cols = self.columns.len();
         let mut rows = Vec::with_capacity(indices.len());
-        for &idx in &indices {
+        for &idx in &*indices {
             let mut values = Vec::with_capacity(num_cols);
             for col in &self.columns {
                 values.push(col.get_datum(idx));
@@ -313,8 +327,13 @@ impl RecordBatch {
     }
 
     /// Return active row indices.
-    pub fn active_indices(&self) -> Vec<usize> {
-        self.selection.as_ref().map_or_else(|| (0..self.num_rows).collect(), Clone::clone)
+    /// Returns `Cow::Borrowed` when a selection vector exists (zero-copy),
+    /// or `Cow::Owned` with a range vector when all rows are active.
+    pub fn active_indices(&self) -> Cow<'_, [usize]> {
+        match &self.selection {
+            Some(sel) => Cow::Borrowed(sel.as_slice()),
+            None => Cow::Owned((0..self.num_rows).collect()),
+        }
     }
 
     /// Number of active (non-filtered) rows.
@@ -356,29 +375,37 @@ pub fn vectorized_filter(batch: &mut RecordBatch, filter: &BoundExpr) {
                 vectorized_filter(batch, right);
                 return;
             }
-            // Fallback: row-at-a-time
-            for &idx in &indices {
-                let row = make_row_from_batch(batch, idx);
-                if crate::expr_engine::ExprEngine::eval_filter(filter, &row).unwrap_or(false) {
+            // Fallback: row-at-a-time (reuse buffer across rows)
+            let mut row_buf = Vec::with_capacity(batch.columns.len());
+            for &idx in &*indices {
+                if eval_filter_on_batch_row(batch, idx, filter, &mut row_buf) {
                     new_sel.push(idx);
                 }
             }
             batch.selection = Some(new_sel);
         }
         BoundExpr::Not(inner) => {
-            // Apply inner, then invert
-            let before: std::collections::HashSet<usize> = indices.iter().copied().collect();
+            // Apply inner, then invert using a bitvec instead of 2× HashSet.
+            let before_indices = indices.into_owned();
             vectorized_filter(batch, inner);
-            let after: std::collections::HashSet<usize> =
-                batch.active_indices().into_iter().collect();
-            let inverted: Vec<usize> = before.difference(&after).copied().collect();
+            let after = batch.active_indices();
+            // Build bitvec marking rows that passed the inner filter
+            let mut passed = vec![false; batch.num_rows];
+            for &idx in &*after {
+                passed[idx] = true;
+            }
+            // Collect rows from "before" that did NOT pass the inner filter
+            let inverted: Vec<usize> = before_indices
+                .into_iter()
+                .filter(|&idx| !passed[idx])
+                .collect();
             batch.selection = Some(inverted);
         }
         _ => {
-            // Fallback: row-at-a-time
-            for &idx in &indices {
-                let row = make_row_from_batch(batch, idx);
-                if crate::expr_engine::ExprEngine::eval_filter(filter, &row).unwrap_or(false) {
+            // Fallback: row-at-a-time (reuse buffer across rows)
+            let mut row_buf = Vec::with_capacity(batch.columns.len());
+            for &idx in &*indices {
+                if eval_filter_on_batch_row(batch, idx, filter, &mut row_buf) {
                     new_sel.push(idx);
                 }
             }
@@ -503,16 +530,50 @@ fn str_cmp(a: &str, b: &str, op: BinOp) -> bool {
 }
 
 fn datum_cmp(a: &Datum, b: &Datum, op: BinOp) -> bool {
-    if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) { float_cmp(af, bf, op) } else {
-        let sa = format!("{a}");
-        let sb = format!("{b}");
-        str_cmp(&sa, &sb, op)
+    if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
+        float_cmp(af, bf, op)
+    } else {
+        // Use cmp_datum_values to avoid per-comparison format!() allocation
+        let ord = cmp_datum_values(a, b);
+        match op {
+            BinOp::Eq => ord == std::cmp::Ordering::Equal,
+            BinOp::NotEq => ord != std::cmp::Ordering::Equal,
+            BinOp::Lt => ord == std::cmp::Ordering::Less,
+            BinOp::LtEq => ord != std::cmp::Ordering::Greater,
+            BinOp::Gt => ord == std::cmp::Ordering::Greater,
+            BinOp::GtEq => ord != std::cmp::Ordering::Less,
+            _ => false,
+        }
     }
 }
 
 fn make_row_from_batch(batch: &RecordBatch, idx: usize) -> OwnedRow {
-    let values: Vec<Datum> = batch.columns.iter().map(|c| c.get_datum(idx)).collect();
+    let mut values = Vec::with_capacity(batch.columns.len());
+    for col in &batch.columns {
+        values.push(col.get_datum(idx));
+    }
     OwnedRow::new(values)
+}
+
+/// Evaluate a filter on a single row from a batch, reusing `buf` across calls
+/// to avoid per-row Vec allocation. The Vec is borrowed, filled, wrapped in
+/// OwnedRow for eval, then reclaimed.
+#[inline]
+fn eval_filter_on_batch_row(
+    batch: &RecordBatch,
+    idx: usize,
+    filter: &BoundExpr,
+    buf: &mut Vec<Datum>,
+) -> bool {
+    buf.clear();
+    for col in &batch.columns {
+        buf.push(col.get_datum(idx));
+    }
+    let row = OwnedRow::new(std::mem::take(buf));
+    let result = crate::expr_engine::ExprEngine::eval_filter(filter, &row).unwrap_or(false);
+    // Reclaim the Vec allocation for reuse
+    *buf = row.values;
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -861,12 +922,19 @@ pub fn vectorized_project(
                 }
             }
             BoundProjection::Expr(expr, _) => {
-                // Evaluate expression per active row
+                // Evaluate expression per active row — reuse buffer across rows
                 let mut datums = Vec::with_capacity(num_active);
-                for &idx in &indices {
-                    let row = make_row_from_batch(batch, idx);
+                let mut row_buf: Vec<Datum> = Vec::with_capacity(batch.columns.len());
+                for &idx in &*indices {
+                    row_buf.clear();
+                    for col in &batch.columns {
+                        row_buf.push(col.get_datum(idx));
+                    }
+                    let row = OwnedRow::new(std::mem::take(&mut row_buf));
                     let val =
                         crate::expr_engine::ExprEngine::eval_row(expr, &row).unwrap_or(Datum::Null);
+                    // Reclaim buffer for reuse
+                    row_buf = row.values;
                     datums.push(val);
                 }
                 out_cols.push(ColumnVector::from_datums(&datums));
@@ -990,32 +1058,36 @@ pub fn vectorized_hash_join(
     let left_ncols = left.columns.len();
     let right_ncols = right.columns.len();
 
-    // Build phase: hash table keyed by right key columns → list of right row indices
-    let mut hash_table: HashMap<Vec<u64>, Vec<usize>> = HashMap::new();
-    for &ri in &right_indices {
-        let key: Vec<u64> = right_key_cols
-            .iter()
-            .map(|&c| hash_datum(&right.columns[c].get_datum(ri)))
-            .collect();
-        hash_table.entry(key).or_default().push(ri);
+    // Build phase: hash table keyed by right key columns → list of right row indices.
+    // Reuse a single key buffer to avoid per-row Vec allocation.
+    let mut hash_table: HashMap<Vec<u64>, Vec<usize>> =
+        HashMap::with_capacity(right_indices.len());
+    let mut key_buf: Vec<u64> = Vec::with_capacity(right_key_cols.len());
+    for &ri in &*right_indices {
+        key_buf.clear();
+        for &c in right_key_cols {
+            key_buf.push(hash_datum(&right.columns[c].get_datum_ref(ri)));
+        }
+        hash_table.entry(key_buf.clone()).or_default().push(ri);
     }
 
-    // Probe phase: for each left row, look up matching right rows
+    // Probe phase: for each left row, look up matching right rows.
+    // Reuse key_buf for probing — zero allocation per probe.
     let mut out_left_idxs: Vec<usize> = Vec::new();
     let mut out_right_idxs: Vec<usize> = Vec::new();
 
-    for &li in &left_indices {
-        let probe_key: Vec<u64> = left_key_cols
-            .iter()
-            .map(|&c| hash_datum(&left.columns[c].get_datum(li)))
-            .collect();
-        if let Some(matches) = hash_table.get(&probe_key) {
+    for &li in &*left_indices {
+        key_buf.clear();
+        for &c in left_key_cols {
+            key_buf.push(hash_datum(&left.columns[c].get_datum_ref(li)));
+        }
+        if let Some(matches) = hash_table.get(&key_buf) {
             for &ri in matches {
                 // Verify actual equality (hash collision check)
                 let mut eq = true;
                 for (&lk, &rk) in left_key_cols.iter().zip(right_key_cols.iter()) {
-                    let lv = left.columns[lk].get_datum(li);
-                    let rv = right.columns[rk].get_datum(ri);
+                    let lv = left.columns[lk].get_datum_ref(li);
+                    let rv = right.columns[rk].get_datum_ref(ri);
                     if !datum_equal(&lv, &rv) {
                         eq = false;
                         break;
@@ -1122,12 +1194,12 @@ pub fn vectorized_sort(batch: &RecordBatch, sort_keys: &[VecSortKey]) -> RecordB
         return batch.clone();
     }
 
-    let mut indices = batch.active_indices();
+    let mut indices = batch.active_indices().into_owned();
 
-    indices.sort_by(|&a, &b| {
+    indices.sort_unstable_by(|&a, &b| {
         for key in sort_keys {
-            let da = batch.columns[key.col_idx].get_datum(a);
-            let db = batch.columns[key.col_idx].get_datum(b);
+            let da = batch.columns[key.col_idx].get_datum_ref(a);
+            let db = batch.columns[key.col_idx].get_datum_ref(b);
             let ord = cmp_datum_sort(&da, &db, key.nulls_first);
             if ord != std::cmp::Ordering::Equal {
                 return if key.descending { ord.reverse() } else { ord };
@@ -1204,7 +1276,34 @@ fn cmp_datum_values(a: &Datum, b: &Datum) -> std::cmp::Ordering {
         (Datum::Boolean(x), Datum::Boolean(y)) => x.cmp(y),
         (Datum::Timestamp(x), Datum::Timestamp(y)) => x.cmp(y),
         (Datum::Date(x), Datum::Date(y)) => x.cmp(y),
+        (Datum::Time(x), Datum::Time(y)) => x.cmp(y),
+        (Datum::Decimal(mx, sx), Datum::Decimal(my, sy)) => {
+            // Normalize to common scale for correct comparison
+            if sx == sy {
+                mx.cmp(my)
+            } else if sx < sy {
+                let shift = u32::from(*sy - *sx);
+                let mx_scaled = mx.saturating_mul(10i128.saturating_pow(shift));
+                mx_scaled.cmp(my)
+            } else {
+                let shift = u32::from(*sx - *sy);
+                let my_scaled = my.saturating_mul(10i128.saturating_pow(shift));
+                mx.cmp(&my_scaled)
+            }
+        }
+        (Datum::Uuid(x), Datum::Uuid(y)) => x.cmp(y),
+        (Datum::Bytea(x), Datum::Bytea(y)) => x.cmp(y),
+        (Datum::Interval(m1, d1, u1), Datum::Interval(m2, d2, u2)) => {
+            // Compare by total microseconds approximation
+            let total_a = (*m1 as i64) * 30 * 86_400_000_000 + (*d1 as i64) * 86_400_000_000 + *u1;
+            let total_b = (*m2 as i64) * 30 * 86_400_000_000 + (*d2 as i64) * 86_400_000_000 + *u2;
+            total_a.cmp(&total_b)
+        }
+        (Datum::Null, Datum::Null) => std::cmp::Ordering::Equal,
         _ => {
+            // Rare fallback for Array, Jsonb, or cross-type comparisons.
+            // All common same-type pairs are handled above, so format!()
+            // only fires for genuinely uncommon cases.
             let sa = format!("{a}");
             let sb = format!("{b}");
             sa.cmp(&sb)

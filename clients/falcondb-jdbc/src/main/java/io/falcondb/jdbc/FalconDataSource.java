@@ -12,7 +12,7 @@ import java.util.logging.Logger;
  * DataSource implementation for FalconDB. Compatible with HikariCP.
  *
  * Required properties: host, port, database, user, password.
- * Optional: connectTimeout, fallback, fallbackUrl.
+ * Optional: connectTimeout, ssl, sslTrustAll, fallback, fallbackUrl.
  */
 public class FalconDataSource implements DataSource {
 
@@ -24,6 +24,8 @@ public class FalconDataSource implements DataSource {
     private int connectTimeout = 5000;
     private String fallback = "";
     private String fallbackUrl = "";
+    private boolean ssl = false;
+    private boolean sslTrustAll = false;
     private PrintWriter logWriter;
     private int loginTimeout = 0;
 
@@ -61,6 +63,12 @@ public class FalconDataSource implements DataSource {
     public String getFallbackUrl() { return fallbackUrl; }
     public void setFallbackUrl(String fallbackUrl) { this.fallbackUrl = fallbackUrl; }
 
+    public boolean getSsl() { return ssl; }
+    public void setSsl(boolean ssl) { this.ssl = ssl; }
+
+    public boolean getSslTrustAll() { return sslTrustAll; }
+    public void setSslTrustAll(boolean sslTrustAll) { this.sslTrustAll = sslTrustAll; }
+
     // ── DataSource interface ─────────────────────────────────────────
 
     @Override
@@ -72,6 +80,8 @@ public class FalconDataSource implements DataSource {
     public Connection getConnection(String username, String password) throws SQLException {
         String url = String.format("jdbc:falcondb://%s:%d/%s?user=%s&password=%s&connectTimeout=%d",
             host, port, database, username, password, connectTimeout);
+        if (ssl) url += "&ssl=true";
+        if (sslTrustAll) url += "&sslTrustAll=true";
         if (!fallback.isEmpty()) url += "&fallback=" + fallback;
         if (!fallbackUrl.isEmpty()) url += "&fallbackUrl=" + fallbackUrl;
 

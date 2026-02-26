@@ -37,21 +37,26 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --workspace
       - run: cargo test --workspace
-      - name: Package
+      - name: Package tarball
         run: |
-          VERSION=${{ needs.validate-tag.outputs.version }}
-          mkdir -p dist-linux/FalconDB/bin
-          cp target/release/falcon dist-linux/FalconDB/bin/
-          cp target/release/fsql dist-linux/FalconDB/bin/ 2>/dev/null || true
-          cp -r dist/conf dist-linux/FalconDB/
-          echo "FalconDB v${VERSION}" > dist-linux/FalconDB/VERSION
-          echo "Build: linux-x86_64" >> dist-linux/FalconDB/VERSION
-          echo "Git: $(git rev-parse --short=8 HEAD)" >> dist-linux/FalconDB/VERSION
-          cd dist-linux && tar czf ../FalconDB-${VERSION}-linux-x86_64.tar.gz FalconDB/
+          chmod +x scripts/build_linux_dist.sh
+          ./scripts/build_linux_dist.sh
+      - name: Package .deb
+        run: |
+          chmod +x scripts/build_deb.sh
+          ./scripts/build_deb.sh
+      - name: Package .rpm
+        run: |
+          sudo apt-get update && sudo apt-get install -y rpm
+          chmod +x scripts/build_rpm.sh
+          ./scripts/build_rpm.sh
       - uses: actions/upload-artifact@v4
         with:
           name: linux-dist
-          path: FalconDB-*.tar.gz
+          path: |
+            target/dist/falcondb-*.tar.gz
+            target/dist/falcondb_*.deb
+            target/dist/falcondb-*.rpm
 
   build-windows:
     name: Build Windows

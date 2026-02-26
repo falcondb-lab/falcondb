@@ -1204,8 +1204,10 @@ impl Executor {
 /// Map a DataType to the cast target string used by eval_cast.
 fn datatype_to_cast_target(dt: &DataType) -> String {
     match dt {
+        DataType::Int16 => "smallint".into(),
         DataType::Int32 => "int".into(),
         DataType::Int64 => "bigint".into(),
+        DataType::Float32 => "real".into(),
         DataType::Float64 => "float".into(),
         DataType::Boolean => "boolean".into(),
         DataType::Text => "text".into(),

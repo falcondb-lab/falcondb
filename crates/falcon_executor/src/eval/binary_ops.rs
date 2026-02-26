@@ -16,11 +16,15 @@ pub fn eval_binary_op(
         };
     }
 
-    // Cross-type coercion for comparisons: when one side is Date/Timestamp and the other is Text,
-    // cast the Text to match the typed side.
-    let (left, right) = coerce_for_comparison(left, right);
-    let left = &left;
-    let right = &right;
+    // Fast path: skip coercion when both sides are the same Datum variant.
+    // This avoids 2 Datum clones for the common same-type case.
+    // Only invoke coercion for cross-type pairs (Date vs Text, Int32 vs Int64, etc.).
+    if std::mem::discriminant(left) != std::mem::discriminant(right) {
+        let (cl, cr) = coerce_for_comparison(left, right);
+        // Use eval_binary_op_same to avoid re-entering coercion (prevents infinite recursion
+        // when coercion cannot unify the types).
+        return eval_binary_op_same(&cl, op, &cr);
+    }
 
     match op {
         BinOp::Eq => Ok(Datum::Boolean(left == right)),
@@ -72,6 +76,108 @@ pub fn eval_binary_op(
             eval_arithmetic(left, right, |a, b| a % b, |a, b| a % b)
         }
         // JSONB operators
+        BinOp::JsonArrow => eval_json_arrow(left, right, false),
+        BinOp::JsonArrowText => eval_json_arrow(left, right, true),
+        BinOp::JsonHashArrow => eval_json_path(left, right, false),
+        BinOp::JsonHashArrowText => eval_json_path(left, right, true),
+        BinOp::JsonContains => eval_json_contains(left, right),
+        BinOp::JsonContainedBy => eval_json_contains(right, left),
+        BinOp::JsonExists => eval_json_exists(left, right),
+        BinOp::StringConcat => match (left, right) {
+            (Datum::Array(a), Datum::Array(b)) => {
+                let mut result = a.clone();
+                result.extend(b.iter().cloned());
+                Ok(Datum::Array(result))
+            }
+            (Datum::Array(a), elem) if !elem.is_null() => {
+                let mut result = a.clone();
+                result.push(elem.clone());
+                Ok(Datum::Array(result))
+            }
+            (elem, Datum::Array(b)) if !elem.is_null() => {
+                let mut result = vec![elem.clone()];
+                result.extend(b.iter().cloned());
+                Ok(Datum::Array(result))
+            }
+            (Datum::Null, _) | (_, Datum::Null) => Ok(Datum::Null),
+            (l, r) => {
+                let ls = match l {
+                    Datum::Text(s) => s.clone(),
+                    other => format!("{other}"),
+                };
+                let rs = match r {
+                    Datum::Text(s) => s.clone(),
+                    other => format!("{other}"),
+                };
+                Ok(Datum::Text(format!("{ls}{rs}")))
+            }
+        },
+    }
+}
+
+/// Inner binary op evaluation — called after coercion. Does NOT re-enter
+/// coercion, preventing infinite recursion when types remain mismatched.
+fn eval_binary_op_same(
+    left: &Datum,
+    op: BinOp,
+    right: &Datum,
+) -> Result<Datum, ExecutionError> {
+    if left.is_null() || right.is_null() {
+        return match op {
+            BinOp::And => eval_and_null(left, right),
+            BinOp::Or => eval_or_null(left, right),
+            _ => Ok(Datum::Null),
+        };
+    }
+    match op {
+        BinOp::Eq => Ok(Datum::Boolean(left == right)),
+        BinOp::NotEq => Ok(Datum::Boolean(left != right)),
+        BinOp::Lt => Ok(Datum::Boolean(left < right)),
+        BinOp::LtEq => Ok(Datum::Boolean(left <= right)),
+        BinOp::Gt => Ok(Datum::Boolean(left > right)),
+        BinOp::GtEq => Ok(Datum::Boolean(left >= right)),
+        BinOp::And => {
+            let lb = left
+                .as_bool()
+                .ok_or_else(|| ExecutionError::TypeError("AND requires boolean".into()))?;
+            let rb = right
+                .as_bool()
+                .ok_or_else(|| ExecutionError::TypeError("AND requires boolean".into()))?;
+            Ok(Datum::Boolean(lb && rb))
+        }
+        BinOp::Or => {
+            let lb = left
+                .as_bool()
+                .ok_or_else(|| ExecutionError::TypeError("OR requires boolean".into()))?;
+            let rb = right
+                .as_bool()
+                .ok_or_else(|| ExecutionError::TypeError("OR requires boolean".into()))?;
+            Ok(Datum::Boolean(lb || rb))
+        }
+        BinOp::Plus => eval_arithmetic(left, right, |a, b| a + b, |a, b| a + b),
+        BinOp::Minus => eval_arithmetic(left, right, |a, b| a - b, |a, b| a - b),
+        BinOp::Multiply => eval_arithmetic(left, right, |a, b| a * b, |a, b| a * b),
+        BinOp::Divide => {
+            match right {
+                Datum::Int32(0) | Datum::Int64(0) => {
+                    return Err(ExecutionError::DivisionByZero);
+                }
+                Datum::Float64(f) if *f == 0.0 => {
+                    return Err(ExecutionError::DivisionByZero);
+                }
+                _ => {}
+            }
+            eval_arithmetic(left, right, |a, b| a / b, |a, b| a / b)
+        }
+        BinOp::Modulo => {
+            match right {
+                Datum::Int32(0) | Datum::Int64(0) => {
+                    return Err(ExecutionError::DivisionByZero);
+                }
+                _ => {}
+            }
+            eval_arithmetic(left, right, |a, b| a % b, |a, b| a % b)
+        }
         BinOp::JsonArrow => eval_json_arrow(left, right, false),
         BinOp::JsonArrowText => eval_json_arrow(left, right, true),
         BinOp::JsonHashArrow => eval_json_path(left, right, false),

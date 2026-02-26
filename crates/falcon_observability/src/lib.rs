@@ -857,6 +857,48 @@ pub fn record_cluster_health_metrics(
     metrics::gauge!("falcon_cluster_replication_lag_max_ms").set(replication_lag_max_ms as f64);
 }
 
+/// Record segment-level replication streaming metrics.
+pub fn record_segment_streaming_metrics(
+    handshakes_total: u64,
+    segments_streamed_total: u64,
+    segment_bytes_total: u64,
+    tail_bytes_total: u64,
+    checksum_failures: u64,
+    error_rollbacks: u64,
+    snapshots_created: u64,
+) {
+    metrics::gauge!("falcon_repl_handshakes_total").set(handshakes_total as f64);
+    metrics::gauge!("falcon_repl_segments_streamed_total").set(segments_streamed_total as f64);
+    metrics::gauge!("falcon_repl_segment_bytes_total").set(segment_bytes_total as f64);
+    metrics::gauge!("falcon_repl_tail_bytes_total").set(tail_bytes_total as f64);
+    metrics::gauge!("falcon_repl_checksum_failures_total").set(checksum_failures as f64);
+    metrics::gauge!("falcon_repl_error_rollbacks_total").set(error_rollbacks as f64);
+    metrics::gauge!("falcon_repl_snapshots_created_total").set(snapshots_created as f64);
+}
+
+/// Record automatic shard rebalancer metrics.
+pub fn record_rebalancer_metrics(
+    runs_completed: u64,
+    total_rows_migrated: u64,
+    is_running: bool,
+    is_paused: bool,
+    last_imbalance_ratio: f64,
+    last_completed_tasks: u64,
+    last_failed_tasks: u64,
+    last_duration_ms: u64,
+    shard_move_rate: f64,
+) {
+    metrics::gauge!("falcon_rebalancer_runs_total").set(runs_completed as f64);
+    metrics::gauge!("falcon_rebalancer_rows_migrated_total").set(total_rows_migrated as f64);
+    metrics::gauge!("falcon_rebalancer_running").set(if is_running { 1.0 } else { 0.0 });
+    metrics::gauge!("falcon_rebalancer_paused").set(if is_paused { 1.0 } else { 0.0 });
+    metrics::gauge!("falcon_rebalancer_imbalance_ratio").set(last_imbalance_ratio);
+    metrics::gauge!("falcon_rebalancer_completed_tasks").set(last_completed_tasks as f64);
+    metrics::gauge!("falcon_rebalancer_failed_tasks").set(last_failed_tasks as f64);
+    metrics::gauge!("falcon_rebalancer_last_duration_ms").set(last_duration_ms as f64);
+    metrics::gauge!("falcon_rebalancer_move_rate_rows_per_sec").set(shard_move_rate);
+}
+
 /// Record lock contention event for a named lock/structure.
 pub fn record_lock_contention(lock_name: &str, wait_us: u64) {
     metrics::counter!(

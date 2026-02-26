@@ -13,6 +13,8 @@ import java.util.logging.Logger;
  *   fallback=pgjdbc          - fall back to PostgreSQL JDBC on native failure
  *   fallbackUrl=jdbc:postgresql://...  - explicit fallback URL
  *   connectTimeout=5000      - connection timeout in ms
+ *   ssl=true                 - enable TLS encryption
+ *   sslTrustAll=true         - trust all server certificates (dev only)
  */
 public class FalconDriver implements Driver {
 
@@ -42,9 +44,15 @@ public class FalconDriver implements Driver {
         }
         if (password == null) password = "";
 
+        boolean sslEnabled = Boolean.parseBoolean(
+            info.getProperty("ssl", parsed.params.getOrDefault("ssl", "false")));
+        boolean sslTrustAll = Boolean.parseBoolean(
+            info.getProperty("sslTrustAll", parsed.params.getOrDefault("sslTrustAll", "false")));
+
         try {
             return new FalconConnection(parsed.host, parsed.port, parsed.database,
-                                        user, password, connectTimeout);
+                                        user, password, connectTimeout,
+                                        sslEnabled, sslTrustAll);
         } catch (Exception e) {
             // Fallback to pgjdbc if configured
             String fallback = info.getProperty("fallback", parsed.params.getOrDefault("fallback", ""));
@@ -75,6 +83,8 @@ public class FalconDriver implements Driver {
             new DriverPropertyInfo("user", info.getProperty("user")),
             new DriverPropertyInfo("password", info.getProperty("password")),
             new DriverPropertyInfo("connectTimeout", "5000"),
+            new DriverPropertyInfo("ssl", "false"),
+            new DriverPropertyInfo("sslTrustAll", "false"),
             new DriverPropertyInfo("fallback", ""),
             new DriverPropertyInfo("fallbackUrl", ""),
         };

@@ -1,0 +1,36 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        # Create falcondb system user if not exists
+        if ! getent passwd falcondb >/dev/null 2>&1; then
+            adduser --system --group --no-create-home \
+                --home /var/lib/falcondb \
+                --shell /usr/sbin/nologin \
+                --gecos "FalconDB Database Server" \
+                falcondb
+        fi
+
+        # Create data and log directories
+        install -d -m 0750 -o falcondb -g falcondb /var/lib/falcondb
+        install -d -m 0750 -o falcondb -g falcondb /var/log/falcondb
+
+        # Ensure config directory permissions
+        if [ -d /etc/falcondb ]; then
+            chown root:falcondb /etc/falcondb
+            chmod 0750 /etc/falcondb
+        fi
+
+        # Enable and start systemd service
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload
+            systemctl enable falcondb.service
+            echo "FalconDB installed. Start with: sudo systemctl start falcondb"
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

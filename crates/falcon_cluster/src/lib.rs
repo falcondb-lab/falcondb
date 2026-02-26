@@ -86,8 +86,8 @@ pub use query_engine::{
 };
 pub use rebalancer::{
     MigrationPhase, MigrationPlan, MigrationStatus, MigrationTask, RebalanceRunner,
-    RebalanceRunnerConfig, RebalanceRunnerHandle, RebalancerConfig, RebalancerStatus,
-    ShardLoadDetailed, ShardLoadSnapshot, ShardRebalancer, TableLoad,
+    RebalanceRunnerConfig, RebalanceRunnerHandle, RebalancerConfig, RebalancerMetrics,
+    RebalancerStatus, ShardLoadDetailed, ShardLoadSnapshot, ShardRebalancer, TableLoad,
 };
 pub use replication::{
     apply_wal_record_to_engine, AsyncReplicationTransport, ChannelTransport, InProcessTransport,

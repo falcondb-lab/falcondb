@@ -1,0 +1,17 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    remove|purge)
+        # Stop and disable the service
+        if [ -d /run/systemd/system ]; then
+            systemctl stop falcondb.service 2>/dev/null || true
+            systemctl disable falcondb.service 2>/dev/null || true
+            systemctl daemon-reload
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0
