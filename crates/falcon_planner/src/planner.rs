@@ -381,6 +381,9 @@ impl Planner {
                 if let Some(plan) = Self::try_index_scan_plan(sel, indexes) {
                     return Ok(plan);
                 }
+                if let Some(plan) = Self::try_index_range_scan_plan(sel, indexes) {
+                    return Ok(plan);
+                }
             }
         }
         // EXPLAIN / EXPLAIN ANALYZE: recurse
@@ -482,6 +485,20 @@ impl Planner {
                 ctes,
                 unions,
                 ..
+            }
+            | PhysicalPlan::IndexRangeScan {
+                projections,
+                group_by,
+                grouping_sets,
+                having,
+                order_by,
+                limit,
+                offset,
+                distinct,
+                filter,
+                ctes,
+                unions,
+                ..
             } => {
                 // If the query has cross-table subqueries (IN/EXISTS/scalar subquery),
                 // CTEs, UNIONs, or GROUPING SETS, DON'T distribute — requires
@@ -524,7 +541,8 @@ impl Planner {
                 if let Some(new_projs) = rewritten_projs {
                     match &mut subplan {
                         PhysicalPlan::SeqScan { projections, .. }
-                        | PhysicalPlan::IndexScan { projections, .. } => {
+                        | PhysicalPlan::IndexScan { projections, .. }
+                        | PhysicalPlan::IndexRangeScan { projections, .. } => {
                             *projections = new_projs;
                         }
                         _ => {}
@@ -603,6 +621,11 @@ impl Planner {
                 ..
             }
             | PhysicalPlan::IndexScan {
+                limit: lim,
+                offset: off,
+                ..
+            }
+            | PhysicalPlan::IndexRangeScan {
                 limit: lim,
                 offset: off,
                 ..
@@ -749,10 +772,15 @@ impl Planner {
         }
     }
 
-    /// Strip HAVING from a SeqScan subplan (applied post-merge in TwoPhaseAgg).
+    /// Strip HAVING from a SeqScan/IndexScan/IndexRangeScan subplan (applied post-merge in TwoPhaseAgg).
     fn strip_having(plan: &mut PhysicalPlan) {
-        if let PhysicalPlan::SeqScan { having, .. } = plan {
-            *having = None;
+        match plan {
+            PhysicalPlan::SeqScan { having, .. }
+            | PhysicalPlan::IndexScan { having, .. }
+            | PhysicalPlan::IndexRangeScan { having, .. } => {
+                *having = None;
+            }
+            _ => {}
         }
     }
 
@@ -1350,6 +1378,176 @@ impl Planner {
             unions: sel.unions.clone(),
             virtual_rows: sel.virtual_rows.clone(),
         })
+    }
+
+    /// Try to produce an IndexRangeScan plan for a single-table SELECT when the
+    /// filter contains a range predicate (>, <, >=, <=, BETWEEN) on an indexed column.
+    fn try_index_range_scan_plan(
+        sel: &BoundSelect,
+        indexes: &IndexedColumns,
+    ) -> Option<PhysicalPlan> {
+        let filter = sel.filter.as_ref()?;
+        let indexed_cols = indexes.get(&sel.table_id)?;
+        if indexed_cols.is_empty() {
+            return None;
+        }
+
+        let (col_idx, lower, upper, residual) =
+            Self::try_extract_range_predicate(filter, indexed_cols)?;
+
+        Some(PhysicalPlan::IndexRangeScan {
+            table_id: sel.table_id,
+            schema: sel.schema.clone(),
+            index_col: col_idx,
+            lower_bound: lower,
+            upper_bound: upper,
+            projections: sel.projections.clone(),
+            visible_projection_count: sel.visible_projection_count,
+            filter: residual,
+            group_by: sel.group_by.clone(),
+            grouping_sets: sel.grouping_sets.clone(),
+            having: sel.having.clone(),
+            order_by: sel.order_by.clone(),
+            limit: sel.limit,
+            offset: sel.offset,
+            distinct: sel.distinct.clone(),
+            ctes: sel.ctes.clone(),
+            unions: sel.unions.clone(),
+            virtual_rows: sel.virtual_rows.clone(),
+        })
+    }
+
+    /// Extract range predicates from a filter expression that match an indexed column.
+    /// Returns (column_idx, lower_bound, upper_bound, residual_filter).
+    /// Each bound is `Option<(literal_expr, inclusive)>`.
+    fn try_extract_range_predicate(
+        filter: &BoundExpr,
+        indexed_cols: &[usize],
+    ) -> Option<(usize, Option<(BoundExpr, bool)>, Option<(BoundExpr, bool)>, Option<BoundExpr>)> {
+        // Flatten AND tree
+        let mut conjuncts: Vec<&BoundExpr> = Vec::new();
+        Self::flatten_and_refs(filter, &mut conjuncts);
+
+        for &col_idx in indexed_cols {
+            let mut lower: Option<(BoundExpr, bool)> = None;
+            let mut upper: Option<(BoundExpr, bool)> = None;
+            let mut matched: Vec<bool> = vec![false; conjuncts.len()];
+
+            for (ci, conj) in conjuncts.iter().enumerate() {
+                if let Some((cidx, lo, hi)) = Self::try_extract_single_range_bound(conj) {
+                    if cidx == col_idx {
+                        if let Some(l) = lo {
+                            lower = Some(l);
+                            matched[ci] = true;
+                        }
+                        if let Some(u) = hi {
+                            upper = Some(u);
+                            matched[ci] = true;
+                        }
+                    }
+                }
+            }
+
+            if lower.is_some() || upper.is_some() {
+                let remaining: Vec<BoundExpr> = conjuncts
+                    .iter()
+                    .zip(matched.iter())
+                    .filter(|(_, &m)| !m)
+                    .map(|(&conj, _)| conj.clone())
+                    .collect();
+                let residual = if remaining.is_empty() {
+                    None
+                } else {
+                    let mut acc = remaining[0].clone();
+                    for e in &remaining[1..] {
+                        acc = BoundExpr::BinaryOp {
+                            left: Box::new(acc),
+                            op: BinOp::And,
+                            right: Box::new(e.clone()),
+                        };
+                    }
+                    Some(acc)
+                };
+                return Some((col_idx, lower, upper, residual));
+            }
+        }
+        None
+    }
+
+    /// Extract a single range bound from a comparison expression.
+    /// Returns (col_idx, optional_lower_bound, optional_upper_bound).
+    fn try_extract_single_range_bound(
+        expr: &BoundExpr,
+    ) -> Option<(usize, Option<(BoundExpr, bool)>, Option<(BoundExpr, bool)>)> {
+        match expr {
+            BoundExpr::BinaryOp { left, op, right } => {
+                let (col_idx, lit, flipped) = match (left.as_ref(), right.as_ref()) {
+                    (BoundExpr::ColumnRef(idx), BoundExpr::Literal(_)) => {
+                        (*idx, right.as_ref().clone(), false)
+                    }
+                    (BoundExpr::Literal(_), BoundExpr::ColumnRef(idx)) => {
+                        (*idx, left.as_ref().clone(), true)
+                    }
+                    _ => return None,
+                };
+                let effective_op = if flipped {
+                    match op {
+                        BinOp::Gt => BinOp::Lt,
+                        BinOp::GtEq => BinOp::LtEq,
+                        BinOp::Lt => BinOp::Gt,
+                        BinOp::LtEq => BinOp::GtEq,
+                        other => *other,
+                    }
+                } else {
+                    *op
+                };
+                match effective_op {
+                    BinOp::Gt => Some((col_idx, Some((lit, false)), None)),
+                    BinOp::GtEq => Some((col_idx, Some((lit, true)), None)),
+                    BinOp::Lt => Some((col_idx, None, Some((lit, false)))),
+                    BinOp::LtEq => Some((col_idx, None, Some((lit, true)))),
+                    _ => None,
+                }
+            }
+            BoundExpr::Between {
+                expr: inner,
+                low,
+                high,
+                negated,
+            } => {
+                if *negated {
+                    return None;
+                }
+                if let BoundExpr::ColumnRef(idx) = inner.as_ref() {
+                    if let (BoundExpr::Literal(_), BoundExpr::Literal(_)) =
+                        (low.as_ref(), high.as_ref())
+                    {
+                        return Some((
+                            *idx,
+                            Some((*low.clone(), true)),
+                            Some((*high.clone(), true)),
+                        ));
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Flatten an AND expression tree into a list of conjuncts (borrows).
+    fn flatten_and_refs<'a>(expr: &'a BoundExpr, out: &mut Vec<&'a BoundExpr>) {
+        match expr {
+            BoundExpr::BinaryOp {
+                left,
+                op: BinOp::And,
+                right,
+            } => {
+                Self::flatten_and_refs(left, out);
+                Self::flatten_and_refs(right, out);
+            }
+            other => out.push(other),
+        }
     }
 
     /// Extract a `col = literal` predicate from a filter expression that matches

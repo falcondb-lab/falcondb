@@ -1,0 +1,42 @@
+# FalconDB PoC #4 — Observability: Monitoring Stack
+# Prometheus + Grafana for live metrics visualization.
+#
+# FalconDB nodes run on the host (not in Docker).
+# This compose file only runs the monitoring stack.
+#
+# Usage:
+#   docker compose -f docker/docker-compose.yml up -d
+#
+# Grafana:    http://localhost:3000  (admin/admin)
+# Prometheus: http://localhost:9090
+
+version: "3.8"
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: falcondb_prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ../prom/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: falcondb_grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/falcondb_overview.json
+    volumes:
+      - ../dashboards:/var/lib/grafana/dashboards:ro
+      - ./grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ./grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped

@@ -368,6 +368,81 @@ pub fn decode_message(buf: &mut BytesMut) -> Result<Option<FrontendMessage>, Str
     }
 }
 
+/// Decode a 'p' message as SASLInitialResponse during SASL auth step 1.
+///
+/// Wire format: `p` | int32 len | C-string mechanism | int32 data_len | data bytes
+///
+/// Returns `Ok(Some(SASLInitialResponse { mechanism, data }))` on success.
+pub fn decode_sasl_initial_response(buf: &mut BytesMut) -> Result<Option<FrontendMessage>, String> {
+    if buf.len() < 5 {
+        return Ok(None);
+    }
+    let msg_type = buf[0];
+    let len = (&buf[1..5]).get_i32() as usize;
+    if buf.len() < 1 + len {
+        return Ok(None);
+    }
+    if msg_type != b'p' {
+        return Err(format!(
+            "expected 'p' message for SASLInitialResponse, got '{}'",
+            msg_type as char
+        ));
+    }
+
+    buf.advance(1); // type byte
+    let mut msg_buf = buf.split_to(len);
+    msg_buf.advance(4); // length field
+
+    // Read mechanism name (C-string)
+    let mechanism = read_cstring(&mut msg_buf)?;
+
+    // Read SASL data length (i32, -1 means no data)
+    let data = if msg_buf.remaining() >= 4 {
+        let data_len = msg_buf.get_i32();
+        if data_len > 0 && msg_buf.remaining() >= data_len as usize {
+            let d = msg_buf[..data_len as usize].to_vec();
+            msg_buf.advance(data_len as usize);
+            d
+        } else {
+            Vec::new()
+        }
+    } else {
+        // Some clients may omit the length field and just append data after mechanism
+        msg_buf.to_vec()
+    };
+
+    Ok(Some(FrontendMessage::SASLInitialResponse { mechanism, data }))
+}
+
+/// Decode a 'p' message as SASLResponse during SASL auth step 2+.
+///
+/// Wire format: `p` | int32 len | data bytes (entire payload is SASL data)
+///
+/// Returns `Ok(Some(SASLResponse { data }))` on success.
+pub fn decode_sasl_response(buf: &mut BytesMut) -> Result<Option<FrontendMessage>, String> {
+    if buf.len() < 5 {
+        return Ok(None);
+    }
+    let msg_type = buf[0];
+    let len = (&buf[1..5]).get_i32() as usize;
+    if buf.len() < 1 + len {
+        return Ok(None);
+    }
+    if msg_type != b'p' {
+        return Err(format!(
+            "expected 'p' message for SASLResponse, got '{}'",
+            msg_type as char
+        ));
+    }
+
+    buf.advance(1); // type byte
+    let mut msg_buf = buf.split_to(len);
+    msg_buf.advance(4); // length field
+
+    let data = msg_buf.to_vec();
+    Ok(Some(FrontendMessage::SASLResponse { data }))
+}
+
 /// Encode a backend message into bytes.
 pub fn encode_message(msg: &BackendMessage) -> BytesMut {
     let mut buf = BytesMut::new();

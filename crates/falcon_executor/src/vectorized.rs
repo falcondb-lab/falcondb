@@ -227,6 +227,69 @@ impl ColumnVector {
     }
 }
 
+impl ColumnVector {
+    /// Build a new ColumnVector by gathering elements at the given indices.
+    /// Stays in the same typed representation — avoids intermediate Vec<Datum>
+    /// and the from_datums re-dispatch overhead.
+    pub fn gather(&self, indices: &[usize]) -> Self {
+        let n = indices.len();
+        match self {
+            Self::Int32s { values, nulls } => {
+                let mut v = Vec::with_capacity(n);
+                let mut nl = Vec::with_capacity(n);
+                for &i in indices {
+                    v.push(values[i]);
+                    nl.push(nulls[i]);
+                }
+                Self::Int32s { values: v, nulls: nl }
+            }
+            Self::Int64s { values, nulls } => {
+                let mut v = Vec::with_capacity(n);
+                let mut nl = Vec::with_capacity(n);
+                for &i in indices {
+                    v.push(values[i]);
+                    nl.push(nulls[i]);
+                }
+                Self::Int64s { values: v, nulls: nl }
+            }
+            Self::Float64s { values, nulls } => {
+                let mut v = Vec::with_capacity(n);
+                let mut nl = Vec::with_capacity(n);
+                for &i in indices {
+                    v.push(values[i]);
+                    nl.push(nulls[i]);
+                }
+                Self::Float64s { values: v, nulls: nl }
+            }
+            Self::Booleans { values, nulls } => {
+                let mut v = Vec::with_capacity(n);
+                let mut nl = Vec::with_capacity(n);
+                for &i in indices {
+                    v.push(values[i]);
+                    nl.push(nulls[i]);
+                }
+                Self::Booleans { values: v, nulls: nl }
+            }
+            Self::Texts { values, nulls } => {
+                let mut v = Vec::with_capacity(n);
+                let mut nl = Vec::with_capacity(n);
+                for &i in indices {
+                    v.push(values[i].clone());
+                    nl.push(nulls[i]);
+                }
+                Self::Texts { values: v, nulls: nl }
+            }
+            Self::Mixed(data) => {
+                let mut v = Vec::with_capacity(n);
+                for &i in indices {
+                    v.push(data[i].clone());
+                }
+                Self::Mixed(v)
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // RecordBatch
 // ---------------------------------------------------------------------------
@@ -313,15 +376,30 @@ impl RecordBatch {
 
     /// Materialise active rows back to OwnedRow format.
     pub fn to_rows(&self) -> Vec<OwnedRow> {
-        let indices = self.active_indices();
         let num_cols = self.columns.len();
-        let mut rows = Vec::with_capacity(indices.len());
-        for &idx in &*indices {
-            let mut values = Vec::with_capacity(num_cols);
-            for col in &self.columns {
-                values.push(col.get_datum(idx));
+        let count = self.active_count();
+        let mut rows = Vec::with_capacity(count);
+        // Inline iteration avoids the Vec<usize> allocation in active_indices()
+        // when no selection vector exists (all rows active).
+        match &self.selection {
+            Some(sel) => {
+                for &idx in sel {
+                    let mut values = Vec::with_capacity(num_cols);
+                    for col in &self.columns {
+                        values.push(col.get_datum(idx));
+                    }
+                    rows.push(OwnedRow::new(values));
+                }
             }
-            rows.push(OwnedRow::new(values));
+            None => {
+                for idx in 0..self.num_rows {
+                    let mut values = Vec::with_capacity(num_cols);
+                    for col in &self.columns {
+                        values.push(col.get_datum(idx));
+                    }
+                    rows.push(OwnedRow::new(values));
+                }
+            }
         }
         rows
     }
@@ -547,6 +625,7 @@ fn datum_cmp(a: &Datum, b: &Datum, op: BinOp) -> bool {
     }
 }
 
+#[allow(dead_code)]
 fn make_row_from_batch(batch: &RecordBatch, idx: usize) -> OwnedRow {
     let mut values = Vec::with_capacity(batch.columns.len());
     for col in &batch.columns {
@@ -1102,24 +1181,18 @@ pub fn vectorized_hash_join(
     }
 
     // Build output batch: [left_cols..., right_cols...]
+    // Use gather() to stay in typed representation — avoids intermediate Vec<Datum>
+    // and the from_datums() type-inference re-dispatch per column.
     let num_out = out_left_idxs.len();
     let mut out_columns: Vec<ColumnVector> = Vec::with_capacity(left_ncols + right_ncols);
 
     // Left columns
     for col_idx in 0..left_ncols {
-        let mut datums = Vec::with_capacity(num_out);
-        for &li in &out_left_idxs {
-            datums.push(left.columns[col_idx].get_datum(li));
-        }
-        out_columns.push(ColumnVector::from_datums(&datums));
+        out_columns.push(left.columns[col_idx].gather(&out_left_idxs));
     }
     // Right columns
     for col_idx in 0..right_ncols {
-        let mut datums = Vec::with_capacity(num_out);
-        for &ri in &out_right_idxs {
-            datums.push(right.columns[col_idx].get_datum(ri));
-        }
-        out_columns.push(ColumnVector::from_datums(&datums));
+        out_columns.push(right.columns[col_idx].gather(&out_right_idxs));
     }
 
     RecordBatch {
@@ -1190,7 +1263,14 @@ fn datum_equal(a: &Datum, b: &Datum) -> bool {
 /// Sort a RecordBatch by one or more columns. Produces a new RecordBatch with
 /// rows rearranged. Supports ascending/descending and nulls-first/nulls-last.
 pub fn vectorized_sort(batch: &RecordBatch, sort_keys: &[VecSortKey]) -> RecordBatch {
-    if sort_keys.is_empty() || batch.active_count() == 0 {
+    if batch.active_count() == 0 {
+        return RecordBatch {
+            columns: Vec::new(),
+            num_rows: 0,
+            selection: None,
+        };
+    }
+    if sort_keys.is_empty() {
         return batch.clone();
     }
 

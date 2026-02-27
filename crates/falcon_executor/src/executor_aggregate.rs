@@ -226,40 +226,43 @@ impl ProjAccum {
     }
 }
 
+/// Encode ALL columns of a row into a reusable buffer — avoids the need to
+/// build a `Vec<usize>` of `(0..ncols)` indices just for dedup / DISTINCT.
+#[inline]
+pub(crate) fn encode_group_key_all(buf: &mut Vec<u8>, row: &OwnedRow) {
+    buf.clear();
+    for datum in &row.values {
+        encode_datum_into(buf, datum);
+    }
+}
+
+/// Encode a single Datum into the buffer (shared by both key encoders).
+#[inline]
+fn encode_datum_into(buf: &mut Vec<u8>, datum: &Datum) {
+    match datum {
+        Datum::Null => buf.push(0),
+        Datum::Boolean(b) => { buf.push(1); buf.push(u8::from(*b)); }
+        Datum::Int32(v) => { buf.push(2); buf.extend_from_slice(&v.to_le_bytes()); }
+        Datum::Int64(v) => { buf.push(3); buf.extend_from_slice(&v.to_le_bytes()); }
+        Datum::Float64(v) => { buf.push(4); buf.extend_from_slice(&v.to_le_bytes()); }
+        Datum::Text(s) => { buf.push(5); buf.extend_from_slice(s.as_bytes()); buf.push(0); }
+        Datum::Timestamp(v) => { buf.push(6); buf.extend_from_slice(&v.to_le_bytes()); }
+        Datum::Date(v) => { buf.push(7); buf.extend_from_slice(&v.to_le_bytes()); }
+        Datum::Time(v) => { buf.push(8); buf.extend_from_slice(&v.to_le_bytes()); }
+        Datum::Decimal(m, s) => { buf.push(9); buf.extend_from_slice(&m.to_le_bytes()); buf.push(*s); }
+        Datum::Uuid(v) => { buf.push(10); buf.extend_from_slice(&v.to_le_bytes()); }
+        Datum::Bytea(b) => { buf.push(11); buf.extend_from_slice(&(b.len() as u32).to_le_bytes()); buf.extend_from_slice(b); }
+        Datum::Interval(mo, d, us) => { buf.push(12); buf.extend_from_slice(&mo.to_le_bytes()); buf.extend_from_slice(&d.to_le_bytes()); buf.extend_from_slice(&us.to_le_bytes()); }
+        other => { buf.push(255); buf.extend_from_slice(format!("{other}").as_bytes()); buf.push(0); }
+    }
+}
+
 /// Encode group key from row into a reusable buffer (avoids per-row allocation).
 pub(crate) fn encode_group_key(buf: &mut Vec<u8>, row: &OwnedRow, group_cols: &[usize]) {
     buf.clear();
     for &col_idx in group_cols {
         let datum = row.get(col_idx).unwrap_or(&Datum::Null);
-        match datum {
-            Datum::Null => buf.push(0),
-            Datum::Boolean(b) => {
-                buf.push(1);
-                buf.push(u8::from(*b));
-            }
-            Datum::Int32(v) => {
-                buf.push(2);
-                buf.extend_from_slice(&v.to_le_bytes());
-            }
-            Datum::Int64(v) => {
-                buf.push(3);
-                buf.extend_from_slice(&v.to_le_bytes());
-            }
-            Datum::Float64(v) => {
-                buf.push(4);
-                buf.extend_from_slice(&v.to_le_bytes());
-            }
-            Datum::Text(s) => {
-                buf.push(5);
-                buf.extend_from_slice(s.as_bytes());
-                buf.push(0);
-            }
-            other => {
-                buf.push(255);
-                buf.extend_from_slice(format!("{other}").as_bytes());
-                buf.push(0);
-            }
-        }
+        encode_datum_into(buf, datum);
     }
 }
 
@@ -504,14 +507,14 @@ impl Executor {
                 if b.error.is_some() {
                     return b;
                 }
-                // Merge b's groups into a
+                // Merge b's groups into a — in-place to avoid Vec allocation per group
                 for (key, (b_accums, b_first)) in b.groups {
                     if let Some((a_accums, a_first)) = a.groups.get_mut(&key) {
-                        *a_accums = std::mem::take(a_accums)
-                            .into_iter()
-                            .zip(b_accums)
-                            .map(|(x, y)| x.merge(y))
-                            .collect();
+                        // Merge in-place: drain b_accums and merge into a_accums
+                        for (a_acc, b_acc) in a_accums.iter_mut().zip(b_accums) {
+                            let old = std::mem::replace(a_acc, ProjAccum::CountStar(0));
+                            *a_acc = old.merge(b_acc);
+                        }
                         *a_first = *a_first && b_first;
                     } else {
                         a.groups.insert(key, (b_accums, b_first));
@@ -621,28 +624,28 @@ impl Executor {
             });
         }
 
-        // GROUP BY: build groups using HashMap with byte-encoded keys — O(n)
-        // instead of the previous O(n*g) Vec-based linear scan.
-        let mut group_map: HashMap<Vec<u8>, Vec<usize>> =
+        // GROUP BY: build groups using HashMap with byte-encoded keys — O(n).
+        // group_map maps key → index into group_indices (insertion-ordered).
+        // Only one key_buf.clone() per distinct group (stored in group_map key).
+        let mut group_map: HashMap<Vec<u8>, usize> =
             HashMap::with_capacity(filtered.len().min(1024));
-        // Insertion-order keys so iteration order is deterministic.
-        let mut group_order: Vec<Vec<u8>> = Vec::new();
+        let mut group_indices: Vec<Vec<usize>> = Vec::new();
         let mut key_buf = Vec::with_capacity(64);
         for (i, row) in filtered.iter().enumerate() {
             encode_group_key(&mut key_buf, row, group_by);
-            if let Some(indices) = group_map.get_mut(key_buf.as_slice()) {
-                indices.push(i);
+            if let Some(&gi) = group_map.get(key_buf.as_slice()) {
+                group_indices[gi].push(i);
             } else {
-                group_map.insert(key_buf.clone(), vec![i]);
-                group_order.push(key_buf.clone());
+                let gi = group_indices.len();
+                group_map.insert(key_buf.clone(), gi);
+                group_indices.push(vec![i]);
             }
         }
 
         // Compute aggregates per group — reuse a single Vec buffer across groups
-        let mut result_rows: Vec<OwnedRow> = Vec::with_capacity(group_order.len());
+        let mut result_rows: Vec<OwnedRow> = Vec::with_capacity(group_indices.len());
         let mut group_rows: Vec<&OwnedRow> = Vec::new();
-        for gkey in &group_order {
-            let indices = &group_map[gkey];
+        for indices in &group_indices {
             group_rows.clear();
             group_rows.extend(indices.iter().map(|&i| filtered[i]));
             let row_values = self.compute_group_row(projections, &group_rows)?;
@@ -678,14 +681,12 @@ impl Executor {
 
         // DISTINCT
         if !matches!(distinct, DistinctMode::None) {
-            let ncols = result_rows.first().map_or(0, |r| r.values.len());
-            let all_cols: Vec<usize> = (0..ncols).collect();
-            let mut seen: std::collections::HashSet<Vec<u8>> =
+            let mut seen: std::collections::HashSet<Box<[u8]>> =
                 std::collections::HashSet::with_capacity(result_rows.len());
             let mut buf = Vec::with_capacity(64);
             result_rows.retain(|row| {
-                encode_group_key(&mut buf, row, &all_cols);
-                seen.insert(buf.clone())
+                encode_group_key_all(&mut buf, row);
+                seen.insert(buf.clone().into_boxed_slice())
             });
         }
 
@@ -735,24 +736,29 @@ impl Executor {
             return Ok(vec![OwnedRow::new(row_values)]);
         }
 
-        // Build groups by active_set columns only
-        let mut groups: Vec<(Vec<Datum>, Vec<usize>)> = Vec::new();
+        // Build groups by active_set columns using HashMap — O(n) amortized.
+        // Single clone per distinct key (stored in group_map).
+        let mut group_map: HashMap<Vec<u8>, usize> =
+            HashMap::with_capacity(filtered.len().min(256));
+        let mut group_indices: Vec<Vec<usize>> = Vec::new();
+        let mut key_buf = Vec::with_capacity(64);
         for (i, row) in filtered.iter().enumerate() {
-            let key: Vec<Datum> = active_set
-                .iter()
-                .map(|&col_idx| row.get(col_idx).cloned().unwrap_or(Datum::Null))
-                .collect();
-
-            if let Some(pos) = groups.iter().position(|(k, _)| k == &key) {
-                groups[pos].1.push(i);
+            encode_group_key(&mut key_buf, row, active_set);
+            if let Some(&gi) = group_map.get(key_buf.as_slice()) {
+                group_indices[gi].push(i);
             } else {
-                groups.push((key, vec![i]));
+                let gi = group_indices.len();
+                group_map.insert(key_buf.clone(), gi);
+                group_indices.push(vec![i]);
             }
         }
 
         let mut result_rows = Vec::new();
-        for (_key, indices) in &groups {
-            let group_rows: Vec<&OwnedRow> = indices.iter().map(|&i| filtered[i]).collect();
+        let mut group_rows_buf: Vec<&OwnedRow> = Vec::new();
+        for indices in &group_indices {
+            group_rows_buf.clear();
+            group_rows_buf.extend(indices.iter().map(|&i| filtered[i]));
+            let group_rows = &group_rows_buf;
             let row_values = self.compute_group_row_with_nulls(
                 projections,
                 &group_rows,
@@ -781,7 +787,8 @@ impl Executor {
         active_set: &[usize],
         all_group_cols: &[usize],
     ) -> Result<Vec<Datum>, FalconError> {
-        let mut values = Vec::new();
+        let mut values = Vec::with_capacity(projections.len());
+        let empty_row = OwnedRow::new(vec![]);
         for proj in projections {
             match proj {
                 BoundProjection::Aggregate(func, agg_expr, _, agg_distinct, agg_filter) => {
@@ -814,8 +821,7 @@ impl Executor {
                 BoundProjection::Expr(expr, _) => {
                     // Substitute GROUPING() nodes with computed bitmask before eval
                     let substituted = Self::substitute_grouping(expr, active_set, all_group_cols);
-                    let empty = OwnedRow::new(vec![]);
-                    let dummy = group_rows.first().copied().unwrap_or(&empty);
+                    let dummy = group_rows.first().copied().unwrap_or(&empty_row);
                     let val = ExprEngine::eval_row(&substituted, dummy)
                         .map_err(FalconError::Execution)?;
                     values.push(val);
@@ -902,32 +908,34 @@ impl Executor {
     }
 
     /// Filter group rows by an aggregate FILTER clause.
-    /// If no filter, returns the original rows unchanged (as owned copies).
+    /// Returns `Cow::Borrowed` when no filter — avoids cloning the entire slice.
     /// When active_set/all_group_cols are non-empty (GROUPING SETS context),
     /// GROUPING() nodes in the filter are substituted before evaluation.
     fn apply_agg_filter<'a>(
-        rows: &[&'a OwnedRow],
+        rows: &'a [&'a OwnedRow],
         filter: Option<&BoundExpr>,
         active_set: &[usize],
         all_group_cols: &[usize],
-    ) -> Vec<&'a OwnedRow> {
+    ) -> std::borrow::Cow<'a, [&'a OwnedRow]> {
         match filter {
-            None => rows.to_vec(),
+            None => std::borrow::Cow::Borrowed(rows),
             Some(expr) => {
                 let substituted = if !all_group_cols.is_empty() {
                     Self::substitute_grouping(expr, active_set, all_group_cols)
                 } else {
                     expr.clone()
                 };
-                rows.iter()
-                    .copied()
-                    .filter(|row| {
-                        matches!(
-                            ExprEngine::eval_row(&substituted, row),
-                            Ok(Datum::Boolean(true))
-                        )
-                    })
-                    .collect()
+                std::borrow::Cow::Owned(
+                    rows.iter()
+                        .copied()
+                        .filter(|row| {
+                            matches!(
+                                ExprEngine::eval_row(&substituted, row),
+                                Ok(Datum::Boolean(true))
+                            )
+                        })
+                        .collect(),
+                )
             }
         }
     }
@@ -938,7 +946,9 @@ impl Executor {
         projections: &[BoundProjection],
         group_rows: &[&OwnedRow],
     ) -> Result<Vec<Datum>, FalconError> {
-        let mut values = Vec::new();
+        let mut values = Vec::with_capacity(projections.len());
+        // Hoist empty row once — used as fallback for Expr projections on empty groups.
+        let empty_row = OwnedRow::new(vec![]);
         for proj in projections {
             match proj {
                 BoundProjection::Aggregate(func, agg_expr, _, agg_distinct, agg_filter) => {
@@ -960,8 +970,7 @@ impl Executor {
                     values.push(val);
                 }
                 BoundProjection::Expr(expr, _) => {
-                    let empty = OwnedRow::new(vec![]);
-                    let dummy = group_rows.first().copied().unwrap_or(&empty);
+                    let dummy = group_rows.first().copied().unwrap_or(&empty_row);
                     let val = ExprEngine::eval_row(expr, dummy).map_err(FalconError::Execution)?;
                     values.push(val);
                 }
@@ -1143,22 +1152,38 @@ impl Executor {
                 let expr = agg_expr.ok_or_else(|| FalconError::Execution(ExecutionError::TypeError(
                     "STRING_AGG requires an argument".into(),
                 )))?;
-                let mut parts: Vec<String> = Vec::new();
-                if distinct {
-                    let vals = distinct_vals(expr)?;
-                    for val in vals {
-                        parts.push(format!("{val}"));
-                    }
+                let vals = if distinct {
+                    distinct_vals(expr)?
                 } else {
-                    let vals = eval_all(expr)?;
-                    for val in vals {
-                        parts.push(format!("{val}"));
+                    eval_all(expr)?
+                };
+                if vals.is_empty() {
+                    return Ok(Datum::Null);
+                }
+                // Build result string directly — avoid format!() for Text values
+                let mut result = String::new();
+                let mut first = true;
+                for val in &vals {
+                    if val.is_null() {
+                        continue;
+                    }
+                    if !first {
+                        result.push_str(sep);
+                    }
+                    first = false;
+                    match val {
+                        Datum::Text(s) => result.push_str(s),
+                        other => {
+                            use std::fmt::Write;
+                            let _ = write!(result, "{other}");
+                        }
                     }
                 }
-                if parts.is_empty() {
+                if first {
+                    // All values were NULL
                     Ok(Datum::Null)
                 } else {
-                    Ok(Datum::Text(parts.join(sep)))
+                    Ok(Datum::Text(result))
                 }
             }
             AggFunc::ArrayAgg => {

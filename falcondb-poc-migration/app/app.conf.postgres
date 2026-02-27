@@ -1,0 +1,7 @@
+# Demo application configuration — PostgreSQL target
+[database]
+host = 127.0.0.1
+port = 5432
+dbname = shop_demo
+user = postgres
+password =

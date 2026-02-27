@@ -1,0 +1,31 @@
+# FalconDB pgbench PoC — Server Configuration
+#
+# FAIRNESS DISCLOSURE:
+#   - WAL is ENABLED (durability guaranteed)
+#   - sync_mode = "fdatasync" (equivalent to PostgreSQL fsync = on)
+#   - Single-node mode (no replication overhead)
+#   - Authentication: TRUST (same as PostgreSQL peer/trust for local pgbench)
+#
+# This configuration is intentionally conservative.
+# No unsafe optimizations are applied.
+
+[server]
+pg_listen_addr = "0.0.0.0:5433"
+admin_listen_addr = "0.0.0.0:8080"
+node_id = 1
+max_connections = 200
+
+[storage]
+wal_enabled = true
+data_dir = "./falcon_bench_data"
+
+[wal]
+group_commit = true
+flush_interval_us = 1000
+sync_mode = "fdatasync"
+
+[auth]
+method = "trust"
+
+[gc]
+enabled = true

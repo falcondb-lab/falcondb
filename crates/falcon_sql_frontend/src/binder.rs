@@ -1423,23 +1423,30 @@ impl Binder {
             ast::DataType::Float8
             | ast::DataType::Float(None)
             | ast::DataType::DoublePrecision
-            | ast::DataType::Double
-            | ast::DataType::Numeric(_)
-            | ast::DataType::Decimal(_) => Ok(DataType::Float64),
+            | ast::DataType::Double => Ok(DataType::Float64),
+            ast::DataType::Numeric(info) | ast::DataType::Decimal(info) => {
+                let (p, s) = match info {
+                    ast::ExactNumberInfo::PrecisionAndScale(p, s) => (*p as u8, *s as u8),
+                    ast::ExactNumberInfo::Precision(p) => (*p as u8, 0),
+                    ast::ExactNumberInfo::None => (38, 10),
+                };
+                Ok(DataType::Decimal(p, s))
+            }
             ast::DataType::Text
             | ast::DataType::Varchar(_)
             | ast::DataType::CharVarying(_)
             | ast::DataType::String(_)
             | ast::DataType::Char(_)
             | ast::DataType::Character(_)
-            | ast::DataType::Interval
-            | ast::DataType::Enum(_)
-            | ast::DataType::Uuid
-            | ast::DataType::Bytea
+            | ast::DataType::Enum(_) => Ok(DataType::Text),
+            ast::DataType::Interval => Ok(DataType::Interval),
+            ast::DataType::Uuid => Ok(DataType::Uuid),
+            ast::DataType::Bytea
             | ast::DataType::Blob(_)
             | ast::DataType::Binary(_)
-            | ast::DataType::Varbinary(_) => Ok(DataType::Text),
+            | ast::DataType::Varbinary(_) => Ok(DataType::Bytea),
             ast::DataType::Timestamp(_, _) => Ok(DataType::Timestamp),
+            ast::DataType::Time(_, _) => Ok(DataType::Time),
             ast::DataType::Date => Ok(DataType::Date),
             ast::DataType::Array(inner) => {
                 let elem_type = match inner {
@@ -1455,16 +1462,20 @@ impl Binder {
             ast::DataType::Custom(name, _) => {
                 let type_name = name.to_string().to_lowercase();
                 match type_name.as_str() {
-                    "uuid" | "bytea" | "inet" | "cidr" | "macaddr"
-                    | "name" | "varchar" | "character varying" | "bpchar"
-                    | "interval" => Ok(DataType::Text),
+                    "inet" | "cidr" | "macaddr"
+                    | "name" | "varchar" | "character varying" | "bpchar" => Ok(DataType::Text),
+                    "uuid" => Ok(DataType::Uuid),
+                    "bytea" => Ok(DataType::Bytea),
+                    "interval" => Ok(DataType::Interval),
+                    "time" => Ok(DataType::Time),
+                    "date" => Ok(DataType::Date),
                     "int2" | "smallint" => Ok(DataType::Int16),
                     "oid" | "regclass" | "regtype"
                     | "int4" | "integer" | "int" => Ok(DataType::Int32),
                     "int8" | "bigint" => Ok(DataType::Int64),
                     "float4" | "real" => Ok(DataType::Float32),
-                    "money" | "float8" | "double precision"
-                    | "numeric" | "decimal" => Ok(DataType::Float64),
+                    "money" | "float8" | "double precision" => Ok(DataType::Float64),
+                    "numeric" | "decimal" => Ok(DataType::Decimal(38, 10)),
                     "timestamp" | "timestamptz" => Ok(DataType::Timestamp),
                     _ => Err(SqlError::Unsupported(format!("Data type: {type_name}"))),
                 }

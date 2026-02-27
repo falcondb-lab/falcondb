@@ -657,15 +657,18 @@ fn parse_cast_target(target: &str) -> Option<DataType> {
         "int" | "int4" | "integer" => Some(DataType::Int32),
         "bigint" | "int8" => Some(DataType::Int64),
         "real" | "float4" => Some(DataType::Float32),
-        "float" | "float8" | "double precision" | "double" | "numeric" | "decimal" => {
-            Some(DataType::Float64)
-        }
+        "float" | "float8" | "double precision" | "double" => Some(DataType::Float64),
+        "numeric" | "decimal" => Some(DataType::Decimal(38, 10)),
         "text" | "varchar" | "char" | "character varying" | "character" | "bpchar" => {
             Some(DataType::Text)
         }
         "boolean" | "bool" => Some(DataType::Boolean),
         "timestamp" | "timestamp without time zone" | "timestamptz" => Some(DataType::Timestamp),
         "date" => Some(DataType::Date),
+        "time" | "time without time zone" => Some(DataType::Time),
+        "interval" => Some(DataType::Interval),
+        "uuid" => Some(DataType::Uuid),
+        "bytea" => Some(DataType::Bytea),
         "jsonb" | "json" => Some(DataType::Jsonb),
         _ => None,
     }

@@ -258,15 +258,40 @@ pub enum AuthMethod {
 /// Authentication configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
-    /// Authentication method: trust, password, or md5.
+    /// Authentication method: trust, password, md5, or scram-sha-256.
     pub method: AuthMethod,
     /// Required password (cleartext). Used by `password` and `md5` methods.
-    /// In production, this should come from an env var or secrets manager.
+    /// For SCRAM, prefer using the `users` list with stored verifiers instead.
     #[serde(default)]
     pub password: String,
-    /// Required username. If empty, any username is accepted.
+    /// Required username. If empty, any username is accepted (legacy single-user mode).
     #[serde(default)]
     pub username: String,
+    /// Named user credentials for SCRAM-SHA-256.
+    /// Each entry has a username and a SCRAM verifier string.
+    /// Format: `SCRAM-SHA-256$<iterations>:<salt_b64>$<stored_key_b64>:<server_key_b64>`
+    #[serde(default)]
+    pub users: Vec<UserCredential>,
+    /// Allowed client CIDR ranges (e.g. `["127.0.0.1/32", "::1/128"]`).
+    /// Empty means all addresses are allowed.
+    #[serde(default)]
+    pub allow_cidrs: Vec<String>,
+}
+
+/// A named user credential for SCRAM-SHA-256 authentication.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserCredential {
+    /// Username (case-sensitive, matches PostgreSQL behavior).
+    pub username: String,
+    /// SCRAM-SHA-256 verifier string.
+    /// Format: `SCRAM-SHA-256$<iterations>:<salt_b64>$<stored_key_b64>:<server_key_b64>`
+    /// Can be generated with `falcon user add --username ... --password ...`
+    #[serde(default)]
+    pub scram: String,
+    /// Plaintext password (legacy, used only if `scram` is empty).
+    /// Prefer `scram` verifier in production.
+    #[serde(default)]
+    pub password: String,
 }
 
 const fn default_shutdown_drain_timeout_secs() -> u64 {
@@ -288,6 +313,8 @@ impl Default for AuthConfig {
             method: AuthMethod::Trust,
             password: String::new(),
             username: String::new(),
+            users: Vec::new(),
+            allow_cidrs: Vec::new(),
         }
     }
 }

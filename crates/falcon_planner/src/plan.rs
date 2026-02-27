@@ -129,6 +129,33 @@ pub enum PhysicalPlan {
         unions: Vec<(BoundSelect, SetOpKind, bool)>,
         virtual_rows: Vec<falcon_common::datum::OwnedRow>,
     },
+    /// Query: index range scan + residual filter + project + group + sort + limit
+    /// Used when the planner detects a range predicate (>, <, >=, <=, BETWEEN)
+    /// on an indexed column.
+    IndexRangeScan {
+        table_id: TableId,
+        schema: TableSchema,
+        /// Column index used for the index range lookup.
+        index_col: usize,
+        /// Lower bound: `(literal_expr, inclusive)`. None = unbounded below.
+        lower_bound: Option<(BoundExpr, bool)>,
+        /// Upper bound: `(literal_expr, inclusive)`. None = unbounded above.
+        upper_bound: Option<(BoundExpr, bool)>,
+        projections: Vec<BoundProjection>,
+        visible_projection_count: usize,
+        /// Residual filter after extracting the range predicate.
+        filter: Option<BoundExpr>,
+        group_by: Vec<usize>,
+        grouping_sets: Vec<Vec<usize>>,
+        having: Option<BoundExpr>,
+        order_by: Vec<BoundOrderBy>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+        distinct: DistinctMode,
+        ctes: Vec<BoundCte>,
+        unions: Vec<(BoundSelect, SetOpKind, bool)>,
+        virtual_rows: Vec<falcon_common::datum::OwnedRow>,
+    },
     /// Query with JOINs: nested loop join + filter + project + sort + limit
     NestedLoopJoin {
         left_table_id: TableId,

@@ -1,0 +1,7 @@
+# Demo application configuration — FalconDB target
+[database]
+host = 127.0.0.1
+port = 5433
+dbname = shop_demo
+user = falcon
+password =

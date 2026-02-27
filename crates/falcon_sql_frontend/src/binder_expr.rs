@@ -907,10 +907,16 @@ fn parse_target_type(target: &str) -> Option<DataType> {
         "bigint" | "int8" => Some(DataType::Int64),
         "real" | "float4" => Some(DataType::Float32),
         "float" | "double precision" | "float8" => Some(DataType::Float64),
+        "numeric" | "decimal" => Some(DataType::Decimal(38, 10)),
         "text" | "varchar" | "character varying" => Some(DataType::Text),
         "boolean" | "bool" => Some(DataType::Boolean),
         "timestamp" | "timestamp without time zone" => Some(DataType::Timestamp),
-        "jsonb" => Some(DataType::Jsonb),
+        "date" => Some(DataType::Date),
+        "time" | "time without time zone" => Some(DataType::Time),
+        "interval" => Some(DataType::Interval),
+        "uuid" => Some(DataType::Uuid),
+        "bytea" => Some(DataType::Bytea),
+        "jsonb" | "json" => Some(DataType::Jsonb),
         _ => None,
     }
 }

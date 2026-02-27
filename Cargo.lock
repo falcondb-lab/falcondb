@@ -908,6 +908,7 @@ dependencies = [
 name = "falcon_protocol_pg"
 version = "1.2.0"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
  "dashmap",
  "falcon_cluster",
@@ -918,8 +919,10 @@ dependencies = [
  "falcon_sql_frontend",
  "falcon_storage",
  "falcon_txn",
+ "hmac",
  "md-5",
  "parking_lot",
+ "rand 0.8.5",
  "rustls-pemfile",
  "sha2",
  "tokio",

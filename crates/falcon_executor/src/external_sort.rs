@@ -251,13 +251,17 @@ fn write_run(path: &Path, rows: &[OwnedRow]) -> Result<u64, FalconError> {
 
     w.write_all(&(rows.len() as u64).to_le_bytes())
         .map_err(io_err)?;
+    // Reuse a single serialization buffer across all rows to avoid
+    // N heap allocations (one Vec<u8> per row) in bincode::serialize().
+    let mut ser_buf: Vec<u8> = Vec::with_capacity(256);
     for row in rows {
-        let bytes = bincode::serialize(row)
+        ser_buf.clear();
+        bincode::serialize_into(&mut ser_buf, row)
             .map_err(|e| FalconError::Internal(format!("Spill serialization error: {e}")))?;
-        w.write_all(&(bytes.len() as u32).to_le_bytes())
+        w.write_all(&(ser_buf.len() as u32).to_le_bytes())
             .map_err(io_err)?;
-        w.write_all(&bytes).map_err(io_err)?;
-        total_bytes += 4 + bytes.len() as u64;
+        w.write_all(&ser_buf).map_err(io_err)?;
+        total_bytes += 4 + ser_buf.len() as u64;
     }
     w.flush().map_err(io_err)?;
     Ok(total_bytes)

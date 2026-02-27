@@ -2151,6 +2151,27 @@ pub(crate) fn text_params_to_datum(
                 Some(DataType::Decimal(_, _)) => {
                     Datum::parse_decimal(&s).unwrap_or_else(|| Datum::Text(s.into_owned()))
                 }
+                Some(DataType::Uuid) => {
+                    let hex: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+                    if hex.len() == 32 {
+                        u128::from_str_radix(&hex, 16)
+                            .map_or_else(|_| Datum::Text(s.into_owned()), Datum::Uuid)
+                    } else {
+                        Datum::Text(s.into_owned())
+                    }
+                }
+                Some(DataType::Bytea) => {
+                    let raw = s.strip_prefix("\\x").unwrap_or(&s);
+                    let bytes: Vec<u8> = (0..raw.len())
+                        .step_by(2)
+                        .filter_map(|i| raw.get(i..i + 2).and_then(|h| u8::from_str_radix(h, 16).ok()))
+                        .collect();
+                    Datum::Bytea(bytes)
+                }
+                Some(DataType::Time) | Some(DataType::Interval)
+                | Some(DataType::Timestamp) | Some(DataType::Date)
+                | Some(DataType::Text) | Some(DataType::Array(_))
+                | Some(DataType::Jsonb) => Datum::Text(s.into_owned()),
                 _ => {
                     // No hint or text-like types: try integer, float, text
                     if let Ok(i) = s.parse::<i64>() {
@@ -5089,5 +5110,252 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert!(rows[0][0].as_ref().unwrap().starts_with("1.5"));
         assert!(rows[0][1].as_ref().unwrap().starts_with("2.5"));
+    }
+
+    // ── NUMERIC / DECIMAL tests ────────────────────────────────────────
+
+    #[test]
+    fn test_numeric_create_insert_select() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query(
+            "CREATE TABLE t_numeric (id INT PRIMARY KEY, price NUMERIC(10,2), qty DECIMAL)",
+            &mut session,
+        );
+        handler.handle_query(
+            "INSERT INTO t_numeric VALUES (1, 123.45, 99.9)",
+            &mut session,
+        );
+
+        let msgs = handler.handle_query("SELECT price, qty FROM t_numeric WHERE id = 1", &mut session);
+        let rows = extract_data_rows(&msgs);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], Some("123.45".into()));
+        // qty parsed as Decimal with default precision
+        assert!(rows[0][1].as_ref().unwrap().contains("99.9"));
+    }
+
+    #[test]
+    fn test_numeric_cast_from_text() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query(
+            "CREATE TABLE t_num_cast (id INT PRIMARY KEY, v TEXT)",
+            &mut session,
+        );
+        handler.handle_query("INSERT INTO t_num_cast VALUES (1, '456.789')", &mut session);
+
+        let msgs = handler.handle_query(
+            "SELECT CAST(v AS NUMERIC) FROM t_num_cast WHERE id = 1",
+            &mut session,
+        );
+        let rows = extract_data_rows(&msgs);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], Some("456.789".into()));
+    }
+
+    #[test]
+    fn test_numeric_cast_from_int() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query(
+            "CREATE TABLE t_num_int (id INT PRIMARY KEY, v INT)",
+            &mut session,
+        );
+        handler.handle_query("INSERT INTO t_num_int VALUES (1, 42)", &mut session);
+
+        let msgs = handler.handle_query(
+            "SELECT CAST(v AS DECIMAL) FROM t_num_int WHERE id = 1",
+            &mut session,
+        );
+        let rows = extract_data_rows(&msgs);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], Some("42".into()));
+    }
+
+    // ── UUID tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_uuid_create_insert_select() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query(
+            "CREATE TABLE t_uuid (id INT PRIMARY KEY, uid UUID)",
+            &mut session,
+        );
+        handler.handle_query(
+            "INSERT INTO t_uuid VALUES (1, '550e8400-e29b-41d4-a716-446655440000')",
+            &mut session,
+        );
+
+        let msgs = handler.handle_query("SELECT uid FROM t_uuid WHERE id = 1", &mut session);
+        let rows = extract_data_rows(&msgs);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0][0],
+            Some("550e8400-e29b-41d4-a716-446655440000".into())
+        );
+    }
+
+    #[test]
+    fn test_uuid_cast_from_text() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query(
+            "CREATE TABLE t_uuid_cast (id INT PRIMARY KEY, v TEXT)",
+            &mut session,
+        );
+        handler.handle_query(
+            "INSERT INTO t_uuid_cast VALUES (1, '12345678-1234-1234-1234-123456789abc')",
+            &mut session,
+        );
+
+        let msgs = handler.handle_query(
+            "SELECT CAST(v AS UUID) FROM t_uuid_cast WHERE id = 1",
+            &mut session,
+        );
+        let rows = extract_data_rows(&msgs);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0][0],
+            Some("12345678-1234-1234-1234-123456789abc".into())
+        );
+    }
+
+    // ── BYTEA tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_bytea_create_insert_select() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query(
+            "CREATE TABLE t_bytea (id INT PRIMARY KEY, data BYTEA)",
+            &mut session,
+        );
+        handler.handle_query(
+            "INSERT INTO t_bytea VALUES (1, '\\xdeadbeef')",
+            &mut session,
+        );
+
+        let msgs = handler.handle_query("SELECT data FROM t_bytea WHERE id = 1", &mut session);
+        let rows = extract_data_rows(&msgs);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], Some("\\xdeadbeef".into()));
+    }
+
+    #[test]
+    fn test_bytea_cast_from_text() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query(
+            "CREATE TABLE t_bytea_cast (id INT PRIMARY KEY, v TEXT)",
+            &mut session,
+        );
+        handler.handle_query(
+            "INSERT INTO t_bytea_cast VALUES (1, 'cafebabe')",
+            &mut session,
+        );
+
+        let msgs = handler.handle_query(
+            "SELECT CAST(v AS BYTEA) FROM t_bytea_cast WHERE id = 1",
+            &mut session,
+        );
+        let rows = extract_data_rows(&msgs);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], Some("\\xcafebabe".into()));
+    }
+
+    // ── TIME tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_time_create_insert_select() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query(
+            "CREATE TABLE t_time (id INT PRIMARY KEY, t TIME)",
+            &mut session,
+        );
+        handler.handle_query(
+            "INSERT INTO t_time VALUES (1, '14:30:00')",
+            &mut session,
+        );
+
+        let msgs = handler.handle_query("SELECT t FROM t_time WHERE id = 1", &mut session);
+        let rows = extract_data_rows(&msgs);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], Some("14:30:00".into()));
+    }
+
+    #[test]
+    fn test_time_cast_from_text() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query(
+            "CREATE TABLE t_time_cast (id INT PRIMARY KEY, v TEXT)",
+            &mut session,
+        );
+        handler.handle_query(
+            "INSERT INTO t_time_cast VALUES (1, '09:15:30')",
+            &mut session,
+        );
+
+        let msgs = handler.handle_query(
+            "SELECT CAST(v AS TIME) FROM t_time_cast WHERE id = 1",
+            &mut session,
+        );
+        let rows = extract_data_rows(&msgs);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], Some("09:15:30".into()));
+    }
+
+    // ── INTERVAL tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_interval_create_insert_select() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query(
+            "CREATE TABLE t_interval (id INT PRIMARY KEY, dur INTERVAL)",
+            &mut session,
+        );
+        handler.handle_query(
+            "INSERT INTO t_interval VALUES (1, '01:30:00')",
+            &mut session,
+        );
+
+        let msgs = handler.handle_query("SELECT dur FROM t_interval WHERE id = 1", &mut session);
+        let rows = extract_data_rows(&msgs);
+        assert_eq!(rows.len(), 1);
+        // Interval stored as text currently, should come back
+        assert!(rows[0][0].is_some());
+    }
+
+    // ── Mixed-type table ───────────────────────────────────────────────
+
+    #[test]
+    fn test_all_new_types_table() {
+        let (handler, mut session) = setup_handler();
+        handler.handle_query(
+            "CREATE TABLE t_all_types (\
+                id INT PRIMARY KEY, \
+                price NUMERIC(10,2), \
+                uid UUID, \
+                blob BYTEA, \
+                t TIME \
+            )",
+            &mut session,
+        );
+        handler.handle_query(
+            "INSERT INTO t_all_types VALUES (\
+                1, \
+                99.95, \
+                'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', \
+                '\\xaabbccdd', \
+                '23:59:59' \
+            )",
+            &mut session,
+        );
+
+        let msgs = handler.handle_query("SELECT * FROM t_all_types WHERE id = 1", &mut session);
+        let rows = extract_data_rows(&msgs);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], Some("1".into()));
+        assert_eq!(rows[0][1], Some("99.95".into()));
+        assert_eq!(
+            rows[0][2],
+            Some("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11".into())
+        );
+        assert_eq!(rows[0][3], Some("\\xaabbccdd".into()));
+        assert_eq!(rows[0][4], Some("23:59:59".into()));
     }
 }

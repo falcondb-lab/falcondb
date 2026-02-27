@@ -49,6 +49,14 @@ garbage collection, and reproducible benchmarks.
 This is FalconDB's core engineering property, called the **Deterministic Commit Guarantee (DCG)**.
 It is not a configuration option — it is the default behavior under the `LocalWalSync` commit policy.
 
+- **Prove it yourself**: [falcondb-poc-dcg/](falcondb-poc-dcg/) — one-click demo: write 1,000 orders → kill -9 primary → verify zero data loss
+- **Benchmark it yourself**: [falcondb-poc-pgbench/](falcondb-poc-pgbench/) — pgbench comparison vs PostgreSQL under identical durability settings
+- **Crash under load**: [falcondb-poc-failover-under-load/](falcondb-poc-failover-under-load/) — kill -9 primary during sustained writes → verify zero data loss + automatic recovery
+- **See inside**: [falcondb-poc-observability/](falcondb-poc-observability/) — live Grafana dashboard, Prometheus metrics, operational controls (pause/resume rebalance, failover visibility)
+- **Migrate from PG**: [falcondb-poc-migration/](falcondb-poc-migration/) — migrate a real PostgreSQL app by changing only the connection string, with full compatibility boundary documentation
+- **Same SLA, lower cost**: [falcondb-poc-cost-efficiency/](falcondb-poc-cost-efficiency/) — same OLTP workload, fewer resources, predictable latency, with transparent cost comparison
+- **Recover after disaster**: [falcondb-poc-backup-pitr/](falcondb-poc-backup-pitr/) — destroy the database, restore from backup, replay to exact second, verify every row matches
+- **Manufacturing MES**: [falcondb-mes-workorder/](falcondb-mes-workorder/) — real MES work order system: report production, kill -9 the database, verify every confirmed report survives
 - **Formal definition**: [docs/consistency_evidence_map.md](docs/consistency_evidence_map.md)
 - **How it works**: [docs/commit_sequence.md](docs/commit_sequence.md)
 - **What we don't do**: [docs/non_goals.md](docs/non_goals.md)
@@ -987,6 +995,33 @@ defined in code but require Raft (not implemented). See [docs/rpo_rto.md](docs/r
 | [docs/native_protocol_compat.md](docs/native_protocol_compat.md) | Native protocol version negotiation and feature flags |
 | [docs/perf_testing.md](docs/perf_testing.md) | Performance testing methodology and CI gates |
 | [CHANGELOG.md](CHANGELOG.md) | Semantic versioning changelog (v0.1–v1.2) |
+
+---
+
+## Benchmarks
+
+FalconDB ships with a reproducible benchmark suite for pgbench comparison, failover validation, and kernel performance.
+
+```bash
+# pgbench: FalconDB vs PostgreSQL (requires both servers running)
+./scripts/bench_pgbench_vs_postgres.sh
+
+# Failover under load (starts 2 FalconDB nodes, kills primary, checks determinism)
+./scripts/bench_failover_under_load.sh
+
+# Internal kernel benchmark (no server required)
+./scripts/bench_kernel_falcon_bench.sh
+
+# Quick smoke test (CI)
+./scripts/ci_bench_smoke.sh
+```
+
+Results are written to `bench_out/<timestamp>/` with logs, JSON metrics, and a Markdown report.
+
+- **[Methodology](docs/benchmark_methodology.md)** — fairness rules, hardware disclosure, reproducibility
+- **[Results Template](docs/benchmarks/RESULTS_TEMPLATE.md)** — standard report format
+
+> Windows users: use `scripts/bench_pgbench_vs_postgres.ps1` (PowerShell 7+).
 
 ---
 

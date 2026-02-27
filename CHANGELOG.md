@@ -37,7 +37,274 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [Unreleased] — OS Tuning, Executor Performance, Cluster Observability, v1.2 Benchmark
+## [Unreleased]
+
+### Added — DCG Failover PoC (`falcondb-poc-dcg/`)
+
+- **`falcondb-poc-dcg/`** — Customer-facing, black-box PoC proving FalconDB's
+  Deterministic Commit Guarantee (DCG) under crash failover. Designed for
+  customer PoC, investor demo, technical due diligence, and internal confidence.
+- **`run_demo.sh` / `run_demo.ps1`** — One-command end-to-end demo: start cluster →
+  write orders → kill -9 primary → promote replica → verify → PASS/FAIL verdict.
+- **`workload/src/main.rs`** — Rust deterministic order writer: single-txn commits,
+  logs order_id ONLY after server COMMIT confirmation. No batch, no async buffer.
+- **`workload/order_writer.py`** — Python fallback workload generator (psycopg2).
+- **Modular scripts** — `start_cluster`, `run_workload`, `kill_primary`,
+  `promote_replica`, `verify_results`, `cleanup` — each step independently runnable,
+  with both `.sh` and `.ps1` variants.
+- **`scripts/verify_results.sh`** — Compares committed_orders.log vs database query
+  on survivor. Checks for missing (data loss), phantom (uncommitted appeared),
+  and duplicates. Produces `verification_report.txt` + `verification_evidence.json`.
+- **`docs/explanation_for_customers.md`** — Non-technical explanation of commit,
+  why databases lose data, what FalconDB guarantees, why the demo is trustworthy.
+  No jargon (no MVCC, WAL, 2PC, consensus terms).
+- **`schema/orders.sql`** — Simple order table (order_id BIGINT PK, created_at, payload).
+- **`configs/`** — Primary + replica TOML (WAL enabled, fdatasync, TRUST auth).
+
+### Added — pgbench Performance PoC (`falcondb-poc-pgbench/`)
+
+- **`falcondb-poc-pgbench/`** — Customer-facing pgbench comparison: FalconDB vs
+  PostgreSQL under identical conditions. Same hardware, same dataset, same
+  concurrency, same durability settings. No shortcuts.
+- **`run_benchmark.sh` / `run_benchmark.ps1`** — One-command orchestrator: env check →
+  start both servers → init pgbench → warm-up + 3 measured runs each → collect →
+  generate `results/report.md` comparison table.
+- **Modular scripts** — `check_env`, `start_falcondb`, `start_postgres`,
+  `init_pgbench`, `run_pgbench_falcon`, `run_pgbench_postgres`, `collect_results`,
+  `cleanup` — each independently runnable, with `.sh` and `.ps1` variants.
+- **`scripts/collect_results.sh`** — Parses pgbench TPS + latency from all runs,
+  selects median, computes ratio, generates `summary.json` + `report.md`.
+- **`conf/falcon.bench.toml`** — FalconDB config (WAL, fdatasync, TRUST, 200 conns).
+- **`conf/postgres.bench.conf`** — PostgreSQL config (fsync=on, synchronous_commit=on,
+  256MB shared_buffers, fdatasync).
+- **`docs/benchmark_methodology.md`** — Full methodology: fairness constraints,
+  hardware disclosure, anti-cheating checklist, known limitations, interpretation
+  guidance. Designed for technical due diligence.
+
+### Added — Failover Under Load PoC (`falcondb-poc-failover-under-load/`)
+
+- **`falcondb-poc-failover-under-load/`** — Customer-facing PoC proving FalconDB
+  correctness during primary crash under sustained OLTP write traffic. Crash
+  happens during active writes, not after — the hardest test for any database.
+- **`run_demo.sh` / `run_demo.ps1`** — One-command orchestrator: start cluster →
+  verify replication → start sustained writer → crash primary during writes →
+  promote replica → writer auto-reconnects → measure downtime → verify PASS/FAIL.
+- **`workload/src/main.rs`** — Rust commit marker writer with automatic failover
+  reconnect. Logs marker_id ONLY after COMMIT confirmation. Retries same marker
+  on failure. Supports `STOP_FILE` for graceful termination.
+- **Modular scripts** — `start_cluster`, `wait_cluster_ready`, `start_load`,
+  `kill_primary`, `promote_replica`, `monitor_downtime`, `verify_integrity`,
+  `cleanup` — each independently runnable, `.sh` and `.ps1` variants.
+- **`scripts/verify_integrity.sh`** — Compares committed markers log vs database
+  on survivor. Checks missing (data loss), phantom (uncommitted appeared), and
+  duplicates. Produces `verification_report.txt` + `verification_evidence.json`.
+- **`scripts/monitor_downtime.sh`** — Calculates failover window from kill to
+  first successful post-promotion commit. Produces `failover_timeline.json`.
+- **`docs/explanation_for_customers.md`** — Plain-language explanation of crash
+  behavior, what databases get wrong, what FalconDB guarantees, why the demo
+  is trustworthy.
+
+### Added — Observability PoC (`falcondb-poc-observability/`)
+
+- **`falcondb-poc-observability/`** — Customer-facing PoC proving FalconDB is
+  operable in production: live Prometheus metrics, Grafana dashboard, and
+  operational controls (pause/resume rebalance, trigger rebalance, failover).
+- **`docker/docker-compose.yml`** — One-command monitoring stack: Prometheus
+  (5s scrape) + Grafana with auto-provisioned datasource and dashboard.
+- **`dashboards/falcondb_overview.json`** — Pre-built "FalconDB Cluster Overview"
+  dashboard: 20 panels covering cluster health, transaction throughput, WAL
+  latency, replication lag, rebalancer status, memory, failover, migrations.
+  All metrics reference real `falcon_*` Prometheus metrics from falcon_observability.
+- **Operational scripts** — `start_cluster`, `start_monitoring`, `generate_activity`,
+  `trigger_rebalance`, `pause_rebalance`, `resume_rebalance`, `simulate_failover`,
+  `cleanup` — each with `.sh` and `.ps1` variants.
+- **`docs/explanation_for_customers.md`** — "Black box DB vs Observable DB",
+  metric-to-real-world mapping, operator decision scenarios, dashboard layout.
+
+### Added — Migration PoC (`falcondb-poc-migration/`)
+
+- **`falcondb-poc-migration/`** — Customer-facing PoC proving FalconDB can be
+  adopted as a drop-in replacement for PostgreSQL OLTP workloads with minimal
+  migration friction. Focus: adoption cost transparency, not performance.
+- **`app/demo_app.py`** — Standard psycopg2 application: create order, update
+  status, query by PK, list recent orders. Same code, same SQL, two configs.
+- **`scripts/migrate_schema.sh`** — Exports PG schema via `pg_dump --schema-only`,
+  applies to FalconDB, records applied/failed objects, generates migration report.
+- **`scripts/migrate_data.sh`** — Exports PG data via `pg_dump --data-only`,
+  imports into FalconDB, verifies row counts match per table, records timing.
+- **`scripts/run_app_smoke_test.sh`** — Runs identical workflows against both
+  PostgreSQL and FalconDB, produces side-by-side PASS/FAIL comparison table.
+- **`output/incompatibilities.json`** — Structured list of known incompatibilities
+  with impact level, affected SQL, workaround, and roadmap status.
+- **`schema/falcon_compat_notes.md`** — Detailed compatibility boundary document:
+  supported features, unsupported features, migration decision checklist.
+- All scripts in `.sh` and `.ps1` variants.
+
+### Added — Cost Efficiency PoC (`falcondb-poc-cost-efficiency/`)
+
+- **`falcondb-poc-cost-efficiency/`** — Customer-facing PoC proving FalconDB
+  delivers the same OLTP correctness and durability with significantly lower
+  resource consumption. Focus: cost-performance ratio and predictability.
+- **`workload/src/main.rs`** — Rust rate-limited OLTP workload generator:
+  transactional balance transfers at fixed tx/s, latency distribution (p50/p95/p99),
+  same binary for both databases.
+- **`scripts/collect_resource_usage.sh`** — Per-process CPU/memory/disk IO sampler
+  with JSON output (Linux /proc + macOS ps + Windows Get-Process).
+- **`scripts/simulate_peak.sh`** — 3-phase peak test: normal → 2x spike → recovery,
+  system must recover without restart.
+- **`scripts/generate_cost_report.sh`** — Produces Markdown cost comparison with
+  AWS on-demand pricing, resource usage tables, and savings calculation.
+- **`conf/falcon.small.toml`** — FalconDB small footprint: 512 MB soft / 768 MB hard,
+  WAL+fsync enabled, no unsafe optimizations.
+- **`conf/postgres.large.conf`** — PostgreSQL production config: 4 GB shared_buffers,
+  12 GB cache, fsync on, not artificially weakened.
+- **`docs/explanation_for_customers.md`** — Over-provisioning problem, deterministic
+  execution model, peak behavior comparison, cost savings math.
+- All scripts in `.sh` and `.ps1` variants.
+
+### Added — Backup & PITR PoC (`falcondb-poc-backup-pitr/`)
+
+- **`falcondb-poc-backup-pitr/`** — Customer-facing PoC proving FalconDB can
+  safely recover data after catastrophic failure and restore to an exact
+  point in time. Focus: recoverability and trust after disaster.
+- **`schema/accounts.sql`** — Simple accounts table with deterministic seed
+  data (100 accounts, known starting balances).
+- **`scripts/generate_data.sh`** — Deterministic transaction generator: one
+  UPDATE per transaction, each explicitly committed, logged externally for
+  verification.
+- **`scripts/take_backup.sh`** — Full consistent backup with JSON manifest
+  (backup time, WAL position, checksum, row count, balance).
+- **`scripts/record_timestamp.sh`** — Captures precise recovery target T1
+  with per-account balance snapshot for later verification.
+- **`scripts/induce_disaster.sh`** — Irreversible database destruction:
+  kills process, deletes entire data directory.
+- **`scripts/restore_from_backup.sh`** — Restores base snapshot, validates
+  backup integrity, prepares for WAL replay.
+- **`scripts/replay_wal_until.sh`** — Starts FalconDB in recovery mode,
+  WAL replay advances database to recovery target T1.
+- **`scripts/verify_restored_data.sh`** — Per-account balance comparison
+  against T1 snapshot, outputs PASS/FAIL with detailed report.
+- **`docs/explanation_for_customers.md`** — Plain-language explanation of
+  backup vs PITR, "video rewind" analogy, compliance coverage.
+- All scripts in `.sh` and `.ps1` variants.
+
+### Added — MES Work Order System (`falcondb-mes-workorder/`)
+
+- **`falcondb-mes-workorder/`** — Real business system: MES work order +
+  operation reporting. Proves FalconDB's DCG through manufacturing semantics:
+  "Once the system confirms a report, that production fact never disappears."
+- **`schema/init.sql`** — 4 core tables: work_order, operation,
+  operation_report (append-only fact ledger), work_order_state_log (audit).
+- **`backend/app.py`** — FastAPI REST service with 12 endpoints: work order
+  CRUD, operation lifecycle (start/report/complete), invariant verification.
+- **`backend/invariants.py`** — 3 business invariant checks: forward-only
+  operation status, monotonic reported qty, irreversible completion.
+- **`scripts/run_demo.sh`** — Three scenarios: normal production, failover
+  during production (kill -9 + recover + verify), concurrent reporting.
+- **`scripts/kill_primary.sh`** — Hard crash simulation (SIGKILL / Stop-Process).
+- **`scripts/verify_business_state.sh`** — Post-failover verification with
+  before/after comparison, human-readable bilingual report.
+- **`docs/explanation_for_customers.md`** — Plain-language (Chinese + English)
+  explanation for factory management, no database terminology.
+- All scripts in `.sh` and `.ps1` variants.
+
+---
+
+## [1.2.1] — Production Readiness, Executor Optimization, Cluster Observability
+
+### Track A — OS-Level Production Tuning
+
+- **`docs/os/windows_server_2022.md`** — Windows Server 2022 tuning guide covering
+  IOCP backend, NTFS vs ReFS, antivirus exclusions, Large Pages, TCP RSS/autotuning,
+  Windows Service deployment checklist, security baseline (ACLs, service account).
+  Includes 10-minute production checklist.
+- **`docs/os/rhel_9.md`** — RHEL 9 tuning guide covering XFS/ext4 selection,
+  io_uring (with privilege constraints), NUMA pinning, THP/jemalloc, systemd +
+  cgroup v2 resource control, BBR/TCP tuning, SELinux and firewall configuration.
+  Includes 10-minute production checklist.
+
+### Track B — Executor Hot-Path Optimization
+
+- **`cmp_datum_values` direct dispatch** — Time, Decimal (normalized scale), UUID,
+  Bytea, Interval (microsecond approximation), and NULL ordering all handled via
+  native comparison. `format!()` fallback restricted to Jsonb, Array, and rare
+  cross-type comparisons.
+- **`cmp_datum_sort` with configurable NULL ordering** — NULLS FIRST / NULLS LAST
+  handled without allocation.
+
+### Track C — Cluster Rebalancer Control & Metrics
+
+- **`ShardRebalancer::pause()` / `resume()` / `is_paused()`** — SLA-safe pause
+  prevents new rebalance tasks without interrupting in-flight migrations.
+- **`ShardRebalancer::metrics_snapshot() -> RebalancerMetrics`** — point-in-time
+  snapshot: runs_completed, total_rows_migrated, is_running, is_paused,
+  last_imbalance_ratio, last_completed_tasks, last_failed_tasks, last_duration_ms,
+  shard_move_rate.
+- **`RebalancerMetrics`** exported publicly from falcon_cluster crate.
+- New tests: `test_resume_allows_rebalance`, `test_metrics_snapshot_consistency`.
+
+### Track D — Observability Enhancements (Prometheus)
+
+- **Segment streaming metrics** — `record_segment_streaming_metrics()`: handshakes,
+  segments_streamed, segment_bytes, tail_bytes, checksum_failures, error_rollbacks,
+  snapshots_created.
+- **Rebalancer metrics export** — `record_rebalancer_metrics()`: all 9
+  `RebalancerMetrics` fields mapped to `falcon_rebalancer_*` gauges.
+
+### Track E — Benchmark Baseline & Evidence
+
+- **`docs/benchmarks/v1.2_baseline.md`** — workloads W1–W5, hardware disclosure,
+  FalconDB config, v1.0 → v1.2 performance delta summary, throughput + latency
+  interpretation notes.
+- **`evidence/INDEX.md`** — E13 (v1.2 performance baseline), E14 (OS tuning guides),
+  E15 (cluster observability & rebalance controls).
+
+---
+
+## [Unreleased]
+
+### Added — Benchmark Suite
+
+- **`scripts/bench_pgbench_vs_postgres.sh`** — pgbench comparison benchmark
+  (FalconDB vs PostgreSQL). Configurable scale, concurrency, duration, mode.
+  Produces `bench_out/<ts>/REPORT.md` + JSON summary + raw logs + environment snapshot.
+- **`scripts/bench_pgbench_vs_postgres.ps1`** — Windows PowerShell variant with
+  identical semantics (PowerShell 7+, no admin rights required).
+- **`scripts/bench_failover_under_load.sh`** — 2-node primary/replica failover
+  under sustained write load. Kills primary, promotes replica, validates no
+  phantom commits via tx marker table. Explicit PASS/FAIL verdict.
+- **`scripts/bench_kernel_falcon_bench.sh`** — standardized internal kernel
+  benchmark wrapper for `falcon_bench`. Produces structured output under
+  `bench_out/<ts>/kernel_bench/`.
+- **`scripts/ci_bench_smoke.sh`** — CI smoke test ensuring scripts exist,
+  parse correctly, and produce expected artifacts. Not a performance test.
+- **`docs/benchmark_methodology.md`** — non-negotiable fairness rules, hardware
+  disclosure requirements, warm-up/run-count policy, interpretation guidance,
+  quick-start reproduction steps.
+- **`docs/benchmarks/RESULTS_TEMPLATE.md`** — standard report skeleton with
+  environment block, results tables, exact commands, and notes section.
+- **`bench_configs/falcon.bench.toml`** — FalconDB config tuned for fair
+  benchmarking (WAL enabled, fdatasync, TRUST auth).
+
+### Added — SCRAM-SHA-256 Authentication
+
+- **SCRAM-SHA-256 SASL authentication** — PostgreSQL-compatible SCRAM-SHA-256 (RFC 5802/7677)
+  for PG wire protocol. Replaces the broken inline implementation with a proper state-machine
+  engine (`auth::scram::ScramServerSession`) using `hmac`/`sha2` crates, constant-time proof
+  verification, and cryptographically secure nonce generation (`rand`).
+- **Stored verifier support** — `ScramVerifier` parses/serializes PostgreSQL SCRAM format
+  (`SCRAM-SHA-256$<iter>:<salt_b64>$<stored_key_b64>:<server_key_b64>`). Verifiers can be
+  pre-computed and stored in config; plaintext password never persisted.
+- **SASL binary codec** — `decode_sasl_initial_response()` and `decode_sasl_response()` in
+  `codec.rs` properly parse SASLInitialResponse (mechanism + binary data) and SASLResponse
+  (raw SASL bytes) from PG wire `'p'` messages, fixing compatibility with psql and pgAdmin.
+- **User credential config** — `AuthConfig.users: Vec<UserCredential>` for named SCRAM users
+  with stored verifiers or plaintext passwords. `AuthConfig.allow_cidrs` for CIDR allowlisting.
+- **24 new tests** — 14 SCRAM engine unit tests (verifier roundtrip, full handshake, wrong
+  password, bad mechanism, constant-time eq, PBKDF2 vectors) + 10 codec/integration tests
+  (SASL encode/decode, wire-level handshake with verifier, config user lookup).
+- **`docs/authentication.md`** — TRUST vs SCRAM-SHA-256 guide, protocol flow, verifier format,
+  config reference, psql/pgAdmin connection instructions.
 
 ### Added — OS Platform Tuning Guides
 

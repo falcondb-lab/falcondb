@@ -1,0 +1,29 @@
+# FalconDB PoC #4 — Observability: Prometheus Scrape Configuration
+# Scrapes all FalconDB nodes at 5-second intervals.
+# Metrics endpoint: http://<host>:<admin_port>/metrics
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: "falcondb"
+    static_configs:
+      # Node 1 (Primary): admin port 8080
+      - targets: ["host.docker.internal:8080"]
+        labels:
+          node: "node1"
+          initial_role: "primary"
+
+      # Node 2 (Replica): admin port 8081
+      - targets: ["host.docker.internal:8081"]
+        labels:
+          node: "node2"
+          initial_role: "replica"
+
+      # Node 3 (Replica): admin port 8082 — optional third node
+      # Uncomment if running a 3-node cluster
+      # - targets: ["host.docker.internal:8082"]
+      #   labels:
+      #     node: "node3"
+      #     initial_role: "replica"

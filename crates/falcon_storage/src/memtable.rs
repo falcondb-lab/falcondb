@@ -331,6 +331,40 @@ impl SecondaryIndex {
         }
     }
 
+    /// Range scan: return all PKs with index key in the specified range.
+    ///
+    /// - `lower`: optional lower bound `(key, inclusive)`
+    /// - `upper`: optional upper bound `(key, inclusive)`
+    ///
+    /// Examples:
+    /// - `range_scan(Some((k, true)), None)` → `key >= k`
+    /// - `range_scan(Some((k, false)), None)` → `key > k`
+    /// - `range_scan(None, Some((k, false)))` → `key < k`
+    /// - `range_scan(Some((lo, true)), Some((hi, true)))` → `lo <= key <= hi`
+    pub fn range_scan(
+        &self,
+        lower: Option<(&[u8], bool)>,
+        upper: Option<(&[u8], bool)>,
+    ) -> Vec<PrimaryKey> {
+        use std::ops::Bound;
+        let tree = self.tree.read();
+        let lo = match lower {
+            Some((k, true)) => Bound::Included(k.to_vec()),
+            Some((k, false)) => Bound::Excluded(k.to_vec()),
+            None => Bound::Unbounded,
+        };
+        let hi = match upper {
+            Some((k, true)) => Bound::Included(k.to_vec()),
+            Some((k, false)) => Bound::Excluded(k.to_vec()),
+            None => Bound::Unbounded,
+        };
+        let mut result = Vec::new();
+        for (_k, pks) in tree.range((lo, hi)) {
+            result.extend(pks.iter().cloned());
+        }
+        result
+    }
+
     /// Prefix scan: return all PKs whose key starts with the given prefix.
     /// Useful for composite index leftmost-prefix queries and prefix indexes.
     pub fn prefix_scan(&self, prefix: &[u8]) -> Vec<PrimaryKey> {
@@ -556,6 +590,18 @@ impl MemTable {
         for entry in &self.data {
             if let Some(row) = entry.value().read_for_txn(txn_id, read_ts) {
                 results.push((entry.key().clone(), row));
+            }
+        }
+        results
+    }
+
+    /// Scan returning only row data — avoids cloning the PK per row.
+    /// Use this when the caller only needs row values (SELECT, aggregates, joins).
+    pub fn scan_rows_only(&self, txn_id: TxnId, read_ts: Timestamp) -> Vec<OwnedRow> {
+        let mut results = Vec::with_capacity(self.data.len());
+        for entry in &self.data {
+            if let Some(row) = entry.value().read_for_txn(txn_id, read_ts) {
+                results.push(row);
             }
         }
         results

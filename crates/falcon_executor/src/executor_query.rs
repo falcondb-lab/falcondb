@@ -13,6 +13,15 @@ use crate::expr_engine::ExprEngine;
 use crate::parallel::parallel_filter;
 use crate::vectorized::{is_vectorizable, vectorized_filter, RecordBatch};
 
+/// Range bound extracted from a comparison predicate on an indexed column.
+enum RangeBound {
+    Gt(Datum),
+    Gte(Datum),
+    Lt(Datum),
+    Lte(Datum),
+    Between(Datum, Datum),
+}
+
 impl Executor {
     /// Try to detect a PK point lookup from the filter expression.
     /// Supports both single-column and composite (multi-column) PKs.
@@ -194,6 +203,140 @@ impl Executor {
                             let key = encode_column_value(datum);
                             return Some((col_idx, key, Some(*left.clone())));
                         }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Try to extract range predicates on an indexed column from the filter.
+    ///
+    /// Detects patterns:
+    /// - `col > literal`, `col >= literal`, `col < literal`, `col <= literal`
+    /// - `col BETWEEN low AND high`
+    /// - AND combinations that form a range on the same indexed column
+    ///
+    /// Returns `(column_idx, lower_bound, upper_bound, remaining_filter)`.
+    /// Each bound is `Option<(encoded_key, inclusive)>`.
+    pub(crate) fn try_index_range_scan_predicate(
+        &self,
+        filter: Option<&BoundExpr>,
+        table_id: TableId,
+    ) -> Option<(
+        usize,
+        Option<(Vec<u8>, bool)>,
+        Option<(Vec<u8>, bool)>,
+        Option<BoundExpr>,
+    )> {
+        let f = filter?;
+        let indexed_cols = self.storage.get_indexed_columns(table_id);
+        if indexed_cols.is_empty() {
+            return None;
+        }
+
+        // Flatten AND tree into conjuncts
+        let mut conjuncts: Vec<&BoundExpr> = Vec::new();
+        Self::flatten_and(f, &mut conjuncts);
+
+        // For each indexed column, try to collect range bounds from conjuncts
+        for &(col_idx, _unique) in &indexed_cols {
+            let mut lower: Option<(Vec<u8>, bool)> = None; // (key, inclusive)
+            let mut upper: Option<(Vec<u8>, bool)> = None;
+            let mut matched: Vec<bool> = vec![false; conjuncts.len()];
+
+            for (ci, conj) in conjuncts.iter().enumerate() {
+                if let Some((cidx, bound)) = Self::try_extract_range_bound(conj) {
+                    if cidx == col_idx {
+                        match bound {
+                            RangeBound::Gt(d) => {
+                                let key = encode_column_value(&d);
+                                lower = Some((key, false));
+                                matched[ci] = true;
+                            }
+                            RangeBound::Gte(d) => {
+                                let key = encode_column_value(&d);
+                                lower = Some((key, true));
+                                matched[ci] = true;
+                            }
+                            RangeBound::Lt(d) => {
+                                let key = encode_column_value(&d);
+                                upper = Some((key, false));
+                                matched[ci] = true;
+                            }
+                            RangeBound::Lte(d) => {
+                                let key = encode_column_value(&d);
+                                upper = Some((key, true));
+                                matched[ci] = true;
+                            }
+                            RangeBound::Between(lo, hi) => {
+                                lower = Some((encode_column_value(&lo), true));
+                                upper = Some((encode_column_value(&hi), true));
+                                matched[ci] = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if lower.is_some() || upper.is_some() {
+                let remaining: Vec<BoundExpr> = conjuncts
+                    .iter()
+                    .zip(matched.iter())
+                    .filter(|(_, &m)| !m)
+                    .map(|(&conj, _)| conj.clone())
+                    .collect();
+                let residual = Self::conjoin(remaining);
+                return Some((col_idx, lower, upper, residual));
+            }
+        }
+        None
+    }
+
+    /// Extract a range bound from a comparison expression on a column.
+    fn try_extract_range_bound(expr: &BoundExpr) -> Option<(usize, RangeBound)> {
+        match expr {
+            BoundExpr::BinaryOp { left, op, right } => {
+                let (col_idx, datum, flipped) = match (left.as_ref(), right.as_ref()) {
+                    (BoundExpr::ColumnRef(idx), BoundExpr::Literal(d)) => (*idx, d.clone(), false),
+                    (BoundExpr::Literal(d), BoundExpr::ColumnRef(idx)) => (*idx, d.clone(), true),
+                    _ => return None,
+                };
+                // When the literal is on the left (flipped), reverse the operator direction
+                let effective_op = if flipped {
+                    match op {
+                        BinOp::Gt => BinOp::Lt,
+                        BinOp::GtEq => BinOp::LtEq,
+                        BinOp::Lt => BinOp::Gt,
+                        BinOp::LtEq => BinOp::GtEq,
+                        other => *other,
+                    }
+                } else {
+                    *op
+                };
+                match effective_op {
+                    BinOp::Gt => Some((col_idx, RangeBound::Gt(datum))),
+                    BinOp::GtEq => Some((col_idx, RangeBound::Gte(datum))),
+                    BinOp::Lt => Some((col_idx, RangeBound::Lt(datum))),
+                    BinOp::LtEq => Some((col_idx, RangeBound::Lte(datum))),
+                    _ => None,
+                }
+            }
+            BoundExpr::Between {
+                expr: inner,
+                low,
+                high,
+                negated,
+            } => {
+                if *negated {
+                    return None;
+                }
+                if let BoundExpr::ColumnRef(idx) = inner.as_ref() {
+                    if let (BoundExpr::Literal(lo), BoundExpr::Literal(hi)) =
+                        (low.as_ref(), high.as_ref())
+                    {
+                        return Some((*idx, RangeBound::Between(lo.clone(), hi.clone())));
                     }
                 }
                 None
@@ -517,6 +660,134 @@ impl Executor {
         })
     }
 
+    /// Execute an index range scan: evaluate range bounds, look up PKs via
+    /// `StorageEngine::index_range_scan`, then apply the standard
+    /// filter → project → sort → limit pipeline.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn exec_index_range_scan(
+        &self,
+        table_id: TableId,
+        schema: &TableSchema,
+        index_col: usize,
+        lower_bound: Option<&(BoundExpr, bool)>,
+        upper_bound: Option<&(BoundExpr, bool)>,
+        projections: &[BoundProjection],
+        visible_projection_count: usize,
+        filter: Option<&BoundExpr>,
+        group_by: &[usize],
+        grouping_sets: &[Vec<usize>],
+        having: Option<&BoundExpr>,
+        order_by: &[BoundOrderBy],
+        limit: Option<usize>,
+        offset: Option<usize>,
+        distinct: &DistinctMode,
+        txn: &TxnHandle,
+        _cte_data: &CteData,
+        _virtual_rows: &[OwnedRow],
+    ) -> Result<ExecutionResult, FalconError> {
+        let dummy_row = OwnedRow::new(vec![]);
+
+        let lo = if let Some((expr, inclusive)) = lower_bound {
+            let d = crate::expr_engine::ExprEngine::eval_row(expr, &dummy_row)
+                .map_err(FalconError::Execution)?;
+            Some((encode_column_value(&d), *inclusive))
+        } else {
+            None
+        };
+        let hi = if let Some((expr, inclusive)) = upper_bound {
+            let d = crate::expr_engine::ExprEngine::eval_row(expr, &dummy_row)
+                .map_err(FalconError::Execution)?;
+            Some((encode_column_value(&d), *inclusive))
+        } else {
+            None
+        };
+
+        let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+        let lo_ref = lo.as_ref().map(|(k, inc)| (k.as_slice(), *inc));
+        let hi_ref = hi.as_ref().map(|(k, inc)| (k.as_slice(), *inc));
+        let raw_rows = self.storage.index_range_scan(
+            table_id, index_col, lo_ref, hi_ref, txn.txn_id, read_ts,
+        )?;
+
+        // Same pipeline as exec_index_scan
+        let mat_filter = self.materialize_filter(filter, txn)?;
+        let mat_having = self.materialize_filter(having, txn)?;
+        let filter_has_correlated_sub = mat_filter.as_ref().is_some_and(Self::expr_has_outer_ref);
+
+        let has_window = projections.iter().any(|p| matches!(p, BoundProjection::Window(..)));
+        let has_agg = projections.iter().any(|p| matches!(p, BoundProjection::Aggregate(..)));
+
+        if (has_agg || !group_by.is_empty() || !grouping_sets.is_empty()) && !has_window {
+            return self.exec_aggregate(
+                &raw_rows, schema, projections, mat_filter.as_ref(),
+                group_by, grouping_sets, mat_having.as_ref(),
+                order_by, limit, offset, distinct,
+            );
+        }
+
+        let projs_have_correlated = projections.iter().any(|p| match p {
+            BoundProjection::Expr(e, _) => Self::expr_has_outer_ref(e),
+            _ => false,
+        });
+
+        let capacity_hint = match (
+            order_by.is_empty() && matches!(distinct, DistinctMode::None) && !has_window,
+            limit, offset,
+        ) {
+            (true, Some(lim), Some(off)) => lim + off,
+            (true, Some(lim), None) => lim,
+            _ => raw_rows.len(),
+        };
+
+        let mut columns = self.resolve_output_columns(projections, schema);
+        let mut filtered: Vec<&OwnedRow> = Vec::new();
+        let mut result_rows: Vec<OwnedRow> = Vec::with_capacity(capacity_hint.min(raw_rows.len()));
+
+        let early_limit = if order_by.is_empty() && matches!(distinct, DistinctMode::None) && !has_window {
+            limit.map(|l| l + offset.unwrap_or(0))
+        } else {
+            None
+        };
+
+        for (_pk, row) in &raw_rows {
+            if let Some(max) = early_limit {
+                if result_rows.len() >= max { break; }
+            }
+            if let Some(ref f) = mat_filter {
+                if filter_has_correlated_sub {
+                    let row_filter = self.materialize_correlated(f, row, txn)?;
+                    if !crate::expr_engine::ExprEngine::eval_filter(&row_filter, row)
+                        .map_err(FalconError::Execution)? { continue; }
+                } else if !crate::expr_engine::ExprEngine::eval_filter(f, row)
+                    .map_err(FalconError::Execution)? { continue; }
+            }
+            if has_window { filtered.push(row); }
+            if projs_have_correlated {
+                result_rows.push(self.project_row_correlated(row, projections, txn)?);
+            } else {
+                result_rows.push(self.project_row(row, projections)?);
+            }
+        }
+
+        if has_window {
+            self.compute_window_functions(&filtered, projections, &mut result_rows)?;
+        }
+        crate::external_sort::sort_rows(&mut result_rows, order_by, self.external_sorter.as_ref())?;
+        self.apply_distinct(distinct, &mut result_rows);
+
+        if let Some(off) = offset {
+            if off < result_rows.len() { result_rows.drain(..off); } else { result_rows.clear(); }
+        }
+        if let Some(lim) = limit { result_rows.truncate(lim); }
+
+        if visible_projection_count < projections.len() {
+            for row in &mut result_rows { row.values.truncate(visible_projection_count); }
+            columns.truncate(visible_projection_count);
+        }
+
+        Ok(ExecutionResult::Query { columns, rows: result_rows })
+    }
+
     pub(crate) fn exec_seq_scan(
         &self,
         table_id: falcon_common::types::TableId,
@@ -614,15 +885,15 @@ impl Executor {
             if !virtual_rows.is_empty() {
                 // VALUES clause or GENERATE_SERIES — use inline data directly
                 (
-                    virtual_rows.iter().map(|r| (vec![], r.clone())).collect(),
+                    virtual_rows.iter().map(|r| (Vec::new(), r.clone())).collect(),
                     filter.cloned(),
                 )
             } else if table_id == TableId(0) {
                 // Virtual dual table — single empty row for SELECT without FROM
-                (vec![(vec![], OwnedRow::new(vec![]))], filter.cloned())
+                (vec![(Vec::new(), OwnedRow::new(Vec::new()))], filter.cloned())
             } else if let Some(cte_rows) = cte_data.get(&table_id) {
                 (
-                    cte_rows.iter().map(|r| (vec![], r.clone())).collect(),
+                    cte_rows.iter().map(|r| (Vec::new(), r.clone())).collect(),
                     filter.cloned(),
                 )
             } else if let Some((pk, remaining)) = self.try_pk_point_lookup(filter, schema) {
@@ -640,6 +911,17 @@ impl Executor {
                 let rows = self
                     .storage
                     .index_scan(table_id, col_idx, &key, txn.txn_id, read_ts)?;
+                (rows, remaining)
+            } else if let Some((col_idx, lo, hi, remaining)) =
+                self.try_index_range_scan_predicate(filter, table_id)
+            {
+                // Index range scan: use secondary index for range queries
+                let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+                let lo_ref = lo.as_ref().map(|(k, inc)| (k.as_slice(), *inc));
+                let hi_ref = hi.as_ref().map(|(k, inc)| (k.as_slice(), *inc));
+                let rows = self.storage.index_range_scan(
+                    table_id, col_idx, lo_ref, hi_ref, txn.txn_id, read_ts,
+                )?;
                 (rows, remaining)
             } else if let Some((k, ascending)) = self.try_pk_ordered_limit(
                 schema, filter, order_by, limit, offset, group_by, distinct,
@@ -773,6 +1055,43 @@ impl Executor {
         let mut filtered: Vec<&OwnedRow> = Vec::new();
         let mut result_rows: Vec<OwnedRow> = Vec::with_capacity(capacity_hint);
 
+        // Detect column-only projections: when all projections are Column(idx),
+        // we can gather values by index without going through eval_expr at all.
+        let col_only_indices: Option<Vec<usize>> = if !projs_have_correlated {
+            let indices: Vec<usize> = projections
+                .iter()
+                .filter_map(|p| match p {
+                    BoundProjection::Column(idx, _) => Some(*idx),
+                    _ => None,
+                })
+                .collect();
+            if indices.len() == projections.len() {
+                Some(indices)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Inline helper: project a row using the fastest available path.
+        macro_rules! do_project {
+            ($row:expr) => {
+                if projs_have_correlated {
+                    self.project_row_correlated($row, projections, txn)?
+                } else if let Some(ref idx) = col_only_indices {
+                    // Fast path: column-only projection — gather by index, no eval
+                    let vals: Vec<Datum> = idx
+                        .iter()
+                        .map(|&i| $row.get(i).cloned().unwrap_or(Datum::Null))
+                        .collect();
+                    OwnedRow::new(vals)
+                } else {
+                    self.project_row($row, projections)?
+                }
+            };
+        }
+
         if let Some(ref f) = mat_filter {
             if filter_has_correlated_sub {
                 // Correlated subquery: must re-materialise per row (no parallel/vectorized)
@@ -783,11 +1102,7 @@ impl Executor {
                     let row_filter = self.materialize_correlated(f, row, txn)?;
                     if ExprEngine::eval_filter(&row_filter, row).map_err(FalconError::Execution)? {
                         if has_window { filtered.push(row); }
-                        if projs_have_correlated {
-                            result_rows.push(self.project_row_correlated(row, projections, txn)?);
-                        } else {
-                            result_rows.push(self.project_row(row, projections)?);
-                        }
+                        result_rows.push(do_project!(row));
                     }
                 }
             } else if self.parallel_config.should_parallelize(raw_rows.len())
@@ -801,11 +1116,7 @@ impl Executor {
                     }
                     let row = &raw_rows[idx].1;
                     if has_window { filtered.push(row); }
-                    if projs_have_correlated {
-                        result_rows.push(self.project_row_correlated(row, projections, txn)?);
-                    } else {
-                        result_rows.push(self.project_row(row, projections)?);
-                    }
+                    result_rows.push(do_project!(row));
                 }
             } else if raw_rows.len() >= 256 && is_vectorizable(projections, mat_filter.as_ref()) {
                 // ── Vectorized filter path (single-threaded, batched) ──
@@ -818,11 +1129,7 @@ impl Executor {
                     }
                     let row = &raw_rows[idx].1;
                     if has_window { filtered.push(row); }
-                    if projs_have_correlated {
-                        result_rows.push(self.project_row_correlated(row, projections, txn)?);
-                    } else {
-                        result_rows.push(self.project_row(row, projections)?);
-                    }
+                    result_rows.push(do_project!(row));
                 }
             } else {
                 // ── Row-at-a-time filter+project (small data, fused single pass) ──
@@ -832,11 +1139,7 @@ impl Executor {
                     }
                     if ExprEngine::eval_filter(f, row).map_err(FalconError::Execution)? {
                         if has_window { filtered.push(row); }
-                        if projs_have_correlated {
-                            result_rows.push(self.project_row_correlated(row, projections, txn)?);
-                        } else {
-                            result_rows.push(self.project_row(row, projections)?);
-                        }
+                        result_rows.push(do_project!(row));
                     }
                 }
             }
@@ -847,11 +1150,7 @@ impl Executor {
                     if result_rows.len() >= max { break; }
                 }
                 if has_window { filtered.push(row); }
-                if projs_have_correlated {
-                    result_rows.push(self.project_row_correlated(row, projections, txn)?);
-                } else {
-                    result_rows.push(self.project_row(row, projections)?);
-                }
+                result_rows.push(do_project!(row));
             }
         }
 
@@ -919,14 +1218,18 @@ impl Executor {
     /// Uses compact binary encoding instead of `format!("{d}")` string keys,
     /// eliminating all per-row String allocations.
     pub(crate) fn dedup_rows(&self, rows: &mut Vec<OwnedRow>) {
-        let ncols = rows.first().map_or(0, |r| r.values.len());
-        let all_cols: Vec<usize> = (0..ncols).collect();
-        let mut seen: std::collections::HashSet<Vec<u8>> =
+        let mut seen: std::collections::HashSet<Box<[u8]>> =
             std::collections::HashSet::with_capacity(rows.len());
         let mut buf = Vec::with_capacity(64);
         rows.retain(|row| {
-            crate::executor_aggregate::encode_group_key(&mut buf, row, &all_cols);
-            seen.insert(buf.clone())
+            crate::executor_aggregate::encode_group_key_all(&mut buf, row);
+            // Two-step: only clone+box for genuinely new keys
+            if seen.contains(buf.as_slice()) {
+                false
+            } else {
+                seen.insert(buf.clone().into_boxed_slice());
+                true
+            }
         });
     }
 
@@ -936,12 +1239,17 @@ impl Executor {
             DistinctMode::None => {}
             DistinctMode::All => self.dedup_rows(rows),
             DistinctMode::On(indices) => {
-                let mut seen: std::collections::HashSet<Vec<u8>> =
+                let mut seen: std::collections::HashSet<Box<[u8]>> =
                     std::collections::HashSet::with_capacity(rows.len());
                 let mut buf = Vec::with_capacity(64);
                 rows.retain(|row| {
                     crate::executor_aggregate::encode_group_key(&mut buf, row, indices);
-                    seen.insert(buf.clone())
+                    if seen.contains(buf.as_slice()) {
+                        false
+                    } else {
+                        seen.insert(buf.clone().into_boxed_slice());
+                        true
+                    }
                 });
             }
         }
@@ -1011,6 +1319,33 @@ impl Executor {
             }
         }
         Ok(OwnedRow::new(values))
+    }
+
+    /// Buffer-reusing projection: fills `buf`, produces an OwnedRow, caller
+    /// reclaims the Vec from the returned row for reuse on the next iteration.
+    #[inline]
+    #[allow(dead_code)]
+    pub(crate) fn project_row_into(
+        &self,
+        row: &OwnedRow,
+        projections: &[BoundProjection],
+        buf: &mut Vec<Datum>,
+    ) -> Result<OwnedRow, FalconError> {
+        buf.clear();
+        for proj in projections {
+            match proj {
+                BoundProjection::Column(idx, _) => {
+                    buf.push(row.get(*idx).cloned().unwrap_or(Datum::Null));
+                }
+                BoundProjection::Expr(expr, _) => {
+                    let val = self.eval_expr_with_sequences(expr, row)?;
+                    buf.push(val);
+                }
+                BoundProjection::Aggregate(..) => buf.push(Datum::Null),
+                BoundProjection::Window(..) => buf.push(Datum::Null),
+            }
+        }
+        Ok(OwnedRow::new(std::mem::take(buf)))
     }
 
     /// Evaluate an expression, handling sequence functions via storage.

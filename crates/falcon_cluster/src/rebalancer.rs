@@ -1449,4 +1449,89 @@ mod tests {
         assert!(!metrics.is_paused);
         assert!(metrics.last_imbalance_ratio > 1.0);
     }
+
+    #[test]
+    fn test_resume_allows_rebalance() {
+        let engine = ShardedEngine::new(2);
+        let schema = make_test_schema();
+        engine.create_table_all(&schema).unwrap();
+
+        // Insert skewed data into shard 0
+        let shard0 = engine.shard(ShardId(0)).unwrap();
+        for i in 0..200 {
+            let row = OwnedRow::new(vec![Datum::Int64(i), Datum::Text(format!("u{}", i))]);
+            let pk = encode_pk_from_datums(&[&Datum::Int64(i)]);
+            shard0.storage.insert_row(TableId(1), pk, row).unwrap();
+        }
+
+        let config = RebalancerConfig {
+            imbalance_threshold: 1.25,
+            batch_size: 64,
+            min_donor_rows: 10,
+            cooldown_ms: 0,
+        };
+        let rebalancer = ShardRebalancer::new(config);
+
+        // Pause → verify no migration
+        rebalancer.pause();
+        assert!(rebalancer.is_paused());
+        let migrated = rebalancer.check_and_rebalance(&engine);
+        assert_eq!(migrated, 0);
+
+        // Resume → verify migration proceeds
+        rebalancer.resume();
+        assert!(!rebalancer.is_paused());
+        let migrated = rebalancer.check_and_rebalance(&engine);
+        // After resume, the rebalancer should have run (even if 0 rows moved
+        // because threshold not met, runs_completed should increment)
+        assert!(migrated > 0 || rebalancer.runs_completed() > 0);
+
+        // Verify metrics reflect resumed state
+        let metrics = rebalancer.metrics_snapshot();
+        assert!(!metrics.is_paused);
+        assert!(metrics.runs_completed >= 1);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_consistency() {
+        let engine = ShardedEngine::new(2);
+        let schema = make_test_schema();
+        engine.create_table_all(&schema).unwrap();
+
+        let shard0 = engine.shard(ShardId(0)).unwrap();
+        for i in 0..300 {
+            let row = OwnedRow::new(vec![Datum::Int64(i), Datum::Text(format!("u{}", i))]);
+            let pk = encode_pk_from_datums(&[&Datum::Int64(i)]);
+            shard0.storage.insert_row(TableId(1), pk, row).unwrap();
+        }
+
+        let config = RebalancerConfig {
+            imbalance_threshold: 1.25,
+            batch_size: 64,
+            min_donor_rows: 10,
+            cooldown_ms: 0,
+        };
+        let rebalancer = ShardRebalancer::new(config);
+
+        // Run twice (cooldown=0 allows back-to-back)
+        let migrated1 = rebalancer.check_and_rebalance(&engine);
+        let migrated2 = rebalancer.check_and_rebalance(&engine);
+
+        let metrics = rebalancer.metrics_snapshot();
+
+        // runs_completed must equal atomic counter
+        assert_eq!(metrics.runs_completed, rebalancer.runs_completed());
+        // total_rows_migrated must equal atomic counter
+        assert_eq!(metrics.total_rows_migrated, rebalancer.total_rows_migrated());
+        // total must be sum of individual runs
+        assert_eq!(metrics.total_rows_migrated, migrated1 + migrated2);
+        // Not running after synchronous call
+        assert!(!metrics.is_running);
+        // Not paused (we never paused)
+        assert!(!metrics.is_paused);
+        // Imbalance ratio should be non-negative
+        assert!(metrics.last_imbalance_ratio >= 0.0);
+        // Move rate should be non-negative
+        assert!(metrics.shard_move_rate >= 0.0);
+    }
 }

@@ -1,0 +1,31 @@
+# FalconDB DCG PoC — Primary Node Configuration
+# Port 5433 | Replication port 50051 | Admin port 8080
+
+[server]
+pg_listen_addr = "0.0.0.0:5433"
+admin_listen_addr = "0.0.0.0:8080"
+node_id = 1
+max_connections = 256
+
+[storage]
+wal_enabled = true
+data_dir = "./poc_data_primary"
+
+[wal]
+group_commit = true
+flush_interval_us = 1000
+sync_mode = "fdatasync"
+
+[auth]
+method = "trust"
+
+[replication]
+role = "primary"
+grpc_listen_addr = "0.0.0.0:50051"
+primary_endpoint = ""
+max_records_per_chunk = 1000
+poll_interval_ms = 100
+shard_count = 1
+
+[gc]
+enabled = false

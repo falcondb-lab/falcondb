@@ -1,0 +1,38 @@
+# ============================================================================
+# FalconDB PoC #6 — Cost Efficiency: Small-Footprint Configuration
+# ============================================================================
+# Demonstrates that FalconDB can deliver production-grade OLTP correctness
+# with a deliberately constrained resource envelope.
+#
+# Resource Envelope (intentionally smaller than the PostgreSQL reference):
+#   - Memory cap: application-level (see --memory-limit flag or OS cgroup)
+#   - Durability: FULL (WAL + fsync, same as production)
+#   - No unsafe shortcuts
+# ============================================================================
+
+[server]
+pg_listen_addr  = "0.0.0.0:5433"
+admin_listen_addr = "0.0.0.0:8080"
+node_id         = 1
+max_connections = 128
+
+[storage]
+wal_enabled = true
+data_dir    = "./cost_data_falcon"
+
+[wal]
+group_commit       = true
+flush_interval_us  = 1000
+sync_mode          = "fdatasync"
+
+[auth]
+method = "trust"
+
+[memory]
+# Soft limit: 512 MB — intentionally modest
+soft_limit_bytes   = 536870912
+# Hard limit: 768 MB
+hard_limit_bytes   = 805306368
+
+[gc]
+enabled = true

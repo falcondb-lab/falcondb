@@ -1,0 +1,31 @@
+# FalconDB PoC #3 — Failover Under Load: Replica Node
+# Port 5434 | Replication 50052 | Admin 8081
+
+[server]
+pg_listen_addr = "0.0.0.0:5434"
+admin_listen_addr = "0.0.0.0:8081"
+node_id = 2
+max_connections = 256
+
+[storage]
+wal_enabled = true
+data_dir = "./poc_data_replica"
+
+[wal]
+group_commit = true
+flush_interval_us = 1000
+sync_mode = "fdatasync"
+
+[auth]
+method = "trust"
+
+[replication]
+role = "replica"
+grpc_listen_addr = "0.0.0.0:50052"
+primary_endpoint = "http://127.0.0.1:50051"
+max_records_per_chunk = 1000
+poll_interval_ms = 100
+shard_count = 1
+
+[gc]
+enabled = false

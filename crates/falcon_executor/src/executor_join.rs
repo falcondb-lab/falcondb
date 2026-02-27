@@ -33,8 +33,7 @@ impl Executor {
         let left_data: Vec<OwnedRow> = if let Some(cte_rows) = cte_data.get(&left_table_id) {
             cte_rows.clone()
         } else {
-            let left_rows = self.storage.scan(left_table_id, txn.txn_id, read_ts)?;
-            left_rows.into_iter().map(|(_, row)| row).collect()
+            self.storage.scan_rows_only(left_table_id, txn.txn_id, read_ts)?
         };
 
         // Start with left rows as combined rows
@@ -46,27 +45,40 @@ impl Executor {
                 if let Some(cte_rows) = cte_data.get(&join.right_table_id) {
                     cte_rows.clone()
                 } else {
-                    let right_rows = self
-                        .storage
-                        .scan(join.right_table_id, txn.txn_id, read_ts)?;
-                    right_rows.into_iter().map(|(_, row)| row).collect()
+                    self.storage.scan_rows_only(join.right_table_id, txn.txn_id, read_ts)?
                 };
 
             let mut new_combined = Vec::new();
+
+            // Pre-allocate null rows and merge buffer outside the loops
+            let left_width = combined_rows.first().map_or(0, |r| r.values.len());
+            let right_width = right_data.first().map_or(
+                join.right_schema.columns.len(),
+                |r| r.values.len(),
+            );
+            let null_right = OwnedRow::new(vec![Datum::Null; right_width]);
+            let null_left = OwnedRow::new(vec![Datum::Null; left_width]);
+            let has_cond = join.condition.is_some();
+            let mut merge_buf: Vec<Datum> = Vec::with_capacity(left_width + right_width);
 
             match join.join_type {
                 JoinType::Inner => {
                     for left_row in &combined_rows {
                         for right_row in &right_data {
-                            let merged = self.merge_rows(left_row, right_row);
-                            if let Some(ref cond) = join.condition {
-                                if !ExprEngine::eval_filter(cond, &merged)
-                                    .map_err(FalconError::Execution)?
-                                {
-                                    continue;
+                            if has_cond {
+                                let merged = self.merge_rows_into(left_row, right_row, &mut merge_buf);
+                                if let Some(ref cond) = join.condition {
+                                    if !ExprEngine::eval_filter(cond, &merged)
+                                        .map_err(FalconError::Execution)?
+                                    {
+                                        merge_buf = merged.values;
+                                        continue;
+                                    }
                                 }
+                                new_combined.push(merged);
+                            } else {
+                                new_combined.push(self.merge_rows(left_row, right_row));
                             }
-                            new_combined.push(merged);
                         }
                     }
                 }
@@ -74,21 +86,24 @@ impl Executor {
                     for left_row in &combined_rows {
                         let mut matched = false;
                         for right_row in &right_data {
-                            let merged = self.merge_rows(left_row, right_row);
-                            if let Some(ref cond) = join.condition {
-                                if !ExprEngine::eval_filter(cond, &merged)
-                                    .map_err(FalconError::Execution)?
-                                {
-                                    continue;
+                            if has_cond {
+                                let merged = self.merge_rows_into(left_row, right_row, &mut merge_buf);
+                                if let Some(ref cond) = join.condition {
+                                    if !ExprEngine::eval_filter(cond, &merged)
+                                        .map_err(FalconError::Execution)?
+                                    {
+                                        merge_buf = merged.values;
+                                        continue;
+                                    }
                                 }
+                                matched = true;
+                                new_combined.push(merged);
+                            } else {
+                                matched = true;
+                                new_combined.push(self.merge_rows(left_row, right_row));
                             }
-                            matched = true;
-                            new_combined.push(merged);
                         }
                         if !matched {
-                            // Emit left row with NULLs for right columns
-                            let null_right =
-                                OwnedRow::new(vec![Datum::Null; join.right_schema.columns.len()]);
                             new_combined.push(self.merge_rows(left_row, &null_right));
                         }
                     }
@@ -97,53 +112,59 @@ impl Executor {
                     for right_row in &right_data {
                         let mut matched = false;
                         for left_row in &combined_rows {
-                            let merged = self.merge_rows(left_row, right_row);
-                            if let Some(ref cond) = join.condition {
-                                if !ExprEngine::eval_filter(cond, &merged)
-                                    .map_err(FalconError::Execution)?
-                                {
-                                    continue;
+                            if has_cond {
+                                let merged = self.merge_rows_into(left_row, right_row, &mut merge_buf);
+                                if let Some(ref cond) = join.condition {
+                                    if !ExprEngine::eval_filter(cond, &merged)
+                                        .map_err(FalconError::Execution)?
+                                    {
+                                        merge_buf = merged.values;
+                                        continue;
+                                    }
                                 }
+                                matched = true;
+                                new_combined.push(merged);
+                            } else {
+                                matched = true;
+                                new_combined.push(self.merge_rows(left_row, right_row));
                             }
-                            matched = true;
-                            new_combined.push(merged);
                         }
                         if !matched {
-                            let left_width =
-                                combined_rows.first().map_or(0, |r| r.values.len());
-                            let null_left = OwnedRow::new(vec![Datum::Null; left_width]);
                             new_combined.push(self.merge_rows(&null_left, right_row));
                         }
                     }
                 }
                 JoinType::FullOuter => {
-                    let left_width = combined_rows.first().map_or(0, |r| r.values.len());
                     let mut right_matched = vec![false; right_data.len()];
                     for left_row in &combined_rows {
                         let mut left_matched = false;
                         for (ri, right_row) in right_data.iter().enumerate() {
-                            let merged = self.merge_rows(left_row, right_row);
-                            if let Some(ref cond) = join.condition {
-                                if !ExprEngine::eval_filter(cond, &merged)
-                                    .map_err(FalconError::Execution)?
-                                {
-                                    continue;
+                            if has_cond {
+                                let merged = self.merge_rows_into(left_row, right_row, &mut merge_buf);
+                                if let Some(ref cond) = join.condition {
+                                    if !ExprEngine::eval_filter(cond, &merged)
+                                        .map_err(FalconError::Execution)?
+                                    {
+                                        merge_buf = merged.values;
+                                        continue;
+                                    }
                                 }
+                                left_matched = true;
+                                right_matched[ri] = true;
+                                new_combined.push(merged);
+                            } else {
+                                left_matched = true;
+                                right_matched[ri] = true;
+                                new_combined.push(self.merge_rows(left_row, right_row));
                             }
-                            left_matched = true;
-                            right_matched[ri] = true;
-                            new_combined.push(merged);
                         }
                         if !left_matched {
-                            let null_right =
-                                OwnedRow::new(vec![Datum::Null; join.right_schema.columns.len()]);
                             new_combined.push(self.merge_rows(left_row, &null_right));
                         }
                     }
                     // Emit unmatched right rows with NULL left
                     for (ri, right_row) in right_data.iter().enumerate() {
                         if !right_matched[ri] {
-                            let null_left = OwnedRow::new(vec![Datum::Null; left_width]);
                             new_combined.push(self.merge_rows(&null_left, right_row));
                         }
                     }
@@ -193,11 +214,7 @@ impl Executor {
         let left_data: Vec<OwnedRow> = if let Some(cte_rows) = cte_data.get(&left_table_id) {
             cte_rows.clone()
         } else {
-            self.storage
-                .scan(left_table_id, txn.txn_id, read_ts)?
-                .into_iter()
-                .map(|(_, row)| row)
-                .collect()
+            self.storage.scan_rows_only(left_table_id, txn.txn_id, read_ts)?
         };
 
         let mut combined_rows: Vec<OwnedRow> = left_data;
@@ -207,11 +224,7 @@ impl Executor {
                 if let Some(cte_rows) = cte_data.get(&join.right_table_id) {
                     cte_rows.clone()
                 } else {
-                    self.storage
-                        .scan(join.right_table_id, txn.txn_id, read_ts)?
-                        .into_iter()
-                        .map(|(_, row)| row)
-                        .collect()
+                    self.storage.scan_rows_only(join.right_table_id, txn.txn_id, read_ts)?
                 };
 
             // Extract equi-join key column indices from the condition
@@ -319,7 +332,12 @@ impl Executor {
                 for (ri, right_row) in right_data.iter().enumerate() {
                     key_buf.clear();
                     Self::encode_join_key_into(right_row, &right_key_cols, &mut key_buf);
-                    hash_table.entry(key_buf.clone()).or_default().push(ri);
+                    // Two-step lookup: avoid cloning key_buf when key already exists
+                    if let Some(bucket) = hash_table.get_mut(key_buf.as_slice()) {
+                        bucket.push(ri);
+                    } else {
+                        hash_table.insert(key_buf.clone(), vec![ri]);
+                    }
                 }
 
                 // Probe buffer: reused across all left rows — zero alloc per probe.
@@ -335,6 +353,14 @@ impl Executor {
                     + right_data.first().map_or(0, |r| r.values.len());
                 let mut merge_buf: Vec<Datum> = Vec::with_capacity(merge_width);
 
+                // Pre-allocate null rows once for outer joins (R8-7)
+                let right_width = right_data.first().map_or(
+                    join.right_schema.columns.len(),
+                    |r| r.values.len(),
+                );
+                let null_right = OwnedRow::new(vec![Datum::Null; right_width]);
+                let null_left = OwnedRow::new(vec![Datum::Null; left_width]);
+
                 match join.join_type {
                     JoinType::Inner => {
                         for left_row in &combined_rows {
@@ -342,21 +368,18 @@ impl Executor {
                             Self::encode_join_key_into(left_row, &left_key_cols, &mut probe_buf);
                             if let Some(indices) = hash_table.get(probe_buf.as_slice()) {
                                 for &ri in indices {
+                                    let merged = self.merge_rows_into(left_row, &right_data[ri], &mut merge_buf);
                                     if !pure_equi {
-                                        let merged = self.merge_rows_into(left_row, &right_data[ri], &mut merge_buf);
                                         if let Some(ref cond) = join.condition {
                                             if !ExprEngine::eval_filter(cond, &merged)
                                                 .map_err(FalconError::Execution)?
                                             {
-                                                // Reclaim buffer from rejected row
                                                 merge_buf = merged.values;
                                                 continue;
                                             }
                                         }
-                                        new_combined.push(merged);
-                                    } else {
-                                        new_combined.push(self.merge_rows(left_row, &right_data[ri]));
                                     }
+                                    new_combined.push(merged);
                                 }
                             }
                         }
@@ -368,12 +391,13 @@ impl Executor {
                             let mut matched = false;
                             if let Some(indices) = hash_table.get(probe_buf.as_slice()) {
                                 for &ri in indices {
-                                    let merged = self.merge_rows(left_row, &right_data[ri]);
+                                    let merged = self.merge_rows_into(left_row, &right_data[ri], &mut merge_buf);
                                     if !pure_equi {
                                         if let Some(ref cond) = join.condition {
                                             if !ExprEngine::eval_filter(cond, &merged)
                                                 .map_err(FalconError::Execution)?
                                             {
+                                                merge_buf = merged.values;
                                                 continue;
                                             }
                                         }
@@ -383,10 +407,6 @@ impl Executor {
                                 }
                             }
                             if !matched {
-                                let null_right = OwnedRow::new(vec![
-                                    Datum::Null;
-                                    join.right_schema.columns.len()
-                                ]);
                                 new_combined.push(self.merge_rows(left_row, &null_right));
                             }
                         }
@@ -398,7 +418,11 @@ impl Executor {
                         for (li, left_row) in combined_rows.iter().enumerate() {
                             key_buf.clear();
                             Self::encode_join_key_into(left_row, &left_key_cols, &mut key_buf);
-                            left_hash.entry(key_buf.clone()).or_default().push(li);
+                            if let Some(bucket) = left_hash.get_mut(key_buf.as_slice()) {
+                                bucket.push(li);
+                            } else {
+                                left_hash.insert(key_buf.clone(), vec![li]);
+                            }
                         }
                         for right_row in &right_data {
                             probe_buf.clear();
@@ -406,12 +430,13 @@ impl Executor {
                             let mut matched = false;
                             if let Some(indices) = left_hash.get(probe_buf.as_slice()) {
                                 for &li in indices {
-                                    let merged = self.merge_rows(&combined_rows[li], right_row);
+                                    let merged = self.merge_rows_into(&combined_rows[li], right_row, &mut merge_buf);
                                     if !pure_equi {
                                         if let Some(ref cond) = join.condition {
                                             if !ExprEngine::eval_filter(cond, &merged)
                                                 .map_err(FalconError::Execution)?
                                             {
+                                                merge_buf = merged.values;
                                                 continue;
                                             }
                                         }
@@ -421,7 +446,6 @@ impl Executor {
                                 }
                             }
                             if !matched {
-                                let null_left = OwnedRow::new(vec![Datum::Null; left_width]);
                                 new_combined.push(self.merge_rows(&null_left, right_row));
                             }
                         }
@@ -435,12 +459,13 @@ impl Executor {
                             let mut left_matched = false;
                             if let Some(indices) = hash_table.get(probe_buf.as_slice()) {
                                 for &ri in indices {
-                                    let merged = self.merge_rows(left_row, &right_data[ri]);
+                                    let merged = self.merge_rows_into(left_row, &right_data[ri], &mut merge_buf);
                                     if !pure_equi {
                                         if let Some(ref cond) = join.condition {
                                             if !ExprEngine::eval_filter(cond, &merged)
                                                 .map_err(FalconError::Execution)?
                                             {
+                                                merge_buf = merged.values;
                                                 continue;
                                             }
                                         }
@@ -451,17 +476,12 @@ impl Executor {
                                 }
                             }
                             if !left_matched {
-                                let null_right = OwnedRow::new(vec![
-                                    Datum::Null;
-                                    join.right_schema.columns.len()
-                                ]);
                                 new_combined.push(self.merge_rows(left_row, &null_right));
                             }
                         }
                         // Emit unmatched right rows with NULL left
                         for (ri, right_row) in right_data.iter().enumerate() {
                             if !right_matched[ri] {
-                                let null_left = OwnedRow::new(vec![Datum::Null; left_width]);
                                 new_combined.push(self.merge_rows(&null_left, right_row));
                             }
                         }
@@ -510,11 +530,7 @@ impl Executor {
         let left_data: Vec<OwnedRow> = if let Some(cte_rows) = cte_data.get(&left_table_id) {
             cte_rows.clone()
         } else {
-            self.storage
-                .scan(left_table_id, txn.txn_id, read_ts)?
-                .into_iter()
-                .map(|(_, row)| row)
-                .collect()
+            self.storage.scan_rows_only(left_table_id, txn.txn_id, read_ts)?
         };
 
         let mut combined_rows: Vec<OwnedRow> = left_data;
@@ -524,11 +540,7 @@ impl Executor {
                 if let Some(cte_rows) = cte_data.get(&join.right_table_id) {
                     cte_rows.clone()
                 } else {
-                    self.storage
-                        .scan(join.right_table_id, txn.txn_id, read_ts)?
-                        .into_iter()
-                        .map(|(_, row)| row)
-                        .collect()
+                    self.storage.scan_rows_only(join.right_table_id, txn.txn_id, read_ts)?
                 };
 
             let left_width = combined_rows.first().map_or(0, |r| r.values.len());
@@ -590,26 +602,32 @@ impl Executor {
                     key_pairs.iter().map(|(_, rc)| (*rc, false)).collect();
 
                 // Build (byte_key, original_index) for left side
-                let mut left_sorted: Vec<(Vec<u8>, usize)> = Vec::with_capacity(combined_rows.len());
+                // Use Box<[u8]> (shrink-to-fit) to eliminate excess Vec capacity per key.
+                let mut left_sorted: Vec<(Box<[u8]>, usize)> = Vec::with_capacity(combined_rows.len());
                 let mut kb = Vec::with_capacity(key_pairs.len() * 9);
                 for (i, row) in combined_rows.iter().enumerate() {
                     kb.clear();
                     Self::encode_join_key_into(row, &left_key_cols, &mut kb);
-                    left_sorted.push((kb.clone(), i));
+                    left_sorted.push((kb.clone().into_boxed_slice(), i));
                 }
                 left_sorted.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
                 // Build (byte_key, original_index) for right side
-                let mut right_sorted: Vec<(Vec<u8>, usize)> = Vec::with_capacity(right_data.len());
+                let mut right_sorted: Vec<(Box<[u8]>, usize)> = Vec::with_capacity(right_data.len());
                 for (i, row) in right_data.iter().enumerate() {
                     kb.clear();
                     Self::encode_join_key_into(row, &right_key_cols, &mut kb);
-                    right_sorted.push((kb.clone(), i));
+                    right_sorted.push((kb.clone().into_boxed_slice(), i));
                 }
                 right_sorted.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
                 // For pure equi-joins, skip redundant filter eval
                 let pure_equi_merge = Self::is_pure_equi_join(join.condition.as_ref(), left_width);
+
+                // Reusable merge buffer for merge_rows_into
+                let merge_width = combined_rows.first().map_or(0, |r| r.values.len())
+                    + right_data.first().map_or(0, |r| r.values.len());
+                let mut merge_buf: Vec<Datum> = Vec::with_capacity(merge_width);
 
                 // Merge pass
                 let mut li = 0;
@@ -641,15 +659,17 @@ impl Executor {
                             // Cross-product of matching groups
                             for l in li..left_group_end {
                                 for r in ri..right_group_end {
-                                    let merged = self.merge_rows(
+                                    let merged = self.merge_rows_into(
                                         &combined_rows[left_sorted[l].1],
                                         &right_data[right_sorted[r].1],
+                                        &mut merge_buf,
                                     );
                                     if !pure_equi_merge {
                                         if let Some(ref cond) = join.condition {
                                             if !ExprEngine::eval_filter(cond, &merged)
                                                 .map_err(FalconError::Execution)?
                                             {
+                                                merge_buf = merged.values;
                                                 continue;
                                             }
                                         }
@@ -688,32 +708,82 @@ impl Executor {
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> Result<ExecutionResult, FalconError> {
-        // Apply WHERE filter
-        let mut filtered: Vec<OwnedRow> = Vec::with_capacity(combined_rows.len());
-        for row in combined_rows {
-            if let Some(ref f) = mat_filter {
-                if !ExprEngine::eval_filter(f, &row).map_err(FalconError::Execution)? {
-                    continue;
-                }
-            }
-            filtered.push(row);
-        }
-
         let has_window = projections
             .iter()
             .any(|p| matches!(p, BoundProjection::Window(..)));
 
-        let mut columns = self.resolve_output_columns(projections, combined_schema);
-        let filtered_refs: Vec<&OwnedRow> = filtered.iter().collect();
-        let mut result_rows: Vec<OwnedRow> = Vec::with_capacity(filtered.len());
-        for row in &filtered {
-            result_rows.push(self.project_row(row, projections)?);
-        }
+        let columns = self.resolve_output_columns(projections, combined_schema);
+
+        // Column-only projection fast path: when all projections are Column(idx),
+        // gather values by index without going through eval_expr.
+        let col_only_indices: Option<Vec<usize>> = {
+            let indices: Vec<usize> = projections
+                .iter()
+                .filter_map(|p| match p {
+                    BoundProjection::Column(idx, _) => Some(*idx),
+                    _ => None,
+                })
+                .collect();
+            if indices.len() == projections.len() { Some(indices) } else { None }
+        };
 
         if has_window {
+            // Window functions need both filtered refs and projected rows — two-pass required.
+            let mut filtered: Vec<OwnedRow> = Vec::with_capacity(combined_rows.len());
+            for row in combined_rows {
+                if let Some(ref f) = mat_filter {
+                    if !ExprEngine::eval_filter(f, &row).map_err(FalconError::Execution)? {
+                        continue;
+                    }
+                }
+                filtered.push(row);
+            }
+            let filtered_refs: Vec<&OwnedRow> = filtered.iter().collect();
+            let mut result_rows: Vec<OwnedRow> = Vec::with_capacity(filtered.len());
+            for row in &filtered {
+                if let Some(ref idx) = col_only_indices {
+                    let vals: Vec<Datum> = idx.iter().map(|&i| row.get(i).cloned().unwrap_or(Datum::Null)).collect();
+                    result_rows.push(OwnedRow::new(vals));
+                } else {
+                    result_rows.push(self.project_row(row, projections)?);
+                }
+            }
             self.compute_window_functions(&filtered_refs, projections, &mut result_rows)?;
+
+            return self.finish_join_post(result_rows, columns, visible_projection_count, distinct, order_by, limit, offset);
         }
 
+        // Fused single-pass: filter + project in one loop (no intermediate Vec)
+        let mut result_rows: Vec<OwnedRow> = Vec::with_capacity(combined_rows.len());
+        for row in &combined_rows {
+            if let Some(ref f) = mat_filter {
+                if !ExprEngine::eval_filter(f, row).map_err(FalconError::Execution)? {
+                    continue;
+                }
+            }
+            if let Some(ref idx) = col_only_indices {
+                let vals: Vec<Datum> = idx.iter().map(|&i| row.get(i).cloned().unwrap_or(Datum::Null)).collect();
+                result_rows.push(OwnedRow::new(vals));
+            } else {
+                result_rows.push(self.project_row(row, projections)?);
+            }
+        }
+
+        self.finish_join_post(result_rows, columns, visible_projection_count, distinct, order_by, limit, offset)
+    }
+
+    /// Shared post-projection pipeline: distinct → sort → offset/limit → column truncation.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_join_post(
+        &self,
+        mut result_rows: Vec<OwnedRow>,
+        mut columns: Vec<(String, falcon_common::types::DataType)>,
+        visible_projection_count: usize,
+        distinct: &DistinctMode,
+        order_by: &[BoundOrderBy],
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> Result<ExecutionResult, FalconError> {
         self.apply_distinct(distinct, &mut result_rows);
 
         crate::external_sort::sort_rows(&mut result_rows, order_by, self.external_sorter.as_ref())?;
@@ -729,7 +799,7 @@ impl Executor {
             result_rows.truncate(lim);
         }
 
-        if visible_projection_count < projections.len() {
+        if visible_projection_count < columns.len() {
             for row in &mut result_rows {
                 row.values.truncate(visible_projection_count);
             }
@@ -743,6 +813,7 @@ impl Executor {
     }
 
     /// Compare two datum key vectors for sort-merge join ordering.
+    #[allow(dead_code)]
     fn cmp_datum_keys(a: &[Datum], b: &[Datum]) -> std::cmp::Ordering {
         for (av, bv) in a.iter().zip(b.iter()) {
             let ord = Self::cmp_datum(av, bv);
@@ -754,6 +825,7 @@ impl Executor {
     }
 
     /// Compare two Datum values for ordering. NULL sorts last.
+    #[allow(dead_code)]
     fn cmp_datum(a: &Datum, b: &Datum) -> std::cmp::Ordering {
         match (a, b) {
             (Datum::Null, Datum::Null) => std::cmp::Ordering::Equal,

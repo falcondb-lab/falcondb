@@ -34,6 +34,14 @@ impl Executor {
 
         let mut rows_inserted: u64 = 0;
 
+        // Build default-values template once; clone per row instead of
+        // rebuilding from schema on every iteration.
+        let default_values: Vec<Datum> = schema
+            .columns
+            .iter()
+            .map(|c| c.default_value.clone().unwrap_or(Datum::Null))
+            .collect();
+
         for (line_idx, line) in text.lines().enumerate() {
             // Skip header row
             if header && line_idx == 0 {
@@ -61,12 +69,7 @@ impl Executor {
                 ))));
             }
 
-            // Build row with default values
-            let mut values: Vec<Datum> = schema
-                .columns
-                .iter()
-                .map(|c| c.default_value.clone().unwrap_or(Datum::Null))
-                .collect();
+            let mut values: Vec<Datum> = default_values.clone();
 
             // Parse each field into the appropriate Datum type
             for (i, field) in fields.iter().enumerate() {
@@ -134,49 +137,47 @@ impl Executor {
             }
         };
 
-        let mut output_lines: Vec<Vec<u8>> = Vec::new();
+        let mut result_rows: Vec<OwnedRow> = Vec::with_capacity(rows.len() + 1);
+        let delim_str = delimiter.to_string();
 
         // Header row
         if header {
             let header_fields: Vec<String> = columns.iter().map(|(name, _)| name.clone()).collect();
-            let line = if csv {
+            let mut line = if csv {
                 format_csv_line(&header_fields, delimiter, quote, escape)
             } else {
-                header_fields.join(&delimiter.to_string())
+                header_fields.join(&delim_str)
             };
-            output_lines.push(format!("{line}\n").into_bytes());
+            line.push('\n');
+            result_rows.push(OwnedRow::new(vec![Datum::Text(line)]));
         }
 
+        // Reusable fields buffer for non-CSV text mode
+        let mut fields_buf: Vec<String> = Vec::with_capacity(columns.len());
+        let mut line_buf = String::with_capacity(256);
         for row in &rows {
-            let fields: Vec<String> = row
-                .values
-                .iter()
-                .map(|datum| {
-                    if datum.is_null() {
-                        null_string.to_owned()
-                    } else {
-                        datum_to_text(datum)
-                    }
-                })
-                .collect();
-
-            let line = if csv {
-                format_csv_line(&fields, delimiter, quote, escape)
+            fields_buf.clear();
+            for datum in &row.values {
+                if datum.is_null() {
+                    fields_buf.push(null_string.to_owned());
+                } else {
+                    fields_buf.push(datum_to_text(datum));
+                }
+            }
+            line_buf.clear();
+            if csv {
+                line_buf.push_str(&format_csv_line(&fields_buf, delimiter, quote, escape));
             } else {
-                fields.join(&delimiter.to_string())
-            };
-            output_lines.push(format!("{line}\n").into_bytes());
+                for (i, f) in fields_buf.iter().enumerate() {
+                    if i > 0 { line_buf.push_str(&delim_str); }
+                    line_buf.push_str(f);
+                }
+            }
+            line_buf.push('\n');
+            result_rows.push(OwnedRow::new(vec![Datum::Text(line_buf.clone())]));
         }
 
         let result_columns = vec![("copy_data".into(), DataType::Text)];
-        let result_rows: Vec<OwnedRow> = output_lines
-            .into_iter()
-            .map(|bytes| {
-                let s = String::from_utf8(bytes).unwrap_or_default();
-                OwnedRow::new(vec![Datum::Text(s)])
-            })
-            .collect();
-
         Ok(ExecutionResult::Query {
             columns: result_columns,
             rows: result_rows,
@@ -204,7 +205,8 @@ impl Executor {
             .scan(table_id, txn.txn_id, txn.start_ts)
             .map_err(FalconError::Storage)?;
 
-        let mut output_lines: Vec<Vec<u8>> = Vec::new();
+        let mut result_rows: Vec<OwnedRow> = Vec::with_capacity(rows.len() + 1);
+        let delim_str = delimiter.to_string();
 
         // Header row
         if header {
@@ -212,48 +214,44 @@ impl Executor {
                 .iter()
                 .map(|&i| schema.columns[i].name.clone())
                 .collect();
-            let line = if csv {
+            let mut line = if csv {
                 format_csv_line(&header_fields, delimiter, quote, escape)
             } else {
-                header_fields.join(&delimiter.to_string())
+                header_fields.join(&delim_str)
             };
-            output_lines.push(format!("{line}\n").into_bytes());
+            line.push('\n');
+            result_rows.push(OwnedRow::new(vec![Datum::Text(line)]));
         }
 
-        for row in &rows {
-            let fields: Vec<String> = columns
-                .iter()
-                .map(|&i| {
-                    let datum = &row.1.values[i];
-                    if datum.is_null() {
-                        null_string.to_owned()
-                    } else {
-                        datum_to_text(datum)
-                    }
-                })
-                .collect();
-
-            let line = if csv {
-                format_csv_line(&fields, delimiter, quote, escape)
+        // Reuse fields and line buffers across rows
+        let mut fields_buf: Vec<String> = Vec::with_capacity(columns.len());
+        let mut line_buf = String::with_capacity(256);
+        for (_pk, row) in &rows {
+            fields_buf.clear();
+            for &i in columns {
+                let datum = &row.values[i];
+                if datum.is_null() {
+                    fields_buf.push(null_string.to_owned());
+                } else {
+                    fields_buf.push(datum_to_text(datum));
+                }
+            }
+            line_buf.clear();
+            if csv {
+                line_buf.push_str(&format_csv_line(&fields_buf, delimiter, quote, escape));
             } else {
-                fields.join(&delimiter.to_string())
-            };
-            output_lines.push(format!("{line}\n").into_bytes());
+                for (j, f) in fields_buf.iter().enumerate() {
+                    if j > 0 { line_buf.push_str(&delim_str); }
+                    line_buf.push_str(f);
+                }
+            }
+            line_buf.push('\n');
+            result_rows.push(OwnedRow::new(vec![Datum::Text(line_buf.clone())]));
         }
 
         // Return the formatted lines as a special Query result.
         // The handler will convert these into CopyData messages.
         let result_columns = vec![("copy_data".into(), DataType::Text)];
-        let result_rows: Vec<OwnedRow> = output_lines
-            .into_iter()
-            .map(|bytes| {
-                let s = String::from_utf8(bytes).unwrap_or_default();
-                OwnedRow::new(vec![Datum::Text(s)])
-            })
-            .collect();
-
-        // We store the row count in a special way — the handler will use it for CommandComplete.
-        // We use tag "COPY" and store the lines as rows.
         Ok(ExecutionResult::Query {
             columns: result_columns,
             rows: result_rows,

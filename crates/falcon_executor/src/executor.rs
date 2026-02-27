@@ -702,6 +702,55 @@ impl Executor {
                 }
                 Ok(result)
             }
+            PhysicalPlan::IndexRangeScan {
+                table_id,
+                schema,
+                index_col,
+                lower_bound,
+                upper_bound,
+                projections,
+                visible_projection_count,
+                filter,
+                group_by,
+                grouping_sets,
+                having,
+                order_by,
+                limit,
+                offset,
+                distinct,
+                ctes,
+                unions,
+                virtual_rows,
+            } => {
+                let txn = txn.ok_or_else(|| FalconError::Internal(
+                    "SELECT requires active transaction".into(),
+                ))?;
+                let cte_data = self.materialize_ctes(ctes, txn)?;
+                let mut result = self.exec_index_range_scan(
+                    *table_id,
+                    schema,
+                    *index_col,
+                    lower_bound.as_ref(),
+                    upper_bound.as_ref(),
+                    projections,
+                    *visible_projection_count,
+                    filter.as_ref(),
+                    group_by,
+                    grouping_sets,
+                    having.as_ref(),
+                    order_by,
+                    *limit,
+                    *offset,
+                    distinct,
+                    txn,
+                    &cte_data,
+                    virtual_rows,
+                )?;
+                if !unions.is_empty() {
+                    result = self.exec_union(result, unions, txn)?;
+                }
+                Ok(result)
+            }
             PhysicalPlan::NestedLoopJoin {
                 left_table_id,
                 left_schema,
@@ -1531,6 +1580,91 @@ impl Executor {
                         "{}  Set Ops: {} additional query(ies)",
                         pad,
                         unions.len()
+                    ));
+                }
+                lines
+            }
+            PhysicalPlan::IndexRangeScan {
+                table_id,
+                schema,
+                index_col,
+                lower_bound,
+                upper_bound,
+                projections,
+                filter,
+                order_by,
+                limit,
+                offset,
+                distinct,
+                unions,
+                ..
+            } => {
+                let base_rows = self
+                    .storage
+                    .get_table_stats(*table_id)
+                    .map(|s| s.row_count as f64)
+                    .unwrap_or_else(|| {
+                        self.storage
+                            .get_table(*table_id)
+                            .map_or(1000.0, |t| t.row_count_approx() as f64)
+                    });
+                let est_rows = (base_rows * 0.10).max(1.0); // range scan ~10% selectivity
+                let startup_cost = 0.0_f64;
+                let total_cost = est_rows * 0.01 + 1.0;
+                let col_name = schema
+                    .columns
+                    .get(*index_col)
+                    .map_or("?", |c| c.name.as_str());
+                let mut lines = vec![format!(
+                    "{}Index Range Scan using {} on {}  (cost={:.2}..{:.2} rows={} width={})",
+                    pad, col_name, schema.name, startup_cost, total_cost,
+                    est_rows as u64, schema.columns.len() * 8
+                )];
+                // Format the range condition
+                let lo_str = lower_bound.as_ref().map(|(expr, inc)| {
+                    let op = if *inc { ">=" } else { ">" };
+                    format!("{col_name} {op} {expr:?}")
+                });
+                let hi_str = upper_bound.as_ref().map(|(expr, inc)| {
+                    let op = if *inc { "<=" } else { "<" };
+                    format!("{col_name} {op} {expr:?}")
+                });
+                let cond = match (lo_str, hi_str) {
+                    (Some(l), Some(h)) => format!("{l} AND {h}"),
+                    (Some(l), None) => l,
+                    (None, Some(h)) => h,
+                    (None, None) => "?".into(),
+                };
+                lines.push(format!("{pad}  Index Cond: ({cond})"));
+                let cols: Vec<String> = projections
+                    .iter()
+                    .map(|p| match p {
+                        BoundProjection::Column(_, a) => a.clone(),
+                        BoundProjection::Aggregate(_, _, a, _, _) => a.clone(),
+                        BoundProjection::Expr(_, a) => a.clone(),
+                        BoundProjection::Window(wf) => wf.alias.clone(),
+                    })
+                    .collect();
+                lines.push(format!("{}  Output: {}", pad, cols.join(", ")));
+                if let Some(f) = filter {
+                    lines.push(format!("{pad}  Filter: {f:?}"));
+                }
+                if !order_by.is_empty() {
+                    lines.push(format!("{}  Sort Key: {} column(s)", pad, order_by.len()));
+                }
+                if let Some(l) = limit {
+                    lines.push(format!("{pad}  Limit: {l}"));
+                }
+                if let Some(o) = offset {
+                    lines.push(format!("{pad}  Offset: {o}"));
+                }
+                if !matches!(distinct, DistinctMode::None) {
+                    lines.push(format!("{pad}  Distinct: {distinct:?}"));
+                }
+                if !unions.is_empty() {
+                    lines.push(format!(
+                        "{}  Set Ops: {} additional query(ies)",
+                        pad, unions.len()
                     ));
                 }
                 lines

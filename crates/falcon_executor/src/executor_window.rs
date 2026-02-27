@@ -17,12 +17,17 @@ impl Executor {
         for (proj_idx, proj) in projections.iter().enumerate() {
             if let BoundProjection::Window(wf) = proj {
                 // Build partition groups: partition_key -> vec of row indices
-                let mut partitions: std::collections::HashMap<Vec<u8>, Vec<usize>> =
+                let mut partitions: std::collections::HashMap<Box<[u8]>, Vec<usize>> =
                     std::collections::HashMap::with_capacity(source_rows.len().min(256));
                 let mut buf = Vec::with_capacity(64);
                 for (i, row) in source_rows.iter().enumerate() {
                     crate::executor_aggregate::encode_group_key(&mut buf, row, &wf.partition_by);
-                    partitions.entry(buf.clone()).or_default().push(i);
+                    // Use a two-step lookup to avoid cloning buf when the key already exists
+                    if let Some(v) = partitions.get_mut(buf.as_slice()) {
+                        v.push(i);
+                    } else {
+                        partitions.insert(buf.clone().into_boxed_slice(), vec![i]);
+                    }
                 }
 
                 // For each partition, sort by window ORDER BY and compute values
@@ -225,9 +230,10 @@ impl Executor {
                         WindowFunc::Agg(agg_func, col_idx) => {
                             let agg_expr = col_idx.map(BoundExpr::ColumnRef);
                             if wf.frame.is_full_partition() {
-                                // Entire partition — compute once
-                                let partition_rows: Vec<&OwnedRow> =
-                                    indices.iter().map(|&i| source_rows[i]).collect();
+                                // Entire partition — compute once, reuse buffer
+                                let mut partition_rows: Vec<&OwnedRow> =
+                                    Vec::with_capacity(indices.len());
+                                partition_rows.extend(indices.iter().map(|&i| source_rows[i]));
                                 let val = self.compute_aggregate(
                                     agg_func,
                                     agg_expr.as_ref(),
@@ -237,16 +243,60 @@ impl Executor {
                                 for &row_idx in &indices {
                                     result_rows[row_idx].values[proj_idx] = val.clone();
                                 }
+                            } else if let Some(ci) = col_idx {
+                                // Try sliding window O(N) fast path for SUM/COUNT/AVG
+                                // on numeric ColumnRef expressions.
+                                let use_sliding = matches!(
+                                    agg_func,
+                                    falcon_sql_frontend::types::AggFunc::Sum
+                                        | falcon_sql_frontend::types::AggFunc::Count
+                                        | falcon_sql_frontend::types::AggFunc::Avg
+                                );
+                                if use_sliding {
+                                    Self::sliding_window_agg(
+                                        source_rows,
+                                        &indices,
+                                        *ci,
+                                        agg_func,
+                                        &wf.frame,
+                                        result_rows,
+                                        proj_idx,
+                                    );
+                                } else {
+                                    // Fallback: per-row recompute with reusable buffer
+                                    let n = indices.len();
+                                    let mut frame_rows: Vec<&OwnedRow> = Vec::with_capacity(n);
+                                    for (pos, &row_idx) in indices.iter().enumerate() {
+                                        let start = Self::resolve_frame_start(&wf.frame, pos, n);
+                                        let end = Self::resolve_frame_end(&wf.frame, pos, n);
+                                        frame_rows.clear();
+                                        frame_rows.extend(
+                                            (start..=end)
+                                                .filter(|&j| j < n)
+                                                .map(|j| source_rows[indices[j]]),
+                                        );
+                                        let val = self.compute_aggregate(
+                                            agg_func,
+                                            agg_expr.as_ref(),
+                                            false,
+                                            &frame_rows,
+                                        )?;
+                                        result_rows[row_idx].values[proj_idx] = val;
+                                    }
+                                }
                             } else {
-                                // Per-row frame computation
+                                // No column index (e.g. COUNT(*)) — per-row recompute
                                 let n = indices.len();
+                                let mut frame_rows: Vec<&OwnedRow> = Vec::with_capacity(n);
                                 for (pos, &row_idx) in indices.iter().enumerate() {
                                     let start = Self::resolve_frame_start(&wf.frame, pos, n);
                                     let end = Self::resolve_frame_end(&wf.frame, pos, n);
-                                    let frame_rows: Vec<&OwnedRow> = (start..=end)
-                                        .filter(|&j| j < n)
-                                        .map(|j| source_rows[indices[j]])
-                                        .collect();
+                                    frame_rows.clear();
+                                    frame_rows.extend(
+                                        (start..=end)
+                                            .filter(|&j| j < n)
+                                            .map(|j| source_rows[indices[j]]),
+                                    );
                                     let val = self.compute_aggregate(
                                         agg_func,
                                         agg_expr.as_ref(),
@@ -262,6 +312,83 @@ impl Executor {
             }
         }
         Ok(())
+    }
+
+    /// O(N) sliding window aggregation for SUM/COUNT/AVG on a numeric column.
+    /// Instead of recomputing the aggregate from scratch for each row's frame,
+    /// we maintain a running (sum, count) and add entering / subtract leaving values.
+    fn sliding_window_agg(
+        source_rows: &[&OwnedRow],
+        indices: &[usize],
+        col_idx: usize,
+        agg_func: &falcon_sql_frontend::types::AggFunc,
+        frame: &WindowFrame,
+        result_rows: &mut [OwnedRow],
+        proj_idx: usize,
+    ) {
+        use falcon_sql_frontend::types::AggFunc;
+
+        let n = indices.len();
+        if n == 0 {
+            return;
+        }
+
+        // Extract f64 values (None for NULL) — single pass over the partition.
+        let vals: Vec<Option<f64>> = indices
+            .iter()
+            .map(|&i| source_rows[i].get(col_idx).and_then(|d| d.as_f64()))
+            .collect();
+
+        let mut sum: f64 = 0.0;
+        let mut count: i64 = 0;
+        let mut prev_start: usize = 0;
+        let mut prev_end_plus1: usize = 0; // exclusive end of the previous frame
+
+        for pos in 0..n {
+            let start = Self::resolve_frame_start(frame, pos, n).min(n);
+            let end = Self::resolve_frame_end(frame, pos, n).min(n.saturating_sub(1));
+            let end_plus1 = end + 1; // exclusive
+
+            if pos == 0 {
+                // Initial frame: compute from scratch
+                for j in start..end_plus1 {
+                    if let Some(v) = vals[j] {
+                        sum += v;
+                        count += 1;
+                    }
+                }
+            } else {
+                // Subtract values that left the frame (prev_start..start)
+                for j in prev_start..start.min(prev_end_plus1) {
+                    if let Some(v) = vals[j] {
+                        sum -= v;
+                        count -= 1;
+                    }
+                }
+                // Add values that entered the frame (prev_end_plus1..end_plus1)
+                for j in prev_end_plus1.max(start)..end_plus1 {
+                    if let Some(v) = vals[j] {
+                        sum += v;
+                        count += 1;
+                    }
+                }
+            }
+
+            prev_start = start;
+            prev_end_plus1 = end_plus1;
+
+            let row_idx = indices[pos];
+            result_rows[row_idx].values[proj_idx] = if count == 0 {
+                Datum::Null
+            } else {
+                match agg_func {
+                    AggFunc::Sum => Datum::Float64(sum),
+                    AggFunc::Count => Datum::Int64(count),
+                    AggFunc::Avg => Datum::Float64(sum / count as f64),
+                    _ => Datum::Null,
+                }
+            };
+        }
     }
 
     /// Resolve the starting row index for a window frame given the current position.

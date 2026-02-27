@@ -127,15 +127,15 @@ pub enum TopologyChangeType {
 
 /// Registered subscriber info.
 struct Subscriber {
-    id: SubscriptionId,
+    _id: SubscriptionId,
     /// Client-reported epoch at subscription time.
-    client_epoch: u64,
+    _client_epoch: u64,
     /// Pending events not yet delivered.
     pending_events: Vec<TopologyChangeEvent>,
     /// Maximum pending events before oldest are dropped.
     max_pending: usize,
     /// When this subscription was created.
-    created_at: Instant,
+    _created_at: Instant,
     /// When events were last polled.
     last_poll: Instant,
     /// Whether this subscription is still active.
@@ -193,11 +193,11 @@ impl TopologySubscriptionManager {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let now = Instant::now();
         let sub = Subscriber {
-            id,
-            client_epoch,
+            _id: id,
+            _client_epoch: client_epoch,
             pending_events: Vec::new(),
             max_pending: 100,
-            created_at: now,
+            _created_at: now,
             last_poll: now,
             active: true,
         };
@@ -313,11 +313,11 @@ pub struct ClientRoutingTable {
 /// A cached route entry.
 #[derive(Debug, Clone)]
 struct CachedRoute {
-    shard_id: ShardId,
-    leader_node: NodeId,
+    _shard_id: ShardId,
+    _leader_node: NodeId,
     leader_addr: String,
-    leader_epoch: u64,
-    cached_at: Instant,
+    _leader_epoch: u64,
+    _cached_at: Instant,
 }
 
 /// Routing table metrics.
@@ -358,11 +358,11 @@ impl ClientRoutingTable {
             routes.insert(
                 entry.shard_id.0,
                 CachedRoute {
-                    shard_id: entry.shard_id,
-                    leader_node: entry.leader_node,
+                    _shard_id: entry.shard_id,
+                    _leader_node: entry.leader_node,
                     leader_addr: entry.leader_addr.clone(),
-                    leader_epoch: entry.leader_epoch,
-                    cached_at: now,
+                    _leader_epoch: entry.leader_epoch,
+                    _cached_at: now,
                 },
             );
         }
@@ -395,11 +395,11 @@ impl ClientRoutingTable {
         routes.insert(
             shard_id.0,
             CachedRoute {
-                shard_id,
-                leader_node: new_leader,
+                _shard_id: shard_id,
+                _leader_node: new_leader,
                 leader_addr: new_addr,
-                leader_epoch: new_epoch,
-                cached_at: Instant::now(),
+                _leader_epoch: new_epoch,
+                _cached_at: Instant::now(),
             },
         );
     }
@@ -621,7 +621,7 @@ pub struct ClientConnectionManager {
     config: ConnectionManagerConfig,
     connections: RwLock<Vec<GatewayConnection>>,
     active_index: AtomicU64,
-    routing_table: Arc<ClientRoutingTable>,
+    _routing_table: Arc<ClientRoutingTable>,
     pub metrics: ConnectionManagerMetrics,
 }
 
@@ -667,7 +667,7 @@ impl ClientConnectionManager {
             config,
             connections: RwLock::new(connections),
             active_index: AtomicU64::new(0),
-            routing_table,
+            _routing_table: routing_table,
             metrics: ConnectionManagerMetrics::default(),
         }
     }

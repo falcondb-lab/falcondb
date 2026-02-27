@@ -1,0 +1,31 @@
+# FalconDB PoC #4 — Observability: Node 1 (Primary)
+# Port 5433 | Admin/Metrics 8080 | Replication 50051
+
+[server]
+pg_listen_addr = "0.0.0.0:5433"
+admin_listen_addr = "0.0.0.0:8080"
+node_id = 1
+max_connections = 256
+
+[storage]
+wal_enabled = true
+data_dir = "./obs_data_node1"
+
+[wal]
+group_commit = true
+flush_interval_us = 1000
+sync_mode = "fdatasync"
+
+[auth]
+method = "trust"
+
+[replication]
+role = "primary"
+grpc_listen_addr = "0.0.0.0:50051"
+primary_endpoint = ""
+max_records_per_chunk = 1000
+poll_interval_ms = 100
+shard_count = 1
+
+[gc]
+enabled = false

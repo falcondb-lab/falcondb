@@ -1416,8 +1416,40 @@ fn rule_constant_fold(plan: LogicalPlan) -> LogicalPlan {
     }
 }
 
+/// Quick check: does this expression contain any Literal that fold_expr could act on?
+/// If not, we can skip the entire fold recursion and avoid Box reconstructions.
+fn expr_has_foldable(expr: &BoundExpr) -> bool {
+    match expr {
+        BoundExpr::Literal(_) => true,
+        BoundExpr::BinaryOp { left, right, .. } => {
+            expr_has_foldable(left) || expr_has_foldable(right)
+        }
+        BoundExpr::Not(inner) => expr_has_foldable(inner),
+        BoundExpr::IsNull(inner)
+        | BoundExpr::IsNotNull(inner)
+        | BoundExpr::Cast { expr: inner, .. } => expr_has_foldable(inner),
+        BoundExpr::Between { expr: e, low, high, .. } => {
+            expr_has_foldable(e) || expr_has_foldable(low) || expr_has_foldable(high)
+        }
+        BoundExpr::InList { expr: e, list, .. } => {
+            expr_has_foldable(e) || list.iter().any(expr_has_foldable)
+        }
+        BoundExpr::Like { expr: e, pattern, .. } => {
+            expr_has_foldable(e) || expr_has_foldable(pattern)
+        }
+        BoundExpr::IsNotDistinctFrom { left, right } => {
+            expr_has_foldable(left) || expr_has_foldable(right)
+        }
+        _ => false,
+    }
+}
+
 /// Recursively fold constant sub-expressions.
 fn fold_expr(expr: BoundExpr) -> BoundExpr {
+    // Fast path: no literals in the tree → nothing to fold, return as-is.
+    if !expr_has_foldable(&expr) {
+        return expr;
+    }
     match expr {
         BoundExpr::BinaryOp { left, op, right } => {
             let l = fold_expr(*left);

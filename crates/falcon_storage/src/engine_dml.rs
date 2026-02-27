@@ -398,6 +398,42 @@ impl StorageEngine {
         Err(StorageError::TableNotFound(table_id))
     }
 
+    /// Scan with an inline predicate: only materializes rows that pass `predicate`.
+    /// For selective queries (e.g. WHERE id = 5 on a large table), this avoids
+    /// cloning the vast majority of rows that would be discarded post-scan.
+    /// `predicate` receives `&OwnedRow` and returns true if the row should be kept.
+    /// Optional `limit` stops scanning after collecting enough rows.
+    pub fn scan_with_filter<F>(
+        &self,
+        table_id: TableId,
+        txn_id: TxnId,
+        read_ts: Timestamp,
+        predicate: F,
+        limit: Option<usize>,
+    ) -> Result<Vec<(PrimaryKey, OwnedRow)>, StorageError>
+    where
+        F: Fn(&OwnedRow) -> bool,
+    {
+        if let Some(table) = self.tables.get(&table_id) {
+            let mut results = Vec::new();
+            for entry in table.data.iter() {
+                if let Some(lim) = limit {
+                    if results.len() >= lim {
+                        break;
+                    }
+                }
+                let pk = entry.key().clone();
+                entry.value().with_visible_data(txn_id, read_ts, |row| {
+                    if predicate(row) {
+                        results.push((pk.clone(), row.clone()));
+                    }
+                });
+            }
+            return Ok(results);
+        }
+        Err(StorageError::TableNotFound(table_id))
+    }
+
     /// Stream through all visible rows without cloning (zero-copy).
     /// The closure receives a reference to each visible row.
     pub fn for_each_visible<F>(
@@ -439,6 +475,24 @@ impl StorageEngine {
             return Ok(table.map_reduce_visible(txn_id, read_ts, init, map, reduce));
         }
         Err(StorageError::TableNotFound(table_id))
+    }
+
+    /// Scan returning only row data — avoids cloning the PK per row.
+    /// Use this when the caller only needs row values (SELECT, aggregates, joins).
+    /// Does not record reads for conflict detection (caller must handle if needed).
+    pub fn scan_rows_only(
+        &self,
+        table_id: TableId,
+        txn_id: TxnId,
+        read_ts: Timestamp,
+    ) -> Result<Vec<OwnedRow>, StorageError> {
+        if let Some(table) = self.tables.get(&table_id) {
+            let results = table.scan_rows_only(txn_id, read_ts);
+            return Ok(results);
+        }
+        // Fall back to full scan for non-rowstore tables
+        let full = self.scan(table_id, txn_id, read_ts)?;
+        Ok(full.into_iter().map(|(_, row)| row).collect())
     }
 
     pub fn scan(
@@ -569,6 +623,51 @@ impl StorageEngine {
                 let row = chain.read_for_txn(txn_id, read_ts);
                 if let Some(r) = row {
                     // Record read for OCC
+                    self.record_read(txn_id, table_id, pk.clone());
+                    results.push((pk, r));
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    /// Perform an index range scan: look up PKs via secondary index range,
+    /// then fetch visible rows.
+    ///
+    /// - `lower`: optional `(encoded_key, inclusive)` lower bound
+    /// - `upper`: optional `(encoded_key, inclusive)` upper bound
+    ///
+    /// Returns `(pk_bytes, row)` pairs visible to the given txn.
+    pub fn index_range_scan(
+        &self,
+        table_id: TableId,
+        column_idx: usize,
+        lower: Option<(&[u8], bool)>,
+        upper: Option<(&[u8], bool)>,
+        txn_id: TxnId,
+        read_ts: Timestamp,
+    ) -> Result<Vec<(Vec<u8>, OwnedRow)>, StorageError> {
+        let table = self
+            .tables
+            .get(&table_id)
+            .ok_or(StorageError::TableNotFound(table_id))?;
+
+        let pks = {
+            let indexes = table.secondary_indexes.read();
+            let mut found = Vec::new();
+            for idx in indexes.iter() {
+                if idx.column_idx == column_idx {
+                    found = idx.range_scan(lower, upper);
+                    break;
+                }
+            }
+            found
+        };
+
+        let mut results = Vec::new();
+        for pk in pks {
+            if let Some(chain) = table.data.get(&pk) {
+                if let Some(r) = chain.read_for_txn(txn_id, read_ts) {
                     self.record_read(txn_id, table_id, pk.clone());
                     results.push((pk, r));
                 }

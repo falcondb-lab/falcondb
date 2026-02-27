@@ -778,151 +778,128 @@ async fn handle_connection_with_timeout(
                     }
                     AuthMethod::ScramSha256 => {
                         // ── SCRAM-SHA-256 SASL authentication ──
+                        use crate::auth::scram::{ScramVerifier, ScramServerSession, SCRAM_SHA_256};
+
+                        // Look up SCRAM verifier for this user:
+                        // 1. Check auth_config.users list for a matching entry
+                        // 2. Fall back to generating an ephemeral verifier from effective_password
+                        let verifier = auth_config
+                            .users
+                            .iter()
+                            .find(|u| u.username == session.user)
+                            .and_then(|u| {
+                                if !u.scram.is_empty() {
+                                    ScramVerifier::parse(&u.scram).ok()
+                                } else if !u.password.is_empty() {
+                                    Some(ScramVerifier::generate(&u.password, 4096))
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or_else(|| {
+                                // Fallback: generate ephemeral verifier from effective_password
+                                ScramVerifier::generate(&effective_password, 4096)
+                            });
+
+                        let mut scram_session = ScramServerSession::new(verifier);
+
                         // Step 1: Send AuthenticationSASL with mechanism list
                         send_message(
                             &mut stream,
                             &BackendMessage::AuthenticationSASL {
-                                mechanisms: vec!["SCRAM-SHA-256".into()],
+                                mechanisms: vec![SCRAM_SHA_256.into()],
                             },
                         )
                         .await?;
                         stream.flush().await?;
 
                         // Step 2: Receive SASLInitialResponse (client-first-message)
-                        let client_first_msg = loop {
+                        let (mechanism, client_first_data) = loop {
                             let pn = stream.read_buf(&mut buf).await?;
                             if pn == 0 {
                                 return Ok(());
                             }
-                            if let Some(FrontendMessage::PasswordMessage(pw)) =
-                                codec::decode_message(&mut buf)?
+                            if let Some(FrontendMessage::SASLInitialResponse {
+                                mechanism,
+                                data,
+                            }) = codec::decode_sasl_initial_response(&mut buf)?
                             {
-                                break pw;
+                                break (mechanism, data);
                             }
                         };
 
-                        // Parse client-first-message: n,,n=<user>,r=<client-nonce>
-                        let client_first_bare =
-                            if let Some(stripped) = client_first_msg.strip_prefix("n,,") {
-                                stripped.to_owned()
-                            } else {
-                                client_first_msg.clone()
-                            };
+                        let client_first_msg = String::from_utf8_lossy(&client_first_data);
 
-                        let client_nonce = client_first_bare
-                            .split(',')
-                            .find(|p| p.starts_with("r="))
-                            .map_or("", |p| &p[2..]).to_owned();
-
-                        // Generate server nonce and salt
-                        use sha2::Digest as Sha2Digest;
-                        let server_nonce_raw = {
-                            use std::collections::hash_map::RandomState;
-                            use std::hash::{BuildHasher, Hasher};
-                            let s = RandomState::new();
-                            format!("{:016x}", s.build_hasher().finish())
+                        // Step 3: Process client-first, send server-first
+                        let server_first_data = match scram_session
+                            .handle_client_first(&mechanism, &client_first_msg)
+                        {
+                            Ok(data) => data,
+                            Err(e) => {
+                                tracing::warn!("SCRAM client-first failed for user \"{}\": {e}", session.user);
+                                let msg = BackendMessage::ErrorResponse {
+                                    severity: "FATAL".into(),
+                                    code: "28000".into(),
+                                    message: format!(
+                                        "SASL authentication failed for user \"{}\"",
+                                        session.user
+                                    ),
+                                };
+                                send_message(&mut stream, &msg).await?;
+                                return Ok(());
+                            }
                         };
-                        let combined_nonce = format!("{client_nonce}{server_nonce_raw}");
-                        let iterations = 4096u32;
-                        let salt_bytes: [u8; 16] = {
-                            use std::collections::hash_map::RandomState;
-                            use std::hash::{BuildHasher, Hasher};
-                            let s1 = RandomState::new();
-                            let s2 = RandomState::new();
-                            let h1 = s1.build_hasher().finish().to_le_bytes();
-                            let h2 = s2.build_hasher().finish().to_le_bytes();
-                            let mut salt = [0u8; 16];
-                            salt[..8].copy_from_slice(&h1);
-                            salt[8..].copy_from_slice(&h2);
-                            salt
-                        };
-                        let salt_b64 = base64_encode(&salt_bytes);
-
-                        // Step 3: Send AuthenticationSASLContinue (server-first-message)
-                        let server_first_msg =
-                            format!("r={combined_nonce},s={salt_b64},i={iterations}");
                         send_message(
                             &mut stream,
                             &BackendMessage::AuthenticationSASLContinue {
-                                data: server_first_msg.as_bytes().to_vec(),
+                                data: server_first_data,
                             },
                         )
                         .await?;
                         stream.flush().await?;
 
                         // Step 4: Receive SASLResponse (client-final-message)
-                        let client_final_msg = loop {
+                        let client_final_data = loop {
                             let pn = stream.read_buf(&mut buf).await?;
                             if pn == 0 {
                                 return Ok(());
                             }
-                            if let Some(FrontendMessage::PasswordMessage(pw)) =
-                                codec::decode_message(&mut buf)?
+                            if let Some(FrontendMessage::SASLResponse { data }) =
+                                codec::decode_sasl_response(&mut buf)?
                             {
-                                break pw;
+                                break data;
                             }
                         };
 
-                        // Parse client-final-message: c=<channel-binding>,r=<nonce>,p=<proof>
-                        let client_proof_b64 = client_final_msg
-                            .split(',')
-                            .find(|p| p.starts_with("p="))
-                            .map_or("", |p| &p[2..]);
+                        let client_final_msg = String::from_utf8_lossy(&client_final_data);
 
-                        // Derive keys using PBKDF2-HMAC-SHA256
-                        let salted_password =
-                            pbkdf2_sha256(effective_password.as_bytes(), &salt_bytes, iterations);
-
-                        let client_key = hmac_sha256(&salted_password, b"Client Key");
-                        let stored_key = {
-                            let mut h = sha2::Sha256::new();
-                            h.update(client_key);
-                            let result: [u8; 32] = h.finalize().into();
-                            result
-                        };
-                        let server_key = hmac_sha256(&salted_password, b"Server Key");
-
-                        // Build auth message for signature
-                        let client_final_without_proof: String = client_final_msg
-                            .split(',')
-                            .filter(|p| !p.starts_with("p="))
-                            .collect::<Vec<_>>()
-                            .join(",");
-                        let auth_message = format!(
-                            "{client_first_bare},{server_first_msg},{client_final_without_proof}"
-                        );
-
-                        let client_signature = hmac_sha256(&stored_key, auth_message.as_bytes());
-                        let server_signature = hmac_sha256(&server_key, auth_message.as_bytes());
-
-                        // Verify client proof: ClientProof = ClientKey XOR ClientSignature
-                        let expected_proof: Vec<u8> = client_key
-                            .iter()
-                            .zip(client_signature.iter())
-                            .map(|(a, b)| a ^ b)
-                            .collect();
-                        let expected_proof_b64 = base64_encode(&expected_proof);
-
-                        if client_proof_b64 != expected_proof_b64 {
-                            let msg = BackendMessage::ErrorResponse {
-                                severity: "FATAL".into(),
-                                code: "28P01".into(),
-                                message: format!(
-                                    "password authentication failed for user \"{}\"",
-                                    session.user
-                                ),
+                        // Step 5: Verify client proof and get server-final
+                        let server_final_data =
+                            match scram_session.handle_client_final(&client_final_msg) {
+                                Ok(data) => data,
+                                Err(_) => {
+                                    tracing::warn!(
+                                        "SCRAM authentication failed for user \"{}\"",
+                                        session.user
+                                    );
+                                    let msg = BackendMessage::ErrorResponse {
+                                        severity: "FATAL".into(),
+                                        code: "28P01".into(),
+                                        message: format!(
+                                            "password authentication failed for user \"{}\"",
+                                            session.user
+                                        ),
+                                    };
+                                    send_message(&mut stream, &msg).await?;
+                                    return Ok(());
+                                }
                             };
-                            send_message(&mut stream, &msg).await?;
-                            return Ok(());
-                        }
 
-                        // Step 5: Send AuthenticationSASLFinal (server signature)
-                        let server_sig_b64 = base64_encode(&server_signature);
-                        let server_final_msg = format!("v={server_sig_b64}");
+                        // Step 6: Send AuthenticationSASLFinal + AuthenticationOk
                         send_message(
                             &mut stream,
                             &BackendMessage::AuthenticationSASLFinal {
-                                data: server_final_msg.as_bytes().to_vec(),
+                                data: server_final_data,
                             },
                         )
                         .await?;
@@ -2134,14 +2111,43 @@ fn decode_param_value(
             "f" | "false" | "0" | "no" | "off" => Datum::Boolean(false),
             _ => Datum::Text(s.to_owned()),
         },
+        Some(DataType::Uuid) => {
+            let hex: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+            if hex.len() == 32 {
+                u128::from_str_radix(&hex, 16)
+                    .map_or_else(|_| Datum::Text(s.to_owned()), Datum::Uuid)
+            } else {
+                Datum::Text(s.to_owned())
+            }
+        }
+        Some(DataType::Time) => {
+            // Parse HH:MM:SS or HH:MM:SS.ffffff
+            let parts: Vec<&str> = s.split(':').collect();
+            if parts.len() >= 2 {
+                let h: i64 = parts[0].parse().unwrap_or(0);
+                let m: i64 = parts[1].parse().unwrap_or(0);
+                let (sec, frac) = if parts.len() >= 3 {
+                    let sp: Vec<&str> = parts[2].split('.').collect();
+                    let sv: i64 = sp[0].parse().unwrap_or(0);
+                    let fv: i64 = if sp.len() > 1 {
+                        format!("{:0<6}", &sp[1][..sp[1].len().min(6)]).parse().unwrap_or(0)
+                    } else { 0 };
+                    (sv, fv)
+                } else { (0, 0) };
+                Datum::Time(h * 3_600_000_000 + m * 60_000_000 + sec * 1_000_000 + frac)
+            } else {
+                Datum::Text(s.to_owned())
+            }
+        }
+        Some(DataType::Interval) => {
+            // Simple interval text: "HH:MM:SS" or pass as text
+            Datum::Text(s.to_owned())
+        }
         Some(DataType::Text)
         | Some(DataType::Timestamp)
         | Some(DataType::Date)
         | Some(DataType::Array(_))
-        | Some(DataType::Jsonb)
-        | Some(DataType::Time)
-        | Some(DataType::Interval)
-        | Some(DataType::Uuid) => Datum::Text(s.to_owned()),
+        | Some(DataType::Jsonb) => Datum::Text(s.to_owned()),
         Some(DataType::Decimal(_, _)) => {
             Datum::parse_decimal(s).unwrap_or_else(|| Datum::Text(s.to_owned()))
         }
@@ -2285,17 +2291,19 @@ fn decode_param_value_binary(
         Some(DataType::Uuid) => {
             // PG binary UUID format: 16 bytes raw
             if bytes.len() == 16 {
-                let s = format!(
-                    "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                    bytes[0], bytes[1], bytes[2], bytes[3],
-                    bytes[4], bytes[5],
-                    bytes[6], bytes[7],
-                    bytes[8], bytes[9],
-                    bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
-                );
-                Datum::Text(s)
+                let mut arr = [0u8; 16];
+                arr.copy_from_slice(bytes);
+                Datum::Uuid(u128::from_be_bytes(arr))
             } else {
-                Datum::Text(String::from_utf8_lossy(bytes).into_owned())
+                // Fallback: try text parse
+                let s = String::from_utf8_lossy(bytes);
+                let hex: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+                if hex.len() == 32 {
+                    u128::from_str_radix(&hex, 16)
+                        .map_or_else(|_| Datum::Text(s.into_owned()), Datum::Uuid)
+                } else {
+                    Datum::Text(s.into_owned())
+                }
             }
         }
         Some(DataType::Text)
@@ -2364,6 +2372,7 @@ fn parse_set_statement_timeout(sql: &str) -> Option<u64> {
 // ---------------------------------------------------------------------------
 
 /// PBKDF2-HMAC-SHA256 key derivation (RFC 7677).
+#[allow(dead_code)]
 fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
     // PBKDF2 with HMAC-SHA256: U1 = HMAC(password, salt || INT(1))
     // Ui = HMAC(password, U_{i-1}), result = U1 XOR U2 XOR ... XOR Ui
@@ -2386,6 +2395,7 @@ fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
 }
 
 /// HMAC-SHA-256 (RFC 2104).
+#[allow(dead_code)]
 fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
     use sha2::Digest;
     const BLOCK_SIZE: usize = 64;
@@ -2425,6 +2435,7 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
 }
 
 /// Simple base64 encoder (standard alphabet, with padding).
+#[allow(dead_code)]
 fn base64_encode(data: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
@@ -2842,8 +2853,11 @@ mod tests {
             0x00, 0x00,
         ]);
         match decode_param_value_binary(&raw, Some(&DataType::Uuid)) {
-            Datum::Text(s) => assert_eq!(s, "550e8400-e29b-41d4-a716-446655440000"),
-            other => panic!("expected UUID text, got {:?}", other),
+            Datum::Uuid(v) => {
+                // Verify it formats back to the expected UUID string
+                assert_eq!(format!("{}", Datum::Uuid(v)), "550e8400-e29b-41d4-a716-446655440000");
+            }
+            other => panic!("expected Datum::Uuid, got {:?}", other),
         }
     }
 
@@ -2853,8 +2867,10 @@ mod tests {
         use falcon_common::types::DataType;
         let raw = Some(b"550e8400-e29b-41d4-a716-446655440000".to_vec());
         match decode_param_value_binary(&raw, Some(&DataType::Uuid)) {
-            Datum::Text(s) => assert_eq!(s, "550e8400-e29b-41d4-a716-446655440000"),
-            other => panic!("expected UUID text, got {:?}", other),
+            Datum::Uuid(v) => {
+                assert_eq!(format!("{}", Datum::Uuid(v)), "550e8400-e29b-41d4-a716-446655440000");
+            }
+            other => panic!("expected Datum::Uuid, got {:?}", other),
         }
     }
 
@@ -3200,5 +3216,271 @@ mod tests {
         // Simulate connection cleanup
         registry.remove(&10);
         assert!(registry.get(&10).is_none());
+    }
+
+    // ── SCRAM-SHA-256 SASL codec tests ──
+
+    #[test]
+    fn test_decode_sasl_initial_response() {
+        use bytes::BufMut;
+        // Build a SASLInitialResponse wire message:
+        // 'p' | int32 len | C-string mechanism | int32 data_len | data bytes
+        let mechanism = b"SCRAM-SHA-256\0";
+        let sasl_data = b"n,,n=testuser,r=clientnonce123";
+        let payload_len = mechanism.len() + 4 + sasl_data.len();
+        let total_len = 4 + payload_len; // includes the 4-byte length field itself
+
+        let mut buf = BytesMut::new();
+        buf.put_u8(b'p');
+        buf.put_i32(total_len as i32);
+        buf.put_slice(mechanism);
+        buf.put_i32(sasl_data.len() as i32);
+        buf.put_slice(sasl_data);
+
+        match codec::decode_sasl_initial_response(&mut buf).unwrap() {
+            Some(FrontendMessage::SASLInitialResponse { mechanism, data }) => {
+                assert_eq!(mechanism, "SCRAM-SHA-256");
+                assert_eq!(data, sasl_data.to_vec());
+            }
+            other => panic!("expected SASLInitialResponse, got: {other:?}"),
+        }
+        assert!(buf.is_empty(), "buffer should be fully consumed");
+    }
+
+    #[test]
+    fn test_decode_sasl_response() {
+        use bytes::BufMut;
+        // Build a SASLResponse wire message:
+        // 'p' | int32 len | data bytes
+        let sasl_data = b"c=biws,r=clientnonce123servernonce456,p=dGVzdHByb29m";
+        let total_len = 4 + sasl_data.len();
+
+        let mut buf = BytesMut::new();
+        buf.put_u8(b'p');
+        buf.put_i32(total_len as i32);
+        buf.put_slice(sasl_data);
+
+        match codec::decode_sasl_response(&mut buf).unwrap() {
+            Some(FrontendMessage::SASLResponse { data }) => {
+                assert_eq!(data, sasl_data.to_vec());
+            }
+            other => panic!("expected SASLResponse, got: {other:?}"),
+        }
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_decode_sasl_initial_response_incomplete() {
+        use bytes::BufMut;
+        // Not enough bytes — should return None
+        let mut buf = BytesMut::new();
+        buf.put_u8(b'p');
+        buf.put_i32(100); // claims 100 bytes but we don't provide them
+        assert!(codec::decode_sasl_initial_response(&mut buf).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_decode_sasl_response_wrong_type() {
+        use bytes::BufMut;
+        let mut buf = BytesMut::new();
+        buf.put_u8(b'Q'); // wrong type
+        buf.put_i32(4);
+        assert!(codec::decode_sasl_response(&mut buf).is_err());
+    }
+
+    #[test]
+    fn test_encode_authentication_sasl() {
+        let msg = BackendMessage::AuthenticationSASL {
+            mechanisms: vec!["SCRAM-SHA-256".into()],
+        };
+        let encoded = codec::encode_message(&msg);
+        // R(1) + len(4) + auth_type=10(4) + "SCRAM-SHA-256\0" + "\0"
+        assert_eq!(encoded[0], b'R');
+        // Auth type at offset 5..9 should be 10
+        let auth_type = i32::from_be_bytes([encoded[5], encoded[6], encoded[7], encoded[8]]);
+        assert_eq!(auth_type, 10);
+    }
+
+    #[test]
+    fn test_encode_authentication_sasl_continue() {
+        let data = b"r=clientnonce123servernonce,s=c2FsdA==,i=4096";
+        let msg = BackendMessage::AuthenticationSASLContinue {
+            data: data.to_vec(),
+        };
+        let encoded = codec::encode_message(&msg);
+        assert_eq!(encoded[0], b'R');
+        let auth_type = i32::from_be_bytes([encoded[5], encoded[6], encoded[7], encoded[8]]);
+        assert_eq!(auth_type, 11);
+        // Data should follow after the auth type
+        assert_eq!(&encoded[9..], data);
+    }
+
+    #[test]
+    fn test_encode_authentication_sasl_final() {
+        let data = b"v=dGVzdHNpZw==";
+        let msg = BackendMessage::AuthenticationSASLFinal {
+            data: data.to_vec(),
+        };
+        let encoded = codec::encode_message(&msg);
+        assert_eq!(encoded[0], b'R');
+        let auth_type = i32::from_be_bytes([encoded[5], encoded[6], encoded[7], encoded[8]]);
+        assert_eq!(auth_type, 12);
+        assert_eq!(&encoded[9..], data);
+    }
+
+    // ── SCRAM-SHA-256 full wire-level handshake test ──
+
+    #[test]
+    fn test_scram_wire_handshake_with_verifier() {
+        use crate::auth::scram::{ScramVerifier, ScramServerSession, SCRAM_SHA_256, b64_encode, b64_decode};
+        use sha2::{Sha256, Digest};
+
+        let password = "s3cret";
+        let salt = b"test_salt_16byte";
+        let iterations = 4096u32;
+
+        // Pre-generate a stored verifier (as would be in config)
+        let verifier = ScramVerifier::generate_with_salt(password, iterations, salt);
+        let pg_verifier = verifier.to_pg_verifier();
+
+        // Parse it back (simulates loading from config)
+        let loaded_verifier = ScramVerifier::parse(&pg_verifier).unwrap();
+        assert_eq!(loaded_verifier.iterations, iterations);
+        assert_eq!(loaded_verifier.salt, salt.to_vec());
+        assert_eq!(loaded_verifier.stored_key, verifier.stored_key);
+        assert_eq!(loaded_verifier.server_key, verifier.server_key);
+
+        // Create server session
+        let mut server = ScramServerSession::new(loaded_verifier);
+
+        // Client-first-message
+        let client_nonce = "rOprNGfwEbeRWgbNEkqO";
+        let client_first_bare = format!("n=testuser,r={client_nonce}");
+        let client_first_msg = format!("n,,{client_first_bare}");
+
+        // Server processes client-first → server-first
+        let server_first_bytes = server
+            .handle_client_first(SCRAM_SHA_256, &client_first_msg)
+            .unwrap();
+        let server_first_msg = String::from_utf8(server_first_bytes).unwrap();
+
+        // Parse server-first-message
+        let combined_nonce = server_first_msg
+            .split(',').find(|p| p.starts_with("r=")).unwrap()[2..].to_owned();
+        let server_salt_b64 = server_first_msg
+            .split(',').find(|p| p.starts_with("s=")).unwrap()[2..].to_owned();
+        let server_iterations: u32 = server_first_msg
+            .split(',').find(|p| p.starts_with("i=")).unwrap()[2..].parse().unwrap();
+
+        assert!(combined_nonce.starts_with(client_nonce));
+        assert_eq!(server_iterations, iterations);
+
+        // Client derives keys using the salt and iterations from server
+        let server_salt = b64_decode(&server_salt_b64).unwrap();
+        let salted_password = {
+            // PBKDF2 inline for test
+            use hmac::{Hmac, Mac};
+            type HmacSha256 = Hmac<Sha256>;
+            let mut input = Vec::with_capacity(server_salt.len() + 4);
+            input.extend_from_slice(&server_salt);
+            input.extend_from_slice(&1u32.to_be_bytes());
+
+            let mut mac = HmacSha256::new_from_slice(password.as_bytes()).unwrap();
+            mac.update(&input);
+            let mut u_prev: [u8; 32] = mac.finalize().into_bytes().into();
+            let mut result = u_prev;
+
+            for _ in 1..server_iterations {
+                let mut mac = HmacSha256::new_from_slice(password.as_bytes()).unwrap();
+                mac.update(&u_prev);
+                let u_next: [u8; 32] = mac.finalize().into_bytes().into();
+                for (r, u) in result.iter_mut().zip(u_next.iter()) {
+                    *r ^= u;
+                }
+                u_prev = u_next;
+            }
+            result
+        };
+
+        let hmac_fn = |key: &[u8], msg: &[u8]| -> [u8; 32] {
+            use hmac::{Hmac, Mac};
+            type HmacSha256 = Hmac<Sha256>;
+            let mut mac = HmacSha256::new_from_slice(key).unwrap();
+            mac.update(msg);
+            mac.finalize().into_bytes().into()
+        };
+
+        let client_key = hmac_fn(&salted_password, b"Client Key");
+        let stored_key: [u8; 32] = Sha256::digest(client_key).into();
+
+        // Build auth message
+        let client_final_without_proof = format!("c=biws,r={combined_nonce}");
+        let auth_message = format!(
+            "{client_first_bare},{server_first_msg},{client_final_without_proof}"
+        );
+
+        let client_signature = hmac_fn(&stored_key, auth_message.as_bytes());
+        let client_proof: Vec<u8> = client_key
+            .iter()
+            .zip(client_signature.iter())
+            .map(|(a, b)| a ^ b)
+            .collect();
+
+        let client_final_msg = format!(
+            "{client_final_without_proof},p={}",
+            b64_encode(&client_proof)
+        );
+
+        // Server verifies client-final → server-final
+        let server_final_bytes = server.handle_client_final(&client_final_msg).unwrap();
+        let server_final_msg = String::from_utf8(server_final_bytes).unwrap();
+        assert!(server_final_msg.starts_with("v="));
+        assert!(server.is_complete());
+
+        // Verify server signature
+        let server_key = hmac_fn(&salted_password, b"Server Key");
+        let expected_server_sig = hmac_fn(&server_key, auth_message.as_bytes());
+        let server_sig_b64 = &server_final_msg[2..];
+        let actual_server_sig = b64_decode(server_sig_b64).unwrap();
+        assert_eq!(actual_server_sig, expected_server_sig.to_vec());
+    }
+
+    #[test]
+    fn test_auth_config_users_default_empty() {
+        let config = AuthConfig::default();
+        assert!(config.users.is_empty());
+        assert!(config.allow_cidrs.is_empty());
+        assert_eq!(config.method, AuthMethod::Trust);
+    }
+
+    #[test]
+    fn test_auth_config_scram_user_lookup() {
+        use crate::auth::scram::ScramVerifier;
+
+        let verifier = ScramVerifier::generate("testpw", 4096);
+        let pg_str = verifier.to_pg_verifier();
+
+        let config = AuthConfig {
+            method: AuthMethod::ScramSha256,
+            password: String::new(),
+            username: String::new(),
+            users: vec![falcon_common::config::UserCredential {
+                username: "alice".into(),
+                scram: pg_str.clone(),
+                password: String::new(),
+            }],
+            allow_cidrs: vec!["127.0.0.1/32".into()],
+        };
+
+        // Find user
+        let found = config.users.iter().find(|u| u.username == "alice");
+        assert!(found.is_some());
+        let parsed = ScramVerifier::parse(&found.unwrap().scram).unwrap();
+        assert_eq!(parsed.iterations, 4096);
+        assert_eq!(parsed.stored_key, verifier.stored_key);
+
+        // Unknown user
+        let not_found = config.users.iter().find(|u| u.username == "bob");
+        assert!(not_found.is_none());
     }
 }

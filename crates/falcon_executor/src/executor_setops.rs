@@ -78,19 +78,17 @@ impl Executor {
                 }
                 SetOpKind::Intersect => {
                     // Keep only rows present in both sides
-                    let ncols = right_rows.first().map_or(0, |r| r.values.len());
-                    let all_cols: Vec<usize> = (0..ncols).collect();
                     let mut buf = Vec::with_capacity(64);
-                    let right_set: std::collections::HashSet<Vec<u8>> = right_rows
+                    let right_set: std::collections::HashSet<Box<[u8]>> = right_rows
                         .iter()
                         .map(|r| {
-                            crate::executor_aggregate::encode_group_key(&mut buf, r, &all_cols);
-                            buf.clone()
+                            crate::executor_aggregate::encode_group_key_all(&mut buf, r);
+                            buf.clone().into_boxed_slice()
                         })
                         .collect();
                     all_rows.retain(|r| {
-                        crate::executor_aggregate::encode_group_key(&mut buf, r, &all_cols);
-                        right_set.contains(&buf)
+                        crate::executor_aggregate::encode_group_key_all(&mut buf, r);
+                        right_set.contains(buf.as_slice())
                     });
                     if !is_all {
                         self.dedup_rows(&mut all_rows);
@@ -98,19 +96,17 @@ impl Executor {
                 }
                 SetOpKind::Except => {
                     // Remove rows that appear in the right side
-                    let ncols = right_rows.first().map_or(0, |r| r.values.len());
-                    let all_cols: Vec<usize> = (0..ncols).collect();
                     let mut buf = Vec::with_capacity(64);
-                    let right_set: std::collections::HashSet<Vec<u8>> = right_rows
+                    let right_set: std::collections::HashSet<Box<[u8]>> = right_rows
                         .iter()
                         .map(|r| {
-                            crate::executor_aggregate::encode_group_key(&mut buf, r, &all_cols);
-                            buf.clone()
+                            crate::executor_aggregate::encode_group_key_all(&mut buf, r);
+                            buf.clone().into_boxed_slice()
                         })
                         .collect();
                     all_rows.retain(|r| {
-                        crate::executor_aggregate::encode_group_key(&mut buf, r, &all_cols);
-                        !right_set.contains(&buf)
+                        crate::executor_aggregate::encode_group_key_all(&mut buf, r);
+                        !right_set.contains(buf.as_slice())
                     });
                     if !is_all {
                         self.dedup_rows(&mut all_rows);
@@ -136,24 +132,32 @@ impl Executor {
             // Recursive CTE: iterative fixpoint execution
             if let Some(ref recursive_sel) = cte.recursive_select {
                 let base_rows = self.exec_cte_select(&cte.select, txn, &cte_data)?;
-                let mut all_rows = base_rows.clone();
-                let mut working_rows = base_rows;
+                // Move base_rows into all_rows — no clone needed
+                let mut working_rows = base_rows.clone();
+                let mut all_rows = base_rows;
+
+                // Build a single recursive_cte_data that we reuse each iteration
+                // by swapping only the recursive CTE's working rows, avoiding
+                // a full cte_data.clone() per iteration.
+                let mut recursive_cte_data = cte_data.clone();
 
                 const MAX_ITERATIONS: usize = 1000;
                 for _ in 0..MAX_ITERATIONS {
                     if working_rows.is_empty() {
                         break;
                     }
-                    // Feed current working rows as CTE data for recursive reference
-                    let mut recursive_cte_data = cte_data.clone();
                     recursive_cte_data.insert(cte.table_id, working_rows);
 
                     let new_rows = self.exec_cte_select(recursive_sel, txn, &recursive_cte_data)?;
                     if new_rows.is_empty() {
+                        // Reclaim the working rows we inserted
+                        recursive_cte_data.remove(&cte.table_id);
                         break;
                     }
-                    all_rows.extend(new_rows.clone());
-                    working_rows = new_rows;
+                    // Move new_rows: extend all_rows, then assign working_rows
+                    // without cloning by cloning only once into working_rows.
+                    working_rows = new_rows.clone();
+                    all_rows.extend(new_rows);
                 }
                 cte_data.insert(cte.table_id, all_rows);
                 continue;
