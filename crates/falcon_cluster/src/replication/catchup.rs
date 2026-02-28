@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 
 use falcon_common::error::FalconError;
-use falcon_common::schema::TableSchema;
 use falcon_common::types::{TableId, TxnId};
 use falcon_storage::engine::StorageEngine;
 use falcon_storage::wal::WalRecord;
@@ -38,12 +37,10 @@ pub fn apply_wal_record_to_engine(
         WalRecord::DropDatabase { name } => {
             let _ = engine.drop_database(name);
         }
-        WalRecord::CreateTable { schema_json } => {
-            let schema: TableSchema = serde_json::from_str(schema_json)
-                .map_err(|e| FalconError::Internal(format!("Schema parse error: {e}")))?;
+        WalRecord::CreateTable { schema } => {
             // Skip if already exists.
             if engine.get_catalog().find_table(&schema.name).is_none() {
-                engine.create_table(schema)?;
+                engine.create_table(schema.clone())?;
             }
         }
         WalRecord::DropTable { table_name } => {
@@ -125,41 +122,21 @@ pub fn apply_wal_record_to_engine(
         }
         WalRecord::AlterTable {
             table_name,
-            operation_json,
+            op,
         } => {
-            // Replay ALTER TABLE by parsing the operation JSON
-            if let Ok(op) = serde_json::from_str::<serde_json::Value>(operation_json) {
-                let op_type = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
-                match op_type {
-                    "add_column" => {
-                        if let Some(col_val) = op.get("column") {
-                            if let Ok(col) = serde_json::from_value::<
-                                falcon_common::schema::ColumnDef,
-                            >(col_val.clone())
-                            {
-                                let _ = engine.alter_table_add_column(table_name, col);
-                            }
-                        }
-                    }
-                    "drop_column" => {
-                        if let Some(col_name) = op.get("column_name").and_then(|v| v.as_str()) {
-                            let _ = engine.alter_table_drop_column(table_name, col_name);
-                        }
-                    }
-                    "rename_column" => {
-                        let old_name = op.get("old_name").and_then(|v| v.as_str()).unwrap_or("");
-                        let new_name = op.get("new_name").and_then(|v| v.as_str()).unwrap_or("");
-                        if !old_name.is_empty() && !new_name.is_empty() {
-                            let _ =
-                                engine.alter_table_rename_column(table_name, old_name, new_name);
-                        }
-                    }
-                    "rename_table" => {
-                        if let Some(new_name) = op.get("new_name").and_then(|v| v.as_str()) {
-                            let _ = engine.alter_table_rename(table_name, new_name);
-                        }
-                    }
-                    _ => {}
+            use falcon_storage::wal::AlterTableOp;
+            match op {
+                AlterTableOp::AddColumn { column } => {
+                    let _ = engine.alter_table_add_column(table_name, column.clone());
+                }
+                AlterTableOp::DropColumn { column_name } => {
+                    let _ = engine.alter_table_drop_column(table_name, column_name);
+                }
+                AlterTableOp::RenameColumn { old_name, new_name } => {
+                    let _ = engine.alter_table_rename_column(table_name, old_name, new_name);
+                }
+                AlterTableOp::RenameTable { new_name } => {
+                    let _ = engine.alter_table_rename(table_name, new_name);
                 }
             }
         }
@@ -207,18 +184,8 @@ pub fn apply_wal_record_to_engine(
         WalRecord::DropRole { name } => {
             let _ = engine.drop_role(name);
         }
-        WalRecord::AlterRole { name, options_json } => {
-            #[derive(serde::Deserialize)]
-            struct AlterOpts {
-                password: Option<Option<String>>,
-                can_login: Option<bool>,
-                is_superuser: Option<bool>,
-                can_create_db: Option<bool>,
-                can_create_role: Option<bool>,
-            }
-            if let Ok(opts) = serde_json::from_str::<AlterOpts>(options_json) {
-                let _ = engine.alter_role(name, opts.password, opts.can_login, opts.is_superuser, opts.can_create_db, opts.can_create_role);
-            }
+        WalRecord::AlterRole { name, opts } => {
+            let _ = engine.alter_role(name, opts.password.clone(), opts.can_login, opts.is_superuser, opts.can_create_db, opts.can_create_role);
         }
         WalRecord::GrantPrivilege {
             grantee,

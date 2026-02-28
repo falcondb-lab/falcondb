@@ -51,9 +51,9 @@ pub fn eval_binary_op(
                 .ok_or_else(|| ExecutionError::TypeError("OR requires boolean".into()))?;
             Ok(Datum::Boolean(lb || rb))
         }
-        BinOp::Plus => eval_arithmetic(left, right, |a, b| a + b, |a, b| a + b),
-        BinOp::Minus => eval_arithmetic(left, right, |a, b| a - b, |a, b| a - b),
-        BinOp::Multiply => eval_arithmetic(left, right, |a, b| a * b, |a, b| a * b),
+        BinOp::Plus => eval_arithmetic(left, right, i64::checked_add, |a, b| a + b),
+        BinOp::Minus => eval_arithmetic(left, right, i64::checked_sub, |a, b| a - b),
+        BinOp::Multiply => eval_arithmetic(left, right, i64::checked_mul, |a, b| a * b),
         BinOp::Divide => {
             match right {
                 Datum::Int32(0) | Datum::Int64(0) => {
@@ -64,16 +64,19 @@ pub fn eval_binary_op(
                 }
                 _ => {}
             }
-            eval_arithmetic(left, right, |a, b| a / b, |a, b| a / b)
+            eval_arithmetic(left, right, i64::checked_div, |a, b| a / b)
         }
         BinOp::Modulo => {
             match right {
                 Datum::Int32(0) | Datum::Int64(0) => {
                     return Err(ExecutionError::DivisionByZero);
                 }
+                Datum::Float64(f) if *f == 0.0 => {
+                    return Err(ExecutionError::DivisionByZero);
+                }
                 _ => {}
             }
-            eval_arithmetic(left, right, |a, b| a % b, |a, b| a % b)
+            eval_arithmetic(left, right, i64::checked_rem, |a, b| a % b)
         }
         // JSONB operators
         BinOp::JsonArrow => eval_json_arrow(left, right, false),
@@ -154,9 +157,9 @@ fn eval_binary_op_same(
                 .ok_or_else(|| ExecutionError::TypeError("OR requires boolean".into()))?;
             Ok(Datum::Boolean(lb || rb))
         }
-        BinOp::Plus => eval_arithmetic(left, right, |a, b| a + b, |a, b| a + b),
-        BinOp::Minus => eval_arithmetic(left, right, |a, b| a - b, |a, b| a - b),
-        BinOp::Multiply => eval_arithmetic(left, right, |a, b| a * b, |a, b| a * b),
+        BinOp::Plus => eval_arithmetic(left, right, i64::checked_add, |a, b| a + b),
+        BinOp::Minus => eval_arithmetic(left, right, i64::checked_sub, |a, b| a - b),
+        BinOp::Multiply => eval_arithmetic(left, right, i64::checked_mul, |a, b| a * b),
         BinOp::Divide => {
             match right {
                 Datum::Int32(0) | Datum::Int64(0) => {
@@ -167,16 +170,19 @@ fn eval_binary_op_same(
                 }
                 _ => {}
             }
-            eval_arithmetic(left, right, |a, b| a / b, |a, b| a / b)
+            eval_arithmetic(left, right, i64::checked_div, |a, b| a / b)
         }
         BinOp::Modulo => {
             match right {
                 Datum::Int32(0) | Datum::Int64(0) => {
                     return Err(ExecutionError::DivisionByZero);
                 }
+                Datum::Float64(f) if *f == 0.0 => {
+                    return Err(ExecutionError::DivisionByZero);
+                }
                 _ => {}
             }
-            eval_arithmetic(left, right, |a, b| a % b, |a, b| a % b)
+            eval_arithmetic(left, right, i64::checked_rem, |a, b| a % b)
         }
         BinOp::JsonArrow => eval_json_arrow(left, right, false),
         BinOp::JsonArrowText => eval_json_arrow(left, right, true),
@@ -217,22 +223,47 @@ fn eval_binary_op_same(
     }
 }
 
+/// Safely convert i64 to f64, returning NumericOverflow if the value
+/// exceeds f64's exact integer range (±2^53).
+fn safe_i64_to_f64(v: i64) -> Result<f64, ExecutionError> {
+    const MAX_SAFE: i64 = 1_i64 << 53;
+    if v > MAX_SAFE || v < -MAX_SAFE {
+        Err(ExecutionError::NumericOverflow)
+    } else {
+        Ok(v as f64)
+    }
+}
+
 fn eval_arithmetic(
     left: &Datum,
     right: &Datum,
-    int_op: impl Fn(i64, i64) -> i64,
+    checked_op: impl Fn(i64, i64) -> Option<i64>,
     float_op: impl Fn(f64, f64) -> f64,
 ) -> Result<Datum, ExecutionError> {
     match (left, right) {
-        (Datum::Int32(a), Datum::Int32(b)) => Ok(Datum::Int64(int_op(i64::from(*a), i64::from(*b)))),
-        (Datum::Int64(a), Datum::Int64(b)) => Ok(Datum::Int64(int_op(*a, *b))),
-        (Datum::Int32(a), Datum::Int64(b)) => Ok(Datum::Int64(int_op(i64::from(*a), *b))),
-        (Datum::Int64(a), Datum::Int32(b)) => Ok(Datum::Int64(int_op(*a, i64::from(*b)))),
+        (Datum::Int32(a), Datum::Int32(b)) => checked_op(i64::from(*a), i64::from(*b))
+            .map(Datum::Int64)
+            .ok_or(ExecutionError::NumericOverflow),
+        (Datum::Int64(a), Datum::Int64(b)) => checked_op(*a, *b)
+            .map(Datum::Int64)
+            .ok_or(ExecutionError::NumericOverflow),
+        (Datum::Int32(a), Datum::Int64(b)) => checked_op(i64::from(*a), *b)
+            .map(Datum::Int64)
+            .ok_or(ExecutionError::NumericOverflow),
+        (Datum::Int64(a), Datum::Int32(b)) => checked_op(*a, i64::from(*b))
+            .map(Datum::Int64)
+            .ok_or(ExecutionError::NumericOverflow),
         (Datum::Float64(a), Datum::Float64(b)) => Ok(Datum::Float64(float_op(*a, *b))),
         (Datum::Float64(a), Datum::Int32(b)) => Ok(Datum::Float64(float_op(*a, f64::from(*b)))),
-        (Datum::Float64(a), Datum::Int64(b)) => Ok(Datum::Float64(float_op(*a, *b as f64))),
+        (Datum::Float64(a), Datum::Int64(b)) => {
+            let bf = safe_i64_to_f64(*b)?;
+            Ok(Datum::Float64(float_op(*a, bf)))
+        }
         (Datum::Int32(a), Datum::Float64(b)) => Ok(Datum::Float64(float_op(f64::from(*a), *b))),
-        (Datum::Int64(a), Datum::Float64(b)) => Ok(Datum::Float64(float_op(*a as f64, *b))),
+        (Datum::Int64(a), Datum::Float64(b)) => {
+            let af = safe_i64_to_f64(*a)?;
+            Ok(Datum::Float64(float_op(af, *b)))
+        }
         _ => Err(ExecutionError::TypeError(format!(
             "Cannot perform arithmetic on {left:?} and {right:?}"
         ))),
@@ -292,8 +323,26 @@ fn eval_json_arrow(left: &Datum, right: &Datum, as_text: bool) -> Result<Datum, 
     let json = datum_to_json(left)?;
     let result = match right {
         Datum::Text(key) => json.get(key.as_str()).cloned(),
-        Datum::Int32(idx) => json.get(*idx as usize).cloned(),
-        Datum::Int64(idx) => json.get(*idx as usize).cloned(),
+        Datum::Int32(idx) => {
+            let i = *idx as i64;
+            if i < 0 {
+                let len = json.as_array().map_or(0, |a| a.len() as i64);
+                let resolved = len + i;
+                if resolved >= 0 { json.get(resolved as usize).cloned() } else { None }
+            } else {
+                json.get(i as usize).cloned()
+            }
+        }
+        Datum::Int64(idx) => {
+            let i = *idx;
+            if i < 0 {
+                let len = json.as_array().map_or(0, |a| a.len() as i64);
+                let resolved = len + i;
+                if resolved >= 0 { json.get(resolved as usize).cloned() } else { None }
+            } else {
+                json.get(i as usize).cloned()
+            }
+        }
         _ => {
             return Err(ExecutionError::TypeError(
                 "JSONB -> operator requires text key or integer index".into(),
@@ -403,6 +452,23 @@ fn coerce_for_comparison(left: &Datum, right: &Datum) -> (Datum, Datum) {
         }
         (Datum::Int64(_), Datum::Int32(b)) => {
             return (left.clone(), Datum::Int64(i64::from(*b)));
+        }
+        // Float64 vs Int: promote Int to Float64
+        (Datum::Float64(_), Datum::Int32(b)) => {
+            return (left.clone(), Datum::Float64(f64::from(*b)));
+        }
+        (Datum::Int32(a), Datum::Float64(_)) => {
+            return (Datum::Float64(f64::from(*a)), right.clone());
+        }
+        (Datum::Float64(_), Datum::Int64(b)) => {
+            if let Ok(fb) = safe_i64_to_f64(*b) {
+                return (left.clone(), Datum::Float64(fb));
+            }
+        }
+        (Datum::Int64(a), Datum::Float64(_)) => {
+            if let Ok(fa) = safe_i64_to_f64(*a) {
+                return (Datum::Float64(fa), right.clone());
+            }
         }
         _ => {}
     }

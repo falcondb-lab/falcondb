@@ -54,7 +54,9 @@ impl Executor {
                 values[col_idx] = if col.data_type == DataType::Int64 {
                     Datum::Int64(next_val)
                 } else {
-                    Datum::Int32(next_val as i32)
+                    Datum::Int32(i32::try_from(next_val).map_err(|_| {
+                        FalconError::Execution(falcon_common::error::ExecutionError::NumericOverflow)
+                    })?)
                 };
             }
         }
@@ -182,8 +184,15 @@ impl Executor {
                 let ref_col_indices: Vec<usize> = fk
                     .ref_columns
                     .iter()
-                    .map(|name| ref_schema.find_column(name).unwrap_or(0))
-                    .collect();
+                    .map(|name| {
+                        ref_schema.find_column(name).ok_or_else(|| {
+                            FalconError::Execution(ExecutionError::TypeError(format!(
+                                "Referenced column '{}' not found in table '{}'",
+                                name, fk.ref_table
+                            )))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
 
                 // Scan referenced table ONCE, build HashSet of valid FK values
                 let ref_rows = self.storage.scan(ref_table_id, txn.txn_id, read_ts)?;
@@ -283,8 +292,15 @@ impl Executor {
                         let ref_col_indices: Vec<usize> = fk
                             .ref_columns
                             .iter()
-                            .map(|name| ref_schema.find_column(name).unwrap_or(0))
-                            .collect();
+                            .map(|name| {
+                                ref_schema.find_column(name).ok_or_else(|| {
+                                    FalconError::Execution(ExecutionError::TypeError(format!(
+                                        "Referenced column '{}' not found in table '{}'",
+                                        name, fk.ref_table
+                                    )))
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
                         let ref_rows =
                             self.storage.scan(ref_table_id, txn.txn_id, read_ts)?;
                         let fk_set: std::collections::HashSet<Vec<Datum>> = ref_rows
@@ -376,9 +392,9 @@ impl Executor {
                         let ret_vals: Vec<Datum> = returning
                             .iter()
                             .map(|(expr, _)| {
-                                ExprEngine::eval_row(expr, &ret_row).unwrap_or(Datum::Null)
+                                ExprEngine::eval_row(expr, &ret_row).map_err(FalconError::Execution)
                             })
-                            .collect();
+                            .collect::<Result<Vec<_>, _>>()?;
                         returning_rows.push(ret_vals);
                     }
                     count += 1;
@@ -424,9 +440,9 @@ impl Executor {
                                             .iter()
                                             .map(|(expr, _)| {
                                                 ExprEngine::eval_row(expr, &ret_row)
-                                                    .unwrap_or(Datum::Null)
+                                                    .map_err(FalconError::Execution)
                                             })
-                                            .collect();
+                                            .collect::<Result<Vec<_>, _>>()?;
                                         returning_rows.push(ret_vals);
                                     }
                                     count += 1;
@@ -610,6 +626,13 @@ impl Executor {
         let mat_filter = self.materialize_filter(effective_filter.as_ref(), txn)?;
         let mut returning_rows = Vec::new();
 
+        // Pre-scan all rows once for UNIQUE constraint checks (avoid per-row O(n) rescan)
+        let all_rows_for_uniq = if !schema.unique_constraints.is_empty() {
+            Some(self.storage.scan(table_id, txn.txn_id, read_ts)?)
+        } else {
+            None
+        };
+
         for (pk, row) in &rows {
             // Apply filter
             if let Some(ref f) = mat_filter {
@@ -640,16 +663,14 @@ impl Executor {
             self.eval_check_constraints(schema, &check_row)?;
 
             // Enforce UNIQUE constraints on updated row
-            if !schema.unique_constraints.is_empty() {
-                // Need all rows for uniqueness check (not just the narrowed scan result)
-                let all_rows = self.storage.scan(table_id, txn.txn_id, read_ts)?;
+            if let Some(ref all_rows) = all_rows_for_uniq {
                 for uniq_cols in &schema.unique_constraints {
                     let new_vals: Vec<&Datum> =
                         uniq_cols.iter().map(|&idx| &new_values[idx]).collect();
                     if new_vals.iter().any(|v| v.is_null()) {
                         continue;
                     }
-                    for (other_pk, other_row) in &all_rows {
+                    for (other_pk, other_row) in all_rows {
                         if other_pk == pk {
                             continue;
                         } // skip self
@@ -680,8 +701,8 @@ impl Executor {
                 let ret_row = OwnedRow::new(new_values.clone());
                 let ret_vals: Vec<Datum> = returning
                     .iter()
-                    .map(|(expr, _)| ExprEngine::eval_row(expr, &ret_row).unwrap_or(Datum::Null))
-                    .collect();
+                    .map(|(expr, _)| ExprEngine::eval_row(expr, &ret_row).map_err(FalconError::Execution))
+                    .collect::<Result<Vec<_>, _>>()?;
                 returning_rows.push(ret_vals);
             }
 
@@ -764,8 +785,8 @@ impl Executor {
             if !returning.is_empty() {
                 let ret_vals: Vec<Datum> = returning
                     .iter()
-                    .map(|(expr, _)| ExprEngine::eval_row(expr, row).unwrap_or(Datum::Null))
-                    .collect();
+                    .map(|(expr, _)| ExprEngine::eval_row(expr, row).map_err(FalconError::Execution))
+                    .collect::<Result<Vec<_>, _>>()?;
                 returning_rows.push(ret_vals);
             }
 
@@ -809,6 +830,18 @@ impl Executor {
         parent_schema: &TableSchema,
         deleted_row: &OwnedRow,
         txn: &TxnHandle,
+    ) -> Result<(), FalconError> {
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(parent_schema.id);
+        self.apply_fk_on_delete_inner(parent_schema, deleted_row, txn, &mut visited)
+    }
+
+    fn apply_fk_on_delete_inner(
+        &self,
+        parent_schema: &TableSchema,
+        deleted_row: &OwnedRow,
+        txn: &TxnHandle,
+        visited: &mut std::collections::HashSet<falcon_common::types::TableId>,
     ) -> Result<(), FalconError> {
         use falcon_common::schema::FkAction;
 
@@ -860,8 +893,12 @@ impl Executor {
                     // Matching child row found — apply the action
                     match fk.on_delete {
                         FkAction::Cascade => {
+                            // Cycle detection: skip if we've already visited this child table
+                            if !visited.insert(child_table.id) {
+                                continue;
+                            }
                             // Recursively apply cascading for grandchild tables
-                            self.apply_fk_on_delete(child_table, child_row, txn)?;
+                            self.apply_fk_on_delete_inner(child_table, child_row, txn, visited)?;
                             self.storage.delete(child_table.id, child_pk, txn.txn_id)?;
                         }
                         FkAction::SetNull => {
@@ -908,6 +945,19 @@ impl Executor {
         old_row: &OwnedRow,
         new_values: &[Datum],
         txn: &TxnHandle,
+    ) -> Result<(), FalconError> {
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(parent_schema.id);
+        self.apply_fk_on_update_inner(parent_schema, old_row, new_values, txn, &mut visited)
+    }
+
+    fn apply_fk_on_update_inner(
+        &self,
+        parent_schema: &TableSchema,
+        old_row: &OwnedRow,
+        new_values: &[Datum],
+        txn: &TxnHandle,
+        visited: &mut std::collections::HashSet<falcon_common::types::TableId>,
     ) -> Result<(), FalconError> {
         use falcon_common::schema::FkAction;
 
@@ -966,6 +1016,16 @@ impl Executor {
                             let mut updated_child = child_row.values.clone();
                             for (i, &fk_col) in fk.columns.iter().enumerate() {
                                 updated_child[fk_col] = new_ref_vals[i].clone();
+                            }
+                            // Recursively propagate CASCADE to grandchild tables (with cycle detection)
+                            if visited.insert(child_table.id) {
+                                self.apply_fk_on_update_inner(
+                                    child_table,
+                                    child_row,
+                                    &updated_child,
+                                    txn,
+                                    visited,
+                                )?;
                             }
                             let new_row = OwnedRow::new(updated_child);
                             self.storage
@@ -1078,9 +1138,9 @@ impl Executor {
                     let ret_vals: Vec<Datum> = returning
                         .iter()
                         .map(|(expr, _)| {
-                            ExprEngine::eval_row(expr, &ret_row).unwrap_or(Datum::Null)
+                            ExprEngine::eval_row(expr, &ret_row).map_err(FalconError::Execution)
                         })
-                        .collect();
+                        .collect::<Result<Vec<_>, _>>()?;
                     returning_rows.push(ret_vals);
                 }
 
@@ -1160,9 +1220,9 @@ impl Executor {
                     let ret_vals: Vec<Datum> = returning
                         .iter()
                         .map(|(expr, _)| {
-                            ExprEngine::eval_row(expr, target_row).unwrap_or(Datum::Null)
+                            ExprEngine::eval_row(expr, target_row).map_err(FalconError::Execution)
                         })
-                        .collect();
+                        .collect::<Result<Vec<_>, _>>()?;
                     returning_rows.push(ret_vals);
                 }
 

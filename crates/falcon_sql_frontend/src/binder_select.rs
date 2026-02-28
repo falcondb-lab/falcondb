@@ -1930,9 +1930,15 @@ impl Binder {
                             && !target.contains("bigint")
                             && !target.contains("int8") =>
                     {
-                        Ok(Datum::Int32(*n as i32))
+                        let v = i32::try_from(*n).map_err(|_| SqlError::InvalidExpression("integer out of range".into()))?;
+                        Ok(Datum::Int32(v))
                     }
-                    Datum::Float64(f) if target.contains("int") => Ok(Datum::Int64(*f as i64)),
+                    Datum::Float64(f) if target.contains("int") => {
+                        if f.is_nan() || f.is_infinite() || *f < (i64::MIN as f64) || *f > (i64::MAX as f64) {
+                            return Err(SqlError::InvalidExpression("numeric value out of range".into()));
+                        }
+                        Ok(Datum::Int64(*f as i64))
+                    }
                     _ => Ok(val),
                 }
             }

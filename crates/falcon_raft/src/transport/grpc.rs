@@ -62,6 +62,16 @@ impl GrpcTransport {
         self.peers.write().remove(&peer_id);
     }
 
+    /// Number of registered peers.
+    pub fn peer_count(&self) -> usize {
+        self.peers.read().len()
+    }
+
+    /// Check if a peer is registered.
+    pub fn has_peer(&self, peer_id: u64) -> bool {
+        self.peers.read().contains_key(&peer_id)
+    }
+
     /// Get metrics reference.
     pub const fn metrics(&self) -> &Arc<TransportMetrics> {
         &self.metrics

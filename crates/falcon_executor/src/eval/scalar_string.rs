@@ -23,7 +23,7 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
             )),
         },
         ScalarFunc::Length => match args.first() {
-            Some(Datum::Text(s)) => Ok(Datum::Int32(s.len() as i32)),
+            Some(Datum::Text(s)) => Ok(Datum::Int32(s.chars().count() as i32)),
             Some(Datum::Null) | None => Ok(Datum::Null),
             _ => Err(ExecutionError::TypeError(
                 "LENGTH requires text argument".into(),
@@ -41,8 +41,8 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
                 }
             };
             let start = match args.get(1) {
-                Some(Datum::Int32(n)) => (*n as usize).saturating_sub(1),
-                Some(Datum::Int64(n)) => (*n as usize).saturating_sub(1),
+                Some(Datum::Int32(n)) => usize::try_from(*n).unwrap_or(0).saturating_sub(1),
+                Some(Datum::Int64(n)) => usize::try_from(*n).unwrap_or(0).saturating_sub(1),
                 _ => 0,
             };
             // Avoid Vec<char>: find byte offset of char at `start` via char_indices.
@@ -52,8 +52,8 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
             }
             let tail = &s[byte_start..];
             let result: String = match args.get(2) {
-                Some(Datum::Int32(n)) => tail.chars().take(*n as usize).collect(),
-                Some(Datum::Int64(n)) => tail.chars().take(*n as usize).collect(),
+                Some(Datum::Int32(n)) => tail.chars().take(usize::try_from(*n).unwrap_or(0)).collect(),
+                Some(Datum::Int64(n)) => tail.chars().take(usize::try_from(*n).unwrap_or(0)).collect(),
                 _ => tail.to_owned(),
             };
             Ok(Datum::Text(result))
@@ -200,7 +200,11 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
                     ))
                 }
             };
-            Ok(Datum::Int32(haystack.find(needle).map_or(0, |pos| (pos + 1) as i32)))
+            Ok(Datum::Int32(haystack.find(needle).map_or(0, |byte_pos| {
+                // Convert byte offset to 1-indexed character position
+                let char_pos = haystack[..byte_pos].chars().count();
+                (char_pos + 1) as i32
+            })))
         }
         ScalarFunc::Lpad => {
             let s = match args.first() {
@@ -212,9 +216,10 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
                     ))
                 }
             };
+            const MAX_PAD_LEN: usize = 10_000_000;
             let len = match args.get(1) {
-                Some(Datum::Int32(n)) => *n as usize,
-                Some(Datum::Int64(n)) => *n as usize,
+                Some(Datum::Int32(n)) => usize::try_from(*n).unwrap_or(0),
+                Some(Datum::Int64(n)) => usize::try_from(*n).unwrap_or(0),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -222,6 +227,11 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
                     ))
                 }
             };
+            if len > MAX_PAD_LEN {
+                return Err(ExecutionError::TypeError(
+                    format!("LPAD length {} exceeds maximum {}", len, MAX_PAD_LEN),
+                ));
+            }
             let fill = match args.get(2) {
                 Some(Datum::Text(f)) => f.clone(),
                 None => " ".to_owned(),
@@ -252,9 +262,10 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
                     ))
                 }
             };
+            const MAX_PAD_LEN: usize = 10_000_000;
             let len = match args.get(1) {
-                Some(Datum::Int32(n)) => *n as usize,
-                Some(Datum::Int64(n)) => *n as usize,
+                Some(Datum::Int32(n)) => usize::try_from(*n).unwrap_or(0),
+                Some(Datum::Int64(n)) => usize::try_from(*n).unwrap_or(0),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -262,6 +273,11 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
                     ))
                 }
             };
+            if len > MAX_PAD_LEN {
+                return Err(ExecutionError::TypeError(
+                    format!("RPAD length {} exceeds maximum {}", len, MAX_PAD_LEN),
+                ));
+            }
             let fill = match args.get(2) {
                 Some(Datum::Text(f)) => f.clone(),
                 None => " ".to_owned(),
@@ -285,8 +301,8 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
                 _ => return Err(ExecutionError::TypeError("LEFT requires text".into())),
             };
             let n = match args.get(1) {
-                Some(Datum::Int32(n)) => *n as usize,
-                Some(Datum::Int64(n)) => *n as usize,
+                Some(Datum::Int32(n)) => usize::try_from(*n).unwrap_or(0),
+                Some(Datum::Int64(n)) => usize::try_from(*n).unwrap_or(0),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("LEFT requires integer".into())),
             };
@@ -299,8 +315,8 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
                 _ => return Err(ExecutionError::TypeError("RIGHT requires text".into())),
             };
             let n = match args.get(1) {
-                Some(Datum::Int32(n)) => *n as usize,
-                Some(Datum::Int64(n)) => *n as usize,
+                Some(Datum::Int32(n)) => usize::try_from(*n).unwrap_or(0),
+                Some(Datum::Int64(n)) => usize::try_from(*n).unwrap_or(0),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("RIGHT requires integer".into())),
             };
@@ -316,12 +332,18 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("REPEAT requires text".into())),
             };
+            const MAX_REPEAT_LEN: usize = 10_000_000;
             let n = match args.get(1) {
-                Some(Datum::Int32(n)) => *n as usize,
-                Some(Datum::Int64(n)) => *n as usize,
+                Some(Datum::Int32(n)) => usize::try_from(*n).unwrap_or(0),
+                Some(Datum::Int64(n)) => usize::try_from(*n).unwrap_or(0),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("REPEAT requires integer".into())),
             };
+            if s.len().saturating_mul(n) > MAX_REPEAT_LEN {
+                return Err(ExecutionError::TypeError(
+                    format!("REPEAT result length exceeds maximum {}", MAX_REPEAT_LEN),
+                ));
+            }
             Ok(Datum::Text(s.repeat(n)))
         }
         ScalarFunc::Reverse => {
@@ -409,8 +431,8 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
                 }
             };
             let field = match args.get(2) {
-                Some(Datum::Int32(n)) => *n as usize,
-                Some(Datum::Int64(n)) => *n as usize,
+                Some(Datum::Int32(n)) => usize::try_from(*n).unwrap_or(0),
+                Some(Datum::Int64(n)) => usize::try_from(*n).unwrap_or(0),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -441,8 +463,8 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
                 }
             };
             let start = match args.get(2) {
-                Some(Datum::Int32(n)) => *n as usize,
-                Some(Datum::Int64(n)) => *n as usize,
+                Some(Datum::Int32(n)) => usize::try_from(*n).unwrap_or(0),
+                Some(Datum::Int64(n)) => usize::try_from(*n).unwrap_or(0),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -451,9 +473,9 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
                 }
             };
             let count = match args.get(3) {
-                Some(Datum::Int32(n)) => *n as usize,
-                Some(Datum::Int64(n)) => *n as usize,
-                None => replacement.len(),
+                Some(Datum::Int32(n)) => usize::try_from(*n).unwrap_or(0),
+                Some(Datum::Int64(n)) => usize::try_from(*n).unwrap_or(0),
+                None => replacement.chars().count(),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -461,14 +483,13 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
                     ))
                 }
             };
-            let start_idx = start.saturating_sub(1);
-            let end_idx = (start_idx + count).min(s.len());
-            let result = format!(
-                "{}{}{}",
-                &s[..start_idx.min(s.len())],
-                replacement,
-                &s[end_idx..]
-            );
+            let char_start = start.saturating_sub(1);
+            let prefix: String = s.chars().take(char_start).collect();
+            let suffix: String = s.chars().skip(char_start + count).collect();
+            let mut result = String::with_capacity(prefix.len() + replacement.len() + suffix.len());
+            result.push_str(&prefix);
+            result.push_str(&replacement);
+            result.push_str(&suffix);
             Ok(Datum::Text(result))
         }
         ScalarFunc::StartsWith => {
@@ -511,8 +532,8 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
         }
         ScalarFunc::Chr => {
             let code = match args.first() {
-                Some(Datum::Int32(n)) => *n as u32,
-                Some(Datum::Int64(n)) => *n as u32,
+                Some(Datum::Int32(n)) => u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?,
+                Some(Datum::Int64(n)) => u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?,
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("CHR requires integer".into())),
             };

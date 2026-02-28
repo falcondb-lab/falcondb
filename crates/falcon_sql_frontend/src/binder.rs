@@ -919,6 +919,7 @@ impl Binder {
             storage_type,
             shard_key: shard_key_cols,
             sharding_policy,
+            range_bounds: Vec::new(),
         };
 
         Ok(BoundStatement::CreateTable(BoundCreateTable {

@@ -45,8 +45,7 @@
         // Write WAL with an uncommitted transaction (no Commit record)
         {
             let wal = WalWriter::open(&dir, SyncMode::None).unwrap();
-            let schema_json = serde_json::to_string(&recovery_schema()).unwrap();
-            wal.append(&WalRecord::CreateTable { schema_json }).unwrap();
+            wal.append(&WalRecord::CreateTable { schema: recovery_schema() }).unwrap();
 
             // Committed txn
             wal.append(&WalRecord::Insert {
@@ -92,8 +91,7 @@
         // Write WAL
         {
             let wal = WalWriter::open(&dir, SyncMode::None).unwrap();
-            let schema_json = serde_json::to_string(&recovery_schema()).unwrap();
-            wal.append(&WalRecord::CreateTable { schema_json }).unwrap();
+            wal.append(&WalRecord::CreateTable { schema: recovery_schema() }).unwrap();
 
             wal.append(&WalRecord::Insert {
                 txn_id: TxnId(1),
@@ -232,8 +230,7 @@
         // Write WAL with explicit abort record
         {
             let wal = WalWriter::open(&dir, SyncMode::None).unwrap();
-            let schema_json = serde_json::to_string(&recovery_schema()).unwrap();
-            wal.append(&WalRecord::CreateTable { schema_json }).unwrap();
+            wal.append(&WalRecord::CreateTable { schema: recovery_schema() }).unwrap();
 
             wal.append(&WalRecord::Insert {
                 txn_id: TxnId(1),
@@ -280,8 +277,7 @@
 
         {
             let wal = WalWriter::open(&dir, SyncMode::None).unwrap();
-            let schema_json = serde_json::to_string(&recovery_schema()).unwrap();
-            wal.append(&WalRecord::CreateTable { schema_json }).unwrap();
+            wal.append(&WalRecord::CreateTable { schema: recovery_schema() }).unwrap();
 
             wal.append(&WalRecord::Insert {
                 txn_id: TxnId(1),
@@ -324,8 +320,7 @@
 
         {
             let wal = WalWriter::open(&dir, SyncMode::None).unwrap();
-            let schema_json = serde_json::to_string(&recovery_schema()).unwrap();
-            wal.append(&WalRecord::CreateTable { schema_json }).unwrap();
+            wal.append(&WalRecord::CreateTable { schema: recovery_schema() }).unwrap();
 
             // Committed local txn for baseline
             wal.append(&WalRecord::Insert {
@@ -375,8 +370,7 @@
 
         {
             let wal = WalWriter::open(&dir, SyncMode::None).unwrap();
-            let schema_json = serde_json::to_string(&recovery_schema()).unwrap();
-            wal.append(&WalRecord::CreateTable { schema_json }).unwrap();
+            wal.append(&WalRecord::CreateTable { schema: recovery_schema() }).unwrap();
 
             // Global txn: prepared then explicitly aborted
             wal.append(&WalRecord::Insert {
@@ -502,14 +496,12 @@
 
         {
             let wal = WalWriter::open(&dir, SyncMode::None).unwrap();
-            let s1_json = serde_json::to_string(&recovery_schema()).unwrap();
-            let s2_json = serde_json::to_string(&schema2).unwrap();
             wal.append(&WalRecord::CreateTable {
-                schema_json: s1_json,
+                schema: recovery_schema(),
             })
             .unwrap();
             wal.append(&WalRecord::CreateTable {
-                schema_json: s2_json,
+                schema: schema2.clone(),
             })
             .unwrap();
 
@@ -569,8 +561,7 @@
 
         {
             let wal = WalWriter::open(&dir, SyncMode::None).unwrap();
-            let schema_json = serde_json::to_string(&recovery_schema()).unwrap();
-            wal.append(&WalRecord::CreateTable { schema_json }).unwrap();
+            wal.append(&WalRecord::CreateTable { schema: recovery_schema() }).unwrap();
             for i in 1..=5i32 {
                 wal.append(&WalRecord::Insert {
                     txn_id: TxnId(i as u64),

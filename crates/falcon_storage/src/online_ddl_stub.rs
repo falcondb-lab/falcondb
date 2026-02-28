@@ -1,11 +1,14 @@
-//! # Module Status: STUB (feature-gated, default OFF)
-//! Minimal type stubs so `StorageEngine` compiles without `online_ddl_full` feature.
+//! # Module Status: STUB (default build, `online_ddl_full` feature OFF)
+//!
+//! Minimal no-op stubs so `StorageEngine` compiles without the full
+//! online DDL state-machine.  Enable `online_ddl_full` to get the real
+//! implementation with background backfill tracking and status queries.
 
-/// Stub DDL operation tracker — no-ops in v1.0 default build.
+/// Stub DDL operation tracker — all methods are no-ops.
 #[derive(Debug, Default)]
 pub struct OnlineDdlManager;
 
-/// DDL operation kind (stub).
+/// DDL operation kind (stub — mirrors real enum variants for API compat).
 #[derive(Debug, Clone)]
 pub enum DdlOpKind {
     AddColumn { table_name: String, column_name: String, has_default: bool },
@@ -14,8 +17,8 @@ pub enum DdlOpKind {
     MetadataOnly { description: String },
 }
 
-/// Backfill batch size (stub constant for compatibility).
-pub const BACKFILL_BATCH_SIZE: usize = 1000;
+/// Backfill batch size — must match the real module's value (1024).
+pub const BACKFILL_BATCH_SIZE: usize = 1024;
 
 impl OnlineDdlManager {
     pub fn new() -> Self { Self }

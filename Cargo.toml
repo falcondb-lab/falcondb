@@ -110,6 +110,9 @@ zstd = "0.13"
 zstd-safe = "7.2"
 falcon_segment_codec = { path = "crates/falcon_segment_codec" }
 
+# Benchmarking
+criterion = { version = "0.5", features = ["html_reports"] }
+
 [profile.release]
 opt-level = 3
 lto = "thin"

@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to FalconDB are documented in this file.
+All notable changes to FalconDB are documented here.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).

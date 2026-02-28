@@ -178,15 +178,11 @@ impl PriorityScheduler {
         if priority == QueryPriority::High {
             lane.active.fetch_add(1, Ordering::Relaxed);
             lane.total_admitted.fetch_add(1, Ordering::Relaxed);
+            self.high_waiters.fetch_add(1, Ordering::Relaxed);
             return Ok(SchedulerGuard {
                 scheduler: self,
                 priority,
             });
-        }
-
-        // Track high waiters for backpressure
-        if priority == QueryPriority::High {
-            self.high_waiters.fetch_add(1, Ordering::Relaxed);
         }
 
         let timeout = if self.config.acquire_timeout_ms > 0 {
@@ -262,7 +258,7 @@ impl PriorityScheduler {
         let lane_idx = priority as usize;
         self.lanes[lane_idx].active.fetch_sub(1, Ordering::Relaxed);
         if priority == QueryPriority::High {
-            // high_waiters is only incremented for non-High, so no decrement needed
+            self.high_waiters.fetch_sub(1, Ordering::Relaxed);
         }
         self.slot_cond.notify_all();
     }

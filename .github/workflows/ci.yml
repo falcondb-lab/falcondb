@@ -21,8 +21,12 @@ jobs:
       - run: cargo check --workspace
 
   test:
-    name: Test
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -54,6 +58,7 @@ jobs:
     name: Failover Gate
     runs-on: ubuntu-latest
     needs: [test]
+    if: always() && !failure() && !cancelled()
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -64,6 +69,7 @@ jobs:
     name: JDBC Smoke
     runs-on: ubuntu-latest
     needs: [test]
+    if: always() && !failure() && !cancelled()
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -85,6 +91,7 @@ jobs:
     name: Distributed Invariants
     runs-on: ubuntu-latest
     needs: [test]
+    if: always() && !failure() && !cancelled()
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -102,6 +109,7 @@ jobs:
     name: Performance Regression Gate
     runs-on: ubuntu-latest
     needs: [test]
+    if: always() && !failure() && !cancelled()
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -130,12 +138,72 @@ jobs:
           path: bench/
           retention-days: 30
 
-  windows:
-    name: Windows Check
-    runs-on: windows-latest
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: always() && !failure() && !cancelled()
+    permissions:
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace
-      - run: cargo test --workspace
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Run coverage (llvm-cov)
+        run: |
+          cargo llvm-cov \
+            --workspace \
+            --lcov --output-path coverage/lcov.info \
+            --html \
+            --ignore-filename-regex 'crates/falcon_bench|crates/falcon_proto'
+        env:
+          RUSTFLAGS: ""
+      - name: Coverage summary for PR
+        if: github.event_name == 'pull_request'
+        run: |
+          cargo llvm-cov report \
+            --ignore-filename-regex 'crates/falcon_bench|crates/falcon_proto' \
+            --summary-only 2>&1 | tee coverage/summary.txt
+          COVERED=$(grep -oP 'Lines.*?\K[\d.]+(?=%)' coverage/summary.txt | head -1 || echo '?')
+          echo "## Code Coverage" >> $GITHUB_STEP_SUMMARY
+          echo "**Line coverage: ${COVERED}%**" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat coverage/summary.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+        env:
+          RUSTFLAGS: ""
+      - name: Upload coverage to Codecov
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage/lcov.info
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+      - name: Upload coverage artifact (HTML + lcov)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report-${{ github.sha }}
+          path: coverage/
+          retention-days: 30
+
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # cargo audit — checks for known CVEs in the advisory database
+      - uses: rustsec/audit-check@v1.4.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      # cargo deny — license, banned crates, duplicate versions, source policies
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+      - name: Run cargo deny
+        run: cargo deny check
+        # Warn only on PRs; block merges to main
+        continue-on-error: ${{ github.event_name == 'pull_request' }}

@@ -60,7 +60,7 @@ fn default_guc_vars() -> HashMap<String, String> {
     m.insert("timezone".into(), "UTC".into());
     m.insert("integer_datetimes".into(), "on".into());
     m.insert("intervalstyle".into(), "postgres".into());
-    m.insert("is_superuser".into(), "on".into());
+    m.insert("is_superuser".into(), "off".into());
     m.insert(
         "default_transaction_isolation".into(),
         "read committed".into(),

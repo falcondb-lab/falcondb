@@ -912,3 +912,339 @@ pub fn record_lock_contention(lock_name: &str, wait_us: u64) {
     )
     .record(wait_us as f64);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── LocalTimer ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_local_timer_format() {
+        use tracing_subscriber::fmt::time::FormatTime;
+        let timer = LocalTimer;
+        let mut buf = String::new();
+        let mut writer = tracing_subscriber::fmt::format::Writer::new(&mut buf);
+        timer.format_time(&mut writer).expect("format_time should not fail");
+        // Output should be an ISO-8601-ish timestamp: YYYY-MM-DDTHH:MM:SS.mmm+HH:MM
+        assert!(buf.len() >= 23, "timestamp too short: {buf}");
+        assert!(buf.contains('T'), "missing 'T' separator in: {buf}");
+    }
+
+    // ── Pressure state encoding ─────────────────────────────────────────
+
+    #[test]
+    fn test_memory_pressure_encoding() {
+        // These should not panic even without a metrics recorder installed.
+        // The `metrics` crate uses a no-op recorder by default.
+        record_memory_metrics(1000, 500, 200, 1700, 2000, 4000, "normal", 0);
+        record_memory_metrics(1000, 500, 200, 1700, 2000, 4000, "pressure", 5);
+        record_memory_metrics(1000, 500, 200, 1700, 2000, 4000, "critical", 10);
+        record_memory_metrics(1000, 500, 200, 1700, 2000, 4000, "unknown_state", 0);
+    }
+
+    // ── Cluster health status encoding ──────────────────────────────────
+
+    #[test]
+    fn test_cluster_health_status_encoding() {
+        record_cluster_health_metrics("healthy", 3, 3, 16, 16, 0);
+        record_cluster_health_metrics("degraded", 3, 2, 16, 14, 500);
+        record_cluster_health_metrics("critical", 3, 1, 16, 8, 5000);
+        record_cluster_health_metrics("unknown", 3, 0, 16, 0, 99999);
+    }
+
+    // ── Query metrics smoke ─────────────────────────────────────────────
+
+    #[test]
+    fn test_record_query_metrics_does_not_panic() {
+        record_query_metrics(150, "select", true);
+        record_query_metrics(0, "insert", false);
+        record_query_metrics(u64::MAX, "update", true);
+    }
+
+    #[test]
+    fn test_record_txn_metrics_does_not_panic() {
+        record_txn_metrics("begin");
+        record_txn_metrics("commit");
+        record_txn_metrics("abort");
+    }
+
+    #[test]
+    fn test_record_active_connections_does_not_panic() {
+        record_active_connections(0);
+        record_active_connections(1000);
+    }
+
+    #[test]
+    fn test_record_storage_metrics_does_not_panic() {
+        record_storage_metrics(10, 500_000);
+        record_storage_metrics(0, 0);
+    }
+
+    // ── Prepared statement metrics smoke ─────────────────────────────────
+
+    #[test]
+    fn test_prepared_stmt_metrics_do_not_panic() {
+        record_prepared_stmt_op("parse", "plan");
+        record_prepared_stmt_op("bind", "legacy");
+        record_prepared_stmt_op("execute", "plan");
+        record_prepared_stmt_sql_cmd("prepare");
+        record_prepared_stmt_sql_cmd("execute");
+        record_prepared_stmt_sql_cmd("deallocate");
+        record_prepared_stmt_parse_duration_us(100, true);
+        record_prepared_stmt_parse_duration_us(5000, false);
+        record_prepared_stmt_bind_duration_us(50);
+        record_prepared_stmt_execute_duration_us(200, true);
+        record_prepared_stmt_param_count(0);
+        record_prepared_stmt_param_count(10);
+        record_prepared_stmt_active(5);
+        record_prepared_stmt_portals_active(3);
+    }
+
+    // ── Enterprise / tenant metrics smoke ────────────────────────────────
+
+    #[test]
+    fn test_tenant_metrics_do_not_panic() {
+        record_tenant_metrics(1, "acme", 5, 1024 * 1024, 150.0, 1000, 10, 0);
+        record_tenant_metrics(0, "", 0, 0, 0.0, 0, 0, 0);
+    }
+
+    #[test]
+    fn test_wal_stability_metrics_do_not_panic() {
+        record_wal_stability_metrics(10000, 500, 100, 3.5, 8192);
+    }
+
+    #[test]
+    fn test_replication_metrics_do_not_panic() {
+        record_replication_metrics(2, 500, 1000, 1);
+    }
+
+    #[test]
+    fn test_backup_metrics_do_not_panic() {
+        record_backup_metrics(10, 1, 1024 * 1024 * 100);
+    }
+
+    #[test]
+    fn test_audit_metrics_do_not_panic() {
+        record_audit_metrics(5000, 50);
+    }
+
+    // ── Security metrics smoke ──────────────────────────────────────────
+
+    #[test]
+    fn test_security_metrics_do_not_panic() {
+        record_security_metrics(true, true, true, 5, 1000);
+        record_security_metrics(false, false, false, 0, 0);
+    }
+
+    #[test]
+    fn test_security_hardening_metrics_do_not_panic() {
+        record_security_hardening_metrics(100, 5, 20, 2, 50, 3, 200, 10, 1, 0, 0);
+    }
+
+    // ── Health / SLA metrics smoke ──────────────────────────────────────
+
+    #[test]
+    fn test_health_metrics_do_not_panic() {
+        record_health_metrics(95, 10, 2);
+        record_health_metrics(0, 0, 0);
+    }
+
+    #[test]
+    fn test_sla_metrics_do_not_panic() {
+        record_sla_metrics(500, 1000, 5000, 3, 1, 2);
+    }
+
+    #[test]
+    fn test_sla_admission_metrics_do_not_panic() {
+        record_sla_admission_metrics(500, 1000, 10.0, 50.0, 5, 2, 0, 100, 3);
+        record_sla_rejection("latency", "fast");
+    }
+
+    // ── 2PC / distributed metrics smoke ─────────────────────────────────
+
+    #[test]
+    fn test_decision_log_metrics_do_not_panic() {
+        record_decision_log_metrics(100, 99, 10, 1);
+    }
+
+    #[test]
+    fn test_layered_timeout_metrics_do_not_panic() {
+        record_layered_timeout_metrics(5, 2, 1);
+    }
+
+    #[test]
+    fn test_slow_shard_metrics_do_not_panic() {
+        record_slow_shard_metrics(3, 1, 2, 1, 0);
+    }
+
+    // ── Chaos / fault injection metrics smoke ───────────────────────────
+
+    #[test]
+    fn test_fault_injection_metrics_do_not_panic() {
+        record_fault_injection_metrics(10, true, 3, 2, 5, false, 0);
+        record_fault_injection_metrics(0, false, 0, 0, 0, true, 100);
+    }
+
+    // ── Scheduler / token bucket metrics smoke ──────────────────────────
+
+    #[test]
+    fn test_priority_scheduler_metrics_do_not_panic() {
+        record_priority_scheduler_metrics(5, 100, 2, 10, 20, 500, 10, 150, 3, 5, 200, 50, 300);
+    }
+
+    #[test]
+    fn test_token_bucket_metrics_do_not_panic() {
+        record_token_bucket_metrics("write_limiter", 1000, 100, 50, false, 500, 600, 10, 200);
+        record_token_bucket_metrics("read_limiter", 5000, 500, 0, true, 0, 0, 0, 0);
+    }
+
+    // ── Crash domain metrics smoke ──────────────────────────────────────
+
+    #[test]
+    fn test_crash_domain_metrics_do_not_panic() {
+        record_crash_domain_metrics(0, 0, 0, 0);
+        record_crash_domain_metrics(5, 3, 1, 2);
+    }
+
+    // ── Background task metrics smoke ───────────────────────────────────
+
+    #[test]
+    fn test_bg_task_metrics_do_not_panic() {
+        record_bg_task_failed("gc_runner");
+        record_bg_supervisor_metrics(5, 4, 1, true);
+        record_bg_supervisor_metrics(3, 3, 0, false);
+    }
+
+    // ── Transaction stats metrics smoke ─────────────────────────────────
+
+    #[test]
+    fn test_txn_stats_do_not_panic() {
+        record_txn_stats(1000, 900, 100, 50, 10, 5, 3);
+    }
+
+    #[test]
+    fn test_txn_terminal_state_do_not_panic() {
+        record_txn_terminal_state("committed", "", "00000");
+        record_txn_terminal_state("aborted_retryable", "write_conflict", "40001");
+        record_txn_terminal_state("rejected", "admission_control", "53300");
+    }
+
+    // ── GC budget metrics smoke ─────────────────────────────────────────
+
+    #[test]
+    fn test_gc_budget_metrics_do_not_panic() {
+        record_gc_budget_metrics(500, false, false, false, 100, 8192, 5, 1.5);
+        record_gc_budget_metrics(2000, true, true, true, 500, 65536, 20, 3.7);
+    }
+
+    // ── Network / distributed query metrics smoke ───────────────────────
+
+    #[test]
+    fn test_dist_query_network_metrics_do_not_panic() {
+        record_dist_query_network_metrics(10000, 5000, 100, 50, true, true, true);
+        record_dist_query_network_metrics(0, 0, 0, 0, false, false, false);
+        // bytes_in <= bytes_out (no savings path)
+        record_dist_query_network_metrics(100, 200, 10, 20, false, false, false);
+    }
+
+    // ── Cluster observability metrics smoke ──────────────────────────────
+
+    #[test]
+    fn test_gateway_routing_metrics_do_not_panic() {
+        record_gateway_routing_metrics(100, 50, 5, 2, 10, 60, 3, 200, 5);
+    }
+
+    #[test]
+    fn test_topology_cache_metrics_do_not_panic() {
+        record_topology_cache_metrics(500, 50, 10, 5, 3, 42);
+    }
+
+    #[test]
+    fn test_discovery_subscription_metrics_do_not_panic() {
+        record_discovery_subscription_metrics(10, 100, 500, 490, 10, 2);
+    }
+
+    #[test]
+    fn test_client_connection_metrics_do_not_panic() {
+        record_client_connection_metrics(3, 100, 5, 50, 2);
+    }
+
+    #[test]
+    fn test_redirector_metrics_do_not_panic() {
+        record_redirector_metrics(20, 18, 2, 15);
+    }
+
+    #[test]
+    fn test_epoch_fence_metrics_do_not_panic() {
+        record_epoch_fence_metrics(42, 1000, 5, 995);
+    }
+
+    #[test]
+    fn test_shard_migration_metrics_do_not_panic() {
+        record_shard_migration_metrics(1, 10, 2, 1, 1024 * 1024);
+    }
+
+    #[test]
+    fn test_segment_streaming_metrics_do_not_panic() {
+        record_segment_streaming_metrics(5, 100, 1024 * 1024, 512, 0, 1, 3);
+    }
+
+    #[test]
+    fn test_rebalancer_metrics_do_not_panic() {
+        record_rebalancer_metrics(5, 10000, true, false, 0.15, 3, 0, 5000, 200.0);
+        record_rebalancer_metrics(0, 0, false, true, 0.0, 0, 0, 0, 0.0);
+    }
+
+    #[test]
+    fn test_lock_contention_does_not_panic() {
+        record_lock_contention("shard_map_rwlock", 150);
+        record_lock_contention("wal_buffer", 0);
+    }
+
+    // ── Compat metrics smoke ────────────────────────────────────────────
+
+    #[test]
+    fn test_compat_metrics_do_not_panic() {
+        record_compat_metrics(1, 1);
+        record_compat_metrics(u32::MAX, u32::MAX);
+    }
+
+    // ── Metering metrics smoke ──────────────────────────────────────────
+
+    #[test]
+    fn test_metering_metrics_do_not_panic() {
+        record_metering_metrics(1, 5000, 1024 * 1024, 1024 * 1024 * 10, 500, 100.0, false);
+        record_metering_metrics(0, 0, 0, 0, 0, 0.0, true);
+    }
+
+    // ── Queue depth metrics smoke ───────────────────────────────────────
+
+    #[test]
+    fn test_queue_depth_metrics_do_not_panic() {
+        record_queue_depth_metrics("wal_writer", 10, 100, 50, 1000, 5);
+    }
+
+    // ── Replay metrics smoke ────────────────────────────────────────────
+
+    #[test]
+    fn test_replay_metrics_do_not_panic() {
+        record_replay_metrics(100, 5, 0);
+    }
+
+    // ── Admission rejection smoke ───────────────────────────────────────
+
+    #[test]
+    fn test_admission_rejection_do_not_panic() {
+        record_admission_rejection("connections", "53300");
+        record_admission_rejection("memory", "53200");
+    }
+
+    // ── Failover recovery smoke ─────────────────────────────────────────
+
+    #[test]
+    fn test_failover_recovery_do_not_panic() {
+        record_failover_recovery_duration_ms(1500, "success");
+        record_failover_recovery_duration_ms(30000, "timeout");
+    }
+}

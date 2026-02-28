@@ -429,7 +429,7 @@ pub fn read_zstd_cold_segment(
     if data.len() < 4 {
         return Err("segment body too small for block count".to_owned());
     }
-    let block_count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+    let block_count = u32::from_le_bytes(data[0..4].try_into().expect("infallible: 4-byte slice to [u8;4]")) as usize;
     let mut offset = 4;
     let mut rows = Vec::with_capacity(block_count);
 

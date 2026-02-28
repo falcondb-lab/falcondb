@@ -1242,7 +1242,7 @@ impl ShardMigrationCoordinator {
                     self.max_freeze_duration.as_millis()
                 ));
                 self.metrics.lock().failed_migrations += 1;
-                return Err(task.error.clone().unwrap());
+                return Err(task.error.clone().expect("BUG: error is None immediately after assignment"));
             }
         }
 

@@ -220,6 +220,7 @@ impl ReplicaRunner {
                 self.config.connect_timeout,
             );
 
+            let stream_start = tokio::time::Instant::now();
             match self.run_stream(&transport, &stop, &metrics).await {
                 Ok(()) => {
                     // Clean shutdown (stop signaled while streaming).
@@ -233,6 +234,13 @@ impl ReplicaRunner {
                     metrics.connected.store(false, Ordering::Relaxed);
                     metrics.reconnect_count.fetch_add(1, Ordering::Relaxed);
 
+                    // If the stream ran for longer than max_backoff, the connection
+                    // was healthy for a while — reset backoff so a transient glitch
+                    // doesn't pay the full escalated penalty.
+                    if stream_start.elapsed() > self.config.max_backoff {
+                        backoff = self.config.initial_backoff;
+                    }
+
                     tracing::warn!(
                         shard_id = self.config.shard_id.0,
                         error = %e,
@@ -241,7 +249,19 @@ impl ReplicaRunner {
                     );
 
                     // Exponential backoff with jitter (stop-aware sleep).
-                    let sleep_end = tokio::time::Instant::now() + backoff;
+                    // Add ±25% jitter to prevent thundering-herd reconnects.
+                    let jitter_pct = {
+                        let raw = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .subsec_nanos();
+                        // Map to range [0.75, 1.25]
+                        0.75 + (raw % 1000) as f64 / 2000.0
+                    };
+                    let jittered = Duration::from_millis(
+                        (backoff.as_millis() as f64 * jitter_pct) as u64
+                    );
+                    let sleep_end = tokio::time::Instant::now() + jittered;
                     while tokio::time::Instant::now() < sleep_end {
                         if stop.load(Ordering::SeqCst) {
                             return;

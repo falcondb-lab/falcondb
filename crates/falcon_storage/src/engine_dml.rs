@@ -6,6 +6,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
+#[cfg(any(feature = "columnstore", feature = "disk_rowstore"))]
 use falcon_common::config::NodeRole;
 use falcon_common::datum::{Datum, OwnedRow};
 use falcon_common::error::StorageError;
@@ -62,7 +63,7 @@ impl StorageEngine {
                 table_id,
                 row: row.clone(),
             })?;
-            let cdc_row = if self.cdc_manager.is_enabled() { Some(row.clone()) } else { None };
+            let cdc_row = if self.ext.cdc_manager.is_enabled() { Some(row.clone()) } else { None };
             let pk = table.insert(row, txn_id)?;
             self.record_write(txn_id, table_id, pk.clone());
 
@@ -74,13 +75,14 @@ impl StorageEngine {
             // CDC: emit INSERT event
             if let Some(cdc_row) = cdc_row {
                 let tname = self.cdc_table_name(table_id);
-                self.cdc_manager.emit_insert(txn_id, table_id, &tname, cdc_row, Some(format!("{pk:?}")));
+                self.ext.cdc_manager.emit_insert(txn_id, table_id, &tname, cdc_row, Some(format!("{pk:?}")));
             }
 
             return Ok(pk);
         }
 
         // Columnstore (feature-gated)
+        #[cfg(feature = "columnstore")]
         if let Some(_cs) = self.columnstore_tables.get(&table_id) {
             self.record_write_path_violation_columnstore()?;
             self.append_wal(&WalRecord::Insert {
@@ -89,7 +91,7 @@ impl StorageEngine {
                 row: row.clone(),
             })?;
             let pk = crate::memtable::encode_pk(&row, _cs.schema.pk_indices());
-            _cs.insert(txn_id, row);
+            let _ = _cs.insert(row, txn_id);
             return Ok(pk);
         }
 
@@ -186,7 +188,7 @@ impl StorageEngine {
         };
 
         // Insert rows into memtable and collect PKs
-        let cdc_enabled = self.cdc_manager.is_enabled();
+        let cdc_enabled = self.ext.cdc_manager.is_enabled();
         let cdc_table_name = if cdc_enabled { Some(self.cdc_table_name(table_id)) } else { None };
         let mut pks = Vec::with_capacity(row_count);
         for row in rows {
@@ -196,7 +198,7 @@ impl StorageEngine {
 
             // CDC: emit INSERT event for each row in batch
             if let (Some(cdc_row), Some(ref tname)) = (cdc_row, &cdc_table_name) {
-                self.cdc_manager.emit_insert(txn_id, table_id, tname, cdc_row, Some(format!("{pk:?}")));
+                self.ext.cdc_manager.emit_insert(txn_id, table_id, tname, cdc_row, Some(format!("{pk:?}")));
             }
 
             pks.push(pk);
@@ -222,14 +224,14 @@ impl StorageEngine {
                 pk: pk.clone(),
                 new_row: new_row.clone(),
             })?;
-            let cdc_row = if self.cdc_manager.is_enabled() { Some(new_row.clone()) } else { None };
+            let cdc_row = if self.ext.cdc_manager.is_enabled() { Some(new_row.clone()) } else { None };
             table.update(pk, new_row, txn_id)?;
             self.record_write(txn_id, table_id, pk.clone());
 
             // CDC: emit UPDATE event (old_row=None; REPLICA IDENTITY FULL not yet supported)
             if let Some(cdc_row) = cdc_row {
                 let tname = self.cdc_table_name(table_id);
-                self.cdc_manager.emit_update(txn_id, table_id, &tname, None, cdc_row, Some(format!("{pk:?}")));
+                self.ext.cdc_manager.emit_update(txn_id, table_id, &tname, None, cdc_row, Some(format!("{pk:?}")));
             }
 
             return Ok(());
@@ -269,6 +271,7 @@ impl StorageEngine {
         }
 
         // Columnstore: UPDATE not natively supported (analytics workload)
+        #[cfg(feature = "columnstore")]
         if self.columnstore_tables.contains_key(&table_id) {
             self.record_write_path_violation_columnstore()?;
             return Err(StorageError::Io(std::io::Error::other(
@@ -298,9 +301,9 @@ impl StorageEngine {
             self.record_write(txn_id, table_id, pk.clone());
 
             // CDC: emit DELETE event
-            if self.cdc_manager.is_enabled() {
+            if self.ext.cdc_manager.is_enabled() {
                 let tname = self.cdc_table_name(table_id);
-                self.cdc_manager.emit_delete(txn_id, table_id, &tname, None, Some(format!("{pk:?}")));
+                self.ext.cdc_manager.emit_delete(txn_id, table_id, &tname, None, Some(format!("{pk:?}")));
             }
 
             return Ok(());
@@ -338,6 +341,7 @@ impl StorageEngine {
         }
 
         // Columnstore: DELETE not natively supported
+        #[cfg(feature = "columnstore")]
         if self.columnstore_tables.contains_key(&table_id) {
             self.record_write_path_violation_columnstore()?;
             return Err(StorageError::Io(std::io::Error::other(
@@ -391,6 +395,7 @@ impl StorageEngine {
         }
 
         // Columnstore: point-get not efficient, return not found
+        #[cfg(feature = "columnstore")]
         if self.columnstore_tables.contains_key(&table_id) {
             return Ok(None);
         }
@@ -570,7 +575,8 @@ impl StorageEngine {
             return Ok(results);
         }
 
-        // Columnstore (feature-gated via stub)
+        // Columnstore (feature-gated)
+        #[cfg(feature = "columnstore")]
         if let Some(cs) = self.columnstore_tables.get(&table_id) {
             let results = cs.scan(txn_id, read_ts);
             return Ok(results);
@@ -615,6 +621,7 @@ impl StorageEngine {
     /// Columnar scan: returns one Vec<Datum> per column for vectorized aggregate execution.
     /// Only available for ColumnStore tables; returns None for rowstore/disk tables.
     /// The executor uses this to bypass row-at-a-time deserialization for analytics queries.
+    #[cfg(feature = "columnstore")]
     pub fn scan_columnar(
         &self,
         table_id: TableId,
@@ -627,6 +634,17 @@ impl StorageEngine {
             .map(|col_idx| cs.column_scan(col_idx, txn_id, read_ts))
             .collect();
         Some(columns)
+    }
+
+    /// Columnar scan stub — always returns None when columnstore feature is disabled.
+    #[cfg(not(feature = "columnstore"))]
+    pub fn scan_columnar(
+        &self,
+        _table_id: TableId,
+        _txn_id: TxnId,
+        _read_ts: Timestamp,
+    ) -> Option<Vec<Vec<falcon_common::datum::Datum>>> {
+        None
     }
 
     /// Perform an index scan: look up PKs via secondary index, then fetch rows.
@@ -778,6 +796,7 @@ impl StorageEngine {
     /// - `HardDeny` — same as FailFast; the transaction is unconditionally rejected.
     ///
     /// Returns `Ok(())` when the write may proceed, `Err` when it must be rejected.
+    #[cfg(feature = "columnstore")]
     pub(crate) fn record_write_path_violation_columnstore(&self) -> Result<(), StorageError> {
         use falcon_common::config::WritePathEnforcement;
         self.write_path_columnstore_violations
@@ -812,7 +831,7 @@ impl StorageEngine {
     /// Record that a write operation touched a disk-rowstore table.
     ///
     /// Same enforcement semantics as `record_write_path_violation_columnstore`.
-    #[allow(dead_code)]
+    #[cfg(feature = "disk_rowstore")]
     pub(crate) fn record_write_path_violation_disk(&self) -> Result<(), StorageError> {
         use falcon_common::config::WritePathEnforcement;
         self.write_path_disk_violations

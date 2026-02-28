@@ -343,6 +343,7 @@ impl HealthState {
             NodeRole::Replica => "replica",
             NodeRole::Analytics => "analytics",
             NodeRole::Standalone => "standalone",
+            NodeRole::RaftMember => "raft_member",
         }
     }
 }

@@ -1,0 +1,143 @@
+name: Fuzz Testing
+
+on:
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'crates/falcon_sql_frontend/**'
+      - 'crates/falcon_protocol_pg/**'
+      - 'fuzz/**'
+  schedule:
+    # Nightly exploratory fuzzing at 04:00 UTC (after chaos tests at 03:00)
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: 'Total fuzz duration in seconds per target'
+        required: false
+        default: '600'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Short corpus regression (PRs) ─────────────────────────────────────────
+  # Replays the seed corpus through each target to catch regressions.
+  # Fast: usually < 2 minutes.
+  corpus-regression:
+    name: Corpus Regression (${{ matrix.target }})
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [fuzz_sql_parser, fuzz_pg_codec]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz -> fuzz/target
+          key: fuzz-${{ matrix.target }}
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Run corpus regression (${{ matrix.target }})
+        run: |
+          # Run the existing corpus through the target.
+          # This ensures the parser / codec doesn't panic on any known inputs.
+          # --runs=0 means "process corpus once, then exit"
+          cargo fuzz run ${{ matrix.target }} -- \
+            -runs=0 \
+            -max_len=65536
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes-${{ matrix.target }}-${{ github.sha }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          retention-days: 30
+
+  # ── Nightly exploratory fuzzing ────────────────────────────────────────────
+  # Runs each target for a configurable duration to discover new crashes.
+  nightly-fuzz:
+    name: Nightly Fuzz (${{ matrix.target }})
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [fuzz_sql_parser, fuzz_pg_codec]
+        include:
+          - target: fuzz_sql_parser
+            max_len: 4096
+          - target: fuzz_pg_codec
+            max_len: 65536
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz -> fuzz/target
+          key: fuzz-${{ matrix.target }}
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Determine fuzz duration
+        id: duration
+        run: |
+          DURATION="${{ github.event.inputs.fuzz_duration || '600' }}"
+          echo "seconds=$DURATION" >> $GITHUB_OUTPUT
+
+      - name: Fuzz ${{ matrix.target }} for ${{ steps.duration.outputs.seconds }}s
+        run: |
+          cargo fuzz run ${{ matrix.target }} -- \
+            -max_total_time=${{ steps.duration.outputs.seconds }} \
+            -max_len=${{ matrix.max_len }} \
+            -print_final_stats=1
+        continue-on-error: true
+
+      - name: Check for crashes
+        id: crash_check
+        run: |
+          CRASH_DIR="fuzz/artifacts/${{ matrix.target }}"
+          if [ -d "$CRASH_DIR" ] && [ "$(ls -A $CRASH_DIR 2>/dev/null)" ]; then
+            echo "found=true" >> $GITHUB_OUTPUT
+            echo "::error::Crash found in ${{ matrix.target }}! See artifacts."
+            ls -la "$CRASH_DIR"
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+            echo "No crashes found in ${{ matrix.target }}"
+          fi
+
+      - name: Upload crash artifacts
+        if: steps.crash_check.outputs.found == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes-${{ matrix.target }}-${{ github.run_id }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          retention-days: 90
+
+      - name: Upload new corpus entries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          path: fuzz/corpus/${{ matrix.target }}/
+          retention-days: 30
+
+      - name: Fuzz summary
+        if: always()
+        run: |
+          echo "## Fuzz: ${{ matrix.target }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Duration**: ${{ steps.duration.outputs.seconds }}s" >> $GITHUB_STEP_SUMMARY
+          echo "- **Max input length**: ${{ matrix.max_len }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.crash_check.outputs.found }}" = "true" ]; then
+            echo "- **Result**: :x: CRASH FOUND" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Result**: :white_check_mark: No crashes" >> $GITHUB_STEP_SUMMARY
+          fi

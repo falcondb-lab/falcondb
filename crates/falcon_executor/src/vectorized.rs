@@ -686,32 +686,60 @@ fn vectorized_sum(col: &ColumnVector, indices: &[usize]) -> Result<Datum, Execut
     match col {
         ColumnVector::Int64s { values, nulls } => {
             let mut sum: i64 = 0;
+            let mut sum_f: f64 = 0.0;
+            let mut overflowed = false;
             let mut has_value = false;
             for &idx in indices {
                 if !nulls[idx] {
-                    sum += values[idx];
+                    if !overflowed {
+                        if let Some(s) = sum.checked_add(values[idx]) {
+                            sum = s;
+                        } else {
+                            sum_f += sum as f64 + values[idx] as f64;
+                            sum = 0;
+                            overflowed = true;
+                        }
+                    } else {
+                        sum_f += values[idx] as f64;
+                    }
                     has_value = true;
                 }
             }
-            Ok(if has_value {
-                Datum::Int64(sum)
-            } else {
+            Ok(if !has_value {
                 Datum::Null
+            } else if overflowed {
+                Datum::Float64(sum_f)
+            } else {
+                Datum::Int64(sum)
             })
         }
         ColumnVector::Int32s { values, nulls } => {
             let mut sum: i64 = 0;
+            let mut sum_f: f64 = 0.0;
+            let mut overflowed = false;
             let mut has_value = false;
             for &idx in indices {
                 if !nulls[idx] {
-                    sum += i64::from(values[idx]);
+                    if !overflowed {
+                        if let Some(s) = sum.checked_add(i64::from(values[idx])) {
+                            sum = s;
+                        } else {
+                            sum_f += sum as f64 + f64::from(values[idx]);
+                            sum = 0;
+                            overflowed = true;
+                        }
+                    } else {
+                        sum_f += f64::from(values[idx]);
+                    }
                     has_value = true;
                 }
             }
-            Ok(if has_value {
-                Datum::Int64(sum)
-            } else {
+            Ok(if !has_value {
                 Datum::Null
+            } else if overflowed {
+                Datum::Float64(sum_f)
+            } else {
+                Datum::Int64(sum)
             })
         }
         ColumnVector::Float64s { values, nulls } => {
@@ -1011,7 +1039,7 @@ pub fn vectorized_project(
                     }
                     let row = OwnedRow::new(std::mem::take(&mut row_buf));
                     let val =
-                        crate::expr_engine::ExprEngine::eval_row(expr, &row).unwrap_or(Datum::Null);
+                        crate::expr_engine::ExprEngine::eval_row(expr, &row)?;
                     // Reclaim buffer for reuse
                     row_buf = row.values;
                     datums.push(val);
@@ -1217,7 +1245,7 @@ fn hash_datum(d: &Datum) -> u64 {
         Datum::Date(v) => v.hash(&mut hasher),
         Datum::Array(arr) => {
             for a in arr {
-                let _ = hash_datum(a);
+                hash_datum(a).hash(&mut hasher);
             }
             arr.len().hash(&mut hasher);
         }
@@ -1374,9 +1402,13 @@ fn cmp_datum_values(a: &Datum, b: &Datum) -> std::cmp::Ordering {
         (Datum::Uuid(x), Datum::Uuid(y)) => x.cmp(y),
         (Datum::Bytea(x), Datum::Bytea(y)) => x.cmp(y),
         (Datum::Interval(m1, d1, u1), Datum::Interval(m2, d2, u2)) => {
-            // Compare by total microseconds approximation
-            let total_a = (*m1 as i64) * 30 * 86_400_000_000 + (*d1 as i64) * 86_400_000_000 + *u1;
-            let total_b = (*m2 as i64) * 30 * 86_400_000_000 + (*d2 as i64) * 86_400_000_000 + *u2;
+            // Compare by total microseconds approximation (saturating to avoid overflow)
+            let total_a = (*m1 as i64).saturating_mul(30 * 86_400_000_000)
+                .saturating_add((*d1 as i64).saturating_mul(86_400_000_000))
+                .saturating_add(*u1);
+            let total_b = (*m2 as i64).saturating_mul(30 * 86_400_000_000)
+                .saturating_add((*d2 as i64).saturating_mul(86_400_000_000))
+                .saturating_add(*u2);
             total_a.cmp(&total_b)
         }
         (Datum::Null, Datum::Null) => std::cmp::Ordering::Equal,

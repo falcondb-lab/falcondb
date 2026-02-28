@@ -165,7 +165,7 @@ impl ConnectionPool {
         config: PoolConfig,
     ) -> Self {
         let max = if config.max_size == 0 {
-            usize::MAX >> 1
+            10_000 // sensible upper bound for "unlimited" connections
         } else {
             config.max_size
         };

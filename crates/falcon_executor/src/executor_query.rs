@@ -67,7 +67,7 @@ impl Executor {
         }
 
         // Encode composite PK in column order
-        let datum_refs: Vec<&Datum> = pk_datums.into_iter().map(|d| d.unwrap()).collect();
+        let datum_refs: Vec<&Datum> = pk_datums.into_iter().map(|d| d.expect("BUG: None pk_datum after is_none guard")).collect();
         let pk = encode_pk_from_datums(&datum_refs);
 
         // Build residual filter from unmatched conjuncts
@@ -111,9 +111,9 @@ impl Executor {
     fn conjoin(mut exprs: Vec<BoundExpr>) -> Option<BoundExpr> {
         match exprs.len() {
             0 => None,
-            1 => Some(exprs.pop().unwrap()),
+            1 => Some(exprs.pop().expect("BUG: pop failed on len==1 vec")),
             _ => {
-                let mut acc = exprs.pop().unwrap();
+                let mut acc = exprs.pop().expect("BUG: pop failed on len>=2 vec");
                 while let Some(e) = exprs.pop() {
                     acc = BoundExpr::BinaryOp {
                         left: Box::new(e),
@@ -435,14 +435,20 @@ impl Executor {
         let mut values = Vec::with_capacity(projections.len());
         for m in &mappings {
             if m.is_avg {
-                let sum = &raw_results[m.sum_idx.unwrap()];
-                let count = &raw_results[m.count_idx.unwrap()];
+                let (Some(si), Some(ci)) = (m.sum_idx, m.count_idx) else {
+                    return None;
+                };
+                let sum = &raw_results[si];
+                let count = &raw_results[ci];
                 match (sum.as_f64(), count.as_f64()) {
                     (Some(s), Some(c)) if c > 0.0 => values.push(Datum::Float64(s / c)),
                     _ => values.push(Datum::Null),
                 }
             } else {
-                values.push(raw_results[m.direct_idx.unwrap()].clone());
+                let Some(di) = m.direct_idx else {
+                    return None;
+                };
+                values.push(raw_results[di].clone());
             }
         }
 
@@ -577,7 +583,7 @@ impl Executor {
 
         // Early-limit capacity hint: if no ORDER BY/DISTINCT/window, we know the max output size.
         let capacity_hint = match (order_by.is_empty() && matches!(distinct, DistinctMode::None) && !has_window, limit, offset) {
-            (true, Some(lim), Some(off)) => lim + off,
+            (true, Some(lim), Some(off)) => lim.saturating_add(off),
             (true, Some(lim), None) => lim,
             _ => raw_rows.len(),
         };
@@ -589,7 +595,7 @@ impl Executor {
 
         // Effective row limit for early cutoff (only when no sort/distinct/window).
         let early_limit = if order_by.is_empty() && matches!(distinct, DistinctMode::None) && !has_window {
-            limit.map(|l| l + offset.unwrap_or(0))
+            limit.map(|l| l.saturating_add(offset.unwrap_or(0)))
         } else {
             None
         };
@@ -734,7 +740,7 @@ impl Executor {
             order_by.is_empty() && matches!(distinct, DistinctMode::None) && !has_window,
             limit, offset,
         ) {
-            (true, Some(lim), Some(off)) => lim + off,
+            (true, Some(lim), Some(off)) => lim.saturating_add(off),
             (true, Some(lim), None) => lim,
             _ => raw_rows.len(),
         };
@@ -744,7 +750,7 @@ impl Executor {
         let mut result_rows: Vec<OwnedRow> = Vec::with_capacity(capacity_hint.min(raw_rows.len()));
 
         let early_limit = if order_by.is_empty() && matches!(distinct, DistinctMode::None) && !has_window {
-            limit.map(|l| l + offset.unwrap_or(0))
+            limit.map(|l| l.saturating_add(offset.unwrap_or(0)))
         } else {
             None
         };
@@ -1036,14 +1042,14 @@ impl Executor {
             limit,
             offset,
         ) {
-            (true, Some(lim), Some(off)) => (lim + off).min(raw_rows.len()),
+            (true, Some(lim), Some(off)) => lim.saturating_add(off).min(raw_rows.len()),
             (true, Some(lim), None) => lim.min(raw_rows.len()),
             _ => raw_rows.len(),
         };
 
         // Effective row limit for early cutoff (only when no sort/distinct/window).
         let early_limit = if order_by.is_empty() && matches!(distinct, DistinctMode::None) && !has_window {
-            limit.map(|l| l + offset.unwrap_or(0))
+            limit.map(|l| l.saturating_add(offset.unwrap_or(0)))
         } else {
             None
         };

@@ -220,6 +220,8 @@ impl VersionChain {
     ///
     /// Used by MemTable to undo/redo secondary index entries on abort.
     pub fn abort_and_report(&self, txn_id: TxnId) -> (Option<OwnedRow>, Option<OwnedRow>) {
+        // Invalidate ultra-fast path — chain structure is changing.
+        self.fast_commit_ts.store(0, Ordering::Release);
         let mut head = self.head.write();
         // Capture the aborted version's data before removing
         let aborted = match *head {
@@ -351,9 +353,8 @@ impl VersionChain {
     /// Replace the data of the latest version in-place.
     /// Used by DDL ALTER COLUMN TYPE to convert existing row data.
     pub fn replace_latest(&self, new_row: OwnedRow) {
-        let head = self.head.read();
+        let mut head = self.head.write();
         if let Some(ref ver) = *head {
-            // Safety: we construct a new Arc<Version> with updated data, same metadata
             let old_prev = ver.get_prev();
             let replacement = Arc::new(Version {
                 created_by: ver.created_by,
@@ -361,9 +362,7 @@ impl VersionChain {
                 data: Some(new_row),
                 prev: RwLock::new(old_prev),
             });
-            drop(head);
-            let mut head_w = self.head.write();
-            *head_w = Some(replacement);
+            *head = Some(replacement);
         }
     }
 
@@ -488,8 +487,8 @@ impl VersionChain {
             if cts.0 == 0 && ver.created_by == txn_id && ver.data.is_some() {
                 return true;
             }
-            // Committed version that is not a tombstone
-            if cts.0 != 0 && ver.data.is_some() {
+            // Committed (non-aborted) version that is not a tombstone
+            if cts.0 != 0 && cts != Timestamp::MAX && ver.data.is_some() {
                 return true;
             }
         }

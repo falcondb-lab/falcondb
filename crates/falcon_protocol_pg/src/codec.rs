@@ -172,7 +172,11 @@ pub fn decode_startup(buf: &mut BytesMut) -> Result<Option<FrontendMessage>, Str
         return Ok(None);
     }
 
-    let len = (&buf[0..4]).get_i32() as usize;
+    let len_i32 = (&buf[0..4]).get_i32();
+    if len_i32 < 0 {
+        return Err("Invalid startup message: negative length".into());
+    }
+    let len = len_i32 as usize;
     if buf.len() < len {
         return Ok(None);
     }
@@ -225,7 +229,11 @@ pub fn decode_message(buf: &mut BytesMut) -> Result<Option<FrontendMessage>, Str
     }
 
     let msg_type = buf[0];
-    let len = (&buf[1..5]).get_i32() as usize;
+    let len_i32 = (&buf[1..5]).get_i32();
+    if len_i32 < 0 {
+        return Err("Invalid message: negative length".into());
+    }
+    let len = len_i32 as usize;
 
     if buf.len() < 1 + len {
         return Ok(None);
@@ -290,11 +298,15 @@ pub fn decode_message(buf: &mut BytesMut) -> Result<Option<FrontendMessage>, Str
                     let vlen = msg_buf.get_i32();
                     if vlen < 0 {
                         param_values.push(None);
+                    } else if vlen as usize > msg_buf.remaining() {
+                        return Err(format!(
+                            "Bind parameter value length {} exceeds remaining message bytes {}",
+                            vlen,
+                            msg_buf.remaining()
+                        ));
                     } else {
                         let mut val = vec![0u8; vlen as usize];
-                        if msg_buf.remaining() >= vlen as usize {
-                            msg_buf.copy_to_slice(&mut val);
-                        }
+                        msg_buf.copy_to_slice(&mut val);
                         param_values.push(Some(val));
                     }
                 }
@@ -378,7 +390,11 @@ pub fn decode_sasl_initial_response(buf: &mut BytesMut) -> Result<Option<Fronten
         return Ok(None);
     }
     let msg_type = buf[0];
-    let len = (&buf[1..5]).get_i32() as usize;
+    let len_i32 = (&buf[1..5]).get_i32();
+    if len_i32 < 0 {
+        return Err("Invalid SASL initial response: negative length".into());
+    }
+    let len = len_i32 as usize;
     if buf.len() < 1 + len {
         return Ok(None);
     }
@@ -424,7 +440,11 @@ pub fn decode_sasl_response(buf: &mut BytesMut) -> Result<Option<FrontendMessage
         return Ok(None);
     }
     let msg_type = buf[0];
-    let len = (&buf[1..5]).get_i32() as usize;
+    let len_i32 = (&buf[1..5]).get_i32();
+    if len_i32 < 0 {
+        return Err("Invalid SASL response: negative length".into());
+    }
+    let len = len_i32 as usize;
     if buf.len() < 1 + len {
         return Ok(None);
     }

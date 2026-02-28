@@ -24,7 +24,7 @@ CP-L (LogicalCommit) ≤ CP-D (DurableCommit) ≤ CP-V (ClientVisibleCommit)
 
 ## 2. Transaction Terminal States
 
-Every transaction MUST end in exactly one terminal state. No exceptions.
+Every transaction MUST end in exactly one terminal state.
 
 | Terminal State | SQLSTATE | Retryable | Meaning |
 |---------------|----------|-----------|---------|

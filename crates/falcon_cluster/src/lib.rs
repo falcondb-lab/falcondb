@@ -4,16 +4,15 @@
 //! MVP: single-node, single-shard. All data lives on one node.
 //! P1: hash-based sharding with shard routing via gRPC (tonic).
 
+// ── Core production modules ──────────────────────────────────────────────
 pub mod admission;
 pub mod bg_supervisor;
-pub mod circuit_breaker;
 pub mod cluster;
 pub mod cluster_ops;
 pub mod cross_shard;
 pub mod deterministic_2pc;
 pub mod distributed_exec;
 pub mod failover_txn_hardening;
-pub mod fault_injection;
 pub mod grpc_transport;
 pub mod ha;
 pub mod indoubt_resolver;
@@ -24,25 +23,32 @@ pub mod raft_rebalance;
 pub mod rebalancer;
 pub mod replication;
 pub mod routing;
-pub mod security_hardening;
 pub mod sharded_engine;
+pub mod sharding;
 pub mod stability_hardening;
 pub mod determinism_hardening;
-pub mod sharding;
+pub mod two_phase;
+
+// ── Hardening & safety modules ──────────────────────────────────────────
+pub mod circuit_breaker;
+pub mod dist_hardening;
+pub mod fault_injection;
+pub mod security_hardening;
 pub mod sla_admission;
 pub mod token_bucket;
-pub use falcon_enterprise::control_plane;
-pub use falcon_enterprise::enterprise_ops;
-pub use falcon_enterprise::enterprise_security;
-pub mod ga_hardening;
+
+// ── Operational & enterprise modules ────────────────────────────────────
+pub mod cluster_lifecycle;
+pub mod client_discovery;
 pub mod cost_capacity;
+pub mod distributed_enhancements;
+pub mod ga_hardening;
 pub mod segment_streaming;
 pub mod self_healing;
 pub mod smart_gateway;
-pub mod two_phase;
-pub mod client_discovery;
-pub mod dist_hardening;
-pub mod distributed_enhancements;
+pub use falcon_enterprise::control_plane;
+pub use falcon_enterprise::enterprise_ops;
+pub use falcon_enterprise::enterprise_security;
 
 /// Protobuf types and tonic client/server for WAL replication.
 /// Re-exported from the `falcon_proto` crate (generated at build time).
@@ -75,7 +81,7 @@ pub use deterministic_2pc::{
 };
 pub use distributed_exec::{
     AggMerge, DistributedExecutor, FailurePolicy, GatherLimits, GatherStrategy,
-    ScatterGatherMetrics, SubPlan,
+    ScatterGatherMetrics, StreamingMergeSort, SubPlan,
 };
 pub use ha::{
     FailoverOrchestrator, FailoverOrchestratorConfig, FailoverOrchestratorHandle,
@@ -113,19 +119,21 @@ pub use failover_txn_hardening::{
 pub use stability_hardening::{
     CommitPhase, CommitPhaseMetrics, CommitPhaseTracker, DefensiveValidator,
     DefensiveValidatorMetrics, ErrorClassStabilizer, EscalationOutcome, EscalationRecord,
-    FailoverOutcomeGuard, FailoverOutcomeGuardMetrics, InDoubtEscalator, InDoubtEscalatorMetrics,
+    FailoverExpectedOutcome, FailoverOutcomeGuard, FailoverOutcomeGuardMetrics,
+    InDoubtEscalator, InDoubtEscalatorMetrics,
     InDoubtReason, ProtocolPhase, ResolutionMethod, RetryGuard, RetryGuardMetrics,
     StateOrdinal, TxnOutcomeEntry, TxnOutcomeJournal, TxnStateGuard, TxnStateGuardMetrics,
 };
 pub use determinism_hardening::{
-    AbortReason, CommitPhase as DeterminismCommitPhase, DeterministicRejectPolicy,
-    FailoverCrashRecord, FailoverExpectedOutcome, IdempotentReplayValidator,
+    AbortReason, DeterministicRejectPolicy,
+    FailoverCrashRecord, IdempotentReplayValidator,
     QueueDepthGuard, QueueDepthSnapshot, QueueSlot, RejectReason, ResourceExhaustionContract,
     RetryPolicy, TxnTerminalState,
 };
 pub use sharded_engine::ShardedEngine;
 pub use sharding::{
-    all_shards_for_table, compute_shard_hash, compute_shard_hash_from_datums, target_shard_for_row,
+    all_shards_for_table, cmp_datum_for_range, compute_shard_hash,
+    compute_shard_hash_from_datums, shards_for_range_query, target_shard_for_row,
     target_shard_from_datums,
 };
 pub use sla_admission::{
@@ -146,7 +154,7 @@ pub use self_healing::{
     CatchUpConfig, CatchUpMetrics, CatchUpPhase, ClusterFailureDetector,
     ClusterHealthLevel, ClusterHealthResponse, ClusterStatusResponse,
     DrainPhase, ElectionConfig, ElectionError, ElectionMetrics, ElectionState,
-    FailureDetectorConfig, FailureDetectorMetrics, JoinPhase,
+    FailureDetectorConfig, FailureDetectorHandle, FailureDetectorMetrics, JoinPhase,
     LeaderElectionCoordinator, LifecycleMetrics, NodeDrainState,
     NodeHealthRecord, NodeJoinState, NodeLiveness, NodeLifecycleCoordinator,
     OpsAuditEvent, OpsAuditLog, OpsCommand, OpsEventType,
@@ -228,9 +236,12 @@ pub use client_discovery::{
     ClientConnectionManager, ClientRoutingMetrics, ClientRoutingTable,
     ConnectionManagerConfig, ConnectionManagerMetrics, ConnectionState,
     NodeDirectoryEntry, NotLeaderRedirector, ProviderMetrics, RedirectOutcome,
-    RedirectorConfig, RedirectorMetrics, ShardRouteEntry, SubscriptionId,
-    SubscriptionMetrics, TopologyChangeEvent, TopologyChangeType,
+    RedirectorConfig, RedirectorMetrics, ShardRouteEntry, SubscriptionEvictorHandle,
+    SubscriptionId, SubscriptionMetrics, TopologyChangeEvent, TopologyChangeType,
     TopologyProvider, TopologySnapshot, TopologySubscriptionManager,
+};
+pub use cluster_lifecycle::{
+    ClusterLifecycleConfig, ClusterLifecycleCoordinator, LifecycleCoordinatorMetrics,
 };
 pub use distributed_enhancements::{
     ClusterHealthStatus, ClusterStatusBuilder, ClusterStatusView, CommitPolicy,

@@ -99,7 +99,8 @@ impl AuthRateLimiter {
         if let Some(locked_until) = state.locked_until {
             if now < locked_until {
                 let remaining = locked_until.duration_since(now).as_secs();
-                self.total_lockouts.fetch_add(1, Ordering::Relaxed);
+                // Note: total_lockouts is incremented in record_failure when
+                // the lockout is first imposed, not here on every check.
                 return AuthRateResult::LockedOut {
                     remaining_secs: remaining,
                     failure_count: state.failures.len() as u32,
@@ -135,6 +136,7 @@ impl AuthRateLimiter {
         // Check if lockout threshold reached
         if state.failures.len() as u32 >= self.config.max_failures {
             state.locked_until = Some(now + self.config.lockout_duration);
+            self.total_lockouts.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(
                 source = source,
                 failures = state.failures.len(),
@@ -260,11 +262,12 @@ impl PasswordPolicy {
         self.total_checks.fetch_add(1, Ordering::Relaxed);
         let mut reasons = Vec::new();
 
-        if password.len() < self.config.min_length {
+        let char_count = password.chars().count();
+        if char_count < self.config.min_length {
             reasons.push(format!(
                 "Password must be at least {} characters (got {})",
                 self.config.min_length,
-                password.len()
+                char_count
             ));
         }
 
@@ -444,7 +447,10 @@ impl SqlFirewall {
             }
         }
 
-        let sql_upper = sql.to_uppercase();
+        // Strip string literals so injection/dangerous-statement detection
+        // operates on SQL structure only, not on user-supplied string values.
+        let stripped = Self::strip_string_literals(sql);
+        let sql_upper = stripped.to_uppercase();
 
         // SQL injection pattern detection
         if self.config.detect_injection {
@@ -476,6 +482,60 @@ impl SqlFirewall {
         }
 
         SqlFirewallResult::Allowed
+    }
+
+    /// Strip SQL string literals and quoted identifiers, replacing them with
+    /// empty placeholders (`''` / `""`). This ensures injection pattern detection
+    /// operates only on SQL structure, not on user-supplied string values.
+    ///
+    /// Uses SQL-standard `''` / `""` doubled-quote escaping (same as `has_real_semicolons`).
+    fn strip_string_literals(sql: &str) -> String {
+        let mut result = String::with_capacity(sql.len());
+        let chars: Vec<char> = sql.chars().collect();
+        let len = chars.len();
+        let mut i = 0;
+
+        while i < len {
+            let ch = chars[i];
+            if ch == '\'' {
+                // Consume everything until the closing single-quote
+                result.push('\'');
+                i += 1;
+                while i < len {
+                    if chars[i] == '\'' {
+                        if i + 1 < len && chars[i + 1] == '\'' {
+                            i += 2; // skip escaped ''
+                        } else {
+                            break; // closing quote
+                        }
+                    } else {
+                        i += 1;
+                    }
+                }
+                result.push('\''); // closing quote (content stripped)
+                if i < len { i += 1; } // skip past closing quote
+            } else if ch == '"' {
+                result.push('"');
+                i += 1;
+                while i < len {
+                    if chars[i] == '"' {
+                        if i + 1 < len && chars[i + 1] == '"' {
+                            i += 2;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                }
+                result.push('"');
+                if i < len { i += 1; }
+            } else {
+                result.push(ch);
+                i += 1;
+            }
+        }
+        result
     }
 
     /// Detect common SQL injection patterns.
@@ -544,25 +604,47 @@ impl SqlFirewall {
     }
 
     /// Check for real semicolons (not inside string literals).
+    ///
+    /// Uses SQL-standard quoting rules:
+    /// - Single quotes are escaped by doubling: `''`
+    /// - Double quotes (identifiers) are escaped by doubling: `""`
+    /// Backslash escaping (`\'`) is NOT standard SQL and is not recognised here.
     fn has_real_semicolons(sql: &str) -> bool {
         let mut in_single_quote = false;
         let mut in_double_quote = false;
-        let mut prev_char = '\0';
+        let chars: Vec<char> = sql.chars().collect();
+        let len = chars.len();
+        let mut i = 0;
 
-        for ch in sql.chars() {
-            match ch {
-                '\'' if !in_double_quote && prev_char != '\\' => {
-                    in_single_quote = !in_single_quote;
+        while i < len {
+            let ch = chars[i];
+            if in_single_quote {
+                if ch == '\'' {
+                    // Doubled single-quote '' is an escaped literal, stay in string
+                    if i + 1 < len && chars[i + 1] == '\'' {
+                        i += 2;
+                        continue;
+                    }
+                    in_single_quote = false;
                 }
-                '"' if !in_single_quote && prev_char != '\\' => {
-                    in_double_quote = !in_double_quote;
+            } else if in_double_quote {
+                if ch == '"' {
+                    // Doubled double-quote "" is an escaped identifier quote
+                    if i + 1 < len && chars[i + 1] == '"' {
+                        i += 2;
+                        continue;
+                    }
+                    in_double_quote = false;
                 }
-                ';' if !in_single_quote && !in_double_quote => {
-                    return true;
+            } else {
+                match ch {
+                    '\'' => in_single_quote = true,
+                    '"' => in_double_quote = true,
+                    ';' => return true,
+                    _ => {}
                 }
-                _ => {}
             }
-            prev_char = ch;
+            i += 1;
         }
         false
     }

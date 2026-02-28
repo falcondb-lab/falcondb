@@ -78,7 +78,7 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
                 "hex" => {
                     let bytes: Result<Vec<u8>, _> = (0..data.len())
                         .step_by(2)
-                        .map(|i| u8::from_str_radix(&data[i..i + 2], 16))
+                        .map(|i| u8::from_str_radix(&data[i..(i + 2).min(data.len())], 16))
                         .collect();
                     let bytes =
                         bytes.map_err(|_| ExecutionError::TypeError("Invalid hex".into()))?;

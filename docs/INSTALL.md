@@ -20,7 +20,7 @@
 msiexec /i FalconDB-1.0.0-x64.msi
 ```
 
-**Silent install (enterprise deployment):**
+**Silent install:**
 
 ```powershell
 msiexec /i FalconDB-1.0.0-x64.msi /qn /l*v install.log
@@ -32,7 +32,7 @@ msiexec /i FalconDB-1.0.0-x64.msi /qn /l*v install.log
 msiexec /i FalconDB-1.0.0-x64.msi INSTALLDIR="D:\FalconDB"
 ```
 
-The MSI installer will:
+The MSI will:
 1. Install `falcon.exe` to `C:\Program Files\FalconDB\bin\`
 2. Create data directories under `C:\ProgramData\FalconDB\`
 3. Deploy default `falcon.toml` to `C:\ProgramData\FalconDB\conf\`

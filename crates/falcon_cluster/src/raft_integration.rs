@@ -59,6 +59,7 @@ use crate::routing::shard_map::ShardMap;
 // Re-export from falcon_raft for convenience
 // ---------------------------------------------------------------------------
 
+pub use falcon_raft::network::GrpcNetworkFactory;
 pub use falcon_raft::{ConsensusError, RaftGroup};
 
 // ---------------------------------------------------------------------------
@@ -367,6 +368,11 @@ pub struct RaftShardCoordinator {
     _watcher_handle: Mutex<Option<RaftFailoverWatcherHandle>>,
     /// Total WAL records proposed across all shards.
     total_proposed: AtomicU64,
+    /// gRPC network factory for multi-process clusters.
+    /// Kept alive so peer connections persist for the lifetime of the coordinator.
+    /// Currently used alongside in-process `RouterNetworkFactory`; will replace it
+    /// when `RaftGroup` supports pluggable network factories.
+    grpc_network: Mutex<Option<GrpcNetworkFactory>>,
 }
 
 impl RaftShardCoordinator {
@@ -377,7 +383,14 @@ impl RaftShardCoordinator {
             shard_map,
             _watcher_handle: Mutex::new(None),
             total_proposed: AtomicU64::new(0),
+            grpc_network: Mutex::new(None),
         })
+    }
+
+    /// Set the gRPC network factory for multi-process cluster communication.
+    /// The factory is kept alive for the lifetime of the coordinator.
+    pub fn set_grpc_network(&self, factory: GrpcNetworkFactory) {
+        *self.grpc_network.lock() = Some(factory);
     }
 
     /// Register a shard group.
@@ -476,6 +489,11 @@ impl RaftShardCoordinator {
             .add_voter(node_id.0, addr)
             .await
             .map_err(|e| FalconError::Internal(format!("add_voter: {e}")))
+    }
+
+    /// Return the `RaftWalGroup` for the given shard, if registered.
+    pub fn get_shard_group(&self, shard_id: ShardId) -> Option<Arc<RaftWalGroup>> {
+        self.groups.read().get(&shard_id.0).cloned()
     }
 
     /// Remove a voter from a shard's Raft cluster (scale-in / decommission).

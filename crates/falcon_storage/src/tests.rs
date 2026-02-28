@@ -68,3 +68,7 @@ mod si_litmus_tests;
 #[cfg(test)]
 #[path = "tests/ddl_concurrency_tests.rs"]
 mod ddl_concurrency_tests;
+
+#[cfg(test)]
+#[path = "tests/mvcc_proptest.rs"]
+mod mvcc_proptest;

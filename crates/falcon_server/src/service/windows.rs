@@ -129,7 +129,7 @@ pub mod scm {
         let runner = super::get_server_runner()
             .expect("Server runner must be registered before dispatch");
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime for Windows service");
         let exit_code = rt.block_on(async {
             match runner(config_path, Some(coordinator)).await {
                 Ok(()) => 0u32,

@@ -1,0 +1,1 @@
+SELECT o.id, c.name, p.title, oi.qty FROM orders o INNER JOIN customers c ON o.cust_id = c.id LEFT JOIN order_items oi ON o.id = oi.order_id RIGHT JOIN products p ON oi.product_id = p.id CROSS JOIN (SELECT 1 AS dummy) d WHERE o.status = 'shipped'

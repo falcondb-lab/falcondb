@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::{Mutex, RwLock};
 
@@ -198,7 +198,10 @@ impl TxnStateGuard {
             txn_id,
             from_state: from.to_owned(),
             to_state: to.to_owned(),
-            timestamp_us: Instant::now().elapsed().as_micros() as u64,
+            timestamp_us: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_micros() as u64,
             valid,
             reason: reason.to_owned(),
         });
@@ -225,10 +228,16 @@ impl Default for TxnStateGuard {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Explicit commit phases (forward-only).
+///
+/// Also used for failover invariant validation:
+/// - **FC-1**: Leader crash before CP-D → txn MUST be lost (rolled back).
+/// - **FC-2**: Leader crash after CP-D but before CP-V → txn MUST survive recovery.
+/// - **FC-3**: No txn may be acknowledged (CP-V) without being durable (CP-D).
+/// - **FC-4**: Replay of a committed txn is idempotent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CommitPhase {
-    /// Not started.
-    None = 0,
+    /// Transaction active, no WAL record yet.
+    Active = 0,
     /// CP-L: WAL record logged (in-memory).
     WalLogged = 1,
     /// CP-D: WAL fsynced to durable storage.
@@ -242,7 +251,7 @@ pub enum CommitPhase {
 impl std::fmt::Display for CommitPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::None => write!(f, "None"),
+            Self::Active => write!(f, "Active"),
             Self::WalLogged => write!(f, "CP-L"),
             Self::WalDurable => write!(f, "CP-D"),
             Self::Visible => write!(f, "CP-V"),
@@ -251,11 +260,41 @@ impl std::fmt::Display for CommitPhase {
     }
 }
 
+/// Expected outcome after recovery from a crash at a given commit phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailoverExpectedOutcome {
+    /// Transaction must be rolled back (invisible).
+    MustBeRolledBack,
+    /// Transaction must survive and be visible.
+    MustSurvive,
+    /// Outcome depends on commit policy (may or may not survive).
+    PolicyDependent,
+}
+
+impl CommitPhase {
+    /// Determine expected recovery outcome for a crash at this phase.
+    pub const fn expected_recovery(&self, local_fsync_required: bool) -> FailoverExpectedOutcome {
+        match self {
+            Self::Active => FailoverExpectedOutcome::MustBeRolledBack,
+            Self::WalLogged => {
+                if local_fsync_required {
+                    FailoverExpectedOutcome::MustBeRolledBack
+                } else {
+                    FailoverExpectedOutcome::PolicyDependent
+                }
+            }
+            Self::WalDurable | Self::Visible | Self::Acknowledged => {
+                FailoverExpectedOutcome::MustSurvive
+            }
+        }
+    }
+}
+
 /// Per-txn commit phase tracking.
 #[derive(Debug, Clone)]
 struct CommitPhaseEntry {
     phase: CommitPhase,
-    _entered_at: Instant,
+    entered_at: Instant,
     commit_ts: Option<u64>,
 }
 
@@ -294,8 +333,8 @@ impl CommitPhaseTracker {
         self.entries.write().insert(
             txn_id,
             CommitPhaseEntry {
-                phase: CommitPhase::None,
-                _entered_at: Instant::now(),
+                phase: CommitPhase::Active,
+                entered_at: Instant::now(),
                 commit_ts: None,
             },
         );
@@ -337,6 +376,7 @@ impl CommitPhaseTracker {
         }
 
         entry.phase = target_phase;
+        entry.entered_at = Instant::now();
         if let Some(ts) = commit_ts {
             entry.commit_ts = Some(ts);
         }
@@ -1200,7 +1240,7 @@ mod tests {
         let tid = TxnId(10);
         tracker.begin_commit(tid);
 
-        assert_eq!(tracker.current_phase(tid), Some(CommitPhase::None));
+        assert_eq!(tracker.current_phase(tid), Some(CommitPhase::Active));
         tracker.advance(tid, CommitPhase::WalLogged, None).unwrap();
         tracker.advance(tid, CommitPhase::WalDurable, None).unwrap();
         tracker.advance(tid, CommitPhase::Visible, Some(100)).unwrap();

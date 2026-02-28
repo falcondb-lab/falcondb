@@ -1,6 +1,24 @@
 use falcon_common::datum::Datum;
 use falcon_common::error::ExecutionError;
 
+/// Safely convert f64 to i32, rejecting NaN, infinities, and out-of-range values.
+fn float64_to_i32(v: f64) -> Result<i32, ExecutionError> {
+    if v.is_nan() || v.is_infinite() || v < (i32::MIN as f64) || v > (i32::MAX as f64) {
+        Err(ExecutionError::NumericOverflow)
+    } else {
+        Ok(v as i32)
+    }
+}
+
+/// Safely convert f64 to i64, rejecting NaN, infinities, and out-of-range values.
+fn float64_to_i64(v: f64) -> Result<i64, ExecutionError> {
+    if v.is_nan() || v.is_infinite() || v < (i64::MIN as f64) || v > (i64::MAX as f64) {
+        Err(ExecutionError::NumericOverflow)
+    } else {
+        Ok(v as i64)
+    }
+}
+
 pub fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionError> {
     if val.is_null() {
         return Ok(Datum::Null);
@@ -9,8 +27,10 @@ pub fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionError> {
     match target_lower.as_str() {
         "smallint" | "int2" => match &val {
             Datum::Int32(_) => Ok(val),
-            Datum::Int64(v) => Ok(Datum::Int32(*v as i32)),
-            Datum::Float64(v) => Ok(Datum::Int32(*v as i32)),
+            Datum::Int64(v) => i32::try_from(*v)
+                .map(Datum::Int32)
+                .map_err(|_| ExecutionError::NumericOverflow),
+            Datum::Float64(v) => float64_to_i32(*v).map(Datum::Int32),
             Datum::Text(s) => s
                 .parse::<i32>()
                 .map(Datum::Int32)
@@ -22,8 +42,10 @@ pub fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionError> {
         },
         "int" | "integer" | "int4" => match &val {
             Datum::Int32(_) => Ok(val),
-            Datum::Int64(v) => Ok(Datum::Int32(*v as i32)),
-            Datum::Float64(v) => Ok(Datum::Int32(*v as i32)),
+            Datum::Int64(v) => i32::try_from(*v)
+                .map(Datum::Int32)
+                .map_err(|_| ExecutionError::NumericOverflow),
+            Datum::Float64(v) => float64_to_i32(*v).map(Datum::Int32),
             Datum::Text(s) => s
                 .parse::<i32>()
                 .map(Datum::Int32)
@@ -36,7 +58,7 @@ pub fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionError> {
         "bigint" | "int8" => match &val {
             Datum::Int64(_) => Ok(val),
             Datum::Int32(v) => Ok(Datum::Int64(i64::from(*v))),
-            Datum::Float64(v) => Ok(Datum::Int64(*v as i64)),
+            Datum::Float64(v) => float64_to_i64(*v).map(Datum::Int64),
             Datum::Text(s) => s
                 .parse::<i64>()
                 .map(Datum::Int64)
@@ -96,7 +118,9 @@ pub fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionError> {
             Datum::Timestamp(_) => Ok(val),
             Datum::Date(days) => {
                 // Convert date (days since epoch) to timestamp (microseconds since epoch) at midnight
-                let us = i64::from(*days) * 86400 * 1_000_000;
+                let us = i64::from(*days)
+                    .checked_mul(86_400_000_000)
+                    .ok_or(ExecutionError::NumericOverflow)?;
                 Ok(Datum::Timestamp(us))
             }
             Datum::Int64(us) => Ok(Datum::Timestamp(*us)),
@@ -127,7 +151,8 @@ pub fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionError> {
             Datum::Date(_) => Ok(val),
             Datum::Timestamp(us) => {
                 // Convert timestamp (microseconds since epoch) to date (days since epoch)
-                let days = (*us / (86400 * 1_000_000)) as i32;
+                let days = i32::try_from(*us / 86_400_000_000)
+                    .map_err(|_| ExecutionError::NumericOverflow)?;
                 Ok(Datum::Date(days))
             }
             Datum::Text(s) => {
@@ -140,11 +165,14 @@ pub fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionError> {
                     })?;
                 let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)
                     .unwrap_or_else(|| NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or(NaiveDate::MIN));
-                let days = (date - epoch).num_days() as i32;
+                let days = i32::try_from((date - epoch).num_days())
+                    .map_err(|_| ExecutionError::NumericOverflow)?;
                 Ok(Datum::Date(days))
             }
             Datum::Int32(d) => Ok(Datum::Date(*d)),
-            Datum::Int64(d) => Ok(Datum::Date(*d as i32)),
+            Datum::Int64(d) => i32::try_from(*d)
+                .map(Datum::Date)
+                .map_err(|_| ExecutionError::NumericOverflow),
             _ => Err(ExecutionError::TypeError(format!(
                 "Cannot cast {val:?} to date"
             ))),
@@ -210,15 +238,19 @@ pub fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionError> {
                 } else if s_lower.contains(':') {
                     // HH:MM:SS
                     let parts: Vec<&str> = s_lower.split(':').collect();
+                    let cast_err = || ExecutionError::TypeError(format!("Cannot cast '{s}' to interval"));
                     if parts.len() >= 2 {
-                        let h: i64 = parts[0].trim().parse().unwrap_or(0);
-                        let m: i64 = parts[1].trim().parse().unwrap_or(0);
+                        let h: i64 = parts[0].trim().parse().map_err(|_| cast_err())?;
+                        let m: i64 = parts[1].trim().parse().map_err(|_| cast_err())?;
                         let sec: i64 = if parts.len() >= 3 {
-                            parts[2].trim().split('.').next().unwrap_or("0").parse().unwrap_or(0)
+                            parts[2].trim().split('.').next().unwrap_or("0").parse().map_err(|_| cast_err())?
                         } else {
                             0
                         };
-                        let us = h * 3_600_000_000 + m * 60_000_000 + sec * 1_000_000;
+                        let us = h.checked_mul(3_600_000_000)
+                            .and_then(|v| v.checked_add(m.checked_mul(60_000_000)?))
+                            .and_then(|v| v.checked_add(sec.checked_mul(1_000_000)?))
+                            .ok_or(ExecutionError::NumericOverflow)?;
                         Ok(Datum::Interval(0, 0, us))
                     } else {
                         Err(ExecutionError::TypeError(format!(
@@ -250,13 +282,14 @@ pub fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionError> {
                 let m: i64 = parts[1].parse().map_err(|_| {
                     ExecutionError::TypeError(format!("Cannot cast '{s}' to time"))
                 })?;
+                let cast_err = || ExecutionError::TypeError(format!("Cannot cast '{s}' to time"));
                 let (sec, frac) = if parts.len() >= 3 {
                     let sec_parts: Vec<&str> = parts[2].split('.').collect();
-                    let s_val: i64 = sec_parts[0].parse().unwrap_or(0);
+                    let s_val: i64 = sec_parts[0].parse().map_err(|_| cast_err())?;
                     let f_val: i64 = if sec_parts.len() > 1 {
                         let f = sec_parts[1];
                         let padded = format!("{:0<6}", &f[..f.len().min(6)]);
-                        padded.parse().unwrap_or(0)
+                        padded.parse().map_err(|_| cast_err())?
                     } else {
                         0
                     };
@@ -264,9 +297,12 @@ pub fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionError> {
                 } else {
                     (0, 0)
                 };
-                Ok(Datum::Time(
-                    h * 3_600_000_000 + m * 60_000_000 + sec * 1_000_000 + frac,
-                ))
+                let time_us = h.checked_mul(3_600_000_000)
+                    .and_then(|v| v.checked_add(m.checked_mul(60_000_000)?))
+                    .and_then(|v| v.checked_add(sec.checked_mul(1_000_000)?))
+                    .and_then(|v| v.checked_add(frac))
+                    .ok_or(ExecutionError::NumericOverflow)?;
+                Ok(Datum::Time(time_us))
             }
             Datum::Timestamp(us) => {
                 // Extract time-of-day from timestamp

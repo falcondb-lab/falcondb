@@ -438,7 +438,7 @@ impl MemTable {
             dashmap::mapref::entry::Entry::Occupied(e) => {
                 let chain = e.get();
                 if chain.has_write_conflict(txn_id) {
-                    return Err(falcon_common::error::StorageError::DuplicateKey);
+                    return Err(falcon_common::error::StorageError::WriteConflict);
                 }
                 if chain.has_live_version(txn_id) {
                     return Err(falcon_common::error::StorageError::DuplicateKey);
@@ -466,7 +466,7 @@ impl MemTable {
     ) -> Result<(), falcon_common::error::StorageError> {
         if let Some(chain) = self.data.get(pk) {
             if chain.has_write_conflict(txn_id) {
-                return Err(falcon_common::error::StorageError::DuplicateKey);
+                return Err(falcon_common::error::StorageError::WriteConflict);
             }
             chain.prepend(txn_id, Some(new_row));
             self.gc_candidates.fetch_add(1, AtomicOrdering::Relaxed);
@@ -485,7 +485,7 @@ impl MemTable {
     ) -> Result<(), falcon_common::error::StorageError> {
         if let Some(chain) = self.data.get(pk) {
             if chain.has_write_conflict(txn_id) {
-                return Err(falcon_common::error::StorageError::DuplicateKey);
+                return Err(falcon_common::error::StorageError::WriteConflict);
             }
             chain.prepend(txn_id, None); // tombstone
             self.gc_candidates.fetch_add(1, AtomicOrdering::Relaxed);
@@ -578,7 +578,7 @@ impl MemTable {
                 })
                 .collect();
 
-            let results: Vec<T> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+            let results: Vec<T> = handles.into_iter().map(|h| h.join().expect("parallel_aggregate worker thread panicked")).collect();
             let merged = results.into_iter().reduce(|a, b| reduce(a, b));
             merged.unwrap_or_else(|| init())
         })
@@ -811,7 +811,7 @@ impl MemTable {
                                 let d = &row.values[*ci];
                                 if !matches!(d, Datum::Null)
                                     && (mins[i].is_none()
-                                        || d.partial_cmp(mins[i].as_ref().unwrap())
+                                        || d.partial_cmp(mins[i].as_ref().expect("BUG: None after is_none short-circuit"))
                                             == Some(std::cmp::Ordering::Less))
                                 {
                                     mins[i] = Some(d.clone());
@@ -823,7 +823,7 @@ impl MemTable {
                                 let d = &row.values[*ci];
                                 if !matches!(d, Datum::Null)
                                     && (maxs[i].is_none()
-                                        || d.partial_cmp(maxs[i].as_ref().unwrap())
+                                        || d.partial_cmp(maxs[i].as_ref().expect("BUG: None after is_none short-circuit"))
                                             == Some(std::cmp::Ordering::Greater))
                                 {
                                     maxs[i] = Some(d.clone());

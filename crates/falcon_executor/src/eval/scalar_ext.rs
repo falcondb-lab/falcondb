@@ -184,8 +184,8 @@ fn dispatch_array_matrix(name: &str, args: &[Datum]) -> Result<Datum, ExecutionE
         .collect();
 
     let rows = match args.get(1) {
-        Some(Datum::Int64(n)) => *n as usize,
-        Some(Datum::Int32(n)) => *n as usize,
+        Some(Datum::Int64(n)) => usize::try_from(*n).unwrap_or(0),
+        Some(Datum::Int32(n)) => usize::try_from(*n).unwrap_or(0),
         _ => {
             return Err(ExecutionError::TypeError(format!(
                 "{name} requires rows as second arg"
@@ -193,8 +193,8 @@ fn dispatch_array_matrix(name: &str, args: &[Datum]) -> Result<Datum, ExecutionE
         }
     };
     let cols = match args.get(2) {
-        Some(Datum::Int64(n)) => *n as usize,
-        Some(Datum::Int32(n)) => *n as usize,
+        Some(Datum::Int64(n)) => usize::try_from(*n).unwrap_or(0),
+        Some(Datum::Int32(n)) => usize::try_from(*n).unwrap_or(0),
         _ => {
             return Err(ExecutionError::TypeError(format!(
                 "{name} requires cols as third arg"
@@ -202,8 +202,8 @@ fn dispatch_array_matrix(name: &str, args: &[Datum]) -> Result<Datum, ExecutionE
         }
     };
     let idx = match args.get(3) {
-        Some(Datum::Int64(n)) => *n as usize,
-        Some(Datum::Int32(n)) => *n as usize,
+        Some(Datum::Int64(n)) => usize::try_from(*n).unwrap_or(0),
+        Some(Datum::Int32(n)) => usize::try_from(*n).unwrap_or(0),
         _ => {
             return Err(ExecutionError::TypeError(format!(
                 "{name} requires index as fourth arg"
@@ -397,8 +397,8 @@ fn string_decode(delimiter: char, args: &[Datum]) -> Result<Datum, ExecutionErro
         }
     };
     let idx = match args.get(1) {
-        Some(Datum::Int64(n)) => *n as usize,
-        Some(Datum::Int32(n)) => *n as usize,
+        Some(Datum::Int64(n)) => usize::try_from(*n).unwrap_or(0),
+        Some(Datum::Int32(n)) => usize::try_from(*n).unwrap_or(0),
         _ => {
             return Err(ExecutionError::TypeError(
                 "STRING_*_DECODE requires index second arg".into(),

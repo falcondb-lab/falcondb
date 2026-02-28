@@ -117,8 +117,9 @@ pub fn parallel_filter(
             .collect();
 
         for h in handles {
-            if let Ok(indices) = h.join() {
-                partials.push(indices);
+            match h.join() {
+                Ok(indices) => partials.push(indices),
+                Err(panic_payload) => std::panic::resume_unwind(panic_payload),
             }
         }
     });

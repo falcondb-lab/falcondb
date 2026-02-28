@@ -162,9 +162,11 @@ impl QueryGovernor {
 
     /// Release previously recorded memory.
     pub fn release_memory(&self, bytes: u64) {
-        let current = self.memory_used.load(Ordering::Relaxed);
         self.memory_used
-            .store(current.saturating_sub(bytes), Ordering::Relaxed);
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_sub(bytes))
+            })
+            .ok();
     }
 
     /// Elapsed execution time in milliseconds.

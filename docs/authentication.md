@@ -1,12 +1,12 @@
 # Authentication
 
-FalconDB supports PostgreSQL-compatible authentication methods for client connections.
+FalconDB supports PostgreSQL-compatible authentication for client connections.
 
 ## Authentication Methods
 
 ### Trust (default)
 
-No authentication required. Any client can connect with any username.
+No authentication. Any client can connect with any username.
 
 ```toml
 [server.auth]
@@ -17,7 +17,7 @@ method = "trust"
 
 ### Cleartext Password
 
-Client sends password in cleartext. Simple but not recommended for production.
+Client sends password in cleartext. Not recommended for production.
 
 ```toml
 [server.auth]

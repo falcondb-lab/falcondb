@@ -400,19 +400,49 @@ const SLA_TARGET_HIGH_US: u64 = 10_000; // 10ms for high-priority
 const SLA_TARGET_NORMAL_US: u64 = 100_000; // 100ms for normal
 const SLA_TARGET_BACKGROUND_US: u64 = 1_000_000; // 1s for background
 
-/// Maximum latency samples kept per bucket before eviction.
-/// When reached, the oldest half is dropped to amortize the cost.
+/// Maximum latency samples kept per bucket (ring buffer size).
 const LATENCY_SAMPLES_CAP: usize = 100_000;
 
-/// Sorted latency samples for percentile computation.
+/// Ring-buffer backed latency sample bucket.
+struct LatencyBucket {
+    samples: Vec<u64>,
+    write_pos: usize,
+    full: bool,
+}
+
+impl LatencyBucket {
+    const fn new() -> Self {
+        Self {
+            samples: Vec::new(),
+            write_pos: 0,
+            full: false,
+        }
+    }
+
+    fn push(&mut self, value: u64) {
+        if self.samples.len() < LATENCY_SAMPLES_CAP {
+            self.samples.push(value);
+        } else {
+            self.samples[self.write_pos] = value;
+            self.full = true;
+        }
+        self.write_pos = (self.write_pos + 1) % LATENCY_SAMPLES_CAP;
+    }
+
+    fn snapshot(&self) -> Vec<u64> {
+        self.samples.clone()
+    }
+}
+
+/// Latency samples for percentile computation using ring buffers.
 struct LatencyRecorder {
-    fast_path: Vec<u64>,
-    slow_path: Vec<u64>,
+    fast_path: LatencyBucket,
+    slow_path: LatencyBucket,
     /// P2-3: Per-priority latency samples.
-    priority_background: Vec<u64>,
-    priority_normal: Vec<u64>,
-    priority_high: Vec<u64>,
-    priority_system: Vec<u64>,
+    priority_background: LatencyBucket,
+    priority_normal: LatencyBucket,
+    priority_high: LatencyBucket,
+    priority_system: LatencyBucket,
     /// P2-3: SLA violation counters.
     sla_high_violations: u64,
     sla_normal_violations: u64,
@@ -422,12 +452,12 @@ struct LatencyRecorder {
 impl LatencyRecorder {
     const fn new() -> Self {
         Self {
-            fast_path: Vec::new(),
-            slow_path: Vec::new(),
-            priority_background: Vec::new(),
-            priority_normal: Vec::new(),
-            priority_high: Vec::new(),
-            priority_system: Vec::new(),
+            fast_path: LatencyBucket::new(),
+            slow_path: LatencyBucket::new(),
+            priority_background: LatencyBucket::new(),
+            priority_normal: LatencyBucket::new(),
+            priority_high: LatencyBucket::new(),
+            priority_system: LatencyBucket::new(),
             sla_high_violations: 0,
             sla_normal_violations: 0,
             sla_total_violations: 0,
@@ -436,59 +466,51 @@ impl LatencyRecorder {
 
     fn record(&mut self, path: TxnPath, latency_us: u64) {
         match path {
-            TxnPath::Fast => Self::capped_push(&mut self.fast_path, latency_us),
-            TxnPath::Slow => Self::capped_push(&mut self.slow_path, latency_us),
+            TxnPath::Fast => self.fast_path.push(latency_us),
+            TxnPath::Slow => self.slow_path.push(latency_us),
         }
-    }
-
-    /// Push a sample, evicting the oldest half when the cap is reached.
-    fn capped_push(vec: &mut Vec<u64>, value: u64) {
-        if vec.len() >= LATENCY_SAMPLES_CAP {
-            let drain_count = LATENCY_SAMPLES_CAP / 2;
-            vec.drain(..drain_count);
-        }
-        vec.push(value);
     }
 
     /// P2-3: Record latency by priority and check SLA violations.
     fn record_priority(&mut self, priority: TxnPriority, latency_us: u64) {
         match priority {
             TxnPriority::Background => {
-                Self::capped_push(&mut self.priority_background, latency_us);
+                self.priority_background.push(latency_us);
                 if latency_us > SLA_TARGET_BACKGROUND_US {
                     self.sla_total_violations += 1;
                 }
             }
             TxnPriority::Normal => {
-                Self::capped_push(&mut self.priority_normal, latency_us);
+                self.priority_normal.push(latency_us);
                 if latency_us > SLA_TARGET_NORMAL_US {
                     self.sla_normal_violations += 1;
                     self.sla_total_violations += 1;
                 }
             }
             TxnPriority::High => {
-                Self::capped_push(&mut self.priority_high, latency_us);
+                self.priority_high.push(latency_us);
                 if latency_us > SLA_TARGET_HIGH_US {
                     self.sla_high_violations += 1;
                     self.sla_total_violations += 1;
                 }
             }
             TxnPriority::System => {
-                Self::capped_push(&mut self.priority_system, latency_us);
+                self.priority_system.push(latency_us);
             }
         }
     }
 
     fn compute_stats(&self) -> LatencyStats {
-        let mut all: Vec<u64> = self
-            .fast_path
+        let fast_snap = self.fast_path.snapshot();
+        let slow_snap = self.slow_path.snapshot();
+        let mut all: Vec<u64> = fast_snap
             .iter()
-            .chain(self.slow_path.iter())
+            .chain(slow_snap.iter())
             .copied()
             .collect();
         LatencyStats {
-            fast_path: percentile_set(&self.fast_path),
-            slow_path: percentile_set(&self.slow_path),
+            fast_path: percentile_set(&fast_snap),
+            slow_path: percentile_set(&slow_snap),
             all: {
                 all.sort_unstable();
                 compute_percentiles(&all)
@@ -498,10 +520,10 @@ impl LatencyRecorder {
 
     fn compute_priority_stats(&self) -> PriorityLatencyStats {
         PriorityLatencyStats {
-            background: percentile_set(&self.priority_background),
-            normal: percentile_set(&self.priority_normal),
-            high: percentile_set(&self.priority_high),
-            system: percentile_set(&self.priority_system),
+            background: percentile_set(&self.priority_background.snapshot()),
+            normal: percentile_set(&self.priority_normal.snapshot()),
+            high: percentile_set(&self.priority_high.snapshot()),
+            system: percentile_set(&self.priority_system.snapshot()),
         }
     }
 
@@ -514,12 +536,12 @@ impl LatencyRecorder {
     }
 
     fn reset(&mut self) {
-        self.fast_path.clear();
-        self.slow_path.clear();
-        self.priority_background.clear();
-        self.priority_normal.clear();
-        self.priority_high.clear();
-        self.priority_system.clear();
+        self.fast_path = LatencyBucket::new();
+        self.slow_path = LatencyBucket::new();
+        self.priority_background = LatencyBucket::new();
+        self.priority_normal = LatencyBucket::new();
+        self.priority_high = LatencyBucket::new();
+        self.priority_system = LatencyBucket::new();
         self.sla_high_violations = 0;
         self.sla_normal_violations = 0;
         self.sla_total_violations = 0;
@@ -537,12 +559,17 @@ fn compute_percentiles(sorted: &[u64]) -> PercentileSet {
         return PercentileSet::default();
     }
     let n = sorted.len();
+    // Nearest-rank method: index = ceil(n * p / 100) - 1, clamped to [0, n-1].
+    let pct = |p_num: usize, p_den: usize| -> usize {
+        let rank = (n * p_num + p_den - 1) / p_den; // ceiling division
+        std::cmp::min(rank.saturating_sub(1), n - 1)
+    };
     PercentileSet {
         count: n as u64,
-        p50_us: sorted[n * 50 / 100],
-        p95_us: sorted[std::cmp::min(n * 95 / 100, n - 1)],
-        p99_us: sorted[std::cmp::min(n * 99 / 100, n - 1)],
-        p999_us: sorted[std::cmp::min(n * 999 / 1000, n - 1)],
+        p50_us: sorted[pct(50, 100)],
+        p95_us: sorted[pct(95, 100)],
+        p99_us: sorted[pct(99, 100)],
+        p999_us: sorted[pct(999, 1000)],
     }
 }
 
@@ -762,9 +789,15 @@ impl TxnManager {
                 return Err(TxnError::MemoryLimitExceeded(dummy_txn_id));
             }
             PressureState::Pressure => {
-                self.stats.record_admission_rejection();
-                tracing::warn!("Admission control: rejecting txn (PRESSURE memory state)");
-                return Err(TxnError::MemoryPressure(dummy_txn_id));
+                // Under PRESSURE, only reject write-path (Global) transactions.
+                // Local transactions may be read-only and should not be blocked,
+                // because the transaction access mode is not yet known at begin time.
+                if classification.txn_type == TxnType::Global {
+                    self.stats.record_admission_rejection();
+                    tracing::warn!("Admission control: rejecting global txn (PRESSURE memory state)");
+                    return Err(TxnError::MemoryPressure(dummy_txn_id));
+                }
+                tracing::debug!("Admission control: allowing local txn under PRESSURE");
             }
             PressureState::Normal => {}
         }

@@ -5,11 +5,12 @@ use bytes::BytesMut;
 use dashmap::DashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use falcon_cluster::{DistributedQueryEngine, ReplicaRunnerMetrics};
+use falcon_cluster::{DistributedQueryEngine, RaftShardCoordinator, ReplicaRunnerMetrics};
 use falcon_common::config::{AuthConfig, AuthMethod};
 use falcon_common::types::ShardId;
 use falcon_executor::Executor;
 use falcon_storage::engine::StorageEngine;
+use falcon_storage::security_manager::{SecurityManager, IpCheckResult};
 use falcon_txn::TxnManager;
 
 use crate::codec::{self, BackendMessage, FrontendMessage};
@@ -52,6 +53,8 @@ pub struct PgServer {
     idle_timeout_ms: u64,
     /// Replica replication metrics (only set when running as replica).
     replica_metrics: Option<Arc<ReplicaRunnerMetrics>>,
+    /// Raft shard coordinator for SHOW falcon.raft_stats (only set for RaftMember role).
+    raft_coordinator: Option<Arc<RaftShardCoordinator>>,
     /// Authentication configuration.
     auth_config: AuthConfig,
     /// Shared cancellation registry for cancel request support.
@@ -64,6 +67,8 @@ pub struct PgServer {
     tls_acceptor: Option<Arc<TlsAcceptor>>,
     /// TLS configuration.
     tls_config: TlsConfig,
+    /// P3-6: Security manager for IP allowlist enforcement.
+    security_manager: Arc<SecurityManager>,
 }
 
 impl PgServer {
@@ -86,12 +91,14 @@ impl PgServer {
             default_statement_timeout_ms: 0,
             idle_timeout_ms: 0,
             replica_metrics: None,
+            raft_coordinator: None,
             auth_config: AuthConfig::default(),
             cancel_registry: Arc::new(DashMap::new()),
             connection_pool: None,
             notification_hub: Arc::new(NotificationHub::new()),
             tls_acceptor: None,
             tls_config: TlsConfig::default(),
+            security_manager: Arc::new(SecurityManager::new()),
         }
     }
 
@@ -117,13 +124,25 @@ impl PgServer {
             default_statement_timeout_ms: 0,
             idle_timeout_ms: 0,
             replica_metrics: None,
+            raft_coordinator: None,
             auth_config: AuthConfig::default(),
             cancel_registry: Arc::new(DashMap::new()),
             connection_pool: None,
             notification_hub: Arc::new(NotificationHub::new()),
             tls_acceptor: None,
             tls_config: TlsConfig::default(),
+            security_manager: Arc::new(SecurityManager::new()),
         }
+    }
+
+    /// Set a shared SecurityManager (for IP allowlist enforcement + SHOW metrics).
+    pub fn set_security_manager(&mut self, mgr: Arc<SecurityManager>) {
+        self.security_manager = mgr;
+    }
+
+    /// Get a shared reference to the security manager.
+    pub fn security_manager(&self) -> &Arc<SecurityManager> {
+        &self.security_manager
     }
 
     /// Configure TLS for SSL connections.
@@ -207,6 +226,11 @@ impl PgServer {
         self.replica_metrics = Some(metrics);
     }
 
+    /// Set the Raft shard coordinator for SHOW falcon.raft_stats.
+    pub fn set_raft_coordinator(&mut self, coordinator: Arc<RaftShardCoordinator>) {
+        self.raft_coordinator = Some(coordinator);
+    }
+
     /// Replace the active connections counter with a shared one.
     /// Used to share the counter between PgServer and Executor for SHOW falcon.connections.
     pub fn set_active_connections(&mut self, counter: Arc<AtomicUsize>) {
@@ -231,6 +255,17 @@ impl PgServer {
 
         loop {
             let (stream, addr) = listener.accept().await?;
+
+            // P3-6: IP allowlist enforcement — reject before any protocol work.
+            if let IpCheckResult::Denied = self.security_manager.check_ip(addr.ip()) {
+                tracing::warn!(
+                    client_ip = %addr.ip(),
+                    "connection rejected by IP allowlist"
+                );
+                drop(stream);
+                continue;
+            }
+
             tracing::info!("New connection from {}", addr);
             self.spawn_connection(stream);
         }
@@ -264,6 +299,17 @@ impl PgServer {
             tokio::select! {
                 result = listener.accept() => {
                     let (stream, addr) = result?;
+
+                    // P3-6: IP allowlist enforcement — reject before any protocol work.
+                    if let IpCheckResult::Denied = self.security_manager.check_ip(addr.ip()) {
+                        tracing::warn!(
+                            client_ip = %addr.ip(),
+                            "connection rejected by IP allowlist"
+                        );
+                        drop(stream);
+                        continue;
+                    }
+
                     tracing::info!("New connection from {}", addr);
                     self.spawn_connection(stream);
                 }
@@ -334,9 +380,11 @@ impl PgServer {
         let auth_config = self.auth_config.clone();
         let cancel_reg = self.cancel_registry.clone();
         let replica_metrics = self.replica_metrics.clone();
+        let raft_coordinator = self.raft_coordinator.clone();
         let notification_hub = self.notification_hub.clone();
         let tls_acceptor = self.tls_acceptor.clone();
         let tls_required = self.tls_config.require;
+        let security_mgr = self.security_manager.clone();
 
         // Increment active connections now; the handler will decrement on exit.
         // The actual max_connections check happens after the startup handshake
@@ -350,8 +398,12 @@ impl PgServer {
             tokio::spawn(async move {
                 if let Some(pooled) = pool.acquire().await {
                     let mut handler = pooled.handler_clone();
+                    handler.set_security_manager(security_mgr.clone());
                     if let Some(ref rm) = replica_metrics {
                         handler.set_replica_metrics(rm.clone());
+                    }
+                    if let Some(ref rc) = raft_coordinator {
+                        handler.set_raft_coordinator(rc.clone());
                     }
                     if let Err(e) = handle_connection_with_timeout(
                         stream,
@@ -409,8 +461,12 @@ impl PgServer {
                     self.executor.clone(),
                 )
             };
+            handler.set_security_manager(security_mgr.clone());
             if let Some(ref rm) = replica_metrics {
                 handler.set_replica_metrics(rm.clone());
+            }
+            if let Some(ref rc) = raft_coordinator {
+                handler.set_raft_coordinator(rc.clone());
             }
 
             tokio::spawn(async move {
@@ -719,13 +775,12 @@ async fn handle_connection_with_timeout(
                         send_message(&mut stream, &BackendMessage::AuthenticationOk).await?;
                     }
                     AuthMethod::Md5 => {
-                        // Generate random 4-byte salt
-                        use std::collections::hash_map::RandomState;
-                        use std::hash::{BuildHasher, Hasher};
+                        // Generate random 4-byte salt (CSPRNG)
                         let salt: [u8; 4] = {
-                            let s = RandomState::new();
-                            let h = s.build_hasher().finish();
-                            (h as u32).to_le_bytes()
+                            use rand::RngCore;
+                            let mut buf = [0u8; 4];
+                            rand::thread_rng().fill_bytes(&mut buf);
+                            buf
                         };
                         send_message(
                             &mut stream,
@@ -1888,9 +1943,9 @@ async fn handle_replication_streaming<S: AsyncReadExt + AsyncWriteExt + Unpin>(
         // Poll for new CDC events — collect into local vec to avoid holding
         // the RwLockReadGuard across .await points.
         let pending_messages: Vec<(u64, Vec<u8>)> = {
-            if let Some(slot) = storage.cdc_manager.get_slot_by_name(slot_name) {
+            if let Some(slot) = storage.ext.cdc_manager.get_slot_by_name(slot_name) {
                 let slot_id = slot.id;
-                storage.cdc_manager.poll_changes(slot_id, 100)
+                storage.ext.cdc_manager.poll_changes(slot_id, 100)
                     .iter()
                     .map(|event| {
                         let text = logical_replication::encode_change_event_text(event);
@@ -1914,8 +1969,8 @@ async fn handle_replication_streaming<S: AsyncReadExt + AsyncWriteExt + Unpin>(
 
         // Advance the slot's confirmed flush position
         if current_lsn > 0 && !pending_messages.is_empty() {
-            if let Some(slot) = storage.cdc_manager.get_slot_by_name(slot_name) {
-                let _ = storage.cdc_manager.advance_slot(slot.id, falcon_storage::cdc::CdcLsn(current_lsn));
+            if let Some(slot) = storage.ext.cdc_manager.get_slot_by_name(slot_name) {
+                let _ = storage.ext.cdc_manager.advance_slot(slot.id, falcon_storage::cdc::CdcLsn(current_lsn));
             }
         }
 
@@ -1932,8 +1987,8 @@ async fn handle_replication_streaming<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                 // Connection closed
                 tracing::debug!("Replication client disconnected (session {})", session_id);
                 // Deactivate slot
-                if let Some(slot) = storage.cdc_manager.get_slot_by_name(slot_name) {
-                    storage.cdc_manager.deactivate_slot(slot.id);
+                if let Some(slot) = storage.ext.cdc_manager.get_slot_by_name(slot_name) {
+                    storage.ext.cdc_manager.deactivate_slot(slot.id);
                 }
                 return Ok(());
             }
@@ -1946,8 +2001,8 @@ async fn handle_replication_streaming<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                                 "Replication streaming ended by client (session {})",
                                 session_id
                             );
-                            if let Some(slot) = storage.cdc_manager.get_slot_by_name(slot_name) {
-                                storage.cdc_manager.deactivate_slot(slot.id);
+                            if let Some(slot) = storage.ext.cdc_manager.get_slot_by_name(slot_name) {
+                                storage.ext.cdc_manager.deactivate_slot(slot.id);
                             }
                             return Ok(());
                         }
@@ -1957,8 +2012,8 @@ async fn handle_replication_streaming<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                             if let Some(status) =
                                 logical_replication::StandbyStatusUpdate::parse(&data)
                             {
-                                if let Some(slot) = storage.cdc_manager.get_slot_by_name(slot_name) {
-                                    let _ = storage.cdc_manager.advance_slot(
+                                if let Some(slot) = storage.ext.cdc_manager.get_slot_by_name(slot_name) {
+                                    let _ = storage.ext.cdc_manager.advance_slot(
                                         slot.id,
                                         falcon_storage::cdc::CdcLsn(status.flush_lsn),
                                     );
@@ -1974,8 +2029,8 @@ async fn handle_replication_streaming<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                             }
                         }
                         FrontendMessage::Terminate => {
-                            if let Some(slot) = storage.cdc_manager.get_slot_by_name(slot_name) {
-                                storage.cdc_manager.deactivate_slot(slot.id);
+                            if let Some(slot) = storage.ext.cdc_manager.get_slot_by_name(slot_name) {
+                                storage.ext.cdc_manager.deactivate_slot(slot.id);
                             }
                             return Ok(());
                         }
@@ -1989,8 +2044,8 @@ async fn handle_replication_streaming<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                     session_id,
                     e
                 );
-                if let Some(slot) = storage.cdc_manager.get_slot_by_name(slot_name) {
-                    storage.cdc_manager.deactivate_slot(slot.id);
+                if let Some(slot) = storage.ext.cdc_manager.get_slot_by_name(slot_name) {
+                    storage.ext.cdc_manager.deactivate_slot(slot.id);
                 }
                 return Err(e.into());
             }
@@ -2118,7 +2173,13 @@ fn decode_param_value(
                     } else { 0 };
                     (sv, fv)
                 } else { (0, 0) };
-                Datum::Time(h * 3_600_000_000 + m * 60_000_000 + sec * 1_000_000 + frac)
+                Datum::Time(
+                    h.checked_mul(3_600_000_000)
+                        .and_then(|v| v.checked_add(m.checked_mul(60_000_000)?))
+                        .and_then(|v| v.checked_add(sec.checked_mul(1_000_000)?))
+                        .and_then(|v| v.checked_add(frac))
+                        .unwrap_or(0),
+                )
             } else {
                 Datum::Text(s.to_owned())
             }

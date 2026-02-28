@@ -1,7 +1,6 @@
 # Contributing to FalconDB
 
-Thank you for your interest in contributing to FalconDB! This document covers
-the development workflow, code standards, and submission process.
+This document covers the development workflow, code standards, and submission process.
 
 ---
 
@@ -128,6 +127,8 @@ All PRs must pass these gates before merge:
 | **Windows** | Build + test on Windows | ✅ |
 | **Native Protocol** | `cargo test -p falcon_protocol_native -p falcon_native_server` | ✅ |
 | **JDBC Smoke** | `scripts/ci_native_jdbc_smoke.sh` (Rust + Java) | ✅ |
+| **Code Coverage** | `cargo tarpaulin --workspace` → Codecov upload + artifact | ⚠️ Warning |
+| **Security Audit** | `cargo audit` via `rustsec/audit-check` (RustSec advisory DB) | ✅ |
 
 ---
 

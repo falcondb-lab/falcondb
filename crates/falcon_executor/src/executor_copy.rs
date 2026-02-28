@@ -355,7 +355,8 @@ fn parse_datum(field: &str, data_type: &DataType) -> Result<Datum, String> {
                 .map_err(|e| format!("Cannot parse '{field}' as DATE: {e}"))?;
             let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)
                 .unwrap_or_else(|| NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or(NaiveDate::MIN));
-            let days = (date - epoch).num_days() as i32;
+            let days = i32::try_from((date - epoch).num_days())
+                .map_err(|_| format!("Date value out of range"))?;
             Ok(Datum::Date(days))
         }
         DataType::Jsonb => {
@@ -401,13 +402,16 @@ fn parse_datum(field: &str, data_type: &DataType) -> Result<Datum, String> {
             let frac: i64 = if sec_parts.len() > 1 {
                 let f = sec_parts[1];
                 let padded = format!("{:0<6}", &f[..f.len().min(6)]);
-                padded.parse().unwrap_or(0)
+                padded.parse().map_err(|_| format!("Cannot parse '{field}' as TIME"))?
             } else {
                 0
             };
-            Ok(Datum::Time(
-                h * 3_600_000_000 + m * 60_000_000 + s * 1_000_000 + frac,
-            ))
+            let us = h.checked_mul(3_600_000_000)
+                .and_then(|v| v.checked_add(m.checked_mul(60_000_000)?))
+                .and_then(|v| v.checked_add(s.checked_mul(1_000_000)?))
+                .and_then(|v| v.checked_add(frac))
+                .ok_or_else(|| format!("TIME value out of range: '{field}'"))?;
+            Ok(Datum::Time(us))
         }
         DataType::Interval => {
             // Simplified: just store as text-parsed microseconds
@@ -427,7 +431,7 @@ fn parse_datum(field: &str, data_type: &DataType) -> Result<Datum, String> {
             let hex_str = field.strip_prefix("\\x").unwrap_or(field);
             let bytes = (0..hex_str.len())
                 .step_by(2)
-                .map(|i| u8::from_str_radix(&hex_str[i..i + 2.min(hex_str.len())], 16))
+                .map(|i| u8::from_str_radix(&hex_str[i..(i + 2).min(hex_str.len())], 16))
                 .collect::<Result<Vec<u8>, _>>()
                 .map_err(|e| format!("Cannot parse '{field}' as BYTEA: {e}"))?;
             Ok(Datum::Bytea(bytes))
@@ -446,7 +450,7 @@ fn datum_to_text(datum: &Datum) -> String {
         Datum::Text(s) => s.clone(),
         Datum::Timestamp(us) => {
             let secs = us / 1_000_000;
-            let nsecs = ((us % 1_000_000) * 1000) as u32;
+            let nsecs = ((us % 1_000_000).abs() * 1000) as u32;
             chrono::DateTime::from_timestamp(secs, nsecs).map_or_else(
                 || us.to_string(),
                 |dt| dt.format("%Y-%m-%d %H:%M:%S").to_string(),

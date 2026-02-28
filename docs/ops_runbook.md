@@ -4,7 +4,7 @@
 
 ## Ops Audit Log
 
-Every cluster operation is recorded in the `OpsAuditLog` ring buffer (default 4096 events). Events are queryable via `falconctl ops audit`.
+Every cluster operation is recorded in the `OpsAuditLog` ring buffer (default 4096 events). Query via `falconctl ops audit`.
 
 ### Event Types
 

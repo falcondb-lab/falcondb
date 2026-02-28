@@ -1,0 +1,73 @@
+# cargo-deny configuration for FalconDB
+# Run locally: cargo deny check
+# Docs: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# Treat dev-dependencies the same as normal deps for auditing.
+all-features = false
+no-default-features = false
+
+# ── Advisories (cargo audit equivalent) ──────────────────────────────────────
+[advisories]
+# Warn on unmaintained crates rather than hard-fail, since some dependencies
+# may be transitively pulled in and outside our control.
+unmaintained = "warn"
+yanked = "deny"
+notice = "warn"
+# Path to the advisory database. Leave unset to use the bundled default.
+# db-path = "~/.cargo/advisory-db"
+# db-urls = ["https://github.com/rustsec/advisory-db"]
+
+# Known-safe advisories to ignore. Add entries as:
+# ignore = ["RUSTSEC-2021-XXXX"]
+ignore = []
+
+# ── Licenses ─────────────────────────────────────────────────────────────────
+[licenses]
+# Deny crates with no license declared.
+unlicensed = "deny"
+# Deny copyleft licenses that are incompatible with commercial use.
+copyleft = "deny"
+# Allow these SPDX license expressions.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "Zlib",
+    "OpenSSL",
+]
+# Default confidence threshold for license text detection.
+confidence-threshold = 0.8
+
+# ── Bans (duplicate / prohibited crates) ─────────────────────────────────────
+[bans]
+# Deny multiple versions of the same crate to keep the dependency tree lean.
+multiple-versions = "warn"
+# Wildcards in workspace Cargo.toml are fine.
+wildcards = "allow"
+# Crates we never want in the tree (direct or otherwise).
+deny = []
+
+# TODO: openssl is pulled in transitively (via tonic / hyper / native-tls paths).
+# Once the dependency chain is cleaned up, add it to `deny` with:
+#   { name = "openssl", reason = "use rustls instead for memory safety" }
+# For now, skip it to unblock CI.
+skip = [
+    { name = "openssl", version = "*" },
+    { name = "openssl-sys", version = "*" },
+]
+skip-tree = []
+
+# ── Sources ──────────────────────────────────────────────────────────────────
+[sources]
+# Only allow crates from crates.io and our own workspace.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

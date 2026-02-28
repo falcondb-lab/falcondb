@@ -111,8 +111,11 @@ fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, TlsSetupError
     })?;
     let mut reader = io::BufReader::new(file);
     let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut reader)
-        .filter_map(std::result::Result::ok)
-        .collect();
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| TlsSetupError::CertLoad {
+            path: path.to_path_buf(),
+            error: format!("failed to parse PEM certificate: {e}"),
+        })?;
     if certs.is_empty() {
         return Err(TlsSetupError::CertLoad {
             path: path.to_path_buf(),

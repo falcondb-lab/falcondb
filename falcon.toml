@@ -51,3 +51,32 @@ encrypt_wal = true
 encrypt_data = true
 
 [memory]
+
+# ── Raft consensus configuration ─────────────────────────────────────────────
+# Active when replication.role = "raft_member".
+# Single-node (default): node_id = 1, node_ids = [1], no peers.
+# 3-node cluster example:
+#   [replication]
+#   role = "raft_member"
+#
+#   [raft]
+#   node_id = 1                          # This node's unique ID (> 0)
+#   node_ids = [1, 2, 3]                 # All nodes in the Raft cluster
+#   raft_listen_addr = "0.0.0.0:50052"  # gRPC transport listen address
+#   peers = [                            # Peer addresses (omit local node)
+#     "2=http://node2:50052",
+#     "3=http://node3:50052",
+#   ]
+#   failover_poll_interval_ms = 200      # How often to poll for leader changes
+#   heartbeat_interval_ms = 50
+#   election_timeout_min_ms = 150
+#   election_timeout_max_ms = 300
+[raft]
+node_id = 1
+node_ids = [1]
+raft_listen_addr = "0.0.0.0:50052"
+peers = []
+failover_poll_interval_ms = 200
+heartbeat_interval_ms = 50
+election_timeout_min_ms = 150
+election_timeout_max_ms = 300

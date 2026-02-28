@@ -1,10 +1,13 @@
-//! Core sharding utilities: multi-column shard key hashing, shard routing,
+//! Core sharding utilities: multi-column shard key hashing, range routing,
 //! and shard-aware DDL/DML dispatch.
 //!
 //! # Design (SingleStore-inspired)
 //!
 //! - **Hash sharding**: rows are assigned to shards by hashing the shard key
 //!   columns (or PK if no explicit shard key) with xxHash3.
+//! - **Range sharding**: rows are assigned to shards by comparing the first
+//!   shard key column against ordered boundary values. Ideal for time-series,
+//!   log-partitioned, or naturally ordered datasets.
 //! - **Reference tables**: fully replicated on every shard (no shard key).
 //! - **Auto-sharding**: `CREATE TABLE ... WITH (shard_key='col', sharding='hash')`
 //!   automatically distributes the table across all shards.
@@ -15,6 +18,13 @@
 //! each column value (using the same PK encoding as MemTable) and computing
 //! xxHash3-64 over the result.  This gives uniform distribution for any
 //! combination of Datum types.
+//!
+//! # Range Routing
+//!
+//! For range-sharded tables, `range_bounds` in the schema contains N-1 split
+//! points for N shards.  A row with shard-key value `v` is routed to shard `i`
+//! where `range_bounds[i-1] <= v < range_bounds[i]` (implicit -∞/+∞ at ends).
+//! Range queries can be pruned to only the shards whose boundaries overlap.
 
 use falcon_common::datum::{Datum, OwnedRow};
 use falcon_common::schema::TableSchema;
@@ -50,9 +60,81 @@ pub fn compute_shard_hash_from_datums(datums: &[&Datum]) -> u64 {
     xxh3_64(&buf)
 }
 
+/// Compare two `Datum` values for range routing.
+/// NULL is treated as less-than any non-NULL value.
+pub fn cmp_datum_for_range(a: &Datum, b: &Datum) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (Datum::Null, Datum::Null) => Ordering::Equal,
+        (Datum::Null, _) => Ordering::Less,
+        (_, Datum::Null) => Ordering::Greater,
+        (Datum::Int32(x), Datum::Int32(y)) => x.cmp(y),
+        (Datum::Int64(x), Datum::Int64(y)) => x.cmp(y),
+        (Datum::Int32(x), Datum::Int64(y)) => i64::from(*x).cmp(y),
+        (Datum::Int64(x), Datum::Int32(y)) => x.cmp(&i64::from(*y)),
+        (Datum::Float64(x), Datum::Float64(y)) => {
+            x.partial_cmp(y).unwrap_or(Ordering::Equal)
+        }
+        (Datum::Float64(x), Datum::Int64(y)) => {
+            x.partial_cmp(&(*y as f64)).unwrap_or(Ordering::Equal)
+        }
+        (Datum::Int64(x), Datum::Float64(y)) => {
+            (*x as f64).partial_cmp(y).unwrap_or(Ordering::Equal)
+        }
+        (Datum::Float64(x), Datum::Int32(y)) => {
+            x.partial_cmp(&f64::from(*y)).unwrap_or(Ordering::Equal)
+        }
+        (Datum::Int32(x), Datum::Float64(y)) => {
+            f64::from(*x).partial_cmp(y).unwrap_or(Ordering::Equal)
+        }
+        (Datum::Text(x), Datum::Text(y)) => x.cmp(y),
+        (Datum::Boolean(x), Datum::Boolean(y)) => x.cmp(y),
+        (Datum::Timestamp(x), Datum::Timestamp(y)) => x.cmp(y),
+        (Datum::Date(x), Datum::Date(y)) => x.cmp(y),
+        (Datum::Time(x), Datum::Time(y)) => x.cmp(y),
+        (Datum::Uuid(x), Datum::Uuid(y)) => x.cmp(y),
+        (Datum::Decimal(mx, sx), Datum::Decimal(my, sy)) => {
+            // Normalize to same scale before comparing mantissas.
+            if sx == sy {
+                mx.cmp(my)
+            } else if sx > sy {
+                let shift = 10i128.saturating_pow((*sx - *sy) as u32);
+                mx.cmp(&(my.saturating_mul(shift)))
+            } else {
+                let shift = 10i128.saturating_pow((*sy - *sx) as u32);
+                (mx.saturating_mul(shift)).cmp(my)
+            }
+        }
+        _ => std::cmp::Ordering::Equal,
+    }
+}
+
+/// Find the shard index for a value given sorted range boundaries.
+/// Returns the 0-based shard index (0..=range_bounds.len()).
+///
+/// Boundary semantics (N-1 bounds for N shards):
+/// - shard 0: value < range_bounds[0]
+/// - shard i: range_bounds[i-1] <= value < range_bounds[i]
+/// - shard N-1: value >= range_bounds[N-2]
+fn range_shard_index(value: &Datum, range_bounds: &[Datum]) -> u64 {
+    // Binary search: find first bound where value < bound.
+    let mut lo = 0usize;
+    let mut hi = range_bounds.len();
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if cmp_datum_for_range(value, &range_bounds[mid]) == std::cmp::Ordering::Less {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    lo as u64
+}
+
 /// Determine the target shard for a row given the table schema and number of shards.
 /// Handles all sharding policies:
 /// - Hash: hash shard key columns → shard_id = hash % num_shards
+/// - Range: compare first shard key column against range_bounds
 /// - Reference: returns None (caller must replicate to all shards)
 /// - None: falls back to PK hash or shard 0
 pub fn target_shard_for_row(
@@ -72,6 +154,13 @@ pub fn target_shard_for_row(
             let key_cols = schema.effective_shard_key();
             let hash = compute_shard_hash(row, key_cols);
             Some(ShardId(hash % num_shards))
+        }
+        ShardingPolicy::Range => {
+            let key_cols = schema.effective_shard_key();
+            let first_col = *key_cols.first().unwrap_or(&0);
+            let value = row.values.get(first_col).unwrap_or(&Datum::Null);
+            let idx = range_shard_index(value, &schema.range_bounds);
+            Some(ShardId(idx.min(num_shards - 1)))
         }
         ShardingPolicy::None => {
             // Fall back to PK-based hash if PK exists, else shard 0
@@ -98,10 +187,57 @@ pub fn target_shard_from_datums(
         return Some(ShardId(0));
     }
 
-    if schema.sharding_policy == ShardingPolicy::Reference { None } else {
-        let hash = compute_shard_hash_from_datums(datums);
-        Some(ShardId(hash % num_shards))
+    match schema.sharding_policy {
+        ShardingPolicy::Reference => None,
+        ShardingPolicy::Range => {
+            let value = datums.first().map(|d| *d).unwrap_or(&Datum::Null);
+            let idx = range_shard_index(value, &schema.range_bounds);
+            Some(ShardId(idx.min(num_shards - 1)))
+        }
+        _ => {
+            let hash = compute_shard_hash_from_datums(datums);
+            Some(ShardId(hash % num_shards))
+        }
     }
+}
+
+/// Determine the subset of shards that a range query [lower, upper] may touch.
+/// Enables **shard pruning** for range-sharded tables: only scatter to shards
+/// whose partition boundaries overlap with the query range.
+///
+/// - `lower`: inclusive lower bound (None = -∞)
+/// - `upper`: inclusive upper bound (None = +∞)
+///
+/// For non-range-sharded tables, returns all shards (no pruning possible).
+pub fn shards_for_range_query(
+    schema: &TableSchema,
+    num_shards: u64,
+    lower: Option<&Datum>,
+    upper: Option<&Datum>,
+) -> Vec<ShardId> {
+    use falcon_common::schema::ShardingPolicy;
+
+    if num_shards == 0 {
+        return vec![ShardId(0)];
+    }
+
+    if schema.sharding_policy != ShardingPolicy::Range || schema.range_bounds.is_empty() {
+        return (0..num_shards).map(ShardId).collect();
+    }
+
+    let bounds = &schema.range_bounds;
+    // Find the first shard that could contain `lower`.
+    let start_shard = match lower {
+        Some(lo) => range_shard_index(lo, bounds).min(num_shards - 1),
+        None => 0,
+    };
+    // Find the last shard that could contain `upper`.
+    let end_shard = match upper {
+        Some(hi) => range_shard_index(hi, bounds).min(num_shards - 1),
+        None => num_shards - 1,
+    };
+
+    (start_shard..=end_shard).map(ShardId).collect()
 }
 
 /// Determine all target shards for a table.
@@ -195,6 +331,176 @@ mod tests {
     use falcon_common::datum::Datum;
     use falcon_common::schema::{ColumnDef, ShardingPolicy};
     use falcon_common::types::{ColumnId, DataType, TableId};
+
+    // ── Range sharding helpers ────────────────────────────────────────────
+
+    fn make_range_schema() -> TableSchema {
+        TableSchema {
+            id: TableId(3),
+            name: "events".to_string(),
+            columns: vec![
+                ColumnDef {
+                    id: ColumnId(0),
+                    name: "ts".into(),
+                    data_type: DataType::Int64,
+                    nullable: false,
+                    is_primary_key: true,
+                    default_value: None,
+                    is_serial: false,
+                },
+                ColumnDef {
+                    id: ColumnId(1),
+                    name: "payload".into(),
+                    data_type: DataType::Text,
+                    nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                    is_serial: false,
+                },
+            ],
+            primary_key_columns: vec![0],
+            shard_key: vec![0], // range-shard on ts
+            sharding_policy: ShardingPolicy::Range,
+            // 3 boundaries → 4 shards: [−∞,100), [100,200), [200,300), [300,+∞)
+            range_bounds: vec![Datum::Int64(100), Datum::Int64(200), Datum::Int64(300)],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_range_shard_first_partition() {
+        let schema = make_range_schema();
+        let row = OwnedRow::new(vec![Datum::Int64(50), Datum::Text("a".into())]);
+        let shard = target_shard_for_row(&row, &schema, 4);
+        assert_eq!(shard, Some(ShardId(0)));
+    }
+
+    #[test]
+    fn test_range_shard_middle_partition() {
+        let schema = make_range_schema();
+        let row = OwnedRow::new(vec![Datum::Int64(150), Datum::Text("b".into())]);
+        let shard = target_shard_for_row(&row, &schema, 4);
+        assert_eq!(shard, Some(ShardId(1)));
+    }
+
+    #[test]
+    fn test_range_shard_boundary_exact() {
+        let schema = make_range_schema();
+        // Exact boundary value 200 → shard 2 (range_bounds[1] <= 200 < range_bounds[2])
+        let row = OwnedRow::new(vec![Datum::Int64(200), Datum::Text("c".into())]);
+        let shard = target_shard_for_row(&row, &schema, 4);
+        assert_eq!(shard, Some(ShardId(2)));
+    }
+
+    #[test]
+    fn test_range_shard_last_partition() {
+        let schema = make_range_schema();
+        let row = OwnedRow::new(vec![Datum::Int64(999), Datum::Text("d".into())]);
+        let shard = target_shard_for_row(&row, &schema, 4);
+        assert_eq!(shard, Some(ShardId(3)));
+    }
+
+    #[test]
+    fn test_range_shard_from_datums() {
+        let schema = make_range_schema();
+        let d = Datum::Int64(150);
+        let shard = target_shard_from_datums(&[&d], &schema, 4);
+        assert_eq!(shard, Some(ShardId(1)));
+    }
+
+    #[test]
+    fn test_range_shard_null_goes_to_first() {
+        let schema = make_range_schema();
+        let row = OwnedRow::new(vec![Datum::Null, Datum::Text("x".into())]);
+        let shard = target_shard_for_row(&row, &schema, 4);
+        assert_eq!(shard, Some(ShardId(0)), "NULL should route to first shard");
+    }
+
+    #[test]
+    fn test_range_shard_text_boundaries() {
+        let schema = TableSchema {
+            id: TableId(4),
+            name: "logs".to_string(),
+            columns: vec![ColumnDef {
+                id: ColumnId(0),
+                name: "region".into(),
+                data_type: DataType::Text,
+                nullable: false,
+                is_primary_key: true,
+                default_value: None,
+                is_serial: false,
+            }],
+            primary_key_columns: vec![0],
+            shard_key: vec![0],
+            sharding_policy: ShardingPolicy::Range,
+            range_bounds: vec![Datum::Text("eu".into()), Datum::Text("us".into())],
+            ..Default::default()
+        };
+        let row_ap = OwnedRow::new(vec![Datum::Text("ap".into())]);
+        let row_eu = OwnedRow::new(vec![Datum::Text("eu".into())]);
+        let row_us = OwnedRow::new(vec![Datum::Text("us-west".into())]);
+        assert_eq!(target_shard_for_row(&row_ap, &schema, 3), Some(ShardId(0)));
+        assert_eq!(target_shard_for_row(&row_eu, &schema, 3), Some(ShardId(1)));
+        assert_eq!(target_shard_for_row(&row_us, &schema, 3), Some(ShardId(2)));
+    }
+
+    #[test]
+    fn test_shards_for_range_query_full() {
+        let schema = make_range_schema();
+        // Full scan → all 4 shards
+        let shards = shards_for_range_query(&schema, 4, None, None);
+        assert_eq!(shards.len(), 4);
+    }
+
+    #[test]
+    fn test_shards_for_range_query_pruned() {
+        let schema = make_range_schema();
+        // Query: ts BETWEEN 150 AND 250 → shards 1 and 2
+        let lo = Datum::Int64(150);
+        let hi = Datum::Int64(250);
+        let shards = shards_for_range_query(&schema, 4, Some(&lo), Some(&hi));
+        assert_eq!(shards, vec![ShardId(1), ShardId(2)]);
+    }
+
+    #[test]
+    fn test_shards_for_range_query_single_shard() {
+        let schema = make_range_schema();
+        // Query: ts BETWEEN 50 AND 99 → shard 0 only
+        let lo = Datum::Int64(50);
+        let hi = Datum::Int64(99);
+        let shards = shards_for_range_query(&schema, 4, Some(&lo), Some(&hi));
+        assert_eq!(shards, vec![ShardId(0)]);
+    }
+
+    #[test]
+    fn test_shards_for_range_query_open_upper() {
+        let schema = make_range_schema();
+        // Query: ts >= 250 → shards 2, 3
+        let lo = Datum::Int64(250);
+        let shards = shards_for_range_query(&schema, 4, Some(&lo), None);
+        assert_eq!(shards, vec![ShardId(2), ShardId(3)]);
+    }
+
+    #[test]
+    fn test_shards_for_range_non_range_table() {
+        let schema = make_hash_schema();
+        // Hash-sharded tables get no pruning → all shards
+        let lo = Datum::Int64(50);
+        let shards = shards_for_range_query(&schema, 4, Some(&lo), None);
+        assert_eq!(shards.len(), 4);
+    }
+
+    #[test]
+    fn test_cmp_datum_cross_type() {
+        assert_eq!(
+            cmp_datum_for_range(&Datum::Int32(100), &Datum::Int64(100)),
+            std::cmp::Ordering::Equal,
+        );
+        assert_eq!(
+            cmp_datum_for_range(&Datum::Int32(99), &Datum::Int64(100)),
+            std::cmp::Ordering::Less,
+        );
+    }
 
     fn make_hash_schema() -> TableSchema {
         TableSchema {

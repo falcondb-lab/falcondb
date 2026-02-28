@@ -14,9 +14,6 @@ use crate::wal::WalRecord;
 
 #[cfg(feature = "columnstore")]
 use crate::columnstore::ColumnStoreTable;
-#[cfg(not(feature = "columnstore"))]
-#[allow(unused_imports)]
-use crate::columnstore_stub::ColumnStoreTable;
 
 #[cfg(feature = "disk_rowstore")]
 use crate::disk_rowstore::DiskRowstoreTable;
@@ -156,26 +153,11 @@ impl StorageEngine {
             .map_err(StorageError::RoleNotFound)?;
         drop(catalog);
 
-        #[derive(serde::Serialize)]
-        struct AlterOpts {
-            #[serde(skip_serializing_if = "Option::is_none")]
-            password: Option<Option<String>>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            can_login: Option<bool>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            is_superuser: Option<bool>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            can_create_db: Option<bool>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            can_create_role: Option<bool>,
-        }
-        let opts_json = serde_json::to_string(&AlterOpts {
-            password, can_login, is_superuser, can_create_db, can_create_role,
-        }).unwrap_or_default();
-
         self.append_wal(&WalRecord::AlterRole {
             name: name.to_owned(),
-            options_json: opts_json,
+            opts: crate::wal::AlterRoleOpts {
+                password, can_login, is_superuser, can_create_db, can_create_role,
+            },
         })?;
 
         tracing::info!("Altered role '{}'", name);
@@ -374,14 +356,12 @@ impl StorageEngine {
         );
 
         // WAL + replication observer
-        let json = serde_json::to_string(&schema)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.append_wal(&WalRecord::CreateTable { schema_json: json })?;
+        self.append_wal(&WalRecord::CreateTable { schema: schema.clone() })?;
 
         // CDC: emit DDL event for CREATE TABLE
-        if self.cdc_manager.is_enabled() {
+        if self.ext.cdc_manager.is_enabled() {
             let txn_id = falcon_common::types::TxnId(0);
-            self.cdc_manager.emit_ddl(txn_id, &format!("CREATE TABLE {}", schema.name));
+            self.ext.cdc_manager.emit_ddl(txn_id, &format!("CREATE TABLE {}", schema.name));
         }
 
         catalog.add_table(schema);
@@ -396,6 +376,7 @@ impl StorageEngine {
         let table_id = table.id;
         // Remove from whichever storage map holds it
         self.tables.remove(&table_id);
+        #[cfg(feature = "columnstore")]
         self.columnstore_tables.remove(&table_id);
         #[cfg(feature = "disk_rowstore")]
         self.disk_tables.remove(&table_id);
@@ -411,9 +392,9 @@ impl StorageEngine {
         })?;
 
         // CDC: emit DDL event for DROP TABLE
-        if self.cdc_manager.is_enabled() {
+        if self.ext.cdc_manager.is_enabled() {
             let txn_id = falcon_common::types::TxnId(0);
-            self.cdc_manager.emit_ddl(txn_id, &format!("DROP TABLE {name}"));
+            self.ext.cdc_manager.emit_ddl(txn_id, &format!("DROP TABLE {name}"));
         }
 
         catalog.drop_table(name);
@@ -502,9 +483,9 @@ impl StorageEngine {
         })?;
 
         // CDC: emit DDL event for TRUNCATE TABLE
-        if self.cdc_manager.is_enabled() {
+        if self.ext.cdc_manager.is_enabled() {
             let txn_id = falcon_common::types::TxnId(0);
-            self.cdc_manager.emit_ddl(txn_id, &format!("TRUNCATE TABLE {name}"));
+            self.ext.cdc_manager.emit_ddl(txn_id, &format!("TRUNCATE TABLE {name}"));
         }
 
         Ok(())
@@ -593,17 +574,15 @@ impl StorageEngine {
         );
         self.online_ddl.start(ddl_id);
 
-        let col_json =
-            serde_json::to_string(&col).map_err(|e| StorageError::Serialization(e.to_string()))?;
         self.append_wal(&WalRecord::AlterTable {
             table_name: table_name.to_owned(),
-            operation_json: format!(r#"{{"op":"add_column","column":{col_json}}}"#),
+            op: crate::wal::AlterTableOp::AddColumn { column: col.clone() },
         })?;
 
         // CDC: emit DDL event for ALTER TABLE ADD COLUMN
-        if self.cdc_manager.is_enabled() {
+        if self.ext.cdc_manager.is_enabled() {
             let txn_id = falcon_common::types::TxnId(0);
-            self.cdc_manager.emit_ddl(txn_id, &format!("ALTER TABLE {table_name} ADD COLUMN {}", col.name));
+            self.ext.cdc_manager.emit_ddl(txn_id, &format!("ALTER TABLE {table_name} ADD COLUMN {}", col.name));
         }
 
         // Backfill existing rows with default value if needed
@@ -699,13 +678,13 @@ impl StorageEngine {
 
         self.append_wal(&WalRecord::AlterTable {
             table_name: table_name.to_owned(),
-            operation_json: format!(r#"{{"op":"drop_column","column_name":"{col_name}"}}"#),
+            op: crate::wal::AlterTableOp::DropColumn { column_name: col_name.to_owned() },
         })?;
 
         // CDC: emit DDL event for ALTER TABLE DROP COLUMN
-        if self.cdc_manager.is_enabled() {
+        if self.ext.cdc_manager.is_enabled() {
             let txn_id = falcon_common::types::TxnId(0);
-            self.cdc_manager.emit_ddl(txn_id, &format!("ALTER TABLE {table_name} DROP COLUMN {col_name}"));
+            self.ext.cdc_manager.emit_ddl(txn_id, &format!("ALTER TABLE {table_name} DROP COLUMN {col_name}"));
         }
 
         self.online_ddl.complete(ddl_id);
@@ -744,15 +723,16 @@ impl StorageEngine {
 
         self.append_wal(&WalRecord::AlterTable {
             table_name: table_name.to_owned(),
-            operation_json: format!(
-                r#"{{"op":"rename_column","old_name":"{old_name}","new_name":"{new_name}"}}"#
-            ),
+            op: crate::wal::AlterTableOp::RenameColumn {
+                old_name: old_name.to_owned(),
+                new_name: new_name.to_owned(),
+            },
         })?;
 
         // CDC: emit DDL event for ALTER TABLE RENAME COLUMN
-        if self.cdc_manager.is_enabled() {
+        if self.ext.cdc_manager.is_enabled() {
             let txn_id = falcon_common::types::TxnId(0);
-            self.cdc_manager.emit_ddl(txn_id, &format!("ALTER TABLE {table_name} RENAME COLUMN {old_name} TO {new_name}"));
+            self.ext.cdc_manager.emit_ddl(txn_id, &format!("ALTER TABLE {table_name} RENAME COLUMN {old_name} TO {new_name}"));
         }
 
         self.online_ddl.complete(ddl_id);
@@ -782,13 +762,13 @@ impl StorageEngine {
 
         self.append_wal(&WalRecord::AlterTable {
             table_name: old_name.to_owned(),
-            operation_json: format!(r#"{{"op":"rename_table","new_name":"{new_name}"}}"#),
+            op: crate::wal::AlterTableOp::RenameTable { new_name: new_name.to_owned() },
         })?;
 
         // CDC: emit DDL event for ALTER TABLE RENAME
-        if self.cdc_manager.is_enabled() {
+        if self.ext.cdc_manager.is_enabled() {
             let txn_id = falcon_common::types::TxnId(0);
-            self.cdc_manager.emit_ddl(txn_id, &format!("ALTER TABLE {old_name} RENAME TO {new_name}"));
+            self.ext.cdc_manager.emit_ddl(txn_id, &format!("ALTER TABLE {old_name} RENAME TO {new_name}"));
         }
 
         self.online_ddl.complete(ddl_id);

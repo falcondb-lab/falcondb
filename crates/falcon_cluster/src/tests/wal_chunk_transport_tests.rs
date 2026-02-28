@@ -277,9 +277,9 @@
 
         // Apply once
         group.apply_chunk_to_replica(0, &chunk).unwrap();
-        // Apply again (should be idempotent  —skip already-applied LSNs)
+        // Apply again (should be idempotent — skip already-applied LSNs)
         let applied2 = group.apply_chunk_to_replica(0, &chunk).unwrap();
-        assert_eq!(applied2, 2); // returns chunk size but skips internally
+        assert_eq!(applied2, 0); // all records skipped (already applied)
 
         // Still just 1 row
         let rows = group.replicas[0]

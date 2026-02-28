@@ -110,7 +110,7 @@ impl Datum {
             Self::Text(s) => Some(s.clone()),
             Self::Timestamp(us) => {
                 let secs = us / 1_000_000;
-                let nsecs = ((us % 1_000_000) * 1000) as u32;
+                let nsecs = ((us % 1_000_000).abs() * 1000) as u32;
                 Some(chrono::DateTime::from_timestamp(secs, nsecs).map_or_else(
                     || us.to_string(),
                     |dt| dt.format("%Y-%m-%d %H:%M:%S").to_string(),
@@ -151,25 +151,31 @@ impl Datum {
     pub fn add(&self, other: &Self) -> Option<Self> {
         match (self, other) {
             (Self::Int32(a), Self::Int32(b)) => Some(Self::Int64(i64::from(*a) + i64::from(*b))),
-            (Self::Int64(a), Self::Int64(b)) => Some(Self::Int64(a + b)),
-            (Self::Int64(a), Self::Int32(b)) => Some(Self::Int64(a + i64::from(*b))),
-            (Self::Int32(a), Self::Int64(b)) => Some(Self::Int64(i64::from(*a) + b)),
+            (Self::Int64(a), Self::Int64(b)) => Some(
+                a.checked_add(*b)
+                    .map(Self::Int64)
+                    .unwrap_or_else(|| Self::Float64(*a as f64 + *b as f64)),
+            ),
+            (Self::Int64(a), Self::Int32(b)) => Some(
+                a.checked_add(i64::from(*b))
+                    .map(Self::Int64)
+                    .unwrap_or_else(|| Self::Float64(*a as f64 + f64::from(*b))),
+            ),
+            (Self::Int32(a), Self::Int64(b)) => Some(
+                b.checked_add(i64::from(*a))
+                    .map(Self::Int64)
+                    .unwrap_or_else(|| Self::Float64(f64::from(*a) + *b as f64)),
+            ),
             (Self::Float64(a), Self::Float64(b)) => Some(Self::Float64(a + b)),
             (Self::Float64(a), Self::Int64(b)) => Some(Self::Float64(a + *b as f64)),
             (Self::Float64(a), Self::Int32(b)) => Some(Self::Float64(a + f64::from(*b))),
             (Self::Decimal(a, sa), Self::Decimal(b, sb)) => Some(decimal_add(*a, *sa, *b, *sb)),
-            (Self::Decimal(a, sa), Self::Int64(b)) => Some(decimal_add(
-                *a,
-                *sa,
-                i128::from(*b) * 10i128.pow(u32::from(*sa)),
-                *sa,
-            )),
-            (Self::Int64(a), Self::Decimal(b, sb)) => Some(decimal_add(
-                i128::from(*a) * 10i128.pow(u32::from(*sb)),
-                *sb,
-                *b,
-                *sb,
-            )),
+            (Self::Decimal(a, sa), Self::Int64(b)) => {
+                Some(decimal_add(*a, *sa, i128::from(*b), 0))
+            }
+            (Self::Int64(a), Self::Decimal(b, sb)) => {
+                Some(decimal_add(i128::from(*a), 0, *b, *sb))
+            }
             _ => None,
         }
     }
@@ -183,6 +189,9 @@ impl Datum {
         let (int_part, frac_part) = s.find('.').map_or((s, ""), |dot_pos| {
             (&s[..dot_pos], &s[dot_pos + 1..])
         });
+        if frac_part.len() > u8::MAX as usize {
+            return None; // scale exceeds u8 range
+        }
         let scale = frac_part.len() as u8;
         let combined = format!("{int_part}{frac_part}");
         let mantissa: i128 = combined.parse().ok()?;
@@ -199,7 +208,15 @@ impl fmt::Display for Datum {
             Self::Int64(v) => write!(f, "{v}"),
             Self::Float64(v) => write!(f, "{v}"),
             Self::Text(s) => write!(f, "{s}"),
-            Self::Timestamp(us) => write!(f, "{us}"),
+            Self::Timestamp(us) => {
+                let secs = us / 1_000_000;
+                let nsecs = ((us % 1_000_000).abs() * 1000) as u32;
+                if let Some(dt) = chrono::DateTime::from_timestamp(secs, nsecs) {
+                    write!(f, "{}", dt.format("%Y-%m-%d %H:%M:%S"))
+                } else {
+                    write!(f, "{us}")
+                }
+            }
             Self::Date(days) => {
                 let epoch =
                     chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap_or(chrono::NaiveDate::MIN);
@@ -309,18 +326,30 @@ impl PartialEq for Datum {
             (Self::Decimal(a, sa), Self::Decimal(b, sb)) => {
                 if sa == sb {
                     a == b
-                } else {
-                    let (na, nb) = decimal_normalize(*a, *sa, *b, *sb);
+                } else if let Some((na, nb)) = decimal_normalize(*a, *sa, *b, *sb) {
                     na == nb
+                } else {
+                    // Overflow: fall back to f64 comparison
+                    let fa = *a as f64 / 10f64.powi(i32::from(*sa));
+                    let fb = *b as f64 / 10f64.powi(i32::from(*sb));
+                    fa == fb
                 }
             }
             (Self::Decimal(a, sa), Self::Int64(b)) => {
-                let bm = i128::from(*b) * 10i128.pow(u32::from(*sa));
-                *a == bm
+                if let Some(bm) = i128::from(*b).checked_mul(10i128.pow(u32::from(*sa))) {
+                    *a == bm
+                } else {
+                    let fa = *a as f64 / 10f64.powi(i32::from(*sa));
+                    fa == *b as f64
+                }
             }
             (Self::Int64(a), Self::Decimal(b, sb)) => {
-                let am = i128::from(*a) * 10i128.pow(u32::from(*sb));
-                am == *b
+                if let Some(am) = i128::from(*a).checked_mul(10i128.pow(u32::from(*sb))) {
+                    am == *b
+                } else {
+                    let fb = *b as f64 / 10f64.powi(i32::from(*sb));
+                    *a as f64 == fb
+                }
             }
             (Self::Time(a), Self::Time(b)) => a == b,
             (Self::Interval(am, ad, aus), Self::Interval(bm, bd, bus)) => {
@@ -430,16 +459,30 @@ impl PartialOrd for Datum {
             (Self::Timestamp(a), Self::Timestamp(b)) => a.partial_cmp(b),
             (Self::Date(a), Self::Date(b)) => a.partial_cmp(b),
             (Self::Decimal(a, sa), Self::Decimal(b, sb)) => {
-                let (na, nb) = decimal_normalize(*a, *sa, *b, *sb);
-                na.partial_cmp(&nb)
+                if let Some((na, nb)) = decimal_normalize(*a, *sa, *b, *sb) {
+                    na.partial_cmp(&nb)
+                } else {
+                    // Overflow: fall back to f64 comparison
+                    let fa = *a as f64 / 10f64.powi(i32::from(*sa));
+                    let fb = *b as f64 / 10f64.powi(i32::from(*sb));
+                    fa.partial_cmp(&fb)
+                }
             }
             (Self::Decimal(a, sa), Self::Int64(b)) => {
-                let bm = i128::from(*b) * 10i128.pow(u32::from(*sa));
-                a.partial_cmp(&bm)
+                if let Some(bm) = i128::from(*b).checked_mul(10i128.pow(u32::from(*sa))) {
+                    a.partial_cmp(&bm)
+                } else {
+                    let fa = *a as f64 / 10f64.powi(i32::from(*sa));
+                    fa.partial_cmp(&(*b as f64))
+                }
             }
             (Self::Int64(a), Self::Decimal(b, sb)) => {
-                let am = i128::from(*a) * 10i128.pow(u32::from(*sb));
-                am.partial_cmp(b)
+                if let Some(am) = i128::from(*a).checked_mul(10i128.pow(u32::from(*sb))) {
+                    am.partial_cmp(b)
+                } else {
+                    let fb = *b as f64 / 10f64.powi(i32::from(*sb));
+                    (*a as f64).partial_cmp(&fb)
+                }
             }
             (Self::Decimal(a, sa), Self::Float64(b)) => {
                 let af = *a as f64 / 10f64.powi(i32::from(*sa));
@@ -538,23 +581,37 @@ pub fn decimal_to_string(mantissa: i128, scale: u8) -> String {
 }
 
 /// Normalize two decimals to the same scale, returning (a_normalized, b_normalized).
-const fn decimal_normalize(a: i128, sa: u8, b: i128, sb: u8) -> (i128, i128) {
+/// Returns None if the scaling multiplication overflows i128.
+const fn decimal_normalize(a: i128, sa: u8, b: i128, sb: u8) -> Option<(i128, i128)> {
     if sa == sb {
-        (a, b)
+        Some((a, b))
     } else if sa > sb {
         let diff = (sa - sb) as u32;
-        (a, b * 10i128.pow(diff))
+        match b.checked_mul(10i128.pow(diff)) {
+            Some(nb) => Some((a, nb)),
+            None => None,
+        }
     } else {
         let diff = (sb - sa) as u32;
-        (a * 10i128.pow(diff), b)
+        match a.checked_mul(10i128.pow(diff)) {
+            Some(na) => Some((na, b)),
+            None => None,
+        }
     }
 }
 
 /// Add two decimals, returning a Datum::Decimal with the larger scale.
 fn decimal_add(a: i128, sa: u8, b: i128, sb: u8) -> Datum {
     let max_scale = sa.max(sb);
-    let (na, nb) = decimal_normalize(a, sa, b, sb);
-    Datum::Decimal(na + nb, max_scale)
+    if let Some((na, nb)) = decimal_normalize(a, sa, b, sb) {
+        if let Some(result) = na.checked_add(nb) {
+            return Datum::Decimal(result, max_scale);
+        }
+    }
+    // Overflow fallback: convert to f64
+    let fa = a as f64 / 10f64.powi(i32::from(sa));
+    let fb = b as f64 / 10f64.powi(i32::from(sb));
+    Datum::Float64(fa + fb)
 }
 
 /// Remove trailing zeros from a decimal for canonical form.
@@ -572,13 +629,27 @@ const fn decimal_trim(mut mantissa: i128, mut scale: u8) -> (i128, u8) {
 /// Subtract two decimals.
 pub fn decimal_sub(a: i128, sa: u8, b: i128, sb: u8) -> Datum {
     let max_scale = sa.max(sb);
-    let (na, nb) = decimal_normalize(a, sa, b, sb);
-    Datum::Decimal(na - nb, max_scale)
+    if let Some((na, nb)) = decimal_normalize(a, sa, b, sb) {
+        if let Some(result) = na.checked_sub(nb) {
+            return Datum::Decimal(result, max_scale);
+        }
+    }
+    // Overflow fallback: convert to f64
+    let fa = a as f64 / 10f64.powi(i32::from(sa));
+    let fb = b as f64 / 10f64.powi(i32::from(sb));
+    Datum::Float64(fa - fb)
 }
 
 /// Multiply two decimals.
-pub const fn decimal_mul(a: i128, sa: u8, b: i128, sb: u8) -> Datum {
-    Datum::Decimal(a * b, sa + sb)
+pub fn decimal_mul(a: i128, sa: u8, b: i128, sb: u8) -> Datum {
+    if let (Some(result), Some(combined_scale)) = (a.checked_mul(b), sa.checked_add(sb)) {
+        Datum::Decimal(result, combined_scale)
+    } else {
+        // Overflow fallback: convert to f64
+        let fa = a as f64 / 10f64.powi(i32::from(sa));
+        let fb = b as f64 / 10f64.powi(i32::from(sb));
+        Datum::Float64(fa * fb)
+    }
 }
 
 /// Divide two decimals with a target result scale.
@@ -589,8 +660,14 @@ pub fn decimal_div(a: i128, sa: u8, b: i128, sb: u8, result_scale: u8) -> Option
     // Scale up numerator to get desired precision
     let target_scale = result_scale.max(sa).max(sb);
     let extra = u32::from(target_scale) + u32::from(sb) - u32::from(sa);
-    let scaled_a = a * 10i128.pow(extra);
-    Some(Datum::Decimal(scaled_a / b, target_scale))
+    if let Some(scaled_a) = a.checked_mul(10i128.pow(extra)) {
+        Some(Datum::Decimal(scaled_a / b, target_scale))
+    } else {
+        // Overflow fallback: convert to f64
+        let fa = a as f64 / 10f64.powi(i32::from(sa));
+        let fb = b as f64 / 10f64.powi(i32::from(sb));
+        Some(Datum::Float64(fa / fb))
+    }
 }
 
 #[cfg(test)]

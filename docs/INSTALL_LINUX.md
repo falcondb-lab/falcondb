@@ -20,7 +20,7 @@
 sudo dpkg -i falcondb_1.2.0_amd64.deb
 ```
 
-This automatically:
+This installs:
 - Installs `/usr/bin/falcon` and `/usr/bin/falcon-cli`
 - Creates config at `/etc/falcondb/falcon.toml`
 - Creates system user `falcondb`

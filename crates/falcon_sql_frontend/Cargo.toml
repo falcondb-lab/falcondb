@@ -7,3 +7,11 @@ edition.workspace = true
 falcon_common = { path = "../falcon_common" }
 sqlparser.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+proptest = "1"
+criterion.workspace = true
+
+[[bench]]
+name = "bench_parser"
+harness = false

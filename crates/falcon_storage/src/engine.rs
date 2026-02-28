@@ -36,8 +36,6 @@ use crate::tenant_registry::TenantRegistry;
 // ── Feature-gated storage engine imports ──
 #[cfg(feature = "columnstore")]
 use crate::columnstore::ColumnStoreTable;
-#[cfg(not(feature = "columnstore"))]
-use crate::columnstore_stub::ColumnStoreTable;
 
 #[cfg(feature = "disk_rowstore")]
 use crate::disk_rowstore::DiskRowstoreTable;
@@ -341,6 +339,48 @@ pub struct TdeDekInfo {
     pub created_at_ms: u64,
 }
 
+/// Enterprise and non-core extension fields extracted from `StorageEngine`.
+///
+/// Grouping these reduces the God Object surface of `StorageEngine` and makes
+/// it obvious which fields are on the production OLTP hot-path (in `StorageEngine`
+/// directly) versus enterprise / tiering / multi-tenant add-ons (here).
+pub struct EnterpriseExtensions {
+    /// Row-Level Security policy manager.
+    pub rls_manager: RwLock<RlsPolicyManager>,
+    /// Transparent Data Encryption key manager.
+    pub key_manager: RwLock<KeyManager>,
+    /// Table partitioning manager.
+    pub partition_manager: RwLock<PartitionManager>,
+    /// WAL archiver for Point-in-Time Recovery.
+    pub wal_archiver: Arc<RwLock<WalArchiver>>,
+    /// Change Data Capture stream manager (internally thread-safe).
+    pub cdc_manager: CdcManager,
+    /// Hot/Cold Memory Tiering — cold store for compressed old MVCC version payloads.
+    pub cold_store: Arc<crate::cold_store::ColdStore>,
+    /// String intern pool for low-cardinality string deduplication.
+    pub intern_pool: Arc<crate::cold_store::StringInternPool>,
+    /// P2-1: Multi-tenant registry — manages tenant lifecycle and quota enforcement.
+    pub tenant_registry: Arc<TenantRegistry>,
+    /// P3-3: Resource meter — per-tenant billing and throttling.
+    pub resource_meter: Arc<ResourceMeter>,
+}
+
+impl Default for EnterpriseExtensions {
+    fn default() -> Self {
+        Self {
+            rls_manager: RwLock::new(RlsPolicyManager::new()),
+            key_manager: RwLock::new(KeyManager::disabled()),
+            partition_manager: RwLock::new(PartitionManager::new()),
+            wal_archiver: Arc::new(RwLock::new(WalArchiver::disabled())),
+            cdc_manager: CdcManager::new(DEFAULT_CDC_BUFFER_SIZE),
+            cold_store: Arc::new(crate::cold_store::ColdStore::new_in_memory()),
+            intern_pool: Arc::new(crate::cold_store::StringInternPool::new()),
+            tenant_registry: Arc::new(TenantRegistry::new()),
+            resource_meter: Arc::new(ResourceMeter::new()),
+        }
+    }
+}
+
 /// The storage engine. Owns all tables (rowstore, columnstore, disk), the catalog, and the WAL.
 pub struct StorageEngine {
     /// Runtime node role — controls which storage paths are permitted.
@@ -349,6 +389,7 @@ pub struct StorageEngine {
     /// Rowstore tables (in-memory, default).
     pub(crate) tables: DashMap<TableId, Arc<MemTable>>,
     /// Columnstore tables (columnar, analytics-optimised). Feature-gated.
+    #[cfg(feature = "columnstore")]
     pub(crate) columnstore_tables: DashMap<TableId, Arc<ColumnStoreTable>>,
     /// Disk-based rowstore tables (B-tree on disk). Feature-gated.
     #[cfg(feature = "disk_rowstore")]
@@ -395,38 +436,23 @@ pub struct StorageEngine {
     /// Tracks per-replica ack timestamps for GC safepoint computation.
     pub(crate) replica_ack_tracker: ReplicaAckTracker,
     /// Counter: number of times a write-txn path touched columnstore (should be 0 on Primary).
+    #[cfg(feature = "columnstore")]
     pub(crate) write_path_columnstore_violations: AtomicU64,
     /// Counter: number of times a write-txn path touched disk-rowstore (should be 0 on Primary).
+    #[cfg(feature = "disk_rowstore")]
     pub(crate) write_path_disk_violations: AtomicU64,
     /// Enforcement level for write-path purity violations on Primary nodes.
     pub(crate) write_path_enforcement: WritePathEnforcement,
     /// Whether LSM tables sync every write to disk.
     pub(crate) lsm_sync_writes: bool,
-    // ── Enterprise Features ──
-    /// Row-Level Security policy manager.
-    pub rls_manager: RwLock<RlsPolicyManager>,
-    /// Transparent Data Encryption key manager.
-    pub key_manager: RwLock<KeyManager>,
-    /// Table partitioning manager.
-    pub partition_manager: RwLock<PartitionManager>,
-    /// WAL archiver for Point-in-Time Recovery.
-    pub wal_archiver: RwLock<WalArchiver>,
-    /// Change Data Capture stream manager (internally thread-safe).
-    pub cdc_manager: CdcManager,
     /// USTM (User-Space Tiered Memory) page cache engine.
     pub ustm: Arc<crate::ustm::UstmEngine>,
     /// Pre-tracked write-buffer bytes per transaction (set during batch_insert).
     /// Avoids re-scanning the write-set in estimate_write_set_bytes at commit.
     pub(crate) txn_write_bytes: DashMap<TxnId, AtomicU64>,
-    // ── v1.0.7: Hot/Cold Memory Tiering ──
-    /// Cold store for compressed old MVCC version payloads.
-    pub cold_store: Arc<crate::cold_store::ColdStore>,
-    /// String intern pool for low-cardinality string deduplication.
-    pub intern_pool: Arc<crate::cold_store::StringInternPool>,
-    /// P2-1: Multi-tenant registry — manages tenant lifecycle and quota enforcement.
-    pub tenant_registry: Arc<TenantRegistry>,
-    /// P3-3: Resource meter — per-tenant billing and throttling.
-    pub resource_meter: Arc<ResourceMeter>,
+    // ── Enterprise / non-core extensions (RLS, TDE, PITR, CDC, tenancy, cold store) ──
+    /// Grouped enterprise features — see [`EnterpriseExtensions`].
+    pub ext: EnterpriseExtensions,
 }
 
 impl StorageEngine {
@@ -535,6 +561,7 @@ impl StorageEngine {
         Ok(Self {
             node_role: NodeRole::Standalone,
             tables: DashMap::new(),
+            #[cfg(feature = "columnstore")]
             columnstore_tables: DashMap::new(),
             #[cfg(feature = "disk_rowstore")]
             disk_tables: DashMap::new(),
@@ -558,21 +585,15 @@ impl StorageEngine {
             online_ddl: OnlineDdlManager::new(),
             internal_txn_counter: AtomicU64::new(1u64 << 60),
             replica_ack_tracker: ReplicaAckTracker::new(),
+            #[cfg(feature = "columnstore")]
             write_path_columnstore_violations: AtomicU64::new(0),
+            #[cfg(feature = "disk_rowstore")]
             write_path_disk_violations: AtomicU64::new(0),
             write_path_enforcement: WritePathEnforcement::Warn,
             lsm_sync_writes: false,
-            rls_manager: RwLock::new(RlsPolicyManager::new()),
-            key_manager: RwLock::new(KeyManager::disabled()),
-            partition_manager: RwLock::new(PartitionManager::new()),
-            wal_archiver: RwLock::new(WalArchiver::disabled()),
-            cdc_manager: CdcManager::new(DEFAULT_CDC_BUFFER_SIZE),
             ustm: Self::default_ustm(),
             txn_write_bytes: DashMap::new(),
-            cold_store: Arc::new(crate::cold_store::ColdStore::new_in_memory()),
-            intern_pool: Arc::new(crate::cold_store::StringInternPool::new()),
-            tenant_registry: Arc::new(TenantRegistry::new()),
-            resource_meter: Arc::new(ResourceMeter::new()),
+            ext: EnterpriseExtensions::default(),
         })
     }
 
@@ -583,21 +604,16 @@ impl StorageEngine {
     pub fn configure_pitr(&self, enabled: bool, archive_dir: &str, retention_hours: u64) {
         if enabled && !archive_dir.is_empty() {
             let path = std::path::Path::new(archive_dir);
-            *self.wal_archiver.write() = crate::pitr::WalArchiver::new(path);
+            *self.ext.wal_archiver.write() = crate::pitr::WalArchiver::new(path);
 
             // Install a segment-rotation callback on the WAL writer.
-            // Transmit the pointer as usize (always Send+Sync) and cast back inside the closure.
-            // SAFETY: StorageEngine is Arc-held; wal_archiver outlives the WalWriter.
+            // The Arc<RwLock<WalArchiver>> is cloned into the closure so the
+            // archiver is kept alive as long as the callback exists — no unsafe needed.
             if let Some(ref wal) = self.wal {
-                let archiver_addr: usize =
-                    (&self.wal_archiver as *const RwLock<crate::pitr::WalArchiver>) as usize;
+                let archiver_arc = Arc::clone(&self.ext.wal_archiver);
                 let cb: crate::wal::SegmentRotateCallback =
                     std::sync::Arc::new(move |seg_id: u64, seg_size: u64| {
-                        // SAFETY: pointer is valid for StorageEngine lifetime.
-                        let archiver = unsafe {
-                            &*(archiver_addr as *const RwLock<crate::pitr::WalArchiver>)
-                        };
-                        let mut guard = archiver.write();
+                        let mut guard = archiver_arc.write();
                         if guard.is_enabled() {
                             let fname = crate::wal::segment_filename(seg_id);
                             let lsn_start = crate::pitr::Lsn(seg_id.saturating_mul(1_000_000));
@@ -647,23 +663,26 @@ impl StorageEngine {
         };
 
         // Initialize the key manager with the passphrase
-        *self.key_manager.write() = crate::encryption::KeyManager::new(&passphrase);
+        *self.ext.key_manager.write() = crate::encryption::KeyManager::new(&passphrase);
 
         if encrypt_wal {
             // Generate a DEK for WAL encryption and install it on the WAL writer
-            let dek_id = self.key_manager.write().generate_dek(
+            match self.ext.key_manager.write().generate_dek(
                 crate::encryption::EncryptionScope::Wal,
-            );
-            if let Some(ref wal) = self.wal {
-                let km = self.key_manager.read();
-                if let Some(enc) = crate::wal::WalEncryption::from_key_manager(&km, dek_id) {
-                    // SAFETY: set_encryption requires &mut but we only call this once at startup
-                    // before any concurrent WAL writes occur.
-                    let wal_ptr = Arc::as_ptr(wal) as *mut crate::wal::WalWriter;
-                    unsafe { (*wal_ptr).set_encryption(enc); }
-                    tracing::info!("TDE: WAL encryption enabled (DEK {})", dek_id);
-                } else {
-                    tracing::error!("TDE: failed to create WAL encryption context for DEK {}", dek_id);
+            ) {
+                Ok(dek_id) => {
+                    if let Some(ref wal) = self.wal {
+                        let mut km = self.ext.key_manager.write();
+                        if let Some(enc) = crate::wal::WalEncryption::from_key_manager(&mut km, dek_id) {
+                            wal.set_encryption(enc);
+                            tracing::info!("TDE: WAL encryption enabled (DEK {})", dek_id);
+                        } else {
+                            tracing::error!("TDE: failed to create WAL encryption context for DEK {}", dek_id);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("TDE: failed to generate WAL DEK: {}", e);
                 }
             }
         }
@@ -672,7 +691,7 @@ impl StorageEngine {
             tracing::info!("TDE: data block encryption enabled (per-table DEKs generated on demand)");
         }
 
-        let km = self.key_manager.read();
+        let km = self.ext.key_manager.read();
         tracing::info!(
             "TDE enabled: algorithm=AES-256-GCM, dek_count={}, encrypt_wal={}, encrypt_data={}",
             km.dek_count(), encrypt_wal, encrypt_data,
@@ -681,7 +700,7 @@ impl StorageEngine {
 
     /// Get TDE status summary for SHOW commands.
     pub fn tde_status(&self) -> TdeStatusInfo {
-        let km = self.key_manager.read();
+        let km = self.ext.key_manager.read();
         let wal_encrypted = self.wal.as_ref().map_or(false, |w| w.is_encrypted());
         TdeStatusInfo {
             enabled: km.is_enabled(),
@@ -693,7 +712,7 @@ impl StorageEngine {
 
     /// List all DEK metadata (without exposing key material).
     pub fn tde_list_deks(&self) -> Vec<TdeDekInfo> {
-        let km = self.key_manager.read();
+        let km = self.ext.key_manager.read();
         km.list_deks().iter().map(|d| TdeDekInfo {
             id: d.id.0,
             label: d.label.clone(),
@@ -704,22 +723,24 @@ impl StorageEngine {
 
     /// Rotate the TDE master key with a new passphrase.
     pub fn tde_rotate_master_key(&self, new_passphrase: &str) -> Result<(), String> {
-        let mut km = self.key_manager.write();
+        let mut km = self.ext.key_manager.write();
         if !km.is_enabled() {
             return Err("TDE is not enabled".into());
         }
-        km.rotate_master_key(new_passphrase);
+        km.rotate_master_key(new_passphrase)
+            .map_err(|e| format!("TDE master key rotation failed: {e}"))?;
         tracing::info!("TDE: master key rotated successfully");
         Ok(())
     }
 
     /// Generate a new DEK for a given scope (e.g., table encryption).
     pub fn tde_generate_dek(&self, scope: crate::encryption::EncryptionScope) -> Result<u64, String> {
-        let mut km = self.key_manager.write();
+        let mut km = self.ext.key_manager.write();
         if !km.is_enabled() {
             return Err("TDE is not enabled".into());
         }
-        let dek_id = km.generate_dek(scope);
+        let dek_id = km.generate_dek(scope)
+            .map_err(|e| format!("TDE DEK generation failed: {e}"))?;
         tracing::info!("TDE: generated DEK {} for scope {}", dek_id, scope);
         Ok(dek_id.0)
     }
@@ -738,7 +759,7 @@ impl StorageEngine {
         if enabled {
             // Register the system tenant in the metering system
             use falcon_common::tenant::SYSTEM_TENANT_ID;
-            self.resource_meter.register_tenant(SYSTEM_TENANT_ID);
+            self.ext.resource_meter.register_tenant(SYSTEM_TENANT_ID);
             tracing::info!(
                 "Multi-tenant isolation enabled (metering={}, default_max_qps={}, default_max_txns={}, default_max_mem={}, default_max_storage={})",
                 metering_enabled, default_max_qps, default_max_concurrent_txns,
@@ -752,7 +773,7 @@ impl StorageEngine {
     /// Check whether a tenant is allowed to begin a new transaction.
     /// Returns Ok(()) if allowed, or Err with the denial reason.
     pub fn check_tenant_quota(&self, tenant_id: falcon_common::tenant::TenantId) -> Result<(), String> {
-        let result = self.tenant_registry.check_begin_txn(tenant_id);
+        let result = self.ext.tenant_registry.check_begin_txn(tenant_id);
         match result {
             crate::tenant_registry::QuotaCheckResult::Allowed => Ok(()),
             crate::tenant_registry::QuotaCheckResult::QpsExceeded { limit, current } => {
@@ -772,27 +793,27 @@ impl StorageEngine {
 
     /// Record that a transaction has begun for a tenant (metering + quota tracking).
     pub fn record_tenant_txn_begin(&self, tenant_id: falcon_common::tenant::TenantId) {
-        self.tenant_registry.record_txn_begin(tenant_id);
-        self.resource_meter.record_query(tenant_id);
+        self.ext.tenant_registry.record_txn_begin(tenant_id);
+        self.ext.resource_meter.record_query(tenant_id);
     }
 
     /// Record that a transaction has committed for a tenant.
     pub fn record_tenant_txn_commit(&self, tenant_id: falcon_common::tenant::TenantId) {
-        self.tenant_registry.record_txn_commit(tenant_id);
-        self.resource_meter.record_txn_commit(tenant_id);
+        self.ext.tenant_registry.record_txn_commit(tenant_id);
+        self.ext.resource_meter.record_txn_commit(tenant_id);
     }
 
     /// Record that a transaction has been aborted for a tenant.
     pub fn record_tenant_txn_abort(&self, tenant_id: falcon_common::tenant::TenantId) {
-        self.tenant_registry.record_txn_abort(tenant_id);
-        self.resource_meter.record_txn_abort(tenant_id);
+        self.ext.tenant_registry.record_txn_abort(tenant_id);
+        self.ext.resource_meter.record_txn_abort(tenant_id);
     }
 
     /// Create a named restore point at the current WAL LSN.
     /// Returns the LSN at which the restore point was recorded.
     pub fn create_restore_point(&self, name: &str) -> Result<u64, StorageError> {
         let lsn = self.wal.as_ref().map_or(0, |w| w.current_lsn());
-        self.wal_archiver
+        self.ext.wal_archiver
             .write()
             .create_restore_point(name, crate::pitr::Lsn(lsn));
         tracing::info!("Restore point '{}' created at LSN {}", name, lsn);
@@ -834,7 +855,7 @@ impl StorageEngine {
             size_bytes: 0,
             consistent: true,
         };
-        self.wal_archiver.write().register_base_backup(backup);
+        self.ext.wal_archiver.write().register_base_backup(backup);
         tracing::info!(
             "Base backup stopped: label='{}' backup_id={} end_lsn={}",
             label, backup_id, lsn
@@ -844,7 +865,7 @@ impl StorageEngine {
 
     /// Archive a completed WAL segment (called from the WAL rotation hook).
     pub fn archive_wal_segment(&self, segment_id: u64, size_bytes: u64) {
-        let mut archiver = self.wal_archiver.write();
+        let mut archiver = self.ext.wal_archiver.write();
         if !archiver.is_enabled() {
             return;
         }
@@ -857,22 +878,22 @@ impl StorageEngine {
 
     /// List all archived WAL segments.
     pub fn list_archived_segments(&self) -> Vec<crate::pitr::ArchivedSegment> {
-        self.wal_archiver.read().list_segments().into_iter().cloned().collect()
+        self.ext.wal_archiver.read().list_segments().into_iter().cloned().collect()
     }
 
     /// List all base backups registered with the archiver.
     pub fn list_base_backups(&self) -> Vec<crate::pitr::BaseBackup> {
-        self.wal_archiver.read().list_base_backups().into_iter().cloned().collect()
+        self.ext.wal_archiver.read().list_base_backups().into_iter().cloned().collect()
     }
 
     /// List all named restore points.
     pub fn list_restore_points(&self) -> Vec<crate::pitr::RestorePoint> {
-        self.wal_archiver.read().list_restore_points().into_iter().cloned().collect()
+        self.ext.wal_archiver.read().list_restore_points().into_iter().cloned().collect()
     }
 
     /// PITR archiver stats: (enabled, segment_count, bytes_archived).
     pub fn pitr_stats(&self) -> (bool, u64, u64) {
-        let archiver = self.wal_archiver.read();
+        let archiver = self.ext.wal_archiver.read();
         (archiver.is_enabled(), archiver.segment_count(), archiver.total_bytes())
     }
 
@@ -880,10 +901,10 @@ impl StorageEngine {
     /// Call this after construction if you have a `[cdc]` config section.
     pub fn configure_cdc(&self, enabled: bool, buffer_size: usize) {
         if enabled {
-            self.cdc_manager.set_enabled(true);
+            self.ext.cdc_manager.set_enabled(true);
             tracing::info!("CDC enabled (buffer_size={})", buffer_size);
         } else {
-            self.cdc_manager.set_enabled(false);
+            self.ext.cdc_manager.set_enabled(false);
             tracing::info!("CDC disabled by configuration");
         }
     }
@@ -899,16 +920,26 @@ impl StorageEngine {
     }
 
     /// Number of OLTP write-path columnstore violations (should be 0 on Primary).
+    #[cfg(feature = "columnstore")]
     pub fn write_path_columnstore_violation_count(&self) -> u64 {
         self.write_path_columnstore_violations
             .load(AtomicOrdering::Relaxed)
     }
 
+    /// Always 0 when columnstore feature is disabled.
+    #[cfg(not(feature = "columnstore"))]
+    pub fn write_path_columnstore_violation_count(&self) -> u64 { 0 }
+
     /// Number of OLTP write-path disk-rowstore violations (should be 0 on Primary).
+    #[cfg(feature = "disk_rowstore")]
     pub fn write_path_disk_violation_count(&self) -> u64 {
         self.write_path_disk_violations
             .load(AtomicOrdering::Relaxed)
     }
+
+    /// Always 0 when disk_rowstore feature is disabled.
+    #[cfg(not(feature = "disk_rowstore"))]
+    pub fn write_path_disk_violation_count(&self) -> u64 { 0 }
 
     /// Set the write-path enforcement level.
     /// Call this after `set_node_role` to configure production enforcement.
@@ -947,6 +978,7 @@ impl StorageEngine {
         Ok(Self {
             node_role: NodeRole::Standalone,
             tables: DashMap::new(),
+            #[cfg(feature = "columnstore")]
             columnstore_tables: DashMap::new(),
             #[cfg(feature = "disk_rowstore")]
             disk_tables: DashMap::new(),
@@ -970,21 +1002,15 @@ impl StorageEngine {
             online_ddl: OnlineDdlManager::new(),
             internal_txn_counter: AtomicU64::new(1u64 << 60),
             replica_ack_tracker: ReplicaAckTracker::new(),
+            #[cfg(feature = "columnstore")]
             write_path_columnstore_violations: AtomicU64::new(0),
+            #[cfg(feature = "disk_rowstore")]
             write_path_disk_violations: AtomicU64::new(0),
             write_path_enforcement: WritePathEnforcement::Warn,
             lsm_sync_writes: false,
-            rls_manager: RwLock::new(RlsPolicyManager::new()),
-            key_manager: RwLock::new(KeyManager::disabled()),
-            partition_manager: RwLock::new(PartitionManager::new()),
-            wal_archiver: RwLock::new(WalArchiver::disabled()),
-            cdc_manager: CdcManager::new(DEFAULT_CDC_BUFFER_SIZE),
             ustm: Self::default_ustm(),
             txn_write_bytes: DashMap::new(),
-            cold_store: Arc::new(crate::cold_store::ColdStore::new_in_memory()),
-            intern_pool: Arc::new(crate::cold_store::StringInternPool::new()),
-            tenant_registry: Arc::new(TenantRegistry::new()),
-            resource_meter: Arc::new(ResourceMeter::new()),
+            ext: EnterpriseExtensions::default(),
         })
     }
 
@@ -993,6 +1019,7 @@ impl StorageEngine {
         Self {
             node_role: NodeRole::Standalone,
             tables: DashMap::new(),
+            #[cfg(feature = "columnstore")]
             columnstore_tables: DashMap::new(),
             #[cfg(feature = "disk_rowstore")]
             disk_tables: DashMap::new(),
@@ -1016,21 +1043,15 @@ impl StorageEngine {
             online_ddl: OnlineDdlManager::new(),
             internal_txn_counter: AtomicU64::new(1u64 << 60),
             replica_ack_tracker: ReplicaAckTracker::new(),
+            #[cfg(feature = "columnstore")]
             write_path_columnstore_violations: AtomicU64::new(0),
+            #[cfg(feature = "disk_rowstore")]
             write_path_disk_violations: AtomicU64::new(0),
             write_path_enforcement: WritePathEnforcement::Warn,
             lsm_sync_writes: false,
-            rls_manager: RwLock::new(RlsPolicyManager::new()),
-            key_manager: RwLock::new(KeyManager::disabled()),
-            partition_manager: RwLock::new(PartitionManager::new()),
-            wal_archiver: RwLock::new(WalArchiver::disabled()),
-            cdc_manager: CdcManager::new(DEFAULT_CDC_BUFFER_SIZE),
             ustm: Self::default_ustm(),
             txn_write_bytes: DashMap::new(),
-            cold_store: Arc::new(crate::cold_store::ColdStore::new_in_memory()),
-            intern_pool: Arc::new(crate::cold_store::StringInternPool::new()),
-            tenant_registry: Arc::new(TenantRegistry::new()),
-            resource_meter: Arc::new(ResourceMeter::new()),
+            ext: EnterpriseExtensions::default(),
         }
     }
 
@@ -1039,6 +1060,7 @@ impl StorageEngine {
         Self {
             node_role: NodeRole::Standalone,
             tables: DashMap::new(),
+            #[cfg(feature = "columnstore")]
             columnstore_tables: DashMap::new(),
             #[cfg(feature = "disk_rowstore")]
             disk_tables: DashMap::new(),
@@ -1062,21 +1084,15 @@ impl StorageEngine {
             online_ddl: OnlineDdlManager::new(),
             internal_txn_counter: AtomicU64::new(1u64 << 60),
             replica_ack_tracker: ReplicaAckTracker::new(),
+            #[cfg(feature = "columnstore")]
             write_path_columnstore_violations: AtomicU64::new(0),
+            #[cfg(feature = "disk_rowstore")]
             write_path_disk_violations: AtomicU64::new(0),
             write_path_enforcement: WritePathEnforcement::Warn,
             lsm_sync_writes: false,
-            rls_manager: RwLock::new(RlsPolicyManager::new()),
-            key_manager: RwLock::new(KeyManager::disabled()),
-            partition_manager: RwLock::new(PartitionManager::new()),
-            wal_archiver: RwLock::new(WalArchiver::disabled()),
-            cdc_manager: CdcManager::new(DEFAULT_CDC_BUFFER_SIZE),
             ustm: Self::default_ustm(),
             txn_write_bytes: DashMap::new(),
-            cold_store: Arc::new(crate::cold_store::ColdStore::new_in_memory()),
-            intern_pool: Arc::new(crate::cold_store::StringInternPool::new()),
-            tenant_registry: Arc::new(TenantRegistry::new()),
-            resource_meter: Arc::new(ResourceMeter::new()),
+            ext: EnterpriseExtensions::default(),
         }
     }
 
@@ -1490,19 +1506,25 @@ impl StorageEngine {
         self.memory_tracker.dealloc_write_buffer(ws_bytes);
         self.memory_tracker.alloc_mvcc(ws_bytes);
 
+        // CP-D: WAL commit record MUST be durable BEFORE MVCC visibility.
+        // This is the Write-Ahead Logging invariant: if we crash after this
+        // point, recovery replays the commit. If we crash before, the txn
+        // is rolled back — and no reader ever saw the committed data.
+        self.append_and_flush_wal(&WalRecord::CommitTxnLocal { txn_id, commit_ts })?;
+
+        // CP-V: Apply to MVCC — makes writes visible to concurrent readers.
         // Commit-time unique constraint re-validation + MVCC commit + index update.
-        // If validation fails, abort the write-set and propagate the error.
+        // If validation fails, compensate with an abort WAL record.
         if let Err(e) = self.apply_commit_to_write_set(txn_id, commit_ts, &write_set) {
-            // Undo the accounting transition
             self.memory_tracker.dealloc_mvcc(ws_bytes);
             self.apply_abort_to_write_set(txn_id, &write_set);
+            // Compensate the durable commit record so recovery also aborts.
+            let _ = self.append_and_flush_wal(&WalRecord::AbortTxnLocal { txn_id });
             return Err(e);
         }
 
-        self.append_and_flush_wal(&WalRecord::CommitTxnLocal { txn_id, commit_ts })?;
-
-        // CDC: emit commit marker after successful WAL flush
-        self.cdc_manager.emit_commit(txn_id);
+        // CDC: emit commit marker after both durable and visible.
+        self.ext.cdc_manager.emit_commit(txn_id);
 
         Ok(())
     }
@@ -1530,18 +1552,20 @@ impl StorageEngine {
         self.memory_tracker.dealloc_write_buffer(ws_bytes);
         self.memory_tracker.alloc_mvcc(ws_bytes);
 
-        // Commit-time unique constraint re-validation + MVCC commit + index update.
-        // If validation fails, abort the write-set and propagate the error.
+        // CP-D: WAL commit record MUST be durable BEFORE MVCC visibility.
+        self.append_and_flush_wal(&WalRecord::CommitTxnGlobal { txn_id, commit_ts })?;
+
+        // CP-V: Apply to MVCC — makes writes visible to concurrent readers.
         if let Err(e) = self.apply_commit_to_write_set(txn_id, commit_ts, &write_set) {
             self.memory_tracker.dealloc_mvcc(ws_bytes);
             self.apply_abort_to_write_set(txn_id, &write_set);
+            // Compensate the durable commit record so recovery also aborts.
+            let _ = self.append_and_flush_wal(&WalRecord::AbortTxn { txn_id });
             return Err(e);
         }
 
-        self.append_and_flush_wal(&WalRecord::CommitTxnGlobal { txn_id, commit_ts })?;
-
-        // CDC: emit commit marker after successful WAL flush
-        self.cdc_manager.emit_commit(txn_id);
+        // CDC: emit commit marker after both durable and visible.
+        self.ext.cdc_manager.emit_commit(txn_id);
 
         Ok(())
     }
@@ -1563,7 +1587,7 @@ impl StorageEngine {
         self.append_wal(&WalRecord::AbortTxnLocal { txn_id })?;
 
         // CDC: emit rollback marker
-        self.cdc_manager.emit_rollback(txn_id);
+        self.ext.cdc_manager.emit_rollback(txn_id);
 
         Ok(())
     }
@@ -1585,7 +1609,7 @@ impl StorageEngine {
         self.append_wal(&WalRecord::AbortTxnGlobal { txn_id })?;
 
         // CDC: emit rollback marker
-        self.cdc_manager.emit_rollback(txn_id);
+        self.ext.cdc_manager.emit_rollback(txn_id);
 
         Ok(())
     }
@@ -1650,7 +1674,7 @@ impl StorageEngine {
 
     /// Snapshot of cold store metrics.
     pub fn cold_store_metrics(&self) -> crate::cold_store::ColdStoreMetricsSnapshot {
-        self.cold_store.metrics.snapshot()
+        self.ext.cold_store.metrics.snapshot()
     }
 
     /// Hot memory bytes (MVCC bytes tracked by memory tracker).
@@ -1661,12 +1685,12 @@ impl StorageEngine {
 
     /// Cold memory bytes (compressed, in cold store).
     pub fn memory_cold_bytes(&self) -> u64 {
-        self.cold_store.metrics.cold_bytes.load(std::sync::atomic::Ordering::Relaxed)
+        self.ext.cold_store.metrics.cold_bytes.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// String intern pool hit rate.
     pub fn intern_hit_rate(&self) -> f64 {
-        self.intern_pool.hit_rate()
+        self.ext.intern_pool.hit_rate()
     }
 
     // ── Garbage Collection ──────────────────────────────────────────
@@ -1965,16 +1989,14 @@ impl StorageEngine {
                     let mut catalog = engine.catalog.write();
                     let _ = catalog.drop_database(name);
                 }
-                WalRecord::CreateTable { schema_json } => {
-                    let schema: TableSchema = serde_json::from_str(schema_json)
-                        .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                WalRecord::CreateTable { schema } => {
                     // Skip if table already exists (from checkpoint)
                     if engine.tables.contains_key(&schema.id) {
                         continue;
                     }
                     let table = Arc::new(MemTable::new(schema.clone()));
                     engine.tables.insert(schema.id, table);
-                    engine.catalog.write().add_table(schema);
+                    engine.catalog.write().add_table(schema.clone());
                 }
                 WalRecord::DropTable { table_name } => {
                     let mut catalog = engine.catalog.write();
@@ -2082,93 +2104,63 @@ impl StorageEngine {
                 }
                 WalRecord::AlterTable {
                     table_name,
-                    operation_json,
+                    op,
                 } => {
-                    // Parse the operation JSON and replay the schema change
-                    if let Ok(op) = serde_json::from_str::<serde_json::Value>(operation_json) {
-                        let op_type = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
-                        match op_type {
-                            "add_column" => {
-                                if let Some(col_val) = op.get("column") {
-                                    if let Ok(col) =
-                                        serde_json::from_value::<falcon_common::schema::ColumnDef>(
-                                            col_val.clone(),
-                                        )
-                                    {
-                                        let mut catalog = engine.catalog.write();
-                                        if let Some(schema) = catalog.find_table_mut(table_name) {
-                                            let new_id = falcon_common::types::ColumnId(
-                                                schema.columns.len() as u32,
-                                            );
-                                            let mut new_col = col;
-                                            new_col.id = new_id;
-                                            schema.columns.push(new_col);
-                                        }
-                                    }
-                                }
-                            }
-                            "drop_column" => {
-                                if let Some(col_name) =
-                                    op.get("column_name").and_then(|v| v.as_str())
-                                {
-                                    let mut catalog = engine.catalog.write();
-                                    if let Some(schema) = catalog.find_table_mut(table_name) {
-                                        let lower = col_name.to_lowercase();
-                                        if let Some(idx) = schema
-                                            .columns
-                                            .iter()
-                                            .position(|c| c.name.to_lowercase() == lower)
-                                        {
-                                            schema.columns.remove(idx);
-                                            schema.primary_key_columns = schema
-                                                .primary_key_columns
-                                                .iter()
-                                                .filter_map(|&pk| {
-                                                    if pk == idx {
-                                                        None
-                                                    } else if pk > idx {
-                                                        Some(pk - 1)
-                                                    } else {
-                                                        Some(pk)
-                                                    }
-                                                })
-                                                .collect();
-                                        }
-                                    }
-                                }
-                            }
-                            "rename_column" => {
-                                let old_name =
-                                    op.get("old_name").and_then(|v| v.as_str()).unwrap_or("");
-                                let new_name =
-                                    op.get("new_name").and_then(|v| v.as_str()).unwrap_or("");
-                                if !old_name.is_empty() && !new_name.is_empty() {
-                                    let mut catalog = engine.catalog.write();
-                                    if let Some(schema) = catalog.find_table_mut(table_name) {
-                                        let lower = old_name.to_lowercase();
-                                        if let Some(col) = schema
-                                            .columns
-                                            .iter_mut()
-                                            .find(|c| c.name.to_lowercase() == lower)
-                                        {
-                                            col.name = new_name.to_owned();
-                                        }
-                                    }
-                                }
-                            }
-                            "rename_table" => {
-                                if let Some(new_name) = op.get("new_name").and_then(|v| v.as_str())
-                                {
-                                    let mut catalog = engine.catalog.write();
-                                    catalog.rename_table(table_name, new_name);
-                                }
-                            }
-                            _ => {
-                                tracing::warn!(
-                                    "Unknown ALTER TABLE operation during recovery: {}",
-                                    op_type
+                    use crate::wal::AlterTableOp;
+                    match op {
+                        AlterTableOp::AddColumn { column } => {
+                            let mut catalog = engine.catalog.write();
+                            if let Some(schema) = catalog.find_table_mut(table_name) {
+                                let new_id = falcon_common::types::ColumnId(
+                                    schema.columns.len() as u32,
                                 );
+                                let mut new_col = column.clone();
+                                new_col.id = new_id;
+                                schema.columns.push(new_col);
                             }
+                        }
+                        AlterTableOp::DropColumn { column_name } => {
+                            let mut catalog = engine.catalog.write();
+                            if let Some(schema) = catalog.find_table_mut(table_name) {
+                                let lower = column_name.to_lowercase();
+                                if let Some(idx) = schema
+                                    .columns
+                                    .iter()
+                                    .position(|c| c.name.to_lowercase() == lower)
+                                {
+                                    schema.columns.remove(idx);
+                                    schema.primary_key_columns = schema
+                                        .primary_key_columns
+                                        .iter()
+                                        .filter_map(|&pk| {
+                                            if pk == idx {
+                                                None
+                                            } else if pk > idx {
+                                                Some(pk - 1)
+                                            } else {
+                                                Some(pk)
+                                            }
+                                        })
+                                        .collect();
+                                }
+                            }
+                        }
+                        AlterTableOp::RenameColumn { old_name, new_name } => {
+                            let mut catalog = engine.catalog.write();
+                            if let Some(schema) = catalog.find_table_mut(table_name) {
+                                let lower = old_name.to_lowercase();
+                                if let Some(col) = schema
+                                    .columns
+                                    .iter_mut()
+                                    .find(|c| c.name.to_lowercase() == lower)
+                                {
+                                    col.name = new_name.clone();
+                                }
+                            }
+                        }
+                        AlterTableOp::RenameTable { new_name } => {
+                            let mut catalog = engine.catalog.write();
+                            catalog.rename_table(table_name, new_name);
                         }
                     }
                 }
@@ -2261,20 +2253,12 @@ impl StorageEngine {
                     let mut catalog = engine.catalog.write();
                     let _ = catalog.drop_role(name);
                 }
-                WalRecord::AlterRole { name, options_json } => {
-                    #[derive(serde::Deserialize)]
-                    struct AlterOpts {
-                        password: Option<Option<String>>,
-                        can_login: Option<bool>,
-                        is_superuser: Option<bool>,
-                        can_create_db: Option<bool>,
-                        can_create_role: Option<bool>,
-                    }
-                    if let Ok(opts) = serde_json::from_str::<AlterOpts>(options_json) {
+                WalRecord::AlterRole { name, opts } => {
+                    {
                         let mut catalog = engine.catalog.write();
                         let _ = catalog.alter_role(
                             name,
-                            opts.password,
+                            opts.password.clone(),
                             opts.can_login,
                             opts.is_superuser,
                             opts.can_create_db,

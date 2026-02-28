@@ -15,7 +15,8 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
             let now = chrono::Utc::now();
             let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
                 .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or(chrono::NaiveDate::MIN));
-            let days = (now.date_naive() - epoch).num_days() as i32;
+            let days = i32::try_from((now.date_naive() - epoch).num_days())
+                .map_err(|_| ExecutionError::NumericOverflow)?;
             Ok(Datum::Date(days))
         }
         ScalarFunc::CurrentTime => {
@@ -36,7 +37,7 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
             let ts_us = match args.get(1) {
                 Some(Datum::Timestamp(us))
                 | Some(Datum::Int64(us)) => *us,
-                Some(Datum::Date(days)) => i64::from(*days) * 86400 * 1_000_000,
+                Some(Datum::Date(days)) => i64::from(*days).checked_mul(86_400_000_000).ok_or(ExecutionError::NumericOverflow)?,
                 Some(Datum::Int32(us)) => i64::from(*us),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
@@ -80,7 +81,7 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
             let ts_us = match args.get(1) {
                 Some(Datum::Timestamp(us))
                 | Some(Datum::Int64(us)) => *us,
-                Some(Datum::Date(days)) => i64::from(*days) * 86400 * 1_000_000,
+                Some(Datum::Date(days)) => i64::from(*days).checked_mul(86_400_000_000).ok_or(ExecutionError::NumericOverflow)?,
                 Some(Datum::Int32(us)) => i64::from(*us),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
@@ -134,7 +135,7 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
             let ts_us = match args.first() {
                 Some(Datum::Timestamp(us))
                 | Some(Datum::Int64(us)) => *us,
-                Some(Datum::Date(days)) => i64::from(*days) * 86400 * 1_000_000,
+                Some(Datum::Date(days)) => i64::from(*days).checked_mul(86_400_000_000).ok_or(ExecutionError::NumericOverflow)?,
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(

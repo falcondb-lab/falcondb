@@ -30,9 +30,9 @@
 > - ❌ Not HTAP — no analytical workloads
 > - ❌ Not full PG — [see unsupported list below](#not-supported)
 
-FalconDB provides stable OLTP, fast/slow-path transactions, WAL-based
-primary–replica replication with gRPC streaming, promote/failover, MVCC
-garbage collection, and reproducible benchmarks.
+FalconDB provides OLTP with fast/slow-path transactions, WAL-based primary–replica
+replication (gRPC streaming), promote/failover, MVCC garbage collection, and
+reproducible benchmarks.
 
 ### Deterministic Commit Guarantee (DCG)
 
@@ -142,7 +142,7 @@ cargo build --release --workspace
 # Build with LSM storage engine enabled
 cargo build --release -p falcon_server --features lsm
 
-# Run tests (2,643+ tests across 16 crates + root integration)
+# Run tests (3,972 tests across 16 crates + root integration)
 cargo test --workspace
 
 # Lint
@@ -714,7 +714,7 @@ cargo run -p falcon_server -- --print-default-config > falcon.toml
 
 ## Roadmap
 
-All milestones through v1.2 are released. Current test count: **2,643+** across 16 crates.
+All milestones through v1.2 are released. Current test count: **3,972** across 16 crates.
 
 | Milestone | Highlights |
 |-----------|------------|
@@ -774,7 +774,7 @@ Results are written to `bench_out/<timestamp>/` with logs, JSON metrics, and a M
 ## Testing
 
 ```bash
-# Run all tests (2,643+ total)
+# Run all tests (3,972 total)
 cargo test --workspace
 
 # By crate (key ones)

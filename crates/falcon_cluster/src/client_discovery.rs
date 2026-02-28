@@ -12,6 +12,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use tokio_util::sync::CancellationToken;
+
 use falcon_common::types::{NodeId, ShardId};
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -127,15 +129,15 @@ pub enum TopologyChangeType {
 
 /// Registered subscriber info.
 struct Subscriber {
-    _id: SubscriptionId,
+    id: SubscriptionId,
     /// Client-reported epoch at subscription time.
-    _client_epoch: u64,
+    client_epoch: u64,
     /// Pending events not yet delivered.
     pending_events: Vec<TopologyChangeEvent>,
     /// Maximum pending events before oldest are dropped.
     max_pending: usize,
     /// When this subscription was created.
-    _created_at: Instant,
+    created_at: Instant,
     /// When events were last polled.
     last_poll: Instant,
     /// Whether this subscription is still active.
@@ -193,11 +195,11 @@ impl TopologySubscriptionManager {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let now = Instant::now();
         let sub = Subscriber {
-            _id: id,
-            _client_epoch: client_epoch,
+            id,
+            client_epoch,
             pending_events: Vec::new(),
             max_pending: 100,
-            _created_at: now,
+            created_at: now,
             last_poll: now,
             active: true,
         };
@@ -267,6 +269,12 @@ impl TopologySubscriptionManager {
         let mut deactivated = 0usize;
         for sub in subs.values_mut() {
             if sub.active && now.duration_since(sub.last_poll) > timeout {
+                tracing::debug!(
+                    sub_id = sub.id,
+                    client_epoch = sub.client_epoch,
+                    age_secs = sub.created_at.elapsed().as_secs(),
+                    "evicting idle topology subscriber",
+                );
                 sub.active = false;
                 deactivated += 1;
             }
@@ -293,6 +301,46 @@ impl TopologySubscriptionManager {
     pub fn epoch(&self) -> u64 {
         self.current_epoch.load(Ordering::Relaxed)
     }
+
+    /// Spawn a background task that periodically evicts idle subscriptions.
+    ///
+    /// Runs every `idle_timeout / 2` to catch stale subscriptions promptly.
+    /// Returns a handle that stops the evictor when dropped.
+    pub fn spawn_evictor(
+        self: &Arc<Self>,
+        cancel: CancellationToken,
+    ) -> SubscriptionEvictorHandle {
+        let mgr = Arc::clone(self);
+        let interval = mgr.idle_timeout / 2;
+        let token = cancel.clone();
+        let handle = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(interval);
+            loop {
+                tokio::select! {
+                    _ = token.cancelled() => {
+                        tracing::info!("topology subscription evictor shutting down");
+                        break;
+                    }
+                    _ = tick.tick() => {
+                        let evicted = mgr.evict_idle();
+                        if evicted > 0 {
+                            tracing::debug!(evicted, "evicted idle topology subscriptions");
+                        }
+                    }
+                }
+            }
+        });
+        SubscriptionEvictorHandle {
+            _cancel: cancel,
+            _join: handle,
+        }
+    }
+}
+
+/// Handle returned by [`TopologySubscriptionManager::spawn_evictor`].
+pub struct SubscriptionEvictorHandle {
+    _cancel: CancellationToken,
+    _join: tokio::task::JoinHandle<()>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -313,11 +361,11 @@ pub struct ClientRoutingTable {
 /// A cached route entry.
 #[derive(Debug, Clone)]
 struct CachedRoute {
-    _shard_id: ShardId,
-    _leader_node: NodeId,
+    shard_id: ShardId,
+    leader_node: NodeId,
     leader_addr: String,
-    _leader_epoch: u64,
-    _cached_at: Instant,
+    leader_epoch: u64,
+    cached_at: Instant,
 }
 
 /// Routing table metrics.
@@ -358,11 +406,11 @@ impl ClientRoutingTable {
             routes.insert(
                 entry.shard_id.0,
                 CachedRoute {
-                    _shard_id: entry.shard_id,
-                    _leader_node: entry.leader_node,
+                    shard_id: entry.shard_id,
+                    leader_node: entry.leader_node,
                     leader_addr: entry.leader_addr.clone(),
-                    _leader_epoch: entry.leader_epoch,
-                    _cached_at: now,
+                    leader_epoch: entry.leader_epoch,
+                    cached_at: now,
                 },
             );
         }
@@ -374,6 +422,7 @@ impl ClientRoutingTable {
     pub fn get_leader(&self, shard_id: ShardId) -> Option<String> {
         let routes = self.routes.read().unwrap_or_else(|e| e.into_inner());
         if let Some(route) = routes.get(&shard_id.0) {
+            debug_assert_eq!(route.shard_id, shard_id, "routing table key/value shard_id mismatch");
             self.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
             Some(route.leader_addr.clone())
         } else {
@@ -390,18 +439,32 @@ impl ClientRoutingTable {
     }
 
     /// Update a single shard's leader (from NOT_LEADER hint).
+    /// Ignores updates with a stale epoch to prevent ABA routing.
     pub fn update_leader(&self, shard_id: ShardId, new_leader: NodeId, new_addr: String, new_epoch: u64) {
         let mut routes = self.routes.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = routes.get(&shard_id.0) {
+            if new_epoch < existing.leader_epoch {
+                return; // stale update — ignore
+            }
+        }
         routes.insert(
             shard_id.0,
             CachedRoute {
-                _shard_id: shard_id,
-                _leader_node: new_leader,
+                shard_id,
+                leader_node: new_leader,
                 leader_addr: new_addr,
-                _leader_epoch: new_epoch,
-                _cached_at: Instant::now(),
+                leader_epoch: new_epoch,
+                cached_at: Instant::now(),
             },
         );
+    }
+
+    /// Get detailed route info for a shard (leader node, epoch, cache age).
+    pub fn get_route_detail(&self, shard_id: ShardId) -> Option<(NodeId, String, u64, Duration)> {
+        let routes = self.routes.read().unwrap_or_else(|e| e.into_inner());
+        routes.get(&shard_id.0).map(|r| {
+            (r.leader_node, r.leader_addr.clone(), r.leader_epoch, r.cached_at.elapsed())
+        })
     }
 
     /// Current cached epoch.
@@ -516,9 +579,11 @@ impl NotLeaderRedirector {
         }
 
         // If we have a leader hint, apply it immediately.
+        // Use current epoch + 1 since NOT_LEADER implies a newer leadership than cached.
         if let Some((node_id, addr)) = leader_hint {
+            let new_epoch = self.routing_table.epoch() + 1;
             self.routing_table
-                .update_leader(shard_id, node_id, addr.clone(), 0);
+                .update_leader(shard_id, node_id, addr.clone(), new_epoch);
             self.metrics.leader_hints_applied.fetch_add(1, Ordering::Relaxed);
             self.metrics.redirect_successes.fetch_add(1, Ordering::Relaxed);
             return RedirectOutcome::Redirected {

@@ -429,7 +429,9 @@ impl HAReplicaGroup {
             FalconError::Internal(format!("failover pre-flight rejected: {reason}"))
         })?;
 
-        let best_idx = best_idx.unwrap(); // safe: pre-flight checks candidate_idx
+        let best_idx = best_idx.ok_or_else(|| {
+            FalconError::Internal("no promotion candidate available after pre-flight".into())
+        })?;
 
         // Begin promotion with safety guard
         self.promotion_guard.begin(primary_lsn);

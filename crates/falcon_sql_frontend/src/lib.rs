@@ -7,6 +7,8 @@ pub mod parser;
 pub mod resolve_function;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_proptest;
 pub mod types;
 pub mod var_registry;
 

@@ -80,11 +80,23 @@ impl ProjAccum {
                     AggFunc::Sum => {
                         match val {
                             Datum::Int32(v) => {
-                                *sum_i += i64::from(*v);
+                                if let Some(s) = sum_i.checked_add(i64::from(*v)) {
+                                    *sum_i = s;
+                                } else {
+                                    *sum_f += *sum_i as f64 + f64::from(*v);
+                                    *sum_i = 0;
+                                    *has_float = true;
+                                }
                                 *has_int = true;
                             }
                             Datum::Int64(v) => {
-                                *sum_i += v;
+                                if let Some(s) = sum_i.checked_add(*v) {
+                                    *sum_i = s;
+                                } else {
+                                    *sum_f += *sum_i as f64 + *v as f64;
+                                    *sum_i = 0;
+                                    *has_float = true;
+                                }
                                 *has_int = true;
                             }
                             Datum::Float64(v) => {
@@ -165,10 +177,17 @@ impl ProjAccum {
             ) => Self::Agg {
                 func,
                 count: c1 + c2,
-                sum_i: s1 + s2,
-                sum_f: sf1 + sf2,
+                sum_i: s1.checked_add(s2).unwrap_or_else(|| {
+                    // Overflow: will be handled in result() via has_float
+                    0
+                }),
+                sum_f: sf1 + sf2 + if s1.checked_add(s2).is_none() {
+                    s1 as f64 + s2 as f64
+                } else {
+                    0.0
+                },
                 has_int: hi1 || hi2,
-                has_float: hf1 || hf2,
+                has_float: hf1 || hf2 || s1.checked_add(s2).is_none(),
                 min_val: match (mn1, mn2) {
                     (None, b) => b,
                     (a, None) => a,
@@ -488,7 +507,7 @@ impl Executor {
                         }
                         let a = Self::create_accums(projections);
                         state.groups.insert(state.key_buf.clone(), (a, true));
-                        state.groups.get_mut(state.key_buf.as_slice()).unwrap()
+                        state.groups.get_mut(state.key_buf.as_slice()).expect("BUG: key missing immediately after insert")
                     };
 
                 let first = *is_first;

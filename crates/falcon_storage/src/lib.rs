@@ -39,6 +39,10 @@ pub mod wal_win_async;
 // ── Enterprise stubs (always compiled for handler compat, disabled at runtime) ──
 pub mod cdc;
 pub mod encryption;
+#[cfg(feature = "online_ddl_full")]
+pub mod online_ddl;
+#[cfg(not(feature = "online_ddl_full"))]
+#[path = "online_ddl_stub.rs"]
 pub mod online_ddl;
 pub mod pitr;
 pub mod resource_isolation;
@@ -56,7 +60,8 @@ pub mod lsm_table;
 
 // ── Stub for columnstore so engine.rs compiles without the feature ──
 #[cfg(not(feature = "columnstore"))]
-pub mod columnstore_stub;
+#[path = "columnstore_stub.rs"]
+pub mod columnstore;
 
 #[cfg(test)]
 mod tests;
@@ -105,8 +110,16 @@ pub(crate) fn eval_cast_datum(
     match target {
         "int" => match &val {
             Datum::Int32(_) => Ok(val),
-            Datum::Int64(v) => Ok(Datum::Int32(*v as i32)),
-            Datum::Float64(v) => Ok(Datum::Int32(*v as i32)),
+            Datum::Int64(v) => i32::try_from(*v)
+                .map(Datum::Int32)
+                .map_err(|_| "Numeric value out of range for int".to_string()),
+            Datum::Float64(v) => {
+                if v.is_nan() || v.is_infinite() || *v < (i32::MIN as f64) || *v > (i32::MAX as f64) {
+                    Err("Numeric value out of range for int".to_string())
+                } else {
+                    Ok(Datum::Int32(*v as i32))
+                }
+            }
             Datum::Text(s) => s
                 .parse::<i32>()
                 .map(Datum::Int32)
@@ -117,7 +130,13 @@ pub(crate) fn eval_cast_datum(
         "bigint" => match &val {
             Datum::Int64(_) => Ok(val),
             Datum::Int32(v) => Ok(Datum::Int64(i64::from(*v))),
-            Datum::Float64(v) => Ok(Datum::Int64(*v as i64)),
+            Datum::Float64(v) => {
+                if v.is_nan() || v.is_infinite() || *v < (i64::MIN as f64) || *v > (i64::MAX as f64) {
+                    Err("Numeric value out of range for bigint".to_string())
+                } else {
+                    Ok(Datum::Int64(*v as i64))
+                }
+            }
             Datum::Text(s) => s
                 .parse::<i64>()
                 .map(Datum::Int64)
@@ -149,7 +168,9 @@ pub(crate) fn eval_cast_datum(
         "timestamp" => match &val {
             Datum::Timestamp(_) => Ok(val),
             Datum::Date(days) => {
-                let us = i64::from(*days) * 86400 * 1_000_000;
+                let us = i64::from(*days)
+                    .checked_mul(86_400_000_000)
+                    .ok_or_else(|| "Date value out of range for timestamp".to_string())?;
                 Ok(Datum::Timestamp(us))
             }
             Datum::Int64(us) => Ok(Datum::Timestamp(*us)),
@@ -159,7 +180,8 @@ pub(crate) fn eval_cast_datum(
         "date" => match &val {
             Datum::Date(_) => Ok(val),
             Datum::Timestamp(us) => {
-                let days = (*us / (86400 * 1_000_000)) as i32;
+                let days = i32::try_from(*us / 86_400_000_000)
+                    .map_err(|_| "Timestamp value out of range for date".to_string())?;
                 Ok(Datum::Date(days))
             }
             Datum::Text(s) => {
@@ -183,7 +205,9 @@ pub(crate) fn eval_cast_datum(
                 }
             }
             Datum::Int32(d) => Ok(Datum::Date(*d)),
-            Datum::Int64(d) => Ok(Datum::Date(*d as i32)),
+            Datum::Int64(d) => i32::try_from(*d)
+                .map(Datum::Date)
+                .map_err(|_| "Numeric value out of range for date".to_string()),
             _ => Err(format!("Cannot cast {val:?} to date")),
         },
         "jsonb" => match &val {

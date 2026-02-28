@@ -11,9 +11,11 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{self, Write as _};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Instant, SystemTime};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use parking_lot::{Mutex, RwLock};
+use tokio_util::sync::CancellationToken;
 
 use falcon_common::types::NodeId;
 
@@ -53,8 +55,8 @@ pub struct MigrationTask {
     pub state: MigrationState,
     pub bytes_migrated: u64,
     pub total_bytes: u64,
-    pub started_at: Option<Instant>,
-    pub completed_at: Option<Instant>,
+    pub started_at: Option<SystemTime>,
+    pub completed_at: Option<SystemTime>,
 }
 
 /// Migration state machine.
@@ -172,7 +174,7 @@ impl AutoRebalancer {
         for (from_node, shards) in &mut overloaded {
             while shards.len() > ideal {
                 if let Some((to_node, remaining)) = underloaded.iter_mut().find(|(_, r)| *r > 0) {
-                    let shard_id = shards.pop().unwrap();
+                    let shard_id = shards.pop().expect("BUG: pop failed while shards.len() > ideal");
                     plan.push((shard_id, *from_node, *to_node));
                     *remaining -= 1;
                 } else {
@@ -209,24 +211,29 @@ impl AutoRebalancer {
     }
 
     /// Advance a migration to the next state.
+    /// Returns false if the task is not found or the transition is invalid.
     pub fn advance(&self, task_id: u64, new_state: MigrationState) -> bool {
         let mut tasks = self.tasks.write();
         if let Some(task) = tasks.iter_mut().find(|t| t.task_id == task_id) {
             let old = task.state;
+            // Validate state transition
+            if !Self::is_valid_transition(old, new_state) {
+                return false;
+            }
             task.state = new_state;
             match new_state {
                 MigrationState::Preparing => {
-                    task.started_at = Some(Instant::now());
+                    task.started_at = Some(SystemTime::now());
                     self.active_count.fetch_add(1, Ordering::Relaxed);
                 }
                 MigrationState::Completed => {
-                    task.completed_at = Some(Instant::now());
+                    task.completed_at = Some(SystemTime::now());
                     self.active_count.fetch_sub(1, Ordering::Relaxed);
                     self.metrics.migrations_completed.fetch_add(1, Ordering::Relaxed);
                     self.metrics.bytes_migrated.fetch_add(task.bytes_migrated, Ordering::Relaxed);
                 }
                 MigrationState::Failed | MigrationState::Cancelled => {
-                    task.completed_at = Some(Instant::now());
+                    task.completed_at = Some(SystemTime::now());
                     if old != MigrationState::Pending {
                         self.active_count.fetch_sub(1, Ordering::Relaxed);
                     }
@@ -240,6 +247,30 @@ impl AutoRebalancer {
         } else {
             false
         }
+    }
+
+    /// Check if a state transition is valid according to the migration state machine.
+    /// Valid forward transitions: Pending→Preparing→Copying→CatchingUp→Cutover→Completed.
+    /// Failed/Cancelled can be reached from any non-terminal state.
+    fn is_valid_transition(from: MigrationState, to: MigrationState) -> bool {
+        matches!(
+            (from, to),
+            (MigrationState::Pending, MigrationState::Preparing)
+                | (MigrationState::Preparing, MigrationState::Copying)
+                | (MigrationState::Copying, MigrationState::CatchingUp)
+                | (MigrationState::CatchingUp, MigrationState::Cutover)
+                | (MigrationState::Cutover, MigrationState::Completed)
+                // Failed/Cancelled allowed from any non-terminal state
+                | (MigrationState::Pending, MigrationState::Cancelled)
+                | (MigrationState::Preparing, MigrationState::Failed)
+                | (MigrationState::Preparing, MigrationState::Cancelled)
+                | (MigrationState::Copying, MigrationState::Failed)
+                | (MigrationState::Copying, MigrationState::Cancelled)
+                | (MigrationState::CatchingUp, MigrationState::Failed)
+                | (MigrationState::CatchingUp, MigrationState::Cancelled)
+                | (MigrationState::Cutover, MigrationState::Failed)
+                | (MigrationState::Cutover, MigrationState::Cancelled)
+        )
     }
 
     /// Update migration progress.
@@ -436,7 +467,7 @@ impl CapacityPlanner {
         let capacity = self.capacities.read().get(&resource).copied().unwrap_or(f64::MAX);
 
         // Linear regression: y = a + b*x (x = hours since first sample)
-        let first_ts = samples.front().unwrap().timestamp as f64;
+        let first_ts = samples.front().expect("BUG: empty samples after len>=2 check").timestamp as f64;
         let n = samples.len() as f64;
         let mut sum_x = 0.0f64;
         let mut sum_y = 0.0f64;
@@ -461,7 +492,7 @@ impl CapacityPlanner {
             (a, b)
         };
 
-        let last = samples.back().unwrap();
+        let last = samples.back().expect("BUG: empty samples after len>=2 check");
         let current_x = (last.timestamp as f64 - first_ts) / 3600.0;
         let predicted_value = b.mul_add(current_x + horizon_hours, a);
         let time_to_exhaustion = if b > 1e-10 {
@@ -537,6 +568,50 @@ impl CapacityPlanner {
     pub fn alert_history(&self, limit: usize) -> Vec<CapacityAlert> {
         self.alerts.lock().iter().rev().take(limit).cloned().collect()
     }
+
+    /// Spawn a background evaluator that periodically runs `evaluate_alerts()`.
+    ///
+    /// Alerts are logged via `tracing`.
+    pub fn spawn_alert_evaluator(
+        self: &Arc<Self>,
+        interval: Duration,
+        cancel: CancellationToken,
+    ) -> CapacityEvaluatorHandle {
+        let planner = Arc::clone(self);
+        let token = cancel.clone();
+        let handle = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(interval);
+            loop {
+                tokio::select! {
+                    _ = token.cancelled() => {
+                        tracing::info!("capacity alert evaluator shutting down");
+                        break;
+                    }
+                    _ = tick.tick() => {
+                        let alerts = planner.evaluate_alerts();
+                        for alert in &alerts {
+                            tracing::warn!(
+                                resource = %alert.resource,
+                                level = %alert.level,
+                                message = %alert.message,
+                                "capacity alert",
+                            );
+                        }
+                    }
+                }
+            }
+        });
+        CapacityEvaluatorHandle {
+            _cancel: cancel,
+            _join: handle,
+        }
+    }
+}
+
+/// Handle returned by [`CapacityPlanner::spawn_alert_evaluator`].
+pub struct CapacityEvaluatorHandle {
+    _cancel: CancellationToken,
+    _join: tokio::task::JoinHandle<()>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -725,7 +800,9 @@ impl SloEngine {
                 let mut sorted = window_samples;
                 sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 let pct = if *metric == SloMetricType::LatencyP99 { 0.99 } else { 0.999 };
-                let idx = ((sorted.len() as f64 * pct).ceil() as usize).min(sorted.len()) - 1;
+                let idx = ((sorted.len() as f64 * pct).ceil() as usize)
+                    .min(sorted.len())
+                    .saturating_sub(1);
                 sorted[idx]
             }
             SloMetricType::ReplicationLag => {
@@ -909,6 +986,9 @@ impl IncidentTimeline {
     }
 
     /// Create an incident from recent events.
+    ///
+    /// Lock ordering: events lock first, then incidents lock. This matches
+    /// `auto_correlate` to prevent deadlocks.
     pub fn create_incident(
         &self,
         title: &str,
@@ -920,25 +1000,29 @@ impl IncidentTimeline {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+
+        // Correlate events first (events lock)
+        {
+            let mut events = self.events.lock();
+            for eid in &event_ids {
+                if let Some(e) = events.iter_mut().find(|e| e.id == *eid) {
+                    e.incident_id = Some(id);
+                }
+            }
+        }
+
+        // Then push incident (incidents lock)
         let incident = Incident {
             id,
             title: title.to_owned(),
             severity,
             started_at: ts,
             resolved_at: None,
-            event_ids: event_ids.clone(),
+            event_ids,
             root_cause: None,
             impact: None,
         };
         self.incidents.write().push(incident);
-
-        // Correlate events
-        let mut events = self.events.lock();
-        for eid in &event_ids {
-            if let Some(e) = events.iter_mut().find(|e| e.id == *eid) {
-                e.incident_id = Some(id);
-            }
-        }
         self.metrics.incidents_created.fetch_add(1, Ordering::Relaxed);
         id
     }
@@ -962,33 +1046,62 @@ impl IncidentTimeline {
     }
 
     /// Auto-correlate: find recent high-severity events and group them.
+    ///
+    /// Lock ordering: we must never hold `events` while acquiring `incidents`
+    /// because `create_incident` acquires them in reverse order. Instead we
+    /// atomically collect **and mark** events under the events lock (preventing
+    /// the TOCTOU race), then drop the lock before touching `incidents`.
     pub fn auto_correlate(&self) -> Option<u64> {
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
         let cutoff = now.saturating_sub(self.correlation_window_secs);
-        let events = self.events.lock();
-        let uncorrelated: Vec<u64> = events.iter()
-            .filter(|e| {
-                e.timestamp >= cutoff
-                    && e.incident_id.is_none()
-                    && e.severity >= IncidentSeverity::High
-            })
-            .map(|e| e.id)
-            .collect();
-        drop(events);
 
-        if uncorrelated.len() >= 2 {
-            let incident_id = self.create_incident(
-                "Auto-correlated incident",
-                IncidentSeverity::High,
-                uncorrelated,
-            );
-            Some(incident_id)
-        } else {
-            None
-        }
+        // Reserve the incident_id early so we can stamp events atomically.
+        let incident_id = self.next_incident_id.fetch_add(1, Ordering::Relaxed);
+
+        let uncorrelated = {
+            let mut events = self.events.lock();
+            let ids: Vec<u64> = events.iter()
+                .filter(|e| {
+                    e.timestamp >= cutoff
+                        && e.incident_id.is_none()
+                        && e.severity >= IncidentSeverity::High
+                })
+                .map(|e| e.id)
+                .collect();
+
+            if ids.len() < 2 {
+                // Nothing to correlate — "return" the unused id (harmless gap).
+                return None;
+            }
+
+            // Mark events while we still hold the lock (TOCTOU-safe).
+            for eid in &ids {
+                if let Some(e) = events.iter_mut().find(|e| e.id == *eid) {
+                    e.incident_id = Some(incident_id);
+                }
+            }
+            ids
+            // events lock dropped here
+        };
+
+        // Now safe to acquire incidents lock (no events lock held).
+        let incident = Incident {
+            id: incident_id,
+            title: "Auto-correlated incident".to_owned(),
+            severity: IncidentSeverity::High,
+            started_at: now,
+            resolved_at: None,
+            event_ids: uncorrelated,
+            root_cause: None,
+            impact: None,
+        };
+        self.incidents.write().push(incident);
+        self.metrics.incidents_created.fetch_add(1, Ordering::Relaxed);
+
+        Some(incident_id)
     }
 
     /// Get recent events.

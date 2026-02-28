@@ -6,11 +6,13 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use falcon_cluster::{DistributedQueryEngine, ShardedEngine};
+use falcon_cluster::{DistributedQueryEngine, RaftShardCoordinator, ShardedEngine};
 use falcon_common::config::{FalconConfig, NodeRole};
 use falcon_common::types::ShardId;
 use falcon_executor::Executor;
 use falcon_protocol_pg::server::PgServer;
+use falcon_raft::server::{LocalRaftHandle, start_raft_transport_server};
+use falcon_raft::network::GrpcNetworkFactory;
 use falcon_server::shutdown::{self, ShutdownCoordinator, ShutdownReason};
 use falcon_server::service;
 use falcon_storage::engine::StorageEngine;
@@ -677,6 +679,9 @@ async fn run_server_inner(
     // Role-based replication startup
     let mut replica_runner_handle: Option<falcon_cluster::ReplicaRunnerHandle> = None;
     let mut grpc_join_handle: Option<tokio::task::JoinHandle<()>> = None;
+    // Raft coordinator and transport handle (only set for RaftMember role)
+    let mut raft_coordinator: Option<std::sync::Arc<RaftShardCoordinator>> = None;
+    let mut raft_transport_handle: Option<tokio::task::JoinHandle<()>> = None;
     match config.replication.role {
         NodeRole::Primary => {
             let grpc_addr = config.replication.grpc_listen_addr.clone();
@@ -777,6 +782,93 @@ async fn run_server_inner(
         NodeRole::Standalone => {
             tracing::info!("Role: STANDALONE — no replication");
         }
+        NodeRole::RaftMember => {
+            // ── Raft consensus replication path ──────────────────────────────
+            // Validate Raft config before starting.
+            if let Err(e) = config.raft.validate() {
+                anyhow::bail!("Invalid [raft] configuration: {e}");
+            }
+
+            tracing::info!(
+                node_id = config.raft.node_id,
+                node_ids = ?config.raft.node_ids,
+                raft_addr = %config.raft.raft_listen_addr,
+                "Role: RAFT_MEMBER — starting Raft consensus"
+            );
+
+            // Build the shard routing map for the coordinator.
+            let local_node_id = falcon_common::types::NodeId(config.raft.node_id);
+            let shard_map = Arc::new(parking_lot::RwLock::new(
+                falcon_cluster::ShardMap::uniform(num_shards, local_node_id),
+            ));
+
+            // Create one RaftWalGroup per shard.
+            let coordinator = RaftShardCoordinator::new(shard_map.clone());
+
+            for shard_idx in 0..num_shards {
+                let shard_id = ShardId(shard_idx);
+                let group = falcon_cluster::RaftWalGroup::new(
+                    shard_id,
+                    config.raft.node_ids.clone(),
+                    storage.clone(),
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("RaftWalGroup init shard {shard_idx}: {e}"))?;
+                coordinator.register_shard(group);
+            }
+
+            // Wait for leader election on all shards.
+            coordinator
+                .wait_all_leaders_elected(std::time::Duration::from_secs(10))
+                .await
+                .map_err(|e| anyhow::anyhow!("Raft leader election timeout: {e}"))?;
+
+            // Start automatic failover watcher.
+            let poll_interval =
+                std::time::Duration::from_millis(config.raft.failover_poll_interval_ms);
+            coordinator.start_failover_watcher(poll_interval);
+
+            tracing::info!("Raft leader elected; failover watcher running");
+
+            // Wire the Raft gRPC transport server so remote peers can reach this node.
+            // Register shard-0's local Raft node handle for the gRPC transport.
+            let local_handle = LocalRaftHandle::new();
+            if let Some(group) = coordinator.get_shard_group(ShardId(0)) {
+                if let Some(raft_node) = group.raft_group.get_node(config.raft.node_id) {
+                    local_handle.set(raft_node).await;
+                }
+            }
+
+            let raft_listen = config.raft.raft_listen_addr.clone();
+            match start_raft_transport_server(raft_listen.clone(), local_handle).await {
+                Ok(h) => {
+                    tracing::info!("Raft transport server started on {}", raft_listen);
+                    raft_transport_handle = Some(h);
+                }
+                Err(e) => {
+                    anyhow::bail!("Raft transport server failed to start on {raft_listen}: {e}");
+                }
+            }
+
+            // Wire GrpcNetworkFactory peers so remote-node RPCs can be sent.
+            // Peers are specified as "<node_id>=<addr>" in raft.peers.
+            let peers = config.raft.parsed_peers();
+            if !peers.is_empty() {
+                let factory = GrpcNetworkFactory::with_peers(peers.clone());
+                tracing::info!("Raft gRPC peers configured: {:?}", peers);
+                // Store the factory on the coordinator so peer connections
+                // persist for the lifetime of the server.
+                coordinator.set_grpc_network(factory);
+            }
+
+            // Share coordinator with shutdown path.
+            raft_coordinator = Some(coordinator);
+        }
+    }
+
+    // Share Raft coordinator with PgServer for SHOW falcon.raft_stats
+    if let Some(ref coord) = raft_coordinator {
+        pg_server.set_raft_coordinator(coord.clone());
     }
 
     let pg_port = config
@@ -849,6 +941,18 @@ async fn run_server_inner(
         tracing::info!("ReplicaRunner stopped");
     }
 
+    // 1b. Drop Raft coordinator (stops failover watcher and Raft groups)
+    if let Some(coord) = raft_coordinator.take() {
+        tracing::info!("Stopping Raft coordinator...");
+        drop(coord);
+        tracing::info!("Raft coordinator stopped");
+    }
+
+    // 1c. Stop Raft transport server
+    if let Some(h) = raft_transport_handle.take() {
+        h.abort();
+    }
+
     // 2. Ensure global shutdown is signalled (in case PG server exited without signal)
     if !coordinator.is_shutting_down() {
         coordinator.shutdown(ShutdownReason::Requested);
@@ -892,8 +996,9 @@ fn parse_node_role(s: &str) -> Result<NodeRole, String> {
         "primary" => Ok(NodeRole::Primary),
         "replica" => Ok(NodeRole::Replica),
         "analytics" => Ok(NodeRole::Analytics),
+        "raft_member" | "raft" => Ok(NodeRole::RaftMember),
         _ => Err(format!(
-            "Invalid role '{s}': expected standalone, primary, replica, or analytics"
+            "Invalid role '{s}': expected standalone, primary, replica, analytics, or raft_member"
         )),
     }
 }

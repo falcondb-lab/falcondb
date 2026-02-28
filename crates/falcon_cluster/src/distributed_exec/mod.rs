@@ -12,10 +12,12 @@
 pub mod gather;
 pub mod network_stats;
 pub mod scatter;
+pub mod streaming_merge;
 
 // Re-export all public types at the module level for backward compatibility.
 pub use gather::{compare_datums, merge_two_phase_agg};
 pub use scatter::DistributedExecutor;
+pub use streaming_merge::StreamingMergeSort;
 
 use std::sync::Arc;
 

@@ -555,7 +555,6 @@ pub struct ShardConflictTracker {
     /// Per-shard counters: (shard_id → ShardConflictCounters).
     shards: RwLock<HashMap<u64, ShardConflictCounters>>,
     /// Window size for rate calculation.
-    #[allow(dead_code)]
     window: Duration,
 }
 
@@ -563,10 +562,9 @@ struct ShardConflictCounters {
     total_txns: AtomicU64,
     conflict_aborts: AtomicU64,
     timeout_aborts: AtomicU64,
-    #[allow(dead_code)]
     other_aborts: AtomicU64,
     total_lock_wait_us: AtomicU64,
-    #[allow(dead_code)]
+    /// Start of the current measurement window (for windowed rate calculation).
     window_start: Mutex<Instant>,
 }
 
@@ -639,6 +637,33 @@ impl ShardConflictTracker {
         }
     }
 
+    /// Record a non-conflict, non-timeout abort on a shard (e.g. deadlock, user cancel).
+    pub fn record_other_abort(&self, shard_id: u64) {
+        self.ensure_shard(shard_id);
+        let read = self.shards.read();
+        if let Some(c) = read.get(&shard_id) {
+            c.other_aborts.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Reset counters for shards whose measurement window has expired.
+    /// Called periodically by the adaptive concurrency controller to get
+    /// fresh windowed rates instead of cumulative all-time rates.
+    pub fn reset_expired_windows(&self) {
+        let read = self.shards.read();
+        for c in read.values() {
+            let mut ws = c.window_start.lock();
+            if ws.elapsed() >= self.window {
+                c.total_txns.store(0, Ordering::Relaxed);
+                c.conflict_aborts.store(0, Ordering::Relaxed);
+                c.timeout_aborts.store(0, Ordering::Relaxed);
+                c.other_aborts.store(0, Ordering::Relaxed);
+                c.total_lock_wait_us.store(0, Ordering::Relaxed);
+                *ws = Instant::now();
+            }
+        }
+    }
+
     /// Get conflict rate snapshot for a shard.
     pub fn shard_snapshot(&self, shard_id: u64) -> ShardConflictSnapshot {
         let read = self.shards.read();
@@ -647,6 +672,7 @@ impl ShardConflictTracker {
                 let total = c.total_txns.load(Ordering::Relaxed);
                 let conflicts = c.conflict_aborts.load(Ordering::Relaxed);
                 let timeouts = c.timeout_aborts.load(Ordering::Relaxed);
+                let others = c.other_aborts.load(Ordering::Relaxed);
                 ShardConflictSnapshot {
                     shard_id,
                     total_txns: total,
@@ -658,7 +684,7 @@ impl ShardConflictTracker {
                         0.0
                     },
                     abort_rate: if total > 0 {
-                        (conflicts + timeouts) as f64 / total as f64
+                        (conflicts + timeouts + others) as f64 / total as f64
                     } else {
                         0.0
                     },

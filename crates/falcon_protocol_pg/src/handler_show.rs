@@ -68,8 +68,35 @@ impl QueryHandler {
             "falcon.pitr_restore_points" => Some(self.show_falcon_pitr_restore_points()),
             "falcon.tde_status" => Some(self.show_falcon_tde_status()),
             "falcon.tde_keys" => Some(self.show_falcon_tde_keys()),
+            "falcon.raft_stats" => Some(self.show_falcon_raft_stats()),
             _ => None,
         }
+    }
+
+    fn show_falcon_raft_stats(&self) -> Vec<BackendMessage> {
+        let Some(ref coord) = self.raft_coordinator else {
+            return self.single_row_result(
+                vec![("metric", 25, -1), ("value", 25, -1)],
+                vec![vec![Some("raft_enabled".into()), Some("false".into())]],
+            );
+        };
+        let metrics = coord.metrics_snapshot();
+        let mut rows: Vec<Vec<Option<String>>> = vec![
+            vec![Some("raft_enabled".into()), Some("true".into())],
+            vec![Some("shard_count".into()), Some(metrics.shard_count.to_string())],
+            vec![Some("total_proposed".into()), Some(metrics.total_proposed.to_string())],
+        ];
+        for shard in &metrics.shards {
+            rows.push(vec![
+                Some(format!("shard_{}_proposed", shard.shard_id.0)),
+                Some(shard.records_proposed.to_string()),
+            ]);
+            rows.push(vec![
+                Some(format!("shard_{}_applied", shard.shard_id.0)),
+                Some(shard.records_applied.to_string()),
+            ]);
+        }
+        self.single_row_result(vec![("metric", 30, -1), ("value", 25, -1)], rows)
     }
 
     fn show_falcon_pitr_status(&self) -> Vec<BackendMessage> {

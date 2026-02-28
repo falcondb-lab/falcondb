@@ -19,8 +19,7 @@ FalconDB upgrades follow these invariants:
 
 ## Method 1: MSI Upgrade (Recommended)
 
-The MSI supports **major upgrade** — installing a new MSI automatically removes
-the previous version and preserves all data.
+The MSI supports **major upgrade**: installing a new MSI removes the previous version and preserves all data.
 
 ```powershell
 # Interactive
@@ -30,7 +29,7 @@ msiexec /i FalconDB-1.1.0-x64.msi
 msiexec /i FalconDB-1.1.0-x64.msi /qn /l*v upgrade.log
 ```
 
-The MSI will automatically:
+The MSI will:
 1. Stop the FalconDB service
 2. Remove old program files
 3. Install new program files
@@ -102,8 +101,7 @@ psql -h 127.0.0.1 -p 5443 -U falcon -c "SELECT 1"
 
 ## Config Migration
 
-FalconDB configs include a `config_version` field. On upgrade, the config
-schema may change. The migration system handles this automatically:
+FalconDB configs include a `config_version` field. On upgrade, the schema may change. Use the migration system:
 
 ```powershell
 # Check if migration is needed

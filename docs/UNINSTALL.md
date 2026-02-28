@@ -10,8 +10,7 @@ FalconDB strictly separates **program files** from **data**:
 | Windows Service | Registry | **Yes** |
 | Config, Data, Logs | `C:\ProgramData\FalconDB\` | **No** |
 
-This protects production data from accidental removal during uninstall or
-re-install cycles.
+This prevents accidental data removal during uninstall or reinstall.
 
 ## Method 1: MSI Uninstall (Recommended)
 

@@ -14,6 +14,16 @@ pub enum ShardingPolicy {
     /// Hash-based sharding on the specified shard key columns.
     /// Rows are assigned to shards by hashing the shard key values.
     Hash,
+    /// Range-based sharding on the first shard key column.
+    /// Rows are assigned to shards by comparing the shard key value against
+    /// ordered boundary values. Ideal for time-series, log-partitioned, or
+    /// naturally ordered datasets where range scans dominate.
+    ///
+    /// Boundary semantics: `range_bounds` contains N-1 split points for N
+    /// shards.  A row with shard-key value `v` is routed to shard `i` where
+    /// `range_bounds[i-1] <= v < range_bounds[i]` (with implicit -∞ / +∞
+    /// at the ends).
+    Range,
     /// Reference table: fully replicated on every shard.
     /// Ideal for small dimension tables used in JOINs.
     Reference,
@@ -80,9 +90,15 @@ pub struct TableSchema {
     /// Shard key column indices (into `columns`).  Empty = use PK or no sharding.
     #[serde(default)]
     pub shard_key: Vec<usize>,
-    /// Sharding policy: Hash, Reference, or None.
+    /// Sharding policy: Hash, Range, Reference, or None.
     #[serde(default)]
     pub sharding_policy: ShardingPolicy,
+    /// Range partition boundaries (only used when `sharding_policy == Range`).
+    /// Contains N-1 split-point `Datum` values for N shards, in ascending order.
+    /// Shard assignment: row goes to shard `i` where
+    /// `range_bounds[i-1] <= shard_key_value < range_bounds[i]`.
+    #[serde(default)]
+    pub range_bounds: Vec<Datum>,
 }
 
 /// Referential action for foreign key ON DELETE / ON UPDATE.
@@ -122,6 +138,7 @@ impl Default for TableSchema {
             storage_type: StorageType::Rowstore,
             shard_key: Vec::new(),
             sharding_policy: ShardingPolicy::None,
+            range_bounds: Vec::new(),
         }
     }
 }
@@ -163,6 +180,11 @@ impl TableSchema {
     /// Whether this table has an explicit hash sharding policy.
     pub fn is_hash_sharded(&self) -> bool {
         self.sharding_policy == ShardingPolicy::Hash
+    }
+
+    /// Whether this table has an explicit range sharding policy.
+    pub fn is_range_sharded(&self) -> bool {
+        self.sharding_policy == ShardingPolicy::Range
     }
 }
 
@@ -339,13 +361,13 @@ impl Catalog {
     /// Get a reference to the in-memory role catalog.
     pub fn role_catalog(&mut self) -> &RoleCatalog {
         self.ensure_role_catalog();
-        self.role_catalog.as_ref().unwrap()
+        self.role_catalog.as_ref().expect("BUG: ensure_role_catalog did not initialize role_catalog")
     }
 
     /// Get a mutable reference to the in-memory role catalog.
     pub fn role_catalog_mut(&mut self) -> &mut RoleCatalog {
         self.ensure_role_catalog();
-        self.role_catalog.as_mut().unwrap()
+        self.role_catalog.as_mut().expect("BUG: ensure_role_catalog did not initialize role_catalog")
     }
 
     pub const fn next_table_id(&mut self) -> TableId {
@@ -718,7 +740,7 @@ impl Catalog {
         let role_id = entry.id;
 
         self.ensure_role_catalog();
-        let rc = self.role_catalog.as_ref().unwrap();
+        let rc = self.role_catalog.as_ref().expect("BUG: ensure_role_catalog did not initialize role_catalog");
         let effective = rc.effective_roles(RoleId(role_id));
         let effective_ids: Vec<u64> = effective.iter().map(|r| r.0).collect();
 

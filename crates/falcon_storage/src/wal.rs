@@ -29,6 +29,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use falcon_common::datum::OwnedRow;
 use falcon_common::error::StorageError;
+use falcon_common::schema::{ColumnDef, TableSchema};
 use falcon_common::types::{TableId, Timestamp, TxnId};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -61,7 +62,7 @@ impl WalEncryption {
     /// Create from a `KeyManager` + `DekId`. Returns `None` if the DEK
     /// cannot be unwrapped (wrong master key, missing DEK, etc.).
     pub fn from_key_manager(
-        km: &crate::encryption::KeyManager,
+        km: &mut crate::encryption::KeyManager,
         dek_id: crate::encryption::DekId,
     ) -> Option<Self> {
         let key = km.unwrap_dek(dek_id).ok()?;
@@ -293,13 +294,43 @@ fn find_latest_segment_in(dir: &Path) -> Option<u64> {
 ///
 /// Increment this when the WalRecord enum changes in a backward-incompatible way.
 /// v3: Added WalRecord::CreateIndex and WalRecord::DropIndex variants.
-pub const WAL_FORMAT_VERSION: u32 = 3;
+/// v4: Eliminated nested JSON — CreateTable, AlterTable, AlterRole now use
+///     native bincode-serialized structs instead of JSON strings.
+pub const WAL_FORMAT_VERSION: u32 = 4;
 
 /// Magic bytes written at the start of each WAL segment for validation.
 pub const WAL_MAGIC: &[u8; 4] = b"FALC";
 
 /// Size of the WAL segment header: magic (4) + format version (4) = 8 bytes.
 pub const WAL_SEGMENT_HEADER_SIZE: usize = 8;
+
+/// Typed ALTER TABLE operation for WAL serialization.
+///
+/// Replaces the previous `operation_json: String` field, eliminating
+/// nested JSON inside bincode-serialized WAL records.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AlterTableOp {
+    /// Add a new column to the table.
+    AddColumn { column: ColumnDef },
+    /// Drop a column by name.
+    DropColumn { column_name: String },
+    /// Rename a column.
+    RenameColumn { old_name: String, new_name: String },
+    /// Rename the table itself.
+    RenameTable { new_name: String },
+}
+
+/// Typed ALTER ROLE options for WAL serialization.
+///
+/// Replaces the previous `options_json: String` field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlterRoleOpts {
+    pub password: Option<Option<String>>,
+    pub can_login: Option<bool>,
+    pub is_superuser: Option<bool>,
+    pub can_create_db: Option<bool>,
+    pub can_create_role: Option<bool>,
+}
 
 /// A single WAL record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -349,18 +380,18 @@ pub enum WalRecord {
     CreateDatabase { name: String, owner: String },
     /// DDL: drop database.
     DropDatabase { name: String },
-    /// DDL: create table (schema stored as JSON).
-    CreateTable { schema_json: String },
+    /// DDL: create table (schema serialized natively via bincode).
+    CreateTable { schema: TableSchema },
     /// DDL: drop table.
     DropTable { table_name: String },
     /// DDL: create view.
     CreateView { name: String, query_sql: String },
     /// DDL: drop view.
     DropView { name: String },
-    /// DDL: alter table (operation stored as JSON for flexibility).
+    /// DDL: alter table (typed operation, bincode-serialized).
     AlterTable {
         table_name: String,
-        operation_json: String,
+        op: AlterTableOp,
     },
     /// DDL: create sequence.
     CreateSequence { name: String, start: i64 },
@@ -398,10 +429,10 @@ pub enum WalRecord {
     },
     /// DDL: drop role.
     DropRole { name: String },
-    /// DDL: alter role.
+    /// DDL: alter role (typed options, bincode-serialized).
     AlterRole {
         name: String,
-        options_json: String,
+        opts: AlterRoleOpts,
     },
     /// DCL: grant privilege.
     GrantPrivilege {
@@ -456,7 +487,8 @@ pub struct WalWriter {
     group_commit_size: usize,
     /// Optional TDE encryption context. When `Some`, every record's serialized
     /// payload is encrypted with AES-256-GCM before being written to disk.
-    encryption: Option<WalEncryption>,
+    /// Wrapped in `RwLock` for safe one-time initialization via `set_encryption(&self)`.
+    encryption: parking_lot::RwLock<Option<WalEncryption>>,
     /// Optional callback invoked after each segment rotation (for PITR archiving).
     segment_rotate_callback: parking_lot::RwLock<Option<SegmentRotateCallback>>,
 }
@@ -555,19 +587,20 @@ impl WalWriter {
             sync_mode,
             max_segment_size,
             group_commit_size,
-            encryption: None,
+            encryption: parking_lot::RwLock::new(None),
         })
     }
 
     /// Enable TDE for this WAL writer. All subsequent `append` calls will
     /// encrypt the serialized record payload with AES-256-GCM.
-    pub fn set_encryption(&mut self, enc: WalEncryption) {
-        self.encryption = Some(enc);
+    /// Safe to call from `&self` — uses interior mutability (RwLock).
+    pub fn set_encryption(&self, enc: WalEncryption) {
+        *self.encryption.write() = Some(enc);
     }
 
     /// Whether WAL encryption is currently active.
-    pub const fn is_encrypted(&self) -> bool {
-        self.encryption.is_some()
+    pub fn is_encrypted(&self) -> bool {
+        self.encryption.read().is_some()
     }
 
     fn find_latest_segment(dir: &Path) -> Option<u64> {
@@ -598,7 +631,7 @@ impl WalWriter {
             bincode::serialize(record).map_err(|e| StorageError::Serialization(e.to_string()))?;
 
         // Optionally encrypt the serialized payload
-        let data = match &self.encryption {
+        let data = match self.encryption.read().as_ref() {
             Some(enc) => enc.encrypt(&raw)?,
             None => raw,
         };

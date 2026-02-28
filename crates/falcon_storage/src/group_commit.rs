@@ -26,10 +26,10 @@ use crate::wal::{WalRecord, WalWriter};
 pub enum CommitPolicy {
     /// Wait for local WAL fsync only.
     LocalDurable,
-    /// Wait for at least one replica to ack.
-    ReplicaDurable,
-    /// Wait for a quorum of replicas to ack (strongest).
+    /// Wait for a quorum of replicas to ack.
     QuorumVisible,
+    /// Wait for ALL replicas to ack (strongest).
+    ReplicaDurable,
 }
 
 impl From<DurabilityPolicy> for CommitPolicy {

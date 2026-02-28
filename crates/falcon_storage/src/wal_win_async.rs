@@ -84,8 +84,12 @@ mod inner {
         write_buf: Vec<u8>,
     }
 
-    // SAFETY: HANDLE is a kernel object reference, safe to send across threads.
+    // SAFETY: `WinAsyncInner` contains Windows HANDLE values (kernel object references)
+    // which are process-wide and not bound to a single thread. All mutable access is
+    // serialized through `Mutex<WinAsyncInner>`, so no data race is possible.
+    // The `_file` field keeps the underlying OS handle alive for the lifetime of this struct.
     unsafe impl Send for WinAsyncInner {}
+    // SAFETY: See Send impl above — Mutex serializes all access.
     unsafe impl Sync for WinAsyncInner {}
 
     /// Windows IOCP-based WAL device.
@@ -179,8 +183,13 @@ mod inner {
             match sync_mode {
                 SyncMode::None => {}
                 SyncMode::FSync | SyncMode::FDataSync => {
+                    // SAFETY: `inner.handle` is a valid file HANDLE obtained from
+                    // `File::as_raw_handle()` and kept alive by `inner._file`.
+                    // FlushFileBuffers is safe to call on any valid file handle.
                     let ok = unsafe { FlushFileBuffers(inner.handle) };
                     if ok == 0 {
+                        // SAFETY: GetLastError retrieves the thread-local Win32 error
+                        // code set by the immediately preceding FlushFileBuffers call.
                         let err = unsafe { GetLastError() };
                         return Err(StorageError::Wal(format!(
                             "FlushFileBuffers failed: win32 error {err}"
@@ -219,6 +228,9 @@ mod inner {
             let _ = flush_buffer_overlapped(inner);
             // Close IOCP handle (file handle closed by std::fs::File Drop)
             if inner.iocp != 0 {
+                // SAFETY: `inner.iocp` is a valid IOCP handle created by
+                // CreateIoCompletionPort during open/rotate. We only close it
+                // once — in Drop — after all I/O has been flushed.
                 unsafe { CloseHandle(inner.iocp) };
             }
         }
@@ -274,8 +286,13 @@ mod inner {
         let handle = file.as_raw_handle() as HANDLE;
 
         // Create IOCP bound to this file handle
+        // SAFETY: `handle` is a valid file HANDLE opened with FILE_FLAG_OVERLAPPED,
+        // which is required for IOCP association. We pass 0 for ExistingCompletionPort
+        // to create a new port, 0 for CompletionKey, and 1 for NumberOfConcurrentThreads.
         let iocp = unsafe { CreateIoCompletionPort(handle, 0, 0, 1) };
         if iocp == 0 {
+            // SAFETY: GetLastError retrieves the thread-local error from the
+            // immediately preceding CreateIoCompletionPort call.
             let err = unsafe { GetLastError() };
             return Err(StorageError::Wal(format!(
                 "CreateIoCompletionPort failed: win32 error {err}"
@@ -310,12 +327,21 @@ mod inner {
             write_offset
         };
 
+        // SAFETY: OVERLAPPED is a C struct with no invalid bit patterns;
+        // zero-initialization is the canonical way to create one. The offset
+        // fields are set immediately below before any I/O call.
         let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
         // Set the file offset via the OVERLAPPED Anonymous union
         overlapped.Anonymous.Anonymous.Offset = actual_offset as u32;
         overlapped.Anonymous.Anonymous.OffsetHigh = (actual_offset >> 32) as u32;
 
         let mut bytes_written: u32 = 0;
+        // SAFETY: All arguments are valid for this call:
+        // - `inner.handle`: valid file HANDLE kept alive by `inner._file`
+        // - `data.as_ptr()` + `data.len()`: valid buffer; `data` lives until
+        //   IOCP completion is confirmed below
+        // - `&mut overlapped`: stack-allocated, lives until GetQueuedCompletionStatus returns
+        // The file was opened with FILE_FLAG_OVERLAPPED so async completion is expected.
         let ok = unsafe {
             windows_sys::Win32::Storage::FileSystem::WriteFile(
                 inner.handle,
@@ -327,6 +353,8 @@ mod inner {
         };
 
         if ok == 0 {
+            // SAFETY: GetLastError retrieves the thread-local error from
+            // the immediately preceding WriteFile call.
             let err = unsafe { GetLastError() };
             if err != ERROR_IO_PENDING {
                 return Err(StorageError::Wal(format!(
@@ -340,6 +368,12 @@ mod inner {
         let mut completion_key: usize = 0;
         let mut completion_overlapped: *mut OVERLAPPED = std::ptr::null_mut();
 
+        // SAFETY: All arguments are valid:
+        // - `inner.iocp`: valid IOCP handle created in open_segment_overlapped
+        // - Output pointers are stack-allocated and live for the duration of the call
+        // - Timeout of 5000ms bounds the blocking wait
+        // The overlapped I/O initiated by WriteFile above will post a completion
+        // packet to this port, which we consume here.
         let wait_result = unsafe {
             GetQueuedCompletionStatus(
                 inner.iocp,
@@ -351,6 +385,8 @@ mod inner {
         };
 
         if wait_result == 0 {
+            // SAFETY: GetLastError retrieves the thread-local error from
+            // the immediately preceding GetQueuedCompletionStatus call.
             let err = unsafe { GetLastError() };
             return Err(StorageError::Wal(format!(
                 "IOCP GetQueuedCompletionStatus failed: win32 error {err}"
@@ -371,10 +407,15 @@ mod inner {
     /// Rotate to a new WAL segment.
     fn rotate_segment(inner: &mut WinAsyncInner) -> Result<u64, StorageError> {
         // Sync current segment
+        // SAFETY: `inner.handle` is a valid file HANDLE kept alive by `inner._file`.
+        // We flush before rotation to ensure all data is persisted to the old segment.
         unsafe { FlushFileBuffers(inner.handle) };
 
         // Close IOCP (file handle closed when _file is replaced)
         if inner.iocp != 0 {
+            // SAFETY: `inner.iocp` is a valid IOCP handle. We close it before
+            // replacing it with a new one for the rotated segment. No pending I/O
+            // remains because flush_buffer_overlapped was called before rotate.
             unsafe { CloseHandle(inner.iocp) };
         }
 

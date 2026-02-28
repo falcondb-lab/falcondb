@@ -211,6 +211,10 @@ impl AuthnManager {
     }
 
     /// Authenticate a user.
+    ///
+    /// Uses a read lock for the credential-checking phase and only briefly
+    /// acquires a write lock to update login counters, reducing contention
+    /// under high-concurrency authentication workloads.
     pub fn authenticate(&self, request: &AuthnRequest) -> AuthnResult {
         self.metrics.auth_attempts.fetch_add(1, Ordering::Relaxed);
         let now = SystemTime::now()
@@ -218,7 +222,7 @@ impl AuthnManager {
             .unwrap_or_default()
             .as_secs();
 
-        // Look up user
+        // Look up user id
         let user_id = {
             let idx = self.username_index.read();
             if let Some(id) = idx.get(&request.username) { *id } else {
@@ -229,69 +233,113 @@ impl AuthnManager {
             }
         };
 
-        let mut users = self.users.write();
-        let user = if let Some(u) = users.get_mut(&user_id) { u } else {
-            self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
-            return AuthnResult::Failed {
-                reason: "user not found".into(),
-            };
-        };
+        // Phase 1: read-only checks (read lock)
+        enum AuthOutcome {
+            Success,
+            CredentialExpired,
+            Failed,
+        }
 
-        // Check lockout
-        if let Some(locked) = user.locked_until {
-            if now < locked {
-                self.metrics.auth_lockouts.fetch_add(1, Ordering::Relaxed);
-                return AuthnResult::Locked {
-                    remaining_secs: locked - now,
+        let outcome = {
+            let users = self.users.read();
+            let user = if let Some(u) = users.get(&user_id) { u } else {
+                self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
+                return AuthnResult::Failed {
+                    reason: "user not found".into(),
+                };
+            };
+
+            // Check lockout
+            if let Some(locked) = user.locked_until {
+                if now < locked {
+                    self.metrics.auth_lockouts.fetch_add(1, Ordering::Relaxed);
+                    return AuthnResult::Locked {
+                        remaining_secs: locked - now,
+                    };
+                }
+                // lockout expired — will clear in write phase
+            }
+
+            if !user.is_active {
+                self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
+                return AuthnResult::Failed {
+                    reason: "account disabled".into(),
                 };
             }
-            user.locked_until = None;
-            user.failed_login_count = 0;
-        }
 
-        if !user.is_active {
-            self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
-            return AuthnResult::Failed {
-                reason: "account disabled".into(),
-            };
-        }
+            // Find matching credential (read-only check)
+            #[allow(clippy::suspicious_operation_groupings)]
+            let matched = user.credentials.iter().find(|c| {
+                c.credential_type == request.credential_type
+                    && c.credential_hash == request.credential
+                    && !c.is_revoked
+            });
 
-        // Find matching credential
-        // NOTE: request.credential holds the pre-hashed value; compared against stored hash.
-        #[allow(clippy::suspicious_operation_groupings)]
-        let matched = user.credentials.iter_mut().find(|c| {
-            c.credential_type == request.credential_type
-                && c.credential_hash == request.credential
-                && !c.is_revoked
-        });
+            if let Some(cred) = matched {
+                if let Some(exp) = cred.expires_at {
+                    if now > exp {
+                        AuthOutcome::CredentialExpired
+                    } else {
+                        AuthOutcome::Success
+                    }
+                } else {
+                    AuthOutcome::Success
+                }
+            } else {
+                AuthOutcome::Failed
+            }
+        }; // read lock released here
 
-        if let Some(cred) = matched {
-            // Check expiration
-            if let Some(exp) = cred.expires_at {
-                if now > exp {
-                    self.metrics.credential_expirations.fetch_add(1, Ordering::Relaxed);
-                    return AuthnResult::CredentialExpired;
+        // Phase 2: brief write lock to update counters
+        match outcome {
+            AuthOutcome::Success => {
+                {
+                    let mut users = self.users.write();
+                    if let Some(user) = users.get_mut(&user_id) {
+                        // Clear expired lockout if any
+                        if user.locked_until.is_some() {
+                            user.locked_until = None;
+                            user.failed_login_count = 0;
+                        }
+                        user.last_login_at = Some(now);
+                        user.failed_login_count = 0;
+                        // Update last_used_at on the matched credential
+                        #[allow(clippy::suspicious_operation_groupings)]
+                        if let Some(cred) = user.credentials.iter_mut().find(|c| {
+                            c.credential_type == request.credential_type
+                                && c.credential_hash == request.credential
+                                && !c.is_revoked
+                        }) {
+                            cred.last_used_at = Some(now);
+                        }
+                    }
+                }
+                self.metrics.auth_successes.fetch_add(1, Ordering::Relaxed);
+                let session = format!("session-{user_id}-{now}");
+                AuthnResult::Success {
+                    user_id,
+                    session_token: session,
                 }
             }
-            cred.last_used_at = Some(now);
-            user.last_login_at = Some(now);
-            user.failed_login_count = 0;
-            self.metrics.auth_successes.fetch_add(1, Ordering::Relaxed);
-            // Generate session token (simplified — in production use JWT)
-            let session = format!("session-{user_id}-{now}");
-            AuthnResult::Success {
-                user_id,
-                session_token: session,
+            AuthOutcome::CredentialExpired => {
+                self.metrics.credential_expirations.fetch_add(1, Ordering::Relaxed);
+                AuthnResult::CredentialExpired
             }
-        } else {
-            user.failed_login_count += 1;
-            if user.failed_login_count >= self.lockout_threshold {
-                user.locked_until = Some(now + self.lockout_duration_secs);
-                self.metrics.auth_lockouts.fetch_add(1, Ordering::Relaxed);
-            }
-            self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
-            AuthnResult::Failed {
-                reason: "invalid credentials".into(),
+            AuthOutcome::Failed => {
+                {
+                    let mut users = self.users.write();
+                    if let Some(user) = users.get_mut(&user_id) {
+                        user.failed_login_count += 1;
+                        if user.failed_login_count >= self.lockout_threshold {
+                            user.locked_until = Some(now + self.lockout_duration_secs);
+                            self.metrics.auth_lockouts.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+                self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
+                AuthnResult::Failed {
+                    reason: "invalid credentials".into(),
+                }
             }
         }
     }
@@ -419,9 +467,26 @@ pub enum RbacCheckResult {
     Denied { scope: RbacScope, permission: String, resource: String },
 }
 
+/// Index key for fast RBAC permission lookup: (role_id, scope, resource, permission).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RbacIndexKey {
+    role_id: u64,
+    scope: RbacScope,
+    resource: String,
+    permission: EnterprisePermission,
+}
+
+/// Inner state for EnterpriseRbac, protected by a single RwLock.
+struct RbacInner {
+    /// Ordered list of all grants (for iteration, export, revoke).
+    grants: Vec<RbacGrant>,
+    /// Hash index for O(1) permission checks.
+    index: HashSet<RbacIndexKey>,
+}
+
 /// Enterprise RBAC manager — extends existing RoleCatalog with scoped permissions.
 pub struct EnterpriseRbac {
-    grants: RwLock<Vec<RbacGrant>>,
+    inner: RwLock<RbacInner>,
     /// Role→superuser mapping.
     superuser_roles: RwLock<HashSet<u64>>,
     pub metrics: RbacMetrics,
@@ -445,7 +510,10 @@ impl EnterpriseRbac {
         let mut su = HashSet::new();
         su.insert(0); // superuser role_id=0
         Self {
-            grants: RwLock::new(Vec::new()),
+            inner: RwLock::new(RbacInner {
+                grants: Vec::new(),
+                index: HashSet::new(),
+            }),
             superuser_roles: RwLock::new(su),
             metrics: RbacMetrics::default(),
         }
@@ -464,7 +532,14 @@ impl EnterpriseRbac {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        self.grants.write().push(RbacGrant {
+        let mut inner = self.inner.write();
+        inner.index.insert(RbacIndexKey {
+            role_id,
+            scope,
+            resource: resource.to_owned(),
+            permission: permission.clone(),
+        });
+        inner.grants.push(RbacGrant {
             role_id,
             scope,
             resource: resource.to_owned(),
@@ -483,15 +558,24 @@ impl EnterpriseRbac {
         resource: &str,
         permission: &EnterprisePermission,
     ) -> bool {
-        let mut grants = self.grants.write();
-        let before = grants.len();
-        grants.retain(|g| {
+        let mut inner = self.inner.write();
+        let before = inner.grants.len();
+        inner.grants.retain(|g| {
             !(g.role_id == role_id
                 && g.scope == scope
                 && g.resource == resource
                 && g.permission == *permission)
         });
-        grants.len() < before
+        let removed = inner.grants.len() < before;
+        if removed {
+            inner.index.remove(&RbacIndexKey {
+                role_id,
+                scope,
+                resource: resource.to_owned(),
+                permission: permission.clone(),
+            });
+        }
+        removed
     }
 
     /// Mark a role as superuser.
@@ -516,12 +600,21 @@ impl EnterpriseRbac {
             return RbacCheckResult::Allowed;
         }
 
-        let grants = self.grants.read();
-        let allowed = grants.iter().any(|g| {
-            effective_roles.contains(&g.role_id)
-                && g.scope == scope
-                && (g.resource == resource || g.resource == "*")
-                && g.permission == *permission
+        let inner = self.inner.read();
+        // O(k) where k = number of effective roles (typically small),
+        // instead of O(n) where n = total grants.
+        let allowed = effective_roles.iter().any(|&rid| {
+            inner.index.contains(&RbacIndexKey {
+                role_id: rid,
+                scope,
+                resource: resource.to_owned(),
+                permission: permission.clone(),
+            }) || inner.index.contains(&RbacIndexKey {
+                role_id: rid,
+                scope,
+                resource: "*".to_owned(),
+                permission: permission.clone(),
+            })
         });
 
         if allowed {
@@ -538,7 +631,7 @@ impl EnterpriseRbac {
 
     /// List grants for a role.
     pub fn grants_for_role(&self, role_id: u64) -> Vec<RbacGrant> {
-        self.grants.read().iter()
+        self.inner.read().grants.iter()
             .filter(|g| g.role_id == role_id)
             .cloned()
             .collect()
@@ -628,6 +721,8 @@ impl CertificateManager {
     }
 
     /// Rotate a certificate (hot-reload). Returns success.
+    /// Validates that paths and fingerprint are non-empty and the certificate
+    /// is not already expired before accepting the rotation.
     pub fn rotate_cert(
         &self,
         link_type: TlsLinkType,
@@ -649,6 +744,39 @@ impl CertificateManager {
                 .map(|c| c.fingerprint.clone())
                 .unwrap_or_default()
         };
+
+        // Validate inputs before accepting the rotation
+        let validation_error = if new_cert_path.is_empty() {
+            Some("cert_path is empty".to_owned())
+        } else if new_key_path.is_empty() {
+            Some("key_path is empty".to_owned())
+        } else if new_fingerprint.is_empty() {
+            Some("fingerprint is empty".to_owned())
+        } else if not_after <= now {
+            Some(format!("certificate already expired (not_after={not_after}, now={now})"))
+        } else if not_before > not_after {
+            Some("not_before > not_after".to_owned())
+        } else {
+            None
+        };
+
+        if let Some(err) = validation_error {
+            self.metrics.rotations_failed.fetch_add(1, Ordering::Relaxed);
+            let event = CertRotationEvent {
+                link_type,
+                old_fingerprint,
+                new_fingerprint: new_fingerprint.to_owned(),
+                rotated_at: now,
+                success: false,
+                error: Some(err),
+            };
+            let mut hist = self.rotation_history.lock();
+            if hist.len() >= 100 {
+                hist.pop_front();
+            }
+            hist.push_back(event);
+            return false;
+        }
 
         let new_record = CertificateRecord {
             link_type,
@@ -1130,14 +1258,14 @@ impl EnterpriseAuditLog {
         }
     }
 
-    /// Compute a simple hash for integrity.
+    /// Compute a keyed hash for integrity using SipHash (std DefaultHasher).
     fn compute_hash(&self, event_str: &str, prev_hash: &str) -> String {
-        // Simple hash: djb2(key + prev_hash + event_str)
-        let input = format!("{}{}{}", self.hmac_key, prev_hash, event_str);
-        let mut h: u64 = 5381;
-        for b in input.bytes() {
-            h = h.wrapping_mul(33).wrapping_add(u64::from(b));
-        }
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.hmac_key.hash(&mut hasher);
+        prev_hash.hash(&mut hasher);
+        event_str.hash(&mut hasher);
+        let h = hasher.finish();
         format!("{h:016x}")
     }
 
@@ -1446,15 +1574,19 @@ mod tests {
     #[test]
     fn test_cert_rotation() {
         let mgr = CertificateManager::new(true);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         mgr.load_cert(CertificateRecord {
             link_type: TlsLinkType::ClientToGateway,
             cert_path: "/old.pem".into(),
             key_path: "/old.key".into(),
             ca_path: None,
             fingerprint: "old".into(),
-            not_before: 1000,
-            not_after: 2000,
-            loaded_at: 1500,
+            not_before: now - 1000,
+            not_after: now + 1000,
+            loaded_at: now,
             is_active: true,
         });
         let ok = mgr.rotate_cert(
@@ -1462,8 +1594,8 @@ mod tests {
             "/new.pem",
             "/new.key",
             "new_fp",
-            2000,
-            3000,
+            now,
+            now + 86400,
         );
         assert!(ok);
         let cert = mgr.get_cert(TlsLinkType::ClientToGateway).unwrap();

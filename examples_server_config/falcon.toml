@@ -1,0 +1,7 @@
+[server]
+pg_listen_addr = "0.0.0.0:5443"
+admin_listen_addr = "0.0.0.0:8080"
+max_connections = 1024
+ 
+[server.auth]
+method = "trust"

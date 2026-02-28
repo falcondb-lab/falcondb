@@ -305,12 +305,17 @@ impl BufferPool {
     fn load_page(&self, page_id: PageId) -> Option<Page> {
         let mut page = Page::new(page_id);
         let offset = (page_id - 1) * PAGE_SIZE as u64;
-        let mut file = self.file.write();
-        if file.seek(SeekFrom::Start(offset)).is_err() {
-            return None;
-        }
-        if file.read_exact(&mut page.data).is_err() {
-            return None;
+        // Read from disk while holding only the file lock.
+        // Drop the file lock BEFORE calling put_page to avoid lock ordering
+        // inversion (load_page: file→pages vs maybe_evict: pages→file).
+        {
+            let mut file = self.file.write();
+            if file.seek(SeekFrom::Start(offset)).is_err() {
+                return None;
+            }
+            if file.read_exact(&mut page.data).is_err() {
+                return None;
+            }
         }
         self.put_page(page.clone());
         Some(page)
@@ -325,15 +330,18 @@ impl BufferPool {
     fn maybe_evict(&self) {
         let mut pages = self.pages.write();
         let mut lru = self.lru.write();
+        let mut file = self.file.write();
         while pages.len() > self.capacity && !lru.is_empty() {
             if let Some(victim_id) = lru.pop_front() {
                 if let Some(page) = pages.get(&victim_id) {
                     if page.dirty {
-                        // Flush before evict
+                        // Flush before evict — log errors instead of silently ignoring
                         let offset = (page.id - 1) * PAGE_SIZE as u64;
-                        let mut file = self.file.write();
-                        let _ = file.seek(SeekFrom::Start(offset));
-                        let _ = file.write_all(&page.data);
+                        if let Err(e) = file.seek(SeekFrom::Start(offset))
+                            .and_then(|_| file.write_all(&page.data))
+                        {
+                            eprintln!("BufferPool: failed to flush dirty page {}: {e}", page.id);
+                        }
                     }
                 }
                 pages.remove(&victim_id);

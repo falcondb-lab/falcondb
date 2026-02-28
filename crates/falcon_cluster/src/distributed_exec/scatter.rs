@@ -11,6 +11,7 @@ use falcon_common::types::ShardId;
 use crate::sharded_engine::ShardedEngine;
 
 use super::gather::{compare_datums, merge_two_phase_agg};
+use super::streaming_merge::StreamingMergeSort;
 use super::{
     compare_rows_by_columns, FailurePolicy, GatherLimits, GatherStrategy, ScatterGatherMetrics,
     ShardResult, SubPlan, SubPlanResult,
@@ -281,87 +282,13 @@ impl DistributedExecutor {
                 });
 
                 if is_pre_sorted {
-                    use std::cmp::Reverse;
-                    use std::collections::BinaryHeap;
-
-                    let need = match (offset, limit) {
-                        (Some(o), Some(l)) => Some(o + l),
-                        _ => None,
-                    };
-
-                    struct MergeEntry {
-                        row: OwnedRow,
-                        shard_idx: usize,
-                        row_idx: usize,
-                        sort_columns: Arc<Vec<(usize, bool)>>,
-                    }
-                    impl PartialEq for MergeEntry {
-                        fn eq(&self, other: &Self) -> bool {
-                            self.cmp(other) == std::cmp::Ordering::Equal
-                        }
-                    }
-                    impl Eq for MergeEntry {}
-                    impl PartialOrd for MergeEntry {
-                        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-                            Some(self.cmp(other))
-                        }
-                    }
-                    impl Ord for MergeEntry {
-                        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-                            compare_rows_by_columns(
-                                &self.row,
-                                &other.row,
-                                self.sort_columns.as_slice(),
-                            )
-                        }
-                    }
-
-                    let shard_rows: Vec<&[OwnedRow]> =
-                        shard_results.iter().map(|sr| sr.rows.as_slice()).collect();
-                    let sort_cols = Arc::new(sort_columns.clone());
-                    let mut heap: BinaryHeap<Reverse<MergeEntry>> = BinaryHeap::new();
-
-                    for (si, rows) in shard_rows.iter().enumerate() {
-                        if !rows.is_empty() {
-                            heap.push(Reverse(MergeEntry {
-                                row: rows[0].clone(),
-                                shard_idx: si,
-                                row_idx: 0,
-                                sort_columns: sort_cols.clone(),
-                            }));
-                        }
-                    }
-
-                    let mut merged = Vec::with_capacity(need.unwrap_or(total_rows_gathered));
-                    while let Some(Reverse(entry)) = heap.pop() {
-                        merged.push(entry.row);
-                        if let Some(n) = need {
-                            if merged.len() >= n {
-                                break;
-                            }
-                        }
-                        let next_idx = entry.row_idx + 1;
-                        if next_idx < shard_rows[entry.shard_idx].len() {
-                            heap.push(Reverse(MergeEntry {
-                                row: shard_rows[entry.shard_idx][next_idx].clone(),
-                                shard_idx: entry.shard_idx,
-                                row_idx: next_idx,
-                                sort_columns: sort_cols.clone(),
-                            }));
-                        }
-                    }
-
-                    if let Some(off) = offset {
-                        if *off < merged.len() {
-                            merged = merged.split_off(*off);
-                        } else {
-                            merged.clear();
-                        }
-                    }
-                    if let Some(lim) = limit {
-                        merged.truncate(*lim);
-                    }
-                    merged
+                    // Use streaming k-way merge: O(N log K) with early
+                    // termination at OFFSET + LIMIT.
+                    let merger = StreamingMergeSort::from_shard_results(
+                        &shard_results,
+                        sort_columns.clone(),
+                    );
+                    merger.collect_with_offset_limit(*offset, *limit)
                 } else {
                     // Fallback: generic path for unsorted per-shard outputs.
                     let mut all_rows = Vec::with_capacity(total_rows_gathered);

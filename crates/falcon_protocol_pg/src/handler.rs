@@ -9,8 +9,8 @@ use falcon_cluster::security_hardening::{
 use falcon_cluster::{
     ClusterAdmin, ClusterEventLog, CoordinatorDecisionLog, DecisionLogConfig,
     DistributedQueryEngine, HAReplicaGroup, LayeredTimeoutConfig, LayeredTimeoutController,
-    ReplicaRunnerMetrics, SlowShardConfig, SlowShardTracker, SyncReplicationWaiter, TokenBucket,
-    TokenBucketConfig,
+    RaftShardCoordinator, ReplicaRunnerMetrics, SlowShardConfig, SlowShardTracker,
+    SyncReplicationWaiter, TokenBucket, TokenBucketConfig,
 };
 use falcon_common::consistency::CommitPolicy;
 use falcon_common::datum::Datum;
@@ -91,6 +91,8 @@ pub struct QueryHandler {
     pub(crate) password_policy: Arc<PasswordPolicy>,
     /// SQL firewall for injection detection.
     pub(crate) sql_firewall: Arc<SqlFirewall>,
+    /// Raft shard coordinator for SHOW falcon.raft_stats.
+    pub(crate) raft_coordinator: Option<Arc<RaftShardCoordinator>>,
 }
 
 impl QueryHandler {
@@ -99,8 +101,8 @@ impl QueryHandler {
         txn_mgr: Arc<TxnManager>,
         executor: Arc<Executor>,
     ) -> Self {
-        let tenant_reg = storage.tenant_registry.clone();
-        let res_meter = storage.resource_meter.clone();
+        let tenant_reg = storage.ext.tenant_registry.clone();
+        let res_meter = storage.ext.resource_meter.clone();
         Self {
             storage,
             txn_mgr,
@@ -135,6 +137,7 @@ impl QueryHandler {
             auth_rate_limiter: Arc::new(AuthRateLimiter::new(AuthRateLimiterConfig::default())),
             password_policy: Arc::new(PasswordPolicy::new(PasswordPolicyConfig::default())),
             sql_firewall: Arc::new(SqlFirewall::new(SqlFirewallConfig::default())),
+            raft_coordinator: None,
         }
     }
 
@@ -150,8 +153,8 @@ impl QueryHandler {
         shard_ids: Vec<ShardId>,
         dist_engine: Arc<DistributedQueryEngine>,
     ) -> Self {
-        let tenant_reg = storage.tenant_registry.clone();
-        let res_meter = storage.resource_meter.clone();
+        let tenant_reg = storage.ext.tenant_registry.clone();
+        let res_meter = storage.ext.resource_meter.clone();
         Self {
             storage,
             txn_mgr,
@@ -186,6 +189,7 @@ impl QueryHandler {
             auth_rate_limiter: Arc::new(AuthRateLimiter::new(AuthRateLimiterConfig::default())),
             password_policy: Arc::new(PasswordPolicy::new(PasswordPolicyConfig::default())),
             sql_firewall: Arc::new(SqlFirewall::new(SqlFirewallConfig::default())),
+            raft_coordinator: None,
         }
     }
 
@@ -212,6 +216,17 @@ impl QueryHandler {
     /// Set replica runner metrics for SHOW falcon.replica_stats.
     pub fn set_replica_metrics(&mut self, metrics: Arc<ReplicaRunnerMetrics>) {
         self.replica_metrics = Some(metrics);
+    }
+
+    /// Set the Raft shard coordinator for SHOW falcon.raft_stats.
+    pub fn set_raft_coordinator(&mut self, coordinator: Arc<RaftShardCoordinator>) {
+        self.raft_coordinator = Some(coordinator);
+    }
+
+    /// Set a shared SecurityManager instance (so SHOW falcon.security reflects
+    /// the same state as the PgServer IP allowlist enforcement).
+    pub fn set_security_manager(&mut self, mgr: Arc<falcon_storage::security_manager::SecurityManager>) {
+        self.security_manager = mgr;
     }
 
     /// Set a shared slow query log instance.
@@ -613,7 +628,7 @@ impl QueryHandler {
                         }
                     };
                     // CDC: emit BEGIN marker for explicit transaction
-                    self.storage.cdc_manager.emit_begin(txn.txn_id);
+                    self.storage.ext.cdc_manager.emit_begin(txn.txn_id);
                     // Multi-tenant: record txn begin for metering
                     self.storage.record_tenant_txn_begin(session.tenant_id);
 
@@ -3950,7 +3965,7 @@ mod tests {
         );
         assert_eq!(rows[0][0], Some("server_version".into()));
         assert_eq!(rows[1][0], Some("wal_format_version".into()));
-        assert_eq!(rows[1][1], Some("3".into()));
+        assert_eq!(rows[1][1], Some("4".into()));
         assert_eq!(rows[8][0], Some("wal_magic".into()));
         assert_eq!(rows[8][1], Some("FALC".into()));
     }

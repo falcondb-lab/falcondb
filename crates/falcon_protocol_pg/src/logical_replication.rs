@@ -106,7 +106,7 @@ pub fn handle_replication_command(sql: &str, storage: &Arc<StorageEngine>) -> Re
 
 /// IDENTIFY_SYSTEM — returns system info.
 fn handle_identify_system(storage: &Arc<StorageEngine>) -> ReplicationResult {
-    let current_lsn = storage.cdc_manager.buffer_len() as u64;
+    let current_lsn = storage.ext.cdc_manager.buffer_len() as u64;
 
     let fields = vec![
         FieldDescription {
@@ -180,9 +180,9 @@ fn handle_create_replication_slot(sql: &str, storage: &Arc<StorageEngine>) -> Re
     }
     let _plugin = tokens[3]; // accepted but we use our own decoder
 
-    match storage.cdc_manager.create_slot(slot_name) {
+    match storage.ext.cdc_manager.create_slot(slot_name) {
         Ok(slot_id) => {
-            let slot = storage.cdc_manager.list_slots().into_iter().find(|s| s.id == slot_id);
+            let slot = storage.ext.cdc_manager.list_slots().into_iter().find(|s| s.id == slot_id);
             let consistent_point = slot.map_or(0, |s| s.confirmed_flush_lsn.0);
 
             let fields = vec![
@@ -251,7 +251,7 @@ fn handle_drop_replication_slot(sql: &str, storage: &Arc<StorageEngine>) -> Repl
     }
 
     let slot_name = tokens[1];
-    match storage.cdc_manager.drop_slot(slot_name) {
+    match storage.ext.cdc_manager.drop_slot(slot_name) {
         Ok(_) => {
             ReplicationResult::Messages(vec![BackendMessage::CommandComplete {
                 tag: "DROP_REPLICATION_SLOT".into(),
@@ -286,7 +286,7 @@ fn handle_start_replication(sql: &str, storage: &Arc<StorageEngine>) -> Replicat
     let start_lsn = parse_lsn(tokens[4]).unwrap_or(0);
 
     // Verify slot exists and activate it
-    let slot = match storage.cdc_manager.get_slot_by_name(slot_name) {
+    let slot = match storage.ext.cdc_manager.get_slot_by_name(slot_name) {
         Some(s) => s.id,
         None => {
             return ReplicationResult::Error(format!(
@@ -295,7 +295,7 @@ fn handle_start_replication(sql: &str, storage: &Arc<StorageEngine>) -> Replicat
         }
     };
 
-    if let Err(e) = storage.cdc_manager.activate_slot(slot) {
+    if let Err(e) = storage.ext.cdc_manager.activate_slot(slot) {
         return ReplicationResult::Error(e);
     }
 
@@ -603,9 +603,9 @@ mod tests {
         }
 
         // Deactivate for cleanup
-        let slot = storage.cdc_manager.get_slot_by_name("my_slot").unwrap();
+        let slot = storage.ext.cdc_manager.get_slot_by_name("my_slot").unwrap();
         let slot_id = slot.id;
-        storage.cdc_manager.deactivate_slot(slot_id);
+        storage.ext.cdc_manager.deactivate_slot(slot_id);
     }
 
     #[test]

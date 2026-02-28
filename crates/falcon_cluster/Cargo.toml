@@ -23,6 +23,7 @@ xxhash-rust.workspace = true
 tonic.workspace = true
 prost.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tokio-stream.workspace = true
 async-trait.workspace = true
 parking_lot.workspace = true

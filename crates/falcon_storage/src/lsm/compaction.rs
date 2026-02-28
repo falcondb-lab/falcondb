@@ -150,16 +150,14 @@ impl Compactor {
         // For dedup: keep the first occurrence of each key (newest)
         all_entries.sort_by(|a, b| a.key.cmp(&b.key));
 
-        // Deduplicate: keep last write for each key
+        // Deduplicate: keep the first occurrence of each key (newest).
+        // L0 entries were inserted newest-first, so after stable sort by key
+        // the first entry for a given key is the most recent write.
         let mut deduped: Vec<SstEntry> = Vec::new();
         for entry in all_entries {
             if let Some(last) = deduped.last() {
                 if last.key == entry.key {
-                    // Replace with newer (L0 entries were added first)
-                    // Safety: last() returned Some, so last_mut() is guaranteed Some
-                    if let Some(slot) = deduped.last_mut() {
-                        *slot = entry;
-                    }
+                    // Skip older duplicate — the first (newest) occurrence is already kept.
                     continue;
                 }
             }

@@ -248,8 +248,8 @@ impl QueryHandler {
                 }]);
             }
             let catalog = self.storage.get_catalog();
-            if catalog.find_database(&db_name).is_some() {
-                let real_name = catalog.find_database(&db_name).unwrap().name.clone();
+            if let Some(db) = catalog.find_database(&db_name) {
+                let real_name = db.name.clone();
                 drop(catalog);
                 session.database = real_name;
                 return Some(vec![BackendMessage::CommandComplete {

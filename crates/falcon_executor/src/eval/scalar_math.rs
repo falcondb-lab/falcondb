@@ -70,6 +70,9 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("SQRT requires numeric".into())),
             };
+            if val < 0.0 {
+                return Err(ExecutionError::TypeError("cannot take square root of a negative number".into()));
+            }
             Ok(Datum::Float64(val.sqrt()))
         }
         ScalarFunc::Sign => match args.first() {
@@ -95,7 +98,7 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
             };
             let precision = match args.get(1) {
                 Some(Datum::Int32(n)) => *n,
-                Some(Datum::Int64(n)) => *n as i32,
+                Some(Datum::Int64(n)) => i32::try_from(*n).unwrap_or(if *n > 0 { i32::MAX } else { i32::MIN }),
                 _ => 0,
             };
             let factor = 10f64.powi(precision);
@@ -109,6 +112,9 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("LN requires numeric".into())),
             };
+            if val <= 0.0 {
+                return Err(ExecutionError::TypeError("cannot take logarithm of zero or negative number".into()));
+            }
             Ok(Datum::Float64(val.ln()))
         }
         ScalarFunc::Log => {
@@ -138,6 +144,12 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
                 };
                 (10.0, v)
             };
+            if val <= 0.0 || base <= 0.0 {
+                return Err(ExecutionError::TypeError("cannot take logarithm of zero or negative number".into()));
+            }
+            if base == 1.0 {
+                return Err(ExecutionError::DivisionByZero);
+            }
             Ok(Datum::Float64(val.log(base)))
         }
         ScalarFunc::Exp => {
@@ -152,30 +164,44 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
         }
         ScalarFunc::Pi => Ok(Datum::Float64(std::f64::consts::PI)),
         ScalarFunc::Mod => {
+            // Handle integer MOD directly to avoid precision loss from f64 round-trip
+            match (args.first(), args.get(1)) {
+                (Some(Datum::Null), _) | (_, Some(Datum::Null)) => return Ok(Datum::Null),
+                (Some(Datum::Int64(a)), Some(Datum::Int64(b))) => {
+                    if *b == 0 { return Err(ExecutionError::DivisionByZero); }
+                    return Ok(Datum::Int64(a.checked_rem(*b).ok_or(ExecutionError::NumericOverflow)?));
+                }
+                (Some(Datum::Int32(a)), Some(Datum::Int32(b))) => {
+                    if *b == 0 { return Err(ExecutionError::DivisionByZero); }
+                    return Ok(Datum::Int64(i64::from(*a) % i64::from(*b)));
+                }
+                (Some(Datum::Int64(a)), Some(Datum::Int32(b))) => {
+                    let b64 = i64::from(*b);
+                    if b64 == 0 { return Err(ExecutionError::DivisionByZero); }
+                    return Ok(Datum::Int64(*a % b64));
+                }
+                (Some(Datum::Int32(a)), Some(Datum::Int64(b))) => {
+                    if *b == 0 { return Err(ExecutionError::DivisionByZero); }
+                    return Ok(Datum::Int64(i64::from(*a) % *b));
+                }
+                _ => {}
+            }
             let a = match args.first() {
+                Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
                 Some(Datum::Int32(n)) => f64::from(*n),
-                Some(Datum::Float64(n)) => *n,
-                Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("MOD requires numeric".into())),
             };
             let b = match args.get(1) {
+                Some(Datum::Float64(n)) => *n,
                 Some(Datum::Int64(n)) => *n as f64,
                 Some(Datum::Int32(n)) => f64::from(*n),
-                Some(Datum::Float64(n)) => *n,
-                Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("MOD requires numeric".into())),
             };
             if b == 0.0 {
-                return Err(ExecutionError::TypeError("division by zero".into()));
+                return Err(ExecutionError::DivisionByZero);
             }
-            if matches!(args[0], Datum::Int64(_) | Datum::Int32(_))
-                && matches!(args[1], Datum::Int64(_) | Datum::Int32(_))
-            {
-                Ok(Datum::Int64(a as i64 % b as i64))
-            } else {
-                Ok(Datum::Float64(a % b))
-            }
+            Ok(Datum::Float64(a % b))
         }
         ScalarFunc::Degrees => {
             let v = match args.first() {

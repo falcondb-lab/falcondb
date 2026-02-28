@@ -6,9 +6,11 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use parking_lot::{Mutex, RwLock};
+use tokio_util::sync::CancellationToken;
 
 use falcon_common::types::NodeId;
 
@@ -286,6 +288,52 @@ impl ClusterFailureDetector {
             .map(|r| r.node_id)
             .collect()
     }
+
+    /// Spawn a background evaluator that periodically calls `evaluate()`.
+    ///
+    /// Returns a `FailureDetectorHandle` that stops the evaluator on drop.
+    /// State transitions are logged via `tracing`.
+    pub fn spawn_evaluator(
+        self: &Arc<Self>,
+        cancel: CancellationToken,
+    ) -> FailureDetectorHandle {
+        let detector = Arc::clone(self);
+        let interval = detector.config.heartbeat_interval;
+        let token = cancel.clone();
+        let handle = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(interval);
+            loop {
+                tokio::select! {
+                    _ = token.cancelled() => {
+                        tracing::info!("failure detector evaluator shutting down");
+                        break;
+                    }
+                    _ = tick.tick() => {
+                        let transitions = detector.evaluate();
+                        for (node_id, old, new) in &transitions {
+                            tracing::warn!(
+                                ?node_id,
+                                old_state = ?old,
+                                new_state = ?new,
+                                "node liveness transition",
+                            );
+                        }
+                    }
+                }
+            }
+        });
+        FailureDetectorHandle {
+            _cancel: cancel,
+            _join: handle,
+        }
+    }
+}
+
+/// Handle returned by [`ClusterFailureDetector::spawn_evaluator`].
+/// Cancels the background evaluator when dropped.
+pub struct FailureDetectorHandle {
+    _cancel: CancellationToken,
+    _join: tokio::task::JoinHandle<()>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

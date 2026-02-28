@@ -111,6 +111,9 @@ pub enum StorageError {
         index_key_hex: String,
     },
 
+    #[error("Write conflict: concurrent uncommitted write by another transaction")]
+    WriteConflict,
+
     #[error("Serialization failure: concurrent modification detected")]
     SerializationFailure,
 
@@ -266,6 +269,9 @@ pub enum ExecutionError {
 
     #[error("Resource exhausted: {0}")]
     ResourceExhausted(String),
+
+    #[error("Numeric value out of range")]
+    NumericOverflow,
 }
 
 /// Cluster / metadata errors.
@@ -303,6 +309,7 @@ impl FalconError {
             | Self::Execution(ExecutionError::GovernorAbort(_))
             | Self::Execution(ExecutionError::ResourceExhausted(_))
             | Self::Execution(ExecutionError::CheckConstraintViolation(_))
+            | Self::Execution(ExecutionError::NumericOverflow)
             | Self::Storage(StorageError::TableNotFound(_))
             | Self::Storage(StorageError::TableAlreadyExists(_))
             | Self::Storage(StorageError::DatabaseAlreadyExists(_))
@@ -316,6 +323,7 @@ impl FalconError {
             | Self::Txn(TxnError::WriteConflict(_))
             | Self::Txn(TxnError::SerializationConflict(_))
             | Self::Txn(TxnError::Aborted(_))
+            | Self::Storage(StorageError::WriteConflict)
             | Self::Storage(StorageError::SerializationFailure)
             | Self::Cluster(ClusterError::NotLeader) => ErrorKind::Retryable,
 
@@ -383,7 +391,8 @@ impl FalconError {
             Self::Storage(StorageError::TableAlreadyExists(_)) => "42P07", // duplicate_table
             Self::Storage(StorageError::DuplicateKey)
             | Self::Storage(StorageError::UniqueViolation { .. }) => "23505", // unique_violation
-            Self::Storage(StorageError::SerializationFailure)
+            Self::Storage(StorageError::WriteConflict)
+            | Self::Storage(StorageError::SerializationFailure)
             | Self::Txn(TxnError::WriteConflict(_))
             | Self::Txn(TxnError::SerializationConflict(_))
             | Self::Retryable { .. } => "40001", // serialization_failure
@@ -401,6 +410,7 @@ impl FalconError {
             Self::Protocol(ProtocolError::InvalidMessage(_)) => "08P01", // protocol_violation
             Self::Protocol(ProtocolError::ConnectionClosed) => "08006", // connection_failure
             Self::Execution(ExecutionError::DivisionByZero) => "22012", // division_by_zero
+            Self::Execution(ExecutionError::NumericOverflow) => "22003", // numeric_value_out_of_range
             Self::Execution(ExecutionError::TypeError(_)) => "22000",   // data_exception
             Self::Execution(ExecutionError::InsufficientPrivilege(_)) => "42501", // insufficient_privilege
             Self::Execution(ExecutionError::ResourceExhausted(_))

@@ -753,6 +753,7 @@ mod txn_manager_tests {
 
     #[test]
     fn test_try_begin_rejects_under_pressure() {
+        use falcon_common::types::{TxnType, ShardId};
         let (storage, mgr) = setup_with_budget(1000, 2000);
         // Push into PRESSURE state (>= soft_limit but < hard_limit)
         storage.memory_tracker().alloc_mvcc(1500);
@@ -761,8 +762,18 @@ mod txn_manager_tests {
             falcon_storage::memory::PressureState::Pressure
         );
 
+        // Local transactions are allowed under Pressure (may be read-only).
         let result = mgr.try_begin(IsolationLevel::ReadCommitted);
-        assert!(result.is_err(), "try_begin should reject under Pressure");
+        assert!(result.is_ok(), "local try_begin should be allowed under Pressure");
+
+        // Global (write-path) transactions are rejected under Pressure.
+        let global_class = TxnClassification {
+            txn_type: TxnType::Global,
+            involved_shards: vec![ShardId(0), ShardId(1)],
+            slow_path_mode: SlowPathMode::Xa2Pc,
+        };
+        let result = mgr.try_begin_with_classification(IsolationLevel::ReadCommitted, global_class);
+        assert!(result.is_err(), "global try_begin should reject under Pressure");
         match result.unwrap_err() {
             falcon_common::error::TxnError::MemoryPressure(_) => {}
             other => panic!("Expected MemoryPressure, got {:?}", other),
@@ -789,11 +800,18 @@ mod txn_manager_tests {
 
     #[test]
     fn test_admission_recovers_after_dealloc() {
+        use falcon_common::types::{TxnType, ShardId};
         let (storage, mgr) = setup_with_budget(1000, 2000);
 
         // Push into PRESSURE
         storage.memory_tracker().alloc_mvcc(1500);
-        assert!(mgr.try_begin(IsolationLevel::ReadCommitted).is_err());
+        // Global txns should be rejected
+        let global_class = TxnClassification {
+            txn_type: TxnType::Global,
+            involved_shards: vec![ShardId(0), ShardId(1)],
+            slow_path_mode: SlowPathMode::Xa2Pc,
+        };
+        assert!(mgr.try_begin_with_classification(IsolationLevel::ReadCommitted, global_class).is_err());
 
         // Deallocate to return to NORMAL
         storage.memory_tracker().dealloc_mvcc(1000);

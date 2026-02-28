@@ -9,6 +9,7 @@
 
 use std::collections::HashSet;
 use std::net::IpAddr;
+// Ipv4Addr and Ipv6Addr removed — unused
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::RwLock;
@@ -98,6 +99,83 @@ impl Default for KmsConfig {
     }
 }
 
+/// A CIDR network specification for IP allowlist rules.
+/// Supports both IPv4 (e.g. "10.0.0.0/8") and IPv6 (e.g. "::1/128").
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct IpNet {
+    addr: IpAddr,
+    prefix_len: u8,
+}
+
+impl IpNet {
+    /// Create a new CIDR network.
+    ///
+    /// # Panics
+    /// Panics if `prefix_len` exceeds 32 for IPv4 or 128 for IPv6.
+    pub fn new(addr: IpAddr, prefix_len: u8) -> Self {
+        let max = match addr {
+            IpAddr::V4(_) => 32,
+            IpAddr::V6(_) => 128,
+        };
+        assert!(prefix_len <= max, "prefix_len {prefix_len} exceeds max {max}");
+        Self { addr, prefix_len }
+    }
+
+    /// Parse a CIDR string like "10.0.0.0/8" or "192.168.1.0/24".
+    /// A bare IP ("10.0.0.1") is treated as a /32 (IPv4) or /128 (IPv6).
+    pub fn parse(s: &str) -> Result<Self, String> {
+        if let Some((addr_str, prefix_str)) = s.split_once('/') {
+            let addr: IpAddr = addr_str.trim().parse()
+                .map_err(|e| format!("invalid IP in CIDR '{}': {}", s, e))?;
+            let prefix_len: u8 = prefix_str.trim().parse()
+                .map_err(|e| format!("invalid prefix length in '{}': {}", s, e))?;
+            let max = match addr {
+                IpAddr::V4(_) => 32,
+                IpAddr::V6(_) => 128,
+            };
+            if prefix_len > max {
+                return Err(format!("prefix length {} exceeds max {} for {}", prefix_len, max, s));
+            }
+            Ok(Self { addr, prefix_len })
+        } else {
+            let addr: IpAddr = s.trim().parse()
+                .map_err(|e| format!("invalid IP '{}': {}", s, e))?;
+            let prefix_len = match addr {
+                IpAddr::V4(_) => 32,
+                IpAddr::V6(_) => 128,
+            };
+            Ok(Self { addr, prefix_len })
+        }
+    }
+
+    /// Check whether `ip` falls within this CIDR range.
+    pub fn contains(&self, ip: IpAddr) -> bool {
+        match (self.addr, ip) {
+            (IpAddr::V4(net), IpAddr::V4(candidate)) => {
+                if self.prefix_len == 0 {
+                    return true;
+                }
+                let mask = u32::MAX.checked_shl(32 - self.prefix_len as u32).unwrap_or(0);
+                u32::from(net) & mask == u32::from(candidate) & mask
+            }
+            (IpAddr::V6(net), IpAddr::V6(candidate)) => {
+                if self.prefix_len == 0 {
+                    return true;
+                }
+                let mask = u128::MAX.checked_shl(128 - self.prefix_len as u32).unwrap_or(0);
+                u128::from(net) & mask == u128::from(candidate) & mask
+            }
+            _ => false, // v4 vs v6 mismatch
+        }
+    }
+}
+
+impl std::fmt::Display for IpNet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.addr, self.prefix_len)
+    }
+}
+
 /// Result of an IP allowlist check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpCheckResult {
@@ -112,8 +190,10 @@ pub struct SecurityManager {
     encryption: RwLock<EncryptionConfig>,
     tls: RwLock<TlsConfig>,
     kms: RwLock<KmsConfig>,
-    /// IP allowlist. Empty = disabled (all allowed).
+    /// IP allowlist: exact IPs.
     ip_allowlist: RwLock<HashSet<IpAddr>>,
+    /// IP allowlist: CIDR ranges.
+    ip_cidr_rules: RwLock<Vec<IpNet>>,
     /// Whether the IP allowlist is enabled.
     ip_allowlist_enabled: RwLock<bool>,
     /// Total connection attempts blocked by IP filter.
@@ -129,6 +209,7 @@ impl SecurityManager {
             tls: RwLock::new(TlsConfig::default()),
             kms: RwLock::new(KmsConfig::default()),
             ip_allowlist: RwLock::new(HashSet::new()),
+            ip_cidr_rules: RwLock::new(Vec::new()),
             ip_allowlist_enabled: RwLock::new(false),
             blocked_by_ip: AtomicU64::new(0),
             total_connection_attempts: AtomicU64::new(0),
@@ -195,17 +276,40 @@ impl SecurityManager {
         self.ip_allowlist.write().remove(&ip);
     }
 
-    /// Set the full allowlist at once.
+    /// Set the full exact-IP allowlist at once.
     pub fn set_allowlist(&self, ips: HashSet<IpAddr>) {
         *self.ip_allowlist.write() = ips;
     }
 
-    /// Get the current allowlist.
+    /// Get the current exact-IP allowlist.
     pub fn allowlist(&self) -> HashSet<IpAddr> {
         self.ip_allowlist.read().clone()
     }
 
+    /// Add a CIDR range to the allowlist (e.g. "10.0.0.0/8").
+    pub fn add_cidr_rule(&self, cidr: IpNet) {
+        self.ip_cidr_rules.write().push(cidr);
+    }
+
+    /// Remove all CIDR rules matching the given network.
+    pub fn remove_cidr_rule(&self, cidr: &IpNet) {
+        self.ip_cidr_rules.write().retain(|r| r != cidr);
+    }
+
+    /// Set the full CIDR rule list at once.
+    pub fn set_cidr_rules(&self, rules: Vec<IpNet>) {
+        *self.ip_cidr_rules.write() = rules;
+    }
+
+    /// Get the current CIDR rules.
+    pub fn cidr_rules(&self) -> Vec<IpNet> {
+        self.ip_cidr_rules.read().clone()
+    }
+
     /// Check if an IP address is allowed to connect.
+    ///
+    /// Checks exact IPs first (O(1) hash lookup), then CIDR rules (linear scan).
+    /// Returns `Denied` with an audit log entry if the IP is not in the allowlist.
     pub fn check_ip(&self, ip: IpAddr) -> IpCheckResult {
         self.total_connection_attempts
             .fetch_add(1, Ordering::Relaxed);
@@ -214,13 +318,18 @@ impl SecurityManager {
             return IpCheckResult::Disabled;
         }
 
-        let allowed = self.ip_allowlist.read().contains(&ip);
-        if !allowed {
-            self.blocked_by_ip.fetch_add(1, Ordering::Relaxed);
-            IpCheckResult::Denied
-        } else {
-            IpCheckResult::Allowed
+        // Fast path: exact IP match
+        if self.ip_allowlist.read().contains(&ip) {
+            return IpCheckResult::Allowed;
         }
+
+        // Slow path: CIDR range match
+        if self.ip_cidr_rules.read().iter().any(|cidr| cidr.contains(ip)) {
+            return IpCheckResult::Allowed;
+        }
+
+        self.blocked_by_ip.fetch_add(1, Ordering::Relaxed);
+        IpCheckResult::Denied
     }
 
     // ── Metrics ──
@@ -387,5 +496,124 @@ mod tests {
         assert!(summary.tls_enabled);
         assert!(summary.ip_allowlist_enabled);
         assert_eq!(summary.ip_allowlist_size, 1);
+    }
+
+    // ── IpNet / CIDR tests ──
+
+    #[test]
+    fn test_ipnet_parse_cidr_v4() {
+        let net = IpNet::parse("10.0.0.0/8").unwrap();
+        assert!(net.contains(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+        assert!(net.contains(IpAddr::V4(Ipv4Addr::new(10, 255, 255, 255))));
+        assert!(!net.contains(IpAddr::V4(Ipv4Addr::new(11, 0, 0, 1))));
+    }
+
+    #[test]
+    fn test_ipnet_parse_cidr_v4_24() {
+        let net = IpNet::parse("192.168.1.0/24").unwrap();
+        assert!(net.contains(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 0))));
+        assert!(net.contains(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 255))));
+        assert!(!net.contains(IpAddr::V4(Ipv4Addr::new(192, 168, 2, 1))));
+    }
+
+    #[test]
+    fn test_ipnet_parse_bare_ip() {
+        let net = IpNet::parse("10.0.0.1").unwrap();
+        assert!(net.contains(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+        assert!(!net.contains(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))));
+    }
+
+    #[test]
+    fn test_ipnet_parse_v6() {
+        let net = IpNet::parse("::1/128").unwrap();
+        assert!(net.contains(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)));
+        assert!(!net.contains(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)));
+    }
+
+    #[test]
+    fn test_ipnet_v4_v6_mismatch() {
+        let net = IpNet::parse("10.0.0.0/8").unwrap();
+        assert!(!net.contains(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)));
+    }
+
+    #[test]
+    fn test_ipnet_parse_invalid() {
+        assert!(IpNet::parse("not-an-ip").is_err());
+        assert!(IpNet::parse("10.0.0.0/33").is_err());
+        assert!(IpNet::parse("10.0.0.0/abc").is_err());
+    }
+
+    #[test]
+    fn test_ipnet_prefix_0_matches_all() {
+        let net = IpNet::parse("0.0.0.0/0").unwrap();
+        assert!(net.contains(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))));
+        assert!(net.contains(IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255))));
+    }
+
+    #[test]
+    fn test_ipnet_display() {
+        let net = IpNet::parse("10.0.0.0/8").unwrap();
+        assert_eq!(net.to_string(), "10.0.0.0/8");
+    }
+
+    #[test]
+    fn test_cidr_rule_allowlist() {
+        let mgr = SecurityManager::new();
+        mgr.add_cidr_rule(IpNet::parse("10.0.0.0/8").unwrap());
+        mgr.enable_ip_allowlist();
+
+        // 10.x.x.x should be allowed via CIDR
+        assert_eq!(
+            mgr.check_ip(IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3))),
+            IpCheckResult::Allowed,
+        );
+        // 192.168.x.x should be denied
+        assert_eq!(
+            mgr.check_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))),
+            IpCheckResult::Denied,
+        );
+    }
+
+    #[test]
+    fn test_cidr_and_exact_ip_combined() {
+        let mgr = SecurityManager::new();
+        mgr.add_cidr_rule(IpNet::parse("10.0.0.0/8").unwrap());
+        mgr.add_allowed_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)));
+        mgr.enable_ip_allowlist();
+
+        // Exact match
+        assert_eq!(
+            mgr.check_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))),
+            IpCheckResult::Allowed,
+        );
+        // CIDR match
+        assert_eq!(
+            mgr.check_ip(IpAddr::V4(Ipv4Addr::new(10, 99, 0, 1))),
+            IpCheckResult::Allowed,
+        );
+        // Neither
+        assert_eq!(
+            mgr.check_ip(IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))),
+            IpCheckResult::Denied,
+        );
+    }
+
+    #[test]
+    fn test_remove_cidr_rule() {
+        let mgr = SecurityManager::new();
+        let cidr = IpNet::parse("10.0.0.0/8").unwrap();
+        mgr.add_cidr_rule(cidr.clone());
+        mgr.enable_ip_allowlist();
+
+        assert_eq!(
+            mgr.check_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+            IpCheckResult::Allowed,
+        );
+
+        mgr.remove_cidr_rule(&cidr);
+        assert_eq!(
+            mgr.check_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+            IpCheckResult::Denied,
+        );
     }
 }

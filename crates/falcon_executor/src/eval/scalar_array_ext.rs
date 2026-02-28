@@ -195,9 +195,10 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             if matches!(elem, Datum::Null) {
                 return Ok(Datum::Null);
             }
+            const MAX_ARRAY_LEN: usize = 10_000_000;
             let count = match args.get(1) {
-                Some(Datum::Int64(n)) => *n as usize,
-                Some(Datum::Int32(n)) => *n as usize,
+                Some(Datum::Int64(n)) => usize::try_from(*n).unwrap_or(0),
+                Some(Datum::Int32(n)) => usize::try_from(*n).unwrap_or(0),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -205,6 +206,11 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                     ))
                 }
             };
+            if count > MAX_ARRAY_LEN {
+                return Err(ExecutionError::TypeError(
+                    format!("ARRAY_REPEAT count {} exceeds maximum {}", count, MAX_ARRAY_LEN),
+                ));
+            }
             Ok(Datum::Array(vec![elem; count]))
         }
         ScalarFunc::ArrayRotate => {
@@ -247,8 +253,8 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 }
             };
             let n = match args.get(1) {
-                Some(Datum::Int64(n)) => *n as usize,
-                Some(Datum::Int32(n)) => *n as usize,
+                Some(Datum::Int64(n)) => usize::try_from(*n).unwrap_or(0),
+                Some(Datum::Int32(n)) => usize::try_from(*n).unwrap_or(0),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -337,17 +343,34 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                     "ARRAY_GENERATE step cannot be zero".into(),
                 ));
             }
+            const MAX_GENERATE_LEN: usize = 10_000_000;
             let mut result = Vec::new();
             let mut i = start;
             if step > 0 {
                 while i <= stop {
+                    if result.len() >= MAX_GENERATE_LEN {
+                        return Err(ExecutionError::TypeError(
+                            format!("ARRAY_GENERATE result exceeds maximum {} elements", MAX_GENERATE_LEN),
+                        ));
+                    }
                     result.push(Datum::Int64(i));
-                    i += step;
+                    i = match i.checked_add(step) {
+                        Some(next) => next,
+                        None => break,
+                    };
                 }
             } else {
                 while i >= stop {
+                    if result.len() >= MAX_GENERATE_LEN {
+                        return Err(ExecutionError::TypeError(
+                            format!("ARRAY_GENERATE result exceeds maximum {} elements", MAX_GENERATE_LEN),
+                        ));
+                    }
                     result.push(Datum::Int64(i));
-                    i += step;
+                    i = match i.checked_add(step) {
+                        Some(next) => next,
+                        None => break,
+                    };
                 }
             }
             Ok(Datum::Array(result))
@@ -371,7 +394,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                     }
                     Datum::Timestamp(us) => {
                         let secs = us / 1_000_000;
-                        let nsecs = ((us % 1_000_000) * 1000) as u32;
+                        let nsecs = ((us % 1_000_000).abs() * 1000) as u32;
                         if let Some(dt) = chrono::DateTime::from_timestamp(secs, nsecs) {
                             format!("\"{}\"", dt.format("%Y-%m-%dT%H:%M:%S"))
                         } else {
@@ -572,8 +595,8 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 }
             };
             let start = match args.get(1) {
-                Some(Datum::Int32(n)) => *n as usize,
-                Some(Datum::Int64(n)) => *n as usize,
+                Some(Datum::Int32(n)) => usize::try_from(*n).unwrap_or(0),
+                Some(Datum::Int64(n)) => usize::try_from(*n).unwrap_or(0),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -582,8 +605,8 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 }
             };
             let end = match args.get(2) {
-                Some(Datum::Int32(n)) => *n as usize,
-                Some(Datum::Int64(n)) => *n as usize,
+                Some(Datum::Int32(n)) => usize::try_from(*n).unwrap_or(0),
+                Some(Datum::Int64(n)) => usize::try_from(*n).unwrap_or(0),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("ARRAY_SLICE requires end".into())),
             };
@@ -604,9 +627,10 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                     ))
                 }
             };
+            const MAX_ARRAY_LEN: usize = 10_000_000;
             let count = match args.get(1) {
-                Some(Datum::Int32(n)) => *n as usize,
-                Some(Datum::Int64(n)) => *n as usize,
+                Some(Datum::Int32(n)) => usize::try_from(*n).unwrap_or(0),
+                Some(Datum::Int64(n)) => usize::try_from(*n).unwrap_or(0),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -614,6 +638,11 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                     ))
                 }
             };
+            if count > MAX_ARRAY_LEN {
+                return Err(ExecutionError::TypeError(
+                    format!("ARRAY_FILL count {} exceeds maximum {}", count, MAX_ARRAY_LEN),
+                ));
+            }
             Ok(Datum::Array(vec![value; count]))
         }
         _ => unreachable!("dispatch_inner called with unhandled variant"),

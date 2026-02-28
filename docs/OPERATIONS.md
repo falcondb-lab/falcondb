@@ -76,7 +76,7 @@ falcon service status
 
 ### Recovery Policy
 
-The service is configured with automatic restart on failure:
+The service is configured to restart automatically on failure:
 
 | Failure # | Action | Delay |
 |-----------|--------|-------|

@@ -517,27 +517,9 @@ pub fn classify_error(err: &FalconError) -> TxnTerminalState {
 // §3: Failover × Commit Invariant Validator
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Models the commit phases for failover invariant validation.
-///
-/// **Invariant FC-1**: Leader crash before CP-D → txn MUST be lost (rolled back).
-/// **Invariant FC-2**: Leader crash after CP-D but before CP-V → txn MUST survive
-///   recovery and become visible on the new leader.
-/// **Invariant FC-3**: No txn may be acknowledged (CP-V) without being durable (CP-D).
-/// **Invariant FC-4**: Replay of a committed txn is idempotent — replaying twice
-///   produces the same state as replaying once.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum CommitPhase {
-    /// Transaction active, no WAL record.
-    Active,
-    /// WAL record written but not fsynced (CP-L).
-    WalLogged,
-    /// WAL record fsynced to disk (CP-D).
-    WalDurable,
-    /// Transaction visible to readers (CP-V).
-    Visible,
-    /// Client has received acknowledgement (CP-A).
-    Acknowledged,
-}
+// CommitPhase and FailoverExpectedOutcome are canonically defined in stability_hardening.rs.
+// Re-exported here for backward compatibility with existing import paths.
+pub use super::stability_hardening::{CommitPhase, FailoverExpectedOutcome};
 
 /// Record of a transaction's commit phase at the moment of a simulated crash.
 #[derive(Debug, Clone)]
@@ -545,36 +527,6 @@ pub struct FailoverCrashRecord {
     pub txn_id: TxnId,
     pub phase_at_crash: CommitPhase,
     pub expected_after_recovery: FailoverExpectedOutcome,
-}
-
-/// Expected outcome after recovery from a crash at a given commit phase.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FailoverExpectedOutcome {
-    /// Transaction must be rolled back (invisible).
-    MustBeRolledBack,
-    /// Transaction must survive and be visible.
-    MustSurvive,
-    /// Outcome depends on commit policy (may or may not survive).
-    PolicyDependent,
-}
-
-impl CommitPhase {
-    /// Determine expected recovery outcome for a crash at this phase.
-    pub const fn expected_recovery(&self, local_fsync_required: bool) -> FailoverExpectedOutcome {
-        match self {
-            Self::Active => FailoverExpectedOutcome::MustBeRolledBack,
-            Self::WalLogged => {
-                if local_fsync_required {
-                    FailoverExpectedOutcome::MustBeRolledBack
-                } else {
-                    FailoverExpectedOutcome::PolicyDependent
-                }
-            }
-            Self::WalDurable | Self::Visible | Self::Acknowledged => {
-                FailoverExpectedOutcome::MustSurvive
-            }
-        }
-    }
 }
 
 /// Validates failover invariants for a set of transactions.

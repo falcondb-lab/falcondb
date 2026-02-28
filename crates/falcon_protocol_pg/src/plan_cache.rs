@@ -54,39 +54,50 @@ impl PlanCache {
     /// Returns `Some(plan)` if found and still valid, `None` otherwise.
     pub fn get(&self, sql: &str) -> Option<PhysicalPlan> {
         let key = normalize_sql(sql);
-        let mut inner = self.inner.write().ok()?;
 
-        // Check if entry exists and is from current schema generation
-        let gen_valid = inner
-            .entry_generations
-            .get(&key)
-            .map(|g| *g == inner.schema_generation);
+        // Fast path: read lock for HashMap lookup + plan clone (concurrent-friendly).
+        {
+            let inner = self.inner.read().ok()?;
+            let gen_valid = inner
+                .entry_generations
+                .get(&key)
+                .map(|g| *g == inner.schema_generation);
 
-        match gen_valid {
-            Some(true) => {
-                let result = inner.entries.get_mut(&key).map(|(plan, count)| {
-                    *count += 1;
-                    plan.clone()
-                });
-                if result.is_some() {
-                    inner.hits += 1;
-                } else {
-                    inner.misses += 1;
+            match gen_valid {
+                Some(true) => {
+                    if let Some((plan, _)) = inner.entries.get(&key) {
+                        let cloned = plan.clone();
+                        drop(inner);
+                        // Brief write lock for counter updates only.
+                        if let Ok(mut w) = self.inner.write() {
+                            w.hits += 1;
+                            if let Some((_, count)) = w.entries.get_mut(&key) {
+                                *count += 1;
+                            }
+                        }
+                        return Some(cloned);
+                    }
+                    // Entry in generations but not in entries — inconsistency, treat as miss.
                 }
-                result
-            }
-            Some(false) => {
-                // Stale entry — remove it
-                inner.entries.remove(&key);
-                inner.entry_generations.remove(&key);
-                inner.misses += 1;
-                None
-            }
-            None => {
-                inner.misses += 1;
-                None
+                Some(false) => {
+                    drop(inner);
+                    // Stale entry — need write lock to remove.
+                    if let Ok(mut w) = self.inner.write() {
+                        w.entries.remove(&key);
+                        w.entry_generations.remove(&key);
+                        w.misses += 1;
+                    }
+                    return None;
+                }
+                None => {}
             }
         }
+
+        // Miss path — brief write lock for counter only.
+        if let Ok(mut inner) = self.inner.write() {
+            inner.misses += 1;
+        }
+        None
     }
 
     /// Insert a plan into the cache.

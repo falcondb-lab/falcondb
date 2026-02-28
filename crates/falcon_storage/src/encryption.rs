@@ -34,11 +34,27 @@ pub const SALT_LEN: usize = 16;
 
 /// A 256-bit encryption key.
 ///
-/// In production builds, key bytes should be zeroized on drop (via the `zeroize`
-/// crate). Simplified here to avoid an extra dependency.
-#[derive(Clone)]
+/// Key material is zeroized on drop to prevent residual secrets in freed memory.
+/// `Clone` is intentionally NOT derived — each clone copies key bytes, so
+/// callers should prefer borrowing `as_bytes()` on the hot path.
 pub struct EncryptionKey {
     bytes: [u8; AES256_KEY_LEN],
+}
+
+impl Clone for EncryptionKey {
+    fn clone(&self) -> Self {
+        Self { bytes: self.bytes }
+    }
+}
+
+impl Drop for EncryptionKey {
+    fn drop(&mut self) {
+        // Use write_volatile to prevent the compiler from eliding the zeroing.
+        for byte in &mut self.bytes {
+            unsafe { std::ptr::write_volatile(byte, 0) };
+        }
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl EncryptionKey {
@@ -165,6 +181,10 @@ pub struct KeyManager {
     salt: [u8; SALT_LEN],
     /// Whether encryption is enabled.
     enabled: bool,
+    /// Cache of unwrapped (plaintext) DEKs to avoid repeated AES-GCM decryption
+    /// of the wrapped DEK on every `encrypt_block` / `decrypt_block` call.
+    /// Invalidated on master key rotation.
+    dek_cache: HashMap<DekId, EncryptionKey>,
 }
 
 impl KeyManager {
@@ -177,6 +197,7 @@ impl KeyManager {
             next_dek_id: AtomicU64::new(1),
             salt: [0u8; SALT_LEN],
             enabled: false,
+            dek_cache: HashMap::new(),
         }
     }
 
@@ -192,6 +213,7 @@ impl KeyManager {
             next_dek_id: AtomicU64::new(1),
             salt,
             enabled: true,
+            dek_cache: HashMap::new(),
         }
     }
 
@@ -205,6 +227,7 @@ impl KeyManager {
             next_dek_id: AtomicU64::new(1),
             salt,
             enabled: true,
+            dek_cache: HashMap::new(),
         }
     }
 
@@ -219,7 +242,7 @@ impl KeyManager {
     }
 
     /// Generate a new DEK for a scope. Wraps it with the master key and stores it.
-    pub fn generate_dek(&mut self, scope: EncryptionScope) -> DekId {
+    pub fn generate_dek(&mut self, scope: EncryptionScope) -> Result<DekId, TdeError> {
         let dek = EncryptionKey::generate();
         let id = DekId(self.next_dek_id.fetch_add(1, Ordering::Relaxed));
 
@@ -229,7 +252,7 @@ impl KeyManager {
         let gcm_nonce = Nonce::from_slice(&nonce);
         let ciphertext = cipher
             .encrypt(gcm_nonce, dek.as_bytes().as_ref())
-            .expect("AES-256-GCM encryption of DEK must not fail with valid key");
+            .map_err(|_| TdeError::EncryptionFailed)?;
 
         // Deactivate previous DEK for this scope
         if let Some(prev_id) = self.active_deks.get(&scope) {
@@ -250,13 +273,23 @@ impl KeyManager {
             active: true,
         };
 
+        // Cache the plaintext DEK so subsequent encrypt/decrypt calls avoid re-unwrapping.
+        self.dek_cache.insert(id, dek);
         self.wrapped_deks.insert(id, wrapped);
         self.active_deks.insert(scope, id);
-        id
+        Ok(id)
     }
 
     /// Unwrap (decrypt) a DEK using the master key.
-    pub fn unwrap_dek(&self, dek_id: DekId) -> Result<EncryptionKey, TdeError> {
+    ///
+    /// Results are cached in `dek_cache` so repeated calls for the same DEK
+    /// avoid the AES-GCM decrypt overhead on the hot path.
+    pub fn unwrap_dek(&mut self, dek_id: DekId) -> Result<EncryptionKey, TdeError> {
+        // Fast path: return cached plaintext DEK.
+        if let Some(cached) = self.dek_cache.get(&dek_id) {
+            return Ok(cached.clone());
+        }
+        // Slow path: decrypt the wrapped DEK and cache it.
         let wrapped = self
             .wrapped_deks
             .get(&dek_id)
@@ -270,7 +303,9 @@ impl KeyManager {
         if decrypted.len() >= AES256_KEY_LEN {
             key_bytes.copy_from_slice(&decrypted[..AES256_KEY_LEN]);
         }
-        Ok(EncryptionKey::from_bytes(key_bytes))
+        let key = EncryptionKey::from_bytes(key_bytes);
+        self.dek_cache.insert(dek_id, key.clone());
+        Ok(key)
     }
 
     /// Get the active DEK ID for a scope.
@@ -282,7 +317,7 @@ impl KeyManager {
     ///
     /// The caller stores the returned bytes as-is; to decrypt, pass them to
     /// `decrypt_block` which splits the nonce prefix automatically.
-    pub fn encrypt_block(&self, dek_id: DekId, plaintext: &[u8]) -> Result<Vec<u8>, TdeError> {
+    pub fn encrypt_block(&mut self, dek_id: DekId, plaintext: &[u8]) -> Result<Vec<u8>, TdeError> {
         let dek = self.unwrap_dek(dek_id)?;
         let cipher = Aes256Gcm::new(dek.as_bytes().into());
         let nonce_bytes = Self::generate_nonce();
@@ -299,7 +334,7 @@ impl KeyManager {
 
     /// Decrypt a data block previously produced by `encrypt_block`.
     /// Input format: `nonce (12 bytes) || ciphertext+tag`.
-    pub fn decrypt_block(&self, dek_id: DekId, encrypted: &[u8]) -> Result<Vec<u8>, TdeError> {
+    pub fn decrypt_block(&mut self, dek_id: DekId, encrypted: &[u8]) -> Result<Vec<u8>, TdeError> {
         if encrypted.len() < NONCE_LEN + GCM_TAG_LEN {
             return Err(TdeError::DecryptionFailed);
         }
@@ -315,7 +350,7 @@ impl KeyManager {
     /// Encrypt a data block with caller-supplied nonce (for WAL records where
     /// the nonce is derived from LSN to allow deterministic re-encryption).
     pub fn encrypt_block_with_nonce(
-        &self,
+        &mut self,
         dek_id: DekId,
         plaintext: &[u8],
         nonce: &[u8; NONCE_LEN],
@@ -330,7 +365,7 @@ impl KeyManager {
 
     /// Decrypt a data block with caller-supplied nonce.
     pub fn decrypt_block_with_nonce(
-        &self,
+        &mut self,
         dek_id: DekId,
         ciphertext: &[u8],
         nonce: &[u8; NONCE_LEN],
@@ -344,12 +379,14 @@ impl KeyManager {
     }
 
     /// Rotate the master key. Re-wraps all existing DEKs with the new master key.
-    pub fn rotate_master_key(&mut self, new_passphrase: &str) {
-        // Unwrap all DEKs with old master key
+    pub fn rotate_master_key(&mut self, new_passphrase: &str) -> Result<(), TdeError> {
+        // Unwrap all DEKs with old master key.
+        // Collect IDs first to avoid borrow conflict with &mut self in unwrap_dek.
+        let dek_ids: Vec<DekId> = self.wrapped_deks.keys().copied().collect();
         let mut raw_deks: Vec<(DekId, EncryptionKey)> = Vec::new();
-        for id in self.wrapped_deks.keys() {
-            if let Ok(dek) = self.unwrap_dek(*id) {
-                raw_deks.push((*id, dek));
+        for id in dek_ids {
+            if let Ok(dek) = self.unwrap_dek(id) {
+                raw_deks.push((id, dek));
             }
         }
 
@@ -364,7 +401,7 @@ impl KeyManager {
             let gcm_nonce = Nonce::from_slice(&nonce);
             let ciphertext = cipher
                 .encrypt(gcm_nonce, dek.as_bytes().as_ref())
-                .expect("Re-wrap must not fail with valid key");
+                .map_err(|_| TdeError::EncryptionFailed)?;
             if let Some(wrapped) = self.wrapped_deks.get_mut(id) {
                 wrapped.ciphertext = ciphertext;
                 wrapped.nonce = nonce;
@@ -373,6 +410,12 @@ impl KeyManager {
 
         self.master_key = new_master;
         self.salt = new_salt;
+        // Invalidate and repopulate the plaintext DEK cache with new unwraps.
+        self.dek_cache.clear();
+        for (id, dek) in &raw_deks {
+            self.dek_cache.insert(*id, dek.clone());
+        }
+        Ok(())
     }
 
     /// Number of managed DEKs.
@@ -430,7 +473,7 @@ mod tests {
     #[test]
     fn test_generate_and_unwrap_dek() {
         let mut km = KeyManager::new("test-pass");
-        let dek_id = km.generate_dek(EncryptionScope::Wal);
+        let dek_id = km.generate_dek(EncryptionScope::Wal).unwrap();
         assert_eq!(km.dek_count(), 1);
 
         let dek = km.unwrap_dek(dek_id).expect("unwrap should succeed");
@@ -440,7 +483,7 @@ mod tests {
     #[test]
     fn test_encrypt_decrypt_roundtrip() {
         let mut km = KeyManager::new("test-pass");
-        let dek_id = km.generate_dek(EncryptionScope::Table(1));
+        let dek_id = km.generate_dek(EncryptionScope::Table(1)).unwrap();
 
         let plaintext = b"Hello, FalconDB Enterprise!";
         let encrypted = km.encrypt_block(dek_id, plaintext).unwrap();
@@ -457,7 +500,7 @@ mod tests {
     #[test]
     fn test_encrypt_decrypt_with_explicit_nonce() {
         let mut km = KeyManager::new("test-pass");
-        let dek_id = km.generate_dek(EncryptionScope::Wal);
+        let dek_id = km.generate_dek(EncryptionScope::Wal).unwrap();
 
         let plaintext = b"WAL record payload";
         let nonce = [42u8; NONCE_LEN];
@@ -474,7 +517,7 @@ mod tests {
     #[test]
     fn test_tampered_ciphertext_detected() {
         let mut km = KeyManager::new("test-pass");
-        let dek_id = km.generate_dek(EncryptionScope::Table(1));
+        let dek_id = km.generate_dek(EncryptionScope::Table(1)).unwrap();
 
         let plaintext = b"sensitive data";
         let mut encrypted = km.encrypt_block(dek_id, plaintext).unwrap();
@@ -492,7 +535,7 @@ mod tests {
     #[test]
     fn test_wrong_dek_id_fails() {
         let mut km = KeyManager::new("test-pass");
-        let dek_id = km.generate_dek(EncryptionScope::Wal);
+        let dek_id = km.generate_dek(EncryptionScope::Wal).unwrap();
 
         let encrypted = km.encrypt_block(dek_id, b"data").unwrap();
 
@@ -506,10 +549,10 @@ mod tests {
         let mut km = KeyManager::new("test-pass");
         let scope = EncryptionScope::Wal;
 
-        let id1 = km.generate_dek(scope);
+        let id1 = km.generate_dek(scope).unwrap();
         assert_eq!(km.active_dek(scope), Some(id1));
 
-        let id2 = km.generate_dek(scope);
+        let id2 = km.generate_dek(scope).unwrap();
         assert_eq!(km.active_dek(scope), Some(id2));
         assert_ne!(id1, id2);
 
@@ -522,7 +565,7 @@ mod tests {
     #[test]
     fn test_master_key_rotation() {
         let mut km = KeyManager::new("old-password");
-        let dek_id = km.generate_dek(EncryptionScope::Wal);
+        let dek_id = km.generate_dek(EncryptionScope::Wal).unwrap();
 
         let plaintext = b"sensitive data before rotation";
         let encrypted = km.encrypt_block(dek_id, plaintext).unwrap();
@@ -548,9 +591,9 @@ mod tests {
     #[test]
     fn test_multiple_scopes() {
         let mut km = KeyManager::new("test");
-        let wal_dek = km.generate_dek(EncryptionScope::Wal);
-        let tbl_dek = km.generate_dek(EncryptionScope::Table(1));
-        let sst_dek = km.generate_dek(EncryptionScope::Sst(42));
+        let wal_dek = km.generate_dek(EncryptionScope::Wal).unwrap();
+        let tbl_dek = km.generate_dek(EncryptionScope::Table(1)).unwrap();
+        let sst_dek = km.generate_dek(EncryptionScope::Sst(42)).unwrap();
 
         assert_eq!(km.dek_count(), 3);
         assert_ne!(wal_dek, tbl_dek);
@@ -596,8 +639,8 @@ mod tests {
     #[test]
     fn test_list_deks() {
         let mut km = KeyManager::new("test");
-        km.generate_dek(EncryptionScope::Wal);
-        km.generate_dek(EncryptionScope::Table(1));
+        km.generate_dek(EncryptionScope::Wal).unwrap();
+        km.generate_dek(EncryptionScope::Table(1)).unwrap();
         let deks = km.list_deks();
         assert_eq!(deks.len(), 2);
         assert!(deks.iter().any(|d| d.label == "wal"));
@@ -616,7 +659,7 @@ mod tests {
     #[test]
     fn test_large_block_roundtrip() {
         let mut km = KeyManager::new("test");
-        let dek_id = km.generate_dek(EncryptionScope::Sst(1));
+        let dek_id = km.generate_dek(EncryptionScope::Sst(1)).unwrap();
 
         // 64 KB block (typical page size)
         let plaintext: Vec<u8> = (0..65536).map(|i| (i % 256) as u8).collect();
@@ -628,7 +671,7 @@ mod tests {
     #[test]
     fn test_empty_block_roundtrip() {
         let mut km = KeyManager::new("test");
-        let dek_id = km.generate_dek(EncryptionScope::Table(1));
+        let dek_id = km.generate_dek(EncryptionScope::Table(1)).unwrap();
 
         let encrypted = km.encrypt_block(dek_id, b"").unwrap();
         let decrypted = km.decrypt_block(dek_id, &encrypted).unwrap();
@@ -639,8 +682,8 @@ mod tests {
     fn test_dek_isolation_across_scopes() {
         // Data encrypted with one scope's DEK cannot be decrypted with another's
         let mut km = KeyManager::new("test");
-        let wal_dek = km.generate_dek(EncryptionScope::Wal);
-        let tbl_dek = km.generate_dek(EncryptionScope::Table(1));
+        let wal_dek = km.generate_dek(EncryptionScope::Wal).unwrap();
+        let tbl_dek = km.generate_dek(EncryptionScope::Table(1)).unwrap();
 
         let plaintext = b"scope-isolated data";
         let encrypted = km.encrypt_block(wal_dek, plaintext).unwrap();
@@ -659,11 +702,11 @@ mod tests {
         let scope = EncryptionScope::Wal;
 
         // Encrypt with first DEK
-        let dek1 = km.generate_dek(scope);
+        let dek1 = km.generate_dek(scope).unwrap();
         let encrypted1 = km.encrypt_block(dek1, b"old data").unwrap();
 
         // Rotate to new DEK
-        let dek2 = km.generate_dek(scope);
+        let dek2 = km.generate_dek(scope).unwrap();
         assert_ne!(dek1, dek2);
 
         // Old DEK should still decrypt old data
@@ -674,7 +717,7 @@ mod tests {
     #[test]
     fn test_truncated_ciphertext_fails() {
         let mut km = KeyManager::new("test");
-        let dek_id = km.generate_dek(EncryptionScope::Wal);
+        let dek_id = km.generate_dek(EncryptionScope::Wal).unwrap();
 
         let encrypted = km.encrypt_block(dek_id, b"data").unwrap();
 

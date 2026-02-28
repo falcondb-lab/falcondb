@@ -183,6 +183,9 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("ASIN requires numeric".into())),
             };
+            if n < -1.0 || n > 1.0 {
+                return Err(ExecutionError::TypeError("input is out of range for ASIN".into()));
+            }
             Ok(Datum::Float64(n.asin()))
         }
         ScalarFunc::Acos => {
@@ -193,6 +196,9 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("ACOS requires numeric".into())),
             };
+            if n < -1.0 || n > 1.0 {
+                return Err(ExecutionError::TypeError("input is out of range for ACOS".into()));
+            }
             Ok(Datum::Float64(n.acos()))
         }
         ScalarFunc::Atan => {
@@ -300,8 +306,8 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 }
             };
             let count = match args.get(3) {
-                Some(Datum::Int64(n)) => *n as usize,
-                Some(Datum::Int32(n)) => *n as usize,
+                Some(Datum::Int64(n)) => usize::try_from(*n).unwrap_or(0),
+                Some(Datum::Int32(n)) => usize::try_from(*n).unwrap_or(0),
                 _ => replacement.len(),
             };
             let mut result = Vec::new();
@@ -474,7 +480,8 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => 0,
             };
-            let factor = 10f64.powi(places as i32);
+            let places_i32 = i32::try_from(places).unwrap_or(if places > 0 { i32::MAX } else { i32::MIN });
+            let factor = 10f64.powi(places_i32);
             Ok(Datum::Float64((n * factor).trunc() / factor))
         }
         ScalarFunc::RoundPrecision => {
@@ -496,7 +503,8 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => 0,
             };
-            let factor = 10f64.powi(places as i32);
+            let places_i32 = i32::try_from(places).unwrap_or(if places > 0 { i32::MAX } else { i32::MIN });
+            let factor = 10f64.powi(places_i32);
             Ok(Datum::Float64((n * factor).round() / factor))
         }
         ScalarFunc::RegexpLike => {
@@ -595,14 +603,24 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let a = match args.first() {
                 Some(Datum::Int64(n)) => *n,
                 Some(Datum::Int32(n)) => i64::from(*n),
-                Some(Datum::Float64(n)) => *n as i64,
+                Some(Datum::Float64(n)) => {
+                    if n.is_nan() || n.is_infinite() || *n < (i64::MIN as f64) || *n > (i64::MAX as f64) {
+                        return Err(ExecutionError::NumericOverflow);
+                    }
+                    *n as i64
+                }
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("DIV requires numeric".into())),
             };
             let b = match args.get(1) {
                 Some(Datum::Int64(n)) => *n,
                 Some(Datum::Int32(n)) => i64::from(*n),
-                Some(Datum::Float64(n)) => *n as i64,
+                Some(Datum::Float64(n)) => {
+                    if n.is_nan() || n.is_infinite() || *n < (i64::MIN as f64) || *n > (i64::MAX as f64) {
+                        return Err(ExecutionError::NumericOverflow);
+                    }
+                    *n as i64
+                }
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("DIV requires numeric".into())),
             };
@@ -659,7 +677,9 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             };
             let re = regex::Regex::new(&pattern)
                 .map_err(|e| ExecutionError::TypeError(format!("Invalid regex: {e}")))?;
-            let pos = re.find(&source).map_or(0, |m| m.start() + 1);
+            let pos = re.find(&source).map_or(0, |m| {
+                source[..m.start()].chars().count() + 1
+            });
             Ok(Datum::Int64(pos as i64))
         }
         ScalarFunc::WidthBucket => {
@@ -725,6 +745,9 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("LOG10 requires numeric".into())),
             };
+            if n <= 0.0 {
+                return Err(ExecutionError::TypeError("cannot take logarithm of zero or negative number".into()));
+            }
             Ok(Datum::Float64(n.log10()))
         }
         ScalarFunc::Log2 => {
@@ -735,6 +758,9 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("LOG2 requires numeric".into())),
             };
+            if n <= 0.0 {
+                return Err(ExecutionError::TypeError("cannot take logarithm of zero or negative number".into()));
+            }
             Ok(Datum::Float64(n.log2()))
         }
         ScalarFunc::Cot => {
@@ -745,7 +771,11 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("COT requires numeric".into())),
             };
-            Ok(Datum::Float64(1.0 / n.tan()))
+            let t = n.tan();
+            if t == 0.0 {
+                return Err(ExecutionError::DivisionByZero);
+            }
+            Ok(Datum::Float64(1.0 / t))
         }
         ScalarFunc::Sinh => {
             let n = match args.first() {
@@ -922,6 +952,12 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let a: Vec<char> = s1.chars().collect();
             let b: Vec<char> = s2.chars().collect();
             let (m, n) = (a.len(), b.len());
+            const MAX_LEVENSHTEIN_LEN: usize = 5_000;
+            if m > MAX_LEVENSHTEIN_LEN || n > MAX_LEVENSHTEIN_LEN {
+                return Err(ExecutionError::TypeError(
+                    format!("LEVENSHTEIN input length exceeds maximum {} characters", MAX_LEVENSHTEIN_LEN),
+                ));
+            }
             let mut dp = vec![vec![0usize; n + 1]; m + 1];
             for (i, row) in dp.iter_mut().enumerate().take(m + 1) {
                 row[0] = i;

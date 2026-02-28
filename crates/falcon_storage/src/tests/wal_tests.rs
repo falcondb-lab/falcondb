@@ -321,10 +321,10 @@
 
         // Use full KeyManager flow: passphrase → master key → DEK → WalEncryption
         let mut km = KeyManager::new("my-secret-passphrase");
-        let dek_id = km.generate_dek(EncryptionScope::Wal);
-        let enc = WalEncryption::from_key_manager(&km, dek_id).expect("unwrap DEK");
+        let dek_id = km.generate_dek(EncryptionScope::Wal).unwrap();
+        let enc = WalEncryption::from_key_manager(&mut km, dek_id).expect("unwrap DEK");
 
-        let mut wal = WalWriter::open(&dir, SyncMode::None).unwrap();
+        let wal = WalWriter::open(&dir, SyncMode::None).unwrap();
         wal.set_encryption(enc);
 
         wal.append(&WalRecord::Insert {
@@ -335,7 +335,7 @@
         wal.flush().unwrap();
 
         // Decrypt with the same KeyManager
-        let dec = WalEncryption::from_key_manager(&km, dek_id).expect("unwrap DEK");
+        let dec = WalEncryption::from_key_manager(&mut km, dek_id.clone()).expect("unwrap DEK");
         let reader = WalReader::new(&dir);
         let records = reader.read_all_encrypted(Some(&dec)).unwrap();
         assert_eq!(records.len(), 1);

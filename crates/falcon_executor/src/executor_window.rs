@@ -98,15 +98,19 @@ impl Executor {
                             }
                         }
                         WindowFunc::Ntile(n) => {
-                            let total = indices.len();
+                            let total = indices.len() as i64;
                             for (i, &row_idx) in indices.iter().enumerate() {
-                                let bucket = (i as i64 * *n) / total as i64 + 1;
+                                let bucket = if total == 0 {
+                                    1
+                                } else {
+                                    (i as i64).saturating_mul(*n) / total + 1
+                                };
                                 result_rows[row_idx].values[proj_idx] = Datum::Int64(bucket);
                             }
                         }
                         WindowFunc::Lag(col_idx, offset) => {
                             for (i, &row_idx) in indices.iter().enumerate() {
-                                let off = *offset as usize;
+                                let off = usize::try_from(*offset).unwrap_or(usize::MAX);
                                 if i >= off {
                                     let prev_row_idx = indices[i - off];
                                     let val = source_rows[prev_row_idx]
@@ -121,14 +125,18 @@ impl Executor {
                         }
                         WindowFunc::Lead(col_idx, offset) => {
                             for (i, &row_idx) in indices.iter().enumerate() {
-                                let off = *offset as usize;
-                                if i + off < indices.len() {
-                                    let next_row_idx = indices[i + off];
-                                    let val = source_rows[next_row_idx]
-                                        .get(*col_idx)
-                                        .cloned()
-                                        .unwrap_or(Datum::Null);
-                                    result_rows[row_idx].values[proj_idx] = val;
+                                let off = usize::try_from(*offset).unwrap_or(usize::MAX);
+                                if let Some(target) = i.checked_add(off) {
+                                    if target < indices.len() {
+                                        let next_row_idx = indices[target];
+                                        let val = source_rows[next_row_idx]
+                                            .get(*col_idx)
+                                            .cloned()
+                                            .unwrap_or(Datum::Null);
+                                        result_rows[row_idx].values[proj_idx] = val;
+                                    } else {
+                                        result_rows[row_idx].values[proj_idx] = Datum::Null;
+                                    }
                                 } else {
                                     result_rows[row_idx].values[proj_idx] = Datum::Null;
                                 }
@@ -390,7 +398,7 @@ impl Executor {
             WindowFrameBound::UnboundedPreceding => 0,
             WindowFrameBound::CurrentRow => pos,
             WindowFrameBound::Preceding(n) => pos.saturating_sub(*n as usize),
-            WindowFrameBound::Following(n) => pos + *n as usize,
+            WindowFrameBound::Following(n) => pos.saturating_add(*n as usize),
             WindowFrameBound::UnboundedFollowing => _partition_len,
         }
     }
@@ -401,7 +409,7 @@ impl Executor {
             WindowFrameBound::UnboundedFollowing => partition_len.saturating_sub(1),
             WindowFrameBound::CurrentRow => pos,
             WindowFrameBound::Following(n) => {
-                (pos + *n as usize).min(partition_len.saturating_sub(1))
+                pos.saturating_add(*n as usize).min(partition_len.saturating_sub(1))
             }
             WindowFrameBound::Preceding(n) => pos.saturating_sub(*n as usize),
             WindowFrameBound::UnboundedPreceding => 0,

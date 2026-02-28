@@ -130,6 +130,7 @@ impl ShardReplicaGroup {
 
         let mut write_sets: HashMap<TxnId, Vec<WriteOp>> = HashMap::new();
         let mut max_lsn = replica.current_lsn();
+        let mut applied = 0usize;
 
         for lsn_record in &chunk.records {
             // Skip records already applied (idempotent).
@@ -138,10 +139,11 @@ impl ShardReplicaGroup {
             }
             apply_wal_record_to_engine(&replica.storage, &lsn_record.record, &mut write_sets)?;
             max_lsn = lsn_record.lsn;
+            applied += 1;
         }
 
         replica.applied_lsn.store(max_lsn, Ordering::SeqCst);
-        Ok(chunk.records.len())
+        Ok(applied)
     }
 
     /// Replication lag: how many LSNs behind the primary each replica is.

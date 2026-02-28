@@ -206,20 +206,24 @@ impl SsiLockManager {
     ///
     /// Returns the list of transactions whose predicates are violated.
     pub fn check_rw_conflicts(&self, txn_id: TxnId) -> Vec<TxnId> {
-        let writes = self.write_intents.lock();
-        let predicates = self.predicates.lock();
-
-        let my_writes = match writes.get(&txn_id) {
-            Some(w) => w,
-            None => return vec![],
+        // Snapshot write intents under their own lock, then release before acquiring predicates.
+        // This avoids holding both locks simultaneously, preventing potential deadlock.
+        let my_writes = {
+            let writes = self.write_intents.lock();
+            match writes.get(&txn_id) {
+                Some(w) => w.clone(),
+                None => return vec![],
+            }
         };
+
+        let predicates = self.predicates.lock();
 
         let mut conflicting = Vec::new();
         for (&other_txn, preds) in predicates.iter() {
             if other_txn == txn_id {
                 continue;
             }
-            for write in my_writes {
+            for write in &my_writes {
                 for pred in preds {
                     if pred.table_id == write.table_id && Self::key_in_range(&write.key, pred) {
                         conflicting.push(other_txn);

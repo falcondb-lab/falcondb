@@ -47,6 +47,10 @@ pub struct FalconConfig {
     /// v1.2.0: Transparent Data Encryption (TDE) configuration.
     #[serde(default)]
     pub tde: TdeConfig,
+    /// Raft consensus configuration.
+    /// Active when `replication.role = "raft_member"`.
+    #[serde(default)]
+    pub raft: RaftConfig,
 }
 
 const fn default_config_version() -> u32 { CURRENT_CONFIG_VERSION }
@@ -607,18 +611,135 @@ pub enum NodeRole {
     /// Standalone: single-node mode, no replication (M1 default).
     #[default]
     Standalone,
+    /// RaftMember: participates in Raft consensus replication.
+    /// Writes are proposed through Raft before being applied to the storage engine.
+    /// Leader node accepts writes; followers serve read-only queries.
+    /// Configure the cluster via the `[raft]` section in falcon.toml.
+    #[serde(rename = "raft_member")]
+    RaftMember,
 }
 
 impl NodeRole {
     /// Returns true if this role is allowed to serve write transactions.
+    /// RaftMember nodes determine writability dynamically (only the Raft leader
+    /// accepts writes at runtime); we return true here so the executor is
+    /// created in read-write mode and the Raft layer enforces leader-only writes.
     pub const fn is_writable(&self) -> bool {
-        matches!(self, Self::Primary | Self::Standalone)
+        matches!(self, Self::Primary | Self::Standalone | Self::RaftMember)
     }
 
     /// Returns true if columnstore / analytical storage paths are permitted.
     /// Primary nodes must never touch columnar storage on the write path.
     pub const fn allows_columnstore(&self) -> bool {
         matches!(self, Self::Analytics | Self::Standalone)
+    }
+
+    /// Returns true if this role uses Raft consensus for replication.
+    pub const fn is_raft_member(&self) -> bool {
+        matches!(self, Self::RaftMember)
+    }
+}
+
+/// Raft consensus configuration.
+///
+/// Used when `replication.role = "raft_member"`. Each shard runs a Raft group
+/// of `node_ids`. The local node's ID is `node_id`. Peer addresses for the
+/// gRPC Raft transport are specified in `peers` as `"<node_id>=<addr>"` pairs.
+///
+/// Example falcon.toml section for a 3-node cluster:
+/// ```toml
+/// [raft]
+/// node_id = 1
+/// node_ids = [1, 2, 3]
+/// raft_listen_addr = "0.0.0.0:50052"
+/// peers = ["2=http://node2:50052", "3=http://node3:50052"]
+/// failover_poll_interval_ms = 200
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RaftConfig {
+    /// This node's Raft node ID (must be unique within the cluster, > 0).
+    #[serde(default = "default_raft_node_id")]
+    pub node_id: u64,
+    /// All node IDs in this Raft cluster (including this node).
+    #[serde(default = "default_raft_node_ids")]
+    pub node_ids: Vec<u64>,
+    /// gRPC listen address for the Raft transport server.
+    #[serde(default = "default_raft_listen_addr")]
+    pub raft_listen_addr: String,
+    /// Peer addresses in the format `"<node_id>=<grpc_uri>"`,
+    /// e.g. `"2=http://node2:50052"`. Omit the entry for the local node.
+    #[serde(default)]
+    pub peers: Vec<String>,
+    /// How often (ms) the `RaftFailoverWatcher` polls for leader changes.
+    #[serde(default = "default_raft_poll_interval_ms")]
+    pub failover_poll_interval_ms: u64,
+    /// Raft heartbeat interval in milliseconds.
+    #[serde(default = "default_raft_heartbeat_ms")]
+    pub heartbeat_interval_ms: u64,
+    /// Raft election timeout minimum in milliseconds.
+    #[serde(default = "default_raft_election_min_ms")]
+    pub election_timeout_min_ms: u64,
+    /// Raft election timeout maximum in milliseconds.
+    #[serde(default = "default_raft_election_max_ms")]
+    pub election_timeout_max_ms: u64,
+}
+
+fn default_raft_node_id() -> u64 { 1 }
+fn default_raft_node_ids() -> Vec<u64> { vec![1] }
+fn default_raft_listen_addr() -> String { "0.0.0.0:50052".to_owned() }
+fn default_raft_poll_interval_ms() -> u64 { 200 }
+fn default_raft_heartbeat_ms() -> u64 { 50 }
+fn default_raft_election_min_ms() -> u64 { 150 }
+fn default_raft_election_max_ms() -> u64 { 300 }
+
+impl Default for RaftConfig {
+    fn default() -> Self {
+        Self {
+            node_id: default_raft_node_id(),
+            node_ids: default_raft_node_ids(),
+            raft_listen_addr: default_raft_listen_addr(),
+            peers: Vec::new(),
+            failover_poll_interval_ms: default_raft_poll_interval_ms(),
+            heartbeat_interval_ms: default_raft_heartbeat_ms(),
+            election_timeout_min_ms: default_raft_election_min_ms(),
+            election_timeout_max_ms: default_raft_election_max_ms(),
+        }
+    }
+}
+
+impl RaftConfig {
+    /// Parse the `peers` list into `(node_id, addr)` pairs.
+    pub fn parsed_peers(&self) -> Vec<(u64, String)> {
+        self.peers
+            .iter()
+            .filter_map(|entry| {
+                let mut parts = entry.splitn(2, '=');
+                let id_str = parts.next()?;
+                let addr = parts.next()?;
+                let id: u64 = id_str.trim().parse().ok()?;
+                Some((id, addr.trim().to_owned()))
+            })
+            .collect()
+    }
+
+    /// Validate the Raft configuration.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.node_id == 0 {
+            return Err("raft.node_id must be > 0".into());
+        }
+        if self.node_ids.is_empty() {
+            return Err("raft.node_ids must not be empty".into());
+        }
+        if !self.node_ids.contains(&self.node_id) {
+            return Err(format!(
+                "raft.node_id {} must be present in raft.node_ids {:?}",
+                self.node_id, self.node_ids
+            ));
+        }
+        if self.raft_listen_addr.is_empty() {
+            return Err("raft.raft_listen_addr must not be empty".into());
+        }
+        Ok(())
     }
 }
 
@@ -649,7 +770,10 @@ impl ReplicationConfig {
     /// role-specific settings are coherent.
     pub fn validate(&self) -> Result<(), String> {
         // Primary/Replica/Analytics must have a valid gRPC address
-        if self.role != NodeRole::Standalone && self.grpc_listen_addr.is_empty() {
+        // RaftMember uses its own raft.raft_listen_addr, not replication.grpc_listen_addr
+        if !matches!(self.role, NodeRole::Standalone | NodeRole::RaftMember)
+            && self.grpc_listen_addr.is_empty()
+        {
             return Err("grpc_listen_addr must be set for non-standalone nodes".into());
         }
 
@@ -883,6 +1007,7 @@ impl Default for FalconConfig {
             pitr: PitrConfig::default(),
             multi_tenant: MultiTenantConfig::default(),
             tde: TdeConfig::default(),
+            raft: RaftConfig::default(),
         }
     }
 }
