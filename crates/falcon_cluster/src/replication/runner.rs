@@ -348,21 +348,10 @@ impl ReplicaRunner {
                         )?;
                         max_lsn = lsn_record.lsn;
                         applied += 1;
-                    }
 
-                    metrics.applied_lsn.store(max_lsn, Ordering::SeqCst);
-                    // Track primary's end_lsn so lag_lsn = primary_lsn - applied_lsn is accurate.
-                    if chunk.end_lsn > metrics.primary_lsn.load(Ordering::Relaxed) {
-                        metrics.primary_lsn.store(chunk.end_lsn, Ordering::Relaxed);
-                    }
-                    metrics.chunks_applied.fetch_add(1, Ordering::Relaxed);
-                    metrics
-                        .records_applied
-                        .fetch_add(applied, Ordering::Relaxed);
-                    chunks_since_ack += 1;
-
-                    // Periodic ack.
-                    if chunks_since_ack >= self.config.ack_interval_chunks {
+                        // RPO=0: ack immediately after each record is durably applied
+                        // so the primary's append_and_wait() is unblocked as soon as
+                        // possible — not deferred to the end-of-chunk batch.
                         if let Err(e) = transport
                             .ack_wal(self.config.shard_id, self.config.replica_id, max_lsn)
                             .await
@@ -376,8 +365,19 @@ impl ReplicaRunner {
                         } else {
                             metrics.acks_sent.fetch_add(1, Ordering::Relaxed);
                         }
-                        chunks_since_ack = 0;
                     }
+
+                    metrics.applied_lsn.store(max_lsn, Ordering::SeqCst);
+                    // Track primary's end_lsn so lag_lsn = primary_lsn - applied_lsn is accurate.
+                    if chunk.end_lsn > metrics.primary_lsn.load(Ordering::Relaxed) {
+                        metrics.primary_lsn.store(chunk.end_lsn, Ordering::Relaxed);
+                    }
+                    metrics.chunks_applied.fetch_add(1, Ordering::Relaxed);
+                    metrics
+                        .records_applied
+                        .fetch_add(applied, Ordering::Relaxed);
+                    chunks_since_ack += 1;
+                    let _ = chunks_since_ack; // batched ack superseded by per-record ack above
                 }
                 Ok(Some(Err(e))) => {
                     // Stream error — reconnect.

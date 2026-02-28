@@ -30,6 +30,9 @@ pub mod structured_lsn;
 pub mod unified_data_plane;
 pub mod unified_data_plane_full;
 pub mod zstd_segment;
+pub mod zstd_dict;
+pub mod zstd_streaming;
+pub mod zstd_recompress;
 pub mod wal;
 pub mod wal_win_async;
 

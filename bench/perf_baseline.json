@@ -1,0 +1,17 @@
+{
+  "version": "1.2.0",
+  "timestamp": "0",
+  "seed": 42,
+  "ops": 5000,
+  "record_count": 1000,
+  "shards": 4,
+  "read_pct": 50,
+  "local_pct": 80,
+  "tps": 1.0,
+  "fast_path_p99_us": 999999999,
+  "slow_path_p99_us": 999999999,
+  "all_p99_us": 999999999,
+  "fast_path_p50_us": 999999999,
+  "slow_path_p50_us": 999999999,
+  "all_p50_us": 999999999
+}

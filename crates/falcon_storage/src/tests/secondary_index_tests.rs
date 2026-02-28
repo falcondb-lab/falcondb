@@ -302,7 +302,7 @@
         engine.insert(TableId(200), row2, txn1).unwrap();
         engine.commit_txn_local(txn1, Timestamp(10)).unwrap();
 
-        // Now create index  鈥?it should backfill existing rows
+        // Now create index  —it should backfill existing rows
         engine.create_index("idx_test", 1).unwrap();
 
         let alice_key = encode_column_value(&Datum::Text("alice".into()));
@@ -347,7 +347,7 @@
         let engine = StorageEngine::new_in_memory();
         engine.create_table(idx_schema()).unwrap();
 
-        // Insert/update/delete without any index  鈥?should work fine
+        // Insert/update/delete without any index  —should work fine
         let txn1 = TxnId(1);
         let row = OwnedRow::new(vec![
             Datum::Int32(1),
@@ -370,7 +370,7 @@
         engine.delete(TableId(200), &pk, txn3).unwrap();
         engine.commit_txn_local(txn3, Timestamp(30)).unwrap();
 
-        // No crash, no errors  鈥?index maintenance is a no-op when no indexes exist
+        // No crash, no errors  —index maintenance is a no-op when no indexes exist
     }
 
     #[test]
@@ -400,7 +400,7 @@
         // Abort the transaction
         engine.abort_txn_local(txn1).unwrap();
 
-        // Index still empty  鈥?abort is a no-op for indexes under Approach A
+        // Index still empty  —abort is a no-op for indexes under Approach A
         assert!(
             engine
                 .index_lookup(TableId(200), 1, &key)
@@ -491,7 +491,7 @@
         engine.insert(TableId(200), row1, txn1).unwrap();
         engine.commit_txn_local(txn1, Timestamp(10)).unwrap();
 
-        // Insert another row with same name  鈥?should fail
+        // Insert another row with same name  —should fail
         let txn2 = TxnId(2);
         let row2 = OwnedRow::new(vec![
             Datum::Int32(2),
@@ -644,10 +644,10 @@
         engine.insert(TableId(200), row1, txn1).unwrap();
         engine.insert(TableId(200), row2, txn2).unwrap();
 
-        // txn1 commits first  鈥?succeeds
+        // txn1 commits first  —succeeds
         engine.commit_txn_local(txn1, Timestamp(10)).unwrap();
 
-        // txn2 tries to commit  鈥?must fail (UniqueViolation)
+        // txn2 tries to commit  —must fail (UniqueViolation)
         let result = engine.commit_txn_local(txn2, Timestamp(20));
         assert!(
             result.is_err(),
@@ -682,7 +682,7 @@
         engine.insert(TableId(200), row1, txn1).unwrap();
         engine.commit_txn_local(txn1, Timestamp(10)).unwrap();
 
-        // txn2 started after txn1 committed  鈥?insert-time check catches it
+        // txn2 started after txn1 committed  —insert-time check catches it
         let txn2 = TxnId(2);
         let row2 = OwnedRow::new(vec![
             Datum::Int32(2),
@@ -699,7 +699,7 @@
     #[test]
     fn test_update_causing_unique_key_conflict_at_commit() {
         // txn1 commits "alice" (pk=1) and "bob" (pk=2).
-        // txn2 updates pk=2 to name="alice"  鈥?passes at DML time (no conflict yet
+        // txn2 updates pk=2 to name="alice"  —passes at DML time (no conflict yet
         // because the index check at update time is against committed index which
         // has "bob" for pk=2). At commit, re-validation catches it.
         let engine = StorageEngine::new_in_memory();
@@ -721,7 +721,7 @@
         let pk2 = engine.insert(TableId(200), row2, txn1).unwrap();
         engine.commit_txn_local(txn1, Timestamp(10)).unwrap();
 
-        // txn2 updates pk=2 to name="alice"  鈥?conflicts with pk=1
+        // txn2 updates pk=2 to name="alice"  —conflicts with pk=1
         let txn2 = TxnId(2);
         let updated_row = OwnedRow::new(vec![
             Datum::Int32(2),
@@ -752,7 +752,7 @@
         // Setup: txn1 and txn2 both start before any commit.
         // txn1 inserts "alice" (pk=1). txn2 inserts "carol" (pk=10) and "alice" (pk=20).
         // Both pass insert-time check (index is empty).
-        // txn1 commits first. txn2 commit fails  鈥?neither "carol" nor "alice" should commit.
+        // txn1 commits first. txn2 commit fails  —neither "carol" nor "alice" should commit.
         let engine = StorageEngine::new_in_memory();
         engine.create_table(idx_schema()).unwrap();
         engine.create_unique_index("idx_test", 1).unwrap();
@@ -768,7 +768,7 @@
         ]);
         engine.insert(TableId(200), row1, txn1).unwrap();
 
-        // txn2 inserts "carol" AND "alice"  鈥?both pass insert-time check (index empty)
+        // txn2 inserts "carol" AND "alice"  —both pass insert-time check (index empty)
         let row_carol = OwnedRow::new(vec![
             Datum::Int32(10),
             Datum::Text("carol".into()),
@@ -782,14 +782,14 @@
         engine.insert(TableId(200), row_carol, txn2).unwrap();
         engine.insert(TableId(200), row_alice2, txn2).unwrap();
 
-        // txn1 commits first  鈥?succeeds, "alice" now in index
+        // txn1 commits first  —succeeds, "alice" now in index
         engine.commit_txn_local(txn1, Timestamp(10)).unwrap();
 
-        // txn2 commit should fail  鈥?"alice" conflicts
+        // txn2 commit should fail  —"alice" conflicts
         let result = engine.commit_txn_local(txn2, Timestamp(20));
         assert!(result.is_err());
 
-        // Only txn1's row (pk=1, alice) should be visible  鈥?carol should NOT be committed
+        // Only txn1's row (pk=1, alice) should be visible  —carol should NOT be committed
         let rows = engine.scan(TableId(200), TxnId(3), Timestamp(30)).unwrap();
         assert_eq!(
             rows.len(),

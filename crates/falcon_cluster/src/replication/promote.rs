@@ -11,9 +11,11 @@ use falcon_storage::engine::StorageEngine;
 
 use crate::routing::shard_map::ShardMap;
 
+use std::time::Duration;
+
 use super::catchup::{apply_wal_record_to_engine, WriteOp};
 use super::replica_state::{ReplicaNode, ReplicaRole};
-use super::wal_stream::{ReplicationLog, WalChunk};
+use super::wal_stream::{ReplicationLog, SyncMode, WalChunk};
 use super::ReplicationMetrics;
 
 /// Manages replication for a single shard: one primary, N replicas.
@@ -50,10 +52,30 @@ impl ShardReplicaGroup {
         })
     }
 
-    /// Ship a WAL record from primary to the replication log.
+    /// Ship a WAL record from primary to the replication log (Async — RPO > 0).
     /// Returns the LSN assigned to this record.
     pub fn ship_wal_record(&self, record: falcon_storage::wal::WalRecord) -> u64 {
         self.log.append(record)
+    }
+
+    /// Ship a WAL record and wait for replica acknowledgement (RPO = 0).
+    ///
+    /// - `SyncMode::Async` — identical to `ship_wal_record`; returns immediately.
+    /// - `SyncMode::SemiSync` — blocks until **at least 1** replica acks the LSN.
+    /// - `SyncMode::Sync` — blocks until **all** replicas ack the LSN.
+    ///
+    /// `ack_timeout` controls how long to wait before returning an error.
+    /// On timeout the WAL record is already durable on the primary; the error
+    /// only means the replica has not yet confirmed — callers may choose to
+    /// degrade to Async or abort the transaction.
+    pub fn ship_wal_record_sync(
+        &self,
+        record: falcon_storage::wal::WalRecord,
+        mode: SyncMode,
+        ack_timeout: Duration,
+    ) -> Result<u64, FalconError> {
+        let required = mode.required_acks(self.replicas.len());
+        self.log.append_and_wait(record, required, ack_timeout)
     }
 
     /// Apply pending WAL records to a specific replica via the replication log.

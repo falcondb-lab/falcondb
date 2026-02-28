@@ -80,11 +80,11 @@
                 &target,
                 IsolationLevel::ReadCommitted,
                 |storage, _txn_mgr, txn_id| {
-                    // Insert on all shards  鈥?but shard 2 (3rd) gets a duplicate PK
+                    // Insert on all shards  —but shard 2 (3rd) gets a duplicate PK
                     // which we simulate by inserting the same key twice.
                     let row = OwnedRow::new(vec![Datum::Int32(1)]);
                     storage.insert(TableId(1), row.clone(), txn_id)?;
-                    // Insert duplicate  鈥?this will fail on the storage layer
+                    // Insert duplicate  —this will fail on the storage layer
                     storage.insert(TableId(1), row, txn_id)?;
                     Ok(())
                 },

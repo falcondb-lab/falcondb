@@ -61,7 +61,7 @@
             })
             .unwrap();
 
-            // Uncommitted txn (no commit record  鈥?simulates crash)
+            // Uncommitted txn (no commit record  —simulates crash)
             wal.append(&WalRecord::Insert {
                 txn_id: TxnId(2),
                 table_id: TableId(1),
@@ -71,7 +71,7 @@
             wal.flush().unwrap();
         }
 
-        // Recover  鈥?uncommitted txn should be aborted
+        // Recover  —uncommitted txn should be aborted
         let engine = StorageEngine::recover(&dir).unwrap();
         let rows = engine.scan(TableId(1), TxnId(3), Timestamp(100)).unwrap();
         assert_eq!(
@@ -124,7 +124,7 @@
             assert_eq!(rows.len(), 1);
         }
 
-        // Second recovery (idempotent  鈥?same result)
+        // Second recovery (idempotent  —same result)
         {
             let engine = StorageEngine::recover(&dir).unwrap();
             let rows = engine.scan(TableId(1), TxnId(3), Timestamp(100)).unwrap();
@@ -169,10 +169,10 @@
                     txn2,
                 )
                 .unwrap();
-            // No commit  鈥?crash!
+            // No commit  —crash!
         }
 
-        // Recover  鈥?should see original value, not the uncommitted update
+        // Recover  —should see original value, not the uncommitted update
         let engine = StorageEngine::recover(&dir).unwrap();
         let rows = engine.scan(TableId(1), TxnId(3), Timestamp(100)).unwrap();
         assert_eq!(rows.len(), 1);
@@ -208,10 +208,10 @@
             // Delete without commit
             let txn2 = TxnId(2);
             engine.delete(TableId(1), &pk, txn2).unwrap();
-            // No commit  鈥?crash!
+            // No commit  —crash!
         }
 
-        // Recover  鈥?row should still be visible
+        // Recover  —row should still be visible
         let engine = StorageEngine::recover(&dir).unwrap();
         let rows = engine.scan(TableId(1), TxnId(3), Timestamp(100)).unwrap();
         assert_eq!(
@@ -349,7 +349,7 @@
             .unwrap();
             wal.append(&WalRecord::PrepareTxn { txn_id: TxnId(2) })
                 .unwrap();
-            // No commit record  鈥?crash after prepare
+            // No commit record  —crash after prepare
             wal.flush().unwrap();
         }
 
@@ -439,7 +439,7 @@
                 .unwrap();
         }
 
-        // Phase 2: recover 鈥?index must be present in the registry
+        // Phase 2: recover —index must be present in the registry
         let engine = StorageEngine::recover(&dir).unwrap();
         assert!(
             engine.index_exists("idx_val"),
@@ -470,11 +470,11 @@
             engine.drop_index("idx_val").unwrap();
         }
 
-        // Phase 2: recover 鈥?index must NOT be present
+        // Phase 2: recover —index must NOT be present
         let engine = StorageEngine::recover(&dir).unwrap();
         assert!(
             !engine.index_exists("idx_val"),
-            "DROP INDEX must survive WAL recovery 鈥?index should be gone"
+            "DROP INDEX must survive WAL recovery —index should be gone"
         );
         let indexed = engine.get_indexed_columns(TableId(1));
         assert!(
@@ -587,7 +587,7 @@
             wal.flush().unwrap();
         }
 
-        // Replay 3 times 鈥?each must produce identical result
+        // Replay 3 times —each must produce identical result
         for attempt in 1..=3 {
             let engine = StorageEngine::recover(&dir).unwrap();
             let rows = engine.scan(TableId(1), TxnId(99), Timestamp(100)).unwrap();

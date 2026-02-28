@@ -71,7 +71,7 @@
                 .unwrap();
         }
 
-        // ColumnStore has no MVCC 鈥?all rows visible at any read_ts
+        // ColumnStore has no MVCC —all rows visible at any read_ts
         let rows_past = engine.scan(TableId(500), TxnId(2), Timestamp(0)).unwrap();
         let rows_future = engine
             .scan(TableId(500), TxnId(2), Timestamp(u64::MAX))
@@ -130,7 +130,7 @@
 
     #[test]
     fn test_columnstore_commit_does_not_affect_visibility() {
-        // ColumnStore rows are immediately visible 鈥?commit is a no-op for visibility
+        // ColumnStore rows are immediately visible —commit is a no-op for visibility
         let engine = analytics_engine();
         engine.create_table(cs_schema()).unwrap();
 

@@ -19,6 +19,8 @@ pub mod priority_scheduler;
 pub mod row_stream;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_expr;
 pub mod vectorized;
 
 pub use executor::{ExecutionResult, Executor};

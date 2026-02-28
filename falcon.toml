@@ -27,4 +27,27 @@ no_buffering = false
 [gc]
 enabled = false
 
+[cdc]
+enabled = true
+buffer_size = 100000
+
+[pitr]
+enabled = false
+archive_dir = ""
+retention_hours = 0
+
+[multi_tenant]
+enabled = false
+metering_enabled = false
+default_max_qps = 0
+default_max_concurrent_txns = 0
+default_max_memory_bytes = 0
+default_max_storage_bytes = 0
+
+[tde]
+enabled = false
+key_env_var = "FALCON_TDE_KEY"
+encrypt_wal = true
+encrypt_data = true
+
 [memory]

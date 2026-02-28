@@ -106,9 +106,9 @@ pub fn parallel_filter(
                 let end = (start + chunk_size).min(n);
                 s.spawn(move || {
                     let mut matched = Vec::new();
-                    for i in start..end {
-                        if ExprEngine::eval_filter(filter, &rows[i].1).unwrap_or(false) {
-                            matched.push(i);
+                    for (i, row) in rows[start..end].iter().enumerate() {
+                        if ExprEngine::eval_filter(filter, &row.1).unwrap_or(false) {
+                            matched.push(start + i);
                         }
                     }
                     matched
@@ -309,8 +309,7 @@ pub fn parallel_grouped_aggregate(
                     let mut local_map: HashMap<GroupKey, PartialAggState> =
                         HashMap::with_capacity((end - start) / 4 + 1);
                     let mut key_buf = Vec::with_capacity(64);
-                    for i in start..end {
-                        let row = &rows[i].1;
+                    for (_, row) in rows[start..end].iter().map(|(pk, r)| (pk, r)) {
                         crate::executor_aggregate::encode_group_key(&mut key_buf, row, group_by);
                         let val = row.values.get(agg_col_idx).and_then(falcon_common::datum::Datum::as_f64);
                         let state = local_map.entry(key_buf.clone()).or_default();

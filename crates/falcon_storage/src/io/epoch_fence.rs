@@ -146,7 +146,7 @@ impl StorageEpochFence {
     }
 
     /// Whether fencing is enabled.
-    pub fn is_enabled(&self) -> bool {
+    pub const fn is_enabled(&self) -> bool {
         self.enabled
     }
 

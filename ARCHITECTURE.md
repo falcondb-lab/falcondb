@@ -1,6 +1,6 @@
 # FalconDB — PG-Compatible Distributed In-Memory OLTP
 
-> English | [简体中文](ARCHITECTURE_zh.md) | [日本語](ARCHITECTURE_ja.md) | [한국어](ARCHITECTURE_ko.md) | [Français](ARCHITECTURE_fr.md) | [Deutsch](ARCHITECTURE_de.md) | [Español](ARCHITECTURE_es.md) | [Português](ARCHITECTURE_pt.md) | [Italiano](ARCHITECTURE_it.md) | [العربية](ARCHITECTURE_ar.md) | [Bahasa Melayu](ARCHITECTURE_ms.md)
+> English | [简体中文](ARCHITECTURE_zh.md)
 
 ## 0. Core Property: Deterministic Commit Guarantee (DCG)
 

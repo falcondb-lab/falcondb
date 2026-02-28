@@ -78,7 +78,7 @@ impl TopologySnapshot {
     }
 
     /// Number of shards in this snapshot.
-    pub fn shard_count(&self) -> usize {
+    pub const fn shard_count(&self) -> usize {
         self.shards.len()
     }
 
@@ -541,7 +541,7 @@ impl NotLeaderRedirector {
         let exp = base_ms * 2.0_f64.powi(attempt as i32);
         let capped = exp.min(self.config.max_delay.as_millis() as f64);
         // Simple deterministic "jitter" — proportional reduction based on attempt
-        let jittered = capped * (1.0 - self.config.jitter_factor * ((attempt % 3) as f64 / 3.0));
+        let jittered = capped * self.config.jitter_factor.mul_add(-((attempt % 3) as f64 / 3.0), 1.0);
         Duration::from_millis(jittered.max(1.0) as u64)
     }
 }

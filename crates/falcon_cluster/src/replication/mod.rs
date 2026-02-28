@@ -11,9 +11,13 @@
 //! - `InProcessTransport`: same-process simulation (direct memory access).
 //! - `ChannelTransport`: tokio mpsc channel-based (simulates cross-process gRPC streaming).
 //!
-//! Commit ack semantics (M1, Scheme A):
-//! - commit ack = primary WAL durable (fsync). Does NOT wait for replica.
-//! - RPO may be > 0 if primary crashes before replica catches up.
+//! Commit ack semantics:
+//! - **Async** (legacy Scheme A): commit ack = primary WAL durable only. RPO > 0.
+//! - **SemiSync**: commit ack after 1 replica confirms apply. RPO = 0.
+//! - **Sync**: commit ack after ALL replicas confirm apply. RPO = 0.
+//!
+//! Use `ShardReplicaGroup::ship_wal_record_sync(record, SyncMode::SemiSync, timeout)`
+//! to achieve RPO = 0.
 
 pub mod catchup;
 pub mod promote;
@@ -31,7 +35,7 @@ pub use runner::{
 };
 pub use wal_stream::{
     AsyncReplicationTransport, ChannelTransport, InProcessTransport, LsnWalRecord, ReplicationLog,
-    ReplicationTransport, WalChunk,
+    ReplicationTransport, SyncMode, SyncWalAck, WalAckTimeout, WalChunk,
 };
 
 use std::sync::atomic::{AtomicU64, Ordering};

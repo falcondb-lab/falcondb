@@ -260,7 +260,7 @@
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
         let shards: Vec<ShardId> = (0..4).map(ShardId).collect();
 
-        // INSERT via DistributedQueryEngine  鈥?should route to a specific shard.
+        // INSERT via DistributedQueryEngine  —should route to a specific shard.
         let plan = plan_and_wrap(
             "INSERT INTO users (id, name, age) VALUES (12345, 'routed_user', 42)",
             &catalog,
@@ -435,7 +435,7 @@
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
         let shards: Vec<ShardId> = (0..4).map(ShardId).collect();
 
-        // Multi-row INSERT with different PK values  鈥?rows should be split across shards.
+        // Multi-row INSERT with different PK values  —rows should be split across shards.
         let plan = plan_and_wrap(
             "INSERT INTO users (id, name, age) VALUES (1000, 'a', 10), (2000, 'b', 20), (3000, 'c', 30)",
             &catalog,
@@ -510,7 +510,7 @@
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
         let shards: Vec<ShardId> = (0..4).map(ShardId).collect();
 
-        // SELECT SUM(age), MIN(age), MAX(age)  鈥?all supported for TwoPhaseAgg
+        // SELECT SUM(age), MIN(age), MAX(age)  —all supported for TwoPhaseAgg
         let plan = plan_and_wrap(
             "SELECT SUM(age), MIN(age), MAX(age) FROM users",
             &catalog,
@@ -805,7 +805,7 @@
         let (engine, _catalog) = setup();
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
 
-        // Insert 100 rows that hash to different shards  鈥?parallel execution.
+        // Insert 100 rows that hash to different shards  —parallel execution.
         let mut row_exprs = Vec::new();
         for i in 5000..5100 {
             row_exprs.push(vec![
@@ -1636,7 +1636,7 @@
             }
             Ok(_) => {
                 // If the machine is extremely fast, the query might succeed.
-                // That's acceptable  鈥?the important thing is no panic.
+                // That's acceptable  —the important thing is no panic.
             }
         }
     }

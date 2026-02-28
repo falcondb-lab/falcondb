@@ -770,7 +770,7 @@ fn eval_scalar_func(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Executio
 
 /// Byte-encode a single Datum into `buf` for dedup/hashing purposes.
 /// Uses tag-byte + fixed-width payload — no String allocation.
-pub(crate) fn encode_datum_key(buf: &mut Vec<u8>, datum: &Datum) {
+pub fn encode_datum_key(buf: &mut Vec<u8>, datum: &Datum) {
     match datum {
         Datum::Null => buf.push(0),
         Datum::Boolean(b) => { buf.push(1); buf.push(u8::from(*b)); }
@@ -931,7 +931,7 @@ pub fn eval_filter(expr: &BoundExpr, row: &OwnedRow) -> Result<bool, ExecutionEr
         // IS NULL / IS NOT NULL — borrow, no clone
         BoundExpr::IsNull(inner) => {
             if let BoundExpr::ColumnRef(idx) = inner.as_ref() {
-                Ok(row.get(*idx).map_or(true, Datum::is_null))
+                Ok(row.get(*idx).is_none_or(Datum::is_null))
             } else {
                 let val = eval_expr(inner, row)?;
                 Ok(val.is_null())
@@ -939,7 +939,7 @@ pub fn eval_filter(expr: &BoundExpr, row: &OwnedRow) -> Result<bool, ExecutionEr
         }
         BoundExpr::IsNotNull(inner) => {
             if let BoundExpr::ColumnRef(idx) = inner.as_ref() {
-                Ok(row.get(*idx).map_or(false, |d| !d.is_null()))
+                Ok(row.get(*idx).is_some_and(|d| !d.is_null()))
             } else {
                 let val = eval_expr(inner, row)?;
                 Ok(!val.is_null())

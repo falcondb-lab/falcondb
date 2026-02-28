@@ -1,9 +1,30 @@
 //! Raft consensus layer for FalconDB.
 //!
-//! - `RaftNode`: single-node Raft (backward compat)
-//! - `RaftGroup`: multi-node in-process Raft cluster
-//! - `RaftConsensus`: `Consensus` trait backed by per-shard `RaftGroup`
-//! - `SingleNodeConsensus`: no-op for single-node deployments
+//! # Implementations
+//!
+//! | Type | Network | Use case |
+//! |------|---------|----------|
+//! | [`SingleNodeConsensus`] | **none (no-op stub)** | Single-node deployments; all ops succeed immediately without replication |
+//! | [`RaftNode`] | in-process (`RouterNetworkFactory`) | Single-node backward compat; real openraft state machine, no network |
+//! | [`RaftGroup`] | in-process (`RouterNetworkFactory`) | Multi-node in same process (tests + single-binary clusters) |
+//! | [`RaftConsensus`] | delegates to `RaftGroup` per shard | Production multi-shard consensus — wire it to `GrpcNetworkFactory` for real deployments |
+//!
+//! # Production vs. Test / Stub paths
+//!
+//! **`SingleNodeConsensus` is a stub.** It implements [`Consensus`] with no-op
+//! methods that always succeed. It exists so that single-node deployments can
+//! satisfy the `Consensus` bound without spinning up an openraft instance.
+//! It is **not** backed by any log, state machine, or network.
+//!
+//! **`RaftGroup` uses in-process RPCs** (`RouterNetworkFactory`). This is
+//! intentional for tests and single-binary embedded clusters. For
+//! multi-process production clusters, construct a `RaftGroup` backed by
+//! `GrpcNetworkFactory` (see `falcon_raft::network::GrpcNetworkFactory`) and
+//! bridge it through `falcon_cluster::raft_integration::RaftShardCoordinator`.
+//!
+//! The 32 tests in this crate exercise the openraft state machine and
+//! consensus logic through the in-process network; they do **not** exercise
+//! the gRPC transport or the WAL-application bridge in `falcon_cluster`.
 
 pub mod network;
 pub mod server;
@@ -51,6 +72,14 @@ pub trait Consensus: Send + Sync + 'static {
     async fn remove_member(&self, shard: ShardId, node: NodeId) -> Result<(), ConsensusError>;
 }
 
+/// No-op [`Consensus`] stub for single-node deployments.
+///
+/// **This is not a real Raft implementation.** All methods succeed immediately
+/// without persisting anything, replicating to peers, or maintaining a log.
+/// It exists solely to satisfy the [`Consensus`] trait bound in configurations
+/// that do not need distributed consensus (standalone / embedded nodes).
+///
+/// Do not use this in multi-node clusters. Use [`RaftConsensus`] instead.
 pub struct SingleNodeConsensus;
 
 #[async_trait]
@@ -72,7 +101,14 @@ impl Consensus for SingleNodeConsensus {
     }
 }
 
-/// Single-node Raft cluster (backward compat).
+/// Single-node Raft cluster (backward compatibility).
+///
+/// Uses an in-process `NetworkFactory` whose RPCs always return `Unreachable`.
+/// Suitable for single-node embedded use where openraft's log/state-machine is
+/// desired but no peer communication is needed.
+///
+/// For multi-node clusters use [`RaftGroup`] (in-process) or
+/// [`RaftConsensus`] wired to `GrpcNetworkFactory` (production).
 pub struct RaftNode {
     raft: Raft<TypeConfig>,
 }
@@ -126,8 +162,19 @@ impl RaftNode {
 // RaftGroup — multi-node in-process Raft cluster
 // ---------------------------------------------------------------------------
 
-/// Multi-node Raft cluster using in-process `RaftRouter` for RPCs.
-/// All nodes run in the same tokio runtime; RPCs are zero-copy function calls.
+/// Multi-node Raft cluster using **in-process** `RaftRouter` for RPCs.
+///
+/// All nodes run in the same tokio runtime and communicate via
+/// `RouterNetworkFactory` — RPCs are zero-copy function calls with no real
+/// network socket. This is the correct choice for:
+///
+/// - **Unit / integration tests** in this crate and `falcon_cluster`.
+/// - **Single-binary embedded clusters** where all replicas coexist in one
+///   process (e.g. dev mode, CI).
+///
+/// For **production multi-process clusters** construct the openraft nodes with
+/// `GrpcNetworkFactory` and coordinate them through
+/// `falcon_cluster::raft_integration::RaftShardCoordinator`.
 pub struct RaftGroup {
     router: Arc<RaftRouter>,
     node_ids: Vec<u64>,
@@ -421,13 +468,31 @@ impl Consensus for RaftConsensus {
     }
 }
 
+/// Tests for `falcon_raft`.
+///
+/// # What these tests cover
+///
+/// All tests in this module use the **in-process `RouterNetworkFactory`**.
+/// They exercise the openraft state machine, leader election, log replication,
+/// apply callbacks, membership changes, and snapshot triggering — but they do
+/// **not** test the gRPC transport layer (`GrpcNetworkFactory`) or the
+/// WAL-application bridge (`falcon_cluster::raft_integration`).
+///
+/// # What is NOT tested here
+///
+/// - Real network connectivity (TCP / TLS / gRPC)
+/// - Cross-process failover
+/// - WAL record application to `StorageEngine`
+/// - Production shard coordination via `RaftShardCoordinator`
+///
+/// Those paths are covered in `falcon_cluster/tests/`.
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
 
     use super::*;
 
-    // ── Single-node (backward compat) ────────────────────────────────────────
+    // ── Single-node (backward compat) — uses in-process NetworkFactory ────────
 
     #[tokio::test]
     async fn test_single_node_init() {

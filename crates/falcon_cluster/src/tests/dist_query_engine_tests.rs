@@ -115,7 +115,7 @@
         let engine = setup_engine_with_data(4, 25);
         let qe = DistributedQueryEngine::new(engine.clone(), Duration::from_secs(10));
 
-        // Each shard does a COUNT  鈥?returns 1 row with count as Int64.
+        // Each shard does a COUNT  —returns 1 row with count as Int64.
         // We use a SeqScan with a group_by trick, but since the executor
         // does the aggregation, we need to use the actual planner types.
         // For simplicity, test with Union and check total row count.

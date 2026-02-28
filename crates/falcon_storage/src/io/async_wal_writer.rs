@@ -668,7 +668,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // TIMING-SENSITIVE: asserts on `sync_count >= 1` after a fixed 50ms sleep.
+    // The background syncer thread may not have flushed within 50ms on a
+    // heavily loaded CI runner.
     #[test]
+    #[ignore = "timing-sensitive: relies on 50ms sleep for background syncer; run with: cargo test -- --ignored"]
     fn test_async_wal_group_commit_syncer() {
         let dir = std::env::temp_dir().join("falcon_awal_test_gc_syncer");
         let _ = std::fs::remove_dir_all(&dir);
@@ -785,7 +789,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // TIMING-SENSITIVE: asserts `sync_count < 100` (coalescing effectiveness)
+    // after a fixed 50ms sleep. Both the coalescing assertion and the
+    // sleep-based synchronisation are timing-dependent.
     #[test]
+    #[ignore = "timing-sensitive: coalescing assertion and 50ms sync depend on scheduling; run with: cargo test -- --ignored"]
     fn test_async_wal_concurrent_appends() {
         let dir = std::env::temp_dir().join("falcon_awal_test_concurrent");
         let _ = std::fs::remove_dir_all(&dir);

@@ -67,7 +67,7 @@ pub enum InvariantResult {
 }
 
 impl InvariantResult {
-    pub fn is_satisfied(&self) -> bool {
+    pub const fn is_satisfied(&self) -> bool {
         matches!(self, Self::Satisfied)
     }
 }
@@ -718,7 +718,7 @@ impl ParticipantIdempotencyRegistry {
             records.retain(|_, r| r.last_applied_at > cutoff);
         }
 
-        let entry = records.entry(key).or_insert(ParticipantRecord {
+        let entry = records.entry(key).or_insert_with(|| ParticipantRecord {
             last_decision: None,
             apply_count: 0,
             last_applied_at: Instant::now(),
@@ -969,7 +969,7 @@ impl MembershipLifecycle {
 
     /// Mark a node as Removed.
     pub fn remove_node(&self, node_id: u64) -> Result<(), String> {
-        let current = self.get_state(node_id).ok_or(format!("node {} not found", node_id))?;
+        let current = self.get_state(node_id).ok_or_else(|| format!("node {} not found", node_id))?;
         match current {
             MemberState::Draining | MemberState::Active | MemberState::Joining => {
                 self.transition_unchecked(node_id, current, MemberState::Removed, "node removed")
@@ -1031,7 +1031,7 @@ impl MembershipLifecycle {
         to: MemberState,
         reason: &str,
     ) -> Result<(), String> {
-        let current = self.get_state(node_id).ok_or(format!("node {} not found", node_id))?;
+        let current = self.get_state(node_id).ok_or_else(|| format!("node {} not found", node_id))?;
         if current != expected_from {
             return Err(format!(
                 "invalid transition for node {}: expected {} but found {}",
@@ -1227,7 +1227,7 @@ impl ShardMigrationCoordinator {
         let mut active = self.active.write();
         let task = active
             .get_mut(&shard_id)
-            .ok_or(format!("no active migration for shard {:?}", shard_id))?;
+            .ok_or_else(|| format!("no active migration for shard {:?}", shard_id))?;
 
         // Record freeze duration if leaving freeze phase
         if task.phase == ShardMigrationPhase::Freeze {
@@ -1263,7 +1263,7 @@ impl ShardMigrationCoordinator {
         let mut active = self.active.write();
         let task = active
             .get_mut(&shard_id)
-            .ok_or(format!("no active migration for shard {:?}", shard_id))?;
+            .ok_or_else(|| format!("no active migration for shard {:?}", shard_id))?;
 
         task.phase = ShardMigrationPhase::Complete;
 
@@ -1289,7 +1289,7 @@ impl ShardMigrationCoordinator {
         let mut active = self.active.write();
         let task = active
             .get_mut(&shard_id)
-            .ok_or(format!("no active migration for shard {:?}", shard_id))?;
+            .ok_or_else(|| format!("no active migration for shard {:?}", shard_id))?;
 
         task.phase = ShardMigrationPhase::RolledBack;
         task.error = Some(reason.to_string());
@@ -1439,12 +1439,12 @@ impl ClusterStatusBuilder {
         self
     }
 
-    pub fn twopc_inflight(mut self, count: u64) -> Self {
+    pub const fn twopc_inflight(mut self, count: u64) -> Self {
         self.view.twopc_inflight = count;
         self
     }
 
-    pub fn indoubt_count(mut self, count: usize) -> Self {
+    pub const fn indoubt_count(mut self, count: usize) -> Self {
         self.view.indoubt_count = count;
         self
     }
@@ -1454,7 +1454,7 @@ impl ClusterStatusBuilder {
         self
     }
 
-    pub fn routing_version(mut self, version: u64) -> Self {
+    pub const fn routing_version(mut self, version: u64) -> Self {
         self.view.routing_version = version;
         self
     }
@@ -1469,17 +1469,17 @@ impl ClusterStatusBuilder {
         self
     }
 
-    pub fn split_brain_events(mut self, count: u64) -> Self {
+    pub const fn split_brain_events(mut self, count: u64) -> Self {
         self.view.split_brain_events = count;
         self
     }
 
-    pub fn epoch_fence_rejections(mut self, count: u64) -> Self {
+    pub const fn epoch_fence_rejections(mut self, count: u64) -> Self {
         self.view.epoch_fence_rejections = count;
         self
     }
 
-    pub fn idempotency_duplicates(mut self, count: u64) -> Self {
+    pub const fn idempotency_duplicates(mut self, count: u64) -> Self {
         self.view.idempotency_duplicates = count;
         self
     }

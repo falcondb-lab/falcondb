@@ -1,4 +1,4 @@
-//! # Zstd Integration in Unified Data Plane
+﻿//! # Zstd Integration in Unified Data Plane
 //!
 //! **"Zstd is not a row compressor. It is a segment-level infrastructure primitive."**
 //!
@@ -15,32 +15,39 @@
 //! - F: GC rewrite = recompression opportunity
 //! - G: Metrics & ops status
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-use parking_lot::{Mutex, RwLock};
 
 use crate::unified_data_plane::{
     SegmentCodec, SegmentKind, SegmentStore, SegmentStoreError,
-    UnifiedSegmentHeader, Manifest,
-    UNIFIED_HEADER_SIZE,
+    UnifiedSegmentHeader, UNIFIED_HEADER_SIZE,
 };
 use crate::unified_data_plane_full::ColdBlockEncoding;
 
-// ═══════════════════════════════════════════════════════════════════════════
-// §A — Compression Scope & Codec Policy
-// ═══════════════════════════════════════════════════════════════════════════
+pub use crate::zstd_dict::{
+    DictionaryEntry, DictionaryMetrics, DictionaryStore,
+};
+pub use crate::zstd_streaming::{
+    StreamingCodecCaps, DecompressCacheKey, DecompressCache,
+    DecompressCacheMetrics, DecompressPool, DecompressPoolMetrics,
+    compress_streaming_chunk, decompress_streaming_chunk, negotiate_streaming_codec,
+};
+pub use crate::zstd_recompress::{
+    RecompressRequest, RecompressReason, RecompressResult, recompress_segment,
+    ZstdMetricsSnapshot, ZstdCompressMetrics, build_zstd_metrics,
+    SegmentCodecInfo, list_segments_by_codec,
+};
 
+
+// Compression Scope & Codec Policy
 /// Codec policy configuration — which codec is allowed/required where.
 ///
 /// Hard constraints:
-/// - ❌ Active WAL tail: NEVER zstd
-/// - ❌ OLTP hot row / MVCC visibility: NEVER zstd
-/// - ✅ COLD_SEGMENT: zstd (default) or lz4
-/// - ✅ SNAPSHOT_SEGMENT: zstd (forced)
-/// - ✅ Segment Streaming: adaptive (none/lz4/zstd)
-/// - ✅ Sealed WAL long-term: optional lz4
+/// - [X] Active WAL tail: NEVER zstd
+/// - [X] OLTP hot row / MVCC visibility: NEVER zstd
+/// - [OK] COLD_SEGMENT: zstd (default) or lz4
+/// - [OK] SNAPSHOT_SEGMENT: zstd (forced)
+/// - [OK] Segment Streaming: adaptive (none/lz4/zstd)
+/// - [OK] Sealed WAL long-term: optional lz4
 #[derive(Debug, Clone)]
 pub struct CodecPolicy {
     /// Codec for WAL segments (none or lz4, NEVER zstd).
@@ -126,10 +133,8 @@ impl fmt::Display for StreamingCodecPolicy {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// §B — Segment-Level Zstd: Block Compression / Decompression
-// ═══════════════════════════════════════════════════════════════════════════
-
+// ----------------------------------------------------------------
+// Part B — Segment-Level Zstd: Block Compression / Decompression
 /// Extended segment header metadata for Zstd-compressed segments.
 /// Stored alongside UnifiedSegmentHeader (fits in the 4K header region).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -363,10 +368,8 @@ pub fn decompress_block(block: &ZstdBlock, dict: Option<&[u8]>) -> Result<Vec<u8
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// §B2 — Zstd Segment Writer / Reader
-// ═══════════════════════════════════════════════════════════════════════════
-
+// ----------------------------------------------------------------
+// Part B2 — Zstd Segment Writer / Reader
 /// Write a full Zstd-compressed cold segment.
 ///
 /// Invariants:
@@ -441,717 +444,11 @@ pub fn read_zstd_cold_segment(
     Ok(rows)
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// §C — Dictionary Lifecycle
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Dictionary entry in the DictionaryStore.
-#[derive(Debug, Clone)]
-pub struct DictionaryEntry {
-    /// Unique dictionary ID.
-    pub dictionary_id: u64,
-    /// Segment ID where the dictionary data is stored (DICT_SEGMENT).
-    pub segment_id: u64,
-    /// Table ID this dictionary applies to.
-    pub table_id: u64,
-    /// Schema version this dictionary was trained on.
-    pub schema_version: u64,
-    /// Dictionary data bytes.
-    pub data: Vec<u8>,
-    /// Checksum of dictionary data.
-    pub checksum: u32,
-    /// Creation timestamp.
-    pub created_at_epoch: u64,
-    /// Number of samples used for training.
-    pub sample_count: u64,
-}
-
-/// Dictionary store — manages dictionary lifecycle.
-///
-/// Dictionaries are stored as special segments in the SegmentStore
-/// and tracked in the Manifest via dictionary_id → segment_id mapping.
-pub struct DictionaryStore {
-    /// Dictionary ID → DictionaryEntry
-    dictionaries: RwLock<BTreeMap<u64, DictionaryEntry>>,
-    /// Table ID → latest dictionary ID
-    table_dict: RwLock<BTreeMap<u64, u64>>,
-    /// Next dictionary ID
-    next_dict_id: AtomicU64,
-    pub metrics: DictionaryMetrics,
-}
-
-/// Dictionary metrics.
-#[derive(Debug, Default)]
-pub struct DictionaryMetrics {
-    pub dictionaries_created: AtomicU64,
-    pub dictionaries_used: AtomicU64,
-    pub dictionary_bytes_total: AtomicU64,
-    pub training_runs: AtomicU64,
-    pub dict_hit: AtomicU64,
-    pub dict_miss: AtomicU64,
-}
-
-impl DictionaryMetrics {
-    pub fn hit_rate(&self) -> f64 {
-        let hit = self.dict_hit.load(Ordering::Relaxed) as f64;
-        let miss = self.dict_miss.load(Ordering::Relaxed) as f64;
-        if hit + miss == 0.0 { return 0.0; }
-        hit / (hit + miss)
-    }
-}
-
-impl DictionaryStore {
-    pub fn new() -> Self {
-        Self {
-            dictionaries: RwLock::new(BTreeMap::new()),
-            table_dict: RwLock::new(BTreeMap::new()),
-            next_dict_id: AtomicU64::new(1),
-            metrics: DictionaryMetrics::default(),
-        }
-    }
-
-    /// Train a new dictionary from sample data.
-    ///
-    /// In production this would use `zstd::dict::from_samples()`.
-    /// Here we create a dictionary from the concatenated samples.
-    pub fn train_dictionary(
-        &self,
-        table_id: u64,
-        schema_version: u64,
-        samples: &[Vec<u8>],
-        max_dict_size: usize,
-    ) -> Result<DictionaryEntry, String> {
-        if samples.is_empty() {
-            return Err("no samples for dictionary training".to_owned());
-        }
-
-        // Use zstd's dictionary training
-        let dict_data = zstd::dict::from_samples(samples, max_dict_size)
-            .map_err(|e| format!("zstd dict training: {e}"))?;
-
-        let dict_id = self.next_dict_id.fetch_add(1, Ordering::Relaxed);
-        let checksum = djb2_crc(&dict_data);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        let entry = DictionaryEntry {
-            dictionary_id: dict_id,
-            segment_id: 0, // set when stored as segment
-            table_id,
-            schema_version,
-            data: dict_data,
-            checksum,
-            created_at_epoch: now,
-            sample_count: samples.len() as u64,
-        };
-
-        self.metrics.dictionaries_created.fetch_add(1, Ordering::Relaxed);
-        self.metrics.dictionary_bytes_total.fetch_add(entry.data.len() as u64, Ordering::Relaxed);
-        self.metrics.training_runs.fetch_add(1, Ordering::Relaxed);
-
-        Ok(entry)
-    }
-
-    /// Register a dictionary entry.
-    pub fn register(&self, entry: DictionaryEntry) {
-        let dict_id = entry.dictionary_id;
-        let table_id = entry.table_id;
-        self.dictionaries.write().insert(dict_id, entry);
-        self.table_dict.write().insert(table_id, dict_id);
-    }
-
-    /// Get dictionary by ID.
-    pub fn get(&self, dictionary_id: u64) -> Option<DictionaryEntry> {
-        let entry = self.dictionaries.read().get(&dictionary_id).cloned();
-        if entry.is_some() {
-            self.metrics.dict_hit.fetch_add(1, Ordering::Relaxed);
-        } else {
-            self.metrics.dict_miss.fetch_add(1, Ordering::Relaxed);
-        }
-        entry
-    }
-
-    /// Get the latest dictionary for a table.
-    pub fn get_for_table(&self, table_id: u64) -> Option<DictionaryEntry> {
-        let dict_id = *self.table_dict.read().get(&table_id)?;
-        self.get(dict_id)
-    }
-
-    /// List all dictionary IDs.
-    pub fn list(&self) -> Vec<u64> {
-        self.dictionaries.read().keys().copied().collect()
-    }
-
-    /// Store a dictionary as a segment in the SegmentStore.
-    pub fn store_as_segment(
-        &self,
-        entry: &mut DictionaryEntry,
-        store: &SegmentStore,
-    ) -> Result<u64, SegmentStoreError> {
-        let seg_id = store.next_segment_id();
-        // Use Snapshot kind to carry dictionary data (DICT is a special snapshot)
-        let hdr = UnifiedSegmentHeader::new_snapshot(seg_id, entry.data.len() as u64, entry.dictionary_id, 0);
-        store.create_segment(hdr)?;
-        store.write_chunk(seg_id, &entry.data)?;
-        store.seal_segment(seg_id)?;
-        entry.segment_id = seg_id;
-        Ok(seg_id)
-    }
-
-    /// Load a dictionary from a segment.
-    pub fn load_from_segment(
-        &self,
-        store: &SegmentStore,
-        segment_id: u64,
-        dictionary_id: u64,
-        table_id: u64,
-        schema_version: u64,
-    ) -> Result<DictionaryEntry, String> {
-        let body = store.get_segment_body(segment_id)
-            .map_err(|e| format!("load dict segment: {e}"))?;
-
-        let data = if body.len() > UNIFIED_HEADER_SIZE as usize {
-            body[UNIFIED_HEADER_SIZE as usize..].to_vec()
-        } else {
-            return Err("dict segment too small".to_owned());
-        };
-
-        let checksum = djb2_crc(&data);
-        Ok(DictionaryEntry {
-            dictionary_id,
-            segment_id,
-            table_id,
-            schema_version,
-            data,
-            checksum,
-            created_at_epoch: 0,
-            sample_count: 0,
-        })
-    }
-}
-
-impl Default for DictionaryStore {
-    fn default() -> Self { Self::new() }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// §D — Streaming Codec Negotiation
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Streaming codec capabilities advertised during handshake.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StreamingCodecCaps {
-    /// Codecs the node supports.
-    pub supported: Vec<SegmentCodec>,
-    /// Preferred codec (based on bandwidth estimate).
-    pub preferred: SegmentCodec,
-    /// Estimated bandwidth in bytes/sec (for adaptive selection).
-    pub estimated_bandwidth_bps: u64,
-}
-
-impl StreamingCodecCaps {
-    /// High bandwidth (same datacenter): prefer LZ4 for speed.
-    pub fn high_bandwidth() -> Self {
-        Self {
-            supported: vec![SegmentCodec::None, SegmentCodec::Lz4, SegmentCodec::Zstd],
-            preferred: SegmentCodec::Lz4,
-            estimated_bandwidth_bps: 10 * 1024 * 1024 * 1024, // 10 GB/s
-        }
-    }
-
-    /// Low bandwidth (cross-datacenter): prefer Zstd for ratio.
-    pub fn low_bandwidth() -> Self {
-        Self {
-            supported: vec![SegmentCodec::Lz4, SegmentCodec::Zstd],
-            preferred: SegmentCodec::Zstd,
-            estimated_bandwidth_bps: 100 * 1024 * 1024, // 100 MB/s
-        }
-    }
-}
-
-/// Negotiate streaming codec between sender and receiver.
-pub fn negotiate_streaming_codec(
-    sender: &StreamingCodecCaps,
-    receiver: &StreamingCodecCaps,
-) -> SegmentCodec {
-    // Both must support the codec
-    let common: Vec<SegmentCodec> = sender.supported.iter()
-        .filter(|c| receiver.supported.contains(c))
-        .copied()
-        .collect();
-
-    if common.is_empty() {
-        return SegmentCodec::None;
-    }
-
-    // If either prefers zstd and both support it, use zstd
-    if (sender.preferred == SegmentCodec::Zstd || receiver.preferred == SegmentCodec::Zstd)
-        && common.contains(&SegmentCodec::Zstd)
-    {
-        return SegmentCodec::Zstd;
-    }
-
-    // Otherwise prefer sender's preference if common
-    if common.contains(&sender.preferred) {
-        return sender.preferred;
-    }
-
-    // Fallback to first common
-    common[0]
-}
-
-/// Compress a streaming chunk.
-pub fn compress_streaming_chunk(data: &[u8], codec: SegmentCodec, level: i32) -> Result<Vec<u8>, String> {
-    match codec {
-        SegmentCodec::None => Ok(data.to_vec()),
-        SegmentCodec::Lz4 => Ok(lz4_flex::compress_prepend_size(data)),
-        SegmentCodec::Zstd => {
-            zstd::bulk::compress(data, level)
-                .map_err(|e| format!("zstd stream compress: {e}"))
-        }
-    }
-}
-
-/// Decompress a streaming chunk.
-pub fn decompress_streaming_chunk(data: &[u8], codec: SegmentCodec, max_size: usize) -> Result<Vec<u8>, String> {
-    match codec {
-        SegmentCodec::None => Ok(data.to_vec()),
-        SegmentCodec::Lz4 => {
-            lz4_flex::decompress_size_prepended(data)
-                .map_err(|e| format!("lz4 stream decompress: {e}"))
-        }
-        SegmentCodec::Zstd => {
-            zstd::bulk::decompress(data, max_size)
-                .map_err(|e| format!("zstd stream decompress: {e}"))
-        }
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// §E — Decompression Isolation: Thread Pool + Cache
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Cache key for decompressed blocks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DecompressCacheKey {
-    pub segment_id: u64,
-    pub block_index: u32,
-}
-
-/// LRU-based decompression cache with byte-capacity limit.
-pub struct DecompressCache {
-    /// Capacity in bytes.
-    capacity_bytes: u64,
-    /// Current usage in bytes.
-    used_bytes: AtomicU64,
-    /// Cache entries: key → (data, insertion_order).
-    entries: Mutex<HashMap<DecompressCacheKey, Vec<u8>>>,
-    /// LRU order.
-    order: Mutex<VecDeque<DecompressCacheKey>>,
-    pub metrics: DecompressCacheMetrics,
-}
-
-/// Cache metrics.
-#[derive(Debug, Default)]
-pub struct DecompressCacheMetrics {
-    pub hits: AtomicU64,
-    pub misses: AtomicU64,
-    pub evictions: AtomicU64,
-    pub bytes_cached: AtomicU64,
-}
-
-impl DecompressCacheMetrics {
-    pub fn hit_rate(&self) -> f64 {
-        let h = self.hits.load(Ordering::Relaxed) as f64;
-        let m = self.misses.load(Ordering::Relaxed) as f64;
-        if h + m == 0.0 { return 0.0; }
-        h / (h + m)
-    }
-}
-
-impl DecompressCache {
-    pub fn new(capacity_bytes: u64) -> Self {
-        Self {
-            capacity_bytes,
-            used_bytes: AtomicU64::new(0),
-            entries: Mutex::new(HashMap::new()),
-            order: Mutex::new(VecDeque::new()),
-            metrics: DecompressCacheMetrics::default(),
-        }
-    }
-
-    /// Get a cached decompressed block.
-    pub fn get(&self, key: &DecompressCacheKey) -> Option<Vec<u8>> {
-        let entries = self.entries.lock();
-        if let Some(data) = entries.get(key) {
-            self.metrics.hits.fetch_add(1, Ordering::Relaxed);
-            Some(data.clone())
-        } else {
-            self.metrics.misses.fetch_add(1, Ordering::Relaxed);
-            None
-        }
-    }
-
-    /// Insert a decompressed block into the cache.
-    pub fn insert(&self, key: DecompressCacheKey, data: Vec<u8>) {
-        let data_len = data.len() as u64;
-
-        // Evict until we have space
-        while self.used_bytes.load(Ordering::Relaxed) + data_len > self.capacity_bytes {
-            let evict_key = {
-                let mut order = self.order.lock();
-                order.pop_front()
-            };
-            if let Some(ek) = evict_key {
-                let mut entries = self.entries.lock();
-                if let Some(evicted) = entries.remove(&ek) {
-                    self.used_bytes.fetch_sub(evicted.len() as u64, Ordering::Relaxed);
-                    self.metrics.evictions.fetch_add(1, Ordering::Relaxed);
-                }
-            } else {
-                break;
-            }
-        }
-
-        let mut entries = self.entries.lock();
-        if let std::collections::hash_map::Entry::Vacant(e) = entries.entry(key) {
-            e.insert(data);
-            self.used_bytes.fetch_add(data_len, Ordering::Relaxed);
-            self.metrics.bytes_cached.fetch_add(data_len, Ordering::Relaxed);
-            self.order.lock().push_back(key);
-        }
-    }
-
-    /// Current cache usage in bytes.
-    pub fn used_bytes(&self) -> u64 {
-        self.used_bytes.load(Ordering::Relaxed)
-    }
-
-    /// Number of entries.
-    pub fn len(&self) -> usize {
-        self.entries.lock().len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
-/// Decompression pool with concurrency limit.
-///
-/// Zstd decompression NEVER runs on the OLTP executor thread.
-/// This pool enforces isolation.
-pub struct DecompressPool {
-    /// Max concurrent decompression tasks.
-    pub max_concurrent: u32,
-    /// Current inflight count.
-    inflight: AtomicU64,
-    /// Shared cache.
-    pub cache: DecompressCache,
-    pub metrics: DecompressPoolMetrics,
-}
-
-/// Pool metrics.
-#[derive(Debug, Default)]
-pub struct DecompressPoolMetrics {
-    pub decompress_total: AtomicU64,
-    pub decompress_bytes: AtomicU64,
-    pub decompress_ns_total: AtomicU64,
-    pub decompress_errors: AtomicU64,
-    pub rejected_overload: AtomicU64,
-}
-
-impl DecompressPool {
-    pub fn new(max_concurrent: u32, cache_capacity_bytes: u64) -> Self {
-        Self {
-            max_concurrent,
-            inflight: AtomicU64::new(0),
-            cache: DecompressCache::new(cache_capacity_bytes),
-            metrics: DecompressPoolMetrics::default(),
-        }
-    }
-
-    /// Decompress a block, using cache if available.
-    /// Returns Err if overloaded (concurrency limit reached).
-    pub fn decompress(
-        &self,
-        segment_id: u64,
-        block_index: u32,
-        block: &ZstdBlock,
-        dict: Option<&[u8]>,
-    ) -> Result<Vec<u8>, String> {
-        let cache_key = DecompressCacheKey { segment_id, block_index };
-
-        // Check cache first
-        if let Some(cached) = self.cache.get(&cache_key) {
-            return Ok(cached);
-        }
-
-        // Check concurrency limit
-        let current = self.inflight.fetch_add(1, Ordering::Relaxed);
-        if current >= u64::from(self.max_concurrent) {
-            self.inflight.fetch_sub(1, Ordering::Relaxed);
-            self.metrics.rejected_overload.fetch_add(1, Ordering::Relaxed);
-            return Err("decompress pool overloaded".to_owned());
-        }
-
-        let start = std::time::Instant::now();
-        let result = decompress_block(block, dict);
-        let elapsed_ns = start.elapsed().as_nanos() as u64;
-
-        self.inflight.fetch_sub(1, Ordering::Relaxed);
-        self.metrics.decompress_total.fetch_add(1, Ordering::Relaxed);
-        self.metrics.decompress_ns_total.fetch_add(elapsed_ns, Ordering::Relaxed);
-
-        match result {
-            Ok(data) => {
-                self.metrics.decompress_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
-                self.cache.insert(cache_key, data.clone());
-                Ok(data)
-            }
-            Err(e) => {
-                self.metrics.decompress_errors.fetch_add(1, Ordering::Relaxed);
-                Err(e)
-            }
-        }
-    }
-
-    /// Current inflight count.
-    pub fn inflight(&self) -> u64 {
-        self.inflight.load(Ordering::Relaxed)
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// §F — GC Rewrite = Recompression Opportunity
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Request to recompress a segment (e.g., during GC merge or dict upgrade).
-#[derive(Debug, Clone)]
-pub struct RecompressRequest {
-    /// Source segment ID.
-    pub source_segment_id: u64,
-    /// Target codec.
-    pub target_codec: SegmentCodec,
-    /// Target zstd level.
-    pub target_level: i32,
-    /// New dictionary ID (0 = no dict).
-    pub new_dictionary_id: u64,
-    /// Reason for recompression.
-    pub reason: RecompressReason,
-}
-
-/// Why a segment is being recompressed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecompressReason {
-    /// GC merge of multiple cold segments.
-    GcMerge,
-    /// Dictionary upgrade (new dict available).
-    DictUpgrade,
-    /// Codec policy change (e.g., lz4 → zstd).
-    CodecChange,
-    /// Manual recompression via ops command.
-    Manual,
-}
-
-impl fmt::Display for RecompressReason {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::GcMerge => write!(f, "gc_merge"),
-            Self::DictUpgrade => write!(f, "dict_upgrade"),
-            Self::CodecChange => write!(f, "codec_change"),
-            Self::Manual => write!(f, "manual"),
-        }
-    }
-}
-
-/// Result of a recompression.
-#[derive(Debug, Clone)]
-pub struct RecompressResult {
-    /// Old segment ID.
-    pub old_segment_id: u64,
-    /// New segment ID.
-    pub new_segment_id: u64,
-    /// Old codec.
-    pub old_codec: SegmentCodec,
-    /// New codec.
-    pub new_codec: SegmentCodec,
-    /// Old size.
-    pub old_bytes: u64,
-    /// New size.
-    pub new_bytes: u64,
-    /// Space saved.
-    pub bytes_saved: i64,
-}
-
-/// Recompress a segment using a new codec/dictionary.
-///
-/// 1. Read all blocks from source segment
-/// 2. Decompress each block (using old dict if needed)
-/// 3. Recompress with new codec/dict
-/// 4. Write to new segment
-/// 5. Seal new segment
-/// 6. Return result (caller updates manifest + schedules GC for old)
-pub fn recompress_segment(
-    store: &SegmentStore,
-    request: &RecompressRequest,
-    old_dict: Option<&[u8]>,
-    new_dict: Option<&[u8]>,
-    table_id: u64,
-    shard_id: u64,
-) -> Result<RecompressResult, String> {
-    // Read source
-    let rows = read_zstd_cold_segment(store, request.source_segment_id, old_dict)?;
-    let old_size = store.segment_size(request.source_segment_id)
-        .map_err(|e| format!("segment size: {e}"))?;
-
-    // Write new segment
-    let (new_seg_id, _meta) = write_zstd_cold_segment(
-        store, table_id, shard_id, &rows,
-        request.target_level, new_dict, request.new_dictionary_id,
-    ).map_err(|e| format!("write recompressed: {e}"))?;
-
-    let new_size = store.segment_size(new_seg_id)
-        .map_err(|e| format!("new segment size: {e}"))?;
-
-    Ok(RecompressResult {
-        old_segment_id: request.source_segment_id,
-        new_segment_id: new_seg_id,
-        old_codec: SegmentCodec::Zstd, // assume old was zstd
-        new_codec: request.target_codec,
-        old_bytes: old_size,
-        new_bytes: new_size,
-        bytes_saved: old_size as i64 - new_size as i64,
-    })
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// §G — Metrics & Admin Status
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Comprehensive Zstd metrics for /admin/status.
-#[derive(Debug, Clone, Default)]
-pub struct ZstdMetricsSnapshot {
-    // Compression
-    pub compress_total: u64,
-    pub compress_bytes_in: u64,
-    pub compress_bytes_out: u64,
-    pub compress_ratio: f64,
-    // Decompression
-    pub decompress_total: u64,
-    pub decompress_bytes: u64,
-    pub decompress_ns_total: u64,
-    pub decompress_avg_us: f64,
-    pub decompress_errors: u64,
-    pub decompress_rejected: u64,
-    // Cache
-    pub cache_hit_rate: f64,
-    pub cache_used_bytes: u64,
-    pub cache_evictions: u64,
-    // Dictionary
-    pub dict_count: u64,
-    pub dict_bytes_total: u64,
-    pub dict_hit_rate: f64,
-    pub dict_training_runs: u64,
-    // Streaming
-    pub stream_bytes_saved_ratio: f64,
-}
-
-/// Zstd metrics collector.
-#[derive(Debug, Default)]
-pub struct ZstdCompressMetrics {
-    pub compress_total: AtomicU64,
-    pub compress_bytes_in: AtomicU64,
-    pub compress_bytes_out: AtomicU64,
-}
-
-impl ZstdCompressMetrics {
-    pub fn record(&self, bytes_in: u64, bytes_out: u64) {
-        self.compress_total.fetch_add(1, Ordering::Relaxed);
-        self.compress_bytes_in.fetch_add(bytes_in, Ordering::Relaxed);
-        self.compress_bytes_out.fetch_add(bytes_out, Ordering::Relaxed);
-    }
-
-    pub fn ratio(&self) -> f64 {
-        let i = self.compress_bytes_in.load(Ordering::Relaxed) as f64;
-        let o = self.compress_bytes_out.load(Ordering::Relaxed) as f64;
-        if o > 0.0 { i / o } else { 1.0 }
-    }
-}
-
-/// Build a full Zstd metrics snapshot from all components.
-pub fn build_zstd_metrics(
-    compress: &ZstdCompressMetrics,
-    pool: &DecompressPool,
-    dict_store: &DictionaryStore,
-) -> ZstdMetricsSnapshot {
-    let decompress_total = pool.metrics.decompress_total.load(Ordering::Relaxed);
-    let decompress_ns = pool.metrics.decompress_ns_total.load(Ordering::Relaxed);
-    let avg_us = if decompress_total > 0 {
-        (decompress_ns as f64 / decompress_total as f64) / 1000.0
-    } else { 0.0 };
-
-    ZstdMetricsSnapshot {
-        compress_total: compress.compress_total.load(Ordering::Relaxed),
-        compress_bytes_in: compress.compress_bytes_in.load(Ordering::Relaxed),
-        compress_bytes_out: compress.compress_bytes_out.load(Ordering::Relaxed),
-        compress_ratio: compress.ratio(),
-        decompress_total,
-        decompress_bytes: pool.metrics.decompress_bytes.load(Ordering::Relaxed),
-        decompress_ns_total: decompress_ns,
-        decompress_avg_us: avg_us,
-        decompress_errors: pool.metrics.decompress_errors.load(Ordering::Relaxed),
-        decompress_rejected: pool.metrics.rejected_overload.load(Ordering::Relaxed),
-        cache_hit_rate: pool.cache.metrics.hit_rate(),
-        cache_used_bytes: pool.cache.used_bytes(),
-        cache_evictions: pool.cache.metrics.evictions.load(Ordering::Relaxed),
-        dict_count: dict_store.list().len() as u64,
-        dict_bytes_total: dict_store.metrics.dictionary_bytes_total.load(Ordering::Relaxed),
-        dict_hit_rate: dict_store.metrics.hit_rate(),
-        dict_training_runs: dict_store.metrics.training_runs.load(Ordering::Relaxed),
-        stream_bytes_saved_ratio: compress.ratio(),
-    }
-}
-
-/// Segment codec listing for `falconctl segments ls --codec=...`
-#[derive(Debug, Clone)]
-pub struct SegmentCodecInfo {
-    pub segment_id: u64,
-    pub kind: SegmentKind,
-    pub codec: SegmentCodec,
-    pub size_bytes: u64,
-    pub dictionary_id: u64,
-    pub sealed: bool,
-}
-
-/// List segments filtered by codec.
-pub fn list_segments_by_codec(manifest: &Manifest, codec: Option<SegmentCodec>) -> Vec<SegmentCodecInfo> {
-    manifest.segments.values()
-        .filter(|e| codec.is_none_or(|c| e.codec == c))
-        .map(|e| SegmentCodecInfo {
-            segment_id: e.segment_id,
-            kind: e.kind,
-            codec: e.codec,
-            size_bytes: e.size_bytes,
-            dictionary_id: 0, // would come from ZstdSegmentMeta in real impl
-            sealed: e.sealed,
-        })
-        .collect()
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// §I — Unit Tests
-// ═══════════════════════════════════════════════════════════════════════════
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::unified_data_plane::{ManifestEntry, LogicalRange};
     use crate::structured_lsn::StructuredLsn;
-
-    // -- §A: Codec Policy --
 
     #[test]
     fn test_codec_policy_defaults() {
@@ -1164,19 +461,14 @@ mod tests {
     #[test]
     fn test_codec_policy_validation() {
         let policy = CodecPolicy::default();
-        // WAL: none/lz4 ok, zstd forbidden
         assert!(policy.validate_codec(SegmentKind::Wal, SegmentCodec::None));
         assert!(policy.validate_codec(SegmentKind::Wal, SegmentCodec::Lz4));
         assert!(!policy.validate_codec(SegmentKind::Wal, SegmentCodec::Zstd));
-        // Cold: anything ok
         assert!(policy.validate_codec(SegmentKind::Cold, SegmentCodec::Zstd));
         assert!(policy.validate_codec(SegmentKind::Cold, SegmentCodec::Lz4));
-        // Snapshot: zstd only
         assert!(policy.validate_codec(SegmentKind::Snapshot, SegmentCodec::Zstd));
         assert!(!policy.validate_codec(SegmentKind::Snapshot, SegmentCodec::Lz4));
     }
-
-    // -- §B: Block Compression --
 
     #[test]
     fn test_zstd_compress_decompress_roundtrip() {
@@ -1221,41 +513,30 @@ mod tests {
     #[test]
     fn test_compress_block_dispatches() {
         let data = b"dispatch test data for all codecs";
-        // None
         let b = compress_block(data, SegmentCodec::None, 0, None).unwrap();
         assert_eq!(decompress_block(&b, None).unwrap(), data);
-        // LZ4
         let b = compress_block(data, SegmentCodec::Lz4, 0, None).unwrap();
         assert_eq!(decompress_block(&b, None).unwrap(), data);
-        // Zstd
         let b = compress_block(data, SegmentCodec::Zstd, 3, None).unwrap();
         assert_eq!(decompress_block(&b, None).unwrap(), data);
     }
 
     #[test]
     fn test_zstd_compression_ratio() {
-        // Repetitive data should compress well
         let data = vec![0xABu8; 10_000];
         let block = zstd_compress_block(&data, 3, None).unwrap();
         let ratio = data.len() as f64 / block.compressed_data.len() as f64;
         assert!(ratio > 2.0, "expected ratio > 2.0, got {:.2}", ratio);
     }
 
-    // -- §B2: Segment Writer/Reader --
-
     #[test]
     fn test_write_read_zstd_cold_segment() {
         let store = SegmentStore::new();
         let rows: Vec<Vec<u8>> = (0..10).map(|i| vec![i as u8; 200]).collect();
-
-        let (seg_id, meta) = write_zstd_cold_segment(
-            &store, 1, 0, &rows, 3, None, 0,
-        ).unwrap();
-
+        let (seg_id, meta) = write_zstd_cold_segment(&store, 1, 0, &rows, 3, None, 0).unwrap();
         assert!(store.is_sealed(seg_id).unwrap());
         assert_eq!(meta.block_count, 10);
         assert!(meta.compression_ratio() >= 1.0);
-
         let recovered = read_zstd_cold_segment(&store, seg_id, None).unwrap();
         assert_eq!(recovered.len(), 10);
         for (i, row) in recovered.iter().enumerate() {
@@ -1265,8 +546,7 @@ mod tests {
 
     #[test]
     fn test_zstd_segment_meta_roundtrip() {
-        let meta = ZstdSegmentMeta::new(5)
-            .with_dictionary(42, 0xDEAD);
+        let meta = ZstdSegmentMeta::new(5).with_dictionary(42, 0xDEAD);
         let bytes = meta.to_bytes();
         let recovered = ZstdSegmentMeta::from_bytes(&bytes).unwrap();
         assert_eq!(recovered.codec_level, 5);
@@ -1274,241 +554,19 @@ mod tests {
         assert_eq!(recovered.dictionary_checksum, 0xDEAD);
     }
 
-    // -- §C: Dictionary --
-
     #[test]
-    fn test_dictionary_training_and_use() {
-        let dict_store = DictionaryStore::new();
-        // Create repetitive samples for dictionary training
-        let samples: Vec<Vec<u8>> = (0..100).map(|i| {
-            let mut v = b"FalconDB row data prefix common ".to_vec();
-            v.extend_from_slice(&(i as u32).to_le_bytes());
-            v.extend_from_slice(&vec![0u8; 64]);
-            v
-        }).collect();
-
-        let entry = dict_store.train_dictionary(1, 1, &samples, 4096).unwrap();
-        assert!(!entry.data.is_empty());
-        assert_eq!(entry.table_id, 1);
-        assert!(entry.checksum != 0);
-
-        dict_store.register(entry.clone());
-        let fetched = dict_store.get(entry.dictionary_id).unwrap();
-        assert_eq!(fetched.data, entry.data);
-
-        let by_table = dict_store.get_for_table(1).unwrap();
-        assert_eq!(by_table.dictionary_id, entry.dictionary_id);
-    }
-
-    #[test]
-    fn test_dictionary_compress_with_dict() {
-        let dict_store = DictionaryStore::new();
-        let samples: Vec<Vec<u8>> = (0..100).map(|i| {
-            let mut v = b"common prefix data for dict training ".to_vec();
-            v.extend_from_slice(&(i as u32).to_le_bytes());
-            v.extend_from_slice(&vec![0xABu8; 50]);
-            v
-        }).collect();
-
-        let entry = dict_store.train_dictionary(1, 1, &samples, 8192).unwrap();
-        let dict_data = &entry.data;
-
-        // Compress with dictionary
-        let test_data = b"common prefix data for dict training \x05\x00\x00\x00ABABABABABABABABABABABABABABABABABABABABABABABABABAB";
-        let block = zstd_compress_block(test_data, 3, Some(dict_data)).unwrap();
-        assert!(block.verify());
-
-        let decompressed = zstd_decompress_block(&block, Some(dict_data)).unwrap();
-        assert_eq!(decompressed, test_data);
-    }
-
-    #[test]
-    fn test_dictionary_store_as_segment() {
-        let seg_store = SegmentStore::new();
-        let dict_store = DictionaryStore::new();
-
-        let samples: Vec<Vec<u8>> = (0..50).map(|i| {
-            let mut v = b"segment dict data ".to_vec();
-            v.extend_from_slice(&vec![i as u8; 40]);
-            v
-        }).collect();
-
-        let mut entry = dict_store.train_dictionary(1, 1, &samples, 4096).unwrap();
-        let seg_id = dict_store.store_as_segment(&mut entry, &seg_store).unwrap();
-        assert!(seg_store.is_sealed(seg_id).unwrap());
-        assert_eq!(entry.segment_id, seg_id);
-
-        // Load back
-        let loaded = dict_store.load_from_segment(&seg_store, seg_id, entry.dictionary_id, 1, 1).unwrap();
-        assert_eq!(loaded.data, entry.data);
-    }
-
-    #[test]
-    fn test_dictionary_metrics() {
-        let dict_store = DictionaryStore::new();
-        let samples: Vec<Vec<u8>> = (0..50).map(|i| vec![i as u8; 100]).collect();
-        let entry = dict_store.train_dictionary(1, 1, &samples, 4096).unwrap();
-        dict_store.register(entry.clone());
-
-        assert_eq!(dict_store.metrics.training_runs.load(Ordering::Relaxed), 1);
-        assert_eq!(dict_store.metrics.dictionaries_created.load(Ordering::Relaxed), 1);
-
-        dict_store.get(entry.dictionary_id);
-        assert_eq!(dict_store.metrics.dict_hit.load(Ordering::Relaxed), 1);
-
-        dict_store.get(9999);
-        assert_eq!(dict_store.metrics.dict_miss.load(Ordering::Relaxed), 1);
-        assert!((dict_store.metrics.hit_rate() - 0.5).abs() < 0.01);
-    }
-
-    // -- §D: Streaming Codec Negotiation --
-
-    #[test]
-    fn test_negotiate_high_bandwidth() {
-        let sender = StreamingCodecCaps::high_bandwidth();
-        let receiver = StreamingCodecCaps::high_bandwidth();
-        let codec = negotiate_streaming_codec(&sender, &receiver);
-        assert_eq!(codec, SegmentCodec::Lz4);
-    }
-
-    #[test]
-    fn test_negotiate_low_bandwidth() {
-        let sender = StreamingCodecCaps::low_bandwidth();
-        let receiver = StreamingCodecCaps::low_bandwidth();
-        let codec = negotiate_streaming_codec(&sender, &receiver);
-        assert_eq!(codec, SegmentCodec::Zstd);
-    }
-
-    #[test]
-    fn test_negotiate_mixed_prefers_zstd() {
-        let sender = StreamingCodecCaps::high_bandwidth();
-        let receiver = StreamingCodecCaps::low_bandwidth();
-        let codec = negotiate_streaming_codec(&sender, &receiver);
-        // Receiver prefers zstd, both support it → zstd
-        assert_eq!(codec, SegmentCodec::Zstd);
-    }
-
-    #[test]
-    fn test_streaming_chunk_roundtrip() {
-        let data = vec![42u8; 4096];
-        for codec in [SegmentCodec::None, SegmentCodec::Lz4, SegmentCodec::Zstd] {
-            let compressed = compress_streaming_chunk(&data, codec, 1).unwrap();
-            let decompressed = decompress_streaming_chunk(&compressed, codec, data.len()).unwrap();
-            assert_eq!(decompressed, data, "failed for codec {:?}", codec);
-        }
-    }
-
-    // -- §E: Decompress Cache & Pool --
-
-    #[test]
-    fn test_decompress_cache_basic() {
-        let cache = DecompressCache::new(1024 * 1024);
-        let key = DecompressCacheKey { segment_id: 1, block_index: 0 };
-        assert!(cache.get(&key).is_none());
-
-        cache.insert(key, vec![1, 2, 3]);
-        let cached = cache.get(&key).unwrap();
-        assert_eq!(cached, vec![1, 2, 3]);
-        assert!(cache.metrics.hit_rate() > 0.0);
-    }
-
-    #[test]
-    fn test_decompress_cache_eviction() {
-        let cache = DecompressCache::new(100); // tiny cache
-        for i in 0..20u32 {
-            let key = DecompressCacheKey { segment_id: 1, block_index: i };
-            cache.insert(key, vec![0u8; 50]); // each 50 bytes, cache=100 → evictions
-        }
-        assert!(cache.metrics.evictions.load(Ordering::Relaxed) > 0);
-        assert!(cache.used_bytes() <= 100);
-    }
-
-    #[test]
-    fn test_decompress_pool_basic() {
-        let pool = DecompressPool::new(4, 1024 * 1024);
-        let data = b"pool test data";
-        let block = zstd_compress_block(data, 1, None).unwrap();
-
-        let result = pool.decompress(1, 0, &block, None).unwrap();
-        assert_eq!(result, data);
-        assert_eq!(pool.metrics.decompress_total.load(Ordering::Relaxed), 1);
-
-        // Second call hits cache
-        let cached = pool.decompress(1, 0, &block, None).unwrap();
-        assert_eq!(cached, data);
-        assert_eq!(pool.cache.metrics.hits.load(Ordering::Relaxed), 1);
-    }
-
-    #[test]
-    fn test_decompress_pool_crc_failure() {
-        let pool = DecompressPool::new(4, 1024 * 1024);
-        let mut block = zstd_compress_block(b"data", 1, None).unwrap();
-        block.crc = 0xDEAD; // corrupt CRC
-
-        let result = pool.decompress(1, 0, &block, None);
-        assert!(result.is_err());
-        assert_eq!(pool.metrics.decompress_errors.load(Ordering::Relaxed), 1);
-    }
-
-    // -- §F: Recompression --
-
-    #[test]
-    fn test_recompress_segment() {
-        let store = SegmentStore::new();
-        let rows: Vec<Vec<u8>> = (0..5).map(|i| vec![i as u8; 300]).collect();
-
-        // Write with level 1
-        let (seg_id, _) = write_zstd_cold_segment(&store, 1, 0, &rows, 1, None, 0).unwrap();
-
-        // Recompress with level 5
-        let request = RecompressRequest {
-            source_segment_id: seg_id,
-            target_codec: SegmentCodec::Zstd,
-            target_level: 5,
-            new_dictionary_id: 0,
-            reason: RecompressReason::CodecChange,
-        };
-
-        let result = recompress_segment(&store, &request, None, None, 1, 0).unwrap();
-        assert_ne!(result.old_segment_id, result.new_segment_id);
-        assert!(store.is_sealed(result.new_segment_id).unwrap());
-
-        // Verify data integrity after recompression
-        let recovered = read_zstd_cold_segment(&store, result.new_segment_id, None).unwrap();
-        assert_eq!(recovered.len(), 5);
-        for (i, row) in recovered.iter().enumerate() {
-            assert_eq!(row, &vec![i as u8; 300]);
-        }
-    }
-
-    // -- §G: Metrics --
-
-    #[test]
-    fn test_zstd_compress_metrics() {
-        let metrics = ZstdCompressMetrics::default();
-        metrics.record(1000, 300);
-        metrics.record(2000, 500);
-        assert_eq!(metrics.compress_total.load(Ordering::Relaxed), 2);
-        assert!((metrics.ratio() - 3.75).abs() < 0.01); // 3000/800
-    }
-
-    #[test]
-    fn test_build_zstd_metrics() {
-        let compress = ZstdCompressMetrics::default();
-        compress.record(5000, 1000);
-        let pool = DecompressPool::new(4, 1024 * 1024);
-        let dict_store = DictionaryStore::new();
-
-        let snapshot = build_zstd_metrics(&compress, &pool, &dict_store);
-        assert_eq!(snapshot.compress_total, 1);
-        assert_eq!(snapshot.compress_bytes_in, 5000);
-        assert_eq!(snapshot.compress_bytes_out, 1000);
-        assert!((snapshot.compress_ratio - 5.0).abs() < 0.01);
+    fn test_display_streaming_codec_policy() {
+        use crate::zstd_streaming::StreamingCodecCaps;
+        let hi = StreamingCodecCaps::high_bandwidth();
+        let lo = StreamingCodecCaps::low_bandwidth();
+        assert_eq!(hi.preferred, SegmentCodec::Lz4);
+        assert_eq!(lo.preferred, SegmentCodec::Zstd);
     }
 
     #[test]
     fn test_list_segments_by_codec() {
-        let mut m = Manifest::new();
+        use crate::zstd_recompress::list_segments_by_codec;
+        let mut m = crate::unified_data_plane::Manifest::new();
         m.add_segment(ManifestEntry {
             segment_id: 0, kind: SegmentKind::Wal, size_bytes: 100,
             codec: SegmentCodec::None,
@@ -1525,38 +583,11 @@ mod tests {
             },
             sealed: true,
         });
-        m.add_segment(ManifestEntry {
-            segment_id: 2, kind: SegmentKind::Cold, size_bytes: 300,
-            codec: SegmentCodec::Lz4,
-            logical_range: LogicalRange::Cold {
-                table_id: 1, shard_id: 0, min_key: vec![], max_key: vec![],
-            },
-            sealed: true,
-        });
-
         let all = list_segments_by_codec(&m, None);
-        assert_eq!(all.len(), 3);
-
+        assert_eq!(all.len(), 2);
         let zstd_only = list_segments_by_codec(&m, Some(SegmentCodec::Zstd));
         assert_eq!(zstd_only.len(), 1);
         assert_eq!(zstd_only[0].segment_id, 1);
-
-        let lz4_only = list_segments_by_codec(&m, Some(SegmentCodec::Lz4));
-        assert_eq!(lz4_only.len(), 1);
-        assert_eq!(lz4_only[0].segment_id, 2);
-    }
-
-    // -- Display --
-
-    #[test]
-    fn test_display_streaming_codec_policy() {
-        assert_eq!(format!("{}", StreamingCodecPolicy::Adaptive), "adaptive");
-        assert_eq!(format!("{}", StreamingCodecPolicy::Zstd), "zstd");
-    }
-
-    #[test]
-    fn test_display_recompress_reason() {
-        assert_eq!(format!("{}", RecompressReason::GcMerge), "gc_merge");
-        assert_eq!(format!("{}", RecompressReason::DictUpgrade), "dict_upgrade");
     }
 }
+

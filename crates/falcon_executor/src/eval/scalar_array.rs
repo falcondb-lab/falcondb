@@ -274,7 +274,7 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
                 }
             };
             let mut sorted = arr;
-            sorted.sort_by(|a, b| a.cmp(b));
+            sorted.sort();
             Ok(Datum::Array(sorted))
         }
         ScalarFunc::ArrayContains => {

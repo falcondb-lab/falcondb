@@ -62,8 +62,101 @@ impl QueryHandler {
             "falcon.observability_catalog" => Some(self.show_falcon_observability_catalog()),
             "falcon.security_audit" => Some(self.show_falcon_security_audit()),
             "falcon.wire_compat" => Some(self.show_falcon_wire_compat()),
+            "falcon.pitr_status" => Some(self.show_falcon_pitr_status()),
+            "falcon.pitr_segments" => Some(self.show_falcon_pitr_segments()),
+            "falcon.pitr_backups" => Some(self.show_falcon_pitr_backups()),
+            "falcon.pitr_restore_points" => Some(self.show_falcon_pitr_restore_points()),
+            "falcon.tde_status" => Some(self.show_falcon_tde_status()),
+            "falcon.tde_keys" => Some(self.show_falcon_tde_keys()),
             _ => None,
         }
+    }
+
+    fn show_falcon_pitr_status(&self) -> Vec<BackendMessage> {
+        let (enabled, segment_count, bytes_archived) = self.storage.pitr_stats();
+        let rows = vec![
+            vec![Some("enabled".into()), Some(enabled.to_string())],
+            vec![Some("segments_archived".into()), Some(segment_count.to_string())],
+            vec![Some("bytes_archived".into()), Some(bytes_archived.to_string())],
+        ];
+        self.single_row_result(
+            vec![("metric", 25, -1), ("value", 25, -1)],
+            rows,
+        )
+    }
+
+    fn show_falcon_pitr_segments(&self) -> Vec<BackendMessage> {
+        let segments = self.storage.list_archived_segments();
+        if segments.is_empty() {
+            return self.single_row_result(
+                vec![("filename", 25, -1), ("start_lsn", 25, -1), ("end_lsn", 25, -1), ("size_bytes", 25, -1)],
+                vec![],
+            );
+        }
+        let rows: Vec<Vec<Option<String>>> = segments
+            .iter()
+            .map(|s| {
+                vec![
+                    Some(s.filename.clone()),
+                    Some(format!("{}", s.start_lsn)),
+                    Some(format!("{}", s.end_lsn)),
+                    Some(s.size_bytes.to_string()),
+                ]
+            })
+            .collect();
+        self.single_row_result(
+            vec![("filename", 25, -1), ("start_lsn", 25, -1), ("end_lsn", 25, -1), ("size_bytes", 25, -1)],
+            rows,
+        )
+    }
+
+    fn show_falcon_pitr_backups(&self) -> Vec<BackendMessage> {
+        let backups = self.storage.list_base_backups();
+        if backups.is_empty() {
+            return self.single_row_result(
+                vec![("label", 25, -1), ("start_lsn", 25, -1), ("end_lsn", 25, -1), ("consistent", 25, -1)],
+                vec![],
+            );
+        }
+        let rows: Vec<Vec<Option<String>>> = backups
+            .iter()
+            .map(|b| {
+                vec![
+                    Some(b.label.clone()),
+                    Some(format!("{}", b.start_lsn)),
+                    Some(format!("{}", b.end_lsn)),
+                    Some(b.consistent.to_string()),
+                ]
+            })
+            .collect();
+        self.single_row_result(
+            vec![("label", 25, -1), ("start_lsn", 25, -1), ("end_lsn", 25, -1), ("consistent", 25, -1)],
+            rows,
+        )
+    }
+
+    fn show_falcon_pitr_restore_points(&self) -> Vec<BackendMessage> {
+        let rps = self.storage.list_restore_points();
+        if rps.is_empty() {
+            return self.single_row_result(
+                vec![("name", 25, -1), ("lsn", 25, -1), ("created_at_ms", 25, -1)],
+                vec![],
+            );
+        }
+        let rows: Vec<Vec<Option<String>>> = rps
+            .iter()
+            .map(|rp| {
+                vec![
+                    Some(rp.name.clone()),
+                    Some(format!("{}", rp.lsn)),
+                    Some(rp.created_at_ms.to_string()),
+                ]
+            })
+            .collect();
+        self.single_row_result(
+            vec![("name", 25, -1), ("lsn", 25, -1), ("created_at_ms", 25, -1)],
+            rows,
+        )
     }
 
     fn show_falcon_txn(&self, session: &PgSession) -> Vec<BackendMessage> {
@@ -2599,5 +2692,36 @@ impl QueryHandler {
             vec![Some("wal_segment_header_bytes".into()), Some("8".into())],
         ];
         self.single_row_result(vec![("property", 35, -1), ("value", 20, -1)], rows)
+    }
+
+    fn show_falcon_tde_status(&self) -> Vec<BackendMessage> {
+        let status = self.storage.tde_status();
+        let rows = vec![
+            vec![Some("enabled".into()), Some(status.enabled.to_string())],
+            vec![Some("algorithm".into()), Some(status.algorithm)],
+            vec![Some("dek_count".into()), Some(status.dek_count.to_string())],
+            vec![Some("wal_encrypted".into()), Some(status.wal_encrypted.to_string())],
+        ];
+        self.single_row_result(vec![("metric", 25, -1), ("value", 25, -1)], rows)
+    }
+
+    fn show_falcon_tde_keys(&self) -> Vec<BackendMessage> {
+        let deks = self.storage.tde_list_deks();
+        if deks.is_empty() {
+            return self.single_row_result(
+                vec![("id", 20, -1), ("label", 25, -1), ("active", 16, -1), ("created_at_ms", 20, -1)],
+                vec![vec![Some("(no DEKs)".into()), Some("".into()), Some("".into()), Some("".into())]],
+            );
+        }
+        let rows: Vec<Vec<Option<String>>> = deks.iter().map(|d| vec![
+            Some(d.id.to_string()),
+            Some(d.label.clone()),
+            Some(d.active.to_string()),
+            Some(d.created_at_ms.to_string()),
+        ]).collect();
+        self.single_row_result(
+            vec![("id", 20, -1), ("label", 25, -1), ("active", 16, -1), ("created_at_ms", 20, -1)],
+            rows,
+        )
     }
 }

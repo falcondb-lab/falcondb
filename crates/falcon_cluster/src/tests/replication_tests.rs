@@ -190,7 +190,7 @@
         insert_on_primary(&group, TxnId(3), Timestamp(3), 3, "c");
         group.catch_up_replica(0).unwrap();
 
-        // Phase 2: "disconnect"  鈥?insert more rows without catching up
+        // Phase 2: "disconnect"  —insert more rows without catching up
         insert_on_primary(&group, TxnId(4), Timestamp(4), 4, "d");
         insert_on_primary(&group, TxnId(5), Timestamp(5), 5, "e");
 
@@ -198,7 +198,7 @@
         let lag = group.replication_lag();
         assert!(lag[0].1 > 0, "should have lag after disconnect");
 
-        // Phase 3: "reconnect"  鈥?catch up from last applied LSN
+        // Phase 3: "reconnect"  —catch up from last applied LSN
         let applied = group.catch_up_replica(0).unwrap();
         assert_eq!(
             applied, 4,
@@ -307,7 +307,7 @@
     #[test]
     fn test_replication_lag_timeline() {
         // Simulates replication lag over time with a burst of writes,
-        // gradual catch-up, and a second burst  鈥?produces data suitable
+        // gradual catch-up, and a second burst  —produces data suitable
         // for a "replication lag over time" graph.
         let group = ShardReplicaGroup::new(ShardId(0), &[test_schema()]).unwrap();
 

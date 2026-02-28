@@ -229,7 +229,7 @@ impl ProjAccum {
 /// Encode ALL columns of a row into a reusable buffer — avoids the need to
 /// build a `Vec<usize>` of `(0..ncols)` indices just for dedup / DISTINCT.
 #[inline]
-pub(crate) fn encode_group_key_all(buf: &mut Vec<u8>, row: &OwnedRow) {
+pub fn encode_group_key_all(buf: &mut Vec<u8>, row: &OwnedRow) {
     buf.clear();
     for datum in &row.values {
         encode_datum_into(buf, datum);
@@ -258,7 +258,7 @@ fn encode_datum_into(buf: &mut Vec<u8>, datum: &Datum) {
 }
 
 /// Encode group key from row into a reusable buffer (avoids per-row allocation).
-pub(crate) fn encode_group_key(buf: &mut Vec<u8>, row: &OwnedRow, group_cols: &[usize]) {
+pub fn encode_group_key(buf: &mut Vec<u8>, row: &OwnedRow, group_cols: &[usize]) {
     buf.clear();
     for &col_idx in group_cols {
         let datum = row.get(col_idx).unwrap_or(&Datum::Null);
@@ -761,13 +761,13 @@ impl Executor {
             let group_rows = &group_rows_buf;
             let row_values = self.compute_group_row_with_nulls(
                 projections,
-                &group_rows,
+                group_rows,
                 active_set,
                 all_group_cols,
             )?;
 
             if let Some(h) = having {
-                if !ExprEngine::eval_having_filter(h, &group_rows)
+                if !ExprEngine::eval_having_filter(h, group_rows)
                     .map_err(FalconError::Execution)?
                 {
                     continue;
@@ -1333,6 +1333,7 @@ impl Executor {
                                 if syy == 0.0 {
                                     Ok(Datum::Null)
                                 } else {
+                                    #[allow(clippy::suspicious_operation_groupings)]
                                     Ok(Datum::Float64((sxy * sxy) / (sxx * syy)))
                                 }
                             }

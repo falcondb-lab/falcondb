@@ -99,7 +99,7 @@
         eprintln!("  ratio (largest/smallest) = {:.1}x", ratio);
         assert!(
             ratio < 20.0,
-            "commit latency ratio {:.1}x exceeds 20x threshold  鈥?commit may not be O(|write_set|)",
+            "commit latency ratio {:.1}x exceeds 20x threshold  —commit may not be O(|write_set|)",
             ratio
         );
     }

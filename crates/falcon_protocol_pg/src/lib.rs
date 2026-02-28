@@ -3,6 +3,7 @@ pub mod codec;
 pub mod connection_pool;
 pub mod handler;
 mod handler_catalog;
+mod handler_utils;
 mod handler_copy;
 mod handler_session;
 mod handler_show;

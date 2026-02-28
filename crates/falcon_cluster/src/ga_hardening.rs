@@ -509,10 +509,8 @@ impl ConfigRollbackManager {
                 self.metrics.checksum_mismatches.fetch_add(1, Ordering::Relaxed);
                 return false;
             }
-            true
-        } else {
-            true // missing key is not a mismatch
         }
+        true
     }
 
     /// Get history for a key.

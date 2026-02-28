@@ -784,11 +784,14 @@ name = "falcon_cluster"
 version = "1.2.0"
 dependencies = [
  "async-trait",
+ "bincode",
  "dashmap",
  "falcon_common",
+ "falcon_enterprise",
  "falcon_executor",
  "falcon_planner",
  "falcon_proto",
+ "falcon_raft",
  "falcon_sql_frontend",
  "falcon_storage",
  "falcon_txn",
@@ -796,6 +799,7 @@ dependencies = [
  "prost",
  "serde",
  "serde_json",
+ "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -816,6 +820,17 @@ dependencies = [
  "tracing",
  "uuid",
  "xxhash-rust",
+]
+
+[[package]]
+name = "falcon_enterprise"
+version = "1.2.0"
+dependencies = [
+ "falcon_common",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]

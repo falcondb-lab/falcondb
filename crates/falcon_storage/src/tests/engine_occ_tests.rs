@@ -46,7 +46,7 @@
         engine.insert(TableId(100), row, txn1).unwrap();
         engine.commit_txn_local(txn1, Timestamp(10)).unwrap();
 
-        // txn2 reads  鈥?no concurrent modifications
+        // txn2 reads  —no concurrent modifications
         let txn2 = TxnId(2);
         let _rows = engine.scan(TableId(100), txn2, Timestamp(15)).unwrap();
         assert!(engine.validate_read_set(txn2, Timestamp(15)).is_ok());
@@ -86,12 +86,12 @@
         engine.insert(TableId(100), row, txn1).unwrap();
         engine.commit_txn_local(txn1, Timestamp(10)).unwrap();
 
-        // txn2 reads then commits  鈥?read-set should be cleaned
+        // txn2 reads then commits  —read-set should be cleaned
         let txn2 = TxnId(2);
         let _ = engine.scan(TableId(100), txn2, Timestamp(15)).unwrap();
         engine.commit_txn_local(txn2, Timestamp(20)).unwrap();
 
-        // After commit, validate finds no read-set  鈥?passes trivially
+        // After commit, validate finds no read-set  —passes trivially
         assert!(engine.validate_read_set(txn2, Timestamp(15)).is_ok());
     }
 

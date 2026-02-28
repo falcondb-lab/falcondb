@@ -388,8 +388,15 @@ impl RaftNetwork<TypeConfig> for GrpcConnection {
 // NetworkFactory — single-node stub (backward compat)
 // ---------------------------------------------------------------------------
 
-/// Single-node network factory — returns a stub that errors on all RPCs.
-/// Correct for single-node mode where no inter-node replication occurs.
+/// **Stub** network factory for single-node mode (backward compatibility).
+///
+/// Every RPC method on the produced [`NetworkConnection`] returns
+/// `Unreachable`. This is intentional: in single-node mode there are no peers
+/// to replicate to, so the network layer is never exercised.
+///
+/// **Do not use this for multi-node clusters.** Use:
+/// - [`RouterNetworkFactory`] for in-process multi-node (tests, embedded), or
+/// - [`GrpcNetworkFactory`] for production multi-process clusters.
 pub struct NetworkFactory;
 
 impl RaftNetworkFactory<TypeConfig> for NetworkFactory {
@@ -400,7 +407,10 @@ impl RaftNetworkFactory<TypeConfig> for NetworkFactory {
     }
 }
 
-/// Stub network connection — all RPCs fail with Unreachable.
+/// **Stub** network connection produced by [`NetworkFactory`].
+///
+/// All RPC methods unconditionally return `Unreachable`. This is correct for
+/// single-node mode and must not be used in any multi-node path.
 pub struct NetworkConnection;
 
 impl RaftNetwork<TypeConfig> for NetworkConnection {

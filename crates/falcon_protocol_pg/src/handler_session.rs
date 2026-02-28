@@ -5,9 +5,10 @@ use falcon_sql_frontend::parser::parse_sql;
 use crate::codec::{BackendMessage, FieldDescription};
 use crate::session::PgSession;
 
-use super::handler::{
+use crate::handler::QueryHandler;
+use crate::handler_utils::{
     bind_params, parse_execute_statement, parse_prepare_statement, parse_set_command,
-    parse_set_log_min_duration, text_params_to_datum, QueryHandler,
+    parse_set_log_min_duration, text_params_to_datum,
 };
 
 impl QueryHandler {
@@ -67,6 +68,95 @@ impl QueryHandler {
             if let Some(result) = self.parse_and_dispatch_admin_command(sql_lower) {
                 return Some(result);
             }
+        }
+
+        // ── PITR / WAL archiving SQL functions ──────────────────────────────
+
+        // SELECT pg_create_restore_point('name')
+        if sql_lower.starts_with("select pg_create_restore_point(") {
+            let name = extract_string_arg(&sql_lower, "select pg_create_restore_point(");
+            match self.storage.create_restore_point(&name) {
+                Ok(lsn) => {
+                    return Some(self.single_row_result(
+                        vec![("pg_create_restore_point", 25, -1)],
+                        vec![vec![Some(format!("{:X}/{:08X}", lsn >> 32, lsn & 0xFFFF_FFFF))]],
+                    ));
+                }
+                Err(e) => {
+                    return Some(vec![BackendMessage::ErrorResponse {
+                        severity: "ERROR".into(),
+                        code: "XX000".into(),
+                        message: format!("pg_create_restore_point failed: {e}"),
+                    }]);
+                }
+            }
+        }
+
+        // SELECT pg_start_backup('label')
+        if sql_lower.starts_with("select pg_start_backup(") {
+            let label = extract_string_arg(&sql_lower, "select pg_start_backup(");
+            match self.storage.start_base_backup(&label) {
+                Ok((_backup_id, lsn)) => {
+                    return Some(self.single_row_result(
+                        vec![("pg_start_backup", 25, -1)],
+                        vec![vec![Some(format!(
+                            "{:X}/{:08X}",
+                            lsn >> 32,
+                            lsn & 0xFFFF_FFFF
+                        ))]],
+                    ));
+                }
+                Err(e) => {
+                    return Some(vec![BackendMessage::ErrorResponse {
+                        severity: "ERROR".into(),
+                        code: "XX000".into(),
+                        message: format!("pg_start_backup failed: {e}"),
+                    }]);
+                }
+            }
+        }
+
+        // SELECT pg_stop_backup()
+        if sql_lower.starts_with("select pg_stop_backup()") {
+            match self.storage.stop_base_backup(0, "manual", "") {
+                Ok(lsn) => {
+                    return Some(self.single_row_result(
+                        vec![("pg_stop_backup", 25, -1)],
+                        vec![vec![Some(format!(
+                            "{:X}/{:08X}",
+                            lsn >> 32,
+                            lsn & 0xFFFF_FFFF
+                        ))]],
+                    ));
+                }
+                Err(e) => {
+                    return Some(vec![BackendMessage::ErrorResponse {
+                        severity: "ERROR".into(),
+                        code: "XX000".into(),
+                        message: format!("pg_stop_backup failed: {e}"),
+                    }]);
+                }
+            }
+        }
+
+        // SELECT pg_current_wal_lsn()
+        if sql_lower.starts_with("select pg_current_wal_lsn()") {
+            let lsn = self.storage.current_wal_lsn();
+            return Some(self.single_row_result(
+                vec![("pg_current_wal_lsn", 25, -1)],
+                vec![vec![Some(format!("{:X}/{:08X}", lsn >> 32, lsn & 0xFFFF_FFFF))]],
+            ));
+        }
+
+        // SELECT pg_walfile_name(lsn) — returns the WAL segment filename for a given LSN
+        if sql_lower.starts_with("select pg_walfile_name(") {
+            let lsn_str = extract_string_arg(&sql_lower, "select pg_walfile_name(");
+            let seg_id = lsn_str.parse::<u64>().unwrap_or(0);
+            let fname = falcon_storage::wal::segment_filename(seg_id);
+            return Some(self.single_row_result(
+                vec![("pg_walfile_name", 25, -1)],
+                vec![vec![Some(fname)]],
+            ));
         }
 
         // CHECKPOINT — trigger a storage checkpoint (WAL compaction)
@@ -219,6 +309,96 @@ impl QueryHandler {
         // DROP TENANT name
         if sql_lower.starts_with("drop tenant ") {
             return Some(self.handle_drop_tenant(sql_lower));
+        }
+
+        // SELECT falcon_tde_status()
+        if sql_lower.starts_with("select falcon_tde_status()") {
+            let status = self.storage.tde_status();
+            return Some(self.single_row_result(
+                vec![
+                    ("enabled", 16, -1),
+                    ("algorithm", 25, -1),
+                    ("dek_count", 23, -1),
+                    ("wal_encrypted", 16, -1),
+                ],
+                vec![vec![
+                    Some(status.enabled.to_string()),
+                    Some(status.algorithm),
+                    Some(status.dek_count.to_string()),
+                    Some(status.wal_encrypted.to_string()),
+                ]],
+            ));
+        }
+
+        // SELECT falcon_rotate_master_key('new_passphrase')
+        if sql_lower.starts_with("select falcon_rotate_master_key(") {
+            let passphrase = extract_string_arg(sql_lower, "select falcon_rotate_master_key(");
+            match self.storage.tde_rotate_master_key(&passphrase) {
+                Ok(()) => {
+                    return Some(self.single_row_result(
+                        vec![("falcon_rotate_master_key", 25, -1)],
+                        vec![vec![Some("OK".into())]],
+                    ));
+                }
+                Err(e) => {
+                    return Some(vec![BackendMessage::ErrorResponse {
+                        severity: "ERROR".into(),
+                        code: "XX000".into(),
+                        message: e,
+                    }]);
+                }
+            }
+        }
+
+        // SELECT falcon_generate_dek('scope')  — scope: wal | table_N | sst_N | backup
+        if sql_lower.starts_with("select falcon_generate_dek(") {
+            let scope_str = extract_string_arg(sql_lower, "select falcon_generate_dek(");
+            let scope = parse_encryption_scope(&scope_str);
+            match scope {
+                Some(s) => match self.storage.tde_generate_dek(s) {
+                    Ok(dek_id) => {
+                        return Some(self.single_row_result(
+                            vec![("falcon_generate_dek", 20, -1)],
+                            vec![vec![Some(dek_id.to_string())]],
+                        ));
+                    }
+                    Err(e) => {
+                        return Some(vec![BackendMessage::ErrorResponse {
+                            severity: "ERROR".into(),
+                            code: "XX000".into(),
+                            message: e,
+                        }]);
+                    }
+                },
+                None => {
+                    return Some(vec![BackendMessage::ErrorResponse {
+                        severity: "ERROR".into(),
+                        code: "42601".into(),
+                        message: format!("invalid encryption scope: '{}' (use wal, table_N, sst_N, or backup)", scope_str),
+                    }]);
+                }
+            }
+        }
+
+        // SELECT falcon_list_deks()
+        if sql_lower.starts_with("select falcon_list_deks()") {
+            let deks = self.storage.tde_list_deks();
+            if deks.is_empty() {
+                return Some(self.single_row_result(
+                    vec![("id", 20, -1), ("label", 25, -1), ("active", 16, -1), ("created_at_ms", 20, -1)],
+                    vec![],
+                ));
+            }
+            let rows: Vec<Vec<Option<String>>> = deks.iter().map(|d| vec![
+                Some(d.id.to_string()),
+                Some(d.label.clone()),
+                Some(d.active.to_string()),
+                Some(d.created_at_ms.to_string()),
+            ]).collect();
+            return Some(self.single_row_result(
+                vec![("id", 20, -1), ("label", 25, -1), ("active", 16, -1), ("created_at_ms", 20, -1)],
+                rows,
+            ));
         }
 
         // SHOW ... queries
@@ -907,5 +1087,29 @@ impl QueryHandler {
                 }]
             }
         }
+    }
+}
+
+/// Extract the first string argument from a SQL function call like `prefix('value')`.
+/// Strips surrounding quotes if present. Returns empty string on parse failure.
+fn extract_string_arg(sql_lower: &str, prefix: &str) -> String {
+    let after = sql_lower.trim_start_matches(prefix);
+    let inner = after.trim_end_matches(')').trim_end_matches(';').trim();
+    inner.trim_matches('\'').trim_matches('"').to_owned()
+}
+
+/// Parse an encryption scope string like "wal", "table_5", "sst_3", "backup".
+fn parse_encryption_scope(s: &str) -> Option<falcon_storage::encryption::EncryptionScope> {
+    use falcon_storage::encryption::EncryptionScope;
+    match s {
+        "wal" => Some(EncryptionScope::Wal),
+        "backup" => Some(EncryptionScope::Backup),
+        _ if s.starts_with("table_") => {
+            s.strip_prefix("table_")?.parse::<u64>().ok().map(EncryptionScope::Table)
+        }
+        _ if s.starts_with("sst_") => {
+            s.strip_prefix("sst_")?.parse::<u64>().ok().map(EncryptionScope::Sst)
+        }
+        _ => None,
     }
 }

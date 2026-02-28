@@ -35,9 +35,153 @@ pub struct FalconConfig {
     /// the configuration meets minimum safety requirements for production use.
     #[serde(default)]
     pub production_safety: ProductionSafetyConfig,
+    /// v1.2.0: Change Data Capture (CDC) configuration.
+    #[serde(default)]
+    pub cdc: CdcConfig,
+    /// v1.2.0: Point-in-Time Recovery (PITR) / WAL archiving configuration.
+    #[serde(default)]
+    pub pitr: PitrConfig,
+    /// v1.2.0: Multi-tenant isolation and metering configuration.
+    #[serde(default)]
+    pub multi_tenant: MultiTenantConfig,
+    /// v1.2.0: Transparent Data Encryption (TDE) configuration.
+    #[serde(default)]
+    pub tde: TdeConfig,
 }
 
 const fn default_config_version() -> u32 { CURRENT_CONFIG_VERSION }
+
+/// Change Data Capture (CDC) configuration section in falcon.toml.
+///
+/// CDC captures row-level changes (INSERT, UPDATE, DELETE) and DDL events
+/// into an in-memory ring buffer, consumable via PostgreSQL logical replication.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdcConfig {
+    /// Enable CDC event capture (default: true).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Maximum number of change events in the ring buffer (default: 100_000).
+    /// Oldest events are evicted when the buffer is full.
+    #[serde(default = "default_cdc_buffer_size")]
+    pub buffer_size: usize,
+}
+
+const fn default_cdc_buffer_size() -> usize { 100_000 }
+
+/// Point-in-Time Recovery (PITR) configuration section in falcon.toml.
+///
+/// PITR enables recovery to any point in time by archiving WAL segments
+/// to a local directory. Combine with base backups for full data protection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PitrConfig {
+    /// Enable WAL archiving for PITR (default: false).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Directory where completed WAL segments are archived.
+    /// Required when enabled = true.
+    #[serde(default)]
+    pub archive_dir: String,
+    /// WAL segment retention in hours (0 = keep forever).
+    /// Archived segments older than this are removed during GC.
+    #[serde(default)]
+    pub retention_hours: u64,
+}
+
+impl Default for PitrConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            archive_dir: String::new(),
+            retention_hours: 0,
+        }
+    }
+}
+
+/// Multi-tenant isolation and metering configuration section in falcon.toml.
+///
+/// When enabled, tenant quota enforcement (QPS, memory, concurrent txns) and
+/// per-tenant resource metering are active. Tenants are created via SQL:
+/// `CREATE TENANT name [MAX_QPS n] [MAX_STORAGE_BYTES n]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultiTenantConfig {
+    /// Enable multi-tenant isolation (default: false).
+    /// When false, all sessions use SYSTEM_TENANT_ID with unlimited quotas.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Enable per-tenant resource metering for billing (default: false).
+    #[serde(default)]
+    pub metering_enabled: bool,
+    /// Default max QPS for newly created tenants (0 = unlimited).
+    #[serde(default)]
+    pub default_max_qps: u64,
+    /// Default max concurrent transactions for newly created tenants (0 = unlimited).
+    #[serde(default)]
+    pub default_max_concurrent_txns: u32,
+    /// Default max memory bytes for newly created tenants (0 = unlimited).
+    #[serde(default)]
+    pub default_max_memory_bytes: u64,
+    /// Default max storage bytes for newly created tenants (0 = unlimited).
+    #[serde(default)]
+    pub default_max_storage_bytes: u64,
+}
+
+/// Transparent Data Encryption (TDE) configuration section in falcon.toml.
+///
+/// When enabled, WAL records and data blocks are encrypted with AES-256-GCM.
+/// The master key is derived from a passphrase via PBKDF2-HMAC-SHA256.
+/// The passphrase is read from the environment variable named by `key_env_var`
+/// (never stored in the config file).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TdeConfig {
+    /// Enable transparent data encryption (default: false).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Environment variable name that holds the master key passphrase.
+    /// The passphrase is never stored in the config file.
+    #[serde(default = "default_tde_key_env_var")]
+    pub key_env_var: String,
+    /// Encrypt WAL records (default: true when TDE is enabled).
+    #[serde(default = "default_true")]
+    pub encrypt_wal: bool,
+    /// Encrypt data/table blocks (default: true when TDE is enabled).
+    #[serde(default = "default_true")]
+    pub encrypt_data: bool,
+}
+
+fn default_tde_key_env_var() -> String { "FALCON_TDE_KEY".into() }
+
+impl Default for TdeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            key_env_var: default_tde_key_env_var(),
+            encrypt_wal: true,
+            encrypt_data: true,
+        }
+    }
+}
+
+impl Default for MultiTenantConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            metering_enabled: false,
+            default_max_qps: 0,
+            default_max_concurrent_txns: 0,
+            default_max_memory_bytes: 0,
+            default_max_storage_bytes: 0,
+        }
+    }
+}
+
+impl Default for CdcConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            buffer_size: default_cdc_buffer_size(),
+        }
+    }
+}
 
 /// Production Safety Mode configuration.
 ///
@@ -47,17 +191,13 @@ const fn default_config_version() -> u32 { CURRENT_CONFIG_VERSION }
 ///
 /// This is FalconDB's "no foot-guns in production" guard rail.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct ProductionSafetyConfig {
     /// Enable production safety enforcement. Default: false (warn only).
     #[serde(default)]
     pub enforce: bool,
 }
 
-impl Default for ProductionSafetyConfig {
-    fn default() -> Self {
-        Self { enforce: false }
-    }
-}
 
 /// A single production safety check result.
 #[derive(Debug, Clone)]
@@ -739,6 +879,10 @@ impl Default for FalconConfig {
             wal_mode: default_wal_mode(),
             gateway: GatewayConfig::default(),
             production_safety: ProductionSafetyConfig::default(),
+            cdc: CdcConfig::default(),
+            pitr: PitrConfig::default(),
+            multi_tenant: MultiTenantConfig::default(),
+            tde: TdeConfig::default(),
         }
     }
 }

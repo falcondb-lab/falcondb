@@ -17,6 +17,19 @@ use crate::wal::WalRecord;
 
 use super::engine::StorageEngine;
 
+impl StorageEngine {
+    /// Resolve a table name from its ID via the catalog (for CDC events).
+    /// Returns empty string if the table is not found (avoid blocking on catalog).
+    #[inline]
+    fn cdc_table_name(&self, table_id: TableId) -> String {
+        self.catalog
+            .read()
+            .find_table_by_id(table_id)
+            .map(|s| s.name.clone())
+            .unwrap_or_default()
+    }
+}
+
 /// Derive a USTM PageId from a table id and primary key hash.
 #[inline]
 fn ustm_page_id(table_id: TableId, pk: &PrimaryKey) -> PageId {
@@ -49,6 +62,7 @@ impl StorageEngine {
                 table_id,
                 row: row.clone(),
             })?;
+            let cdc_row = if self.cdc_manager.is_enabled() { Some(row.clone()) } else { None };
             let pk = table.insert(row, txn_id)?;
             self.record_write(txn_id, table_id, pk.clone());
 
@@ -56,6 +70,12 @@ impl StorageEngine {
             let page_id = ustm_page_id(table_id, &pk);
             let data = PageData::new(pk.clone());
             let _ = self.ustm.alloc_hot(page_id, data, AccessPriority::HotRow);
+
+            // CDC: emit INSERT event
+            if let Some(cdc_row) = cdc_row {
+                let tname = self.cdc_table_name(table_id);
+                self.cdc_manager.emit_insert(txn_id, table_id, &tname, cdc_row, Some(format!("{pk:?}")));
+            }
 
             return Ok(pk);
         }
@@ -166,10 +186,19 @@ impl StorageEngine {
         };
 
         // Insert rows into memtable and collect PKs
+        let cdc_enabled = self.cdc_manager.is_enabled();
+        let cdc_table_name = if cdc_enabled { Some(self.cdc_table_name(table_id)) } else { None };
         let mut pks = Vec::with_capacity(row_count);
         for row in rows {
+            let cdc_row = if cdc_enabled { Some(row.clone()) } else { None };
             let pk = table.insert(row, txn_id)?;
             self.record_write_no_dedup(txn_id, table_id, pk.clone());
+
+            // CDC: emit INSERT event for each row in batch
+            if let (Some(cdc_row), Some(ref tname)) = (cdc_row, &cdc_table_name) {
+                self.cdc_manager.emit_insert(txn_id, table_id, tname, cdc_row, Some(format!("{pk:?}")));
+            }
+
             pks.push(pk);
         }
 
@@ -193,8 +222,16 @@ impl StorageEngine {
                 pk: pk.clone(),
                 new_row: new_row.clone(),
             })?;
+            let cdc_row = if self.cdc_manager.is_enabled() { Some(new_row.clone()) } else { None };
             table.update(pk, new_row, txn_id)?;
             self.record_write(txn_id, table_id, pk.clone());
+
+            // CDC: emit UPDATE event (old_row=None; REPLICA IDENTITY FULL not yet supported)
+            if let Some(cdc_row) = cdc_row {
+                let tname = self.cdc_table_name(table_id);
+                self.cdc_manager.emit_update(txn_id, table_id, &tname, None, cdc_row, Some(format!("{pk:?}")));
+            }
+
             return Ok(());
         }
 
@@ -259,6 +296,13 @@ impl StorageEngine {
             })?;
             table.delete(pk, txn_id)?;
             self.record_write(txn_id, table_id, pk.clone());
+
+            // CDC: emit DELETE event
+            if self.cdc_manager.is_enabled() {
+                let tname = self.cdc_table_name(table_id);
+                self.cdc_manager.emit_delete(txn_id, table_id, &tname, None, Some(format!("{pk:?}")));
+            }
+
             return Ok(());
         }
 

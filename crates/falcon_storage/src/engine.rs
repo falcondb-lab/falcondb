@@ -26,10 +26,12 @@ use crate::wal::{CheckpointData, SyncMode, WalRecord, WalWriter};
 
 use falcon_common::rls::RlsPolicyManager;
 
-use crate::cdc::CdcManager;
+use crate::cdc::{CdcManager, DEFAULT_CDC_BUFFER_SIZE};
 use crate::encryption::KeyManager;
+use crate::metering::ResourceMeter;
 use crate::online_ddl::OnlineDdlManager;
 use crate::pitr::WalArchiver;
+use crate::tenant_registry::TenantRegistry;
 
 // ── Feature-gated storage engine imports ──
 #[cfg(feature = "columnstore")]
@@ -321,6 +323,24 @@ impl ReplicaAckTracker {
     }
 }
 
+/// TDE status snapshot for observability.
+#[derive(Debug, Clone)]
+pub struct TdeStatusInfo {
+    pub enabled: bool,
+    pub algorithm: String,
+    pub dek_count: usize,
+    pub wal_encrypted: bool,
+}
+
+/// DEK metadata snapshot (key material never exposed).
+#[derive(Debug, Clone)]
+pub struct TdeDekInfo {
+    pub id: u64,
+    pub label: String,
+    pub active: bool,
+    pub created_at_ms: u64,
+}
+
 /// The storage engine. Owns all tables (rowstore, columnstore, disk), the catalog, and the WAL.
 pub struct StorageEngine {
     /// Runtime node role — controls which storage paths are permitted.
@@ -391,8 +411,8 @@ pub struct StorageEngine {
     pub partition_manager: RwLock<PartitionManager>,
     /// WAL archiver for Point-in-Time Recovery.
     pub wal_archiver: RwLock<WalArchiver>,
-    /// Change Data Capture stream manager.
-    pub cdc_manager: RwLock<CdcManager>,
+    /// Change Data Capture stream manager (internally thread-safe).
+    pub cdc_manager: CdcManager,
     /// USTM (User-Space Tiered Memory) page cache engine.
     pub ustm: Arc<crate::ustm::UstmEngine>,
     /// Pre-tracked write-buffer bytes per transaction (set during batch_insert).
@@ -403,6 +423,10 @@ pub struct StorageEngine {
     pub cold_store: Arc<crate::cold_store::ColdStore>,
     /// String intern pool for low-cardinality string deduplication.
     pub intern_pool: Arc<crate::cold_store::StringInternPool>,
+    /// P2-1: Multi-tenant registry — manages tenant lifecycle and quota enforcement.
+    pub tenant_registry: Arc<TenantRegistry>,
+    /// P3-3: Resource meter — per-tenant billing and throttling.
+    pub resource_meter: Arc<ResourceMeter>,
 }
 
 impl StorageEngine {
@@ -542,12 +566,326 @@ impl StorageEngine {
             key_manager: RwLock::new(KeyManager::disabled()),
             partition_manager: RwLock::new(PartitionManager::new()),
             wal_archiver: RwLock::new(WalArchiver::disabled()),
-            cdc_manager: RwLock::new(CdcManager::disabled()),
+            cdc_manager: CdcManager::new(DEFAULT_CDC_BUFFER_SIZE),
             ustm: Self::default_ustm(),
             txn_write_bytes: DashMap::new(),
             cold_store: Arc::new(crate::cold_store::ColdStore::new_in_memory()),
             intern_pool: Arc::new(crate::cold_store::StringInternPool::new()),
+            tenant_registry: Arc::new(TenantRegistry::new()),
+            resource_meter: Arc::new(ResourceMeter::new()),
         })
+    }
+
+    /// Configure PITR / WAL archiving from the [pitr] config section.
+    /// Call this after construction to enable WAL segment archiving.
+    /// Also installs a WAL segment-rotation callback so completed segments
+    /// are automatically registered with the archiver.
+    pub fn configure_pitr(&self, enabled: bool, archive_dir: &str, retention_hours: u64) {
+        if enabled && !archive_dir.is_empty() {
+            let path = std::path::Path::new(archive_dir);
+            *self.wal_archiver.write() = crate::pitr::WalArchiver::new(path);
+
+            // Install a segment-rotation callback on the WAL writer.
+            // Transmit the pointer as usize (always Send+Sync) and cast back inside the closure.
+            // SAFETY: StorageEngine is Arc-held; wal_archiver outlives the WalWriter.
+            if let Some(ref wal) = self.wal {
+                let archiver_addr: usize =
+                    (&self.wal_archiver as *const RwLock<crate::pitr::WalArchiver>) as usize;
+                let cb: crate::wal::SegmentRotateCallback =
+                    std::sync::Arc::new(move |seg_id: u64, seg_size: u64| {
+                        // SAFETY: pointer is valid for StorageEngine lifetime.
+                        let archiver = unsafe {
+                            &*(archiver_addr as *const RwLock<crate::pitr::WalArchiver>)
+                        };
+                        let mut guard = archiver.write();
+                        if guard.is_enabled() {
+                            let fname = crate::wal::segment_filename(seg_id);
+                            let lsn_start = crate::pitr::Lsn(seg_id.saturating_mul(1_000_000));
+                            let lsn_end = crate::pitr::Lsn(
+                                (seg_id + 1).saturating_mul(1_000_000).saturating_sub(1),
+                            );
+                            guard.archive_segment(&fname, lsn_start, lsn_end, seg_size);
+                            tracing::debug!(
+                                "PITR: archived segment {} ({} bytes)",
+                                fname,
+                                seg_size
+                            );
+                        }
+                    });
+                wal.set_segment_rotate_callback(cb);
+            }
+
+            tracing::info!(
+                "PITR enabled: archive_dir={} retention_hours={}",
+                archive_dir, retention_hours
+            );
+        } else if enabled && archive_dir.is_empty() {
+            tracing::warn!("PITR enabled but pitr.archive_dir is empty — archiving inactive");
+        } else {
+            tracing::info!("PITR disabled by configuration");
+        }
+    }
+
+    /// Configure Transparent Data Encryption (TDE) from the [tde] config section.
+    /// Reads the passphrase from the environment variable specified by `key_env_var`.
+    /// When enabled, generates a WAL DEK and installs encryption on the WAL writer.
+    pub fn configure_tde(&self, enabled: bool, key_env_var: &str, encrypt_wal: bool, encrypt_data: bool) {
+        if !enabled {
+            tracing::info!("TDE disabled by configuration");
+            return;
+        }
+
+        let passphrase = match std::env::var(key_env_var) {
+            Ok(p) if !p.is_empty() => p,
+            _ => {
+                tracing::error!(
+                    "TDE enabled but environment variable '{}' is not set or empty — TDE inactive",
+                    key_env_var
+                );
+                return;
+            }
+        };
+
+        // Initialize the key manager with the passphrase
+        *self.key_manager.write() = crate::encryption::KeyManager::new(&passphrase);
+
+        if encrypt_wal {
+            // Generate a DEK for WAL encryption and install it on the WAL writer
+            let dek_id = self.key_manager.write().generate_dek(
+                crate::encryption::EncryptionScope::Wal,
+            );
+            if let Some(ref wal) = self.wal {
+                let km = self.key_manager.read();
+                if let Some(enc) = crate::wal::WalEncryption::from_key_manager(&km, dek_id) {
+                    // SAFETY: set_encryption requires &mut but we only call this once at startup
+                    // before any concurrent WAL writes occur.
+                    let wal_ptr = Arc::as_ptr(wal) as *mut crate::wal::WalWriter;
+                    unsafe { (*wal_ptr).set_encryption(enc); }
+                    tracing::info!("TDE: WAL encryption enabled (DEK {})", dek_id);
+                } else {
+                    tracing::error!("TDE: failed to create WAL encryption context for DEK {}", dek_id);
+                }
+            }
+        }
+
+        if encrypt_data {
+            tracing::info!("TDE: data block encryption enabled (per-table DEKs generated on demand)");
+        }
+
+        let km = self.key_manager.read();
+        tracing::info!(
+            "TDE enabled: algorithm=AES-256-GCM, dek_count={}, encrypt_wal={}, encrypt_data={}",
+            km.dek_count(), encrypt_wal, encrypt_data,
+        );
+    }
+
+    /// Get TDE status summary for SHOW commands.
+    pub fn tde_status(&self) -> TdeStatusInfo {
+        let km = self.key_manager.read();
+        let wal_encrypted = self.wal.as_ref().map_or(false, |w| w.is_encrypted());
+        TdeStatusInfo {
+            enabled: km.is_enabled(),
+            algorithm: if km.is_enabled() { "AES-256-GCM".into() } else { "none".into() },
+            dek_count: km.dek_count(),
+            wal_encrypted,
+        }
+    }
+
+    /// List all DEK metadata (without exposing key material).
+    pub fn tde_list_deks(&self) -> Vec<TdeDekInfo> {
+        let km = self.key_manager.read();
+        km.list_deks().iter().map(|d| TdeDekInfo {
+            id: d.id.0,
+            label: d.label.clone(),
+            active: d.active,
+            created_at_ms: d.created_at_ms,
+        }).collect()
+    }
+
+    /// Rotate the TDE master key with a new passphrase.
+    pub fn tde_rotate_master_key(&self, new_passphrase: &str) -> Result<(), String> {
+        let mut km = self.key_manager.write();
+        if !km.is_enabled() {
+            return Err("TDE is not enabled".into());
+        }
+        km.rotate_master_key(new_passphrase);
+        tracing::info!("TDE: master key rotated successfully");
+        Ok(())
+    }
+
+    /// Generate a new DEK for a given scope (e.g., table encryption).
+    pub fn tde_generate_dek(&self, scope: crate::encryption::EncryptionScope) -> Result<u64, String> {
+        let mut km = self.key_manager.write();
+        if !km.is_enabled() {
+            return Err("TDE is not enabled".into());
+        }
+        let dek_id = km.generate_dek(scope);
+        tracing::info!("TDE: generated DEK {} for scope {}", dek_id, scope);
+        Ok(dek_id.0)
+    }
+
+    /// Configure multi-tenant isolation and metering from the [multi_tenant] config section.
+    /// Call this after construction to enable tenant quota enforcement and resource metering.
+    pub fn configure_multi_tenant(
+        &self,
+        enabled: bool,
+        metering_enabled: bool,
+        default_max_qps: u64,
+        default_max_concurrent_txns: u32,
+        default_max_memory_bytes: u64,
+        default_max_storage_bytes: u64,
+    ) {
+        if enabled {
+            // Register the system tenant in the metering system
+            use falcon_common::tenant::SYSTEM_TENANT_ID;
+            self.resource_meter.register_tenant(SYSTEM_TENANT_ID);
+            tracing::info!(
+                "Multi-tenant isolation enabled (metering={}, default_max_qps={}, default_max_txns={}, default_max_mem={}, default_max_storage={})",
+                metering_enabled, default_max_qps, default_max_concurrent_txns,
+                default_max_memory_bytes, default_max_storage_bytes,
+            );
+        } else {
+            tracing::info!("Multi-tenant isolation disabled — all sessions use system tenant");
+        }
+    }
+
+    /// Check whether a tenant is allowed to begin a new transaction.
+    /// Returns Ok(()) if allowed, or Err with the denial reason.
+    pub fn check_tenant_quota(&self, tenant_id: falcon_common::tenant::TenantId) -> Result<(), String> {
+        let result = self.tenant_registry.check_begin_txn(tenant_id);
+        match result {
+            crate::tenant_registry::QuotaCheckResult::Allowed => Ok(()),
+            crate::tenant_registry::QuotaCheckResult::QpsExceeded { limit, current } => {
+                Err(format!("tenant QPS limit exceeded: {current}/{limit}"))
+            }
+            crate::tenant_registry::QuotaCheckResult::MemoryExceeded { limit, current } => {
+                Err(format!("tenant memory limit exceeded: {current}/{limit} bytes"))
+            }
+            crate::tenant_registry::QuotaCheckResult::TxnLimitExceeded { limit, current } => {
+                Err(format!("tenant concurrent transaction limit exceeded: {current}/{limit}"))
+            }
+            crate::tenant_registry::QuotaCheckResult::TenantNotActive { status } => {
+                Err(format!("tenant is not active: {status}"))
+            }
+        }
+    }
+
+    /// Record that a transaction has begun for a tenant (metering + quota tracking).
+    pub fn record_tenant_txn_begin(&self, tenant_id: falcon_common::tenant::TenantId) {
+        self.tenant_registry.record_txn_begin(tenant_id);
+        self.resource_meter.record_query(tenant_id);
+    }
+
+    /// Record that a transaction has committed for a tenant.
+    pub fn record_tenant_txn_commit(&self, tenant_id: falcon_common::tenant::TenantId) {
+        self.tenant_registry.record_txn_commit(tenant_id);
+        self.resource_meter.record_txn_commit(tenant_id);
+    }
+
+    /// Record that a transaction has been aborted for a tenant.
+    pub fn record_tenant_txn_abort(&self, tenant_id: falcon_common::tenant::TenantId) {
+        self.tenant_registry.record_txn_abort(tenant_id);
+        self.resource_meter.record_txn_abort(tenant_id);
+    }
+
+    /// Create a named restore point at the current WAL LSN.
+    /// Returns the LSN at which the restore point was recorded.
+    pub fn create_restore_point(&self, name: &str) -> Result<u64, StorageError> {
+        let lsn = self.wal.as_ref().map_or(0, |w| w.current_lsn());
+        self.wal_archiver
+            .write()
+            .create_restore_point(name, crate::pitr::Lsn(lsn));
+        tracing::info!("Restore point '{}' created at LSN {}", name, lsn);
+        Ok(lsn)
+    }
+
+    /// Start a base backup. Returns (backup_id, start_lsn).
+    pub fn start_base_backup(&self, label: &str) -> Result<(u64, u64), StorageError> {
+        let lsn = self.wal.as_ref().map_or(0, |w| w.current_lsn());
+        // Use a monotonic counter based on wall time as backup_id
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let backup_id = now_ms;
+        tracing::info!(
+            "Base backup started: label='{}' backup_id={} start_lsn={}",
+            label, backup_id, lsn
+        );
+        Ok((backup_id, lsn))
+    }
+
+    /// Stop a base backup and register it with the archiver.
+    /// Returns end_lsn.
+    pub fn stop_base_backup(&self, backup_id: u64, label: &str, backup_path: &str) -> Result<u64, StorageError> {
+        let lsn = self.wal.as_ref().map_or(0, |w| w.current_lsn());
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        let backup = crate::pitr::BaseBackup {
+            label: label.to_owned(),
+            start_lsn: crate::pitr::Lsn(backup_id), // backup_id encodes start time ≈ start_lsn
+            end_lsn: crate::pitr::Lsn(lsn),
+            start_time_ms: backup_id,
+            end_time_ms: now_ms,
+            backup_path: std::path::PathBuf::from(backup_path),
+            size_bytes: 0,
+            consistent: true,
+        };
+        self.wal_archiver.write().register_base_backup(backup);
+        tracing::info!(
+            "Base backup stopped: label='{}' backup_id={} end_lsn={}",
+            label, backup_id, lsn
+        );
+        Ok(lsn)
+    }
+
+    /// Archive a completed WAL segment (called from the WAL rotation hook).
+    pub fn archive_wal_segment(&self, segment_id: u64, size_bytes: u64) {
+        let mut archiver = self.wal_archiver.write();
+        if !archiver.is_enabled() {
+            return;
+        }
+        let filename = crate::wal::segment_filename(segment_id);
+        let lsn_start = crate::pitr::Lsn(segment_id * 1000);
+        let lsn_end = crate::pitr::Lsn((segment_id + 1) * 1000 - 1);
+        archiver.archive_segment(&filename, lsn_start, lsn_end, size_bytes);
+        tracing::debug!("WAL segment {} archived ({} bytes)", filename, size_bytes);
+    }
+
+    /// List all archived WAL segments.
+    pub fn list_archived_segments(&self) -> Vec<crate::pitr::ArchivedSegment> {
+        self.wal_archiver.read().list_segments().into_iter().cloned().collect()
+    }
+
+    /// List all base backups registered with the archiver.
+    pub fn list_base_backups(&self) -> Vec<crate::pitr::BaseBackup> {
+        self.wal_archiver.read().list_base_backups().into_iter().cloned().collect()
+    }
+
+    /// List all named restore points.
+    pub fn list_restore_points(&self) -> Vec<crate::pitr::RestorePoint> {
+        self.wal_archiver.read().list_restore_points().into_iter().cloned().collect()
+    }
+
+    /// PITR archiver stats: (enabled, segment_count, bytes_archived).
+    pub fn pitr_stats(&self) -> (bool, u64, u64) {
+        let archiver = self.wal_archiver.read();
+        (archiver.is_enabled(), archiver.segment_count(), archiver.total_bytes())
+    }
+
+    /// Configure CDC from the [cdc] config section.
+    /// Call this after construction if you have a `[cdc]` config section.
+    pub fn configure_cdc(&self, enabled: bool, buffer_size: usize) {
+        if enabled {
+            self.cdc_manager.set_enabled(true);
+            tracing::info!("CDC enabled (buffer_size={})", buffer_size);
+        } else {
+            self.cdc_manager.set_enabled(false);
+            tracing::info!("CDC disabled by configuration");
+        }
     }
 
     /// Set the node role. Must be called before any DML.
@@ -640,11 +978,13 @@ impl StorageEngine {
             key_manager: RwLock::new(KeyManager::disabled()),
             partition_manager: RwLock::new(PartitionManager::new()),
             wal_archiver: RwLock::new(WalArchiver::disabled()),
-            cdc_manager: RwLock::new(CdcManager::disabled()),
+            cdc_manager: CdcManager::new(DEFAULT_CDC_BUFFER_SIZE),
             ustm: Self::default_ustm(),
             txn_write_bytes: DashMap::new(),
             cold_store: Arc::new(crate::cold_store::ColdStore::new_in_memory()),
             intern_pool: Arc::new(crate::cold_store::StringInternPool::new()),
+            tenant_registry: Arc::new(TenantRegistry::new()),
+            resource_meter: Arc::new(ResourceMeter::new()),
         })
     }
 
@@ -684,11 +1024,13 @@ impl StorageEngine {
             key_manager: RwLock::new(KeyManager::disabled()),
             partition_manager: RwLock::new(PartitionManager::new()),
             wal_archiver: RwLock::new(WalArchiver::disabled()),
-            cdc_manager: RwLock::new(CdcManager::disabled()),
+            cdc_manager: CdcManager::new(DEFAULT_CDC_BUFFER_SIZE),
             ustm: Self::default_ustm(),
             txn_write_bytes: DashMap::new(),
             cold_store: Arc::new(crate::cold_store::ColdStore::new_in_memory()),
             intern_pool: Arc::new(crate::cold_store::StringInternPool::new()),
+            tenant_registry: Arc::new(TenantRegistry::new()),
+            resource_meter: Arc::new(ResourceMeter::new()),
         }
     }
 
@@ -728,11 +1070,13 @@ impl StorageEngine {
             key_manager: RwLock::new(KeyManager::disabled()),
             partition_manager: RwLock::new(PartitionManager::new()),
             wal_archiver: RwLock::new(WalArchiver::disabled()),
-            cdc_manager: RwLock::new(CdcManager::disabled()),
+            cdc_manager: CdcManager::new(DEFAULT_CDC_BUFFER_SIZE),
             ustm: Self::default_ustm(),
             txn_write_bytes: DashMap::new(),
             cold_store: Arc::new(crate::cold_store::ColdStore::new_in_memory()),
             intern_pool: Arc::new(crate::cold_store::StringInternPool::new()),
+            tenant_registry: Arc::new(TenantRegistry::new()),
+            resource_meter: Arc::new(ResourceMeter::new()),
         }
     }
 
@@ -1157,6 +1501,9 @@ impl StorageEngine {
 
         self.append_and_flush_wal(&WalRecord::CommitTxnLocal { txn_id, commit_ts })?;
 
+        // CDC: emit commit marker after successful WAL flush
+        self.cdc_manager.emit_commit(txn_id);
+
         Ok(())
     }
 
@@ -1193,6 +1540,9 @@ impl StorageEngine {
 
         self.append_and_flush_wal(&WalRecord::CommitTxnGlobal { txn_id, commit_ts })?;
 
+        // CDC: emit commit marker after successful WAL flush
+        self.cdc_manager.emit_commit(txn_id);
+
         Ok(())
     }
 
@@ -1212,6 +1562,9 @@ impl StorageEngine {
 
         self.append_wal(&WalRecord::AbortTxnLocal { txn_id })?;
 
+        // CDC: emit rollback marker
+        self.cdc_manager.emit_rollback(txn_id);
+
         Ok(())
     }
 
@@ -1230,6 +1583,9 @@ impl StorageEngine {
         self.apply_abort_to_write_set(txn_id, &write_set);
 
         self.append_wal(&WalRecord::AbortTxnGlobal { txn_id })?;
+
+        // CDC: emit rollback marker
+        self.cdc_manager.emit_rollback(txn_id);
 
         Ok(())
     }

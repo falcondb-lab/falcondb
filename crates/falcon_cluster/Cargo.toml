@@ -5,12 +5,16 @@ edition.workspace = true
 
 [dependencies]
 falcon_common = { path = "../falcon_common" }
+falcon_enterprise = { path = "../falcon_enterprise" }
 falcon_executor = { path = "../falcon_executor" }
 falcon_planner = { path = "../falcon_planner" }
 falcon_proto = { path = "../falcon_proto" }
+falcon_raft = { path = "../falcon_raft" }
 falcon_sql_frontend = { path = "../falcon_sql_frontend" }
 falcon_storage = { path = "../falcon_storage" }
 falcon_txn = { path = "../falcon_txn" }
+bincode.workspace = true
+thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true

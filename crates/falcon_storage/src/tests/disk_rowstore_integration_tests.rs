@@ -110,7 +110,7 @@
 
     #[test]
     fn test_disk_rowstore_scan_ignores_read_ts() {
-        // DiskRowstore has no MVCC 鈥?read_ts is accepted but not used for versioning
+        // DiskRowstore has no MVCC —read_ts is accepted but not used for versioning
         let engine = analytics_engine();
         engine.create_table(disk_schema()).unwrap();
 
@@ -158,7 +158,7 @@
 
     #[test]
     fn test_disk_rowstore_commit_does_not_affect_visibility() {
-        // DiskRowstore rows are immediately visible 鈥?commit is a no-op for visibility
+        // DiskRowstore rows are immediately visible —commit is a no-op for visibility
         let engine = analytics_engine();
         engine.create_table(disk_schema()).unwrap();
 

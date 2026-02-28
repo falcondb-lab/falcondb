@@ -512,7 +512,6 @@ impl RetryGuard {
 
             // Update phase
             entry.last_phase = phase;
-            Ok(())
         } else {
             // First time seeing this txn_id — register
             if entries.len() >= self.max_entries {
@@ -529,8 +528,8 @@ impl RetryGuard {
                     first_seen: Instant::now(),
                 },
             );
-            Ok(())
         }
+        Ok(())
     }
 
     /// Remove a txn from tracking (completed).

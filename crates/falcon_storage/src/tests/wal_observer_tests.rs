@@ -345,7 +345,7 @@
             .commit_txn(TxnId(3), Timestamp(30), TxnType::Local)
             .unwrap();
 
-        // Register a slow replica at ts=5  鈥?should block GC
+        // Register a slow replica at ts=5  —should block GC
         engine.replica_ack_tracker().update_ack(0, 5);
 
         let provider = Arc::new(DynamicProvider {

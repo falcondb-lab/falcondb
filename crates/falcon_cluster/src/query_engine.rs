@@ -120,8 +120,8 @@ impl DistributedQueryEngine {
                     let engine = &self.engine;
                     s.spawn(move || {
                         let start = Instant::now();
-                        engine.shard(sid).map_or(
-                            (sid, false, start.elapsed().as_micros() as u64),
+                        engine.shard(sid).map_or_else(
+                            || (sid, false, start.elapsed().as_micros() as u64),
                             |shard| {
                                 let txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
                                 let _ = shard.txn_mgr.commit(txn.txn_id);

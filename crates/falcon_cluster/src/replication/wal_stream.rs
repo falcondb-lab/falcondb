@@ -26,7 +26,8 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex as StdMutex};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 
@@ -134,6 +135,9 @@ pub trait ReplicationTransport: Send + Sync {
 }
 
 /// In-process transport: reads directly from the `ReplicationLog`.
+///
+/// On `ack_wal`, also notifies `ReplicationLog::sync_ack` so that any
+/// primary waiting in `append_and_wait` is woken immediately.
 pub struct InProcessTransport {
     log: Arc<ReplicationLog>,
     shard_id: ShardId,
@@ -180,6 +184,8 @@ impl ReplicationTransport for InProcessTransport {
         applied_lsn: u64,
     ) -> Result<(), FalconError> {
         self.ack_lsns.lock().insert(replica_id, applied_lsn);
+        // Wake any primary blocked in append_and_wait.
+        self.log.sync_ack.record_ack(replica_id, applied_lsn);
         Ok(())
     }
 }
@@ -308,6 +314,182 @@ impl<T: ReplicationTransport> AsyncReplicationTransport for T {
 }
 
 // ---------------------------------------------------------------------------
+// SyncWalAck — per-commit replica acknowledgement gate (RPO = 0)
+// ---------------------------------------------------------------------------
+
+/// Replication sync mode.
+///
+/// Controls how many replicas must acknowledge a WAL record before the
+/// primary returns success to the client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncMode {
+    /// Primary ACKs client after local WAL append only.  RPO > 0.
+    Async,
+    /// Primary blocks until **at least 1** replica has applied the record.  RPO = 0.
+    SemiSync,
+    /// Primary blocks until **all** replicas have applied the record.  RPO = 0.
+    Sync,
+}
+
+impl SyncMode {
+    /// Number of replica ACKs required before unblocking.
+    /// `total_replicas` is the current replica count.
+    pub fn required_acks(self, total_replicas: usize) -> usize {
+        match self {
+            Self::Async => 0,
+            Self::SemiSync => 1.min(total_replicas),
+            Self::Sync => total_replicas,
+        }
+    }
+}
+
+/// Per-commit synchronisation gate.
+///
+/// The primary calls `wait_for_acks(lsn, n, timeout)` immediately after
+/// appending a WAL record.  Each replica calls `record_ack(replica_id, lsn)`
+/// after it has durably applied the record.  The condvar wakes the waiting
+/// primary thread so it can check whether enough replicas have acked.
+///
+/// # Design notes
+/// - A single `SyncWalAck` is shared for the whole `ReplicationLog`.
+/// - `replica_lsns` maps replica_id → highest applied LSN.
+/// - A replica ACK for LSN *k* counts as an ACK for all LSNs ≤ k
+///   (monotone progress guarantee).
+/// - The condvar uses a `std::sync::Mutex` (not parking_lot) so it can be
+///   paired with `Condvar::wait_timeout`.
+pub struct SyncWalAck {
+    /// `replica_id` → highest LSN confirmed applied on that replica.
+    replica_lsns: StdMutex<HashMap<usize, u64>>,
+    /// Woken whenever any replica acks a new LSN.
+    cond: Condvar,
+}
+
+impl Default for SyncWalAck {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SyncWalAck {
+    pub fn new() -> Self {
+        Self {
+            replica_lsns: StdMutex::new(HashMap::new()),
+            cond: Condvar::new(),
+        }
+    }
+
+    /// Called by a replica (or `InProcessTransport::ack_wal`) when it has
+    /// applied WAL records up to `applied_lsn`.
+    pub fn record_ack(&self, replica_id: usize, applied_lsn: u64) {
+        let mut guard = self
+            .replica_lsns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prev = guard.entry(replica_id).or_insert(0);
+        if applied_lsn > *prev {
+            *prev = applied_lsn;
+            drop(guard);
+            self.cond.notify_all();
+        }
+    }
+
+    /// Block the calling thread until `required_acks` replicas have confirmed
+    /// LSN ≥ `target_lsn`, or `timeout` elapses.
+    ///
+    /// Returns `Ok(ack_count)` on success, `Err(WalAckTimeout)` on timeout.
+    pub fn wait_for_acks(
+        &self,
+        target_lsn: u64,
+        required_acks: usize,
+        timeout: Duration,
+    ) -> Result<usize, WalAckTimeout> {
+        if required_acks == 0 {
+            return Ok(0);
+        }
+
+        let deadline = std::time::Instant::now() + timeout;
+        let mut guard = self
+            .replica_lsns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        loop {
+            let acked = guard.values().filter(|&&lsn| lsn >= target_lsn).count();
+            if acked >= required_acks {
+                return Ok(acked);
+            }
+
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(WalAckTimeout {
+                    target_lsn,
+                    required: required_acks,
+                    got: acked,
+                });
+            }
+
+            let (g, timed_out) = self
+                .cond
+                .wait_timeout(guard, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard = g;
+            if timed_out.timed_out() {
+                let acked = guard.values().filter(|&&lsn| lsn >= target_lsn).count();
+                return if acked >= required_acks {
+                    Ok(acked)
+                } else {
+                    Err(WalAckTimeout {
+                        target_lsn,
+                        required: required_acks,
+                        got: acked,
+                    })
+                };
+            }
+        }
+    }
+
+    /// Snapshot of per-replica acked LSNs (for observability).
+    pub fn acked_lsns(&self) -> HashMap<usize, u64> {
+        self.replica_lsns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Minimum acked LSN across all replicas that have reported.
+    /// Returns 0 if no replica has acked yet.
+    pub fn min_acked_lsn(&self) -> u64 {
+        self.replica_lsns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .copied()
+            .min()
+            .unwrap_or(0)
+    }
+}
+
+/// Error returned when `wait_for_acks` times out.
+#[derive(Debug, Clone)]
+pub struct WalAckTimeout {
+    pub target_lsn: u64,
+    pub required: usize,
+    pub got: usize,
+}
+
+impl std::fmt::Display for WalAckTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "WalAckTimeout: lsn={} required={} got={}",
+            self.target_lsn, self.required, self.got
+        )
+    }
+}
+
+impl std::error::Error for WalAckTimeout {}
+
+// ---------------------------------------------------------------------------
 // LsnWalRecord & ReplicationLog
 // ---------------------------------------------------------------------------
 
@@ -346,6 +528,8 @@ pub struct ReplicationLog {
     evicted_records: AtomicU64,
     /// Wakes any server-streaming tasks waiting for new records.
     notify: tokio::sync::Notify,
+    /// Synchronous ACK gate for SemiSync / Sync modes.  Shared with transports.
+    pub sync_ack: Arc<SyncWalAck>,
 }
 
 impl Default for ReplicationLog {
@@ -367,7 +551,32 @@ impl ReplicationLog {
             max_capacity,
             evicted_records: AtomicU64::new(0),
             notify: tokio::sync::Notify::new(),
+            sync_ack: Arc::new(SyncWalAck::new()),
         }
+    }
+
+    /// Append a WAL record and **block** until `required_acks` replicas have
+    /// confirmed they applied it, or `timeout` elapses.
+    ///
+    /// This is the RPO = 0 path for SemiSync and Sync modes.
+    /// Use `append()` for the legacy Async path.
+    ///
+    /// # Errors
+    /// Returns `Err` if the replica quorum was not reached within `timeout`.
+    pub fn append_and_wait(
+        &self,
+        record: WalRecord,
+        required_acks: usize,
+        timeout: Duration,
+    ) -> Result<u64, FalconError> {
+        let lsn = self.append(record);
+        if required_acks == 0 {
+            return Ok(lsn);
+        }
+        self.sync_ack
+            .wait_for_acks(lsn, required_acks, timeout)
+            .map(|_| lsn)
+            .map_err(|e| FalconError::Internal(e.to_string()))
     }
 
     /// Append a WAL record and return its LSN.

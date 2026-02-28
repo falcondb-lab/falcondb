@@ -99,7 +99,7 @@
         chain.prepend(TxnId(2), Some(row(2)));
         chain.commit(TxnId(2), Timestamp(20));
         chain.prepend(TxnId(3), Some(row(3)));
-        // Abort txn 3  鈥?sets commit_ts to MAX
+        // Abort txn 3  —sets commit_ts to MAX
         chain.abort(TxnId(3));
 
         // GC at watermark 25: head has commit_ts=MAX (aborted), skip it.
@@ -647,17 +647,17 @@
                 )
                 .unwrap();
 
-            // Run GC  鈥?reclaims old version of key 1 in memory
+            // Run GC  —reclaims old version of key 1 in memory
             let result = engine.gc_sweep(Timestamp(25));
             assert_eq!(result.reclaimed_versions, 1);
 
-            // "crash"  鈥?engine dropped, WAL persisted
+            // "crash"  —engine dropped, WAL persisted
         }
 
         // Phase 2: Recover from WAL
         {
             let recovered = StorageEngine::recover(&dir).unwrap();
-            // WAL replays all committed writes  鈥?both keys should exist
+            // WAL replays all committed writes  —both keys should exist
             let rows = recovered
                 .scan(TableId(1), TxnId(999), Timestamp(100))
                 .unwrap();

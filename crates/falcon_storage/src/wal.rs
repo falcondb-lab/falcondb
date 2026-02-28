@@ -441,6 +441,10 @@ pub enum WalRecord {
     CoordinatorAbort { txn_id: TxnId },
 }
 
+/// Callback invoked when a WAL segment is rotated (completed).
+/// Arguments: (completed_segment_id, segment_size_bytes)
+pub type SegmentRotateCallback = Arc<dyn Fn(u64, u64) + Send + Sync>;
+
 /// WAL writer: append-only, with group commit and segment rotation.
 pub struct WalWriter {
     inner: Mutex<WalWriterInner>,
@@ -453,6 +457,8 @@ pub struct WalWriter {
     /// Optional TDE encryption context. When `Some`, every record's serialized
     /// payload is encrypted with AES-256-GCM before being written to disk.
     encryption: Option<WalEncryption>,
+    /// Optional callback invoked after each segment rotation (for PITR archiving).
+    segment_rotate_callback: parking_lot::RwLock<Option<SegmentRotateCallback>>,
 }
 
 struct WalWriterInner {
@@ -462,6 +468,8 @@ struct WalWriterInner {
     current_segment_size: u64,
     pending_count: usize,
 }
+
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy)]
 pub enum SyncMode {
@@ -487,6 +495,13 @@ impl WalWriter {
             DEFAULT_SEGMENT_SIZE,
             DEFAULT_GROUP_COMMIT_SIZE,
         )
+    }
+
+    /// Register a callback to be invoked on each WAL segment rotation.
+    /// The callback receives (completed_segment_id, segment_size_bytes).
+    /// Used by the PITR archiver to copy completed segments to the archive dir.
+    pub fn set_segment_rotate_callback(&self, cb: SegmentRotateCallback) {
+        *self.segment_rotate_callback.write() = Some(cb);
     }
 
     pub fn open_with_options(
@@ -535,6 +550,7 @@ impl WalWriter {
                 current_segment_size,
                 pending_count: 0,
             }),
+            segment_rotate_callback: parking_lot::RwLock::new(None),
             lsn: AtomicU64::new(0),
             sync_mode,
             max_segment_size,
@@ -642,6 +658,10 @@ impl WalWriter {
             inner.writer.get_ref().sync_data()?;
         }
 
+        // Record completed segment info before rotating (for PITR callback)
+        let completed_segment_id = inner.current_segment;
+        let completed_segment_size = inner.current_segment_size;
+
         // Open new segment
         inner.current_segment += 1;
         let new_path = inner.dir.join(segment_filename(inner.current_segment));
@@ -658,6 +678,12 @@ impl WalWriter {
         inner.pending_count = 0;
 
         tracing::debug!("WAL rotated to segment {}", inner.current_segment);
+
+        // Invoke PITR archive callback (outside the lock for this segment)
+        if let Some(ref cb) = *self.segment_rotate_callback.read() {
+            cb(completed_segment_id, completed_segment_size);
+        }
+
         Ok(())
     }
 

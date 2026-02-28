@@ -1552,7 +1552,7 @@ fn rule_common_subexpr_elimination(plan: LogicalPlan) -> LogicalPlan {
             }
         }
         LogicalPlan::Aggregate { input, group_by, grouping_sets, projections, visible_count, having } => {
-            let having = having.and_then(|h| dedup_conjuncts(h));
+            let having = having.and_then(dedup_conjuncts);
             LogicalPlan::Aggregate {
                 input: Box::new(rule_common_subexpr_elimination(*input)),
                 group_by, grouping_sets, projections, visible_count, having,

@@ -49,7 +49,7 @@
 
         // txn3 at ts=5 sees txn1 commit (10 > 5)
         assert!(chain.has_committed_write_after(TxnId(3), Timestamp(5)));
-        // txn3 at ts=15: txn1 at 10 <= 15, txn2 aborted  鈥?no conflict
+        // txn3 at ts=15: txn1 at 10 <= 15, txn2 aborted  —no conflict
         assert!(!chain.has_committed_write_after(TxnId(3), Timestamp(15)));
     }
 

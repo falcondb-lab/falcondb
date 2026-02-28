@@ -117,7 +117,7 @@
             engine.commit_txn_local(txn2, Timestamp(20)).unwrap();
         }
 
-        // Phase 2: Recover  鈥?should see both pre- and post-checkpoint data
+        // Phase 2: Recover  —should see both pre- and post-checkpoint data
         {
             let engine = StorageEngine::recover(&dir).unwrap();
             let rows = engine.scan(TableId(1), TxnId(3), Timestamp(100)).unwrap();
@@ -166,10 +166,10 @@
                     txn2,
                 )
                 .unwrap();
-            // No commit  鈥?crash!
+            // No commit  —crash!
         }
 
-        // Phase 2: Recover  鈥?uncommitted post-checkpoint write should be aborted
+        // Phase 2: Recover  —uncommitted post-checkpoint write should be aborted
         {
             let engine = StorageEngine::recover(&dir).unwrap();
             let rows = engine.scan(TableId(1), TxnId(3), Timestamp(100)).unwrap();

@@ -72,6 +72,8 @@ impl DistributedExecutor {
         }
 
         let shard_results: Vec<Result<ShardResult, FalconError>> = std::thread::scope(|s| {
+            // collect() is required: ScopedJoinHandle borrows `s` and must be stored before joining.
+            #[allow(clippy::needless_collect)]
             let handles: Vec<_> = target_shards
                 .iter()
                 .map(|&shard_id| {

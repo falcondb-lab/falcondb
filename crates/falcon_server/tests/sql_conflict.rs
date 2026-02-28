@@ -1506,7 +1506,7 @@ fn test_correlated_scalar_subquery_in_where() {
                     _ => "",
                 })
                 .collect();
-            // Category A: avg=150, Gadget(200) > 150 鉁? Widget(100) < 150 鉁?            // Category B: avg=62.5, Thingamajig(75) > 62.5 鉁? Doohickey(50) < 62.5 鉁?            assert!(names.contains(&"Gadget"), "Gadget (200) > avg(A)=150");
+            // Category A: avg=150, Gadget(200) > 150 [OK] Widget(100) < 150 [OK]            // Category B: avg=62.5, Thingamajig(75) > 62.5 [OK] Doohickey(50) < 62.5 [OK]            assert!(names.contains(&"Gadget"), "Gadget (200) > avg(A)=150");
             assert!(
                 names.contains(&"Thingamajig"),
                 "Thingamajig (75) > avg(B)=62.5"

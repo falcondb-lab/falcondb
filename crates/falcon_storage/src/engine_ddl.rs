@@ -378,6 +378,12 @@ impl StorageEngine {
             .map_err(|e| StorageError::Serialization(e.to_string()))?;
         self.append_wal(&WalRecord::CreateTable { schema_json: json })?;
 
+        // CDC: emit DDL event for CREATE TABLE
+        if self.cdc_manager.is_enabled() {
+            let txn_id = falcon_common::types::TxnId(0);
+            self.cdc_manager.emit_ddl(txn_id, &format!("CREATE TABLE {}", schema.name));
+        }
+
         catalog.add_table(schema);
         Ok(table_id)
     }
@@ -403,6 +409,12 @@ impl StorageEngine {
         self.append_wal(&WalRecord::DropTable {
             table_name: name.to_owned(),
         })?;
+
+        // CDC: emit DDL event for DROP TABLE
+        if self.cdc_manager.is_enabled() {
+            let txn_id = falcon_common::types::TxnId(0);
+            self.cdc_manager.emit_ddl(txn_id, &format!("DROP TABLE {name}"));
+        }
 
         catalog.drop_table(name);
         Ok(())
@@ -488,6 +500,13 @@ impl StorageEngine {
         self.append_wal(&WalRecord::TruncateTable {
             table_name: name.to_owned(),
         })?;
+
+        // CDC: emit DDL event for TRUNCATE TABLE
+        if self.cdc_manager.is_enabled() {
+            let txn_id = falcon_common::types::TxnId(0);
+            self.cdc_manager.emit_ddl(txn_id, &format!("TRUNCATE TABLE {name}"));
+        }
+
         Ok(())
     }
 
@@ -580,6 +599,12 @@ impl StorageEngine {
             table_name: table_name.to_owned(),
             operation_json: format!(r#"{{"op":"add_column","column":{col_json}}}"#),
         })?;
+
+        // CDC: emit DDL event for ALTER TABLE ADD COLUMN
+        if self.cdc_manager.is_enabled() {
+            let txn_id = falcon_common::types::TxnId(0);
+            self.cdc_manager.emit_ddl(txn_id, &format!("ALTER TABLE {table_name} ADD COLUMN {}", col.name));
+        }
 
         // Backfill existing rows with default value if needed
         if has_default {
@@ -677,6 +702,12 @@ impl StorageEngine {
             operation_json: format!(r#"{{"op":"drop_column","column_name":"{col_name}"}}"#),
         })?;
 
+        // CDC: emit DDL event for ALTER TABLE DROP COLUMN
+        if self.cdc_manager.is_enabled() {
+            let txn_id = falcon_common::types::TxnId(0);
+            self.cdc_manager.emit_ddl(txn_id, &format!("ALTER TABLE {table_name} DROP COLUMN {col_name}"));
+        }
+
         self.online_ddl.complete(ddl_id);
         Ok(ddl_id)
     }
@@ -718,6 +749,12 @@ impl StorageEngine {
             ),
         })?;
 
+        // CDC: emit DDL event for ALTER TABLE RENAME COLUMN
+        if self.cdc_manager.is_enabled() {
+            let txn_id = falcon_common::types::TxnId(0);
+            self.cdc_manager.emit_ddl(txn_id, &format!("ALTER TABLE {table_name} RENAME COLUMN {old_name} TO {new_name}"));
+        }
+
         self.online_ddl.complete(ddl_id);
         Ok(ddl_id)
     }
@@ -747,6 +784,12 @@ impl StorageEngine {
             table_name: old_name.to_owned(),
             operation_json: format!(r#"{{"op":"rename_table","new_name":"{new_name}"}}"#),
         })?;
+
+        // CDC: emit DDL event for ALTER TABLE RENAME
+        if self.cdc_manager.is_enabled() {
+            let txn_id = falcon_common::types::TxnId(0);
+            self.cdc_manager.emit_ddl(txn_id, &format!("ALTER TABLE {old_name} RENAME TO {new_name}"));
+        }
 
         self.online_ddl.complete(ddl_id);
         Ok(ddl_id)

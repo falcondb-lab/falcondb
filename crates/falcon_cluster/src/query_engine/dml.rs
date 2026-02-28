@@ -13,6 +13,7 @@ impl super::DistributedQueryEngine {
     /// Execute DDL on ALL shards in parallel. Returns the result from the first shard.
     pub(crate) fn exec_ddl_all_shards(&self, plan: &PhysicalPlan) -> Result<ExecutionResult, FalconError> {
         let results: Vec<Result<ExecutionResult, FalconError>> = std::thread::scope(|s| {
+            #[allow(clippy::needless_collect)] // scoped JoinHandles must be stored before joining
             let handles: Vec<_> = self
                 .engine
                 .all_shards()
@@ -307,6 +308,7 @@ impl super::DistributedQueryEngine {
     /// Execute RunGc on ALL shards in parallel, aggregating results.
     pub(crate) fn exec_gc_all_shards(&self) -> Result<ExecutionResult, FalconError> {
         let gc_results: Vec<Result<ExecutionResult, FalconError>> = std::thread::scope(|s| {
+            #[allow(clippy::needless_collect)] // scoped JoinHandles must be stored before joining
             let handles: Vec<_> = self
                 .engine
                 .all_shards()
@@ -513,6 +515,7 @@ impl super::DistributedQueryEngine {
     pub(crate) fn exec_dml_all_shards(&self, plan: &PhysicalPlan) -> Result<ExecutionResult, FalconError> {
         let shard_count = self.engine.all_shards().len();
         let results: Vec<(usize, Result<ExecutionResult, FalconError>)> = std::thread::scope(|s| {
+            #[allow(clippy::needless_collect)] // scoped JoinHandles must be stored before joining
             let handles: Vec<_> = self
                 .engine
                 .all_shards()

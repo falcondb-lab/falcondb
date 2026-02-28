@@ -567,7 +567,7 @@ impl BootstrapCoordinator {
         if let Some(ref manifest) = self.manifest {
             let mut all_ok = true;
             for seg_id in manifest.all_segment_ids() {
-                if let Ok(true) = store.verify_segment(seg_id) { self.segments_verified += 1; } else {
+                if matches!(store.verify_segment(seg_id), Ok(true)) { self.segments_verified += 1; } else {
                     all_ok = false;
                     self.failed_segments.push(seg_id);
                 }

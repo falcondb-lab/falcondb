@@ -63,7 +63,7 @@
         let chunk = svc.handle_pull(ShardId(0), 0, 100).unwrap();
         assert_eq!(chunk.len(), 3);
 
-        // Pull from LSN 2  鈥?should get only LSN 3
+        // Pull from LSN 2  —should get only LSN 3
         let chunk2 = svc.handle_pull(ShardId(0), 2, 100).unwrap();
         assert_eq!(chunk2.len(), 1);
         assert_eq!(chunk2.start_lsn, 3);
@@ -104,7 +104,7 @@
 
     #[tokio::test]
     async fn test_grpc_transport_pull_connection_refused() {
-        // GrpcTransport now actually connects via gRPC  鈥?connecting to a
+        // GrpcTransport now actually connects via gRPC  —connecting to a
         // non-existent server should return a connection error.
         let transport = GrpcTransport::new("http://127.0.0.1:19999".into(), ShardId(0));
         let result =

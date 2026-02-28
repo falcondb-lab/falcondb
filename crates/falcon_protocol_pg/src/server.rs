@@ -1888,10 +1888,9 @@ async fn handle_replication_streaming<S: AsyncReadExt + AsyncWriteExt + Unpin>(
         // Poll for new CDC events — collect into local vec to avoid holding
         // the RwLockReadGuard across .await points.
         let pending_messages: Vec<(u64, Vec<u8>)> = {
-            let cdc = storage.cdc_manager.read();
-            if let Some(slot) = cdc.get_slot_by_name(slot_name) {
+            if let Some(slot) = storage.cdc_manager.get_slot_by_name(slot_name) {
                 let slot_id = slot.id;
-                cdc.poll_changes(slot_id, 100)
+                storage.cdc_manager.poll_changes(slot_id, 100)
                     .iter()
                     .map(|event| {
                         let text = logical_replication::encode_change_event_text(event);
@@ -1905,7 +1904,7 @@ async fn handle_replication_streaming<S: AsyncReadExt + AsyncWriteExt + Unpin>(
             } else {
                 vec![]
             }
-        }; // RwLockReadGuard dropped here
+        };
 
         // Send collected messages (no lock held)
         for (lsn, xlog_data) in &pending_messages {
@@ -1915,12 +1914,8 @@ async fn handle_replication_streaming<S: AsyncReadExt + AsyncWriteExt + Unpin>(
 
         // Advance the slot's confirmed flush position
         if current_lsn > 0 && !pending_messages.is_empty() {
-            let cdc = storage.cdc_manager.read();
-            if let Some(slot) = cdc.get_slot_by_name(slot_name) {
-                let slot_id = slot.id;
-                drop(cdc);
-                let mut cdc_w = storage.cdc_manager.write();
-                let _ = cdc_w.advance_slot(slot_id, falcon_storage::cdc::CdcLsn(current_lsn));
+            if let Some(slot) = storage.cdc_manager.get_slot_by_name(slot_name) {
+                let _ = storage.cdc_manager.advance_slot(slot.id, falcon_storage::cdc::CdcLsn(current_lsn));
             }
         }
 
@@ -1937,10 +1932,8 @@ async fn handle_replication_streaming<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                 // Connection closed
                 tracing::debug!("Replication client disconnected (session {})", session_id);
                 // Deactivate slot
-                let mut cdc = storage.cdc_manager.write();
-                if let Some(slot) = cdc.get_slot_by_name(slot_name) {
-                    let sid = slot.id;
-                    cdc.deactivate_slot(sid);
+                if let Some(slot) = storage.cdc_manager.get_slot_by_name(slot_name) {
+                    storage.cdc_manager.deactivate_slot(slot.id);
                 }
                 return Ok(());
             }
@@ -1953,10 +1946,8 @@ async fn handle_replication_streaming<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                                 "Replication streaming ended by client (session {})",
                                 session_id
                             );
-                            let mut cdc = storage.cdc_manager.write();
-                            if let Some(slot) = cdc.get_slot_by_name(slot_name) {
-                                let sid = slot.id;
-                                cdc.deactivate_slot(sid);
+                            if let Some(slot) = storage.cdc_manager.get_slot_by_name(slot_name) {
+                                storage.cdc_manager.deactivate_slot(slot.id);
                             }
                             return Ok(());
                         }
@@ -1966,17 +1957,14 @@ async fn handle_replication_streaming<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                             if let Some(status) =
                                 logical_replication::StandbyStatusUpdate::parse(&data)
                             {
-                                let mut cdc = storage.cdc_manager.write();
-                                if let Some(slot) = cdc.get_slot_by_name(slot_name) {
-                                    let sid = slot.id;
-                                    let _ = cdc.advance_slot(
-                                        sid,
+                                if let Some(slot) = storage.cdc_manager.get_slot_by_name(slot_name) {
+                                    let _ = storage.cdc_manager.advance_slot(
+                                        slot.id,
                                         falcon_storage::cdc::CdcLsn(status.flush_lsn),
                                     );
                                 }
                                 needs_reply = status.reply_requested;
                             }
-                            // Send reply outside the lock
                             if needs_reply {
                                 let keepalive = logical_replication::build_keepalive_message(
                                     current_lsn,
@@ -1986,10 +1974,8 @@ async fn handle_replication_streaming<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                             }
                         }
                         FrontendMessage::Terminate => {
-                            let mut cdc = storage.cdc_manager.write();
-                            if let Some(slot) = cdc.get_slot_by_name(slot_name) {
-                                let sid = slot.id;
-                                cdc.deactivate_slot(sid);
+                            if let Some(slot) = storage.cdc_manager.get_slot_by_name(slot_name) {
+                                storage.cdc_manager.deactivate_slot(slot.id);
                             }
                             return Ok(());
                         }
@@ -2003,10 +1989,8 @@ async fn handle_replication_streaming<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                     session_id,
                     e
                 );
-                let mut cdc = storage.cdc_manager.write();
-                if let Some(slot) = cdc.get_slot_by_name(slot_name) {
-                    let sid = slot.id;
-                    cdc.deactivate_slot(sid);
+                if let Some(slot) = storage.cdc_manager.get_slot_by_name(slot_name) {
+                    storage.cdc_manager.deactivate_slot(slot.id);
                 }
                 return Err(e.into());
             }

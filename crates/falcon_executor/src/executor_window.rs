@@ -344,40 +344,33 @@ impl Executor {
         let mut prev_start: usize = 0;
         let mut prev_end_plus1: usize = 0; // exclusive end of the previous frame
 
-        for pos in 0..n {
+        for (pos, &row_idx) in indices.iter().enumerate().take(n) {
             let start = Self::resolve_frame_start(frame, pos, n).min(n);
             let end = Self::resolve_frame_end(frame, pos, n).min(n.saturating_sub(1));
             let end_plus1 = end + 1; // exclusive
 
             if pos == 0 {
                 // Initial frame: compute from scratch
-                for j in start..end_plus1 {
-                    if let Some(v) = vals[j] {
-                        sum += v;
-                        count += 1;
-                    }
+                for v in vals[start..end_plus1].iter().flatten() {
+                    sum += v;
+                    count += 1;
                 }
             } else {
                 // Subtract values that left the frame (prev_start..start)
-                for j in prev_start..start.min(prev_end_plus1) {
-                    if let Some(v) = vals[j] {
-                        sum -= v;
-                        count -= 1;
-                    }
+                for v in vals[prev_start..start.min(prev_end_plus1)].iter().flatten() {
+                    sum -= v;
+                    count -= 1;
                 }
                 // Add values that entered the frame (prev_end_plus1..end_plus1)
-                for j in prev_end_plus1.max(start)..end_plus1 {
-                    if let Some(v) = vals[j] {
-                        sum += v;
-                        count += 1;
-                    }
+                for v in vals[prev_end_plus1.max(start)..end_plus1].iter().flatten() {
+                    sum += v;
+                    count += 1;
                 }
             }
 
             prev_start = start;
             prev_end_plus1 = end_plus1;
 
-            let row_idx = indices[pos];
             result_rows[row_idx].values[proj_idx] = if count == 0 {
                 Datum::Null
             } else {

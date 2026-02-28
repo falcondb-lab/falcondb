@@ -147,12 +147,12 @@
         log.append(WalRecord::BeginTxn { txn_id: TxnId(2) });
         log.append(WalRecord::BeginTxn { txn_id: TxnId(3) });
 
-        // Pull from LSN 0  鈥?should get all 3
+        // Pull from LSN 0  —should get all 3
         let chunk = transport.pull_wal_chunk(ShardId(0), 0, 100).unwrap();
         assert_eq!(chunk.len(), 3);
         assert!(chunk.verify_checksum());
 
-        // Pull from LSN 2  鈥?should get only LSN 3
+        // Pull from LSN 2  —should get only LSN 3
         let chunk2 = transport.pull_wal_chunk(ShardId(0), 2, 100).unwrap();
         assert_eq!(chunk2.len(), 1);
         assert_eq!(chunk2.start_lsn, 3);
@@ -187,12 +187,12 @@
         let chunk = WalChunk::from_records(ShardId(0), records);
         transport.push_chunk(chunk).unwrap();
 
-        // Pull  鈥?should get the chunk
+        // Pull  —should get the chunk
         let pulled = transport.pull_wal_chunk(ShardId(0), 0, 100).unwrap();
         assert_eq!(pulled.len(), 2);
         assert!(pulled.verify_checksum());
 
-        // Pull again  鈥?nothing pending
+        // Pull again  —nothing pending
         let empty = transport.pull_wal_chunk(ShardId(0), 0, 100).unwrap();
         assert!(empty.is_empty());
     }
@@ -277,7 +277,7 @@
 
         // Apply once
         group.apply_chunk_to_replica(0, &chunk).unwrap();
-        // Apply again (should be idempotent  鈥?skip already-applied LSNs)
+        // Apply again (should be idempotent  —skip already-applied LSNs)
         let applied2 = group.apply_chunk_to_replica(0, &chunk).unwrap();
         assert_eq!(applied2, 2); // returns chunk size but skips internally
 

@@ -4,3 +4,8 @@
 *~
 .DS_Store
 Thumbs.db
+/*.txt
+/*.zip
+/check_*.rs
+/test_results*.txt
+/clippy_nursery*.txt

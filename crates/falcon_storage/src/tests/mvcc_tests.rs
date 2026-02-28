@@ -13,7 +13,7 @@
         let ts_commit = Timestamp(10);
 
         chain.prepend(txn1, Some(row(vec![Datum::Int32(42)])));
-        // Uncommitted  鈥?not visible to other txns
+        // Uncommitted  —not visible to other txns
         assert!(chain.read_committed(Timestamp(100)).is_none());
         // Visible to own txn
         assert!(chain.read_for_txn(txn1, Timestamp(0)).is_some());
@@ -92,7 +92,7 @@
         let txn2 = TxnId(2);
 
         chain.prepend(txn1, Some(row(vec![Datum::Int32(1)])));
-        // txn1 has uncommitted write  鈥?txn2 should see conflict
+        // txn1 has uncommitted write  —txn2 should see conflict
         assert!(chain.has_write_conflict(txn2));
         // txn1 itself should NOT see conflict
         assert!(!chain.has_write_conflict(txn1));

@@ -153,7 +153,7 @@
             commit_ts: Timestamp(30),
         });
 
-        // GC on primary at watermark 25  鈥?reclaims ts=10
+        // GC on primary at watermark 25  —reclaims ts=10
         let result = group.primary.storage.gc_sweep(Timestamp(25));
         assert_eq!(result.reclaimed_versions, 1);
 
@@ -215,7 +215,7 @@
         let safepoint2 = compute_safepoint(min_active_ts, Timestamp(100));
         assert_eq!(safepoint2, Timestamp(99));
 
-        // Still 0 reclaimed  鈥?each key has 1 version (no multi-version chains)
+        // Still 0 reclaimed  —each key has 1 version (no multi-version chains)
         let result2 = group
             .primary
             .storage

@@ -19,6 +19,8 @@ pub mod ha;
 pub mod indoubt_resolver;
 pub mod gateway;
 pub mod query_engine;
+pub mod raft_integration;
+pub mod raft_rebalance;
 pub mod rebalancer;
 pub mod replication;
 pub mod routing;
@@ -29,9 +31,9 @@ pub mod determinism_hardening;
 pub mod sharding;
 pub mod sla_admission;
 pub mod token_bucket;
-pub mod control_plane;
-pub mod enterprise_ops;
-pub mod enterprise_security;
+pub use falcon_enterprise::control_plane;
+pub use falcon_enterprise::enterprise_ops;
+pub use falcon_enterprise::enterprise_security;
 pub mod ga_hardening;
 pub mod cost_capacity;
 pub mod segment_streaming;
@@ -153,7 +155,7 @@ pub use self_healing::{
     RollingUpgradeCoordinator, ShardElection, SloSnapshot, SloTracker,
     UpgradeMetrics, UpgradeNodeRecord, UpgradeNodeState, UpgradeOrder,
 };
-pub use control_plane::{
+pub use falcon_enterprise::control_plane::{
     CommandDispatcher, CommandResult, ConfigEntry, ConfigStore,
     ConsistentMetadataStore, ControlPlaneCommand, ControllerHAGroup,
     ControllerHAMetrics, ControllerNode, ControllerRole,
@@ -163,7 +165,7 @@ pub use control_plane::{
     PlacementMetrics, ReadConsistency, ShardPlacement,
     ShardPlacementManager, ShardPlacementState,
 };
-pub use enterprise_security::{
+pub use falcon_enterprise::enterprise_security::{
     AuditCategory, AuditSeverity, AuthnManager, AuthnMetrics,
     AuthnRequest, AuthnResult, BackupJob, BackupJobStatus,
     BackupOrchestrator, BackupOrchestratorMetrics, BackupTarget,
@@ -174,7 +176,7 @@ pub use enterprise_security::{
     RbacGrant, RbacMetrics, RbacScope, RestoreJob, RestoreType,
     StoredCredential, TlsLinkType, UserRecord,
 };
-pub use enterprise_ops::{
+pub use falcon_enterprise::enterprise_ops::{
     AdminApiRouter, AdminEndpoint, AutoRebalancer, CapacityAlert,
     CapacityAlertLevel, CapacityMetrics, CapacityPlanner,
     ClusterOverviewResponse, ForecastResult, Incident,
@@ -203,6 +205,15 @@ pub use cost_capacity::{
     ImpactRisk, MetricChange, PostmortemGenerator, PostmortemMetrics,
     PostmortemReport, PostmortemTimelineEntry, PressureType, ProposedChange,
     Recommendation, ShardCost, TableCost, UnifiedAuditEvent,
+};
+pub use raft_integration::{
+    RaftCoordinatorMetrics, RaftFailoverWatcher, RaftFailoverWatcherHandle,
+    RaftFailoverWatcherMetrics, RaftShardCoordinator, RaftStatRow, RaftWalGroup,
+    RaftWalGroupMetrics, collect_raft_stats,
+};
+pub use raft_rebalance::{
+    RebalanceTriggerPolicy, SmartRebalanceConfig, SmartRebalanceMetrics,
+    SmartRebalanceMetricsSnapshot, SmartRebalanceRunner, SmartRebalanceRunnerHandle,
 };
 pub use two_phase::TwoPhaseCoordinator;
 pub use dist_hardening::{

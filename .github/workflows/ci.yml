@@ -98,6 +98,38 @@ jobs:
       - name: Failover determinism matrix
         run: cargo test -p falcon_cluster --test failover_determinism
 
+  perf-regression:
+    name: Performance Regression Gate
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run YCSB regression gate
+        run: |
+          chmod +x scripts/ci_perf_regression.sh
+          ./scripts/ci_perf_regression.sh
+        env:
+          PERF_OPS: "5000"
+          PERF_READ_PCT: "50"
+          PERF_LOCAL_PCT: "80"
+          PERF_SHARDS: "4"
+          PERF_RECORDS: "1000"
+          PERF_THREADS: "1"
+          PERF_SEED: "42"
+          PERF_ISOLATION: "rc"
+          PERF_TPS_THRESHOLD: "15"
+          PERF_P99_THRESHOLD: "25"
+          PERF_BASELINE_PATH: "bench/perf_baseline.json"
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-results-${{ github.sha }}
+          path: bench/
+          retention-days: 30
+
   windows:
     name: Windows Check
     runs-on: windows-latest

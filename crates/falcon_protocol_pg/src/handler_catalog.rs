@@ -1,7 +1,8 @@
 use crate::codec::{BackendMessage, FieldDescription};
 use crate::session::PgSession;
 
-use super::handler::{extract_where_eq, QueryHandler};
+use crate::handler::QueryHandler;
+use crate::handler_utils::extract_where_eq;
 
 impl QueryHandler {
     /// Route information_schema and pg_catalog queries.

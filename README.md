@@ -19,18 +19,11 @@
   <img src="https://img.shields.io/badge/license-Apache--2.0-green" alt="License" />
 </p>
 
-> **English** | [简体中文](README_zh.md) | [Español](README_es.md) | [Français](README_fr.md) | [한국어](README_ko.md) | [日本語](README_ja.md) | [Deutsch](README_de.md) | [العربية](README_ar.md) | [Italiano](README_it.md) | [Bahasa Melayu](README_ms.md) | [Português](README_pt.md)
-
-<!-- Version: sourced from workspace Cargo.toml [workspace.package] version -->
-<!-- Do NOT hardcode version numbers anywhere else. See docs/versioning.md -->
-
 > FalconDB is a **PG-compatible, distributed, memory-first OLTP database** with
 > deterministic transaction semantics. Benchmarked against PostgreSQL, VoltDB,
 > and SingleStore — see **[Benchmark Matrix](benchmarks/README.md)**.
 >
 > - ✅ **Low latency** — single-shard fast-path commits bypass 2PC entirely
-> - ✅ **Scan performance** — fused streaming aggregates, zero-copy MVCC iteration, near-PG parity on 1M rows
-> - ✅ **Stability** — p99 bounded, abort rate < 1%, reproducible benchmarks
 > - ✅ **Provable consistency** — MVCC/OCC under Snapshot Isolation, CI-verified ACID
 > - ✅ **Operability** — 50+ SHOW commands, Prometheus metrics, failover CI gate
 > - ✅ **Determinism** — hardened state machine, bounded in-doubt, idempotent retry
@@ -52,15 +45,9 @@ It is not a configuration option — it is the default behavior under the `Local
 - **Prove it yourself**: [falcondb-poc-dcg/](falcondb-poc-dcg/) — one-click demo: write 1,000 orders → kill -9 primary → verify zero data loss
 - **Benchmark it yourself**: [falcondb-poc-pgbench/](falcondb-poc-pgbench/) — pgbench comparison vs PostgreSQL under identical durability settings
 - **Crash under load**: [falcondb-poc-failover-under-load/](falcondb-poc-failover-under-load/) — kill -9 primary during sustained writes → verify zero data loss + automatic recovery
-- **See inside**: [falcondb-poc-observability/](falcondb-poc-observability/) — live Grafana dashboard, Prometheus metrics, operational controls (pause/resume rebalance, failover visibility)
-- **Migrate from PG**: [falcondb-poc-migration/](falcondb-poc-migration/) — migrate a real PostgreSQL app by changing only the connection string, with full compatibility boundary documentation
-- **Same SLA, lower cost**: [falcondb-poc-cost-efficiency/](falcondb-poc-cost-efficiency/) — same OLTP workload, fewer resources, predictable latency, with transparent cost comparison
+- **See inside**: [falcondb-poc-observability/](falcondb-poc-observability/) — live Grafana dashboard, Prometheus metrics, operational controls
+- **Migrate from PG**: [falcondb-poc-migration/](falcondb-poc-migration/) — migrate a real PostgreSQL app by changing only the connection string
 - **Recover after disaster**: [falcondb-poc-backup-pitr/](falcondb-poc-backup-pitr/) — destroy the database, restore from backup, replay to exact second, verify every row matches
-- **Manufacturing MES**: [falcondb-mes-workorder/](falcondb-mes-workorder/) — real MES work order system: report production, kill -9 the database, verify every confirmed report survives
-- **Formal definition**: [docs/consistency_evidence_map.md](docs/consistency_evidence_map.md)
-- **How it works**: [docs/commit_sequence.md](docs/commit_sequence.md)
-- **What we don't do**: [docs/non_goals.md](docs/non_goals.md)
-- **Performance cost**: [docs/benchmarks/v1.0_baseline.md](docs/benchmarks/v1.0_baseline.md)
 
 ### Supported Platforms
 
@@ -90,8 +77,6 @@ It is not a configuration option — it is the default behavior under the `Local
 | Cancel request | ✅ | AtomicBool polling, 50ms latency, simple + extended query |
 | LISTEN/NOTIFY | ✅ | In-memory broadcast hub, LISTEN/UNLISTEN/NOTIFY |
 | Logical replication protocol | ✅ | IDENTIFY_SYSTEM, CREATE/DROP_REPLICATION_SLOT, START_REPLICATION |
-
-See [docs/protocol_compatibility.md](docs/protocol_compatibility.md) for full test procedures.
 
 ### SQL Coverage
 
@@ -125,7 +110,7 @@ Attempting to use them returns a clear `ErrorResponse` with the appropriate SQLS
 
 > **Scope Guard**: HTAP, ColumnStore, disk tier/spill, and online DDL are all
 > either `feature = "off"` or stub-only. Raft consensus is a single-node stub
-> (NOT on the production path). See [docs/v1.0_scope.md](docs/v1.0_scope.md) for the full scope checklist.
+> (NOT on the production path).
 
 ### Planned — NOT Implemented (P2 roadmap, no code on default build path)
 
@@ -497,44 +482,20 @@ cargo run -p falcon_bench -- --ops 10000 --export csv
 cargo run -p falcon_bench -- --ops 10000 --export json
 ```
 
-### Fast-Path ON vs OFF comparison (Chart 2: p99 latency)
+### Additional benchmarks
 
 ```bash
+# Fast-path vs slow-path p99 comparison
 cargo run -p falcon_bench -- --ops 10000 --compare --export csv
-```
 
-Output: TPS, commit counts, latency p50/p95/p99 for fast-path vs all-global.
-
-### Scale-out benchmark (Chart 1: TPS vs shard count)
-
-```bash
-# Runs 1/2/4/8 shard configurations automatically
+# Scale-out (1/2/4/8 shards)
 cargo run -p falcon_bench -- --scaleout --ops 5000 --export csv
-```
 
-Output: `shards,ops,elapsed_ms,tps,scatter_gather_total_us,...`
-
-### Failover benchmark (Chart 3: before/after latency)
-
-```bash
+# Failover benchmark
 cargo run -p falcon_bench -- --failover --ops 10000 --export csv
 ```
 
-Output: before-failover TPS/latency, failover duration, after-failover TPS/latency, data integrity check.
-
-### Benchmark parameters (frozen for M1)
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--ops` | 10000 | Total operations per run |
-| `--read-pct` | 50 | Read percentage (0–100) |
-| `--local-pct` | 80 | Local (single-shard) txn percentage |
-| `--shards` | 4 | Logical shard count |
-| `--record-count` | 1000 | Pre-loaded rows |
-| `--isolation` | rc | `rc` (ReadCommitted) or `si` (SnapshotIsolation) |
-| `--export` | text | `text`, `csv`, or `json` |
-
-Random seed is fixed at 42 for reproducibility.
+Key parameters: `--ops`, `--read-pct`, `--local-pct`, `--shards`, `--isolation` (rc/si), `--export` (text/csv/json). Random seed fixed at 42.
 
 ---
 
@@ -567,200 +528,13 @@ SHOW falcon.replication_stats;
 SHOW falcon.scatter_stats;
 ```
 
-### `SHOW falcon.txn_stats` output
-
-| Metric | Description |
-|--------|-------------|
-| `total_committed` | Total committed transactions |
-| `fast_path_commits` | Commits via fast-path (LocalTxn) |
-| `slow_path_commits` | Commits via slow-path (GlobalTxn) |
-| `total_aborted` | Total aborted transactions |
-| `occ_conflicts` | OCC serialization failures |
-| `constraint_violations` | Unique constraint violations |
-| `active_count` | Currently active transactions |
-| `fast_p50/p95/p99_us` | Fast-path commit latency percentiles |
-| `slow_p50/p95/p99_us` | Slow-path commit latency percentiles |
-
-### `SHOW falcon.gc_stats` output
-
-| Metric | Description |
-|--------|-------------|
-| `gc_safepoint_ts` | Current GC watermark timestamp |
-| `active_txn_count` | Active transactions blocking GC |
-| `oldest_txn_ts` | Oldest active transaction timestamp |
-| `total_sweeps` | Total GC sweep cycles completed |
-| `reclaimed_version_count` | Total MVCC versions reclaimed |
-| `reclaimed_memory_bytes` | Total bytes freed by GC |
-| `last_sweep_duration_us` | Duration of last GC sweep |
-| `max_chain_length` | Longest version chain observed |
-
-### `SHOW falcon.gc_safepoint` output
-
-| Metric | Description |
-|--------|-------------|
-| `active_txn_count` | Active transactions blocking GC |
-| `longest_txn_age_us` | Age of the longest-running active transaction (µs) |
-| `min_active_start_ts` | Start timestamp of the oldest active transaction |
-| `current_ts` | Current timestamp allocator value |
-| `stalled` | Whether the GC safepoint is stalled by long-running txns |
+See [docs/observability.md](docs/observability.md) for full metric descriptions.
 
 ---
 
 ## Supported SQL
 
-### DDL
-
-```sql
--- Default: Rowstore (in-memory, USTM Hot Zone)
-CREATE TABLE users (id INT PRIMARY KEY, name TEXT, age INT);
-
--- LSM: disk-backed, USTM Warm Zone cache (survives memory pressure)
-CREATE TABLE events (id BIGSERIAL PRIMARY KEY, payload TEXT) ENGINE=lsm;
-
-CREATE TABLE IF NOT EXISTS orders (
-    id SERIAL PRIMARY KEY,
-    user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    total FLOAT8 DEFAULT 0.0,
-    CHECK (total >= 0)
-);
-DROP TABLE users;
-DROP TABLE IF EXISTS users;
-TRUNCATE TABLE users;
-
--- Indexes
-CREATE INDEX idx_name ON users (name);
-CREATE UNIQUE INDEX idx_email ON users (email);
-DROP INDEX idx_name;
-
--- ALTER TABLE
-ALTER TABLE users ADD COLUMN email TEXT;
-ALTER TABLE users DROP COLUMN email;
-ALTER TABLE users RENAME COLUMN name TO full_name;
-ALTER TABLE users RENAME TO people;
-ALTER TABLE users ALTER COLUMN age SET NOT NULL;
-ALTER TABLE users ALTER COLUMN age DROP NOT NULL;
-ALTER TABLE users ALTER COLUMN age SET DEFAULT 0;
-ALTER TABLE users ALTER COLUMN age TYPE BIGINT;
-
--- Sequences
-CREATE SEQUENCE user_id_seq START 1;
-SELECT nextval('user_id_seq');
-SELECT currval('user_id_seq');
-SELECT setval('user_id_seq', 100);
-```
-
-### DML
-
-```sql
--- INSERT (single, multi-row, DEFAULT, RETURNING, ON CONFLICT)
-INSERT INTO users VALUES (1, 'Alice', 30);
-INSERT INTO users (name, age) VALUES ('Bob', 25), ('Eve', 22);
-INSERT INTO users VALUES (1, 'Alice', 30) ON CONFLICT DO NOTHING;
-INSERT INTO users VALUES (1, 'Alice', 30)
-    ON CONFLICT (id) DO UPDATE SET name = excluded.name;
-INSERT INTO users VALUES (2, 'Bob', 25) RETURNING *;
-INSERT INTO users VALUES (3, 'Eve', 22) RETURNING id, name;
-INSERT INTO orders SELECT id, name FROM staging;  -- INSERT ... SELECT
-
--- UPDATE (single-table, multi-table FROM, RETURNING)
-UPDATE users SET age = 31 WHERE id = 1;
-UPDATE users SET age = 31 WHERE id = 1 RETURNING id, age;
-UPDATE products SET price = p.new_price
-    FROM price_updates p WHERE products.id = p.id;
-
--- DELETE (single-table, multi-table USING, RETURNING)
-DELETE FROM users WHERE id = 2;
-DELETE FROM users WHERE id = 2 RETURNING *;
-DELETE FROM employees USING terminated
-    WHERE employees.id = terminated.emp_id;
-
--- COPY (stdin/stdout, CSV/text formats)
-COPY users FROM STDIN;
-COPY users TO STDOUT WITH (FORMAT csv, HEADER true);
-COPY (SELECT * FROM users WHERE age > 25) TO STDOUT;
-```
-
-### Queries
-
-```sql
--- Basic SELECT with filtering, ordering, pagination
-SELECT * FROM users;
-SELECT name, age FROM users WHERE age > 25 ORDER BY name LIMIT 10 OFFSET 5;
-SELECT DISTINCT department FROM employees;
-
--- Expressions: CASE, COALESCE, NULLIF, CAST, BETWEEN, IN, LIKE/ILIKE
-SELECT CASE WHEN age > 30 THEN 'senior' ELSE 'junior' END FROM users;
-SELECT COALESCE(nickname, name) FROM users;
-SELECT * FROM users WHERE age BETWEEN 20 AND 30;
-SELECT * FROM users WHERE name LIKE 'A%';
-SELECT * FROM users WHERE name ILIKE '%alice%';
-SELECT CAST(age AS TEXT) FROM users;
-
--- Aggregates and GROUP BY / HAVING
-SELECT dept, COUNT(*), SUM(salary), AVG(salary), MIN(salary), MAX(salary)
-    FROM employees GROUP BY dept HAVING COUNT(*) > 5;
-SELECT BOOL_AND(active), BOOL_OR(active) FROM users;
-SELECT ARRAY_AGG(name) FROM users;
-
--- Window functions
-SELECT name, salary,
-    ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC),
-    RANK() OVER (ORDER BY salary DESC),
-    DENSE_RANK() OVER (ORDER BY salary DESC),
-    LAG(salary) OVER (ORDER BY salary),
-    LEAD(salary) OVER (ORDER BY salary),
-    SUM(salary) OVER (PARTITION BY dept)
-FROM employees;
-
--- Joins (INNER, LEFT, RIGHT, FULL OUTER, CROSS, NATURAL, USING)
-SELECT * FROM orders JOIN users ON orders.user_id = users.id;
-SELECT * FROM orders LEFT JOIN users ON orders.user_id = users.id;
-SELECT * FROM orders NATURAL JOIN users;
-SELECT * FROM t1 JOIN t2 USING (id);
-
--- Subqueries (scalar, IN, EXISTS, correlated)
-SELECT * FROM users WHERE id IN (SELECT user_id FROM orders);
-SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id);
-SELECT name, (SELECT COUNT(*) FROM orders WHERE orders.user_id = users.id) FROM users;
-
--- Set operations (UNION, INTERSECT, EXCEPT — with ALL)
-SELECT name FROM employees UNION SELECT name FROM contractors;
-SELECT id FROM t1 INTERSECT SELECT id FROM t2;
-SELECT id FROM t1 EXCEPT ALL SELECT id FROM t2;
-
--- CTEs (WITH, recursive)
-WITH active AS (SELECT * FROM users WHERE active = true)
-SELECT * FROM active WHERE age > 25;
-WITH RECURSIVE nums AS (
-    SELECT 1 AS n UNION ALL SELECT n + 1 FROM nums WHERE n < 10
-) SELECT * FROM nums;
-
--- Arrays
-SELECT ARRAY[1, 2, 3];
-SELECT arr[1] FROM t;
-SELECT UNNEST(ARRAY[1, 2, 3]);
-SELECT ARRAY_AGG(name) FROM users;
-
--- ANY / ALL operators
-SELECT * FROM users WHERE id = ANY(ARRAY[1, 2, 3]);
-SELECT * FROM users WHERE age > ALL(SELECT min_age FROM rules);
-
--- IS DISTINCT FROM
-SELECT * FROM t WHERE a IS DISTINCT FROM b;
-
--- Transactions
-BEGIN;
-INSERT INTO users VALUES (3, 'Charlie', 28);
-COMMIT;  -- or ROLLBACK;
-
--- EXPLAIN
-EXPLAIN SELECT * FROM users WHERE id = 1;
-
--- Observability
-SHOW falcon.txn_stats;
-SHOW falcon.gc_stats;
-SHOW falcon.replication_stats;
-```
+For full reference see [docs/sql_compatibility.md](docs/sql_compatibility.md). Quick summary:
 
 ### Supported Types
 
@@ -940,35 +714,19 @@ cargo run -p falcon_server -- --print-default-config > falcon.toml
 
 ## Roadmap
 
-| Phase | Scope | Details |
-|-------|-------|---------|
-| **v0.1–v0.4** ✅ | OLTP foundation, WAL, failover, gRPC streaming, TLS, columnstore, multi-tenancy | Released |
-| **v0.4.x** ✅ | Production hardening: error model, crash domain, unwrap=0 in core crates | Released |
-| **v0.5** ✅ | Operationally usable: cluster admin, rebalance, scale-out/in, ops playbook | Released |
-| **v0.6** ✅ | Latency-controlled OLTP: priority scheduler, token bucket, backpressure | Released |
-| **v0.7** ✅ | Deterministic 2PC: decision log, layered timeouts, slow-shard tracker | Released |
-| **v0.8** ✅ | Chaos-ready: fault injection, network partition, CPU/IO jitter, observability pass | Released |
-| **v0.9** ✅ | Production candidate: security hardening, WAL versioning, wire compat, config compat | Released |
-| **v1.0 Phase 1** ✅ | LSM kernel: disk-backed OLTP, MVCC encoding, idempotency, TPC-B benchmark | 1,917 tests |
-| **v1.0 Phase 2** ✅ | SQL completeness: DECIMAL, composite indexes, RBAC, txn READ ONLY, governor v2 | 1,976 tests |
-| **v1.0 Phase 3** ✅ | Enterprise: RLS, TDE, partitioning, PITR, CDC | 2,056 tests |
-| **Storage Hardening** ✅ | WAL recovery, compaction scheduler, memory budget, GC safepoint, fault injection | 2,261 tests |
-| **Distributed Hardening** ✅ | Epoch fencing, leader lease, shard migration, cross-shard throttle, supervisor | +62 tests |
-| **Native Protocol** ✅ | FalconDB native binary protocol, Java JDBC driver, compression, HA failover | 2,239 tests |
-| **v1.0.0** ✅ | Production-grade database kernel — all gates pass | 2,499 tests |
-| **v1.0.1** ✅ | Zero-panic policy, crash safety, unified error model | 2,499 tests |
-| **v1.0.2** ✅ | Failover × transaction hardening: 20-test matrix (SS/XS/CH/ID) | 2,554 tests |
-| **v1.0.3** ✅ | Stability, determinism & trust hardening: state machine, retry safety, in-doubt bounding | 2,599 tests |
-| **USTM** ✅ | User-Space Tiered Memory: LIRS-2 cache, query prefetch, 3-zone memory manager | 2,643 tests |
-| **Query Perf** ✅ | Fused streaming aggregates, zero-copy MVCC, bounded-heap top-K, near-PG parity on 1M rows | 2,643 tests |
+All milestones through v1.2 are released. Current test count: **2,643+** across 16 crates.
 
-See [docs/roadmap.md](docs/roadmap.md) for detailed acceptance criteria per milestone.
+| Milestone | Highlights |
+|-----------|------------|
+| **v0.1–v0.9** ✅ | OLTP foundation, WAL, failover, gRPC, security, chaos-hardening |
+| **v1.0** ✅ | LSM engine, SQL completeness, enterprise features (RLS/TDE/PITR/CDC), distributed hardening |
+| **v1.0.1–v1.0.3** ✅ | Zero-panic, failover×txn matrix, determinism & trust hardening |
+| **v1.1–v1.2** ✅ | USTM tiered memory, fused streaming aggregates, near-PG query parity |
 
 ### RPO / RTO
 
 FalconDB supports two production durability policies: `local-fsync` (default, RPO > 0 possible)
-and `sync-replica` (primary waits for replica WAL ack, RPO ≈ 0). Quorum-based policies are
-defined in code but require Raft (not implemented). See [docs/rpo_rto.md](docs/rpo_rto.md) for details.
+and `sync-replica` (primary waits for replica WAL ack, RPO ≈ 0). See [docs/rpo_rto.md](docs/rpo_rto.md) for details.
 
 ---
 
@@ -977,23 +735,14 @@ defined in code but require Raft (not implemented). See [docs/rpo_rto.md](docs/r
 | Document | Description |
 |----------|-------------|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | System architecture, crate structure, data flow |
-| [docs/roadmap.md](docs/roadmap.md) | Milestone definitions and acceptance criteria |
 | [docs/rpo_rto.md](docs/rpo_rto.md) | RPO/RTO guarantees per durability policy |
-| [docs/show_commands_schema.md](docs/show_commands_schema.md) | Stable output schema for all `SHOW falcon.*` commands |
-| [docs/protocol_compatibility.md](docs/protocol_compatibility.md) | PG client compatibility matrix (psql, JDBC, pgbench) |
-| [docs/feature_gap_analysis.md](docs/feature_gap_analysis.md) | Known gaps and improvement areas |
 | [docs/error_model.md](docs/error_model.md) | Unified error model, SQLSTATE mapping, retry hints |
 | [docs/observability.md](docs/observability.md) | Prometheus metrics, SHOW commands, slow query log |
-| [docs/production_readiness.md](docs/production_readiness.md) | Production readiness checklist |
-| [docs/production_readiness_report.md](docs/production_readiness_report.md) | Full production readiness audit |
-| [docs/ops_playbook.md](docs/ops_playbook.md) | Scale-out/in, failover, rolling upgrade procedures |
-| [docs/chaos_matrix.md](docs/chaos_matrix.md) | 30 chaos scenarios with expected behavior |
 | [docs/security.md](docs/security.md) | Security features, RBAC, SQL firewall, audit |
-| [docs/wire_compatibility.md](docs/wire_compatibility.md) | WAL/snapshot/wire/config compatibility policy |
-| [docs/performance_baseline.md](docs/performance_baseline.md) | P99 latency targets and benchmark methodology |
-| [docs/native_protocol.md](docs/native_protocol.md) | FalconDB native binary protocol specification |
-| [docs/native_protocol_compat.md](docs/native_protocol_compat.md) | Native protocol version negotiation and feature flags |
-| [docs/perf_testing.md](docs/perf_testing.md) | Performance testing methodology and CI gates |
+| [docs/ops_runbook.md](docs/ops_runbook.md) | Operations runbook: failover, rolling upgrade, scale-out |
+| [docs/backup_restore.md](docs/backup_restore.md) | Backup and restore procedures |
+| [docs/sql_compatibility.md](docs/sql_compatibility.md) | SQL compatibility reference |
+| [docs/INSTALL.md](docs/INSTALL.md) | Installation guide |
 | [CHANGELOG.md](CHANGELOG.md) | Semantic versioning changelog (v0.1–v1.2) |
 
 ---
@@ -1018,9 +767,6 @@ FalconDB ships with a reproducible benchmark suite for pgbench comparison, failo
 
 Results are written to `bench_out/<timestamp>/` with logs, JSON metrics, and a Markdown report.
 
-- **[Methodology](docs/benchmark_methodology.md)** — fairness rules, hardware disclosure, reproducibility
-- **[Results Template](docs/benchmarks/RESULTS_TEMPLATE.md)** — standard report format
-
 > Windows users: use `scripts/bench_pgbench_vs_postgres.ps1` (PowerShell 7+).
 
 ---
@@ -1031,20 +777,11 @@ Results are written to `bench_out/<timestamp>/` with logs, JSON metrics, and a M
 # Run all tests (2,643+ total)
 cargo test --workspace
 
-# By crate
-cargo test -p falcon_cluster          # 585 tests (replication, failover, scatter/gather, 2PC, epoch, migration, supervisor, throttle, failover×txn matrix, stability hardening, stress tests)
-cargo test -p falcon_server           # 383 tests (SQL end-to-end, error paths, SHOW commands)
-cargo test -p falcon_storage          # 364 tests (MVCC, WAL, GC, LSM, indexes, TDE, partitioning, PITR, CDC, recovery, compaction scheduler)
-cargo test -p falcon_common           # 252 tests (error model, config, RBAC, RoleCatalog, PrivilegeManager, Decimal, RLS)
-cargo test -p falcon_protocol_pg      # 232 tests (SHOW commands, error paths, txn lifecycle, handler, logical replication)
-cargo test -p falcon_cli              # 201 tests (CLI parsing, config generation)
-cargo test -p falcon_executor         # 162 tests (governor v2, priority scheduler, vectorized, RBAC enforcement, fused streaming aggregates)
-cargo test -p falcon_sql_frontend     # 148 tests (binder, predicate normalization, param inference)
-cargo test -p falcon_txn              # 103 tests (txn lifecycle, OCC, stats, READ ONLY mode, timeout, exec summary, state machine)
-cargo test -p falcon_planner          # 89 tests (routing hints, distributed wrapping, shard key inference)
-cargo test -p falcon_protocol_native  # 39 tests (native protocol codec, compression, type mapping)
-cargo test -p falcon_native_server    # 28 tests (server, session, executor bridge, nonce anti-replay)
-cargo test -p falcon_raft             # 12 tests (consensus stub — NOT on production path)
+# By crate (key ones)
+cargo test -p falcon_cluster   # 585 tests
+cargo test -p falcon_server    # 383 tests
+cargo test -p falcon_storage   # 364 tests
+cargo test -p falcon_common    # 252 tests
 
 # Lint
 cargo clippy --workspace       # must be 0 warnings

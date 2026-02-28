@@ -460,6 +460,34 @@ async fn run_server_inner(
         engine.set_lsm_sync_writes(config.storage.lsm_sync_writes);
         tracing::info!("LSM sync_writes: {}", config.storage.lsm_sync_writes);
 
+        // Apply CDC configuration
+        engine.configure_cdc(config.cdc.enabled, config.cdc.buffer_size);
+
+        // Apply PITR / WAL archiving configuration
+        engine.configure_pitr(
+            config.pitr.enabled,
+            &config.pitr.archive_dir,
+            config.pitr.retention_hours,
+        );
+
+        // Apply multi-tenant isolation configuration
+        engine.configure_multi_tenant(
+            config.multi_tenant.enabled,
+            config.multi_tenant.metering_enabled,
+            config.multi_tenant.default_max_qps,
+            config.multi_tenant.default_max_concurrent_txns,
+            config.multi_tenant.default_max_memory_bytes,
+            config.multi_tenant.default_max_storage_bytes,
+        );
+
+        // Apply TDE (Transparent Data Encryption) configuration
+        engine.configure_tde(
+            config.tde.enabled,
+            &config.tde.key_env_var,
+            config.tde.encrypt_wal,
+            config.tde.encrypt_data,
+        );
+
         // Hook WAL observer for primary replication
         if let Some(ref log) = replication_log {
             let log_clone = log.clone();
@@ -496,6 +524,34 @@ async fn run_server_inner(
         // Apply LSM sync_writes from storage config
         engine.set_lsm_sync_writes(config.storage.lsm_sync_writes);
         tracing::info!("LSM sync_writes: {}", config.storage.lsm_sync_writes);
+
+        // Apply CDC configuration
+        engine.configure_cdc(config.cdc.enabled, config.cdc.buffer_size);
+
+        // Apply PITR configuration (no WAL in in-memory mode, so this is a no-op unless WAL was configured)
+        engine.configure_pitr(
+            config.pitr.enabled,
+            &config.pitr.archive_dir,
+            config.pitr.retention_hours,
+        );
+
+        // Apply multi-tenant isolation configuration
+        engine.configure_multi_tenant(
+            config.multi_tenant.enabled,
+            config.multi_tenant.metering_enabled,
+            config.multi_tenant.default_max_qps,
+            config.multi_tenant.default_max_concurrent_txns,
+            config.multi_tenant.default_max_memory_bytes,
+            config.multi_tenant.default_max_storage_bytes,
+        );
+
+        // Apply TDE (Transparent Data Encryption) configuration
+        engine.configure_tde(
+            config.tde.enabled,
+            &config.tde.key_env_var,
+            config.tde.encrypt_wal,
+            config.tde.encrypt_data,
+        );
 
         // Even in-memory mode can replicate if role is Primary
         if let Some(ref log) = replication_log {

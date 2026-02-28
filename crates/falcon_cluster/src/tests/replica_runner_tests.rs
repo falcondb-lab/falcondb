@@ -218,7 +218,7 @@
         let replica_storage = Arc::new(StorageEngine::new_in_memory());
 
         let config = ReplicaRunnerConfig {
-            primary_endpoint: "http://127.0.0.1:1".into(), // port 1  鈥?refused
+            primary_endpoint: "http://127.0.0.1:1".into(), // port 1  —refused
             shard_id: ShardId(0),
             replica_id: 0,
             max_records_per_chunk: 100,
@@ -258,7 +258,7 @@
     /// Test that ReplicaRunner stops cleanly when signaled.
     #[tokio::test]
     async fn test_replica_runner_clean_stop() {
-        // Point at a non-existent server  鈥?runner will keep retrying
+        // Point at a non-existent server  —runner will keep retrying
         let replica_storage = Arc::new(StorageEngine::new_in_memory());
         let config = ReplicaRunnerConfig {
             primary_endpoint: "http://127.0.0.1:1".into(), // unlikely to be open

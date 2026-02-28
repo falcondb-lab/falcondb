@@ -230,7 +230,7 @@
         let chain = VersionChain::new();
         // T1 inserts, uncommitted
         chain.prepend(TxnId(1), Some(row1(100)));
-        // T2 reads 鈥?should not see T1
+        // T2 reads —should not see T1
         assert!(chain.read_committed(Timestamp(50)).is_none());
         assert!(chain.read_for_txn(TxnId(2), Timestamp(50)).is_none());
         // T1 commits
@@ -255,7 +255,7 @@
     #[test]
     fn si_16_write_skew_both_read_old() {
         // Classic write-skew: T1 and T2 both read, then write different keys.
-        // Under SI, both see the old snapshot 鈥?this is expected behavior.
+        // Under SI, both see the old snapshot —this is expected behavior.
         let chain_a = VersionChain::new();
         let chain_b = VersionChain::new();
         // Initial: A=1, B=1
@@ -344,7 +344,7 @@
     fn si_20_gc_does_not_drop_uncommitted() {
         let chain = VersionChain::new();
         chain.prepend(TxnId(1), Some(row1(10)));
-        // Don't commit 鈥?GC should not touch uncommitted
+        // Don't commit —GC should not touch uncommitted
         chain.gc(Timestamp(100));
         // Still readable by own txn
         assert!(chain.read_for_txn(TxnId(1), Timestamp(0)).is_some());
@@ -358,7 +358,7 @@
         engine
             .insert(TableId(900), row2(1, "hello"), TxnId(1))
             .unwrap();
-        // Scan by another txn 鈥?should not see uncommitted row
+        // Scan by another txn —should not see uncommitted row
         let rows = engine.scan(TableId(900), TxnId(2), Timestamp(100)).unwrap();
         assert!(rows.is_empty());
     }
@@ -496,7 +496,7 @@
     #[test]
     fn si_28_engine_concurrent_inserts_isolation() {
         let engine = engine_with_table();
-        // T1 inserts row 1, T2 inserts row 2 鈥?both uncommitted
+        // T1 inserts row 1, T2 inserts row 2 —both uncommitted
         engine
             .insert(TableId(900), row2(1, "t1"), TxnId(1))
             .unwrap();
@@ -584,7 +584,7 @@
 
     #[test]
     fn si_32_commit_at_ts_zero_invisible() {
-        // Commit timestamp 0 is reserved for "uncommitted" 鈥?should never be visible
+        // Commit timestamp 0 is reserved for "uncommitted" —should never be visible
         let chain = VersionChain::new();
         chain.prepend(TxnId(1), Some(row1(42)));
         // Manually check: commit_ts defaults to 0
