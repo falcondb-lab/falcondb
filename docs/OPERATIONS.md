@@ -257,3 +257,36 @@ C:\ProgramData\FalconDB\             ← Data root (preserved on uninstall)
           ├── falcon.exe
           └── falcon.toml
 ```
+
+---
+
+## Configuration Management
+
+Every config change is versioned, checksummed, staged, and rollbackable via `ConfigRollbackManager`.
+
+### Config Entry Properties
+
+| Property | Description |
+|----------|-------------|
+| `version` | Monotonically increasing u64 |
+| `checksum` | djb2 hash of key+value |
+| `rollout_state` | Staged / Canary / RollingOut / Applied / RolledBack |
+
+### Staged Rollout Workflow
+
+1. **Stage** — change recorded, not yet active
+2. **Canary** — applied to canary nodes, monitor 15 min
+3. **RollingOut** — gradually applied to all nodes
+4. **Applied** — fully active cluster-wide
+5. **Rollback** — reverts to previous version if needed
+
+### Operational Commands
+
+```bash
+falconctl config set <key> <value>          # stage + apply
+falconctl config stage <key> <value>        # stage only
+falconctl config rollout <key> <version>    # advance rollout
+falconctl config rollback <key>             # rollback to previous
+falconctl config history <key>              # show version history
+falconctl config verify                     # verify all checksums
+```

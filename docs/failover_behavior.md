@@ -138,5 +138,37 @@ with data integrity verified at each step.
 | `fde5_idempotent_wal_replay_after_failover` | Idempotent WAL replay: double-ship produces identical state |
 | `failover_txn_tests.rs` (SS-01..04, XS-01..08, CH-01..02, ID-01..02) | 16-case failover × txn state machine |
 
+---
+
+## 9. Replication Drift & Data Integrity
+
+### Integrity Checks
+
+| Check | Method | Non-blocking |
+|-------|--------|-------------|
+| **Row count** | `scan()` on both nodes, compare counts | ✅ Read-only |
+| **Checksum** | Sort rows by PK, hash all column values, compare digests | ✅ Read-only |
+| **LSN alignment** | Compare `flushed_lsn` on primary vs replica | ✅ Metadata only |
+
+### Drift Recovery
+
+| Drift Type | Recovery | Automated |
+|-----------|----------|-----------|
+| Replica behind (row count < primary) | Re-ship missing WAL tail | ✅ `catch_up_replica()` |
+| Replica diverged (checksum mismatch) | Full rebuild from snapshot | Manual trigger |
+| LSN gap | Identify missing range, re-stream | ✅ Replication protocol |
+
+Scheduling: on demand, periodic (background task), or automatically post-failover.
+
+### Replication Metrics
+
+| Metric | Description |
+|--------|-------------|
+| `falcon_replication_lag_us` | Current replication lag |
+| `falcon_replication_leader_changes` | Total leader changes |
+| `falcon_replication_promote_count` | Total promotions |
+
+---
+
 > **See also**: [`docs/failover_partition_sla.md`](failover_partition_sla.md) for quantified SLA
 > covering network partition + write conflict + in-doubt resolution bounds.

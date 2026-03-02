@@ -21,7 +21,8 @@ use falcon_txn::manager::TxnManager;
 use crate::cross_shard::{
     CircuitBreaker, ConcurrencyLimiter, CrossShardLatencyBreakdown, CrossShardTxnResult,
     DeadlockDetector, FailureClass, LayeredTimeouts, RetryConfig, RetryOutcome,
-    ShardConflictTracker, TimeoutPhase, TimeoutPolicy, WaitReason,
+    ShardConflictTracker, TimeoutPhase, TimeoutPolicy, VictimSelectionPolicy,
+    WaitForGraphDetector, WaitReason,
 };
 use crate::sharded_engine::ShardedEngine;
 
@@ -196,6 +197,9 @@ pub struct HardenedConfig {
     pub conflict_window: Duration,
     /// Deadlock detection timeout.
     pub deadlock_timeout: Duration,
+    /// Victim selection policy for wait-for graph deadlock detection.
+    /// `None` uses the default policy (Youngest).
+    pub victim_selection: Option<VictimSelectionPolicy>,
 }
 
 impl Default for HardenedConfig {
@@ -208,6 +212,7 @@ impl Default for HardenedConfig {
             circuit_breaker: (5, Duration::from_secs(10)),
             conflict_window: Duration::from_secs(60),
             deadlock_timeout: Duration::from_secs(10),
+            victim_selection: None,
         }
     }
 }
@@ -219,7 +224,7 @@ impl Default for HardenedConfig {
 /// - Retry with exponential backoff + jitter + budget
 /// - Circuit breaker (anti-thundering-herd)
 /// - Per-shard conflict/abort tracking
-/// - Deadlock detection (timeout-based)
+/// - Deadlock detection (timeout-based + wait-for graph)
 pub struct HardenedTwoPhaseCoordinator {
     engine: Arc<ShardedEngine>,
     config: HardenedConfig,
@@ -227,6 +232,7 @@ pub struct HardenedTwoPhaseCoordinator {
     circuit_breaker: CircuitBreaker,
     conflict_tracker: ShardConflictTracker,
     deadlock_detector: DeadlockDetector,
+    wfg_detector: WaitForGraphDetector,
     total_attempted: AtomicU64,
     total_committed: AtomicU64,
     total_aborted: AtomicU64,
@@ -242,6 +248,9 @@ impl HardenedTwoPhaseCoordinator {
             circuit_breaker: CircuitBreaker::new(cb_thresh, cb_recovery),
             conflict_tracker: ShardConflictTracker::new(config.conflict_window),
             deadlock_detector: DeadlockDetector::new(config.deadlock_timeout),
+            wfg_detector: WaitForGraphDetector::new(
+                config.victim_selection.unwrap_or_default(),
+            ),
             config,
             total_attempted: AtomicU64::new(0),
             total_committed: AtomicU64::new(0),
@@ -574,9 +583,29 @@ impl HardenedTwoPhaseCoordinator {
         self.conflict_tracker.all_snapshots()
     }
 
-    /// Detect stalled transactions.
+    /// Detect stalled transactions (timeout-based).
     pub fn detect_stalled(&self) -> Vec<crate::cross_shard::StalledTxn> {
         self.deadlock_detector.detect_stalled()
+    }
+
+    /// Detect true deadlocks via wait-for graph cycle detection.
+    pub fn detect_deadlocks(&self) -> Vec<crate::cross_shard::DeadlockCycle> {
+        self.wfg_detector.detect_deadlocks()
+    }
+
+    /// Register a transaction's wait-for graph entry for cycle-based detection.
+    pub fn wfg_register(&self, txn_id: u64, holds: Vec<u64>, waits_for: Vec<u64>) {
+        self.wfg_detector.register_wait(txn_id, holds, waits_for);
+    }
+
+    /// Unregister a transaction from the wait-for graph.
+    pub fn wfg_unregister(&self, txn_id: u64) {
+        self.wfg_detector.unregister(txn_id);
+    }
+
+    /// Snapshot of the wait-for graph for diagnostics.
+    pub fn wfg_snapshot(&self) -> crate::cross_shard::WaitForGraphSnapshot {
+        self.wfg_detector.snapshot()
     }
 
     /// Lifetime counters.

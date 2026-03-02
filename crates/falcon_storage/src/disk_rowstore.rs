@@ -43,12 +43,16 @@ pub type PageId = u64;
 // Serialization helpers
 // ---------------------------------------------------------------------------
 
-fn serialize_row(row: &OwnedRow) -> Vec<u8> {
-    bincode::serialize(row).unwrap_or_default()
+fn serialize_row(row: &OwnedRow) -> Result<Vec<u8>, StorageError> {
+    bincode::serialize(row).map_err(|e| {
+        StorageError::Internal(format!("row serialization failed: {e}"))
+    })
 }
 
-fn deserialize_row(bytes: &[u8]) -> Option<OwnedRow> {
-    bincode::deserialize(bytes).ok()
+fn deserialize_row(bytes: &[u8]) -> Result<OwnedRow, StorageError> {
+    bincode::deserialize(bytes).map_err(|e| {
+        StorageError::Internal(format!("row deserialization failed: {e}"))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -126,8 +130,12 @@ impl Page {
             }
             let pk = row_bytes[4..4 + pk_len].to_vec();
             let row_data = &row_bytes[4 + pk_len..];
-            if let Some(row) = deserialize_row(row_data) {
-                rows.push((pk, row));
+            match deserialize_row(row_data) {
+                Ok(row) => rows.push((pk, row)),
+                Err(e) => {
+                    tracing::warn!(page_id = self.id, slot = i, "corrupt row slot: {e}");
+                    continue;
+                }
             }
         }
         let _ = header_size; // suppress unused warning
@@ -136,7 +144,13 @@ impl Page {
 
     /// Try to append a row to this page. Returns false if page is full.
     fn try_append(&mut self, pk: &[u8], row: &OwnedRow) -> bool {
-        let row_bytes = serialize_row(row);
+        let row_bytes = match serialize_row(row) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!(page_id = self.id, "row serialization failed: {e}");
+                return false;
+            }
+        };
         let pk_len = pk.len();
         // Total slot data: 4 (pk_len) + pk + row_bytes
         let slot_data_len = 4 + pk_len + row_bytes.len();

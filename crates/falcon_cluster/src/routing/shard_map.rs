@@ -13,13 +13,23 @@ pub struct ShardInfo {
     pub leader: NodeId,
     /// Replica nodes (including leader).
     pub replicas: Vec<NodeId>,
+    /// Monotonically increasing epoch. Incremented on every leader change.
+    /// Used for fencing: requests with a stale epoch are rejected.
+    pub epoch: u64,
 }
+
+/// Callback invoked when a shard leader changes.
+/// Arguments: (shard_id, old_leader, new_leader, new_epoch).
+pub type LeaderChangeCallback =
+    Box<dyn Fn(ShardId, NodeId, NodeId, u64) + Send + Sync>;
 
 /// Shard map: maps keys to shards via consistent hashing.
 /// MVP: single shard covering the full hash range.
 pub struct ShardMap {
     shards: Vec<ShardInfo>,
     num_shards: u64,
+    /// Optional callback fired on every leader change.
+    on_leader_change: Option<LeaderChangeCallback>,
 }
 
 impl ShardMap {
@@ -31,10 +41,12 @@ impl ShardMap {
             hash_range_end: u64::MAX,
             leader: node_id,
             replicas: vec![node_id],
+            epoch: 1,
         };
         Self {
             shards: vec![shard],
             num_shards: 1,
+            on_leader_change: None,
         }
     }
 
@@ -52,9 +64,22 @@ impl ShardMap {
                 },
                 leader: node_id,
                 replicas: vec![node_id],
+                epoch: 1,
             })
             .collect();
-        Self { shards, num_shards }
+        Self {
+            shards,
+            num_shards,
+            on_leader_change: None,
+        }
+    }
+
+    /// Register a callback that fires on every leader change.
+    pub fn set_leader_change_callback<F>(&mut self, cb: F)
+    where
+        F: Fn(ShardId, NodeId, NodeId, u64) + Send + Sync + 'static,
+    {
+        self.on_leader_change = Some(Box::new(cb));
     }
 
     /// Locate the shard for a given primary key.
@@ -83,20 +108,50 @@ impl ShardMap {
     }
 
     /// Update the leader of a shard (used after promote/failover).
-    /// Returns true if the shard was found and updated.
-    pub fn update_leader(&mut self, shard_id: ShardId, new_leader: NodeId) -> bool {
+    /// Increments the shard epoch and fires the leader-change callback.
+    /// Returns the new epoch if the shard was found and updated, None otherwise.
+    pub fn update_leader(&mut self, shard_id: ShardId, new_leader: NodeId) -> Option<u64> {
         if let Some(shard) = self.shards.iter_mut().find(|s| s.id == shard_id) {
-            tracing::info!(
-                "ShardMap: shard {:?} leader changed {:?} → {:?}",
-                shard_id,
-                shard.leader,
-                new_leader,
-            );
+            let old_leader = shard.leader;
+            if old_leader == new_leader {
+                return Some(shard.epoch); // no-op
+            }
             shard.leader = new_leader;
-            true
+            shard.epoch += 1;
+            let new_epoch = shard.epoch;
+            tracing::info!(
+                "ShardMap: shard {:?} leader {:?} → {:?} (epoch {})",
+                shard_id,
+                old_leader,
+                new_leader,
+                new_epoch,
+            );
+            if let Some(ref cb) = self.on_leader_change {
+                cb(shard_id, old_leader, new_leader, new_epoch);
+            }
+            Some(new_epoch)
         } else {
-            false
+            None
         }
+    }
+
+    /// Validate that a request's epoch matches the current shard epoch.
+    /// Returns `Ok(())` if the epoch is current, `Err` with the current epoch otherwise.
+    pub fn validate_epoch(&self, shard_id: ShardId, request_epoch: u64) -> Result<(), u64> {
+        if let Some(shard) = self.shards.iter().find(|s| s.id == shard_id) {
+            if request_epoch < shard.epoch {
+                Err(shard.epoch)
+            } else {
+                Ok(())
+            }
+        } else {
+            Ok(()) // unknown shard — let the caller handle
+        }
+    }
+
+    /// Get the current epoch for a shard.
+    pub fn shard_epoch(&self, shard_id: ShardId) -> Option<u64> {
+        self.shards.iter().find(|s| s.id == shard_id).map(|s| s.epoch)
     }
 
     /// Get shard info by ID.
@@ -132,6 +187,7 @@ impl ShardMap {
             hash_range_end: old.hash_range_end,
             leader,
             replicas,
+            epoch: 1,
         };
 
         // Shrink original: [old_start, mid)

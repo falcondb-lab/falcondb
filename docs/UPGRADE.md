@@ -158,3 +158,54 @@ Check logs after any upgrade:
 ```powershell
 Get-Content C:\ProgramData\FalconDB\logs\falcon.log -Tail 50
 ```
+
+---
+
+## Rolling Upgrade (Cluster)
+
+FalconDB supports zero-downtime rolling upgrades. Nodes are upgraded in order: **Followers → Gateways → Leaders**.
+
+Each node phases: `PENDING → DRAINING → UPGRADING → REJOINING → COMPLETE (or FAILED)`.
+
+### Protocol Version Compatibility
+
+`ProtocolVersion` (major.minor) — same major + minor within 1 step = compatible. Different major or minor > 1 step = incompatible.
+
+### Rolling Upgrade Workflow
+
+```bash
+falconctl upgrade plan --target-version 1.0.10   # Validate + produce plan
+falconctl upgrade apply                           # Execute (drain → upgrade → rejoin per node)
+falconctl upgrade status                          # Monitor progress
+```
+
+If a node fails health check, upgrade pauses. Operator investigates; rollback = reinstall previous binary.
+
+### Safety Guarantees
+
+1. **No data loss** — WAL catch-up ensures no entries lost during restart
+2. **No split-brain** — epoch fencing prevents stale writes
+3. **No client errors** — gateway retry handles brief leader unavailability
+4. **Rollback-safe** — previous binary can always be reinstalled
+
+---
+
+## Version Management
+
+Single source of truth: `Cargo.toml` → `[workspace.package] version`.
+
+| Consumer | Mechanism |
+|----------|-----------|
+| All crate `Cargo.toml` | `version.workspace = true` |
+| `falcon --version` | `env!("CARGO_PKG_VERSION")` via build.rs |
+| ZIP / MSI | Build scripts read from Cargo.toml |
+| CI gate | `scripts/ci_version_check.sh` every PR |
+
+### Version Bump Procedure
+
+1. Edit `Cargo.toml` → `[workspace.package] version = "x.y.z"`
+2. Run `scripts/extract_version.ps1 -WriteFiles`
+3. Update README badge + CHANGELOG.md entry
+4. `git commit && git tag vx.y.z`
+
+Forbidden: hardcoded version strings anywhere except `Cargo.toml [workspace.package]`.

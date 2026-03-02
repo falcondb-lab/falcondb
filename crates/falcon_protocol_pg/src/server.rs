@@ -18,7 +18,7 @@ use crate::connection_pool::{ConnectionPool, PoolConfig};
 use crate::handler::QueryHandler;
 use crate::logical_replication;
 use crate::notify::NotificationHub;
-use crate::session::PgSession;
+use crate::session::{PgSession, PG_COMPAT_VERSION, PG_COMPAT_VERSION_NUM};
 use crate::tls::{self, TlsConfig};
 use tokio_rustls::TlsAcceptor;
 
@@ -976,8 +976,8 @@ async fn handle_connection_with_timeout(
                     .unwrap_or("ISO, MDY").to_owned();
                 let timezone = session.get_guc("timezone").unwrap_or("UTC").to_owned();
                 let startup_params: Vec<(&str, String)> = vec![
-                    ("server_version", "18.0.0".into()),
-                    ("server_version_num", "180000".into()),
+                    ("server_version", PG_COMPAT_VERSION.into()),
+                    ("server_version_num", PG_COMPAT_VERSION_NUM.into()),
                     ("server_encoding", "UTF8".into()),
                     ("client_encoding", client_enc),
                     ("DateStyle", datestyle),

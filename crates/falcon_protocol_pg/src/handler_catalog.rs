@@ -1,5 +1,5 @@
 use crate::codec::{BackendMessage, FieldDescription};
-use crate::session::PgSession;
+use crate::session::{PgSession, PG_COMPAT_VERSION, PG_COMPAT_VERSION_NUM};
 
 use crate::handler::QueryHandler;
 use crate::handler_utils::extract_where_eq;
@@ -767,14 +767,14 @@ impl QueryHandler {
         let rows = vec![
             vec![
                 Some("server_version".into()),
-                Some("18.0.0".into()),
+                Some(PG_COMPAT_VERSION.into()),
                 None,
                 Some("Version".into()),
                 Some("FalconDB PG-compatible version".into()),
             ],
             vec![
                 Some("server_version_num".into()),
-                Some("180000".into()),
+                Some(PG_COMPAT_VERSION_NUM.into()),
                 None,
                 Some("Version".into()),
                 Some("FalconDB PG-compatible version number".into()),

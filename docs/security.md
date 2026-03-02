@@ -49,6 +49,45 @@ The `AuthRateLimiter` tracks failed authentication attempts per source IP and en
 - Lockout expiry automatically resets the counter
 - Observable via `SHOW falcon.security_audit` (auth.* rows)
 
+### SCRAM-SHA-256 Protocol Flow
+
+1. Client sends **StartupMessage** with `user` parameter
+2. Server sends **AuthenticationSASL** with mechanism `SCRAM-SHA-256`
+3. Client sends **SASLInitialResponse** with client-first-message
+4. Server sends **AuthenticationSASLContinue** with server-first-message
+5. Client sends **SASLResponse** with client-final-message (includes proof)
+6. Server verifies proof, sends **AuthenticationSASLFinal** with server signature
+7. Server sends **AuthenticationOk**
+
+Stored verifiers follow PostgreSQL format:
+```
+SCRAM-SHA-256$<iterations>:<salt_base64>$<stored_key_base64>:<server_key_base64>
+```
+
+### Named User Credentials
+
+```toml
+[server.auth]
+method = "scram-sha-256"
+
+[[server.auth.users]]
+username = "alice"
+scram = "SCRAM-SHA-256$4096:c2FsdHNhbHQ=$/STORED_KEY_B64:SERVER_KEY_B64"
+
+[[server.auth.users]]
+username = "bob"
+password = "bobspassword"   # ephemeral verifier generated at startup
+```
+
+Credential lookup order: config users list → catalog role → fallback `server.auth.password`.
+
+### Security Properties
+
+- **No plaintext on wire**: SCRAM exchanges only proofs and signatures
+- **Constant-time comparison**: Proof verification uses constant-time byte comparison
+- **Cryptographic nonce**: Server nonce is 24 bytes from OS CSPRNG
+- **No credential logging**: Passwords, proofs, and keys are never logged
+
 ---
 
 ## Authorization (RBAC)
@@ -88,6 +127,18 @@ GRANT SELECT ON users TO analyst_role;
 GRANT ALL ON SCHEMA public TO admin_role;
 GRANT analyst_role TO alice;  -- Role membership
 ```
+
+### Enterprise RBAC (v1.1.0+)
+
+Enterprise RBAC adds three scope levels with deny-by-default semantics:
+
+| Scope | Permissions |
+|-------|------------|
+| **Cluster** | `ManageCluster`, `CreateDatabase`, `ManageUsers`, `ViewAuditLog`, `ManageBackups` |
+| **Database** | `Connect`, `CreateTable`, `DropTable` |
+| **Table** | `Select`, `Insert`, `Update`, `Delete`, `Truncate` |
+
+Resolution order: superuser bypass → transitive role closure → grant search (scope + resource + permission) → wildcard `*` → **default deny**.
 
 ---
 

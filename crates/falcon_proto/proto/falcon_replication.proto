@@ -19,6 +19,13 @@ service WalReplication {
 
   // Unary: replica requests a full checkpoint for bootstrap (new replica join).
   rpc GetCheckpoint(GetCheckpointRequest) returns (stream CheckpointChunk);
+
+  // Unary: execute a serialized subplan on a remote shard and return results.
+  // Used by the distributed query engine for cross-node scatter/gather.
+  rpc ExecuteSubPlan(ExecuteSubPlanRequest) returns (ExecuteSubPlanResponse);
+
+  // Unary: forward a SQL query to a remote shard leader for execution.
+  rpc ForwardQuery(ForwardQueryRpc) returns (ForwardQueryRpcResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -77,4 +84,46 @@ message CheckpointChunk {
   bytes data = 3;
   // The WAL LSN at checkpoint time — replica replays from here.
   uint64 checkpoint_lsn = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Execute SubPlan (remote shard execution for scatter/gather)
+// ---------------------------------------------------------------------------
+
+message ExecuteSubPlanRequest {
+  // Target shard ID on the remote node.
+  uint64 shard_id = 1;
+  // Serialized SerializableSubPlan (bincode-encoded).
+  bytes subplan_payload = 2;
+  // Caller-assigned request ID for correlation.
+  uint64 request_id = 3;
+}
+
+message ExecuteSubPlanResponse {
+  bool success = 1;
+  string error = 2;
+  // Bincode-serialized SubPlanResult: (Vec<(String, DataType)>, Vec<OwnedRow>).
+  // Using a single blob avoids proto↔Rust type mapping for DataType variants.
+  bytes result_payload = 3;
+  // Execution latency on the remote shard (microseconds).
+  uint64 execution_us = 4;
+  // Number of result rows (for observability without deserializing payload).
+  uint64 row_count = 5;
+}
+
+// ---------------------------------------------------------------------------
+// Forward Query (SQL-level query forwarding)
+// ---------------------------------------------------------------------------
+
+message ForwardQueryRpc {
+  uint64 shard_id = 1;
+  string sql = 2;
+  uint64 txn_id = 3;
+}
+
+message ForwardQueryRpcResponse {
+  bool success = 1;
+  string error = 2;
+  string result_json = 3;
+  uint64 rows_affected = 4;
 }

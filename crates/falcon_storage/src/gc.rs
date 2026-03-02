@@ -25,24 +25,16 @@ use falcon_common::types::Timestamp;
 /// GC configuration.
 #[derive(Debug, Clone)]
 pub struct GcConfig {
-    /// Whether GC is enabled.
     pub enabled: bool,
-    /// Interval between GC sweeps (milliseconds).
+    /// Sweep interval (ms).
     pub interval_ms: u64,
-    /// Maximum number of keys to process per sweep (0 = unlimited).
+    /// Max keys per sweep (0 = unlimited).
     pub batch_size: usize,
-    /// Minimum number of versions in a chain before GC considers it (avoids
-    /// overhead on short chains). 0 = always process.
+    /// Skip chains shorter than this (0 = always process).
     pub min_chain_length: usize,
-    /// Maximum allowed version chain length per key.
-    /// When a chain exceeds this length, GC will aggressively prune it even
-    /// if the safepoint would not normally allow it (best-effort, never removes
-    /// uncommitted or still-visible versions).
-    /// 0 = no cap (default).
+    /// Aggressively prune chains exceeding this length (0 = no cap).
     pub max_chain_length: usize,
-    /// Minimum wall-clock time between consecutive GC sweeps (milliseconds).
-    /// Acts as a rate-limiter: even under memory pressure, GC will not sweep
-    /// more frequently than this. 0 = no rate limit (default).
+    /// Rate-limit: min wall-clock ms between sweeps (0 = no limit).
     pub min_sweep_interval_ms: u64,
 }
 

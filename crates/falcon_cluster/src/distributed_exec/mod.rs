@@ -9,14 +9,22 @@
 //! - **Retry**: 1 retry with 5ms backoff on transient failure
 //! - **Timeout**: per-scatter timeout check after each shard completes
 
+pub mod backend;
 pub mod gather;
+pub mod join_exec;
+pub mod join_strategies;
 pub mod network_stats;
 pub mod scatter;
+pub mod serializable_plan;
 pub mod streaming_merge;
 
 // Re-export all public types at the module level for backward compatibility.
+pub use backend::{GrpcShardBackend, LocalShardBackend, ShardExecBackend};
 pub use gather::{compare_datums, merge_two_phase_agg};
+pub use join_exec::{execute_broadcast_join, execute_hash_partition_join, JoinExecContext};
+pub use join_strategies::{select_join_strategy, JoinCostInput, JoinStrategy, TableStats};
 pub use scatter::DistributedExecutor;
+pub use serializable_plan::{ColumnAssignment, SerializableSubPlan};
 pub use streaming_merge::StreamingMergeSort;
 
 use std::sync::Arc;

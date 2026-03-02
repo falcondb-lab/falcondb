@@ -95,7 +95,18 @@ impl ControllerHAGroup {
         }
     }
 
-    /// Elect self as leader (simplified — in production uses Raft).
+    /// Elect self as leader — **local-only, NO distributed consensus**.
+    ///
+    /// # WARNING
+    /// This method unconditionally sets the local node as leader without
+    /// contacting any peers or running a quorum vote.  It exists **only** for:
+    /// - Single-node / embedded deployments where no other controller exists.
+    /// - Initial bootstrap of a new HA group before Raft is configured.
+    ///
+    /// For multi-node production clusters, leader election **must** be driven
+    /// by the Raft consensus layer (`falcon_raft::RaftConsensus`) which
+    /// guarantees leader-lease and fencing semantics.  Call [`set_leader`]
+    /// with the Raft-elected leader ID instead.
     pub fn elect_self(&self) -> u64 {
         let term = self.current_term.fetch_add(1, Ordering::SeqCst) + 1;
         *self.leader_id.write() = Some(self.self_id);

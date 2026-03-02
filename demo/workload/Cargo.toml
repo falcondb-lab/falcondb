@@ -1,0 +1,18 @@
+[package]
+name = "failover_writer"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "failover_writer"
+path = "src/main.rs"
+
+[[bin]]
+name = "failover_reader"
+path = "src/reader.rs"
+
+[dependencies]
+postgres = "0.19"
+chrono = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

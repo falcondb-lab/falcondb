@@ -36,9 +36,7 @@ use falcon_common::error::StorageError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum CompressionCodec {
-    /// No compression — raw bytes.
     None = 0,
-    /// LZ4 block compression (lz4_flex).
     Lz4 = 1,
 }
 
@@ -68,15 +66,12 @@ impl std::fmt::Display for CompressionCodec {
 /// Cold store configuration.
 #[derive(Debug, Clone)]
 pub struct ColdStoreConfig {
-    /// Whether cold storage is enabled.
     pub enabled: bool,
-    /// Maximum segment size in bytes (default: 64 MB).
+    /// Default: 64 MB.
     pub max_segment_size: u64,
-    /// Compression codec (default: LZ4).
     pub codec: CompressionCodec,
-    /// Whether compression is enabled globally.
     pub compression_enabled: bool,
-    /// LRU block cache capacity in bytes (default: 16 MB).
+    /// LRU cache capacity in bytes (default: 16 MB).
     pub block_cache_capacity: u64,
     /// Directory for cold segment files (None = in-memory only).
     pub segment_dir: Option<PathBuf>,

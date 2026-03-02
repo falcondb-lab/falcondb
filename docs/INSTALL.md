@@ -120,3 +120,46 @@ falcon service restart
 | Config error | `falcon config check --config ...` |
 | Permission denied | Run as Administrator |
 | Logs | `Get-Content C:\ProgramData\FalconDB\logs\falcon.log -Tail 100` |
+
+---
+
+## Uninstall
+
+FalconDB separates **program files** from **data** — uninstall removes binaries but preserves data.
+
+| What | Location | Removed on Uninstall? |
+|------|----------|----------------------|
+| Binary (`falcon.exe`) | `C:\Program Files\FalconDB\` | **Yes** |
+| Windows Service | Registry | **Yes** |
+| Config, Data, Logs | `C:\ProgramData\FalconDB\` | **No** |
+
+### MSI Uninstall
+
+```powershell
+msiexec /x FalconDB-1.0.0-x64.msi /qn /l*v uninstall.log
+```
+
+### CLI Uninstall (Green Distribution)
+
+```powershell
+falcon service uninstall
+```
+
+### Complete Removal (Including Data)
+
+```powershell
+falcon purge --yes
+# or manually:
+Remove-Item -Recurse -Force "$env:ProgramData\FalconDB"
+```
+
+### Cleanup Checklist
+
+```powershell
+sc.exe query FalconDB                                    # Service removed?
+Test-Path "C:\Program Files\FalconDB"                    # Binary removed?
+Test-Path "C:\ProgramData\FalconDB"                      # Data removed?
+netsh advfirewall firewall delete rule name="FalconDB PG" # Firewall rules
+```
+
+Re-installing after uninstall reuses existing config and data (no data loss).

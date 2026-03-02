@@ -415,3 +415,76 @@ cargo test -p falcon_cluster --test distributed_enhancements_integration -- --no
 # E2E lifecycle test:
 cargo test -p falcon_cluster --test distributed_enhancements_integration test_e2e -- --nocapture
 ```
+
+---
+
+## 10. Operations Runbook
+
+### Ops Audit Log
+
+Every cluster operation is recorded in `OpsAuditLog` (default 4096 events). Query via `falconctl ops audit`.
+
+| Event | Trigger |
+|-------|---------|
+| `NODE_UP` / `NODE_DOWN` / `NODE_SUSPECT` | Heartbeat restored / declared DEAD / late |
+| `LEADER_ELECTED` / `LEADER_LOST` | Election resolved / leader declared DEAD |
+| `DRAIN_STARTED` / `DRAIN_COMPLETED` | `falconctl node drain` lifecycle |
+| `JOIN_STARTED` / `JOIN_COMPLETED` | `falconctl node join` lifecycle |
+| `UPGRADE_STARTED` / `UPGRADE_COMPLETE` | Rolling upgrade lifecycle |
+| `CONFIG_CHANGED` | Config key modified |
+| `BACKPRESSURE_CHANGED` | Pressure level transition |
+| `CATCHUP_STARTED` / `CATCHUP_COMPLETED` | Replica catch-up lifecycle |
+
+### Scenario: Node Failure
+
+1. Failure detector: ALIVE → SUSPECT → DEAD
+2. Election coordinator triggers re-election for affected shards
+3. Highest-LSN surviving replica becomes new leader
+4. Catch-up coordinator syncs lagging replicas
+
+```bash
+falconctl cluster status          # Check node states
+falconctl cluster health          # Detailed health check
+falconctl ops audit --last 20     # Recent events
+```
+
+### Scenario: Planned Maintenance (Node Drain)
+
+```bash
+falconctl node drain <node_id>           # Stop new requests, transfer shards
+falconctl node drain-status <node_id>    # Monitor progress
+# ... perform maintenance ...
+falconctl node join <node_id>            # Rejoin
+falconctl node join-status <node_id>     # Monitor sync
+```
+
+### Scenario: Rolling Upgrade
+
+```bash
+falconctl upgrade plan --target-version 1.0.10   # Check compatibility
+falconctl upgrade apply                           # Automated: follower → gateway → leader
+falconctl upgrade status                          # Monitor
+```
+
+### Scenario: High Latency / Backpressure
+
+Check SLO (`curl http://localhost:8080/admin/slo`), identify signal (CPU/memory/WAL backlog/replication lag), address root cause. If CRITICAL admission rate is 10%, drain slow nodes.
+
+### Scenario: Split-Brain Suspicion
+
+```bash
+falconctl cluster status    # Check epoch and terms
+falconctl cluster health    # Verify single leader per shard
+# Stale node rejected by epoch fencing; force-fence if needed:
+falconctl epoch fence <node_id>
+```
+
+### Health Check Thresholds
+
+| Check | Healthy | Degraded | Critical |
+|-------|---------|----------|----------|
+| Dead nodes | 0 | 1 | ≥ 2 |
+| Suspect nodes | 0 | 1–2 | ≥ 3 |
+| Pressure level | Normal | Elevated/High | Critical |
+| Write availability | > 99.9% | 99–99.9% | < 99% |
+| Replication lag | < 1000 | 1000–10000 | > 10000 |

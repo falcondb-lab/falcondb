@@ -31,68 +31,63 @@ use crate::plan_cache::PlanCache;
 use crate::session::PgSession;
 use crate::slow_query_log::SlowQueryLog;
 
+// ── Sub-context structs ──────────────────────────────────────────────────
+// Grouping reduces cognitive load and makes dependencies explicit.
+
+/// Enterprise / multi-tenant / security context.
+#[derive(Clone)]
+pub(crate) struct EnterpriseContext {
+    pub(crate) tenant_registry: Arc<falcon_storage::tenant_registry::TenantRegistry>,
+    pub(crate) audit_log: Arc<falcon_storage::audit::AuditLog>,
+    pub(crate) license_info: Arc<falcon_common::edition::LicenseInfo>,
+    pub(crate) feature_gate: Arc<falcon_common::edition::FeatureGate>,
+    pub(crate) resource_meter: Arc<falcon_storage::metering::ResourceMeter>,
+    pub(crate) security_manager: Arc<falcon_storage::security_manager::SecurityManager>,
+    pub(crate) auth_rate_limiter: Arc<AuthRateLimiter>,
+    pub(crate) password_policy: Arc<PasswordPolicy>,
+    pub(crate) sql_firewall: Arc<SqlFirewall>,
+}
+
+/// Cluster / distributed execution / replication context.
+#[derive(Clone)]
+pub(crate) struct ClusterContext {
+    pub(crate) shard_ids: Vec<ShardId>,
+    pub(crate) dist_engine: Option<Arc<DistributedQueryEngine>>,
+    pub(crate) commit_policy: CommitPolicy,
+    pub(crate) sync_waiter: Option<Arc<SyncReplicationWaiter>>,
+    pub(crate) ha_group: Option<Arc<RwLock<HAReplicaGroup>>>,
+    pub(crate) admin: Arc<ClusterAdmin>,
+    pub(crate) rebalance_token_bucket: Arc<TokenBucket>,
+    pub(crate) decision_log: Arc<CoordinatorDecisionLog>,
+    pub(crate) timeout_controller: Arc<LayeredTimeoutController>,
+    pub(crate) slow_shard_tracker: Arc<SlowShardTracker>,
+    pub(crate) fault_injector: Arc<FaultInjector>,
+    pub(crate) raft_coordinator: Option<Arc<RaftShardCoordinator>>,
+}
+
+/// Observability / diagnostics context.
+#[derive(Clone)]
+pub(crate) struct ObservabilityContext {
+    pub(crate) slow_query_log: Arc<SlowQueryLog>,
+    pub(crate) plan_cache: Arc<PlanCache>,
+    pub(crate) replica_metrics: Option<Arc<ReplicaRunnerMetrics>>,
+    pub(crate) hotspot_detector: Arc<falcon_storage::hotspot::HotspotDetector>,
+    pub(crate) consistency_verifier: Arc<falcon_storage::verification::ConsistencyVerifier>,
+    pub(crate) priority_scheduler: Arc<PriorityScheduler>,
+}
+
 /// Handles a single SQL query within a session, producing PG backend messages.
 #[derive(Clone)]
 pub struct QueryHandler {
+    // ── Core (always required) ──
     pub(crate) storage: Arc<StorageEngine>,
     pub(crate) txn_mgr: Arc<TxnManager>,
     pub(crate) executor: Arc<Executor>,
-    /// When set, the handler wraps eligible plans in DistPlan for multi-shard execution.
-    /// Empty or single-element means single-shard mode (no wrapping).
-    pub(crate) cluster_shard_ids: Vec<ShardId>,
-    /// Optional distributed query engine for executing DistPlan and routed DML.
-    /// When present, DistPlan/DDL/DML are dispatched here instead of the local executor.
-    pub(crate) dist_engine: Option<Arc<DistributedQueryEngine>>,
-    /// Slow query log shared across all sessions.
-    pub(crate) slow_query_log: Arc<SlowQueryLog>,
-    /// Query plan cache shared across all sessions.
-    pub(crate) plan_cache: Arc<PlanCache>,
-    /// Replica replication metrics (only set when running as replica).
-    pub(crate) replica_metrics: Option<Arc<ReplicaRunnerMetrics>>,
-    /// P2-1: Tenant registry for multi-tenant isolation.
-    pub(crate) tenant_registry: Arc<falcon_storage::tenant_registry::TenantRegistry>,
-    /// P2-2: Audit log for enterprise compliance.
-    pub(crate) audit_log: Arc<falcon_storage::audit::AuditLog>,
-    /// P3-1: License information.
-    pub(crate) license_info: Arc<falcon_common::edition::LicenseInfo>,
-    /// P3-1: Feature gate for edition-based feature control.
-    pub(crate) feature_gate: Arc<falcon_common::edition::FeatureGate>,
-    /// P3-3: Resource meter for per-tenant billing.
-    pub(crate) resource_meter: Arc<falcon_storage::metering::ResourceMeter>,
-    /// P3-6: Security manager for encryption/TLS/IP control.
-    pub(crate) security_manager: Arc<falcon_storage::security_manager::SecurityManager>,
-    /// DK-5: Hotspot detector for shard/table access monitoring.
-    pub(crate) hotspot_detector: Arc<falcon_storage::hotspot::HotspotDetector>,
-    /// DK-9: Consistency verifier for self-verification.
-    pub(crate) consistency_verifier: Arc<falcon_storage::verification::ConsistencyVerifier>,
-    /// Active commit policy: determines durability guarantees before client ACK.
-    pub(crate) commit_policy: CommitPolicy,
-    /// Sync replication waiter: enforces quorum-ack / semi-sync / sync durability.
-    pub(crate) sync_waiter: Option<Arc<SyncReplicationWaiter>>,
-    /// HA replica group for sync replication LSN tracking.
-    pub(crate) ha_group: Option<Arc<RwLock<HAReplicaGroup>>>,
-    /// Cluster admin coordinator for scale-out/in, rebalance, leader transfer.
-    pub(crate) cluster_admin: Arc<ClusterAdmin>,
-    /// Priority scheduler for tail latency governance.
-    pub(crate) priority_scheduler: Arc<PriorityScheduler>,
-    /// Token bucket for DDL/backfill/rebalance rate limiting.
-    pub(crate) rebalance_token_bucket: Arc<TokenBucket>,
-    /// 2PC coordinator decision log (durable commit point).
-    pub(crate) decision_log: Arc<CoordinatorDecisionLog>,
-    /// 2PC layered timeout controller.
-    pub(crate) timeout_controller: Arc<LayeredTimeoutController>,
-    /// 2PC slow-shard tracker.
-    pub(crate) slow_shard_tracker: Arc<SlowShardTracker>,
-    /// Fault injector for chaos testing.
-    pub(crate) fault_injector: Arc<FaultInjector>,
-    /// Auth rate limiter for brute-force protection.
-    pub(crate) auth_rate_limiter: Arc<AuthRateLimiter>,
-    /// Password policy enforcer.
-    pub(crate) password_policy: Arc<PasswordPolicy>,
-    /// SQL firewall for injection detection.
-    pub(crate) sql_firewall: Arc<SqlFirewall>,
-    /// Raft shard coordinator for SHOW falcon.raft_stats.
-    pub(crate) raft_coordinator: Option<Arc<RaftShardCoordinator>>,
+
+    // ── Grouped contexts ──
+    pub(crate) enterprise: EnterpriseContext,
+    pub(crate) cluster: ClusterContext,
+    pub(crate) observability: ObservabilityContext,
 }
 
 impl QueryHandler {
@@ -107,37 +102,43 @@ impl QueryHandler {
             storage,
             txn_mgr,
             executor,
-            cluster_shard_ids: vec![ShardId(0)],
-            dist_engine: None,
-            slow_query_log: Arc::new(SlowQueryLog::disabled()),
-            plan_cache: Arc::new(PlanCache::new(256)),
-            replica_metrics: None,
-            tenant_registry: tenant_reg,
-            audit_log: Arc::new(falcon_storage::audit::AuditLog::new()),
-            license_info: Arc::new(falcon_common::edition::LicenseInfo::community()),
-            feature_gate: Arc::new(falcon_common::edition::FeatureGate::for_edition(
-                falcon_common::edition::EditionTier::Community,
-            )),
-            resource_meter: res_meter,
-            security_manager: Arc::new(falcon_storage::security_manager::SecurityManager::new()),
-            hotspot_detector: Arc::new(falcon_storage::hotspot::HotspotDetector::default()),
-            consistency_verifier: Arc::new(
-                falcon_storage::verification::ConsistencyVerifier::default(),
-            ),
-            commit_policy: CommitPolicy::default(),
-            sync_waiter: None,
-            ha_group: None,
-            cluster_admin: ClusterAdmin::new(ClusterEventLog::new(256)),
-            priority_scheduler: PriorityScheduler::new(PrioritySchedulerConfig::default()),
-            rebalance_token_bucket: TokenBucket::new(TokenBucketConfig::rebalance()),
-            decision_log: CoordinatorDecisionLog::new(DecisionLogConfig::default()),
-            timeout_controller: LayeredTimeoutController::new(LayeredTimeoutConfig::default()),
-            slow_shard_tracker: SlowShardTracker::new(SlowShardConfig::default()),
-            fault_injector: Arc::new(FaultInjector::new()),
-            auth_rate_limiter: Arc::new(AuthRateLimiter::new(AuthRateLimiterConfig::default())),
-            password_policy: Arc::new(PasswordPolicy::new(PasswordPolicyConfig::default())),
-            sql_firewall: Arc::new(SqlFirewall::new(SqlFirewallConfig::default())),
-            raft_coordinator: None,
+            enterprise: EnterpriseContext {
+                tenant_registry: tenant_reg,
+                audit_log: Arc::new(falcon_storage::audit::AuditLog::new()),
+                license_info: Arc::new(falcon_common::edition::LicenseInfo::community()),
+                feature_gate: Arc::new(falcon_common::edition::FeatureGate::for_edition(
+                    falcon_common::edition::EditionTier::Community,
+                )),
+                resource_meter: res_meter,
+                security_manager: Arc::new(falcon_storage::security_manager::SecurityManager::new()),
+                auth_rate_limiter: Arc::new(AuthRateLimiter::new(AuthRateLimiterConfig::default())),
+                password_policy: Arc::new(PasswordPolicy::new(PasswordPolicyConfig::default())),
+                sql_firewall: Arc::new(SqlFirewall::new(SqlFirewallConfig::default())),
+            },
+            cluster: ClusterContext {
+                shard_ids: vec![ShardId(0)],
+                dist_engine: None,
+                commit_policy: CommitPolicy::default(),
+                sync_waiter: None,
+                ha_group: None,
+                admin: ClusterAdmin::new(ClusterEventLog::new(256)),
+                rebalance_token_bucket: TokenBucket::new(TokenBucketConfig::rebalance()),
+                decision_log: CoordinatorDecisionLog::new(DecisionLogConfig::default()),
+                timeout_controller: LayeredTimeoutController::new(LayeredTimeoutConfig::default()),
+                slow_shard_tracker: SlowShardTracker::new(SlowShardConfig::default()),
+                fault_injector: Arc::new(FaultInjector::new()),
+                raft_coordinator: None,
+            },
+            observability: ObservabilityContext {
+                slow_query_log: Arc::new(SlowQueryLog::disabled()),
+                plan_cache: Arc::new(PlanCache::new(256)),
+                replica_metrics: None,
+                hotspot_detector: Arc::new(falcon_storage::hotspot::HotspotDetector::default()),
+                consistency_verifier: Arc::new(
+                    falcon_storage::verification::ConsistencyVerifier::default(),
+                ),
+                priority_scheduler: PriorityScheduler::new(PrioritySchedulerConfig::default()),
+            },
         }
     }
 
@@ -159,48 +160,54 @@ impl QueryHandler {
             storage,
             txn_mgr,
             executor,
-            cluster_shard_ids: shard_ids,
-            dist_engine: Some(dist_engine),
-            slow_query_log: Arc::new(SlowQueryLog::disabled()),
-            plan_cache: Arc::new(PlanCache::new(256)),
-            replica_metrics: None,
-            tenant_registry: tenant_reg,
-            audit_log: Arc::new(falcon_storage::audit::AuditLog::new()),
-            license_info: Arc::new(falcon_common::edition::LicenseInfo::community()),
-            feature_gate: Arc::new(falcon_common::edition::FeatureGate::for_edition(
-                falcon_common::edition::EditionTier::Community,
-            )),
-            resource_meter: res_meter,
-            security_manager: Arc::new(falcon_storage::security_manager::SecurityManager::new()),
-            hotspot_detector: Arc::new(falcon_storage::hotspot::HotspotDetector::default()),
-            consistency_verifier: Arc::new(
-                falcon_storage::verification::ConsistencyVerifier::default(),
-            ),
-            commit_policy: CommitPolicy::default(),
-            sync_waiter: None,
-            ha_group: None,
-            cluster_admin: ClusterAdmin::new(ClusterEventLog::new(256)),
-            priority_scheduler: PriorityScheduler::new(PrioritySchedulerConfig::default()),
-            rebalance_token_bucket: TokenBucket::new(TokenBucketConfig::rebalance()),
-            decision_log: CoordinatorDecisionLog::new(DecisionLogConfig::default()),
-            timeout_controller: LayeredTimeoutController::new(LayeredTimeoutConfig::default()),
-            slow_shard_tracker: SlowShardTracker::new(SlowShardConfig::default()),
-            fault_injector: Arc::new(FaultInjector::new()),
-            auth_rate_limiter: Arc::new(AuthRateLimiter::new(AuthRateLimiterConfig::default())),
-            password_policy: Arc::new(PasswordPolicy::new(PasswordPolicyConfig::default())),
-            sql_firewall: Arc::new(SqlFirewall::new(SqlFirewallConfig::default())),
-            raft_coordinator: None,
+            enterprise: EnterpriseContext {
+                tenant_registry: tenant_reg,
+                audit_log: Arc::new(falcon_storage::audit::AuditLog::new()),
+                license_info: Arc::new(falcon_common::edition::LicenseInfo::community()),
+                feature_gate: Arc::new(falcon_common::edition::FeatureGate::for_edition(
+                    falcon_common::edition::EditionTier::Community,
+                )),
+                resource_meter: res_meter,
+                security_manager: Arc::new(falcon_storage::security_manager::SecurityManager::new()),
+                auth_rate_limiter: Arc::new(AuthRateLimiter::new(AuthRateLimiterConfig::default())),
+                password_policy: Arc::new(PasswordPolicy::new(PasswordPolicyConfig::default())),
+                sql_firewall: Arc::new(SqlFirewall::new(SqlFirewallConfig::default())),
+            },
+            cluster: ClusterContext {
+                shard_ids,
+                dist_engine: Some(dist_engine),
+                commit_policy: CommitPolicy::default(),
+                sync_waiter: None,
+                ha_group: None,
+                admin: ClusterAdmin::new(ClusterEventLog::new(256)),
+                rebalance_token_bucket: TokenBucket::new(TokenBucketConfig::rebalance()),
+                decision_log: CoordinatorDecisionLog::new(DecisionLogConfig::default()),
+                timeout_controller: LayeredTimeoutController::new(LayeredTimeoutConfig::default()),
+                slow_shard_tracker: SlowShardTracker::new(SlowShardConfig::default()),
+                fault_injector: Arc::new(FaultInjector::new()),
+                raft_coordinator: None,
+            },
+            observability: ObservabilityContext {
+                slow_query_log: Arc::new(SlowQueryLog::disabled()),
+                plan_cache: Arc::new(PlanCache::new(256)),
+                replica_metrics: None,
+                hotspot_detector: Arc::new(falcon_storage::hotspot::HotspotDetector::default()),
+                consistency_verifier: Arc::new(
+                    falcon_storage::verification::ConsistencyVerifier::default(),
+                ),
+                priority_scheduler: PriorityScheduler::new(PrioritySchedulerConfig::default()),
+            },
         }
     }
 
     /// Set the cluster admin coordinator.
     pub fn set_cluster_admin(&mut self, admin: Arc<ClusterAdmin>) {
-        self.cluster_admin = admin;
+        self.cluster.admin = admin;
     }
 
     /// Set the commit policy for durability guarantees.
     pub const fn set_commit_policy(&mut self, policy: CommitPolicy) {
-        self.commit_policy = policy;
+        self.cluster.commit_policy = policy;
     }
 
     /// Configure synchronous replication waiter for quorum-ack / semi-sync / sync modes.
@@ -209,35 +216,35 @@ impl QueryHandler {
         waiter: Arc<SyncReplicationWaiter>,
         group: Arc<RwLock<HAReplicaGroup>>,
     ) {
-        self.sync_waiter = Some(waiter);
-        self.ha_group = Some(group);
+        self.cluster.sync_waiter = Some(waiter);
+        self.cluster.ha_group = Some(group);
     }
 
     /// Set replica runner metrics for SHOW falcon.replica_stats.
     pub fn set_replica_metrics(&mut self, metrics: Arc<ReplicaRunnerMetrics>) {
-        self.replica_metrics = Some(metrics);
+        self.observability.replica_metrics = Some(metrics);
     }
 
     /// Set the Raft shard coordinator for SHOW falcon.raft_stats.
     pub fn set_raft_coordinator(&mut self, coordinator: Arc<RaftShardCoordinator>) {
-        self.raft_coordinator = Some(coordinator);
+        self.cluster.raft_coordinator = Some(coordinator);
     }
 
     /// Set a shared SecurityManager instance (so SHOW falcon.security reflects
     /// the same state as the PgServer IP allowlist enforcement).
     pub fn set_security_manager(&mut self, mgr: Arc<falcon_storage::security_manager::SecurityManager>) {
-        self.security_manager = mgr;
+        self.enterprise.security_manager = mgr;
     }
 
     /// Set a shared slow query log instance.
     pub fn with_slow_query_log(mut self, log: Arc<SlowQueryLog>) -> Self {
-        self.slow_query_log = log;
+        self.observability.slow_query_log = log;
         self
     }
 
     /// Get a reference to the slow query log.
     pub const fn slow_query_log(&self) -> &Arc<SlowQueryLog> {
-        &self.slow_query_log
+        &self.observability.slow_query_log
     }
 
     /// Process a simple query string. Returns a list of backend messages to send.
@@ -478,7 +485,7 @@ impl QueryHandler {
         };
 
         // Execute
-        let result = if let Some(dist) = &self.dist_engine {
+        let result = if let Some(dist) = &self.cluster.dist_engine {
             dist.execute(&plan, session.txn.as_ref())
         } else {
             self.executor.execute(&plan, session.txn.as_ref())
@@ -535,7 +542,7 @@ impl QueryHandler {
         // ── Fast-path: lightweight INSERT parser (bypasses sqlparser-rs) ──
         if let Some(fast_ins) = self.try_fast_insert_parse(sql) {
             let plan = match Planner::plan_insert_owned(fast_ins) {
-                Ok(p) => Planner::wrap_distributed(p, &self.cluster_shard_ids),
+                Ok(p) => Planner::wrap_distributed(p, &self.cluster.shard_ids),
                 Err(e) => return Ok(vec![self.error_response(&FalconError::Sql(e))]),
             };
             return self.execute_single_plan(sql, plan, session);
@@ -553,7 +560,7 @@ impl QueryHandler {
 
         for stmt in &stmts {
             // Try plan cache first
-            let plan = if let Some(cached) = self.plan_cache.get(sql) {
+            let plan = if let Some(cached) = self.observability.plan_cache.get(sql) {
                 cached
             } else {
                 // Bind
@@ -572,7 +579,7 @@ impl QueryHandler {
                 
                 if let BoundStatement::Insert(ins) = bound {
                     match Planner::plan_insert_owned(ins) {
-                        Ok(p) => Planner::wrap_distributed(p, &self.cluster_shard_ids),
+                        Ok(p) => Planner::wrap_distributed(p, &self.cluster.shard_ids),
                         Err(e) => {
                             messages.push(self.error_response(&FalconError::Sql(e)));
                             return Ok(messages);
@@ -588,10 +595,10 @@ impl QueryHandler {
                             return Ok(messages);
                         }
                     };
-                    let p = Planner::wrap_distributed(p, &self.cluster_shard_ids);
+                    let p = Planner::wrap_distributed(p, &self.cluster.shard_ids);
                     // Cache the plan (skip DML — each UPDATE/DELETE has unique literals)
                     if !matches!(p, PhysicalPlan::Update { .. } | PhysicalPlan::Delete { .. }) {
-                        self.plan_cache.put(sql, p.clone());
+                        self.observability.plan_cache.put(sql, p.clone());
                     }
                     p
                 }
@@ -645,7 +652,7 @@ impl QueryHandler {
                             Ok(commit_ts) => {
                                 // Sync replication: wait for replicas to ack before responding
                                 if let (Some(ref waiter), Some(ref group)) =
-                                    (&self.sync_waiter, &self.ha_group)
+                                    (&self.cluster.sync_waiter, &self.cluster.ha_group)
                                 {
                                     let timeout = std::time::Duration::from_secs(5);
                                     let group_read = group.read();
@@ -934,7 +941,7 @@ impl QueryHandler {
             ) {
                 match self.executor.execute(&plan, None) {
                     Ok(ExecutionResult::Ddl { message }) => {
-                        self.plan_cache.invalidate();
+                        self.observability.plan_cache.invalidate();
                         messages.push(BackendMessage::CommandComplete { tag: message });
                     }
                     Ok(ExecutionResult::Query { columns, rows }) => {
@@ -992,7 +999,7 @@ impl QueryHandler {
             // Route execution: DistPlan and multi-shard DML/DDL go through
             // DistributedQueryEngine when available; local plans use Executor.
             let query_start = Instant::now();
-            let result = if let Some(dist) = &self.dist_engine {
+            let result = if let Some(dist) = &self.cluster.dist_engine {
                 dist.execute(&plan, session.txn.as_ref())
             } else {
                 self.executor.execute(&plan, session.txn.as_ref())
@@ -1040,7 +1047,7 @@ impl QueryHandler {
                             messages.push(BackendMessage::CommandComplete { tag: cmd_tag });
                         }
                         ExecutionResult::Ddl { message } => {
-                            self.plan_cache.invalidate();
+                            self.observability.plan_cache.invalidate();
                             messages.push(BackendMessage::CommandComplete { tag: message });
                         }
                         ExecutionResult::TxnControl { action } => {
@@ -1058,11 +1065,11 @@ impl QueryHandler {
                     }
 
                     // Record to slow query log
-                    self.slow_query_log.record(sql, query_duration, session.id);
+                    self.observability.slow_query_log.record(sql, query_duration, session.id);
                 }
                 Err(e) => {
                     // Record to slow query log (even failed queries)
-                    self.slow_query_log.record(sql, query_duration, session.id);
+                    self.observability.slow_query_log.record(sql, query_duration, session.id);
 
                     // Auto-abort on error
                     if auto_txn {
@@ -1258,7 +1265,7 @@ impl QueryHandler {
             .map_err(FalconError::Sql)?;
 
         // Wrap in DistPlan if multi-shard cluster
-        let plan = Planner::wrap_distributed(plan, &self.cluster_shard_ids);
+        let plan = Planner::wrap_distributed(plan, &self.cluster.shard_ids);
 
         // Build compact row description from the plan output fields
         let fields = self.plan_output_fields(&plan);
@@ -1340,7 +1347,7 @@ impl QueryHandler {
         ) {
             match self.executor.execute(plan, None) {
                 Ok(ExecutionResult::Ddl { message }) => {
-                    self.plan_cache.invalidate();
+                    self.observability.plan_cache.invalidate();
                     messages.push(BackendMessage::CommandComplete { tag: message });
                 }
                 Ok(ExecutionResult::Query { columns, rows }) => {
@@ -1396,7 +1403,7 @@ impl QueryHandler {
 
         // Execute with parameter substitution — route through dist_engine when available
         let query_start = std::time::Instant::now();
-        let result = if let Some(dist) = &self.dist_engine {
+        let result = if let Some(dist) = &self.cluster.dist_engine {
             dist.execute_with_params(plan, session.txn.as_ref(), params)
         } else {
             self.executor
@@ -1441,7 +1448,7 @@ impl QueryHandler {
                         messages.push(BackendMessage::CommandComplete { tag: cmd_tag });
                     }
                     ExecutionResult::Ddl { message } => {
-                        self.plan_cache.invalidate();
+                        self.observability.plan_cache.invalidate();
                         messages.push(BackendMessage::CommandComplete { tag: message });
                     }
                     ExecutionResult::TxnControl { action } => {

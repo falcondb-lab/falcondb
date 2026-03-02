@@ -14,33 +14,22 @@ use std::fmt;
 /// Kubernetes deployment configuration for a FalconDB cluster.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct K8sDeployConfig {
-    /// Kubernetes namespace.
     pub namespace: String,
-    /// StatefulSet name.
     pub statefulset_name: String,
-    /// Number of replicas (pods).
     pub replicas: u32,
-    /// Docker image for FalconDB.
     pub image: String,
-    /// CPU request per pod (millicores, e.g. 1000 = 1 core).
+    /// Millicores (e.g. 1000 = 1 core).
     pub cpu_request_milli: u32,
-    /// CPU limit per pod (millicores).
+    /// Millicores.
     pub cpu_limit_milli: u32,
-    /// Memory request per pod (bytes).
     pub memory_request_bytes: u64,
-    /// Memory limit per pod (bytes).
     pub memory_limit_bytes: u64,
-    /// Persistent volume size per pod (bytes).
     pub storage_size_bytes: u64,
-    /// Storage class name.
     pub storage_class: String,
-    /// Whether anti-affinity is enabled (spread across nodes).
+    /// Spread pods across nodes.
     pub anti_affinity: bool,
-    /// Additional labels for pods.
     pub labels: HashMap<String, String>,
-    /// Rolling update strategy: max surge.
     pub rolling_update_max_surge: u32,
-    /// Rolling update strategy: max unavailable.
     pub rolling_update_max_unavailable: u32,
 }
 

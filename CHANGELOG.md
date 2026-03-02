@@ -7,36 +7,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [1.0.0] — GA Release
-
-### Added — SQL Compatibility
-
-- **SQL-level PREPARE/EXECUTE/DEALLOCATE** — plan-based execution path using
-  `prepare_statement()` for physical plan generation and typed parameter inference.
-  `text_params_to_datum` helper converts SQL EXECUTE text params to typed Datum values.
-  Falls back to legacy text substitution when planning is unavailable.
-- **SMALLINT (INT2) data type** — `DataType::Int16` across schema, DDL, parser, PG OID (21),
-  wire protocol (text + binary decode), COPY, CAST. Runtime values widened to `Datum::Int32`.
-- **REAL (FLOAT4) data type** — `DataType::Float32` across schema, DDL, parser, PG OID (700),
-  wire protocol (text + binary decode), COPY, CAST. Runtime values widened to `Datum::Float64`.
-
-### Added — Linux Packaging
-
-- **`packaging/systemd/falcondb.service`** — production-hardened systemd unit with
-  `ProtectSystem=strict`, `PrivateDevices`, `OOMScoreAdjust=-900`, journald logging.
-- **Debian packaging** — `packaging/debian/` (control, postinst, prerm, conffiles) +
-  `scripts/build_deb.sh` builder. Creates `falcondb` system user, enables systemd service.
-- **RPM packaging** — `packaging/rpm/falcondb.spec` + `scripts/build_rpm.sh` builder.
-  Pre-install user creation, `%systemd_post`/`%systemd_preun` macros.
-- **`docs/INSTALL_LINUX.md`** — installation guide for .deb, .rpm, and tarball methods.
-
-### Changed — Release Pipeline
-
-- **`.github/workflows/release.yml`** — Linux build job now produces .tar.gz, .deb, and .rpm
-  artifacts via dedicated build scripts. All three uploaded to GitHub Releases.
-
----
-
 ## [Unreleased]
 
 ### Added — DCG Failover PoC (`falcondb-poc-dcg/`)
@@ -208,60 +178,231 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   explanation for factory management, no database terminology.
 - All scripts in `.sh` and `.ps1` variants.
 
----
+### Improved — 1M Row Scan & Aggregate Performance (1.83x overall speedup)
 
-## [1.2.1] — Production Readiness, Executor Optimization, Cluster Observability
+Systematic optimization of full table scans, ORDER BY with LIMIT, and aggregate queries
+on large datasets. Benchmarked on 1M row bulk insert + query workload, achieving near-parity
+with PostgreSQL (6.4s vs PG 6.1s).
 
-### Track A — OS-Level Production Tuning
+#### MVCC Visibility Fast Path (`mvcc.rs`)
+- **Arc-clone elimination**: All 5 hot MVCC methods (`read_for_txn`, `read_committed`,
+  `is_visible`, `with_visible_data`, `has_committed_write_after`) now check the head
+  version directly through the `RwLock` read guard reference, avoiding an `Arc::clone`
+  for the common single-version case (1M fewer atomic inc/dec per scan)
+- **Zero-copy row access**: New `with_visible_data()` method calls a closure with
+  `&OwnedRow` reference, enabling downstream consumers to read row data without cloning
 
-- **`docs/os/windows_server_2022.md`** — Windows Server 2022 tuning guide covering
-  IOCP backend, NTFS vs ReFS, antivirus exclusions, Large Pages, TCP RSS/autotuning,
-  Windows Service deployment checklist, security baseline (ACLs, service account).
-  Includes 10-minute production checklist.
-- **`docs/os/rhel_9.md`** — RHEL 9 tuning guide covering XFS/ext4 selection,
-  io_uring (with privilege constraints), NUMA pinning, THP/jemalloc, systemd +
-  cgroup v2 resource control, BBR/TCP tuning, SELinux and firewall configuration.
-  Includes 10-minute production checklist.
+#### Zero-Copy Row Iteration (`memtable.rs`, `engine_dml.rs`)
+- **`for_each_visible()`**: Streams through DashMap entries calling a closure with
+  `&OwnedRow` references — no row materialization or Vec allocation
+- **`compute_simple_aggs()`**: Single-pass streaming aggregates (COUNT/SUM/MIN/MAX)
+  directly over MVCC chains without cloning any row data
 
-### Track B — Executor Hot-Path Optimization
+#### Fused Streaming Aggregate Executor (`executor_aggregate.rs`)
+- **`ProjAccum` accumulator enum**: COUNT, SUM, AVG (decomposed to SUM+COUNT), MIN, MAX
+  with proper type preservation (Int32 SUM stays Int32, not promoted to Float64)
+- **`encode_group_key()`**: Reusable buffer for GROUP BY key encoding into HashMap keys
+- **`exec_fused_aggregate()`**: Single-pass executor that handles WHERE filtering,
+  GROUP BY grouping, and aggregate computation in one DashMap traversal — supports
+  arbitrary expressions including CASE WHEN, BETWEEN, and complex predicates
+- **`is_fused_eligible()`**: Query shape detection to route eligible queries to the
+  fused path before fallback to general `exec_aggregate`
 
-- **`cmp_datum_values` direct dispatch** — Time, Decimal (normalized scale), UUID,
-  Bytea, Interval (microsecond approximation), and NULL ordering all handled via
-  native comparison. `format!()` fallback restricted to Jsonb, Array, and rare
-  cross-type comparisons.
-- **`cmp_datum_sort` with configurable NULL ordering** — NULLS FIRST / NULLS LAST
-  handled without allocation.
+#### Bounded Heap Top-K (`memtable.rs`)
+- **`scan_top_k_by_pk()`** rewritten with `BinaryHeap` bounded to K elements
+- For `ORDER BY id LIMIT 10` on 1M rows: from cloning+sorting all 1M PKs
+  (O(N log N)) to keeping only 10 PKs in memory (O(N log K))
 
-### Track C — Cluster Rebalancer Control & Metrics
+#### Integration (`executor_query.rs`)
+- Fused aggregate path wired into `exec_seq_scan` before the `scan()` fallback
+- `try_streaming_aggs` fast path for simple column-ref aggregates without GROUP BY/WHERE
+- Eligible queries: `has_agg || !group_by.is_empty()`, no window functions, no HAVING,
+  no grouping sets, no virtual rows, no CTE data, no correlated subquery filters
 
-- **`ShardRebalancer::pause()` / `resume()` / `is_paused()`** — SLA-safe pause
-  prevents new rebalance tasks without interrupting in-flight migrations.
-- **`ShardRebalancer::metrics_snapshot() -> RebalancerMetrics`** — point-in-time
-  snapshot: runs_completed, total_rows_migrated, is_running, is_paused,
-  last_imbalance_ratio, last_completed_tasks, last_failed_tasks, last_duration_ms,
-  shard_move_rate.
-- **`RebalancerMetrics`** exported publicly from falcon_cluster crate.
-- New tests: `test_resume_allows_rebalance`, `test_metrics_snapshot_consistency`.
+#### Benchmark Results (1M rows, 112 statements: DDL + 100 INSERT batches + queries)
 
-### Track D — Observability Enhancements (Prometheus)
+| Metric | Before | After | Improvement |
+|--------|--------|-------|-------------|
+| Total elapsed | 11,922 ms | 6,355 ms | **1.88x faster** |
+| INSERT phase | ~4,160 ms | ~2,943 ms | 1.41x faster |
+| Query phase | ~7,762 ms | ~2,800 ms | **2.77x faster** |
+| vs PostgreSQL | 1.96x slower | ~1.05x (near parity) | — |
 
-- **Segment streaming metrics** — `record_segment_streaming_metrics()`: handshakes,
-  segments_streamed, segment_bytes, tail_bytes, checksum_failures, error_rollbacks,
-  snapshots_created.
-- **Rebalancer metrics export** — `record_rebalancer_metrics()`: all 9
-  `RebalancerMetrics` fields mapped to `falcon_rebalancer_*` gauges.
+- **All existing tests pass** — 0 regressions
+- **No new tests required** — optimization-only changes to existing code paths
 
-### Track E — Benchmark Baseline & Evidence
+### Added — USTM (User-Space Tiered Memory) Engine (`falcon_storage::ustm`)
 
-- **`docs/benchmarks/v1.2_baseline.md`** — workloads W1–W5, hardware disclosure,
-  FalconDB config, v1.0 → v1.2 performance delta summary, throughput + latency
-  interpretation notes.
-- **`evidence/INDEX.md`** — E13 (v1.2 performance baseline), E14 (OS tuning guides),
-  E15 (cluster observability & rebalance controls).
+A complete replacement for mmap-based storage access. Gives FalconDB full control
+over memory residency, eviction, and I/O scheduling. Based on the design in
+`docs/design_ustm.md`.
 
----
+#### Core Modules (6 new files, `crates/falcon_storage/src/ustm/`)
 
-## [Unreleased]
+- **`page.rs`** — Core types: `PageId`, `PageHandle`, `PageData`, `AccessPriority`
+  (IndexInternal > HotRow > WarmScan > Cold), `Tier` enum, `PinGuard` (RAII unpin),
+  `fast_hash_pk()` for PK → PageId derivation. 7 tests.
+- **`lirs2.rs`** — LIRS-2 scan-resistant cache replacement algorithm. Classifies pages
+  into LIR (protected) and HIR (eviction candidate) sets. Prevents sequential scans
+  from polluting the cache. Configurable `lir_capacity` / `hir_resident_capacity` /
+  `hir_nonresident_capacity`. 9 tests.
+- **`io_scheduler.rs`** — Priority-based I/O scheduler with three queues:
+  Query (highest) > Prefetch > Background. `TokenBucket` rate limiter prevents
+  compaction/GC from starving foreground queries. 4 tests.
+- **`prefetcher.rs`** — Query-aware prefetcher. Receives `PrefetchSource` hints
+  (`SeqScan`, `IndexRangeScan`, `HashJoin`) from the executor, deduplicates requests,
+  and submits async I/O before data is explicitly requested. 7 tests.
+- **`zones.rs`** — Three-Zone Memory Manager:
+  - **Hot Zone**: MemTable pages + index internals. Pinned in DRAM, never evicted.
+  - **Warm Zone**: SST page cache. Managed by LIRS-2 eviction.
+  - **Cold Zone**: Disk-resident pages. Registered for future async fetch.
+  8 tests.
+- **`engine.rs`** — Top-level `UstmEngine` coordinator. Unified `fetch_pinned()` API
+  (Hot → Warm → Cold disk read). `alloc_hot()`, `insert_warm()`, `register_page()`,
+  `unregister_page()`, `prefetch_hint()`, `prefetch_tick()`, `stats()`, `shutdown()`.
+  10 tests.
+
+**Total: 45 new tests, all passing.**
+
+#### StorageEngine Integration
+
+- **`StorageEngine` struct** — new `ustm: Arc<UstmEngine>` field, initialized in all
+  4 constructors (`new`, `new_in_memory`, `new_in_memory_with_budget`,
+  `new_with_wal_options`). `recover()` inherits via `Self::new()`.
+- **`set_ustm_config(&UstmSectionConfig)`** — replace USTM engine from config at runtime.
+- **`ustm_stats()`** — expose `UstmStats` snapshot for observability.
+- **`shutdown()`** — graceful shutdown: `ustm.shutdown()` + WAL flush + stats log.
+
+#### DML Integration (`engine_dml.rs`)
+
+| Operation | Rowstore | LSM (`ENGINE=lsm`) |
+|-----------|----------|-------------------|
+| INSERT | Hot Zone (HotRow priority) | Warm Zone (disk-backed) |
+| UPDATE | Hot Zone refresh | Warm Zone refresh |
+| DELETE | Hot Zone write | Warm Zone evict (`unregister_page`) |
+| GET | Warm Zone LIRS-2 tracking | Warm Zone LIRS-2 tracking |
+| SCAN | SeqScan prefetch hint | SeqScan prefetch hint → SST path |
+
+#### DDL Integration (`engine_ddl.rs`)
+
+- **CREATE TABLE** → registers table metadata page in Hot Zone (`IndexInternal` priority, never evicted)
+- **DROP TABLE** → `unregister_page()` cleans up metadata page
+
+#### Configuration (`falcon_common::config`)
+
+New `[ustm]` section in `FalconConfig` / `falcon.toml`:
+
+```toml
+[ustm]
+enabled = true
+hot_capacity_bytes = 536870912       # 512 MB
+warm_capacity_bytes = 268435456      # 256 MB
+lirs_lir_capacity = 4096
+lirs_hir_capacity = 1024
+background_iops_limit = 500
+prefetch_iops_limit = 200
+prefetch_enabled = true
+page_size = 8192
+```
+
+`examples/primary.toml` updated with the `[ustm]` section.
+
+#### Server Integration (`falcon_server/src/main.rs`)
+
+`engine.set_ustm_config(&config.ustm)` called in both WAL-enabled and in-memory
+startup paths when `ustm.enabled = true`.
+
+- **USTM unit tests**: 45 pass, 0 failures
+- **Full workspace**: 2,643 pass, 0 failures (no regressions)
+
+### Added — v1.0 Commercial Release Gate (P1)
+- **README v1.0 positioning**: PG-compatible, distributed, memory-first, deterministic txn semantics OLTP
+- **ACID SQL-level tests**: atomicity (commit/rollback), consistency (PK/NOT NULL), isolation (snapshot), durability (6 tests)
+- **PG SQL whitelist tests**: INNER/LEFT JOIN, GROUP BY + aggregates, ORDER BY/LIMIT, UPSERT ON CONFLICT, UPDATE/DELETE RETURNING (7 tests)
+- **Unsupported feature errors**: CREATE TRIGGER, CREATE FUNCTION → `ErrorResponse` with SQLSTATE `0A000` (2 tests)
+- **Observability verification**: SHOW falcon.memory, falcon.nodes, falcon.replication_stats (3 tests)
+- **Fast-path metrics verification**: `fast_path_commits` / `slow_path_commits` exposed in txn_stats (1 test)
+- **v1.0 release CI gate**: `scripts/ci_v1_release_gate.sh` — unified Go/No-Go gate (20+ sub-gates)
+- **v1.0 scope documentation**: `docs/v1.0_scope.md` — full 7-section commercial checklist with verification matrix
+- **README "Not Supported" table**: 9 features with SQLSTATE codes and error messages
+
+### Added — v1.0 Isolation Module (B1–B10, ~135 tests)
+- B1: Explicit `TxnState::try_transition()` state machine with `TransitionResult` and `InvalidTransition` error (28 tests)
+- B3: Snapshot Isolation litmus tests — MVCC visibility at VersionChain + StorageEngine levels (35 tests)
+- B4: WAL-first durability — multi-table interleaved recovery, 3x idempotent replay, WAL-first ordering invariant (3 new, 13 total)
+- B5/B6: Admission backpressure — WAL backlog threshold, replication lag threshold, rejection counter (5 tests)
+- B7: Long-txn detection + kill — `long_running_txns()`, `kill_txn()`, `kill_long_running()` (9 tests)
+- B8: PG protocol corner cases — empty query, semicolons-only, syntax error, txn lifecycle, nonexistent tables, duplicate DDL (12 tests)
+- B9: DDL concurrency safety — concurrent create (same/different), truncate, drop+DML, index lifecycle (8 tests)
+- B10: CI isolation gate script (`scripts/ci_isolation_gate.sh`)
+- Documentation: `docs/v1.0_scope.md` — full checklist with test counts and locations
+
+### Added — v1.0 Phase 3: Enterprise Edition Features
+- Row-Level Security (RLS): `RlsPolicyManager` with permissive/restrictive policies, role-scoped targeting, superuser bypass (`falcon_common::rls`, 15 tests)
+- Transparent Data Encryption (TDE): `KeyManager` with PBKDF2 key derivation, DEK lifecycle, master key rotation (`falcon_storage::encryption`, 11 tests)
+- Table Partitioning: Range/Hash/List strategies with routing, pruning, attach/detach (`falcon_storage::partition`, 10 tests)
+- Point-in-Time Recovery (PITR): WAL archiving, base backups, restore points, coordinated replay (`falcon_storage::pitr`, 10 tests)
+- Change Data Capture (CDC): Replication slots, INSERT/UPDATE/DELETE/COMMIT events, bounded ring buffer (`falcon_storage::cdc`, 9 tests)
+
+### Added — Storage Hardening (7 modules, 61 tests)
+- Graded WAL error types with `WalReadError` and `CorruptionLog` (`falcon_storage::storage_error`, 6 tests)
+- Phased WAL recovery: Scan→Apply→Validate with `RecoveryModeGuard` (`falcon_storage::recovery`, 10 tests)
+- Resource-isolated compaction scheduling with `IoRateLimiter` and priority queue (`falcon_storage::compaction_scheduler`, 11 tests)
+- Unified memory budget: 5 categories, 3 escalation levels (Soft/Hard/Emergency) (`falcon_storage::memory_budget`, 10 tests)
+- GC safepoint unification with long-txn diagnostics and `LongTxnPolicy` (`falcon_storage::gc_safepoint`, 10 tests)
+- Offline diagnostic tools: `sst_verify`, `sst_dump`, `wal_inspect`, `wal_replay_dry_run` (`falcon_storage::storage_tools`, 6 tests)
+- Storage fault injection: 6 fault types with probabilistic triggering (`falcon_storage::storage_fault_injection`, 8 tests)
+- CI storage gate script (`scripts/ci_storage_gate.sh`)
+
+### Added — Distributed Hardening (6 modules, 62 tests)
+- Global epoch/fencing token with `EpochGuard` and `WriteToken` RAII proof (`falcon_cluster::epoch`, 13 tests)
+- Raft-managed cluster state machine with `ConsistentClusterState` (`falcon_cluster::consistent_state`, 8 tests)
+- Quorum/lease-driven leader authority with `LeaderLease` (`falcon_cluster::leader_lease`, 10 tests)
+- Shard migration state machine: Preparing→Copying→CatchingUp→Cutover→Completed (`falcon_cluster::migration`, 10 tests)
+- Cross-shard txn throttling with Queue/Reject policy (`falcon_cluster::cross_shard_throttle`, 7 tests)
+- Unified control-plane supervisor with `DistributedSupervisor` (`falcon_cluster::supervisor`, 9 tests)
+- 8 new Prometheus metric functions for distributed observability
+- CI distributed chaos script (`scripts/ci_distributed_chaos.sh`)
+
+### Added — FalconDB Native Protocol
+- `falcon_protocol_native` crate: binary protocol encode/decode for 17 message types, LZ4-style compression, type mapping (39 tests)
+- `falcon_native_server` crate: TCP server, session state machine, executor bridge, nonce anti-replay tracker (28 tests)
+- Protocol specification: `docs/native_protocol.md` (framing, handshake, auth, query, batch, error codes)
+- Protocol compatibility matrix: `docs/native_protocol_compat.md` (version negotiation, feature flags)
+- Golden test vectors: `tools/native-proto-spec/vectors/golden_vectors.json` (23 vectors)
+
+### Added — Java JDBC Driver (`clients/falcondb-jdbc/`)
+- JDBC interfaces: `FalconDriver`, `FalconConnection`, `FalconStatement`, `FalconPreparedStatement`, `FalconResultSet`, `FalconResultSetMetaData`, `FalconDataSource`
+- Native protocol client: `WireFormat`, `NativeConnection`, `FalconSQLException`
+- HA-aware failover: `ClusterTopologyProvider`, `PrimaryResolver`, `FailoverRetryPolicy`, `FailoverConnection`
+- HikariCP compatibility: `isValid(ping)`, `getNetworkTimeout`/`setNetworkTimeout`, `DataSource` properties
+- SPI registration: `META-INF/services/java.sql.Driver`
+- JDBC URL format: `jdbc:falcondb://host:port/database`
+- Driver compatibility matrix: `clients/falcondb-jdbc/COMPAT_MATRIX.md`
+
+### Added — CI Gate Scripts
+- `scripts/ci_native_jdbc_smoke.sh` — Rust + Java compile, clippy, test
+- `scripts/ci_native_perf_gate.sh` — Release build + protocol performance regression
+- `scripts/ci_native_failover_under_load.sh` — Epoch fencing + failover bench
+
+### Added — Commercial-Grade Hardening (P0/P1)
+- **P0-1**: Module status headers on all storage modules (`PRODUCTION`, `EXPERIMENTAL`, `STUB`)
+- **P0-2**: Golden path documentation on core write path (`TxnManager`, `MemTable`, `WAL`, `StorageEngine`, `wal_stream.rs`)
+- **P0-2**: TODO/FIXME/HACK audit — zero hits in core paths (`falcon_txn`, `falcon_storage` core, `falcon_cluster`)
+- **P1-1**: Cross-shard invariant `XS-5` (Timeout Rollback — no hanging locks) added to `consistency.rs`
+- **P1-1**: `CrossShardInvariant` enum with `all()` + `description()` for programmatic validation
+- **P1-1**: Doc tests on all 5 cross-shard invariant constants (XS-1 through XS-5)
+- **P1-1**: `sql_distributed_txn.rs` — 11 deterministic tests covering atomicity, at-most-once, coordinator crash recovery, participant crash recovery, timeout rollback
+- **P1-5-2**: `ci_failover_gate.sh` updated with distributed txn invariant gate
+- **P2**: README "Planned — NOT Implemented" table explicitly marking 9 features as STUB/EXPERIMENTAL/not-started
+
+### Fixed — PG Protocol Completion
+- Cancel request now fully functional: `CancellationRegistry` with `AtomicBool` polling (50ms), `BackendKeyData` handshake, both simple and extended query (Execute) paths, SQLSTATE `57014` (5 new tests)
+- LISTEN/NOTIFY fully implemented: `NotificationHub` broadcast hub, per-session `SessionNotifications`, LISTEN/UNLISTEN/NOTIFY/UNLISTEN * commands, `NotificationResponse` delivery before `ReadyForQuery` (6 tests)
+- Logical replication protocol: `replication=database` startup detection, `IDENTIFY_SYSTEM`, `CREATE_REPLICATION_SLOT <name> LOGICAL <plugin>`, `DROP_REPLICATION_SLOT`, `START_REPLICATION SLOT <name> LOGICAL <lsn>`, CopyBoth streaming with XLogData/keepalive/StandbyStatusUpdate, backed by CDC infrastructure (18 new tests)
+
+### Test Count
+- **2,262 tests** passing, **0 failures** (was 1,976 at 1.0.0-rc.1)
 
 ### Added — Benchmark Suite
 
@@ -351,10 +492,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`evidence/INDEX.md`** — E13 (v1.2 baseline), E14 (OS tuning guides), E15 (cluster
   observability) evidence categories added.
 
----
-
-## [Unreleased] — TDE, Docker, Linux Packaging
-
 ### Added — Transparent Data Encryption (TDE)
 
 - **Real AES-256-GCM encryption** in `falcon_storage::encryption` — replaces XOR stub.
@@ -388,11 +525,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **`docs/INDEX.md`** — comprehensive documentation index organizing 90+ files by topic.
 
----
-
-## [Unreleased] — Public Reproducible Benchmark Matrix (4 Engines × 5 Workloads)
-
-### Added — Benchmark Infrastructure
+### Added — Benchmark Infrastructure (4-Engine Matrix)
 
 - **4-engine benchmark matrix**: FalconDB vs PostgreSQL vs VoltDB vs SingleStore
   on identical hardware, identical workloads, identical measurement methodology.
@@ -418,10 +551,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   guides, configuration parity table, fair-comparison policy.
 - **`benchmarks/RESULTS.md`** — expanded to 4-engine × 5-workload matrix template
   with per-workload descriptions and engine characteristics table.
-
----
-
-## [Unreleased] — Distributed & Failover Hardening ("无脑稳")
 
 ### Added — Production-Grade Failover Guards
 
@@ -450,10 +579,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `detector.evaluate()` for accurate primary-failed detection.
 - **`falcon_cluster/src/lib.rs`** — exports all `dist_hardening` types.
 
----
-
-## [Unreleased] — Disk Spill & Memory Pressure Hardening
-
 ### Added — Production-Grade Spill Infrastructure
 
 - **`SpillMetrics`** in `external_sort.rs` — 6 observable counters:
@@ -480,10 +605,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `spill_metrics()` public method.
 - **`falcon_executor/src/executor_aggregate.rs`** — hash aggregation group count
   guard wired into `map_reduce_visible` GROUP BY path.
-
----
-
-## [Unreleased] — Failover × In-Flight Txn Determinism Hardening
 
 ### Added — Stronger Failover Evidence (P0-2b)
 
@@ -512,9 +633,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`docs/failover_determinism_report.md`** — added FDE evidence section, updated
   source code table, expanded conclusion with partition/conflict/replay guarantees
 
----
-
-## [Unreleased] — GA Release Gate
+### GA Release Gate
 
 > **Theme**: Formal verification that FalconDB meets all P0 requirements for a
 > stable GA release: transaction correctness, WAL durability, failover behavior,
@@ -552,6 +671,59 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **`scripts/ci_ga_release_gate.sh`** — unified Go/No-Go gate script covering
   all P0/P1 gates plus build, clippy, full test suite, and pre-existing gates
+
+---
+
+## [1.2.1] — Production Readiness, Executor Optimization, Cluster Observability
+
+### Track A — OS-Level Production Tuning
+
+- **`docs/os/windows_server_2022.md`** — Windows Server 2022 tuning guide covering
+  IOCP backend, NTFS vs ReFS, antivirus exclusions, Large Pages, TCP RSS/autotuning,
+  Windows Service deployment checklist, security baseline (ACLs, service account).
+  Includes 10-minute production checklist.
+- **`docs/os/rhel_9.md`** — RHEL 9 tuning guide covering XFS/ext4 selection,
+  io_uring (with privilege constraints), NUMA pinning, THP/jemalloc, systemd +
+  cgroup v2 resource control, BBR/TCP tuning, SELinux and firewall configuration.
+  Includes 10-minute production checklist.
+
+### Track B — Executor Hot-Path Optimization
+
+- **`cmp_datum_values` direct dispatch** — Time, Decimal (normalized scale), UUID,
+  Bytea, Interval (microsecond approximation), and NULL ordering all handled via
+  native comparison. `format!()` fallback restricted to Jsonb, Array, and rare
+  cross-type comparisons.
+- **`cmp_datum_sort` with configurable NULL ordering** — NULLS FIRST / NULLS LAST
+  handled without allocation.
+
+### Track C — Cluster Rebalancer Control & Metrics
+
+- **`ShardRebalancer::pause()` / `resume()` / `is_paused()`** — SLA-safe pause
+  prevents new rebalance tasks without interrupting in-flight migrations.
+- **`ShardRebalancer::metrics_snapshot() -> RebalancerMetrics`** — point-in-time
+  snapshot: runs_completed, total_rows_migrated, is_running, is_paused,
+  last_imbalance_ratio, last_completed_tasks, last_failed_tasks, last_duration_ms,
+  shard_move_rate.
+- **`RebalancerMetrics`** exported publicly from falcon_cluster crate.
+- New tests: `test_resume_allows_rebalance`, `test_metrics_snapshot_consistency`.
+
+### Track D — Observability Enhancements (Prometheus)
+
+- **Segment streaming metrics** — `record_segment_streaming_metrics()`: handshakes,
+  segments_streamed, segment_bytes, tail_bytes, checksum_failures, error_rollbacks,
+  snapshots_created.
+- **Rebalancer metrics export** — `record_rebalancer_metrics()`: all 9
+  `RebalancerMetrics` fields mapped to `falcon_rebalancer_*` gauges.
+
+### Track E — Benchmark Baseline & Evidence
+
+- **`docs/benchmarks/v1.2_baseline.md`** — workloads W1–W5, hardware disclosure,
+  FalconDB config, v1.0 → v1.2 performance delta summary, throughput + latency
+  interpretation notes.
+- **`evidence/INDEX.md`** — E13 (v1.2 performance baseline), E14 (OS tuning guides),
+  E15 (cluster observability & rebalance controls).
+
+---
 
 ## [1.2.0] — Commercial-Grade Readiness (P0 + P1 + P2) + Segment-Level Zstd Compression
 
@@ -1249,154 +1421,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [Unreleased] — Query Performance Optimization
-
-### Improved — 1M Row Scan & Aggregate Performance (1.83x overall speedup)
-
-Systematic optimization of full table scans, ORDER BY with LIMIT, and aggregate queries
-on large datasets. Benchmarked on 1M row bulk insert + query workload, achieving near-parity
-with PostgreSQL (6.4s vs PG 6.1s).
-
-#### MVCC Visibility Fast Path (`mvcc.rs`)
-- **Arc-clone elimination**: All 5 hot MVCC methods (`read_for_txn`, `read_committed`,
-  `is_visible`, `with_visible_data`, `has_committed_write_after`) now check the head
-  version directly through the `RwLock` read guard reference, avoiding an `Arc::clone`
-  for the common single-version case (1M fewer atomic inc/dec per scan)
-- **Zero-copy row access**: New `with_visible_data()` method calls a closure with
-  `&OwnedRow` reference, enabling downstream consumers to read row data without cloning
-
-#### Zero-Copy Row Iteration (`memtable.rs`, `engine_dml.rs`)
-- **`for_each_visible()`**: Streams through DashMap entries calling a closure with
-  `&OwnedRow` references — no row materialization or Vec allocation
-- **`compute_simple_aggs()`**: Single-pass streaming aggregates (COUNT/SUM/MIN/MAX)
-  directly over MVCC chains without cloning any row data
-
-#### Fused Streaming Aggregate Executor (`executor_aggregate.rs`)
-- **`ProjAccum` accumulator enum**: COUNT, SUM, AVG (decomposed to SUM+COUNT), MIN, MAX
-  with proper type preservation (Int32 SUM stays Int32, not promoted to Float64)
-- **`encode_group_key()`**: Reusable buffer for GROUP BY key encoding into HashMap keys
-- **`exec_fused_aggregate()`**: Single-pass executor that handles WHERE filtering,
-  GROUP BY grouping, and aggregate computation in one DashMap traversal — supports
-  arbitrary expressions including CASE WHEN, BETWEEN, and complex predicates
-- **`is_fused_eligible()`**: Query shape detection to route eligible queries to the
-  fused path before fallback to general `exec_aggregate`
-
-#### Bounded Heap Top-K (`memtable.rs`)
-- **`scan_top_k_by_pk()`** rewritten with `BinaryHeap` bounded to K elements
-- For `ORDER BY id LIMIT 10` on 1M rows: from cloning+sorting all 1M PKs
-  (O(N log N)) to keeping only 10 PKs in memory (O(N log K))
-
-#### Integration (`executor_query.rs`)
-- Fused aggregate path wired into `exec_seq_scan` before the `scan()` fallback
-- `try_streaming_aggs` fast path for simple column-ref aggregates without GROUP BY/WHERE
-- Eligible queries: `has_agg || !group_by.is_empty()`, no window functions, no HAVING,
-  no grouping sets, no virtual rows, no CTE data, no correlated subquery filters
-
-#### Benchmark Results (1M rows, 112 statements: DDL + 100 INSERT batches + queries)
-
-| Metric | Before | After | Improvement |
-|--------|--------|-------|-------------|
-| Total elapsed | 11,922 ms | 6,355 ms | **1.88x faster** |
-| INSERT phase | ~4,160 ms | ~2,943 ms | 1.41x faster |
-| Query phase | ~7,762 ms | ~2,800 ms | **2.77x faster** |
-| vs PostgreSQL | 1.96x slower | ~1.05x (near parity) | — |
-
-### Verification
-- **All existing tests pass** — 0 regressions
-- **No new tests required** — optimization-only changes to existing code paths
-
----
-
-## [Unreleased] — USTM Engine & StorageEngine Integration
-
-### Added — USTM (User-Space Tiered Memory) Engine (`falcon_storage::ustm`)
-
-A complete replacement for mmap-based storage access. Gives FalconDB full control
-over memory residency, eviction, and I/O scheduling. Based on the design in
-`docs/design_ustm.md`.
-
-#### Core Modules (6 new files, `crates/falcon_storage/src/ustm/`)
-
-- **`page.rs`** — Core types: `PageId`, `PageHandle`, `PageData`, `AccessPriority`
-  (IndexInternal > HotRow > WarmScan > Cold), `Tier` enum, `PinGuard` (RAII unpin),
-  `fast_hash_pk()` for PK → PageId derivation. 7 tests.
-- **`lirs2.rs`** — LIRS-2 scan-resistant cache replacement algorithm. Classifies pages
-  into LIR (protected) and HIR (eviction candidate) sets. Prevents sequential scans
-  from polluting the cache. Configurable `lir_capacity` / `hir_resident_capacity` /
-  `hir_nonresident_capacity`. 9 tests.
-- **`io_scheduler.rs`** — Priority-based I/O scheduler with three queues:
-  Query (highest) > Prefetch > Background. `TokenBucket` rate limiter prevents
-  compaction/GC from starving foreground queries. 4 tests.
-- **`prefetcher.rs`** — Query-aware prefetcher. Receives `PrefetchSource` hints
-  (`SeqScan`, `IndexRangeScan`, `HashJoin`) from the executor, deduplicates requests,
-  and submits async I/O before data is explicitly requested. 7 tests.
-- **`zones.rs`** — Three-Zone Memory Manager:
-  - **Hot Zone**: MemTable pages + index internals. Pinned in DRAM, never evicted.
-  - **Warm Zone**: SST page cache. Managed by LIRS-2 eviction.
-  - **Cold Zone**: Disk-resident pages. Registered for future async fetch.
-  8 tests.
-- **`engine.rs`** — Top-level `UstmEngine` coordinator. Unified `fetch_pinned()` API
-  (Hot → Warm → Cold disk read). `alloc_hot()`, `insert_warm()`, `register_page()`,
-  `unregister_page()`, `prefetch_hint()`, `prefetch_tick()`, `stats()`, `shutdown()`.
-  10 tests.
-
-**Total: 45 new tests, all passing.**
-
-#### StorageEngine Integration
-
-- **`StorageEngine` struct** — new `ustm: Arc<UstmEngine>` field, initialized in all
-  4 constructors (`new`, `new_in_memory`, `new_in_memory_with_budget`,
-  `new_with_wal_options`). `recover()` inherits via `Self::new()`.
-- **`set_ustm_config(&UstmSectionConfig)`** — replace USTM engine from config at runtime.
-- **`ustm_stats()`** — expose `UstmStats` snapshot for observability.
-- **`shutdown()`** — graceful shutdown: `ustm.shutdown()` + WAL flush + stats log.
-
-#### DML Integration (`engine_dml.rs`)
-
-| Operation | Rowstore | LSM (`ENGINE=lsm`) |
-|-----------|----------|-------------------|
-| INSERT | Hot Zone (HotRow priority) | Warm Zone (disk-backed) |
-| UPDATE | Hot Zone refresh | Warm Zone refresh |
-| DELETE | Hot Zone write | Warm Zone evict (`unregister_page`) |
-| GET | Warm Zone LIRS-2 tracking | Warm Zone LIRS-2 tracking |
-| SCAN | SeqScan prefetch hint | SeqScan prefetch hint → SST path |
-
-#### DDL Integration (`engine_ddl.rs`)
-
-- **CREATE TABLE** → registers table metadata page in Hot Zone (`IndexInternal` priority, never evicted)
-- **DROP TABLE** → `unregister_page()` cleans up metadata page
-
-#### Configuration (`falcon_common::config`)
-
-New `[ustm]` section in `FalconConfig` / `falcon.toml`:
-
-```toml
-[ustm]
-enabled = true
-hot_capacity_bytes = 536870912       # 512 MB
-warm_capacity_bytes = 268435456      # 256 MB
-lirs_lir_capacity = 4096
-lirs_hir_capacity = 1024
-background_iops_limit = 500
-prefetch_iops_limit = 200
-prefetch_enabled = true
-page_size = 8192
-```
-
-`examples/primary.toml` updated with the `[ustm]` section.
-
-#### Server Integration (`falcon_server/src/main.rs`)
-
-`engine.set_ustm_config(&config.ustm)` called in both WAL-enabled and in-memory
-startup paths when `ustm.enabled = true`.
-
-### Verification
-
-- **USTM unit tests**: 45 pass, 0 failures
-- **Full workspace**: 2,643 pass, 0 failures (no regressions)
-
----
-
 ## [1.0.3] — 2026-02-22 — Stability, Determinism & Trust Hardening (LTS Patch)
 
 This is a **stability-only hardening release**. No new features, no new SQL syntax,
@@ -1548,96 +1572,33 @@ Safe for rolling upgrade from v1.0.0. No rollback required for clients.
 
 ---
 
-## [Unreleased]
+## [1.0.0] — GA Release
 
-### Added — v1.0 Commercial Release Gate (P1)
-- **README v1.0 positioning**: PG-compatible, distributed, memory-first, deterministic txn semantics OLTP
-- **ACID SQL-level tests**: atomicity (commit/rollback), consistency (PK/NOT NULL), isolation (snapshot), durability (6 tests)
-- **PG SQL whitelist tests**: INNER/LEFT JOIN, GROUP BY + aggregates, ORDER BY/LIMIT, UPSERT ON CONFLICT, UPDATE/DELETE RETURNING (7 tests)
-- **Unsupported feature errors**: CREATE TRIGGER, CREATE FUNCTION → `ErrorResponse` with SQLSTATE `0A000` (2 tests)
-- **Observability verification**: SHOW falcon.memory, falcon.nodes, falcon.replication_stats (3 tests)
-- **Fast-path metrics verification**: `fast_path_commits` / `slow_path_commits` exposed in txn_stats (1 test)
-- **v1.0 release CI gate**: `scripts/ci_v1_release_gate.sh` — unified Go/No-Go gate (20+ sub-gates)
-- **v1.0 scope documentation**: `docs/v1.0_scope.md` — full 7-section commercial checklist with verification matrix
-- **README "Not Supported" table**: 9 features with SQLSTATE codes and error messages
+### Added — SQL Compatibility
 
-### Added — v1.0 Isolation Module (B1–B10, ~135 tests)
-- B1: Explicit `TxnState::try_transition()` state machine with `TransitionResult` and `InvalidTransition` error (28 tests)
-- B3: Snapshot Isolation litmus tests — MVCC visibility at VersionChain + StorageEngine levels (35 tests)
-- B4: WAL-first durability — multi-table interleaved recovery, 3x idempotent replay, WAL-first ordering invariant (3 new, 13 total)
-- B5/B6: Admission backpressure — WAL backlog threshold, replication lag threshold, rejection counter (5 tests)
-- B7: Long-txn detection + kill — `long_running_txns()`, `kill_txn()`, `kill_long_running()` (9 tests)
-- B8: PG protocol corner cases — empty query, semicolons-only, syntax error, txn lifecycle, nonexistent tables, duplicate DDL (12 tests)
-- B9: DDL concurrency safety — concurrent create (same/different), truncate, drop+DML, index lifecycle (8 tests)
-- B10: CI isolation gate script (`scripts/ci_isolation_gate.sh`)
-- Documentation: `docs/v1.0_scope.md` — full checklist with test counts and locations
+- **SQL-level PREPARE/EXECUTE/DEALLOCATE** — plan-based execution path using
+  `prepare_statement()` for physical plan generation and typed parameter inference.
+  `text_params_to_datum` helper converts SQL EXECUTE text params to typed Datum values.
+  Falls back to legacy text substitution when planning is unavailable.
+- **SMALLINT (INT2) data type** — `DataType::Int16` across schema, DDL, parser, PG OID (21),
+  wire protocol (text + binary decode), COPY, CAST. Runtime values widened to `Datum::Int32`.
+- **REAL (FLOAT4) data type** — `DataType::Float32` across schema, DDL, parser, PG OID (700),
+  wire protocol (text + binary decode), COPY, CAST. Runtime values widened to `Datum::Float64`.
 
-### Added — v1.0 Phase 3: Enterprise Edition Features
-- Row-Level Security (RLS): `RlsPolicyManager` with permissive/restrictive policies, role-scoped targeting, superuser bypass (`falcon_common::rls`, 15 tests)
-- Transparent Data Encryption (TDE): `KeyManager` with PBKDF2 key derivation, DEK lifecycle, master key rotation (`falcon_storage::encryption`, 11 tests)
-- Table Partitioning: Range/Hash/List strategies with routing, pruning, attach/detach (`falcon_storage::partition`, 10 tests)
-- Point-in-Time Recovery (PITR): WAL archiving, base backups, restore points, coordinated replay (`falcon_storage::pitr`, 10 tests)
-- Change Data Capture (CDC): Replication slots, INSERT/UPDATE/DELETE/COMMIT events, bounded ring buffer (`falcon_storage::cdc`, 9 tests)
+### Added — Linux Packaging
 
-### Added — Storage Hardening (7 modules, 61 tests)
-- Graded WAL error types with `WalReadError` and `CorruptionLog` (`falcon_storage::storage_error`, 6 tests)
-- Phased WAL recovery: Scan→Apply→Validate with `RecoveryModeGuard` (`falcon_storage::recovery`, 10 tests)
-- Resource-isolated compaction scheduling with `IoRateLimiter` and priority queue (`falcon_storage::compaction_scheduler`, 11 tests)
-- Unified memory budget: 5 categories, 3 escalation levels (Soft/Hard/Emergency) (`falcon_storage::memory_budget`, 10 tests)
-- GC safepoint unification with long-txn diagnostics and `LongTxnPolicy` (`falcon_storage::gc_safepoint`, 10 tests)
-- Offline diagnostic tools: `sst_verify`, `sst_dump`, `wal_inspect`, `wal_replay_dry_run` (`falcon_storage::storage_tools`, 6 tests)
-- Storage fault injection: 6 fault types with probabilistic triggering (`falcon_storage::storage_fault_injection`, 8 tests)
-- CI storage gate script (`scripts/ci_storage_gate.sh`)
+- **`packaging/systemd/falcondb.service`** — production-hardened systemd unit with
+  `ProtectSystem=strict`, `PrivateDevices`, `OOMScoreAdjust=-900`, journald logging.
+- **Debian packaging** — `packaging/debian/` (control, postinst, prerm, conffiles) +
+  `scripts/build_deb.sh` builder. Creates `falcondb` system user, enables systemd service.
+- **RPM packaging** — `packaging/rpm/falcondb.spec` + `scripts/build_rpm.sh` builder.
+  Pre-install user creation, `%systemd_post`/`%systemd_preun` macros.
+- **`docs/INSTALL_LINUX.md`** — installation guide for .deb, .rpm, and tarball methods.
 
-### Added — Distributed Hardening (6 modules, 62 tests)
-- Global epoch/fencing token with `EpochGuard` and `WriteToken` RAII proof (`falcon_cluster::epoch`, 13 tests)
-- Raft-managed cluster state machine with `ConsistentClusterState` (`falcon_cluster::consistent_state`, 8 tests)
-- Quorum/lease-driven leader authority with `LeaderLease` (`falcon_cluster::leader_lease`, 10 tests)
-- Shard migration state machine: Preparing→Copying→CatchingUp→Cutover→Completed (`falcon_cluster::migration`, 10 tests)
-- Cross-shard txn throttling with Queue/Reject policy (`falcon_cluster::cross_shard_throttle`, 7 tests)
-- Unified control-plane supervisor with `DistributedSupervisor` (`falcon_cluster::supervisor`, 9 tests)
-- 8 new Prometheus metric functions for distributed observability
-- CI distributed chaos script (`scripts/ci_distributed_chaos.sh`)
+### Changed — Release Pipeline
 
-### Added — FalconDB Native Protocol
-- `falcon_protocol_native` crate: binary protocol encode/decode for 17 message types, LZ4-style compression, type mapping (39 tests)
-- `falcon_native_server` crate: TCP server, session state machine, executor bridge, nonce anti-replay tracker (28 tests)
-- Protocol specification: `docs/native_protocol.md` (framing, handshake, auth, query, batch, error codes)
-- Protocol compatibility matrix: `docs/native_protocol_compat.md` (version negotiation, feature flags)
-- Golden test vectors: `tools/native-proto-spec/vectors/golden_vectors.json` (23 vectors)
-
-### Added — Java JDBC Driver (`clients/falcondb-jdbc/`)
-- JDBC interfaces: `FalconDriver`, `FalconConnection`, `FalconStatement`, `FalconPreparedStatement`, `FalconResultSet`, `FalconResultSetMetaData`, `FalconDataSource`
-- Native protocol client: `WireFormat`, `NativeConnection`, `FalconSQLException`
-- HA-aware failover: `ClusterTopologyProvider`, `PrimaryResolver`, `FailoverRetryPolicy`, `FailoverConnection`
-- HikariCP compatibility: `isValid(ping)`, `getNetworkTimeout`/`setNetworkTimeout`, `DataSource` properties
-- SPI registration: `META-INF/services/java.sql.Driver`
-- JDBC URL format: `jdbc:falcondb://host:port/database`
-- Driver compatibility matrix: `clients/falcondb-jdbc/COMPAT_MATRIX.md`
-
-### Added — CI Gate Scripts
-- `scripts/ci_native_jdbc_smoke.sh` — Rust + Java compile, clippy, test
-- `scripts/ci_native_perf_gate.sh` — Release build + protocol performance regression
-- `scripts/ci_native_failover_under_load.sh` — Epoch fencing + failover bench
-
-### Added — Commercial-Grade Hardening (P0/P1)
-- **P0-1**: Module status headers on all storage modules (`PRODUCTION`, `EXPERIMENTAL`, `STUB`)
-- **P0-2**: Golden path documentation on core write path (`TxnManager`, `MemTable`, `WAL`, `StorageEngine`, `wal_stream.rs`)
-- **P0-2**: TODO/FIXME/HACK audit — zero hits in core paths (`falcon_txn`, `falcon_storage` core, `falcon_cluster`)
-- **P1-1**: Cross-shard invariant `XS-5` (Timeout Rollback — no hanging locks) added to `consistency.rs`
-- **P1-1**: `CrossShardInvariant` enum with `all()` + `description()` for programmatic validation
-- **P1-1**: Doc tests on all 5 cross-shard invariant constants (XS-1 through XS-5)
-- **P1-1**: `sql_distributed_txn.rs` — 11 deterministic tests covering atomicity, at-most-once, coordinator crash recovery, participant crash recovery, timeout rollback
-- **P1-5-2**: `ci_failover_gate.sh` updated with distributed txn invariant gate
-- **P2**: README "Planned — NOT Implemented" table explicitly marking 9 features as STUB/EXPERIMENTAL/not-started
-
-### Fixed — PG Protocol Completion
-- Cancel request now fully functional: `CancellationRegistry` with `AtomicBool` polling (50ms), `BackendKeyData` handshake, both simple and extended query (Execute) paths, SQLSTATE `57014` (5 new tests)
-- LISTEN/NOTIFY fully implemented: `NotificationHub` broadcast hub, per-session `SessionNotifications`, LISTEN/UNLISTEN/NOTIFY/UNLISTEN * commands, `NotificationResponse` delivery before `ReadyForQuery` (6 tests)
-- Logical replication protocol: `replication=database` startup detection, `IDENTIFY_SYSTEM`, `CREATE_REPLICATION_SLOT <name> LOGICAL <plugin>`, `DROP_REPLICATION_SLOT`, `START_REPLICATION SLOT <name> LOGICAL <lsn>`, CopyBoth streaming with XLogData/keepalive/StandbyStatusUpdate, backed by CDC infrastructure (18 new tests)
-
-### Test Count
-- **2,262 tests** passing, **0 failures** (was 1,976 at 1.0.0-rc.1)
+- **`.github/workflows/release.yml`** — Linux build job now produces .tar.gz, .deb, and .rpm
+  artifacts via dedicated build scripts. All three uploaded to GitHub Releases.
 
 ---
 

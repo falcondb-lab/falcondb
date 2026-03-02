@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Current config schema version. Bump when config format changes.
-pub const CURRENT_CONFIG_VERSION: u32 = 4;
+pub const CURRENT_CONFIG_VERSION: u32 = 5;
 
 /// Top-level server configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,9 +51,96 @@ pub struct FalconConfig {
     /// Active when `replication.role = "raft_member"`.
     #[serde(default)]
     pub raft: RaftConfig,
+    /// v1.2.1: Automatic shard rebalancing configuration.
+    #[serde(default)]
+    pub rebalance: RebalanceSectionConfig,
 }
 
 const fn default_config_version() -> u32 { CURRENT_CONFIG_VERSION }
+
+/// Automatic shard rebalancing configuration section in falcon.toml.
+///
+/// When enabled, a background task periodically evaluates shard loads and
+/// migrates rows in small non-blocking batches to keep shards balanced.
+///
+/// Example:
+/// ```toml
+/// [rebalance]
+/// enabled = true
+/// check_interval_ms = 30000
+/// imbalance_threshold = 1.25
+/// batch_size = 512
+/// min_donor_rows = 100
+/// cooldown_ms = 5000
+/// start_paused = false
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RebalanceSectionConfig {
+    /// Enable automatic shard rebalancing (default: false).
+    #[serde(default)]
+    pub enabled: bool,
+    /// How often (ms) the rebalancer evaluates shard loads (default: 30000 = 30s).
+    #[serde(default = "default_rebalance_check_interval_ms")]
+    pub check_interval_ms: u64,
+    /// Trigger rebalancing when max_shard_rows > threshold × avg_shard_rows.
+    /// E.g. 1.25 means 25% above average triggers a move. Default: 1.25.
+    #[serde(default = "default_rebalance_imbalance_threshold")]
+    pub imbalance_threshold: f64,
+    /// Number of rows to migrate per batch (default: 512).
+    /// Keeping this moderate allows interleaving with concurrent DML.
+    #[serde(default = "default_rebalance_batch_size")]
+    pub batch_size: usize,
+    /// Minimum rows a shard must have before it can donate rows (default: 100).
+    /// Avoids thrashing tiny shards.
+    #[serde(default = "default_rebalance_min_donor_rows")]
+    pub min_donor_rows: u64,
+    /// Cooldown (ms) between successive rebalance runs (default: 5000).
+    /// Prevents oscillation.
+    #[serde(default = "default_rebalance_cooldown_ms")]
+    pub cooldown_ms: u64,
+    /// Start in paused state; requires manual resume via admin API (default: false).
+    #[serde(default)]
+    pub start_paused: bool,
+}
+
+const fn default_rebalance_check_interval_ms() -> u64 { 30_000 }
+fn default_rebalance_imbalance_threshold() -> f64 { 1.25 }
+const fn default_rebalance_batch_size() -> usize { 512 }
+const fn default_rebalance_min_donor_rows() -> u64 { 100 }
+const fn default_rebalance_cooldown_ms() -> u64 { 5_000 }
+
+impl Default for RebalanceSectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            check_interval_ms: default_rebalance_check_interval_ms(),
+            imbalance_threshold: default_rebalance_imbalance_threshold(),
+            batch_size: default_rebalance_batch_size(),
+            min_donor_rows: default_rebalance_min_donor_rows(),
+            cooldown_ms: default_rebalance_cooldown_ms(),
+            start_paused: false,
+        }
+    }
+}
+
+impl RebalanceSectionConfig {
+    /// Validate the rebalance configuration.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.imbalance_threshold < 1.0 {
+            return Err(format!(
+                "rebalance.imbalance_threshold must be >= 1.0, got {}",
+                self.imbalance_threshold
+            ));
+        }
+        if self.enabled && self.batch_size == 0 {
+            return Err("rebalance.batch_size must be >= 1 when enabled".into());
+        }
+        if self.enabled && self.check_interval_ms == 0 {
+            return Err("rebalance.check_interval_ms must be >= 1 when enabled".into());
+        }
+        Ok(())
+    }
+}
 
 /// Change Data Capture (CDC) configuration section in falcon.toml.
 ///
@@ -1008,6 +1095,7 @@ impl Default for FalconConfig {
             multi_tenant: MultiTenantConfig::default(),
             tde: TdeConfig::default(),
             raft: RaftConfig::default(),
+            rebalance: RebalanceSectionConfig::default(),
         }
     }
 }
@@ -1379,5 +1467,89 @@ slave_mode = true
         let snap = checker.snapshot();
         assert_eq!(snap.total_registered, 6);
         assert_eq!(snap.fields.len(), 6);
+    }
+
+    // ── RebalanceSectionConfig tests ──
+
+    #[test]
+    fn test_rebalance_default_valid() {
+        let config = RebalanceSectionConfig::default();
+        assert!(config.validate().is_ok());
+        assert!(!config.enabled);
+        assert_eq!(config.check_interval_ms, 30_000);
+        assert!((config.imbalance_threshold - 1.25).abs() < f64::EPSILON);
+        assert_eq!(config.batch_size, 512);
+        assert_eq!(config.min_donor_rows, 100);
+        assert_eq!(config.cooldown_ms, 5_000);
+        assert!(!config.start_paused);
+    }
+
+    #[test]
+    fn test_rebalance_threshold_below_one_rejected() {
+        let mut config = RebalanceSectionConfig::default();
+        config.enabled = true;
+        config.imbalance_threshold = 0.5;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_rebalance_zero_batch_size_rejected_when_enabled() {
+        let mut config = RebalanceSectionConfig::default();
+        config.enabled = true;
+        config.batch_size = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_rebalance_zero_batch_size_ok_when_disabled() {
+        let mut config = RebalanceSectionConfig::default();
+        config.enabled = false;
+        config.batch_size = 0;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_rebalance_zero_interval_rejected_when_enabled() {
+        let mut config = RebalanceSectionConfig::default();
+        config.enabled = true;
+        config.check_interval_ms = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_rebalance_toml_deserialization() {
+        let toml_str = r#"
+enabled = true
+check_interval_ms = 15000
+imbalance_threshold = 1.5
+batch_size = 256
+min_donor_rows = 50
+cooldown_ms = 10000
+start_paused = true
+"#;
+        let config: RebalanceSectionConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.check_interval_ms, 15_000);
+        assert!((config.imbalance_threshold - 1.5).abs() < f64::EPSILON);
+        assert_eq!(config.batch_size, 256);
+        assert_eq!(config.min_donor_rows, 50);
+        assert_eq!(config.cooldown_ms, 10_000);
+        assert!(config.start_paused);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_rebalance_toml_defaults() {
+        let toml_str = "";
+        let config: RebalanceSectionConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.enabled);
+        assert_eq!(config.batch_size, 512);
+    }
+
+    #[test]
+    fn test_falcon_config_with_rebalance_section() {
+        let config = FalconConfig::default();
+        assert!(!config.rebalance.enabled);
+        assert!(config.rebalance.validate().is_ok());
     }
 }

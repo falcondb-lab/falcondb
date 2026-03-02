@@ -68,39 +68,26 @@ impl fmt::Display for RecoveryTarget {
 /// Metadata for a base backup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BaseBackup {
-    /// Unique backup label.
     pub label: String,
-    /// LSN at the start of the backup.
     pub start_lsn: Lsn,
-    /// LSN at the end of the backup (after pg_stop_backup equivalent).
     pub end_lsn: Lsn,
-    /// Wall-clock time when the backup started.
     pub start_time_ms: u64,
-    /// Wall-clock time when the backup finished.
     pub end_time_ms: u64,
-    /// Path to the backup data directory.
     pub backup_path: PathBuf,
-    /// Size in bytes.
     pub size_bytes: u64,
-    /// Whether the backup is consistent (all WAL between start/end is included).
+    /// All WAL between start/end LSN is included.
     pub consistent: bool,
 }
 
 /// Metadata for an archived WAL segment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchivedSegment {
-    /// Segment filename (e.g., "falcon_000001.wal").
     pub filename: String,
-    /// First LSN in this segment.
     pub start_lsn: Lsn,
-    /// Last LSN in this segment.
     pub end_lsn: Lsn,
-    /// Wall-clock time range covered by records in this segment.
     pub earliest_time_ms: u64,
     pub latest_time_ms: u64,
-    /// Archive path.
     pub archive_path: PathBuf,
-    /// Segment size in bytes.
     pub size_bytes: u64,
 }
 
@@ -189,20 +176,33 @@ impl WalArchiver {
         self.enabled
     }
 
-    /// Archive a completed WAL segment.
+    /// Archive a completed WAL segment by copying it to the archive directory.
+    ///
+    /// `source_path` is the path to the WAL segment file on the local filesystem.
+    /// The file is copied (not moved) so the original remains available for
+    /// crash-recovery replay until it is explicitly recycled.
+    ///
+    /// Returns `Err` if the archive directory cannot be created or the copy fails.
     pub fn archive_segment(
         &mut self,
+        source_path: &Path,
         filename: &str,
         start_lsn: Lsn,
         end_lsn: Lsn,
         size_bytes: u64,
-    ) -> ArchivedSegment {
+    ) -> Result<ArchivedSegment, std::io::Error> {
+        // Ensure archive directory exists (idempotent).
+        std::fs::create_dir_all(&self.archive_dir)?;
+
+        let archive_path = self.archive_dir.join(filename);
+        // Copy WAL segment to archive.
+        std::fs::copy(source_path, &archive_path)?;
+
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
 
-        let archive_path = self.archive_dir.join(filename);
         let segment = ArchivedSegment {
             filename: filename.to_owned(),
             start_lsn,
@@ -216,7 +216,7 @@ impl WalArchiver {
         self.segments.insert(start_lsn, segment.clone());
         self.segments_archived += 1;
         self.bytes_archived += size_bytes;
-        segment
+        Ok(segment)
     }
 
     /// Create a named restore point.
@@ -441,13 +441,28 @@ mod tests {
 
     #[test]
     fn test_archive_segment() {
-        let dir = PathBuf::from("/tmp/wal_archive");
-        let mut archiver = WalArchiver::new(&dir);
-        let seg = archiver.archive_segment("falcon_000001.wal", Lsn(0), Lsn(1000), 4096);
+        let tmp = std::env::temp_dir().join("falcondb_pitr_test_archive");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let wal_dir = tmp.join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+        let archive_dir = tmp.join("archive");
+
+        // Create a dummy WAL source file.
+        let source = wal_dir.join("falcon_000001.wal");
+        std::fs::write(&source, vec![0u8; 4096]).unwrap();
+
+        let mut archiver = WalArchiver::new(&archive_dir);
+        let seg = archiver
+            .archive_segment(&source, "falcon_000001.wal", Lsn(0), Lsn(1000), 4096)
+            .expect("archive should succeed");
         assert_eq!(seg.start_lsn, Lsn(0));
         assert_eq!(seg.end_lsn, Lsn(1000));
         assert_eq!(archiver.segment_count(), 1);
         assert_eq!(archiver.total_bytes(), 4096);
+        // Verify the file was actually copied.
+        assert!(archive_dir.join("falcon_000001.wal").exists());
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -500,10 +515,16 @@ mod tests {
     fn test_segments_for_recovery() {
         let dir = PathBuf::from("/tmp/wal_archive");
         let mut archiver = WalArchiver::new(&dir);
-        for i in 0..5 {
+        let wal_src_dir = std::env::temp_dir().join("falcondb_pitr_test_recovery_src");
+        let _ = std::fs::remove_dir_all(&wal_src_dir);
+        std::fs::create_dir_all(&wal_src_dir).unwrap();
+        for i in 0..5u64 {
+            let fname = format!("seg_{}.wal", i);
+            let src = wal_src_dir.join(&fname);
+            std::fs::write(&src, vec![0u8; 4096]).unwrap();
             let start = Lsn(i * 1000);
             let end = Lsn((i + 1) * 1000 - 1);
-            archiver.archive_segment(&format!("seg_{}.wal", i), start, end, 4096);
+            archiver.archive_segment(&src, &fname, start, end, 4096).unwrap();
         }
         let backup = BaseBackup {
             label: "base".into(),

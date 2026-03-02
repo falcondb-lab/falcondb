@@ -351,8 +351,10 @@ pub struct WalReplicationService {
     logs: DashMap<ShardId, Arc<ReplicationLog>>,
     /// Ack LSNs per (shard, replica) for lag tracking.
     ack_lsns: DashMap<(ShardId, usize), u64>,
-    /// Storage engine reference for checkpoint serving.
+    /// Storage engine reference for checkpoint serving and subplan execution.
     storage: parking_lot::RwLock<Option<Arc<falcon_storage::engine::StorageEngine>>>,
+    /// Transaction manager for subplan execution.
+    txn_mgr: parking_lot::RwLock<Option<Arc<falcon_txn::manager::TxnManager>>>,
 }
 
 impl WalReplicationService {
@@ -361,6 +363,7 @@ impl WalReplicationService {
             logs: DashMap::new(),
             ack_lsns: DashMap::new(),
             storage: parking_lot::RwLock::new(None),
+            txn_mgr: parking_lot::RwLock::new(None),
         }
     }
 
@@ -369,9 +372,14 @@ impl WalReplicationService {
         self.logs.insert(shard_id, log);
     }
 
-    /// Set the storage engine for checkpoint serving.
+    /// Set the storage engine for checkpoint serving and subplan execution.
     pub fn set_storage(&self, storage: Arc<falcon_storage::engine::StorageEngine>) {
         *self.storage.write() = Some(storage);
+    }
+
+    /// Set the transaction manager for subplan execution.
+    pub fn set_txn_manager(&self, txn_mgr: Arc<falcon_txn::manager::TxnManager>) {
+        *self.txn_mgr.write() = Some(txn_mgr);
     }
 
     /// Handle a SubscribeWal request: return a WalChunk from the given LSN.
@@ -635,6 +643,104 @@ impl crate::proto::wal_replication_server::WalReplication for WalReplicationServ
         Ok(tonic::Response::new(
             tokio_stream::wrappers::ReceiverStream::new(rx),
         ))
+    }
+
+    async fn execute_sub_plan(
+        &self,
+        request: tonic::Request<crate::proto::ExecuteSubPlanRequest>,
+    ) -> Result<tonic::Response<crate::proto::ExecuteSubPlanResponse>, tonic::Status> {
+        let req = request.into_inner();
+        let start = std::time::Instant::now();
+
+        let storage_opt = self.storage.read().clone();
+        let storage = storage_opt.ok_or_else(|| {
+            tonic::Status::unavailable("No StorageEngine configured for subplan execution")
+        })?;
+
+        let txn_mgr_opt = self.txn_mgr.read().clone();
+        let txn_mgr = txn_mgr_opt.ok_or_else(|| {
+            tonic::Status::unavailable("No TxnManager configured for subplan execution")
+        })?;
+
+        // Deserialize the subplan
+        let plan = crate::distributed_exec::serializable_plan::SerializableSubPlan::from_bytes(
+            &req.subplan_payload,
+        )
+        .map_err(|e| tonic::Status::invalid_argument(format!("SubPlan deserialization: {e}")))?;
+
+        tracing::debug!(
+            shard_id = req.shard_id,
+            request_id = req.request_id,
+            "Executing remote subplan locally",
+        );
+
+        // Convert to executable SubPlan and execute
+        let subplan = plan.into_subplan();
+        match subplan.execute(&storage, &txn_mgr) {
+            Ok(result) => {
+                let row_count = result.1.len() as u64;
+                let result_payload = bincode::serialize(&result).map_err(|e| {
+                    tonic::Status::internal(format!("SubPlanResult serialization: {e}"))
+                })?;
+                let execution_us = start.elapsed().as_micros() as u64;
+
+                tracing::debug!(
+                    shard_id = req.shard_id,
+                    request_id = req.request_id,
+                    row_count,
+                    execution_us,
+                    "Remote subplan execution completed",
+                );
+
+                Ok(tonic::Response::new(crate::proto::ExecuteSubPlanResponse {
+                    success: true,
+                    error: String::new(),
+                    result_payload,
+                    execution_us,
+                    row_count,
+                }))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    shard_id = req.shard_id,
+                    request_id = req.request_id,
+                    error = %e,
+                    "Remote subplan execution failed",
+                );
+                Ok(tonic::Response::new(crate::proto::ExecuteSubPlanResponse {
+                    success: false,
+                    error: e.to_string(),
+                    result_payload: Vec::new(),
+                    execution_us: start.elapsed().as_micros() as u64,
+                    row_count: 0,
+                }))
+            }
+        }
+    }
+
+    async fn forward_query(
+        &self,
+        request: tonic::Request<crate::proto::ForwardQueryRpc>,
+    ) -> Result<tonic::Response<crate::proto::ForwardQueryRpcResponse>, tonic::Status> {
+        let req = request.into_inner();
+
+        tracing::debug!(
+            shard_id = req.shard_id,
+            txn_id = req.txn_id,
+            sql_len = req.sql.len(),
+            "Received ForwardQuery RPC",
+        );
+
+        // For now, forward_query returns an error indicating the SQL execution
+        // path should use execute_sub_plan instead (subplan-based execution is
+        // the primary cross-node path). Full SQL forwarding requires the full
+        // SQL frontend pipeline on the remote node.
+        Ok(tonic::Response::new(crate::proto::ForwardQueryRpcResponse {
+            success: false,
+            error: "SQL forwarding not yet implemented; use ExecuteSubPlan RPC instead".into(),
+            result_json: String::new(),
+            rows_affected: 0,
+        }))
     }
 }
 

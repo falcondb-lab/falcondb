@@ -1,0 +1,189 @@
+# ============================================================================
+# FalconDB Helm Chart — Default Values
+# ============================================================================
+
+# -- Image configuration
+image:
+  repository: falcondb/falcondb
+  tag: ""  # defaults to Chart.appVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# -- Replica count (standalone = 1, cluster = 2+)
+replicaCount: 1
+
+# -- FalconDB configuration
+falcondb:
+  # Node role: standalone | primary | replica
+  role: standalone
+
+  # PG wire protocol port
+  pgPort: 5443
+  # Admin / health-check HTTP port
+  adminPort: 8080
+  # gRPC replication port
+  grpcPort: 50051
+
+  # Authentication
+  auth:
+    method: "scram-sha-256"
+    username: "falcon"
+    # Password — set via --set or external secret
+    password: ""
+    # Use an existing Secret instead of creating one
+    existingSecret: ""
+    existingSecretKey: "password"
+
+  # TLS
+  tls:
+    enabled: false
+    # Existing TLS secret (must contain tls.crt and tls.key)
+    existingSecret: ""
+
+  # Storage
+  storage:
+    walEnabled: true
+    memoryLimitBytes: 0
+
+  # WAL
+  wal:
+    groupCommit: true
+    flushIntervalUs: 1000
+    syncMode: "fdatasync"
+    segmentSizeBytes: 67108864
+
+  # GC
+  gc:
+    enabled: true
+    intervalMs: 1000
+    batchSize: 0
+
+  # Replication (only used when role != standalone)
+  replication:
+    primaryEndpoint: ""
+    maxBackoffMs: 5000
+
+  # Server limits
+  maxConnections: 1024
+  statementTimeoutMs: 0
+  idleTimeoutMs: 300000
+  shutdownDrainTimeoutSecs: 30
+
+  # Extra falcon.toml overrides (raw TOML string appended to generated config)
+  extraConfig: ""
+
+# -- Persistence
+persistence:
+  enabled: true
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 10Gi
+  annotations: {}
+
+# -- Service
+service:
+  type: ClusterIP
+  pgPort: 5443
+  adminPort: 8080
+  grpcPort: 50051
+  annotations: {}
+
+# -- Ingress (optional, for admin/health endpoint)
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: falcondb.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# -- Resources
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    cpu: 4
+    memory: 8Gi
+
+# -- Pod configuration
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+# -- Health probes
+livenessProbe:
+  httpGet:
+    path: /health
+    port: admin
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: admin
+  initialDelaySeconds: 3
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+startupProbe:
+  httpGet:
+    path: /health
+    port: admin
+  initialDelaySeconds: 2
+  periodSeconds: 3
+  failureThreshold: 10
+
+# -- ServiceMonitor for Prometheus Operator
+serviceMonitor:
+  enabled: false
+  interval: 15s
+  scrapeTimeout: 10s
+  labels: {}
+  # path: /metrics  (scraped from admin port)
+
+# -- Metrics / Prometheus annotations (if not using ServiceMonitor)
+metrics:
+  enabled: true
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8080"
+    prometheus.io/path: "/metrics"
+
+# -- Pod Disruption Budget
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+  # maxUnavailable: 1
+
+# -- Cluster mode (deploys a StatefulSet with primary + replicas)
+cluster:
+  enabled: false
+  replicas: 2  # total nodes including primary
+  # Headless service for stable DNS names
+  headlessService: true

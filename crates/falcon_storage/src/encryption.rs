@@ -15,6 +15,7 @@
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use aes_gcm::{Aes256Gcm, Nonce};
+use parking_lot::RwLock as CacheRwLock;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -148,6 +149,10 @@ pub enum TdeError {
     DecryptionFailed,
     /// AES-GCM encryption failed (should not happen with valid keys).
     EncryptionFailed,
+    /// Caller-supplied nonce has already been used with this DEK.
+    /// Re-using a nonce with AES-GCM completely breaks confidentiality
+    /// and authenticity. This is a **hard** error — never suppress it.
+    NonceReused { dek_id: DekId },
 }
 
 impl fmt::Display for TdeError {
@@ -156,11 +161,23 @@ impl fmt::Display for TdeError {
             Self::DekNotFound(id) => write!(f, "DEK {id} not found"),
             Self::DecryptionFailed => write!(f, "AES-256-GCM decryption failed (auth tag mismatch)"),
             Self::EncryptionFailed => write!(f, "AES-256-GCM encryption failed"),
+            Self::NonceReused { dek_id } => write!(f, "nonce reuse detected for DEK {dek_id} — refusing to encrypt"),
         }
     }
 }
 
 impl std::error::Error for TdeError {}
+
+/// Result of a DEK rotation for a specific scope.
+#[derive(Debug, Clone)]
+pub struct DekRotationResult {
+    /// Previous active DEK (None if this is the first DEK for this scope).
+    pub old_dek_id: Option<DekId>,
+    /// Newly generated active DEK.
+    pub new_dek_id: DekId,
+    /// The scope that was rotated.
+    pub scope: EncryptionScope,
+}
 
 /// TDE Key Manager — manages the master key and all DEKs.
 ///
@@ -184,7 +201,16 @@ pub struct KeyManager {
     /// Cache of unwrapped (plaintext) DEKs to avoid repeated AES-GCM decryption
     /// of the wrapped DEK on every `encrypt_block` / `decrypt_block` call.
     /// Invalidated on master key rotation.
-    dek_cache: HashMap<DekId, EncryptionKey>,
+    ///
+    /// Uses interior mutability (`CacheRwLock`) so that `decrypt_block` can
+    /// populate the cache via `&self` — the `StorageEngine` can then hold
+    /// `key_manager` behind a **read** lock for decryption on the hot path.
+    dek_cache: CacheRwLock<HashMap<DekId, EncryptionKey>>,
+    /// Tracks caller-supplied nonces per DEK to prevent catastrophic nonce reuse
+    /// in AES-GCM. Only used by [`encrypt_block_with_nonce`]; the random-nonce
+    /// path (`encrypt_block`) generates fresh nonces from the OS CSPRNG which
+    /// has negligible collision probability at 96 bits.
+    used_nonces: HashMap<DekId, std::collections::HashSet<[u8; NONCE_LEN]>>,
 }
 
 impl KeyManager {
@@ -197,7 +223,8 @@ impl KeyManager {
             next_dek_id: AtomicU64::new(1),
             salt: [0u8; SALT_LEN],
             enabled: false,
-            dek_cache: HashMap::new(),
+            dek_cache: CacheRwLock::new(HashMap::new()),
+            used_nonces: HashMap::new(),
         }
     }
 
@@ -213,7 +240,8 @@ impl KeyManager {
             next_dek_id: AtomicU64::new(1),
             salt,
             enabled: true,
-            dek_cache: HashMap::new(),
+            dek_cache: CacheRwLock::new(HashMap::new()),
+            used_nonces: HashMap::new(),
         }
     }
 
@@ -227,7 +255,8 @@ impl KeyManager {
             next_dek_id: AtomicU64::new(1),
             salt,
             enabled: true,
-            dek_cache: HashMap::new(),
+            dek_cache: CacheRwLock::new(HashMap::new()),
+            used_nonces: HashMap::new(),
         }
     }
 
@@ -274,7 +303,7 @@ impl KeyManager {
         };
 
         // Cache the plaintext DEK so subsequent encrypt/decrypt calls avoid re-unwrapping.
-        self.dek_cache.insert(id, dek);
+        self.dek_cache.write().insert(id, dek);
         self.wrapped_deks.insert(id, wrapped);
         self.active_deks.insert(scope, id);
         Ok(id)
@@ -284,9 +313,12 @@ impl KeyManager {
     ///
     /// Results are cached in `dek_cache` so repeated calls for the same DEK
     /// avoid the AES-GCM decrypt overhead on the hot path.
-    pub fn unwrap_dek(&mut self, dek_id: DekId) -> Result<EncryptionKey, TdeError> {
-        // Fast path: return cached plaintext DEK.
-        if let Some(cached) = self.dek_cache.get(&dek_id) {
+    ///
+    /// Takes `&self` (not `&mut self`) thanks to interior-mutable `dek_cache`,
+    /// so callers holding only a **read** lock on `KeyManager` can still decrypt.
+    pub fn unwrap_dek(&self, dek_id: DekId) -> Result<EncryptionKey, TdeError> {
+        // Fast path: return cached plaintext DEK (read lock only).
+        if let Some(cached) = self.dek_cache.read().get(&dek_id) {
             return Ok(cached.clone());
         }
         // Slow path: decrypt the wrapped DEK and cache it.
@@ -304,7 +336,7 @@ impl KeyManager {
             key_bytes.copy_from_slice(&decrypted[..AES256_KEY_LEN]);
         }
         let key = EncryptionKey::from_bytes(key_bytes);
-        self.dek_cache.insert(dek_id, key.clone());
+        self.dek_cache.write().insert(dek_id, key.clone());
         Ok(key)
     }
 
@@ -334,7 +366,10 @@ impl KeyManager {
 
     /// Decrypt a data block previously produced by `encrypt_block`.
     /// Input format: `nonce (12 bytes) || ciphertext+tag`.
-    pub fn decrypt_block(&mut self, dek_id: DekId, encrypted: &[u8]) -> Result<Vec<u8>, TdeError> {
+    ///
+    /// Takes `&self` so the `StorageEngine` only needs a **read** lock on the
+    /// key manager for the decryption hot path.
+    pub fn decrypt_block(&self, dek_id: DekId, encrypted: &[u8]) -> Result<Vec<u8>, TdeError> {
         if encrypted.len() < NONCE_LEN + GCM_TAG_LEN {
             return Err(TdeError::DecryptionFailed);
         }
@@ -349,12 +384,22 @@ impl KeyManager {
 
     /// Encrypt a data block with caller-supplied nonce (for WAL records where
     /// the nonce is derived from LSN to allow deterministic re-encryption).
+    ///
+    /// # Safety invariant
+    /// AES-GCM is **catastrophically broken** if the same (key, nonce) pair is
+    /// used twice. This method tracks every caller-supplied nonce per DEK and
+    /// returns [`TdeError::NonceReused`] if a duplicate is detected.
     pub fn encrypt_block_with_nonce(
         &mut self,
         dek_id: DekId,
         plaintext: &[u8],
         nonce: &[u8; NONCE_LEN],
     ) -> Result<Vec<u8>, TdeError> {
+        // Check for nonce reuse before performing any encryption.
+        let nonce_set = self.used_nonces.entry(dek_id).or_default();
+        if !nonce_set.insert(*nonce) {
+            return Err(TdeError::NonceReused { dek_id });
+        }
         let dek = self.unwrap_dek(dek_id)?;
         let cipher = Aes256Gcm::new(dek.as_bytes().into());
         let gcm_nonce = Nonce::from_slice(nonce);
@@ -365,7 +410,7 @@ impl KeyManager {
 
     /// Decrypt a data block with caller-supplied nonce.
     pub fn decrypt_block_with_nonce(
-        &mut self,
+        &self,
         dek_id: DekId,
         ciphertext: &[u8],
         nonce: &[u8; NONCE_LEN],
@@ -411,10 +456,59 @@ impl KeyManager {
         self.master_key = new_master;
         self.salt = new_salt;
         // Invalidate and repopulate the plaintext DEK cache with new unwraps.
-        self.dek_cache.clear();
+        self.dek_cache.write().clear();
+        // Reset nonce tracking — after key rotation the DEK IDs are unchanged but
+        // callers must generate fresh nonces for the new encryption epoch.
+        self.used_nonces.clear();
+        let mut cache = self.dek_cache.write();
         for (id, dek) in &raw_deks {
-            self.dek_cache.insert(*id, dek.clone());
+            cache.insert(*id, dek.clone());
         }
+        Ok(())
+    }
+
+    /// Rotate the DEK for a scope: generates a new DEK, marks the old one inactive,
+    /// and returns both IDs so the caller can re-encrypt existing data.
+    ///
+    /// After rotation, new writes to `scope` use `new_dek_id`. Old data encrypted
+    /// with `old_dek_id` remains readable (the old DEK stays in the keystore) until
+    /// all segments are re-encrypted and the old DEK is explicitly pruned.
+    pub fn rotate_dek(
+        &mut self,
+        scope: EncryptionScope,
+    ) -> Result<DekRotationResult, TdeError> {
+        let old_dek_id = self.active_deks.get(&scope).copied();
+        let new_dek_id = self.generate_dek(scope)?;
+        Ok(DekRotationResult {
+            old_dek_id,
+            new_dek_id,
+            scope,
+        })
+    }
+
+    /// Re-encrypt a block from `old_dek` to `new_dek` in a single pass.
+    /// Decrypts with the old key, then encrypts with the new key.
+    /// Returns the new ciphertext (nonce-prefixed, ready for storage).
+    pub fn re_encrypt_block(
+        &mut self,
+        old_dek_id: DekId,
+        new_dek_id: DekId,
+        encrypted: &[u8],
+    ) -> Result<Vec<u8>, TdeError> {
+        let plaintext = self.decrypt_block(old_dek_id, encrypted)?;
+        self.encrypt_block(new_dek_id, &plaintext)
+    }
+
+    /// Prune (remove) an old DEK that is no longer needed.
+    /// Only succeeds if the DEK is not the active key for any scope.
+    pub fn prune_dek(&mut self, dek_id: DekId) -> Result<(), TdeError> {
+        // Reject if this DEK is still active for any scope.
+        if self.active_deks.values().any(|&id| id == dek_id) {
+            return Err(TdeError::DekNotFound(dek_id)); // reuse error — DEK still in use
+        }
+        self.wrapped_deks.remove(&dek_id);
+        self.dek_cache.write().remove(&dek_id);
+        self.used_nonces.remove(&dek_id);
         Ok(())
     }
 
@@ -725,5 +819,68 @@ mod tests {
         let truncated = &encrypted[..NONCE_LEN + 5];
         let result = km.decrypt_block(dek_id, truncated);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rotate_dek() {
+        let mut km = KeyManager::new("test");
+        let scope = EncryptionScope::Wal;
+
+        // First DEK
+        let dek1 = km.generate_dek(scope).unwrap();
+        let encrypted1 = km.encrypt_block(dek1, b"old WAL data").unwrap();
+
+        // Rotate
+        let rot = km.rotate_dek(scope).unwrap();
+        assert_eq!(rot.old_dek_id, Some(dek1));
+        assert_ne!(rot.new_dek_id, dek1);
+        assert_eq!(km.active_dek(scope), Some(rot.new_dek_id));
+
+        // Old data still readable
+        let decrypted = km.decrypt_block(dek1, &encrypted1).unwrap();
+        assert_eq!(decrypted.as_slice(), b"old WAL data");
+
+        // New writes use new DEK
+        let encrypted2 = km.encrypt_block(rot.new_dek_id, b"new WAL data").unwrap();
+        let decrypted2 = km.decrypt_block(rot.new_dek_id, &encrypted2).unwrap();
+        assert_eq!(decrypted2.as_slice(), b"new WAL data");
+    }
+
+    #[test]
+    fn test_re_encrypt_block() {
+        let mut km = KeyManager::new("test");
+        let scope = EncryptionScope::Table(1);
+
+        let dek1 = km.generate_dek(scope).unwrap();
+        let original = b"sensitive table data";
+        let encrypted_v1 = km.encrypt_block(dek1, original).unwrap();
+
+        let rot = km.rotate_dek(scope).unwrap();
+        let encrypted_v2 = km.re_encrypt_block(dek1, rot.new_dek_id, &encrypted_v1).unwrap();
+
+        // v2 decrypts with new DEK to same plaintext
+        let decrypted = km.decrypt_block(rot.new_dek_id, &encrypted_v2).unwrap();
+        assert_eq!(decrypted.as_slice(), original);
+
+        // v2 cannot be decrypted with old DEK
+        assert!(km.decrypt_block(dek1, &encrypted_v2).is_err());
+    }
+
+    #[test]
+    fn test_prune_dek() {
+        let mut km = KeyManager::new("test");
+        let scope = EncryptionScope::Sst(1);
+
+        let dek1 = km.generate_dek(scope).unwrap();
+        let _rot = km.rotate_dek(scope).unwrap();
+        assert_eq!(km.dek_count(), 2);
+
+        // Old DEK is no longer active — prune succeeds
+        km.prune_dek(dek1).unwrap();
+        assert_eq!(km.dek_count(), 1);
+
+        // Active DEK cannot be pruned
+        let active = km.active_dek(scope).unwrap();
+        assert!(km.prune_dek(active).is_err());
     }
 }

@@ -8,6 +8,7 @@
 //! - **§5 Retry Framework**: Error classification, exponential backoff+jitter, retry budget, circuit breaker
 //! - **§4 Conflict Tracking**: Per-shard abort/conflict rate tracking, adaptive concurrency
 //! - **§7 Deadlock Detection**: Timeout-based deadlock breaker with explainable abort reason
+//! - **§7.2 Wait-For Graph**: Global cycle-based deadlock detection with victim selection policies
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -903,6 +904,343 @@ impl DeadlockDetector {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// §7.2: Wait-For Graph Deadlock Detection (global, cycle-based)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Strategy for choosing which transaction to abort when a deadlock cycle
+/// is detected in the wait-for graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VictimSelectionPolicy {
+    /// Abort the youngest transaction (highest txn_id) in the cycle.
+    /// Default — minimises wasted work since the youngest has done the least.
+    Youngest,
+    /// Abort the transaction that is waiting on the most shards.
+    MostShards,
+    /// Abort the transaction that has been waiting the *shortest* time
+    /// (least invested).
+    ShortestWait,
+}
+
+impl Default for VictimSelectionPolicy {
+    fn default() -> Self {
+        Self::Youngest
+    }
+}
+
+/// A single edge in the wait-for graph: `waiter` → `holder`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WfgEdge {
+    waiter: u64,
+    holder: u64,
+    resource: u64,
+}
+
+/// A detected deadlock cycle with the selected victim.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeadlockCycle {
+    /// Ordered list of txn IDs forming the cycle (last waits on first).
+    pub cycle: Vec<u64>,
+    /// Resources (shard IDs) involved in the cycle edges.
+    pub resources: Vec<u64>,
+    /// The txn selected as victim for abort.
+    pub victim_txn_id: u64,
+}
+
+/// Registration for a transaction waiting on a resource held by another txn.
+struct WfgEntry {
+    txn_id: u64,
+    /// Resources (shard IDs) this txn holds.
+    holds: Vec<u64>,
+    /// Resources (shard IDs) this txn is waiting for.
+    waits_for: Vec<u64>,
+    registered_at: Instant,
+}
+
+/// Wait-For Graph deadlock detector.
+///
+/// Tracks which transaction holds which resources and which transaction is
+/// waiting for which resources.  Periodically runs DFS-based cycle detection
+/// to find true deadlocks (as opposed to the timeout-based approach which
+/// may false-positive on slow operations).
+///
+/// # Usage
+///
+/// ```text
+///   Coordinator                    WaitForGraphDetector
+///   ──────────                    ─────────────────────
+///   begin_txn(txn_id)
+///       │  acquire shard lock
+///       │  blocked on shard held by other_txn
+///       │─── register_wait(txn_id, holds=[0], waits_for=[1]) ──▶
+///       │                                                       │
+///       │  ... periodic detect_deadlocks() ...                  │
+///       │                                                ◀──────│
+///       │  (DeadlockCycle with victim)
+///       │
+///       │─── unregister(txn_id) ──▶  (on commit/abort)
+/// ```
+pub struct WaitForGraphDetector {
+    /// Registered in-flight transactions.
+    entries: Mutex<HashMap<u64, WfgEntry>>,
+    /// Victim selection policy.
+    policy: VictimSelectionPolicy,
+    /// Lifetime counter: total cycles detected.
+    total_cycles_detected: AtomicU64,
+    /// Lifetime counter: total victims selected for abort.
+    total_victims_aborted: AtomicU64,
+}
+
+impl WaitForGraphDetector {
+    /// Create a new wait-for graph detector with the given victim policy.
+    pub fn new(policy: VictimSelectionPolicy) -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+            policy,
+            total_cycles_detected: AtomicU64::new(0),
+            total_victims_aborted: AtomicU64::new(0),
+        }
+    }
+
+    /// Register a transaction's resource holdings and wait set.
+    ///
+    /// - `txn_id`: the transaction
+    /// - `holds`: resources (shard IDs) currently held by this txn
+    /// - `waits_for`: resources (shard IDs) this txn is blocked on
+    pub fn register_wait(&self, txn_id: u64, holds: Vec<u64>, waits_for: Vec<u64>) {
+        self.entries.lock().insert(
+            txn_id,
+            WfgEntry {
+                txn_id,
+                holds,
+                waits_for,
+                registered_at: Instant::now(),
+            },
+        );
+    }
+
+    /// Update the wait set for an existing transaction (e.g. acquired one
+    /// resource but now blocked on the next).
+    pub fn update_wait(&self, txn_id: u64, waits_for: Vec<u64>) {
+        let mut entries = self.entries.lock();
+        if let Some(entry) = entries.get_mut(&txn_id) {
+            entry.waits_for = waits_for;
+        }
+    }
+
+    /// Unregister a transaction (committed or aborted).
+    pub fn unregister(&self, txn_id: u64) {
+        self.entries.lock().remove(&txn_id);
+    }
+
+    /// Build the wait-for edges and run cycle detection.
+    ///
+    /// Returns all detected deadlock cycles, each with a selected victim.
+    pub fn detect_deadlocks(&self) -> Vec<DeadlockCycle> {
+        let entries = self.entries.lock();
+
+        // Build resource → holder mapping: resource_id → set of txn_ids holding it
+        let mut resource_holders: HashMap<u64, Vec<u64>> = HashMap::new();
+        for entry in entries.values() {
+            for &res in &entry.holds {
+                resource_holders.entry(res).or_default().push(entry.txn_id);
+            }
+        }
+
+        // Build wait-for edges: waiter → holder (via shared resource)
+        let mut edges: Vec<WfgEdge> = Vec::new();
+        let mut adjacency: HashMap<u64, Vec<(u64, u64)>> = HashMap::new(); // txn → [(target_txn, resource)]
+
+        for entry in entries.values() {
+            for &wait_res in &entry.waits_for {
+                if let Some(holders) = resource_holders.get(&wait_res) {
+                    for &holder_txn in holders {
+                        if holder_txn != entry.txn_id {
+                            edges.push(WfgEdge {
+                                waiter: entry.txn_id,
+                                holder: holder_txn,
+                                resource: wait_res,
+                            });
+                            adjacency
+                                .entry(entry.txn_id)
+                                .or_default()
+                                .push((holder_txn, wait_res));
+                        }
+                    }
+                }
+            }
+        }
+
+        if edges.is_empty() {
+            return Vec::new();
+        }
+
+        // DFS-based cycle detection
+        let all_txns: Vec<u64> = entries.keys().copied().collect();
+        let mut visited: HashMap<u64, u8> = HashMap::new(); // 0=white, 1=gray, 2=black
+        let mut parent: HashMap<u64, (u64, u64)> = HashMap::new(); // txn → (predecessor, resource)
+        let mut cycles: Vec<DeadlockCycle> = Vec::new();
+
+        for &start in &all_txns {
+            if *visited.get(&start).unwrap_or(&0) != 0 {
+                continue;
+            }
+            // Iterative DFS with explicit stack
+            let mut stack: Vec<(u64, bool)> = vec![(start, false)]; // (txn, is_backtrack)
+            while let Some((txn, backtrack)) = stack.pop() {
+                if backtrack {
+                    visited.insert(txn, 2); // black
+                    continue;
+                }
+                let color = *visited.get(&txn).unwrap_or(&0);
+                if color == 2 {
+                    continue; // already fully explored
+                }
+                if color == 1 {
+                    // Already gray — this shouldn't happen in normal DFS flow
+                    continue;
+                }
+                visited.insert(txn, 1); // gray
+                stack.push((txn, true)); // push backtrack marker
+
+                if let Some(neighbors) = adjacency.get(&txn) {
+                    for &(next_txn, resource) in neighbors {
+                        let next_color = *visited.get(&next_txn).unwrap_or(&0);
+                        if next_color == 0 {
+                            // White — explore
+                            parent.insert(next_txn, (txn, resource));
+                            stack.push((next_txn, false));
+                        } else if next_color == 1 {
+                            // Gray — back edge → cycle found!
+                            let mut cycle_txns = vec![next_txn];
+                            let mut cycle_resources = vec![resource];
+                            let mut cur = txn;
+                            while cur != next_txn {
+                                cycle_txns.push(cur);
+                                if let Some(&(pred, res)) = parent.get(&cur) {
+                                    cycle_resources.push(res);
+                                    cur = pred;
+                                } else {
+                                    break;
+                                }
+                            }
+                            cycle_txns.reverse();
+                            cycle_resources.reverse();
+
+                            // Select victim
+                            let victim = self.select_victim(&cycle_txns, &entries);
+                            cycles.push(DeadlockCycle {
+                                cycle: cycle_txns,
+                                resources: cycle_resources,
+                                victim_txn_id: victim,
+                            });
+                        }
+                        // Black (2) — already explored, skip
+                    }
+                }
+            }
+        }
+
+        // Update counters
+        let num_cycles = cycles.len() as u64;
+        if num_cycles > 0 {
+            self.total_cycles_detected
+                .fetch_add(num_cycles, Ordering::Relaxed);
+            self.total_victims_aborted
+                .fetch_add(num_cycles, Ordering::Relaxed);
+        }
+
+        cycles
+    }
+
+    /// Select a victim transaction from a cycle based on the configured policy.
+    fn select_victim(&self, cycle: &[u64], entries: &HashMap<u64, WfgEntry>) -> u64 {
+        match self.policy {
+            VictimSelectionPolicy::Youngest => {
+                // Highest txn_id (youngest)
+                *cycle.iter().max().unwrap_or(&0)
+            }
+            VictimSelectionPolicy::MostShards => {
+                // Txn waiting on the most resources
+                cycle
+                    .iter()
+                    .max_by_key(|&&txn_id| {
+                        entries
+                            .get(&txn_id)
+                            .map_or(0, |e| e.waits_for.len() + e.holds.len())
+                    })
+                    .copied()
+                    .unwrap_or(0)
+            }
+            VictimSelectionPolicy::ShortestWait => {
+                // Txn that has been waiting the shortest (least invested)
+                cycle
+                    .iter()
+                    .min_by_key(|&&txn_id| {
+                        entries
+                            .get(&txn_id)
+                            .map_or(Duration::ZERO, |e| e.registered_at.elapsed())
+                    })
+                    .copied()
+                    .unwrap_or(0)
+            }
+        }
+    }
+
+    /// Number of active entries in the graph.
+    pub fn active_count(&self) -> usize {
+        self.entries.lock().len()
+    }
+
+    /// Total cycles detected (lifetime counter).
+    pub fn total_cycles_detected(&self) -> u64 {
+        self.total_cycles_detected.load(Ordering::Relaxed)
+    }
+
+    /// Total victims aborted (lifetime counter).
+    pub fn total_victims_aborted(&self) -> u64 {
+        self.total_victims_aborted.load(Ordering::Relaxed)
+    }
+
+    /// Snapshot of the current wait-for graph for diagnostics.
+    pub fn snapshot(&self) -> WaitForGraphSnapshot {
+        let entries = self.entries.lock();
+        let txn_entries: Vec<WfgTxnSnapshot> = entries
+            .values()
+            .map(|e| WfgTxnSnapshot {
+                txn_id: e.txn_id,
+                holds: e.holds.clone(),
+                waits_for: e.waits_for.clone(),
+                wait_duration_us: e.registered_at.elapsed().as_micros() as u64,
+            })
+            .collect();
+        WaitForGraphSnapshot {
+            txn_count: txn_entries.len(),
+            txns: txn_entries,
+            total_cycles_detected: self.total_cycles_detected.load(Ordering::Relaxed),
+            total_victims_aborted: self.total_victims_aborted.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Snapshot of the wait-for graph for observability / `SHOW falcon.deadlock_graph`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaitForGraphSnapshot {
+    pub txn_count: usize,
+    pub txns: Vec<WfgTxnSnapshot>,
+    pub total_cycles_detected: u64,
+    pub total_victims_aborted: u64,
+}
+
+/// Per-transaction snapshot in the wait-for graph.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WfgTxnSnapshot {
+    pub txn_id: u64,
+    pub holds: Vec<u64>,
+    pub waits_for: Vec<u64>,
+    pub wait_duration_us: u64,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // §3.2: Queue Policy
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1665,6 +2003,179 @@ mod tests {
         std::thread::sleep(Duration::from_millis(15));
         let stalled = dd.detect_stalled();
         assert!(stalled.is_empty());
+    }
+
+    // ── Wait-For Graph Deadlock Detector ──
+
+    #[test]
+    fn test_wfg_no_cycle_empty() {
+        let wfg = WaitForGraphDetector::new(VictimSelectionPolicy::Youngest);
+        let cycles = wfg.detect_deadlocks();
+        assert!(cycles.is_empty());
+        assert_eq!(wfg.active_count(), 0);
+        assert_eq!(wfg.total_cycles_detected(), 0);
+    }
+
+    #[test]
+    fn test_wfg_no_cycle_independent_txns() {
+        let wfg = WaitForGraphDetector::new(VictimSelectionPolicy::Youngest);
+        // Txn 1 holds shard 0, waits for shard 1 — but nobody holds shard 1
+        wfg.register_wait(1, vec![0], vec![1]);
+        // Txn 2 holds shard 2, waits for shard 3 — nobody holds shard 3
+        wfg.register_wait(2, vec![2], vec![3]);
+        let cycles = wfg.detect_deadlocks();
+        assert!(cycles.is_empty(), "No cycles when waiters have no holder");
+        assert_eq!(wfg.active_count(), 2);
+    }
+
+    #[test]
+    fn test_wfg_simple_two_txn_cycle() {
+        let wfg = WaitForGraphDetector::new(VictimSelectionPolicy::Youngest);
+        // Classic AB-BA deadlock:
+        // Txn 1 holds shard 0, waits for shard 1
+        // Txn 2 holds shard 1, waits for shard 0
+        wfg.register_wait(1, vec![0], vec![1]);
+        wfg.register_wait(2, vec![1], vec![0]);
+
+        let cycles = wfg.detect_deadlocks();
+        assert_eq!(cycles.len(), 1, "Should detect exactly one cycle");
+
+        let cycle = &cycles[0];
+        assert!(cycle.cycle.contains(&1));
+        assert!(cycle.cycle.contains(&2));
+        // Youngest = highest txn_id = 2
+        assert_eq!(cycle.victim_txn_id, 2);
+        assert_eq!(wfg.total_cycles_detected(), 1);
+        assert_eq!(wfg.total_victims_aborted(), 1);
+    }
+
+    #[test]
+    fn test_wfg_three_txn_cycle() {
+        let wfg = WaitForGraphDetector::new(VictimSelectionPolicy::Youngest);
+        // Circular: T1→T2→T3→T1
+        // T1 holds 0, waits for 1
+        // T2 holds 1, waits for 2
+        // T3 holds 2, waits for 0
+        wfg.register_wait(10, vec![0], vec![1]);
+        wfg.register_wait(20, vec![1], vec![2]);
+        wfg.register_wait(30, vec![2], vec![0]);
+
+        let cycles = wfg.detect_deadlocks();
+        assert!(!cycles.is_empty(), "Should detect at least one cycle");
+
+        let cycle = &cycles[0];
+        // All three should be in the cycle
+        assert!(cycle.cycle.contains(&10));
+        assert!(cycle.cycle.contains(&20));
+        assert!(cycle.cycle.contains(&30));
+        // Youngest = 30
+        assert_eq!(cycle.victim_txn_id, 30);
+    }
+
+    #[test]
+    fn test_wfg_unregister_breaks_cycle() {
+        let wfg = WaitForGraphDetector::new(VictimSelectionPolicy::Youngest);
+        wfg.register_wait(1, vec![0], vec![1]);
+        wfg.register_wait(2, vec![1], vec![0]);
+
+        // Cycle exists
+        assert!(!wfg.detect_deadlocks().is_empty());
+
+        // Unregister one participant — cycle broken
+        wfg.unregister(2);
+        let cycles = wfg.detect_deadlocks();
+        assert!(cycles.is_empty(), "Cycle should be broken after unregister");
+        assert_eq!(wfg.active_count(), 1);
+    }
+
+    #[test]
+    fn test_wfg_update_wait_changes_edges() {
+        let wfg = WaitForGraphDetector::new(VictimSelectionPolicy::Youngest);
+        // Initially no cycle: T1 holds 0, waits for 1; T2 holds 1, waits for 2
+        wfg.register_wait(1, vec![0], vec![1]);
+        wfg.register_wait(2, vec![1], vec![2]);
+        assert!(wfg.detect_deadlocks().is_empty());
+
+        // Update T2 to wait for shard 0 → creates cycle
+        wfg.update_wait(2, vec![0]);
+        let cycles = wfg.detect_deadlocks();
+        assert!(!cycles.is_empty(), "Cycle should appear after update_wait");
+    }
+
+    #[test]
+    fn test_wfg_victim_policy_most_shards() {
+        let wfg = WaitForGraphDetector::new(VictimSelectionPolicy::MostShards);
+        // T1 holds [0], waits [1] → 2 resources involved
+        // T2 holds [1, 2, 3], waits [0] → 4 resources involved
+        wfg.register_wait(1, vec![0], vec![1]);
+        wfg.register_wait(2, vec![1, 2, 3], vec![0]);
+
+        let cycles = wfg.detect_deadlocks();
+        assert_eq!(cycles.len(), 1);
+        // MostShards → T2 (4 resources) is the victim
+        assert_eq!(cycles[0].victim_txn_id, 2);
+    }
+
+    #[test]
+    fn test_wfg_victim_policy_shortest_wait() {
+        let wfg = WaitForGraphDetector::new(VictimSelectionPolicy::ShortestWait);
+        // Register T1 first (longer wait)
+        wfg.register_wait(1, vec![0], vec![1]);
+        std::thread::sleep(Duration::from_millis(5));
+        // Register T2 later (shorter wait)
+        wfg.register_wait(2, vec![1], vec![0]);
+
+        let cycles = wfg.detect_deadlocks();
+        assert_eq!(cycles.len(), 1);
+        // ShortestWait → T2 (registered later = shorter wait) is the victim
+        assert_eq!(cycles[0].victim_txn_id, 2);
+    }
+
+    #[test]
+    fn test_wfg_snapshot_diagnostics() {
+        let wfg = WaitForGraphDetector::new(VictimSelectionPolicy::Youngest);
+        wfg.register_wait(100, vec![0, 1], vec![2]);
+        wfg.register_wait(200, vec![2], vec![0]);
+
+        let snap = wfg.snapshot();
+        assert_eq!(snap.txn_count, 2);
+        assert_eq!(snap.txns.len(), 2);
+
+        let t100 = snap.txns.iter().find(|t| t.txn_id == 100).unwrap();
+        assert_eq!(t100.holds, vec![0, 1]);
+        assert_eq!(t100.waits_for, vec![2]);
+
+        let t200 = snap.txns.iter().find(|t| t.txn_id == 200).unwrap();
+        assert_eq!(t200.holds, vec![2]);
+        assert_eq!(t200.waits_for, vec![0]);
+    }
+
+    #[test]
+    fn test_wfg_no_self_edge() {
+        // A txn holding and waiting for the same resource should not create a self-edge
+        let wfg = WaitForGraphDetector::new(VictimSelectionPolicy::Youngest);
+        wfg.register_wait(1, vec![0], vec![0]); // holds 0, waits for 0
+        let cycles = wfg.detect_deadlocks();
+        assert!(cycles.is_empty(), "Self-edge should not create a cycle");
+    }
+
+    #[test]
+    fn test_wfg_chain_no_cycle() {
+        let wfg = WaitForGraphDetector::new(VictimSelectionPolicy::Youngest);
+        // Linear chain: T1→T2→T3 (no cycle)
+        // T1 holds 0, waits for 1
+        // T2 holds 1, waits for 2
+        // T3 holds 2, waits for 3 (nobody holds 3)
+        wfg.register_wait(1, vec![0], vec![1]);
+        wfg.register_wait(2, vec![1], vec![2]);
+        wfg.register_wait(3, vec![2], vec![3]);
+        let cycles = wfg.detect_deadlocks();
+        assert!(cycles.is_empty(), "Linear chain should have no cycle");
+    }
+
+    #[test]
+    fn test_wfg_default_policy_is_youngest() {
+        assert_eq!(VictimSelectionPolicy::default(), VictimSelectionPolicy::Youngest);
     }
 
     // ── Queue Policy ──

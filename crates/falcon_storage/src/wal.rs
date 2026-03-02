@@ -677,7 +677,12 @@ impl WalWriter {
         inner.pending_count = 0;
         match self.sync_mode {
             SyncMode::None => {}
-            SyncMode::FSync | SyncMode::FDataSync => {
+            SyncMode::FSync => {
+                // fsync: flush data + file metadata (size, timestamps)
+                inner.writer.get_ref().sync_all()?;
+            }
+            SyncMode::FDataSync => {
+                // fdatasync: flush data only (skip metadata unless size changed)
                 inner.writer.get_ref().sync_data()?;
             }
         }
@@ -687,8 +692,14 @@ impl WalWriter {
     fn rotate_segment(&self, inner: &mut WalWriterInner) -> Result<(), StorageError> {
         // Flush current segment
         inner.writer.flush()?;
-        if matches!(self.sync_mode, SyncMode::FSync | SyncMode::FDataSync) {
-            inner.writer.get_ref().sync_data()?;
+        match self.sync_mode {
+            SyncMode::None => {}
+            SyncMode::FSync => {
+                inner.writer.get_ref().sync_all()?;
+            }
+            SyncMode::FDataSync => {
+                inner.writer.get_ref().sync_data()?;
+            }
         }
 
         // Record completed segment info before rotating (for PITR callback)
@@ -930,13 +941,26 @@ const CHECKPOINT_FILENAME: &str = "checkpoint.bin";
 
 impl CheckpointData {
     /// Write checkpoint to a file in the given directory.
+    ///
+    /// Uses write-to-temp + rename for crash safety.
+    /// On Windows, `fs::rename` fails if the target exists, so we remove it first.
+    /// The window between remove and rename is acceptable: if we crash after remove
+    /// but before rename, the next startup will find no checkpoint and replay the
+    /// full WAL (safe, just slower).
     pub fn write_to_dir(&self, dir: &Path) -> Result<(), StorageError> {
         let path = dir.join(CHECKPOINT_FILENAME);
         let data =
             bincode::serialize(self).map_err(|e| StorageError::Serialization(e.to_string()))?;
-        // Write atomically: write to temp file, then rename
         let tmp_path = dir.join("checkpoint.tmp");
         fs::write(&tmp_path, &data)?;
+        // Sync the temp file to ensure data is durable before replacing
+        let f = fs::File::open(&tmp_path)?;
+        f.sync_all()?;
+        drop(f);
+        // On Windows fs::rename fails if target exists; remove it first
+        if path.exists() {
+            let _ = fs::remove_file(&path);
+        }
         fs::rename(&tmp_path, &path)?;
         Ok(())
     }

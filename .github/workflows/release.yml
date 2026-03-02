@@ -58,6 +58,27 @@ jobs:
             target/dist/falcondb_*.deb
             target/dist/falcondb-*.rpm
 
+  build-macos:
+    name: Build macOS
+    needs: [validate-tag]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --workspace
+      - run: cargo test --workspace
+      - name: Package tarball
+        run: |
+          VERSION=${{ needs.validate-tag.outputs.version }}
+          mkdir -p target/dist
+          tar czf target/dist/falcondb-${VERSION}-macos-x86_64.tar.gz \
+            -C target/release falcon_server falcon_cli
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dist
+          path: target/dist/falcondb-*.tar.gz
+
   build-windows:
     name: Build Windows
     needs: [validate-tag]
@@ -79,9 +100,50 @@ jobs:
           name: windows-dist
           path: target/dist/FalconDB-*.zip
 
+  docker:
+    name: Docker Build & Push
+    needs: [validate-tag]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/login-action@v3
+        if: env.HAS_DOCKERHUB == 'true'
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+        env:
+          HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ghcr.io/${{ github.repository }}
+            falcondb/falcondb
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   release:
     name: Create Release
-    needs: [validate-tag, build-linux, build-windows]
+    needs: [validate-tag, build-linux, build-macos, build-windows, docker]
     runs-on: ubuntu-latest
     permissions:
       contents: write

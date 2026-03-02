@@ -7,6 +7,20 @@
 //! - Thread-safe: all methods take `&self` using interior mutability
 //! - Changes are serialized as structured events for downstream systems
 //!   (Kafka, Debezium, data warehouses, search indexes)
+//!
+//! # ⚠ Limitation: In-Memory Only
+//!
+//! All CDC events and slot state are held in memory (`VecDeque` + `HashMap`).
+//! **Events are lost on process restart.**  This is acceptable for:
+//! - Development and testing
+//! - Short-lived streaming where the consumer keeps up in real time
+//!
+//! For production durability, a future version should:
+//! 1. Persist slot metadata (confirmed LSN, creation time) to disk or the WAL.
+//! 2. Back the event buffer with a spill-to-disk ring buffer or read directly
+//!    from WAL segments (like PostgreSQL's logical decoding from WAL).
+//! 3. Implement slot retention so events are not discarded until all active
+//!    slots have confirmed past them.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};

@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
+use falcon_common::config::RebalanceSectionConfig;
 use falcon_common::error::FalconError;
 use falcon_common::shutdown::ShutdownSignal;
 use falcon_common::types::ShardId;
@@ -50,6 +51,27 @@ impl Default for RebalancerConfig {
             batch_size: 512,
             min_donor_rows: 100,
             cooldown_ms: 5_000,
+        }
+    }
+}
+
+impl From<&RebalanceSectionConfig> for RebalancerConfig {
+    fn from(cfg: &RebalanceSectionConfig) -> Self {
+        Self {
+            imbalance_threshold: cfg.imbalance_threshold,
+            batch_size: cfg.batch_size,
+            min_donor_rows: cfg.min_donor_rows,
+            cooldown_ms: cfg.cooldown_ms,
+        }
+    }
+}
+
+impl From<&RebalanceSectionConfig> for RebalanceRunnerConfig {
+    fn from(cfg: &RebalanceSectionConfig) -> Self {
+        Self {
+            check_interval_ms: cfg.check_interval_ms,
+            rebalancer: RebalancerConfig::from(cfg),
+            enabled: cfg.enabled,
         }
     }
 }
@@ -637,6 +659,16 @@ impl ShardRebalancer {
             runs_completed: AtomicU64::new(0),
             total_rows_migrated: AtomicU64::new(0),
         }
+    }
+
+    /// Create a `ShardRebalancer` from the TOML `[rebalance]` config section.
+    /// Respects `start_paused` setting.
+    pub fn from_config(cfg: &RebalanceSectionConfig) -> Self {
+        let rb = Self::new(RebalancerConfig::from(cfg));
+        if cfg.start_paused {
+            rb.paused.store(true, Ordering::SeqCst);
+        }
+        rb
     }
 
     /// Check shard loads and trigger rebalancing if needed.

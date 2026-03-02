@@ -554,6 +554,7 @@ impl super::DistributedQueryEngine {
                 failed_shards: failed_shard_ids.clone(),
                 merge_labels,
                 pruned_to_shard: None,
+                ..Default::default()
             };
         }
 

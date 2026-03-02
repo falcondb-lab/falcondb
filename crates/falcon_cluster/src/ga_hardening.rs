@@ -3,6 +3,20 @@
 //!
 //! **One-line**: All unpredictable behavior must be eliminated.
 //! The system must behave the same at 3 a.m. on day 300 as it did on day 1.
+//!
+//! # ⚠ Persistence Caveat
+//!
+//! All state in this module (component registry, config versions, leak
+//! detector counters, tail-latency histograms, task schedules) is **in-memory
+//! only** and does **not** survive a process restart.  This means:
+//!
+//! - **Config rollback history** is lost on restart — the running config is
+//!   re-loaded from the on-disk config file, not from an in-memory version
+//!   chain.  A future version should persist config versions to a WAL-backed
+//!   metadata store.
+//! - **Resource leak baselines** are re-calibrated on each startup.
+//! - **Tail-latency histograms** reset to zero on restart; long-term trend
+//!   analysis requires an external metrics sink (Prometheus / TSDB).
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;

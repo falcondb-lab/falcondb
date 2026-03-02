@@ -1,0 +1,69 @@
+# FalconDB — 3-Node Raft Cluster for Failover-Under-Load Demo
+#
+# Usage:
+#   docker compose up -d
+#   docker compose ps
+#   docker compose down -v
+
+services:
+  node1:
+    build: ../..
+    image: falcondb:latest
+    container_name: falcon-node1
+    hostname: node1
+    ports:
+      - "5433:5433"
+      - "8080:8080"
+    volumes:
+      - ./falcon-node1.toml:/etc/falcondb/falcon.toml:ro
+      - node1-data:/var/lib/falcondb
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+      start_period: 5s
+    restart: "no"
+
+  node2:
+    build: ../..
+    image: falcondb:latest
+    container_name: falcon-node2
+    hostname: node2
+    ports:
+      - "5434:5433"
+      - "8081:8080"
+    volumes:
+      - ./falcon-node2.toml:/etc/falcondb/falcon.toml:ro
+      - node2-data:/var/lib/falcondb
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+      start_period: 5s
+    restart: "no"
+
+  node3:
+    build: ../..
+    image: falcondb:latest
+    container_name: falcon-node3
+    hostname: node3
+    ports:
+      - "5435:5433"
+      - "8082:8080"
+    volumes:
+      - ./falcon-node3.toml:/etc/falcondb/falcon.toml:ro
+      - node3-data:/var/lib/falcondb
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+      start_period: 5s
+    restart: "no"
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:

@@ -254,15 +254,18 @@ impl RaftFailoverWatcher {
 
                 if let Some(leader_node) = new_leader {
                     // Update the shard routing map with the new leader.
+                    // ShardMap.update_leader() increments the shard epoch and
+                    // fires the leader-change callback (if registered).
                     let mut map = self.shard_map.write();
-                    map.update_leader(*shard_id, NodeId(leader_node));
+                    let shard_epoch = map.update_leader(*shard_id, NodeId(leader_node));
                     self.failovers_committed.fetch_add(1, Ordering::Relaxed);
 
                     tracing::info!(
                         shard = shard_id.0,
                         old_leader = ?old,
                         new_leader = leader_node,
-                        epoch = new_epoch,
+                        watcher_epoch = new_epoch,
+                        shard_epoch = ?shard_epoch,
                         "RaftFailoverWatcher: shard leader changed → ShardMap updated"
                     );
                 } else {
@@ -904,5 +907,70 @@ mod tests {
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0].shard_id, 0);
         assert!(stats[0].current_leader.is_some());
+    }
+
+    #[test]
+    fn test_shard_map_epoch_fencing() {
+        use crate::routing::shard_map::ShardMap;
+
+        let mut map = ShardMap::uniform(2, NodeId(1));
+
+        // Initial epoch is 1
+        assert_eq!(map.shard_epoch(ShardId(0)), Some(1));
+        assert_eq!(map.shard_epoch(ShardId(1)), Some(1));
+
+        // Epoch validation: current epoch passes
+        assert!(map.validate_epoch(ShardId(0), 1).is_ok());
+
+        // Leader change bumps epoch
+        let new_epoch = map.update_leader(ShardId(0), NodeId(2));
+        assert_eq!(new_epoch, Some(2));
+        assert_eq!(map.shard_epoch(ShardId(0)), Some(2));
+
+        // Stale epoch is rejected
+        assert_eq!(map.validate_epoch(ShardId(0), 1), Err(2));
+        // Current epoch passes
+        assert!(map.validate_epoch(ShardId(0), 2).is_ok());
+
+        // Same leader → no epoch bump (idempotent)
+        let same_epoch = map.update_leader(ShardId(0), NodeId(2));
+        assert_eq!(same_epoch, Some(2));
+
+        // Second leader change
+        let epoch3 = map.update_leader(ShardId(0), NodeId(3));
+        assert_eq!(epoch3, Some(3));
+        assert_eq!(map.validate_epoch(ShardId(0), 2), Err(3));
+    }
+
+    #[test]
+    fn test_shard_map_leader_change_callback() {
+        use crate::routing::shard_map::ShardMap;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let mut map = ShardMap::single_shard(NodeId(1));
+        let callback_count = Arc::new(AtomicU64::new(0));
+        let last_epoch = Arc::new(AtomicU64::new(0));
+
+        let cc = callback_count.clone();
+        let le = last_epoch.clone();
+        map.set_leader_change_callback(move |_shard, _old, _new, epoch| {
+            cc.fetch_add(1, Ordering::Relaxed);
+            le.store(epoch, Ordering::Relaxed);
+        });
+
+        // First change
+        map.update_leader(ShardId(0), NodeId(2));
+        assert_eq!(callback_count.load(Ordering::Relaxed), 1);
+        assert_eq!(last_epoch.load(Ordering::Relaxed), 2);
+
+        // Same leader → no callback
+        map.update_leader(ShardId(0), NodeId(2));
+        assert_eq!(callback_count.load(Ordering::Relaxed), 1);
+
+        // Another change
+        map.update_leader(ShardId(0), NodeId(3));
+        assert_eq!(callback_count.load(Ordering::Relaxed), 2);
+        assert_eq!(last_epoch.load(Ordering::Relaxed), 3);
     }
 }

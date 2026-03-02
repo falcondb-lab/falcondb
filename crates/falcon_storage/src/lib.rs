@@ -24,8 +24,10 @@ pub mod stats;
 pub mod upgrade;
 pub mod ustm;
 pub mod verification;
+#[allow(dead_code)]
 pub mod csn;
 pub mod delta_lsn;
+#[allow(dead_code)]
 pub mod structured_lsn;
 pub mod unified_data_plane;
 pub mod unified_data_plane_full;
@@ -38,6 +40,7 @@ pub mod wal_win_async;
 
 // ── Enterprise stubs (always compiled for handler compat, disabled at runtime) ──
 pub mod cdc;
+pub mod cdc_wal_bridge;
 pub mod encryption;
 #[cfg(feature = "online_ddl_full")]
 pub mod online_ddl;

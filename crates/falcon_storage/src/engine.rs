@@ -27,6 +27,7 @@ use crate::wal::{CheckpointData, SyncMode, WalRecord, WalWriter};
 use falcon_common::rls::RlsPolicyManager;
 
 use crate::cdc::{CdcManager, DEFAULT_CDC_BUFFER_SIZE};
+use crate::cdc_wal_bridge::WalCdcBridge;
 use crate::encryption::KeyManager;
 use crate::metering::ResourceMeter;
 use crate::online_ddl::OnlineDdlManager;
@@ -363,6 +364,9 @@ pub struct EnterpriseExtensions {
     pub tenant_registry: Arc<TenantRegistry>,
     /// P3-3: Resource meter — per-tenant billing and throttling.
     pub resource_meter: Arc<ResourceMeter>,
+    /// WAL → CDC bridge: converts WAL records into CDC change events with real LSNs.
+    /// `None` until explicitly configured via `configure_cdc_bridge()`.
+    pub cdc_bridge: RwLock<Option<Arc<WalCdcBridge>>>,
 }
 
 impl Default for EnterpriseExtensions {
@@ -377,6 +381,7 @@ impl Default for EnterpriseExtensions {
             intern_pool: Arc::new(crate::cold_store::StringInternPool::new()),
             tenant_registry: Arc::new(TenantRegistry::new()),
             resource_meter: Arc::new(ResourceMeter::new()),
+            cdc_bridge: RwLock::new(None),
         }
     }
 }
@@ -430,6 +435,11 @@ pub struct StorageEngine {
     pub(crate) memory_tracker: MemoryTracker,
     /// Online DDL operation tracker.
     pub(crate) online_ddl: OnlineDdlManager,
+    /// Background executor for async DDL backfill (e.g. ALTER TABLE ADD COLUMN
+    /// with DEFAULT). When set, backfill runs in a dedicated thread pool instead
+    /// of blocking the DDL statement. Feature-gated behind `online_ddl_full`.
+    #[cfg(feature = "online_ddl_full")]
+    pub(crate) ddl_executor: Option<Arc<crate::online_ddl::DdlBackgroundExecutor>>,
     /// Internal TxnId counter for auto-commit helpers (insert_row, delete_row).
     /// Uses a high range (starting at 1<<60) to avoid collisions with user txns.
     pub(crate) internal_txn_counter: AtomicU64,
@@ -583,6 +593,8 @@ impl StorageEngine {
             index_registry: DashMap::new(),
             memory_tracker: MemoryTracker::unlimited(),
             online_ddl: OnlineDdlManager::new(),
+            #[cfg(feature = "online_ddl_full")]
+            ddl_executor: None,
             internal_txn_counter: AtomicU64::new(1u64 << 60),
             replica_ack_tracker: ReplicaAckTracker::new(),
             #[cfg(feature = "columnstore")]
@@ -611,6 +623,7 @@ impl StorageEngine {
             // archiver is kept alive as long as the callback exists — no unsafe needed.
             if let Some(ref wal) = self.wal {
                 let archiver_arc = Arc::clone(&self.ext.wal_archiver);
+                let wal_dir = wal.wal_dir();
                 let cb: crate::wal::SegmentRotateCallback =
                     std::sync::Arc::new(move |seg_id: u64, seg_size: u64| {
                         let mut guard = archiver_arc.write();
@@ -620,12 +633,19 @@ impl StorageEngine {
                             let lsn_end = crate::pitr::Lsn(
                                 (seg_id + 1).saturating_mul(1_000_000).saturating_sub(1),
                             );
-                            guard.archive_segment(&fname, lsn_start, lsn_end, seg_size);
-                            tracing::debug!(
-                                "PITR: archived segment {} ({} bytes)",
-                                fname,
-                                seg_size
-                            );
+                            // Source path: absolute path from the WAL directory.
+                            let source = wal_dir.join(&fname);
+                            match guard.archive_segment(&source, &fname, lsn_start, lsn_end, seg_size) {
+                                Ok(_) => tracing::debug!(
+                                    "PITR: archived segment {} ({} bytes)",
+                                    fname,
+                                    seg_size
+                                ),
+                                Err(e) => tracing::error!(
+                                    "PITR: failed to archive segment {}: {e}",
+                                    fname
+                                ),
+                            }
                         }
                     });
                 wal.set_segment_rotate_callback(cb);
@@ -695,6 +715,56 @@ impl StorageEngine {
         tracing::info!(
             "TDE enabled: algorithm=AES-256-GCM, dek_count={}, encrypt_wal={}, encrypt_data={}",
             km.dek_count(), encrypt_wal, encrypt_data,
+        );
+    }
+
+    /// Configure CDC WAL bridge from the [cdc] config section.
+    /// Call this after construction to enable WAL-backed CDC event generation.
+    ///
+    /// When enabled, every WAL record is automatically converted into CDC
+    /// change events with real WAL LSNs. Events are buffered per-transaction
+    /// and only emitted to consumers on commit (matching PostgreSQL logical
+    /// decoding semantics).
+    ///
+    /// `persist_every` controls how often (in CDC events) slot state is flushed
+    /// to disk for crash recovery. Set to 0 to disable persistence.
+    pub fn configure_cdc_bridge(&self, enabled: bool, persist_every: u64) {
+        if !enabled {
+            tracing::info!("CDC WAL bridge disabled by configuration");
+            return;
+        }
+
+        let resolver = Arc::new(crate::cdc_wal_bridge::CachedTableResolver::new());
+
+        // Bulk-load current table names from catalog
+        {
+            let catalog = self.catalog.read();
+            resolver.load_from_catalog(&catalog);
+        }
+
+        let cdc = Arc::new(crate::cdc::CdcManager::new(crate::cdc::DEFAULT_CDC_BUFFER_SIZE));
+
+        let mut bridge = WalCdcBridge::new(Arc::clone(&cdc), resolver);
+
+        // Enable slot persistence if WAL directory is available
+        if persist_every > 0 {
+            if let Some(ref dir) = self.data_dir {
+                bridge = bridge.with_persistence(dir, persist_every);
+                // Recover any previously persisted slots
+                match bridge.recover_slots() {
+                    Ok(n) if n > 0 => tracing::info!("CDC bridge: recovered {} slots from disk", n),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("CDC bridge: slot recovery failed: {}", e),
+                }
+            }
+        }
+
+        // Install the bridge via interior-mutable RwLock
+        *self.ext.cdc_bridge.write() = Some(Arc::new(bridge));
+
+        tracing::info!(
+            "CDC WAL bridge enabled (persist_every={})",
+            persist_every,
         );
     }
 
@@ -872,8 +942,11 @@ impl StorageEngine {
         let filename = crate::wal::segment_filename(segment_id);
         let lsn_start = crate::pitr::Lsn(segment_id * 1000);
         let lsn_end = crate::pitr::Lsn((segment_id + 1) * 1000 - 1);
-        archiver.archive_segment(&filename, lsn_start, lsn_end, size_bytes);
-        tracing::debug!("WAL segment {} archived ({} bytes)", filename, size_bytes);
+        let source = std::path::PathBuf::from(format!("wal/{filename}"));
+        match archiver.archive_segment(&source, &filename, lsn_start, lsn_end, size_bytes) {
+            Ok(_) => tracing::debug!("WAL segment {} archived ({} bytes)", filename, size_bytes),
+            Err(e) => tracing::error!("Failed to archive WAL segment {}: {e}", filename),
+        }
     }
 
     /// List all archived WAL segments.
@@ -1000,6 +1073,8 @@ impl StorageEngine {
             index_registry: DashMap::new(),
             memory_tracker: MemoryTracker::unlimited(),
             online_ddl: OnlineDdlManager::new(),
+            #[cfg(feature = "online_ddl_full")]
+            ddl_executor: None,
             internal_txn_counter: AtomicU64::new(1u64 << 60),
             replica_ack_tracker: ReplicaAckTracker::new(),
             #[cfg(feature = "columnstore")]
@@ -1041,6 +1116,8 @@ impl StorageEngine {
             index_registry: DashMap::new(),
             memory_tracker: MemoryTracker::unlimited(),
             online_ddl: OnlineDdlManager::new(),
+            #[cfg(feature = "online_ddl_full")]
+            ddl_executor: None,
             internal_txn_counter: AtomicU64::new(1u64 << 60),
             replica_ack_tracker: ReplicaAckTracker::new(),
             #[cfg(feature = "columnstore")]
@@ -1082,6 +1159,8 @@ impl StorageEngine {
             index_registry: DashMap::new(),
             memory_tracker: MemoryTracker::new(budget),
             online_ddl: OnlineDdlManager::new(),
+            #[cfg(feature = "online_ddl_full")]
+            ddl_executor: None,
             internal_txn_counter: AtomicU64::new(1u64 << 60),
             replica_ack_tracker: ReplicaAckTracker::new(),
             #[cfg(feature = "columnstore")]
@@ -1122,11 +1201,13 @@ impl StorageEngine {
 
     /// Append a record to the WAL (if enabled) and notify the observer (if set).
     /// This is the single entry point for all WAL writes, ensuring replication
-    /// always sees every record.
+    /// always sees every record. Also feeds the CDC bridge if configured.
     pub(crate) fn append_wal(&self, record: &WalRecord) -> Result<(), StorageError> {
-        if let Some(ref wal) = self.wal {
-            wal.append(record)?;
-        }
+        let lsn = if let Some(ref wal) = self.wal {
+            wal.append(record)?
+        } else {
+            0
+        };
         self.wal_stats
             .records_written
             .fetch_add(1, AtomicOrdering::Relaxed);
@@ -1136,6 +1217,10 @@ impl StorageEngine {
                 .observer_notifications
                 .fetch_add(1, AtomicOrdering::Relaxed);
         }
+        // Feed WAL record into CDC bridge (if configured)
+        if let Some(ref bridge) = *self.ext.cdc_bridge.read() {
+            bridge.on_wal_record(lsn, record);
+        }
         Ok(())
     }
 
@@ -1143,10 +1228,40 @@ impl StorageEngine {
     pub(crate) fn append_and_flush_wal(&self, record: &WalRecord) -> Result<(), StorageError> {
         self.append_wal(record)?;
         if let Some(ref wal) = self.wal {
+            let start = std::time::Instant::now();
             wal.flush()?;
+            let elapsed_us = start.elapsed().as_micros() as u64;
+            self.wal_stats
+                .fsync_total_us
+                .fetch_add(elapsed_us, AtomicOrdering::Relaxed);
+            // Update max fsync latency (lock-free CAS loop).
+            let mut cur = self.wal_stats.fsync_max_us.load(AtomicOrdering::Relaxed);
+            while elapsed_us > cur {
+                match self.wal_stats.fsync_max_us.compare_exchange_weak(
+                    cur,
+                    elapsed_us,
+                    AtomicOrdering::Relaxed,
+                    AtomicOrdering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(actual) => cur = actual,
+                }
+            }
         }
         self.wal_stats.flushes.fetch_add(1, AtomicOrdering::Relaxed);
         Ok(())
+    }
+
+    /// Record group commit statistics after a batch flush.
+    /// Called by the group commit path to update `WalStats` metrics.
+    #[allow(dead_code)]
+    pub(crate) fn record_group_commit(&self, records_in_batch: u64) {
+        self.wal_stats
+            .group_commit_batches
+            .fetch_add(1, AtomicOrdering::Relaxed);
+        self.wal_stats
+            .group_commit_records
+            .fetch_add(records_in_batch, AtomicOrdering::Relaxed);
     }
 
     /// Record a completed failover event (called by cluster layer).
@@ -1162,6 +1277,22 @@ impl StorageEngine {
     /// Access the online DDL manager for status queries.
     pub const fn online_ddl(&self) -> &OnlineDdlManager {
         &self.online_ddl
+    }
+
+    /// Set the background DDL executor for async backfill operations.
+    ///
+    /// When configured, `ALTER TABLE ADD COLUMN ... DEFAULT ...` will submit
+    /// backfill work to this executor and return immediately instead of
+    /// blocking until all existing rows are updated.
+    #[cfg(feature = "online_ddl_full")]
+    pub fn set_ddl_executor(&mut self, executor: Arc<crate::online_ddl::DdlBackgroundExecutor>) {
+        self.ddl_executor = Some(executor);
+    }
+
+    /// Access the background DDL executor, if configured.
+    #[cfg(feature = "online_ddl_full")]
+    pub fn ddl_executor(&self) -> Option<&Arc<crate::online_ddl::DdlBackgroundExecutor>> {
+        self.ddl_executor.as_ref()
     }
 
     /// Get a snapshot of WAL write statistics.

@@ -60,13 +60,24 @@ impl AuditLog {
         let drain_thread = std::thread::Builder::new()
             .name("falcon-audit-drain".into())
             .spawn(move || {
-                for event in rx {
-                    let mut buf = events_clone.lock();
-                    if buf.len() >= capacity {
-                        buf.pop_front();
+                loop {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        for event in &rx {
+                            let mut buf = events_clone.lock();
+                            if buf.len() >= capacity {
+                                buf.pop_front();
+                            }
+                            buf.push_back(event);
+                            drained_clone.fetch_add(1, Ordering::Release);
+                        }
+                    }));
+                    match result {
+                        Ok(()) => break, // channel closed normally
+                        Err(_) => {
+                            tracing::error!("audit drain thread panicked — restarting drain loop");
+                            continue;
+                        }
                     }
-                    buf.push_back(event);
-                    drained_clone.fetch_add(1, Ordering::Release);
                 }
             })
             .unwrap_or_else(|e| {

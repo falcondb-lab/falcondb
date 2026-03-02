@@ -209,7 +209,7 @@ pub struct SecondaryIndex {
 }
 
 impl SecondaryIndex {
-    pub const fn new(column_idx: usize) -> Self {
+    pub fn new(column_idx: usize) -> Self {
         Self {
             column_idx,
             column_indices: vec![],
@@ -220,7 +220,7 @@ impl SecondaryIndex {
         }
     }
 
-    pub const fn new_unique(column_idx: usize) -> Self {
+    pub fn new_unique(column_idx: usize) -> Self {
         Self {
             column_idx,
             column_indices: vec![],
@@ -258,7 +258,7 @@ impl SecondaryIndex {
     }
 
     /// Create a prefix index (truncates key to prefix_len bytes).
-    pub const fn new_prefix(column_idx: usize, prefix_len: usize) -> Self {
+    pub fn new_prefix(column_idx: usize, prefix_len: usize) -> Self {
         Self {
             column_idx,
             column_indices: vec![],
@@ -270,7 +270,7 @@ impl SecondaryIndex {
     }
 
     /// Returns true if this is a composite (multi-column) index.
-    pub const fn is_composite(&self) -> bool {
+    pub fn is_composite(&self) -> bool {
         self.column_indices.len() > 1
     }
 
@@ -429,10 +429,9 @@ impl MemTable {
     ) -> Result<PrimaryKey, falcon_common::error::StorageError> {
         let pk = encode_pk(&row, self.schema.pk_indices());
 
-        // Check unique index constraints against committed index (read-only check)
-        self.check_unique_indexes(&pk, &row)?;
-
         // Use entry() to avoid double DashMap lookup (get + insert → single shard lock).
+        // Unique index check is performed INSIDE the entry critical section to prevent
+        // TOCTOU races where two concurrent transactions both pass the check.
         let entry = self.data.entry(pk.clone());
         match entry {
             dashmap::mapref::entry::Entry::Occupied(e) => {
@@ -443,10 +442,14 @@ impl MemTable {
                 if chain.has_live_version(txn_id) {
                     return Err(falcon_common::error::StorageError::DuplicateKey);
                 }
+                // Check unique index constraints while DashMap shard lock is held
+                self.check_unique_indexes(&pk, &row)?;
                 chain.prepend(txn_id, Some(row));
                 self.gc_candidates.fetch_add(1, AtomicOrdering::Relaxed);
             }
             dashmap::mapref::entry::Entry::Vacant(e) => {
+                // Check unique index constraints while DashMap shard lock is held
+                self.check_unique_indexes(&pk, &row)?;
                 let chain = Arc::new(VersionChain::new());
                 chain.prepend(txn_id, Some(row));
                 e.insert(chain);
@@ -739,8 +742,14 @@ impl MemTable {
     /// committed_row_count is exact and avoids the O(N) DashMap scan entirely.
     pub fn count_visible(&self, txn_id: TxnId, read_ts: Timestamp) -> usize {
         let count = self.committed_row_count.load(AtomicOrdering::Acquire);
-        if count >= 0 && self.gc_candidates.load(AtomicOrdering::Relaxed) == 0 {
+        // Fast path only when count is non-negative and no GC candidates exist.
+        // A negative count indicates a transient race (e.g. abort interleaved with
+        // commit); fall through to the slow path which always returns the true count.
+        if count > 0 && self.gc_candidates.load(AtomicOrdering::Relaxed) == 0 {
             return count as usize;
+        }
+        if count == 0 && self.gc_candidates.load(AtomicOrdering::Relaxed) == 0 {
+            return 0;
         }
         // Slow path: full scan with per-row visibility checks
         let mut n = 0;

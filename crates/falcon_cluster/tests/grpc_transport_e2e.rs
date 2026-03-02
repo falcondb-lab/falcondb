@@ -649,6 +649,552 @@ fn scenario_g_crc32_deterministic() {
     assert_ne!(c1, c3);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Scenario H: Full E2E WAL Streaming Replication
+//
+// Primary: CreateTable + Insert + Commit → WAL → ReplicationLog → gRPC stream
+// Replica: subscribe → decode → apply_wal_record_to_engine → verify data
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn scenario_h_full_wal_streaming_replication_e2e() {
+    use falcon_cluster::grpc_transport::WalReplicationService;
+    use falcon_cluster::proto::wal_replication_server::WalReplicationServer;
+    use falcon_cluster::replication::ReplicationLog;
+    use falcon_cluster::replication::catchup::apply_wal_record_to_engine;
+    use falcon_common::datum::{Datum, OwnedRow};
+    use falcon_common::schema::{ColumnDef, TableSchema};
+    use falcon_common::types::*;
+    use falcon_storage::engine::StorageEngine;
+    use falcon_storage::wal::WalRecord;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio_stream::StreamExt;
+
+    // ── Step 1: Set up primary StorageEngine and schema ──
+    let primary = Arc::new(StorageEngine::new_in_memory());
+    let schema = TableSchema {
+        id: TableId(1),
+        name: "orders".into(),
+        columns: vec![
+            ColumnDef {
+                id: ColumnId(0),
+                name: "id".into(),
+                data_type: DataType::Int32,
+                nullable: false,
+                is_primary_key: true,
+                default_value: None,
+                is_serial: false,
+            },
+            ColumnDef {
+                id: ColumnId(1),
+                name: "amount".into(),
+                data_type: DataType::Int64,
+                nullable: false,
+                is_primary_key: false,
+                default_value: None,
+                is_serial: false,
+            },
+            ColumnDef {
+                id: ColumnId(2),
+                name: "customer".into(),
+                data_type: DataType::Text,
+                nullable: true,
+                is_primary_key: false,
+                default_value: None,
+                is_serial: false,
+            },
+        ],
+        primary_key_columns: vec![0],
+        ..Default::default()
+    };
+    primary.create_table(schema.clone()).unwrap();
+
+    // ── Step 2: Build WAL records simulating writes on the primary ──
+    let wal_records = vec![
+        WalRecord::CreateTable {
+            schema: schema.clone(),
+        },
+        WalRecord::BeginTxn {
+            txn_id: TxnId(100),
+        },
+        WalRecord::Insert {
+            txn_id: TxnId(100),
+            table_id: TableId(1),
+            row: OwnedRow::new(vec![
+                Datum::Int32(1),
+                Datum::Int64(9999),
+                Datum::Text("alice".into()),
+            ]),
+        },
+        WalRecord::Insert {
+            txn_id: TxnId(100),
+            table_id: TableId(1),
+            row: OwnedRow::new(vec![
+                Datum::Int32(2),
+                Datum::Int64(4500),
+                Datum::Text("bob".into()),
+            ]),
+        },
+        WalRecord::CommitTxnLocal {
+            txn_id: TxnId(100),
+            commit_ts: Timestamp(1),
+        },
+        // Second transaction
+        WalRecord::BeginTxn {
+            txn_id: TxnId(101),
+        },
+        WalRecord::Insert {
+            txn_id: TxnId(101),
+            table_id: TableId(1),
+            row: OwnedRow::new(vec![
+                Datum::Int32(3),
+                Datum::Int64(1200),
+                Datum::Text("charlie".into()),
+            ]),
+        },
+        WalRecord::CommitTxnLocal {
+            txn_id: TxnId(101),
+            commit_ts: Timestamp(2),
+        },
+    ];
+
+    // ── Step 3: Populate ReplicationLog (simulates WAL → log pipeline) ──
+    let replication_log = Arc::new(ReplicationLog::new());
+    for record in &wal_records {
+        replication_log.append(record.clone());
+    }
+
+    // ── Step 4: Start gRPC server with the ReplicationLog ──
+    let svc = WalReplicationService::new();
+    svc.register_shard(ShardId(0), replication_log.clone());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server_handle = tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(WalReplicationServer::new(svc))
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+            .await
+            .unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // ── Step 5: Replica subscribes and receives WAL chunks ──
+    let endpoint = format!("http://{}", addr);
+    let channel = tonic::transport::Endpoint::from_shared(endpoint)
+        .unwrap()
+        .connect_timeout(Duration::from_secs(2))
+        .connect()
+        .await
+        .expect("Failed to connect to gRPC server");
+
+    let mut client =
+        falcon_cluster::proto::wal_replication_client::WalReplicationClient::new(channel);
+
+    let request = falcon_cluster::proto::SubscribeWalRequest {
+        shard_id: 0,
+        from_lsn: 0,
+        max_records_per_chunk: 100,
+    };
+    let response = client.subscribe_wal(request).await.expect("subscribe_wal");
+    let mut stream = response.into_inner();
+
+    let msg = stream.next().await.unwrap().expect("stream message");
+    assert_eq!(msg.shard_id, 0);
+    assert_eq!(
+        msg.records.len(),
+        wal_records.len(),
+        "Expected {} WAL records in chunk, got {}",
+        wal_records.len(),
+        msg.records.len()
+    );
+
+    // ── Step 6: Decode proto records back to WalRecords ──
+    // Wire format: record_payload is JSON-serialized LsnWalRecord
+    let decoded_records: Vec<WalRecord> = msg
+        .records
+        .iter()
+        .map(|entry| {
+            let lsn_record: falcon_cluster::replication::LsnWalRecord =
+                serde_json::from_slice(&entry.record_payload)
+                    .expect("WAL record JSON decode failed");
+            lsn_record.record
+        })
+        .collect();
+
+    assert_eq!(decoded_records.len(), wal_records.len());
+
+    // ── Step 7: Apply WAL records on replica StorageEngine ──
+    let replica = Arc::new(StorageEngine::new_in_memory());
+    let mut write_sets: HashMap<TxnId, Vec<falcon_cluster::replication::catchup::WriteOp>> =
+        HashMap::new();
+
+    for record in &decoded_records {
+        apply_wal_record_to_engine(&replica, record, &mut write_sets)
+            .expect("WAL apply on replica failed");
+    }
+
+    // ── Step 8: Verify data is visible on the replica ──
+    // All transactions were committed, so data should be visible
+    let txn_mgr = falcon_txn::TxnManager::new(replica.clone());
+    let txn = txn_mgr.begin(IsolationLevel::ReadCommitted);
+    let read_ts = txn.read_ts(txn_mgr.current_ts());
+
+    let rows = replica
+        .scan(TableId(1), txn.txn_id, read_ts)
+        .expect("scan on replica failed");
+
+    assert_eq!(
+        rows.len(),
+        3,
+        "Replica should have 3 rows after replication, got {}",
+        rows.len()
+    );
+
+    // Verify specific row values
+    let row_values: Vec<(i32, i64, String)> = rows
+        .iter()
+        .map(|(_, r)| {
+            let id = match &r.values[0] {
+                Datum::Int32(v) => *v,
+                other => panic!("Expected Int32, got {:?}", other),
+            };
+            let amount = match &r.values[1] {
+                Datum::Int64(v) => *v,
+                other => panic!("Expected Int64, got {:?}", other),
+            };
+            let customer = match &r.values[2] {
+                Datum::Text(v) => v.clone(),
+                other => panic!("Expected Text, got {:?}", other),
+            };
+            (id, amount, customer)
+        })
+        .collect();
+
+    assert!(
+        row_values.iter().any(|(id, amt, c)| *id == 1 && *amt == 9999 && c == "alice"),
+        "Missing row: (1, 9999, alice)"
+    );
+    assert!(
+        row_values.iter().any(|(id, amt, c)| *id == 2 && *amt == 4500 && c == "bob"),
+        "Missing row: (2, 4500, bob)"
+    );
+    assert!(
+        row_values.iter().any(|(id, amt, c)| *id == 3 && *amt == 1200 && c == "charlie"),
+        "Missing row: (3, 1200, charlie)"
+    );
+
+    // ── Step 9: Ack the applied LSN ──
+    let ack_request = falcon_cluster::proto::AckWalRequest {
+        shard_id: 0,
+        replica_id: 1,
+        applied_lsn: msg.end_lsn,
+    };
+    let ack_response = client.ack_wal(ack_request).await.expect("ack_wal");
+    assert!(ack_response.into_inner().success);
+
+    // ── Step 10: Verify incremental replication (append more records, re-subscribe) ──
+    // This would require a second subscribe from the latest LSN — covered by scenario_e tests.
+
+    server_handle.abort();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Scenario H-incremental: WAL Incremental Replication (from_lsn > 0)
+//
+// Extends scenario_h:
+// 1. Primary populates initial data → replica subscribes from LSN 0
+// 2. Apply initial records on replica, note end_lsn
+// 3. Primary appends MORE records to the ReplicationLog
+// 4. Replica re-subscribes with from_lsn = end_lsn (incremental)
+// 5. Verify only the NEW records arrive
+// 6. Apply them on replica → verify all data present
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn scenario_h_incremental_wal_subscribe_from_lsn() {
+    use falcon_cluster::grpc_transport::WalReplicationService;
+    use falcon_cluster::proto::wal_replication_server::WalReplicationServer;
+    use falcon_cluster::replication::ReplicationLog;
+    use falcon_cluster::replication::catchup::apply_wal_record_to_engine;
+    use falcon_common::datum::{Datum, OwnedRow};
+    use falcon_common::schema::{ColumnDef, TableSchema};
+    use falcon_common::types::*;
+    use falcon_storage::engine::StorageEngine;
+    use falcon_storage::wal::WalRecord;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio_stream::StreamExt;
+
+    // ── Step 1: Set up primary and schema ──
+    let primary = Arc::new(StorageEngine::new_in_memory());
+    let schema = TableSchema {
+        id: TableId(1),
+        name: "incremental".into(),
+        columns: vec![
+            ColumnDef {
+                id: ColumnId(0),
+                name: "id".into(),
+                data_type: DataType::Int32,
+                nullable: false,
+                is_primary_key: true,
+                default_value: None,
+                is_serial: false,
+            },
+            ColumnDef {
+                id: ColumnId(1),
+                name: "val".into(),
+                data_type: DataType::Text,
+                nullable: true,
+                is_primary_key: false,
+                default_value: None,
+                is_serial: false,
+            },
+        ],
+        primary_key_columns: vec![0],
+        ..Default::default()
+    };
+    primary.create_table(schema.clone()).unwrap();
+
+    // ── Step 2: Initial WAL records (batch 1) ──
+    let batch1_records = vec![
+        WalRecord::CreateTable {
+            schema: schema.clone(),
+        },
+        WalRecord::BeginTxn {
+            txn_id: TxnId(100),
+        },
+        WalRecord::Insert {
+            txn_id: TxnId(100),
+            table_id: TableId(1),
+            row: OwnedRow::new(vec![
+                Datum::Int32(1),
+                Datum::Text("alpha".into()),
+            ]),
+        },
+        WalRecord::Insert {
+            txn_id: TxnId(100),
+            table_id: TableId(1),
+            row: OwnedRow::new(vec![
+                Datum::Int32(2),
+                Datum::Text("beta".into()),
+            ]),
+        },
+        WalRecord::CommitTxnLocal {
+            txn_id: TxnId(100),
+            commit_ts: Timestamp(1),
+        },
+    ];
+
+    let replication_log = Arc::new(ReplicationLog::new());
+    for record in &batch1_records {
+        replication_log.append(record.clone());
+    }
+
+    // ── Step 3: Start gRPC server ──
+    let svc = WalReplicationService::new();
+    svc.register_shard(ShardId(0), replication_log.clone());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server_handle = tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(WalReplicationServer::new(svc))
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+            .await
+            .unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // ── Step 4: First subscribe from LSN 0 (full snapshot) ──
+    let endpoint = format!("http://{}", addr);
+    let channel = tonic::transport::Endpoint::from_shared(endpoint.clone())
+        .unwrap()
+        .connect_timeout(Duration::from_secs(2))
+        .connect()
+        .await
+        .expect("connect to gRPC server");
+
+    let mut client =
+        falcon_cluster::proto::wal_replication_client::WalReplicationClient::new(channel);
+
+    let request = falcon_cluster::proto::SubscribeWalRequest {
+        shard_id: 0,
+        from_lsn: 0,
+        max_records_per_chunk: 100,
+    };
+    let response = client.subscribe_wal(request).await.expect("subscribe_wal");
+    let mut stream = response.into_inner();
+
+    let msg1 = stream.next().await.unwrap().expect("first chunk");
+    assert_eq!(
+        msg1.records.len(),
+        batch1_records.len(),
+        "First subscribe should return all {} initial records",
+        batch1_records.len()
+    );
+    let first_end_lsn = msg1.end_lsn;
+    assert!(first_end_lsn > 0, "end_lsn should be > 0 after initial batch");
+    drop(stream);
+
+    // ── Step 5: Apply batch 1 on replica ──
+    let replica = Arc::new(StorageEngine::new_in_memory());
+    let mut write_sets: HashMap<TxnId, Vec<falcon_cluster::replication::catchup::WriteOp>> =
+        HashMap::new();
+
+    let decoded_batch1: Vec<WalRecord> = msg1
+        .records
+        .iter()
+        .map(|entry| {
+            let lsn_record: falcon_cluster::replication::LsnWalRecord =
+                serde_json::from_slice(&entry.record_payload)
+                    .expect("WAL record decode");
+            lsn_record.record
+        })
+        .collect();
+
+    for record in &decoded_batch1 {
+        apply_wal_record_to_engine(&replica, record, &mut write_sets)
+            .expect("WAL apply on replica");
+    }
+
+    // Verify batch 1 data
+    let txn_mgr = falcon_txn::TxnManager::new(replica.clone());
+    let txn = txn_mgr.begin(IsolationLevel::ReadCommitted);
+    let read_ts = txn.read_ts(txn_mgr.current_ts());
+    let rows = replica.scan(TableId(1), txn.txn_id, read_ts).unwrap();
+    assert_eq!(rows.len(), 2, "Replica should have 2 rows after batch 1");
+
+    // ── Step 6: Primary appends batch 2 (incremental records) ──
+    let batch2_records = vec![
+        WalRecord::BeginTxn {
+            txn_id: TxnId(200),
+        },
+        WalRecord::Insert {
+            txn_id: TxnId(200),
+            table_id: TableId(1),
+            row: OwnedRow::new(vec![
+                Datum::Int32(3),
+                Datum::Text("gamma".into()),
+            ]),
+        },
+        WalRecord::Insert {
+            txn_id: TxnId(200),
+            table_id: TableId(1),
+            row: OwnedRow::new(vec![
+                Datum::Int32(4),
+                Datum::Text("delta".into()),
+            ]),
+        },
+        WalRecord::CommitTxnLocal {
+            txn_id: TxnId(200),
+            commit_ts: Timestamp(2),
+        },
+    ];
+
+    for record in &batch2_records {
+        replication_log.append(record.clone());
+    }
+
+    // ── Step 7: Incremental subscribe from first_end_lsn ──
+    let channel2 = tonic::transport::Endpoint::from_shared(endpoint)
+        .unwrap()
+        .connect_timeout(Duration::from_secs(2))
+        .connect()
+        .await
+        .expect("reconnect");
+
+    let mut client2 =
+        falcon_cluster::proto::wal_replication_client::WalReplicationClient::new(channel2);
+
+    let incremental_req = falcon_cluster::proto::SubscribeWalRequest {
+        shard_id: 0,
+        from_lsn: first_end_lsn,
+        max_records_per_chunk: 100,
+    };
+    let response2 = client2
+        .subscribe_wal(incremental_req)
+        .await
+        .expect("incremental subscribe_wal");
+    let mut stream2 = response2.into_inner();
+
+    let msg2 = stream2.next().await.unwrap().expect("incremental chunk");
+
+    // Only batch 2 records should arrive (not batch 1)
+    assert_eq!(
+        msg2.records.len(),
+        batch2_records.len(),
+        "Incremental subscribe should return only {} new records, got {}",
+        batch2_records.len(),
+        msg2.records.len()
+    );
+    assert!(
+        msg2.start_lsn > first_end_lsn || msg2.records.iter().all(|r| r.lsn > first_end_lsn),
+        "All incremental records should have LSN > first_end_lsn ({})",
+        first_end_lsn
+    );
+    drop(stream2);
+
+    // ── Step 8: Apply batch 2 on replica ──
+    let decoded_batch2: Vec<WalRecord> = msg2
+        .records
+        .iter()
+        .map(|entry| {
+            let lsn_record: falcon_cluster::replication::LsnWalRecord =
+                serde_json::from_slice(&entry.record_payload)
+                    .expect("WAL record decode");
+            lsn_record.record
+        })
+        .collect();
+
+    for record in &decoded_batch2 {
+        apply_wal_record_to_engine(&replica, record, &mut write_sets)
+            .expect("WAL apply batch 2");
+    }
+
+    // ── Step 9: Verify all 4 rows on replica ──
+    let txn2 = txn_mgr.begin(IsolationLevel::ReadCommitted);
+    let read_ts2 = txn2.read_ts(txn_mgr.current_ts());
+    let all_rows = replica.scan(TableId(1), txn2.txn_id, read_ts2).unwrap();
+    assert_eq!(
+        all_rows.len(),
+        4,
+        "Replica should have 4 rows after incremental replication, got {}",
+        all_rows.len()
+    );
+
+    let row_ids: Vec<i32> = all_rows
+        .iter()
+        .map(|(_, r)| match &r.values[0] {
+            Datum::Int32(v) => *v,
+            other => panic!("Expected Int32, got {:?}", other),
+        })
+        .collect();
+    for expected_id in [1, 2, 3, 4] {
+        assert!(
+            row_ids.contains(&expected_id),
+            "Missing row with id={} on replica after incremental replication",
+            expected_id
+        );
+    }
+
+    // ── Step 10: Ack the final LSN ──
+    let ack_request = falcon_cluster::proto::AckWalRequest {
+        shard_id: 0,
+        replica_id: 1,
+        applied_lsn: msg2.end_lsn,
+    };
+    let ack_response = client2.ack_wal(ack_request).await.expect("ack_wal");
+    assert!(ack_response.into_inner().success);
+
+    server_handle.abort();
+}
+
 #[test]
 fn scenario_g_wal_chunk_checksum_tamper_detection() {
     let records: Vec<LsnWalRecord> = (1..=3).map(make_lsn_record).collect();

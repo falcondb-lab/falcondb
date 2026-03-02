@@ -562,3 +562,66 @@ When LZ4 compression is negotiated (via `FEATURE_COMPRESSION_LZ4` flag), payload
 - `0x01` — LZ4-compressed (first 4 bytes = uncompressed size LE)
 
 See [native_protocol.md](native_protocol.md) and [native_protocol_compat.md](native_protocol_compat.md) for full protocol specification.
+
+---
+
+## SLA/SLO Metrics
+
+The `SloTracker` exposes real-time SLA/SLO metrics via `/admin/slo`:
+
+| Metric | Description | Target |
+|--------|-------------|--------|
+| `write_availability` | Fraction of successful writes (0.0–1.0) | ≥ 0.999 |
+| `read_availability` | Fraction of successful reads (0.0–1.0) | ≥ 0.9999 |
+| `write_p99_us` | 99th percentile write latency (µs) | ≤ 20ms |
+| `read_p99_us` | 99th percentile read latency (µs) | ≤ 10ms |
+| `replication_lag_max_lsn` | Maximum replication lag across all replicas | ≤ 1000 |
+| `gateway_reject_rate` | Fraction of requests rejected by admission | ≤ 0.01 |
+
+### SLA Tier Recommendations
+
+| Tier | Write Avail | Read Avail | Write P99 | Read P99 | Repl Lag |
+|------|-------------|------------|-----------|----------|----------|
+| **Standard** | 99.9% | 99.99% | 50ms | 20ms | 5000 LSN |
+| **Premium** | 99.95% | 99.999% | 20ms | 10ms | 1000 LSN |
+| **Critical** | 99.99% | 99.999% | 10ms | 5ms | 100 LSN |
+
+### SLO-Driven Backpressure
+
+| Pressure Level | Admission Rate | Trigger |
+|---------------|----------------|---------|
+| **Normal** | 100% | All signals below thresholds |
+| **Elevated** | 80% | Any signal above elevated threshold |
+| **High** | 50% | Any signal above high threshold |
+| **Critical** | 10% | Any signal above critical threshold |
+
+---
+
+## Performance Guardrails
+
+Every hot path has a latency guardrail with automatic backpressure:
+
+| Path | Default p99 | Default p999 | Absolute Max |
+|------|-------------|--------------|--------------|
+| WAL Commit | 5ms | 20ms | 50ms |
+| Gateway Forward | 10ms | 50ms | 100ms |
+| Cold Decompress | 20ms | 100ms | 200ms |
+| Replication Apply | 5ms | 25ms | 75ms |
+| Index Lookup | 10ms | 50ms | 100ms |
+| Txn Commit | 10ms | 50ms | 100ms |
+
+Breach types: `P99_EXCEEDED` (event recorded), `P999_EXCEEDED` (+ backpressure), `ABS_MAX_EXCEEDED` (immediate backpressure).
+
+### Background Task Resource Isolation
+
+| Task | Default CPU | Default IO | Max Concurrent |
+|------|-------------|------------|----------------|
+| Compaction | 20% | 50 MB/s | 2 |
+| Cold Migration | 15% | 30 MB/s | 1 |
+| Snapshot | 10% | 30 MB/s | 1 |
+| Rebalance | 20% | 40 MB/s | 2 |
+| Backup | 10% | 20 MB/s | 1 |
+| Index Build | 15% | 25 MB/s | 1 |
+| GC | 10% | 20 MB/s | 1 |
+
+Dynamic throttle: when foreground load > 50%, background IO = quota × (1 − foreground_load).

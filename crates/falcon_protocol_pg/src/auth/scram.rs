@@ -9,8 +9,11 @@ use sha2::{Digest, Sha256};
 
 // ── Constants ────────────────────────────────────────────────────────────
 
-/// Default PBKDF2 iteration count (matches PostgreSQL 15+ default).
-pub const DEFAULT_ITERATIONS: u32 = 4096;
+/// Default PBKDF2 iteration count.
+/// OWASP 2023 recommends ≥600,000 for PBKDF2-HMAC-SHA256.
+/// PostgreSQL 15 uses 4096 for backward compatibility, but new systems should
+/// use a stronger default. Existing verifier strings retain their stored count.
+pub const DEFAULT_ITERATIONS: u32 = 600_000;
 
 /// SCRAM mechanism name.
 pub const SCRAM_SHA_256: &str = "SCRAM-SHA-256";

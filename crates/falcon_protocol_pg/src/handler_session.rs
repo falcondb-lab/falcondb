@@ -57,7 +57,7 @@ impl QueryHandler {
 
         // SET log_min_duration_statement = <ms>
         if let Some(threshold_ms) = parse_set_log_min_duration(sql_lower) {
-            self.slow_query_log
+            self.observability.slow_query_log
                 .set_threshold(std::time::Duration::from_millis(threshold_ms));
             return Some(vec![BackendMessage::CommandComplete { tag: "SET".into() }]);
         }
@@ -182,7 +182,7 @@ impl QueryHandler {
 
         // RESET falcon.slow_queries — clear the slow query log
         if sql_lower == "reset falcon.slow_queries" {
-            self.slow_query_log.clear();
+            self.observability.slow_query_log.clear();
             return Some(vec![BackendMessage::CommandComplete {
                 tag: "RESET".into(),
             }]);
@@ -745,11 +745,11 @@ impl QueryHandler {
                 }
             }
         }
-        let tenant_id = self.tenant_registry.alloc_tenant_id();
+        let tenant_id = self.enterprise.tenant_registry.alloc_tenant_id();
         let mut config = falcon_common::tenant::TenantConfig::new(tenant_id, tenant_name.clone());
         config.quota.max_qps = max_qps;
         config.quota.max_storage_bytes = max_storage_bytes;
-        if self.tenant_registry.register_tenant(config) {
+        if self.enterprise.tenant_registry.register_tenant(config) {
             vec![BackendMessage::CommandComplete {
                 tag: format!("CREATE TENANT {tenant_name}"),
             }]
@@ -766,8 +766,8 @@ impl QueryHandler {
         let tenant_name = sql_lower
             .trim_start_matches("drop tenant ")
             .trim().to_owned();
-        let found = self.tenant_registry.tenant_ids().into_iter().find(|tid| {
-            self.tenant_registry
+        let found = self.enterprise.tenant_registry.tenant_ids().into_iter().find(|tid| {
+            self.enterprise.tenant_registry
                 .get_config(*tid)
                 .is_some_and(|c| c.name == tenant_name)
         });
@@ -778,7 +778,7 @@ impl QueryHandler {
                 message: format!("tenant \"{tenant_name}\" does not exist"),
             }],
             |tid| {
-                self.tenant_registry.remove_tenant(tid);
+                self.enterprise.tenant_registry.remove_tenant(tid);
                 vec![BackendMessage::CommandComplete {
                     tag: format!("DROP TENANT {tenant_name}"),
                 }]

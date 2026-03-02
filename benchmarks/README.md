@@ -34,6 +34,10 @@ cat benchmarks/results/matrix_*/MATRIX_REPORT.md
 
 # Original 2-engine comparison (backward compatible):
 ./benchmarks/scripts/run_all.sh
+
+# ★ TPC-C industry-standard benchmark:
+./benchmarks/tpcc/run_tpcc.sh falcondb --quick       # 10s quick run
+./benchmarks/tpcc/run_tpcc.sh falcondb --threads 8 --duration 60  # full run
 ```
 
 Engines not installed on the machine are **automatically skipped**.
@@ -46,6 +50,16 @@ Engines not installed on the machine are **automatically skipped**.
 benchmarks/
 ├── README.md                       # This file
 ├── RESULTS.md                      # Results template (4-engine × 5-workload)
+├── tpcc/                           # ★ TPC-C industry-standard benchmark
+│   ├── schema.sql                  # 9-table TPC-C schema (v5.11)
+│   ├── load.sql                    # Data generation (scale factor 1)
+│   ├── new_order.sql               # New-Order transaction (45%)
+│   ├── payment.sql                 # Payment transaction (43%)
+│   ├── order_status.sql            # Order-Status transaction (4%)
+│   ├── delivery.sql                # Delivery transaction (4%)
+│   ├── stock_level.sql             # Stock-Level transaction (4%)
+│   ├── run_tpcc.sh                 # One-command TPC-C runner
+│   └── README.md                   # TPC-C methodology + docs
 ├── workloads/
 │   ├── setup.sql                   # Shared schema (PG-compatible)
 │   ├── setup_voltdb.sql            # VoltDB-specific schema (partitioned)

@@ -266,28 +266,33 @@ impl VersionChain {
     }
 
     fn gc_chain(ver: &Arc<Version>, watermark: Timestamp, result: &mut GcChainResult) {
-        let cts = ver.get_commit_ts();
-        // Skip uncommitted versions (cts == 0) — WAL-aware: never GC uncommitted.
-        // Skip aborted versions (cts == MAX) — they are invisible but may still
-        // be in the chain; they'll be cleaned up when a committed version below
-        // them becomes the truncation point.
-        if cts.0 > 0 && cts != Timestamp::MAX && cts <= watermark {
-            // This version is visible at watermark; drop everything older.
-            let mut reclaimed = 0u64;
-            let mut reclaimed_bytes = 0u64;
-            let mut cur = ver.get_prev();
-            while let Some(old) = cur {
-                reclaimed += 1;
-                reclaimed_bytes += Self::estimate_version_bytes(&old);
-                cur = old.get_prev();
+        // Iterative traversal to avoid stack overflow on long version chains.
+        let mut current = Arc::clone(ver);
+        loop {
+            let cts = current.get_commit_ts();
+            // Skip uncommitted versions (cts == 0) — WAL-aware: never GC uncommitted.
+            // Skip aborted versions (cts == MAX) — they are invisible but may still
+            // be in the chain; they'll be cleaned up when a committed version below
+            // them becomes the truncation point.
+            if cts.0 > 0 && cts != Timestamp::MAX && cts <= watermark {
+                // This version is visible at watermark; drop everything older.
+                let mut reclaimed = 0u64;
+                let mut reclaimed_bytes = 0u64;
+                let mut cur = current.get_prev();
+                while let Some(old) = cur {
+                    reclaimed += 1;
+                    reclaimed_bytes += Self::estimate_version_bytes(&old);
+                    cur = old.get_prev();
+                }
+                current.truncate_prev();
+                result.reclaimed_versions += reclaimed;
+                result.reclaimed_bytes += reclaimed_bytes;
+                return;
             }
-            ver.truncate_prev();
-            result.reclaimed_versions += reclaimed;
-            result.reclaimed_bytes += reclaimed_bytes;
-            return;
-        }
-        if let Some(ref prev) = ver.get_prev() {
-            Self::gc_chain(prev, watermark, result);
+            match current.get_prev() {
+                Some(prev) => current = prev,
+                None => return,
+            }
         }
     }
 

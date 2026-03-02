@@ -347,6 +347,291 @@ impl Default for OnlineDdlManager {
 /// Keeping this moderate allows interleaving with normal DML.
 pub const BACKFILL_BATCH_SIZE: usize = 1024;
 
+// ── Progress snapshot for observability ──────────────────────────────
+
+/// Point-in-time progress snapshot for a DDL operation.
+/// Suitable for Prometheus metrics export or admin API responses.
+#[derive(Debug, Clone)]
+pub struct DdlProgress {
+    pub id: u64,
+    pub description: String,
+    pub phase: DdlPhase,
+    pub rows_processed: u64,
+    pub rows_total: u64,
+    /// Progress percentage (0.0 – 100.0). Returns 100.0 for completed ops.
+    pub pct: f64,
+    pub elapsed_ms: Option<u64>,
+    pub error: Option<String>,
+}
+
+impl DdlProgress {
+    pub fn from_op(op: &DdlOperation) -> Self {
+        let pct = if op.phase == DdlPhase::Completed {
+            100.0
+        } else if op.rows_total > 0 {
+            (op.rows_processed as f64 / op.rows_total as f64 * 100.0).min(100.0)
+        } else {
+            0.0
+        };
+        Self {
+            id: op.id,
+            description: format!("{}", op.kind),
+            phase: op.phase,
+            rows_processed: op.rows_processed,
+            rows_total: op.rows_total,
+            pct,
+            elapsed_ms: op.elapsed_ms(),
+            error: op.error.clone(),
+        }
+    }
+}
+
+impl OnlineDdlManager {
+    /// Get progress snapshots for all active operations.
+    pub fn active_progress(&self) -> Vec<DdlProgress> {
+        self.operations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter(|op| op.phase != DdlPhase::Completed && op.phase != DdlPhase::Failed)
+            .map(DdlProgress::from_op)
+            .collect()
+    }
+
+    /// Get progress snapshot for a specific operation.
+    pub fn progress(&self, id: u64) -> Option<DdlProgress> {
+        self.operations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&id)
+            .map(DdlProgress::from_op)
+    }
+
+    /// Check if any DDL operation is currently running on a specific table.
+    pub fn is_table_locked(&self, table_id: TableId) -> bool {
+        self.operations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .any(|op| {
+                op.table_id == table_id
+                    && matches!(op.phase, DdlPhase::Running | DdlPhase::Backfilling)
+            })
+    }
+
+    /// Cancel a running or backfilling operation (marks as Failed).
+    /// Returns true if the operation was found and cancelled.
+    pub fn cancel(&self, id: u64) -> bool {
+        if let Some(op) = self
+            .operations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&id)
+        {
+            if matches!(op.phase, DdlPhase::Running | DdlPhase::Backfilling | DdlPhase::Pending) {
+                op.fail("Cancelled by user".into());
+                tracing::info!("Online DDL #{} cancelled: {}", id, op.kind);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Summary metrics for all tracked operations.
+    pub fn metrics_summary(&self) -> DdlMetricsSummary {
+        let ops = self.operations.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut summary = DdlMetricsSummary::default();
+        for op in ops.values() {
+            match op.phase {
+                DdlPhase::Pending => summary.pending += 1,
+                DdlPhase::Running => summary.running += 1,
+                DdlPhase::Backfilling => {
+                    summary.backfilling += 1;
+                    summary.total_rows_backfilling += op.rows_total;
+                    summary.rows_processed_backfilling += op.rows_processed;
+                }
+                DdlPhase::Completed => summary.completed += 1,
+                DdlPhase::Failed => summary.failed += 1,
+            }
+        }
+        summary
+    }
+}
+
+/// Summary metrics across all DDL operations.
+#[derive(Debug, Clone, Default)]
+pub struct DdlMetricsSummary {
+    pub pending: usize,
+    pub running: usize,
+    pub backfilling: usize,
+    pub completed: usize,
+    pub failed: usize,
+    pub total_rows_backfilling: u64,
+    pub rows_processed_backfilling: u64,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Background DDL Executor
+// ═══════════════════════════════════════════════════════════════════════════
+
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+
+/// A cancellation token for a submitted DDL background task.
+/// Dropping the token does NOT cancel the task — call `cancel()` explicitly.
+#[derive(Clone)]
+pub struct DdlTaskHandle {
+    cancelled: Arc<AtomicBool>,
+    ddl_id: u64,
+}
+
+impl DdlTaskHandle {
+    /// Signal the background task to stop at the next batch boundary.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    /// Check whether cancellation has been requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+
+    /// The DDL operation ID this handle controls.
+    pub fn ddl_id(&self) -> u64 {
+        self.ddl_id
+    }
+}
+
+/// A boxed backfill closure: `(ddl_id, cancelled_flag) -> Result<(), String>`.
+/// The closure should check `cancelled.load(Relaxed)` between batches and
+/// return early if true.
+pub type BackfillFn = Box<dyn FnOnce(u64, Arc<AtomicBool>) -> Result<(), String> + Send + 'static>;
+
+/// Background executor for DDL backfill tasks.
+///
+/// Runs backfill closures on a dedicated thread pool so that
+/// `ALTER TABLE ADD COLUMN ... DEFAULT ...` returns immediately.
+/// The `OnlineDdlManager` is updated with progress/completion/failure
+/// from within the backfill closure.
+pub struct DdlBackgroundExecutor {
+    /// Sender side of the task channel.
+    tx: Mutex<Option<std::sync::mpsc::Sender<BackfillTask>>>,
+    /// Worker join handles (for graceful shutdown).
+    workers: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    /// Number of tasks currently in-flight.
+    inflight: AtomicU64,
+}
+
+struct BackfillTask {
+    ddl_id: u64,
+    cancelled: Arc<AtomicBool>,
+    work: BackfillFn,
+    manager: Arc<OnlineDdlManager>,
+}
+
+impl DdlBackgroundExecutor {
+    /// Create a new executor with `num_threads` background workers.
+    pub fn new(num_threads: usize) -> Arc<Self> {
+        let (tx, rx) = std::sync::mpsc::channel::<BackfillTask>();
+        let rx = Arc::new(Mutex::new(rx));
+
+        let mut workers = Vec::with_capacity(num_threads);
+        for i in 0..num_threads {
+            let rx = rx.clone();
+            let handle = std::thread::Builder::new()
+                .name(format!("ddl-backfill-{i}"))
+                .spawn(move || {
+                    loop {
+                        let task = {
+                            let guard = rx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                            match guard.recv() {
+                                Ok(task) => task,
+                                Err(_) => break, // channel closed → shutdown
+                            }
+                        };
+
+                        let ddl_id = task.ddl_id;
+                        if task.cancelled.load(Ordering::Relaxed) {
+                            task.manager.fail(ddl_id, "Cancelled before start".into());
+                            continue;
+                        }
+
+                        tracing::info!(ddl_id, "DdlBackgroundExecutor: starting backfill");
+                        match (task.work)(ddl_id, task.cancelled.clone()) {
+                            Ok(()) => {
+                                if task.cancelled.load(Ordering::Relaxed) {
+                                    task.manager.fail(ddl_id, "Cancelled during backfill".into());
+                                } else {
+                                    task.manager.complete(ddl_id);
+                                }
+                            }
+                            Err(e) => {
+                                task.manager.fail(ddl_id, e);
+                            }
+                        }
+                        tracing::info!(ddl_id, "DdlBackgroundExecutor: backfill finished");
+                    }
+                })
+                .expect("failed to spawn DDL backfill thread");
+            workers.push(handle);
+        }
+
+        Arc::new(Self {
+            tx: Mutex::new(Some(tx)),
+            workers: Mutex::new(workers),
+            inflight: AtomicU64::new(0),
+        })
+    }
+
+    /// Submit a backfill task to run in the background.
+    ///
+    /// Returns a `DdlTaskHandle` that can be used to cancel the task.
+    /// The `manager` is used to update DDL operation status on completion/failure.
+    pub fn submit(
+        &self,
+        ddl_id: u64,
+        manager: Arc<OnlineDdlManager>,
+        work: BackfillFn,
+    ) -> Result<DdlTaskHandle, String> {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let handle = DdlTaskHandle {
+            cancelled: cancelled.clone(),
+            ddl_id,
+        };
+
+        let task = BackfillTask {
+            ddl_id,
+            cancelled,
+            work,
+            manager,
+        };
+
+        let guard = self.tx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tx = guard.as_ref().ok_or("Executor has been shut down")?;
+        tx.send(task).map_err(|_| "Executor channel closed".to_string())?;
+        self.inflight.fetch_add(1, Ordering::Relaxed);
+
+        Ok(handle)
+    }
+
+    /// Number of tasks currently queued or running.
+    pub fn inflight_count(&self) -> u64 {
+        self.inflight.load(Ordering::Relaxed)
+    }
+
+    /// Shut down the executor: drop the sender so workers exit, then join all threads.
+    pub fn shutdown(&self) {
+        {
+            let mut guard = self.tx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            *guard = None; // drop sender → workers will see channel closed
+        }
+        let mut workers = self.workers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for handle in workers.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,5 +756,302 @@ mod tests {
         // After GC, only max_history completed ops should remain
         let all = mgr.list_all();
         assert!(all.len() <= 3); // 2 completed + possible 1 from last register triggering GC
+    }
+
+    // ── DdlProgress tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_ddl_progress_snapshot() {
+        let mgr = OnlineDdlManager::new();
+        let id = mgr.register(
+            TableId(1),
+            DdlOpKind::AddColumn {
+                table_name: "users".into(),
+                column_name: "email".into(),
+                has_default: true,
+            },
+        );
+        mgr.start(id);
+        mgr.begin_backfill(id, 1000);
+        mgr.record_progress(id, 250);
+
+        let progress = mgr.progress(id).unwrap();
+        assert_eq!(progress.phase, DdlPhase::Backfilling);
+        assert_eq!(progress.rows_processed, 250);
+        assert_eq!(progress.rows_total, 1000);
+        assert!((progress.pct - 25.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_ddl_progress_completed_is_100_pct() {
+        let mgr = OnlineDdlManager::new();
+        let id = mgr.register(
+            TableId(1),
+            DdlOpKind::MetadataOnly {
+                description: "test".into(),
+            },
+        );
+        mgr.start(id);
+        mgr.complete(id);
+
+        let progress = mgr.progress(id).unwrap();
+        assert!((progress.pct - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_active_progress_filters() {
+        let mgr = OnlineDdlManager::new();
+        let id1 = mgr.register(
+            TableId(1),
+            DdlOpKind::MetadataOnly {
+                description: "op1".into(),
+            },
+        );
+        let id2 = mgr.register(
+            TableId(2),
+            DdlOpKind::MetadataOnly {
+                description: "op2".into(),
+            },
+        );
+        mgr.start(id1);
+        mgr.complete(id1);
+        mgr.start(id2);
+
+        let active = mgr.active_progress();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, id2);
+    }
+
+    #[test]
+    fn test_is_table_locked() {
+        let mgr = OnlineDdlManager::new();
+        assert!(!mgr.is_table_locked(TableId(1)));
+
+        let id = mgr.register(
+            TableId(1),
+            DdlOpKind::AddColumn {
+                table_name: "t".into(),
+                column_name: "c".into(),
+                has_default: true,
+            },
+        );
+        // Pending doesn't lock
+        assert!(!mgr.is_table_locked(TableId(1)));
+
+        mgr.start(id);
+        assert!(mgr.is_table_locked(TableId(1)));
+        assert!(!mgr.is_table_locked(TableId(2)));
+
+        mgr.complete(id);
+        assert!(!mgr.is_table_locked(TableId(1)));
+    }
+
+    #[test]
+    fn test_cancel_operation() {
+        let mgr = OnlineDdlManager::new();
+        let id = mgr.register(
+            TableId(1),
+            DdlOpKind::AddColumn {
+                table_name: "t".into(),
+                column_name: "c".into(),
+                has_default: true,
+            },
+        );
+        mgr.start(id);
+        mgr.begin_backfill(id, 1000);
+
+        assert!(mgr.cancel(id));
+        let op = mgr.get(id).unwrap();
+        assert_eq!(op.phase, DdlPhase::Failed);
+        assert_eq!(op.error.as_deref(), Some("Cancelled by user"));
+
+        // Can't cancel already-failed
+        assert!(!mgr.cancel(id));
+    }
+
+    #[test]
+    fn test_cancel_completed_returns_false() {
+        let mgr = OnlineDdlManager::new();
+        let id = mgr.register(
+            TableId(1),
+            DdlOpKind::MetadataOnly {
+                description: "done".into(),
+            },
+        );
+        mgr.start(id);
+        mgr.complete(id);
+
+        assert!(!mgr.cancel(id));
+    }
+
+    #[test]
+    fn test_metrics_summary() {
+        let mgr = OnlineDdlManager::new();
+
+        let id1 = mgr.register(
+            TableId(1),
+            DdlOpKind::MetadataOnly {
+                description: "op1".into(),
+            },
+        );
+        let id2 = mgr.register(
+            TableId(2),
+            DdlOpKind::AddColumn {
+                table_name: "t".into(),
+                column_name: "c".into(),
+                has_default: true,
+            },
+        );
+        let id3 = mgr.register(
+            TableId(3),
+            DdlOpKind::MetadataOnly {
+                description: "op3".into(),
+            },
+        );
+
+        mgr.start(id1);
+        mgr.complete(id1);
+        mgr.start(id2);
+        mgr.begin_backfill(id2, 500);
+        mgr.record_progress(id2, 200);
+        mgr.start(id3);
+        mgr.fail(id3, "err".into());
+
+        let summary = mgr.metrics_summary();
+        assert_eq!(summary.completed, 1);
+        assert_eq!(summary.backfilling, 1);
+        assert_eq!(summary.failed, 1);
+        assert_eq!(summary.total_rows_backfilling, 500);
+        assert_eq!(summary.rows_processed_backfilling, 200);
+    }
+
+    // ── DdlBackgroundExecutor tests ──────────────────────────────────
+
+    #[test]
+    fn test_background_executor_submit_and_complete() {
+        let mgr = Arc::new(OnlineDdlManager::new());
+        let executor = DdlBackgroundExecutor::new(1);
+
+        let ddl_id = mgr.register(
+            TableId(1),
+            DdlOpKind::AddColumn {
+                table_name: "t".into(),
+                column_name: "c".into(),
+                has_default: true,
+            },
+        );
+        mgr.start(ddl_id);
+        mgr.begin_backfill(ddl_id, 100);
+
+        let mgr2 = mgr.clone();
+        let handle = executor
+            .submit(
+                ddl_id,
+                mgr.clone(),
+                Box::new(move |id, _cancelled| {
+                    // Simulate backfill work
+                    mgr2.record_progress(id, 100);
+                    Ok(())
+                }),
+            )
+            .unwrap();
+
+        // Wait for completion
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let op = mgr.get(handle.ddl_id()).unwrap();
+        assert_eq!(op.phase, DdlPhase::Completed);
+        assert_eq!(op.rows_processed, 100);
+
+        executor.shutdown();
+    }
+
+    #[test]
+    fn test_background_executor_cancellation() {
+        let mgr = Arc::new(OnlineDdlManager::new());
+        let executor = DdlBackgroundExecutor::new(1);
+
+        let ddl_id = mgr.register(
+            TableId(1),
+            DdlOpKind::AddColumn {
+                table_name: "t".into(),
+                column_name: "c".into(),
+                has_default: true,
+            },
+        );
+        mgr.start(ddl_id);
+        mgr.begin_backfill(ddl_id, 10_000);
+
+        let mgr2 = mgr.clone();
+        let handle = executor
+            .submit(
+                ddl_id,
+                mgr.clone(),
+                Box::new(move |id, cancelled| {
+                    for batch in 0..100 {
+                        if cancelled.load(Ordering::Relaxed) {
+                            return Ok(()); // early exit on cancel
+                        }
+                        mgr2.record_progress(id, 100);
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        let _ = batch;
+                    }
+                    Ok(())
+                }),
+            )
+            .unwrap();
+
+        // Cancel after a short delay
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        handle.cancel();
+        assert!(handle.is_cancelled());
+
+        // Wait for the worker to observe cancellation
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let op = mgr.get(ddl_id).unwrap();
+        assert_eq!(op.phase, DdlPhase::Failed);
+        assert!(op.error.as_deref().unwrap().contains("Cancelled"));
+
+        executor.shutdown();
+    }
+
+    #[test]
+    fn test_background_executor_failure() {
+        let mgr = Arc::new(OnlineDdlManager::new());
+        let executor = DdlBackgroundExecutor::new(1);
+
+        let ddl_id = mgr.register(
+            TableId(1),
+            DdlOpKind::ChangeColumnType {
+                table_name: "t".into(),
+                column_name: "c".into(),
+                new_type: "int".into(),
+            },
+        );
+        mgr.start(ddl_id);
+
+        let _handle = executor
+            .submit(
+                ddl_id,
+                mgr.clone(),
+                Box::new(|_id, _cancelled| Err("type conversion error".into())),
+            )
+            .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let op = mgr.get(ddl_id).unwrap();
+        assert_eq!(op.phase, DdlPhase::Failed);
+        assert_eq!(op.error.as_deref(), Some("type conversion error"));
+
+        executor.shutdown();
+    }
+
+    #[test]
+    fn test_background_executor_shutdown() {
+        let executor = DdlBackgroundExecutor::new(2);
+        // Shutdown without submitting any tasks should not panic
+        executor.shutdown();
     }
 }

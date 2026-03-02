@@ -143,15 +143,49 @@ impl super::DistributedQueryEngine {
             "  Total latency: {}us",
             stats.total_latency_us
         ))]));
+        if stats.gather_merge_latency_us > 0 {
+            lines.push(OwnedRow::new(vec![Datum::Text(format!(
+                "  Gather merge latency: {}us",
+                stats.gather_merge_latency_us
+            ))]));
+        }
         for (sid, lat) in &stats.per_shard_latency_us {
             let row_count = stats
                 .per_shard_row_count
                 .iter()
                 .find(|(s, _)| s == sid)
                 .map_or(0, |(_, c)| *c);
-            lines.push(OwnedRow::new(vec![Datum::Text(format!(
-                "  Shard {sid} latency: {lat}us, rows: {row_count}"
-            ))]));
+
+            // Check for network/remote timing breakdown
+            let network_us = stats
+                .per_shard_network_us
+                .iter()
+                .find(|(s, _)| s == sid)
+                .map(|(_, n)| *n);
+            let remote_exec_us = stats
+                .per_shard_remote_exec_us
+                .iter()
+                .find(|(s, _)| s == sid)
+                .map(|(_, r)| *r);
+
+            match (network_us, remote_exec_us) {
+                (Some(net), Some(remote)) => {
+                    let overhead = net.saturating_sub(remote);
+                    lines.push(OwnedRow::new(vec![Datum::Text(format!(
+                        "  Shard {sid}: total={lat}us, rpc={net}us (exec={remote}us, overhead={overhead}us), rows={row_count}"
+                    ))]));
+                }
+                (Some(net), None) => {
+                    lines.push(OwnedRow::new(vec![Datum::Text(format!(
+                        "  Shard {sid}: total={lat}us, rpc={net}us, rows={row_count}"
+                    ))]));
+                }
+                _ => {
+                    lines.push(OwnedRow::new(vec![Datum::Text(format!(
+                        "  Shard {sid}: latency={lat}us, rows={row_count}"
+                    ))]));
+                }
+            }
         }
         if !stats.failed_shards.is_empty() {
             lines.push(OwnedRow::new(vec![Datum::Text(format!(

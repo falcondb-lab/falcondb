@@ -15,6 +15,110 @@ use falcon_common::error::ExecutionError;
 use falcon_sql_frontend::types::*;
 
 // ---------------------------------------------------------------------------
+// NullBitmap — packed bitset (8× more memory-efficient than Vec<bool>)
+// ---------------------------------------------------------------------------
+
+/// A packed null bitmap using `Vec<u64>` as backing storage.
+///
+/// Each bit represents one row: `1` = null, `0` = not-null.
+/// This is 8× more compact than `Vec<bool>` (1 bit vs 1 byte per row)
+/// and is cache-friendlier for SIMD-style vectorized scans.
+#[derive(Debug, Clone)]
+pub struct NullBitmap {
+    words: Vec<u64>,
+    len: usize,
+}
+
+impl NullBitmap {
+    /// Create an empty bitmap.
+    pub fn new() -> Self {
+        Self { words: Vec::new(), len: 0 }
+    }
+
+    /// Create a bitmap with pre-allocated capacity for `cap` bits.
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            words: Vec::with_capacity((cap + 63) / 64),
+            len: 0,
+        }
+    }
+
+    /// Create a bitmap of `len` bits, all cleared (not-null).
+    pub fn all_false(len: usize) -> Self {
+        Self {
+            words: vec![0u64; (len + 63) / 64],
+            len,
+        }
+    }
+
+    /// Number of bits.
+    #[inline]
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the bitmap is empty.
+    #[inline]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Append a bit.
+    #[inline]
+    pub fn push(&mut self, is_null: bool) {
+        let word_idx = self.len / 64;
+        let bit_idx = self.len % 64;
+        if word_idx >= self.words.len() {
+            self.words.push(0);
+        }
+        if is_null {
+            self.words[word_idx] |= 1u64 << bit_idx;
+        }
+        self.len += 1;
+    }
+
+    /// Get the bit at `idx`. Returns `true` if null.
+    #[inline]
+    pub fn get(&self, idx: usize) -> bool {
+        debug_assert!(idx < self.len, "NullBitmap index {idx} out of bounds (len={})", self.len);
+        let word_idx = idx / 64;
+        let bit_idx = idx % 64;
+        (self.words[word_idx] >> bit_idx) & 1 == 1
+    }
+
+    /// Set the bit at `idx`.
+    #[inline]
+    pub fn set(&mut self, idx: usize, is_null: bool) {
+        debug_assert!(idx < self.len);
+        let word_idx = idx / 64;
+        let bit_idx = idx % 64;
+        if is_null {
+            self.words[word_idx] |= 1u64 << bit_idx;
+        } else {
+            self.words[word_idx] &= !(1u64 << bit_idx);
+        }
+    }
+}
+
+impl Default for NullBitmap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Allow `nulls[idx]` syntax — returns `true` if the bit is set (null).
+impl std::ops::Index<usize> for NullBitmap {
+    type Output = bool;
+
+    #[inline]
+    fn index(&self, idx: usize) -> &bool {
+        // We cannot return a reference to a computed value, so we use a
+        // static pair.  This is a well-known pattern for bitset Index impls.
+        if self.get(idx) { &true } else { &false }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ColumnVector
 // ---------------------------------------------------------------------------
 
@@ -22,18 +126,18 @@ use falcon_sql_frontend::types::*;
 /// is more cache-friendly because the type tag is stored once, not per-value.
 #[derive(Debug, Clone)]
 pub enum ColumnVector {
-    /// Boolean column with optional null bitmap.
-    Booleans { values: Vec<bool>, nulls: Vec<bool> },
+    /// Boolean column with packed null bitmap.
+    Booleans { values: Vec<bool>, nulls: NullBitmap },
     /// 32-bit integer column.
-    Int32s { values: Vec<i32>, nulls: Vec<bool> },
+    Int32s { values: Vec<i32>, nulls: NullBitmap },
     /// 64-bit integer column.
-    Int64s { values: Vec<i64>, nulls: Vec<bool> },
+    Int64s { values: Vec<i64>, nulls: NullBitmap },
     /// 64-bit float column.
-    Float64s { values: Vec<f64>, nulls: Vec<bool> },
+    Float64s { values: Vec<f64>, nulls: NullBitmap },
     /// Text column (heap-allocated strings).
     Texts {
         values: Vec<String>,
-        nulls: Vec<bool>,
+        nulls: NullBitmap,
     },
     /// Fallback: heterogeneous Datum column (for mixed / unsupported types).
     Mixed(Vec<Datum>),
@@ -122,7 +226,7 @@ impl ColumnVector {
         match first_type {
             Some(Datum::Int32(_)) => {
                 let mut values = Vec::with_capacity(datums.len());
-                let mut nulls = Vec::with_capacity(datums.len());
+                let mut nulls = NullBitmap::with_capacity(datums.len());
                 for d in datums {
                     match d {
                         Datum::Int32(v) => {
@@ -140,7 +244,7 @@ impl ColumnVector {
             }
             Some(Datum::Int64(_)) => {
                 let mut values = Vec::with_capacity(datums.len());
-                let mut nulls = Vec::with_capacity(datums.len());
+                let mut nulls = NullBitmap::with_capacity(datums.len());
                 for d in datums {
                     match d {
                         Datum::Int64(v) => {
@@ -162,7 +266,7 @@ impl ColumnVector {
             }
             Some(Datum::Float64(_)) => {
                 let mut values = Vec::with_capacity(datums.len());
-                let mut nulls = Vec::with_capacity(datums.len());
+                let mut nulls = NullBitmap::with_capacity(datums.len());
                 for d in datums {
                     match d {
                         Datum::Float64(v) => {
@@ -188,7 +292,7 @@ impl ColumnVector {
             }
             Some(Datum::Boolean(_)) => {
                 let mut values = Vec::with_capacity(datums.len());
-                let mut nulls = Vec::with_capacity(datums.len());
+                let mut nulls = NullBitmap::with_capacity(datums.len());
                 for d in datums {
                     match d {
                         Datum::Boolean(v) => {
@@ -206,7 +310,7 @@ impl ColumnVector {
             }
             Some(Datum::Text(_)) => {
                 let mut values = Vec::with_capacity(datums.len());
-                let mut nulls = Vec::with_capacity(datums.len());
+                let mut nulls = NullBitmap::with_capacity(datums.len());
                 for d in datums {
                     match d {
                         Datum::Text(v) => {
@@ -236,7 +340,7 @@ impl ColumnVector {
         match self {
             Self::Int32s { values, nulls } => {
                 let mut v = Vec::with_capacity(n);
-                let mut nl = Vec::with_capacity(n);
+                let mut nl = NullBitmap::with_capacity(n);
                 for &i in indices {
                     v.push(values[i]);
                     nl.push(nulls[i]);
@@ -245,7 +349,7 @@ impl ColumnVector {
             }
             Self::Int64s { values, nulls } => {
                 let mut v = Vec::with_capacity(n);
-                let mut nl = Vec::with_capacity(n);
+                let mut nl = NullBitmap::with_capacity(n);
                 for &i in indices {
                     v.push(values[i]);
                     nl.push(nulls[i]);
@@ -254,7 +358,7 @@ impl ColumnVector {
             }
             Self::Float64s { values, nulls } => {
                 let mut v = Vec::with_capacity(n);
-                let mut nl = Vec::with_capacity(n);
+                let mut nl = NullBitmap::with_capacity(n);
                 for &i in indices {
                     v.push(values[i]);
                     nl.push(nulls[i]);
@@ -263,7 +367,7 @@ impl ColumnVector {
             }
             Self::Booleans { values, nulls } => {
                 let mut v = Vec::with_capacity(n);
-                let mut nl = Vec::with_capacity(n);
+                let mut nl = NullBitmap::with_capacity(n);
                 for &i in indices {
                     v.push(values[i]);
                     nl.push(nulls[i]);
@@ -272,7 +376,7 @@ impl ColumnVector {
             }
             Self::Texts { values, nulls } => {
                 let mut v = Vec::with_capacity(n);
-                let mut nl = Vec::with_capacity(n);
+                let mut nl = NullBitmap::with_capacity(n);
                 for &i in indices {
                     v.push(values[i].clone());
                     nl.push(nulls[i]);
@@ -1079,7 +1183,7 @@ fn extract_column(col: &ColumnVector, indices: &[usize]) -> ColumnVector {
     match col {
         ColumnVector::Int32s { values, nulls } => {
             let mut v = Vec::with_capacity(indices.len());
-            let mut n = Vec::with_capacity(indices.len());
+            let mut n = NullBitmap::with_capacity(indices.len());
             for &i in indices {
                 v.push(values[i]);
                 n.push(nulls[i]);
@@ -1091,7 +1195,7 @@ fn extract_column(col: &ColumnVector, indices: &[usize]) -> ColumnVector {
         }
         ColumnVector::Int64s { values, nulls } => {
             let mut v = Vec::with_capacity(indices.len());
-            let mut n = Vec::with_capacity(indices.len());
+            let mut n = NullBitmap::with_capacity(indices.len());
             for &i in indices {
                 v.push(values[i]);
                 n.push(nulls[i]);
@@ -1103,7 +1207,7 @@ fn extract_column(col: &ColumnVector, indices: &[usize]) -> ColumnVector {
         }
         ColumnVector::Float64s { values, nulls } => {
             let mut v = Vec::with_capacity(indices.len());
-            let mut n = Vec::with_capacity(indices.len());
+            let mut n = NullBitmap::with_capacity(indices.len());
             for &i in indices {
                 v.push(values[i]);
                 n.push(nulls[i]);
@@ -1115,7 +1219,7 @@ fn extract_column(col: &ColumnVector, indices: &[usize]) -> ColumnVector {
         }
         ColumnVector::Booleans { values, nulls } => {
             let mut v = Vec::with_capacity(indices.len());
-            let mut n = Vec::with_capacity(indices.len());
+            let mut n = NullBitmap::with_capacity(indices.len());
             for &i in indices {
                 v.push(values[i]);
                 n.push(nulls[i]);
@@ -1127,7 +1231,7 @@ fn extract_column(col: &ColumnVector, indices: &[usize]) -> ColumnVector {
         }
         ColumnVector::Texts { values, nulls } => {
             let mut v = Vec::with_capacity(indices.len());
-            let mut n = Vec::with_capacity(indices.len());
+            let mut n = NullBitmap::with_capacity(indices.len());
             for &i in indices {
                 v.push(values[i].clone());
                 n.push(nulls[i]);
@@ -1421,6 +1525,250 @@ fn cmp_datum_values(a: &Datum, b: &Datum) -> std::cmp::Ordering {
             sa.cmp(&sb)
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Vectorized hash GROUP BY aggregation
+// ---------------------------------------------------------------------------
+
+/// Per-group accumulator state for a single aggregate function.
+#[derive(Debug, Clone)]
+enum GroupAccum {
+    Count(i64),
+    SumI64(i64, bool),       // (sum, has_value)
+    SumF64(f64, bool),
+    MinI64(Option<i64>),
+    MinF64(Option<f64>),
+    MinDatum(Datum),
+    MaxI64(Option<i64>),
+    MaxF64(Option<f64>),
+    MaxDatum(Datum),
+    /// (sum, count) — avg = sum / count at finalize
+    AvgF64(f64, usize),
+}
+
+impl GroupAccum {
+    fn new_for(func: &AggFunc, col: Option<&ColumnVector>) -> Self {
+        match func {
+            AggFunc::Count => GroupAccum::Count(0),
+            AggFunc::Sum => match col {
+                Some(ColumnVector::Float64s { .. }) => GroupAccum::SumF64(0.0, false),
+                _ => GroupAccum::SumI64(0, false),
+            },
+            AggFunc::Avg => GroupAccum::AvgF64(0.0, 0),
+            AggFunc::Min => match col {
+                Some(ColumnVector::Int64s { .. } | ColumnVector::Int32s { .. }) => {
+                    GroupAccum::MinI64(None)
+                }
+                Some(ColumnVector::Float64s { .. }) => GroupAccum::MinF64(None),
+                _ => GroupAccum::MinDatum(Datum::Null),
+            },
+            AggFunc::Max => match col {
+                Some(ColumnVector::Int64s { .. } | ColumnVector::Int32s { .. }) => {
+                    GroupAccum::MaxI64(None)
+                }
+                Some(ColumnVector::Float64s { .. }) => GroupAccum::MaxF64(None),
+                _ => GroupAccum::MaxDatum(Datum::Null),
+            },
+            _ => GroupAccum::Count(0), // fallback
+        }
+    }
+
+    fn accumulate(&mut self, datum: &Datum) {
+        match self {
+            GroupAccum::Count(c) => {
+                if !datum.is_null() {
+                    *c += 1;
+                }
+            }
+            GroupAccum::SumI64(s, has) => {
+                if let Some(v) = datum.as_i64() {
+                    *s = s.wrapping_add(v);
+                    *has = true;
+                }
+            }
+            GroupAccum::SumF64(s, has) => {
+                if let Some(v) = datum.as_f64() {
+                    *s += v;
+                    *has = true;
+                }
+            }
+            GroupAccum::AvgF64(s, c) => {
+                if let Some(v) = datum.as_f64() {
+                    *s += v;
+                    *c += 1;
+                }
+            }
+            GroupAccum::MinI64(cur) => {
+                if let Some(v) = datum.as_i64() {
+                    *cur = Some(cur.map_or(v, |m| m.min(v)));
+                }
+            }
+            GroupAccum::MinF64(cur) => {
+                if let Some(v) = datum.as_f64() {
+                    *cur = Some(cur.map_or(v, |m| m.min(v)));
+                }
+            }
+            GroupAccum::MinDatum(cur) => {
+                if !datum.is_null() && (cur.is_null() || datum < cur) {
+                    *cur = datum.clone();
+                }
+            }
+            GroupAccum::MaxI64(cur) => {
+                if let Some(v) = datum.as_i64() {
+                    *cur = Some(cur.map_or(v, |m| m.max(v)));
+                }
+            }
+            GroupAccum::MaxF64(cur) => {
+                if let Some(v) = datum.as_f64() {
+                    *cur = Some(cur.map_or(v, |m| m.max(v)));
+                }
+            }
+            GroupAccum::MaxDatum(cur) => {
+                if !datum.is_null() && (cur.is_null() || datum > cur) {
+                    *cur = datum.clone();
+                }
+            }
+        }
+    }
+
+    fn finalize(&self) -> Datum {
+        match self {
+            GroupAccum::Count(c) => Datum::Int64(*c),
+            GroupAccum::SumI64(s, has) => {
+                if *has { Datum::Int64(*s) } else { Datum::Null }
+            }
+            GroupAccum::SumF64(s, has) => {
+                if *has { Datum::Float64(*s) } else { Datum::Null }
+            }
+            GroupAccum::AvgF64(s, c) => {
+                if *c > 0 { Datum::Float64(*s / *c as f64) } else { Datum::Null }
+            }
+            GroupAccum::MinI64(v) => v.map_or(Datum::Null, Datum::Int64),
+            GroupAccum::MinF64(v) => v.map_or(Datum::Null, Datum::Float64),
+            GroupAccum::MinDatum(d) => d.clone(),
+            GroupAccum::MaxI64(v) => v.map_or(Datum::Null, Datum::Int64),
+            GroupAccum::MaxF64(v) => v.map_or(Datum::Null, Datum::Float64),
+            GroupAccum::MaxDatum(d) => d.clone(),
+        }
+    }
+}
+
+/// Descriptor for one aggregate in a GROUP BY query.
+#[derive(Debug, Clone)]
+pub struct AggDescriptor {
+    pub func: AggFunc,
+    /// Column index for the aggregate argument (None = COUNT(*)).
+    pub col_idx: Option<usize>,
+}
+
+/// Result of a vectorized hash GROUP BY aggregation.
+pub struct HashAggResult {
+    /// One row per group: [group_key_cols..., agg_result_cols...].
+    pub rows: Vec<OwnedRow>,
+}
+
+/// Vectorized hash GROUP BY aggregation.
+///
+/// Hashes group key columns in batch, accumulates typed aggregates per group,
+/// and outputs one row per group with [key_cols..., agg_cols...].
+///
+/// `group_key_cols`: column indices in the batch that form the GROUP BY key.
+/// `aggs`: aggregate descriptors (function + argument column).
+///
+/// Returns one `OwnedRow` per group: first the key columns, then the aggregate results.
+pub fn vectorized_hash_agg(
+    batch: &RecordBatch,
+    group_key_cols: &[usize],
+    aggs: &[AggDescriptor],
+) -> HashAggResult {
+    use std::collections::HashMap;
+
+    let indices = batch.active_indices();
+    let num_aggs = aggs.len();
+
+    // Pre-compute accumulator templates based on column types.
+    let accum_templates: Vec<GroupAccum> = aggs
+        .iter()
+        .map(|a| {
+            let col = a.col_idx.and_then(|ci| batch.columns.get(ci));
+            GroupAccum::new_for(&a.func, col)
+        })
+        .collect();
+
+    // group_key_hash → (group_id, key_datums)
+    // group_accums[group_id] → Vec<GroupAccum>
+    let mut group_map: HashMap<u64, Vec<usize>> = HashMap::new();
+    let mut group_keys: Vec<Vec<Datum>> = Vec::new();
+    let mut group_accums: Vec<Vec<GroupAccum>> = Vec::new();
+    let mut key_hash_buf: u64;
+
+    for &idx in &*indices {
+        // Hash the group key columns.
+        key_hash_buf = 0;
+        for &kc in group_key_cols {
+            let d = batch.columns[kc].get_datum(idx);
+            key_hash_buf = key_hash_buf.wrapping_mul(31).wrapping_add(hash_datum(&d));
+        }
+
+        // Look up or insert group.
+        let candidates = group_map.entry(key_hash_buf).or_default();
+        let mut found_gid: Option<usize> = None;
+        for &gid in candidates.iter() {
+            // Verify key equality (handle hash collisions).
+            let gk = &group_keys[gid];
+            let mut eq = true;
+            for (ki, &kc) in group_key_cols.iter().enumerate() {
+                let d = batch.columns[kc].get_datum(idx);
+                if !datum_equal(&d, &gk[ki]) {
+                    eq = false;
+                    break;
+                }
+            }
+            if eq {
+                found_gid = Some(gid);
+                break;
+            }
+        }
+
+        let gid = match found_gid {
+            Some(g) => g,
+            None => {
+                let new_gid = group_keys.len();
+                let key: Vec<Datum> = group_key_cols
+                    .iter()
+                    .map(|&kc| batch.columns[kc].get_datum(idx))
+                    .collect();
+                group_keys.push(key);
+                group_accums.push(accum_templates.clone());
+                candidates.push(new_gid);
+                new_gid
+            }
+        };
+
+        // Accumulate each aggregate for this group.
+        for (ai, agg) in aggs.iter().enumerate() {
+            let datum = match agg.col_idx {
+                Some(ci) => batch.columns[ci].get_datum(idx),
+                None => Datum::Int64(1), // COUNT(*)
+            };
+            group_accums[gid][ai].accumulate(&datum);
+        }
+    }
+
+    // Finalize: one OwnedRow per group = [key_cols..., agg_results...].
+    let num_keys = group_key_cols.len();
+    let mut rows = Vec::with_capacity(group_keys.len());
+    for (gid, key) in group_keys.into_iter().enumerate() {
+        let mut values = Vec::with_capacity(num_keys + num_aggs);
+        values.extend(key);
+        for ai in 0..num_aggs {
+            values.push(group_accums[gid][ai].finalize());
+        }
+        rows.push(OwnedRow::new(values));
+    }
+
+    HashAggResult { rows }
 }
 
 // ---------------------------------------------------------------------------
@@ -1755,10 +2103,67 @@ mod tests {
     }
 
     #[test]
+    fn test_vectorized_hash_agg_group_by() {
+        // 3 rows: (dept=1, sal=100), (dept=2, sal=200), (dept=1, sal=300)
+        let rows = vec![
+            OwnedRow::new(vec![Datum::Int64(1), Datum::Int64(100)]),
+            OwnedRow::new(vec![Datum::Int64(2), Datum::Int64(200)]),
+            OwnedRow::new(vec![Datum::Int64(1), Datum::Int64(300)]),
+        ];
+        let batch = RecordBatch::from_rows(&rows, 2);
+        let aggs = vec![
+            AggDescriptor { func: AggFunc::Count, col_idx: Some(1) },
+            AggDescriptor { func: AggFunc::Sum, col_idx: Some(1) },
+            AggDescriptor { func: AggFunc::Avg, col_idx: Some(1) },
+        ];
+        let result = vectorized_hash_agg(&batch, &[0], &aggs);
+        assert_eq!(result.rows.len(), 2); // 2 groups
+
+        // Find dept=1 group
+        let g1 = result.rows.iter().find(|r| r.values[0] == Datum::Int64(1)).unwrap();
+        assert_eq!(g1.values[1], Datum::Int64(2));   // COUNT = 2
+        assert_eq!(g1.values[2], Datum::Int64(400));  // SUM = 400
+        match g1.values[3] {
+            Datum::Float64(v) => assert!((v - 200.0).abs() < 0.01), // AVG = 200
+            _ => panic!("expected Float64 for AVG"),
+        }
+
+        // Find dept=2 group
+        let g2 = result.rows.iter().find(|r| r.values[0] == Datum::Int64(2)).unwrap();
+        assert_eq!(g2.values[1], Datum::Int64(1));   // COUNT = 1
+        assert_eq!(g2.values[2], Datum::Int64(200));  // SUM = 200
+    }
+
+    #[test]
+    fn test_vectorized_hash_agg_with_nulls() {
+        let rows = vec![
+            OwnedRow::new(vec![Datum::Int64(1), Datum::Int64(10)]),
+            OwnedRow::new(vec![Datum::Int64(1), Datum::Null]),
+            OwnedRow::new(vec![Datum::Int64(1), Datum::Int64(30)]),
+        ];
+        let batch = RecordBatch::from_rows(&rows, 2);
+        let aggs = vec![
+            AggDescriptor { func: AggFunc::Count, col_idx: Some(1) },
+            AggDescriptor { func: AggFunc::Sum, col_idx: Some(1) },
+            AggDescriptor { func: AggFunc::Min, col_idx: Some(1) },
+            AggDescriptor { func: AggFunc::Max, col_idx: Some(1) },
+        ];
+        let result = vectorized_hash_agg(&batch, &[0], &aggs);
+        assert_eq!(result.rows.len(), 1);
+        let g = &result.rows[0];
+        assert_eq!(g.values[1], Datum::Int64(2));  // COUNT skips NULL
+        assert_eq!(g.values[2], Datum::Int64(40)); // SUM skips NULL
+        assert_eq!(g.values[3], Datum::Int64(10)); // MIN
+        assert_eq!(g.values[4], Datum::Int64(30)); // MAX
+    }
+
+    #[test]
     fn test_extract_column_typed() {
+        let mut nulls = NullBitmap::all_false(4);
+        nulls.set(2, true);
         let col = ColumnVector::Int32s {
             values: vec![10, 20, 30, 40],
-            nulls: vec![false, false, true, false],
+            nulls,
         };
         let extracted = extract_column(&col, &[0, 2, 3]);
         assert_eq!(extracted.len(), 3);

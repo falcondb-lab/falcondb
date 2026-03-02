@@ -16,7 +16,90 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::SystemTime;
 
+use hmac::Hmac;
 use parking_lot::{Mutex, RwLock};
+use rand::RngCore;
+use sha2::Sha256;
+use subtle::ConstantTimeEq;
+
+/// PBKDF2 iteration count — OWASP 2023 minimum for SHA-256.
+const PBKDF2_ITERATIONS: u32 = 600_000;
+/// Salt length in bytes (128 bits).
+const SALT_LEN: usize = 16;
+/// Derived key length in bytes (256 bits).
+const DK_LEN: usize = 32;
+/// Session token random bytes (256 bits of entropy).
+const SESSION_TOKEN_BYTES: usize = 32;
+
+/// Hash a password with PBKDF2-HMAC-SHA256 and a random salt.
+/// Returns `"$pbkdf2-sha256$<iterations>$<hex_salt>$<hex_dk>"` in PHC-ish format.
+pub fn hash_password(password: &str) -> String {
+    let mut salt = [0u8; SALT_LEN];
+    rand::thread_rng().fill_bytes(&mut salt);
+    hash_password_with_salt(password, &salt)
+}
+
+/// Hash a password with a given salt (for testing / deterministic replay).
+fn hash_password_with_salt(password: &str, salt: &[u8]) -> String {
+    let mut dk = [0u8; DK_LEN];
+    pbkdf2::pbkdf2::<Hmac<Sha256>>(password.as_bytes(), salt, PBKDF2_ITERATIONS, &mut dk)
+        .expect("PBKDF2 output length is valid");
+    format!(
+        "$pbkdf2-sha256${}${}${}",
+        PBKDF2_ITERATIONS,
+        hex_encode(salt),
+        hex_encode(&dk),
+    )
+}
+
+/// Verify a password against a stored PHC-format hash using constant-time comparison.
+/// Returns `true` if the password matches.
+fn verify_password(password: &str, stored_hash: &str) -> bool {
+    // Parse "$pbkdf2-sha256$<iterations>$<hex_salt>$<hex_dk>"
+    let parts: Vec<&str> = stored_hash.split('$').collect();
+    if parts.len() != 5 || parts[1] != "pbkdf2-sha256" {
+        return false;
+    }
+    let iterations: u32 = match parts[2].parse() {
+        Ok(n) => n,
+        Err(_) => return false,
+    };
+    let salt = match hex_decode(parts[3]) {
+        Some(s) => s,
+        None => return false,
+    };
+    let expected_dk = match hex_decode(parts[4]) {
+        Some(d) => d,
+        None => return false,
+    };
+    let mut derived = vec![0u8; expected_dk.len()];
+    if pbkdf2::pbkdf2::<Hmac<Sha256>>(password.as_bytes(), &salt, iterations, &mut derived).is_err() {
+        return false;
+    }
+    // Constant-time comparison to prevent timing attacks.
+    derived.ct_eq(&expected_dk).into()
+}
+
+/// Generate a cryptographically secure session token (hex-encoded).
+fn generate_session_token() -> String {
+    let mut buf = [0u8; SESSION_TOKEN_BYTES];
+    rand::thread_rng().fill_bytes(&mut buf);
+    hex_encode(&buf)
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
+}
 
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -49,8 +132,8 @@ impl fmt::Display for CredentialType {
 pub struct StoredCredential {
     pub user_id: u64,
     pub credential_type: CredentialType,
-    /// For password: hash (SCRAM-SHA-256 or bcrypt).
-    /// For token: hash of the token.
+    /// For password: PBKDF2-HMAC-SHA256 PHC-format hash (via [`hash_password`]).
+    /// For token: HMAC-SHA256 hash of the token.
     /// For mTLS: SHA-256 fingerprint of the client cert.
     pub credential_hash: String,
     pub created_at: u64,
@@ -134,7 +217,10 @@ impl AuthnManager {
     }
 
     /// Create a user with a password credential.
-    pub fn create_user(&self, username: &str, password_hash: &str) -> u64 {
+    ///
+    /// `password` is the **raw** password — it is hashed with PBKDF2-HMAC-SHA256
+    /// before storage.  The raw password is never retained.
+    pub fn create_user(&self, username: &str, password: &str) -> u64 {
         let user_id = self.next_user_id.fetch_add(1, Ordering::Relaxed);
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -143,7 +229,7 @@ impl AuthnManager {
         let cred = StoredCredential {
             user_id,
             credential_type: CredentialType::Password,
-            credential_hash: password_hash.to_owned(),
+            credential_hash: hash_password(password),
             created_at: now,
             expires_at: None,
             last_used_at: None,
@@ -267,12 +353,24 @@ impl AuthnManager {
                 };
             }
 
-            // Find matching credential (read-only check)
-            #[allow(clippy::suspicious_operation_groupings)]
+            // Find matching credential (read-only check).
+            // For passwords: use PBKDF2 verify with constant-time comparison.
+            // For tokens/mTLS: use constant-time byte comparison on the hash.
             let matched = user.credentials.iter().find(|c| {
-                c.credential_type == request.credential_type
-                    && c.credential_hash == request.credential
-                    && !c.is_revoked
+                if c.credential_type != request.credential_type || c.is_revoked {
+                    return false;
+                }
+                match c.credential_type {
+                    CredentialType::Password => {
+                        verify_password(&request.credential, &c.credential_hash)
+                    }
+                    CredentialType::Token | CredentialType::MtlsCertificate => {
+                        // Constant-time comparison for token hashes / cert fingerprints.
+                        let a = c.credential_hash.as_bytes();
+                        let b = request.credential.as_bytes();
+                        a.len() == b.len() && a.ct_eq(b).into()
+                    }
+                }
             });
 
             if let Some(cred) = matched {
@@ -303,22 +401,32 @@ impl AuthnManager {
                         }
                         user.last_login_at = Some(now);
                         user.failed_login_count = 0;
-                        // Update last_used_at on the matched credential
-                        #[allow(clippy::suspicious_operation_groupings)]
+                        // Update last_used_at on the matched credential.
+                        // Re-verify with the same secure comparison to locate
+                        // the credential; this is intentionally re-computed.
                         if let Some(cred) = user.credentials.iter_mut().find(|c| {
-                            c.credential_type == request.credential_type
-                                && c.credential_hash == request.credential
-                                && !c.is_revoked
+                            if c.credential_type != request.credential_type || c.is_revoked {
+                                return false;
+                            }
+                            match c.credential_type {
+                                CredentialType::Password => {
+                                    verify_password(&request.credential, &c.credential_hash)
+                                }
+                                CredentialType::Token | CredentialType::MtlsCertificate => {
+                                    let a = c.credential_hash.as_bytes();
+                                    let b = request.credential.as_bytes();
+                                    a.len() == b.len() && a.ct_eq(b).into()
+                                }
+                            }
                         }) {
                             cred.last_used_at = Some(now);
                         }
                     }
                 }
                 self.metrics.auth_successes.fetch_add(1, Ordering::Relaxed);
-                let session = format!("session-{user_id}-{now}");
                 AuthnResult::Success {
                     user_id,
-                    session_token: session,
+                    session_token: generate_session_token(),
                 }
             }
             AuthOutcome::CredentialExpired => {

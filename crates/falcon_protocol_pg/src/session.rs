@@ -12,6 +12,13 @@ use falcon_txn::TxnHandle;
 
 use crate::notify::{NotificationHub, SessionNotifications};
 
+/// PostgreSQL-compatible version string reported to clients.
+/// Clients (pgjdbc, psycopg2, etc.) parse this to determine feature support.
+/// Update these when targeting a new PG compatibility level.
+pub const PG_COMPAT_VERSION: &str = "18.0.0";
+/// Numeric form of PG_COMPAT_VERSION (major * 10000 + minor * 100 + patch).
+pub const PG_COMPAT_VERSION_NUM: &str = "180000";
+
 /// A prepared statement stored in the session.
 #[derive(Debug, Clone)]
 pub struct PreparedStatement {
@@ -50,8 +57,8 @@ pub struct Portal {
 /// Default session GUC variables.
 fn default_guc_vars() -> HashMap<String, String> {
     let mut m = HashMap::new();
-    m.insert("server_version".into(), "18.0.0".into());
-    m.insert("server_version_num".into(), "180000".into());
+    m.insert("server_version".into(), PG_COMPAT_VERSION.into());
+    m.insert("server_version_num".into(), PG_COMPAT_VERSION_NUM.into());
     m.insert("server_encoding".into(), "UTF8".into());
     m.insert("client_encoding".into(), "UTF8".into());
     m.insert("standard_conforming_strings".into(), "on".into());

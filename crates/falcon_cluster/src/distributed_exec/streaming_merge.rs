@@ -107,6 +107,7 @@ impl ShardCursor {
     }
 
     /// Whether this cursor has more rows.
+    #[allow(dead_code)]
     fn has_more(&self) -> bool {
         self.pos < self.rows.len()
     }
@@ -146,7 +147,7 @@ impl StreamingMergeSort {
         shard_rows: Vec<Vec<OwnedRow>>,
         sort_columns: Vec<(usize, bool)>,
     ) -> Self {
-        let mut cursors: Vec<ShardCursor> = shard_rows
+        let cursors: Vec<ShardCursor> = shard_rows
             .into_iter()
             .map(ShardCursor::new)
             .collect();

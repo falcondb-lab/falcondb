@@ -105,26 +105,31 @@ Attempting to use them returns a clear `ErrorResponse` with the appropriate SQLS
 | Full-text search (tsvector/tsquery) | `0A000` | `full-text search is not supported` |
 | Online DDL (concurrent index build) | `0A000` | `concurrent index operations are not supported` |
 | HTAP / ColumnStore analytics | — | Feature-gated off at compile time |
-| Automatic rebalancing | — | Manual shard split only |
+| Automatic rebalancing | — | Available via `[rebalance]` config section (see below) |
 | Custom types (beyond JSONB) | `0A000` | `custom types are not supported` |
 
 > **Scope Guard**: HTAP, ColumnStore, disk tier/spill, and online DDL are all
-> either `feature = "off"` or stub-only. Raft consensus is a single-node stub
-> (NOT on the production path).
+> either `feature = "off"` or stub-only. Raft consensus is available via
+> `replication.role = "raft_member"` (see [ARCHITECTURE.md](ARCHITECTURE.md) §2.7).
 
-### Planned — NOT Implemented (P2 roadmap, no code on default build path)
+### Optional / Non-Default Features (implemented, not on default build path)
 
 | Feature | Module Status | Notes |
 |---------|:------------:|-------|
-| Raft consensus replication | STUB | `falcon_raft` is a single-node no-op stub. Not on production path. No target milestone |
-| Disk spill / tiered storage | STUB | `disk_rowstore.rs`, `columnstore.rs` — code exists but not on production path |
-| LSM-tree storage engine | EXPERIMENTAL | `lsm/` — compile-gated, not default; USTM-integrated for both Rowstore and LSM |
-| Online DDL (non-blocking ALTER) | STUB | `online_ddl.rs` — state machine scaffolding only |
-| HTAP / ColumnStore analytics | STUB | `columnstore.rs` — not wired to query planner |
-| Transparent Data Encryption | STUB | `encryption.rs` — key manager scaffolding only |
-| Point-in-Time Recovery | STUB | `pitr.rs` — WAL archiver scaffolding only |
-| Auto shard rebalancing | — | Not started |
-| Multi-tenant resource isolation | STUB | `resource_isolation.rs`, `tenant_registry.rs` — not enforced |
+| Raft consensus replication | PRODUCTION | `falcon_raft` — `SingleNodeConsensus` (no-op default) or `RaftConsensus` (multi-node via `role = raft_member`). 32 tests, leader election, failover, gRPC transport. |
+| LSM-tree storage engine | EXPERIMENTAL | `lsm/` — compile-gated (`--features lsm`), not default; USTM-integrated for both Rowstore and LSM |
+| Auto shard rebalancing | PRODUCTION | `rebalancer.rs` + `raft_rebalance.rs` — policy-driven background rebalancer with batched row migration, pause/resume, Prometheus metrics, exponential backoff. Enable via `[rebalance]` config section. |
+
+### Planned — NOT Implemented (P2 roadmap, stub or scaffolding only)
+
+| Feature | Module Status | Target | Notes |
+|---------|:------------:|:------:|-------|
+| Disk spill / tiered storage | STUB | TBD | `disk_rowstore.rs`, `columnstore.rs` — code exists but not on production path |
+| Online DDL (non-blocking ALTER) | STUB | TBD | `online_ddl.rs` — state machine scaffolding only |
+| HTAP / ColumnStore analytics | STUB | TBD | `columnstore.rs` — not wired to query planner |
+| Transparent Data Encryption | STUB | v1.4 | `encryption.rs` — key manager scaffolding, WAL encryption implemented |
+| Point-in-Time Recovery | STUB | v1.4 | `pitr.rs` — WAL archiver scaffolding only |
+| Multi-tenant resource isolation | STUB | TBD | `resource_isolation.rs`, `tenant_registry.rs` — not enforced |
 
 ---
 
@@ -315,73 +320,38 @@ group.catch_up_replica(0).unwrap();
 
 ---
 
-## 3. Primary / Replica Configuration
+## 3. Configuration & Replication
 
-### Configuration file (`falcon.toml`)
+### Minimal `falcon.toml`
 
 ```toml
 [server]
-pg_listen_addr = "0.0.0.0:5433"   # PostgreSQL wire protocol listen address
-admin_listen_addr = "0.0.0.0:8080" # Admin/metrics endpoint
-node_id = 1                        # Unique node identifier
-max_connections = 1024              # Max concurrent PG connections
+pg_listen_addr = "0.0.0.0:5433"
+admin_listen_addr = "0.0.0.0:8080"
+node_id = 1
 
 [storage]
-memory_limit_bytes = 0              # 0 = unlimited
-wal_enabled = true                  # Enable write-ahead log
-data_dir = "./falcon_data"           # WAL and checkpoint directory
-
-[wal]
-group_commit = true                 # Batch WAL writes for throughput
-flush_interval_us = 1000            # Group commit flush interval (µs)
-sync_mode = "fdatasync"             # "fsync", "fdatasync", or "none"
-segment_size_bytes = 67108864       # WAL segment size (64MB default)
-
-[gc]
-enabled = true                      # Enable MVCC garbage collection
-interval_ms = 1000                  # GC sweep interval (milliseconds)
-batch_size = 0                      # 0 = unlimited (sweep all chains per cycle)
-min_chain_length = 2                # Skip chains shorter than this
-
-[ustm]
-enabled = true                      # Enable USTM page cache (replaces mmap)
-hot_capacity_bytes = 536870912      # 512 MB — MemTable + index internals (never evicted)
-warm_capacity_bytes = 268435456     # 256 MB — SST page cache (LIRS-2 eviction)
-lirs_lir_capacity = 4096            # Protected high-frequency pages
-lirs_hir_capacity = 1024            # Eviction candidate pages
-background_iops_limit = 500         # Max IOPS for compaction/GC I/O
-prefetch_iops_limit = 200           # Max IOPS for query-driven prefetch
-prefetch_enabled = true             # Enable query-aware prefetcher
-page_size = 8192                    # Default page size (8 KB)
+wal_enabled = true
+data_dir = "./falcon_data"
 
 [replication]
-commit_ack = "primary_durable"      # Scheme A: commit ack = primary WAL fsync
-                                    # RPO > 0 possible (documented tradeoff)
+commit_ack = "primary_durable"      # RPO > 0 possible
 ```
+
+Generate a full default config: `cargo run -p falcon_server -- --print-default-config > falcon.toml`. See [docs/OPERATIONS.md](docs/OPERATIONS.md) for all config sections (`[wal]`, `[gc]`, `[ustm]`, `[rebalance]`, `[memory]`).
 
 ### CLI Options
 
 ```
-falcon [OPTIONS]
-
-Options:
-  -c, --config <FILE>        Config file [default: falcon.toml]
-      --pg-addr <ADDR>       PG listen address (overrides config)
-      --data-dir <DIR>       Data directory (overrides config)
-      --no-wal               Disable WAL (pure in-memory)
-      --metrics-addr <ADDR>  Metrics endpoint [default: 0.0.0.0:9090]
-      --replica              Start in replica mode
-      --primary-addr <ADDR>  Primary address for replication
+falcon -c <FILE> --pg-addr <ADDR> --data-dir <DIR> --no-wal --replica --primary-addr <ADDR>
 ```
 
-### Replication semantics (M1)
+### Replication (M1)
 
-- **Commit Ack (Scheme A)**: `commit ack = primary WAL durable (fsync)`.
-  The primary does not wait for replicas before acknowledging commits.
-  RPO may be > 0 in the event of primary failure before replication.
-- **WAL shipping**: `WalChunk` frames with `start_lsn`, `end_lsn`, CRC32 checksum.
-- **Ack tracking**: replicas report `applied_lsn`; primary tracks per-replica ack LSNs for reconnect/resume from `ack_lsn + 1`.
-- **Replica read-only**: replicas start in `read_only` mode. Writes are rejected until promoted.
+- **Commit Ack**: primary WAL fsync → ack client (RPO > 0 if primary fails before shipping)
+- **WAL shipping**: `WalChunk` frames with LSN range + CRC32
+- **Ack tracking**: replicas report `applied_lsn`; primary resumes from `ack_lsn + 1`
+- **Replica read-only**: writes rejected until promoted
 
 ---
 
@@ -468,6 +438,12 @@ cargo build --release -p falcon_server -p falcon_bench
 > vs PostgreSQL's sequential heap pages, but has been optimized from 12x → 4.3x gap
 > via fused streaming aggregates, zero-copy MVCC iteration, and bounded-heap top-K.
 
+> **Query Performance Roadmap**: The remaining 4.3x query gap is a known priority.
+> Planned optimizations include: (1) vectorized batch execution to amortize per-row
+> overhead, (2) column-oriented read cache for scan-heavy queries, (3) prefetch-aware
+> DashMap iteration to reduce pointer-chasing latency. Track progress in
+> [CHANGELOG.md](CHANGELOG.md).
+
 ### YCSB-style workload
 
 ```bash
@@ -532,32 +508,6 @@ See [docs/observability.md](docs/observability.md) for full metric descriptions.
 
 ---
 
-## Supported SQL
-
-For full reference see [docs/sql_compatibility.md](docs/sql_compatibility.md). Quick summary:
-
-### Supported Types
-
-| Type | PG Equivalent |
-|------|--------------|
-| `INT` / `INTEGER` | `integer` / `int4` |
-| `BIGINT` | `bigint` / `int8` |
-| `FLOAT8` / `DOUBLE PRECISION` | `double precision` |
-| `DECIMAL(p,s)` / `NUMERIC(p,s)` | `numeric` (i128 mantissa + u8 scale) |
-| `TEXT` / `VARCHAR` | `text` / `varchar` |
-| `BOOLEAN` | `boolean` |
-| `TIMESTAMP` | `timestamp without time zone` |
-| `DATE` | `date` |
-| `SERIAL` | auto-incrementing `int4` |
-| `BIGSERIAL` | auto-incrementing `int8` |
-| `INT[]` / `TEXT[]` / ... | one-dimensional arrays |
-
-### Scalar Functions (500+)
-
-Core PG-compatible functions including: `UPPER`, `LOWER`, `LENGTH`, `SUBSTRING`, `CONCAT`, `REPLACE`, `TRIM`, `LPAD`, `RPAD`, `LEFT`, `RIGHT`, `REVERSE`, `INITCAP`, `POSITION`, `SPLIT_PART`, `ABS`, `ROUND`, `CEIL`, `FLOOR`, `POWER`, `SQRT`, `LN`, `LOG`, `EXP`, `MOD`, `SIGN`, `PI`, `GREATEST`, `LEAST`, `TO_CHAR`, `TO_NUMBER`, `TO_DATE`, `TO_TIMESTAMP`, `NOW`, `CURRENT_DATE`, `CURRENT_TIME`, `DATE_TRUNC`, `DATE_PART`, `EXTRACT`, `AGE`, `MD5`, `SHA256`, `ENCODE`, `DECODE`, `GEN_RANDOM_UUID`, `RANDOM`, `REGEXP_REPLACE`, `REGEXP_MATCH`, `REGEXP_COUNT`, `STARTS_WITH`, `ENDS_WITH`, `PG_TYPEOF`, and extensive array/string/math/statistical functions.
-
----
-
 ## Architecture
 
 ```
@@ -594,19 +544,28 @@ Core PG-compatible functions including: `UPPER`, `LOWER`, `LENGTH`, `SUBSTRING`,
 | `falcon_protocol_pg` | PostgreSQL wire protocol codec + TCP server |
 | `falcon_protocol_native` | FalconDB native binary protocol — encode/decode, compression, type mapping |
 | `falcon_native_server` | Native protocol server — session management, executor bridge, nonce anti-replay |
-| `falcon_raft` | Consensus stub (NOT on production path — single-node no-op) |
+| `falcon_raft` | Raft consensus — `SingleNodeConsensus` (standalone default) or `RaftConsensus` (production multi-node via `role = raft_member`) |
 | `falcon_cluster` | Shard map, replication, failover, scatter/gather, epoch, migration, supervisor, stability hardening, failover×txn test matrix |
 | `falcon_observability` | Metrics (Prometheus), structured logging, tracing |
+| `falcon_proto` | Protobuf definitions + tonic gRPC codegen (replication, Raft) |
+| `falcon_segment_codec` | Segment-level compression (Zstd, LZ4, dictionary, streaming, CRC) |
+| `falcon_enterprise` | Enterprise features: control plane HA, security (AuthN/AuthZ, TLS rotation), ops (auto-rebalance, SLO engine) |
 | `falcon_server` | Main binary, wires all components |
+| `falcon_cli` | Interactive CLI client — REPL, cluster management, import/export, failover, consistency checks |
 | `falcon_bench` | YCSB-style benchmark harness |
 
-### Java JDBC Driver (`clients/falcondb-jdbc/`)
+### Client SDKs (`clients/`)
 
-| Module | Responsibility |
-|--------|---------------|
-| `io.falcondb.jdbc` | JDBC Driver, Connection, Statement, PreparedStatement, ResultSet, DataSource |
-| `io.falcondb.jdbc.protocol` | Native protocol wire format, TCP connection, handshake, auth |
-| `io.falcondb.jdbc.ha` | HA-aware failover: ClusterTopologyProvider, PrimaryResolver, FailoverRetryPolicy |
+| SDK | Language | Features |
+|-----|----------|----------|
+| `falcondb-jdbc` | Java | JDBC 4.2, HA failover, connection pooling |
+| `falcondb-go` | Go | Native protocol, HA seed list, pooling |
+| `falcondb-python` | Python | DB-API 2.0, HA failover, pooling |
+| `falcondb-node` | Node.js | Async, TLS, HA failover, TypeScript types |
+
+All SDKs support: native binary protocol, HA-aware failover with seed lists, connection pooling, and epoch fencing.
+
+**Standard PG drivers** (psycopg2, pgx, node-postgres, pgjdbc, tokio-postgres, Npgsql) also connect directly via PG wire protocol on port 5433. See [`docs/pg_driver_compatibility.md`](docs/pg_driver_compatibility.md) for details.
 
 ---
 
@@ -635,47 +594,18 @@ Core PG-compatible functions including: `UPPER`, `LOWER`, `LENGTH`, `SUBSTRING`,
 
 ## Quick Start Demo
 
-### Linux / macOS / WSL
-
 ```bash
-chmod +x scripts/demo_standalone.sh
-./scripts/demo_standalone.sh
-```
+# Standalone (build + start + SQL smoke test + benchmark)
+./scripts/demo_standalone.sh          # Linux/macOS/WSL
+.\scripts\demo_standalone.ps1         # Windows
 
-Builds FalconDB, starts a standalone node, runs SQL smoke tests via `psql`,
-and executes a quick benchmark — all in one command.
-
-### Windows (PowerShell)
-
-```powershell
-.\scripts\demo_standalone.ps1
-```
-
-### Primary + Replica replication demo
-
-```bash
-chmod +x scripts/demo_replication.sh
+# Primary + Replica replication
 ./scripts/demo_replication.sh
+
+# E2E Failover (two-node closed-loop: write → kill primary → promote → verify)
+./scripts/e2e_two_node_failover.sh    # Linux/macOS/WSL
+.\scripts\e2e_two_node_failover.ps1   # Windows
 ```
-
-Starts a primary and replica via gRPC, writes data, verifies replication,
-and shows replication metrics.
-
-### E2E Failover Demo (two-node, closed-loop)
-
-```bash
-# Linux / macOS / WSL
-chmod +x scripts/e2e_two_node_failover.sh
-./scripts/e2e_two_node_failover.sh
-
-# Windows PowerShell
-.\scripts\e2e_two_node_failover.ps1
-```
-
-Full closed-loop test: start primary → start replica → write data → verify
-replication → kill primary → promote replica → verify old data readable →
-write new data → output PASS/FAIL. On failure, prints last 50 lines of each
-node's log plus port/PID diagnostics.
 
 ---
 
@@ -704,12 +634,6 @@ brew install libpq                    # macOS
 cargo build --workspace
 ```
 
-### Default config template
-
-```bash
-cargo run -p falcon_server -- --print-default-config > falcon.toml
-```
-
 ---
 
 ## Roadmap
@@ -735,39 +659,27 @@ and `sync-replica` (primary waits for replica WAL ack, RPO ≈ 0). See [docs/rpo
 | Document | Description |
 |----------|-------------|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | System architecture, crate structure, data flow |
-| [docs/rpo_rto.md](docs/rpo_rto.md) | RPO/RTO guarantees per durability policy |
-| [docs/error_model.md](docs/error_model.md) | Unified error model, SQLSTATE mapping, retry hints |
-| [docs/observability.md](docs/observability.md) | Prometheus metrics, SHOW commands, slow query log |
-| [docs/security.md](docs/security.md) | Security features, RBAC, SQL firewall, audit |
-| [docs/ops_runbook.md](docs/ops_runbook.md) | Operations runbook: failover, rolling upgrade, scale-out |
-| [docs/backup_restore.md](docs/backup_restore.md) | Backup and restore procedures |
+| [docs/INSTALL.md](docs/INSTALL.md) | Installation & uninstall (Windows + Linux) |
+| [docs/UPGRADE.md](docs/UPGRADE.md) | Upgrade, rolling upgrade & version management |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Service management, monitoring, config management |
+| [docs/cluster_ops.md](docs/cluster_ops.md) | Cluster operations, 2PC, failover & ops runbook |
+| [docs/security.md](docs/security.md) | Auth, RBAC, TLS, SQL firewall, audit |
+| [docs/observability.md](docs/observability.md) | Metrics, SHOW commands, SLA/SLO, perf guardrails |
+| [docs/failover_behavior.md](docs/failover_behavior.md) | Failover invariants, replication integrity |
+| [docs/pg_driver_compatibility.md](docs/pg_driver_compatibility.md) | PG driver compatibility & JDBC connection |
 | [docs/sql_compatibility.md](docs/sql_compatibility.md) | SQL compatibility reference |
-| [docs/INSTALL.md](docs/INSTALL.md) | Installation guide |
+| [docs/error_model.md](docs/error_model.md) | Unified error model, SQLSTATE mapping, retry hints |
+| [docs/rpo_rto.md](docs/rpo_rto.md) | RPO/RTO guarantees per durability policy |
+| [docs/backup_restore.md](docs/backup_restore.md) | Backup and restore procedures |
+| [docs/opentelemetry.md](docs/opentelemetry.md) | OpenTelemetry (OTLP) tracing, metrics & logs export |
+| [docs/audit_log.md](docs/audit_log.md) | Audit logging: config, SIEM integration, retention |
+| [docs/production_checklist.md](docs/production_checklist.md) | Production readiness checklist |
+| [docs/cli.md](docs/cli.md) | CLI reference (falcon-cli) |
+| [docs/self_healing.md](docs/self_healing.md) | Self-healing architecture |
+| [docs/design/](docs/design/) | Design docs: MVCC, WAL, sharding, vectorized exec |
+| [docs/adr/](docs/adr/) | Architecture Decision Records (ADR-001–007) |
+| [deploy/helm/falcondb/](deploy/helm/falcondb/) | Kubernetes Helm chart |
 | [CHANGELOG.md](CHANGELOG.md) | Semantic versioning changelog (v0.1–v1.2) |
-
----
-
-## Benchmarks
-
-FalconDB ships with a reproducible benchmark suite for pgbench comparison, failover validation, and kernel performance.
-
-```bash
-# pgbench: FalconDB vs PostgreSQL (requires both servers running)
-./scripts/bench_pgbench_vs_postgres.sh
-
-# Failover under load (starts 2 FalconDB nodes, kills primary, checks determinism)
-./scripts/bench_failover_under_load.sh
-
-# Internal kernel benchmark (no server required)
-./scripts/bench_kernel_falcon_bench.sh
-
-# Quick smoke test (CI)
-./scripts/ci_bench_smoke.sh
-```
-
-Results are written to `bench_out/<timestamp>/` with logs, JSON metrics, and a Markdown report.
-
-> Windows users: use `scripts/bench_pgbench_vs_postgres.ps1` (PowerShell 7+).
 
 ---
 

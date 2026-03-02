@@ -585,12 +585,98 @@ impl StorageEngine {
             self.ext.cdc_manager.emit_ddl(txn_id, &format!("ALTER TABLE {table_name} ADD COLUMN {}", col.name));
         }
 
-        // Backfill existing rows with default value if needed
+        // Backfill existing rows with default value if needed.
+        //
+        // Two paths:
+        // (a) Async: if `ddl_executor` is configured (online_ddl_full feature),
+        //     submit the backfill to the background thread pool and return
+        //     immediately. The executor updates OnlineDdlManager on completion.
+        // (b) Sync (fallback): block until all rows are updated.
         if has_default {
+            #[cfg(feature = "online_ddl_full")]
+            if let Some(executor) = &self.ddl_executor {
+                // ── Async backfill path ──
+                // Capture what the closure needs; it will run on a worker thread.
+                let tables = self.tables.clone();
+                let online_ddl = std::sync::Arc::new(self.online_ddl.clone());
+                let default_val = col
+                    .default_value
+                    .clone()
+                    .unwrap_or(falcon_common::datum::Datum::Null);
+
+                let total = self
+                    .tables
+                    .get(&table_id)
+                    .map(|t| t.value().data.len() as u64)
+                    .unwrap_or(0);
+                self.online_ddl.begin_backfill(ddl_id, total);
+
+                let backfill_fn: crate::online_ddl::BackfillFn = Box::new(
+                    move |_ddl_id, cancelled| {
+                        let table_ref = tables.get(&table_id).ok_or_else(|| {
+                            format!("Table {:?} disappeared during async backfill", table_id)
+                        })?;
+                        let memtable = table_ref.value();
+                        let mut batch_count = 0u64;
+                        for entry in &memtable.data {
+                            // Check cancellation between batches.
+                            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                                return Err("Backfill cancelled".into());
+                            }
+                            let chain = entry.value();
+                            if let Some(row) = chain.read_latest() {
+                                let mut values = row.values.clone();
+                                while values.len() <= col_idx {
+                                    values.push(falcon_common::datum::Datum::Null);
+                                }
+                                values[col_idx] = default_val.clone();
+                                chain.replace_latest(
+                                    falcon_common::datum::OwnedRow::new(values),
+                                );
+                            }
+                            batch_count += 1;
+                            if batch_count % BACKFILL_BATCH_SIZE as u64 == 0 {
+                                online_ddl.record_progress(
+                                    _ddl_id,
+                                    BACKFILL_BATCH_SIZE as u64,
+                                );
+                                std::thread::yield_now();
+                            }
+                        }
+                        let remainder = batch_count % BACKFILL_BATCH_SIZE as u64;
+                        if remainder > 0 {
+                            online_ddl.record_progress(_ddl_id, remainder);
+                        }
+                        Ok(())
+                    },
+                );
+
+                let mgr_arc = std::sync::Arc::new(self.online_ddl.clone());
+                match executor.submit(ddl_id, mgr_arc, backfill_fn) {
+                    Ok(_handle) => {
+                        tracing::info!(
+                            ddl_id,
+                            table = table_name,
+                            "ALTER TABLE ADD COLUMN: backfill submitted to async executor"
+                        );
+                        // Return immediately — executor will call complete/fail.
+                        return Ok(ddl_id);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            ddl_id,
+                            "Async backfill submit failed ({}), falling back to sync",
+                            e
+                        );
+                        // Fall through to synchronous path below.
+                    }
+                }
+            }
+
+            // ── Synchronous backfill path (fallback) ──
             if let Some(table_ref) = self.tables.get(&table_id) {
                 let default_val = col
                     .default_value
-                    
                     .unwrap_or(falcon_common::datum::Datum::Null);
                 let memtable = table_ref.value();
                 let total = memtable.data.len() as u64;
@@ -600,7 +686,6 @@ impl StorageEngine {
                     let chain = entry.value();
                     if let Some(row) = chain.read_latest() {
                         let mut values = row.values.clone();
-                        // Pad row to new schema width if needed
                         while values.len() <= col_idx {
                             values.push(falcon_common::datum::Datum::Null);
                         }
@@ -614,7 +699,6 @@ impl StorageEngine {
                         std::thread::yield_now();
                     }
                 }
-                // Record remaining
                 let remainder = batch_count % BACKFILL_BATCH_SIZE as u64;
                 if remainder > 0 {
                     self.online_ddl.record_progress(ddl_id, remainder);

@@ -74,7 +74,7 @@ impl QueryHandler {
     }
 
     fn show_falcon_raft_stats(&self) -> Vec<BackendMessage> {
-        let Some(ref coord) = self.raft_coordinator else {
+        let Some(ref coord) = self.cluster.raft_coordinator else {
             return self.single_row_result(
                 vec![("metric", 25, -1), ("value", 25, -1)],
                 vec![vec![Some("raft_enabled".into()), Some("false".into())]],
@@ -210,7 +210,7 @@ impl QueryHandler {
     }
 
     fn show_falcon_txn_stats(&self) -> Vec<BackendMessage> {
-        let stats = self.dist_engine.as_ref().map_or_else(
+        let stats = self.cluster.dist_engine.as_ref().map_or_else(
             || self.txn_mgr.stats_snapshot(),
             |dist| dist.aggregate_txn_stats(),
         );
@@ -558,7 +558,7 @@ impl QueryHandler {
     }
 
     fn show_falcon_scatter_stats(&self) -> Vec<BackendMessage> {
-        let rows = if let Some(ref dist) = self.dist_engine {
+        let rows = if let Some(ref dist) = self.cluster.dist_engine {
             let ss = dist.last_scatter_stats();
             let max_latency = ss
                 .per_shard_latency_us
@@ -635,8 +635,8 @@ impl QueryHandler {
     }
 
     fn show_falcon_slow_queries(&self) -> Vec<BackendMessage> {
-        let threshold = self.slow_query_log.threshold();
-        let (entries, total_count) = self.slow_query_log.snapshot();
+        let threshold = self.observability.slow_query_log.threshold();
+        let (entries, total_count) = self.observability.slow_query_log.snapshot();
         let mut rows: Vec<Vec<Option<String>>> = vec![
             vec![
                 Some("threshold_ms".into()),
@@ -698,7 +698,7 @@ impl QueryHandler {
     }
 
     fn show_falcon_plan_cache(&self) -> Vec<BackendMessage> {
-        let stats = self.plan_cache.stats();
+        let stats = self.observability.plan_cache.stats();
         let rows = vec![
             vec![Some("entries".into()), Some(stats.entries.to_string())],
             vec![Some("capacity".into()), Some(stats.capacity.to_string())],
@@ -713,7 +713,7 @@ impl QueryHandler {
     }
 
     fn show_falcon_replica_stats(&self) -> Vec<BackendMessage> {
-        let rows = if let Some(ref rm) = self.replica_metrics {
+        let rows = if let Some(ref rm) = self.observability.replica_metrics {
             let snap = rm.snapshot();
             vec![
                 vec![Some("connected".into()), Some(snap.connected.to_string())],
@@ -745,7 +745,7 @@ impl QueryHandler {
     }
 
     fn show_falcon_health(&self) -> Vec<BackendMessage> {
-        let rows = if let Some(ref dist) = self.dist_engine {
+        let rows = if let Some(ref dist) = self.cluster.dist_engine {
             let health = dist.shard_health_check();
             let all_healthy = health.iter().all(|(_, h, _)| *h);
             let max_lat = health.iter().map(|(_, _, l)| *l).max().unwrap_or(0);
@@ -941,7 +941,7 @@ impl QueryHandler {
             vec![
                 Some("distributed".into()),
                 Some(
-                    if self.cluster_shard_ids.len() > 1 {
+                    if self.cluster.shard_ids.len() > 1 {
                         "yes"
                     } else {
                         "no"
@@ -951,7 +951,7 @@ impl QueryHandler {
             ],
             vec![
                 Some("shard_count".into()),
-                Some(self.cluster_shard_ids.len().to_string()),
+                Some(self.cluster.shard_ids.len().to_string()),
             ],
             vec![
                 Some("supported_agg_funcs".into()),
@@ -969,13 +969,13 @@ impl QueryHandler {
     }
 
     fn show_falcon_query_routing(&self) -> Vec<BackendMessage> {
-        let shard_count = self.cluster_shard_ids.len();
+        let shard_count = self.cluster.shard_ids.len();
         let mode = if shard_count <= 1 {
             "single-shard"
         } else {
             "distributed"
         };
-        let last_stats = if let Some(ref dist) = self.dist_engine {
+        let last_stats = if let Some(ref dist) = self.cluster.dist_engine {
             let s = dist.last_scatter_stats();
             vec![
                 vec![
@@ -1050,9 +1050,9 @@ impl QueryHandler {
     }
 
     fn show_falcon_cluster(&self) -> Vec<BackendMessage> {
-        let shard_count = self.cluster_shard_ids.len();
+        let shard_count = self.cluster.shard_ids.len();
         let shard_list = self
-            .cluster_shard_ids
+            .cluster.shard_ids
             .iter()
             .map(|s| s.0.to_string())
             .collect::<Vec<_>>()
@@ -1091,7 +1091,7 @@ impl QueryHandler {
     }
 
     fn show_falcon_shard_stats(&self) -> Vec<BackendMessage> {
-        if let Some(ref dist) = self.dist_engine {
+        if let Some(ref dist) = self.cluster.dist_engine {
             let stats = dist.per_shard_stats();
             let columns = vec![
                 ("shard_id", 23, 4),
@@ -1135,7 +1135,7 @@ impl QueryHandler {
     }
 
     fn show_falcon_shards(&self) -> Vec<BackendMessage> {
-        if let Some(ref dist) = self.dist_engine {
+        if let Some(ref dist) = self.cluster.dist_engine {
             let detailed = dist.shard_load_detailed();
             let columns = vec![
                 ("shard_id", 23, 4),
@@ -1179,7 +1179,7 @@ impl QueryHandler {
     }
 
     fn show_falcon_rebalance_status(&self) -> Vec<BackendMessage> {
-        if let Some(ref dist) = self.dist_engine {
+        if let Some(ref dist) = self.cluster.dist_engine {
             let status = dist.rebalance_status();
             let mut rows = vec![
                 vec![
@@ -1235,7 +1235,7 @@ impl QueryHandler {
     fn show_falcon_ha_status(&self) -> Vec<BackendMessage> {
         // HA status is available via the DistributedQueryEngine or standalone HA group.
         // In single-node mode, report basic HA info.
-        let rows = if let Some(ref dist) = self.dist_engine {
+        let rows = if let Some(ref dist) = self.cluster.dist_engine {
             let engine = dist.engine();
             let num_shards = engine.num_shards();
             vec![
@@ -1256,7 +1256,7 @@ impl QueryHandler {
     }
 
     fn show_falcon_replica_health(&self) -> Vec<BackendMessage> {
-        if let Some(ref dist) = self.dist_engine {
+        if let Some(ref dist) = self.cluster.dist_engine {
             let columns = vec![
                 ("shard_id", 23, 4),
                 ("replica_idx", 23, 4),
@@ -1333,7 +1333,7 @@ impl QueryHandler {
     }
 
     fn show_falcon_tenants(&self) -> Vec<BackendMessage> {
-        let snapshots = self.tenant_registry.all_tenant_snapshots();
+        let snapshots = self.enterprise.tenant_registry.all_tenant_snapshots();
         let mut rows = vec![vec![
             Some("tenant_count".into()),
             Some(snapshots.len().to_string()),
@@ -1353,7 +1353,7 @@ impl QueryHandler {
     }
 
     fn show_falcon_tenant_usage(&self) -> Vec<BackendMessage> {
-        let snapshots = self.tenant_registry.all_tenant_snapshots();
+        let snapshots = self.enterprise.tenant_registry.all_tenant_snapshots();
         if snapshots.is_empty() {
             return self.single_row_result(
                 vec![("metric", 30, -1), ("value", 30, -1)],
@@ -1391,15 +1391,15 @@ impl QueryHandler {
     }
 
     fn show_falcon_audit_log(&self) -> Vec<BackendMessage> {
-        let events = self.audit_log.snapshot(50);
+        let events = self.enterprise.audit_log.snapshot(50);
         let mut rows = vec![
             vec![
                 Some("total_events".into()),
-                Some(self.audit_log.total_events().to_string()),
+                Some(self.enterprise.audit_log.total_events().to_string()),
             ],
             vec![
                 Some("buffered".into()),
-                Some(self.audit_log.buffered_count().to_string()),
+                Some(self.enterprise.audit_log.buffered_count().to_string()),
             ],
         ];
         for event in &events {
@@ -1501,7 +1501,7 @@ impl QueryHandler {
     }
 
     fn show_falcon_license(&self) -> Vec<BackendMessage> {
-        let lic = &self.license_info;
+        let lic = &self.enterprise.license_info;
         let rows = vec![
             vec![Some("edition".into()), Some(lic.edition.to_string())],
             vec![Some("organization".into()), Some(lic.organization.clone())],
@@ -1521,26 +1521,26 @@ impl QueryHandler {
             vec![Some("validated".into()), Some(lic.validated.to_string())],
             vec![
                 Some("features_enabled".into()),
-                Some(self.feature_gate.enabled_count().to_string()),
+                Some(self.enterprise.feature_gate.enabled_count().to_string()),
             ],
         ];
         self.single_row_result(vec![("metric", 25, -1), ("value", 40, -1)], rows)
     }
 
     fn show_falcon_metering(&self) -> Vec<BackendMessage> {
-        let snaps = self.resource_meter.all_usage_snapshots();
+        let snaps = self.enterprise.resource_meter.all_usage_snapshots();
         let mut rows = vec![
             vec![
                 Some("tenant_count".into()),
-                Some(self.resource_meter.tenant_count().to_string()),
+                Some(self.enterprise.resource_meter.tenant_count().to_string()),
             ],
             vec![
                 Some("throttled_total".into()),
-                Some(self.resource_meter.throttled_count().to_string()),
+                Some(self.enterprise.resource_meter.throttled_count().to_string()),
             ],
             vec![
                 Some("overage_alerts".into()),
-                Some(self.resource_meter.overage_alerts().to_string()),
+                Some(self.enterprise.resource_meter.overage_alerts().to_string()),
             ],
         ];
         for snap in &snaps {
@@ -1591,7 +1591,7 @@ impl QueryHandler {
     }
 
     fn show_falcon_security(&self) -> Vec<BackendMessage> {
-        let summary = self.security_manager.security_summary();
+        let summary = self.enterprise.security_manager.security_summary();
         let rows = vec![
             vec![
                 Some("encryption_enabled".into()),
@@ -1681,19 +1681,19 @@ impl QueryHandler {
     }
 
     fn show_falcon_hotspots(&self) -> Vec<BackendMessage> {
-        let alerts = self.hotspot_detector.detect();
+        let alerts = self.observability.hotspot_detector.detect();
         let mut rows = vec![
             vec![
                 Some("tracked_shards".into()),
-                Some(self.hotspot_detector.tracked_shards().to_string()),
+                Some(self.observability.hotspot_detector.tracked_shards().to_string()),
             ],
             vec![
                 Some("tracked_tables".into()),
-                Some(self.hotspot_detector.tracked_tables().to_string()),
+                Some(self.observability.hotspot_detector.tracked_tables().to_string()),
             ],
             vec![
                 Some("total_alerts".into()),
-                Some(self.hotspot_detector.total_alerts().to_string()),
+                Some(self.observability.hotspot_detector.total_alerts().to_string()),
             ],
         ];
         for alert in &alerts {
@@ -1709,7 +1709,7 @@ impl QueryHandler {
     }
 
     fn show_falcon_verification(&self) -> Vec<BackendMessage> {
-        let report = self.consistency_verifier.audit_report(0);
+        let report = self.observability.consistency_verifier.audit_report(0);
         let mut rows = vec![
             vec![
                 Some("total_checks".into()),
@@ -1801,7 +1801,7 @@ impl QueryHandler {
     // ── Cluster Operations Closure ──────────────────────────────────────
 
     fn show_falcon_cluster_events(&self) -> Vec<BackendMessage> {
-        let events = self.cluster_admin.event_log().snapshot();
+        let events = self.cluster.admin.event_log().snapshot();
         let rows: Vec<Vec<Option<String>>> = events
             .iter()
             .map(|e| {
@@ -1865,8 +1865,8 @@ impl QueryHandler {
     }
 
     fn show_falcon_node_lifecycle(&self) -> Vec<BackendMessage> {
-        let scale_outs = self.cluster_admin.scale_out_snapshot();
-        let scale_ins = self.cluster_admin.scale_in_snapshot();
+        let scale_outs = self.cluster.admin.scale_out_snapshot();
+        let scale_ins = self.cluster.admin.scale_in_snapshot();
 
         let mut rows: Vec<Vec<Option<String>>> = Vec::new();
 
@@ -1912,7 +1912,7 @@ impl QueryHandler {
     }
 
     fn show_falcon_rebalance_plan(&self) -> Vec<BackendMessage> {
-        if let Some(ref dist) = self.dist_engine {
+        if let Some(ref dist) = self.cluster.dist_engine {
             let snapshot = dist.shard_load_snapshot();
             let planner = falcon_cluster::rebalancer::RebalancePlanner::new(
                 falcon_cluster::rebalancer::RebalancerConfig::default(),
@@ -2006,7 +2006,8 @@ impl QueryHandler {
                     ));
                 }
                 match self
-                    .cluster_admin
+                    .cluster
+                    .admin
                     .begin_scale_out(falcon_common::types::NodeId(node_id))
                 {
                     Ok(()) => Some(self.single_row_result(
@@ -2033,7 +2034,8 @@ impl QueryHandler {
                     ));
                 }
                 match self
-                    .cluster_admin
+                    .cluster
+                    .admin
                     .begin_scale_in(falcon_common::types::NodeId(node_id))
                 {
                     Ok(()) => Some(self.single_row_result(
@@ -2059,7 +2061,7 @@ impl QueryHandler {
                         vec![vec![Some("ERROR: invalid shard_id".into())]],
                     ));
                 }
-                self.cluster_admin.log_leader_transfer(
+                self.cluster.admin.log_leader_transfer(
                     falcon_common::types::ShardId(shard_id),
                     falcon_common::types::NodeId(0),
                     falcon_common::types::NodeId(0),
@@ -2072,7 +2074,7 @@ impl QueryHandler {
                 ))
             }
             "falcon_rebalance_apply" => {
-                if self.dist_engine.is_none() {
+                if self.cluster.dist_engine.is_none() {
                     return Some(self.single_row_result(
                         vec![("result", 25, -1)],
                         vec![vec![Some(
@@ -2083,7 +2085,7 @@ impl QueryHandler {
                 let planner = falcon_cluster::rebalancer::RebalancePlanner::new(
                     falcon_cluster::rebalancer::RebalancerConfig::default(),
                 );
-                let plan = match self.dist_engine.as_ref() {
+                let plan = match self.cluster.dist_engine.as_ref() {
                     Some(de) => de.rebalance_plan(&planner),
                     None => return Some(self.single_row_result(
                         vec![("result", 25, -1)],
@@ -2093,7 +2095,7 @@ impl QueryHandler {
                 let num_tasks = plan.tasks.len();
                 let total_rows = plan.total_rows_to_move();
 
-                self.cluster_admin.log_rebalance_plan(num_tasks, total_rows);
+                self.cluster.admin.log_rebalance_plan(num_tasks, total_rows);
 
                 if plan.tasks.is_empty() {
                     return Some(self.single_row_result(
@@ -2104,11 +2106,11 @@ impl QueryHandler {
                     ));
                 }
 
-                self.cluster_admin.log_rebalance_start(num_tasks);
+                self.cluster.admin.log_rebalance_start(num_tasks);
 
                 let start = std::time::Instant::now();
                 let (completed, failed, rows_migrated) =
-                    match self.dist_engine.as_ref() {
+                    match self.cluster.dist_engine.as_ref() {
                         Some(de) => de.rebalance_execute(&plan),
                         None => return Some(self.single_row_result(
                             vec![("result", 25, -1)],
@@ -2116,7 +2118,7 @@ impl QueryHandler {
                         )),
                     };
 
-                self.cluster_admin.log_rebalance_complete(
+                self.cluster.admin.log_rebalance_complete(
                     completed,
                     failed,
                     rows_migrated,
@@ -2139,7 +2141,7 @@ impl QueryHandler {
     }
 
     fn show_falcon_priority_scheduler(&self) -> Vec<BackendMessage> {
-        let snap = self.priority_scheduler.snapshot();
+        let snap = self.observability.priority_scheduler.snapshot();
         let rows = vec![
             vec![
                 Some("high_active".into()),
@@ -2193,7 +2195,7 @@ impl QueryHandler {
     }
 
     fn show_falcon_token_bucket(&self) -> Vec<BackendMessage> {
-        let snap = self.rebalance_token_bucket.snapshot();
+        let snap = self.cluster.rebalance_token_bucket.snapshot();
         let rows = vec![
             vec![
                 Some("rate_per_sec".into()),
@@ -2226,9 +2228,9 @@ impl QueryHandler {
     }
 
     fn show_falcon_two_phase_config(&self) -> Vec<BackendMessage> {
-        let dl = self.decision_log.snapshot();
-        let tc = self.timeout_controller.snapshot();
-        let ss = self.slow_shard_tracker.snapshot();
+        let dl = self.cluster.decision_log.snapshot();
+        let tc = self.cluster.timeout_controller.snapshot();
+        let ss = self.cluster.slow_shard_tracker.snapshot();
 
         let rows = vec![
             // Decision log
@@ -2319,7 +2321,7 @@ impl QueryHandler {
     }
 
     fn show_falcon_fault_injection(&self) -> Vec<BackendMessage> {
-        let snap = self.fault_injector.full_snapshot();
+        let snap = self.cluster.fault_injector.full_snapshot();
         let rows = vec![
             vec![
                 Some("leader_killed".into()),
@@ -2554,9 +2556,9 @@ impl QueryHandler {
     }
 
     fn show_falcon_security_audit(&self) -> Vec<BackendMessage> {
-        let auth = self.auth_rate_limiter.snapshot();
-        let pw = self.password_policy.snapshot();
-        let fw = self.sql_firewall.snapshot();
+        let auth = self.enterprise.auth_rate_limiter.snapshot();
+        let pw = self.enterprise.password_policy.snapshot();
+        let fw = self.enterprise.sql_firewall.snapshot();
 
         let rows = vec![
             // Auth rate limiter

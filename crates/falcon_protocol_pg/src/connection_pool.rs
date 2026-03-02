@@ -248,8 +248,8 @@ impl ConnectionPool {
         };
 
         // Inject shared plan cache and slow query log
-        handler.plan_cache = self.plan_cache.clone();
-        handler.slow_query_log = self.slow_query_log.clone();
+        handler.observability.plan_cache = self.plan_cache.clone();
+        handler.observability.slow_query_log = self.slow_query_log.clone();
 
         Some(PooledHandler {
             handler,

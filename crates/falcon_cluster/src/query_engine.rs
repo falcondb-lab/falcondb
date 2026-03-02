@@ -195,7 +195,14 @@ impl DistributedQueryEngine {
                 self.exec_explain_coordinator_subquery(inner)
             }
 
-            // EXPLAIN ANALYZE: execute on shard 0 (local executor handles timing)
+            // EXPLAIN ANALYZE wrapping a DistPlan: scatter, then show per-shard timing
+            PhysicalPlan::ExplainAnalyze(inner)
+                if matches!(**inner, PhysicalPlan::DistPlan { .. }) =>
+            {
+                self.exec_explain_dist(inner)
+            }
+
+            // EXPLAIN ANALYZE (non-distributed): execute on shard 0
             PhysicalPlan::ExplainAnalyze(_) => {
                 let shard = self.engine.shard(ShardId(0)).ok_or_else(|| {
                     FalconError::internal_bug(

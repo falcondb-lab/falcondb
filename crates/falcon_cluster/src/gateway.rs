@@ -19,6 +19,16 @@ pub struct ScatterStats {
     pub merge_labels: Vec<String>,
     /// Set when PK shard pruning routes a DistPlan to a single shard.
     pub pruned_to_shard: Option<u64>,
+    /// Per-shard network RPC round-trip latency (shard_id, rpc_latency_us).
+    /// Populated only when remote execution is used (gRPC path).
+    /// For local-only execution this is empty.
+    pub per_shard_network_us: Vec<(u64, u64)>,
+    /// Per-shard remote execution latency as reported by the remote node.
+    /// (shard_id, remote_exec_us). When available, `per_shard_latency_us - remote_exec_us`
+    /// gives the serialization + network overhead.
+    pub per_shard_remote_exec_us: Vec<(u64, u64)>,
+    /// Gather-phase merge latency (microseconds).
+    pub gather_merge_latency_us: u64,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
