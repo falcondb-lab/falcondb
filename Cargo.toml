@@ -115,5 +115,11 @@ criterion = { version = "0.5", features = ["html_reports"] }
 
 [profile.release]
 opt-level = 3
+lto = false
+codegen-units = 8
+
+# CI/distribution: use --profile release-lto (requires 32GB+ RAM on Windows)
+[profile.release-lto]
+inherits = "release"
 lto = "thin"
 codegen-units = 1

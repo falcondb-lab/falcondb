@@ -1,4 +1,4 @@
-﻿    use crate::memtable::MemTable;
+    use crate::memtable::MemTable;
     use falcon_common::datum::{Datum, OwnedRow};
     use falcon_common::schema::{ColumnDef, TableSchema};
     use falcon_common::types::{ColumnId, DataType, TableId, Timestamp, TxnId};

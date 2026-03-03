@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::Instant;
 
 use falcon_cluster::fault_injection::FaultInjector;
@@ -19,7 +20,7 @@ use falcon_common::types::ShardId;
 use falcon_executor::{ExecutionResult, Executor, PriorityScheduler, PrioritySchedulerConfig};
 use falcon_planner::{IndexedColumns, PhysicalPlan, PlannedTxnType, Planner, TableRowCounts};
 use falcon_sql_frontend::binder::Binder;
-use falcon_sql_frontend::types::{BoundExpr, BoundInsert, BoundStatement};
+use falcon_sql_frontend::types::{BinOp, BoundExpr, BoundInsert, BoundStatement, OnConflictAction};
 use falcon_sql_frontend::parser::parse_sql;
 use falcon_storage::engine::StorageEngine;
 use falcon_txn::{SlowPathMode, TxnClassification, TxnManager};
@@ -88,6 +89,8 @@ pub struct QueryHandler {
     pub(crate) enterprise: EnterpriseContext,
     pub(crate) cluster: ClusterContext,
     pub(crate) observability: ObservabilityContext,
+
+    flush_stats_counter: Arc<AtomicU64>,
 }
 
 impl QueryHandler {
@@ -102,6 +105,7 @@ impl QueryHandler {
             storage,
             txn_mgr,
             executor,
+            flush_stats_counter: Arc::new(AtomicU64::new(0)),
             enterprise: EnterpriseContext {
                 tenant_registry: tenant_reg,
                 audit_log: Arc::new(falcon_storage::audit::AuditLog::new()),
@@ -131,7 +135,7 @@ impl QueryHandler {
             },
             observability: ObservabilityContext {
                 slow_query_log: Arc::new(SlowQueryLog::disabled()),
-                plan_cache: Arc::new(PlanCache::new(256)),
+                plan_cache: Arc::new(PlanCache::new(65536)),
                 replica_metrics: None,
                 hotspot_detector: Arc::new(falcon_storage::hotspot::HotspotDetector::default()),
                 consistency_verifier: Arc::new(
@@ -160,6 +164,7 @@ impl QueryHandler {
             storage,
             txn_mgr,
             executor,
+            flush_stats_counter: Arc::new(AtomicU64::new(0)),
             enterprise: EnterpriseContext {
                 tenant_registry: tenant_reg,
                 audit_log: Arc::new(falcon_storage::audit::AuditLog::new()),
@@ -189,7 +194,7 @@ impl QueryHandler {
             },
             observability: ObservabilityContext {
                 slow_query_log: Arc::new(SlowQueryLog::disabled()),
-                plan_cache: Arc::new(PlanCache::new(256)),
+                plan_cache: Arc::new(PlanCache::new(65536)),
                 replica_metrics: None,
                 hotspot_detector: Arc::new(falcon_storage::hotspot::HotspotDetector::default()),
                 consistency_verifier: Arc::new(
@@ -306,18 +311,37 @@ impl QueryHandler {
 
         // Expect VALUES keyword
         if rest.len() < 6 || !rest[..6].eq_ignore_ascii_case("VALUES") { return None; }
-        // Reject RETURNING / ON CONFLICT (fall back to standard path)
+        // Reject RETURNING / ON CONFLICT DO UPDATE (fall back to standard path)
+        // Allow ON CONFLICT DO NOTHING
+        let mut on_conflict_do_nothing = false;
         {
             let upper = rest.to_ascii_uppercase();
-            if upper.contains("RETURNING") || upper.contains("ON CONFLICT") {
+            if upper.contains("RETURNING") {
                 return None;
+            }
+            if upper.contains("ON CONFLICT") {
+                if upper.contains("DO NOTHING") {
+                    on_conflict_do_nothing = true;
+                } else {
+                    return None;
+                }
             }
         }
         let values_str = rest[6..].trim_start();
+        // Strip trailing ON CONFLICT DO NOTHING
+        let values_str = if on_conflict_do_nothing {
+            let upper = values_str.to_ascii_uppercase();
+            if let Some(idx) = upper.find("ON CONFLICT") {
+                values_str[..idx].trim_end()
+            } else {
+                values_str
+            }
+        } else {
+            values_str
+        };
 
-        // Look up table in catalog
-        let catalog = self.storage.get_catalog();
-        let schema = catalog.find_table(table_name)?.clone();
+        // Look up table schema directly (avoids cloning the entire catalog)
+        let schema = self.storage.get_table_schema(table_name)?;
         let col_indices: Vec<usize> = col_names.iter().map(|name| {
             schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(name))
         }).collect::<Option<Vec<_>>>()?;
@@ -451,8 +475,187 @@ impl QueryHandler {
             rows,
             source_select: None,
             returning: vec![],
-            on_conflict: None,
+            on_conflict: if on_conflict_do_nothing {
+                Some(OnConflictAction::DoNothing)
+            } else {
+                None
+            },
         })
+    }
+
+    /// Fast-path parser for simple UPDATE table SET col = expr WHERE col = val.
+    /// Handles: col = literal, col = col +/- literal.
+    /// Returns None if the SQL doesn't match (falls back to standard path).
+    fn try_fast_update_parse(&self, sql: &str) -> Option<PhysicalPlan> {
+        let trimmed = sql.trim().trim_end_matches(';').trim_end();
+        if trimmed.len() < 20 || !trimmed[..6].eq_ignore_ascii_case("UPDATE") {
+            return None;
+        }
+        let rest = trimmed[6..].trim_start();
+
+        // Table name
+        let tbl_end = rest.find(|c: char| !c.is_alphanumeric() && c != '_' && c != '"')?;
+        if tbl_end == 0 { return None; }
+        let table_name = rest[..tbl_end].trim_matches('"');
+        let rest = rest[tbl_end..].trim_start();
+
+        // SET keyword
+        if rest.len() < 4 || !rest[..3].eq_ignore_ascii_case("SET") { return None; }
+        let rest = rest[3..].trim_start();
+
+        // Reject RETURNING / FROM (complex)
+        {
+            let upper_check = rest.to_ascii_uppercase();
+            if upper_check.contains("RETURNING") || upper_check.contains(" FROM ") {
+                return None;
+            }
+        }
+
+        // Find WHERE
+        let where_pos = {
+            let upper = rest.to_ascii_uppercase();
+            upper.find(" WHERE ")?
+        };
+        let set_part = rest[..where_pos].trim();
+        let where_part = rest[where_pos + 7..].trim();
+
+        // Look up table
+        let schema = self.storage.get_table_schema(table_name)?;
+
+        // Parse assignments: col = expr [, col = expr]
+        let mut assignments = Vec::new();
+        for assign_str in set_part.split(',') {
+            let assign_str = assign_str.trim();
+            let eq_pos = assign_str.find('=')?;
+            let col_name = assign_str[..eq_pos].trim().trim_matches('"');
+            let expr_str = assign_str[eq_pos + 1..].trim();
+
+            let col_idx = schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(col_name))?;
+
+            // Parse expr: literal | col +/- literal
+            let expr = self.parse_fast_expr(expr_str, &schema)?;
+            assignments.push((col_idx, expr));
+        }
+
+        // Parse WHERE: col = literal [AND col = literal]
+        let mut filters: Vec<BoundExpr> = Vec::new();
+        // AND splitting
+        let conds: Vec<&str> = {
+            let upper = where_part.to_ascii_uppercase();
+            let mut parts = Vec::new();
+            let mut start = 0;
+            while let Some(pos) = upper[start..].find(" AND ") {
+                parts.push(where_part[start..start + pos].trim());
+                start += pos + 5;
+            }
+            parts.push(where_part[start..].trim());
+            parts
+        };
+        for cond in conds {
+            let eq_pos = cond.find('=')?;
+            // Reject !=, >=, <=
+            if eq_pos > 0 && matches!(cond.as_bytes()[eq_pos - 1], b'!' | b'>' | b'<') {
+                return None;
+            }
+            if eq_pos + 1 < cond.len() && cond.as_bytes()[eq_pos + 1] == b'=' {
+                return None; // == not valid SQL but bail
+            }
+            let col_name = cond[..eq_pos].trim().trim_matches('"');
+            let val_str = cond[eq_pos + 1..].trim();
+            let col_idx = schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(col_name))?;
+            let val = self.parse_fast_literal(val_str, &schema.columns[col_idx].data_type)?;
+            filters.push(BoundExpr::BinaryOp {
+                left: Box::new(BoundExpr::ColumnRef(col_idx)),
+                op: BinOp::Eq,
+                right: Box::new(BoundExpr::Literal(val)),
+            });
+        }
+
+        let filter = if filters.len() == 1 {
+            Some(filters.pop().unwrap())
+        } else if filters.len() > 1 {
+            let mut combined = filters.pop().unwrap();
+            while let Some(f) = filters.pop() {
+                combined = BoundExpr::BinaryOp {
+                    left: Box::new(f),
+                    op: BinOp::And,
+                    right: Box::new(combined),
+                };
+            }
+            Some(combined)
+        } else {
+            None
+        };
+
+        Some(PhysicalPlan::Update {
+            table_id: schema.id,
+            schema,
+            assignments,
+            filter,
+            returning: vec![],
+            from_table: None,
+        })
+    }
+
+    fn parse_fast_expr(&self, s: &str, schema: &falcon_common::schema::TableSchema) -> Option<BoundExpr> {
+        let s = s.trim();
+        // Try: col + literal or col - literal
+        if let Some(plus_pos) = s.find('+') {
+            let lhs = s[..plus_pos].trim();
+            let rhs = s[plus_pos + 1..].trim();
+            if let Some(col_idx) = schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(lhs)) {
+                let val = self.parse_fast_literal(rhs, &schema.columns[col_idx].data_type)?;
+                return Some(BoundExpr::BinaryOp {
+                    left: Box::new(BoundExpr::ColumnRef(col_idx)),
+                    op: BinOp::Plus,
+                    right: Box::new(BoundExpr::Literal(val)),
+                });
+            }
+        }
+        if let Some(minus_pos) = s.rfind('-') {
+            if minus_pos > 0 {
+                let lhs = s[..minus_pos].trim();
+                let rhs = s[minus_pos + 1..].trim();
+                if let Some(col_idx) = schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(lhs)) {
+                    let val = self.parse_fast_literal(rhs, &schema.columns[col_idx].data_type)?;
+                    return Some(BoundExpr::BinaryOp {
+                        left: Box::new(BoundExpr::ColumnRef(col_idx)),
+                        op: BinOp::Minus,
+                        right: Box::new(BoundExpr::Literal(val)),
+                    });
+                }
+            }
+        }
+        // Try: plain literal
+        // Need to guess type — use Int64 for numbers, Text for strings
+        if s.starts_with('\'') {
+            let inner = s.trim_matches('\'');
+            return Some(BoundExpr::Literal(Datum::Text(inner.to_owned())));
+        }
+        if s.eq_ignore_ascii_case("NULL") {
+            return Some(BoundExpr::Literal(Datum::Null));
+        }
+        if let Ok(v) = s.parse::<i64>() {
+            return Some(BoundExpr::Literal(Datum::Int64(v)));
+        }
+        if let Ok(v) = s.parse::<f64>() {
+            return Some(BoundExpr::Literal(Datum::Float64(v)));
+        }
+        None
+    }
+
+    fn parse_fast_literal(&self, s: &str, dt: &falcon_common::types::DataType) -> Option<Datum> {
+        use falcon_common::types::DataType;
+        let s = s.trim();
+        if s.eq_ignore_ascii_case("NULL") { return Some(Datum::Null); }
+        if s.starts_with('\'') {
+            return Some(Datum::Text(s.trim_matches('\'').to_owned()));
+        }
+        match dt {
+            DataType::Int32 => Some(Datum::Int32(s.parse().ok()?)),
+            DataType::Float64 => Some(Datum::Float64(s.parse().ok()?)),
+            _ => Some(Datum::Int64(s.parse().ok()?)),
+        }
     }
 
     /// Execute a single DML plan (fast-path for INSERT). Handles autocommit.
@@ -464,20 +667,8 @@ impl QueryHandler {
     ) -> Result<Vec<BackendMessage>, FalconError> {
         let mut messages = Vec::new();
 
-        // Begin autocommit txn if needed
         let auto_txn = if session.txn.is_none() {
-            let routing = plan.routing_hint();
-            let classification = classification_from_routing_hint(&routing);
-            let txn = match self
-                .txn_mgr
-                .try_begin_with_classification(session.default_isolation, classification)
-            {
-                Ok(t) => t,
-                Err(e) => {
-                    let ce: FalconError = e.into();
-                    return Ok(vec![self.error_response(&ce)]);
-                }
-            };
+            let txn = self.txn_mgr.begin_autocommit(session.default_isolation);
             session.txn = Some(txn);
             true
         } else {
@@ -510,23 +701,20 @@ impl QueryHandler {
             Err(e) => {
                 if auto_txn {
                     if let Some(ref txn) = session.txn {
-                        let _ = self.txn_mgr.abort(txn.txn_id);
+                        self.txn_mgr.abort_autocommit(txn.txn_id);
                     }
                     session.txn = None;
-                    self.flush_txn_stats();
                 }
                 messages.push(self.error_response(&e));
                 return Ok(messages);
             }
         }
 
-        // Auto-commit
         if auto_txn {
             if let Some(ref txn) = session.txn {
-                let _ = self.txn_mgr.commit(txn.txn_id);
+                let _ = self.txn_mgr.commit_autocommit(txn.txn_id);
             }
             session.txn = None;
-            self.flush_txn_stats();
         }
 
         Ok(messages)
@@ -545,6 +733,12 @@ impl QueryHandler {
                 Ok(p) => Planner::wrap_distributed(p, &self.cluster.shard_ids),
                 Err(e) => return Ok(vec![self.error_response(&FalconError::Sql(e))]),
             };
+            return self.execute_single_plan(sql, plan, session);
+        }
+
+        // ── Fast-path: lightweight UPDATE parser (bypasses sqlparser-rs) ──
+        if let Some(plan) = self.try_fast_update_parse(sql) {
+            let plan = Planner::wrap_distributed(plan, &self.cluster.shard_ids);
             return self.execute_single_plan(sql, plan, session);
         }
 
@@ -586,8 +780,12 @@ impl QueryHandler {
                         }
                     }
                 } else {
-                    let row_counts = self.build_row_counts();
-                    let indexed_cols = self.build_indexed_columns();
+                    let is_dml = matches!(&bound, BoundStatement::Update(_) | BoundStatement::Delete(_));
+                    let (row_counts, indexed_cols) = if is_dml {
+                        (TableRowCounts::new(), IndexedColumns::new())
+                    } else {
+                        (self.build_row_counts(), self.build_indexed_columns())
+                    };
                     let p = match Planner::plan_with_indexes(&bound, &row_counts, &indexed_cols) {
                         Ok(p) => p,
                         Err(e) => {
@@ -978,18 +1176,7 @@ impl QueryHandler {
 
             // For DML/query, ensure a transaction exists (autocommit = implicit txn)
             let auto_txn = if session.txn.is_none() {
-                let classification = classification_from_routing_hint(&routing_hint);
-                let txn = match self
-                    .txn_mgr
-                    .try_begin_with_classification(session.default_isolation, classification)
-                {
-                    Ok(t) => t,
-                    Err(e) => {
-                        let ce: FalconError = e.into();
-                        messages.push(self.error_response(&ce));
-                        continue;
-                    }
-                };
+                let txn = self.txn_mgr.begin_autocommit(session.default_isolation);
                 session.txn = Some(txn);
                 true
             } else {
@@ -1008,9 +1195,10 @@ impl QueryHandler {
 
             match result {
                 Ok(exec_result) => {
+                    let is_readonly = matches!(&exec_result, ExecutionResult::Query { .. }
+                        | ExecutionResult::Ddl { .. } | ExecutionResult::TxnControl { .. });
                     match exec_result {
                         ExecutionResult::Query { columns, rows } => {
-                            // RowDescription
                             let fields: Vec<FieldDescription> = columns
                                 .iter()
                                 .map(|(name, dt)| FieldDescription {
@@ -1025,7 +1213,6 @@ impl QueryHandler {
                                 .collect();
                             messages.push(BackendMessage::RowDescription { fields });
 
-                            // DataRows
                             let row_count = rows.len();
                             for row in rows {
                                 let values: Vec<Option<String>> =
@@ -1055,13 +1242,15 @@ impl QueryHandler {
                         }
                     }
 
-                    // Auto-commit if needed
                     if auto_txn {
                         if let Some(ref txn) = session.txn {
-                            let _ = self.txn_mgr.commit(txn.txn_id);
+                            if is_readonly {
+                                self.txn_mgr.commit_autocommit_readonly();
+                            } else {
+                                let _ = self.txn_mgr.commit_autocommit(txn.txn_id);
+                            }
                         }
                         session.txn = None;
-                        self.flush_txn_stats();
                     }
 
                     // Record to slow query log
@@ -1074,10 +1263,9 @@ impl QueryHandler {
                     // Auto-abort on error
                     if auto_txn {
                         if let Some(ref txn) = session.txn {
-                            let _ = self.txn_mgr.abort(txn.txn_id);
+                            self.txn_mgr.abort_autocommit(txn.txn_id);
                         }
                         session.txn = None;
-                        self.flush_txn_stats();
                     }
                     messages.push(self.error_response(&e));
                     return Ok(messages);
@@ -1919,8 +2107,12 @@ impl QueryHandler {
         }
     }
 
-    /// Push current txn stats to Prometheus gauges.
+    /// Push current txn stats to Prometheus gauges (sampled 1-in-64).
     pub(crate) fn flush_txn_stats(&self) {
+        let n = self.flush_stats_counter.fetch_add(1, AtomicOrdering::Relaxed);
+        if n % 64 != 0 {
+            return;
+        }
         let s = self.txn_mgr.stats_snapshot();
         falcon_observability::record_txn_stats(
             s.total_committed,

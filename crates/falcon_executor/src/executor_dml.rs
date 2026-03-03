@@ -7,10 +7,37 @@ use falcon_common::types::DataType;
 use falcon_sql_frontend::types::*;
 use falcon_txn::TxnHandle;
 
-use crate::executor::{CteData, ExecutionResult, Executor};
+use crate::executor::{ExecutionResult, Executor};
 use crate::expr_engine::ExprEngine;
 
 impl Executor {
+    /// Fill dynamic defaults (CURRENT_TIMESTAMP, etc.) for NULL columns.
+    fn eval_dynamic_defaults(schema: &TableSchema, values: &mut [Datum]) {
+        use chrono::Timelike;
+        use falcon_common::schema::DefaultFn;
+        for (&col_idx, dfn) in &schema.dynamic_defaults {
+            if col_idx < values.len() && values[col_idx].is_null() {
+                values[col_idx] = match dfn {
+                    DefaultFn::CurrentTimestamp => {
+                        Datum::Timestamp(chrono::Utc::now().timestamp_micros())
+                    }
+                    DefaultFn::CurrentDate => {
+                        let today = chrono::Utc::now().date_naive();
+                        let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+                        Datum::Date((today - epoch).num_days() as i32)
+                    }
+                    DefaultFn::CurrentTime => {
+                        let t = chrono::Utc::now().time();
+                        Datum::Time(
+                            t.num_seconds_from_midnight() as i64 * 1_000_000
+                                + t.nanosecond() as i64 / 1_000,
+                        )
+                    }
+                };
+            }
+        }
+    }
+
     /// Evaluate a single row's expressions, apply defaults, coerce types, fill serials.
     fn build_insert_row(
         &self,
@@ -61,6 +88,9 @@ impl Executor {
             }
         }
 
+        // Dynamic defaults (CURRENT_TIMESTAMP, etc.)
+        Self::eval_dynamic_defaults(schema, &mut values);
+
         // Enforce NOT NULL constraints
         for (i, val) in values.iter().enumerate() {
             if val.is_null() && !schema.columns[i].nullable {
@@ -103,8 +133,6 @@ impl Executor {
         rows: &[Vec<BoundExpr>],
         txn: &TxnHandle,
     ) -> Result<ExecutionResult, FalconError> {
-        let t_start = std::time::Instant::now();
-        // Phase 1: Evaluate all rows and check per-row constraints (NOT NULL, CHECK)
         let has_checks = !schema.check_constraints.is_empty();
         let mut built_rows: Vec<OwnedRow> = Vec::with_capacity(rows.len());
         for row_exprs in rows {
@@ -120,7 +148,6 @@ impl Executor {
             }
         }
 
-        let t_phase1 = t_start.elapsed();
         // Phase 2: Batch UNIQUE constraint check — scan existing rows ONCE
         if !schema.unique_constraints.is_empty() {
             let read_ts = txn.read_ts(self.txn_mgr.current_ts());
@@ -225,23 +252,10 @@ impl Executor {
             }
         }
 
-        // Phase 4: Batch insert — single WAL write
         let count = built_rows.len() as u64;
-        let t_before_insert = std::time::Instant::now();
         self.storage
             .batch_insert(table_id, built_rows, txn.txn_id)
             .map_err(FalconError::Storage)?;
-        let t_phase4 = t_before_insert.elapsed();
-        let t_total = t_start.elapsed();
-        if count >= 1000 {
-            tracing::info!(
-                "exec_insert_batch: rows={} phase1={:.1}ms phase4_insert={:.1}ms total={:.1}ms",
-                count,
-                t_phase1.as_secs_f64() * 1000.0,
-                t_phase4.as_secs_f64() * 1000.0,
-                t_total.as_secs_f64() * 1000.0,
-            );
-        }
 
         Ok(ExecutionResult::Dml {
             rows_affected: count,
@@ -493,6 +507,7 @@ impl Executor {
         txn: &TxnHandle,
     ) -> Result<ExecutionResult, FalconError> {
         // Execute the SELECT query first
+        let cte_data = self.materialize_ctes(&sel.ctes, txn)?;
         let select_result = if sel.joins.is_empty() {
             self.exec_seq_scan(
                 sel.table_id,
@@ -508,7 +523,7 @@ impl Executor {
                 sel.offset,
                 &sel.distinct,
                 txn,
-                &CteData::new(),
+                &cte_data,
                 &sel.virtual_rows,
             )?
         } else {
@@ -525,7 +540,7 @@ impl Executor {
                 sel.offset,
                 &sel.distinct,
                 txn,
-                &CteData::new(),
+                &cte_data,
             )?
         };
 
@@ -548,10 +563,32 @@ impl Executor {
                     source_row.values.len()
                 )));
             }
-            let mut values = vec![Datum::Null; schema.num_columns()];
+            // Start with column defaults, then overwrite with SELECT values
+            let mut values: Vec<Datum> = schema
+                .columns
+                .iter()
+                .map(|c| c.default_value.clone().unwrap_or(Datum::Null))
+                .collect();
             for (i, val) in source_row.values.iter().enumerate() {
                 values[columns[i]] = val.clone();
             }
+
+            // Fill SERIAL columns still NULL
+            for (col_idx, col) in schema.columns.iter().enumerate() {
+                if col.is_serial && values[col_idx].is_null() {
+                    let next_val = self.storage.next_serial_value(&schema.name, col_idx)?;
+                    values[col_idx] = if col.data_type == DataType::Int64 {
+                        Datum::Int64(next_val)
+                    } else {
+                        Datum::Int32(i32::try_from(next_val).map_err(|_| {
+                            FalconError::Execution(falcon_common::error::ExecutionError::NumericOverflow)
+                        })?)
+                    };
+                }
+            }
+
+            // Dynamic defaults (CURRENT_TIMESTAMP, etc.)
+            Self::eval_dynamic_defaults(schema, &mut values);
 
             // Enforce NOT NULL constraints
             for (i, val) in values.iter().enumerate() {

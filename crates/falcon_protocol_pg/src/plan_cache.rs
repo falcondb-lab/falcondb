@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use falcon_planner::PhysicalPlan;
 
@@ -8,20 +9,15 @@ use falcon_planner::PhysicalPlan;
 /// Invalidated on DDL operations (CREATE/DROP/ALTER TABLE, CREATE/DROP VIEW).
 pub struct PlanCache {
     inner: RwLock<PlanCacheInner>,
+    hits: AtomicU64,
+    misses: AtomicU64,
 }
 
 struct PlanCacheInner {
     /// SQL -> (plan, access_count)
     entries: HashMap<String, (PhysicalPlan, u64)>,
-    /// Maximum number of cached plans.
     capacity: usize,
-    /// Total hits (plan found in cache).
-    hits: u64,
-    /// Total misses (plan not found).
-    misses: u64,
-    /// Schema generation counter — incremented on DDL, used to invalidate.
     schema_generation: u64,
-    /// Generation at which each entry was cached.
     entry_generations: HashMap<String, u64>,
 }
 
@@ -40,81 +36,63 @@ impl PlanCache {
     pub fn new(capacity: usize) -> Self {
         Self {
             inner: RwLock::new(PlanCacheInner {
-                entries: HashMap::new(),
+                entries: HashMap::with_capacity(capacity),
                 capacity,
-                hits: 0,
-                misses: 0,
                 schema_generation: 0,
-                entry_generations: HashMap::new(),
+                entry_generations: HashMap::with_capacity(capacity),
             }),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
         }
     }
 
     /// Look up a cached plan by SQL string.
     /// Returns `Some(plan)` if found and still valid, `None` otherwise.
     pub fn get(&self, sql: &str) -> Option<PhysicalPlan> {
-        let key = normalize_sql(sql);
+        let key = sql.trim();
 
-        // Fast path: read lock for HashMap lookup + plan clone (concurrent-friendly).
-        {
-            let inner = self.inner.read().ok()?;
-            let gen_valid = inner
-                .entry_generations
-                .get(&key)
-                .map(|g| *g == inner.schema_generation);
+        let inner = self.inner.read().ok()?;
+        let gen_valid = inner
+            .entry_generations
+            .get(key)
+            .map(|g| *g == inner.schema_generation);
 
-            match gen_valid {
-                Some(true) => {
-                    if let Some((plan, _)) = inner.entries.get(&key) {
-                        let cloned = plan.clone();
-                        drop(inner);
-                        // Brief write lock for counter updates only.
-                        if let Ok(mut w) = self.inner.write() {
-                            w.hits += 1;
-                            if let Some((_, count)) = w.entries.get_mut(&key) {
-                                *count += 1;
-                            }
-                        }
-                        return Some(cloned);
-                    }
-                    // Entry in generations but not in entries — inconsistency, treat as miss.
+        match gen_valid {
+            Some(true) => {
+                if let Some((plan, _)) = inner.entries.get(key) {
+                    self.hits.fetch_add(1, Ordering::Relaxed);
+                    return Some(plan.clone());
                 }
-                Some(false) => {
-                    drop(inner);
-                    // Stale entry — need write lock to remove.
-                    if let Ok(mut w) = self.inner.write() {
-                        w.entries.remove(&key);
-                        w.entry_generations.remove(&key);
-                        w.misses += 1;
-                    }
-                    return None;
-                }
-                None => {}
             }
+            Some(false) => {
+                drop(inner);
+                if let Ok(mut w) = self.inner.write() {
+                    w.entries.remove(key);
+                    w.entry_generations.remove(key);
+                }
+                self.misses.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+            None => {}
         }
 
-        // Miss path — brief write lock for counter only.
-        if let Ok(mut inner) = self.inner.write() {
-            inner.misses += 1;
-        }
+        self.misses.fetch_add(1, Ordering::Relaxed);
         None
     }
 
     /// Insert a plan into the cache.
     pub fn put(&self, sql: &str, plan: PhysicalPlan) {
-        let key = normalize_sql(sql);
-
-        // Don't cache DDL or transaction control plans
         if !is_cacheable(&plan) {
             return;
         }
 
+        let key = sql.trim();
         let Ok(mut inner) = self.inner.write() else {
             return;
         };
 
         // Evict if at capacity — remove least accessed entry
-        if inner.entries.len() >= inner.capacity && !inner.entries.contains_key(&key) {
+        if inner.entries.len() >= inner.capacity && !inner.entries.contains_key(key) {
             if let Some(evict_key) = inner
                 .entries
                 .iter()
@@ -127,8 +105,8 @@ impl PlanCache {
         }
 
         let gen = inner.schema_generation;
-        inner.entries.insert(key.clone(), (plan, 1));
-        inner.entry_generations.insert(key, gen);
+        inner.entries.insert(key.to_owned(), (plan, 1));
+        inner.entry_generations.insert(key.to_owned(), gen);
     }
 
     /// Invalidate all cached plans (called after DDL operations).
@@ -151,14 +129,16 @@ impl PlanCache {
     /// Get cache statistics.
     pub fn stats(&self) -> PlanCacheStats {
         let inner = self.inner.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let total = inner.hits + inner.misses;
+        let hits = self.hits.load(Ordering::Relaxed);
+        let misses = self.misses.load(Ordering::Relaxed);
+        let total = hits + misses;
         PlanCacheStats {
             entries: inner.entries.len(),
             capacity: inner.capacity,
-            hits: inner.hits,
-            misses: inner.misses,
+            hits,
+            misses,
             hit_rate_pct: if total > 0 {
-                (inner.hits as f64 / total as f64) * 100.0
+                (hits as f64 / total as f64) * 100.0
             } else {
                 0.0
             },

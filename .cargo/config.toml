@@ -1,0 +1,4 @@
+# i9-14900K 24-core: full parallelism causes rustc/LLVM STATUS_ACCESS_VIOLATION
+# during release builds (thin-LTO + many crates). Cap at 4 jobs to stay stable.
+[build]
+jobs = 4

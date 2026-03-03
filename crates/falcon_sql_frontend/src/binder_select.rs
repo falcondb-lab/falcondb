@@ -369,13 +369,20 @@ impl Binder {
                         Datum::Int64(1)
                     };
 
-                    // Build virtual schema with single "generate_series" column
+                    // Column name: use alias name when provided (e.g. AS g → col "g"),
+                    // otherwise fall back to "generate_series" for unaliased usage.
+                    let tvf_col_name = alias
+                        .as_ref()
+                        .map(|a| a.name.value.clone())
+                        .unwrap_or_else(|| "generate_series".to_owned());
+
+                    // Build virtual schema with single column
                     let tvf_schema = TableSchema {
                         id: tvf_table_id,
                         name: tvf_alias.clone(),
                         columns: vec![falcon_common::schema::ColumnDef {
                             id: ColumnId(0),
-                            name: "generate_series".to_owned(),
+                            name: tvf_col_name,
                             data_type: DataType::Int64,
                             nullable: false,
                             is_primary_key: false,

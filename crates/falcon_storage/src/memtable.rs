@@ -407,7 +407,7 @@ impl MemTable {
     pub fn new(schema: TableSchema) -> Self {
         Self {
             schema,
-            data: DashMap::new(),
+            data: DashMap::with_capacity_and_hasher_and_shard_amount(1 << 20, Default::default(), 256),
             secondary_indexes: RwLock::new(Vec::new()),
             gc_candidates: AtomicU64::new(0),
             committed_row_count: AtomicI64::new(0),
@@ -636,11 +636,6 @@ impl MemTable {
         } else if row_delta < 0 {
             self.committed_row_count.fetch_sub(-row_delta, AtomicOrdering::Relaxed);
         }
-        if !pk_inserts.is_empty() || !pk_deletes.is_empty() {
-            let mut order = self.pk_order.write();
-            for pk in pk_inserts { order.insert(pk); }
-            for pk in pk_deletes { order.remove(&pk); }
-        }
     }
 
     /// Commit writes for specific keys of a transaction.
@@ -662,47 +657,24 @@ impl MemTable {
         self.validate_unique_constraints_for_commit(txn_id, keys)?;
 
         // Phase 2: All checks passed — apply MVCC commits + index updates.
-        // Collect pk_order changes in local vecs to avoid acquiring the
-        // global RwLock N times (one per key). A single bulk write at the
-        // end reduces contention from O(N) locks to O(1) per transaction.
-        let mut pk_inserts: Vec<PrimaryKey> = Vec::new();
-        let mut pk_deletes: Vec<PrimaryKey> = Vec::new();
         let mut row_delta: i64 = 0;
 
         for pk in keys {
             if let Some(chain) = self.data.get(pk) {
                 let (new_data, old_data) = chain.commit_and_report(txn_id, commit_ts);
                 match (new_data.is_some(), old_data.is_some()) {
-                    (true, false) => {
-                        row_delta += 1;
-                        pk_inserts.push(pk.clone());
-                    }
-                    (false, true) => {
-                        row_delta -= 1;
-                        pk_deletes.push(pk.clone());
-                    }
+                    (true, false) => row_delta += 1,
+                    (false, true) => row_delta -= 1,
                     _ => {}
                 }
                 self.index_update_on_commit(pk, new_data.as_ref(), old_data.as_ref());
             }
         }
 
-        // Apply row count atomically.
         if row_delta > 0 {
             self.committed_row_count.fetch_add(row_delta, AtomicOrdering::Relaxed);
         } else if row_delta < 0 {
             self.committed_row_count.fetch_sub(-row_delta, AtomicOrdering::Relaxed);
-        }
-
-        // Apply pk_order changes with a single write-lock acquisition.
-        if !pk_inserts.is_empty() || !pk_deletes.is_empty() {
-            let mut order = self.pk_order.write();
-            for pk in pk_inserts {
-                order.insert(pk);
-            }
-            for pk in pk_deletes {
-                order.remove(&pk);
-            }
         }
 
         Ok(())

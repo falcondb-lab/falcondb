@@ -595,12 +595,20 @@ impl Executor {
         limit: Option<usize>,
         offset: Option<usize>,
         distinct: &DistinctMode,
+        txn: &TxnHandle,
     ) -> Result<ExecutionResult, FalconError> {
+        let filter_has_correlated_sub = filter.is_some_and(Self::expr_has_outer_ref);
+
         // Filter first (WHERE)
         let mut filtered: Vec<&OwnedRow> = Vec::new();
         for (_pk, row) in raw_rows {
             if let Some(f) = filter {
-                if !ExprEngine::eval_filter(f, row).map_err(FalconError::Execution)? {
+                if filter_has_correlated_sub {
+                    let row_filter = self.materialize_correlated(f, row, txn)?;
+                    if !ExprEngine::eval_filter(&row_filter, row).map_err(FalconError::Execution)? {
+                        continue;
+                    }
+                } else if !ExprEngine::eval_filter(f, row).map_err(FalconError::Execution)? {
                     continue;
                 }
             }

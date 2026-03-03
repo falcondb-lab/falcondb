@@ -1,0 +1,19 @@
+{
+  "workload": "C",
+  "name": "durability_write_throughput",
+  "target": "postgres",
+  "timestamp": "20260302T224806Z",
+  "config": {
+    "clients": 16,
+    "duration_sec": 60,
+    "host": "127.0.0.1",
+    "port": 5432,
+    "mix": "100% INSERT (durable writes)"
+  },
+  "results": {
+    "tps": 56363.903258,
+    "latency_avg_ms": 0.284,
+    "rows": 3301693,
+    "pk_unique": true
+  }
+}

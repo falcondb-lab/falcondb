@@ -739,16 +739,16 @@ impl TxnManager {
 
     /// Allocate a new timestamp.
     pub fn alloc_ts(&self) -> Timestamp {
-        Timestamp(self.ts_counter.fetch_add(1, Ordering::SeqCst))
+        Timestamp(self.ts_counter.fetch_add(1, Ordering::Relaxed))
     }
 
     fn alloc_local_ts(&self) -> Timestamp {
-        Timestamp(self.local_ts_counter.fetch_add(1, Ordering::SeqCst))
+        Timestamp(self.local_ts_counter.fetch_add(1, Ordering::Relaxed))
     }
 
     /// Current (latest) timestamp without advancing.
     pub fn current_ts(&self) -> Timestamp {
-        Timestamp(self.ts_counter.load(Ordering::SeqCst))
+        Timestamp(self.ts_counter.load(Ordering::Relaxed))
     }
 
     /// Begin a new transaction.
@@ -859,7 +859,7 @@ impl TxnManager {
         isolation: IsolationLevel,
         classification: TxnClassification,
     ) -> TxnHandle {
-        let txn_id = TxnId(self.txn_counter.fetch_add(1, Ordering::SeqCst));
+        let txn_id = TxnId(self.txn_counter.fetch_add(1, Ordering::Relaxed));
         let start_ts = self.alloc_ts();
 
         let handle = TxnHandle {
@@ -888,14 +888,58 @@ impl TxnManager {
         };
 
         self.active_txns.insert(txn_id, handle.clone());
-        tracing::debug!(
-            "TXN begin: {} at {} type={:?} shards={:?}",
+        handle
+    }
+
+    /// Lightweight begin for autocommit queries. Skips DashMap insert,
+    /// Instant::now(), and admission control. Caller must use commit_autocommit.
+    pub fn begin_autocommit(&self, isolation: IsolationLevel) -> TxnHandle {
+        let txn_id = TxnId(self.txn_counter.fetch_add(1, Ordering::Relaxed));
+        let start_ts = self.alloc_ts();
+        TxnHandle {
             txn_id,
             start_ts,
-            handle.txn_type,
-            handle.involved_shards
-        );
-        handle
+            isolation,
+            txn_type: TxnType::Local,
+            path: TxnPath::Fast,
+            slow_path_mode: SlowPathMode::Xa2Pc,
+            involved_shards: vec![ShardId(0)],
+            degraded: false,
+            state: TxnState::Active,
+            begin_instant: None,
+            trace_id: txn_id.0,
+            occ_retry_count: 0,
+            tenant_id: SYSTEM_TENANT_ID,
+            priority: TxnPriority::Normal,
+            latency_breakdown: TxnLatencyBreakdown::default(),
+            read_only: false,
+            timeout_ms: 0,
+            exec_summary: TxnExecSummary::default(),
+        }
+    }
+
+    /// Lightweight commit for autocommit write queries.
+    pub fn commit_autocommit(&self, txn_id: TxnId) -> Result<Timestamp, TxnError> {
+        let commit_ts = self.alloc_ts();
+        if let Err(e) = self.storage.commit_txn(txn_id, commit_ts, TxnType::Local) {
+            if matches!(e, StorageError::UniqueViolation { .. }) {
+                self.stats.record_constraint_violation();
+            }
+            return Err(Self::storage_err_to_txn_err(txn_id, e));
+        }
+        self.stats.record_fast_commit();
+        Ok(commit_ts)
+    }
+
+    /// Ultra-lightweight commit for read-only autocommit. Skips storage entirely.
+    pub fn commit_autocommit_readonly(&self) {
+        self.stats.record_fast_commit();
+    }
+
+    /// Lightweight abort for autocommit queries.
+    pub fn abort_autocommit(&self, txn_id: TxnId) {
+        let _ = self.storage.abort_txn(txn_id, TxnType::Local);
+        self.stats.record_abort();
     }
 
     pub fn observe_involved_shards(
@@ -1075,21 +1119,11 @@ impl TxnManager {
                     .ok_or(TxnError::NotFound(txn_id))?;
             }
 
-            let local_seq = self.alloc_local_ts();
             let commit_ts = self.alloc_ts();
             entry.path = TxnPath::Fast;
             // Note: state is set to Committed only AFTER storage confirms.
             drop(entry);
 
-            // Fast-path local commit: no prepare/global coordination.
-            // CP-L: WAL record appended inside commit_txn; CP-D: fsync completes.
-            tracing::debug!(
-                txn_id = txn_id.0,
-                commit_ts = commit_ts.0,
-                cp = "CP-L",
-                path = "fast",
-                "consistency commit point: WAL record logged"
-            );
             if let Err(e) = self.storage.commit_txn(txn_id, commit_ts, TxnType::Local) {
                 let latency_us = entry_begin_instant
                     .map_or(0, |i| i.elapsed().as_micros() as u64);
@@ -1116,26 +1150,9 @@ impl TxnManager {
                 return Err(Self::storage_err_to_txn_err(txn_id, e));
             }
 
-            // CP-D: storage confirmed — WAL durable.
-            tracing::debug!(
-                txn_id = txn_id.0,
-                commit_ts = commit_ts.0,
-                cp = "CP-D",
-                path = "fast",
-                "consistency commit point: WAL durable"
-            );
-
-            // CP-V: mark as Committed — visible to readers.
             if let Some(mut e) = self.active_txns.get_mut(&txn_id) {
                 e.state = TxnState::Committed;
             }
-            tracing::debug!(
-                txn_id = txn_id.0,
-                commit_ts = commit_ts.0,
-                cp = "CP-V",
-                path = "fast",
-                "consistency commit point: visible to readers"
-            );
 
             let latency_us = entry_begin_instant
                 .map_or(0, |i| i.elapsed().as_micros() as u64);
@@ -1157,13 +1174,6 @@ impl TxnManager {
             });
             self.active_txns.remove(&txn_id);
             self.stats.record_fast_commit();
-            tracing::debug!(
-                "TXN fast-commit(local): {} local_seq={} commit_ts={} latency={}us",
-                txn_id,
-                local_seq,
-                commit_ts,
-                latency_us
-            );
             return Ok(commit_ts);
         }
 
@@ -1425,29 +1435,26 @@ impl TxnManager {
         self.latency.lock().reset();
     }
 
-    /// Record a completed transaction into history + latency.
-    /// P1-4: Also checks slow txn threshold and logs to slow_txn_log.
     fn record_completed(&self, record: TxnRecord) {
-        if record.outcome == TxnOutcome::Committed {
-            let mut lat = self.latency.lock();
-            lat.record(record.txn_path, record.commit_latency_us);
-            lat.record_priority(record.priority, record.commit_latency_us);
+        // Sample 1-in-64 commits for latency/history to avoid mutex contention on hot path.
+        let sample = record.txn_id.0 % 64 == 0;
+        if sample {
+            if record.outcome == TxnOutcome::Committed {
+                let mut lat = self.latency.lock();
+                lat.record(record.txn_path, record.commit_latency_us);
+                lat.record_priority(record.priority, record.commit_latency_us);
+            }
+            self.history.lock().push(record.clone());
         }
-        // P1-4: Slow transaction detection
         let threshold = self.slow_txn_threshold_us.load(Ordering::Relaxed);
-        if record.commit_latency_us >= threshold && threshold > 0 {
+        if threshold > 0 && record.commit_latency_us >= threshold {
             tracing::warn!(
                 txn_id = %record.txn_id,
-                trace_id = record.trace_id,
                 latency_us = record.commit_latency_us,
-                path = ?record.txn_path,
-                shards = record.shard_count,
-                occ_retries = record.occ_retry_count,
                 "Slow transaction detected (threshold={}us)", threshold,
             );
-            self.slow_txn_log.lock().push(record.clone());
+            self.slow_txn_log.lock().push(record);
         }
-        self.history.lock().push(record);
     }
 
     /// B7: List transactions running longer than `threshold_us` microseconds.

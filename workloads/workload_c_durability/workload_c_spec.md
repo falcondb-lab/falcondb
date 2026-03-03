@@ -38,10 +38,10 @@ Runs multiple rounds (default 3) to catch intermittent issues.
 
 | Param | Default | Description |
 |-------|---------|-------------|
-| `--rounds` | 3 | Number of crash/recovery cycles |
-| `--count` | 5000 | Writes per round |
-| `--kill-after` | 3000 | Kill after this many commits |
-| `--falcon-bin` | `target/release/falcon_server` | Server binary path |
+| `--rounds` / `-Rounds` | 3 | Number of crash/recovery cycles |
+| `--count` / `-WriteCount` | 5000 | Writes per round |
+| `--kill-after` / `-WriteBeforeKill` | 3000 | Kill after this many commits |
+| `--falcon-bin` / `-FalconBin` | `target/release/falcon.exe` | Server binary path |
 
 ## Output
 
@@ -50,6 +50,14 @@ Runs multiple rounds (default 3) to catch intermittent issues.
 ## Usage
 
 ```bash
-cargo build -p falcon_server --release
+# Linux / macOS
+cargo build --release
 ./crash_runner.sh --rounds 3 --count 5000 --kill-after 3000
+```
+
+```powershell
+# Windows
+cargo build --release
+.\crash_runner.ps1
+.\crash_runner.ps1 -FalconBin .\target\release\falcon.exe -Rounds 3 -WriteCount 5000 -WriteBeforeKill 3000
 ```

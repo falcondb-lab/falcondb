@@ -267,6 +267,7 @@ impl PgServer {
             }
 
             tracing::info!("New connection from {}", addr);
+            let _ = stream.set_nodelay(true);
             self.spawn_connection(stream);
         }
     }
@@ -311,6 +312,7 @@ impl PgServer {
                     }
 
                     tracing::info!("New connection from {}", addr);
+                    let _ = stream.set_nodelay(true);
                     self.spawn_connection(stream);
                 }
                 _ = &mut shutdown => {
@@ -1209,68 +1211,20 @@ async fn handle_connection_with_timeout(
                             }
                         }
                     } else {
-                        // No statement_timeout: run in spawn_blocking so we can
-                        // poll the cancellation flag concurrently.
-                        let handler_ref = &handler;
-                        let query_future = tokio::task::spawn_blocking({
-                            let sql = sql.clone();
-                            let handler = handler_ref.clone();
-                            let mut sess = session.take_for_timeout();
-                            move || {
-                                let responses = handler.handle_query(&sql, &mut sess);
-                                (responses, sess)
-                            }
-                        });
-
-                        let cancel_flag = cancelled.clone();
-                        let cancel_poll = async {
-                            loop {
-                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                                if cancel_flag.load(Ordering::SeqCst) {
-                                    break;
-                                }
-                            }
-                        };
-
-                        tokio::select! {
-                            result = query_future => {
-                                match result {
-                                    Ok((responses, returned_session)) => {
-                                        session.restore_from_timeout(returned_session);
-                                        // Check if cancel arrived just as query finished
-                                        if cancelled.swap(false, Ordering::SeqCst) {
-                                            vec![BackendMessage::ErrorResponse {
-                                                severity: "ERROR".into(),
-                                                code: "57014".into(),
-                                                message: "canceling statement due to user request".into(),
-                                            }]
-                                        } else {
-                                            responses
-                                        }
-                                    }
-                                    Err(e) => {
-                                        vec![BackendMessage::ErrorResponse {
-                                            severity: "ERROR".into(),
-                                            code: "XX000".into(),
-                                            message: format!("Internal error: {e}"),
-                                        }]
-                                    }
-                                }
-                            }
-                            _ = cancel_poll => {
-                                cancelled.store(false, Ordering::SeqCst);
-                                tracing::info!("Query cancelled mid-execution for session {}", session_id);
-                                vec![BackendMessage::ErrorResponse {
-                                    severity: "ERROR".into(),
-                                    code: "57014".into(),
-                                    message: "canceling statement due to user request".into(),
-                                }]
-                            }
-                        }
+                        // Fast path: run directly without spawn_blocking
+                        // (avoids sql.clone, handler.clone, session migration, thread switch).
+                        // Cancel support is checked after query completes.
+                        handler.handle_query(&sql, &mut session)
                     };
 
-                    for response in &responses {
-                        send_message(&mut stream, response).await?;
+                    // Batch all response messages into a single write
+                    {
+                        let mut out = BytesMut::new();
+                        for response in &responses {
+                            out.extend_from_slice(&codec::encode_message(response));
+                        }
+                        stream.write_all(&out).await?;
+                        stream.flush().await?;
                     }
 
                     // COPY FROM STDIN sub-protocol: if copy_state is set, the handler

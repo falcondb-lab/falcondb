@@ -44,6 +44,13 @@ Same as Workload A — fsync + synchronous commit on both targets.
 ## Usage
 
 ```bash
+# Linux / macOS
 ./run.sh --target falcondb --clients 16 --duration 60
 ./run.sh --target postgres --clients 16 --duration 60
+```
+
+```powershell
+# Windows
+.\run.ps1
+.\run.ps1 -Target postgres -Clients 16 -Duration 60
 ```

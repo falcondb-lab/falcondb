@@ -653,6 +653,7 @@ impl Binder {
         let table_name = create.name.to_string();
         let mut columns = Vec::new();
         let mut pk_columns = Vec::new();
+        let mut dynamic_defaults = std::collections::HashMap::new();
 
         for (i, col_def) in create.columns.iter().enumerate() {
             // Check for SERIAL type (parsed as Custom by sqlparser)
@@ -670,6 +671,7 @@ impl Binder {
             let mut is_pk = false;
             let mut nullable = !is_serial;
             let mut default_value = None;
+            let mut default_fn = None;
 
             for option in &col_def.options {
                 match &option.option {
@@ -683,11 +685,43 @@ impl Binder {
                     ast::ColumnOption::Null => {
                         nullable = true;
                     }
-                    ast::ColumnOption::Default(Expr::Value(ref val)) => {
-                        if let Ok(d) = self.value_to_datum(val) {
-                            default_value = Some(d);
+                    ast::ColumnOption::Default(expr) => match expr {
+                        Expr::Value(ref val) => {
+                            if let Ok(d) = self.value_to_datum(val) {
+                                default_value = Some(d);
+                            }
                         }
-                    }
+                        Expr::Function(f) => {
+                            let fname = f.name.to_string().to_uppercase();
+                            match fname.as_str() {
+                                "NOW" | "CURRENT_TIMESTAMP" => {
+                                    default_fn = Some(falcon_common::schema::DefaultFn::CurrentTimestamp);
+                                }
+                                "CURRENT_DATE" => {
+                                    default_fn = Some(falcon_common::schema::DefaultFn::CurrentDate);
+                                }
+                                "CURRENT_TIME" => {
+                                    default_fn = Some(falcon_common::schema::DefaultFn::CurrentTime);
+                                }
+                                _ => {}
+                            }
+                        }
+                        Expr::Identifier(ident) => {
+                            match ident.value.to_uppercase().as_str() {
+                                "CURRENT_TIMESTAMP" | "NOW" => {
+                                    default_fn = Some(falcon_common::schema::DefaultFn::CurrentTimestamp);
+                                }
+                                "CURRENT_DATE" => {
+                                    default_fn = Some(falcon_common::schema::DefaultFn::CurrentDate);
+                                }
+                                "CURRENT_TIME" => {
+                                    default_fn = Some(falcon_common::schema::DefaultFn::CurrentTime);
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    },
                     _ => {}
                 }
             }
@@ -696,6 +730,9 @@ impl Binder {
                 pk_columns.push(i);
             }
 
+            if let Some(dfn) = default_fn {
+                dynamic_defaults.insert(i, dfn);
+            }
             columns.push(ColumnDef {
                 id: ColumnId(i as u32),
                 name: col_def.name.value.clone(),
@@ -920,6 +957,7 @@ impl Binder {
             shard_key: shard_key_cols,
             sharding_policy,
             range_bounds: Vec::new(),
+            dynamic_defaults,
         };
 
         Ok(BoundStatement::CreateTable(BoundCreateTable {

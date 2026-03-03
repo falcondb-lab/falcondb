@@ -476,10 +476,13 @@ pub enum WalRecord {
 /// Arguments: (completed_segment_id, segment_size_bytes)
 pub type SegmentRotateCallback = Arc<dyn Fn(u64, u64) + Send + Sync>;
 
+
 /// WAL writer: append-only, with group commit and segment rotation.
 pub struct WalWriter {
     inner: Mutex<WalWriterInner>,
     lsn: AtomicU64,
+    atomic_pending: std::sync::atomic::AtomicUsize,
+    encryption_enabled: std::sync::atomic::AtomicBool,
     sync_mode: SyncMode,
     /// Max bytes per WAL segment before rotating.
     max_segment_size: u64,
@@ -491,10 +494,17 @@ pub struct WalWriter {
     encryption: parking_lot::RwLock<Option<WalEncryption>>,
     /// Optional callback invoked after each segment rotation (for PITR archiving).
     segment_rotate_callback: parking_lot::RwLock<Option<SegmentRotateCallback>>,
+    flush_fd_cache: Mutex<Option<File>>,
+    // Dedicated flush thread support
+    pub(crate) flushed_lsn: AtomicU64,
+    flush_mu: Mutex<()>,
+    flush_cvar: parking_lot::Condvar,
+    flush_shutdown: std::sync::atomic::AtomicBool,
 }
 
 struct WalWriterInner {
-    writer: BufWriter<File>,
+    file: File,
+    buf: Vec<u8>,
     dir: PathBuf,
     current_segment: u64,
     current_segment_size: u64,
@@ -549,34 +559,28 @@ impl WalWriter {
         let segment_id = latest_segment.unwrap_or(0);
         let seg_path = dir.join(segment_filename(segment_id));
 
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&seg_path)?;
+        // Also handle legacy single-file WAL (falcon.wal)
+        let legacy_path = dir.join("falcon.wal");
+        if legacy_path.exists() && latest_segment.is_none() {
+            let _ = fs::rename(&legacy_path, &seg_path);
+        }
+
+        let file = Self::open_wal_file(&seg_path)?;
         let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
         let is_new_file = file_len == 0;
         let mut current_segment_size = file_len;
 
-        // Also handle legacy single-file WAL (falcon.wal)
-        let legacy_path = dir.join("falcon.wal");
-        if legacy_path.exists() && latest_segment.is_none() {
-            // Rename legacy WAL to segment 0
-            let _ = fs::rename(&legacy_path, &seg_path);
-        }
-
-        let mut writer = BufWriter::new(file);
-
-        // Write segment header for brand-new segments
+        let mut buf = Vec::with_capacity(8 * 1024);
         if is_new_file {
-            writer.write_all(WAL_MAGIC)?;
-            writer.write_all(&WAL_FORMAT_VERSION.to_le_bytes())?;
-            writer.flush()?;
+            buf.extend_from_slice(WAL_MAGIC);
+            buf.extend_from_slice(&WAL_FORMAT_VERSION.to_le_bytes());
             current_segment_size = WAL_SEGMENT_HEADER_SIZE as u64;
         }
 
         Ok(Self {
             inner: Mutex::new(WalWriterInner {
-                writer,
+                file,
+                buf,
                 dir: dir.to_path_buf(),
                 current_segment: segment_id,
                 current_segment_size,
@@ -584,10 +588,17 @@ impl WalWriter {
             }),
             segment_rotate_callback: parking_lot::RwLock::new(None),
             lsn: AtomicU64::new(0),
+            atomic_pending: std::sync::atomic::AtomicUsize::new(0),
+            encryption_enabled: std::sync::atomic::AtomicBool::new(false),
             sync_mode,
             max_segment_size,
             group_commit_size,
             encryption: parking_lot::RwLock::new(None),
+            flush_fd_cache: Mutex::new(None),
+            flushed_lsn: AtomicU64::new(0),
+            flush_mu: Mutex::new(()),
+            flush_cvar: parking_lot::Condvar::new(),
+            flush_shutdown: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -596,11 +607,84 @@ impl WalWriter {
     /// Safe to call from `&self` — uses interior mutability (RwLock).
     pub fn set_encryption(&self, enc: WalEncryption) {
         *self.encryption.write() = Some(enc);
+        self.encryption_enabled.store(true, Ordering::Relaxed);
     }
 
     /// Whether WAL encryption is currently active.
     pub fn is_encrypted(&self) -> bool {
         self.encryption.read().is_some()
+    }
+
+    /// Spawn a dedicated flush thread that does back-to-back FUA writes.
+    /// Returns the JoinHandle. Caller should store it and call shutdown_flush_thread() on drop.
+    pub fn start_flush_thread(self: &Arc<Self>) -> std::thread::JoinHandle<()> {
+        let wal = Arc::clone(self);
+        std::thread::Builder::new()
+            .name("wal-flush".into())
+            .spawn(move || {
+                let mut spins = 0u32;
+                while !wal.flush_shutdown.load(Ordering::Relaxed) {
+                    if wal.atomic_pending.load(Ordering::Relaxed) == 0 {
+                        spins += 1;
+                        if spins < 64 {
+                            std::hint::spin_loop();
+                        } else {
+                            std::thread::yield_now();
+                            if spins > 256 {
+                                std::thread::sleep(std::time::Duration::from_micros(50));
+                            }
+                        }
+                        continue;
+                    }
+                    spins = 0;
+                    if let Err(e) = wal.flush_split() {
+                        tracing::error!("WAL flush thread error: {e}");
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        continue;
+                    }
+                    let new_lsn = wal.current_lsn();
+                    wal.flushed_lsn.store(new_lsn, Ordering::Release);
+                    wal.flush_cvar.notify_all();
+                }
+            })
+            .expect("spawn wal-flush thread")
+    }
+
+    pub fn shutdown_flush_thread(&self) {
+        self.flush_shutdown.store(true, Ordering::Relaxed);
+        self.flush_cvar.notify_all();
+    }
+
+    /// Block until the given LSN has been durably flushed.
+    pub fn wait_flushed(&self, lsn: u64) {
+        if self.flushed_lsn.load(Ordering::Acquire) > lsn {
+            return;
+        }
+        let mut guard = self.flush_mu.lock();
+        while self.flushed_lsn.load(Ordering::Acquire) <= lsn {
+            self.flush_cvar.wait(&mut guard);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn open_wal_file(path: &Path) -> Result<File, StorageError> {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_WRITE_THROUGH: u32 = 0x80000000;
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .custom_flags(FILE_FLAG_WRITE_THROUGH)
+            .open(path)?;
+        Ok(file)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn open_wal_file(path: &Path) -> Result<File, StorageError> {
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        Ok(file)
     }
 
     fn find_latest_segment(dir: &Path) -> Option<u64> {
@@ -630,10 +714,13 @@ impl WalWriter {
         let raw =
             bincode::serialize(record).map_err(|e| StorageError::Serialization(e.to_string()))?;
 
-        // Optionally encrypt the serialized payload
-        let data = match self.encryption.read().as_ref() {
-            Some(enc) => enc.encrypt(&raw)?,
-            None => raw,
+        let data = if self.encryption_enabled.load(Ordering::Relaxed) {
+            match self.encryption.read().as_ref() {
+                Some(enc) => enc.encrypt(&raw)?,
+                None => raw,
+            }
+        } else {
+            raw
         };
 
         let lsn = self.lsn.fetch_add(1, Ordering::Relaxed);
@@ -648,15 +735,14 @@ impl WalWriter {
             self.rotate_segment(&mut inner)?;
         }
 
-        // Record format: [len:4][checksum:4][data:len]
-        // Merge header into a single stack-allocated write to reduce BufWriter calls.
         let mut header = [0u8; 8];
         header[..4].copy_from_slice(&len.to_le_bytes());
         header[4..].copy_from_slice(&checksum.to_le_bytes());
-        inner.writer.write_all(&header)?;
-        inner.writer.write_all(&data)?;
+        inner.buf.extend_from_slice(&header);
+        inner.buf.extend_from_slice(&data);
         inner.current_segment_size += record_size;
         inner.pending_count += 1;
+        self.atomic_pending.fetch_add(1, Ordering::Relaxed);
 
         // Group commit: flush when batch is full
         if inner.pending_count >= self.group_commit_size {
@@ -666,58 +752,110 @@ impl WalWriter {
         Ok(lsn)
     }
 
+    /// Append multiple records under a single mutex hold.
+    /// Serialization + encryption happen outside the mutex; only buf.extend is inside.
+    pub fn append_multi(&self, records: &[&WalRecord]) -> Result<u64, StorageError> {
+        let encrypted = self.encryption_enabled.load(Ordering::Relaxed);
+        let mut items: Vec<(Vec<u8>, u32)> = Vec::with_capacity(records.len());
+        for rec in records {
+            let raw = bincode::serialize(rec)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let data = if encrypted {
+                match self.encryption.read().as_ref() {
+                    Some(enc) => enc.encrypt(&raw)?,
+                    None => raw,
+                }
+            } else {
+                raw
+            };
+            let crc = crc32fast::hash(&data);
+            items.push((data, crc));
+        }
+
+        let count = items.len() as u64;
+        let base_lsn = self.lsn.fetch_add(count, Ordering::Relaxed);
+        let mut inner = self.inner.lock();
+        for (data, crc) in &items {
+            let len = data.len() as u32;
+            let record_size = 8 + data.len() as u64;
+            if inner.current_segment_size + record_size > self.max_segment_size {
+                self.rotate_segment(&mut inner)?;
+            }
+            let mut header = [0u8; 8];
+            header[..4].copy_from_slice(&len.to_le_bytes());
+            header[4..].copy_from_slice(&crc.to_le_bytes());
+            inner.buf.extend_from_slice(&header);
+            inner.buf.extend_from_slice(data);
+            inner.current_segment_size += record_size;
+            inner.pending_count += 1;
+            self.atomic_pending.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(base_lsn + count - 1)
+    }
+
     /// Flush buffered writes and optionally sync to disk.
     pub fn flush(&self) -> Result<(), StorageError> {
         let mut inner = self.inner.lock();
         self.flush_inner(&mut inner)
     }
 
-    fn flush_inner(&self, inner: &mut WalWriterInner) -> Result<(), StorageError> {
-        inner.writer.flush()?;
-        inner.pending_count = 0;
+    /// Double-buffer flush: swap buffer under WAL mutex (instant), then
+    /// FUA write outside mutex so appenders continue concurrently.
+    pub fn flush_split(&self) -> Result<(), StorageError> {
+        let data = {
+            let mut inner = self.inner.lock();
+            if inner.buf.is_empty() {
+                return Ok(());
+            }
+            let data = std::mem::replace(&mut inner.buf, Vec::with_capacity(8 * 1024));
+            inner.pending_count = 0;
+            self.atomic_pending.store(0, Ordering::Relaxed);
+            data
+        };
+        // Get fd from cache (no inner lock) or clone on miss
+        let fd = self.flush_fd_cache.lock().take()
+            .map_or_else(|| self.inner.lock().file.try_clone(), Ok)?;
+        (&fd).write_all(&data)?;
+        #[cfg(not(target_os = "windows"))]
         match self.sync_mode {
             SyncMode::None => {}
-            SyncMode::FSync => {
-                // fsync: flush data + file metadata (size, timestamps)
-                inner.writer.get_ref().sync_all()?;
-            }
-            SyncMode::FDataSync => {
-                // fdatasync: flush data only (skip metadata unless size changed)
-                inner.writer.get_ref().sync_data()?;
-            }
+            SyncMode::FSync => fd.sync_all()?,
+            SyncMode::FDataSync => fd.sync_data()?,
+        }
+        *self.flush_fd_cache.lock() = Some(fd);
+        Ok(())
+    }
+
+    fn flush_inner(&self, inner: &mut WalWriterInner) -> Result<(), StorageError> {
+        if !inner.buf.is_empty() {
+            inner.file.write_all(&inner.buf)?;
+            inner.buf.clear();
+        }
+        inner.pending_count = 0;
+        self.atomic_pending.store(0, Ordering::Relaxed);
+        #[cfg(not(target_os = "windows"))]
+        match self.sync_mode {
+            SyncMode::None => {}
+            SyncMode::FSync => inner.file.sync_all()?,
+            SyncMode::FDataSync => inner.file.sync_data()?,
         }
         Ok(())
     }
 
     fn rotate_segment(&self, inner: &mut WalWriterInner) -> Result<(), StorageError> {
-        // Flush current segment
-        inner.writer.flush()?;
-        match self.sync_mode {
-            SyncMode::None => {}
-            SyncMode::FSync => {
-                inner.writer.get_ref().sync_all()?;
-            }
-            SyncMode::FDataSync => {
-                inner.writer.get_ref().sync_data()?;
-            }
-        }
+        self.flush_inner(inner)?;
 
         // Record completed segment info before rotating (for PITR callback)
         let completed_segment_id = inner.current_segment;
         let completed_segment_size = inner.current_segment_size;
 
-        // Open new segment
         inner.current_segment += 1;
         let new_path = inner.dir.join(segment_filename(inner.current_segment));
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&new_path)?;
-        inner.writer = BufWriter::new(file);
+        inner.file = Self::open_wal_file(&new_path)?;
+        *self.flush_fd_cache.lock() = None;
 
-        // Write segment header
-        inner.writer.write_all(WAL_MAGIC)?;
-        inner.writer.write_all(&WAL_FORMAT_VERSION.to_le_bytes())?;
+        inner.buf.extend_from_slice(WAL_MAGIC);
+        inner.buf.extend_from_slice(&WAL_FORMAT_VERSION.to_le_bytes());
         inner.current_segment_size = WAL_SEGMENT_HEADER_SIZE as u64;
         inner.pending_count = 0;
 
@@ -733,6 +871,14 @@ impl WalWriter {
 
     pub fn current_lsn(&self) -> u64 {
         self.lsn.load(Ordering::SeqCst)
+    }
+
+    pub fn sync_mode(&self) -> SyncMode {
+        self.sync_mode
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.atomic_pending.load(Ordering::Relaxed)
     }
 
     /// Remove WAL segments older than the given segment ID.

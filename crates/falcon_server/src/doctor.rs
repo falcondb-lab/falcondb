@@ -62,7 +62,7 @@ pub fn run_doctor(config_path: &str) {
     }
 
     // 2. Ports
-    for (name, port) in &[("PG", 5443u16), ("Admin/Health", 8080)] {
+    for (name, port) in &[("PG", 5443u16), ("Admin/Health", 7001)] {
         print!("  [check] Port {port} ({name}) ... ");
         match TcpListener::bind(("127.0.0.1", *port)) {
             Ok(_) => {

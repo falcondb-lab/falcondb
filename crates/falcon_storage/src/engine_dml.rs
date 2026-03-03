@@ -58,19 +58,15 @@ impl StorageEngine {
         if let Some(table) = self.tables.get(&table_id) {
             let row_bytes = crate::mvcc::estimate_row_bytes(&row);
             self.memory_tracker.alloc_write_buffer(row_bytes);
-            self.append_wal(&WalRecord::Insert {
-                txn_id,
-                table_id,
-                row: row.clone(),
-            })?;
+            // Defer WAL write to commit time — batch with CommitTxnLocal under one mutex
+            if self.wal.is_some() {
+                self.txn_wal_buf.entry(txn_id).or_default().push(
+                    WalRecord::Insert { txn_id, table_id, row: row.clone() },
+                );
+            }
             let cdc_row = if self.ext.cdc_manager.is_enabled() { Some(row.clone()) } else { None };
             let pk = table.insert(row, txn_id)?;
             self.record_write(txn_id, table_id, pk.clone());
-
-            // USTM: track the written row in the Hot zone for cache warming.
-            let page_id = ustm_page_id(table_id, &pk);
-            let data = PageData::new(pk.clone());
-            let _ = self.ustm.alloc_hot(page_id, data, AccessPriority::HotRow);
 
             // CDC: emit INSERT event
             if let Some(cdc_row) = cdc_row {
@@ -361,13 +357,6 @@ impl StorageEngine {
     ) -> Result<Option<OwnedRow>, StorageError> {
         // Rowstore
         if let Some(table) = self.tables.get(&table_id) {
-            self.record_read(txn_id, table_id, pk.clone());
-
-            // USTM: record page access in Warm zone for LIRS-2 tracking.
-            let page_id = ustm_page_id(table_id, pk);
-            let data = PageData::new(pk.clone());
-            self.ustm.insert_warm(page_id, data, AccessPriority::HotRow);
-
             return Ok(table.get(pk, txn_id, read_ts));
         }
 

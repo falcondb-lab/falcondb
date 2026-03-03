@@ -133,8 +133,13 @@ impl VersionChain {
     /// Find the visible version for a specific transaction (sees own writes).
     #[inline]
     pub fn read_for_txn(&self, txn_id: TxnId, read_ts: Timestamp) -> Option<OwnedRow> {
+        // Ultra-fast path: single committed version, no own-write possible
+        let fcts = self.fast_commit_ts.load(Ordering::Acquire);
+        if fcts > 0 && Timestamp(fcts) <= read_ts {
+            let head = self.head.read();
+            return head.as_ref().and_then(|ver| ver.data.clone());
+        }
         let head = self.head.read();
-        // Fast path: check head version without Arc clone
         if let Some(ref ver) = *head {
             if ver.created_by == txn_id {
                 return ver.data.clone();
@@ -143,7 +148,6 @@ impl VersionChain {
             if cts.0 > 0 && cts <= read_ts {
                 return ver.data.clone();
             }
-            // Slow path: traverse prev chain (needs Arc clone)
             let mut current = ver.get_prev();
             while let Some(ver) = current {
                 if ver.created_by == txn_id {

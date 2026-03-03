@@ -1,4 +1,4 @@
-﻿    use falcon_common::datum::{Datum, OwnedRow};
+    use falcon_common::datum::{Datum, OwnedRow};
     use falcon_common::schema::{ColumnDef, TableSchema};
     use falcon_common::types::{ColumnId, DataType, ShardId, TableId, Timestamp, TxnId};
     use falcon_storage::wal::WalRecord;

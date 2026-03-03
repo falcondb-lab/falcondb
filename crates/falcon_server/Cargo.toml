@@ -34,6 +34,8 @@ toml.workspace = true
 serde.workspace = true
 parking_lot.workspace = true
 
+mimalloc = { version = "0.1", default-features = false }
+
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
 

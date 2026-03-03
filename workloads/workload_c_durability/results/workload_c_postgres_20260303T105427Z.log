@@ -1,0 +1,22 @@
+pgbench (16.3)
+transaction type: H:\falcondb-main\workloads\workload_c_durability\workload.sql
+scaling factor: 1
+query mode: simple
+number of clients: 16
+number of threads: 16
+maximum number of tries: 1
+duration: 30 s
+number of transactions actually processed: 1456549
+number of failed transactions: 0 (0.000%)
+latency average = 0.324 ms
+latency stddev = 0.124 ms
+initial connection time = 436.549 ms
+tps = 49266.626750 (without initial connection time)
+statement latencies in milliseconds and failures:
+         0.001           0  \set seq_id random(1, 100000000)
+         0.324           0  INSERT INTO commit_log (seq_id, payload) VALUES (:seq_id, 'durable-write-bench') ON CONFLICT DO NOTHING;
+progress: 5.0 s, 48818.4 tps, lat 0.299 ms stddev 0.113, 0 failed
+progress: 10.0 s, 47881.6 tps, lat 0.334 ms stddev 0.129, 0 failed
+progress: 15.0 s, 48262.9 tps, lat 0.331 ms stddev 0.127, 0 failed
+progress: 20.0 s, 48722.0 tps, lat 0.328 ms stddev 0.120, 0 failed
+progress: 25.0 s, 48616.6 tps, lat 0.329 ms stddev 0.120, 0 failed

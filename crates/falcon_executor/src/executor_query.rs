@@ -573,6 +573,7 @@ impl Executor {
                 limit,
                 offset,
                 distinct,
+                txn,
             );
         }
 
@@ -727,7 +728,7 @@ impl Executor {
             return self.exec_aggregate(
                 &raw_rows, schema, projections, mat_filter.as_ref(),
                 group_by, grouping_sets, mat_having.as_ref(),
-                order_by, limit, offset, distinct,
+                order_by, limit, offset, distinct, txn,
             );
         }
 
@@ -1025,6 +1026,7 @@ impl Executor {
                 limit,
                 offset,
                 distinct,
+                txn,
             );
         }
 

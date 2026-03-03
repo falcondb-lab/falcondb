@@ -1,5 +1,9 @@
 mod health;
 
+use mimalloc::MiMalloc;
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 use std::path::Path;
 use std::sync::Arc;
 
@@ -412,6 +416,11 @@ async fn run_server_inner(
 
     let storage = if config.storage.wal_enabled {
         let data_dir = Path::new(&config.storage.data_dir);
+        if !data_dir.exists() {
+            std::fs::create_dir_all(data_dir)
+                .map_err(|e| anyhow::anyhow!("failed to create data_dir {:?}: {}", data_dir, e))?;
+            tracing::info!("Created data directory: {:?}", data_dir);
+        }
         tracing::info!(
             "WAL mode: '{}' (no_buffering={})",
             config.wal_mode,

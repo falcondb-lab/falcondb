@@ -535,6 +535,12 @@ const fn default_slow_txn_threshold_us() -> u64 {
 
 fn default_wal_backend() -> String { "file".to_owned() }
 const fn default_group_commit_window_us() -> u64 { 200 }
+fn default_wal_enabled() -> bool { true }
+fn default_data_dir() -> String { "./falcon_data".to_owned() }
+fn default_group_commit() -> bool { true }
+fn default_flush_interval_us() -> u64 { 1000 }
+fn default_wal_sync_mode() -> String { "fdatasync".to_owned() }
+fn default_segment_size_bytes() -> u64 { 64 * 1024 * 1024 }
 fn default_compression_profile() -> String { "balanced".to_owned() }
 fn default_wal_mode() -> String { "auto".to_owned() }
 
@@ -553,10 +559,13 @@ impl Default for AuthConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
     /// Maximum memory budget in bytes (0 = unlimited).
+    #[serde(default)]
     pub memory_limit_bytes: u64,
     /// Enable WAL persistence.
+    #[serde(default = "default_wal_enabled")]
     pub wal_enabled: bool,
     /// Data directory for WAL and snapshots.
+    #[serde(default = "default_data_dir")]
     pub data_dir: String,
     /// Write-path enforcement level for OLTP purity on Primary nodes.
     /// Controls what happens when a write touches columnstore/disk-rowstore.
@@ -573,12 +582,16 @@ pub struct StorageConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalConfig {
     /// Enable group commit.
+    #[serde(default = "default_group_commit")]
     pub group_commit: bool,
     /// Group commit flush interval in microseconds.
+    #[serde(default = "default_flush_interval_us")]
     pub flush_interval_us: u64,
     /// Sync mode: "fsync", "fdatasync", or "none".
+    #[serde(default = "default_wal_sync_mode")]
     pub sync_mode: String,
     /// Max WAL segment size in bytes.
+    #[serde(default = "default_segment_size_bytes")]
     pub segment_size_bytes: u64,
     /// Durability policy: when is a commit considered durable.
     /// Default: LocalFsync. Use QuorumAck for stronger replication guarantees.
@@ -1052,7 +1065,7 @@ impl Default for FalconConfig {
             config_version: CURRENT_CONFIG_VERSION,
             server: ServerConfig {
                 pg_listen_addr: "0.0.0.0:5433".to_owned(),
-                admin_listen_addr: "0.0.0.0:8080".to_owned(),
+                admin_listen_addr: "0.0.0.0:7001".to_owned(),
                 node_id: 1,
                 max_connections: 1024,
                 statement_timeout_ms: 0,

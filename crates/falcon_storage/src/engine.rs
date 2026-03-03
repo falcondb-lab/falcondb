@@ -4,7 +4,7 @@
 //! Non-production fields (columnstore, disk_rowstore, lsm) are retained for
 //! experimental builds but MUST NOT be used on the default write path.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
@@ -409,10 +409,13 @@ pub struct StorageEngine {
     pub(crate) catalog: RwLock<Catalog>,
     /// WAL writer (None if WAL disabled).
     pub(crate) wal: Option<Arc<WalWriter>>,
+    /// Leader-follower group commit: highest durably flushed WAL LSN.
+    pub(crate) wal_flushed_lsn: AtomicU64,
+    /// Leader-follower group commit: only one thread flushes at a time.
+    pub(crate) wal_flush_lock: parking_lot::Mutex<()>,
+    wal_flush_thread: parking_lot::Mutex<Option<std::thread::JoinHandle<()>>>,
     /// Per-transaction write-set for key-scoped commit/abort.
     pub(crate) txn_write_sets: DashMap<TxnId, Vec<TxnWriteOp>>,
-    /// Per-transaction write-set dedup index for O(1) duplicate detection.
-    txn_write_dedup: DashMap<TxnId, HashSet<(TableId, PrimaryKey)>>,
     /// Per-transaction read-set for OCC validation at commit time.
     pub(crate) txn_read_sets: DashMap<TxnId, Vec<TxnReadOp>>,
     /// Cumulative GC statistics (lock-free atomics).
@@ -460,6 +463,8 @@ pub struct StorageEngine {
     /// Pre-tracked write-buffer bytes per transaction (set during batch_insert).
     /// Avoids re-scanning the write-set in estimate_write_set_bytes at commit.
     pub(crate) txn_write_bytes: DashMap<TxnId, AtomicU64>,
+    /// Deferred WAL records per txn — written in batch at commit time to reduce mutex acquisitions.
+    pub(crate) txn_wal_buf: DashMap<TxnId, Vec<WalRecord>>,
     // ── Enterprise / non-core extensions (RLS, TDE, PITR, CDC, tenancy, cold store) ──
     /// Grouped enterprise features — see [`EnterpriseExtensions`].
     pub ext: EnterpriseExtensions,
@@ -559,7 +564,11 @@ impl StorageEngine {
     /// Create a new storage engine with a specific WAL sync mode.
     pub fn new_with_sync_mode(wal_dir: Option<&Path>, sync_mode: SyncMode) -> Result<Self, StorageError> {
         let wal = if let Some(dir) = wal_dir {
-            Some(Arc::new(WalWriter::open(dir, sync_mode)?))
+            // Large group_commit_size prevents WalWriter auto-flush;
+            // GroupCommitSyncer handles flush timing instead.
+            Some(Arc::new(WalWriter::open_with_options(
+                dir, sync_mode, 64 * 1024 * 1024, usize::MAX,
+            )?))
         } else {
             None
         };
@@ -568,6 +577,7 @@ impl StorageEngine {
 
     /// Internal: construct Self from a pre-built WalWriter option.
     fn build_with_wal(wal_dir: Option<&Path>, wal: Option<Arc<WalWriter>>) -> Result<Self, StorageError> {
+        let flush_handle = wal.as_ref().map(|w| w.start_flush_thread());
         Ok(Self {
             node_role: NodeRole::Standalone,
             tables: DashMap::new(),
@@ -580,8 +590,10 @@ impl StorageEngine {
             data_dir: wal_dir.map(std::path::Path::to_path_buf),
             catalog: RwLock::new(Catalog::new()),
             wal,
+            wal_flushed_lsn: AtomicU64::new(0),
+            wal_flush_lock: parking_lot::Mutex::new(()),
+            wal_flush_thread: parking_lot::Mutex::new(flush_handle),
             txn_write_sets: DashMap::new(),
-            txn_write_dedup: DashMap::new(),
             txn_read_sets: DashMap::new(),
             gc_stats: crate::gc::GcStats::new(),
             gc_config: crate::gc::GcConfig::default(),
@@ -605,6 +617,7 @@ impl StorageEngine {
             lsm_sync_writes: false,
             ustm: Self::default_ustm(),
             txn_write_bytes: DashMap::new(),
+            txn_wal_buf: DashMap::new(),
             ext: EnterpriseExtensions::default(),
         })
     }
@@ -1060,8 +1073,9 @@ impl StorageEngine {
             data_dir: Some(wal_dir.to_path_buf()),
             catalog: RwLock::new(Catalog::new()),
             wal,
+            wal_flushed_lsn: AtomicU64::new(0),
+            wal_flush_lock: parking_lot::Mutex::new(()),
             txn_write_sets: DashMap::new(),
-            txn_write_dedup: DashMap::new(),
             txn_read_sets: DashMap::new(),
             gc_stats: crate::gc::GcStats::new(),
             gc_config: crate::gc::GcConfig::default(),
@@ -1085,6 +1099,7 @@ impl StorageEngine {
             lsm_sync_writes: false,
             ustm: Self::default_ustm(),
             txn_write_bytes: DashMap::new(),
+            txn_wal_buf: DashMap::new(),
             ext: EnterpriseExtensions::default(),
         })
     }
@@ -1103,8 +1118,9 @@ impl StorageEngine {
             data_dir: None,
             catalog: RwLock::new(Catalog::new()),
             wal: None,
+            wal_flushed_lsn: AtomicU64::new(0),
+            wal_flush_lock: parking_lot::Mutex::new(()),
             txn_write_sets: DashMap::new(),
-            txn_write_dedup: DashMap::new(),
             txn_read_sets: DashMap::new(),
             gc_stats: crate::gc::GcStats::new(),
             gc_config: crate::gc::GcConfig::default(),
@@ -1128,6 +1144,7 @@ impl StorageEngine {
             lsm_sync_writes: false,
             ustm: Self::default_ustm(),
             txn_write_bytes: DashMap::new(),
+            txn_wal_buf: DashMap::new(),
             ext: EnterpriseExtensions::default(),
         }
     }
@@ -1146,8 +1163,9 @@ impl StorageEngine {
             data_dir: None,
             catalog: RwLock::new(Catalog::new()),
             wal: None,
+            wal_flushed_lsn: AtomicU64::new(0),
+            wal_flush_lock: parking_lot::Mutex::new(()),
             txn_write_sets: DashMap::new(),
-            txn_write_dedup: DashMap::new(),
             txn_read_sets: DashMap::new(),
             gc_stats: crate::gc::GcStats::new(),
             gc_config: crate::gc::GcConfig::default(),
@@ -1171,6 +1189,7 @@ impl StorageEngine {
             lsm_sync_writes: false,
             ustm: Self::default_ustm(),
             txn_write_bytes: DashMap::new(),
+            txn_wal_buf: DashMap::new(),
             ext: EnterpriseExtensions::default(),
         }
     }
@@ -1203,6 +1222,9 @@ impl StorageEngine {
     /// This is the single entry point for all WAL writes, ensuring replication
     /// always sees every record. Also feeds the CDC bridge if configured.
     pub(crate) fn append_wal(&self, record: &WalRecord) -> Result<(), StorageError> {
+        if self.wal.is_none() && self.wal_observer.is_none() {
+            return Ok(());
+        }
         let lsn = if let Some(ref wal) = self.wal {
             wal.append(record)?
         } else {
@@ -1217,7 +1239,6 @@ impl StorageEngine {
                 .observer_notifications
                 .fetch_add(1, AtomicOrdering::Relaxed);
         }
-        // Feed WAL record into CDC bridge (if configured)
         if let Some(ref bridge) = *self.ext.cdc_bridge.read() {
             bridge.on_wal_record(lsn, record);
         }
@@ -1249,6 +1270,45 @@ impl StorageEngine {
             }
         }
         self.wal_stats.flushes.fetch_add(1, AtomicOrdering::Relaxed);
+        Ok(())
+    }
+
+    /// Leader-follower group commit: append WAL record and ensure durable.
+    /// First thread to need a flush becomes the leader and flushes ALL pending
+    /// records. Other threads waiting on the flush lock find their data already
+    /// flushed when they acquire the lock.
+    pub(crate) fn durable_wal_commit(&self, record: &WalRecord) -> Result<(), StorageError> {
+        if let Some(ref wal) = self.wal {
+            // Extract txn_id to check for deferred WAL records
+            let txn_id = match record {
+                WalRecord::CommitTxnLocal { txn_id, .. } => Some(*txn_id),
+                _ => None,
+            };
+            let deferred = txn_id.and_then(|id| self.txn_wal_buf.remove(&id).map(|(_, v)| v));
+
+            let lsn = if let Some(buf) = &deferred {
+                // Batch: deferred records + commit record in one mutex hold
+                let mut all: Vec<&WalRecord> = buf.iter().collect();
+                all.push(record);
+                let n = all.len();
+                let lsn = wal.append_multi(&all)?;
+                self.wal_stats.records_written.fetch_add(n as u64, AtomicOrdering::Relaxed);
+                lsn
+            } else {
+                let lsn = wal.append(record)?;
+                self.wal_stats.records_written.fetch_add(1, AtomicOrdering::Relaxed);
+                lsn
+            };
+
+            if let Some(ref observer) = self.wal_observer {
+                if let Some(buf) = &deferred {
+                    for r in buf { observer(r); }
+                }
+                observer(record);
+            }
+            // Wait for dedicated flush thread to make our LSN durable
+            wal.wait_flushed(lsn);
+        }
         Ok(())
     }
 
@@ -1333,22 +1393,13 @@ impl StorageEngine {
     }
 
     pub(crate) fn record_write(&self, txn_id: TxnId, table_id: TableId, pk: PrimaryKey) {
-        let mut dedup = self.txn_write_dedup.entry(txn_id).or_default();
-        if dedup.insert((table_id, pk.clone())) {
-            self.txn_write_sets
-                .entry(txn_id)
-                .or_default()
-                .push(TxnWriteOp { table_id, pk });
+        let mut ws = self.txn_write_sets.entry(txn_id).or_default();
+        if !ws.iter().any(|op| op.table_id == table_id && op.pk == pk) {
+            ws.push(TxnWriteOp { table_id, pk });
         }
     }
 
-    /// Record a write without dedup checking. Use ONLY when the caller
-    /// guarantees uniqueness (e.g. INSERT with PK enforced by memtable).
     pub(crate) fn record_write_no_dedup(&self, txn_id: TxnId, table_id: TableId, pk: PrimaryKey) {
-        self.txn_write_dedup
-            .entry(txn_id)
-            .or_default()
-            .insert((table_id, pk.clone()));
         self.txn_write_sets
             .entry(txn_id)
             .or_default()
@@ -1370,7 +1421,6 @@ impl StorageEngine {
     }
 
     pub(crate) fn take_write_set(&self, txn_id: TxnId) -> Vec<TxnWriteOp> {
-        self.txn_write_dedup.remove(&txn_id);
         self.txn_write_sets
             .remove(&txn_id)
             .map(|(_, writes)| writes)
@@ -1423,14 +1473,21 @@ impl StorageEngine {
         commit_ts: Timestamp,
         write_set: &[TxnWriteOp],
     ) -> Result<(), StorageError> {
+        if write_set.is_empty() {
+            return Ok(());
+        }
+        let first_table = write_set[0].table_id;
+        if write_set.iter().all(|op| op.table_id == first_table) {
+            if let Some(table) = self.tables.get(&first_table) {
+                let keys: Vec<PrimaryKey> = write_set.iter().map(|op| op.pk.clone()).collect();
+                return table.value().commit_keys(txn_id, commit_ts, &keys);
+            }
+            return Ok(());
+        }
         let mut keys_by_table: HashMap<TableId, Vec<PrimaryKey>> = HashMap::new();
         for op in write_set {
-            keys_by_table
-                .entry(op.table_id)
-                .or_default()
-                .push(op.pk.clone());
+            keys_by_table.entry(op.table_id).or_default().push(op.pk.clone());
         }
-
         for (table_id, keys) in &keys_by_table {
             if let Some(table) = self.tables.get(table_id) {
                 table.value().commit_keys(txn_id, commit_ts, keys)?;
@@ -1440,14 +1497,21 @@ impl StorageEngine {
     }
 
     pub(crate) fn apply_abort_to_write_set(&self, txn_id: TxnId, write_set: &[TxnWriteOp]) {
+        if write_set.is_empty() {
+            return;
+        }
+        let first_table = write_set[0].table_id;
+        if write_set.iter().all(|op| op.table_id == first_table) {
+            if let Some(table) = self.tables.get(&first_table) {
+                let keys: Vec<PrimaryKey> = write_set.iter().map(|op| op.pk.clone()).collect();
+                table.value().abort_keys(txn_id, &keys);
+            }
+            return;
+        }
         let mut keys_by_table: HashMap<TableId, Vec<PrimaryKey>> = HashMap::new();
         for op in write_set {
-            keys_by_table
-                .entry(op.table_id)
-                .or_default()
-                .push(op.pk.clone());
+            keys_by_table.entry(op.table_id).or_default().push(op.pk.clone());
         }
-
         for (table_id, keys) in keys_by_table {
             if let Some(table) = self.tables.get(&table_id) {
                 table.value().abort_keys(txn_id, &keys);
@@ -1638,18 +1702,12 @@ impl StorageEngine {
         self.memory_tracker.alloc_mvcc(ws_bytes);
 
         // CP-D: WAL commit record MUST be durable BEFORE MVCC visibility.
-        // This is the Write-Ahead Logging invariant: if we crash after this
-        // point, recovery replays the commit. If we crash before, the txn
-        // is rolled back — and no reader ever saw the committed data.
-        self.append_and_flush_wal(&WalRecord::CommitTxnLocal { txn_id, commit_ts })?;
+        self.durable_wal_commit(&WalRecord::CommitTxnLocal { txn_id, commit_ts })?;
 
         // CP-V: Apply to MVCC — makes writes visible to concurrent readers.
-        // Commit-time unique constraint re-validation + MVCC commit + index update.
-        // If validation fails, compensate with an abort WAL record.
         if let Err(e) = self.apply_commit_to_write_set(txn_id, commit_ts, &write_set) {
             self.memory_tracker.dealloc_mvcc(ws_bytes);
             self.apply_abort_to_write_set(txn_id, &write_set);
-            // Compensate the durable commit record so recovery also aborts.
             let _ = self.append_and_flush_wal(&WalRecord::AbortTxnLocal { txn_id });
             return Err(e);
         }
@@ -1684,7 +1742,7 @@ impl StorageEngine {
         self.memory_tracker.alloc_mvcc(ws_bytes);
 
         // CP-D: WAL commit record MUST be durable BEFORE MVCC visibility.
-        self.append_and_flush_wal(&WalRecord::CommitTxnGlobal { txn_id, commit_ts })?;
+        self.durable_wal_commit(&WalRecord::CommitTxnGlobal { txn_id, commit_ts })?;
 
         // CP-V: Apply to MVCC — makes writes visible to concurrent readers.
         if let Err(e) = self.apply_commit_to_write_set(txn_id, commit_ts, &write_set) {
@@ -1704,6 +1762,7 @@ impl StorageEngine {
     pub(crate) fn abort_txn_local(&self, txn_id: TxnId) -> Result<(), StorageError> {
         let write_set = self.take_write_set(txn_id);
         let _read_set = self.take_read_set(txn_id);
+        self.txn_wal_buf.remove(&txn_id);
 
         // Memory accounting: aborted writes free the write-buffer allocation
         let ws_bytes = if let Some((_, tracked)) = self.txn_write_bytes.remove(&txn_id) {
@@ -1726,6 +1785,7 @@ impl StorageEngine {
     pub(crate) fn abort_txn_global(&self, txn_id: TxnId) -> Result<(), StorageError> {
         let write_set = self.take_write_set(txn_id);
         let _read_set = self.take_read_set(txn_id);
+        self.txn_wal_buf.remove(&txn_id);
 
         // Memory accounting: aborted writes free the write-buffer allocation
         let ws_bytes = if let Some((_, tracked)) = self.txn_write_bytes.remove(&txn_id) {

@@ -14,7 +14,7 @@
 
 -- 90% INSERT (op 1-9), 10% UPDATE (op 10)
 \if :op <= 9
-INSERT INTO orders (order_id, customer_id, amount) VALUES (:order_id, :customer_id, :amount);
+INSERT INTO orders (order_id, customer_id, amount) VALUES (:order_id, :customer_id, :amount) ON CONFLICT DO NOTHING;
 \else
 UPDATE orders SET amount = :amount, status = 'updated' WHERE order_id = :update_target;
 \endif

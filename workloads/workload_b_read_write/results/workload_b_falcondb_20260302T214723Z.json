@@ -1,0 +1,30 @@
+{
+  "workload": "B",
+  "name": "read_write_oltp",
+  "target": "falcondb",
+  "timestamp": "20260302T214723Z",
+  "config": {
+    "clients": 16,
+    "duration_sec": 60,
+    "host": "127.0.0.1",
+    "port": 5433,
+    "mix": "50% SELECT / 25% INSERT / 25% UPDATE",
+    "durability": "fsync + synchronous_commit"
+  },
+  "results": {
+    "tps": 54739.673969,
+    "latency_avg_ms": 0.292,
+    "users_before": 50000,
+    "users_after": 50000,
+    "orders_before": 100000,
+    "orders_after": 918108,
+    "new_orders": 818108,
+    "balance_before": 1750025000,
+    "balance_after": 1750025000
+  },
+  "verification": {
+    "pk_unique_users": true,
+    "pk_unique_orders": true,
+    "pass": true
+  }
+}

@@ -49,9 +49,13 @@ Run 3 times, take the median TPS. Variance should be ≤5% across runs on same h
 ## Usage
 
 ```bash
-# FalconDB
+# Linux / macOS
 ./run.sh --target falcondb --clients 16 --duration 60
-
-# PostgreSQL
 ./run.sh --target postgres --clients 16 --duration 60
+```
+
+```powershell
+# Windows
+.\run.ps1
+.\run.ps1 -Target postgres -Clients 16 -Duration 60
 ```

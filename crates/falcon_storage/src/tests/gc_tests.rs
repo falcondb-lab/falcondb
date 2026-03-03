@@ -1,4 +1,4 @@
-﻿    use crate::engine::StorageEngine;
+    use crate::engine::StorageEngine;
     use crate::gc::{compute_safepoint, sweep_memtable, GcConfig, GcStats};
     use crate::memtable::MemTable;
     use crate::mvcc::VersionChain;

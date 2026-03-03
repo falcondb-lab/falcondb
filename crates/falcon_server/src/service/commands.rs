@@ -280,7 +280,7 @@ pub fn status() -> Result<(), String> {
         println!();
         println!("  Ports:");
         println!("    PG:     5443 (default)");
-        println!("    Admin:  8080 (default)");
+        println!("    Admin:  7001 (default)");
     }
 
     Ok(())

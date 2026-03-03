@@ -53,6 +53,14 @@ pub enum StorageType {
     LsmRowstore,
 }
 
+/// Dynamic default expression evaluated at INSERT time.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DefaultFn {
+    CurrentTimestamp,
+    CurrentDate,
+    CurrentTime,
+}
+
 /// Column definition in a table schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColumnDef {
@@ -99,6 +107,9 @@ pub struct TableSchema {
     /// `range_bounds[i-1] <= shard_key_value < range_bounds[i]`.
     #[serde(default)]
     pub range_bounds: Vec<Datum>,
+    /// Dynamic default expressions per column index (e.g. CURRENT_TIMESTAMP).
+    #[serde(default)]
+    pub dynamic_defaults: std::collections::HashMap<usize, DefaultFn>,
 }
 
 /// Referential action for foreign key ON DELETE / ON UPDATE.
@@ -139,6 +150,7 @@ impl Default for TableSchema {
             shard_key: Vec::new(),
             sharding_policy: ShardingPolicy::None,
             range_bounds: Vec::new(),
+            dynamic_defaults: std::collections::HashMap::new(),
         }
     }
 }

@@ -1,0 +1,27 @@
+[server]
+pg_listen_addr = "0.0.0.0:5433"
+admin_listen_addr = "0.0.0.0:7001"
+node_id = 1
+max_connections = 1024
+
+[server.auth]
+method = "trust"
+
+[storage]
+data_dir = "H:/falcondb-main/data/node1"
+wal_enabled = true
+
+[wal]
+sync_mode = "fdatasync"
+group_commit = true
+flush_interval_us = 1000
+
+[gc]
+enabled = true
+interval_ms = 50
+batch_size = 10000
+min_chain_length = 2
+
+[memory]
+shard_soft_limit_bytes = 1073741824
+shard_hard_limit_bytes = 2147483648

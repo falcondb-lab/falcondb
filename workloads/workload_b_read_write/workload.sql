@@ -15,7 +15,7 @@
 \if :op <= 2
 SELECT user_id, username, balance, status FROM users WHERE user_id = :uid;
 \elif :op = 3
-INSERT INTO orders (order_id, user_id, amount) VALUES (:oid, :uid, :amount);
+INSERT INTO orders (order_id, user_id, amount) VALUES (:oid, :uid, :amount) ON CONFLICT DO NOTHING;
 \else
 UPDATE users SET balance = balance + :amount WHERE user_id = :uid;
 \endif

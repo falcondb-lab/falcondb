@@ -1,4 +1,4 @@
-﻿    use std::sync::atomic::Ordering;
+    use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
     use falcon_common::datum::{Datum, OwnedRow};

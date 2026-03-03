@@ -1,4 +1,4 @@
-﻿    use crate::engine::StorageEngine;
+    use crate::engine::StorageEngine;
     use crate::memtable::encode_column_value;
     use falcon_common::datum::{Datum, OwnedRow};
     use falcon_common::schema::{ColumnDef, TableSchema};

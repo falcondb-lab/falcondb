@@ -1,4 +1,4 @@
-﻿    use std::sync::Arc;
+    use std::sync::Arc;
 
     use falcon_common::datum::{Datum, OwnedRow};
     use falcon_common::types::{ShardId, TableId, Timestamp, TxnId};

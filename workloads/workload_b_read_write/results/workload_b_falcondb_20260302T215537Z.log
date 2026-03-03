@@ -1,0 +1,37 @@
+pgbench (16.3, server 18.0.0)
+transaction type: H:\falcondb-main\workloads\workload_b_read_write\workload.sql
+scaling factor: 1
+query mode: simple
+number of clients: 16
+number of threads: 16
+maximum number of tries: 1
+duration: 60 s
+number of transactions actually processed: 3236562
+number of failed transactions: 0 (0.000%)
+latency average = 0.296 ms
+latency stddev = 0.073 ms
+initial connection time = 13.456 ms
+tps = 53953.529373 (without initial connection time)
+statement latencies in milliseconds and failures:
+         0.001           0  \set uid random(1, 50000)
+         0.000           0  \set oid random(100001, 99999999)
+         0.000           0  \set amount random(50, 9999)
+         0.000           0  \set op random(1, 4)
+         0.000           0  \if :op <= 2
+         0.330           0  SELECT user_id, username, balance, status FROM users WHERE user_id = :uid;
+         0.000           0  \elif :op = 3
+         0.259           0  INSERT INTO orders (order_id, user_id, amount) VALUES (:oid, :uid, :amount) ON CONFLICT DO NOTHING;
+         0.000           0  \else
+         0.259           0  UPDATE users SET balance = balance + :amount WHERE user_id = :uid;
+         0.001           0  \endif
+progress: 5.0 s, 53486.9 tps, lat 0.298 ms stddev 0.077, 0 failed
+progress: 10.0 s, 53563.7 tps, lat 0.298 ms stddev 0.076, 0 failed
+progress: 15.0 s, 54022.7 tps, lat 0.296 ms stddev 0.072, 0 failed
+progress: 20.0 s, 53855.6 tps, lat 0.297 ms stddev 0.073, 0 failed
+progress: 25.0 s, 54041.5 tps, lat 0.296 ms stddev 0.072, 0 failed
+progress: 30.0 s, 53996.8 tps, lat 0.296 ms stddev 0.072, 0 failed
+progress: 35.0 s, 53970.7 tps, lat 0.296 ms stddev 0.072, 0 failed
+progress: 40.0 s, 54047.1 tps, lat 0.295 ms stddev 0.071, 0 failed
+progress: 45.0 s, 53979.1 tps, lat 0.296 ms stddev 0.072, 0 failed
+progress: 50.0 s, 54081.0 tps, lat 0.295 ms stddev 0.072, 0 failed
+progress: 55.0 s, 54141.0 tps, lat 0.295 ms stddev 0.071, 0 failed

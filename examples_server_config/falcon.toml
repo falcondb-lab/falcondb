@@ -1,7 +1,16 @@
 [server]
 pg_listen_addr = "0.0.0.0:5443"
-admin_listen_addr = "0.0.0.0:8080"
+admin_listen_addr = "0.0.0.0:7001"
+node_id = 1
 max_connections = 1024
- 
+
 [server.auth]
 method = "trust"
+
+[storage]
+data_dir = "H:/falcondb-main/data/node0"
+wal_enabled = true
+
+[wal]
+sync_mode = "fdatasync"
+group_commit = true
