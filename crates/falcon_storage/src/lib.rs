@@ -1,4 +1,6 @@
 // ── PRODUCTION modules (always compiled) ──
+pub mod storage_trait;
+pub mod table_handle;
 pub mod audit;
 pub mod backup;
 pub mod cold_store;
@@ -60,6 +62,10 @@ pub mod disk_rowstore;
 pub mod lsm;
 #[cfg(feature = "lsm")]
 pub mod lsm_table;
+#[cfg(feature = "rocksdb")]
+pub mod rocksdb_table;
+#[cfg(feature = "redb")]
+pub mod redb_table;
 
 // ── Stub for columnstore so engine.rs compiles without the feature ──
 #[cfg(not(feature = "columnstore"))]

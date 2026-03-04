@@ -63,7 +63,21 @@ Write-Host "  Setting up schema..."
 $ErrorActionPreference = "Continue"
 & $psql -h $DbHost -p $Port -U $User -d $Db -f (Join-Path $ScriptDir "schema.sql") 2>&1 | Out-Null
 $ErrorActionPreference = "Stop"
-Write-Host "  Schema ready (10K seed rows)"
+
+# Seed 10K rows for UPDATE targets (batch INSERT VALUES)
+$BatchSize = 500
+Write-Host "  Seeding 10K rows..."
+for ($base = 1; $base -le 10000; $base += $BatchSize) {
+    $end = [Math]::Min($base + $BatchSize - 1, 10000)
+    $vals = ($base..$end | ForEach-Object {
+        $cid = ($_ % 5000) + 1
+        $amt = 100 + ($_ % 9900)
+        "($_,$cid,$amt,'active')"
+    }) -join ','
+    & $psql -h $DbHost -p $Port -U $User -d $Db -t -A -c "INSERT INTO orders (order_id,customer_id,amount,status) VALUES $vals" 2>$null | Out-Null
+}
+$seedCount = (& $psql -h $DbHost -p $Port -U $User -d $Db -t -A -c "SELECT COUNT(*) FROM orders").Trim()
+Write-Host "  Schema ready ($seedCount seed rows)"
 
 # Pre-run count
 $PreCount = (& $psql -h $DbHost -p $Port -U $User -d $Db -t -A -c "SELECT COUNT(*) FROM orders;").Trim()

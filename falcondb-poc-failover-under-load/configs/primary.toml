@@ -16,15 +16,14 @@ group_commit = true
 flush_interval_us = 1000
 sync_mode = "fdatasync"
 
-[auth]
-method = "trust"
-
 [replication]
 role = "primary"
 grpc_listen_addr = "0.0.0.0:50051"
 primary_endpoint = ""
 max_records_per_chunk = 1000
 poll_interval_ms = 100
+max_backoff_ms = 30000
+connect_timeout_ms = 5000
 shard_count = 1
 
 [gc]

@@ -10,7 +10,8 @@ $ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PocRoot    = Split-Path -Parent $ScriptDir
 $OutputDir  = Join-Path $PocRoot "output"
 
-$FalconBin  = if ($env:FALCON_BIN)  { $env:FALCON_BIN }  else { "target\release\falcon_server.exe" }
+$FalconBin  = if ($env:FALCON_BIN)  { $env:FALCON_BIN }  else { "target\release\falcon.exe" }
+$FalconConf = Join-Path $PocRoot "configs\falcon_migration.toml"
 $FalconPort = if ($env:FALCON_PORT) { $env:FALCON_PORT } else { "5433" }
 $FalconUser = if ($env:FALCON_USER) { $env:FALCON_USER } else { "falcon" }
 $FalconDb   = "shop_demo"
@@ -38,7 +39,7 @@ Write-Host "`n  Starting FalconDB (target database)`n" -ForegroundColor Cyan
 
 Info "Starting FalconDB on port $FalconPort..."
 $Proc = Start-Process -FilePath $FalconBin `
-    -ArgumentList "--pg-listen-addr","0.0.0.0:$FalconPort","--admin-listen-addr","0.0.0.0:8080","--data-dir","./mig_data_falcon" `
+    -ArgumentList "--config",$FalconConf `
     -RedirectStandardOutput (Join-Path $OutputDir "falcon.log") `
     -RedirectStandardError  (Join-Path $OutputDir "falcon_err.log") `
     -PassThru -WindowStyle Hidden

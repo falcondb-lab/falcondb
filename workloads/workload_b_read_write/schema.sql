@@ -19,20 +19,5 @@ CREATE TABLE orders (
     created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- Seed 50K users
-INSERT INTO users (user_id, username, balance, status)
-SELECT
-    g,
-    'u_' || g,
-    10000 + (g % 90000),
-    CASE WHEN g % 20 = 0 THEN 'inactive' ELSE 'active' END
-FROM generate_series(1, 50000) AS g;
-
--- Seed 100K orders
-INSERT INTO orders (order_id, user_id, amount, order_type)
-SELECT
-    g,
-    (g % 50000) + 1,
-    50 + (g % 5000),
-    CASE WHEN g % 3 = 0 THEN 'refund' ELSE 'purchase' END
-FROM generate_series(1, 100000) AS g;
+-- Seed data is loaded by run.ps1 (batch INSERT VALUES)
+-- FalconDB does not support INSERT...SELECT FROM generate_series

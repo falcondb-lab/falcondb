@@ -18,6 +18,7 @@
 //! - Non-transactional reads that skip visibility checks → violates isolation
 
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::sync::atomic::AtomicBool;
 use std::cmp::Reverse;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
@@ -176,6 +177,8 @@ pub struct MemTable {
     pub data: DashMap<PrimaryKey, Arc<VersionChain>>,
     /// Secondary B-tree indexes: column_index → (encoded_value → set of PKs).
     pub secondary_indexes: RwLock<Vec<SecondaryIndex>>,
+    /// Fast check: true when secondary_indexes is non-empty. Avoids RwLock read on hot path.
+    pub(crate) has_secondary_idx: AtomicBool,
     /// Hint counter: approximate number of writes that created multi-version
     /// chains (insert-to-existing, update, delete). GC can skip the full
     /// DashMap iteration when this is 0 — eliminating O(n) shard-lock
@@ -184,7 +187,7 @@ pub struct MemTable {
     /// Exact count of committed live (non-tombstone) rows.
     /// Incremented on INSERT commit, decremented on DELETE commit.
     /// Enables O(1) COUNT(*) without WHERE clause.
-    committed_row_count: AtomicI64,
+    pub(crate) committed_row_count: AtomicI64,
     /// Ordered PK index: maintained at commit time.
     /// Enables O(K) scan_top_k_by_pk instead of O(N) full DashMap scan.
     pk_order: RwLock<BTreeSet<PrimaryKey>>,
@@ -409,6 +412,7 @@ impl MemTable {
             schema,
             data: DashMap::with_capacity_and_hasher_and_shard_amount(1 << 20, Default::default(), 256),
             secondary_indexes: RwLock::new(Vec::new()),
+            has_secondary_idx: AtomicBool::new(false),
             gc_candidates: AtomicU64::new(0),
             committed_row_count: AtomicI64::new(0),
             pk_order: RwLock::new(BTreeSet::new()),
@@ -1001,6 +1005,9 @@ impl MemTable {
         pk: &PrimaryKey,
         row: &OwnedRow,
     ) -> Result<(), falcon_common::error::StorageError> {
+        if !self.has_secondary_idx.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(());
+        }
         let indexes = self.secondary_indexes.read();
         for idx in indexes.iter() {
             if idx.unique {
@@ -1095,6 +1102,38 @@ impl MemTable {
                 }
             }
         }
+    }
+}
+
+impl crate::storage_trait::StorageTable for MemTable {
+    fn schema(&self) -> &falcon_common::schema::TableSchema { &self.schema }
+
+    fn insert(&self, row: &OwnedRow, txn_id: TxnId) -> Result<PrimaryKey, falcon_common::error::StorageError> {
+        self.insert(row.clone(), txn_id)
+    }
+
+    fn update(&self, pk: &PrimaryKey, new_row: &OwnedRow, txn_id: TxnId) -> Result<(), falcon_common::error::StorageError> {
+        self.update(pk, new_row.clone(), txn_id)
+    }
+
+    fn delete(&self, pk: &PrimaryKey, txn_id: TxnId) -> Result<(), falcon_common::error::StorageError> {
+        self.delete(pk, txn_id)
+    }
+
+    fn get(&self, pk: &PrimaryKey, txn_id: TxnId, read_ts: Timestamp) -> Result<Option<OwnedRow>, falcon_common::error::StorageError> {
+        Ok(self.get(pk, txn_id, read_ts))
+    }
+
+    fn scan(&self, txn_id: TxnId, read_ts: Timestamp) -> Vec<(PrimaryKey, OwnedRow)> {
+        self.scan(txn_id, read_ts)
+    }
+
+    fn commit_key(&self, pk: &PrimaryKey, txn_id: TxnId, commit_ts: Timestamp) -> Result<(), falcon_common::error::StorageError> {
+        self.commit_keys(txn_id, commit_ts, std::slice::from_ref(pk))
+    }
+
+    fn abort_key(&self, pk: &PrimaryKey, txn_id: TxnId) {
+        self.abort_keys(txn_id, std::slice::from_ref(pk));
     }
 }
 

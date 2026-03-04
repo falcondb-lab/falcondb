@@ -183,7 +183,7 @@ from honesty, not from "100% compatible" marketing.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `FALCON_BIN` | `target/release/falcon_server` | Path to FalconDB binary |
+| `FALCON_BIN` | `target/release/falcon.exe` | Path to FalconDB binary |
 | `FALCON_PORT` | `5433` | FalconDB listen port |
 | `FALCON_USER` | `falcon` | FalconDB user |
 | `PG_PORT` | `5432` | PostgreSQL port |

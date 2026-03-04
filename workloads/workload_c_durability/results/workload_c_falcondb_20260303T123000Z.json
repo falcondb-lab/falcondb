@@ -1,0 +1,19 @@
+{
+  "workload": "C",
+  "name": "durability_write_throughput",
+  "target": "falcondb",
+  "timestamp": "20260303T123000Z",
+  "config": {
+    "clients": 16,
+    "duration_sec": 10,
+    "host": "127.0.0.1",
+    "port": 5433,
+    "mix": "100% INSERT (durable writes)"
+  },
+  "results": {
+    "tps": 45154.634882,
+    "latency_avg_ms": 0.354,
+    "rows": 450030,
+    "pk_unique": true
+  }
+}

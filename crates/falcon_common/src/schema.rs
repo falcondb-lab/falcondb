@@ -51,6 +51,10 @@ pub enum StorageType {
     /// LSM-tree backed row store (like RocksDB / LevelDB).
     /// Write-optimized with background compaction, suitable for write-heavy OLTP.
     LsmRowstore,
+    /// RocksDB-backed row store (uses the actual RocksDB library).
+    RocksDbRowstore,
+    /// redb-backed row store (pure Rust embedded KV store).
+    RedbRowstore,
 }
 
 /// Dynamic default expression evaluated at INSERT time.
@@ -59,6 +63,7 @@ pub enum DefaultFn {
     CurrentTimestamp,
     CurrentDate,
     CurrentTime,
+    Nextval(String),
 }
 
 /// Column definition in a table schema.

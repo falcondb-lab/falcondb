@@ -109,7 +109,7 @@ impl Executor {
 
         Ok(ExecutionResult::Dml {
             rows_affected: rows_inserted,
-            tag: "COPY".into(),
+            tag: "COPY",
         })
     }
 

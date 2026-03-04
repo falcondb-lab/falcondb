@@ -12,7 +12,8 @@ $OutputDir = Join-Path $PocRoot "output"
 $Timeline  = Join-Path $OutputDir "event_timeline.txt"
 
 $HostAddr  = "127.0.0.1"
-$AdminPort = if ($env:ADMIN_PORT) { $env:ADMIN_PORT } else { "8080" }
+$AdminPort    = if ($env:ADMIN_PORT)  { $env:ADMIN_PORT }  else { "8080" }
+$MetricsPort  = if ($env:METRICS_PORT) { $env:METRICS_PORT } else { "9091" }
 
 function Ok($msg)   { Write-Host "  + $msg" -ForegroundColor Green }
 function Info($msg) { Write-Host "  > $msg" -ForegroundColor Yellow }
@@ -35,7 +36,7 @@ try {
 Info "Watch the dashboard: falcon_rebalancer_running should change to 1"
 
 try {
-    $metrics = (Invoke-RestMethod -Uri "http://${HostAddr}:${AdminPort}/metrics" -TimeoutSec 5) -split "`n" | Where-Object { $_ -match "^falcon_rebalancer_" }
+    $metrics = (Invoke-RestMethod -Uri "http://${HostAddr}:${MetricsPort}/metrics" -TimeoutSec 5) -split "`n" | Where-Object { $_ -match "^falcon_rebalancer_" }
     Write-Host "`n  Current rebalancer metrics:"
     $metrics | ForEach-Object { Write-Host "    $_" }
     Write-Host ""

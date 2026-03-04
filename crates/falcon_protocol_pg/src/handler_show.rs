@@ -359,8 +359,8 @@ impl QueryHandler {
     }
 
     fn show_falcon_node_role(&self) -> Vec<BackendMessage> {
-        let role = std::env::var("FALCON_NODE_ROLE").unwrap_or_else(|_| "standalone".into());
-        let rows = vec![vec![Some("role".into()), Some(role)]];
+        let role = falcon_common::globals::node_role();
+        let rows = vec![vec![Some("role".into()), Some(role.to_owned())]];
         self.single_row_result(vec![("property", 25, -1), ("value", 25, -1)], rows)
     }
 
@@ -1062,7 +1062,7 @@ impl QueryHandler {
         } else {
             "distributed"
         };
-        let rows = vec![
+        let mut rows = vec![
             vec![Some("mode".into()), Some(mode.into())],
             vec![Some("shard_count".into()), Some(shard_count.to_string())],
             vec![Some("shard_ids".into()), Some(format!("[{shard_list}]"))],
@@ -1087,6 +1087,28 @@ impl QueryHandler {
                 Some("Union, MergeSortLimit, TwoPhaseAgg".into()),
             ],
         ];
+
+        if let Some(ref lc) = self.cluster.lifecycle_coordinator {
+            let m = lc.metrics();
+            rows.push(vec![Some("lifecycle_started".into()), Some(lc.is_started().to_string())]);
+            rows.push(vec![Some("nodes_online".into()), Some(m.nodes_online.to_string())]);
+            rows.push(vec![Some("nodes_suspect".into()), Some(m.nodes_suspect.to_string())]);
+            rows.push(vec![Some("nodes_offline".into()), Some(m.nodes_offline.to_string())]);
+            rows.push(vec![Some("heartbeat_evals".into()), Some(m.heartbeat_evals.to_string())]);
+            rows.push(vec![Some("slo_evals".into()), Some(m.slo_evals.to_string())]);
+        }
+
+        if let Some(ref fd) = self.cluster.failure_detector {
+            rows.push(vec![Some("fd_alive_nodes".into()), Some(fd.alive_count().to_string())]);
+            let dead = fd.dead_nodes();
+            let dead_str = if dead.is_empty() {
+                "none".to_string()
+            } else {
+                dead.iter().map(|n| n.0.to_string()).collect::<Vec<_>>().join(", ")
+            };
+            rows.push(vec![Some("fd_dead_nodes".into()), Some(dead_str)]);
+        }
+
         self.single_row_result(vec![("metric", 25, -1), ("value", 25, -1)], rows)
     }
 

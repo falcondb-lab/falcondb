@@ -10,7 +10,11 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use falcon_cluster::{DistributedQueryEngine, RaftShardCoordinator, ShardedEngine};
+use falcon_cluster::{
+    ClusterFailureDetector, ClusterLifecycleConfig, ClusterLifecycleCoordinator,
+    DistributedQueryEngine, FailureDetectorConfig, RaftShardCoordinator, ShardedEngine,
+    SmartGateway, SmartGatewayConfig, SmartRebalanceConfig, SmartRebalanceRunner,
+};
 use falcon_common::config::{FalconConfig, NodeRole};
 use falcon_common::types::ShardId;
 use falcon_executor::Executor;
@@ -267,8 +271,9 @@ async fn run_console(cli: Cli) -> Result<()> {
     // Install crash domain panic hook (must be before any other initialization)
     falcon_common::crash_domain::install_panic_hook();
 
-    // Initialize observability (stderr for console mode)
-    falcon_observability::init_tracing();
+    // Initialize observability based on config (early load for logging setup)
+    let early_cfg = load_config(&cli.config);
+    let _log_guards = falcon_observability::init_tracing_from_config(&early_cfg.logging);
     tracing::info!(
         mode = "console",
         version = env!("CARGO_PKG_VERSION"),
@@ -329,6 +334,11 @@ async fn run_server_inner(
         config.replication.grpc_listen_addr = addr.clone();
     }
 
+    // Default table engine for CREATE TABLE without ENGINE=...
+    falcon_common::globals::set_default_table_engine(
+        config.storage.default_engine.to_lowercase(),
+    );
+
     tracing::info!("Config: {:?}", config);
 
     // ── Production Safety Mode ──
@@ -388,9 +398,7 @@ async fn run_server_inner(
         }
     }
 
-    // Expose node role to SHOW falcon.node_role via env var
-    std::env::set_var(
-        "FALCON_NODE_ROLE",
+    falcon_common::globals::set_node_role(
         format!("{:?}", config.replication.role).to_lowercase(),
     );
 
@@ -448,136 +456,26 @@ async fn run_server_inner(
             )?
         };
 
-        // Apply memory budget from config
-        let budget = MemoryBudget::new(
-            config.memory.shard_soft_limit_bytes,
-            config.memory.shard_hard_limit_bytes,
-        );
-        if budget.enabled {
-            engine.set_memory_budget(budget);
-            tracing::info!(
-                "Memory backpressure enabled: soft={}B, hard={}B",
-                config.memory.shard_soft_limit_bytes,
-                config.memory.shard_hard_limit_bytes,
-            );
-        }
-
-        // Apply USTM configuration
-        if config.ustm.enabled {
-            engine.set_ustm_config(&config.ustm);
-        }
-
-        // Apply LSM sync_writes from storage config
-        engine.set_lsm_sync_writes(config.storage.lsm_sync_writes);
-        tracing::info!("LSM sync_writes: {}", config.storage.lsm_sync_writes);
-
-        // Apply CDC configuration
-        engine.configure_cdc(config.cdc.enabled, config.cdc.buffer_size);
-
-        // Apply PITR / WAL archiving configuration
-        engine.configure_pitr(
-            config.pitr.enabled,
-            &config.pitr.archive_dir,
-            config.pitr.retention_hours,
-        );
-
-        // Apply multi-tenant isolation configuration
-        engine.configure_multi_tenant(
-            config.multi_tenant.enabled,
-            config.multi_tenant.metering_enabled,
-            config.multi_tenant.default_max_qps,
-            config.multi_tenant.default_max_concurrent_txns,
-            config.multi_tenant.default_max_memory_bytes,
-            config.multi_tenant.default_max_storage_bytes,
-        );
-
-        // Apply TDE (Transparent Data Encryption) configuration
-        engine.configure_tde(
-            config.tde.enabled,
-            &config.tde.key_env_var,
-            config.tde.encrypt_wal,
-            config.tde.encrypt_data,
-        );
-
-        // Hook WAL observer for primary replication
-        if let Some(ref log) = replication_log {
-            let log_clone = log.clone();
-            engine.set_wal_observer(Box::new(move |record| {
-                log_clone.append(record.clone());
-            }));
-            tracing::info!("WAL observer attached for primary replication");
-        }
-
+        apply_engine_config(&mut engine, &config, &replication_log);
         Arc::new(engine)
     } else {
         tracing::info!("Running in pure in-memory mode (no WAL)");
         let mut engine = StorageEngine::new_in_memory();
-
-        // Apply memory budget from config
-        let budget = MemoryBudget::new(
-            config.memory.shard_soft_limit_bytes,
-            config.memory.shard_hard_limit_bytes,
-        );
-        if budget.enabled {
-            engine.set_memory_budget(budget);
-            tracing::info!(
-                "Memory backpressure enabled: soft={}B, hard={}B",
-                config.memory.shard_soft_limit_bytes,
-                config.memory.shard_hard_limit_bytes,
-            );
-        }
-
-        // Apply USTM configuration
-        if config.ustm.enabled {
-            engine.set_ustm_config(&config.ustm);
-        }
-
-        // Apply LSM sync_writes from storage config
-        engine.set_lsm_sync_writes(config.storage.lsm_sync_writes);
-        tracing::info!("LSM sync_writes: {}", config.storage.lsm_sync_writes);
-
-        // Apply CDC configuration
-        engine.configure_cdc(config.cdc.enabled, config.cdc.buffer_size);
-
-        // Apply PITR configuration (no WAL in in-memory mode, so this is a no-op unless WAL was configured)
-        engine.configure_pitr(
-            config.pitr.enabled,
-            &config.pitr.archive_dir,
-            config.pitr.retention_hours,
-        );
-
-        // Apply multi-tenant isolation configuration
-        engine.configure_multi_tenant(
-            config.multi_tenant.enabled,
-            config.multi_tenant.metering_enabled,
-            config.multi_tenant.default_max_qps,
-            config.multi_tenant.default_max_concurrent_txns,
-            config.multi_tenant.default_max_memory_bytes,
-            config.multi_tenant.default_max_storage_bytes,
-        );
-
-        // Apply TDE (Transparent Data Encryption) configuration
-        engine.configure_tde(
-            config.tde.enabled,
-            &config.tde.key_env_var,
-            config.tde.encrypt_wal,
-            config.tde.encrypt_data,
-        );
-
-        // Even in-memory mode can replicate if role is Primary
-        if let Some(ref log) = replication_log {
-            let log_clone = log.clone();
-            engine.set_wal_observer(Box::new(move |record| {
-                log_clone.append(record.clone());
-            }));
-            tracing::info!("WAL observer attached for primary replication (in-memory mode)");
-        }
-
+        apply_engine_config(&mut engine, &config, &replication_log);
         Arc::new(engine)
     };
 
     // Initialize transaction manager
     let txn_mgr = Arc::new(TxnManager::new(storage.clone()));
+    {
+        use std::sync::atomic::Ordering;
+        let max_ts = storage.recovered_max_ts.load(Ordering::Relaxed);
+        let max_txn = storage.recovered_max_txn_id.load(Ordering::Relaxed);
+        if max_ts > 0 || max_txn > 0 {
+            txn_mgr.advance_counters_past(max_ts, max_txn);
+            tracing::info!("TxnManager counters advanced past recovery: ts={}, txn_id={}", max_ts, max_txn);
+        }
+    }
     txn_mgr.set_slow_txn_threshold_us(config.server.slow_txn_threshold_us);
     tracing::info!("Slow txn threshold: {}us (0=disabled)", config.server.slow_txn_threshold_us);
 
@@ -599,7 +497,18 @@ async fn run_server_inner(
     let num_shards = cli.shards.max(1);
     let mut pg_server = if num_shards > 1 {
         tracing::info!("Starting in distributed mode with {} shards", num_shards);
-        let sharded = Arc::new(ShardedEngine::new(num_shards));
+        let sharded = if config.storage.wal_enabled {
+            let base_dir = Path::new(&config.storage.data_dir);
+            Arc::new(ShardedEngine::new_with_wal(
+                num_shards,
+                base_dir,
+                wal_sync_mode,
+                &config.wal_mode,
+                config.wal.no_buffering,
+            )?)
+        } else {
+            Arc::new(ShardedEngine::new(num_shards))
+        };
         let shard_ids: Vec<ShardId> = (0..num_shards).map(ShardId).collect();
         let dist_engine = Arc::new(DistributedQueryEngine::new(
             sharded,
@@ -647,6 +556,13 @@ async fn run_server_inner(
             "Connection idle timeout: {}ms",
             config.server.idle_timeout_ms
         );
+    }
+    if config.logging.slow_query_ms > 0 {
+        use falcon_protocol_pg::slow_query_log::SlowQueryLog;
+        let threshold = std::time::Duration::from_millis(config.logging.slow_query_ms);
+        let log = Arc::new(SlowQueryLog::new(threshold, 1000));
+        pg_server.set_slow_query_log(log);
+        tracing::info!("Slow query logging enabled (threshold: {}ms)", config.logging.slow_query_ms);
     }
 
     // Start background GC runner (if enabled in config)
@@ -880,6 +796,160 @@ async fn run_server_inner(
         pg_server.set_raft_coordinator(coord.clone());
     }
 
+    // ═══════════════════════════════════════════════════════════════════
+    // Cluster Subsystems — lifecycle, failure detection, rebalancing, gateway
+    // Only active in distributed (shards>1) or raft mode.
+    // ═══════════════════════════════════════════════════════════════════
+    let is_distributed = num_shards > 1
+        || config.replication.role == NodeRole::RaftMember
+        || config.replication.role == NodeRole::Primary;
+
+    let mut lifecycle_coordinator: Option<Arc<ClusterLifecycleCoordinator>> = None;
+    let mut failure_detector: Option<Arc<ClusterFailureDetector>> = None;
+    let mut _failure_detector_handle: Option<falcon_cluster::FailureDetectorHandle> = None;
+    let mut _rebalance_handle: Option<falcon_cluster::SmartRebalanceRunnerHandle> = None;
+    let smart_gateway: Option<Arc<SmartGateway>>;
+
+    if is_distributed && config.cluster.lifecycle_enabled {
+        let local_node_id = falcon_common::types::NodeId(config.server.node_id);
+
+        // ── Cluster Lifecycle Coordinator ──
+        let lc_config = ClusterLifecycleConfig {
+            node_id: local_node_id,
+            advertise_addr: config.server.pg_listen_addr.clone(),
+            heartbeat_interval: std::time::Duration::from_millis(
+                config.cluster.heartbeat_interval_ms,
+            ),
+            suspect_threshold: std::time::Duration::from_millis(
+                config.cluster.suspect_threshold_ms,
+            ),
+            offline_threshold: std::time::Duration::from_millis(
+                config.cluster.offline_threshold_ms,
+            ),
+            config_sync_interval: std::time::Duration::from_millis(
+                config.cluster.config_sync_interval_ms,
+            ),
+            slo_eval_interval: std::time::Duration::from_millis(
+                config.cluster.slo_eval_interval_ms,
+            ),
+            max_shards: config.cluster.max_shards,
+            is_controller: config.replication.role == NodeRole::Primary
+                || config.replication.role == NodeRole::RaftMember,
+        };
+        let lc = Arc::new(ClusterLifecycleCoordinator::new(lc_config));
+        lc.register_default_slos();
+        lc.start();
+        tracing::info!("Cluster lifecycle coordinator started");
+        lifecycle_coordinator = Some(lc);
+
+        // ── Failure Detector ──
+        if config.cluster.failure_detector_enabled {
+            let fd_config = FailureDetectorConfig {
+                heartbeat_interval: std::time::Duration::from_millis(
+                    config.cluster.heartbeat_interval_ms,
+                ),
+                suspect_threshold: std::time::Duration::from_millis(
+                    config.cluster.suspect_threshold_ms,
+                ),
+                failure_timeout: std::time::Duration::from_millis(
+                    config.cluster.offline_threshold_ms,
+                ),
+                max_consecutive_misses: config.cluster.max_consecutive_misses,
+                auto_declare_dead: true,
+            };
+            let fd = Arc::new(ClusterFailureDetector::new(fd_config));
+            fd.register_node(
+                local_node_id,
+                env!("CARGO_PKG_VERSION").to_owned(),
+            );
+            let fd_token = coordinator.child_token();
+            _failure_detector_handle = Some(fd.spawn_evaluator(fd_token));
+            tracing::info!("Cluster failure detector started");
+            failure_detector = Some(fd);
+        }
+
+        // ── Smart Gateway ──
+        let gw_role = match config.gateway.role.as_str() {
+            "dedicated_gateway" => falcon_cluster::GatewayRole::DedicatedGateway,
+            "compute_only" => falcon_cluster::GatewayRole::ComputeOnly,
+            _ => falcon_cluster::GatewayRole::SmartGateway,
+        };
+        let gw = Arc::new(SmartGateway::new(SmartGatewayConfig {
+            node_id: local_node_id,
+            role: gw_role,
+            max_inflight: config.gateway.max_inflight,
+            max_forwarded: config.gateway.max_forwarded,
+            forward_timeout: std::time::Duration::from_millis(config.gateway.forward_timeout_ms),
+            topology_staleness: std::time::Duration::from_secs(
+                config.gateway.topology_staleness_secs,
+            ),
+            max_queue_depth: 0,
+        }));
+        // Seed topology with local shards
+        for shard_idx in 0..num_shards {
+            gw.topology.update_leader(
+                falcon_common::types::ShardId(shard_idx),
+                local_node_id,
+                config.server.pg_listen_addr.clone(),
+            );
+        }
+        tracing::info!(role = %gw_role, "Smart gateway initialized");
+        smart_gateway = Some(gw);
+    } else {
+        smart_gateway = None;
+    }
+
+    // ── Smart Rebalancer (needs shards > 1) ──
+    if num_shards > 1 && config.rebalance.enabled {
+        if let Err(e) = config.rebalance.validate() {
+            tracing::error!("Invalid rebalance config: {e} — rebalancer disabled");
+        } else {
+            let rb_config = SmartRebalanceConfig {
+                check_interval: std::time::Duration::from_millis(
+                    config.rebalance.check_interval_ms,
+                ),
+                rebalancer: falcon_cluster::RebalancerConfig {
+                    imbalance_threshold: config.rebalance.imbalance_threshold,
+                    batch_size: config.rebalance.batch_size,
+                    min_donor_rows: config.rebalance.min_donor_rows,
+                    cooldown_ms: config.rebalance.cooldown_ms,
+                },
+                policy: falcon_cluster::RebalanceTriggerPolicy {
+                    imbalance_threshold: config.rebalance.imbalance_threshold,
+                    min_rows_to_trigger: config.rebalance.min_donor_rows * 10,
+                    min_shards: 2,
+                },
+                start_paused: config.rebalance.start_paused,
+                ..Default::default()
+            };
+            let runner = SmartRebalanceRunner::new(rb_config);
+            // The rebalancer needs access to the ShardedEngine.
+            // Re-create a reference for it if we're in distributed mode.
+            let rb_engine = Arc::new(ShardedEngine::new(num_shards));
+            match runner.start(rb_engine) {
+                Ok(handle) => {
+                    tracing::info!(
+                        check_interval_ms = config.rebalance.check_interval_ms,
+                        threshold = config.rebalance.imbalance_threshold,
+                        "Smart rebalancer started"
+                    );
+                    _rebalance_handle = Some(handle);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to start smart rebalancer: {e}");
+                }
+            }
+        }
+    }
+
+    // Pass cluster subsystems to PgServer for SHOW commands
+    if let Some(ref lc) = lifecycle_coordinator {
+        pg_server.set_lifecycle_coordinator(lc.clone());
+    }
+    if let Some(ref fd) = failure_detector {
+        pg_server.set_failure_detector(fd.clone());
+    }
+
     let pg_port = config
         .server
         .pg_listen_addr
@@ -893,6 +963,90 @@ async fn run_server_inner(
         if num_shards > 1 { "s" } else { "" },
         pg_port
     );
+
+    // ── Background metrics reporter (publishes to Prometheus every 5s) ──
+    {
+        falcon_observability::init_txn_counters();
+        let stor = storage.clone();
+        let txn = txn_mgr.clone();
+        let conns = pg_server.active_connections_handle();
+        let metrics_token = coordinator.child_token();
+        let node_count = if config.replication.role == NodeRole::Standalone { 1u64 } else { 2 };
+        let lc_ref = lifecycle_coordinator.clone();
+        let fd_ref = failure_detector.clone();
+        let gw_ref = smart_gateway.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    _ = metrics_token.cancelled() => break,
+                }
+                falcon_observability::record_active_connections(
+                    conns.load(std::sync::atomic::Ordering::Relaxed),
+                );
+                falcon_observability::record_txn_active_count(txn.active_count() as u64);
+                let ws = stor.wal_stats_snapshot();
+                let backlog = stor.wal_backlog_bytes();
+                falcon_observability::record_wal_stability_metrics(
+                    ws.fsync_total_us, ws.fsync_max_us, ws.fsync_avg_us,
+                    ws.group_commit_avg_size, backlog,
+                );
+                let hot = stor.memory_hot_bytes();
+                let cold = stor.memory_cold_bytes();
+                falcon_observability::record_memory_metrics(
+                    0, 0, 0, hot + cold, 0, 0, "normal", 0,
+                );
+
+                // Cluster health from real subsystems
+                if let Some(ref lc) = lc_ref {
+                    let m = lc.metrics();
+                    let total = m.nodes_online + m.nodes_suspect + m.nodes_offline;
+                    let health = if m.nodes_offline > 0 { "degraded" } else { "healthy" };
+                    falcon_observability::record_cluster_health_metrics(
+                        health,
+                        total as u64,
+                        m.nodes_online as u64,
+                        1,
+                        if m.nodes_offline == 0 { 1 } else { 0 },
+                        m.nodes_suspect as u64,
+                    );
+                } else {
+                    falcon_observability::record_cluster_health_metrics(
+                        "healthy", node_count, node_count, 1, 1, 0,
+                    );
+                }
+
+                // Failure detector metrics
+                if let Some(ref fd) = fd_ref {
+                    let alive = fd.alive_count() as u64;
+                    let dead = fd.dead_nodes().len() as u64;
+                    falcon_observability::record_replication_metrics(
+                        fd.epoch(), alive, dead,
+                        fd.metrics.heartbeats_received.load(std::sync::atomic::Ordering::Relaxed),
+                    );
+                } else {
+                    falcon_observability::record_replication_metrics(0, 0, 0, 0);
+                }
+
+                // Gateway metrics
+                if let Some(ref gw) = gw_ref {
+                    let snap = gw.metrics.snapshot();
+                    falcon_observability::record_rebalancer_metrics(
+                        snap.local_exec_total, snap.forward_total,
+                        false, false, 0.0, snap.reject_no_route_total,
+                        snap.reject_overloaded_total, snap.reject_timeout_total, 0.0,
+                    );
+                } else {
+                    falcon_observability::record_rebalancer_metrics(0, 0, false, false, 0.0, 0, 0, 0, 0.0);
+                }
+
+                falcon_observability::record_segment_streaming_metrics(0, 0, 0, 0, 0, 0, 0);
+                falcon_observability::record_shard_migration_metrics(0, 0, 0, 0, 0);
+            }
+        });
+        tracing::info!("Background metrics reporter started (interval=5s)");
+    }
 
     // ── Health check HTTP server (JoinHandle tracked) ──
     let health_state = Arc::new(health::HealthState::new(
@@ -961,6 +1115,18 @@ async fn run_server_inner(
     if let Some(h) = raft_transport_handle.take() {
         h.abort();
     }
+
+    // 1d. Stop cluster subsystems
+    if let Some(ref lc) = lifecycle_coordinator {
+        tracing::info!("Stopping cluster lifecycle coordinator...");
+        lc.shutdown();
+    }
+    if let Some(h) = _rebalance_handle.take() {
+        tracing::info!("Stopping smart rebalancer...");
+        h.stop_and_join();
+        tracing::info!("Smart rebalancer stopped");
+    }
+    // Failure detector handle drops automatically (cancel token propagated from coordinator)
 
     // 2. Ensure global shutdown is signalled (in case PG server exited without signal)
     if !coordinator.is_shutting_down() {
@@ -1083,6 +1249,64 @@ fn run_purge(skip_confirm: bool) {
             eprintln!("ERROR: Failed to purge {}: {}", root.display(), e);
             std::process::exit(1);
         }
+    }
+}
+
+fn apply_engine_config(
+    engine: &mut StorageEngine,
+    config: &FalconConfig,
+    replication_log: &Option<Arc<falcon_cluster::ReplicationLog>>,
+) {
+    let budget = MemoryBudget::new(
+        config.memory.shard_soft_limit_bytes,
+        config.memory.shard_hard_limit_bytes,
+    );
+    if budget.enabled {
+        engine.set_memory_budget(budget);
+        tracing::info!(
+            "Memory backpressure enabled: soft={}B, hard={}B",
+            config.memory.shard_soft_limit_bytes,
+            config.memory.shard_hard_limit_bytes,
+        );
+    }
+
+    if config.ustm.enabled {
+        engine.set_ustm_config(&config.ustm);
+    }
+
+    engine.set_lsm_sync_writes(config.storage.lsm_sync_writes);
+    tracing::info!("LSM sync_writes: {}", config.storage.lsm_sync_writes);
+
+    engine.configure_cdc(config.cdc.enabled, config.cdc.buffer_size);
+
+    engine.configure_pitr(
+        config.pitr.enabled,
+        &config.pitr.archive_dir,
+        config.pitr.retention_hours,
+    );
+
+    engine.configure_multi_tenant(
+        config.multi_tenant.enabled,
+        config.multi_tenant.metering_enabled,
+        config.multi_tenant.default_max_qps,
+        config.multi_tenant.default_max_concurrent_txns,
+        config.multi_tenant.default_max_memory_bytes,
+        config.multi_tenant.default_max_storage_bytes,
+    );
+
+    engine.configure_tde(
+        config.tde.enabled,
+        &config.tde.key_env_var,
+        config.tde.encrypt_wal,
+        config.tde.encrypt_data,
+    );
+
+    if let Some(ref log) = replication_log {
+        let log_clone = log.clone();
+        engine.set_wal_observer(Box::new(move |record| {
+            log_clone.append(record.clone());
+        }));
+        tracing::info!("WAL observer attached for primary replication");
     }
 }
 

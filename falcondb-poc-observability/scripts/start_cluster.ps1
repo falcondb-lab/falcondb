@@ -9,7 +9,7 @@ $ErrorActionPreference = 'Stop'
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PocRoot   = Split-Path -Parent $ScriptDir
 
-$FalconBin  = if ($env:FALCON_BIN) { $env:FALCON_BIN } else { "target\release\falcon_server.exe" }
+$FalconBin  = if ($env:FALCON_BIN) { $env:FALCON_BIN } else { "target\release\falcon.exe" }
 $ConfNode1  = Join-Path $PocRoot "configs\node1.toml"
 $ConfNode2  = Join-Path $PocRoot "configs\node2.toml"
 $OutputDir  = Join-Path $PocRoot "output"
@@ -17,6 +17,8 @@ $OutputDir  = Join-Path $PocRoot "output"
 $Host_      = "127.0.0.1"
 $Node1Port  = 5433
 $Node2Port  = 5434
+$MetricsPort1 = 9091
+$MetricsPort2 = 9092
 $DbName     = "falcon"
 $DbUser     = "falcon"
 
@@ -40,14 +42,14 @@ if (Test-Path ".\obs_data_node1") { Remove-Item -Recurse -Force ".\obs_data_node
 if (Test-Path ".\obs_data_node2") { Remove-Item -Recurse -Force ".\obs_data_node2" }
 
 Info "Starting Node 1 (primary) on port $Node1Port..."
-$Proc1 = Start-Process -FilePath $FalconBin -ArgumentList "-c",$ConfNode1 `
+$Proc1 = Start-Process -FilePath $FalconBin -ArgumentList "--config",$ConfNode1,"--metrics-addr","0.0.0.0:$MetricsPort1" `
     -RedirectStandardOutput (Join-Path $OutputDir "node1.log") `
     -RedirectStandardError  (Join-Path $OutputDir "node1_err.log") `
     -PassThru -WindowStyle Hidden
 $Proc1.Id | Set-Content (Join-Path $OutputDir "node1.pid")
 
 Info "Starting Node 2 (replica) on port $Node2Port..."
-$Proc2 = Start-Process -FilePath $FalconBin -ArgumentList "-c",$ConfNode2 `
+$Proc2 = Start-Process -FilePath $FalconBin -ArgumentList "--config",$ConfNode2,"--metrics-addr","0.0.0.0:$MetricsPort2" `
     -RedirectStandardOutput (Join-Path $OutputDir "node2.log") `
     -RedirectStandardError  (Join-Path $OutputDir "node2_err.log") `
     -PassThru -WindowStyle Hidden
@@ -88,6 +90,6 @@ Write-Host ""
 Write-Host "  FalconDB cluster is running"
 Write-Host "  Node 1 (primary): psql -h $Host_ -p $Node1Port"
 Write-Host "  Node 2 (replica): psql -h $Host_ -p $Node2Port"
-Write-Host "  Metrics: http://${Host_}:8080/metrics"
-Write-Host "           http://${Host_}:8081/metrics"
+Write-Host "  Metrics: http://${Host_}:${MetricsPort1}/metrics"
+Write-Host "           http://${Host_}:${MetricsPort2}/metrics"
 Write-Host ""

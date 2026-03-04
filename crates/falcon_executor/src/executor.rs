@@ -28,7 +28,7 @@ pub enum ExecutionResult {
     /// DDL success with a message.
     Ddl { message: String },
     /// DML success with affected row count.
-    Dml { rows_affected: u64, tag: String },
+    Dml { rows_affected: u64, tag: &'static str },
     /// Query result with column metadata and rows.
     Query {
         columns: Vec<(String, DataType)>,
@@ -873,7 +873,7 @@ impl Executor {
                 self.storage.truncate_table(table_name)?;
                 Ok(ExecutionResult::Dml {
                     rows_affected: 0,
-                    tag: "TRUNCATE TABLE".into(),
+                    tag: "TRUNCATE TABLE",
                 })
             }
             PhysicalPlan::Explain(inner) => {
@@ -1002,8 +1002,7 @@ impl Executor {
                 Ok(ExecutionResult::Query { columns, rows })
             }
             PhysicalPlan::ShowNodeRole => {
-                let role =
-                    std::env::var("FALCON_NODE_ROLE").unwrap_or_else(|_| "standalone".into());
+                let role = falcon_common::globals::node_role().to_owned();
                 let columns = vec![
                     ("metric".into(), DataType::Text),
                     ("value".into(), DataType::Text),

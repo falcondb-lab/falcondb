@@ -12,7 +12,7 @@ $ResultsDir = Join-Path $PocRoot "results"
 
 $PgHost = if ($env:PG_HOST) { $env:PG_HOST } else { "127.0.0.1" }
 $PgPort = if ($env:PG_PORT) { $env:PG_PORT } else { "5432" }
-$PgUser = if ($env:PG_USER) { $env:PG_USER } else { $env:USERNAME }
+$PgUser = if ($env:PG_USER) { $env:PG_USER } else { "postgres" }
 
 $Clients  = if ($env:PGBENCH_CLIENTS)  { [int]$env:PGBENCH_CLIENTS }  else { 10 }
 $Jobs     = if ($env:PGBENCH_JOBS)     { [int]$env:PGBENCH_JOBS }     else { 2 }

@@ -6,7 +6,10 @@ use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
 
-/// Custom timer that formats timestamps in local time using chrono.
+/// Guard that must be kept alive for the process lifetime to flush async log writers.
+pub type LogGuard = tracing_appender::non_blocking::WorkerGuard;
+
+/// Custom timer: local time with millisecond precision.
 struct LocalTimer;
 
 impl tracing_subscriber::fmt::time::FormatTime for LocalTimer {
@@ -16,7 +19,86 @@ impl tracing_subscriber::fmt::time::FormatTime for LocalTimer {
     }
 }
 
-/// Initialize the global tracing subscriber with structured logging.
+/// Initialize tracing from a `LoggingConfig`. Returns guards that flush pending writes on drop.
+///
+/// Supports:
+/// - `level`: trace/debug/info/warn/error (overridden by RUST_LOG env var)
+/// - `stderr`: write to stderr
+/// - `file`: optional log file path; rotation controlled by `rotation` + `max_size_mb`
+/// - `format`: "text" or "json"
+/// - `max_files`: prune old rotated files after init
+pub fn init_tracing_from_config(cfg: &falcon_common::config::LoggingConfig) -> Vec<LogGuard> {
+    use tracing_appender::rolling::{RollingFileAppender, Rotation};
+    use tracing_subscriber::Registry;
+
+    let mut guards = Vec::new();
+
+    // EnvFilter: RUST_LOG overrides config level
+    let filter_str = std::env::var("RUST_LOG").unwrap_or_else(|_| cfg.level.clone());
+    let env_filter = EnvFilter::new(&filter_str);
+    let use_json = cfg.format.eq_ignore_ascii_case("json");
+
+    let registry = Registry::default().with(env_filter);
+
+    // Build the file appender (optional)
+    let file_writer: Option<tracing_appender::non_blocking::NonBlocking> = if !cfg.file.is_empty() {
+        let path = std::path::Path::new(&cfg.file);
+        let log_dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let filename = path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "falcondb.log".to_owned());
+
+        let _ = std::fs::create_dir_all(log_dir);
+
+        if cfg.max_files > 0 {
+            prune_old_log_files(log_dir, &filename, cfg.max_files);
+        }
+
+        let rotation = match cfg.rotation.to_lowercase().as_str() {
+            "hourly" => Rotation::HOURLY,
+            "never" | "size" => Rotation::NEVER,
+            _ => Rotation::DAILY,
+        };
+
+        let appender = RollingFileAppender::new(rotation, log_dir, &filename);
+        let (nb, guard) = tracing_appender::non_blocking(appender);
+        guards.push(guard);
+        Some(nb)
+    } else {
+        None
+    };
+
+    // Compose layers using Option<Layer> — tracing_subscriber implements Layer for Option<L>.
+    // stderr layer (text or json, mutually exclusive)
+    let stderr_text = if cfg.stderr && !use_json {
+        Some(fmt::layer().with_timer(LocalTimer).with_target(true).with_thread_ids(true)
+            .with_file(true).with_line_number(true).with_ansi(false).with_writer(std::io::stderr))
+    } else { None };
+
+    let stderr_json = if cfg.stderr && use_json {
+        Some(fmt::layer().json().with_timer(LocalTimer).with_target(true).with_thread_ids(true)
+            .with_file(true).with_line_number(true).with_writer(std::io::stderr))
+    } else { None };
+
+    // file layer — build inside if/else so file_writer is consumed by exactly one branch
+    if use_json {
+        let file_json = file_writer.map(|w| {
+            fmt::layer().json().with_timer(LocalTimer).with_target(true).with_thread_ids(true)
+                .with_file(true).with_line_number(true).with_writer(w)
+        });
+        registry.with(stderr_json).with(file_json).init();
+    } else {
+        let file_text = file_writer.map(|w| {
+            fmt::layer().with_timer(LocalTimer).with_target(true).with_thread_ids(true)
+                .with_file(true).with_line_number(true).with_ansi(false).with_writer(w)
+        });
+        registry.with(stderr_text).with(file_text).init();
+    }
+
+    guards
+}
+
+/// Initialize tracing with defaults (stderr, info level). Used before config is loaded.
 pub fn init_tracing() {
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -33,6 +115,32 @@ pub fn init_tracing() {
         .with(env_filter)
         .with(fmt_layer)
         .init();
+}
+
+/// Remove old rotated log files, keeping only the most recent `keep` files.
+fn prune_old_log_files(dir: &std::path::Path, prefix: &str, keep: usize) {
+    let base = prefix.split('.').next().unwrap_or(prefix);
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+
+    let mut files: Vec<_> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(base) && e.path().is_file()
+        })
+        .collect();
+
+    // Sort by modified time descending (newest first)
+    files.sort_by(|a, b| {
+        let ta = a.metadata().and_then(|m| m.modified()).ok();
+        let tb = b.metadata().and_then(|m| m.modified()).ok();
+        tb.cmp(&ta)
+    });
+
+    for old in files.iter().skip(keep) {
+        let _ = std::fs::remove_file(old.path());
+    }
 }
 
 /// Initialize Prometheus metrics exporter.
@@ -54,8 +162,22 @@ pub fn record_query_metrics(duration_us: u64, query_type: &str, success: bool) {
 }
 
 pub fn record_txn_metrics(action: &str) {
-    metrics::counter!("falcon_txn_total", "action" => action.to_owned()).increment(1);
+    match action {
+        "committed" => metrics::counter!("falcon_txn_committed_total").increment(1),
+        "aborted" => metrics::counter!("falcon_txn_aborted_total").increment(1),
+        _ => {}
+    }
 }
+
+pub fn record_txn_active_count(count: u64) {
+    metrics::gauge!("falcon_txn_active_count").set(count as f64);
+}
+
+pub fn init_txn_counters() {
+    metrics::counter!("falcon_txn_committed_total").absolute(0);
+    metrics::counter!("falcon_txn_aborted_total").absolute(0);
+}
+
 
 pub fn record_active_connections(count: usize) {
     metrics::gauge!("falcon_active_connections").set(count as f64);

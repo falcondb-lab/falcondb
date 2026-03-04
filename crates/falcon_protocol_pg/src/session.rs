@@ -171,6 +171,8 @@ pub struct PgSession {
     pub notifications: SessionNotifications,
     /// Shared notification hub (Arc so multiple sessions can share).
     pub notification_hub: Arc<NotificationHub>,
+    /// Client address (IP:port). Empty if not available.
+    pub peer_addr: String,
 }
 
 /// A savepoint entry captures the name and the write-set/read-set positions
@@ -205,6 +207,7 @@ impl PgSession {
             cursors: HashMap::new(),
             notifications: SessionNotifications::new(),
             notification_hub: Arc::new(NotificationHub::new()),
+            peer_addr: String::new(),
         }
     }
 
@@ -254,6 +257,7 @@ impl PgSession {
             cursors: std::mem::take(&mut self.cursors),
             notifications: std::mem::take(&mut self.notifications),
             notification_hub: self.notification_hub.clone(),
+            peer_addr: self.peer_addr.clone(),
         }
     }
 

@@ -351,7 +351,7 @@ impl GroupCommitSyncer {
 
         let wal_lsn = self.wal.current_lsn();
         let backlog_before = self.pending_bytes.load(Ordering::Relaxed);
-        self.wal.flush_split()?;
+        let _flushed_lsn = self.wal.flush_split()?;
 
         // Reset backlog — all pending bytes are now durable
         self.pending_bytes.store(0, Ordering::Relaxed);

@@ -154,6 +154,7 @@ impl IdempotencyStore {
                 ..Default::default()
             },
             sync_writes: true,
+            ..Default::default()
         };
         let engine = LsmEngine::open(&store_dir, lsm_config)?;
         Ok(Self { engine, config })

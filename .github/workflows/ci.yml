@@ -191,6 +191,31 @@ jobs:
           path: coverage/
           retention-days: 30
 
+  msrv:
+    name: MSRV (1.75)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.75.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace
+
+  test-feature-engines:
+    name: Test Feature-Gated Engines
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: always() && !failure() && !cancelled()
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install clang (for RocksDB)
+        run: sudo apt-get install -y clang
+      - name: Test with RocksDB engine
+        run: cargo test -p falcon_storage --features rocksdb
+      - name: Test with redb engine
+        run: cargo test -p falcon_storage --features redb
+
   security-audit:
     name: Security Audit
     runs-on: ubuntu-latest

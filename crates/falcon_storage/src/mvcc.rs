@@ -168,6 +168,21 @@ impl VersionChain {
         self.commit_and_report(txn_id, commit_ts);
     }
 
+    /// Commit without cloning row data. Returns true if a non-tombstone INSERT was committed.
+    pub fn commit_no_report(&self, txn_id: TxnId, commit_ts: Timestamp) -> bool {
+        let head = self.head.read();
+        if let Some(ref ver) = *head {
+            if ver.created_by == txn_id && ver.get_commit_ts().0 == 0 {
+                ver.set_commit_ts(commit_ts);
+                if ver.data.is_some() && ver.get_prev().is_none() {
+                    self.fast_commit_ts.store(commit_ts.0, Ordering::Release);
+                }
+                return ver.data.is_some();
+            }
+        }
+        false
+    }
+
     /// Commit versions for txn_id and return (new_row_data, old_row_data).
     /// - `new_data`: the row data from the newly committed version (None = tombstone/delete).
     /// - `old_data`: the row data from the prior committed version (None = was insert, no prior).

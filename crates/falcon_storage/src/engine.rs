@@ -391,17 +391,14 @@ pub struct StorageEngine {
     /// Runtime node role — controls which storage paths are permitted.
     /// Primary nodes are forbidden from using columnstore/disk paths on the write side.
     pub(crate) node_role: NodeRole,
+    /// Unified table handle map — one entry per table regardless of engine type.
+    /// Used by DML methods for O(1) dispatch without per-engine map chains.
+    pub(crate) engine_tables: DashMap<TableId, crate::table_handle::TableHandle>,
     /// Rowstore tables (in-memory, default).
     pub(crate) tables: DashMap<TableId, Arc<MemTable>>,
     /// Columnstore tables (columnar, analytics-optimised). Feature-gated.
     #[cfg(feature = "columnstore")]
     pub(crate) columnstore_tables: DashMap<TableId, Arc<ColumnStoreTable>>,
-    /// Disk-based rowstore tables (B-tree on disk). Feature-gated.
-    #[cfg(feature = "disk_rowstore")]
-    pub(crate) disk_tables: DashMap<TableId, Arc<DiskRowstoreTable>>,
-    /// LSM-tree backed rowstore tables. Feature-gated.
-    #[cfg(feature = "lsm")]
-    pub(crate) lsm_tables: DashMap<TableId, Arc<LsmTable>>,
     /// Data directory for disk-based tables (None = in-memory only).
     #[allow(dead_code)]
     pub(crate) data_dir: Option<PathBuf>,
@@ -409,9 +406,7 @@ pub struct StorageEngine {
     pub(crate) catalog: RwLock<Catalog>,
     /// WAL writer (None if WAL disabled).
     pub(crate) wal: Option<Arc<WalWriter>>,
-    /// Leader-follower group commit: highest durably flushed WAL LSN.
     pub(crate) wal_flushed_lsn: AtomicU64,
-    /// Leader-follower group commit: only one thread flushes at a time.
     pub(crate) wal_flush_lock: parking_lot::Mutex<()>,
     wal_flush_thread: parking_lot::Mutex<Option<std::thread::JoinHandle<()>>>,
     /// Per-transaction write-set for key-scoped commit/abort.
@@ -465,6 +460,11 @@ pub struct StorageEngine {
     pub(crate) txn_write_bytes: DashMap<TxnId, AtomicU64>,
     /// Deferred WAL records per txn — written in batch at commit time to reduce mutex acquisitions.
     pub(crate) txn_wal_buf: DashMap<TxnId, Vec<WalRecord>>,
+    /// Max commit_ts seen during WAL recovery (0 if no recovery).
+    /// TxnManager must advance its ts_counter past this value.
+    pub recovered_max_ts: AtomicU64,
+    /// Max txn_id seen during WAL recovery (0 if no recovery).
+    pub recovered_max_txn_id: AtomicU64,
     // ── Enterprise / non-core extensions (RLS, TDE, PITR, CDC, tenancy, cold store) ──
     /// Grouped enterprise features — see [`EnterpriseExtensions`].
     pub ext: EnterpriseExtensions,
@@ -577,22 +577,18 @@ impl StorageEngine {
 
     /// Internal: construct Self from a pre-built WalWriter option.
     fn build_with_wal(wal_dir: Option<&Path>, wal: Option<Arc<WalWriter>>) -> Result<Self, StorageError> {
-        let flush_handle = wal.as_ref().map(|w| w.start_flush_thread());
         Ok(Self {
             node_role: NodeRole::Standalone,
+            engine_tables: DashMap::new(),
             tables: DashMap::new(),
             #[cfg(feature = "columnstore")]
             columnstore_tables: DashMap::new(),
-            #[cfg(feature = "disk_rowstore")]
-            disk_tables: DashMap::new(),
-            #[cfg(feature = "lsm")]
-            lsm_tables: DashMap::new(),
             data_dir: wal_dir.map(std::path::Path::to_path_buf),
             catalog: RwLock::new(Catalog::new()),
             wal,
             wal_flushed_lsn: AtomicU64::new(0),
             wal_flush_lock: parking_lot::Mutex::new(()),
-            wal_flush_thread: parking_lot::Mutex::new(flush_handle),
+            wal_flush_thread: parking_lot::Mutex::new(None),
             txn_write_sets: DashMap::new(),
             txn_read_sets: DashMap::new(),
             gc_stats: crate::gc::GcStats::new(),
@@ -618,6 +614,8 @@ impl StorageEngine {
             ustm: Self::default_ustm(),
             txn_write_bytes: DashMap::new(),
             txn_wal_buf: DashMap::new(),
+            recovered_max_ts: AtomicU64::new(0),
+            recovered_max_txn_id: AtomicU64::new(0),
             ext: EnterpriseExtensions::default(),
         })
     }
@@ -1060,21 +1058,18 @@ impl StorageEngine {
             max_segment_size,
             group_commit_size,
         )?));
-
         Ok(Self {
             node_role: NodeRole::Standalone,
+            engine_tables: DashMap::new(),
             tables: DashMap::new(),
             #[cfg(feature = "columnstore")]
             columnstore_tables: DashMap::new(),
-            #[cfg(feature = "disk_rowstore")]
-            disk_tables: DashMap::new(),
-            #[cfg(feature = "lsm")]
-            lsm_tables: DashMap::new(),
             data_dir: Some(wal_dir.to_path_buf()),
             catalog: RwLock::new(Catalog::new()),
             wal,
             wal_flushed_lsn: AtomicU64::new(0),
             wal_flush_lock: parking_lot::Mutex::new(()),
+            wal_flush_thread: parking_lot::Mutex::new(None),
             txn_write_sets: DashMap::new(),
             txn_read_sets: DashMap::new(),
             gc_stats: crate::gc::GcStats::new(),
@@ -1100,6 +1095,8 @@ impl StorageEngine {
             ustm: Self::default_ustm(),
             txn_write_bytes: DashMap::new(),
             txn_wal_buf: DashMap::new(),
+            recovered_max_ts: AtomicU64::new(0),
+            recovered_max_txn_id: AtomicU64::new(0),
             ext: EnterpriseExtensions::default(),
         })
     }
@@ -1108,18 +1105,16 @@ impl StorageEngine {
     pub fn new_in_memory() -> Self {
         Self {
             node_role: NodeRole::Standalone,
+            engine_tables: DashMap::new(),
             tables: DashMap::new(),
             #[cfg(feature = "columnstore")]
             columnstore_tables: DashMap::new(),
-            #[cfg(feature = "disk_rowstore")]
-            disk_tables: DashMap::new(),
-            #[cfg(feature = "lsm")]
-            lsm_tables: DashMap::new(),
             data_dir: None,
             catalog: RwLock::new(Catalog::new()),
             wal: None,
             wal_flushed_lsn: AtomicU64::new(0),
             wal_flush_lock: parking_lot::Mutex::new(()),
+            wal_flush_thread: parking_lot::Mutex::new(None),
             txn_write_sets: DashMap::new(),
             txn_read_sets: DashMap::new(),
             gc_stats: crate::gc::GcStats::new(),
@@ -1145,6 +1140,8 @@ impl StorageEngine {
             ustm: Self::default_ustm(),
             txn_write_bytes: DashMap::new(),
             txn_wal_buf: DashMap::new(),
+            recovered_max_ts: AtomicU64::new(0),
+            recovered_max_txn_id: AtomicU64::new(0),
             ext: EnterpriseExtensions::default(),
         }
     }
@@ -1153,18 +1150,16 @@ impl StorageEngine {
     pub fn new_in_memory_with_budget(budget: MemoryBudget) -> Self {
         Self {
             node_role: NodeRole::Standalone,
+            engine_tables: DashMap::new(),
             tables: DashMap::new(),
             #[cfg(feature = "columnstore")]
             columnstore_tables: DashMap::new(),
-            #[cfg(feature = "disk_rowstore")]
-            disk_tables: DashMap::new(),
-            #[cfg(feature = "lsm")]
-            lsm_tables: DashMap::new(),
             data_dir: None,
             catalog: RwLock::new(Catalog::new()),
             wal: None,
             wal_flushed_lsn: AtomicU64::new(0),
             wal_flush_lock: parking_lot::Mutex::new(()),
+            wal_flush_thread: parking_lot::Mutex::new(None),
             txn_write_sets: DashMap::new(),
             txn_read_sets: DashMap::new(),
             gc_stats: crate::gc::GcStats::new(),
@@ -1190,7 +1185,18 @@ impl StorageEngine {
             ustm: Self::default_ustm(),
             txn_write_bytes: DashMap::new(),
             txn_wal_buf: DashMap::new(),
+            recovered_max_ts: AtomicU64::new(0),
+            recovered_max_txn_id: AtomicU64::new(0),
             ext: EnterpriseExtensions::default(),
+        }
+    }
+
+    pub fn shutdown_wal_flush(&self) {
+        if let Some(ref wal) = self.wal {
+            wal.shutdown_flush_thread();
+        }
+        if let Some(handle) = self.wal_flush_thread.lock().take() {
+            let _ = handle.join();
         }
     }
 
@@ -1274,12 +1280,9 @@ impl StorageEngine {
     }
 
     /// Leader-follower group commit: append WAL record and ensure durable.
-    /// First thread to need a flush becomes the leader and flushes ALL pending
-    /// records. Other threads waiting on the flush lock find their data already
-    /// flushed when they acquire the lock.
+    /// Uses WRITE_THROUGH (FUA) so flush_split's write_all is immediately durable.
     pub(crate) fn durable_wal_commit(&self, record: &WalRecord) -> Result<(), StorageError> {
         if let Some(ref wal) = self.wal {
-            // Extract txn_id to check for deferred WAL records
             let txn_id = match record {
                 WalRecord::CommitTxnLocal { txn_id, .. } => Some(*txn_id),
                 _ => None,
@@ -1287,11 +1290,14 @@ impl StorageEngine {
             let deferred = txn_id.and_then(|id| self.txn_wal_buf.remove(&id).map(|(_, v)| v));
 
             let lsn = if let Some(buf) = &deferred {
-                // Batch: deferred records + commit record in one mutex hold
-                let mut all: Vec<&WalRecord> = buf.iter().collect();
-                all.push(record);
-                let n = all.len();
-                let lsn = wal.append_multi(&all)?;
+                let n = buf.len() + 1;
+                let lsn = if buf.len() == 1 {
+                    wal.append_multi(&[&buf[0], record])?
+                } else {
+                    let mut all: Vec<&WalRecord> = buf.iter().collect();
+                    all.push(record);
+                    wal.append_multi(&all)?
+                };
                 self.wal_stats.records_written.fetch_add(n as u64, AtomicOrdering::Relaxed);
                 lsn
             } else {
@@ -1306,8 +1312,15 @@ impl StorageEngine {
                 }
                 observer(record);
             }
-            // Wait for dedicated flush thread to make our LSN durable
-            wal.wait_flushed(lsn);
+            if self.wal_flushed_lsn.load(AtomicOrdering::Acquire) >= lsn {
+                return Ok(());
+            }
+            let _guard = self.wal_flush_lock.lock();
+            if self.wal_flushed_lsn.load(AtomicOrdering::Acquire) >= lsn {
+                return Ok(());
+            }
+            let flushed = wal.flush_split()?;
+            self.wal_flushed_lsn.store(flushed, AtomicOrdering::Release);
         }
         Ok(())
     }
@@ -1476,23 +1489,54 @@ impl StorageEngine {
         if write_set.is_empty() {
             return Ok(());
         }
+        // Single-key fast path: no Vec alloc, no PK clone, skip index machinery
+        if write_set.len() == 1 {
+            let op = &write_set[0];
+            if let Some(table) = self.tables.get(&op.table_id) {
+                if !table.has_secondary_idx.load(AtomicOrdering::Acquire) {
+                    if let Some(chain) = table.data.get(&op.pk) {
+                        let is_insert = chain.commit_no_report(txn_id, commit_ts);
+                        if is_insert {
+                            table.committed_row_count.fetch_add(1, AtomicOrdering::Relaxed);
+                        }
+                    }
+                    return Ok(());
+                }
+                return table.value().commit_keys(txn_id, commit_ts, &[op.pk.clone()]);
+            }
+            // Not an in-memory table — use engine_tables dispatch
+            if let Some(handle) = self.engine_tables.get(&op.table_id) {
+                handle.commit_keys_batch(&[op.pk.clone()], txn_id, commit_ts)?;
+            }
+            return Ok(());
+        }
         let first_table = write_set[0].table_id;
         if write_set.iter().all(|op| op.table_id == first_table) {
             if let Some(table) = self.tables.get(&first_table) {
                 let keys: Vec<PrimaryKey> = write_set.iter().map(|op| op.pk.clone()).collect();
                 return table.value().commit_keys(txn_id, commit_ts, &keys);
             }
+            // single disk table
+            let keys: Vec<PrimaryKey> = write_set.iter().map(|op| op.pk.clone()).collect();
+            if let Some(handle) = self.engine_tables.get(&first_table) {
+                handle.commit_keys_batch(&keys, txn_id, commit_ts)?;
+            }
             return Ok(());
         }
+        // Multi-table: commit each table type
         let mut keys_by_table: HashMap<TableId, Vec<PrimaryKey>> = HashMap::new();
         for op in write_set {
             keys_by_table.entry(op.table_id).or_default().push(op.pk.clone());
         }
         for (table_id, keys) in &keys_by_table {
-            if let Some(table) = self.tables.get(table_id) {
-                table.value().commit_keys(txn_id, commit_ts, keys)?;
+            if let Some(handle) = self.engine_tables.get(table_id) {
+                match handle.value() {
+                    crate::table_handle::TableHandle::Rowstore(t) => t.commit_keys(txn_id, commit_ts, keys)?,
+                    _ => handle.commit_keys_batch(keys, txn_id, commit_ts)?,
+                }
             }
         }
+
         Ok(())
     }
 
@@ -1505,16 +1549,26 @@ impl StorageEngine {
             if let Some(table) = self.tables.get(&first_table) {
                 let keys: Vec<PrimaryKey> = write_set.iter().map(|op| op.pk.clone()).collect();
                 table.value().abort_keys(txn_id, &keys);
+                return;
+            }
+            // Not in-memory — use engine_tables dispatch
+            if let Some(handle) = self.engine_tables.get(&first_table) {
+                let keys: Vec<PrimaryKey> = write_set.iter().map(|op| op.pk.clone()).collect();
+                handle.abort_keys_batch(&keys, txn_id);
             }
             return;
         }
+        // Multi-table
         let mut keys_by_table: HashMap<TableId, Vec<PrimaryKey>> = HashMap::new();
         for op in write_set {
             keys_by_table.entry(op.table_id).or_default().push(op.pk.clone());
         }
         for (table_id, keys) in keys_by_table {
-            if let Some(table) = self.tables.get(&table_id) {
-                table.value().abort_keys(txn_id, &keys);
+            if let Some(handle) = self.engine_tables.get(&table_id) {
+                match handle.value() {
+                    crate::table_handle::TableHandle::Rowstore(t) => t.abort_keys(txn_id, &keys),
+                    _ => handle.abort_keys_batch(&keys, txn_id),
+                }
             }
         }
     }
@@ -1682,13 +1736,17 @@ impl StorageEngine {
         commit_ts: Timestamp,
     ) -> Result<(), StorageError> {
         let write_set = self.take_write_set(txn_id);
-        let _read_set = self.take_read_set(txn_id);
 
         // Fast path: read-only transactions have no writes to commit.
-        // Skip WAL record, memory accounting, and constraint validation.
         if write_set.is_empty() {
+            self.take_read_set(txn_id);
             self.txn_write_bytes.remove(&txn_id);
             return Ok(());
+        }
+
+        // Skip read_set cleanup for single-key writes (autocommit INSERT never records reads)
+        if write_set.len() > 1 {
+            self.take_read_set(txn_id);
         }
 
         // Memory accounting: on commit, write-buffer bytes become committed MVCC bytes.
@@ -1712,8 +1770,9 @@ impl StorageEngine {
             return Err(e);
         }
 
-        // CDC: emit commit marker after both durable and visible.
-        self.ext.cdc_manager.emit_commit(txn_id);
+        if self.ext.cdc_manager.is_enabled() {
+            self.ext.cdc_manager.emit_commit(txn_id);
+        }
 
         Ok(())
     }
@@ -1753,8 +1812,9 @@ impl StorageEngine {
             return Err(e);
         }
 
-        // CDC: emit commit marker after both durable and visible.
-        self.ext.cdc_manager.emit_commit(txn_id);
+        if self.ext.cdc_manager.is_enabled() {
+            self.ext.cdc_manager.emit_commit(txn_id);
+        }
 
         Ok(())
     }
@@ -2116,20 +2176,48 @@ impl StorageEngine {
                 *catalog = ckpt.catalog.clone();
             }
             for (table_id, rows) in &ckpt.table_data {
-                // Find schema for this table
                 let schema = engine.catalog.read().find_table_by_id(*table_id).cloned();
                 if let Some(schema) = schema {
-                    let memtable = Arc::new(MemTable::new(schema));
-                    // Insert rows as already-committed data (use a sentinel txn + commit)
+                    use falcon_common::schema::StorageType;
                     let sentinel_txn = TxnId(0);
-                    let sentinel_ts = Timestamp(1); // committed at ts=1
-                    for (pk, row) in rows {
-                        let chain = Arc::new(crate::mvcc::VersionChain::new());
-                        chain.prepend(sentinel_txn, Some(row.clone()));
-                        chain.commit(sentinel_txn, sentinel_ts);
-                        memtable.data.insert(pk.clone(), chain);
+                    let sentinel_ts = Timestamp(1);
+                    match schema.storage_type {
+                        #[cfg(feature = "rocksdb")]
+                        StorageType::RocksDbRowstore => {
+                            let data_dir = engine.data_dir.as_deref().unwrap_or_else(|| std::path::Path::new("."));
+                            let rdb_dir = data_dir.join(format!("rocksdb_table_{}", table_id.0));
+                            let _ = std::fs::remove_dir_all(&rdb_dir);
+                            if let Ok(rdb) = crate::rocksdb_table::RocksDbTable::open(schema, &rdb_dir) {
+                                // Write checkpoint rows as committed MVCC values
+                                for (pk, row) in rows {
+                                    if let Ok(data) = bincode::serialize(row) {
+                                        let mv = crate::lsm::mvcc_encoding::MvccValue {
+                                            txn_id: sentinel_txn,
+                                            status: crate::lsm::mvcc_encoding::MvccStatus::Committed,
+                                            commit_ts: sentinel_ts,
+                                            is_tombstone: false,
+                                            data,
+                                        };
+                                        let _ = rdb.insert_committed(pk, &mv);
+                                    }
+                                }
+                                let rdb = Arc::new(rdb);
+                                engine.engine_tables.insert(*table_id, crate::table_handle::TableHandle::RocksDb(Arc::clone(&rdb)));
+                                engine.rocksdb_tables.insert(*table_id, rdb);
+                            }
+                        }
+                        _ => {
+                            let memtable = Arc::new(MemTable::new(schema));
+                            for (pk, row) in rows {
+                                let chain = Arc::new(crate::mvcc::VersionChain::new());
+                                chain.prepend(sentinel_txn, Some(row.clone()));
+                                chain.commit(sentinel_txn, sentinel_ts);
+                                memtable.data.insert(pk.clone(), chain);
+                            }
+                            engine.engine_tables.insert(*table_id, crate::table_handle::TableHandle::Rowstore(Arc::clone(&memtable)));
+                            engine.tables.insert(*table_id, memtable);
+                        }
                     }
-                    engine.tables.insert(*table_id, memtable);
                 }
             }
             tracing::info!(
@@ -2147,6 +2235,8 @@ impl StorageEngine {
         };
 
         let mut recovered_write_sets: HashMap<TxnId, Vec<TxnWriteOp>> = HashMap::new();
+        let mut max_commit_ts: u64 = 0;
+        let mut max_txn_id: u64 = 0;
 
         // When recovering from a checkpoint, skip WAL records until we see the
         // Checkpoint marker, then replay everything after it.
@@ -2181,18 +2271,63 @@ impl StorageEngine {
                     let _ = catalog.drop_database(name);
                 }
                 WalRecord::CreateTable { schema } => {
-                    // Skip if table already exists (from checkpoint)
-                    if engine.tables.contains_key(&schema.id) {
+                    // Skip if table already exists (from checkpoint or prior WAL record)
+                    if engine.engine_tables.contains_key(&schema.id) {
+                        engine.catalog.write().add_table(schema.clone());
                         continue;
                     }
-                    let table = Arc::new(MemTable::new(schema.clone()));
-                    engine.tables.insert(schema.id, table);
+                    use falcon_common::schema::StorageType;
+                    match schema.storage_type {
+                        StorageType::Rowstore => {
+                            let table = Arc::new(MemTable::new(schema.clone()));
+                            engine.engine_tables.insert(schema.id, crate::table_handle::TableHandle::Rowstore(Arc::clone(&table)));
+                            engine.tables.insert(schema.id, table);
+                        }
+                        #[cfg(feature = "rocksdb")]
+                        StorageType::RocksDbRowstore => {
+                            let data_dir = engine.data_dir.as_deref().unwrap_or_else(|| std::path::Path::new("."));
+                            let rdb_dir = data_dir.join(format!("rocksdb_table_{}", schema.id.0));
+                            // Wipe stale RocksDB state — WAL is the source of truth.
+                            let _ = std::fs::remove_dir_all(&rdb_dir);
+                            if let Ok(rdb) = crate::rocksdb_table::RocksDbTable::open(schema.clone(), &rdb_dir) {
+                                let rdb = Arc::new(rdb);
+                                engine.engine_tables.insert(schema.id, crate::table_handle::TableHandle::RocksDb(Arc::clone(&rdb)));
+                                engine.rocksdb_tables.insert(schema.id, rdb);
+                            }
+                        }
+                        #[cfg(feature = "lsm")]
+                        StorageType::LsmRowstore => {
+                            let data_dir = engine.data_dir.as_deref().unwrap_or_else(|| std::path::Path::new("."));
+                            let lsm_dir = data_dir.join(format!("lsm_table_{}", schema.id.0));
+                            let _ = std::fs::remove_dir_all(&lsm_dir);
+                            if let Ok(lsm_engine) = crate::lsm::engine::LsmEngine::open(
+                                &lsm_dir,
+                                crate::lsm::engine::LsmConfig::default(),
+                            ) {
+                                let lsm = Arc::new(crate::lsm_table::LsmTable::new(schema.clone(), Arc::new(lsm_engine)));
+                                engine.engine_tables.insert(schema.id, crate::table_handle::TableHandle::Lsm(Arc::clone(&lsm)));
+                                engine.lsm_tables.insert(schema.id, lsm);
+                            }
+                        }
+                        _ => {
+                            // Fallback: create as in-memory Rowstore
+                            let table = Arc::new(MemTable::new(schema.clone()));
+                            engine.engine_tables.insert(schema.id, crate::table_handle::TableHandle::Rowstore(Arc::clone(&table)));
+                            engine.tables.insert(schema.id, table);
+                        }
+                    }
                     engine.catalog.write().add_table(schema.clone());
                 }
                 WalRecord::DropTable { table_name } => {
                     let mut catalog = engine.catalog.write();
                     if let Some(schema) = catalog.find_table(table_name) {
-                        engine.tables.remove(&schema.id);
+                        let tid = schema.id;
+                        engine.engine_tables.remove(&tid);
+                        engine.tables.remove(&tid);
+                        #[cfg(feature = "rocksdb")]
+                        engine.rocksdb_tables.remove(&tid);
+                        #[cfg(feature = "lsm")]
+                        engine.lsm_tables.remove(&tid);
                     }
                     catalog.drop_table(table_name);
                 }
@@ -2201,8 +2336,8 @@ impl StorageEngine {
                     table_id,
                     row,
                 } => {
-                    if let Some(table) = engine.tables.get(table_id) {
-                        if let Ok(pk) = table.insert(row.clone(), *txn_id) {
+                    if let Some(handle) = engine.engine_tables.get(table_id) {
+                        if let Ok(pk) = handle.insert(row, *txn_id) {
                             recovered_write_sets
                                 .entry(*txn_id)
                                 .or_default()
@@ -2218,9 +2353,9 @@ impl StorageEngine {
                     table_id,
                     rows,
                 } => {
-                    if let Some(table) = engine.tables.get(table_id) {
+                    if let Some(handle) = engine.engine_tables.get(table_id) {
                         for row in rows {
-                            if let Ok(pk) = table.insert(row.clone(), *txn_id) {
+                            if let Ok(pk) = handle.insert(row, *txn_id) {
                                 recovered_write_sets
                                     .entry(*txn_id)
                                     .or_default()
@@ -2238,8 +2373,8 @@ impl StorageEngine {
                     pk,
                     new_row,
                 } => {
-                    if let Some(table) = engine.tables.get(table_id) {
-                        if table.update(pk, new_row.clone(), *txn_id).is_ok() {
+                    if let Some(handle) = engine.engine_tables.get(table_id) {
+                        if handle.update(pk, new_row, *txn_id).is_ok() {
                             recovered_write_sets
                                 .entry(*txn_id)
                                 .or_default()
@@ -2255,8 +2390,8 @@ impl StorageEngine {
                     table_id,
                     pk,
                 } => {
-                    if let Some(table) = engine.tables.get(table_id) {
-                        if table.delete(pk, *txn_id).is_ok() {
+                    if let Some(handle) = engine.engine_tables.get(table_id) {
+                        if handle.delete(pk, *txn_id).is_ok() {
                             recovered_write_sets
                                 .entry(*txn_id)
                                 .or_default()
@@ -2270,9 +2405,9 @@ impl StorageEngine {
                 WalRecord::CommitTxn { txn_id, commit_ts }
                 | WalRecord::CommitTxnLocal { txn_id, commit_ts }
                 | WalRecord::CommitTxnGlobal { txn_id, commit_ts } => {
+                    if commit_ts.0 > max_commit_ts { max_commit_ts = commit_ts.0; }
+                    if txn_id.0 > max_txn_id { max_txn_id = txn_id.0; }
                     let write_set = recovered_write_sets.remove(txn_id).unwrap_or_default();
-                    // During recovery, unique validation is skipped — the txn was
-                    // already committed before crash. Indexes are rebuilt afterwards.
                     let _ = engine.apply_commit_to_write_set(*txn_id, *commit_ts, &write_set);
                 }
                 WalRecord::AbortTxn { txn_id }
@@ -2376,9 +2511,9 @@ impl StorageEngine {
                         let table_id = table_schema.id;
                         let schema = table_schema.clone();
                         drop(catalog);
-                        engine
-                            .tables
-                            .insert(table_id, Arc::new(MemTable::new(schema)));
+                        let new_table = Arc::new(MemTable::new(schema));
+                        engine.engine_tables.insert(table_id, crate::table_handle::TableHandle::Rowstore(Arc::clone(&new_table)));
+                        engine.tables.insert(table_id, new_table);
                     }
                 }
                 WalRecord::CreateIndex {
@@ -2411,6 +2546,7 @@ impl StorageEngine {
                         if let Some(table_ref) = engine.tables.get(&meta.table_id) {
                             let mut indexes = table_ref.secondary_indexes.write();
                             indexes.retain(|idx| idx.column_idx != *column_idx);
+                            table_ref.has_secondary_idx.store(!indexes.is_empty(), AtomicOrdering::Release);
                         }
                     }
                 }
@@ -2505,7 +2641,12 @@ impl StorageEngine {
             entry.value().rebuild_secondary_indexes();
         }
 
-        tracing::info!("WAL recovery complete: {} records replayed", records.len());
+        engine.recovered_max_ts.store(max_commit_ts, AtomicOrdering::Relaxed);
+        engine.recovered_max_txn_id.store(max_txn_id, AtomicOrdering::Relaxed);
+        tracing::info!(
+            "WAL recovery complete: {} records replayed, max_commit_ts={}, max_txn_id={}",
+            records.len(), max_commit_ts, max_txn_id
+        );
         Ok(engine)
     }
 

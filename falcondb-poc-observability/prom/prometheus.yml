@@ -9,14 +9,14 @@ global:
 scrape_configs:
   - job_name: "falcondb"
     static_configs:
-      # Node 1 (Primary): admin port 8080
-      - targets: ["host.docker.internal:8080"]
+      # Node 1 (Primary): metrics port 9091
+      - targets: ["host.docker.internal:9091"]
         labels:
           node: "node1"
           initial_role: "primary"
 
-      # Node 2 (Replica): admin port 8081
-      - targets: ["host.docker.internal:8081"]
+      # Node 2 (Replica): metrics port 9092
+      - targets: ["host.docker.internal:9092"]
         labels:
           node: "node2"
           initial_role: "replica"

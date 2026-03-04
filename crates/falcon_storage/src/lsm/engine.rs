@@ -14,10 +14,14 @@ use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock};
 
-use super::block_cache::{BlockCache, BlockCacheSnapshot};
-use super::compaction::{CompactionConfig, CompactionStats, Compactor};
+use super::block_cache::{BlockCache, BlockCacheSnapshot, BlockKey, CachedBlock};
+use super::compaction::{CompactionConfig, CompactionStats, CompactionTask, Compactor};
+use super::gc::GcPolicy;
+use super::manifest::Manifest;
 use super::memtable::LsmMemTable;
 use super::sst::{SstMeta, SstReader, SstWriter};
+use super::throttle::{BackpressureConfig, BackpressureController, BackpressureLevel, RateLimiter};
+use super::workers::BgWorkers;
 
 /// Configuration for the LSM engine.
 #[derive(Debug, Clone)]
@@ -30,6 +34,14 @@ pub struct LsmConfig {
     pub compaction: CompactionConfig,
     /// Whether to sync WAL on every write (true = durable, false = faster).
     pub sync_writes: bool,
+    /// Backpressure thresholds.
+    pub backpressure: BackpressureConfig,
+    /// Flush I/O rate limit (bytes/sec, 0 = unlimited).
+    pub flush_rate_bytes_per_sec: u64,
+    /// Compaction I/O rate limit (bytes/sec, 0 = unlimited).
+    pub compaction_rate_bytes_per_sec: u64,
+    /// MVCC GC safepoint timestamp (0 = disabled).
+    pub gc_safepoint: u64,
 }
 
 impl Default for LsmConfig {
@@ -39,6 +51,10 @@ impl Default for LsmConfig {
             block_cache_bytes: 128 * 1024 * 1024,    // 128 MB
             compaction: CompactionConfig::default(),
             sync_writes: true,
+            backpressure: BackpressureConfig::default(),
+            flush_rate_bytes_per_sec: 0,
+            compaction_rate_bytes_per_sec: 0,
+            gc_safepoint: 0,
         }
     }
 }
@@ -54,8 +70,11 @@ pub struct LsmStats {
     pub total_sst_bytes: u64,
     pub flushes_completed: u64,
     pub writes_stalled: u64,
+    pub writes_delayed: u64,
     pub block_cache: BlockCacheSnapshot,
     pub compaction: CompactionStats,
+    pub read_amplification: usize,
+    pub pending_compaction_bytes: u64,
     pub seq: u64,
 }
 
@@ -78,6 +97,16 @@ pub struct LsmEngine {
     block_cache: Arc<BlockCache>,
     /// Background compactor.
     compactor: Arc<Compactor>,
+    /// Persistent manifest log.
+    manifest: Mutex<Manifest>,
+    /// Backpressure controller.
+    backpressure: BackpressureController,
+    /// Flush rate limiter.
+    flush_limiter: RateLimiter,
+    /// Compaction rate limiter.
+    compaction_limiter: RateLimiter,
+    /// MVCC GC policy.
+    gc_policy: GcPolicy,
 
     /// Global sequence number.
     next_seq: AtomicU64,
@@ -89,7 +118,10 @@ pub struct LsmEngine {
     shutdown: AtomicBool,
     /// Flush lock (prevents concurrent flushes).
     flush_lock: Mutex<()>,
+    /// Optional background flush/compaction workers (set after construction).
+    bg_workers: RwLock<Option<BgWorkers>>,
 }
+
 
 impl LsmEngine {
     /// Open or create an LSM engine at the given directory.
@@ -98,21 +130,28 @@ impl LsmEngine {
 
         let block_cache = Arc::new(BlockCache::new(config.block_cache_bytes));
         let compactor = Arc::new(Compactor::new(config.compaction.clone(), data_dir));
+        let manifest = Manifest::open(data_dir)?;
+        let backpressure = BackpressureController::new(config.backpressure.clone());
+        let flush_limiter = RateLimiter::new(config.flush_rate_bytes_per_sec);
+        let compaction_limiter = RateLimiter::new(config.compaction_rate_bytes_per_sec);
+        let gc_policy = GcPolicy::new(config.gc_safepoint);
 
-        // Initialize with max_levels empty levels
         let max_levels = config.compaction.max_levels as usize;
-        let mut levels = Vec::with_capacity(max_levels);
-        for _ in 0..max_levels {
-            levels.push(Vec::new());
-        }
 
-        // Scan for existing SST files and rebuild manifest
-        let recovered_levels = Self::recover_sst_files(data_dir, max_levels)?;
-        for (i, files) in recovered_levels.into_iter().enumerate() {
-            if i < levels.len() {
-                levels[i] = files;
+        // Try manifest replay first, fall back to filename-based recovery
+        let mut levels = Manifest::replay(data_dir, max_levels)?;
+        let has_manifest_data = levels.iter().any(|l| !l.is_empty());
+        if !has_manifest_data {
+            let recovered = Self::recover_sst_files(data_dir, max_levels)?;
+            for (i, files) in recovered.into_iter().enumerate() {
+                if i < levels.len() {
+                    levels[i] = files;
+                }
             }
         }
+
+        // Determine starting seq from existing SSTs
+        let max_seq = levels.iter().flat_map(|l| l.iter()).map(|m| m.seq).max().unwrap_or(0);
 
         Ok(Self {
             config,
@@ -122,12 +161,23 @@ impl LsmEngine {
             levels: RwLock::new(levels),
             block_cache,
             compactor,
-            next_seq: AtomicU64::new(1),
+            manifest: Mutex::new(manifest),
+            backpressure,
+            flush_limiter,
+            compaction_limiter,
+            gc_policy,
+            next_seq: AtomicU64::new(max_seq + 1),
             flushes_completed: AtomicU64::new(0),
             writes_stalled: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
             flush_lock: Mutex::new(()),
+            bg_workers: RwLock::new(None),
         })
+    }
+
+    /// Attach background flush/compaction workers.
+    pub fn set_bg_workers(&self, workers: BgWorkers) {
+        *self.bg_workers.write() = Some(workers);
     }
 
     /// Create an in-memory-only LSM engine (for testing).
@@ -144,6 +194,7 @@ impl LsmEngine {
                     ..Default::default()
                 },
                 sync_writes: false,
+                ..Default::default()
             },
         )
     }
@@ -152,7 +203,7 @@ impl LsmEngine {
 
     /// Put a key-value pair into the LSM engine.
     pub fn put(&self, key: &[u8], value: &[u8]) -> io::Result<()> {
-        self.maybe_stall_writes()?;
+        self.check_backpressure()?;
 
         let memtable = self.active_memtable.read().clone();
         memtable
@@ -165,13 +216,24 @@ impl LsmEngine {
 
     /// Delete a key (insert a tombstone).
     pub fn delete(&self, key: &[u8]) -> io::Result<()> {
-        self.maybe_stall_writes()?;
+        self.check_backpressure()?;
 
         let memtable = self.active_memtable.read().clone();
         memtable
             .delete(key.to_vec())
             .map_err(|_| io::Error::other("memtable frozen during write"))?;
 
+        self.maybe_trigger_flush();
+        Ok(())
+    }
+
+    /// Batch put: apply multiple key-value pairs with one lock per shard.
+    pub fn put_batch(&self, pairs: &[(Vec<u8>, Vec<u8>)]) -> io::Result<()> {
+        self.check_backpressure()?;
+        let memtable = self.active_memtable.read().clone();
+        memtable
+            .put_batch(pairs)
+            .map_err(|_| io::Error::other("memtable frozen during batch write"))?;
         self.maybe_trigger_flush();
         Ok(())
     }
@@ -273,6 +335,9 @@ impl LsmEngine {
         }
         let meta = writer.finish(0, seq)?;
 
+        // Record in manifest
+        self.manifest.lock().record_add(&meta)?;
+
         // Add to L0
         self.levels.write()[0].push(meta);
 
@@ -282,6 +347,7 @@ impl LsmEngine {
             .retain(|m| !Arc::ptr_eq(m, &frozen));
 
         self.flushes_completed.fetch_add(1, Ordering::Relaxed);
+        self.update_backpressure_counters();
 
         // Maybe trigger compaction
         self.maybe_trigger_compaction()?;
@@ -291,13 +357,27 @@ impl LsmEngine {
 
     // ── Compaction ──────────────────────────────────────────────────────
 
-    /// Run compaction if L0 file count exceeds the trigger threshold.
+    /// Run compaction if needed, using the picker to select tasks.
     pub fn maybe_trigger_compaction(&self) -> io::Result<()> {
-        let l0_count = self.levels.read()[0].len();
-        if !self.compactor.should_compact_l0(l0_count) {
-            return Ok(());
-        }
+        let task = {
+            let levels = self.levels.read();
+            self.compactor.pick(&levels)
+        };
 
+        let task = match task {
+            Some(t) => t,
+            None => return Ok(()),
+        };
+
+        match task {
+            CompactionTask::L0ToL1 => self.run_l0_compaction(),
+            CompactionTask::LevelToLevel { source_level, source_file_idx } => {
+                self.run_level_compaction(source_level, source_file_idx)
+            }
+        }
+    }
+
+    fn run_l0_compaction(&self) -> io::Result<()> {
         let (l0_files, l1_files) = {
             let levels = self.levels.read();
             (
@@ -307,26 +387,78 @@ impl LsmEngine {
         };
 
         let result = self.compactor.compact_l0_to_l1(&l0_files, &l1_files)?;
+        self.apply_compaction_result(&result, 0, 1)?;
+        Ok(())
+    }
 
-        // Update manifest: remove consumed, add produced
-        let mut levels = self.levels.write();
+    fn run_level_compaction(&self, src_level: usize, src_file_idx: usize) -> io::Result<()> {
+        let (src_file, dst_files, max_levels) = {
+            let levels = self.levels.read();
+            let dst_level = src_level + 1;
+            if src_level >= levels.len() || dst_level >= levels.len() {
+                return Ok(());
+            }
+            if src_file_idx >= levels[src_level].len() {
+                return Ok(());
+            }
+            (
+                levels[src_level][src_file_idx].clone(),
+                levels[dst_level].clone(),
+                levels.len(),
+            )
+        };
 
-        // Remove consumed L0 files
-        let consumed_paths: Vec<PathBuf> = result.consumed.iter().map(|m| m.path.clone()).collect();
-        levels[0].retain(|m| !consumed_paths.contains(&m.path));
+        let dst_level = src_level + 1;
+        let result = self.compactor.compact_level(
+            src_level,
+            &src_file,
+            &dst_files,
+            dst_level,
+            Some(&self.gc_policy),
+            Some(&self.compaction_limiter),
+            max_levels,
+        )?;
+        self.apply_compaction_result(&result, src_level, dst_level)?;
+        Ok(())
+    }
 
-        // Replace L1 with produced + non-overlapping existing
-        if levels.len() > 1 {
-            levels[1].retain(|m| !consumed_paths.contains(&m.path));
-            levels[1].extend(result.produced);
-            levels[1].sort_by(|a, b| a.min_key.cmp(&b.min_key));
+    fn apply_compaction_result(
+        &self,
+        result: &super::compaction::CompactionResult,
+        src_level: usize,
+        dst_level: usize,
+    ) -> io::Result<()> {
+        // Update manifest
+        {
+            let mut mf = self.manifest.lock();
+            for meta in &result.consumed {
+                mf.record_remove(meta)?;
+            }
+            for meta in &result.produced {
+                mf.record_add(meta)?;
+            }
         }
 
-        // Clean up consumed SST files from disk
+        // Update in-memory levels
+        let consumed_paths: Vec<PathBuf> = result.consumed.iter().map(|m| m.path.clone()).collect();
+        {
+            let mut levels = self.levels.write();
+            if src_level < levels.len() {
+                levels[src_level].retain(|m| !consumed_paths.contains(&m.path));
+            }
+            if dst_level < levels.len() {
+                levels[dst_level].retain(|m| !consumed_paths.contains(&m.path));
+                levels[dst_level].extend(result.produced.clone());
+                levels[dst_level].sort_by(|a, b| a.min_key.cmp(&b.min_key));
+            }
+        }
+
+        // Clean up consumed SST files
         for meta in &result.consumed {
             let _ = fs::remove_file(&meta.path);
         }
 
+        self.update_backpressure_counters();
         Ok(())
     }
 
@@ -354,8 +486,11 @@ impl LsmEngine {
             total_sst_bytes,
             flushes_completed: self.flushes_completed.load(Ordering::Relaxed),
             writes_stalled: self.writes_stalled.load(Ordering::Relaxed),
+            writes_delayed: self.backpressure.writes_delayed(),
             block_cache: self.block_cache.snapshot(),
             compaction: self.compactor.stats(),
+            read_amplification: Compactor::read_amplification_estimate(&levels),
+            pending_compaction_bytes: self.compactor.pending_compaction_bytes(&levels),
             seq: self.next_seq.load(Ordering::Relaxed),
         }
     }
@@ -386,6 +521,97 @@ impl LsmEngine {
         entries
     }
 
+    /// Full scan: merge memtable + frozen memtables + all SST levels.
+    /// Returns (key, value) pairs sorted by key, deduplicated (newest wins).
+    /// Tombstones (empty value) are excluded from the result.
+    pub fn scan_all(&self) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        // Memtable entries carry real seq numbers (always higher than any SST seq).
+        let mut entries = self.active_memtable_snapshot();
+
+        // SST entries get a virtual seq based on level + file seq so that
+        // L0 (newest flush) beats L1+, and higher SST seq beats lower.
+        // All virtual seqs are capped below the minimum memtable seq (u64::MAX >> 2).
+        let base: u64 = 1 << 40; // large enough to stay below memtable seqs
+        let levels = self.levels.read();
+        for (level_idx, level) in levels.iter().enumerate() {
+            for meta in level {
+                // L0 gets higher virtual seq than L1+ (level_idx 0 → highest).
+                // Within L0, higher SST seq = newer flush.
+                let virtual_seq = base
+                    .saturating_sub(level_idx as u64 * (1 << 20))
+                    .saturating_add(meta.seq);
+                let reader = SstReader::open(&meta.path, meta.id)?;
+                for e in reader.scan()? {
+                    entries.push((e.key, if e.value.is_empty() { None } else { Some(e.value) }, virtual_seq));
+                }
+            }
+        }
+        drop(levels);
+
+        // Sort by key then seq descending; dedup keeps the first (newest) per key.
+        entries.sort_by(|a, b| a.0.cmp(&b.0).then(b.2.cmp(&a.2)));
+        entries.dedup_by(|a, b| a.0 == b.0);
+
+        Ok(entries
+            .into_iter()
+            .filter_map(|(k, v, _)| v.map(|val| (k, val)))
+            .collect())
+    }
+
+    /// Range scan: same merge logic as scan_all but filtered to [start, end).
+    /// Pass `None` for an open-ended bound.
+    pub fn scan_range(
+        &self,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+    ) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let in_range = |k: &[u8]| -> bool {
+            start.map_or(true, |s| k >= s) && end.map_or(true, |e| k < e)
+        };
+
+        let mut entries: Vec<(Vec<u8>, Option<Vec<u8>>, u64)> = self
+            .active_memtable_snapshot()
+            .into_iter()
+            .filter(|(k, _, _)| in_range(k))
+            .collect();
+
+        let base: u64 = 1 << 40;
+        let levels = self.levels.read();
+        for (level_idx, level) in levels.iter().enumerate() {
+            for meta in level {
+                // Skip SST files whose key range doesn't overlap the query range.
+                if let Some(e) = end {
+                    if meta.min_key.as_slice() >= e {
+                        continue;
+                    }
+                }
+                if let Some(s) = start {
+                    if !meta.max_key.is_empty() && meta.max_key.as_slice() < s {
+                        continue;
+                    }
+                }
+                let virtual_seq = base
+                    .saturating_sub(level_idx as u64 * (1 << 20))
+                    .saturating_add(meta.seq);
+                let reader = SstReader::open(&meta.path, meta.id)?;
+                for e in reader.scan()? {
+                    if in_range(&e.key) {
+                        entries.push((e.key, if e.value.is_empty() { None } else { Some(e.value) }, virtual_seq));
+                    }
+                }
+            }
+        }
+        drop(levels);
+
+        entries.sort_by(|a, b| a.0.cmp(&b.0).then(b.2.cmp(&a.2)));
+        entries.dedup_by(|a, b| a.0 == b.0);
+
+        Ok(entries
+            .into_iter()
+            .filter_map(|(k, v, _)| v.map(|val| (k, val)))
+            .collect())
+    }
+
     /// Shutdown the engine, flushing any pending data.
     pub fn shutdown(&self) -> io::Result<()> {
         self.shutdown.store(true, Ordering::SeqCst);
@@ -395,32 +621,81 @@ impl LsmEngine {
     // ── Internal helpers ────────────────────────────────────────────────
 
     fn get_from_sst(&self, meta: &SstMeta, key: &[u8]) -> io::Result<Option<Vec<u8>>> {
-        // Try block cache first
-        // For simplicity, we cache entire SST lookups by (sst_id, key_hash)
         let reader = SstReader::open(&meta.path, meta.id)?;
-        reader.get(key)
+
+        // Bloom + index → find the block that may contain the key
+        let Some((block_offset, block_len)) = reader.find_block_for_key(key) else {
+            return Ok(None);
+        };
+
+        // Check cache with real (sst_id, block_offset)
+        let bk = BlockKey { sst_id: meta.id, offset: block_offset };
+        if let Some(cached) = self.block_cache.get(&bk) {
+            return SstReader::search_block_pub(&cached.data, key);
+        }
+
+        // Cache miss: read block from disk, cache it, then search
+        let block_data = reader.read_block_raw(block_offset, block_len)?;
+        let result = SstReader::search_block_pub(&block_data, key)?;
+        self.block_cache.insert(bk, CachedBlock { data: block_data });
+        Ok(result)
     }
 
     fn maybe_trigger_flush(&self) {
-        let active = self.active_memtable.read();
-        if active.approx_bytes() >= self.config.memtable_budget_bytes {
-            drop(active);
+        let needs_flush = self.active_memtable.read().approx_bytes()
+            >= self.config.memtable_budget_bytes;
+        if !needs_flush {
+            return;
+        }
+        // Wake the background flush worker; it will call flush() which handles
+        // the freeze+swap+SST-write sequence under flush_lock.
+        if let Some(bg) = self.bg_workers.read().as_ref() {
+            bg.notify_flush();
+        } else {
+            // No background worker attached — fall back to inline flush.
             let _ = self.flush();
         }
     }
 
-    fn maybe_stall_writes(&self) -> io::Result<()> {
-        let l0_count = self.levels.read()[0].len();
-        if self.compactor.should_stall_writes(l0_count) {
-            self.writes_stalled.fetch_add(1, Ordering::Relaxed);
-            // In production, this would block until compaction catches up.
-            // For now, return a transient error.
-            return Err(io::Error::other(format!(
-                "write stalled: L0 file count {} exceeds stall trigger",
-                l0_count
-            )));
+    fn check_backpressure(&self) -> io::Result<()> {
+        match self.backpressure.level() {
+            BackpressureLevel::Normal => Ok(()),
+            BackpressureLevel::Delayed => {
+                self.backpressure.check_write().map_err(io::Error::from)
+            }
+            BackpressureLevel::Stopped => {
+                self.writes_stalled.fetch_add(1, Ordering::Relaxed);
+                self.backpressure.check_write().map_err(io::Error::from)
+            }
         }
-        Ok(())
+    }
+
+    fn update_backpressure_counters(&self) {
+        let levels = self.levels.read();
+        let frozen_count = self.frozen_memtables.read().len();
+        self.backpressure.update_immutable_count(frozen_count);
+        if !levels.is_empty() {
+            self.backpressure.update_l0_count(levels[0].len());
+        }
+        self.backpressure.update_compaction_backlog(
+            self.compactor.pending_compaction_bytes(&levels),
+        );
+    }
+
+    /// Update the MVCC GC safepoint.
+    pub fn set_gc_safepoint(&self, ts: u64) {
+        self.gc_policy.set_safe_gc_ts(ts);
+    }
+
+    /// Get the backpressure controller reference.
+    pub fn backpressure(&self) -> &BackpressureController {
+        &self.backpressure
+    }
+
+    /// Compact the manifest log (rewrite from current state).
+    pub fn compact_manifest(&self) -> io::Result<()> {
+        let levels = self.levels.read();
+        self.manifest.lock().compact(&levels)
     }
 
     fn recover_sst_files(data_dir: &Path, max_levels: usize) -> io::Result<Vec<Vec<SstMeta>>> {
@@ -492,6 +767,7 @@ mod tests {
                     ..Default::default()
                 },
                 sync_writes: false,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -565,6 +841,7 @@ mod tests {
                     ..Default::default()
                 },
                 sync_writes: false,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -594,6 +871,7 @@ mod tests {
                     ..Default::default()
                 },
                 sync_writes: false,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -631,6 +909,7 @@ mod tests {
                     ..Default::default()
                 },
                 sync_writes: false,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -686,5 +965,87 @@ mod tests {
         let engine = test_engine(dir.path());
         engine.put(b"key", b"val").unwrap();
         engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn test_lsm_manifest_recovery() {
+        let dir = TempDir::new().unwrap();
+        {
+            let engine = test_engine(dir.path());
+            for i in 0..30 {
+                let key = format!("mk_{:04}", i);
+                engine.put(key.as_bytes(), b"v").unwrap();
+            }
+            engine.flush().unwrap();
+            // Second batch → second SST
+            for i in 30..60 {
+                let key = format!("mk_{:04}", i);
+                engine.put(key.as_bytes(), b"v2").unwrap();
+            }
+            engine.flush().unwrap();
+        }
+        // Manifest should have recorded both SSTs
+        let manifest_path = dir.path().join("MANIFEST");
+        assert!(manifest_path.exists());
+
+        // Reopen via manifest replay
+        let engine = test_engine(dir.path());
+        assert_eq!(engine.get(b"mk_0000").unwrap(), Some(b"v".to_vec()));
+        assert_eq!(engine.get(b"mk_0059").unwrap(), Some(b"v2".to_vec()));
+        let stats = engine.stats();
+        assert!(stats.l0_file_count >= 2 || stats.total_sst_files >= 2);
+    }
+
+    #[test]
+    fn test_lsm_manifest_compact() {
+        let dir = TempDir::new().unwrap();
+        let engine = test_engine(dir.path());
+        for i in 0..20 {
+            let key = format!("mc_{:04}", i);
+            engine.put(key.as_bytes(), b"x").unwrap();
+        }
+        engine.flush().unwrap();
+        engine.compact_manifest().unwrap();
+
+        // Reopen should still work
+        drop(engine);
+        let engine = test_engine(dir.path());
+        assert_eq!(engine.get(b"mc_0000").unwrap(), Some(b"x".to_vec()));
+    }
+
+    #[test]
+    fn test_lsm_stats_extended() {
+        let dir = TempDir::new().unwrap();
+        let engine = test_engine(dir.path());
+        engine.put(b"s1", b"v1").unwrap();
+        engine.flush().unwrap();
+        let stats = engine.stats();
+        assert_eq!(stats.writes_delayed, 0);
+        assert!(stats.read_amplification >= 0);
+    }
+
+    #[test]
+    fn test_lsm_gc_safepoint() {
+        let dir = TempDir::new().unwrap();
+        let engine = test_engine(dir.path());
+        engine.set_gc_safepoint(100);
+        engine.put(b"gc1", b"v1").unwrap();
+        assert_eq!(engine.get(b"gc1").unwrap(), Some(b"v1".to_vec()));
+    }
+
+    #[test]
+    fn test_lsm_seq_continues_after_reopen() {
+        let dir = TempDir::new().unwrap();
+        let seq1;
+        {
+            let engine = test_engine(dir.path());
+            engine.put(b"r1", b"v1").unwrap();
+            engine.flush().unwrap();
+            seq1 = engine.stats().seq;
+        }
+        {
+            let engine = test_engine(dir.path());
+            assert!(engine.stats().seq >= seq1, "seq should be >= after reopen");
+        }
     }
 }

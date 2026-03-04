@@ -1,0 +1,24 @@
+{
+  "workload": "C",
+  "name": "durability_crash",
+  "timestamp": "20260304T115523Z",
+  "config": {
+    "rounds": 3,
+    "writes_per_round": 5000,
+    "kill_after": 3000,
+    "falcon_bin": "H:/falcondb-main/target/release/falcon.exe",
+    "durability": "fsync + fdatasync + WAL"
+  },
+  "invariants_tested": [
+    "CP-4: crash after DurableCommit must not lose txn",
+    "FC-1: crash before CP-D -> txn rolled back",
+    "FC-2: crash after CP-D -> txn survives",
+    "FC-4: WAL replay is idempotent (no double commit)"
+  ],
+  "rounds": [
+    { "round": 1, "verdict": "PASS", "client_committed": 3000, "db_after_recovery": 3000, "missing_data_loss": 0, "phantom": 0, "duplicates": 0, "kill_after": 3000 },
+    { "round": 2, "verdict": "PASS", "client_committed": 3000, "db_after_recovery": 3000, "missing_data_loss": 0, "phantom": 0, "duplicates": 0, "kill_after": 3000 },
+    { "round": 3, "verdict": "PASS", "client_committed": 3000, "db_after_recovery": 3000, "missing_data_loss": 0, "phantom": 0, "duplicates": 0, "kill_after": 3000 }
+  ],
+  "verdict": "PASS"
+}

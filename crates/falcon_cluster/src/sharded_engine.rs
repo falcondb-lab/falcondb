@@ -5,6 +5,7 @@
 //! This allows testing scatter/gather, two-phase agg, and replication
 //! without real network overhead.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use falcon_common::datum::OwnedRow;
@@ -12,6 +13,7 @@ use falcon_common::error::FalconError;
 use falcon_common::schema::TableSchema;
 use falcon_common::types::{DataType, ShardId};
 use falcon_storage::engine::StorageEngine;
+use falcon_storage::wal::SyncMode;
 use falcon_txn::manager::TxnManager;
 
 use crate::sharding;
@@ -48,6 +50,65 @@ impl ShardedEngine {
             })
             .collect();
         Self { shards, num_shards }
+    }
+
+    /// Create N WAL-backed shards under `base_dir/shard_<i>/`.
+    pub fn new_with_wal(
+        num_shards: u64,
+        base_dir: &Path,
+        sync_mode: SyncMode,
+        wal_mode: &str,
+        no_buffering: bool,
+    ) -> Result<Self, FalconError> {
+        let mut shards = Vec::with_capacity(num_shards as usize);
+        for i in 0..num_shards {
+            let shard_dir = base_dir.join(format!("shard_{i}"));
+            std::fs::create_dir_all(&shard_dir).map_err(|e| {
+                FalconError::Internal(format!("failed to create shard dir {:?}: {e}", shard_dir))
+            })?;
+
+            let has_wal = std::fs::read_dir(&shard_dir)
+                .map(|entries| {
+                    entries.flatten().any(|e| {
+                        let s = e.file_name();
+                        let s = s.to_string_lossy();
+                        s.starts_with("falcon_") && s.ends_with(".wal")
+                    })
+                })
+                .unwrap_or(false);
+
+            let storage = if has_wal {
+                StorageEngine::recover(&shard_dir).map_err(|e| {
+                    FalconError::Internal(format!("shard {i} WAL recovery failed: {e}"))
+                })?
+            } else {
+                StorageEngine::new_with_wal_mode(
+                    Some(&shard_dir),
+                    sync_mode,
+                    wal_mode,
+                    no_buffering,
+                )
+                .map_err(|e| {
+                    FalconError::Internal(format!("shard {i} WAL init failed: {e}"))
+                })?
+            };
+            let storage = Arc::new(storage);
+            let txn_mgr = Arc::new(TxnManager::new(storage.clone()));
+
+            // Advance counters past recovered state
+            let max_ts = storage.recovered_max_ts.load(std::sync::atomic::Ordering::Relaxed);
+            let max_txn = storage.recovered_max_txn_id.load(std::sync::atomic::Ordering::Relaxed);
+            if max_ts > 0 || max_txn > 0 {
+                txn_mgr.advance_counters_past(max_ts, max_txn);
+            }
+
+            shards.push(ShardInstance {
+                shard_id: ShardId(i),
+                storage,
+                txn_mgr,
+            });
+        }
+        Ok(Self { shards, num_shards })
     }
 
     /// Get a shard instance by ShardId.

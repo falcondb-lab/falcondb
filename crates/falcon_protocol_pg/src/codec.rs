@@ -463,10 +463,8 @@ pub fn decode_sasl_response(buf: &mut BytesMut) -> Result<Option<FrontendMessage
     Ok(Some(FrontendMessage::SASLResponse { data }))
 }
 
-/// Encode a backend message into bytes.
-pub fn encode_message(msg: &BackendMessage) -> BytesMut {
-    let mut buf = BytesMut::new();
-
+/// Encode a backend message directly into an existing buffer.
+pub fn encode_message_into(buf: &mut BytesMut, msg: &BackendMessage) {
     match msg {
         BackendMessage::AuthenticationOk => {
             buf.put_u8(b'R');
@@ -517,15 +515,15 @@ pub fn encode_message(msg: &BackendMessage) -> BytesMut {
             buf.put_u8(b'A');
             buf.put_i32(4 + body_len as i32);
             buf.put_i32(*process_id);
-            write_cstring(&mut buf, channel);
-            write_cstring(&mut buf, payload);
+            write_cstring(buf, channel);
+            write_cstring(buf, payload);
         }
         BackendMessage::ParameterStatus { name, value } => {
             let len = 4 + name.len() + 1 + value.len() + 1;
             buf.put_u8(b'S');
             buf.put_i32(len as i32);
-            write_cstring(&mut buf, name);
-            write_cstring(&mut buf, value);
+            write_cstring(buf, name);
+            write_cstring(buf, value);
         }
         BackendMessage::BackendKeyData {
             process_id,
@@ -580,7 +578,7 @@ pub fn encode_message(msg: &BackendMessage) -> BytesMut {
             let len = 4 + tag.len() + 1;
             buf.put_u8(b'C');
             buf.put_i32(len as i32);
-            write_cstring(&mut buf, tag);
+            write_cstring(buf, tag);
         }
         BackendMessage::ErrorResponse {
             severity,
@@ -691,7 +689,12 @@ pub fn encode_message(msg: &BackendMessage) -> BytesMut {
             buf.put_i32(4);
         }
     }
+}
 
+/// Encode a backend message into bytes.
+pub fn encode_message(msg: &BackendMessage) -> BytesMut {
+    let mut buf = BytesMut::new();
+    encode_message_into(&mut buf, msg);
     buf
 }
 

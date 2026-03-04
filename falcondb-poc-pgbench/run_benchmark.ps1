@@ -13,6 +13,19 @@ $ErrorActionPreference = 'Stop'
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
+# ── Auto-detect PostgreSQL bin directory ─────────────────────────────────
+if (-not $env:PG_BIN_DIR) {
+    $pgDirs = Get-ChildItem "C:\Program Files\PostgreSQL" -ErrorAction SilentlyContinue |
+              Sort-Object Name -Descending | Select-Object -First 1
+    if ($pgDirs) {
+        $env:PG_BIN_DIR = Join-Path $pgDirs.FullName "bin"
+    }
+}
+if ($env:PG_BIN_DIR -and ($env:PATH -notlike "*$($env:PG_BIN_DIR)*")) {
+    $env:PATH = "$($env:PG_BIN_DIR);$env:PATH"
+}
+
+if (-not $env:PG_USER)         { $env:PG_USER         = "postgres" }
 if (-not $env:FALCON_BIN)      { $env:FALCON_BIN      = "target\release\falcon_server.exe" }
 if (-not $env:PGBENCH_SCALE)   { $env:PGBENCH_SCALE   = "10" }
 if (-not $env:PGBENCH_CLIENTS) { $env:PGBENCH_CLIENTS = "10" }

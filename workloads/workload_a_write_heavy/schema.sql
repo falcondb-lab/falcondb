@@ -11,11 +11,5 @@ CREATE TABLE orders (
     created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- Pre-seed 10K rows for UPDATE targets
-INSERT INTO orders (order_id, customer_id, amount, status)
-SELECT
-    g,
-    (g % 5000) + 1,
-    100 + (g % 9900),
-    'active'
-FROM generate_series(1, 10000) AS g;
+-- Seed data is loaded by run.ps1 (batch INSERT VALUES)
+-- FalconDB does not support INSERT...SELECT FROM generate_series

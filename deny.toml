@@ -54,14 +54,7 @@ wildcards = "allow"
 # Crates we never want in the tree (direct or otherwise).
 deny = []
 
-# TODO: openssl is pulled in transitively (via tonic / hyper / native-tls paths).
-# Once the dependency chain is cleaned up, add it to `deny` with:
-#   { name = "openssl", reason = "use rustls instead for memory safety" }
-# For now, skip it to unblock CI.
-skip = [
-    { name = "openssl", version = "*" },
-    { name = "openssl-sys", version = "*" },
-]
+skip = []
 skip-tree = []
 
 # ── Sources ──────────────────────────────────────────────────────────────────

@@ -93,7 +93,7 @@ try {
         Write-Host "-- Round $round/$Rounds --"
 
         $CommittedLog = Join-Path $env:TEMP "falcon_crash_committed_${round}.txt"
-        @() | Set-Content $CommittedLog
+        New-Item -Path $CommittedLog -ItemType File -Force | Out-Null
 
         # 1. Start fresh
         Write-Host "  Starting FalconDB..."
@@ -110,9 +110,9 @@ try {
         $failed    = 0
 
         for ($seq = 1; $seq -le $WriteCount; $seq++) {
-            $result = & $psql -h $DbHost -p $Port -U $User -d $Db -t -A -c `
-                "INSERT INTO commit_log (seq_id, payload) VALUES ($seq, 'round${round}-seq${seq}'); SELECT $seq;" 2>$null
-            if ($LASTEXITCODE -eq 0 -and "$result".Trim() -eq "$seq") {
+            & $psql -h $DbHost -p $Port -U $User -d $Db -t -A -c `
+                "INSERT INTO commit_log (seq_id, payload) VALUES ($seq, 'round${round}-seq${seq}')" 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) {
                 Add-Content -Path $CommittedLog -Value $seq
                 $committed++
             } else {

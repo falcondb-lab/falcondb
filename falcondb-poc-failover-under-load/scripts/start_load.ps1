@@ -37,7 +37,13 @@ if (Test-Path $RustBin) {
         -RedirectStandardError  (Join-Path $OutputDir "writer_stderr.log") `
         -PassThru -WindowStyle Hidden
 } else {
-    $py = if (Get-Command python3 -ErrorAction SilentlyContinue) { "python3" } elseif (Get-Command python -ErrorAction SilentlyContinue) { "python" } else { $null }
+    $py = $null
+    $pyPaths = @("C:\Users\003\AppData\Local\Programs\Python\Python312\python.exe")
+    foreach ($p in $pyPaths) { if (Test-Path $p) { $py = $p; break } }
+    if (-not $py) {
+        if (Get-Command python3 -ErrorAction SilentlyContinue) { $py = "python3" }
+        elseif (Get-Command python -ErrorAction SilentlyContinue) { $py = "python" }
+    }
     if ($py) {
         Info "Launching Python fallback workload generator (background)..."
         $writerProc = Start-Process -FilePath $py -ArgumentList (Join-Path $PocRoot "workload\tx_marker_writer.py") `

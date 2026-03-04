@@ -1,0 +1,13 @@
+pgbench (16.3, server 18.0.0)
+transaction type: h:\falcondb-main\falcondb-poc-pgbench\scripts\simple_update.sql
+scaling factor: 1
+query mode: simple
+number of clients: 10
+number of threads: 2
+maximum number of tries: 1
+duration: 10 s
+number of transactions actually processed: 27500
+number of failed transactions: 5 (0.018%)
+latency average = 3.625 ms (including failures)
+initial connection time = 39.156 ms
+tps = 2758.305810 (without initial connection time)

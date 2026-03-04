@@ -29,7 +29,7 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 # Async runtime
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros", "signal"] }
 tokio-util = "0.7"
 tokio-stream = "0.1"
 async-trait = "0.1"
@@ -103,6 +103,12 @@ regex = "1"
 
 # Base64
 base64 = "0.22"
+
+# RocksDB
+rocksdb = "0.22"
+
+# redb
+redb = "3.1.0"
 
 # Compression
 lz4_flex = "0.11"

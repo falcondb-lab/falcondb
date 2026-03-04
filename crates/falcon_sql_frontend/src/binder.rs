@@ -52,6 +52,17 @@ impl Binder {
         }
     }
 
+    fn default_storage_type() -> falcon_common::schema::StorageType {
+        match falcon_common::globals::default_table_engine() {
+            "columnstore" => falcon_common::schema::StorageType::Columnstore,
+            "disk" | "disk_rowstore" | "diskrowstore" => falcon_common::schema::StorageType::DiskRowstore,
+            "lsm" | "lsm_rowstore" | "lsmrowstore" => falcon_common::schema::StorageType::LsmRowstore,
+            "rocksdb" | "rocks" => falcon_common::schema::StorageType::RocksDbRowstore,
+            "redb" => falcon_common::schema::StorageType::RedbRowstore,
+            _ => falcon_common::schema::StorageType::Rowstore,
+        }
+    }
+
     /// Bind a statement with parameter type inference.
     /// Returns a `BindResult` containing the bound statement and inferred param types.
     /// If `type_hints` is provided, those types seed the ParamEnv (from PG Parse message).
@@ -703,6 +714,11 @@ impl Binder {
                                 "CURRENT_TIME" => {
                                     default_fn = Some(falcon_common::schema::DefaultFn::CurrentTime);
                                 }
+                                "NEXTVAL" => {
+                                    if let Some(seq_name) = Self::extract_nextval_seq_name(f) {
+                                        default_fn = Some(falcon_common::schema::DefaultFn::Nextval(seq_name));
+                                    }
+                                }
                                 _ => {}
                             }
                         }
@@ -871,7 +887,7 @@ impl Binder {
         }
         // Resolve storage engine type from ENGINE= option (like SingleStore)
         let storage_type = create.engine.as_ref().map_or(
-            falcon_common::schema::StorageType::Rowstore,
+            Self::default_storage_type(),
             |engine| match engine.name.to_lowercase().as_str() {
                 "columnstore" => falcon_common::schema::StorageType::Columnstore,
                 "disk" | "disk_rowstore" | "diskrowstore" => {
@@ -880,7 +896,11 @@ impl Binder {
                 "lsm" | "lsm_rowstore" | "lsmrowstore" => {
                     falcon_common::schema::StorageType::LsmRowstore
                 }
-                _ => falcon_common::schema::StorageType::Rowstore,
+                "rocksdb" | "rocks" => {
+                    falcon_common::schema::StorageType::RocksDbRowstore
+                }
+                "redb" => falcon_common::schema::StorageType::RedbRowstore,
+                _ => Self::default_storage_type(),
             },
         );
 
@@ -1344,6 +1364,19 @@ impl Binder {
             }
             _ => Err(SqlError::Unsupported("Non-table FROM source".into())),
         }
+    }
+
+    fn extract_nextval_seq_name(f: &ast::Function) -> Option<String> {
+        if let ast::FunctionArguments::List(args) = &f.args {
+            if let Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(expr))) = args.args.first() {
+                match expr {
+                    Expr::Value(Value::SingleQuotedString(s)) => return Some(s.clone()),
+                    Expr::Value(Value::DoubleQuotedString(s)) => return Some(s.clone()),
+                    _ => {}
+                }
+            }
+        }
+        None
     }
 
     pub(crate) fn value_to_datum(&self, value: &Value) -> Result<Datum, SqlError> {

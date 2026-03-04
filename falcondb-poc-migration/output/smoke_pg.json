@@ -1,0 +1,68 @@
+{
+  "target": "127.0.0.1:5432/shop_demo",
+  "timestamp": "2026-03-04T05:23:50.244610Z",
+  "results": [
+    {
+      "workflow": "create_order",
+      "result": "PASS",
+      "order_id": 9,
+      "payment_id": 7,
+      "created_at": "2026-03-04 13:23:50.239837",
+      "duration_ms": 2.0
+    },
+    {
+      "workflow": "update_order",
+      "result": "PASS",
+      "order_id": 9,
+      "duration_ms": 1.5
+    },
+    {
+      "workflow": "query_order",
+      "result": "PASS",
+      "order_id": 1,
+      "status": "completed",
+      "total_amount": 15000,
+      "customer_name": "Alice Chen",
+      "item_count": 3,
+      "duration_ms": 0.0
+    },
+    {
+      "workflow": "list_recent_orders",
+      "result": "PASS",
+      "count": 5,
+      "orders": [
+        {
+          "id": 9,
+          "customer": "Alice Chen",
+          "status": "completed",
+          "amount": 25000
+        },
+        {
+          "id": 8,
+          "customer": "Alice Chen",
+          "status": "shipped",
+          "amount": 18000
+        },
+        {
+          "id": 7,
+          "customer": "Bob Martinez",
+          "status": "pending",
+          "amount": 9500
+        },
+        {
+          "id": 6,
+          "customer": "Eve Park",
+          "status": "cancelled",
+          "amount": 12000
+        },
+        {
+          "id": 5,
+          "customer": "Dave Johnson",
+          "status": "completed",
+          "amount": 35000
+        }
+      ],
+      "duration_ms": 1.5
+    }
+  ]
+}

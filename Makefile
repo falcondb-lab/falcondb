@@ -186,7 +186,7 @@ gate: test e2e_failover chaos bench_backpressure rbac_matrix
 	@mkdir -p $(EVIDENCE)
 	@echo ""
 	@echo "=================================================================="
-	@echo "  FalconDB 1.0.0-rc.1 Production Gate — $(TIMESTAMP)"
+	@echo "  FalconDB 1.2.0 Production Gate — $(TIMESTAMP)"
 	@echo "=================================================================="
 	@echo ""
 	@ALL_PASS=true; \

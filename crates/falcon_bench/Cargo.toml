@@ -15,5 +15,5 @@ falcon_txn = { path = "../falcon_txn" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
+tokio.workspace = true
 tokio-postgres = { version = "0.7", features = [] }

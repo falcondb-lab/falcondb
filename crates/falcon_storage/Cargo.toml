@@ -4,11 +4,13 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-default = []
-# Non-v1.0 storage engines (STUB / EXPERIMENTAL). Default OFF.
+default = ["lsm"]
+# Non-v1.0 storage engines (STUB / EXPERIMENTAL).
 columnstore = []
 disk_rowstore = []
 lsm = []
+rocksdb = ["dep:rocksdb"]
+redb = ["dep:redb"]
 # Linux 6.x io_uring backend for WAL I/O. Default OFF.
 # Enable with: cargo build --features io_uring
 io_uring = ["dep:io-uring"]
@@ -43,6 +45,8 @@ hmac.workspace = true
 pbkdf2.workspace = true
 aes-gcm.workspace = true
 rand.workspace = true
+rocksdb = { workspace = true, optional = true }
+redb = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = [

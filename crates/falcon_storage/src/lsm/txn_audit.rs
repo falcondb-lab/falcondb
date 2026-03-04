@@ -233,6 +233,7 @@ impl TxnAuditLog {
                 ..Default::default()
             },
             sync_writes: false, // audit is off the hot path
+            ..Default::default()
         };
         let engine = LsmEngine::open(&audit_dir, config)?;
         Ok(Self { engine })

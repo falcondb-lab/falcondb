@@ -205,7 +205,7 @@ impl super::DistributedQueryEngine {
             });
 
         let mut total_rows_affected = 0u64;
-        let mut tag = String::new();
+        let mut tag: &'static str = "INSERT";
         let mut errors: Vec<String> = Vec::new();
         let mut succeeded = 0usize;
 
@@ -216,9 +216,7 @@ impl super::DistributedQueryEngine {
                     tag: t,
                 }) => {
                     total_rows_affected += rows_affected;
-                    if tag.is_empty() {
-                        tag = t;
-                    }
+                    tag = t;
                     succeeded += 1;
                 }
                 Ok(other) => return Ok(other),
@@ -269,7 +267,7 @@ impl super::DistributedQueryEngine {
             _ => {
                 return Ok(ExecutionResult::Dml {
                     rows_affected: 0,
-                    tag: "INSERT".into(),
+                    tag: "INSERT",
                 })
             }
         };
@@ -277,7 +275,7 @@ impl super::DistributedQueryEngine {
         if result_rows.is_empty() {
             return Ok(ExecutionResult::Dml {
                 rows_affected: 0,
-                tag: "INSERT".into(),
+                tag: "INSERT",
             });
         }
 
@@ -449,7 +447,7 @@ impl super::DistributedQueryEngine {
         shard_count: usize,
     ) -> Result<ExecutionResult, FalconError> {
         let mut total_rows_affected = 0u64;
-        let mut tag = String::new();
+        let mut tag: &'static str = "";
         let mut errors: Vec<String> = Vec::new();
         let mut succeeded = 0usize;
         // For RETURNING: collect query rows from all shards

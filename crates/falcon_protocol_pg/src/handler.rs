@@ -27,6 +27,28 @@ use falcon_txn::{SlowPathMode, TxnClassification, TxnManager};
 use parking_lot::RwLock;
 
 use crate::codec::{BackendMessage, FieldDescription};
+
+fn datum_add(a: &Datum, b: &Datum) -> Option<Datum> {
+    match (a, b) {
+        (Datum::Int32(x), Datum::Int32(y)) => Some(Datum::Int32(x.wrapping_add(*y))),
+        (Datum::Int64(x), Datum::Int64(y)) => Some(Datum::Int64(x.wrapping_add(*y))),
+        (Datum::Int32(x), Datum::Int64(y)) => Some(Datum::Int64((*x as i64).wrapping_add(*y))),
+        (Datum::Int64(x), Datum::Int32(y)) => Some(Datum::Int64(x.wrapping_add(*y as i64))),
+        (Datum::Float64(x), Datum::Float64(y)) => Some(Datum::Float64(x + y)),
+        _ => None,
+    }
+}
+
+fn datum_sub(a: &Datum, b: &Datum) -> Option<Datum> {
+    match (a, b) {
+        (Datum::Int32(x), Datum::Int32(y)) => Some(Datum::Int32(x.wrapping_sub(*y))),
+        (Datum::Int64(x), Datum::Int64(y)) => Some(Datum::Int64(x.wrapping_sub(*y))),
+        (Datum::Int32(x), Datum::Int64(y)) => Some(Datum::Int64((*x as i64).wrapping_sub(*y))),
+        (Datum::Int64(x), Datum::Int32(y)) => Some(Datum::Int64(x.wrapping_sub(*y as i64))),
+        (Datum::Float64(x), Datum::Float64(y)) => Some(Datum::Float64(x - y)),
+        _ => None,
+    }
+}
 use crate::handler_utils::classification_from_routing_hint;
 use crate::plan_cache::PlanCache;
 use crate::session::PgSession;
@@ -64,6 +86,8 @@ pub(crate) struct ClusterContext {
     pub(crate) slow_shard_tracker: Arc<SlowShardTracker>,
     pub(crate) fault_injector: Arc<FaultInjector>,
     pub(crate) raft_coordinator: Option<Arc<RaftShardCoordinator>>,
+    pub(crate) lifecycle_coordinator: Option<Arc<falcon_cluster::ClusterLifecycleCoordinator>>,
+    pub(crate) failure_detector: Option<Arc<falcon_cluster::ClusterFailureDetector>>,
 }
 
 /// Observability / diagnostics context.
@@ -91,6 +115,8 @@ pub struct QueryHandler {
     pub(crate) observability: ObservabilityContext,
 
     flush_stats_counter: Arc<AtomicU64>,
+    /// Last-1 schema cache: avoids catalog RwLock + deep clone on repeated INSERTs.
+    schema_cache: Arc<parking_lot::Mutex<Option<(String, falcon_common::schema::TableSchema)>>>,
 }
 
 impl QueryHandler {
@@ -106,6 +132,7 @@ impl QueryHandler {
             txn_mgr,
             executor,
             flush_stats_counter: Arc::new(AtomicU64::new(0)),
+            schema_cache: Arc::new(parking_lot::Mutex::new(None)),
             enterprise: EnterpriseContext {
                 tenant_registry: tenant_reg,
                 audit_log: Arc::new(falcon_storage::audit::AuditLog::new()),
@@ -132,6 +159,8 @@ impl QueryHandler {
                 slow_shard_tracker: SlowShardTracker::new(SlowShardConfig::default()),
                 fault_injector: Arc::new(FaultInjector::new()),
                 raft_coordinator: None,
+                lifecycle_coordinator: None,
+                failure_detector: None,
             },
             observability: ObservabilityContext {
                 slow_query_log: Arc::new(SlowQueryLog::disabled()),
@@ -165,6 +194,7 @@ impl QueryHandler {
             txn_mgr,
             executor,
             flush_stats_counter: Arc::new(AtomicU64::new(0)),
+            schema_cache: Arc::new(parking_lot::Mutex::new(None)),
             enterprise: EnterpriseContext {
                 tenant_registry: tenant_reg,
                 audit_log: Arc::new(falcon_storage::audit::AuditLog::new()),
@@ -191,6 +221,8 @@ impl QueryHandler {
                 slow_shard_tracker: SlowShardTracker::new(SlowShardConfig::default()),
                 fault_injector: Arc::new(FaultInjector::new()),
                 raft_coordinator: None,
+                lifecycle_coordinator: None,
+                failure_detector: None,
             },
             observability: ObservabilityContext {
                 slow_query_log: Arc::new(SlowQueryLog::disabled()),
@@ -235,6 +267,14 @@ impl QueryHandler {
         self.cluster.raft_coordinator = Some(coordinator);
     }
 
+    pub fn set_lifecycle_coordinator(&mut self, lc: Arc<falcon_cluster::ClusterLifecycleCoordinator>) {
+        self.cluster.lifecycle_coordinator = Some(lc);
+    }
+
+    pub fn set_failure_detector(&mut self, fd: Arc<falcon_cluster::ClusterFailureDetector>) {
+        self.cluster.failure_detector = Some(fd);
+    }
+
     /// Set a shared SecurityManager instance (so SHOW falcon.security reflects
     /// the same state as the PgServer IP allowlist enforcement).
     pub fn set_security_manager(&mut self, mgr: Arc<falcon_storage::security_manager::SecurityManager>) {
@@ -262,18 +302,110 @@ impl QueryHandler {
         if sql.is_empty() {
             return vec![BackendMessage::EmptyQueryResponse];
         }
+        let t0 = std::time::Instant::now();
+        let first = sql.as_bytes().first().copied().unwrap_or(0);
+        let msgs = self.handle_query_dispatch(sql, first, session);
+        let elapsed_us = t0.elapsed().as_micros() as u64;
+        let qtype = match first {
+            b'I' | b'i' => "insert", b'U' | b'u' => "update",
+            b'D' | b'd' => "delete", b'S' | b's' => "select",
+            b'C' | b'c' | b'B' | b'b' | b'R' | b'r' | b'E' | b'e' => "txn_control",
+            _ => "other",
+        };
+        let ok = !msgs.iter().any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
+        falcon_observability::record_query_metrics(elapsed_us, qtype, ok);
+        msgs
+    }
 
-        // Intercept system/catalog queries that psql sends
-        if let Some(response) = self.handle_system_query(sql, session) {
-            return response;
+    fn handle_query_dispatch(&self, sql: &str, first: u8, session: &mut PgSession) -> Vec<BackendMessage> {
+        // Fast-path transaction control: bypass sqlparser+binder+planner entirely
+        match first {
+            b'B' | b'b' if sql.len() >= 5 && sql.as_bytes()[..5].eq_ignore_ascii_case(b"BEGIN") => {
+                let rest = sql[5..].trim().trim_end_matches(';').trim();
+                if rest.is_empty()
+                    || rest.eq_ignore_ascii_case("TRANSACTION")
+                    || rest.eq_ignore_ascii_case("WORK")
+                {
+                    return self.fast_begin(session);
+                }
+            }
+            b'C' | b'c' if sql.len() >= 6 && sql.as_bytes()[..6].eq_ignore_ascii_case(b"COMMIT") => {
+                let rest = sql[6..].trim().trim_end_matches(';').trim();
+                if rest.is_empty()
+                    || rest.eq_ignore_ascii_case("TRANSACTION")
+                    || rest.eq_ignore_ascii_case("WORK")
+                {
+                    return self.fast_commit(session);
+                }
+            }
+            b'E' | b'e' if sql.len() >= 3 && sql.as_bytes()[..3].eq_ignore_ascii_case(b"END") => {
+                let rest = sql[3..].trim().trim_end_matches(';').trim();
+                if rest.is_empty()
+                    || rest.eq_ignore_ascii_case("TRANSACTION")
+                    || rest.eq_ignore_ascii_case("WORK")
+                {
+                    return self.fast_commit(session);
+                }
+            }
+            b'R' | b'r' if sql.len() >= 8 && sql.as_bytes()[..8].eq_ignore_ascii_case(b"ROLLBACK") => {
+                let rest = sql[8..].trim().trim_end_matches(';').trim();
+                // Don't intercept ROLLBACK TO SAVEPOINT
+                if rest.is_empty() {
+                    return self.fast_rollback(session);
+                }
+            }
+            _ => {}
         }
 
-        // Build per-request context for tracing and error enrichment.
-        let rctx = falcon_common::request_context::RequestContext::new(session.id as u64);
+        // Intercept system/catalog queries that psql sends (skip for DML/SELECT — no match possible)
+        if first != b'I' && first != b'i' && first != b'U' && first != b'u'
+            && first != b'D' && first != b'd' && first != b'S' && first != b's'
+        {
+            if let Some(response) = self.handle_system_query(sql, session) {
+                return response;
+            }
+        }
 
-        // Wrap the core query path in catch_request for crash domain isolation.
-        // If any code below panics, the panic is caught and converted to an
-        // InternalBug error response — the connection stays alive.
+        // Fast-path DML: skip crash domain + RequestContext overhead
+        if first == b'I' || first == b'i' {
+            if let Some(fast_ins) = self.try_fast_insert_parse(sql) {
+                // Ultra-fast: skip executor entirely for simple schemas
+                if let Some(result) = self.try_direct_insert(&fast_ins, session) {
+                    return match result {
+                        Ok(msgs) => msgs,
+                        Err(e) => vec![self.error_response(&e)],
+                    };
+                }
+                let plan = match Planner::plan_insert_owned(fast_ins) {
+                    Ok(p) => Planner::wrap_distributed(p, &self.cluster.shard_ids),
+                    Err(e) => return vec![self.error_response(&FalconError::Sql(e))],
+                };
+                return match self.execute_single_plan(sql, plan, session) {
+                    Ok(msgs) => msgs,
+                    Err(e) => vec![self.error_response(&e)],
+                };
+            }
+        }
+        if first == b'U' || first == b'u' {
+            if let Some(msgs) = self.try_fast_direct_update(sql, session) {
+                return msgs;
+            }
+            if let Some(plan) = self.try_fast_update_parse(sql) {
+                let plan = Planner::wrap_distributed(plan, &self.cluster.shard_ids);
+                return match self.execute_single_plan(sql, plan, session) {
+                    Ok(msgs) => msgs,
+                    Err(e) => vec![self.error_response(&e)],
+                };
+            }
+        }
+        if first == b'S' || first == b's' {
+            if let Some(msgs) = self.try_fast_select(sql, session) {
+                return msgs;
+            }
+        }
+
+        // Standard path: crash domain isolation for complex queries
+        let rctx = falcon_common::request_context::RequestContext::new(session.id as u64);
         let ctx = format!("session_id={}", session.id);
         let result =
             falcon_common::crash_domain::catch_request_result("handle_query", &ctx, || {
@@ -315,12 +447,15 @@ impl QueryHandler {
         // Allow ON CONFLICT DO NOTHING
         let mut on_conflict_do_nothing = false;
         {
-            let upper = rest.to_ascii_uppercase();
-            if upper.contains("RETURNING") {
+            fn contains_ci(hay: &str, needle: &str) -> bool {
+                hay.as_bytes().windows(needle.len()).any(|w|
+                    w.eq_ignore_ascii_case(needle.as_bytes()))
+            }
+            if contains_ci(rest, "RETURNING") {
                 return None;
             }
-            if upper.contains("ON CONFLICT") {
-                if upper.contains("DO NOTHING") {
+            if contains_ci(rest, "ON CONFLICT") {
+                if contains_ci(rest, "DO NOTHING") {
                     on_conflict_do_nothing = true;
                 } else {
                     return None;
@@ -330,9 +465,12 @@ impl QueryHandler {
         let values_str = rest[6..].trim_start();
         // Strip trailing ON CONFLICT DO NOTHING
         let values_str = if on_conflict_do_nothing {
-            let upper = values_str.to_ascii_uppercase();
-            if let Some(idx) = upper.find("ON CONFLICT") {
-                values_str[..idx].trim_end()
+            let bytes = values_str.as_bytes();
+            let needle = b"ON CONFLICT";
+            let idx = bytes.windows(needle.len()).position(|w|
+                w.eq_ignore_ascii_case(needle));
+            if let Some(i) = idx {
+                values_str[..i].trim_end()
             } else {
                 values_str
             }
@@ -340,8 +478,17 @@ impl QueryHandler {
             values_str
         };
 
-        // Look up table schema directly (avoids cloning the entire catalog)
-        let schema = self.storage.get_table_schema(table_name)?;
+        // Last-1 schema cache: skip catalog RwLock + deep clone for repeated table
+        let schema = {
+            let cached = self.schema_cache.lock();
+            if let Some((ref name, ref s)) = *cached {
+                if name == table_name { Some(s.clone()) } else { None }
+            } else { None }
+        }.or_else(|| {
+            let s = self.storage.get_table_schema(table_name)?;
+            *self.schema_cache.lock() = Some((table_name.to_owned(), s.clone()));
+            Some(s)
+        })?;
         let col_indices: Vec<usize> = col_names.iter().map(|name| {
             schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(name))
         }).collect::<Option<Vec<_>>>()?;
@@ -424,6 +571,19 @@ impl QueryHandler {
                     } else {
                         return None;
                     }
+                } else if bytes[pos] == b'c' || bytes[pos] == b'C' {
+                    // CURRENT_TIMESTAMP / CURRENT_DATE
+                    if pos + 17 <= len && values_str[pos..pos+17].eq_ignore_ascii_case("CURRENT_TIMESTAMP") {
+                        pos += 17;
+                        let now = chrono::Utc::now();
+                        Datum::Timestamp(now.timestamp() * 1_000_000 + now.timestamp_subsec_micros() as i64)
+                    } else if pos + 12 <= len && values_str[pos..pos+12].eq_ignore_ascii_case("CURRENT_DATE") {
+                        pos += 12;
+                        let now = chrono::Utc::now();
+                        Datum::Timestamp(now.timestamp() * 1_000_000 + now.timestamp_subsec_micros() as i64)
+                    } else {
+                        return None;
+                    }
                 } else if bytes[pos] == b'-' || bytes[pos].is_ascii_digit() {
                     // Number
                     let num_start = pos;
@@ -483,6 +643,99 @@ impl QueryHandler {
         })
     }
 
+    /// Ultra-fast direct insert: skip executor entirely for simple schemas.
+    /// Handles dynamic defaults (CURRENT_TIMESTAMP etc.) and partial column lists.
+    /// Returns None if schema is too complex (constraints, serials, etc.).
+    fn try_direct_insert(
+        &self,
+        ins: &BoundInsert,
+        session: &mut PgSession,
+    ) -> Option<Result<Vec<BackendMessage>, FalconError>> {
+        // Disabled: saves ~1µs per txn at 16c but causes convoy at 64c (51K→20K).
+        // The executor path's overhead naturally staggers flush_lock arrivals.
+        return None;
+        #[allow(unreachable_code)]
+        use falcon_common::datum::OwnedRow;
+        use falcon_common::schema::DefaultFn;
+        if self.cluster.dist_engine.is_some() || session.txn.is_some() {
+            return None;
+        }
+        let schema = &ins.schema;
+        if !schema.check_constraints.is_empty()
+            || !schema.unique_constraints.is_empty()
+            || !schema.foreign_keys.is_empty()
+            || schema.columns.iter().any(|c| c.is_serial)
+        {
+            return None;
+        }
+        let on_conflict_skip = matches!(ins.on_conflict, Some(OnConflictAction::DoNothing));
+        if ins.on_conflict.is_some() && !on_conflict_skip {
+            return None;
+        }
+        let ncols = schema.columns.len();
+        let mut rows: Vec<OwnedRow> = Vec::with_capacity(ins.rows.len());
+        for row_exprs in &ins.rows {
+            // Start with static defaults for all columns
+            let mut values: Vec<Datum> = schema.columns.iter()
+                .map(|c| c.default_value.clone().unwrap_or(Datum::Null))
+                .collect();
+            // Overlay provided columns with literal values
+            for (i, expr) in row_exprs.iter().enumerate() {
+                match expr {
+                    BoundExpr::Literal(d) => values[ins.columns[i]] = d.clone(),
+                    _ => return None,
+                }
+            }
+            // Fill dynamic defaults for still-NULL columns
+            for (&col_idx, dfn) in &schema.dynamic_defaults {
+                if col_idx < ncols && values[col_idx].is_null() {
+                    values[col_idx] = match dfn {
+                        DefaultFn::CurrentTimestamp => {
+                            Datum::Timestamp(chrono::Utc::now().timestamp_micros())
+                        }
+                        DefaultFn::CurrentDate => {
+                            let today = chrono::Utc::now().date_naive();
+                            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+                            Datum::Date((today - epoch).num_days() as i32)
+                        }
+                        DefaultFn::CurrentTime => {
+                            use chrono::Timelike;
+                            let t = chrono::Utc::now().time();
+                            Datum::Time(
+                                t.num_seconds_from_midnight() as i64 * 1_000_000
+                                    + t.nanosecond() as i64 / 1_000,
+                            )
+                        }
+                        DefaultFn::Nextval(_) => continue,
+                    };
+                }
+            }
+            rows.push(OwnedRow::new(values));
+        }
+        let txn = self.txn_mgr.begin_autocommit(session.default_isolation);
+        let txn_id = txn.txn_id;
+        session.txn = Some(txn);
+        let mut count = 0u64;
+        for row in rows {
+            match self.storage.insert(ins.table_id, row, txn_id) {
+                Ok(_) => count += 1,
+                Err(falcon_common::error::StorageError::DuplicateKey) if on_conflict_skip => {}
+                Err(e) => {
+                    self.txn_mgr.abort_autocommit(txn_id);
+                    session.txn = None;
+                    return Some(Ok(vec![self.error_response(&FalconError::Storage(e))]));
+                }
+            }
+        }
+        if let Err(e) = self.txn_mgr.commit_autocommit(txn_id) {
+            session.txn = None;
+            return Some(Ok(vec![self.error_response(&FalconError::Txn(e))]));
+        }
+        session.txn = None;
+        let tag = if count == 1 { "INSERT 0 1".to_owned() } else { format!("INSERT 0 {count}") };
+        Some(Ok(vec![BackendMessage::CommandComplete { tag }]))
+    }
+
     /// Fast-path parser for simple UPDATE table SET col = expr WHERE col = val.
     /// Handles: col = literal, col = col +/- literal.
     /// Returns None if the SQL doesn't match (falls back to standard path).
@@ -503,24 +756,40 @@ impl QueryHandler {
         if rest.len() < 4 || !rest[..3].eq_ignore_ascii_case("SET") { return None; }
         let rest = rest[3..].trim_start();
 
-        // Reject RETURNING / FROM (complex)
-        {
-            let upper_check = rest.to_ascii_uppercase();
-            if upper_check.contains("RETURNING") || upper_check.contains(" FROM ") {
-                return None;
-            }
+        // Reject RETURNING / FROM (complex) — zero-alloc
+        fn contains_ci_u(hay: &str, needle: &str) -> bool {
+            hay.as_bytes().windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
+        }
+        if contains_ci_u(rest, "RETURNING") || contains_ci_u(rest, " FROM ") {
+            return None;
         }
 
-        // Find WHERE
+        // Find WHERE — zero-alloc byte scan
         let where_pos = {
-            let upper = rest.to_ascii_uppercase();
-            upper.find(" WHERE ")?
+            let bytes = rest.as_bytes();
+            let mut found = None;
+            for i in 0..bytes.len().saturating_sub(6) {
+                if bytes[i] == b' ' && bytes[i+1..i+6].eq_ignore_ascii_case(b"WHERE") && (i + 6 >= bytes.len() || bytes[i+6] == b' ') {
+                    found = Some(i);
+                    break;
+                }
+            }
+            found?
         };
         let set_part = rest[..where_pos].trim();
         let where_part = rest[where_pos + 7..].trim();
 
-        // Look up table
-        let schema = self.storage.get_table_schema(table_name)?;
+        // Look up table (use schema cache)
+        let schema = {
+            let cached = self.schema_cache.lock();
+            if let Some((ref name, ref s)) = *cached {
+                if name == table_name { Some(s.clone()) } else { None }
+            } else { None }
+        }.or_else(|| {
+            let s = self.storage.get_table_schema(table_name)?;
+            *self.schema_cache.lock() = Some((table_name.to_owned(), s.clone()));
+            Some(s)
+        })?;
 
         // Parse assignments: col = expr [, col = expr]
         let mut assignments = Vec::new();
@@ -539,14 +808,20 @@ impl QueryHandler {
 
         // Parse WHERE: col = literal [AND col = literal]
         let mut filters: Vec<BoundExpr> = Vec::new();
-        // AND splitting
+        // AND splitting — zero-alloc byte scan
         let conds: Vec<&str> = {
-            let upper = where_part.to_ascii_uppercase();
+            let bytes = where_part.as_bytes();
             let mut parts = Vec::new();
             let mut start = 0;
-            while let Some(pos) = upper[start..].find(" AND ") {
-                parts.push(where_part[start..start + pos].trim());
-                start += pos + 5;
+            let mut i = 0;
+            while i + 5 <= bytes.len() {
+                if bytes[i] == b' ' && bytes[i+1..i+4].eq_ignore_ascii_case(b"AND") && bytes[i+4] == b' ' {
+                    parts.push(where_part[start..i].trim());
+                    start = i + 5;
+                    i = start;
+                } else {
+                    i += 1;
+                }
             }
             parts.push(where_part[start..].trim());
             parts
@@ -684,11 +959,14 @@ impl QueryHandler {
 
         match result {
             Ok(ExecutionResult::Dml { rows_affected, tag }) => {
-                let cmd_tag = match tag.as_str() {
-                    "INSERT" => format!("INSERT 0 {rows_affected}"),
-                    "UPDATE" => format!("UPDATE {rows_affected}"),
-                    "DELETE" => format!("DELETE {rows_affected}"),
-                    _ => format!("{tag} {rows_affected}"),
+                let cmd_tag = match (tag, rows_affected) {
+                    ("INSERT", 1) => "INSERT 0 1".to_owned(),
+                    ("INSERT", n) => format!("INSERT 0 {n}"),
+                    ("UPDATE", 1) => "UPDATE 1".to_owned(),
+                    ("UPDATE", n) => format!("UPDATE {n}"),
+                    ("DELETE", 1) => "DELETE 1".to_owned(),
+                    ("DELETE", n) => format!("DELETE {n}"),
+                    (t, n) => format!("{t} {n}"),
                 };
                 messages.push(BackendMessage::CommandComplete { tag: cmd_tag });
             }
@@ -720,6 +998,400 @@ impl QueryHandler {
         Ok(messages)
     }
 
+    fn fast_begin(&self, session: &mut PgSession) -> Vec<BackendMessage> {
+        if session.in_transaction() {
+            return vec![
+                BackendMessage::NoticeResponse {
+                    message: "there is already a transaction in progress".into(),
+                },
+                BackendMessage::CommandComplete { tag: "BEGIN".into() },
+            ];
+        }
+        if let Err(reason) = self.storage.check_tenant_quota(session.tenant_id) {
+            return vec![BackendMessage::ErrorResponse {
+                severity: "ERROR".into(),
+                code: "53400".into(),
+                message: reason,
+            }];
+        }
+        let txn = match self.txn_mgr.try_begin_with_classification(
+            session.default_isolation,
+            TxnClassification::local(ShardId(0)),
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                let ce: FalconError = e.into();
+                return vec![self.error_response(&ce)];
+            }
+        };
+        self.storage.ext.cdc_manager.emit_begin(txn.txn_id);
+        self.storage.record_tenant_txn_begin(session.tenant_id);
+        session.txn = Some(txn);
+        session.autocommit = false;
+        vec![BackendMessage::CommandComplete { tag: "BEGIN".into() }]
+    }
+
+    fn fast_commit(&self, session: &mut PgSession) -> Vec<BackendMessage> {
+        if let Some(ref txn) = session.txn {
+            match self.txn_mgr.commit(txn.txn_id) {
+                Ok(commit_ts) => {
+                    if let (Some(ref waiter), Some(ref group)) =
+                        (&self.cluster.sync_waiter, &self.cluster.ha_group)
+                    {
+                        let timeout = std::time::Duration::from_secs(5);
+                        let group_read = group.read();
+                        if let Err(e) = waiter.wait_for_commit(commit_ts.0, &group_read, timeout) {
+                            tracing::warn!("Sync replication wait failed after COMMIT: {}", e);
+                        }
+                    }
+                    self.storage.record_tenant_txn_commit(session.tenant_id);
+                    falcon_observability::record_txn_metrics("committed");
+                    session.txn = None;
+                    session.autocommit = true;
+                    self.flush_txn_stats();
+                    vec![BackendMessage::CommandComplete { tag: "COMMIT".into() }]
+                }
+                Err(e) => {
+                    self.storage.record_tenant_txn_abort(session.tenant_id);
+                    falcon_observability::record_txn_metrics("aborted");
+                    session.txn = None;
+                    session.autocommit = true;
+                    self.flush_txn_stats();
+                    vec![self.error_response(&FalconError::Txn(e))]
+                }
+            }
+        } else {
+            vec![
+                BackendMessage::NoticeResponse {
+                    message: "there is no transaction in progress".into(),
+                },
+                BackendMessage::CommandComplete { tag: "COMMIT".into() },
+            ]
+        }
+    }
+
+    fn fast_rollback(&self, session: &mut PgSession) -> Vec<BackendMessage> {
+        if let Some(ref txn) = session.txn {
+            let _ = self.txn_mgr.abort(txn.txn_id);
+            self.storage.record_tenant_txn_abort(session.tenant_id);
+            falcon_observability::record_txn_metrics("aborted");
+            session.txn = None;
+            session.autocommit = true;
+            self.flush_txn_stats();
+        }
+        vec![BackendMessage::CommandComplete { tag: "ROLLBACK".into() }]
+    }
+
+    /// Fast-path SELECT for simple point lookups: SELECT col [, col2] FROM table WHERE pk = val
+    /// Bypasses sqlparser, binder, planner, and build_indexed_columns entirely.
+    fn try_fast_select(&self, sql: &str, session: &mut PgSession) -> Option<Vec<BackendMessage>> {
+        let trimmed = sql.trim().trim_end_matches(';').trim_end();
+        if trimmed.len() < 20 || !trimmed[..6].eq_ignore_ascii_case("SELECT") {
+            return None;
+        }
+        let rest = trimmed[6..].trim_start();
+
+        // Find FROM keyword
+        let from_pos = {
+            let bytes = rest.as_bytes();
+            let mut i = 0;
+            let mut found = None;
+            while i + 5 <= bytes.len() {
+                if bytes[i] == b' ' && bytes[i+1..i+5].eq_ignore_ascii_case(b"FROM") && (i + 5 >= bytes.len() || bytes[i+5] == b' ') {
+                    found = Some(i);
+                    break;
+                }
+                i += 1;
+            }
+            found?
+        };
+        let cols_str = rest[..from_pos].trim();
+        let after_from = rest[from_pos + 5..].trim_start();
+
+        // Table name
+        let tbl_end = after_from.find(|c: char| !c.is_alphanumeric() && c != '_' && c != '"')?;
+        if tbl_end == 0 { return None; }
+        let table_name = after_from[..tbl_end].trim_matches('"');
+        let after_table = after_from[tbl_end..].trim_start();
+
+        // WHERE keyword
+        if after_table.len() < 6 || !after_table[..5].eq_ignore_ascii_case("WHERE") {
+            return None;
+        }
+        let where_part = after_table[5..].trim_start();
+
+        // Reject complex WHERE (AND, OR, subqueries, etc. beyond simple equality)
+        fn contains_ci(hay: &str, needle: &str) -> bool {
+            hay.as_bytes().windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
+        }
+        if contains_ci(where_part, " AND ") || contains_ci(where_part, " OR ") || where_part.contains('(') {
+            return None;
+        }
+
+        // Parse: col = value
+        let eq_pos = where_part.find('=')?;
+        if eq_pos > 0 && matches!(where_part.as_bytes()[eq_pos - 1], b'!' | b'>' | b'<') {
+            return None;
+        }
+        let where_col = where_part[..eq_pos].trim().trim_matches('"');
+        let where_val_str = where_part[eq_pos + 1..].trim();
+
+        // Look up schema (use cache)
+        let schema = {
+            let cached = self.schema_cache.lock();
+            if let Some((ref name, ref s)) = *cached {
+                if name == table_name { Some(s.clone()) } else { None }
+            } else { None }
+        }.or_else(|| {
+            let s = self.storage.get_table_schema(table_name)?;
+            *self.schema_cache.lock() = Some((table_name.to_owned(), s.clone()));
+            Some(s)
+        })?;
+
+        // WHERE column must be the (single) PK
+        if schema.primary_key_columns.len() != 1 { return None; }
+        let pk_col_idx = schema.primary_key_columns[0];
+        let where_col_idx = schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(where_col))?;
+        if where_col_idx != pk_col_idx { return None; }
+
+        // Parse PK value
+        let pk_val = self.parse_fast_literal(where_val_str, &schema.columns[pk_col_idx].data_type)?;
+        let pk = falcon_storage::memtable::encode_pk_from_datums(&[&pk_val]);
+
+        // Parse select columns
+        let sel_col_names: Vec<&str> = cols_str.split(',').map(|s| s.trim().trim_matches('"')).collect();
+        let sel_col_indices: Vec<usize> = sel_col_names.iter().map(|name| {
+            schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(name))
+        }).collect::<Option<Vec<_>>>()?;
+
+        // Ensure txn exists
+        let auto_txn = if session.txn.is_none() {
+            let txn = self.txn_mgr.begin_autocommit(session.default_isolation);
+            session.txn = Some(txn);
+            true
+        } else {
+            false
+        };
+
+        let txn = session.txn.as_ref().unwrap();
+        let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+        let result = self.storage.get(schema.id, &pk, txn.txn_id, read_ts);
+
+        let mut messages = Vec::new();
+
+        // Build RowDescription
+        let fields: Vec<FieldDescription> = sel_col_indices.iter().map(|&ci| {
+            let col = &schema.columns[ci];
+            FieldDescription {
+                name: col.name.clone(),
+                table_oid: 0,
+                column_attr: 0,
+                type_oid: col.data_type.pg_oid(),
+                type_len: col.data_type.type_len(),
+                type_modifier: -1,
+                format_code: 0,
+            }
+        }).collect();
+        messages.push(BackendMessage::RowDescription { fields });
+
+        match result {
+            Ok(Some(row)) => {
+                let values: Vec<Option<String>> = sel_col_indices.iter()
+                    .map(|&ci| row.values.get(ci).map(|d| d.to_pg_text()).unwrap_or(None))
+                    .collect();
+                messages.push(BackendMessage::DataRow { values });
+                messages.push(BackendMessage::CommandComplete { tag: "SELECT 1".into() });
+            }
+            Ok(None) => {
+                messages.push(BackendMessage::CommandComplete { tag: "SELECT 0".into() });
+            }
+            Err(e) => {
+                if auto_txn {
+                    if let Some(ref txn) = session.txn {
+                        self.txn_mgr.abort_autocommit(txn.txn_id);
+                    }
+                    session.txn = None;
+                }
+                return Some(vec![self.error_response(&FalconError::Storage(e))]);
+            }
+        }
+
+        if auto_txn {
+            self.txn_mgr.commit_autocommit_readonly();
+            session.txn = None;
+        }
+
+        Some(messages)
+    }
+
+    /// Direct UPDATE bypass for simple point updates on constraint-free tables.
+    /// Parses SQL, reads row, applies SET, writes back — skips executor entirely.
+    fn try_fast_direct_update(&self, sql: &str, session: &mut PgSession) -> Option<Vec<BackendMessage>> {
+        let trimmed = sql.trim().trim_end_matches(';').trim_end();
+        if trimmed.len() < 20 || !trimmed[..6].eq_ignore_ascii_case("UPDATE") {
+            return None;
+        }
+        let rest = trimmed[6..].trim_start();
+
+        // Table name
+        let tbl_end = rest.find(|c: char| !c.is_alphanumeric() && c != '_' && c != '"')?;
+        if tbl_end == 0 { return None; }
+        let table_name = rest[..tbl_end].trim_matches('"');
+        let rest = rest[tbl_end..].trim_start();
+
+        // SET keyword
+        if rest.len() < 4 || !rest[..3].eq_ignore_ascii_case("SET") { return None; }
+        let rest = rest[3..].trim_start();
+
+        // Reject RETURNING / FROM
+        fn has_ci(hay: &str, needle: &str) -> bool {
+            hay.as_bytes().windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
+        }
+        if has_ci(rest, "RETURNING") || has_ci(rest, " FROM ") { return None; }
+
+        // Find WHERE
+        let where_pos = {
+            let bytes = rest.as_bytes();
+            let mut found = None;
+            for i in 0..bytes.len().saturating_sub(6) {
+                if bytes[i] == b' ' && bytes[i+1..i+6].eq_ignore_ascii_case(b"WHERE") && (i + 6 >= bytes.len() || bytes[i+6] == b' ') {
+                    found = Some(i);
+                    break;
+                }
+            }
+            found?
+        };
+        let set_part = rest[..where_pos].trim();
+        let where_part = rest[where_pos + 7..].trim();
+
+        // Schema (cached)
+        let schema = {
+            let cached = self.schema_cache.lock();
+            if let Some((ref name, ref s)) = *cached {
+                if name == table_name { Some(s.clone()) } else { None }
+            } else { None }
+        }.or_else(|| {
+            let s = self.storage.get_table_schema(table_name)?;
+            *self.schema_cache.lock() = Some((table_name.to_owned(), s.clone()));
+            Some(s)
+        })?;
+
+        // Eligibility: no constraints, single PK, no RETURNING
+        if !schema.unique_constraints.is_empty()
+            || !schema.check_constraints.is_empty()
+            || !schema.foreign_keys.is_empty()
+            || schema.primary_key_columns.len() != 1
+        {
+            return None;
+        }
+        let pk_col_idx = schema.primary_key_columns[0];
+
+        // Parse WHERE: only pk = literal (no AND)
+        if has_ci(where_part, " AND ") || has_ci(where_part, " OR ") { return None; }
+        let eq_pos = where_part.find('=')?;
+        if eq_pos > 0 && matches!(where_part.as_bytes()[eq_pos - 1], b'!' | b'>' | b'<') { return None; }
+        let w_col = where_part[..eq_pos].trim().trim_matches('"');
+        let w_val_str = where_part[eq_pos + 1..].trim();
+        let w_col_idx = schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(w_col))?;
+        if w_col_idx != pk_col_idx { return None; }
+        let pk_val = self.parse_fast_literal(w_val_str, &schema.columns[pk_col_idx].data_type)?;
+        let pk = falcon_storage::memtable::encode_pk_from_datums(&[&pk_val]);
+
+        // Parse SET assignments: col = expr [, col = expr]
+        // For direct execution, we store (col_idx, SetOp) instead of BoundExpr
+        enum SetOp { Literal(Datum), Plus(usize, Datum), Minus(usize, Datum) }
+        let mut ops: Vec<(usize, SetOp)> = Vec::new();
+        for assign_str in set_part.split(',') {
+            let assign_str = assign_str.trim();
+            let aeq = assign_str.find('=')?;
+            let col_name = assign_str[..aeq].trim().trim_matches('"');
+            let expr_str = assign_str[aeq + 1..].trim();
+            let col_idx = schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(col_name))?;
+
+            if let Some(plus_pos) = expr_str.find('+') {
+                let lhs = expr_str[..plus_pos].trim();
+                let rhs = expr_str[plus_pos + 1..].trim();
+                if schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(lhs))? == col_idx {
+                    let val = self.parse_fast_literal(rhs, &schema.columns[col_idx].data_type)?;
+                    ops.push((col_idx, SetOp::Plus(col_idx, val)));
+                } else { return None; }
+            } else if let Some(minus_pos) = expr_str.rfind('-') {
+                if minus_pos > 0 {
+                    let lhs = expr_str[..minus_pos].trim();
+                    let rhs = expr_str[minus_pos + 1..].trim();
+                    if schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(lhs))? == col_idx {
+                        let val = self.parse_fast_literal(rhs, &schema.columns[col_idx].data_type)?;
+                        ops.push((col_idx, SetOp::Minus(col_idx, val)));
+                    } else { return None; }
+                } else { return None; }
+            } else {
+                let val = self.parse_fast_literal(expr_str, &schema.columns[col_idx].data_type)?;
+                ops.push((col_idx, SetOp::Literal(val)));
+            }
+        }
+
+        // Ensure txn
+        let auto_txn = if session.txn.is_none() {
+            let txn = self.txn_mgr.begin_autocommit(session.default_isolation);
+            session.txn = Some(txn);
+            true
+        } else {
+            false
+        };
+
+        let txn = session.txn.as_ref().unwrap();
+        let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+
+        // Read current row
+        let row = match self.storage.get(schema.id, &pk, txn.txn_id, read_ts) {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                let tag = "UPDATE 0".to_owned();
+                if auto_txn {
+                    let _ = self.txn_mgr.commit_autocommit(txn.txn_id);
+                    session.txn = None;
+                }
+                return Some(vec![BackendMessage::CommandComplete { tag }]);
+            }
+            Err(e) => {
+                if auto_txn {
+                    self.txn_mgr.abort_autocommit(txn.txn_id);
+                    session.txn = None;
+                }
+                return Some(vec![self.error_response(&FalconError::Storage(e))]);
+            }
+        };
+
+        // Apply assignments
+        let mut new_values = row.values.clone();
+        for (col_idx, op) in &ops {
+            new_values[*col_idx] = match op {
+                SetOp::Literal(v) => v.clone(),
+                SetOp::Plus(src, v) => datum_add(&row.values[*src], v)?,
+                SetOp::Minus(src, v) => datum_sub(&row.values[*src], v)?,
+            };
+        }
+
+        let new_row = falcon_common::datum::OwnedRow::new(new_values);
+        match self.storage.update(schema.id, &pk, new_row, txn.txn_id) {
+            Ok(()) => {}
+            Err(e) => {
+                if auto_txn {
+                    self.txn_mgr.abort_autocommit(txn.txn_id);
+                    session.txn = None;
+                }
+                return Some(vec![self.error_response(&FalconError::Storage(e))]);
+            }
+        }
+
+        if auto_txn {
+            let _ = self.txn_mgr.commit_autocommit(txn.txn_id);
+            session.txn = None;
+        }
+
+        Some(vec![BackendMessage::CommandComplete { tag: "UPDATE 1".to_owned() }])
+    }
+
     /// Inner query processing logic, called from `handle_query` inside a
     /// crash-domain guard.
     fn handle_query_inner(
@@ -729,6 +1401,10 @@ impl QueryHandler {
     ) -> Result<Vec<BackendMessage>, FalconError> {
         // ── Fast-path: lightweight INSERT parser (bypasses sqlparser-rs) ──
         if let Some(fast_ins) = self.try_fast_insert_parse(sql) {
+            // Ultra-fast: skip executor entirely for simple schemas
+            if let Some(result) = self.try_direct_insert(&fast_ins, session) {
+                return result;
+            }
             let plan = match Planner::plan_insert_owned(fast_ins) {
                 Ok(p) => Planner::wrap_distributed(p, &self.cluster.shard_ids),
                 Err(e) => return Ok(vec![self.error_response(&FalconError::Sql(e))]),
@@ -1225,7 +1901,7 @@ impl QueryHandler {
                             });
                         }
                         ExecutionResult::Dml { rows_affected, tag } => {
-                            let cmd_tag = match tag.as_str() {
+                            let cmd_tag = match tag {
                                 "INSERT" => format!("INSERT 0 {rows_affected}"),
                                 "UPDATE" => format!("UPDATE {rows_affected}"),
                                 "DELETE" => format!("DELETE {rows_affected}"),
@@ -1253,12 +1929,30 @@ impl QueryHandler {
                         session.txn = None;
                     }
 
-                    // Record to slow query log
-                    self.observability.slow_query_log.record(sql, query_duration, session.id);
+                    // Record to slow query log and emit tracing warn if threshold exceeded
+                    if self.observability.slow_query_log.record(sql, query_duration, session.id, &session.peer_addr) {
+                        tracing::warn!(
+                            target: "slow_query",
+                            session_id = session.id,
+                            client = %session.peer_addr,
+                            duration_ms = query_duration.as_millis(),
+                            sql = %sql,
+                            "slow query"
+                        );
+                    }
                 }
                 Err(e) => {
                     // Record to slow query log (even failed queries)
-                    self.observability.slow_query_log.record(sql, query_duration, session.id);
+                    if self.observability.slow_query_log.record(sql, query_duration, session.id, &session.peer_addr) {
+                        tracing::warn!(
+                            target: "slow_query",
+                            session_id = session.id,
+                            client = %session.peer_addr,
+                            duration_ms = query_duration.as_millis(),
+                            sql = %sql,
+                            "slow query (failed)"
+                        );
+                    }
 
                     // Auto-abort on error
                     if auto_txn {
@@ -1627,7 +2321,7 @@ impl QueryHandler {
                         });
                     }
                     ExecutionResult::Dml { rows_affected, tag } => {
-                        let cmd_tag = match tag.as_str() {
+                        let cmd_tag = match tag {
                             "INSERT" => format!("INSERT 0 {rows_affected}"),
                             "UPDATE" => format!("UPDATE {rows_affected}"),
                             "DELETE" => format!("DELETE {rows_affected}"),
@@ -2607,7 +3301,7 @@ mod tests {
     #[test]
     fn test_reset_slow_queries() {
         let log = Arc::new(SlowQueryLog::new(std::time::Duration::from_millis(1), 100));
-        log.record("SELECT 1", std::time::Duration::from_millis(10), 1);
+        log.record("SELECT 1", std::time::Duration::from_millis(10), 1, "");
 
         let storage = Arc::new(StorageEngine::new_in_memory());
         let txn_mgr = Arc::new(TxnManager::new(storage.clone()));

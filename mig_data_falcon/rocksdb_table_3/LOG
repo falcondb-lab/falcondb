@@ -1,0 +1,283 @@
+2026/03/04-13:23:36.179962 ae40 RocksDB version: 8.10.0
+2026/03/04-13:23:36.180021 ae40 Compile date 2023-12-15 13:01:14
+2026/03/04-13:23:36.180060 ae40 DB SUMMARY
+2026/03/04-13:23:36.180086 ae40 Host name (Env):  DESKTOP-70H04F3
+2026/03/04-13:23:36.180100 ae40 DB Session ID:  KG45MBJK1F5393RY3A0A
+2026/03/04-13:23:36.180371 ae40 SST files in ./mig_data_falcon\rocksdb_table_3 dir, Total Num: 0, files: 
+2026/03/04-13:23:36.180390 ae40 Write Ahead Log file in ./mig_data_falcon\rocksdb_table_3: 
+2026/03/04-13:23:36.180403 ae40                         Options.error_if_exists: 0
+2026/03/04-13:23:36.180415 ae40                       Options.create_if_missing: 1
+2026/03/04-13:23:36.180426 ae40                         Options.paranoid_checks: 1
+2026/03/04-13:23:36.180531 ae40             Options.flush_verify_memtable_count: 1
+2026/03/04-13:23:36.180541 ae40          Options.compaction_verify_record_count: 1
+2026/03/04-13:23:36.180546 ae40                               Options.track_and_verify_wals_in_manifest: 0
+2026/03/04-13:23:36.180550 ae40        Options.verify_sst_unique_id_in_manifest: 1
+2026/03/04-13:23:36.180554 ae40                                     Options.env: 00000225742A6740
+2026/03/04-13:23:36.180558 ae40                                      Options.fs: WinFS
+2026/03/04-13:23:36.180562 ae40                                Options.info_log: 000002257439C370
+2026/03/04-13:23:36.180566 ae40                Options.max_file_opening_threads: 16
+2026/03/04-13:23:36.180570 ae40                              Options.statistics: 0000000000000000
+2026/03/04-13:23:36.180574 ae40                               Options.use_fsync: 0
+2026/03/04-13:23:36.180578 ae40                       Options.max_log_file_size: 0
+2026/03/04-13:23:36.180582 ae40                  Options.max_manifest_file_size: 1073741824
+2026/03/04-13:23:36.180586 ae40                   Options.log_file_time_to_roll: 0
+2026/03/04-13:23:36.180589 ae40                       Options.keep_log_file_num: 1000
+2026/03/04-13:23:36.180593 ae40                    Options.recycle_log_file_num: 0
+2026/03/04-13:23:36.180597 ae40                         Options.allow_fallocate: 1
+2026/03/04-13:23:36.180601 ae40                        Options.allow_mmap_reads: 0
+2026/03/04-13:23:36.180605 ae40                       Options.allow_mmap_writes: 0
+2026/03/04-13:23:36.180610 ae40                        Options.use_direct_reads: 0
+2026/03/04-13:23:36.180613 ae40                        Options.use_direct_io_for_flush_and_compaction: 0
+2026/03/04-13:23:36.180617 ae40          Options.create_missing_column_families: 0
+2026/03/04-13:23:36.180621 ae40                              Options.db_log_dir: 
+2026/03/04-13:23:36.180625 ae40                                 Options.wal_dir: 
+2026/03/04-13:23:36.180629 ae40                Options.table_cache_numshardbits: 6
+2026/03/04-13:23:36.180633 ae40                         Options.WAL_ttl_seconds: 0
+2026/03/04-13:23:36.180637 ae40                       Options.WAL_size_limit_MB: 0
+2026/03/04-13:23:36.180641 ae40                        Options.max_write_batch_group_size_bytes: 1048576
+2026/03/04-13:23:36.180645 ae40             Options.manifest_preallocation_size: 4194304
+2026/03/04-13:23:36.180649 ae40                     Options.is_fd_close_on_exec: 1
+2026/03/04-13:23:36.180652 ae40                   Options.advise_random_on_open: 1
+2026/03/04-13:23:36.180656 ae40                    Options.db_write_buffer_size: 0
+2026/03/04-13:23:36.180660 ae40                    Options.write_buffer_manager: 0000022574907560
+2026/03/04-13:23:36.180664 ae40         Options.access_hint_on_compaction_start: 1
+2026/03/04-13:23:36.180668 ae40           Options.random_access_max_buffer_size: 1048576
+2026/03/04-13:23:36.180672 ae40                      Options.use_adaptive_mutex: 0
+2026/03/04-13:23:36.180676 ae40                            Options.rate_limiter: 0000000000000000
+2026/03/04-13:23:36.180680 ae40     Options.sst_file_manager.rate_bytes_per_sec: 0
+2026/03/04-13:23:36.180684 ae40                       Options.wal_recovery_mode: 2
+2026/03/04-13:23:36.180688 ae40                  Options.enable_thread_tracking: 0
+2026/03/04-13:23:36.180723 ae40                  Options.enable_pipelined_write: 0
+2026/03/04-13:23:36.180730 ae40                  Options.unordered_write: 0
+2026/03/04-13:23:36.180734 ae40         Options.allow_concurrent_memtable_write: 1
+2026/03/04-13:23:36.180738 ae40      Options.enable_write_thread_adaptive_yield: 1
+2026/03/04-13:23:36.180742 ae40             Options.write_thread_max_yield_usec: 100
+2026/03/04-13:23:36.180746 ae40            Options.write_thread_slow_yield_usec: 3
+2026/03/04-13:23:36.180750 ae40                               Options.row_cache: None
+2026/03/04-13:23:36.180753 ae40                              Options.wal_filter: None
+2026/03/04-13:23:36.180758 ae40             Options.avoid_flush_during_recovery: 0
+2026/03/04-13:23:36.180761 ae40             Options.allow_ingest_behind: 0
+2026/03/04-13:23:36.180765 ae40             Options.two_write_queues: 0
+2026/03/04-13:23:36.180769 ae40             Options.manual_wal_flush: 1
+2026/03/04-13:23:36.180773 ae40             Options.wal_compression: 0
+2026/03/04-13:23:36.180777 ae40             Options.atomic_flush: 0
+2026/03/04-13:23:36.180781 ae40             Options.avoid_unnecessary_blocking_io: 0
+2026/03/04-13:23:36.180785 ae40                 Options.persist_stats_to_disk: 0
+2026/03/04-13:23:36.180788 ae40                 Options.write_dbid_to_manifest: 0
+2026/03/04-13:23:36.180792 ae40                 Options.log_readahead_size: 0
+2026/03/04-13:23:36.180796 ae40                 Options.file_checksum_gen_factory: Unknown
+2026/03/04-13:23:36.180801 ae40                 Options.best_efforts_recovery: 0
+2026/03/04-13:23:36.180804 ae40                Options.max_bgerror_resume_count: 2147483647
+2026/03/04-13:23:36.180808 ae40            Options.bgerror_resume_retry_interval: 1000000
+2026/03/04-13:23:36.180812 ae40             Options.allow_data_in_errors: 0
+2026/03/04-13:23:36.180816 ae40             Options.db_host_id: __hostname__
+2026/03/04-13:23:36.180820 ae40             Options.enforce_single_del_contracts: true
+2026/03/04-13:23:36.180824 ae40             Options.max_background_jobs: 4
+2026/03/04-13:23:36.180828 ae40             Options.max_background_compactions: -1
+2026/03/04-13:23:36.180832 ae40             Options.max_subcompactions: 1
+2026/03/04-13:23:36.180836 ae40             Options.avoid_flush_during_shutdown: 0
+2026/03/04-13:23:36.180840 ae40           Options.writable_file_max_buffer_size: 1048576
+2026/03/04-13:23:36.180844 ae40             Options.delayed_write_rate : 16777216
+2026/03/04-13:23:36.180848 ae40             Options.max_total_wal_size: 0
+2026/03/04-13:23:36.180852 ae40             Options.delete_obsolete_files_period_micros: 21600000000
+2026/03/04-13:23:36.180856 ae40                   Options.stats_dump_period_sec: 600
+2026/03/04-13:23:36.180859 ae40                 Options.stats_persist_period_sec: 600
+2026/03/04-13:23:36.180863 ae40                 Options.stats_history_buffer_size: 1048576
+2026/03/04-13:23:36.180867 ae40                          Options.max_open_files: -1
+2026/03/04-13:23:36.180871 ae40                          Options.bytes_per_sync: 0
+2026/03/04-13:23:36.180875 ae40                      Options.wal_bytes_per_sync: 0
+2026/03/04-13:23:36.180879 ae40                   Options.strict_bytes_per_sync: 0
+2026/03/04-13:23:36.180883 ae40       Options.compaction_readahead_size: 2097152
+2026/03/04-13:23:36.180887 ae40                  Options.max_background_flushes: -1
+2026/03/04-13:23:36.180891 ae40 Options.daily_offpeak_time_utc: 
+2026/03/04-13:23:36.180895 ae40 Compression algorithms supported:
+2026/03/04-13:23:36.180899 ae40 	kZSTD supported: 1
+2026/03/04-13:23:36.180904 ae40 	kSnappyCompression supported: 1
+2026/03/04-13:23:36.180908 ae40 	kBZip2Compression supported: 1
+2026/03/04-13:23:36.180912 ae40 	kZlibCompression supported: 1
+2026/03/04-13:23:36.180916 ae40 	kLZ4Compression supported: 1
+2026/03/04-13:23:36.180920 ae40 	kXpressCompression supported: 0
+2026/03/04-13:23:36.180924 ae40 	kLZ4HCCompression supported: 1
+2026/03/04-13:23:36.180928 ae40 	kZSTDNotFinalCompression supported: 1
+2026/03/04-13:23:36.180952 ae40 Fast CRC32 supported: Not supported on x86
+2026/03/04-13:23:36.180958 ae40 DMutex implementation: std::mutex
+2026/03/04-13:23:36.187869 ae40 [db/db_impl/db_impl_open.cc:325] Creating manifest 1 
+2026/03/04-13:23:36.193239 ae40 [db/version_set.cc:5942] Recovering from manifest file: ./mig_data_falcon\rocksdb_table_3/MANIFEST-000001
+2026/03/04-13:23:36.193393 ae40 [db/column_family.cc:618] --------------- Options for column family [default]:
+2026/03/04-13:23:36.193398 ae40               Options.comparator: leveldb.BytewiseComparator
+2026/03/04-13:23:36.193400 ae40           Options.merge_operator: None
+2026/03/04-13:23:36.193402 ae40        Options.compaction_filter: None
+2026/03/04-13:23:36.193404 ae40        Options.compaction_filter_factory: None
+2026/03/04-13:23:36.193406 ae40  Options.sst_partitioner_factory: None
+2026/03/04-13:23:36.193408 ae40         Options.memtable_factory: SkipListFactory
+2026/03/04-13:23:36.193409 ae40            Options.table_factory: BlockBasedTable
+2026/03/04-13:23:36.193427 ae40            table_factory options:   flush_block_policy_factory: FlushBlockBySizePolicyFactory (000002257481B4B0)
+  cache_index_and_filter_blocks: 1
+  cache_index_and_filter_blocks_with_high_priority: 1
+  pin_l0_filter_and_index_blocks_in_cache: 0
+  pin_top_level_index_and_filter: 1
+  index_type: 0
+  data_block_index_type: 0
+  index_shortening: 1
+  data_block_hash_table_util_ratio: 0.750000
+  checksum: 4
+  no_block_cache: 0
+  block_cache: 0000022574907B10
+  block_cache_name: LRUCache
+  block_cache_options:
+    capacity : 33554432
+    num_shard_bits : 6
+    strict_capacity_limit : 0
+    memory_allocator : None
+    high_pri_pool_ratio: 0.500
+    low_pri_pool_ratio: 0.000
+  persistent_cache: 0000000000000000
+  block_size: 4096
+  block_size_deviation: 10
+  block_restart_interval: 16
+  index_block_restart_interval: 1
+  metadata_block_size: 4096
+  partition_filters: 0
+  use_delta_encoding: 1
+  filter_policy: bloomfilter
+  whole_key_filtering: 1
+  verify_compression: 0
+  read_amp_bytes_per_bit: 0
+  format_version: 5
+  enable_index_compression: 1
+  block_align: 0
+  max_auto_readahead_size: 262144
+  prepopulate_block_cache: 0
+  initial_auto_readahead_size: 8192
+  num_file_reads_for_auto_readahead: 2
+2026/03/04-13:23:36.193430 ae40        Options.write_buffer_size: 67108864
+2026/03/04-13:23:36.193432 ae40  Options.max_write_buffer_number: 3
+2026/03/04-13:23:36.193434 ae40          Options.compression: LZ4
+2026/03/04-13:23:36.193436 ae40                  Options.bottommost_compression: Disabled
+2026/03/04-13:23:36.193438 ae40       Options.prefix_extractor: nullptr
+2026/03/04-13:23:36.193440 ae40   Options.memtable_insert_with_hint_prefix_extractor: nullptr
+2026/03/04-13:23:36.193442 ae40             Options.num_levels: 7
+2026/03/04-13:23:36.193443 ae40        Options.min_write_buffer_number_to_merge: 1
+2026/03/04-13:23:36.193445 ae40     Options.max_write_buffer_number_to_maintain: 0
+2026/03/04-13:23:36.193447 ae40     Options.max_write_buffer_size_to_maintain: 0
+2026/03/04-13:23:36.193449 ae40            Options.bottommost_compression_opts.window_bits: -14
+2026/03/04-13:23:36.193451 ae40                  Options.bottommost_compression_opts.level: 32767
+2026/03/04-13:23:36.193454 ae40               Options.bottommost_compression_opts.strategy: 0
+2026/03/04-13:23:36.193456 ae40         Options.bottommost_compression_opts.max_dict_bytes: 0
+2026/03/04-13:23:36.193458 ae40         Options.bottommost_compression_opts.zstd_max_train_bytes: 0
+2026/03/04-13:23:36.193460 ae40         Options.bottommost_compression_opts.parallel_threads: 1
+2026/03/04-13:23:36.193462 ae40                  Options.bottommost_compression_opts.enabled: false
+2026/03/04-13:23:36.193464 ae40         Options.bottommost_compression_opts.max_dict_buffer_bytes: 0
+2026/03/04-13:23:36.193465 ae40         Options.bottommost_compression_opts.use_zstd_dict_trainer: true
+2026/03/04-13:23:36.193467 ae40            Options.compression_opts.window_bits: -14
+2026/03/04-13:23:36.193469 ae40                  Options.compression_opts.level: 32767
+2026/03/04-13:23:36.193474 ae40               Options.compression_opts.strategy: 0
+2026/03/04-13:23:36.193477 ae40         Options.compression_opts.max_dict_bytes: 0
+2026/03/04-13:23:36.193479 ae40         Options.compression_opts.zstd_max_train_bytes: 0
+2026/03/04-13:23:36.193481 ae40         Options.compression_opts.use_zstd_dict_trainer: true
+2026/03/04-13:23:36.193483 ae40         Options.compression_opts.parallel_threads: 1
+2026/03/04-13:23:36.193485 ae40                  Options.compression_opts.enabled: false
+2026/03/04-13:23:36.193487 ae40         Options.compression_opts.max_dict_buffer_bytes: 0
+2026/03/04-13:23:36.193489 ae40      Options.level0_file_num_compaction_trigger: 4
+2026/03/04-13:23:36.193490 ae40          Options.level0_slowdown_writes_trigger: 20
+2026/03/04-13:23:36.193492 ae40              Options.level0_stop_writes_trigger: 36
+2026/03/04-13:23:36.193494 ae40                   Options.target_file_size_base: 67108864
+2026/03/04-13:23:36.193496 ae40             Options.target_file_size_multiplier: 1
+2026/03/04-13:23:36.193498 ae40                Options.max_bytes_for_level_base: 268435456
+2026/03/04-13:23:36.193500 ae40 Options.level_compaction_dynamic_level_bytes: 1
+2026/03/04-13:23:36.193502 ae40          Options.max_bytes_for_level_multiplier: 10.000000
+2026/03/04-13:23:36.193504 ae40 Options.max_bytes_for_level_multiplier_addtl[0]: 1
+2026/03/04-13:23:36.193506 ae40 Options.max_bytes_for_level_multiplier_addtl[1]: 1
+2026/03/04-13:23:36.193508 ae40 Options.max_bytes_for_level_multiplier_addtl[2]: 1
+2026/03/04-13:23:36.193510 ae40 Options.max_bytes_for_level_multiplier_addtl[3]: 1
+2026/03/04-13:23:36.193512 ae40 Options.max_bytes_for_level_multiplier_addtl[4]: 1
+2026/03/04-13:23:36.193514 ae40 Options.max_bytes_for_level_multiplier_addtl[5]: 1
+2026/03/04-13:23:36.193516 ae40 Options.max_bytes_for_level_multiplier_addtl[6]: 1
+2026/03/04-13:23:36.193517 ae40       Options.max_sequential_skip_in_iterations: 8
+2026/03/04-13:23:36.193519 ae40                    Options.max_compaction_bytes: 1677721600
+2026/03/04-13:23:36.193521 ae40   Options.ignore_max_compaction_bytes_for_input: true
+2026/03/04-13:23:36.193523 ae40                        Options.arena_block_size: 1048576
+2026/03/04-13:23:36.193525 ae40   Options.soft_pending_compaction_bytes_limit: 68719476736
+2026/03/04-13:23:36.193527 ae40   Options.hard_pending_compaction_bytes_limit: 274877906944
+2026/03/04-13:23:36.193529 ae40                Options.disable_auto_compactions: 0
+2026/03/04-13:23:36.193532 ae40                        Options.compaction_style: kCompactionStyleLevel
+2026/03/04-13:23:36.193534 ae40                          Options.compaction_pri: kMinOverlappingRatio
+2026/03/04-13:23:36.193536 ae40 Options.compaction_options_universal.size_ratio: 1
+2026/03/04-13:23:36.193538 ae40 Options.compaction_options_universal.min_merge_width: 2
+2026/03/04-13:23:36.193540 ae40 Options.compaction_options_universal.max_merge_width: 4294967295
+2026/03/04-13:23:36.193542 ae40 Options.compaction_options_universal.max_size_amplification_percent: 200
+2026/03/04-13:23:36.193544 ae40 Options.compaction_options_universal.compression_size_percent: -1
+2026/03/04-13:23:36.193546 ae40 Options.compaction_options_universal.stop_style: kCompactionStopStyleTotalSize
+2026/03/04-13:23:36.193548 ae40 Options.compaction_options_fifo.max_table_files_size: 1073741824
+2026/03/04-13:23:36.193550 ae40 Options.compaction_options_fifo.allow_compaction: 0
+2026/03/04-13:23:36.193553 ae40                   Options.table_properties_collectors: 
+2026/03/04-13:23:36.193555 ae40                   Options.inplace_update_support: 0
+2026/03/04-13:23:36.193557 ae40                 Options.inplace_update_num_locks: 10000
+2026/03/04-13:23:36.193559 ae40               Options.memtable_prefix_bloom_size_ratio: 0.000000
+2026/03/04-13:23:36.193561 ae40               Options.memtable_whole_key_filtering: 0
+2026/03/04-13:23:36.193563 ae40   Options.memtable_huge_page_size: 0
+2026/03/04-13:23:36.193565 ae40                           Options.bloom_locality: 0
+2026/03/04-13:23:36.193588 ae40                    Options.max_successive_merges: 0
+2026/03/04-13:23:36.193591 ae40                Options.optimize_filters_for_hits: 0
+2026/03/04-13:23:36.193593 ae40                Options.paranoid_file_checks: 0
+2026/03/04-13:23:36.193594 ae40                Options.force_consistency_checks: 1
+2026/03/04-13:23:36.193596 ae40                Options.report_bg_io_stats: 0
+2026/03/04-13:23:36.193598 ae40                               Options.ttl: 2592000
+2026/03/04-13:23:36.193600 ae40          Options.periodic_compaction_seconds: 0
+2026/03/04-13:23:36.193603 ae40                        Options.default_temperature: kUnknown
+2026/03/04-13:23:36.193605 ae40  Options.preclude_last_level_data_seconds: 0
+2026/03/04-13:23:36.193606 ae40    Options.preserve_internal_time_seconds: 0
+2026/03/04-13:23:36.193608 ae40                       Options.enable_blob_files: false
+2026/03/04-13:23:36.193610 ae40                           Options.min_blob_size: 0
+2026/03/04-13:23:36.193612 ae40                          Options.blob_file_size: 268435456
+2026/03/04-13:23:36.193614 ae40                   Options.blob_compression_type: NoCompression
+2026/03/04-13:23:36.193616 ae40          Options.enable_blob_garbage_collection: false
+2026/03/04-13:23:36.193618 ae40      Options.blob_garbage_collection_age_cutoff: 0.250000
+2026/03/04-13:23:36.193620 ae40 Options.blob_garbage_collection_force_threshold: 1.000000
+2026/03/04-13:23:36.193622 ae40          Options.blob_compaction_readahead_size: 0
+2026/03/04-13:23:36.193624 ae40                Options.blob_file_starting_level: 0
+2026/03/04-13:23:36.193626 ae40         Options.experimental_mempurge_threshold: 0.000000
+2026/03/04-13:23:36.193628 ae40            Options.memtable_max_range_deletions: 0
+2026/03/04-13:23:36.194278 ae40 [db/version_set.cc:5993] Recovered from manifest file:./mig_data_falcon\rocksdb_table_3/MANIFEST-000001 succeeded,manifest_file_number is 1, next_file_number is 3, last_sequence is 0, log_number is 0,prev_log_number is 0,max_column_family is 0,min_log_number_to_keep is 0
+2026/03/04-13:23:36.194289 ae40 [db/version_set.cc:6002] Column family [default] (ID 0), log number is 0
+2026/03/04-13:23:36.194508 ae40 [db/db_impl/db_impl_open.cc:646] DB ID: 4aada712-178a-11f1-b228-005056c00008
+2026/03/04-13:23:36.195239 ae40 [db/version_set.cc:5439] Creating manifest 5
+2026/03/04-13:23:36.203230 ae40 [db/db_impl/db_impl_open.cc:2157] SstFileManager instance 000002257439C9D0
+2026/03/04-13:23:36.203445 ae40 DB pointer 000002257487F900
+2026/03/04-13:23:42.205068 87e8 [db/db_impl/db_impl.cc:1140] ------- DUMPING STATS -------
+2026/03/04-13:23:42.205105 87e8 [db/db_impl/db_impl.cc:1141] 
+** DB Stats **
+Uptime(secs): 6.0 total, 6.0 interval
+Cumulative writes: 17 writes, 32 keys, 17 commit groups, 1.0 writes per commit group, ingest: 0.00 GB, 0.00 MB/s
+Cumulative WAL: 0 writes, 0 syncs, 0.00 writes per sync, written: 0.00 GB, 0.00 MB/s
+Cumulative stall: 00:00:0.000 H:M:S, 0.0 percent
+Interval writes: 17 writes, 32 keys, 17 commit groups, 1.0 writes per commit group, ingest: 0.00 MB, 0.00 MB/s
+Interval WAL: 0 writes, 0 syncs, 0.00 writes per sync, written: 0.00 GB, 0.00 MB/s
+Interval stall: 00:00:0.000 H:M:S, 0.0 percent
+Write Stall (count): write-buffer-manager-limit-stops: 0
+
+** Compaction Stats [default] **
+Level    Files   Size     Score Read(GB)  Rn(GB) Rnp1(GB) Write(GB) Wnew(GB) Moved(GB) W-Amp Rd(MB/s) Wr(MB/s) Comp(sec) CompMergeCPU(sec) Comp(cnt) Avg(sec) KeyIn KeyDrop Rblob(GB) Wblob(GB)
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sum      0/0    0.00 KB   0.0      0.0     0.0      0.0       0.0      0.0       0.0   0.0      0.0      0.0      0.00              0.00         0    0.000       0      0       0.0       0.0
+ Int      0/0    0.00 KB   0.0      0.0     0.0      0.0       0.0      0.0       0.0   0.0      0.0      0.0      0.00              0.00         0    0.000       0      0       0.0       0.0
+
+** Compaction Stats [default] **
+Priority    Files   Size     Score Read(GB)  Rn(GB) Rnp1(GB) Write(GB) Wnew(GB) Moved(GB) W-Amp Rd(MB/s) Wr(MB/s) Comp(sec) CompMergeCPU(sec) Comp(cnt) Avg(sec) KeyIn KeyDrop Rblob(GB) Wblob(GB)
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Blob file count: 0, total size: 0.0 GB, garbage size: 0.0 GB, space amp: 0.0
+
+Uptime(secs): 6.0 total, 6.0 interval
+Flush(GB): cumulative 0.000, interval 0.000
+AddFile(GB): cumulative 0.000, interval 0.000
+AddFile(Total Files): cumulative 0, interval 0
+AddFile(L0 Files): cumulative 0, interval 0
+AddFile(Keys): cumulative 0, interval 0
+Cumulative compaction: 0.00 GB write, 0.00 MB/s write, 0.00 GB read, 0.00 MB/s read, 0.0 seconds
+Interval compaction: 0.00 GB write, 0.00 MB/s write, 0.00 GB read, 0.00 MB/s read, 0.0 seconds
+Write Stall (count): cf-l0-file-count-limit-delays-with-ongoing-compaction: 0, cf-l0-file-count-limit-stops-with-ongoing-compaction: 0, l0-file-count-limit-delays: 0, l0-file-count-limit-stops: 0, memtable-limit-delays: 0, memtable-limit-stops: 0, pending-compaction-bytes-delays: 0, pending-compaction-bytes-stops: 0, total-delays: 0, total-stops: 0
+Block cache LRUCache@0000022574907B10#8576 capacity: 32.00 MB seed: 1354635883 usage: 0.08 KB table_size: 1024 occupancy: 1 collections: 1 last_copies: 0 last_secs: 8.5e-05 secs_since: 0
+Block cache entry stats(count,size,portion): Misc(1,0.00 KB,0%)
+
+** File Read Latency Histogram By Level [default] **

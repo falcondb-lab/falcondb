@@ -10,7 +10,8 @@ $OutputDir = Join-Path $PocRoot "output"
 $Timeline  = Join-Path $OutputDir "event_timeline.txt"
 
 $HostAddr  = "127.0.0.1"
-$AdminPort = if ($env:ADMIN_PORT) { $env:ADMIN_PORT } else { "8080" }
+$AdminPort    = if ($env:ADMIN_PORT)  { $env:ADMIN_PORT }  else { "8080" }
+$MetricsPort  = if ($env:METRICS_PORT) { $env:METRICS_PORT } else { "9091" }
 
 function Ok($msg)   { Write-Host "  + $msg" -ForegroundColor Green }
 function Info($msg) { Write-Host "  > $msg" -ForegroundColor Yellow }

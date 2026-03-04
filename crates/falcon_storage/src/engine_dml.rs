@@ -54,76 +54,73 @@ impl StorageEngine {
         row: OwnedRow,
         txn_id: TxnId,
     ) -> Result<PrimaryKey, StorageError> {
-        // Rowstore (in-memory, default)
-        if let Some(table) = self.tables.get(&table_id) {
-            let row_bytes = crate::mvcc::estimate_row_bytes(&row);
-            self.memory_tracker.alloc_write_buffer(row_bytes);
-            // Defer WAL write to commit time — batch with CommitTxnLocal under one mutex
-            if self.wal.is_some() {
-                self.txn_wal_buf.entry(txn_id).or_default().push(
-                    WalRecord::Insert { txn_id, table_id, row: row.clone() },
-                );
+        use crate::table_handle::TableHandle;
+
+        let handle = self.engine_tables.get(&table_id)
+            .ok_or(StorageError::TableNotFound(table_id))?;
+
+        match handle.value() {
+            TableHandle::Rowstore(table) => {
+                let row_bytes = crate::mvcc::estimate_row_bytes(&row);
+                self.memory_tracker.alloc_write_buffer(row_bytes);
+                self.txn_write_bytes
+                    .entry(txn_id)
+                    .or_insert_with(|| AtomicU64::new(0))
+                    .fetch_add(row_bytes, AtomicOrdering::Relaxed);
+                if self.wal.is_some() {
+                    self.txn_wal_buf.entry(txn_id).or_default().push(
+                        WalRecord::Insert { txn_id, table_id, row: row.clone() },
+                    );
+                }
+                let cdc_row = if self.ext.cdc_manager.is_enabled() { Some(row.clone()) } else { None };
+                let pk = table.insert(row, txn_id)?;
+                self.record_write_no_dedup(txn_id, table_id, pk.clone());
+                if let Some(cdc_row) = cdc_row {
+                    let tname = self.cdc_table_name(table_id);
+                    self.ext.cdc_manager.emit_insert(txn_id, table_id, &tname, cdc_row, Some(format!("{pk:?}")));
+                }
+                Ok(pk)
             }
-            let cdc_row = if self.ext.cdc_manager.is_enabled() { Some(row.clone()) } else { None };
-            let pk = table.insert(row, txn_id)?;
-            self.record_write(txn_id, table_id, pk.clone());
-
-            // CDC: emit INSERT event
-            if let Some(cdc_row) = cdc_row {
-                let tname = self.cdc_table_name(table_id);
-                self.ext.cdc_manager.emit_insert(txn_id, table_id, &tname, cdc_row, Some(format!("{pk:?}")));
+            #[cfg(feature = "columnstore")]
+            TableHandle::Columnstore(cs) => {
+                self.record_write_path_violation_columnstore()?;
+                self.append_wal(&WalRecord::Insert { txn_id, table_id, row: row.clone() })?;
+                let pk = crate::memtable::encode_pk(&row, cs.schema.pk_indices());
+                let _ = cs.insert(row, txn_id);
+                Ok(pk)
             }
-
-            return Ok(pk);
+            #[cfg(feature = "disk_rowstore")]
+            TableHandle::DiskRowstore(disk) => {
+                self.record_write_path_violation_disk()?;
+                self.append_wal(&WalRecord::Insert { txn_id, table_id, row: row.clone() })?;
+                let pk = disk.insert(row, txn_id)?;
+                Ok(pk)
+            }
+            #[cfg(feature = "lsm")]
+            TableHandle::Lsm(lsm) => {
+                self.append_wal(&WalRecord::Insert { txn_id, table_id, row: row.clone() })?;
+                let pk = lsm.insert(&row, txn_id)?;
+                self.record_write(txn_id, table_id, pk.clone());
+                let page_id = ustm_page_id(table_id, &pk);
+                let data = PageData::new(pk.clone());
+                self.ustm.insert_warm(page_id, data, AccessPriority::HotRow);
+                Ok(pk)
+            }
+            #[cfg(feature = "rocksdb")]
+            TableHandle::RocksDb(rdb) => {
+                self.append_wal(&WalRecord::Insert { txn_id, table_id, row: row.clone() })?;
+                let pk = rdb.insert(&row, txn_id)?;
+                self.record_write(txn_id, table_id, pk.clone());
+                Ok(pk)
+            }
+            #[cfg(feature = "redb")]
+            TableHandle::Redb(rdb) => {
+                self.append_wal(&WalRecord::Insert { txn_id, table_id, row: row.clone() })?;
+                let pk = rdb.insert(&row, txn_id)?;
+                self.record_write(txn_id, table_id, pk.clone());
+                Ok(pk)
+            }
         }
-
-        // Columnstore (feature-gated)
-        #[cfg(feature = "columnstore")]
-        if let Some(_cs) = self.columnstore_tables.get(&table_id) {
-            self.record_write_path_violation_columnstore()?;
-            self.append_wal(&WalRecord::Insert {
-                txn_id,
-                table_id,
-                row: row.clone(),
-            })?;
-            let pk = crate::memtable::encode_pk(&row, _cs.schema.pk_indices());
-            let _ = _cs.insert(row, txn_id);
-            return Ok(pk);
-        }
-
-        // Disk rowstore (feature-gated)
-        #[cfg(feature = "disk_rowstore")]
-        if let Some(disk) = self.disk_tables.get(&table_id) {
-            self.record_write_path_violation_disk()?;
-            self.append_wal(&WalRecord::Insert {
-                txn_id,
-                table_id,
-                row: row.clone(),
-            })?;
-            let pk = disk.insert(row, txn_id)?;
-            return Ok(pk);
-        }
-
-        // LSM rowstore (feature-gated)
-        #[cfg(feature = "lsm")]
-        if let Some(lsm) = self.lsm_tables.get(&table_id) {
-            self.append_wal(&WalRecord::Insert {
-                txn_id,
-                table_id,
-                row: row.clone(),
-            })?;
-            let pk = lsm.insert(&row, txn_id)?;
-            self.record_write(txn_id, table_id, pk.clone());
-
-            // USTM: LSM writes go to Warm zone (data lives on disk, not Hot DRAM).
-            let page_id = ustm_page_id(table_id, &pk);
-            let data = PageData::new(pk.clone());
-            self.ustm.insert_warm(page_id, data, AccessPriority::HotRow);
-
-            return Ok(pk);
-        }
-
-        Err(StorageError::TableNotFound(table_id))
     }
 
     /// Batch insert multiple rows with a single WAL record.
@@ -135,72 +132,66 @@ impl StorageEngine {
         rows: Vec<OwnedRow>,
         txn_id: TxnId,
     ) -> Result<Vec<PrimaryKey>, StorageError> {
+        use crate::table_handle::TableHandle;
+
         if rows.is_empty() {
             return Ok(vec![]);
         }
 
-        // LSM rowstore (feature-gated) — fall back to per-row insert
-        #[cfg(feature = "lsm")]
-        if let Some(lsm) = self.lsm_tables.get(&table_id) {
-            let row_count = rows.len();
-            let wal_record = WalRecord::BatchInsert { txn_id, table_id, rows };
-            self.append_wal(&wal_record)?;
-            let rows = match wal_record {
-                WalRecord::BatchInsert { rows, .. } => rows,
-                _ => unreachable!(),
-            };
-            let mut pks = Vec::with_capacity(row_count);
-            for row in rows {
-                let pk = lsm.insert(&row, txn_id)?;
-                self.record_write(txn_id, table_id, pk.clone());
-                pks.push(pk);
-            }
-            return Ok(pks);
-        }
-
-        let table = self
-            .tables
-            .get(&table_id)
+        let handle = self.engine_tables.get(&table_id)
             .ok_or(StorageError::TableNotFound(table_id))?;
 
-        // Batch memory tracking
-        let total_bytes: u64 = rows.iter().map(crate::mvcc::estimate_row_bytes).sum();
-        self.memory_tracker.alloc_write_buffer(total_bytes);
-
-        // Pre-track bytes so commit can skip estimate_write_set_bytes re-scan
-        self.txn_write_bytes
-            .entry(txn_id)
-            .or_insert_with(|| AtomicU64::new(0))
-            .fetch_add(total_bytes, AtomicOrdering::Relaxed);
-
-        // Single WAL record for all rows — move rows in, serialize, then take back.
-        // This avoids an expensive O(rows) clone.
-        let row_count = rows.len();
-        let wal_record = WalRecord::BatchInsert { txn_id, table_id, rows };
-        self.append_wal(&wal_record)?;
-        let rows = match wal_record {
-            WalRecord::BatchInsert { rows, .. } => rows,
-            _ => unreachable!(),
-        };
-
-        // Insert rows into memtable and collect PKs
-        let cdc_enabled = self.ext.cdc_manager.is_enabled();
-        let cdc_table_name = if cdc_enabled { Some(self.cdc_table_name(table_id)) } else { None };
-        let mut pks = Vec::with_capacity(row_count);
-        for row in rows {
-            let cdc_row = if cdc_enabled { Some(row.clone()) } else { None };
-            let pk = table.insert(row, txn_id)?;
-            self.record_write_no_dedup(txn_id, table_id, pk.clone());
-
-            // CDC: emit INSERT event for each row in batch
-            if let (Some(cdc_row), Some(ref tname)) = (cdc_row, &cdc_table_name) {
-                self.ext.cdc_manager.emit_insert(txn_id, table_id, tname, cdc_row, Some(format!("{pk:?}")));
+        match handle.value() {
+            TableHandle::Rowstore(table) => {
+                let total_bytes: u64 = rows.iter().map(crate::mvcc::estimate_row_bytes).sum();
+                self.memory_tracker.alloc_write_buffer(total_bytes);
+                self.txn_write_bytes
+                    .entry(txn_id)
+                    .or_insert_with(|| AtomicU64::new(0))
+                    .fetch_add(total_bytes, AtomicOrdering::Relaxed);
+                let row_count = rows.len();
+                let wal_record = WalRecord::BatchInsert { txn_id, table_id, rows };
+                self.append_wal(&wal_record)?;
+                let rows = match wal_record {
+                    WalRecord::BatchInsert { rows, .. } => rows,
+                    _ => unreachable!(),
+                };
+                let cdc_enabled = self.ext.cdc_manager.is_enabled();
+                let cdc_table_name = if cdc_enabled { Some(self.cdc_table_name(table_id)) } else { None };
+                let mut pks = Vec::with_capacity(row_count);
+                for row in rows {
+                    let cdc_row = if cdc_enabled { Some(row.clone()) } else { None };
+                    let pk = table.insert(row, txn_id)?;
+                    self.record_write_no_dedup(txn_id, table_id, pk.clone());
+                    if let (Some(cdc_row), Some(ref tname)) = (cdc_row, &cdc_table_name) {
+                        self.ext.cdc_manager.emit_insert(txn_id, table_id, tname, cdc_row, Some(format!("{pk:?}")));
+                    }
+                    pks.push(pk);
+                }
+                Ok(pks)
             }
-
-            pks.push(pk);
+            #[allow(unreachable_patterns)]
+            _ => {
+                if let Some(result) = handle.batch_insert_disk(rows.clone(), txn_id) {
+                    // lsm / rocksdb / redb: WAL first, then bulk insert
+                    let wal_record = WalRecord::BatchInsert { txn_id, table_id, rows };
+                    self.append_wal(&wal_record)?;
+                    let pks = result?;
+                    for pk in &pks {
+                        self.record_write(txn_id, table_id, pk.clone());
+                    }
+                    Ok(pks)
+                } else {
+                    // columnstore / disk_rowstore: fall through to per-row insert
+                    drop(handle);
+                    let mut pks = Vec::new();
+                    for row in rows {
+                        pks.push(self.insert(table_id, row, txn_id)?);
+                    }
+                    Ok(pks)
+                }
+            }
         }
-
-        Ok(pks)
     }
 
     pub fn update(
@@ -210,72 +201,60 @@ impl StorageEngine {
         new_row: OwnedRow,
         txn_id: TxnId,
     ) -> Result<(), StorageError> {
-        // Rowstore
-        if let Some(table) = self.tables.get(&table_id) {
-            let row_bytes = crate::mvcc::estimate_row_bytes(&new_row);
-            self.memory_tracker.alloc_write_buffer(row_bytes);
-            self.append_wal(&WalRecord::Update {
-                txn_id,
-                table_id,
-                pk: pk.clone(),
-                new_row: new_row.clone(),
-            })?;
-            let cdc_row = if self.ext.cdc_manager.is_enabled() { Some(new_row.clone()) } else { None };
-            table.update(pk, new_row, txn_id)?;
-            self.record_write(txn_id, table_id, pk.clone());
+        use crate::table_handle::TableHandle;
 
-            // CDC: emit UPDATE event (old_row=None; REPLICA IDENTITY FULL not yet supported)
-            if let Some(cdc_row) = cdc_row {
-                let tname = self.cdc_table_name(table_id);
-                self.ext.cdc_manager.emit_update(txn_id, table_id, &tname, None, cdc_row, Some(format!("{pk:?}")));
+        let handle = self.engine_tables.get(&table_id)
+            .ok_or(StorageError::TableNotFound(table_id))?;
+
+        match handle.value() {
+            TableHandle::Rowstore(table) => {
+                let row_bytes = crate::mvcc::estimate_row_bytes(&new_row);
+                self.memory_tracker.alloc_write_buffer(row_bytes);
+                self.append_wal(&WalRecord::Update { txn_id, table_id, pk: pk.clone(), new_row: new_row.clone() })?;
+                let cdc_row = if self.ext.cdc_manager.is_enabled() { Some(new_row.clone()) } else { None };
+                table.update(pk, new_row, txn_id)?;
+                self.record_write(txn_id, table_id, pk.clone());
+                if let Some(cdc_row) = cdc_row {
+                    let tname = self.cdc_table_name(table_id);
+                    self.ext.cdc_manager.emit_update(txn_id, table_id, &tname, None, cdc_row, Some(format!("{pk:?}")));
+                }
+                Ok(())
             }
-
-            return Ok(());
+            #[cfg(feature = "columnstore")]
+            TableHandle::Columnstore(_) => {
+                self.record_write_path_violation_columnstore()?;
+                Err(StorageError::Io(std::io::Error::other("UPDATE not supported on COLUMNSTORE tables")))
+            }
+            #[cfg(feature = "disk_rowstore")]
+            TableHandle::DiskRowstore(disk) => {
+                self.record_write_path_violation_disk()?;
+                self.append_wal(&WalRecord::Update { txn_id, table_id, pk: pk.clone(), new_row: new_row.clone() })?;
+                disk.update(pk, new_row, txn_id)
+            }
+            #[cfg(feature = "lsm")]
+            TableHandle::Lsm(lsm) => {
+                self.append_wal(&WalRecord::Update { txn_id, table_id, pk: pk.clone(), new_row: new_row.clone() })?;
+                lsm.update(pk, &new_row, txn_id)?;
+                self.record_write(txn_id, table_id, pk.clone());
+                let page_id = ustm_page_id(table_id, pk);
+                self.ustm.insert_warm(page_id, PageData::new(pk.clone()), AccessPriority::HotRow);
+                Ok(())
+            }
+            #[cfg(feature = "rocksdb")]
+            TableHandle::RocksDb(rdb) => {
+                self.append_wal(&WalRecord::Update { txn_id, table_id, pk: pk.clone(), new_row: new_row.clone() })?;
+                rdb.update(pk, &new_row, txn_id)?;
+                self.record_write(txn_id, table_id, pk.clone());
+                Ok(())
+            }
+            #[cfg(feature = "redb")]
+            TableHandle::Redb(rdb) => {
+                self.append_wal(&WalRecord::Update { txn_id, table_id, pk: pk.clone(), new_row: new_row.clone() })?;
+                rdb.update(pk, &new_row, txn_id)?;
+                self.record_write(txn_id, table_id, pk.clone());
+                Ok(())
+            }
         }
-
-        // Disk rowstore (feature-gated)
-        #[cfg(feature = "disk_rowstore")]
-        if let Some(disk) = self.disk_tables.get(&table_id) {
-            self.record_write_path_violation_disk()?;
-            self.append_wal(&WalRecord::Update {
-                txn_id,
-                table_id,
-                pk: pk.clone(),
-                new_row: new_row.clone(),
-            })?;
-            disk.update(pk, new_row, txn_id)?;
-            return Ok(());
-        }
-
-        // LSM rowstore (feature-gated)
-        #[cfg(feature = "lsm")]
-        if let Some(lsm) = self.lsm_tables.get(&table_id) {
-            self.append_wal(&WalRecord::Update {
-                txn_id,
-                table_id,
-                pk: pk.clone(),
-                new_row: new_row.clone(),
-            })?;
-            lsm.update(pk, &new_row, txn_id)?;
-
-            // USTM: refresh Warm zone entry after update.
-            let page_id = ustm_page_id(table_id, pk);
-            let data = PageData::new(pk.clone());
-            self.ustm.insert_warm(page_id, data, AccessPriority::HotRow);
-
-            return Ok(());
-        }
-
-        // Columnstore: UPDATE not natively supported (analytics workload)
-        #[cfg(feature = "columnstore")]
-        if self.columnstore_tables.contains_key(&table_id) {
-            self.record_write_path_violation_columnstore()?;
-            return Err(StorageError::Io(std::io::Error::other(
-                "UPDATE not supported on COLUMNSTORE tables",
-            )));
-        }
-
-        Err(StorageError::TableNotFound(table_id))
     }
 
     pub fn delete(
@@ -284,68 +263,58 @@ impl StorageEngine {
         pk: &PrimaryKey,
         txn_id: TxnId,
     ) -> Result<(), StorageError> {
-        // Rowstore
-        if let Some(table) = self.tables.get(&table_id) {
-            let tombstone_bytes = std::mem::size_of::<crate::mvcc::Version>() as u64;
-            self.memory_tracker.alloc_write_buffer(tombstone_bytes);
-            self.append_wal(&WalRecord::Delete {
-                txn_id,
-                table_id,
-                pk: pk.clone(),
-            })?;
-            table.delete(pk, txn_id)?;
-            self.record_write(txn_id, table_id, pk.clone());
+        use crate::table_handle::TableHandle;
 
-            // CDC: emit DELETE event
-            if self.ext.cdc_manager.is_enabled() {
-                let tname = self.cdc_table_name(table_id);
-                self.ext.cdc_manager.emit_delete(txn_id, table_id, &tname, None, Some(format!("{pk:?}")));
+        let handle = self.engine_tables.get(&table_id)
+            .ok_or(StorageError::TableNotFound(table_id))?;
+
+        match handle.value() {
+            TableHandle::Rowstore(table) => {
+                let tombstone_bytes = std::mem::size_of::<crate::mvcc::Version>() as u64;
+                self.memory_tracker.alloc_write_buffer(tombstone_bytes);
+                self.append_wal(&WalRecord::Delete { txn_id, table_id, pk: pk.clone() })?;
+                table.delete(pk, txn_id)?;
+                self.record_write(txn_id, table_id, pk.clone());
+                if self.ext.cdc_manager.is_enabled() {
+                    let tname = self.cdc_table_name(table_id);
+                    self.ext.cdc_manager.emit_delete(txn_id, table_id, &tname, None, Some(format!("{pk:?}")));
+                }
+                Ok(())
             }
-
-            return Ok(());
+            #[cfg(feature = "columnstore")]
+            TableHandle::Columnstore(_) => {
+                self.record_write_path_violation_columnstore()?;
+                Err(StorageError::Io(std::io::Error::other("DELETE not supported on COLUMNSTORE tables")))
+            }
+            #[cfg(feature = "disk_rowstore")]
+            TableHandle::DiskRowstore(disk) => {
+                self.record_write_path_violation_disk()?;
+                self.append_wal(&WalRecord::Delete { txn_id, table_id, pk: pk.clone() })?;
+                disk.delete(pk, txn_id)
+            }
+            #[cfg(feature = "lsm")]
+            TableHandle::Lsm(lsm) => {
+                self.append_wal(&WalRecord::Delete { txn_id, table_id, pk: pk.clone() })?;
+                lsm.delete(pk, txn_id)?;
+                self.record_write(txn_id, table_id, pk.clone());
+                self.ustm.unregister_page(ustm_page_id(table_id, pk));
+                Ok(())
+            }
+            #[cfg(feature = "rocksdb")]
+            TableHandle::RocksDb(rdb) => {
+                self.append_wal(&WalRecord::Delete { txn_id, table_id, pk: pk.clone() })?;
+                rdb.delete(pk, txn_id)?;
+                self.record_write(txn_id, table_id, pk.clone());
+                Ok(())
+            }
+            #[cfg(feature = "redb")]
+            TableHandle::Redb(rdb) => {
+                self.append_wal(&WalRecord::Delete { txn_id, table_id, pk: pk.clone() })?;
+                rdb.delete(pk, txn_id)?;
+                self.record_write(txn_id, table_id, pk.clone());
+                Ok(())
+            }
         }
-
-        // Disk rowstore (feature-gated)
-        #[cfg(feature = "disk_rowstore")]
-        if let Some(disk) = self.disk_tables.get(&table_id) {
-            self.record_write_path_violation_disk()?;
-            self.append_wal(&WalRecord::Delete {
-                txn_id,
-                table_id,
-                pk: pk.clone(),
-            })?;
-            disk.delete(pk, txn_id)?;
-            return Ok(());
-        }
-
-        // LSM rowstore (feature-gated)
-        #[cfg(feature = "lsm")]
-        if let Some(lsm) = self.lsm_tables.get(&table_id) {
-            self.append_wal(&WalRecord::Delete {
-                txn_id,
-                table_id,
-                pk: pk.clone(),
-            })?;
-            lsm.delete(pk, txn_id)?;
-            self.record_write(txn_id, table_id, pk.clone());
-
-            // USTM: evict the deleted page from Warm zone.
-            let page_id = ustm_page_id(table_id, pk);
-            self.ustm.unregister_page(page_id);
-
-            return Ok(());
-        }
-
-        // Columnstore: DELETE not natively supported
-        #[cfg(feature = "columnstore")]
-        if self.columnstore_tables.contains_key(&table_id) {
-            self.record_write_path_violation_columnstore()?;
-            return Err(StorageError::Io(std::io::Error::other(
-                "DELETE not supported on COLUMNSTORE tables",
-            )));
-        }
-
-        Err(StorageError::TableNotFound(table_id))
     }
 
     pub fn get(
@@ -355,41 +324,37 @@ impl StorageEngine {
         txn_id: TxnId,
         read_ts: Timestamp,
     ) -> Result<Option<OwnedRow>, StorageError> {
-        // Rowstore
-        if let Some(table) = self.tables.get(&table_id) {
-            return Ok(table.get(pk, txn_id, read_ts));
+        use crate::table_handle::TableHandle;
+
+        let handle = self.engine_tables.get(&table_id)
+            .ok_or(StorageError::TableNotFound(table_id))?;
+
+        #[allow(unreachable_patterns)]
+        match handle.value() {
+            TableHandle::Rowstore(table) => Ok(table.get(pk, txn_id, read_ts)),
+            #[cfg(feature = "columnstore")]
+            TableHandle::Columnstore(_) => Ok(None),
+            #[cfg(feature = "disk_rowstore")]
+            TableHandle::DiskRowstore(disk) => Ok(disk.get(pk, txn_id, read_ts)),
+            #[cfg(feature = "lsm")]
+            TableHandle::Lsm(lsm) => {
+                self.record_read(txn_id, table_id, pk.clone());
+                let page_id = ustm_page_id(table_id, pk);
+                let result = lsm.get(pk, txn_id, read_ts)?;
+                self.ustm.insert_warm(page_id, PageData::new(pk.clone()), AccessPriority::HotRow);
+                Ok(result)
+            }
+            #[cfg(feature = "rocksdb")]
+            TableHandle::RocksDb(rdb) => {
+                self.record_read(txn_id, table_id, pk.clone());
+                rdb.get(pk, txn_id, read_ts)
+            }
+            #[cfg(feature = "redb")]
+            TableHandle::Redb(rdb) => {
+                self.record_read(txn_id, table_id, pk.clone());
+                rdb.get(pk, txn_id, read_ts)
+            }
         }
-
-        // Disk rowstore (feature-gated)
-        #[cfg(feature = "disk_rowstore")]
-        if let Some(disk) = self.disk_tables.get(&table_id) {
-            return Ok(disk.get(pk, txn_id, read_ts));
-        }
-
-        // LSM rowstore (feature-gated)
-        #[cfg(feature = "lsm")]
-        if let Some(lsm) = self.lsm_tables.get(&table_id) {
-            self.record_read(txn_id, table_id, pk.clone());
-
-            // USTM: LSM point-get — check Warm zone first, then fall through to LSM.
-            // The Warm zone acts as a read cache for recently accessed LSM rows.
-            let page_id = ustm_page_id(table_id, pk);
-            let result = lsm.get(pk)?;
-
-            // Cache the access in Warm zone for LIRS-2 tracking.
-            let data = PageData::new(pk.clone());
-            self.ustm.insert_warm(page_id, data, AccessPriority::HotRow);
-
-            return Ok(result);
-        }
-
-        // Columnstore: point-get not efficient, return not found
-        #[cfg(feature = "columnstore")]
-        if self.columnstore_tables.contains_key(&table_id) {
-            return Ok(None);
-        }
-
-        Err(StorageError::TableNotFound(table_id))
     }
 
     /// Count visible rows without materializing any row data.
@@ -400,10 +365,9 @@ impl StorageEngine {
         txn_id: TxnId,
         read_ts: Timestamp,
     ) -> Result<usize, StorageError> {
-        if let Some(table) = self.tables.get(&table_id) {
-            return Ok(table.count_visible(txn_id, read_ts));
-        }
-        Err(StorageError::TableNotFound(table_id))
+        let handle = self.engine_tables.get(&table_id)
+            .ok_or(StorageError::TableNotFound(table_id))?;
+        Ok(handle.count_visible(txn_id, read_ts))
     }
 
     /// Scan top-K rows ordered by PK. Only materializes K rows instead of all N.
@@ -416,10 +380,19 @@ impl StorageEngine {
         k: usize,
         ascending: bool,
     ) -> Result<Vec<(PrimaryKey, OwnedRow)>, StorageError> {
-        if let Some(table) = self.tables.get(&table_id) {
-            return Ok(table.scan_top_k_by_pk(txn_id, read_ts, k, ascending));
+        use crate::table_handle::TableHandle;
+        let handle = self.engine_tables.get(&table_id)
+            .ok_or(StorageError::TableNotFound(table_id))?;
+        match handle.value() {
+            TableHandle::Rowstore(table) => Ok(table.scan_top_k_by_pk(txn_id, read_ts, k, ascending)),
+            #[allow(unreachable_patterns)]
+            _ => {
+                let mut rows = handle.scan(txn_id, read_ts);
+                rows.sort_by(|(a, _), (b, _)| if ascending { a.cmp(b) } else { b.cmp(a) });
+                rows.truncate(k);
+                Ok(rows)
+            }
         }
-        Err(StorageError::TableNotFound(table_id))
     }
 
     /// Compute simple aggregates in a streaming pass without materializing rows.
@@ -430,10 +403,107 @@ impl StorageEngine {
         read_ts: Timestamp,
         agg_specs: &[(SimpleAggOp, Option<usize>)],
     ) -> Result<Vec<Datum>, StorageError> {
-        if let Some(table) = self.tables.get(&table_id) {
-            return Ok(table.compute_simple_aggs(txn_id, read_ts, agg_specs));
+        let compute_from_rows = |rows: Vec<(PrimaryKey, OwnedRow)>| {
+            let n = agg_specs.len();
+            let mut counts = vec![0i64; n];
+            let mut sums_i = vec![0i64; n];
+            let mut sums_f = vec![0f64; n];
+            let mut is_float = vec![false; n];
+            let mut mins: Vec<Option<Datum>> = vec![None; n];
+            let mut maxs: Vec<Option<Datum>> = vec![None; n];
+
+            for (_, row) in rows {
+                for (i, (op, col_opt)) in agg_specs.iter().enumerate() {
+                    match op {
+                        SimpleAggOp::CountStar => counts[i] += 1,
+                        SimpleAggOp::Count => {
+                            if let Some(ci) = col_opt {
+                                if !matches!(row.values.get(*ci), Some(Datum::Null) | None) {
+                                    counts[i] += 1;
+                                }
+                            }
+                        }
+                        SimpleAggOp::Sum => {
+                            if let Some(ci) = col_opt {
+                                match row.values.get(*ci) {
+                                    Some(Datum::Int32(v)) => {
+                                        counts[i] += 1;
+                                        sums_i[i] += i64::from(*v);
+                                        sums_f[i] += f64::from(*v);
+                                    }
+                                    Some(Datum::Int64(v)) => {
+                                        counts[i] += 1;
+                                        sums_i[i] += *v;
+                                        sums_f[i] += *v as f64;
+                                    }
+                                    Some(Datum::Float64(v)) => {
+                                        counts[i] += 1;
+                                        is_float[i] = true;
+                                        sums_f[i] += *v;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        SimpleAggOp::Min => {
+                            if let Some(ci) = col_opt {
+                                if let Some(d) = row.values.get(*ci) {
+                                    if !matches!(d, Datum::Null)
+                                        && (mins[i].is_none()
+                                            || d.partial_cmp(mins[i].as_ref().expect("min exists after is_none check"))
+                                                == Some(std::cmp::Ordering::Less))
+                                    {
+                                        mins[i] = Some(d.clone());
+                                    }
+                                }
+                            }
+                        }
+                        SimpleAggOp::Max => {
+                            if let Some(ci) = col_opt {
+                                if let Some(d) = row.values.get(*ci) {
+                                    if !matches!(d, Datum::Null)
+                                        && (maxs[i].is_none()
+                                            || d.partial_cmp(maxs[i].as_ref().expect("max exists after is_none check"))
+                                                == Some(std::cmp::Ordering::Greater))
+                                    {
+                                        maxs[i] = Some(d.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            agg_specs
+                .iter()
+                .enumerate()
+                .map(|(i, (op, _))| match op {
+                    SimpleAggOp::CountStar | SimpleAggOp::Count => Datum::Int64(counts[i]),
+                    SimpleAggOp::Sum => {
+                        if counts[i] == 0 {
+                            Datum::Null
+                        } else if is_float[i] {
+                            Datum::Float64(sums_f[i])
+                        } else {
+                            Datum::Int64(sums_i[i])
+                        }
+                    }
+                    SimpleAggOp::Min => mins[i].clone().unwrap_or(Datum::Null),
+                    SimpleAggOp::Max => maxs[i].clone().unwrap_or(Datum::Null),
+                })
+                .collect::<Vec<_>>()
+        };
+
+        use crate::table_handle::TableHandle;
+        let handle = self.engine_tables.get(&table_id)
+            .ok_or(StorageError::TableNotFound(table_id))?;
+
+        match handle.value() {
+            TableHandle::Rowstore(table) => Ok(table.compute_simple_aggs(txn_id, read_ts, agg_specs)),
+            #[allow(unreachable_patterns)]
+            _ => Ok(compute_from_rows(handle.scan(txn_id, read_ts))),
         }
-        Err(StorageError::TableNotFound(table_id))
     }
 
     /// Scan with an inline predicate: only materializes rows that pass `predicate`.
@@ -469,7 +539,19 @@ impl StorageEngine {
             }
             return Ok(results);
         }
-        Err(StorageError::TableNotFound(table_id))
+        // non-rowstore fallback: full scan then filter
+        let handle = self.engine_tables.get(&table_id)
+            .ok_or(StorageError::TableNotFound(table_id))?;
+        let mut results = Vec::new();
+        for (pk, row) in handle.scan(txn_id, read_ts) {
+            if let Some(lim) = limit {
+                if results.len() >= lim { break; }
+            }
+            if predicate(&row) {
+                results.push((pk, row));
+            }
+        }
+        Ok(results)
     }
 
     /// Stream through all visible rows without cloning (zero-copy).
@@ -484,16 +566,15 @@ impl StorageEngine {
     where
         F: FnMut(&OwnedRow),
     {
-        if let Some(table) = self.tables.get(&table_id) {
-            table.for_each_visible(txn_id, read_ts, f);
-            return Ok(());
-        }
-        Err(StorageError::TableNotFound(table_id))
+        let handle = self.engine_tables.get(&table_id)
+            .ok_or(StorageError::TableNotFound(table_id))?;
+        handle.for_each_visible(txn_id, read_ts, f);
+        Ok(())
     }
 
     /// Parallel map-reduce over all visible rows.
     /// Each thread gets its own accumulator; partial results are merged at the end.
-    /// Automatically falls back to sequential for small tables.
+    /// Rowstore uses parallel rayon shards; other engines fall back to sequential.
     pub fn map_reduce_visible<T, Init, Map, Reduce>(
         &self,
         table_id: TableId,
@@ -509,10 +590,22 @@ impl StorageEngine {
         Map: Fn(&mut T, &OwnedRow) + Sync,
         Reduce: Fn(T, T) -> T,
     {
-        if let Some(table) = self.tables.get(&table_id) {
-            return Ok(table.map_reduce_visible(txn_id, read_ts, init, map, reduce));
+        use crate::table_handle::TableHandle;
+
+        let handle = self.engine_tables.get(&table_id)
+            .ok_or(StorageError::TableNotFound(table_id))?;
+
+        match handle.value() {
+            TableHandle::Rowstore(table) => {
+                Ok(table.map_reduce_visible(txn_id, read_ts, init, map, reduce))
+            }
+            _ => {
+                let mut acc = init();
+                handle.for_each_visible(txn_id, read_ts, |row| map(&mut acc, row));
+                let _ = reduce;
+                Ok(acc)
+            }
         }
-        Err(StorageError::TableNotFound(table_id))
     }
 
     /// Scan returning only row data — avoids cloning the PK per row.
@@ -525,12 +618,11 @@ impl StorageEngine {
         read_ts: Timestamp,
     ) -> Result<Vec<OwnedRow>, StorageError> {
         if let Some(table) = self.tables.get(&table_id) {
-            let results = table.scan_rows_only(txn_id, read_ts);
-            return Ok(results);
+            return Ok(table.scan_rows_only(txn_id, read_ts));
         }
-        // Fall back to full scan for non-rowstore tables
-        let full = self.scan(table_id, txn_id, read_ts)?;
-        Ok(full.into_iter().map(|(_, row)| row).collect())
+        let handle = self.engine_tables.get(&table_id)
+            .ok_or(StorageError::TableNotFound(table_id))?;
+        Ok(handle.scan(txn_id, read_ts).into_iter().map(|(_, row)| row).collect())
     }
 
     pub fn scan(
@@ -539,72 +631,52 @@ impl StorageEngine {
         txn_id: TxnId,
         read_ts: Timestamp,
     ) -> Result<Vec<(PrimaryKey, OwnedRow)>, StorageError> {
-        // Rowstore
-        if let Some(table) = self.tables.get(&table_id) {
-            let results = table.scan(txn_id, read_ts);
-            for (pk, _) in &results {
-                self.record_read(txn_id, table_id, pk.clone());
+        use crate::table_handle::TableHandle;
+
+        let handle = self.engine_tables.get(&table_id)
+            .ok_or(StorageError::TableNotFound(table_id))?;
+
+        #[allow(unreachable_patterns)]
+        match handle.value() {
+            TableHandle::Rowstore(table) => {
+                let results = table.scan(txn_id, read_ts);
+                for (pk, _) in &results {
+                    self.record_read(txn_id, table_id, pk.clone());
+                }
+                if results.len() > 1 {
+                    let scan_pages: Vec<PageId> = (0..results.len().min(16) as u32)
+                        .map(|i| ustm_table_page_id(table_id, i))
+                        .collect();
+                    self.ustm.prefetch_hint(
+                        crate::ustm::PrefetchSource::SeqScan {
+                            start_page: scan_pages[0],
+                            count: scan_pages.len(),
+                        },
+                        std::path::PathBuf::from(format!("table_{}", table_id.0)),
+                    );
+                    self.ustm.prefetch_tick();
+                }
+                Ok(results)
             }
-
-            // USTM: issue prefetch hint for sequential scan pages.
-            if results.len() > 1 {
-                let scan_pages: Vec<PageId> = (0..results.len().min(16) as u32)
-                    .map(|i| ustm_table_page_id(table_id, i))
-                    .collect();
-                self.ustm.prefetch_hint(
-                    crate::ustm::PrefetchSource::SeqScan {
-                        start_page: scan_pages[0],
-                        count: scan_pages.len(),
-                    },
-                    std::path::PathBuf::from(format!("table_{}", table_id.0)),
-                );
-                self.ustm.prefetch_tick();
+            #[cfg(feature = "lsm")]
+            TableHandle::Lsm(lsm) => {
+                let results = lsm.scan(txn_id, read_ts);
+                if results.len() > 1 {
+                    let data_dir = self.data_dir.as_deref().unwrap_or_else(|| std::path::Path::new("."));
+                    let sst_path = data_dir.join(format!("lsm_table_{}", table_id.0));
+                    self.ustm.prefetch_hint(
+                        crate::ustm::PrefetchSource::SeqScan {
+                            start_page: ustm_table_page_id(table_id, 0),
+                            count: results.len().min(16),
+                        },
+                        sst_path,
+                    );
+                    self.ustm.prefetch_tick();
+                }
+                Ok(results)
             }
-
-            return Ok(results);
+            _ => Ok(handle.scan(txn_id, read_ts)),
         }
-
-        // Columnstore (feature-gated)
-        #[cfg(feature = "columnstore")]
-        if let Some(cs) = self.columnstore_tables.get(&table_id) {
-            let results = cs.scan(txn_id, read_ts);
-            return Ok(results);
-        }
-
-        // Disk rowstore (feature-gated)
-        #[cfg(feature = "disk_rowstore")]
-        if let Some(disk) = self.disk_tables.get(&table_id) {
-            let results = disk.scan(txn_id, read_ts);
-            return Ok(results);
-        }
-
-        // LSM rowstore (feature-gated)
-        #[cfg(feature = "lsm")]
-        if let Some(lsm) = self.lsm_tables.get(&table_id) {
-            let results = lsm.scan(txn_id, read_ts);
-
-            // USTM: LSM scan — issue prefetch hints for upcoming SST pages.
-            // LSM data lives on disk, so prefetch is especially valuable.
-            if results.len() > 1 {
-                let data_dir = self
-                    .data_dir
-                    .as_deref()
-                    .unwrap_or_else(|| std::path::Path::new("."));
-                let sst_path = data_dir.join(format!("lsm_table_{}", table_id.0));
-                self.ustm.prefetch_hint(
-                    crate::ustm::PrefetchSource::SeqScan {
-                        start_page: ustm_table_page_id(table_id, 0),
-                        count: results.len().min(16),
-                    },
-                    sst_path,
-                );
-                self.ustm.prefetch_tick();
-            }
-
-            return Ok(results);
-        }
-
-        Err(StorageError::TableNotFound(table_id))
     }
 
     /// Columnar scan: returns one Vec<Datum> per column for vectorized aggregate execution.

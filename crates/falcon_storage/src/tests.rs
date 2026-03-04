@@ -61,6 +61,10 @@ mod columnstore_integration_tests;
 #[path = "tests/disk_rowstore_integration_tests.rs"]
 mod disk_rowstore_integration_tests;
 
+#[cfg(all(test, feature = "lsm"))]
+#[path = "tests/lsm_mvcc_tests.rs"]
+mod lsm_mvcc_tests;
+
 #[cfg(test)]
 #[path = "tests/si_litmus_tests.rs"]
 mod si_litmus_tests;

@@ -12,7 +12,7 @@ $ErrorActionPreference = 'Stop'
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $OutputDir = Join-Path $ScriptDir "output"
 
-if (-not $env:FALCON_BIN)    { $env:FALCON_BIN    = "target\release\falcon_server.exe" }
+if (-not $env:FALCON_BIN)    { $env:FALCON_BIN    = "target\release\falcon.exe" }
 if (-not $env:MARKER_COUNT)  { $env:MARKER_COUNT  = "50000" }
 if (-not $env:LOAD_RAMP_SEC) { $env:LOAD_RAMP_SEC = "5" }
 

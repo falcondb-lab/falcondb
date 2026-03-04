@@ -14,7 +14,7 @@ $PocRoot    = Split-Path -Parent $ScriptDir
 $ResultsDir = Join-Path $PocRoot "results"
 
 $PgPort    = if ($env:PG_PORT) { $env:PG_PORT } else { "5432" }
-$PgUser    = if ($env:PG_USER) { $env:PG_USER } else { $env:USERNAME }
+$PgUser    = if ($env:PG_USER) { $env:PG_USER } else { "postgres" }
 $PgHost    = if ($env:PG_HOST) { $env:PG_HOST } else { "127.0.0.1" }
 $PgDataDir = if ($env:PG_DATADIR) { $env:PG_DATADIR } else { ".\pg_bench_data" }
 $PgConf    = Join-Path $PocRoot "conf\postgres.bench.conf"

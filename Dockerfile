@@ -40,6 +40,7 @@ COPY crates/falcon_server/Cargo.toml         crates/falcon_server/Cargo.toml
 COPY crates/falcon_bench/Cargo.toml          crates/falcon_bench/Cargo.toml
 COPY crates/falcon_cli/Cargo.toml            crates/falcon_cli/Cargo.toml
 COPY crates/falcon_segment_codec/Cargo.toml  crates/falcon_segment_codec/Cargo.toml
+COPY crates/falcon_enterprise/Cargo.toml     crates/falcon_enterprise/Cargo.toml
 
 # Create stub lib.rs for each crate so cargo can resolve the dep graph
 RUN find crates -name Cargo.toml -exec sh -c \

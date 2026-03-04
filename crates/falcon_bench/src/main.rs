@@ -1156,6 +1156,7 @@ fn run_lsm_bench(args: &Args) {
             ..Default::default()
         },
         sync_writes: false,
+        ..Default::default()
     };
     let engine = LsmEngine::open(&dir, config).unwrap();
 

@@ -1,4 +1,5 @@
 pub mod bg_supervisor;
+pub mod globals;
 pub mod cloud;
 pub mod compat;
 pub mod config;

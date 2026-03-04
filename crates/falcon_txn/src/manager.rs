@@ -751,6 +751,18 @@ impl TxnManager {
         Timestamp(self.ts_counter.load(Ordering::Relaxed))
     }
 
+    /// Advance counters past recovered WAL values so new transactions
+    /// get timestamps/ids higher than anything replayed during recovery.
+    pub fn advance_counters_past(&self, max_ts: u64, max_txn_id: u64) {
+        if max_ts > 0 {
+            self.ts_counter.fetch_max(max_ts + 1, Ordering::Relaxed);
+            self.local_ts_counter.fetch_max(max_ts + 1, Ordering::Relaxed);
+        }
+        if max_txn_id > 0 {
+            self.txn_counter.fetch_max(max_txn_id + 1, Ordering::Relaxed);
+        }
+    }
+
     /// Begin a new transaction.
     pub fn begin(&self, isolation: IsolationLevel) -> TxnHandle {
         self.begin_with_classification(isolation, TxnClassification::local(ShardId(0)))
@@ -903,7 +915,7 @@ impl TxnManager {
             txn_type: TxnType::Local,
             path: TxnPath::Fast,
             slow_path_mode: SlowPathMode::Xa2Pc,
-            involved_shards: vec![ShardId(0)],
+            involved_shards: Vec::new(),
             degraded: false,
             state: TxnState::Active,
             begin_instant: None,

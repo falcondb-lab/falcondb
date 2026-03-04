@@ -54,9 +54,74 @@ pub struct FalconConfig {
     /// v1.2.1: Automatic shard rebalancing configuration.
     #[serde(default)]
     pub rebalance: RebalanceSectionConfig,
+    /// v1.3.0: Logging configuration.
+    #[serde(default)]
+    pub logging: LoggingConfig,
+    /// v1.3.0: Cluster lifecycle, failure detection, self-healing.
+    #[serde(default)]
+    pub cluster: ClusterSectionConfig,
 }
 
 const fn default_config_version() -> u32 { CURRENT_CONFIG_VERSION }
+
+/// Cluster lifecycle configuration section in falcon.toml.
+///
+/// Controls the cluster coordinator, failure detector, and self-healing
+/// subsystems. Only active when running in distributed or raft mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterSectionConfig {
+    /// Enable cluster lifecycle coordinator (default: true for distributed modes).
+    #[serde(default = "default_true")]
+    pub lifecycle_enabled: bool,
+    /// Heartbeat evaluation interval in milliseconds.
+    #[serde(default = "default_heartbeat_interval_ms")]
+    pub heartbeat_interval_ms: u64,
+    /// Time (ms) before a node is considered suspect.
+    #[serde(default = "default_suspect_threshold_ms")]
+    pub suspect_threshold_ms: u64,
+    /// Time (ms) before a node is considered offline/dead.
+    #[serde(default = "default_offline_threshold_ms")]
+    pub offline_threshold_ms: u64,
+    /// Config sync push interval in milliseconds.
+    #[serde(default = "default_config_sync_interval_ms")]
+    pub config_sync_interval_ms: u64,
+    /// SLO evaluation interval in milliseconds.
+    #[serde(default = "default_slo_eval_interval_ms")]
+    pub slo_eval_interval_ms: u64,
+    /// Max shards this node can host.
+    #[serde(default = "default_max_shards")]
+    pub max_shards: u32,
+    /// Enable failure detector (default: true).
+    #[serde(default = "default_true")]
+    pub failure_detector_enabled: bool,
+    /// Max consecutive heartbeat misses before declaring node dead.
+    #[serde(default = "default_max_consecutive_misses")]
+    pub max_consecutive_misses: u32,
+}
+
+const fn default_heartbeat_interval_ms() -> u64 { 2000 }
+const fn default_suspect_threshold_ms() -> u64 { 5000 }
+const fn default_offline_threshold_ms() -> u64 { 15000 }
+const fn default_config_sync_interval_ms() -> u64 { 10000 }
+const fn default_slo_eval_interval_ms() -> u64 { 30000 }
+const fn default_max_shards() -> u32 { 64 }
+const fn default_max_consecutive_misses() -> u32 { 5 }
+
+impl Default for ClusterSectionConfig {
+    fn default() -> Self {
+        Self {
+            lifecycle_enabled: true,
+            heartbeat_interval_ms: default_heartbeat_interval_ms(),
+            suspect_threshold_ms: default_suspect_threshold_ms(),
+            offline_threshold_ms: default_offline_threshold_ms(),
+            config_sync_interval_ms: default_config_sync_interval_ms(),
+            slo_eval_interval_ms: default_slo_eval_interval_ms(),
+            max_shards: default_max_shards(),
+            failure_detector_enabled: true,
+            max_consecutive_misses: default_max_consecutive_misses(),
+        }
+    }
+}
 
 /// Automatic shard rebalancing configuration section in falcon.toml.
 ///
@@ -407,6 +472,78 @@ const fn default_true() -> bool { true }
 const fn default_gc_interval() -> u64 { 1000 }
 const fn default_min_chain_length() -> usize { 2 }
 
+/// Logging configuration section in falcon.toml.
+///
+/// Controls log level, output destinations (stderr / file), rotation policy,
+/// log format (text / JSON), and slow-query logging.
+///
+/// Example:
+/// ```toml
+/// [logging]
+/// level = "info"
+/// stderr = true
+/// file = "./dist/logs/falcondb.log"
+/// format = "text"
+/// rotation = "daily"
+/// max_size_mb = 100
+/// max_files = 7
+/// slow_query_ms = 100
+/// slow_query_log = "./dist/logs/slow.log"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingConfig {
+    /// Minimum log level: trace, debug, info, warn, error. Default: info.
+    #[serde(default = "default_log_level")]
+    pub level: String,
+    /// Write logs to stderr (default: true).
+    #[serde(default = "default_true")]
+    pub stderr: bool,
+    /// Optional path for log file output. Empty = no file output.
+    #[serde(default)]
+    pub file: String,
+    /// Log format: "text" (default) or "json".
+    #[serde(default = "default_log_format")]
+    pub format: String,
+    /// File rotation policy: "daily" (default), "hourly", or "size".
+    /// "size" rotates when the file exceeds `max_size_mb`.
+    #[serde(default = "default_log_rotation")]
+    pub rotation: String,
+    /// Max log file size in MB before rotation (only used when rotation = "size"). Default: 100.
+    #[serde(default = "default_log_max_size_mb")]
+    pub max_size_mb: u64,
+    /// Number of rotated log files to keep. 0 = keep all. Default: 7.
+    #[serde(default = "default_log_max_files")]
+    pub max_files: usize,
+    /// Log queries that take longer than this many milliseconds. 0 = disabled.
+    #[serde(default)]
+    pub slow_query_ms: u64,
+    /// Separate file for slow query log. Empty = use main log output.
+    #[serde(default)]
+    pub slow_query_log: String,
+}
+
+fn default_log_level() -> String { "info".to_owned() }
+fn default_log_format() -> String { "text".to_owned() }
+fn default_log_rotation() -> String { "daily".to_owned() }
+const fn default_log_max_size_mb() -> u64 { 100 }
+const fn default_log_max_files() -> usize { 7 }
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: default_log_level(),
+            stderr: true,
+            file: String::new(),
+            format: default_log_format(),
+            rotation: default_log_rotation(),
+            max_size_mb: default_log_max_size_mb(),
+            max_files: default_log_max_files(),
+            slow_query_ms: 0,
+            slow_query_log: String::new(),
+        }
+    }
+}
+
 impl Default for GcSectionConfig {
     fn default() -> Self {
         Self {
@@ -543,6 +680,7 @@ fn default_wal_sync_mode() -> String { "fdatasync".to_owned() }
 fn default_segment_size_bytes() -> u64 { 64 * 1024 * 1024 }
 fn default_compression_profile() -> String { "balanced".to_owned() }
 fn default_wal_mode() -> String { "auto".to_owned() }
+fn default_storage_default_engine() -> String { "rocksdb".to_owned() }
 
 impl Default for AuthConfig {
     fn default() -> Self {
@@ -577,6 +715,12 @@ pub struct StorageConfig {
     /// Default: false (WAL already provides crash-recovery guarantees).
     #[serde(default)]
     pub lsm_sync_writes: bool,
+
+    /// Default table engine when CREATE TABLE omits ENGINE=...
+    /// Supported values: rowstore, lsm, rocksdb, disk_rowstore, columnstore.
+    /// Default: "rocksdb".
+    #[serde(default = "default_storage_default_engine")]
+    pub default_engine: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1081,6 +1225,7 @@ impl Default for FalconConfig {
                 data_dir: "./falcon_data".to_owned(),
                 write_path_enforcement: WritePathEnforcement::Warn,
                 lsm_sync_writes: false,
+                default_engine: default_storage_default_engine(),
             },
             wal: WalConfig {
                 group_commit: true,
@@ -1109,6 +1254,8 @@ impl Default for FalconConfig {
             tde: TdeConfig::default(),
             raft: RaftConfig::default(),
             rebalance: RebalanceSectionConfig::default(),
+            logging: LoggingConfig::default(),
+            cluster: ClusterSectionConfig::default(),
         }
     }
 }

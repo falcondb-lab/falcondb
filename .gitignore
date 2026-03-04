@@ -9,3 +9,6 @@ Thumbs.db
 /check_*.rs
 /test_results*.txt
 /clippy_nursery*.txt
+
+/dist/windows/*.exe
+/dist/windows/stage/

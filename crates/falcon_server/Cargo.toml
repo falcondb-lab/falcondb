@@ -42,6 +42,8 @@ windows-service = "0.7"
 [features]
 default = []
 lsm = ["falcon_storage/lsm"]
+rocksdb = ["falcon_storage/rocksdb"]
+redb = ["falcon_storage/redb"]
 
 [dev-dependencies]
 serde_json.workspace = true

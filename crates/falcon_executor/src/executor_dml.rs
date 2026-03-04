@@ -33,6 +33,7 @@ impl Executor {
                                 + t.nanosecond() as i64 / 1_000,
                         )
                     }
+                    DefaultFn::Nextval(_) => continue, // handled in build_insert_row
                 };
             }
         }
@@ -45,16 +46,30 @@ impl Executor {
         columns: &[usize],
         row_exprs: &[BoundExpr],
     ) -> Result<Vec<Datum>, FalconError> {
-        let dummy_row = OwnedRow::new(vec![]);
-        let mut values: Vec<Datum> = schema
-            .columns
-            .iter()
-            .map(|c| c.default_value.clone().unwrap_or(Datum::Null))
-            .collect();
+        let ncols = schema.columns.len();
+        let mut values: Vec<Datum> = Vec::with_capacity(ncols);
+        values.resize(ncols, Datum::Null);
+
+        // Evaluate provided columns — fast path for literals, skip eval_row overhead
         for (i, expr) in row_exprs.iter().enumerate() {
             let col_idx = columns[i];
-            let val = ExprEngine::eval_row(expr, &dummy_row).map_err(FalconError::Execution)?;
+            let val = match expr {
+                BoundExpr::Literal(d) => d.clone(),
+                _ => {
+                    static EMPTY_ROW: OwnedRow = OwnedRow::empty();
+                    ExprEngine::eval_row(expr, &EMPTY_ROW).map_err(FalconError::Execution)?
+                }
+            };
             values[col_idx] = val;
+        }
+
+        // Fill defaults only for columns NOT provided by the INSERT
+        for (col_idx, col) in schema.columns.iter().enumerate() {
+            if values[col_idx].is_null() {
+                if let Some(ref def) = col.default_value {
+                    values[col_idx] = def.clone();
+                }
+            }
         }
 
         // Coerce values to match column data types (e.g. Text -> Date, Text -> Timestamp)
@@ -91,6 +106,16 @@ impl Executor {
         // Dynamic defaults (CURRENT_TIMESTAMP, etc.)
         Self::eval_dynamic_defaults(schema, &mut values);
 
+        // Fill nextval sequence defaults for columns still NULL
+        for (&col_idx, dfn) in &schema.dynamic_defaults {
+            if let falcon_common::schema::DefaultFn::Nextval(ref seq_name) = dfn {
+                if col_idx < values.len() && values[col_idx].is_null() {
+                    let next_val = self.storage.sequence_nextval(seq_name)?;
+                    values[col_idx] = Datum::Int64(next_val);
+                }
+            }
+        }
+
         // Enforce NOT NULL constraints
         for (i, val) in values.iter().enumerate() {
             if val.is_null() && !schema.columns[i].nullable {
@@ -115,13 +140,42 @@ impl Executor {
         txn: &TxnHandle,
     ) -> Result<ExecutionResult, FalconError> {
         // ── Fast path: no RETURNING, no ON CONFLICT ──────────────────────
-        // Evaluate all rows, batch constraint checks, then batch_insert.
         if returning.is_empty() && on_conflict.is_none() {
             return self.exec_insert_batch(table_id, schema, columns, rows, txn);
         }
 
-        // ── Slow path: RETURNING or ON CONFLICT requires per-row handling ─
+        // ── Fast path: ON CONFLICT DO NOTHING without RETURNING ──────────
+        if returning.is_empty() && matches!(on_conflict, Some(OnConflictAction::DoNothing)) {
+            return self.exec_insert_conflict_skip(table_id, schema, columns, rows, txn);
+        }
+
+        // ── Slow path: RETURNING or ON CONFLICT DO UPDATE ────────────────
         self.exec_insert_slow(table_id, schema, columns, rows, returning, on_conflict, txn)
+    }
+
+    /// INSERT ... ON CONFLICT DO NOTHING fast path: build row, try insert, skip on DuplicateKey.
+    fn exec_insert_conflict_skip(
+        &self,
+        table_id: falcon_common::types::TableId,
+        schema: &TableSchema,
+        columns: &[usize],
+        rows: &[Vec<BoundExpr>],
+        txn: &TxnHandle,
+    ) -> Result<ExecutionResult, FalconError> {
+        let mut count = 0u64;
+        for row_exprs in rows {
+            let values = self.build_insert_row(schema, columns, row_exprs)?;
+            let row = OwnedRow::new(values);
+            match self.storage.insert(table_id, row, txn.txn_id) {
+                Ok(_) => count += 1,
+                Err(falcon_common::error::StorageError::DuplicateKey) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(ExecutionResult::Dml {
+            rows_affected: count,
+            tag: "INSERT",
+        })
     }
 
     /// Fast batch INSERT path: no RETURNING, no ON CONFLICT.
@@ -259,7 +313,7 @@ impl Executor {
 
         Ok(ExecutionResult::Dml {
             rows_affected: count,
-            tag: "INSERT".into(),
+            tag: "INSERT",
         })
     }
 
@@ -493,7 +547,7 @@ impl Executor {
         } else {
             Ok(ExecutionResult::Dml {
                 rows_affected: count,
-                tag: "INSERT".into(),
+                tag: "INSERT",
             })
         }
     }
@@ -611,7 +665,7 @@ impl Executor {
 
         Ok(ExecutionResult::Dml {
             rows_affected: count,
-            tag: "INSERT".into(),
+            tag: "INSERT",
         })
     }
 
@@ -768,7 +822,7 @@ impl Executor {
         } else {
             Ok(ExecutionResult::Dml {
                 rows_affected: count,
-                tag: "UPDATE".into(),
+                tag: "UPDATE",
             })
         }
     }
@@ -854,7 +908,7 @@ impl Executor {
         } else {
             Ok(ExecutionResult::Dml {
                 rows_affected: count,
-                tag: "DELETE".into(),
+                tag: "DELETE",
             })
         }
     }
@@ -1208,7 +1262,7 @@ impl Executor {
         } else {
             Ok(ExecutionResult::Dml {
                 rows_affected: count,
-                tag: "UPDATE".into(),
+                tag: "UPDATE",
             })
         }
     }
@@ -1292,7 +1346,7 @@ impl Executor {
         } else {
             Ok(ExecutionResult::Dml {
                 rows_affected: count,
-                tag: "DELETE".into(),
+                tag: "DELETE",
             })
         }
     }

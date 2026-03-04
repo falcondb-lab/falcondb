@@ -13,6 +13,8 @@ pub struct SlowQueryEntry {
     pub timestamp_ms: u64,
     /// Session ID that executed the query.
     pub session_id: i32,
+    /// Client address (IP:port or empty if unknown).
+    pub client_addr: String,
 }
 
 /// Thread-safe slow query log with a configurable threshold and ring buffer.
@@ -56,7 +58,7 @@ impl SlowQueryLog {
 
     /// Record a query if it exceeds the threshold.
     /// Returns `true` if the query was logged.
-    pub fn record(&self, sql: &str, duration: Duration, session_id: i32) -> bool {
+    pub fn record(&self, sql: &str, duration: Duration, session_id: i32, client_addr: &str) -> bool {
         let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if inner.threshold.is_zero() || duration < inner.threshold {
             return false;
@@ -70,6 +72,7 @@ impl SlowQueryLog {
             duration,
             timestamp_ms: now,
             session_id,
+            client_addr: client_addr.to_owned(),
         };
         inner.total_count += 1;
         if inner.entries.len() >= inner.capacity {
@@ -116,7 +119,7 @@ mod tests {
     #[test]
     fn test_disabled_log_does_not_record() {
         let log = SlowQueryLog::disabled();
-        let recorded = log.record("SELECT 1", Duration::from_millis(500), 1);
+        let recorded = log.record("SELECT 1", Duration::from_millis(500), 1, "");
         assert!(!recorded);
         let (entries, count) = log.snapshot();
         assert!(entries.is_empty());
@@ -127,9 +130,9 @@ mod tests {
     fn test_records_slow_query() {
         let log = SlowQueryLog::new(Duration::from_millis(100), 10);
         // Below threshold — not recorded
-        assert!(!log.record("SELECT 1", Duration::from_millis(50), 1));
+        assert!(!log.record("SELECT 1", Duration::from_millis(50), 1, ""));
         // At or above threshold — recorded
-        assert!(log.record("SELECT * FROM big_table", Duration::from_millis(150), 2));
+        assert!(log.record("SELECT * FROM big_table", Duration::from_millis(150), 2, "127.0.0.1:5432"));
         let (entries, count) = log.snapshot();
         assert_eq!(entries.len(), 1);
         assert_eq!(count, 1);
@@ -140,10 +143,10 @@ mod tests {
     #[test]
     fn test_ring_buffer_eviction() {
         let log = SlowQueryLog::new(Duration::from_millis(1), 3);
-        log.record("q1", Duration::from_millis(10), 1);
-        log.record("q2", Duration::from_millis(10), 1);
-        log.record("q3", Duration::from_millis(10), 1);
-        log.record("q4", Duration::from_millis(10), 1);
+        log.record("q1", Duration::from_millis(10), 1, "");
+        log.record("q2", Duration::from_millis(10), 1, "");
+        log.record("q3", Duration::from_millis(10), 1, "");
+        log.record("q4", Duration::from_millis(10), 1, "");
         let (entries, count) = log.snapshot();
         assert_eq!(count, 4);
         assert_eq!(entries.len(), 3);
@@ -158,13 +161,13 @@ mod tests {
         assert!(log.threshold().is_zero());
         log.set_threshold(Duration::from_millis(200));
         assert_eq!(log.threshold(), Duration::from_millis(200));
-        assert!(log.record("slow", Duration::from_millis(300), 1));
+        assert!(log.record("slow", Duration::from_millis(300), 1, ""));
     }
 
     #[test]
     fn test_clear() {
         let log = SlowQueryLog::new(Duration::from_millis(1), 10);
-        log.record("q1", Duration::from_millis(10), 1);
+        log.record("q1", Duration::from_millis(10), 1, "");
         log.clear();
         let (entries, count) = log.snapshot();
         assert!(entries.is_empty());

@@ -55,6 +55,8 @@ pub struct PgServer {
     replica_metrics: Option<Arc<ReplicaRunnerMetrics>>,
     /// Raft shard coordinator for SHOW falcon.raft_stats (only set for RaftMember role).
     raft_coordinator: Option<Arc<RaftShardCoordinator>>,
+    lifecycle_coordinator: Option<Arc<falcon_cluster::ClusterLifecycleCoordinator>>,
+    failure_detector: Option<Arc<falcon_cluster::ClusterFailureDetector>>,
     /// Authentication configuration.
     auth_config: AuthConfig,
     /// Shared cancellation registry for cancel request support.
@@ -69,6 +71,8 @@ pub struct PgServer {
     tls_config: TlsConfig,
     /// P3-6: Security manager for IP allowlist enforcement.
     security_manager: Arc<SecurityManager>,
+    /// Slow query log shared across all connections.
+    slow_query_log: Arc<crate::slow_query_log::SlowQueryLog>,
 }
 
 impl PgServer {
@@ -92,6 +96,8 @@ impl PgServer {
             idle_timeout_ms: 0,
             replica_metrics: None,
             raft_coordinator: None,
+            lifecycle_coordinator: None,
+            failure_detector: None,
             auth_config: AuthConfig::default(),
             cancel_registry: Arc::new(DashMap::new()),
             connection_pool: None,
@@ -99,6 +105,7 @@ impl PgServer {
             tls_acceptor: None,
             tls_config: TlsConfig::default(),
             security_manager: Arc::new(SecurityManager::new()),
+            slow_query_log: Arc::new(crate::slow_query_log::SlowQueryLog::disabled()),
         }
     }
 
@@ -125,6 +132,8 @@ impl PgServer {
             idle_timeout_ms: 0,
             replica_metrics: None,
             raft_coordinator: None,
+            lifecycle_coordinator: None,
+            failure_detector: None,
             auth_config: AuthConfig::default(),
             cancel_registry: Arc::new(DashMap::new()),
             connection_pool: None,
@@ -132,6 +141,7 @@ impl PgServer {
             tls_acceptor: None,
             tls_config: TlsConfig::default(),
             security_manager: Arc::new(SecurityManager::new()),
+            slow_query_log: Arc::new(crate::slow_query_log::SlowQueryLog::disabled()),
         }
     }
 
@@ -231,10 +241,23 @@ impl PgServer {
         self.raft_coordinator = Some(coordinator);
     }
 
+    pub fn set_lifecycle_coordinator(&mut self, lc: Arc<falcon_cluster::ClusterLifecycleCoordinator>) {
+        self.lifecycle_coordinator = Some(lc);
+    }
+
+    pub fn set_failure_detector(&mut self, fd: Arc<falcon_cluster::ClusterFailureDetector>) {
+        self.failure_detector = Some(fd);
+    }
+
     /// Replace the active connections counter with a shared one.
     /// Used to share the counter between PgServer and Executor for SHOW falcon.connections.
     pub fn set_active_connections(&mut self, counter: Arc<AtomicUsize>) {
         self.active_connections = counter;
+    }
+
+    /// Set the slow query log for all connections spawned by this server.
+    pub fn set_slow_query_log(&mut self, log: Arc<crate::slow_query_log::SlowQueryLog>) {
+        self.slow_query_log = log;
     }
 
     /// Number of currently active connections.
@@ -255,6 +278,7 @@ impl PgServer {
 
         loop {
             let (stream, addr) = listener.accept().await?;
+            let _ = stream.set_nodelay(true);
 
             // P3-6: IP allowlist enforcement — reject before any protocol work.
             if let IpCheckResult::Denied = self.security_manager.check_ip(addr.ip()) {
@@ -268,7 +292,7 @@ impl PgServer {
 
             tracing::info!("New connection from {}", addr);
             let _ = stream.set_nodelay(true);
-            self.spawn_connection(stream);
+            self.spawn_connection(stream, addr);
         }
     }
 
@@ -300,6 +324,7 @@ impl PgServer {
             tokio::select! {
                 result = listener.accept() => {
                     let (stream, addr) = result?;
+                    let _ = stream.set_nodelay(true);
 
                     // P3-6: IP allowlist enforcement — reject before any protocol work.
                     if let IpCheckResult::Denied = self.security_manager.check_ip(addr.ip()) {
@@ -313,7 +338,7 @@ impl PgServer {
 
                     tracing::info!("New connection from {}", addr);
                     let _ = stream.set_nodelay(true);
-                    self.spawn_connection(stream);
+                    self.spawn_connection(stream, addr);
                 }
                 _ = &mut shutdown => {
                     break;
@@ -373,7 +398,7 @@ impl PgServer {
     /// Spawn a new connection handler with active-connection tracking.
     /// The max_connections check is performed **after** the PG startup handshake
     /// so the client receives a properly-framed FATAL error it can display.
-    fn spawn_connection(&self, stream: TcpStream) -> bool {
+    fn spawn_connection(&self, stream: TcpStream, peer_addr: std::net::SocketAddr) -> bool {
         let session_id = self.next_session_id.fetch_add(1, Ordering::SeqCst);
         let active = self.active_connections.clone();
         let max_connections = self.max_connections;
@@ -383,10 +408,14 @@ impl PgServer {
         let cancel_reg = self.cancel_registry.clone();
         let replica_metrics = self.replica_metrics.clone();
         let raft_coordinator = self.raft_coordinator.clone();
+        let lifecycle_coord = self.lifecycle_coordinator.clone();
+        let failure_det = self.failure_detector.clone();
         let notification_hub = self.notification_hub.clone();
         let tls_acceptor = self.tls_acceptor.clone();
         let tls_required = self.tls_config.require;
         let security_mgr = self.security_manager.clone();
+        let slow_query_log = self.slow_query_log.clone();
+        let peer_addr_str = peer_addr.to_string();
 
         // Increment active connections now; the handler will decrement on exit.
         // The actual max_connections check happens after the startup handshake
@@ -401,11 +430,18 @@ impl PgServer {
                 if let Some(pooled) = pool.acquire().await {
                     let mut handler = pooled.handler_clone();
                     handler.set_security_manager(security_mgr.clone());
+                    handler = handler.with_slow_query_log(slow_query_log.clone());
                     if let Some(ref rm) = replica_metrics {
                         handler.set_replica_metrics(rm.clone());
                     }
                     if let Some(ref rc) = raft_coordinator {
                         handler.set_raft_coordinator(rc.clone());
+                    }
+                    if let Some(ref lc) = lifecycle_coord {
+                        handler.set_lifecycle_coordinator(lc.clone());
+                    }
+                    if let Some(ref fd) = failure_det {
+                        handler.set_failure_detector(fd.clone());
                     }
                     if let Err(e) = handle_connection_with_timeout(
                         stream,
@@ -420,6 +456,7 @@ impl PgServer {
                         notification_hub.clone(),
                         tls_acceptor,
                         tls_required,
+                        peer_addr_str,
                     )
                     .await
                     {
@@ -464,11 +501,18 @@ impl PgServer {
                 )
             };
             handler.set_security_manager(security_mgr.clone());
+            let mut handler = handler.with_slow_query_log(slow_query_log);
             if let Some(ref rm) = replica_metrics {
                 handler.set_replica_metrics(rm.clone());
             }
             if let Some(ref rc) = raft_coordinator {
                 handler.set_raft_coordinator(rc.clone());
+            }
+            if let Some(ref lc) = lifecycle_coord {
+                handler.set_lifecycle_coordinator(lc.clone());
+            }
+            if let Some(ref fd) = failure_det {
+                handler.set_failure_detector(fd.clone());
             }
 
             tokio::spawn(async move {
@@ -485,6 +529,7 @@ impl PgServer {
                     notification_hub,
                     tls_acceptor,
                     tls_required,
+                    peer_addr_str,
                 )
                 .await
                 {
@@ -513,10 +558,12 @@ async fn handle_connection_with_timeout(
     notification_hub: Arc<NotificationHub>,
     tls_acceptor: Option<Arc<TlsAcceptor>>,
     tls_required: bool,
+    peer_addr: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut buf = BytesMut::with_capacity(8192);
     let mut session = PgSession::new_with_hub(session_id, notification_hub);
     session.statement_timeout_ms = default_statement_timeout_ms;
+    session.peer_addr = peer_addr;
     #[allow(unused_assignments)]
     let mut is_replication = false;
 
@@ -1219,9 +1266,29 @@ async fn handle_connection_with_timeout(
 
                     // Batch all response messages into a single write
                     {
-                        let mut out = BytesMut::new();
+                        let mut out = BytesMut::with_capacity(64);
                         for response in &responses {
-                            out.extend_from_slice(&codec::encode_message(response));
+                            codec::encode_message_into(&mut out, response);
+                        }
+                        // For non-COPY queries, include notifications + ReadyForQuery
+                        // in the same write to avoid an extra flush syscall.
+                        if session.copy_state.is_none() {
+                            for notif in session.notifications.drain_pending() {
+                                codec::encode_message_into(
+                                    &mut out,
+                                    &BackendMessage::NotificationResponse {
+                                        process_id: notif.sender_pid,
+                                        channel: notif.channel,
+                                        payload: notif.payload,
+                                    },
+                                );
+                            }
+                            codec::encode_message_into(
+                                &mut out,
+                                &BackendMessage::ReadyForQuery {
+                                    txn_status: session.txn_status_byte(),
+                                },
+                            );
                         }
                         stream.write_all(&out).await?;
                         stream.flush().await?;
@@ -1309,27 +1376,7 @@ async fn handle_connection_with_timeout(
                         continue; // Skip the ReadyForQuery below — already sent
                     }
 
-                    // Deliver pending LISTEN notifications before ReadyForQuery
-                    for notif in session.notifications.drain_pending() {
-                        send_message(
-                            &mut stream,
-                            &BackendMessage::NotificationResponse {
-                                process_id: notif.sender_pid,
-                                channel: notif.channel,
-                                payload: notif.payload,
-                            },
-                        )
-                        .await?;
-                    }
-
-                    // Always send ReadyForQuery after query processing
-                    send_message(
-                        &mut stream,
-                        &BackendMessage::ReadyForQuery {
-                            txn_status: session.txn_status_byte(),
-                        },
-                    )
-                    .await?;
+                    // ReadyForQuery + notifications already sent in the batch above
                 }
                 FrontendMessage::Parse {
                     name,

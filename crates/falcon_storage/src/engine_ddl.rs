@@ -272,6 +272,7 @@ impl StorageEngine {
         match schema.storage_type {
             StorageType::Rowstore => {
                 let table = Arc::new(MemTable::new(schema.clone()));
+                self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Rowstore(Arc::clone(&table)));
                 self.tables.insert(table_id, table);
             }
             StorageType::Columnstore => {
@@ -284,6 +285,7 @@ impl StorageEngine {
                         ))));
                     }
                     let table = Arc::new(ColumnStoreTable::new(schema.clone()));
+                    self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Columnstore(Arc::clone(&table)));
                     self.columnstore_tables.insert(table_id, table);
                 }
                 #[cfg(not(feature = "columnstore"))]
@@ -307,6 +309,7 @@ impl StorageEngine {
                         .as_deref()
                         .unwrap_or_else(|| std::path::Path::new("."));
                     let table = Arc::new(DiskRowstoreTable::new(schema.clone(), data_dir)?);
+                    self.engine_tables.insert(table_id, crate::table_handle::TableHandle::DiskRowstore(Arc::clone(&table)));
                     self.disk_tables.insert(table_id, table);
                 }
                 #[cfg(not(feature = "disk_rowstore"))]
@@ -335,12 +338,55 @@ impl StorageEngine {
                         .map_err(StorageError::Io)?,
                     );
                     let table = Arc::new(LsmTable::new(schema.clone(), engine));
+                    self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Lsm(Arc::clone(&table)));
                     self.lsm_tables.insert(table_id, table);
                 }
                 #[cfg(not(feature = "lsm"))]
                 {
                     return Err(StorageError::Io(std::io::Error::other(
                         "LSM storage engine is not available in this build (feature disabled)",
+                    )));
+                }
+            }
+            StorageType::RocksDbRowstore => {
+                #[cfg(feature = "rocksdb")]
+                {
+                    let data_dir = self
+                        .data_dir
+                        .as_deref()
+                        .unwrap_or_else(|| std::path::Path::new("."));
+                    let rdb_dir = data_dir.join(format!("rocksdb_table_{}", table_id.0));
+                    let table = Arc::new(
+                        crate::rocksdb_table::RocksDbTable::open(schema.clone(), &rdb_dir)?
+                    );
+                    self.engine_tables.insert(table_id, crate::table_handle::TableHandle::RocksDb(Arc::clone(&table)));
+                    self.rocksdb_tables.insert(table_id, table);
+                }
+                #[cfg(not(feature = "rocksdb"))]
+                {
+                    return Err(StorageError::Io(std::io::Error::other(
+                        "RocksDB storage engine is not available in this build (feature disabled)",
+                    )));
+                }
+            }
+            StorageType::RedbRowstore => {
+                #[cfg(feature = "redb")]
+                {
+                    let data_dir = self
+                        .data_dir
+                        .as_deref()
+                        .unwrap_or_else(|| std::path::Path::new("."));
+                    let rdb_dir = data_dir.join(format!("redb_table_{}", table_id.0));
+                    let table = Arc::new(
+                        crate::redb_table::RedbTable::open(schema.clone(), &rdb_dir)?
+                    );
+                    self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Redb(Arc::clone(&table)));
+                    self.redb_tables.insert(table_id, table);
+                }
+                #[cfg(not(feature = "redb"))]
+                {
+                    return Err(StorageError::Io(std::io::Error::other(
+                        "redb storage engine is not available in this build (feature disabled)",
                     )));
                 }
             }
@@ -375,6 +421,7 @@ impl StorageEngine {
             .ok_or(StorageError::TableNotFound(TableId(0)))?;
         let table_id = table.id;
         // Remove from whichever storage map holds it
+        self.engine_tables.remove(&table_id);
         self.tables.remove(&table_id);
         #[cfg(feature = "columnstore")]
         self.columnstore_tables.remove(&table_id);
@@ -382,6 +429,10 @@ impl StorageEngine {
         self.disk_tables.remove(&table_id);
         #[cfg(feature = "lsm")]
         self.lsm_tables.remove(&table_id);
+        #[cfg(feature = "rocksdb")]
+        self.rocksdb_tables.remove(&table_id);
+        #[cfg(feature = "redb")]
+        self.redb_tables.remove(&table_id);
 
         // USTM: unregister table metadata page.
         let meta_page_id = PageId(table_id.0 << 32);
@@ -414,14 +465,16 @@ impl StorageEngine {
         // Replace with an empty table of the appropriate storage type
         match schema.storage_type {
             StorageType::Rowstore => {
-                self.tables
-                    .insert(table_id, Arc::new(MemTable::new(schema)));
+                let table = Arc::new(MemTable::new(schema));
+                self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Rowstore(Arc::clone(&table)));
+                self.tables.insert(table_id, table);
             }
             StorageType::Columnstore => {
                 #[cfg(feature = "columnstore")]
                 {
-                    self.columnstore_tables
-                        .insert(table_id, Arc::new(ColumnStoreTable::new(schema)));
+                    let table = Arc::new(ColumnStoreTable::new(schema));
+                    self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Columnstore(Arc::clone(&table)));
+                    self.columnstore_tables.insert(table_id, table);
                 }
                 #[cfg(not(feature = "columnstore"))]
                 {
@@ -438,6 +491,7 @@ impl StorageEngine {
                         .as_deref()
                         .unwrap_or_else(|| std::path::Path::new("."));
                     let table = Arc::new(DiskRowstoreTable::new(schema, data_dir)?);
+                    self.engine_tables.insert(table_id, crate::table_handle::TableHandle::DiskRowstore(Arc::clone(&table)));
                     self.disk_tables.insert(table_id, table);
                 }
                 #[cfg(not(feature = "disk_rowstore"))]
@@ -467,12 +521,57 @@ impl StorageEngine {
                         .map_err(StorageError::Io)?,
                     );
                     let table = Arc::new(LsmTable::new(schema, engine));
+                    self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Lsm(Arc::clone(&table)));
                     self.lsm_tables.insert(table_id, table);
                 }
                 #[cfg(not(feature = "lsm"))]
                 {
                     return Err(StorageError::Io(std::io::Error::other(
                         "LSM not available (feature disabled)",
+                    )));
+                }
+            }
+            StorageType::RocksDbRowstore => {
+                #[cfg(feature = "rocksdb")]
+                {
+                    let data_dir = self
+                        .data_dir
+                        .as_deref()
+                        .unwrap_or_else(|| std::path::Path::new("."));
+                    let rdb_dir = data_dir.join(format!("rocksdb_table_{}", table_id.0));
+                    let _ = std::fs::remove_dir_all(&rdb_dir);
+                    let table = Arc::new(
+                        crate::rocksdb_table::RocksDbTable::open(schema, &rdb_dir)?
+                    );
+                    self.engine_tables.insert(table_id, crate::table_handle::TableHandle::RocksDb(Arc::clone(&table)));
+                    self.rocksdb_tables.insert(table_id, table);
+                }
+                #[cfg(not(feature = "rocksdb"))]
+                {
+                    return Err(StorageError::Io(std::io::Error::other(
+                        "RocksDB not available (feature disabled)",
+                    )));
+                }
+            }
+            StorageType::RedbRowstore => {
+                #[cfg(feature = "redb")]
+                {
+                    let data_dir = self
+                        .data_dir
+                        .as_deref()
+                        .unwrap_or_else(|| std::path::Path::new("."));
+                    let rdb_dir = data_dir.join(format!("redb_table_{}", table_id.0));
+                    let _ = std::fs::remove_dir_all(&rdb_dir);
+                    let table = Arc::new(
+                        crate::redb_table::RedbTable::open(schema, &rdb_dir)?
+                    );
+                    self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Redb(Arc::clone(&table)));
+                    self.redb_tables.insert(table_id, table);
+                }
+                #[cfg(not(feature = "redb"))]
+                {
+                    return Err(StorageError::Io(std::io::Error::other(
+                        "redb not available (feature disabled)",
                     )));
                 }
             }
@@ -1129,6 +1228,7 @@ impl StorageEngine {
             let memtable = table_ref.value();
             let mut indexes = memtable.secondary_indexes.write();
             indexes.retain(|idx| idx.column_idx != meta.column_idx);
+            memtable.has_secondary_idx.store(!indexes.is_empty(), std::sync::atomic::Ordering::Release);
         }
 
         self.append_wal(&WalRecord::DropIndex {
@@ -1177,6 +1277,7 @@ impl StorageEngine {
             self.backfill_index(&new_index, memtable, unique)?;
             let mut indexes = memtable.secondary_indexes.write();
             indexes.push(new_index);
+            memtable.has_secondary_idx.store(true, std::sync::atomic::Ordering::Release);
         }
         Ok(())
     }
@@ -1203,6 +1304,7 @@ impl StorageEngine {
             self.backfill_index(&new_index, memtable, unique)?;
             let mut indexes = memtable.secondary_indexes.write();
             indexes.push(new_index);
+            memtable.has_secondary_idx.store(true, std::sync::atomic::Ordering::Release);
         }
 
         self.index_registry.insert(
@@ -1243,6 +1345,7 @@ impl StorageEngine {
             self.backfill_index(&new_index, memtable, unique)?;
             let mut indexes = memtable.secondary_indexes.write();
             indexes.push(new_index);
+            memtable.has_secondary_idx.store(true, std::sync::atomic::Ordering::Release);
         }
 
         self.index_registry.insert(
@@ -1278,6 +1381,7 @@ impl StorageEngine {
             self.backfill_index(&new_index, memtable, false)?;
             let mut indexes = memtable.secondary_indexes.write();
             indexes.push(new_index);
+            memtable.has_secondary_idx.store(true, std::sync::atomic::Ordering::Release);
         }
 
         self.index_registry.insert(

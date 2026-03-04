@@ -134,11 +134,12 @@ $report = @"
 
 ## Methodology
 
-- **Benchmark tool**: pgbench (built-in tpcb-like workload)
-- **Warm-up**: 1 run (15s), not included in results
-- **Measured runs**: 3 per system
-- **Result selection**: Median of 3 runs
-- **Durability**: WAL enabled, fsync/fdatasync on both systems
+- **Benchmark tool**: pgbench (simple-update workload)
+- **FalconDB**: custom SQL scripts (``scripts/simple_update.sql``) — pgbench built-in modes require pg_catalog partition queries not yet supported
+- **PostgreSQL**: built-in ``-N`` (simple-update) mode
+- **Warm-up**: 1 run, not included in results
+- **Measured runs**: 3 per system, median selected
+- **Durability**: WAL enabled on both systems
 - **All raw output preserved** in ``results/raw/``
 
 ---

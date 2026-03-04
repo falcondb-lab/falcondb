@@ -1,3 +1,14 @@
+[logging]
+level = "info"
+stderr = true
+file = ""
+format = "text"
+rotation = "daily"
+max_size_mb = 100
+max_files = 7
+slow_query_ms = 0
+slow_query_log = ""
+
 [server]
 pg_listen_addr = "0.0.0.0:5433"
 admin_listen_addr = "0.0.0.0:8080"

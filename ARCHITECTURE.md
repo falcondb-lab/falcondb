@@ -127,17 +127,19 @@ Future (M2+): disaggregate into dedicated compute / storage / meta roles.
 | **Dependencies** | `storage` (version visibility, OCC read-set), `common` |
 | **Replaceable** | OCC vs 2PL vs hybrid; timestamp oracle (local vs distributed) |
 
-### 2.6 `storage` — In-Memory Storage Engine
+### 2.6 `storage` — Multi-Engine Storage Layer
 
 | Item | Detail |
 |------|--------|
-| **Responsibility** | Store tuples in memory with MVCC versions; maintain indexes (hash PK + BTree secondary + unique + composite/covering/prefix); WAL write + recovery; MVCC garbage collection; replication stats; LSM disk-backed engine; zero-copy row iteration; streaming aggregate computation |
+| **Responsibility** | Store tuples with MVCC versions across multiple engines; maintain indexes (hash PK + BTree secondary + unique + composite/covering/prefix); WAL write + recovery; MVCC garbage collection; replication stats; zero-copy row iteration; streaming aggregate computation |
+| **Engines** | **Rowstore** (in-memory, default) · **LSM** (disk, default feature) · **RocksDB** (`--features rocksdb`, C++ library) · **redb** (`--features redb`, pure Rust) · DiskRowstore/Columnstore (stubs) |
 | **Input** | Get/Put/Delete/Scan with txn context |
 | **Output** | Tuples (visible version for given txn) |
-| **Core types** | `StorageEngine`, `MemTable`, `VersionChain`, `SecondaryIndex`, `WalWriter`, `WalRecord`, `GcConfig`, `GcStats`, `GcRunner`, `ReplicationStats`, `LsmEngine` |
+| **Core types** | `StorageEngine`, `MemTable`, `VersionChain`, `SecondaryIndex`, `WalWriter`, `WalRecord`, `GcConfig`, `GcStats`, `GcRunner`, `ReplicationStats`, `LsmEngine`, `RocksDbTable`, `RedbTable` |
 | **MVCC fast paths** | `with_visible_data` — zero-copy closure-based row access; `for_each_visible` — streaming DashMap iteration without Vec allocation; `scan_top_k_by_pk` — bounded `BinaryHeap` for O(N log K) top-K; `compute_simple_aggs` — single-pass COUNT/SUM/MIN/MAX; Arc-clone elimination on head version for all visibility checks |
-| **Dependencies** | `common` |
-| **Replaceable** | Entire engine (RocksDB adapter, FoundationDB adapter); index impl (BTree, SkipList, ART) |
+| **WAL optimizations** | Batch WAL writes (`txn_wal_buf` + `append_multi`); cached flush fd; `WRITE_THROUGH` + leader-follower group commit; double-buffer `flush_split`; WAL recovery counter advancement (`recovered_max_ts`/`recovered_max_txn_id`) |
+| **Dependencies** | `common`, `falcon_segment_codec` |
+| **Replaceable** | Per-table engine selection via `ENGINE=` clause; index impl (BTree, SkipList, ART) |
 
 ### 2.7 `raft` — Consensus (production path via `replication.role = "raft_member"`)
 
@@ -290,6 +292,33 @@ Primary ──WAL chunks──▶ Replica(s)
 > 1. **WAL-shipping** (`role = primary/replica`): Primary streams WAL records over gRPC; replicas apply them via `apply_wal_record_to_engine()`. Fully implemented.
 > 2. **Raft consensus** (`role = raft_member`): Writes are proposed through `openraft` → `RaftShardCoordinator` → `StorageEngine`. Automatic leader election and failover via `RaftFailoverWatcher`. Enabled in production as of this release.
 
+### 5.6 WAL Performance & Recovery
+
+#### Write Path Optimizations
+
+FalconDB's WAL uses `FILE_FLAG_WRITE_THROUGH` (FUA) on Windows and `fdatasync` on Linux, with a leader-follower group commit design:
+
+```
+Thread A (leader): append → swap double-buffer under inner lock → FUA write outside lock (~21µs)
+Thread B-N (followers): append → wait on leader's flush completion
+```
+
+- **Batch WAL writes**: `InsertRow` records deferred to commit time via `txn_wal_buf` DashMap + `append_multi`
+- **Cached flush fd**: `flush_fd_cache` avoids `DuplicateHandle` per flush call
+- **Double-buffer `flush_split`**: swap under inner lock (instant), FUA write outside lock
+- **Single-key commit fast path**: `commit_no_report` skips row cloning and unique constraint re-validation for autocommit single-row INSERTs
+- **Fixed-array `append_multi`**: common case (1 deferred + commit record) uses stack array instead of Vec
+
+#### Recovery Counter Advancement
+
+After WAL recovery, `TxnManager` counters must advance past recovered timestamps to ensure MVCC visibility:
+
+1. `StorageEngine::recover()` tracks `max_commit_ts` and `max_txn_id` from WAL `CommitTxn*` records
+2. Values stored in `recovered_max_ts: AtomicU64` and `recovered_max_txn_id: AtomicU64`
+3. `TxnManager::advance_counters_past(max_ts, max_txn_id)` called at startup — advances `ts_counter`, `local_ts_counter`, and `txn_counter` via `fetch_max`
+
+Without this, new queries would get `read_ts < recovered commit_ts`, making recovered rows invisible despite being in the memtable.
+
 #### Cancel Request Implementation
 
 PG cancel requests are fully implemented using `AtomicBool` polling (not `tokio::CancellationToken`):
@@ -317,7 +346,7 @@ falcon/
 ├── .github/workflows/ci.yml    (CI: check, test, clippy, fmt, failover-gate, windows)
 ├── crates/
 │   ├── falcon_common/           (shared types, errors, config, datum, schema, RLS, RBAC)
-│   ├── falcon_storage/          (tables, LSM engine, indexes, WAL, GC, TDE, partitioning, PITR, CDC)
+│   ├── falcon_storage/          (tables, LSM/RocksDB/redb engines, indexes, WAL, GC, TDE, USTM, PITR, CDC)
 │   ├── falcon_txn/              (transaction management, MVCC, OCC, stats)
 │   ├── falcon_sql_frontend/     (parser, binder, analyzer)
 │   ├── falcon_planner/          (logical + physical planning, routing hints)
@@ -329,10 +358,16 @@ falcon/
 │   ├── falcon_proto/            (protobuf definitions + tonic codegen)
 │   ├── falcon_cluster/          (replication, failover, scatter/gather, epoch, migration, supervisor)
 │   ├── falcon_observability/    (metrics, tracing, logging setup)
+│   ├── falcon_segment_codec/    (Zstd/LZ4 segment compression, dictionary, decompression pool)
+│   ├── falcon_enterprise/       (control plane HA, enterprise security, ops automation)
 │   ├── falcon_server/           (main binary + integration tests)
+│   ├── falcon_cli/              (interactive CLI, cluster mgmt, import/export)
 │   └── falcon_bench/            (YCSB benchmark harness)
 ├── clients/
-│   └── falcondb-jdbc/           (Java JDBC driver — Maven project, HA failover)
+│   ├── falcondb-jdbc/           (Java JDBC driver — Maven project, HA failover)
+│   ├── falcondb-go/             (Go client — native protocol, HA seed list, pooling)
+│   ├── falcondb-python/         (Python client — DB-API 2.0, HA failover, pooling)
+│   └── falcondb-node/           (Node.js client — async, TLS, HA failover, TypeScript types)
 ├── tools/
 │   └── native-proto-spec/       (golden test vectors for cross-language validation)
 ├── bench_configs/              (frozen M1 benchmark configurations)
@@ -441,25 +476,27 @@ pub trait Executor: Send + Sync + 'static {
 | **Benchmark** | YCSB workloads, fast vs slow path, scale-out, failover impact | `falcon_bench` |
 | **Data integrity** | Crash-recovery, WAL replay, GC+promote combined correctness | Automated tests |
 
-### 8.2 Test Counts (3,972 tests)
+### 8.2 Test Counts (4,200+ tests across 18 crates)
 
 | Crate | Tests | Coverage |
 |-------|-------|----------|
-| `falcon_cluster` | 1,057 | Replication, failover, scatter/gather, GC, admission, cluster ops, circuit breaker, 2PC, token bucket, epoch, leader lease, migration, throttle, supervisor, control plane, enterprise security, enterprise ops, determinism hardening |
-| `falcon_storage` | 776 | MVCC, WAL, GC, indexes, OCC, SI litmus, DDL concurrency, recovery, checkpoints, secondary indexes, write sets, WAL observers, columnstore, disk rowstore |
-| `falcon_server` (integration) | 421 | Full SQL end-to-end, config migration, service management, CLI subcommands |
-| `falcon_common` | 254 | Config validation, node role, datum types (incl. Decimal), schema, error hierarchy, RBAC, RLS, security, consistency |
-| `falcon_protocol_pg` | 240 | SHOW commands, error paths, txn lifecycle, statement timeout, PgServer config, idle timeout, information_schema, views, plan cache |
-| `falcon_cli` | 201 | SQL splitter, CSV parsing, meta-command parsing, timing, history, completions, cluster/node/txn/failover/policy commands, export/import |
-| `falcon_executor` | 192 | Operator execution, expression evaluation, window functions, subqueries, governor v2, priority scheduler, RBAC enforcement |
-| `falcon_sql_frontend` | 149 | Parsing, binding, analysis, view expansion, ALTER TABLE rename, predicate normalization, param inference |
-| `falcon_txn` | 103 | Txn lifecycle, OCC, stats, history, deadlock detection, READ ONLY mode, timeout, exec summary |
-| `falcon_planner` | 89 | Plan generation, routing hints, distributed wrapping, view/DDL plans, cost model |
+| `falcon_cluster` | 1,050+ | Replication, failover, scatter/gather, GC, admission, cluster ops, circuit breaker, 2PC, token bucket, epoch, leader lease, migration, throttle, supervisor, control plane, enterprise security, enterprise ops, determinism hardening |
+| `falcon_storage` | 820+ | MVCC, WAL, GC, indexes, OCC, SI litmus, DDL concurrency, recovery, checkpoints, secondary indexes, write sets, WAL observers, USTM, LSM, RocksDB, redb |
+| `falcon_server` (integration) | 420+ | Full SQL end-to-end, config migration, service management, CLI subcommands |
+| `falcon_common` | 250+ | Config validation, node role, datum types (incl. Decimal), schema, error hierarchy, RBAC, RLS, security, consistency |
+| `falcon_protocol_pg` | 240+ | SHOW commands, error paths, txn lifecycle, statement timeout, PgServer config, idle timeout, information_schema, views, plan cache |
+| `falcon_cli` | 200+ | SQL splitter, CSV parsing, meta-command parsing, timing, history, completions, cluster/node/txn/failover/policy commands, export/import |
+| `falcon_executor` | 200+ | Operator execution, expression evaluation, window functions, subqueries, governor v2, priority scheduler, RBAC enforcement, spill metrics |
+| `falcon_sql_frontend` | 150+ | Parsing, binding, analysis, view expansion, ALTER TABLE rename, predicate normalization, param inference |
+| `falcon_txn` | 100+ | Txn lifecycle, OCC, stats, history, deadlock detection, READ ONLY mode, timeout, exec summary |
+| `falcon_planner` | 90+ | Plan generation, routing hints, distributed wrapping, view/DDL plans, cost model |
 | `falcon_raft` | 53 | Raft log store, state machine, propose/apply, snapshot, membership |
-| `falcon_segment_codec` | 53 | Segment encoding/decoding, compression, checksums |
+| `falcon_segment_codec` | 53 | Segment encoding/decoding, compression (Zstd/LZ4), dictionary, checksums |
+| `falcon_observability` | 46 | Prometheus metrics, structured logging, metric recording functions |
 | `falcon_protocol_native` | 39 | Native binary protocol codec, compression (LZ4), type mapping, golden vectors |
+| `falcon_enterprise` | 50+ | Control plane HA, enterprise RBAC, security, ops automation |
 | `falcon_native_server` | 28 | Native protocol server, session state machine, executor bridge, nonce anti-replay |
-| **Total** | **3,972** (passing) | `cargo clippy --workspace`: 0 warnings |
+| **Total** | **4,200+** (passing) | 417 `.rs` files across 18 crates · `cargo clippy --workspace`: 0 warnings |
 
 ### 8.3 Acceptance Criteria (M1)
 

@@ -32,16 +32,10 @@ Info "Loading seed data..."
 if ($LASTEXITCODE -eq 0) { Ok "Seed data loaded" } else { Fail "Seed data load failed"; exit 1 }
 
 Info "Verifying row counts..."
-$counts = & psql -h $HostAddr -p $PgPort -U $PgUser -d $PgDb -t -A -c @"
-  SELECT 'customers=' || COUNT(*) FROM customers
-  UNION ALL
-  SELECT 'orders=' || COUNT(*) FROM orders
-  UNION ALL
-  SELECT 'order_items=' || COUNT(*) FROM order_items
-  UNION ALL
-  SELECT 'payments=' || COUNT(*) FROM payments;
-"@
-$counts -split "`n" | Where-Object { $_.Trim() } | ForEach-Object { Ok $_.Trim() }
+foreach ($tbl in @("customers","orders","order_items","payments")) {
+    $count = (& psql -h $HostAddr -p $PgPort -U $PgUser -d $PgDb -t -A -c "SELECT COUNT(*) FROM $tbl;").Trim()
+    Ok "${tbl}=$count"
+}
 
 Write-Host ""
 Ok "PostgreSQL source database ready"

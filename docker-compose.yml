@@ -46,6 +46,12 @@ services:
       - FALCON_ROLE=primary
     command: ["--config", "/etc/falcondb/falcon.toml"]
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
   replica:
     build: .

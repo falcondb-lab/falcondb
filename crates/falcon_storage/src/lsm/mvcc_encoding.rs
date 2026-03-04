@@ -266,6 +266,7 @@ impl TxnMetaStore {
                 ..Default::default()
             },
             sync_writes: true, // must be durable for 2PC
+            ..Default::default()
         };
         let engine = super::engine::LsmEngine::open(&meta_dir, config)?;
         Ok(Self { engine })

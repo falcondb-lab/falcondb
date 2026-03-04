@@ -26,20 +26,24 @@ function Banner($msg) { Write-Host "`n  $msg`n" -ForegroundColor Cyan }
 $RawDir = Join-Path $ResultsDir "raw\falcon"
 New-Item -ItemType Directory -Path $RawDir -Force | Out-Null
 
-$ModeFlag = switch ($Mode) {
-    "read-only"      { "-S" }
-    "select-only"    { "-S" }
-    "simple-update"  { "-N" }
-    default          { "" }
+# FalconDB doesn't support pgbench's built-in partition check (pg_catalog),
+# so we use custom SQL scripts + --no-vacuum.
+$ScriptFile = switch ($Mode) {
+    "read-only"     { Join-Path $PocRoot "scripts\select_only.sql" }
+    "select-only"   { Join-Path $PocRoot "scripts\select_only.sql" }
+    "simple-update" { Join-Path $PocRoot "scripts\simple_update.sql" }
+    default         { Join-Path $PocRoot "scripts\simple_update.sql" }
 }
+
+$Scale = if ($env:PGBENCH_SCALE) { [int]$env:PGBENCH_SCALE } else { 1 }
 
 Banner "FalconDB pgbench: clients=$Clients, jobs=$Jobs, duration=${Duration}s, mode=$Mode"
 
 # ── Warm-up ───────────────────────────────────────────────────────────────
 Info "Warm-up run (15s, not measured)..."
-$warmupArgs = @("-h", $FalconHost, "-p", $FalconPort, "-U", $FalconUser, "-c", $Clients, "-j", $Jobs, "-T", "15")
-if ($ModeFlag) { $warmupArgs += $ModeFlag }
-$warmupArgs += "pgbench"
+$warmupArgs = @("-h", $FalconHost, "-p", $FalconPort, "-U", $FalconUser,
+    "-c", $Clients, "-j", $Jobs, "-T", "15", "--no-vacuum",
+    "-D", "scale=$Scale", "-f", $ScriptFile, "pgbench")
 & pgbench @warmupArgs > (Join-Path $RawDir "warmup.log") 2>&1
 Ok "Warm-up complete"
 
@@ -47,9 +51,9 @@ Ok "Warm-up complete"
 for ($run = 1; $run -le 3; $run++) {
     Info "Run $run/3 (${Duration}s)..."
 
-    $runArgs = @("-h", $FalconHost, "-p", $FalconPort, "-U", $FalconUser, "-c", $Clients, "-j", $Jobs, "-T", $Duration, "--progress=10")
-    if ($ModeFlag) { $runArgs += $ModeFlag }
-    $runArgs += "pgbench"
+    $runArgs = @("-h", $FalconHost, "-p", $FalconPort, "-U", $FalconUser,
+        "-c", $Clients, "-j", $Jobs, "-T", $Duration, "--progress=10", "--no-vacuum",
+        "-D", "scale=$Scale", "-f", $ScriptFile, "pgbench")
 
     & pgbench @runArgs > (Join-Path $RawDir "run_${run}.log") 2>&1
 

@@ -1,0 +1,60 @@
+[logging]
+level = "info"
+stderr = true
+file = ""
+format = "text"
+rotation = "daily"
+max_size_mb = 100
+max_files = 7
+slow_query_ms = 0
+slow_query_log = ""
+
+[server]
+pg_listen_addr = "0.0.0.0:5433"
+admin_listen_addr = "0.0.0.0:8085"
+node_id = 1
+max_connections = 1024
+statement_timeout_ms = 0
+idle_timeout_ms = 0
+shutdown_drain_timeout_secs = 30
+slow_txn_threshold_us = 0
+
+[storage]
+memory_limit_bytes = 0
+wal_enabled = true
+data_dir = "./mig_data_falcon"
+lsm_sync_writes = false
+
+[wal]
+group_commit = true
+flush_interval_us = 1000
+sync_mode = "fdatasync"
+segment_size_bytes = 67108864
+wal_mode = "win_async"
+no_buffering = false
+
+[gc]
+enabled = false
+
+[cdc]
+enabled = false
+
+[pitr]
+enabled = false
+archive_dir = ""
+retention_hours = 0
+
+[multi_tenant]
+enabled = false
+
+[tde]
+enabled = false
+key_env_var = "FALCON_TDE_KEY"
+
+[memory]
+
+[raft]
+node_id = 1
+node_ids = [1]
+raft_listen_addr = "0.0.0.0:50052"
+peers = []

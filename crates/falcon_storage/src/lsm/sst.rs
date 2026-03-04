@@ -26,6 +26,7 @@ use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use super::bloom::BloomFilter;
 
@@ -374,12 +375,19 @@ struct IndexEntry {
 }
 
 /// Reads an SST file for point lookups and range scans.
-#[derive(Debug)]
 pub struct SstReader {
     path: PathBuf,
     meta: SstMeta,
     index: Vec<IndexEntry>,
     bloom: BloomFilter,
+    /// Persistent file handle — reused across read_block calls to avoid open() per block.
+    file: Mutex<BufReader<File>>,
+}
+
+impl std::fmt::Debug for SstReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SstReader").field("path", &self.path).finish_non_exhaustive()
+    }
 }
 
 impl SstReader {
@@ -589,11 +597,19 @@ impl SstReader {
             seq: 0,
         };
 
+        // Reopen for data-block reads (reused across all subsequent read_block calls).
+        let data_file = BufReader::new(File::open(path).map_err(|e| SstReadError::Io {
+            sst_path: sst_path.clone(),
+            source: e,
+            detail: "open file for block reads".into(),
+        })?);
+
         Ok(Self {
             path: path.to_path_buf(),
             meta,
             index,
             bloom,
+            file: Mutex::new(data_file),
         })
     }
 
@@ -631,13 +647,33 @@ impl SstReader {
         &self.meta
     }
 
+    /// Bloom + index lookup: returns (block_offset, block_len) for the block
+    /// that may contain the key, or None if definitely absent.
+    pub fn find_block_for_key(&self, key: &[u8]) -> Option<(u64, u32)> {
+        if !self.bloom.may_contain(key) {
+            return None;
+        }
+        let idx = self.index.partition_point(|e| e.last_key.as_slice() < key);
+        if idx >= self.index.len() {
+            return None;
+        }
+        let entry = &self.index[idx];
+        Some((entry.block_offset, entry.block_len))
+    }
+
+    /// Read a raw data block from disk (public for external caching).
+    pub fn read_block_raw(&self, offset: u64, len: u32) -> io::Result<Vec<u8>> {
+        self.read_block(offset, len)
+    }
+
+    /// Search a raw block for a key (public static wrapper).
+    pub fn search_block_pub(block_data: &[u8], key: &[u8]) -> io::Result<Option<Vec<u8>>> {
+        Self::search_block(block_data, key)
+    }
+
     fn read_block(&self, offset: u64, len: u32) -> io::Result<Vec<u8>> {
         let sst_path = self.path.display().to_string();
-        let mut file = BufReader::new(File::open(&self.path).map_err(|e| SstReadError::Io {
-            sst_path: sst_path.clone(),
-            source: e,
-            detail: "open for block read".into(),
-        })?);
+        let mut file = self.file.lock().unwrap();
         file.seek(SeekFrom::Start(offset))
             .map_err(|e| SstReadError::Io {
                 sst_path: sst_path.clone(),

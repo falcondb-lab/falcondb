@@ -63,7 +63,33 @@ Write-Host "  Setting up schema..."
 $ErrorActionPreference = "Continue"
 & $psql -h $DbHost -p $Port -U $User -d $Db -f (Join-Path $ScriptDir "schema.sql") 2>&1 | Out-Null
 $ErrorActionPreference = "Stop"
-Write-Host "  Schema ready (50K users, 100K orders)"
+
+# Seed data via batch INSERT VALUES (FalconDB doesn't support INSERT...SELECT)
+$BatchSize = 500
+Write-Host "  Seeding 50K users..."
+for ($base = 1; $base -le 50000; $base += $BatchSize) {
+    $end = [Math]::Min($base + $BatchSize - 1, 50000)
+    $vals = ($base..$end | ForEach-Object {
+        $bal = 10000 + ($_ % 90000)
+        $st  = if ($_ % 20 -eq 0) { 'inactive' } else { 'active' }
+        "($_,'u_$_',$bal,'$st')"
+    }) -join ','
+    & $psql -h $DbHost -p $Port -U $User -d $Db -t -A -c "INSERT INTO users (user_id,username,balance,status) VALUES $vals" 2>$null | Out-Null
+}
+Write-Host "  Seeding 100K orders..."
+for ($base = 1; $base -le 100000; $base += $BatchSize) {
+    $end = [Math]::Min($base + $BatchSize - 1, 100000)
+    $vals = ($base..$end | ForEach-Object {
+        $uid = ($_ % 50000) + 1
+        $amt = 50 + ($_ % 5000)
+        $ot  = if ($_ % 3 -eq 0) { 'refund' } else { 'purchase' }
+        "($_,$uid,$amt,'$ot')"
+    }) -join ','
+    & $psql -h $DbHost -p $Port -U $User -d $Db -t -A -c "INSERT INTO orders (order_id,user_id,amount,order_type) VALUES $vals" 2>$null | Out-Null
+}
+$seedUsers  = (& $psql -h $DbHost -p $Port -U $User -d $Db -t -A -c "SELECT COUNT(*) FROM users").Trim()
+$seedOrders = (& $psql -h $DbHost -p $Port -U $User -d $Db -t -A -c "SELECT COUNT(*) FROM orders").Trim()
+Write-Host "  Schema ready ($seedUsers users, $seedOrders orders)"
 
 # Pre-run state
 $PreUsers   = (& $psql -h $DbHost -p $Port -U $User -d $Db -t -A -c "SELECT COUNT(*) FROM users;").Trim()

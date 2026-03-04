@@ -527,6 +527,10 @@ impl OwnedRow {
         Self { values }
     }
 
+    pub const fn empty() -> Self {
+        Self { values: Vec::new() }
+    }
+
     pub fn get(&self, idx: usize) -> Option<&Datum> {
         self.values.get(idx)
     }

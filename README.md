@@ -117,7 +117,9 @@ Attempting to use them returns a clear `ErrorResponse` with the appropriate SQLS
 | Feature | Module Status | Notes |
 |---------|:------------:|-------|
 | Raft consensus replication | PRODUCTION | `falcon_raft` — `SingleNodeConsensus` (no-op default) or `RaftConsensus` (multi-node via `role = raft_member`). 32 tests, leader election, failover, gRPC transport. |
-| LSM-tree storage engine | EXPERIMENTAL | `lsm/` — compile-gated (`--features lsm`), not default; USTM-integrated for both Rowstore and LSM |
+| LSM-tree storage engine | DEFAULT | `lsm/` — enabled by default (`default = ["lsm"]`); USTM-integrated for both Rowstore and LSM |
+| RocksDB storage engine | EXPERIMENTAL | `rocksdb_table.rs` — compile-gated (`--features rocksdb`); full MVCC integration, same version-chain as LSM |
+| redb storage engine | EXPERIMENTAL | `redb_table.rs` — compile-gated (`--features redb`); pure Rust, zero C deps |
 | Auto shard rebalancing | PRODUCTION | `rebalancer.rs` + `raft_rebalance.rs` — policy-driven background rebalancer with batched row migration, pause/resume, Prometheus metrics, exponential backoff. Enable via `[rebalance]` config section. |
 
 ### Planned — NOT Implemented (P2 roadmap, stub or scaffolding only)
@@ -141,13 +143,16 @@ Attempting to use them returns a clear `ErrorResponse` with the appropriate SQLS
 # Build all crates (debug)
 cargo build --workspace
 
-# Build release (default: Rowstore only)
+# Build release (default: Rowstore + LSM)
 cargo build --release --workspace
 
-# Build with LSM storage engine enabled
-cargo build --release -p falcon_server --features lsm
+# Build with RocksDB engine (requires LLVM + MSVC on Windows)
+cargo build --release -p falcon_server --features rocksdb
 
-# Run tests (3,972 tests across 16 crates + root integration)
+# Build with redb engine (pure Rust, no C deps)
+cargo build --release -p falcon_server --features redb
+
+# Run tests (4,200+ tests across 18 crates + root integration)
 cargo test --workspace
 
 # Lint
@@ -166,6 +171,8 @@ FalconDB supports multiple storage engines. Each table can independently choose 
 |--------|---------|-------------|------------|----------|
 | **Rowstore** (default) | In-memory (MVCC version chains) | WAL only (crash-safe if WAL enabled) | Limited by available RAM | Low-latency OLTP, hot data |
 | **LSM** | Disk (LSM-Tree + WAL) | Full disk persistence | Limited by disk space | Large datasets, cold data, persistence-first workloads |
+| **RocksDB** | Disk (RocksDB library) | Full disk persistence | Limited by disk space | Production disk-backed OLTP, proven LSM compaction |
+| **redb** | Disk (pure-Rust embedded KV) | Full disk persistence | Limited by disk space | Lightweight embedded, zero C dependencies |
 
 ### Rowstore (Default — In-Memory)
 
@@ -201,15 +208,10 @@ pressure_policy = "Reject"            # or "Delay"
 
 ### LSM (Disk-Backed)
 
-LSM uses a Log-Structured Merge-Tree for disk-based storage. **Requires the `lsm` feature flag at compile time.**
+LSM uses a Log-Structured Merge-Tree for disk-based storage. **Enabled by default** (the `lsm` feature is in the default feature set).
 
-**Step 1: Build with LSM enabled**
-```bash
-cargo build --release -p falcon_server --features lsm
-```
-
-**Step 2: Create tables with `ENGINE=lsm`**
 ```sql
+-- Create tables with ENGINE=lsm
 CREATE TABLE events (
     id BIGSERIAL PRIMARY KEY,
     payload TEXT,
@@ -230,6 +232,40 @@ Configure LSM sync behavior in `falcon.toml`:
 lsm_sync_writes = false   # true = fsync every write (safer, slower)
 ```
 
+### RocksDB (Disk-Backed, Feature-Gated)
+
+RocksDB uses the actual RocksDB C++ library. **Requires `--features rocksdb` at compile time** and LLVM + MSVC build environment on Windows.
+
+```bash
+cargo build --release -p falcon_server --features rocksdb
+```
+
+```sql
+CREATE TABLE orders (id BIGINT PRIMARY KEY, data TEXT) ENGINE=rocksdb;
+```
+
+**Characteristics:**
+- Full MVCC integration (same version-chain encoding as LSM)
+- write_buffer_size: 64MB, LZ4 compression, max_background_jobs: 4
+- Production-proven compaction via RocksDB
+
+### redb (Disk-Backed, Feature-Gated)
+
+redb is a pure-Rust embedded key-value store. **Requires `--features redb` at compile time.**
+
+```bash
+cargo build --release -p falcon_server --features redb
+```
+
+```sql
+CREATE TABLE logs (id BIGINT PRIMARY KEY, msg TEXT) ENGINE=redb;
+```
+
+**Characteristics:**
+- Zero C/C++ dependencies — pure Rust build
+- ACID transactions with MVCC integration
+- Suitable for lightweight embedded deployments
+
 ### Mixing Engines
 
 Different tables in the same database can use different engines:
@@ -241,6 +277,9 @@ CREATE TABLE sessions (id INT PRIMARY KEY, token TEXT, expires_at TIMESTAMP);
 -- Cold data: disk-backed for capacity
 CREATE TABLE audit_log (id BIGSERIAL PRIMARY KEY, event TEXT, ts TIMESTAMP) ENGINE=lsm;
 
+-- RocksDB-backed for proven durability
+CREATE TABLE trades (id BIGINT PRIMARY KEY, symbol TEXT, qty INT) ENGINE=rocksdb;
+
 -- Queries work identically regardless of engine
 SELECT * FROM sessions s JOIN audit_log a ON s.id = a.user_id;
 ```
@@ -251,9 +290,11 @@ SELECT * FROM sessions s JOIN audit_log a ON s.id = a.user_id;
 |----------|-------------------|
 | Low-latency OLTP (< 10ms p99) | Rowstore |
 | Data fits in memory (< available RAM) | Rowstore |
-| Large datasets (> available RAM) | LSM |
-| Compliance / must persist to disk | LSM |
-| Mixed: hot tables + cold tables | Rowstore + LSM |
+| Large datasets (> available RAM) | LSM / RocksDB |
+| Compliance / must persist to disk | LSM / RocksDB / redb |
+| Production disk OLTP with proven compaction | RocksDB |
+| Lightweight embedded, no C deps | redb |
+| Mixed: hot tables + cold tables | Rowstore + LSM/RocksDB |
 
 ---
 
@@ -521,7 +562,7 @@ See [docs/observability.md](docs/observability.md) for full metric descriptions.
 │         Executor (row-at-a-time + fused streaming agg)  │
 ├──────────────────┬─────────────────────────────────────┤
 │   Txn Manager    │   Storage Engine                    │
-│   (MVCC, OCC)    │   (MemTable + LSM + WAL + GC)      │
+│   (MVCC, OCC)    │   (MemTable+LSM+RocksDB+redb+WAL+GC)│
 │                  ├─────────────────────────────────────┤
 │                  │   USTM — User-Space Tiered Memory   │
 │                  │   Hot(DRAM) │ Warm(LIRS-2) │ Cold   │
@@ -536,7 +577,7 @@ See [docs/observability.md](docs/observability.md) for full metric descriptions.
 | Crate | Responsibility |
 |-------|---------------|
 | `falcon_common` | Shared types, errors, config, datum, schema, RLS, RBAC |
-| `falcon_storage` | In-memory tables, LSM engine, MVCC, indexes, WAL, GC, TDE, partitioning, PITR, CDC, **USTM page cache** |
+| `falcon_storage` | In-memory tables, LSM/RocksDB/redb engines, MVCC, indexes, WAL, GC, TDE, partitioning, PITR, CDC, **USTM page cache** |
 | `falcon_txn` | Transaction lifecycle, OCC validation, timestamp allocation |
 | `falcon_sql_frontend` | SQL parsing (sqlparser-rs) + binding/analysis |
 | `falcon_planner` | Logical → physical plan, routing hints |
@@ -638,7 +679,7 @@ cargo build --workspace
 
 ## Roadmap
 
-All milestones through v1.2 are released. Current test count: **3,972** across 16 crates.
+All milestones through v1.2 are released. Current test count: **4,200+** across 18 crates.
 
 | Milestone | Highlights |
 |-----------|------------|
@@ -686,14 +727,14 @@ and `sync-replica` (primary waits for replica WAL ack, RPO ≈ 0). See [docs/rpo
 ## Testing
 
 ```bash
-# Run all tests (3,972 total)
+# Run all tests (4,200+ total)
 cargo test --workspace
 
 # By crate (key ones)
-cargo test -p falcon_cluster   # 585 tests
-cargo test -p falcon_server    # 383 tests
-cargo test -p falcon_storage   # 364 tests
-cargo test -p falcon_common    # 252 tests
+cargo test -p falcon_cluster   # 1,000+ tests
+cargo test -p falcon_storage   # 800+ tests
+cargo test -p falcon_server    # 400+ tests
+cargo test -p falcon_common    # 250+ tests
 
 # Lint
 cargo clippy --workspace       # must be 0 warnings
