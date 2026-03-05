@@ -38,20 +38,13 @@ use serde::{Deserialize, Serialize};
 // WAL Encryption — transparent per-record AES-256-GCM encryption
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Cached encryption context for WAL records.
-///
-/// Holds the unwrapped AES-256-GCM cipher derived from a DEK so that
-/// per-record encrypt/decrypt avoids repeated `KeyManager::unwrap_dek` calls.
-///
-/// When present in `WalWriter`, every serialized record is encrypted before
-/// being written. The on-disk format stays `[len:4][crc:4][payload:len]`
-/// where `payload` = `nonce(12) || ciphertext+tag` instead of raw bincode.
+#[cfg(feature = "encryption_tde")]
 pub struct WalEncryption {
     cipher: aes_gcm::Aes256Gcm,
 }
 
+#[cfg(feature = "encryption_tde")]
 impl WalEncryption {
-    /// Create from an unwrapped DEK's raw key bytes.
     pub fn from_key(key: &crate::encryption::EncryptionKey) -> Self {
         use aes_gcm::KeyInit;
         Self {
@@ -59,8 +52,6 @@ impl WalEncryption {
         }
     }
 
-    /// Create from a `KeyManager` + `DekId`. Returns `None` if the DEK
-    /// cannot be unwrapped (wrong master key, missing DEK, etc.).
     pub fn from_key_manager(
         km: &mut crate::encryption::KeyManager,
         dek_id: crate::encryption::DekId,
@@ -69,34 +60,26 @@ impl WalEncryption {
         Some(Self::from_key(&key))
     }
 
-    /// Encrypt `plaintext` → `nonce(12) || ciphertext+tag`.
     fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, StorageError> {
         use aes_gcm::aead::{Aead, OsRng};
         use rand::RngCore;
-
         let mut nonce_bytes = [0u8; crate::encryption::NONCE_LEN];
         OsRng.fill_bytes(&mut nonce_bytes);
         let nonce = aes_gcm::Nonce::from_slice(&nonce_bytes);
-
         let ciphertext = self
             .cipher
             .encrypt(nonce, plaintext)
             .map_err(|_| StorageError::Wal("TDE: AES-256-GCM encryption failed".into()))?;
-
         let mut out = Vec::with_capacity(crate::encryption::NONCE_LEN + ciphertext.len());
         out.extend_from_slice(&nonce_bytes);
         out.extend_from_slice(&ciphertext);
         Ok(out)
     }
 
-    /// Decrypt `nonce(12) || ciphertext+tag` → plaintext.
     fn decrypt(&self, encrypted: &[u8]) -> Result<Vec<u8>, StorageError> {
         use aes_gcm::aead::Aead;
-
         if encrypted.len() < crate::encryption::NONCE_LEN + crate::encryption::GCM_TAG_LEN {
-            return Err(StorageError::Wal(
-                "TDE: encrypted WAL record too short".into(),
-            ));
+            return Err(StorageError::Wal("TDE: encrypted WAL record too short".into()));
         }
         let (nonce_bytes, ciphertext) = encrypted.split_at(crate::encryption::NONCE_LEN);
         let nonce = aes_gcm::Nonce::from_slice(nonce_bytes);
@@ -106,9 +89,24 @@ impl WalEncryption {
     }
 }
 
+#[cfg(feature = "encryption_tde")]
 impl std::fmt::Debug for WalEncryption {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "WalEncryption(AES-256-GCM)")
+    }
+}
+
+#[cfg(not(feature = "encryption_tde"))]
+#[derive(Debug)]
+pub struct WalEncryption;
+
+#[cfg(not(feature = "encryption_tde"))]
+impl WalEncryption {
+    fn encrypt(&self, _: &[u8]) -> Result<Vec<u8>, StorageError> {
+        Err(StorageError::Wal("TDE not compiled".into()))
+    }
+    fn decrypt(&self, _: &[u8]) -> Result<Vec<u8>, StorageError> {
+        Err(StorageError::Wal("TDE not compiled".into()))
     }
 }
 
@@ -318,6 +316,15 @@ pub enum AlterTableOp {
     RenameColumn { old_name: String, new_name: String },
     /// Rename the table itself.
     RenameTable { new_name: String },
+    /// Change a column's data type.
+    ChangeColumnType {
+        column_name: String,
+        new_type: falcon_common::types::DataType,
+    },
+    /// Set NOT NULL constraint on a column.
+    SetNotNull { column_name: String },
+    /// Drop NOT NULL constraint from a column.
+    DropNotNull { column_name: String },
 }
 
 /// Typed ALTER ROLE options for WAL serialization.
@@ -477,26 +484,31 @@ pub enum WalRecord {
 pub type SegmentRotateCallback = Arc<dyn Fn(u64, u64) + Send + Sync>;
 
 
+const WAL_SHARD_COUNT: usize = 8;
+
+struct WalShard {
+    buf: Vec<u8>,
+    max_lsn: u64,
+    pending_count: usize,
+}
+
 /// WAL writer: append-only, with group commit and segment rotation.
+/// Uses sharded insertion buffers (like PG's WAL insertion locks) to reduce
+/// contention at high thread counts.
 pub struct WalWriter {
+    shards: [Mutex<WalShard>; WAL_SHARD_COUNT],
     inner: Mutex<WalWriterInner>,
     lsn: AtomicU64,
+    shard_rr: AtomicU64,
     atomic_pending: std::sync::atomic::AtomicUsize,
     encryption_enabled: std::sync::atomic::AtomicBool,
     sync_mode: SyncMode,
-    /// Max bytes per WAL segment before rotating.
     max_segment_size: u64,
-    /// Group commit: buffer up to this many records before flushing.
     group_commit_size: usize,
-    /// Optional TDE encryption context. When `Some`, every record's serialized
-    /// payload is encrypted with AES-256-GCM before being written to disk.
-    /// Wrapped in `RwLock` for safe one-time initialization via `set_encryption(&self)`.
     encryption: parking_lot::RwLock<Option<WalEncryption>>,
-    /// Optional callback invoked after each segment rotation (for PITR archiving).
     segment_rotate_callback: parking_lot::RwLock<Option<SegmentRotateCallback>>,
     flush_fd_cache: Mutex<Option<File>>,
     flush_buf: Mutex<Vec<u8>>,
-    // Dedicated flush thread support
     pub(crate) flushed_lsn: AtomicU64,
     flush_mu: Mutex<()>,
     flush_cvar: parking_lot::Condvar,
@@ -505,12 +517,9 @@ pub struct WalWriter {
 
 struct WalWriterInner {
     file: File,
-    buf: Vec<u8>,
     dir: PathBuf,
     current_segment: u64,
     current_segment_size: u64,
-    pending_count: usize,
-    max_lsn: u64,
 }
 
 use std::sync::Arc;
@@ -567,30 +576,38 @@ impl WalWriter {
             let _ = fs::rename(&legacy_path, &seg_path);
         }
 
-        let file = Self::open_wal_file(&seg_path)?;
+        let mut file = Self::open_wal_file(&seg_path)?;
         let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
         let is_new_file = file_len == 0;
         let mut current_segment_size = file_len;
 
-        let mut buf = Vec::with_capacity(8 * 1024);
+        // Write WAL header directly to file for new segments
         if is_new_file {
-            buf.extend_from_slice(WAL_MAGIC);
-            buf.extend_from_slice(&WAL_FORMAT_VERSION.to_le_bytes());
+            use std::io::Write;
+            file.write_all(WAL_MAGIC)?;
+            file.write_all(&WAL_FORMAT_VERSION.to_le_bytes())?;
             current_segment_size = WAL_SEGMENT_HEADER_SIZE as u64;
         }
 
+        let shards = std::array::from_fn(|_| {
+            Mutex::new(WalShard {
+                buf: Vec::with_capacity(4 * 1024),
+                max_lsn: 0,
+                pending_count: 0,
+            })
+        });
+
         Ok(Self {
+            shards,
             inner: Mutex::new(WalWriterInner {
                 file,
-                buf,
                 dir: dir.to_path_buf(),
                 current_segment: segment_id,
                 current_segment_size,
-                pending_count: 0,
-                max_lsn: 0,
             }),
             segment_rotate_callback: parking_lot::RwLock::new(None),
             lsn: AtomicU64::new(0),
+            shard_rr: AtomicU64::new(0),
             atomic_pending: std::sync::atomic::AtomicUsize::new(0),
             encryption_enabled: std::sync::atomic::AtomicBool::new(false),
             sync_mode,
@@ -722,13 +739,27 @@ impl WalWriter {
         max_id
     }
 
+    /// Pick a shard for the current thread (thread-local affinity).
+    /// Same thread always uses the same shard, preserving record ordering
+    /// within a thread — critical for recovery (inserts must precede commit).
+    fn pick_shard(&self) -> usize {
+        thread_local! {
+            static SHARD: std::cell::Cell<usize> = std::cell::Cell::new(usize::MAX);
+        }
+        SHARD.with(|cell| {
+            let idx = cell.get();
+            if idx < WAL_SHARD_COUNT {
+                idx
+            } else {
+                let new_idx = (self.shard_rr.fetch_add(1, Ordering::Relaxed) as usize) % WAL_SHARD_COUNT;
+                cell.set(new_idx);
+                new_idx
+            }
+        })
+    }
+
     /// Append a record to the WAL. Returns the LSN.
-    /// Group commit: if pending records reach the threshold, auto-flush.
-    ///
-    /// When TDE is enabled (`set_encryption`), the serialized payload is
-    /// encrypted with AES-256-GCM before being written. The on-disk format
-    /// is unchanged: `[len:4][crc:4][payload:len]`, but `payload` contains
-    /// `nonce(12) || ciphertext+tag` instead of raw bincode.
+    /// Uses sharded insertion buffers to reduce lock contention.
     pub fn append(&self, record: &WalRecord) -> Result<u64, StorageError> {
         thread_local! {
             static APPEND_BUF: std::cell::RefCell<Vec<u8>> = std::cell::RefCell::new(Vec::with_capacity(128));
@@ -749,35 +780,25 @@ impl WalWriter {
 
             let checksum = crc32fast::hash(&data);
             let len = data.len() as u32;
-            let record_size = 8 + data.len() as u64;
 
-            let mut inner = self.inner.lock();
+            let shard_idx = self.pick_shard();
+            let mut shard = self.shards[shard_idx].lock();
             let lsn = self.lsn.fetch_add(1, Ordering::Relaxed);
-
-            if inner.current_segment_size + record_size > self.max_segment_size {
-                self.rotate_segment(&mut inner)?;
-            }
 
             let mut header = [0u8; 8];
             header[..4].copy_from_slice(&len.to_le_bytes());
             header[4..].copy_from_slice(&checksum.to_le_bytes());
-            inner.buf.extend_from_slice(&header);
-            inner.buf.extend_from_slice(&data);
-            inner.current_segment_size += record_size;
-            inner.pending_count += 1;
-            inner.max_lsn = lsn;
+            shard.buf.extend_from_slice(&header);
+            shard.buf.extend_from_slice(&data);
+            shard.pending_count += 1;
+            shard.max_lsn = lsn;
             self.atomic_pending.fetch_add(1, Ordering::Relaxed);
-
-            if inner.pending_count >= self.group_commit_size {
-                self.flush_inner(&mut inner)?;
-            }
 
             Ok(lsn)
         })
     }
 
-    /// Append multiple records under a single mutex hold.
-    /// Serialization + encryption happen outside the mutex; only buf.extend is inside.
+    /// Append multiple records under a single shard lock hold.
     pub fn append_multi(&self, records: &[&WalRecord]) -> Result<u64, StorageError> {
         let encrypted = self.encryption_enabled.load(Ordering::Relaxed);
 
@@ -806,51 +827,96 @@ impl WalWriter {
             }
 
             let count = records.len() as u64;
-            let mut inner = self.inner.lock();
+            let shard_idx = self.pick_shard();
+            let mut shard = self.shards[shard_idx].lock();
             let base_lsn = self.lsn.fetch_add(count, Ordering::Relaxed);
             for i in 0..records.len() {
                 let (offset, len, crc) = index[i];
-                let record_size = 8 + len as u64;
-                if inner.current_segment_size + record_size > self.max_segment_size {
-                    self.rotate_segment(&mut inner)?;
-                }
                 let mut header = [0u8; 8];
                 header[..4].copy_from_slice(&(len as u32).to_le_bytes());
                 header[4..].copy_from_slice(&crc.to_le_bytes());
-                inner.buf.extend_from_slice(&header);
-                inner.buf.extend_from_slice(&serial_buf[offset..offset + len]);
-                inner.current_segment_size += record_size;
-                inner.pending_count += 1;
+                shard.buf.extend_from_slice(&header);
+                shard.buf.extend_from_slice(&serial_buf[offset..offset + len]);
+                shard.pending_count += 1;
                 self.atomic_pending.fetch_add(1, Ordering::Relaxed);
             }
             let last_lsn = base_lsn + count - 1;
-            inner.max_lsn = last_lsn;
+            shard.max_lsn = last_lsn;
             Ok(last_lsn)
         })
     }
 
     /// Flush buffered writes and optionally sync to disk.
     pub fn flush(&self) -> Result<(), StorageError> {
+        let mut collected = Vec::new();
+        {
+            let mut shard_guards: [_; WAL_SHARD_COUNT] = std::array::from_fn(|i| self.shards[i].lock());
+            for sg in shard_guards.iter_mut() {
+                if !sg.buf.is_empty() {
+                    collected.extend_from_slice(&sg.buf);
+                    sg.buf.clear();
+                    sg.pending_count = 0;
+                }
+            }
+            self.atomic_pending.store(0, Ordering::Relaxed);
+        }
+        if collected.is_empty() {
+            return Ok(());
+        }
         let mut inner = self.inner.lock();
-        self.flush_inner(&mut inner)
+        if inner.current_segment_size + collected.len() as u64 > self.max_segment_size {
+            self.do_rotate(&mut inner, &collected)?;
+        } else {
+            inner.file.write_all(&collected)?;
+            inner.current_segment_size += collected.len() as u64;
+            #[cfg(not(target_os = "windows"))]
+            match self.sync_mode {
+                SyncMode::None => {}
+                SyncMode::FSync => inner.file.sync_all()?,
+                SyncMode::FDataSync => inner.file.sync_data()?,
+            }
+        }
+        Ok(())
     }
 
-    /// Double-buffer flush: swap buffer under WAL mutex (instant), then
-    /// FUA write outside mutex so appenders continue concurrently.
+    /// Sharded double-buffer flush: lock all shards briefly to collect buffers,
+    /// then FUA write outside all locks so appenders continue concurrently.
     pub fn flush_split(&self) -> Result<u64, StorageError> {
         let mut flush_buf = self.flush_buf.lock();
-        let flushed_lsn = {
-            let mut inner = self.inner.lock();
-            if inner.buf.is_empty() {
-                return Ok(inner.max_lsn);
+        flush_buf.clear();
+        let mut max_lsn = 0u64;
+        let mut total_bytes = 0u64;
+
+        let mut inner = self.inner.lock();
+        {
+            let mut shard_guards: [_; WAL_SHARD_COUNT] = std::array::from_fn(|i| self.shards[i].lock());
+            for sg in shard_guards.iter_mut() {
+                if !sg.buf.is_empty() {
+                    flush_buf.extend_from_slice(&sg.buf);
+                    total_bytes += sg.buf.len() as u64;
+                    sg.buf.clear();
+                    if sg.max_lsn > max_lsn {
+                        max_lsn = sg.max_lsn;
+                    }
+                    sg.pending_count = 0;
+                }
             }
-            let flushed = inner.max_lsn;
-            flush_buf.clear();
-            std::mem::swap(&mut inner.buf, &mut *flush_buf);
-            inner.pending_count = 0;
             self.atomic_pending.store(0, Ordering::Relaxed);
-            flushed
-        };
+        }
+        if flush_buf.is_empty() {
+            return Ok(self.lsn.load(Ordering::Relaxed).saturating_sub(1));
+        }
+
+        // Rare path: segment rotation needed
+        if inner.current_segment_size + total_bytes > self.max_segment_size {
+            self.do_rotate(&mut inner, &flush_buf)?;
+            return Ok(max_lsn);
+        }
+        inner.current_segment_size += total_bytes;
+        // Release inner lock before disk I/O
+        drop(inner);
+
+        // FUA write outside all locks
         let fd = self.flush_fd_cache.lock().take()
             .map_or_else(|| self.inner.lock().file.try_clone(), Ok)?;
         (&fd).write_all(&flush_buf)?;
@@ -861,55 +927,100 @@ impl WalWriter {
             SyncMode::FDataSync => fd.sync_data()?,
         }
         *self.flush_fd_cache.lock() = Some(fd);
-        Ok(flushed_lsn)
+        Ok(max_lsn)
     }
 
-    fn flush_inner(&self, inner: &mut WalWriterInner) -> Result<(), StorageError> {
-        if !inner.buf.is_empty() {
-            inner.file.write_all(&inner.buf)?;
-            inner.buf.clear();
+    /// Write data across segments, rotating as needed. Scans record boundaries
+    /// ([len:4][crc:4][payload:len]) to split at the right place.
+    /// Called with inner lock held.
+    fn do_rotate(
+        &self,
+        inner: &mut WalWriterInner,
+        data: &[u8],
+    ) -> Result<(), StorageError> {
+        let mut offset = 0usize;
+        while offset < data.len() {
+            let remaining = &data[offset..];
+            let space = self.max_segment_size.saturating_sub(inner.current_segment_size) as usize;
+
+            let chunk_end = Self::find_records_boundary(remaining, space);
+            if chunk_end > 0 {
+                inner.file.write_all(&remaining[..chunk_end])?;
+                inner.current_segment_size += chunk_end as u64;
+                offset += chunk_end;
+            } else if space == 0 || offset == 0 {
+                let one_rec = Self::next_record_len(remaining).unwrap_or(remaining.len());
+                inner.file.write_all(&remaining[..one_rec])?;
+                inner.current_segment_size += one_rec as u64;
+                offset += one_rec;
+            }
+
+            if offset < data.len() {
+                self.open_new_segment(inner)?;
+            }
         }
-        inner.pending_count = 0;
-        self.atomic_pending.store(0, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Sync current segment, open a new one with header written directly to file.
+    fn open_new_segment(&self, inner: &mut WalWriterInner) -> Result<(), StorageError> {
         #[cfg(not(target_os = "windows"))]
         match self.sync_mode {
             SyncMode::None => {}
             SyncMode::FSync => inner.file.sync_all()?,
             SyncMode::FDataSync => inner.file.sync_data()?,
         }
-        Ok(())
-    }
-
-    fn rotate_segment(&self, inner: &mut WalWriterInner) -> Result<(), StorageError> {
-        self.flush_inner(inner)?;
-
-        // Record completed segment info before rotating (for PITR callback)
-        let completed_segment_id = inner.current_segment;
-        let completed_segment_size = inner.current_segment_size;
-
+        let completed_id = inner.current_segment;
+        let completed_size = inner.current_segment_size;
         inner.current_segment += 1;
         let new_path = inner.dir.join(segment_filename(inner.current_segment));
         inner.file = Self::open_wal_file(&new_path)?;
         *self.flush_fd_cache.lock() = None;
-
-        inner.buf.extend_from_slice(WAL_MAGIC);
-        inner.buf.extend_from_slice(&WAL_FORMAT_VERSION.to_le_bytes());
+        inner.file.write_all(WAL_MAGIC)?;
+        inner.file.write_all(&WAL_FORMAT_VERSION.to_le_bytes())?;
         inner.current_segment_size = WAL_SEGMENT_HEADER_SIZE as u64;
-        inner.pending_count = 0;
-
         tracing::debug!("WAL rotated to segment {}", inner.current_segment);
-
-        // Invoke PITR archive callback (outside the lock for this segment)
         if let Some(ref cb) = *self.segment_rotate_callback.read() {
-            cb(completed_segment_id, completed_segment_size);
+            cb(completed_id, completed_size);
         }
-
         Ok(())
+    }
+
+    /// Find the last complete record boundary that fits in `max_bytes`.
+    /// Records are: [len:4][crc:4][payload:len].
+    fn find_records_boundary(data: &[u8], max_bytes: usize) -> usize {
+        let mut pos = 0;
+        while pos + 8 <= data.len() {
+            let len = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+            let total = 8 + len;
+            if pos + total > data.len() || pos + total > max_bytes {
+                break;
+            }
+            pos += total;
+        }
+        pos
+    }
+
+    /// Length of the next complete record starting at data[0], or None.
+    fn next_record_len(data: &[u8]) -> Option<usize> {
+        if data.len() < 8 { return None; }
+        let len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        let total = 8 + len;
+        if total <= data.len() { Some(total) } else { None }
     }
 
     pub fn current_lsn(&self) -> u64 {
         self.lsn.load(Ordering::SeqCst)
     }
+}
+
+impl Drop for WalWriter {
+    fn drop(&mut self) {
+        let _ = self.flush();
+    }
+}
+
+impl WalWriter {
 
     pub fn sync_mode(&self) -> SyncMode {
         self.sync_mode

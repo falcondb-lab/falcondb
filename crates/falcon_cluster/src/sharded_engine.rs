@@ -187,6 +187,27 @@ impl ShardedEngine {
         &self.shards
     }
 
+    /// Flush WAL on all shards. Returns the first error encountered, if any.
+    pub fn flush_wal_all(&self) -> Result<(), FalconError> {
+        for shard in &self.shards {
+            if shard.storage.is_wal_enabled() {
+                shard.storage.flush_wal().map_err(|e| {
+                    FalconError::Internal(format!(
+                        "shard {} WAL flush failed: {e}", shard.shard_id.0
+                    ))
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Shutdown WAL flush threads on all shards.
+    pub fn shutdown_wal_all(&self) {
+        for shard in &self.shards {
+            shard.storage.shutdown_wal_flush();
+        }
+    }
+
     /// Execute a subplan function on a single shard.
     ///
     /// This is the first-class `execute_subplan(shard_id, f) -> ResultSet`

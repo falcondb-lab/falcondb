@@ -198,6 +198,21 @@ impl ShardReplicaGroup {
         // Step 1: Fence old primary — no new writes accepted.
         self.primary.fence();
 
+        // Step 1b: Wait for in-flight write transactions to drain.
+        // Without this, a txn that started before the fence could commit
+        // after catch-up, and those writes would be lost on the new primary.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while self.primary.storage.active_txn_count() > 0 {
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    "Promote: {} active txns still draining after 5s, proceeding anyway",
+                    self.primary.storage.active_txn_count()
+                );
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
         // Step 2: Catch up the replica to latest LSN.
         self.catch_up_replica(replica_idx)?;
 

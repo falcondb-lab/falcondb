@@ -1,0 +1,19 @@
+{
+  "test": "backup-pitr",
+  "verdict": "PASS",
+  "backup": {
+    "label": "full_backup_20260304_090313",
+    "total_balance_at_backup": 1012750
+  },
+  "recovery_target": "T1",
+  "expected_accounts": 100,
+  "restored_accounts": 1100,
+  "restored_total_balance": 1025500,
+  "matches": 100,
+  "mismatches": 0,
+  "missing": 0,
+  "extra": 0,
+  "post_t1_txns_excluded": 200,
+  "post_t1_delta_per_txn": 999,
+  "post_t1_total_excluded": 199800
+}

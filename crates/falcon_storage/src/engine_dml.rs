@@ -1,10 +1,11 @@
 //! DML operations on StorageEngine: INSERT, UPDATE, DELETE, GET, SCAN, index scan.
 //!
-//! Each operation first checks the in-memory rowstore map, then the columnstore
-//! map, then the disk-rowstore map.  This avoids coupling to the catalog's
-//! `storage_type` at the DML layer — the table simply lives in one map.
+//! All operations dispatch through `engine_tables` (`DashMap<TableId, TableHandle>`).
+//! Rowstore/Columnstore/DiskRowstore have explicit branches for special semantics;
+//! LSM/RocksDB/redb go through `TableHandle::as_storage_table()` unified path.
 
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+#[cfg(any(feature = "columnstore", feature = "disk_rowstore"))]
+use std::sync::atomic::Ordering as AtomicOrdering;
 
 #[cfg(any(feature = "columnstore", feature = "disk_rowstore"))]
 use falcon_common::config::NodeRole;
@@ -13,7 +14,7 @@ use falcon_common::error::StorageError;
 use falcon_common::types::{TableId, Timestamp, TxnId, TxnType};
 
 use crate::memtable::{PrimaryKey, SimpleAggOp};
-use crate::ustm::{AccessPriority, PageData, PageId};
+use crate::ustm::PageId;
 use crate::wal::WalRecord;
 
 use super::engine::StorageEngine;
@@ -31,19 +32,7 @@ impl StorageEngine {
     }
 }
 
-/// Derive a USTM PageId from a table id and primary key hash.
-#[inline]
-fn ustm_page_id(table_id: TableId, pk: &PrimaryKey) -> PageId {
-    // Combine table_id (upper 32 bits) with a hash of the PK (lower 32 bits)
-    let pk_hash = crate::ustm::page::fast_hash_pk(pk);
-    PageId(table_id.0 << 32 | u64::from(pk_hash))
-}
-
-/// Derive a USTM PageId for a table-level page (DDL / scan).
-#[inline]
-const fn ustm_table_page_id(table_id: TableId, page_seq: u32) -> PageId {
-    PageId(table_id.0 << 32 | page_seq as u64)
-}
+use crate::ustm::page::page_id_for_table;
 
 impl StorageEngine {
     // ── Core DML ─────────────────────────────────────────────────────
@@ -56,6 +45,8 @@ impl StorageEngine {
     ) -> Result<PrimaryKey, StorageError> {
         use crate::table_handle::TableHandle;
 
+        self.check_write_pressure()?;
+
         let handle = self.engine_tables.get(&table_id)
             .ok_or(StorageError::TableNotFound(table_id))?;
 
@@ -63,18 +54,19 @@ impl StorageEngine {
             TableHandle::Rowstore(table) => {
                 let row_bytes = crate::mvcc::estimate_row_bytes(&row);
                 self.memory_tracker.alloc_write_buffer(row_bytes);
-                self.txn_write_bytes
-                    .entry(txn_id)
-                    .or_insert_with(|| AtomicU64::new(0))
-                    .fetch_add(row_bytes, AtomicOrdering::Relaxed);
-                if self.wal.is_some() {
-                    self.txn_wal_buf.entry(txn_id).or_default().push(
-                        WalRecord::Insert { txn_id, table_id, row: row.clone() },
-                    );
-                }
+                let wal_row = if self.wal.is_some() || self.wal_observer.is_some() {
+                    Some(row.clone())
+                } else { None };
                 let cdc_row = if self.ext.cdc_manager.is_enabled() { Some(row.clone()) } else { None };
+                // Single DashMap entry for all three: write_bytes + wal_buf + write_set
+                let mut state = self.txn_local.entry(txn_id).or_default();
+                state.write_bytes += row_bytes;
+                if let Some(wr) = wal_row {
+                    state.wal_buf.push(WalRecord::Insert { txn_id, table_id, row: wr });
+                }
                 let pk = table.insert(row, txn_id)?;
-                self.record_write_no_dedup(txn_id, table_id, pk.clone());
+                state.write_set.push(crate::engine::TxnWriteOp { table_id, pk: pk.clone() });
+                drop(state);
                 if let Some(cdc_row) = cdc_row {
                     let tname = self.cdc_table_name(table_id);
                     self.ext.cdc_manager.emit_insert(txn_id, table_id, &tname, cdc_row, Some(format!("{pk:?}")));
@@ -89,36 +81,19 @@ impl StorageEngine {
                 let _ = cs.insert(row, txn_id);
                 Ok(pk)
             }
-            #[cfg(feature = "disk_rowstore")]
-            TableHandle::DiskRowstore(disk) => {
-                self.record_write_path_violation_disk()?;
-                self.append_wal(&WalRecord::Insert { txn_id, table_id, row: row.clone() })?;
-                let pk = disk.insert(row, txn_id)?;
-                Ok(pk)
-            }
-            #[cfg(feature = "lsm")]
-            TableHandle::Lsm(lsm) => {
-                self.append_wal(&WalRecord::Insert { txn_id, table_id, row: row.clone() })?;
-                let pk = lsm.insert(&row, txn_id)?;
-                self.record_write(txn_id, table_id, pk.clone());
-                let page_id = ustm_page_id(table_id, &pk);
-                let data = PageData::new(pk.clone());
-                self.ustm.insert_warm(page_id, data, AccessPriority::HotRow);
-                Ok(pk)
-            }
-            #[cfg(feature = "rocksdb")]
-            TableHandle::RocksDb(rdb) => {
-                self.append_wal(&WalRecord::Insert { txn_id, table_id, row: row.clone() })?;
-                let pk = rdb.insert(&row, txn_id)?;
-                self.record_write(txn_id, table_id, pk.clone());
-                Ok(pk)
-            }
-            #[cfg(feature = "redb")]
-            TableHandle::Redb(rdb) => {
-                self.append_wal(&WalRecord::Insert { txn_id, table_id, row: row.clone() })?;
-                let pk = rdb.insert(&row, txn_id)?;
-                self.record_write(txn_id, table_id, pk.clone());
-                Ok(pk)
+            #[allow(unreachable_patterns)]
+            _ => {
+                if let Some(t) = handle.as_storage_table() {
+                    #[cfg(feature = "disk_rowstore")]
+                    if handle.is_disk_rowstore() { self.record_write_path_violation_disk()?; }
+                    self.append_wal(&WalRecord::Insert { txn_id, table_id, row: row.clone() })?;
+                    let pk = t.insert(&row, txn_id)?;
+                    self.record_write(txn_id, table_id, pk.clone());
+                    t.prefetch_hint(table_id, &pk, &self.ustm);
+                    Ok(pk)
+                } else {
+                    Err(StorageError::TableNotFound(table_id))
+                }
             }
         }
     }
@@ -138,6 +113,8 @@ impl StorageEngine {
             return Ok(vec![]);
         }
 
+        self.check_write_pressure()?;
+
         let handle = self.engine_tables.get(&table_id)
             .ok_or(StorageError::TableNotFound(table_id))?;
 
@@ -145,10 +122,7 @@ impl StorageEngine {
             TableHandle::Rowstore(table) => {
                 let total_bytes: u64 = rows.iter().map(crate::mvcc::estimate_row_bytes).sum();
                 self.memory_tracker.alloc_write_buffer(total_bytes);
-                self.txn_write_bytes
-                    .entry(txn_id)
-                    .or_insert_with(|| AtomicU64::new(0))
-                    .fetch_add(total_bytes, AtomicOrdering::Relaxed);
+                self.txn_local.entry(txn_id).or_default().write_bytes += total_bytes;
                 let row_count = rows.len();
                 let wal_record = WalRecord::BatchInsert { txn_id, table_id, rows };
                 self.append_wal(&wal_record)?;
@@ -203,6 +177,8 @@ impl StorageEngine {
     ) -> Result<(), StorageError> {
         use crate::table_handle::TableHandle;
 
+        self.check_write_pressure()?;
+
         let handle = self.engine_tables.get(&table_id)
             .ok_or(StorageError::TableNotFound(table_id))?;
 
@@ -211,12 +187,17 @@ impl StorageEngine {
                 let row_bytes = crate::mvcc::estimate_row_bytes(&new_row);
                 self.memory_tracker.alloc_write_buffer(row_bytes);
                 self.append_wal(&WalRecord::Update { txn_id, table_id, pk: pk.clone(), new_row: new_row.clone() })?;
-                let cdc_row = if self.ext.cdc_manager.is_enabled() { Some(new_row.clone()) } else { None };
+                let old_row = if self.ext.cdc_manager.is_enabled() {
+                    table.get(pk, txn_id, falcon_common::types::Timestamp(u64::MAX))
+                } else {
+                    None
+                };
+                let cdc_new = if self.ext.cdc_manager.is_enabled() { Some(new_row.clone()) } else { None };
                 table.update(pk, new_row, txn_id)?;
                 self.record_write(txn_id, table_id, pk.clone());
-                if let Some(cdc_row) = cdc_row {
+                if let Some(cdc_new) = cdc_new {
                     let tname = self.cdc_table_name(table_id);
-                    self.ext.cdc_manager.emit_update(txn_id, table_id, &tname, None, cdc_row, Some(format!("{pk:?}")));
+                    self.ext.cdc_manager.emit_update(txn_id, table_id, &tname, old_row, cdc_new, Some(format!("{pk:?}")));
                 }
                 Ok(())
             }
@@ -225,34 +206,19 @@ impl StorageEngine {
                 self.record_write_path_violation_columnstore()?;
                 Err(StorageError::Io(std::io::Error::other("UPDATE not supported on COLUMNSTORE tables")))
             }
-            #[cfg(feature = "disk_rowstore")]
-            TableHandle::DiskRowstore(disk) => {
-                self.record_write_path_violation_disk()?;
-                self.append_wal(&WalRecord::Update { txn_id, table_id, pk: pk.clone(), new_row: new_row.clone() })?;
-                disk.update(pk, new_row, txn_id)
-            }
-            #[cfg(feature = "lsm")]
-            TableHandle::Lsm(lsm) => {
-                self.append_wal(&WalRecord::Update { txn_id, table_id, pk: pk.clone(), new_row: new_row.clone() })?;
-                lsm.update(pk, &new_row, txn_id)?;
-                self.record_write(txn_id, table_id, pk.clone());
-                let page_id = ustm_page_id(table_id, pk);
-                self.ustm.insert_warm(page_id, PageData::new(pk.clone()), AccessPriority::HotRow);
-                Ok(())
-            }
-            #[cfg(feature = "rocksdb")]
-            TableHandle::RocksDb(rdb) => {
-                self.append_wal(&WalRecord::Update { txn_id, table_id, pk: pk.clone(), new_row: new_row.clone() })?;
-                rdb.update(pk, &new_row, txn_id)?;
-                self.record_write(txn_id, table_id, pk.clone());
-                Ok(())
-            }
-            #[cfg(feature = "redb")]
-            TableHandle::Redb(rdb) => {
-                self.append_wal(&WalRecord::Update { txn_id, table_id, pk: pk.clone(), new_row: new_row.clone() })?;
-                rdb.update(pk, &new_row, txn_id)?;
-                self.record_write(txn_id, table_id, pk.clone());
-                Ok(())
+            #[allow(unreachable_patterns)]
+            _ => {
+                if let Some(t) = handle.as_storage_table() {
+                    #[cfg(feature = "disk_rowstore")]
+                    if handle.is_disk_rowstore() { self.record_write_path_violation_disk()?; }
+                    self.append_wal(&WalRecord::Update { txn_id, table_id, pk: pk.clone(), new_row: new_row.clone() })?;
+                    t.update(pk, &new_row, txn_id)?;
+                    self.record_write(txn_id, table_id, pk.clone());
+                    t.prefetch_hint(table_id, pk, &self.ustm);
+                    Ok(())
+                } else {
+                    Err(StorageError::Io(std::io::Error::other("UPDATE not supported on this engine")))
+                }
             }
         }
     }
@@ -265,6 +231,8 @@ impl StorageEngine {
     ) -> Result<(), StorageError> {
         use crate::table_handle::TableHandle;
 
+        self.check_write_pressure()?;
+
         let handle = self.engine_tables.get(&table_id)
             .ok_or(StorageError::TableNotFound(table_id))?;
 
@@ -273,11 +241,16 @@ impl StorageEngine {
                 let tombstone_bytes = std::mem::size_of::<crate::mvcc::Version>() as u64;
                 self.memory_tracker.alloc_write_buffer(tombstone_bytes);
                 self.append_wal(&WalRecord::Delete { txn_id, table_id, pk: pk.clone() })?;
+                let old_row = if self.ext.cdc_manager.is_enabled() {
+                    table.get(pk, txn_id, falcon_common::types::Timestamp(u64::MAX))
+                } else {
+                    None
+                };
                 table.delete(pk, txn_id)?;
                 self.record_write(txn_id, table_id, pk.clone());
                 if self.ext.cdc_manager.is_enabled() {
                     let tname = self.cdc_table_name(table_id);
-                    self.ext.cdc_manager.emit_delete(txn_id, table_id, &tname, None, Some(format!("{pk:?}")));
+                    self.ext.cdc_manager.emit_delete(txn_id, table_id, &tname, old_row, Some(format!("{pk:?}")));
                 }
                 Ok(())
             }
@@ -286,33 +259,19 @@ impl StorageEngine {
                 self.record_write_path_violation_columnstore()?;
                 Err(StorageError::Io(std::io::Error::other("DELETE not supported on COLUMNSTORE tables")))
             }
-            #[cfg(feature = "disk_rowstore")]
-            TableHandle::DiskRowstore(disk) => {
-                self.record_write_path_violation_disk()?;
-                self.append_wal(&WalRecord::Delete { txn_id, table_id, pk: pk.clone() })?;
-                disk.delete(pk, txn_id)
-            }
-            #[cfg(feature = "lsm")]
-            TableHandle::Lsm(lsm) => {
-                self.append_wal(&WalRecord::Delete { txn_id, table_id, pk: pk.clone() })?;
-                lsm.delete(pk, txn_id)?;
-                self.record_write(txn_id, table_id, pk.clone());
-                self.ustm.unregister_page(ustm_page_id(table_id, pk));
-                Ok(())
-            }
-            #[cfg(feature = "rocksdb")]
-            TableHandle::RocksDb(rdb) => {
-                self.append_wal(&WalRecord::Delete { txn_id, table_id, pk: pk.clone() })?;
-                rdb.delete(pk, txn_id)?;
-                self.record_write(txn_id, table_id, pk.clone());
-                Ok(())
-            }
-            #[cfg(feature = "redb")]
-            TableHandle::Redb(rdb) => {
-                self.append_wal(&WalRecord::Delete { txn_id, table_id, pk: pk.clone() })?;
-                rdb.delete(pk, txn_id)?;
-                self.record_write(txn_id, table_id, pk.clone());
-                Ok(())
+            #[allow(unreachable_patterns)]
+            _ => {
+                if let Some(t) = handle.as_storage_table() {
+                    #[cfg(feature = "disk_rowstore")]
+                    if handle.is_disk_rowstore() { self.record_write_path_violation_disk()?; }
+                    self.append_wal(&WalRecord::Delete { txn_id, table_id, pk: pk.clone() })?;
+                    t.delete(pk, txn_id)?;
+                    self.record_write(txn_id, table_id, pk.clone());
+                    t.prefetch_evict(table_id, pk, &self.ustm);
+                    Ok(())
+                } else {
+                    Err(StorageError::Io(std::io::Error::other("DELETE not supported on this engine")))
+                }
             }
         }
     }
@@ -329,30 +288,23 @@ impl StorageEngine {
         let handle = self.engine_tables.get(&table_id)
             .ok_or(StorageError::TableNotFound(table_id))?;
 
-        #[allow(unreachable_patterns)]
         match handle.value() {
-            TableHandle::Rowstore(table) => Ok(table.get(pk, txn_id, read_ts)),
+            TableHandle::Rowstore(table) => {
+                self.record_read(txn_id, table_id, pk.clone());
+                Ok(table.get(pk, txn_id, read_ts))
+            }
             #[cfg(feature = "columnstore")]
             TableHandle::Columnstore(_) => Ok(None),
-            #[cfg(feature = "disk_rowstore")]
-            TableHandle::DiskRowstore(disk) => Ok(disk.get(pk, txn_id, read_ts)),
-            #[cfg(feature = "lsm")]
-            TableHandle::Lsm(lsm) => {
-                self.record_read(txn_id, table_id, pk.clone());
-                let page_id = ustm_page_id(table_id, pk);
-                let result = lsm.get(pk, txn_id, read_ts)?;
-                self.ustm.insert_warm(page_id, PageData::new(pk.clone()), AccessPriority::HotRow);
-                Ok(result)
-            }
-            #[cfg(feature = "rocksdb")]
-            TableHandle::RocksDb(rdb) => {
-                self.record_read(txn_id, table_id, pk.clone());
-                rdb.get(pk, txn_id, read_ts)
-            }
-            #[cfg(feature = "redb")]
-            TableHandle::Redb(rdb) => {
-                self.record_read(txn_id, table_id, pk.clone());
-                rdb.get(pk, txn_id, read_ts)
+            #[allow(unreachable_patterns)]
+            _ => {
+                if let Some(t) = handle.as_storage_table() {
+                    self.record_read(txn_id, table_id, pk.clone());
+                    let result = t.get(pk, txn_id, read_ts)?;
+                    t.prefetch_hint(table_id, pk, &self.ustm);
+                    Ok(result)
+                } else {
+                    Ok(None)
+                }
             }
         }
     }
@@ -522,7 +474,9 @@ impl StorageEngine {
     where
         F: Fn(&OwnedRow) -> bool,
     {
-        if let Some(table) = self.tables.get(&table_id) {
+        let handle = self.engine_tables.get(&table_id)
+            .ok_or(StorageError::TableNotFound(table_id))?;
+        if let Some(table) = handle.as_rowstore() {
             let mut results = Vec::new();
             for entry in table.data.iter() {
                 if let Some(lim) = limit {
@@ -539,9 +493,6 @@ impl StorageEngine {
             }
             return Ok(results);
         }
-        // non-rowstore fallback: full scan then filter
-        let handle = self.engine_tables.get(&table_id)
-            .ok_or(StorageError::TableNotFound(table_id))?;
         let mut results = Vec::new();
         for (pk, row) in handle.scan(txn_id, read_ts) {
             if let Some(lim) = limit {
@@ -617,11 +568,11 @@ impl StorageEngine {
         txn_id: TxnId,
         read_ts: Timestamp,
     ) -> Result<Vec<OwnedRow>, StorageError> {
-        if let Some(table) = self.tables.get(&table_id) {
-            return Ok(table.scan_rows_only(txn_id, read_ts));
-        }
         let handle = self.engine_tables.get(&table_id)
             .ok_or(StorageError::TableNotFound(table_id))?;
+        if let Some(table) = handle.as_rowstore() {
+            return Ok(table.scan_rows_only(txn_id, read_ts));
+        }
         Ok(handle.scan(txn_id, read_ts).into_iter().map(|(_, row)| row).collect())
     }
 
@@ -645,7 +596,7 @@ impl StorageEngine {
                 }
                 if results.len() > 1 {
                     let scan_pages: Vec<PageId> = (0..results.len().min(16) as u32)
-                        .map(|i| ustm_table_page_id(table_id, i))
+                        .map(|i| page_id_for_table(table_id, i))
                         .collect();
                     self.ustm.prefetch_hint(
                         crate::ustm::PrefetchSource::SeqScan {
@@ -658,24 +609,13 @@ impl StorageEngine {
                 }
                 Ok(results)
             }
-            #[cfg(feature = "lsm")]
-            TableHandle::Lsm(lsm) => {
-                let results = lsm.scan(txn_id, read_ts);
-                if results.len() > 1 {
-                    let data_dir = self.data_dir.as_deref().unwrap_or_else(|| std::path::Path::new("."));
-                    let sst_path = data_dir.join(format!("lsm_table_{}", table_id.0));
-                    self.ustm.prefetch_hint(
-                        crate::ustm::PrefetchSource::SeqScan {
-                            start_page: ustm_table_page_id(table_id, 0),
-                            count: results.len().min(16),
-                        },
-                        sst_path,
-                    );
-                    self.ustm.prefetch_tick();
+            _ => {
+                let results = handle.scan(txn_id, read_ts);
+                if let Some(t) = handle.as_storage_table() {
+                    t.scan_prefetch_hint(table_id, results.len(), &self.ustm);
                 }
                 Ok(results)
             }
-            _ => Ok(handle.scan(txn_id, read_ts)),
         }
     }
 
@@ -689,7 +629,8 @@ impl StorageEngine {
         txn_id: TxnId,
         read_ts: Timestamp,
     ) -> Option<Vec<Vec<falcon_common::datum::Datum>>> {
-        let cs = self.columnstore_tables.get(&table_id)?;
+        let handle = self.engine_tables.get(&table_id)?;
+        let cs = handle.as_columnstore()?;
         let num_cols = cs.schema.columns.len();
         let columns = (0..num_cols)
             .map(|col_idx| cs.column_scan(col_idx, txn_id, read_ts))
@@ -718,38 +659,13 @@ impl StorageEngine {
         txn_id: TxnId,
         read_ts: Timestamp,
     ) -> Result<Vec<(Vec<u8>, OwnedRow)>, StorageError> {
-        let table = self
-            .tables
-            .get(&table_id)
+        let handle = self.engine_tables.get(&table_id)
             .ok_or(StorageError::TableNotFound(table_id))?;
-
-        // Look up PKs from the secondary index
-        let pks = {
-            let indexes = table.secondary_indexes.read();
-            let mut found = Vec::new();
-            for idx in indexes.iter() {
-                if idx.column_idx == column_idx {
-                    let tree = idx.tree.read();
-                    if let Some(pk_list) = tree.get(key) {
-                        found = pk_list.clone();
-                    }
-                    break;
-                }
-            }
-            found
-        };
-
-        // Fetch visible rows for each PK
-        let mut results = Vec::new();
-        for pk in pks {
-            if let Some(chain) = table.data.get(&pk) {
-                let row = chain.read_for_txn(txn_id, read_ts);
-                if let Some(r) = row {
-                    // Record read for OCC
-                    self.record_read(txn_id, table_id, pk.clone());
-                    results.push((pk, r));
-                }
-            }
+        let table = handle.as_rowstore()
+            .ok_or_else(|| StorageError::Io(std::io::Error::other("secondary indexes only supported on rowstore")))?;
+        let results = table.index_scan(column_idx, key, txn_id, read_ts);
+        for (pk, _) in &results {
+            self.record_read(txn_id, table_id, pk.clone());
         }
         Ok(results)
     }
@@ -770,31 +686,13 @@ impl StorageEngine {
         txn_id: TxnId,
         read_ts: Timestamp,
     ) -> Result<Vec<(Vec<u8>, OwnedRow)>, StorageError> {
-        let table = self
-            .tables
-            .get(&table_id)
+        let handle = self.engine_tables.get(&table_id)
             .ok_or(StorageError::TableNotFound(table_id))?;
-
-        let pks = {
-            let indexes = table.secondary_indexes.read();
-            let mut found = Vec::new();
-            for idx in indexes.iter() {
-                if idx.column_idx == column_idx {
-                    found = idx.range_scan(lower, upper);
-                    break;
-                }
-            }
-            found
-        };
-
-        let mut results = Vec::new();
-        for pk in pks {
-            if let Some(chain) = table.data.get(&pk) {
-                if let Some(r) = chain.read_for_txn(txn_id, read_ts) {
-                    self.record_read(txn_id, table_id, pk.clone());
-                    results.push((pk, r));
-                }
-            }
+        let table = handle.as_rowstore()
+            .ok_or_else(|| StorageError::Io(std::io::Error::other("secondary indexes only supported on rowstore")))?;
+        let results = table.index_range_scan(column_idx, lower, upper, txn_id, read_ts);
+        for (pk, _) in &results {
+            self.record_read(txn_id, table_id, pk.clone());
         }
         Ok(results)
     }
@@ -806,18 +704,11 @@ impl StorageEngine {
         column_idx: usize,
         key: &[u8],
     ) -> Result<Vec<PrimaryKey>, StorageError> {
-        let table = self
-            .tables
-            .get(&table_id)
+        let handle = self.engine_tables.get(&table_id)
             .ok_or(StorageError::TableNotFound(table_id))?;
-        let indexes = table.secondary_indexes.read();
-        for idx in indexes.iter() {
-            if idx.column_idx == column_idx {
-                let tree = idx.tree.read();
-                return Ok(tree.get(key).cloned().unwrap_or_default());
-            }
-        }
-        Ok(vec![])
+        let table = handle.as_rowstore()
+            .ok_or_else(|| StorageError::Io(std::io::Error::other("secondary indexes only supported on rowstore")))?;
+        Ok(table.index_lookup_pks(column_idx, key))
     }
 
     // ── Auto-commit helpers (for internal migration / rebalancer) ───
@@ -922,5 +813,107 @@ impl StorageEngine {
                 )))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod cdc_before_after_tests {
+    use falcon_common::datum::{Datum, OwnedRow};
+    use falcon_common::schema::{ColumnDef, TableSchema};
+    use falcon_common::types::{ColumnId, DataType, TableId, TxnId}; // Timestamp not needed here
+
+    use crate::cdc::ChangeOp;
+    use crate::engine::StorageEngine;
+    use crate::memtable::PrimaryKey;
+
+    fn make_engine_with_cdc() -> StorageEngine {
+        let engine = StorageEngine::new_in_memory();
+        engine.ext.cdc_manager.set_enabled(true);
+        engine
+    }
+
+    fn col(id: u32, name: &str, dt: DataType, pk: bool) -> ColumnDef {
+        ColumnDef {
+            id: ColumnId(id),
+            name: name.into(),
+            data_type: dt,
+            nullable: !pk,
+            is_primary_key: pk,
+            default_value: None,
+            is_serial: false,
+        }
+    }
+
+    fn make_schema(table_id: TableId) -> TableSchema {
+        TableSchema {
+            id: table_id,
+            name: "test_tbl".into(),
+            columns: vec![
+                col(0, "id", DataType::Int64, true),
+                col(1, "val", DataType::Text, false),
+            ],
+            primary_key_columns: vec![0],
+            ..Default::default()
+        }
+    }
+
+    fn pk(id: i64) -> PrimaryKey {
+        bincode::serialize(&id).unwrap()
+    }
+
+    fn row(id: i64, val: &str) -> OwnedRow {
+        OwnedRow::new(vec![Datum::Int64(id), Datum::Text(val.into())])
+    }
+
+    #[test]
+    fn test_cdc_update_has_old_and_new_row() {
+        use falcon_common::types::{Timestamp, TxnType};
+        let engine = make_engine_with_cdc();
+        let schema = make_schema(TableId(1));
+        engine.create_table(schema).unwrap();
+
+        let slot_id = engine.ext.cdc_manager.create_slot("s1").unwrap();
+        let tid = TableId(1);
+        let txn = TxnId(1);
+
+        let actual_pk = engine.insert(tid, row(42, "original"), txn).unwrap();
+        engine.commit_txn(txn, Timestamp(1), TxnType::Local).unwrap();
+        let _ = engine.ext.cdc_manager.poll_changes(slot_id, 100); // drain insert
+
+        let txn2 = TxnId(2);
+        engine.update(tid, &actual_pk, row(42, "updated"), txn2).unwrap();
+
+        let events = engine.ext.cdc_manager.poll_changes(slot_id, 100);
+        let upd = events.iter().find(|e| e.op == ChangeOp::Update).expect("UPDATE event missing");
+        assert!(upd.new_row.is_some(), "new_row should be present");
+        assert!(upd.old_row.is_some(), "old_row (before-image) should be present");
+        let old = upd.old_row.as_ref().unwrap();
+        assert_eq!(old.values[1], Datum::Text("original".into()), "old_row should have original value");
+        let new = upd.new_row.as_ref().unwrap();
+        assert_eq!(new.values[1], Datum::Text("updated".into()), "new_row should have updated value");
+    }
+
+    #[test]
+    fn test_cdc_delete_has_old_row() {
+        use falcon_common::types::{Timestamp, TxnType};
+        let engine = make_engine_with_cdc();
+        let schema = make_schema(TableId(2));
+        engine.create_table(schema).unwrap();
+
+        let slot_id = engine.ext.cdc_manager.create_slot("s2").unwrap();
+        let tid = TableId(2);
+
+        let actual_pk = engine.insert(tid, row(99, "to_delete"), TxnId(1)).unwrap();
+        engine.commit_txn(TxnId(1), Timestamp(1), TxnType::Local).unwrap();
+        let _ = engine.ext.cdc_manager.poll_changes(slot_id, 100); // drain insert
+
+        engine.delete(tid, &actual_pk, TxnId(2)).unwrap();
+
+        let events = engine.ext.cdc_manager.poll_changes(slot_id, 100);
+        let del = events.iter().find(|e| e.op == ChangeOp::Delete).expect("DELETE event missing");
+        assert!(del.old_row.is_some(), "old_row (before-image) should be present on DELETE");
+        let old = del.old_row.as_ref().unwrap();
+        assert_eq!(old.values[1], Datum::Text("to_delete".into()), "old_row should have the deleted row's value");
+        assert!(del.new_row.is_none(), "new_row should be None for DELETE");
     }
 }

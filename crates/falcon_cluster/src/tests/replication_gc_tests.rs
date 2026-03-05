@@ -537,6 +537,7 @@
             max_backoff_ms: 10_000,
             connect_timeout_ms: 3_000,
             shard_count: 2,
+            replica_id: 1,
         };
         let json = serde_json::to_string(&config).unwrap();
         let deser: falcon_common::config::ReplicationConfig = serde_json::from_str(&json).unwrap();

@@ -50,6 +50,8 @@ struct SyncerState {
     fsynced_lsn: u64,
     /// Number of pending (unfsynced) appends.
     pending_count: u64,
+    /// Set when do_flush fails; waiters see this and return an error.
+    flush_failed: bool,
 }
 
 /// Configuration for the group commit syncer.
@@ -173,6 +175,7 @@ impl GroupCommitSyncer {
                 Mutex::new(SyncerState {
                     fsynced_lsn: 0,
                     pending_count: 0,
+                    flush_failed: false,
                 }),
                 Condvar::new(),
             )),
@@ -233,14 +236,14 @@ impl GroupCommitSyncer {
             cvar.notify_one();
 
             // Wait until our LSN is fsynced
-            while state.fsynced_lsn <= seq && !self.shutdown.load(Ordering::Relaxed) {
+            while state.fsynced_lsn <= seq && !self.shutdown.load(Ordering::Relaxed) && !state.flush_failed {
                 let timeout = Duration::from_micros(self.config.flush_interval_us * 10);
                 let result = cvar
                     .wait_timeout(state, timeout)
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 state = result.0;
             }
-            seq
+            (seq, state.flush_failed)
         };
 
         let elapsed = start.elapsed().as_micros() as u64;
@@ -257,8 +260,11 @@ impl GroupCommitSyncer {
                     None
                 }
             });
-        let _ = my_lsn;
+        let (_seq, failed) = my_lsn;
 
+        if failed {
+            return Err(StorageError::Wal("group-commit flush failed".into()));
+        }
         Ok(lsn)
     }
 
@@ -274,6 +280,67 @@ impl GroupCommitSyncer {
             cvar.notify_one();
         }
         Ok(lsn)
+    }
+
+    /// Notify the syncer that `count` records have been externally appended
+    /// to the WAL (by `durable_wal_commit`), and block until they are flushed.
+    /// This avoids double-appending — the caller already wrote to WAL shards.
+    pub fn notify_and_wait(&self, count: u64) -> Result<(), StorageError> {
+        let start = std::time::Instant::now();
+        let seq = {
+            let (lock, cvar) = &*self.state;
+            let mut state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.pending_count += count;
+            let seq = self.next_lsn.fetch_add(count, Ordering::Relaxed) + count - 1;
+            cvar.notify_one();
+            drop(state);
+            seq
+        };
+
+        // Fast path: spin briefly before falling back to Condvar.
+        // FUA write takes ~21-30µs; at 64c most completions land within ~100 spins.
+        let mut spins = 0u32;
+        loop {
+            if self.atomic_fsynced_lsn.load(Ordering::Acquire) >= seq {
+                let elapsed = start.elapsed().as_micros() as u64;
+                self.stats.total_wait_us.fetch_add(elapsed, Ordering::Relaxed);
+                let _ = self.stats.max_wait_us.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| if elapsed > c { Some(elapsed) } else { None });
+                return Ok(());
+            }
+            if self.shutdown.load(Ordering::Relaxed) {
+                break;
+            }
+            spins += 1;
+            if spins < 500 {
+                std::hint::spin_loop();
+            } else {
+                break;
+            }
+        }
+
+        // Slow path: Condvar wait
+        let my_lsn = {
+            let (lock, cvar) = &*self.state;
+            let mut state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            while state.fsynced_lsn <= seq && !self.shutdown.load(Ordering::Relaxed) && !state.flush_failed {
+                let timeout = Duration::from_micros(self.config.flush_interval_us * 10);
+                let result = cvar
+                    .wait_timeout(state, timeout)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state = result.0;
+            }
+            state.flush_failed
+        };
+
+        let elapsed = start.elapsed().as_micros() as u64;
+        self.stats.total_wait_us.fetch_add(elapsed, Ordering::Relaxed);
+        let _ = self.stats.max_wait_us.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+            if elapsed > cur { Some(elapsed) } else { None }
+        });
+        if my_lsn {
+            return Err(StorageError::Wal("group-commit flush failed".into()));
+        }
+        Ok(())
     }
 
     /// Signal the syncer to shut down gracefully.
@@ -331,6 +398,11 @@ impl GroupCommitSyncer {
             if should_flush {
                 if let Err(e) = self.do_flush() {
                     tracing::error!("group-commit fsync error: {}", e);
+                    // Signal all waiters that the flush failed
+                    let (lock, cvar) = &*self.state;
+                    let mut state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    state.flush_failed = true;
+                    cvar.notify_all();
                 }
             }
         }

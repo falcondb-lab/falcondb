@@ -454,7 +454,7 @@ impl ShardMigrator {
 
                 let target_shard = engine.shard_for_key(pk_key);
                 if target_shard == task.target_shard {
-                    batch_keys.push((pk, row.clone()));
+                    batch_keys.push((pk, (*row).clone()));
                     migrated_rows += 1;
 
                     if batch_keys.len() >= self.config.batch_size {

@@ -257,6 +257,7 @@ fn rule_predicate_pushdown(plan: LogicalPlan) -> LogicalPlan {
             null_string,
             quote,
             escape,
+            file_path,
         } => LogicalPlan::CopyQueryTo {
             query: Box::new(rule_predicate_pushdown(*query)),
             csv,
@@ -265,6 +266,7 @@ fn rule_predicate_pushdown(plan: LogicalPlan) -> LogicalPlan {
             null_string,
             quote,
             escape,
+            file_path,
         },
         // Leaf / DML / DDL / utility — no children to recurse into
         other => other,
@@ -369,6 +371,7 @@ fn rule_join_reorder(plan: LogicalPlan, stats: &TableRowCounts) -> LogicalPlan {
             null_string,
             quote,
             escape,
+            file_path,
         } => LogicalPlan::CopyQueryTo {
             query: Box::new(rule_join_reorder(*query, stats)),
             csv,
@@ -377,6 +380,7 @@ fn rule_join_reorder(plan: LogicalPlan, stats: &TableRowCounts) -> LogicalPlan {
             null_string,
             quote,
             escape,
+            file_path,
         },
         other => other,
     }
@@ -514,6 +518,7 @@ fn rule_limit_pushdown(plan: LogicalPlan) -> LogicalPlan {
             null_string,
             quote,
             escape,
+            file_path,
         } => LogicalPlan::CopyQueryTo {
             query: Box::new(rule_limit_pushdown(*query)),
             csv,
@@ -522,6 +527,7 @@ fn rule_limit_pushdown(plan: LogicalPlan) -> LogicalPlan {
             null_string,
             quote,
             escape,
+            file_path,
         },
         other => other,
     }
@@ -701,6 +707,7 @@ fn prune_plan(plan: LogicalPlan, required: &Option<HashSet<usize>>) -> LogicalPl
             null_string,
             quote,
             escape,
+            file_path,
         } => LogicalPlan::CopyQueryTo {
             query: Box::new(prune_plan(*query, required)),
             csv,
@@ -709,6 +716,7 @@ fn prune_plan(plan: LogicalPlan, required: &Option<HashSet<usize>>) -> LogicalPl
             null_string,
             quote,
             escape,
+            file_path,
         },
         other => other,
     }
@@ -1043,6 +1051,7 @@ fn rule_subquery_decorrelation(plan: LogicalPlan) -> LogicalPlan {
             null_string,
             quote,
             escape,
+            file_path,
         } => LogicalPlan::CopyQueryTo {
             query: Box::new(rule_subquery_decorrelation(*query)),
             csv,
@@ -1051,6 +1060,7 @@ fn rule_subquery_decorrelation(plan: LogicalPlan) -> LogicalPlan {
             null_string,
             quote,
             escape,
+            file_path,
         },
         other => other,
     }
@@ -1406,10 +1416,10 @@ fn rule_constant_fold(plan: LogicalPlan) -> LogicalPlan {
         LogicalPlan::ExplainAnalyze(inner) => {
             LogicalPlan::ExplainAnalyze(Box::new(rule_constant_fold(*inner)))
         }
-        LogicalPlan::CopyQueryTo { query, csv, delimiter, header, null_string, quote, escape } => {
+        LogicalPlan::CopyQueryTo { query, csv, delimiter, header, null_string, quote, escape, file_path } => {
             LogicalPlan::CopyQueryTo {
                 query: Box::new(rule_constant_fold(*query)),
-                csv, delimiter, header, null_string, quote, escape,
+                csv, delimiter, header, null_string, quote, escape, file_path,
             }
         }
         other => other,
@@ -1594,10 +1604,10 @@ fn rule_common_subexpr_elimination(plan: LogicalPlan) -> LogicalPlan {
         LogicalPlan::ExplainAnalyze(inner) => {
             LogicalPlan::ExplainAnalyze(Box::new(rule_common_subexpr_elimination(*inner)))
         }
-        LogicalPlan::CopyQueryTo { query, csv, delimiter, header, null_string, quote, escape } => {
+        LogicalPlan::CopyQueryTo { query, csv, delimiter, header, null_string, quote, escape, file_path } => {
             LogicalPlan::CopyQueryTo {
                 query: Box::new(rule_common_subexpr_elimination(*query)),
-                csv, delimiter, header, null_string, quote, escape,
+                csv, delimiter, header, null_string, quote, escape, file_path,
             }
         }
         other => other,

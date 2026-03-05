@@ -1,0 +1,115 @@
+2026-03-04T17:42:30.133+08:00  INFO ThreadId(01) falcon: crates\falcon_server\src\main.rs:280: Starting FalconDB... mode="console" version="1.2.0" git="unknown" built="2026-03-04T08:45:53Z"
+2026-03-04T17:42:30.134+08:00  INFO ThreadId(01) falcon: crates\falcon_server\src\main.rs:1498: Loaded config from H:\falcondb-main\falcondb-mes-workorder\conf\falcon_mes.toml
+2026-03-04T17:42:30.134+08:00  INFO ThreadId(01) falcon: crates\falcon_server\src\main.rs:345: Config: FalconConfig { config_version: 5, server: ServerConfig { pg_listen_addr: "0.0.0.0:5433", admin_listen_addr: "0.0.0.0:8080", node_id: 1, max_connections: 128, statement_timeout_ms: 0, idle_timeout_ms: 0, shutdown_drain_timeout_secs: 30, slow_txn_threshold_us: 100000, auth: AuthConfig { method: Trust, password: "", username: "", users: [], allow_cidrs: [] }, tls: TlsConfig { cert_path: "", key_path: "" } }, storage: StorageConfig { memory_limit_bytes: 0, wal_enabled: true, data_dir: "./mes_data", write_path_enforcement: Warn, lsm_sync_writes: false, default_engine: "rowstore" }, wal: WalConfig { group_commit: true, flush_interval_us: 1000, sync_mode: "fdatasync", segment_size_bytes: 67108864, durability_policy: LocalFsync, backlog_admission_threshold_bytes: 0, replication_lag_admission_threshold_ms: 0, backend: "file", no_buffering: false, group_commit_window_us: 200 }, replication: ReplicationConfig { role: Standalone, grpc_listen_addr: "0.0.0.0:50051", primary_endpoint: "http://127.0.0.1:50051", max_records_per_chunk: 1000, poll_interval_ms: 100, max_backoff_ms: 30000, connect_timeout_ms: 5000, shard_count: 1, replica_id: 0 }, spill: SpillConfig { memory_rows_threshold: 500000, temp_dir: "", merge_fan_in: 16, hash_agg_group_limit: 1000000, pressure_spill_trigger: "soft" }, memory: MemoryConfig { shard_soft_limit_bytes: 0, shard_hard_limit_bytes: 0, node_limit_bytes: 0, cluster_limit_bytes: 0, pressure_policy: Reject, max_txn_write_keys: 0, max_txn_write_bytes: 0, enabled: true }, gc: GcSectionConfig { enabled: true, interval_ms: 1000, batch_size: 0, min_chain_length: 2 }, ustm: UstmSectionConfig { enabled: true, hot_capacity_bytes: 536870912, warm_capacity_bytes: 268435456, lirs_lir_capacity: 4096, lirs_hir_capacity: 1024, background_iops_limit: 500, prefetch_iops_limit: 200, prefetch_enabled: true, page_size: 8192 }, compression_profile: "balanced", wal_mode: "auto", gateway: GatewayConfig { role: "smart_gateway", max_inflight: 0, max_forwarded: 0, forward_timeout_ms: 5000, topology_staleness_secs: 30 }, production_safety: ProductionSafetyConfig { enforce: false }, cdc: CdcConfig { enabled: true, buffer_size: 100000 }, pitr: PitrConfig { enabled: false, archive_dir: "", retention_hours: 0 }, multi_tenant: MultiTenantConfig { enabled: false, metering_enabled: false, default_max_qps: 0, default_max_concurrent_txns: 0, default_max_memory_bytes: 0, default_max_storage_bytes: 0 }, tde: TdeConfig { enabled: false, key_env_var: "FALCON_TDE_KEY", encrypt_wal: true, encrypt_data: true }, raft: RaftConfig { node_id: 1, node_ids: [1], raft_listen_addr: "0.0.0.0:50052", peers: [], failover_poll_interval_ms: 200, heartbeat_interval_ms: 50, election_timeout_min_ms: 150, election_timeout_max_ms: 300 }, rebalance: RebalanceSectionConfig { enabled: false, check_interval_ms: 30000, imbalance_threshold: 1.25, batch_size: 512, min_donor_rows: 100, cooldown_ms: 5000, start_paused: false }, logging: LoggingConfig { level: "info", stderr: true, file: "", format: "text", rotation: "daily", max_size_mb: 100, max_files: 7, slow_query_ms: 0, slow_query_log: "" }, cluster: ClusterSectionConfig { lifecycle_enabled: true, heartbeat_interval_ms: 2000, suspect_threshold_ms: 5000, offline_threshold_ms: 15000, config_sync_interval_ms: 10000, slo_eval_interval_ms: 30000, max_shards: 64, failure_detector_enabled: true, max_consecutive_misses: 5, peers: [] } }
+2026-03-04T17:42:30.134+08:00 ERROR ThreadId(01) falcon: crates\falcon_server\src\main.rs:353: [Production Safety] PS-3: Authentication method is 'trust' (no password required). Any client can connect and modify data. Set server.auth.method = 'scram-sha-256'. id="PS-3"
+2026-03-04T17:42:30.134+08:00  WARN ThreadId(01) falcon: crates\falcon_server\src\main.rs:355: [Production Safety] PS-4: No memory hard limit configured (memory.shard_hard_limit_bytes=0). Unbounded memory usage may cause OOM kill. Set a hard limit appropriate for your hardware. id="PS-4"
+2026-03-04T17:42:30.135+08:00  WARN ThreadId(01) falcon: crates\falcon_server\src\main.rs:355: [Production Safety] PS-5: No statement timeout configured (server.statement_timeout_ms=0). Runaway queries may hold locks indefinitely. Set a timeout (e.g. 30000 for 30s). id="PS-5"
+2026-03-04T17:42:30.135+08:00  WARN ThreadId(01) falcon: crates\falcon_server\src\main.rs:355: [Production Safety] PS-6: TLS is not configured. Client connections are unencrypted. Set server.tls.cert_path and server.tls.key_path. id="PS-6"
+2026-03-04T17:42:30.135+08:00  WARN ThreadId(01) falcon: crates\falcon_server\src\main.rs:366: [Production Safety] 1 CRITICAL violation(s) detected but enforce=false — proceeding anyway. Set [production_safety] enforce = true to block unsafe startups.
+2026-03-04T17:42:30.337+08:00  INFO ThreadId(01) falcon_observability: crates\falcon_observability\src\lib.rs:153: Prometheus metrics endpoint on http://0.0.0.0:9090/metrics
+2026-03-04T17:42:30.337+08:00  INFO ThreadId(01) falcon: crates\falcon_server\src\main.rs:426: WAL sync mode: FDataSync
+2026-03-04T17:42:30.337+08:00  INFO ThreadId(01) falcon: crates\falcon_server\src\main.rs:433: Created data directory: "./mes_data"
+2026-03-04T17:42:30.337+08:00  INFO ThreadId(01) falcon: crates\falcon_server\src\main.rs:435: WAL mode: 'auto' (no_buffering=false)
+2026-03-04T17:42:30.337+08:00  INFO ThreadId(01) falcon_storage::engine: crates\falcon_storage\src\engine.rs:529: WAL backend: WinAsync (IOCP) — wal_mode=auto no_buffering=false
+2026-03-04T17:42:30.338+08:00  INFO ThreadId(01) falcon_storage::engine: crates\falcon_storage\src\engine.rs:1185: USTM engine configured: hot=512MB, warm=256MB, lirs_lir=4096, prefetch=true
+2026-03-04T17:42:30.338+08:00  INFO ThreadId(01) falcon: crates\falcon_server\src\main.rs:1460: LSM sync_writes: false
+2026-03-04T17:42:30.338+08:00  INFO ThreadId(01) falcon_storage::engine: crates\falcon_storage\src\engine.rs:976: CDC enabled (buffer_size=100000)
+2026-03-04T17:42:30.338+08:00  INFO ThreadId(01) falcon_storage::engine: crates\falcon_storage\src\engine.rs:659: PITR disabled by configuration
+2026-03-04T17:42:30.338+08:00  INFO ThreadId(01) falcon_storage::engine: crates\falcon_storage\src\engine.rs:837: Multi-tenant isolation disabled — all sessions use system tenant
+2026-03-04T17:42:30.338+08:00  INFO ThreadId(01) falcon_storage::engine: crates\falcon_storage\src\engine.rs:668: TDE disabled by configuration
+2026-03-04T17:42:30.338+08:00  INFO ThreadId(01) falcon: crates\falcon_server\src\main.rs:483: Slow txn threshold: 100000us (0=disabled)
+2026-03-04T17:42:30.339+08:00  INFO ThreadId(01) falcon: crates\falcon_server\src\main.rs:551: Max connections: 128
+2026-03-04T17:42:30.339+08:00  INFO ThreadId(01) falcon: crates\falcon_server\src\main.rs:585: Background GC runner started (interval=1000ms, batch_size=0, min_chain_length=2)
+2026-03-04T17:42:30.339+08:00  INFO ThreadId(01) falcon: crates\falcon_server\src\main.rs:748: Role: STANDALONE — no replication
+2026-03-04T17:42:30.339+08:00  INFO ThreadId(01) falcon: crates\falcon_server\src\main.rs:1132: FalconDB ready (role=Standalone, 1 shard). Connect with: psql -h 127.0.0.1 -p 5433
+2026-03-04T17:42:30.339+08:00  INFO ThreadId(01) falcon: crates\falcon_server\src\main.rs:1221: Background metrics reporter started (interval=5s)
+2026-03-04T17:42:30.339+08:00  INFO ThreadId(34) falcon_storage::gc: crates\falcon_storage\src\gc.rs:318: GC runner started (interval=1000ms, min_sweep_interval=0ms, max_chain=0)
+2026-03-04T17:42:30.339+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:319: FalconDB PG server listening on 0.0.0.0:5433
+2026-03-04T17:42:30.339+08:00  INFO ThreadId(33) falcon::health: crates\falcon_server\src\health.rs:366: Health check server listening on 0.0.0.0:8080
+2026-03-04T17:42:30.621+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51509
+2026-03-04T17:42:30.633+08:00  INFO ThreadId(32) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 1)
+2026-03-04T17:42:30.673+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51510
+2026-03-04T17:42:30.675+08:00  INFO ThreadId(15) falcon_storage::engine_ddl: crates\falcon_storage\src\engine_ddl.rs:44: Created database 'mes_prod' (oid=2)
+2026-03-04T17:42:30.675+08:00  INFO ThreadId(15) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 2)
+2026-03-04T17:42:30.716+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51511
+2026-03-04T17:42:30.724+08:00  INFO ThreadId(32) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 3)
+2026-03-04T17:42:31.339+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51517
+2026-03-04T17:42:31.349+08:00  INFO ThreadId(15) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 4)
+2026-03-04T17:42:37.014+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51539
+2026-03-04T17:42:37.016+08:00  INFO ThreadId(32) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 5)
+2026-03-04T17:42:37.019+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51541
+2026-03-04T17:42:37.020+08:00  INFO ThreadId(15) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 6)
+2026-03-04T17:42:37.022+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51543
+2026-03-04T17:42:37.024+08:00  INFO ThreadId(32) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 7)
+2026-03-04T17:42:37.026+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51545
+2026-03-04T17:42:37.038+08:00  INFO ThreadId(15) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 8)
+2026-03-04T17:42:37.040+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51547
+2026-03-04T17:42:37.051+08:00  INFO ThreadId(32) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 9)
+2026-03-04T17:42:37.053+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51549
+2026-03-04T17:42:37.065+08:00  INFO ThreadId(15) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 10)
+2026-03-04T17:42:37.067+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51551
+2026-03-04T17:42:37.079+08:00  INFO ThreadId(32) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 11)
+2026-03-04T17:42:37.081+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51553
+2026-03-04T17:42:37.092+08:00  INFO ThreadId(15) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 12)
+2026-03-04T17:42:37.093+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51555
+2026-03-04T17:42:37.095+08:00  INFO ThreadId(32) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 13)
+2026-03-04T17:42:37.097+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51557
+2026-03-04T17:42:37.099+08:00  INFO ThreadId(15) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 14)
+2026-03-04T17:42:37.100+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51559
+2026-03-04T17:42:37.102+08:00  INFO ThreadId(32) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 15)
+2026-03-04T17:42:37.103+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51561
+2026-03-04T17:42:37.105+08:00  INFO ThreadId(15) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 16)
+2026-03-04T17:42:37.106+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51563
+2026-03-04T17:42:37.108+08:00  INFO ThreadId(32) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 17)
+2026-03-04T17:42:37.109+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51565
+2026-03-04T17:42:37.111+08:00  INFO ThreadId(15) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 18)
+2026-03-04T17:42:37.113+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51567
+2026-03-04T17:42:37.124+08:00  INFO ThreadId(32) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 19)
+2026-03-04T17:42:37.126+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51569
+2026-03-04T17:42:37.138+08:00  INFO ThreadId(15) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 20)
+2026-03-04T17:42:37.139+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51571
+2026-03-04T17:42:37.151+08:00  INFO ThreadId(32) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 21)
+2026-03-04T17:42:37.153+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51573
+2026-03-04T17:42:37.164+08:00  INFO ThreadId(15) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 22)
+2026-03-04T17:42:37.166+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51575
+2026-03-04T17:42:37.178+08:00  INFO ThreadId(32) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 23)
+2026-03-04T17:42:37.180+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51577
+2026-03-04T17:42:37.191+08:00  INFO ThreadId(15) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 24)
+2026-03-04T17:42:37.193+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51579
+2026-03-04T17:42:37.204+08:00  INFO ThreadId(32) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 25)
+2026-03-04T17:42:37.206+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51581
+2026-03-04T17:42:37.208+08:00  INFO ThreadId(15) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 26)
+2026-03-04T17:42:37.209+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51583
+2026-03-04T17:42:37.221+08:00  INFO ThreadId(32) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 27)
+2026-03-04T17:42:37.223+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51585
+2026-03-04T17:42:37.235+08:00  INFO ThreadId(15) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 28)
+2026-03-04T17:42:37.237+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51587
+2026-03-04T17:42:37.239+08:00  INFO ThreadId(32) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 29)
+2026-03-04T17:42:37.240+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51589
+2026-03-04T17:42:37.241+08:00  INFO ThreadId(15) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 30)
+2026-03-04T17:42:37.243+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51591
+2026-03-04T17:42:37.245+08:00  INFO ThreadId(32) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 31)
+2026-03-04T17:42:37.247+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51593
+2026-03-04T17:42:37.248+08:00  INFO ThreadId(15) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 32)
+2026-03-04T17:42:37.250+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51595
+2026-03-04T17:42:37.261+08:00  INFO ThreadId(32) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 33)
+2026-03-04T17:42:37.262+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51596
+2026-03-04T17:42:37.273+08:00  INFO ThreadId(15) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 34)
+2026-03-04T17:42:37.273+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51597
+2026-03-04T17:42:37.284+08:00  INFO ThreadId(32) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 35)
+2026-03-04T17:42:37.284+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51598
+2026-03-04T17:42:37.286+08:00  INFO ThreadId(32) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 36)
+2026-03-04T17:42:37.288+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51600
+2026-03-04T17:42:37.300+08:00  INFO ThreadId(15) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 37)
+2026-03-04T17:42:37.302+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51602
+2026-03-04T17:42:37.314+08:00  INFO ThreadId(32) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 38)
+2026-03-04T17:42:37.315+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51604
+2026-03-04T17:42:37.328+08:00  INFO ThreadId(15) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 39)
+2026-03-04T17:42:37.330+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51606
+2026-03-04T17:42:37.342+08:00  INFO ThreadId(32) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 40)
+2026-03-04T17:42:37.344+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51608
+2026-03-04T17:42:37.355+08:00  INFO ThreadId(15) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 41)
+2026-03-04T17:42:37.357+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51610
+2026-03-04T17:42:37.368+08:00  INFO ThreadId(32) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 42)
+2026-03-04T17:42:37.370+08:00  INFO ThreadId(01) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:339: New connection from 127.0.0.1:51612
+2026-03-04T17:42:37.382+08:00  INFO ThreadId(15) falcon_protocol_pg::server: crates\falcon_protocol_pg\src\server.rs:540: Connection closed (session 43)

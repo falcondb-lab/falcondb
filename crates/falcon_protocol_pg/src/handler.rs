@@ -2,6 +2,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::Instant;
 
+use crate::session_registry::SessionRegistry;
+
 use falcon_cluster::fault_injection::FaultInjector;
 use falcon_cluster::security_hardening::{
     AuthRateLimiter, AuthRateLimiterConfig, PasswordPolicy, PasswordPolicyConfig, SqlFirewall,
@@ -20,7 +22,7 @@ use falcon_common::types::ShardId;
 use falcon_executor::{ExecutionResult, Executor, PriorityScheduler, PrioritySchedulerConfig};
 use falcon_planner::{IndexedColumns, PhysicalPlan, PlannedTxnType, Planner, TableRowCounts};
 use falcon_sql_frontend::binder::Binder;
-use falcon_sql_frontend::types::{BinOp, BoundExpr, BoundInsert, BoundStatement, OnConflictAction};
+use falcon_sql_frontend::types::BoundStatement;
 use falcon_sql_frontend::parser::parse_sql;
 use falcon_storage::engine::StorageEngine;
 use falcon_txn::{SlowPathMode, TxnClassification, TxnManager};
@@ -28,27 +30,6 @@ use parking_lot::RwLock;
 
 use crate::codec::{BackendMessage, FieldDescription};
 
-fn datum_add(a: &Datum, b: &Datum) -> Option<Datum> {
-    match (a, b) {
-        (Datum::Int32(x), Datum::Int32(y)) => Some(Datum::Int32(x.wrapping_add(*y))),
-        (Datum::Int64(x), Datum::Int64(y)) => Some(Datum::Int64(x.wrapping_add(*y))),
-        (Datum::Int32(x), Datum::Int64(y)) => Some(Datum::Int64((*x as i64).wrapping_add(*y))),
-        (Datum::Int64(x), Datum::Int32(y)) => Some(Datum::Int64(x.wrapping_add(*y as i64))),
-        (Datum::Float64(x), Datum::Float64(y)) => Some(Datum::Float64(x + y)),
-        _ => None,
-    }
-}
-
-fn datum_sub(a: &Datum, b: &Datum) -> Option<Datum> {
-    match (a, b) {
-        (Datum::Int32(x), Datum::Int32(y)) => Some(Datum::Int32(x.wrapping_sub(*y))),
-        (Datum::Int64(x), Datum::Int64(y)) => Some(Datum::Int64(x.wrapping_sub(*y))),
-        (Datum::Int32(x), Datum::Int64(y)) => Some(Datum::Int64((*x as i64).wrapping_sub(*y))),
-        (Datum::Int64(x), Datum::Int32(y)) => Some(Datum::Int64(x.wrapping_sub(*y as i64))),
-        (Datum::Float64(x), Datum::Float64(y)) => Some(Datum::Float64(x - y)),
-        _ => None,
-    }
-}
 use crate::handler_utils::classification_from_routing_hint;
 use crate::plan_cache::PlanCache;
 use crate::session::PgSession;
@@ -114,9 +95,11 @@ pub struct QueryHandler {
     pub(crate) cluster: ClusterContext,
     pub(crate) observability: ObservabilityContext,
 
-    flush_stats_counter: Arc<AtomicU64>,
+    pub(crate) flush_stats_counter: Arc<AtomicU64>,
     /// Last-1 schema cache: avoids catalog RwLock + deep clone on repeated INSERTs.
-    schema_cache: Arc<parking_lot::Mutex<Option<(String, falcon_common::schema::TableSchema)>>>,
+    pub(crate) schema_cache: Arc<parking_lot::Mutex<Option<(String, falcon_common::schema::TableSchema)>>>,
+    /// Shared session registry for pg_stat_activity.
+    pub(crate) session_registry: SessionRegistry,
 }
 
 impl QueryHandler {
@@ -172,6 +155,7 @@ impl QueryHandler {
                 ),
                 priority_scheduler: PriorityScheduler::new(PrioritySchedulerConfig::default()),
             },
+            session_registry: SessionRegistry::new(),
         }
     }
 
@@ -234,6 +218,7 @@ impl QueryHandler {
                 ),
                 priority_scheduler: PriorityScheduler::new(PrioritySchedulerConfig::default()),
             },
+            session_registry: SessionRegistry::new(),
         }
     }
 
@@ -275,6 +260,10 @@ impl QueryHandler {
         self.cluster.failure_detector = Some(fd);
     }
 
+    pub fn set_session_registry(&mut self, reg: SessionRegistry) {
+        self.session_registry = reg;
+    }
+
     /// Set a shared SecurityManager instance (so SHOW falcon.security reflects
     /// the same state as the PgServer IP allowlist enforcement).
     pub fn set_security_manager(&mut self, mgr: Arc<falcon_storage::security_manager::SecurityManager>) {
@@ -302,6 +291,7 @@ impl QueryHandler {
         if sql.is_empty() {
             return vec![BackendMessage::EmptyQueryResponse];
         }
+        let _fg_guard = self.storage.ext.resource_isolator.begin_foreground();
         let t0 = std::time::Instant::now();
         let first = sql.as_bytes().first().copied().unwrap_or(0);
         let msgs = self.handle_query_dispatch(sql, first, session);
@@ -357,10 +347,9 @@ impl QueryHandler {
             _ => {}
         }
 
-        // Intercept system/catalog queries that psql sends (skip for DML/SELECT — no match possible)
-        if first != b'I' && first != b'i' && first != b'U' && first != b'u'
-            && first != b'D' && first != b'd' && first != b'S' && first != b's'
-        {
+        // Intercept system/catalog queries (skip for INSERT/UPDATE — no match possible).
+        // DELETE shares prefix 'D' with DEALLOCATE/DISCARD, so we can't exclude it.
+        if first != b'I' && first != b'i' && first != b'U' && first != b'u' {
             if let Some(response) = self.handle_system_query(sql, session) {
                 return response;
             }
@@ -417,980 +406,8 @@ impl QueryHandler {
         }
     }
 
-    /// Fast-path parser for simple INSERT INTO table (cols) VALUES (...), ...
-    /// Bypasses sqlparser-rs entirely, producing BoundInsert directly.
-    /// Returns None if the SQL doesn't match the simple pattern (falls back to standard path).
-    fn try_fast_insert_parse(&self, sql: &str) -> Option<BoundInsert> {
-        let trimmed = sql.trim();
-        // Quick prefix check (case-insensitive)
-        if trimmed.len() < 20 || !trimmed[..11].eq_ignore_ascii_case("INSERT INTO") {
-            return None;
-        }
-        let rest = trimmed[11..].trim_start();
-
-        // Extract table name (identifier chars)
-        let tbl_end = rest.find(|c: char| !c.is_alphanumeric() && c != '_' && c != '"')?;
-        if tbl_end == 0 { return None; }
-        let table_name = rest[..tbl_end].trim_matches('"');
-        let rest = rest[tbl_end..].trim_start();
-
-        // Extract column list: (col1, col2, ...)
-        if !rest.starts_with('(') { return None; }
-        let col_end = rest.find(')')?;
-        let col_names: Vec<&str> = rest[1..col_end].split(',').map(|s| s.trim().trim_matches('"')).collect();
-        if col_names.is_empty() { return None; }
-        let rest = rest[col_end + 1..].trim_start();
-
-        // Expect VALUES keyword
-        if rest.len() < 6 || !rest[..6].eq_ignore_ascii_case("VALUES") { return None; }
-        // Reject RETURNING / ON CONFLICT DO UPDATE (fall back to standard path)
-        // Allow ON CONFLICT DO NOTHING
-        let mut on_conflict_do_nothing = false;
-        {
-            fn contains_ci(hay: &str, needle: &str) -> bool {
-                hay.as_bytes().windows(needle.len()).any(|w|
-                    w.eq_ignore_ascii_case(needle.as_bytes()))
-            }
-            if contains_ci(rest, "RETURNING") {
-                return None;
-            }
-            if contains_ci(rest, "ON CONFLICT") {
-                if contains_ci(rest, "DO NOTHING") {
-                    on_conflict_do_nothing = true;
-                } else {
-                    return None;
-                }
-            }
-        }
-        let values_str = rest[6..].trim_start();
-        // Strip trailing ON CONFLICT DO NOTHING
-        let values_str = if on_conflict_do_nothing {
-            let bytes = values_str.as_bytes();
-            let needle = b"ON CONFLICT";
-            let idx = bytes.windows(needle.len()).position(|w|
-                w.eq_ignore_ascii_case(needle));
-            if let Some(i) = idx {
-                values_str[..i].trim_end()
-            } else {
-                values_str
-            }
-        } else {
-            values_str
-        };
-
-        // Last-1 schema cache: skip catalog RwLock + deep clone for repeated table
-        let schema = {
-            let cached = self.schema_cache.lock();
-            if let Some((ref name, ref s)) = *cached {
-                if name == table_name { Some(s.clone()) } else { None }
-            } else { None }
-        }.or_else(|| {
-            let s = self.storage.get_table_schema(table_name)?;
-            *self.schema_cache.lock() = Some((table_name.to_owned(), s.clone()));
-            Some(s)
-        })?;
-        let col_indices: Vec<usize> = col_names.iter().map(|name| {
-            schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(name))
-        }).collect::<Option<Vec<_>>>()?;
-
-        // Collect column DataTypes for value parsing
-        use falcon_common::types::DataType;
-        let col_types: Vec<&DataType> = col_indices.iter().map(|&i| &schema.columns[i].data_type).collect();
-        let ncols = col_indices.len();
-
-        // Parse VALUES tuples using byte-level scanner
-        let bytes = values_str.as_bytes();
-        let len = bytes.len();
-        let mut pos = 0;
-        let mut rows: Vec<Vec<BoundExpr>> = Vec::new();
-
-        while pos < len {
-            // Skip whitespace and commas between tuples
-            while pos < len && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r' | b',') {
-                pos += 1;
-            }
-            if pos >= len || bytes[pos] == b';' { break; }
-            if bytes[pos] != b'(' { return None; }
-            pos += 1;
-
-            let mut vals = Vec::with_capacity(ncols);
-            #[allow(clippy::needless_range_loop)]
-            for vi in 0..ncols {
-                // Skip whitespace
-                while pos < len && bytes[pos] == b' ' { pos += 1; }
-                if vi > 0 {
-                    if pos < len && bytes[pos] == b',' { pos += 1; }
-                    while pos < len && bytes[pos] == b' ' { pos += 1; }
-                }
-
-                // Parse one value
-                let datum = if bytes[pos] == b'\'' {
-                    // String literal
-                    pos += 1;
-                    let mut s = String::new();
-                    let mut start = pos;
-                    loop {
-                        if pos >= len { return None; }
-                        if bytes[pos] == b'\'' {
-                            s.push_str(std::str::from_utf8(&bytes[start..pos]).ok()?);
-                            pos += 1;
-                            if pos < len && bytes[pos] == b'\'' {
-                                // Escaped quote
-                                s.push('\'');
-                                pos += 1;
-                                start = pos;
-                            } else {
-                                break;
-                            }
-                        } else {
-                            pos += 1;
-                        }
-                    }
-                    Datum::Text(s)
-                } else if bytes[pos] == b'N' || bytes[pos] == b'n' {
-                    // NULL
-                    if pos + 4 <= len && values_str[pos..pos+4].eq_ignore_ascii_case("null") {
-                        pos += 4;
-                        Datum::Null
-                    } else {
-                        return None;
-                    }
-                } else if bytes[pos] == b't' || bytes[pos] == b'T' {
-                    // true
-                    if pos + 4 <= len && values_str[pos..pos+4].eq_ignore_ascii_case("true") {
-                        pos += 4;
-                        Datum::Boolean(true)
-                    } else {
-                        return None;
-                    }
-                } else if bytes[pos] == b'f' || bytes[pos] == b'F' {
-                    // false
-                    if pos + 5 <= len && values_str[pos..pos+5].eq_ignore_ascii_case("false") {
-                        pos += 5;
-                        Datum::Boolean(false)
-                    } else {
-                        return None;
-                    }
-                } else if bytes[pos] == b'c' || bytes[pos] == b'C' {
-                    // CURRENT_TIMESTAMP / CURRENT_DATE
-                    if pos + 17 <= len && values_str[pos..pos+17].eq_ignore_ascii_case("CURRENT_TIMESTAMP") {
-                        pos += 17;
-                        let now = chrono::Utc::now();
-                        Datum::Timestamp(now.timestamp() * 1_000_000 + now.timestamp_subsec_micros() as i64)
-                    } else if pos + 12 <= len && values_str[pos..pos+12].eq_ignore_ascii_case("CURRENT_DATE") {
-                        pos += 12;
-                        let now = chrono::Utc::now();
-                        Datum::Timestamp(now.timestamp() * 1_000_000 + now.timestamp_subsec_micros() as i64)
-                    } else {
-                        return None;
-                    }
-                } else if bytes[pos] == b'-' || bytes[pos].is_ascii_digit() {
-                    // Number
-                    let num_start = pos;
-                    if bytes[pos] == b'-' { pos += 1; }
-                    let mut is_float = false;
-                    while pos < len && bytes[pos].is_ascii_digit() { pos += 1; }
-                    if pos < len && bytes[pos] == b'.' {
-                        is_float = true;
-                        pos += 1;
-                        while pos < len && bytes[pos].is_ascii_digit() { pos += 1; }
-                    }
-                    // Scientific notation
-                    if pos < len && (bytes[pos] == b'e' || bytes[pos] == b'E') {
-                        is_float = true;
-                        pos += 1;
-                        if pos < len && (bytes[pos] == b'+' || bytes[pos] == b'-') { pos += 1; }
-                        while pos < len && bytes[pos].is_ascii_digit() { pos += 1; }
-                    }
-                    let num_str = std::str::from_utf8(&bytes[num_start..pos]).ok()?;
-                    if is_float {
-                        Datum::Float64(num_str.parse().ok()?)
-                    } else {
-                        match col_types[vi] {
-                            DataType::Int32 => Datum::Int32(num_str.parse().ok()?),
-                            DataType::Float64 => Datum::Float64(num_str.parse().ok()?),
-                            _ => Datum::Int64(num_str.parse().ok()?),
-                        }
-                    }
-                } else {
-                    return None;
-                };
-                vals.push(BoundExpr::Literal(datum));
-            }
-
-            // Skip whitespace and expect ')'
-            while pos < len && bytes[pos] == b' ' { pos += 1; }
-            if pos >= len || bytes[pos] != b')' { return None; }
-            pos += 1;
-            rows.push(vals);
-        }
-
-        if rows.is_empty() { return None; }
-
-        Some(BoundInsert {
-            table_id: schema.id,
-            table_name: table_name.to_owned(),
-            schema,
-            columns: col_indices,
-            rows,
-            source_select: None,
-            returning: vec![],
-            on_conflict: if on_conflict_do_nothing {
-                Some(OnConflictAction::DoNothing)
-            } else {
-                None
-            },
-        })
-    }
-
-    /// Ultra-fast direct insert: skip executor entirely for simple schemas.
-    /// Handles dynamic defaults (CURRENT_TIMESTAMP etc.) and partial column lists.
-    /// Returns None if schema is too complex (constraints, serials, etc.).
-    fn try_direct_insert(
-        &self,
-        ins: &BoundInsert,
-        session: &mut PgSession,
-    ) -> Option<Result<Vec<BackendMessage>, FalconError>> {
-        // Disabled: saves ~1µs per txn at 16c but causes convoy at 64c (51K→20K).
-        // The executor path's overhead naturally staggers flush_lock arrivals.
-        return None;
-        #[allow(unreachable_code)]
-        use falcon_common::datum::OwnedRow;
-        use falcon_common::schema::DefaultFn;
-        if self.cluster.dist_engine.is_some() || session.txn.is_some() {
-            return None;
-        }
-        let schema = &ins.schema;
-        if !schema.check_constraints.is_empty()
-            || !schema.unique_constraints.is_empty()
-            || !schema.foreign_keys.is_empty()
-            || schema.columns.iter().any(|c| c.is_serial)
-        {
-            return None;
-        }
-        let on_conflict_skip = matches!(ins.on_conflict, Some(OnConflictAction::DoNothing));
-        if ins.on_conflict.is_some() && !on_conflict_skip {
-            return None;
-        }
-        let ncols = schema.columns.len();
-        let mut rows: Vec<OwnedRow> = Vec::with_capacity(ins.rows.len());
-        for row_exprs in &ins.rows {
-            // Start with static defaults for all columns
-            let mut values: Vec<Datum> = schema.columns.iter()
-                .map(|c| c.default_value.clone().unwrap_or(Datum::Null))
-                .collect();
-            // Overlay provided columns with literal values
-            for (i, expr) in row_exprs.iter().enumerate() {
-                match expr {
-                    BoundExpr::Literal(d) => values[ins.columns[i]] = d.clone(),
-                    _ => return None,
-                }
-            }
-            // Fill dynamic defaults for still-NULL columns
-            for (&col_idx, dfn) in &schema.dynamic_defaults {
-                if col_idx < ncols && values[col_idx].is_null() {
-                    values[col_idx] = match dfn {
-                        DefaultFn::CurrentTimestamp => {
-                            Datum::Timestamp(chrono::Utc::now().timestamp_micros())
-                        }
-                        DefaultFn::CurrentDate => {
-                            let today = chrono::Utc::now().date_naive();
-                            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-                            Datum::Date((today - epoch).num_days() as i32)
-                        }
-                        DefaultFn::CurrentTime => {
-                            use chrono::Timelike;
-                            let t = chrono::Utc::now().time();
-                            Datum::Time(
-                                t.num_seconds_from_midnight() as i64 * 1_000_000
-                                    + t.nanosecond() as i64 / 1_000,
-                            )
-                        }
-                        DefaultFn::Nextval(_) => continue,
-                    };
-                }
-            }
-            rows.push(OwnedRow::new(values));
-        }
-        let txn = self.txn_mgr.begin_autocommit(session.default_isolation);
-        let txn_id = txn.txn_id;
-        session.txn = Some(txn);
-        let mut count = 0u64;
-        for row in rows {
-            match self.storage.insert(ins.table_id, row, txn_id) {
-                Ok(_) => count += 1,
-                Err(falcon_common::error::StorageError::DuplicateKey) if on_conflict_skip => {}
-                Err(e) => {
-                    self.txn_mgr.abort_autocommit(txn_id);
-                    session.txn = None;
-                    return Some(Ok(vec![self.error_response(&FalconError::Storage(e))]));
-                }
-            }
-        }
-        if let Err(e) = self.txn_mgr.commit_autocommit(txn_id) {
-            session.txn = None;
-            return Some(Ok(vec![self.error_response(&FalconError::Txn(e))]));
-        }
-        session.txn = None;
-        let tag = if count == 1 { "INSERT 0 1".to_owned() } else { format!("INSERT 0 {count}") };
-        Some(Ok(vec![BackendMessage::CommandComplete { tag }]))
-    }
-
-    /// Fast-path parser for simple UPDATE table SET col = expr WHERE col = val.
-    /// Handles: col = literal, col = col +/- literal.
-    /// Returns None if the SQL doesn't match (falls back to standard path).
-    fn try_fast_update_parse(&self, sql: &str) -> Option<PhysicalPlan> {
-        let trimmed = sql.trim().trim_end_matches(';').trim_end();
-        if trimmed.len() < 20 || !trimmed[..6].eq_ignore_ascii_case("UPDATE") {
-            return None;
-        }
-        let rest = trimmed[6..].trim_start();
-
-        // Table name
-        let tbl_end = rest.find(|c: char| !c.is_alphanumeric() && c != '_' && c != '"')?;
-        if tbl_end == 0 { return None; }
-        let table_name = rest[..tbl_end].trim_matches('"');
-        let rest = rest[tbl_end..].trim_start();
-
-        // SET keyword
-        if rest.len() < 4 || !rest[..3].eq_ignore_ascii_case("SET") { return None; }
-        let rest = rest[3..].trim_start();
-
-        // Reject RETURNING / FROM (complex) — zero-alloc
-        fn contains_ci_u(hay: &str, needle: &str) -> bool {
-            hay.as_bytes().windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
-        }
-        if contains_ci_u(rest, "RETURNING") || contains_ci_u(rest, " FROM ") {
-            return None;
-        }
-
-        // Find WHERE — zero-alloc byte scan
-        let where_pos = {
-            let bytes = rest.as_bytes();
-            let mut found = None;
-            for i in 0..bytes.len().saturating_sub(6) {
-                if bytes[i] == b' ' && bytes[i+1..i+6].eq_ignore_ascii_case(b"WHERE") && (i + 6 >= bytes.len() || bytes[i+6] == b' ') {
-                    found = Some(i);
-                    break;
-                }
-            }
-            found?
-        };
-        let set_part = rest[..where_pos].trim();
-        let where_part = rest[where_pos + 7..].trim();
-
-        // Look up table (use schema cache)
-        let schema = {
-            let cached = self.schema_cache.lock();
-            if let Some((ref name, ref s)) = *cached {
-                if name == table_name { Some(s.clone()) } else { None }
-            } else { None }
-        }.or_else(|| {
-            let s = self.storage.get_table_schema(table_name)?;
-            *self.schema_cache.lock() = Some((table_name.to_owned(), s.clone()));
-            Some(s)
-        })?;
-
-        // Parse assignments: col = expr [, col = expr]
-        let mut assignments = Vec::new();
-        for assign_str in set_part.split(',') {
-            let assign_str = assign_str.trim();
-            let eq_pos = assign_str.find('=')?;
-            let col_name = assign_str[..eq_pos].trim().trim_matches('"');
-            let expr_str = assign_str[eq_pos + 1..].trim();
-
-            let col_idx = schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(col_name))?;
-
-            // Parse expr: literal | col +/- literal
-            let expr = self.parse_fast_expr(expr_str, &schema)?;
-            assignments.push((col_idx, expr));
-        }
-
-        // Parse WHERE: col = literal [AND col = literal]
-        let mut filters: Vec<BoundExpr> = Vec::new();
-        // AND splitting — zero-alloc byte scan
-        let conds: Vec<&str> = {
-            let bytes = where_part.as_bytes();
-            let mut parts = Vec::new();
-            let mut start = 0;
-            let mut i = 0;
-            while i + 5 <= bytes.len() {
-                if bytes[i] == b' ' && bytes[i+1..i+4].eq_ignore_ascii_case(b"AND") && bytes[i+4] == b' ' {
-                    parts.push(where_part[start..i].trim());
-                    start = i + 5;
-                    i = start;
-                } else {
-                    i += 1;
-                }
-            }
-            parts.push(where_part[start..].trim());
-            parts
-        };
-        for cond in conds {
-            let eq_pos = cond.find('=')?;
-            // Reject !=, >=, <=
-            if eq_pos > 0 && matches!(cond.as_bytes()[eq_pos - 1], b'!' | b'>' | b'<') {
-                return None;
-            }
-            if eq_pos + 1 < cond.len() && cond.as_bytes()[eq_pos + 1] == b'=' {
-                return None; // == not valid SQL but bail
-            }
-            let col_name = cond[..eq_pos].trim().trim_matches('"');
-            let val_str = cond[eq_pos + 1..].trim();
-            let col_idx = schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(col_name))?;
-            let val = self.parse_fast_literal(val_str, &schema.columns[col_idx].data_type)?;
-            filters.push(BoundExpr::BinaryOp {
-                left: Box::new(BoundExpr::ColumnRef(col_idx)),
-                op: BinOp::Eq,
-                right: Box::new(BoundExpr::Literal(val)),
-            });
-        }
-
-        let filter = if filters.len() == 1 {
-            Some(filters.pop().unwrap())
-        } else if filters.len() > 1 {
-            let mut combined = filters.pop().unwrap();
-            while let Some(f) = filters.pop() {
-                combined = BoundExpr::BinaryOp {
-                    left: Box::new(f),
-                    op: BinOp::And,
-                    right: Box::new(combined),
-                };
-            }
-            Some(combined)
-        } else {
-            None
-        };
-
-        Some(PhysicalPlan::Update {
-            table_id: schema.id,
-            schema,
-            assignments,
-            filter,
-            returning: vec![],
-            from_table: None,
-        })
-    }
-
-    fn parse_fast_expr(&self, s: &str, schema: &falcon_common::schema::TableSchema) -> Option<BoundExpr> {
-        let s = s.trim();
-        // Try: col + literal or col - literal
-        if let Some(plus_pos) = s.find('+') {
-            let lhs = s[..plus_pos].trim();
-            let rhs = s[plus_pos + 1..].trim();
-            if let Some(col_idx) = schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(lhs)) {
-                let val = self.parse_fast_literal(rhs, &schema.columns[col_idx].data_type)?;
-                return Some(BoundExpr::BinaryOp {
-                    left: Box::new(BoundExpr::ColumnRef(col_idx)),
-                    op: BinOp::Plus,
-                    right: Box::new(BoundExpr::Literal(val)),
-                });
-            }
-        }
-        if let Some(minus_pos) = s.rfind('-') {
-            if minus_pos > 0 {
-                let lhs = s[..minus_pos].trim();
-                let rhs = s[minus_pos + 1..].trim();
-                if let Some(col_idx) = schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(lhs)) {
-                    let val = self.parse_fast_literal(rhs, &schema.columns[col_idx].data_type)?;
-                    return Some(BoundExpr::BinaryOp {
-                        left: Box::new(BoundExpr::ColumnRef(col_idx)),
-                        op: BinOp::Minus,
-                        right: Box::new(BoundExpr::Literal(val)),
-                    });
-                }
-            }
-        }
-        // Try: plain literal
-        // Need to guess type — use Int64 for numbers, Text for strings
-        if s.starts_with('\'') {
-            let inner = s.trim_matches('\'');
-            return Some(BoundExpr::Literal(Datum::Text(inner.to_owned())));
-        }
-        if s.eq_ignore_ascii_case("NULL") {
-            return Some(BoundExpr::Literal(Datum::Null));
-        }
-        if let Ok(v) = s.parse::<i64>() {
-            return Some(BoundExpr::Literal(Datum::Int64(v)));
-        }
-        if let Ok(v) = s.parse::<f64>() {
-            return Some(BoundExpr::Literal(Datum::Float64(v)));
-        }
-        None
-    }
-
-    fn parse_fast_literal(&self, s: &str, dt: &falcon_common::types::DataType) -> Option<Datum> {
-        use falcon_common::types::DataType;
-        let s = s.trim();
-        if s.eq_ignore_ascii_case("NULL") { return Some(Datum::Null); }
-        if s.starts_with('\'') {
-            return Some(Datum::Text(s.trim_matches('\'').to_owned()));
-        }
-        match dt {
-            DataType::Int32 => Some(Datum::Int32(s.parse().ok()?)),
-            DataType::Float64 => Some(Datum::Float64(s.parse().ok()?)),
-            _ => Some(Datum::Int64(s.parse().ok()?)),
-        }
-    }
-
-    /// Execute a single DML plan (fast-path for INSERT). Handles autocommit.
-    fn execute_single_plan(
-        &self,
-        _sql: &str,
-        plan: PhysicalPlan,
-        session: &mut PgSession,
-    ) -> Result<Vec<BackendMessage>, FalconError> {
-        let mut messages = Vec::new();
-
-        let auto_txn = if session.txn.is_none() {
-            let txn = self.txn_mgr.begin_autocommit(session.default_isolation);
-            session.txn = Some(txn);
-            true
-        } else {
-            false
-        };
-
-        // Execute
-        let result = if let Some(dist) = &self.cluster.dist_engine {
-            dist.execute(&plan, session.txn.as_ref())
-        } else {
-            self.executor.execute(&plan, session.txn.as_ref())
-        };
-
-        match result {
-            Ok(ExecutionResult::Dml { rows_affected, tag }) => {
-                let cmd_tag = match (tag, rows_affected) {
-                    ("INSERT", 1) => "INSERT 0 1".to_owned(),
-                    ("INSERT", n) => format!("INSERT 0 {n}"),
-                    ("UPDATE", 1) => "UPDATE 1".to_owned(),
-                    ("UPDATE", n) => format!("UPDATE {n}"),
-                    ("DELETE", 1) => "DELETE 1".to_owned(),
-                    ("DELETE", n) => format!("DELETE {n}"),
-                    (t, n) => format!("{t} {n}"),
-                };
-                messages.push(BackendMessage::CommandComplete { tag: cmd_tag });
-            }
-            Ok(other) => {
-                // Unexpected result type for fast-path; shouldn't happen
-                messages.push(BackendMessage::CommandComplete {
-                    tag: format!("{other:?}"),
-                });
-            }
-            Err(e) => {
-                if auto_txn {
-                    if let Some(ref txn) = session.txn {
-                        self.txn_mgr.abort_autocommit(txn.txn_id);
-                    }
-                    session.txn = None;
-                }
-                messages.push(self.error_response(&e));
-                return Ok(messages);
-            }
-        }
-
-        if auto_txn {
-            if let Some(ref txn) = session.txn {
-                let _ = self.txn_mgr.commit_autocommit(txn.txn_id);
-            }
-            session.txn = None;
-        }
-
-        Ok(messages)
-    }
-
-    fn fast_begin(&self, session: &mut PgSession) -> Vec<BackendMessage> {
-        if session.in_transaction() {
-            return vec![
-                BackendMessage::NoticeResponse {
-                    message: "there is already a transaction in progress".into(),
-                },
-                BackendMessage::CommandComplete { tag: "BEGIN".into() },
-            ];
-        }
-        if let Err(reason) = self.storage.check_tenant_quota(session.tenant_id) {
-            return vec![BackendMessage::ErrorResponse {
-                severity: "ERROR".into(),
-                code: "53400".into(),
-                message: reason,
-            }];
-        }
-        let txn = match self.txn_mgr.try_begin_with_classification(
-            session.default_isolation,
-            TxnClassification::local(ShardId(0)),
-        ) {
-            Ok(t) => t,
-            Err(e) => {
-                let ce: FalconError = e.into();
-                return vec![self.error_response(&ce)];
-            }
-        };
-        self.storage.ext.cdc_manager.emit_begin(txn.txn_id);
-        self.storage.record_tenant_txn_begin(session.tenant_id);
-        session.txn = Some(txn);
-        session.autocommit = false;
-        vec![BackendMessage::CommandComplete { tag: "BEGIN".into() }]
-    }
-
-    fn fast_commit(&self, session: &mut PgSession) -> Vec<BackendMessage> {
-        if let Some(ref txn) = session.txn {
-            match self.txn_mgr.commit(txn.txn_id) {
-                Ok(commit_ts) => {
-                    if let (Some(ref waiter), Some(ref group)) =
-                        (&self.cluster.sync_waiter, &self.cluster.ha_group)
-                    {
-                        let timeout = std::time::Duration::from_secs(5);
-                        let group_read = group.read();
-                        if let Err(e) = waiter.wait_for_commit(commit_ts.0, &group_read, timeout) {
-                            tracing::warn!("Sync replication wait failed after COMMIT: {}", e);
-                        }
-                    }
-                    self.storage.record_tenant_txn_commit(session.tenant_id);
-                    falcon_observability::record_txn_metrics("committed");
-                    session.txn = None;
-                    session.autocommit = true;
-                    self.flush_txn_stats();
-                    vec![BackendMessage::CommandComplete { tag: "COMMIT".into() }]
-                }
-                Err(e) => {
-                    self.storage.record_tenant_txn_abort(session.tenant_id);
-                    falcon_observability::record_txn_metrics("aborted");
-                    session.txn = None;
-                    session.autocommit = true;
-                    self.flush_txn_stats();
-                    vec![self.error_response(&FalconError::Txn(e))]
-                }
-            }
-        } else {
-            vec![
-                BackendMessage::NoticeResponse {
-                    message: "there is no transaction in progress".into(),
-                },
-                BackendMessage::CommandComplete { tag: "COMMIT".into() },
-            ]
-        }
-    }
-
-    fn fast_rollback(&self, session: &mut PgSession) -> Vec<BackendMessage> {
-        if let Some(ref txn) = session.txn {
-            let _ = self.txn_mgr.abort(txn.txn_id);
-            self.storage.record_tenant_txn_abort(session.tenant_id);
-            falcon_observability::record_txn_metrics("aborted");
-            session.txn = None;
-            session.autocommit = true;
-            self.flush_txn_stats();
-        }
-        vec![BackendMessage::CommandComplete { tag: "ROLLBACK".into() }]
-    }
-
-    /// Fast-path SELECT for simple point lookups: SELECT col [, col2] FROM table WHERE pk = val
-    /// Bypasses sqlparser, binder, planner, and build_indexed_columns entirely.
-    fn try_fast_select(&self, sql: &str, session: &mut PgSession) -> Option<Vec<BackendMessage>> {
-        let trimmed = sql.trim().trim_end_matches(';').trim_end();
-        if trimmed.len() < 20 || !trimmed[..6].eq_ignore_ascii_case("SELECT") {
-            return None;
-        }
-        let rest = trimmed[6..].trim_start();
-
-        // Find FROM keyword
-        let from_pos = {
-            let bytes = rest.as_bytes();
-            let mut i = 0;
-            let mut found = None;
-            while i + 5 <= bytes.len() {
-                if bytes[i] == b' ' && bytes[i+1..i+5].eq_ignore_ascii_case(b"FROM") && (i + 5 >= bytes.len() || bytes[i+5] == b' ') {
-                    found = Some(i);
-                    break;
-                }
-                i += 1;
-            }
-            found?
-        };
-        let cols_str = rest[..from_pos].trim();
-        let after_from = rest[from_pos + 5..].trim_start();
-
-        // Table name
-        let tbl_end = after_from.find(|c: char| !c.is_alphanumeric() && c != '_' && c != '"')?;
-        if tbl_end == 0 { return None; }
-        let table_name = after_from[..tbl_end].trim_matches('"');
-        let after_table = after_from[tbl_end..].trim_start();
-
-        // WHERE keyword
-        if after_table.len() < 6 || !after_table[..5].eq_ignore_ascii_case("WHERE") {
-            return None;
-        }
-        let where_part = after_table[5..].trim_start();
-
-        // Reject complex WHERE (AND, OR, subqueries, etc. beyond simple equality)
-        fn contains_ci(hay: &str, needle: &str) -> bool {
-            hay.as_bytes().windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
-        }
-        if contains_ci(where_part, " AND ") || contains_ci(where_part, " OR ") || where_part.contains('(') {
-            return None;
-        }
-
-        // Parse: col = value
-        let eq_pos = where_part.find('=')?;
-        if eq_pos > 0 && matches!(where_part.as_bytes()[eq_pos - 1], b'!' | b'>' | b'<') {
-            return None;
-        }
-        let where_col = where_part[..eq_pos].trim().trim_matches('"');
-        let where_val_str = where_part[eq_pos + 1..].trim();
-
-        // Look up schema (use cache)
-        let schema = {
-            let cached = self.schema_cache.lock();
-            if let Some((ref name, ref s)) = *cached {
-                if name == table_name { Some(s.clone()) } else { None }
-            } else { None }
-        }.or_else(|| {
-            let s = self.storage.get_table_schema(table_name)?;
-            *self.schema_cache.lock() = Some((table_name.to_owned(), s.clone()));
-            Some(s)
-        })?;
-
-        // WHERE column must be the (single) PK
-        if schema.primary_key_columns.len() != 1 { return None; }
-        let pk_col_idx = schema.primary_key_columns[0];
-        let where_col_idx = schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(where_col))?;
-        if where_col_idx != pk_col_idx { return None; }
-
-        // Parse PK value
-        let pk_val = self.parse_fast_literal(where_val_str, &schema.columns[pk_col_idx].data_type)?;
-        let pk = falcon_storage::memtable::encode_pk_from_datums(&[&pk_val]);
-
-        // Parse select columns
-        let sel_col_names: Vec<&str> = cols_str.split(',').map(|s| s.trim().trim_matches('"')).collect();
-        let sel_col_indices: Vec<usize> = sel_col_names.iter().map(|name| {
-            schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(name))
-        }).collect::<Option<Vec<_>>>()?;
-
-        // Ensure txn exists
-        let auto_txn = if session.txn.is_none() {
-            let txn = self.txn_mgr.begin_autocommit(session.default_isolation);
-            session.txn = Some(txn);
-            true
-        } else {
-            false
-        };
-
-        let txn = session.txn.as_ref().unwrap();
-        let read_ts = txn.read_ts(self.txn_mgr.current_ts());
-        let result = self.storage.get(schema.id, &pk, txn.txn_id, read_ts);
-
-        let mut messages = Vec::new();
-
-        // Build RowDescription
-        let fields: Vec<FieldDescription> = sel_col_indices.iter().map(|&ci| {
-            let col = &schema.columns[ci];
-            FieldDescription {
-                name: col.name.clone(),
-                table_oid: 0,
-                column_attr: 0,
-                type_oid: col.data_type.pg_oid(),
-                type_len: col.data_type.type_len(),
-                type_modifier: -1,
-                format_code: 0,
-            }
-        }).collect();
-        messages.push(BackendMessage::RowDescription { fields });
-
-        match result {
-            Ok(Some(row)) => {
-                let values: Vec<Option<String>> = sel_col_indices.iter()
-                    .map(|&ci| row.values.get(ci).map(|d| d.to_pg_text()).unwrap_or(None))
-                    .collect();
-                messages.push(BackendMessage::DataRow { values });
-                messages.push(BackendMessage::CommandComplete { tag: "SELECT 1".into() });
-            }
-            Ok(None) => {
-                messages.push(BackendMessage::CommandComplete { tag: "SELECT 0".into() });
-            }
-            Err(e) => {
-                if auto_txn {
-                    if let Some(ref txn) = session.txn {
-                        self.txn_mgr.abort_autocommit(txn.txn_id);
-                    }
-                    session.txn = None;
-                }
-                return Some(vec![self.error_response(&FalconError::Storage(e))]);
-            }
-        }
-
-        if auto_txn {
-            self.txn_mgr.commit_autocommit_readonly();
-            session.txn = None;
-        }
-
-        Some(messages)
-    }
-
-    /// Direct UPDATE bypass for simple point updates on constraint-free tables.
-    /// Parses SQL, reads row, applies SET, writes back — skips executor entirely.
-    fn try_fast_direct_update(&self, sql: &str, session: &mut PgSession) -> Option<Vec<BackendMessage>> {
-        let trimmed = sql.trim().trim_end_matches(';').trim_end();
-        if trimmed.len() < 20 || !trimmed[..6].eq_ignore_ascii_case("UPDATE") {
-            return None;
-        }
-        let rest = trimmed[6..].trim_start();
-
-        // Table name
-        let tbl_end = rest.find(|c: char| !c.is_alphanumeric() && c != '_' && c != '"')?;
-        if tbl_end == 0 { return None; }
-        let table_name = rest[..tbl_end].trim_matches('"');
-        let rest = rest[tbl_end..].trim_start();
-
-        // SET keyword
-        if rest.len() < 4 || !rest[..3].eq_ignore_ascii_case("SET") { return None; }
-        let rest = rest[3..].trim_start();
-
-        // Reject RETURNING / FROM
-        fn has_ci(hay: &str, needle: &str) -> bool {
-            hay.as_bytes().windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
-        }
-        if has_ci(rest, "RETURNING") || has_ci(rest, " FROM ") { return None; }
-
-        // Find WHERE
-        let where_pos = {
-            let bytes = rest.as_bytes();
-            let mut found = None;
-            for i in 0..bytes.len().saturating_sub(6) {
-                if bytes[i] == b' ' && bytes[i+1..i+6].eq_ignore_ascii_case(b"WHERE") && (i + 6 >= bytes.len() || bytes[i+6] == b' ') {
-                    found = Some(i);
-                    break;
-                }
-            }
-            found?
-        };
-        let set_part = rest[..where_pos].trim();
-        let where_part = rest[where_pos + 7..].trim();
-
-        // Schema (cached)
-        let schema = {
-            let cached = self.schema_cache.lock();
-            if let Some((ref name, ref s)) = *cached {
-                if name == table_name { Some(s.clone()) } else { None }
-            } else { None }
-        }.or_else(|| {
-            let s = self.storage.get_table_schema(table_name)?;
-            *self.schema_cache.lock() = Some((table_name.to_owned(), s.clone()));
-            Some(s)
-        })?;
-
-        // Eligibility: no constraints, single PK, no RETURNING
-        if !schema.unique_constraints.is_empty()
-            || !schema.check_constraints.is_empty()
-            || !schema.foreign_keys.is_empty()
-            || schema.primary_key_columns.len() != 1
-        {
-            return None;
-        }
-        let pk_col_idx = schema.primary_key_columns[0];
-
-        // Parse WHERE: only pk = literal (no AND)
-        if has_ci(where_part, " AND ") || has_ci(where_part, " OR ") { return None; }
-        let eq_pos = where_part.find('=')?;
-        if eq_pos > 0 && matches!(where_part.as_bytes()[eq_pos - 1], b'!' | b'>' | b'<') { return None; }
-        let w_col = where_part[..eq_pos].trim().trim_matches('"');
-        let w_val_str = where_part[eq_pos + 1..].trim();
-        let w_col_idx = schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(w_col))?;
-        if w_col_idx != pk_col_idx { return None; }
-        let pk_val = self.parse_fast_literal(w_val_str, &schema.columns[pk_col_idx].data_type)?;
-        let pk = falcon_storage::memtable::encode_pk_from_datums(&[&pk_val]);
-
-        // Parse SET assignments: col = expr [, col = expr]
-        // For direct execution, we store (col_idx, SetOp) instead of BoundExpr
-        enum SetOp { Literal(Datum), Plus(usize, Datum), Minus(usize, Datum) }
-        let mut ops: Vec<(usize, SetOp)> = Vec::new();
-        for assign_str in set_part.split(',') {
-            let assign_str = assign_str.trim();
-            let aeq = assign_str.find('=')?;
-            let col_name = assign_str[..aeq].trim().trim_matches('"');
-            let expr_str = assign_str[aeq + 1..].trim();
-            let col_idx = schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(col_name))?;
-
-            if let Some(plus_pos) = expr_str.find('+') {
-                let lhs = expr_str[..plus_pos].trim();
-                let rhs = expr_str[plus_pos + 1..].trim();
-                if schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(lhs))? == col_idx {
-                    let val = self.parse_fast_literal(rhs, &schema.columns[col_idx].data_type)?;
-                    ops.push((col_idx, SetOp::Plus(col_idx, val)));
-                } else { return None; }
-            } else if let Some(minus_pos) = expr_str.rfind('-') {
-                if minus_pos > 0 {
-                    let lhs = expr_str[..minus_pos].trim();
-                    let rhs = expr_str[minus_pos + 1..].trim();
-                    if schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(lhs))? == col_idx {
-                        let val = self.parse_fast_literal(rhs, &schema.columns[col_idx].data_type)?;
-                        ops.push((col_idx, SetOp::Minus(col_idx, val)));
-                    } else { return None; }
-                } else { return None; }
-            } else {
-                let val = self.parse_fast_literal(expr_str, &schema.columns[col_idx].data_type)?;
-                ops.push((col_idx, SetOp::Literal(val)));
-            }
-        }
-
-        // Ensure txn
-        let auto_txn = if session.txn.is_none() {
-            let txn = self.txn_mgr.begin_autocommit(session.default_isolation);
-            session.txn = Some(txn);
-            true
-        } else {
-            false
-        };
-
-        let txn = session.txn.as_ref().unwrap();
-        let read_ts = txn.read_ts(self.txn_mgr.current_ts());
-
-        // Read current row
-        let row = match self.storage.get(schema.id, &pk, txn.txn_id, read_ts) {
-            Ok(Some(r)) => r,
-            Ok(None) => {
-                let tag = "UPDATE 0".to_owned();
-                if auto_txn {
-                    let _ = self.txn_mgr.commit_autocommit(txn.txn_id);
-                    session.txn = None;
-                }
-                return Some(vec![BackendMessage::CommandComplete { tag }]);
-            }
-            Err(e) => {
-                if auto_txn {
-                    self.txn_mgr.abort_autocommit(txn.txn_id);
-                    session.txn = None;
-                }
-                return Some(vec![self.error_response(&FalconError::Storage(e))]);
-            }
-        };
-
-        // Apply assignments
-        let mut new_values = row.values.clone();
-        for (col_idx, op) in &ops {
-            new_values[*col_idx] = match op {
-                SetOp::Literal(v) => v.clone(),
-                SetOp::Plus(src, v) => datum_add(&row.values[*src], v)?,
-                SetOp::Minus(src, v) => datum_sub(&row.values[*src], v)?,
-            };
-        }
-
-        let new_row = falcon_common::datum::OwnedRow::new(new_values);
-        match self.storage.update(schema.id, &pk, new_row, txn.txn_id) {
-            Ok(()) => {}
-            Err(e) => {
-                if auto_txn {
-                    self.txn_mgr.abort_autocommit(txn.txn_id);
-                    session.txn = None;
-                }
-                return Some(vec![self.error_response(&FalconError::Storage(e))]);
-            }
-        }
-
-        if auto_txn {
-            let _ = self.txn_mgr.commit_autocommit(txn.txn_id);
-            session.txn = None;
-        }
-
-        Some(vec![BackendMessage::CommandComplete { tag: "UPDATE 1".to_owned() }])
-    }
+    // Fast-path DML methods moved to handler_fast_path.rs
+    // Extended query protocol methods moved to handler_extended.rs
 
     /// Inner query processing logic, called from `handle_query` inside a
     /// crash-domain guard.
@@ -1457,12 +474,19 @@ impl QueryHandler {
                     }
                 } else {
                     let is_dml = matches!(&bound, BoundStatement::Update(_) | BoundStatement::Delete(_));
-                    let (row_counts, indexed_cols) = if is_dml {
-                        (TableRowCounts::new(), IndexedColumns::new())
+                    let indexed_cols = if is_dml { IndexedColumns::new() } else { self.build_indexed_columns() };
+                    let p = if is_dml {
+                        Planner::plan_with_indexes(&bound, &TableRowCounts::new(), &indexed_cols)
                     } else {
-                        (self.build_row_counts(), self.build_indexed_columns())
+                        let stats = self.build_table_stats();
+                        if stats.is_empty() {
+                            let row_counts = self.build_row_counts();
+                            Planner::plan_with_indexes(&bound, &row_counts, &indexed_cols)
+                        } else {
+                            Planner::plan_optimized(&bound, &stats, &indexed_cols)
+                        }
                     };
-                    let p = match Planner::plan_with_indexes(&bound, &row_counts, &indexed_cols) {
+                    let p = match p {
                         Ok(p) => p,
                         Err(e) => {
                             messages.push(self.error_response(&FalconError::Sql(e)));
@@ -1598,7 +622,7 @@ impl QueryHandler {
                 }
             }
 
-            // Handle COPY FROM STDIN — store state in session, return CopyInResponse
+            // Handle COPY FROM STDIN / FILE
             if let PhysicalPlan::CopyFrom {
                 table_id,
                 schema,
@@ -1609,8 +633,83 @@ impl QueryHandler {
                 null_string,
                 quote,
                 escape,
+                file_path,
             } = &plan
             {
+                if let Some(path) = file_path {
+                    // Server-side file import: read file, execute, return CommandComplete
+                    let data = match std::fs::read(path) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            messages.push(BackendMessage::ErrorResponse {
+                                severity: "ERROR".into(),
+                                code: "58030".into(),
+                                message: format!("could not read server file '{}': {}", path, e),
+                            });
+                            continue;
+                        }
+                    };
+                    let auto_txn = if session.txn.is_none() {
+                        let classification = classification_from_routing_hint(&routing_hint);
+                        let txn = match self.txn_mgr.try_begin_with_classification(
+                            session.default_isolation, classification,
+                        ) {
+                            Ok(t) => t,
+                            Err(e) => {
+                                let ce: FalconError = e.into();
+                                messages.push(self.error_response(&ce));
+                                continue;
+                            }
+                        };
+                        session.txn = Some(txn);
+                        true
+                    } else {
+                        false
+                    };
+                    let txn_ref = match session.txn.as_ref() {
+                        Some(t) => t,
+                        None => {
+                            messages.push(BackendMessage::ErrorResponse {
+                                severity: "ERROR".into(),
+                                code: "25P01".into(),
+                                message: "no active transaction for COPY FROM".into(),
+                            });
+                            continue;
+                        }
+                    };
+                    let result = self.executor.exec_copy_from_data(
+                        *table_id, schema, columns, &data,
+                        *csv, *delimiter, *header, null_string, *quote, *escape, txn_ref,
+                    );
+                    match result {
+                        Ok(ExecutionResult::Dml { rows_affected, .. }) => {
+                            if auto_txn {
+                                if let Some(ref txn) = session.txn {
+                                    let _ = self.txn_mgr.commit(txn.txn_id);
+                                }
+                                session.txn = None;
+                                self.flush_txn_stats();
+                            }
+                            messages.push(BackendMessage::CommandComplete {
+                                tag: format!("COPY {rows_affected}"),
+                            });
+                        }
+                        Err(e) => {
+                            if auto_txn {
+                                if let Some(ref txn) = session.txn {
+                                    let _ = self.txn_mgr.abort(txn.txn_id);
+                                }
+                                session.txn = None;
+                                self.flush_txn_stats();
+                            }
+                            messages.push(self.error_response(&e));
+                        }
+                        _ => {}
+                    }
+                    return Ok(messages);
+                }
+
+                // STDIN path: store state in session, return CopyInResponse
                 use crate::session::{CopyFormat, CopyState};
                 session.copy_state = Some(CopyState {
                     table_name: schema.name.clone(),
@@ -1626,7 +725,7 @@ impl QueryHandler {
                         escape: *escape,
                     },
                 });
-                let col_formats = vec![0i16; columns.len()]; // text format
+                let col_formats = vec![0i16; columns.len()];
                 messages.push(BackendMessage::CopyInResponse {
                     format: 0,
                     column_formats: col_formats,
@@ -1634,7 +733,7 @@ impl QueryHandler {
                 return Ok(messages);
             }
 
-            // Handle COPY TO STDOUT — execute scan and stream data
+            // Handle COPY TO STDOUT / FILE
             if let PhysicalPlan::CopyTo {
                 table_id,
                 schema,
@@ -1645,6 +744,7 @@ impl QueryHandler {
                 null_string,
                 quote,
                 escape,
+                file_path,
             } = &plan
             {
                 // Ensure a transaction exists
@@ -1690,21 +790,43 @@ impl QueryHandler {
 
                 match result {
                     Ok(ExecutionResult::Query { rows, .. }) => {
-                        let col_formats = vec![0i16; columns.len()];
-                        messages.push(BackendMessage::CopyOutResponse {
-                            format: 0,
-                            column_formats: col_formats,
-                        });
-                        let row_count = rows.len();
-                        for row in &rows {
-                            if let Some(Datum::Text(ref line)) = row.values.first().cloned() {
-                                messages.push(BackendMessage::CopyData(line.as_bytes().to_vec()));
+                        if let Some(path) = file_path {
+                            // Write to server-side file
+                            let mut buf = String::new();
+                            for row in &rows {
+                                if let Some(Datum::Text(ref line)) = row.values.first().cloned() {
+                                    buf.push_str(line);
+                                    buf.push('\n');
+                                }
                             }
+                            if let Err(e) = std::fs::write(path, buf.as_bytes()) {
+                                messages.push(BackendMessage::ErrorResponse {
+                                    severity: "ERROR".into(),
+                                    code: "58030".into(),
+                                    message: format!("could not write server file '{}': {}", path, e),
+                                });
+                            } else {
+                                messages.push(BackendMessage::CommandComplete {
+                                    tag: format!("COPY {}", rows.len()),
+                                });
+                            }
+                        } else {
+                            let col_formats = vec![0i16; columns.len()];
+                            messages.push(BackendMessage::CopyOutResponse {
+                                format: 0,
+                                column_formats: col_formats,
+                            });
+                            let row_count = rows.len();
+                            for row in &rows {
+                                if let Some(Datum::Text(ref line)) = row.values.first().cloned() {
+                                    messages.push(BackendMessage::CopyData(line.as_bytes().to_vec()));
+                                }
+                            }
+                            messages.push(BackendMessage::CopyDone);
+                            messages.push(BackendMessage::CommandComplete {
+                                tag: format!("COPY {row_count}"),
+                            });
                         }
-                        messages.push(BackendMessage::CopyDone);
-                        messages.push(BackendMessage::CommandComplete {
-                            tag: format!("COPY {row_count}"),
-                        });
                     }
                     Err(e) => {
                         messages.push(self.error_response(&e));
@@ -1722,7 +844,7 @@ impl QueryHandler {
                 return Ok(messages);
             }
 
-            // Handle COPY (query) TO STDOUT
+            // Handle COPY (query) TO STDOUT / FILE
             if let PhysicalPlan::CopyQueryTo {
                 query,
                 csv,
@@ -1731,6 +853,7 @@ impl QueryHandler {
                 null_string,
                 quote,
                 escape,
+                file_path,
             } = &plan
             {
                 let auto_txn = if session.txn.is_none() {
@@ -1773,21 +896,42 @@ impl QueryHandler {
 
                 match result {
                     Ok(ExecutionResult::Query { rows, .. }) => {
-                        let col_formats = vec![0i16; 1]; // single text column
-                        messages.push(BackendMessage::CopyOutResponse {
-                            format: 0,
-                            column_formats: col_formats,
-                        });
-                        let row_count = rows.len();
-                        for row in &rows {
-                            if let Some(Datum::Text(ref line)) = row.values.first().cloned() {
-                                messages.push(BackendMessage::CopyData(line.as_bytes().to_vec()));
+                        if let Some(path) = file_path {
+                            let mut buf = String::new();
+                            for row in &rows {
+                                if let Some(Datum::Text(ref line)) = row.values.first().cloned() {
+                                    buf.push_str(line);
+                                    buf.push('\n');
+                                }
                             }
+                            if let Err(e) = std::fs::write(path, buf.as_bytes()) {
+                                messages.push(BackendMessage::ErrorResponse {
+                                    severity: "ERROR".into(),
+                                    code: "58030".into(),
+                                    message: format!("could not write server file '{}': {}", path, e),
+                                });
+                            } else {
+                                messages.push(BackendMessage::CommandComplete {
+                                    tag: format!("COPY {}", rows.len()),
+                                });
+                            }
+                        } else {
+                            let col_formats = vec![0i16; 1];
+                            messages.push(BackendMessage::CopyOutResponse {
+                                format: 0,
+                                column_formats: col_formats,
+                            });
+                            let row_count = rows.len();
+                            for row in &rows {
+                                if let Some(Datum::Text(ref line)) = row.values.first().cloned() {
+                                    messages.push(BackendMessage::CopyData(line.as_bytes().to_vec()));
+                                }
+                            }
+                            messages.push(BackendMessage::CopyDone);
+                            messages.push(BackendMessage::CommandComplete {
+                                tag: format!("COPY {row_count}"),
+                            });
                         }
-                        messages.push(BackendMessage::CopyDone);
-                        messages.push(BackendMessage::CommandComplete {
-                            tag: format!("COPY {row_count}"),
-                        });
                     }
                     Err(e) => {
                         messages.push(self.error_response(&e));
@@ -1869,9 +1013,12 @@ impl QueryHandler {
             };
             let query_duration = query_start.elapsed();
 
+            let plan_is_dml = matches!(&plan,
+                PhysicalPlan::Insert { .. } | PhysicalPlan::Update { .. } | PhysicalPlan::Delete { .. });
+
             match result {
                 Ok(exec_result) => {
-                    let is_readonly = matches!(&exec_result, ExecutionResult::Query { .. }
+                    let is_readonly = !plan_is_dml && matches!(&exec_result, ExecutionResult::Query { .. }
                         | ExecutionResult::Ddl { .. } | ExecutionResult::TxnControl { .. });
                     match exec_result {
                         ExecutionResult::Query { columns, rows } => {
@@ -2030,756 +1177,6 @@ impl QueryHandler {
         messages
     }
 
-    /// Build an IndexedColumns map from storage for index scan detection in the planner.
-    fn build_indexed_columns(&self) -> IndexedColumns {
-        let mut indexed = IndexedColumns::new();
-        let catalog = self.storage.get_catalog();
-        for table in catalog.tables_map().values() {
-            let cols = self.storage.get_indexed_columns(table.id);
-            if !cols.is_empty() {
-                indexed.insert(table.id, cols.iter().map(|(c, _)| *c).collect());
-            }
-        }
-        indexed
-    }
-
-    /// Build a TableRowCounts map from cached ANALYZE stats for cost-based planning.
-    fn build_row_counts(&self) -> TableRowCounts {
-        let all_stats = self.storage.get_all_table_stats();
-        let mut counts = TableRowCounts::new();
-        for ts in &all_stats {
-            counts.insert(ts.table_id, ts.row_count);
-        }
-        counts
-    }
-
-    /// Describe a SQL query: parse/bind/plan and return the output column descriptions.
-    /// Used by the extended query protocol's Describe message.
-    /// Returns Ok(fields) for queries, Ok(empty) for DML/DDL, Err for parse/bind errors.
-    ///
-    /// Wrapped in crash-domain guard — panics are caught and converted to FalconError.
-    pub fn describe_query(&self, sql: &str) -> Result<Vec<FieldDescription>, FalconError> {
-        falcon_common::crash_domain::catch_request_result("describe_query", sql, || {
-            self.describe_query_inner(sql)
-        })
-    }
-
-    fn describe_query_inner(&self, sql: &str) -> Result<Vec<FieldDescription>, FalconError> {
-        let sql = sql.trim();
-        if sql.is_empty() {
-            return Ok(vec![]);
-        }
-
-        let stmts = parse_sql(sql).map_err(FalconError::Sql)?;
-        if stmts.is_empty() {
-            return Ok(vec![]);
-        }
-
-        let catalog = self.storage.get_catalog();
-        let mut binder = Binder::new(catalog);
-        let bound = binder.bind(&stmts[0]).map_err(FalconError::Sql)?;
-
-        let row_counts = self.build_row_counts();
-        let indexed_cols = self.build_indexed_columns();
-        let plan = Planner::plan_with_indexes(&bound, &row_counts, &indexed_cols)
-            .map_err(FalconError::Sql)?;
-
-        // Extract column info from the plan
-        Ok(self.plan_output_fields(&plan))
-    }
-
-    /// Parse + bind + plan a SQL statement for the extended query protocol.
-    /// Returns (PhysicalPlan, inferred_param_types, row_desc) on success.
-    ///
-    /// Wrapped in crash-domain guard — panics are caught and converted to FalconError.
-    #[allow(clippy::type_complexity)]
-    pub fn prepare_statement(
-        &self,
-        sql: &str,
-    ) -> Result<
-        (
-            PhysicalPlan,
-            Vec<Option<falcon_common::types::DataType>>,
-            Vec<crate::session::FieldDescriptionCompact>,
-        ),
-        FalconError,
-    > {
-        falcon_common::crash_domain::catch_request_result("prepare_statement", sql, || {
-            self.prepare_statement_inner(sql)
-        })
-    }
-
-    #[allow(clippy::type_complexity)]
-    fn prepare_statement_inner(
-        &self,
-        sql: &str,
-    ) -> Result<
-        (
-            PhysicalPlan,
-            Vec<Option<falcon_common::types::DataType>>,
-            Vec<crate::session::FieldDescriptionCompact>,
-        ),
-        FalconError,
-    > {
-        let sql = sql.trim();
-        if sql.is_empty() {
-            return Err(FalconError::Sql(falcon_common::error::SqlError::Parse(
-                "empty query".into(),
-            )));
-        }
-
-        let stmts = parse_sql(sql).map_err(FalconError::Sql)?;
-        if stmts.is_empty() {
-            return Err(FalconError::Sql(falcon_common::error::SqlError::Parse(
-                "empty query".into(),
-            )));
-        }
-
-        let catalog = self.storage.get_catalog();
-        let mut binder = Binder::new(catalog);
-        let (bound, inferred_types) = binder
-            .bind_with_params_lenient(&stmts[0], None)
-            .map_err(FalconError::Sql)?;
-
-        let row_counts = self.build_row_counts();
-        let indexed_cols = self.build_indexed_columns();
-        let plan = Planner::plan_with_indexes(&bound, &row_counts, &indexed_cols)
-            .map_err(FalconError::Sql)?;
-
-        // Wrap in DistPlan if multi-shard cluster
-        let plan = Planner::wrap_distributed(plan, &self.cluster.shard_ids);
-
-        // Build compact row description from the plan output fields
-        let fields = self.plan_output_fields(&plan);
-        let row_desc: Vec<crate::session::FieldDescriptionCompact> = fields
-            .iter()
-            .map(|f| crate::session::FieldDescriptionCompact {
-                name: f.name.clone(),
-                type_oid: f.type_oid,
-                type_len: f.type_len,
-            })
-            .collect();
-
-        Ok((plan, inferred_types, row_desc))
-    }
-
-    /// Execute a pre-planned query with parameter values.
-    /// Used by the extended query protocol's Execute message.
-    ///
-    /// Wrapped in crash-domain guard — panics are caught and converted to ErrorResponse.
-    pub fn execute_plan(
-        &self,
-        plan: &PhysicalPlan,
-        params: &[Datum],
-        session: &mut PgSession,
-    ) -> Vec<BackendMessage> {
-        let rctx = falcon_common::request_context::RequestContext::new(session.id as u64);
-        let ctx = format!("session_id={}", session.id);
-        let result = falcon_common::crash_domain::catch_request("execute_plan", &ctx, || {
-            self.execute_plan_inner(plan, params, session)
-        });
-        match result {
-            Ok(msgs) => msgs,
-            Err(e) => vec![self.error_response(&e.with_request_context(&rctx))],
-        }
-    }
-
-    fn execute_plan_inner(
-        &self,
-        plan: &PhysicalPlan,
-        params: &[Datum],
-        session: &mut PgSession,
-    ) -> Vec<BackendMessage> {
-        let mut messages = Vec::new();
-
-        // Handle transaction control plans directly (no params needed)
-        match plan {
-            PhysicalPlan::Begin | PhysicalPlan::Commit | PhysicalPlan::Rollback => {
-                // Delegate to handle_query for transaction control
-                // (these don't have parameters anyway)
-                let sql = match plan {
-                    PhysicalPlan::Begin => "BEGIN",
-                    PhysicalPlan::Commit => "COMMIT",
-                    PhysicalPlan::Rollback => "ROLLBACK",
-                    _ => unreachable!(),
-                };
-                return self.handle_query(sql, session);
-            }
-            _ => {}
-        }
-
-        let routing_hint = plan.routing_hint();
-
-        if let Some(ref txn) = session.txn {
-            let _ = self
-                .txn_mgr
-                .observe_involved_shards(txn.txn_id, &routing_hint.involved_shards);
-            if matches!(routing_hint.planned_txn_type(), PlannedTxnType::Global) {
-                let _ = self.txn_mgr.force_global(txn.txn_id, SlowPathMode::Xa2Pc);
-            }
-        }
-
-        // For DDL/metadata, execute without params
-        if matches!(
-            plan,
-            PhysicalPlan::CreateTable { .. }
-                | PhysicalPlan::DropTable { .. }
-                | PhysicalPlan::ShowTxnStats
-                | PhysicalPlan::RunGc
-        ) {
-            match self.executor.execute(plan, None) {
-                Ok(ExecutionResult::Ddl { message }) => {
-                    self.observability.plan_cache.invalidate();
-                    messages.push(BackendMessage::CommandComplete { tag: message });
-                }
-                Ok(ExecutionResult::Query { columns, rows }) => {
-                    let fields: Vec<FieldDescription> = columns
-                        .iter()
-                        .map(|(name, dt)| FieldDescription {
-                            name: name.clone(),
-                            table_oid: 0,
-                            column_attr: 0,
-                            type_oid: dt.pg_oid(),
-                            type_len: dt.type_len(),
-                            type_modifier: -1,
-                            format_code: 0,
-                        })
-                        .collect();
-                    messages.push(BackendMessage::RowDescription { fields });
-                    for row in &rows {
-                        let values: Vec<Option<String>> =
-                            row.values.iter().map(|d| Some(d.to_string())).collect();
-                        messages.push(BackendMessage::DataRow { values });
-                    }
-                    messages.push(BackendMessage::CommandComplete {
-                        tag: format!("SHOW {}", rows.len()),
-                    });
-                }
-                Err(e) => {
-                    messages.push(self.error_response(&e));
-                }
-                _ => {}
-            }
-            return messages;
-        }
-
-        // For DML/query, ensure a transaction exists (autocommit = implicit txn)
-        let auto_txn = if session.txn.is_none() {
-            let classification = classification_from_routing_hint(&routing_hint);
-            let txn = match self
-                .txn_mgr
-                .try_begin_with_classification(session.default_isolation, classification)
-            {
-                Ok(t) => t,
-                Err(e) => {
-                    let ce: FalconError = e.into();
-                    messages.push(self.error_response(&ce));
-                    return messages;
-                }
-            };
-            session.txn = Some(txn);
-            true
-        } else {
-            false
-        };
-
-        // Execute with parameter substitution — route through dist_engine when available
-        let query_start = std::time::Instant::now();
-        let result = if let Some(dist) = &self.cluster.dist_engine {
-            dist.execute_with_params(plan, session.txn.as_ref(), params)
-        } else {
-            self.executor
-                .execute_with_params(plan, session.txn.as_ref(), params)
-        };
-        let _query_duration = query_start.elapsed();
-
-        match result {
-            Ok(exec_result) => {
-                match exec_result {
-                    ExecutionResult::Query { columns, rows } => {
-                        let fields: Vec<FieldDescription> = columns
-                            .iter()
-                            .map(|(name, dt)| FieldDescription {
-                                name: name.clone(),
-                                table_oid: 0,
-                                column_attr: 0,
-                                type_oid: dt.pg_oid(),
-                                type_len: dt.type_len(),
-                                type_modifier: -1,
-                                format_code: 0,
-                            })
-                            .collect();
-                        messages.push(BackendMessage::RowDescription { fields });
-                        let row_count = rows.len();
-                        for row in rows {
-                            let values: Vec<Option<String>> =
-                                row.values.iter().map(falcon_common::datum::Datum::to_pg_text).collect();
-                            messages.push(BackendMessage::DataRow { values });
-                        }
-                        messages.push(BackendMessage::CommandComplete {
-                            tag: format!("SELECT {row_count}"),
-                        });
-                    }
-                    ExecutionResult::Dml { rows_affected, tag } => {
-                        let cmd_tag = match tag {
-                            "INSERT" => format!("INSERT 0 {rows_affected}"),
-                            "UPDATE" => format!("UPDATE {rows_affected}"),
-                            "DELETE" => format!("DELETE {rows_affected}"),
-                            _ => format!("{tag} {rows_affected}"),
-                        };
-                        messages.push(BackendMessage::CommandComplete { tag: cmd_tag });
-                    }
-                    ExecutionResult::Ddl { message } => {
-                        self.observability.plan_cache.invalidate();
-                        messages.push(BackendMessage::CommandComplete { tag: message });
-                    }
-                    ExecutionResult::TxnControl { action } => {
-                        messages.push(BackendMessage::CommandComplete { tag: action });
-                    }
-                }
-
-                if auto_txn {
-                    if let Some(ref txn) = session.txn {
-                        let _ = self.txn_mgr.commit(txn.txn_id);
-                    }
-                    session.txn = None;
-                    self.flush_txn_stats();
-                }
-            }
-            Err(e) => {
-                if auto_txn {
-                    if let Some(ref txn) = session.txn {
-                        let _ = self.txn_mgr.abort(txn.txn_id);
-                    }
-                    session.txn = None;
-                    self.flush_txn_stats();
-                }
-                messages.push(self.error_response(&e));
-            }
-        }
-
-        messages
-    }
-
-    /// Map a Falcon DataType to a PostgreSQL type OID.
-    pub const fn datatype_to_oid(&self, dt: Option<&falcon_common::types::DataType>) -> i32 {
-        use falcon_common::types::DataType;
-        match dt {
-            Some(DataType::Int16) => 21,           // INT2
-            Some(DataType::Int32) => 23,           // INT4
-            Some(DataType::Int64) => 20,           // INT8
-            Some(DataType::Float32) => 700,        // FLOAT4
-            Some(DataType::Float64) => 701,        // FLOAT8
-            Some(DataType::Boolean) => 16,         // BOOL
-            Some(DataType::Text) => 25,            // TEXT
-            Some(DataType::Timestamp) => 1114,     // TIMESTAMP
-            Some(DataType::Date) => 1082,          // DATE
-            Some(DataType::Array(_)) => 2277,      // ANYARRAY
-            Some(DataType::Jsonb) => 3802,         // JSONB
-            Some(DataType::Decimal(_, _)) => 1700, // NUMERIC
-            Some(DataType::Time) => 1083,          // TIME
-            Some(DataType::Interval) => 1186,      // INTERVAL
-            Some(DataType::Uuid) => 2950,          // UUID
-            Some(DataType::Bytea) => 17,           // BYTEA
-            None => 0,                             // unspecified
-        }
-    }
-
-    /// Extract output column FieldDescriptions from a physical plan.
-    fn plan_output_fields(&self, plan: &PhysicalPlan) -> Vec<FieldDescription> {
-        use falcon_common::types::DataType;
-        use falcon_sql_frontend::types::{AggFunc, BinOp, BoundExpr, BoundProjection, ScalarFunc};
-
-        /// Infer the DataType of a BoundExpr given the source table schema columns.
-        fn infer_expr_type(
-            expr: &BoundExpr,
-            cols: &[falcon_common::schema::ColumnDef],
-        ) -> DataType {
-            match expr {
-                BoundExpr::Literal(d) => d.data_type().unwrap_or(DataType::Text),
-                BoundExpr::ColumnRef(idx) => cols
-                    .get(*idx)
-                    .map_or(DataType::Text, |c| c.data_type.clone()),
-                BoundExpr::BinaryOp { left, op, right } => {
-                    match op {
-                        // Comparison / logical → Boolean
-                        BinOp::Eq
-                        | BinOp::NotEq
-                        | BinOp::Lt
-                        | BinOp::LtEq
-                        | BinOp::Gt
-                        | BinOp::GtEq
-                        | BinOp::And
-                        | BinOp::Or => DataType::Boolean,
-                        // Arithmetic → promote operand types
-                        BinOp::Plus
-                        | BinOp::Minus
-                        | BinOp::Multiply
-                        | BinOp::Divide
-                        | BinOp::Modulo => {
-                            let lt = infer_expr_type(left, cols);
-                            let rt = infer_expr_type(right, cols);
-                            promote_numeric(lt, rt)
-                        }
-                        // String concat
-                        BinOp::StringConcat
-                        | BinOp::JsonArrowText
-                        | BinOp::JsonHashArrowText => DataType::Text,
-                        // JSONB operators → Jsonb (or Text for ->>/#>>)
-                        BinOp::JsonArrow
-                        | BinOp::JsonHashArrow
-                        | BinOp::JsonContains
-                        | BinOp::JsonContainedBy
-                        | BinOp::JsonExists => DataType::Jsonb,
-                    }
-                }
-                BoundExpr::Not(_)
-                | BoundExpr::IsNull(_)
-                | BoundExpr::IsNotNull(_)
-                | BoundExpr::IsNotDistinctFrom { .. }
-                | BoundExpr::Like { .. }
-                | BoundExpr::Between { .. }
-                | BoundExpr::InList { .. }
-                | BoundExpr::Exists { .. }
-                | BoundExpr::InSubquery { .. } => DataType::Boolean,
-                BoundExpr::Cast { target_type, .. } => parse_cast_type(target_type),
-                BoundExpr::Case {
-                    results,
-                    else_result,
-                    ..
-                } => {
-                    // Infer from first THEN branch
-                    if let Some(first) = results.first() {
-                        infer_expr_type(first, cols)
-                    } else if let Some(e) = else_result {
-                        infer_expr_type(e, cols)
-                    } else {
-                        DataType::Text
-                    }
-                }
-                BoundExpr::Coalesce(exprs) => exprs
-                    .first()
-                    .map_or(DataType::Text, |e| infer_expr_type(e, cols)),
-                BoundExpr::Function { func, args } => infer_func_type(func, args, cols),
-                BoundExpr::AggregateExpr { func, arg, .. } => {
-                    let input_ty = arg.as_ref().map(|a| infer_expr_type(a, cols));
-                    infer_agg_return_type(func, input_ty)
-                }
-                BoundExpr::ArrayLiteral(_) => DataType::Array(Box::new(DataType::Text)),
-                BoundExpr::ArrayIndex { array, .. } => {
-                    // Element type of the array
-                    match infer_expr_type(array, cols) {
-                        DataType::Array(inner) => *inner,
-                        _ => DataType::Text,
-                    }
-                }
-                BoundExpr::OuterColumnRef(idx) => cols
-                    .get(*idx)
-                    .map_or(DataType::Text, |c| c.data_type.clone()),
-                BoundExpr::SequenceNextval(_)
-                | BoundExpr::SequenceCurrval(_)
-                | BoundExpr::SequenceSetval(_, _) => DataType::Int64,
-                BoundExpr::Grouping(_) => DataType::Int32,
-                _ => DataType::Text,
-            }
-        }
-
-        fn promote_numeric(a: DataType, b: DataType) -> DataType {
-            match (&a, &b) {
-                (DataType::Float64, _) | (_, DataType::Float64) => DataType::Float64,
-                (DataType::Int64, _) | (_, DataType::Int64) => DataType::Int64,
-                (DataType::Int32, DataType::Int32) => DataType::Int32,
-                _ => a,
-            }
-        }
-
-        fn parse_cast_type(t: &str) -> DataType {
-            match t.to_uppercase().as_str() {
-                "INT" | "INT4" | "INTEGER" => DataType::Int32,
-                "BIGINT" | "INT8" => DataType::Int64,
-                "FLOAT" | "FLOAT8" | "DOUBLE" | "DOUBLE PRECISION" => DataType::Float64,
-                "BOOL" | "BOOLEAN" => DataType::Boolean,
-                "TIMESTAMP" | "TIMESTAMP WITHOUT TIME ZONE" => DataType::Timestamp,
-                "DATE" => DataType::Date,
-                "JSONB" => DataType::Jsonb,
-                _ => DataType::Text,
-            }
-        }
-
-        fn infer_func_type(
-            func: &ScalarFunc,
-            args: &[BoundExpr],
-            cols: &[falcon_common::schema::ColumnDef],
-        ) -> DataType {
-            match func {
-                // String → Text
-                ScalarFunc::Upper
-                | ScalarFunc::Lower
-                | ScalarFunc::Trim
-                | ScalarFunc::Replace
-                | ScalarFunc::Lpad
-                | ScalarFunc::Rpad
-                | ScalarFunc::Left
-                | ScalarFunc::Right
-                | ScalarFunc::Repeat
-                | ScalarFunc::Reverse
-                | ScalarFunc::Initcap
-                | ScalarFunc::Chr
-                | ScalarFunc::ToChar
-                | ScalarFunc::Concat
-                | ScalarFunc::ConcatWs
-                | ScalarFunc::Substring
-                | ScalarFunc::Btrim
-                | ScalarFunc::Ltrim
-                | ScalarFunc::Rtrim
-                | ScalarFunc::Overlay
-                | ScalarFunc::RegexpReplace
-                | ScalarFunc::RegexpSubstr
-                | ScalarFunc::Translate
-                | ScalarFunc::QuoteLiteral
-                | ScalarFunc::QuoteIdent
-                | ScalarFunc::QuoteNullable
-                | ScalarFunc::Md5
-                | ScalarFunc::Encode
-                | ScalarFunc::Decode
-                | ScalarFunc::ToHex
-                | ScalarFunc::PgTypeof
-                | ScalarFunc::GenRandomUuid
-                | ScalarFunc::ArrayDims
-                | ScalarFunc::ArrayToString => DataType::Text,
-                // Integer results
-                ScalarFunc::Length
-                | ScalarFunc::Position
-                | ScalarFunc::Ascii
-                | ScalarFunc::RegexpCount
-                | ScalarFunc::ArrayLength
-                | ScalarFunc::ArrayPosition
-                | ScalarFunc::Cardinality
-                | ScalarFunc::ArrayUpper
-                | ScalarFunc::ArrayLower
-                | ScalarFunc::WidthBucket
-                | ScalarFunc::Factorial
-                | ScalarFunc::Gcd
-                | ScalarFunc::Lcm => DataType::Int64,
-                // Float results
-                ScalarFunc::Abs
-                | ScalarFunc::Round
-                | ScalarFunc::Ceil
-                | ScalarFunc::Floor
-                | ScalarFunc::Power
-                | ScalarFunc::Sqrt
-                | ScalarFunc::Sign
-                | ScalarFunc::Trunc
-                | ScalarFunc::Ln
-                | ScalarFunc::Log
-                | ScalarFunc::Exp
-                | ScalarFunc::Pi
-                | ScalarFunc::Mod
-                | ScalarFunc::Degrees
-                | ScalarFunc::Radians
-                | ScalarFunc::Cbrt
-                | ScalarFunc::Extract
-                | ScalarFunc::ToNumber
-                | ScalarFunc::Random
-                | ScalarFunc::Log10
-                | ScalarFunc::Log2
-                | ScalarFunc::Sin
-                | ScalarFunc::Cos
-                | ScalarFunc::Tan
-                | ScalarFunc::Asin
-                | ScalarFunc::Acos
-                | ScalarFunc::Atan
-                | ScalarFunc::Atan2
-                | ScalarFunc::Cot
-                | ScalarFunc::Sinh
-                | ScalarFunc::Cosh
-                | ScalarFunc::Tanh => DataType::Float64,
-                // Date/time
-                ScalarFunc::Now
-                | ScalarFunc::DateTrunc => DataType::Timestamp,
-                ScalarFunc::CurrentDate => DataType::Date,
-                ScalarFunc::CurrentTime => DataType::Time,
-                // Bool
-                ScalarFunc::StartsWith
-                | ScalarFunc::EndsWith
-                | ScalarFunc::ArrayContains
-                | ScalarFunc::ArrayOverlap => DataType::Boolean,
-                // Array-returning
-                ScalarFunc::Split
-                | ScalarFunc::RegexpMatch
-                | ScalarFunc::RegexpSplitToArray
-                | ScalarFunc::StringToArray
-                | ScalarFunc::ArrayFill
-                | ScalarFunc::ArrayReverse
-                | ScalarFunc::ArrayDistinct
-                | ScalarFunc::ArraySort
-                | ScalarFunc::ArrayIntersect
-                | ScalarFunc::ArrayExcept
-                | ScalarFunc::ArrayCompact
-                | ScalarFunc::ArrayFlatten
-                | ScalarFunc::ArraySlice => DataType::Array(Box::new(DataType::Text)),
-                // Pass-through: Greatest/Least inherit from first arg
-                ScalarFunc::Greatest | ScalarFunc::Least => args
-                    .first()
-                    .map_or(DataType::Text, |a| infer_expr_type(a, cols)),
-                // Array mutation returns array
-                ScalarFunc::ArrayAppend
-                | ScalarFunc::ArrayPrepend
-                | ScalarFunc::ArrayRemove
-                | ScalarFunc::ArrayReplace
-                | ScalarFunc::ArrayCat => args
-                    .first().map_or_else(|| DataType::Array(Box::new(DataType::Text)), |a| infer_expr_type(a, cols)),
-                // Catch-all for remaining scalar functions — default to Text
-                _ => DataType::Text,
-            }
-        }
-
-        fn infer_agg_return_type(func: &AggFunc, input_ty: Option<DataType>) -> DataType {
-            match func {
-                AggFunc::Count => DataType::Int64,
-                AggFunc::Sum => match input_ty {
-                    Some(DataType::Float64) => DataType::Float64,
-                    _ => DataType::Int64, // SUM promotes int types to bigint
-                },
-                AggFunc::Min | AggFunc::Max => input_ty.unwrap_or(DataType::Text),
-                AggFunc::StringAgg(_) => DataType::Text,
-                AggFunc::BoolAnd | AggFunc::BoolOr => DataType::Boolean,
-                AggFunc::ArrayAgg => DataType::Array(Box::new(input_ty.unwrap_or(DataType::Text))),
-                // Statistical aggregates always return Float64
-                AggFunc::Avg
-                | AggFunc::StddevPop
-                | AggFunc::StddevSamp
-                | AggFunc::VarPop
-                | AggFunc::VarSamp
-                | AggFunc::Corr
-                | AggFunc::CovarPop
-                | AggFunc::CovarSamp
-                | AggFunc::RegrSlope
-                | AggFunc::RegrIntercept
-                | AggFunc::RegrR2
-                | AggFunc::RegrAvgX
-                | AggFunc::RegrAvgY
-                | AggFunc::RegrSXX
-                | AggFunc::RegrSYY
-                | AggFunc::RegrSXY
-                | AggFunc::PercentileCont(_)
-                | AggFunc::PercentileDisc(_) => DataType::Float64,
-                AggFunc::RegrCount => DataType::Int64,
-                AggFunc::Mode => input_ty.unwrap_or(DataType::Text),
-                AggFunc::BitAndAgg | AggFunc::BitOrAgg | AggFunc::BitXorAgg => DataType::Int64,
-            }
-        }
-
-        fn projection_to_field(
-            p: &BoundProjection,
-            schema: &falcon_common::schema::TableSchema,
-        ) -> FieldDescription {
-            match p {
-                BoundProjection::Column(idx, alias) => {
-                    if let Some(col) = schema.columns.get(*idx) {
-                        FieldDescription {
-                            name: alias.clone(),
-                            table_oid: 0,
-                            column_attr: 0,
-                            type_oid: col.data_type.pg_oid(),
-                            type_len: col.data_type.type_len(),
-                            type_modifier: -1,
-                            format_code: 0,
-                        }
-                    } else {
-                        FieldDescription {
-                            name: alias.clone(),
-                            table_oid: 0,
-                            column_attr: 0,
-                            type_oid: 25, // TEXT fallback
-                            type_len: -1,
-                            type_modifier: -1,
-                            format_code: 0,
-                        }
-                    }
-                }
-                BoundProjection::Aggregate(func, arg, alias, _, _) => {
-                    let input_ty = arg.as_ref().map(|a| infer_expr_type(a, &schema.columns));
-                    let dt = infer_agg_return_type(func, input_ty);
-                    FieldDescription {
-                        name: alias.clone(),
-                        table_oid: 0,
-                        column_attr: 0,
-                        type_oid: dt.pg_oid(),
-                        type_len: dt.type_len(),
-                        type_modifier: -1,
-                        format_code: 0,
-                    }
-                }
-                BoundProjection::Expr(expr, alias) => {
-                    let dt = infer_expr_type(expr, &schema.columns);
-                    FieldDescription {
-                        name: alias.clone(),
-                        table_oid: 0,
-                        column_attr: 0,
-                        type_oid: dt.pg_oid(),
-                        type_len: dt.type_len(),
-                        type_modifier: -1,
-                        format_code: 0,
-                    }
-                }
-                BoundProjection::Window(w) => {
-                    FieldDescription {
-                        name: w.alias.clone(),
-                        table_oid: 0,
-                        column_attr: 0,
-                        type_oid: 20, // BIGINT (window funcs typically return int)
-                        type_len: 8,
-                        type_modifier: -1,
-                        format_code: 0,
-                    }
-                }
-            }
-        }
-
-        match plan {
-            PhysicalPlan::SeqScan {
-                projections,
-                schema,
-                ..
-            }
-            | PhysicalPlan::IndexScan {
-                projections,
-                schema,
-                ..
-            } => projections
-                .iter()
-                .map(|p| projection_to_field(p, schema))
-                .collect(),
-            PhysicalPlan::NestedLoopJoin {
-                projections,
-                combined_schema,
-                ..
-            }
-            | PhysicalPlan::HashJoin {
-                projections,
-                combined_schema,
-                ..
-            } => projections
-                .iter()
-                .map(|p| projection_to_field(p, combined_schema))
-                .collect(),
-            PhysicalPlan::Explain(_) | PhysicalPlan::ExplainAnalyze(_) => {
-                vec![FieldDescription {
-                    name: "QUERY PLAN".into(),
-                    table_oid: 0,
-                    column_attr: 0,
-                    type_oid: 25, // TEXT
-                    type_len: -1,
-                    type_modifier: -1,
-                    format_code: 0,
-                }]
-            }
-            PhysicalPlan::DistPlan { subplan, .. } => self.plan_output_fields(subplan),
-            // DML/DDL/txn control — no result columns
-            _ => vec![],
-        }
-    }
 
     pub(crate) fn error_response(&self, err: &FalconError) -> BackendMessage {
         let mut message = err.to_string();
@@ -4179,7 +2576,7 @@ mod tests {
             crate::session::PreparedStatement {
                 query: "SELECT * FROM ps_life WHERE id = $1".into(),
                 param_types: effective_oids.clone(),
-                plan: Some(plan),
+                plan: Some(std::sync::Arc::new(plan)),
                 inferred_param_types: inferred_types.clone(),
                 row_desc: row_desc.clone(),
             },
@@ -4243,7 +2640,7 @@ mod tests {
             crate::session::PreparedStatement {
                 query: "SELECT * FROM ps_mp WHERE id = $1".into(),
                 param_types: vec![23],
-                plan: Some(plan),
+                plan: Some(std::sync::Arc::new(plan)),
                 inferred_param_types: inferred_types,
                 row_desc,
             },

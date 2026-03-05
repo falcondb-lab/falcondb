@@ -1,0 +1,8 @@
+{
+  "backup_path": "H:\\falcondb-main\\falcondb-poc-backup-pitr\\backups\\full_backup_20260304_090313",
+  "backup_label": "full_backup_20260304_090313",
+  "status": "completed",
+  "database": "pitr_demo",
+  "data_dir": "H:\\falcondb-main\\falcondb-poc-backup-pitr\\pitr_data",
+  "total_balance": 1012750
+}

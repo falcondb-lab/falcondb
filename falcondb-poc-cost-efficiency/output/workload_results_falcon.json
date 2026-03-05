@@ -1,0 +1,17 @@
+{
+  "label": "falcon",
+  "host": "127.0.0.1",
+  "port": 5433,
+  "target_rate": 1000,
+  "actual_rate": 967.5,
+  "duration_sec": 10,
+  "total_committed": 9682,
+  "total_errors": 0,
+  "latency_min_us": 350,
+  "latency_max_us": 2238,
+  "latency_avg_us": 563,
+  "latency_p50_us": 515,
+  "latency_p95_us": 887,
+  "latency_p99_us": 1258,
+  "timestamp": "2026-03-04T08:49:25.235394+00:00"
+}

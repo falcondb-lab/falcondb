@@ -17,6 +17,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::{Mutex, RwLock};
@@ -544,34 +545,84 @@ pub struct SegmentReplicationCoordinator {
     config: SegmentReplicationConfig,
     leader: RwLock<LeaderState>,
     followers: RwLock<HashMap<NodeId, FollowerState>>,
-    /// In-memory segment store (for testing / in-process mode).
-    /// In production, this would be backed by the filesystem.
+    /// In-memory segment cache (fallback when no segment_dir).
     segment_store: RwLock<HashMap<u64, Vec<u8>>>,
+    /// Filesystem directory for durable segment storage.
+    segment_dir: Option<PathBuf>,
     pub metrics: SegmentStreamingMetrics,
 }
 
 impl SegmentReplicationCoordinator {
-    /// Create a new coordinator.
+    /// Create a new coordinator (in-memory segment store).
     pub fn new(config: SegmentReplicationConfig, leader_segment_id: u64, leader_offset: u64) -> Self {
         Self {
             config,
             leader: RwLock::new(LeaderState::new(leader_segment_id, leader_offset)),
             followers: RwLock::new(HashMap::new()),
             segment_store: RwLock::new(HashMap::new()),
+            segment_dir: None,
             metrics: SegmentStreamingMetrics::default(),
         }
     }
 
-    /// Register a sealed segment's data (for testing / in-process mode).
+    /// Create a coordinator with filesystem-backed segment storage.
+    pub fn with_dir(config: SegmentReplicationConfig, leader_segment_id: u64, leader_offset: u64, dir: &Path) -> Self {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            tracing::error!(path = ?dir, error = %e, "failed to create segment directory");
+        }
+        Self {
+            config,
+            leader: RwLock::new(LeaderState::new(leader_segment_id, leader_offset)),
+            followers: RwLock::new(HashMap::new()),
+            segment_store: RwLock::new(HashMap::new()),
+            segment_dir: Some(dir.to_path_buf()),
+            metrics: SegmentStreamingMetrics::default(),
+        }
+    }
+
+    fn segment_path(&self, segment_id: u64) -> Option<PathBuf> {
+        self.segment_dir.as_ref().map(|d| d.join(format!("segment_{:06}.dat", segment_id)))
+    }
+
+    fn write_segment_file(&self, segment_id: u64, data: &[u8]) {
+        if let Some(path) = self.segment_path(segment_id) {
+            if let Err(e) = std::fs::write(&path, data) {
+                tracing::error!(segment_id, path = ?path, error = %e, "failed to write segment file");
+            }
+        }
+    }
+
+    fn read_segment_data(&self, segment_id: u64) -> Option<Vec<u8>> {
+        // Try filesystem first
+        if let Some(path) = self.segment_path(segment_id) {
+            if path.exists() {
+                match std::fs::read(&path) {
+                    Ok(data) => return Some(data),
+                    Err(e) => {
+                        tracing::warn!(segment_id, error = %e, "failed to read segment file, falling back to memory");
+                    }
+                }
+            }
+        }
+        // Fallback to in-memory
+        self.segment_store.read().get(&segment_id).cloned()
+    }
+
     pub fn register_segment_data(&self, segment_id: u64, data: Vec<u8>) {
-        self.segment_store.write().insert(segment_id, data);
+        if self.segment_dir.is_some() {
+            self.write_segment_file(segment_id, &data);
+        } else {
+            self.segment_store.write().insert(segment_id, data);
+        }
         self.leader.write().sealed_segments.insert(segment_id);
     }
 
-    /// Register the active (unsealed) segment's data for tail streaming.
-    /// Does NOT mark the segment as sealed.
     pub fn register_active_segment_data(&self, segment_id: u64, data: Vec<u8>) {
-        self.segment_store.write().insert(segment_id, data);
+        if self.segment_dir.is_some() {
+            self.write_segment_file(segment_id, &data);
+        } else {
+            self.segment_store.write().insert(segment_id, data);
+        }
     }
 
     /// Update leader's current write position.
@@ -608,12 +659,10 @@ impl SegmentReplicationCoordinator {
     /// Stream a sealed segment to a follower as chunks.
     /// Returns an iterator of `SegmentChunk`s.
     pub fn stream_segment(&self, segment_id: u64) -> Option<SegmentChunkIterator> {
-        let store = self.segment_store.read();
-        let data = store.get(&segment_id)?;
+        let data = self.read_segment_data(segment_id)?;
 
-        // Parse last_valid_offset from the segment header if possible
         let last_valid = if data.len() >= SEGMENT_HEADER_SIZE as usize {
-            if let Some(hdr) = SegmentHeader::from_bytes(data) {
+            if let Some(hdr) = SegmentHeader::from_bytes(&data) {
                 if hdr.validate() {
                     hdr.last_valid_offset
                 } else {
@@ -630,7 +679,7 @@ impl SegmentReplicationCoordinator {
 
         Some(SegmentChunkIterator::new(
             segment_id,
-            data.clone(),
+            data,
             last_valid,
             self.config.chunk_size,
         ))
@@ -644,9 +693,7 @@ impl SegmentReplicationCoordinator {
         segment_id: u64,
         from_offset: u64,
     ) -> Option<TailBatch> {
-        let store = self.segment_store.read();
-        // Try the active segment data (may be in store for testing)
-        let data = store.get(&segment_id)?;
+        let data = self.read_segment_data(segment_id)?;
 
         let leader = self.leader.read();
         let end_offset = if segment_id == leader.current_segment_id {

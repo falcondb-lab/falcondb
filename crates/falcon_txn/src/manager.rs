@@ -702,6 +702,9 @@ pub struct TxnManager {
     /// Admission gate: replication lag threshold (0 = disabled).
     /// When slowest replica lag >= this, new write transactions are rejected.
     replication_lag_threshold_ms: AtomicU64,
+    /// Max age for idle-in-transaction sessions (ms, 0 = disabled).
+    /// Transactions exceeding this are auto-aborted by the GC reaper.
+    idle_in_txn_timeout_ms: AtomicU64,
 }
 
 impl TxnManager {
@@ -719,6 +722,7 @@ impl TxnManager {
             slow_txn_threshold_us: AtomicU64::new(DEFAULT_SLOW_TXN_THRESHOLD_US),
             wal_backlog_threshold_bytes: AtomicU64::new(0),
             replication_lag_threshold_ms: AtomicU64::new(0),
+            idle_in_txn_timeout_ms: AtomicU64::new(0),
         }
     }
 
@@ -864,6 +868,42 @@ impl TxnManager {
     pub fn set_replication_lag_threshold(&self, lag: u64) {
         self.replication_lag_threshold_ms
             .store(lag, Ordering::Relaxed);
+    }
+
+    /// Set idle-in-transaction timeout (ms, 0 = disabled).
+    /// Transactions exceeding this age are auto-aborted by reap_long_transactions().
+    pub fn set_idle_in_txn_timeout_ms(&self, ms: u64) {
+        self.idle_in_txn_timeout_ms.store(ms, Ordering::Relaxed);
+    }
+
+    pub fn idle_in_txn_timeout_ms(&self) -> u64 {
+        self.idle_in_txn_timeout_ms.load(Ordering::Relaxed)
+    }
+
+    /// Auto-abort transactions that have been active longer than idle_in_txn_timeout_ms.
+    /// Skips Prepared (in-doubt) transactions — those must be resolved by the 2PC coordinator.
+    /// Returns number of transactions reaped.
+    pub fn reap_long_transactions(&self) -> usize {
+        let timeout_ms = self.idle_in_txn_timeout_ms.load(Ordering::Relaxed);
+        if timeout_ms == 0 {
+            return 0;
+        }
+        let victims: Vec<TxnId> = self.active_txns.iter()
+            .filter(|e| {
+                let h = e.value();
+                h.state == TxnState::Active && h.elapsed_ms() > timeout_ms
+            })
+            .map(|e| e.key().clone())
+            .collect();
+
+        let mut reaped = 0;
+        for txn_id in victims {
+            if let Ok(()) = self.abort_with_reason(txn_id, "idle_in_transaction_timeout") {
+                tracing::warn!(%txn_id, timeout_ms, "reaped long-running transaction");
+                reaped += 1;
+            }
+        }
+        reaped
     }
 
     pub fn begin_with_classification(
@@ -1111,27 +1151,28 @@ impl TxnManager {
             }
 
             // ── OCC validation under SI / Serializable ──
-            // Must validate BEFORE allocating commit_ts to avoid phantom commits.
+            // Allocate commit_ts FIRST, then validate. This closes the TOCTOU
+            // window: any concurrent commit that obtains a higher ts cannot
+            // have been visible at our start_ts, and any commit with ts in
+            // (start_ts, commit_ts) is caught by validate_read_set.
+            // A wasted ts on abort is harmless.
+            let commit_ts = self.alloc_ts();
             if matches!(
                 isolation,
                 IsolationLevel::SnapshotIsolation | IsolationLevel::Serializable
             ) {
-                // Drop the DashMap ref before calling into storage to avoid deadlocks.
                 drop(entry);
                 if self.storage.validate_read_set(txn_id, start_ts).is_err() {
-                    // Validation failed — abort the transaction.
                     self.stats.record_occ_conflict();
                     self.abort(txn_id)?;
                     return Err(TxnError::SerializationConflict(txn_id));
                 }
-                // Re-acquire the entry after validation.
                 entry = self
                     .active_txns
                     .get_mut(&txn_id)
                     .ok_or(TxnError::NotFound(txn_id))?;
             }
 
-            let commit_ts = self.alloc_ts();
             entry.path = TxnPath::Fast;
             // Note: state is set to Committed only AFTER storage confirms.
             drop(entry);
@@ -1553,5 +1594,9 @@ impl falcon_storage::gc::SafepointProvider for TxnManager {
 
     fn replica_safe_ts(&self) -> Timestamp {
         self.storage.replica_ack_tracker().min_replica_safe_ts()
+    }
+
+    fn reap_long_transactions(&self) -> usize {
+        self.reap_long_transactions()
     }
 }

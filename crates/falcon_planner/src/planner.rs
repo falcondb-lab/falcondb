@@ -2,7 +2,9 @@ use falcon_common::error::SqlError;
 use falcon_common::types::ShardId;
 use falcon_sql_frontend::types::*;
 
-use crate::cost::{self, IndexedColumns, TableRowCounts};
+use crate::cost::{self, IndexedColumns, TableRowCounts, TableStatsMap};
+use crate::logical_plan::LogicalPlan;
+use crate::optimizer::{self, OptimizerConfig, OptimizerContext};
 use crate::plan::{DistAggMerge, DistGather, PhysicalPlan};
 
 /// Join algorithm strategy selected by the cost-based optimizer.
@@ -82,6 +84,25 @@ impl Planner {
             }),
             BoundStatement::Select(sel) => {
                 if sel.joins.is_empty() {
+                    // Columnstore tables use ColumnScan for vectorized execution
+                    if sel.schema.storage_type == falcon_common::schema::StorageType::Columnstore {
+                        return Ok(PhysicalPlan::ColumnScan {
+                            table_id: sel.table_id,
+                            schema: sel.schema.clone(),
+                            projections: sel.projections.clone(),
+                            visible_projection_count: sel.visible_projection_count,
+                            filter: sel.filter.clone(),
+                            group_by: sel.group_by.clone(),
+                            grouping_sets: sel.grouping_sets.clone(),
+                            having: sel.having.clone(),
+                            order_by: sel.order_by.clone(),
+                            limit: sel.limit,
+                            offset: sel.offset,
+                            distinct: sel.distinct.clone(),
+                            ctes: sel.ctes.clone(),
+                            unions: sel.unions.clone(),
+                        });
+                    }
                     Ok(PhysicalPlan::SeqScan {
                         table_id: sel.table_id,
                         schema: sel.schema.clone(),
@@ -156,11 +177,13 @@ impl Planner {
                 table_name,
                 column_indices,
                 unique,
+                concurrently,
             } => Ok(PhysicalPlan::CreateIndex {
                 index_name: index_name.clone(),
                 table_name: table_name.clone(),
                 column_indices: column_indices.clone(),
                 unique: *unique,
+                concurrently: *concurrently,
             }),
             BoundStatement::DropIndex { index_name } => Ok(PhysicalPlan::DropIndex {
                 index_name: index_name.clone(),
@@ -298,6 +321,7 @@ impl Planner {
                 null_string,
                 quote,
                 escape,
+                file_path,
             } => Ok(PhysicalPlan::CopyFrom {
                 table_id: *table_id,
                 schema: schema.clone(),
@@ -308,6 +332,7 @@ impl Planner {
                 null_string: null_string.clone(),
                 quote: *quote,
                 escape: *escape,
+                file_path: file_path.clone(),
             }),
             BoundStatement::CopyTo {
                 table_id,
@@ -319,6 +344,7 @@ impl Planner {
                 null_string,
                 quote,
                 escape,
+                file_path,
             } => Ok(PhysicalPlan::CopyTo {
                 table_id: *table_id,
                 schema: schema.clone(),
@@ -329,6 +355,7 @@ impl Planner {
                 null_string: null_string.clone(),
                 quote: *quote,
                 escape: *escape,
+                file_path: file_path.clone(),
             }),
             BoundStatement::CopyQueryTo {
                 query,
@@ -338,6 +365,7 @@ impl Planner {
                 null_string,
                 quote,
                 escape,
+                file_path,
             } => {
                 let inner_plan = Self::plan(&BoundStatement::Select(*query.clone()))?;
                 Ok(PhysicalPlan::CopyQueryTo {
@@ -348,6 +376,7 @@ impl Planner {
                     null_string: null_string.clone(),
                     quote: *quote,
                     escape: *escape,
+                    file_path: file_path.clone(),
                 })
             }
         }
@@ -499,6 +528,20 @@ impl Planner {
                 ctes,
                 unions,
                 ..
+            }
+            | PhysicalPlan::ColumnScan {
+                projections,
+                group_by,
+                grouping_sets,
+                having,
+                order_by,
+                limit,
+                offset,
+                distinct,
+                filter,
+                ctes,
+                unions,
+                ..
             } => {
                 // If the query has cross-table subqueries (IN/EXISTS/scalar subquery),
                 // CTEs, UNIONs, or GROUPING SETS, DON'T distribute — requires
@@ -542,7 +585,8 @@ impl Planner {
                     match &mut subplan {
                         PhysicalPlan::SeqScan { projections, .. }
                         | PhysicalPlan::IndexScan { projections, .. }
-                        | PhysicalPlan::IndexRangeScan { projections, .. } => {
+                        | PhysicalPlan::IndexRangeScan { projections, .. }
+                        | PhysicalPlan::ColumnScan { projections, .. } => {
                             *projections = new_projs;
                         }
                         _ => {}
@@ -641,6 +685,11 @@ impl Planner {
                 ..
             }
             | PhysicalPlan::MergeSortJoin {
+                limit: lim,
+                offset: off,
+                ..
+            }
+            | PhysicalPlan::ColumnScan {
                 limit: lim,
                 offset: off,
                 ..
@@ -777,7 +826,8 @@ impl Planner {
         match plan {
             PhysicalPlan::SeqScan { having, .. }
             | PhysicalPlan::IndexScan { having, .. }
-            | PhysicalPlan::IndexRangeScan { having, .. } => {
+            | PhysicalPlan::IndexRangeScan { having, .. }
+            | PhysicalPlan::ColumnScan { having, .. } => {
                 *having = None;
             }
             _ => {}
@@ -1628,5 +1678,427 @@ impl Planner {
             }
             _ => None,
         }
+    }
+
+    /// Full optimization pipeline: `BoundStatement` → `LogicalPlan` → optimize → `PhysicalPlan`.
+    ///
+    /// Uses `TableStatsMap` for selectivity-based cost estimation and index selection.
+    /// Falls back to `plan_with_indexes` for statements that don't go through the
+    /// logical plan path (Database DDL, Schema/Role/Grant DDL).
+    pub fn plan_optimized(
+        stmt: &BoundStatement,
+        stats: &TableStatsMap,
+        indexes: &IndexedColumns,
+    ) -> Result<PhysicalPlan, SqlError> {
+        let row_counts: TableRowCounts = stats.iter().map(|(id, s)| (*id, s.row_count)).collect();
+
+        // SetOp (UNION/INTERSECT/EXCEPT) lowering doesn't reconstruct the right-branch BoundSelect.
+        // Fall back to the legacy planner which preserves the original unions vec.
+        if let BoundStatement::Select(sel) = stmt {
+            if !sel.unions.is_empty() {
+                return Self::plan_with_indexes(stmt, &row_counts, indexes);
+            }
+        }
+
+        let logical = match LogicalPlan::from_bound(stmt) {
+            Ok(lp) => lp,
+            Err(_) => {
+                return Self::plan_with_indexes(stmt, &row_counts, indexes);
+            }
+        };
+
+        // Optimize
+        let config = OptimizerConfig::default();
+        let ctx = OptimizerContext {
+            stats: &row_counts,
+            indexes,
+            config: &config,
+        };
+        let optimized = optimizer::optimize(logical, &ctx);
+
+        // Lower to physical plan with cost-based decisions
+        Self::lower_to_physical(optimized, stats, indexes)
+    }
+
+    /// Lower an optimized `LogicalPlan` tree to a `PhysicalPlan`.
+    fn lower_to_physical(
+        plan: LogicalPlan,
+        stats: &TableStatsMap,
+        indexes: &IndexedColumns,
+    ) -> Result<PhysicalPlan, SqlError> {
+        match plan {
+            // ── SELECT path ──────────────────────────────────────────
+            // The optimizer decomposes SELECT into Scan → Filter → Join → Agg → Sort → Limit → Project.
+            // We need to re-compose these into the flat PhysicalPlan variants the executor expects.
+            // Strategy: walk down collecting components, then emit the right physical operator.
+            LogicalPlan::Project { input, projections, visible_count } => {
+                Self::lower_select_tree(*input, projections, visible_count, stats, indexes)
+            }
+            LogicalPlan::Aggregate { input, group_by, grouping_sets, projections, visible_count, having } => {
+                // Aggregate at top level (no outer Project wrapping it)
+                let (table_id, schema, filter, virtual_rows, joins, ctes, unions, order_by, limit, offset, distinct) =
+                    Self::collect_scan_components(*input);
+                if !joins.is_empty() {
+                    return Self::build_join_plan(
+                        table_id, schema, joins, projections, visible_count,
+                        filter, group_by, grouping_sets, having, order_by,
+                        limit, offset, distinct, ctes, unions, stats,
+                    );
+                }
+                Self::build_scan_plan(
+                    table_id, schema, projections, visible_count,
+                    filter, group_by, grouping_sets, having, order_by,
+                    limit, offset, distinct, ctes, unions, virtual_rows,
+                    stats, indexes,
+                )
+            }
+
+            // ── DML / DDL pass-through ───────────────────────────────
+            LogicalPlan::Insert { table_id, schema, columns, rows, source_select, returning, on_conflict } => {
+                Ok(PhysicalPlan::Insert { table_id, schema, columns, rows, source_select, returning, on_conflict })
+            }
+            LogicalPlan::Update { table_id, schema, assignments, filter, returning, from_table } => {
+                Ok(PhysicalPlan::Update { table_id, schema, assignments, filter, returning, from_table })
+            }
+            LogicalPlan::Delete { table_id, schema, filter, returning, using_table } => {
+                Ok(PhysicalPlan::Delete { table_id, schema, filter, returning, using_table })
+            }
+            LogicalPlan::CreateTable { schema, if_not_exists } => Ok(PhysicalPlan::CreateTable { schema, if_not_exists }),
+            LogicalPlan::DropTable { table_name, if_exists } => Ok(PhysicalPlan::DropTable { table_name, if_exists }),
+            LogicalPlan::AlterTable { table_name, ops } => Ok(PhysicalPlan::AlterTable { table_name, ops }),
+            LogicalPlan::Truncate { table_name } => Ok(PhysicalPlan::Truncate { table_name }),
+            LogicalPlan::CreateIndex { index_name, table_name, column_indices, unique, concurrently } => {
+                Ok(PhysicalPlan::CreateIndex { index_name, table_name, column_indices, unique, concurrently })
+            }
+            LogicalPlan::DropIndex { index_name } => Ok(PhysicalPlan::DropIndex { index_name }),
+            LogicalPlan::CreateView { name, query_sql, or_replace } => Ok(PhysicalPlan::CreateView { name, query_sql, or_replace }),
+            LogicalPlan::DropView { name, if_exists } => Ok(PhysicalPlan::DropView { name, if_exists }),
+            LogicalPlan::CreateSequence { name, start } => Ok(PhysicalPlan::CreateSequence { name, start }),
+            LogicalPlan::DropSequence { name, if_exists } => Ok(PhysicalPlan::DropSequence { name, if_exists }),
+            LogicalPlan::Explain(inner) => {
+                let p = Self::lower_to_physical(*inner, stats, indexes)?;
+                Ok(PhysicalPlan::Explain(Box::new(p)))
+            }
+            LogicalPlan::ExplainAnalyze(inner) => {
+                let p = Self::lower_to_physical(*inner, stats, indexes)?;
+                Ok(PhysicalPlan::ExplainAnalyze(Box::new(p)))
+            }
+            LogicalPlan::Begin => Ok(PhysicalPlan::Begin),
+            LogicalPlan::Commit => Ok(PhysicalPlan::Commit),
+            LogicalPlan::Rollback => Ok(PhysicalPlan::Rollback),
+            LogicalPlan::ShowTxnStats => Ok(PhysicalPlan::ShowTxnStats),
+            LogicalPlan::ShowNodeRole => Ok(PhysicalPlan::ShowNodeRole),
+            LogicalPlan::ShowWalStats => Ok(PhysicalPlan::ShowWalStats),
+            LogicalPlan::ShowConnections => Ok(PhysicalPlan::ShowConnections),
+            LogicalPlan::RunGc => Ok(PhysicalPlan::RunGc),
+            LogicalPlan::Analyze { table_name } => Ok(PhysicalPlan::Analyze { table_name }),
+            LogicalPlan::ShowTableStats { table_name } => Ok(PhysicalPlan::ShowTableStats { table_name }),
+            LogicalPlan::ShowSequences => Ok(PhysicalPlan::ShowSequences),
+            LogicalPlan::ShowTenants => Ok(PhysicalPlan::ShowTenants),
+            LogicalPlan::ShowTenantUsage => Ok(PhysicalPlan::ShowTenantUsage),
+            LogicalPlan::CreateTenant { name, max_qps, max_storage_bytes } => {
+                Ok(PhysicalPlan::CreateTenant { name, max_qps, max_storage_bytes })
+            }
+            LogicalPlan::DropTenant { name } => Ok(PhysicalPlan::DropTenant { name }),
+            LogicalPlan::CopyFrom { table_id, schema, columns, csv, delimiter, header, null_string, quote, escape, file_path } => {
+                Ok(PhysicalPlan::CopyFrom { table_id, schema, columns, csv, delimiter, header, null_string, quote, escape, file_path })
+            }
+            LogicalPlan::CopyTo { table_id, schema, columns, csv, delimiter, header, null_string, quote, escape, file_path } => {
+                Ok(PhysicalPlan::CopyTo { table_id, schema, columns, csv, delimiter, header, null_string, quote, escape, file_path })
+            }
+            LogicalPlan::CopyQueryTo { query, csv, delimiter, header, null_string, quote, escape, file_path } => {
+                let inner = Self::lower_to_physical(*query, stats, indexes)?;
+                Ok(PhysicalPlan::CopyQueryTo { query: Box::new(inner), csv, delimiter, header, null_string, quote, escape, file_path })
+            }
+            // For remaining logical nodes not directly mapped, fall through to a scan
+            other => Self::lower_remaining(other, stats, indexes),
+        }
+    }
+
+    /// Lower a SELECT tree rooted at Project(input).
+    fn lower_select_tree(
+        input: LogicalPlan,
+        projections: Vec<BoundProjection>,
+        visible_count: usize,
+        stats: &TableStatsMap,
+        indexes: &IndexedColumns,
+    ) -> Result<PhysicalPlan, SqlError> {
+        let (table_id, schema, filter, virtual_rows, joins, ctes, unions, order_by, limit, offset, distinct) =
+            Self::collect_scan_components(input);
+
+        let group_by = vec![];
+        let grouping_sets = vec![];
+        let having = None;
+
+        if !joins.is_empty() {
+            return Self::build_join_plan(
+                table_id, schema, joins, projections, visible_count,
+                filter, group_by, grouping_sets, having, order_by,
+                limit, offset, distinct, ctes, unions, stats,
+            );
+        }
+
+        Self::build_scan_plan(
+            table_id, schema, projections, visible_count,
+            filter, group_by, grouping_sets, having, order_by,
+            limit, offset, distinct, ctes, unions, virtual_rows,
+            stats, indexes,
+        )
+    }
+
+    /// Walk down a logical plan tree, extracting components needed for physical plan construction.
+    #[allow(clippy::type_complexity)]
+    fn collect_scan_components(plan: LogicalPlan) -> (
+        falcon_common::types::TableId,
+        falcon_common::schema::TableSchema,
+        Option<BoundExpr>,           // filter
+        Vec<falcon_common::datum::OwnedRow>, // virtual_rows
+        Vec<BoundJoin>,              // joins
+        Vec<BoundCte>,               // ctes
+        Vec<(BoundSelect, SetOpKind, bool)>, // unions
+        Vec<BoundOrderBy>,           // order_by
+        Option<usize>,               // limit
+        Option<usize>,               // offset
+        DistinctMode,                // distinct
+    ) {
+        let mut filter = None;
+        let mut order_by = vec![];
+        let mut limit = None;
+        let mut offset = None;
+        let mut distinct = DistinctMode::None;
+        let mut joins = vec![];
+        let mut ctes = vec![];
+        // SetOp queries (UNION/INTERSECT/EXCEPT) are routed through the legacy planner
+        // before reaching collect_scan_components, so this vec is always empty here.
+        let unions: Vec<(BoundSelect, SetOpKind, bool)> = vec![];
+
+        let mut current = plan;
+        loop {
+            match current {
+                LogicalPlan::Filter { input, predicate } => {
+                    filter = Some(match filter {
+                        Some(existing) => BoundExpr::BinaryOp {
+                            left: Box::new(existing),
+                            op: BinOp::And,
+                            right: Box::new(predicate),
+                        },
+                        None => predicate,
+                    });
+                    current = *input;
+                }
+                LogicalPlan::Sort { input, order_by: ob } => {
+                    if order_by.is_empty() {
+                        order_by = ob;
+                    }
+                    current = *input;
+                }
+                LogicalPlan::Limit { input, limit: l, offset: o } => {
+                    if limit.is_none() { limit = l; }
+                    if offset.is_none() { offset = o; }
+                    current = *input;
+                }
+                LogicalPlan::Distinct { input, mode } => {
+                    distinct = mode;
+                    current = *input;
+                }
+                LogicalPlan::MultiJoin { base, joins: j } => {
+                    joins = j;
+                    current = *base;
+                }
+                LogicalPlan::WithCtes { ctes: c, input } => {
+                    ctes = c;
+                    current = *input;
+                }
+                LogicalPlan::SetOp { left, right: _, kind: _, all: _ } => {
+                    // TODO: handle set ops properly; for now just descend left
+                    current = *left;
+                }
+                LogicalPlan::Aggregate { input, group_by: _, grouping_sets: _, projections: _, visible_count: _, having: _ } => {
+                    // Aggregate should be handled by caller before this point
+                    current = *input;
+                }
+                LogicalPlan::Project { input, .. } => {
+                    current = *input;
+                }
+                LogicalPlan::Scan { table_id, schema, virtual_rows } => {
+                    return (table_id, schema, filter, virtual_rows, joins, ctes, unions, order_by, limit, offset, distinct);
+                }
+                _ => {
+                    // Fallback for unexpected nodes
+                    return (
+                        falcon_common::types::TableId(0),
+                        falcon_common::schema::TableSchema::default(),
+                        filter, vec![], joins, ctes, unions, order_by, limit, offset, distinct,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Build a physical scan plan, choosing SeqScan vs IndexScan based on cost.
+    #[allow(clippy::too_many_arguments)]
+    fn build_scan_plan(
+        table_id: falcon_common::types::TableId,
+        schema: falcon_common::schema::TableSchema,
+        projections: Vec<BoundProjection>,
+        visible_projection_count: usize,
+        filter: Option<BoundExpr>,
+        group_by: Vec<usize>,
+        grouping_sets: Vec<Vec<usize>>,
+        having: Option<BoundExpr>,
+        order_by: Vec<BoundOrderBy>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+        distinct: DistinctMode,
+        ctes: Vec<BoundCte>,
+        unions: Vec<(BoundSelect, SetOpKind, bool)>,
+        virtual_rows: Vec<falcon_common::datum::OwnedRow>,
+        stats: &TableStatsMap,
+        indexes: &IndexedColumns,
+    ) -> Result<PhysicalPlan, SqlError> {
+        // Columnstore tables use ColumnScan
+        if schema.storage_type == falcon_common::schema::StorageType::Columnstore {
+            return Ok(PhysicalPlan::ColumnScan {
+                table_id, schema, projections, visible_projection_count: visible_projection_count,
+                filter, group_by, grouping_sets, having, order_by,
+                limit, offset, distinct, ctes, unions,
+            });
+        }
+
+        // Try cost-based index scan selection
+        if let Some(ref f) = filter {
+            if let Some(indexed_cols) = indexes.get(&table_id) {
+                if !indexed_cols.is_empty() {
+                    let table_stats = stats.get(&table_id);
+                    let sel = table_stats
+                        .map(|s| cost::estimate_selectivity(f, Some(s)))
+                        .unwrap_or(0.5);
+                    let row_count = table_stats.map_or(1000, |s| s.row_count);
+
+                    if cost::prefer_index_scan(row_count, sel) {
+                        // Try to extract an index predicate
+                        if let Some((col_idx, value, residual)) =
+                            Self::try_extract_index_predicate(f, indexed_cols)
+                        {
+                            return Ok(PhysicalPlan::IndexScan {
+                                table_id, schema, index_col: col_idx, index_value: value,
+                                projections, visible_projection_count,
+                                filter: residual,
+                                group_by, grouping_sets, having, order_by,
+                                limit, offset, distinct, ctes, unions, virtual_rows,
+                            });
+                        }
+                        // Try range scan
+                        if let Some((col_idx, lower, upper, residual)) =
+                            Self::try_extract_range_predicate(f, indexed_cols)
+                        {
+                            return Ok(PhysicalPlan::IndexRangeScan {
+                                table_id, schema, index_col: col_idx,
+                                lower_bound: lower, upper_bound: upper,
+                                projections, visible_projection_count,
+                                filter: residual,
+                                group_by, grouping_sets, having, order_by,
+                                limit, offset, distinct, ctes, unions, virtual_rows,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Default: SeqScan
+        Ok(PhysicalPlan::SeqScan {
+            table_id, schema, projections, visible_projection_count,
+            filter, group_by, grouping_sets, having, order_by,
+            limit, offset, distinct, ctes, unions, virtual_rows,
+        })
+    }
+
+    /// Build a join plan choosing NL/Hash/MergeSort based on stats.
+    #[allow(clippy::too_many_arguments)]
+    fn build_join_plan(
+        table_id: falcon_common::types::TableId,
+        schema: falcon_common::schema::TableSchema,
+        joins: Vec<BoundJoin>,
+        projections: Vec<BoundProjection>,
+        visible_projection_count: usize,
+        filter: Option<BoundExpr>,
+        _group_by: Vec<usize>,
+        _grouping_sets: Vec<Vec<usize>>,
+        _having: Option<BoundExpr>,
+        order_by: Vec<BoundOrderBy>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+        distinct: DistinctMode,
+        ctes: Vec<BoundCte>,
+        unions: Vec<(BoundSelect, SetOpKind, bool)>,
+        stats: &TableStatsMap,
+    ) -> Result<PhysicalPlan, SqlError> {
+        let row_counts: TableRowCounts = stats.iter().map(|(id, s)| (*id, s.row_count)).collect();
+
+        // Reorder joins using cost model
+        let left_col_count = joins.first().map_or(0, |j| j.right_col_offset);
+        let reordered = cost::reorder_joins(left_col_count, &joins, &row_counts);
+
+        let all_equi = reordered.iter().all(|j| Self::is_equi_join_condition(j.condition.as_ref()));
+        let left_rows = stats.get(&table_id).map_or(1000, |s| s.row_count);
+        let right_rows_sum: u64 = reordered.iter()
+            .map(|j| stats.get(&j.right_table_id).map_or(1000, |s| s.row_count))
+            .sum();
+
+        let strategy = if !all_equi {
+            JoinStrategy::NestedLoop
+        } else if right_rows_sum < 100 {
+            JoinStrategy::NestedLoop
+        } else if left_rows > 50_000 && right_rows_sum > 50_000 {
+            JoinStrategy::MergeSort
+        } else {
+            JoinStrategy::Hash
+        };
+
+        match strategy {
+            JoinStrategy::NestedLoop => Ok(PhysicalPlan::NestedLoopJoin {
+                left_table_id: table_id, left_schema: schema.clone(),
+                joins: reordered, combined_schema: schema,
+                projections, visible_projection_count,
+                filter, order_by, limit, offset, distinct, ctes, unions,
+            }),
+            JoinStrategy::Hash => Ok(PhysicalPlan::HashJoin {
+                left_table_id: table_id, left_schema: schema.clone(),
+                joins: reordered, combined_schema: schema,
+                projections, visible_projection_count,
+                filter, order_by, limit, offset, distinct, ctes, unions,
+            }),
+            JoinStrategy::MergeSort => Ok(PhysicalPlan::MergeSortJoin {
+                left_table_id: table_id, left_schema: schema.clone(),
+                joins: reordered, combined_schema: schema,
+                projections, visible_projection_count,
+                filter, order_by, limit, offset, distinct, ctes, unions,
+            }),
+        }
+    }
+
+    /// Handle any LogicalPlan nodes not directly mapped by lower_to_physical.
+    fn lower_remaining(
+        plan: LogicalPlan,
+        stats: &TableStatsMap,
+        indexes: &IndexedColumns,
+    ) -> Result<PhysicalPlan, SqlError> {
+        // For nodes like bare Scan, Filter, Sort, etc., collect components and build scan
+        let (table_id, schema, filter, virtual_rows, joins, ctes, unions, order_by, limit, offset, distinct) =
+            Self::collect_scan_components(plan);
+        if !joins.is_empty() {
+            return Self::build_join_plan(
+                table_id, schema, joins, vec![], 0,
+                filter, vec![], vec![], None, order_by,
+                limit, offset, distinct, ctes, unions, stats,
+            );
+        }
+        Self::build_scan_plan(
+            table_id, schema, vec![], 0,
+            filter, vec![], vec![], None, order_by,
+            limit, offset, distinct, ctes, unions, virtual_rows,
+            stats, indexes,
+        )
     }
 }

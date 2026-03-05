@@ -729,6 +729,7 @@
             table_name: "users".into(),
             column_indices: vec![2],
             unique: false,
+            concurrently: false,
         };
         let result = qe.execute(&idx_plan, None).unwrap();
         assert!(matches!(result, ExecutionResult::Ddl { .. }));

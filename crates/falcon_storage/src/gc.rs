@@ -232,7 +232,7 @@ pub fn sweep_memtable(
     for entry in &table.data {
         // Batch limit
         if config.batch_size > 0 && processed >= config.batch_size as u64 {
-            result.keys_skipped += table.data.len() as u64 - processed;
+            result.keys_skipped += (table.data.len() as u64).saturating_sub(processed);
             break;
         }
 
@@ -281,6 +281,9 @@ pub trait SafepointProvider: Send + Sync {
     /// Minimum applied timestamp across all replicas.
     /// Return Timestamp::MAX if no replicas exist.
     fn replica_safe_ts(&self) -> Timestamp;
+
+    /// Auto-abort transactions exceeding the idle timeout. Returns count reaped.
+    fn reap_long_transactions(&self) -> usize { 0 }
 }
 
 /// Background GC runner.
@@ -357,6 +360,12 @@ impl GcRunner {
                         }
                     }
 
+                    // Reap stale transactions before computing safepoint
+                    let reaped = provider.reap_long_transactions();
+                    if reaped > 0 {
+                        tracing::info!("GC reaper: aborted {} long-running transactions", reaped);
+                    }
+
                     let min_ts = provider.min_active_ts();
                     let replica_ts = provider.replica_safe_ts();
                     let safepoint = compute_safepoint(min_ts, replica_ts);
@@ -386,12 +395,27 @@ impl GcRunner {
                         crate::memory::PressureState::Normal => config.clone(),
                     };
 
+                    // Acquire a background CPU slot before sweeping
+                    let isolator = &engine.ext.resource_isolator;
+                    let _cpu_guard = match isolator.cpu.try_acquire() {
+                        Some(g) => g,
+                        None => {
+                            tracing::trace!("GC skipped: background CPU slots exhausted");
+                            continue;
+                        }
+                    };
+
                     last_sweep = Instant::now();
                     let result = engine.run_gc_with_config(
                         safepoint,
                         &effective_config,
                         engine.gc_stats_snapshot_ref(),
                     );
+
+                    // Charge reclaimed bytes to the I/O budget
+                    if result.reclaimed_bytes > 0 {
+                        isolator.io.consume_blocking(result.reclaimed_bytes);
+                    }
 
                     if result.reclaimed_versions > 0 {
                         tracing::debug!(

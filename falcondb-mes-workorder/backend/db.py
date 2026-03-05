@@ -1,9 +1,8 @@
 """
 FalconDB MES — Database connection layer.
 
-All connections go through FalconDB's PostgreSQL wire protocol (port 5433).
-Every write uses an explicit transaction with synchronous COMMIT.
-No caching. No async-write-behind. What the database confirms is truth.
+Uses simple query protocol (no parameterized queries) for full
+FalconDB compatibility. Every confirmed write is durable.
 """
 
 import os
@@ -17,44 +16,38 @@ DB_USER = os.getenv("FALCON_USER", "falcon")
 DB_NAME = os.getenv("FALCON_DB", "mes_prod")
 
 
+def _escape(v):
+    if v is None:
+        return "NULL"
+    if isinstance(v, bool):
+        return "TRUE" if v else "FALSE"
+    if isinstance(v, (int, float)):
+        return str(v)
+    s = str(v).replace("'", "''")
+    return f"'{s}'"
+
+
+def sql(template, *args):
+    """Format SQL with embedded values for simple query protocol."""
+    if not args:
+        return template
+    return template % tuple(_escape(a) for a in args)
+
+
 def get_connection():
-    """Create a new database connection. Autocommit OFF by default."""
-    return psycopg2.connect(
+    conn = psycopg2.connect(
         host=DB_HOST,
         port=DB_PORT,
         user=DB_USER,
         dbname=DB_NAME,
-        options="-c synchronous_commit=on",
     )
-
-
-@contextmanager
-def transaction():
-    """Context manager that yields (conn, cursor) inside an explicit transaction.
-
-    On success: COMMIT.
-    On exception: ROLLBACK, then re-raise.
-    Always closes the connection.
-    """
-    conn = get_connection()
-    conn.autocommit = False
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-    try:
-        yield conn, cur
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        cur.close()
-        conn.close()
-
-
-@contextmanager
-def read_cursor():
-    """Read-only cursor for queries."""
-    conn = get_connection()
     conn.autocommit = True
+    return conn
+
+
+@contextmanager
+def get_cursor():
+    conn = get_connection()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
         yield cur

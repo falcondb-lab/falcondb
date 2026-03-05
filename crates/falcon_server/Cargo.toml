@@ -19,6 +19,7 @@ falcon_executor = { path = "../falcon_executor" }
 falcon_protocol_pg = { path = "../falcon_protocol_pg" }
 falcon_observability = { path = "../falcon_observability" }
 falcon_cluster = { path = "../falcon_cluster" }
+falcon_enterprise = { path = "../falcon_enterprise" }
 falcon_raft = { path = "../falcon_raft" }
 falcon_sql_frontend = { path = "../falcon_sql_frontend" }
 falcon_planner = { path = "../falcon_planner" }

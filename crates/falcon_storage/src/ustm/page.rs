@@ -349,6 +349,19 @@ impl std::fmt::Debug for PinGuard {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/// Derive a USTM PageId from a table id and primary key hash.
+#[inline]
+pub(crate) fn page_id_for_pk(table_id: falcon_common::types::TableId, pk: &[u8]) -> PageId {
+    let pk_hash = fast_hash_pk(pk);
+    PageId(table_id.0 << 32 | u64::from(pk_hash))
+}
+
+/// Derive a USTM PageId for a table-level page (DDL / scan).
+#[inline]
+pub(crate) const fn page_id_for_table(table_id: falcon_common::types::TableId, page_seq: u32) -> PageId {
+    PageId(table_id.0 << 32 | page_seq as u64)
+}
+
 /// Fast hash of a primary key byte slice for USTM page ID derivation.
 pub fn fast_hash_pk(pk: &[u8]) -> u32 {
     // FNV-1a 32-bit hash — fast, no allocation, good distribution.

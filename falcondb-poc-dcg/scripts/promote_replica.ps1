@@ -19,18 +19,41 @@ function Ok($msg)   { Write-Host "  + $msg" -ForegroundColor Green }
 function Fail($msg) { Write-Host "  x $msg" -ForegroundColor Red }
 function Info($msg) { Write-Host "  > $msg" -ForegroundColor Yellow }
 
-Info "Promoting replica to primary..."
+$FalconBin = if ($env:FALCON_BIN) { $env:FALCON_BIN } else { "target\release\falcon.exe" }
+$ConfReplica = Join-Path $PocRoot "configs\replica.toml"
 
-try { Invoke-RestMethod -Uri "http://${Host_}:8081/promote" -Method Post -ErrorAction SilentlyContinue } catch {}
-Start-Sleep -Seconds 2
+# Resolve binary path
+if (-not (Test-Path $FalconBin)) {
+    $RepoBin = Join-Path (Split-Path -Parent $PocRoot) $FalconBin
+    if (Test-Path $RepoBin) { $FalconBin = $RepoBin }
+}
+
+Info "Promoting replica to primary (restart as standalone)..."
+
+# Stop the replica process
+$ReplicaPidFile = Join-Path $OutputDir "replica.pid"
+if (Test-Path $ReplicaPidFile) {
+    $ReplicaPid = [int](Get-Content $ReplicaPidFile).Trim()
+    Stop-Process -Id $ReplicaPid -Force -ErrorAction SilentlyContinue
+    Info "Stopped replica (pid $ReplicaPid)"
+    Start-Sleep -Seconds 2
+}
+
+# Restart as standalone (writable) using the same data directory
+$NewProc = Start-Process -FilePath $FalconBin -ArgumentList "-c",$ConfReplica,"--role","standalone" `
+    -RedirectStandardOutput (Join-Path $OutputDir "replica_promoted.log") `
+    -RedirectStandardError  (Join-Path $OutputDir "replica_promoted_err.log") `
+    -PassThru -WindowStyle Hidden
+
+$NewProc.Id | Set-Content $ReplicaPidFile
 
 $PromoteOk = $false
-for ($attempt = 1; $attempt -le 20; $attempt++) {
+for ($attempt = 1; $attempt -le 30; $attempt++) {
     try {
         $r = & psql -h $Host_ -p $ReplicaPort -U $DbUser -d $DbName -t -A -c "SELECT 1;" 2>$null
         if ($r -match "1") {
             $PromoteOk = $true
-            Ok "Replica promoted and accepting queries (${attempt}s)"
+            Ok "Replica promoted and accepting queries (pid $($NewProc.Id), ${attempt}s)"
             break
         }
     } catch {}

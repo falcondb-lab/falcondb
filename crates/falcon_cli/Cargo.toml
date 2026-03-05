@@ -10,12 +10,22 @@ description = "fsql — FalconDB interactive CLI client (psql-compatible)"
 name = "fsql"
 path = "src/main.rs"
 
+[[bin]]
+name = "fexport"
+path = "src/bin/fexport.rs"
+
+[[bin]]
+name = "fimport"
+path = "src/bin/fimport.rs"
+
 [dependencies]
 # CLI parsing
 clap = { version = "4", features = ["derive", "env"] }
 
 # PG client
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
+futures = "0.3"
+bytes = "1"
 
 # Async runtime
 tokio = { workspace = true }

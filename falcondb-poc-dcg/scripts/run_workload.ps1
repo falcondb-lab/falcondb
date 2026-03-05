@@ -34,8 +34,14 @@ $RustBin = Join-Path $PocRoot "workload\target\release\order_writer.exe"
 if (Test-Path $RustBin) {
     Info "Using Rust workload generator"
     & $RustBin
-} elseif ((Get-Command python3 -ErrorAction SilentlyContinue) -or (Get-Command python -ErrorAction SilentlyContinue)) {
-    $py = if (Get-Command python3 -ErrorAction SilentlyContinue) { "python3" } else { "python" }
+} elseif (
+    (Test-Path "C:\Users\003\AppData\Local\Programs\Python\Python312\python.exe") -or
+    (Get-Command python3 -ErrorAction SilentlyContinue) -or
+    (Get-Command python -ErrorAction SilentlyContinue)
+) {
+    $py = if (Test-Path "C:\Users\003\AppData\Local\Programs\Python\Python312\python.exe") {
+        "C:\Users\003\AppData\Local\Programs\Python\Python312\python.exe"
+    } elseif (Get-Command python3 -ErrorAction SilentlyContinue) { "python3" } else { "python" }
     & $py -c "import psycopg2" 2>$null
     if ($LASTEXITCODE -eq 0) {
         Info "Using Python workload generator"

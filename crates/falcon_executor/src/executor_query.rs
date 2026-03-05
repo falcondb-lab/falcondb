@@ -1014,6 +1014,39 @@ impl Executor {
                 }
             }
 
+            // ── Columnar GROUP BY aggregate path ──
+            // When: GROUP BY present, no HAVING, no correlated filter, no GROUPING SETS,
+            // table is ColumnStore — use vectorized_hash_agg bypassing row materialisation.
+            let is_columnar_group_agg = !group_by.is_empty()
+                && grouping_sets.is_empty()
+                && having.is_none()
+                && !filter_has_correlated_sub
+                && virtual_rows.is_empty()
+                && table_id != TableId(0)
+                && cte_data.get(&table_id).is_none()
+                && projections.iter().all(|p| matches!(
+                    p,
+                    BoundProjection::Aggregate(_, _, _, false, None)
+                    | BoundProjection::Column(..)
+                ));
+
+            if is_columnar_group_agg {
+                let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+                if let Some(col_vecs) = self.storage.scan_columnar(table_id, txn.txn_id, read_ts) {
+                    return self.exec_columnar_group_agg(
+                        col_vecs,
+                        schema,
+                        projections,
+                        mat_filter.as_ref(),
+                        group_by,
+                        order_by,
+                        limit,
+                        offset,
+                        distinct,
+                    );
+                }
+            }
+
             return self.exec_aggregate(
                 &raw_rows,
                 schema,

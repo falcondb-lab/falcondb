@@ -13,7 +13,7 @@ $ErrorActionPreference = 'Stop'
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PocRoot   = Split-Path -Parent $ScriptDir
 
-$FalconBin    = if ($env:FALCON_BIN) { $env:FALCON_BIN } else { "target\release\falcon_server.exe" }
+$FalconBin    = if ($env:FALCON_BIN) { $env:FALCON_BIN } else { "target\release\falcon.exe" }
 $ConfPrimary  = Join-Path $PocRoot "configs\primary.toml"
 $ConfReplica  = Join-Path $PocRoot "configs\replica.toml"
 $OutputDir    = Join-Path $PocRoot "output"

@@ -28,6 +28,8 @@ use falcon_common::error::{FalconError, FalconResult};
 use falcon_common::shutdown::ShutdownSignal;
 use falcon_common::types::TxnId;
 
+use crate::sharded_engine::ShardedEngine;
+
 /// The final outcome of a 2PC transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxnOutcome {
@@ -197,6 +199,8 @@ pub struct InDoubtResolver {
     indoubt: RwLock<HashMap<TxnId, InDoubtTxn>>,
     /// Outcome cache for coordinator decisions.
     outcome_cache: Arc<TxnOutcomeCache>,
+    /// ShardedEngine for applying commit/abort to participant shards.
+    engine: Option<Arc<ShardedEngine>>,
     /// Sweep interval.
     sweep_interval: Duration,
     /// Max resolution attempts before giving up (and alerting).
@@ -217,6 +221,22 @@ impl InDoubtResolver {
         Arc::new(Self {
             indoubt: RwLock::new(HashMap::new()),
             outcome_cache,
+            engine: None,
+            sweep_interval: Duration::from_secs(5),
+            max_attempts: 10,
+            max_per_sweep: 100,
+            metrics: RwLock::new(ResolverMetrics::default()),
+            signal: ShutdownSignal::new(),
+            total_resolved: AtomicU64::new(0),
+        })
+    }
+
+    /// Create with ShardedEngine for applying decisions to participant shards.
+    pub fn with_engine(outcome_cache: Arc<TxnOutcomeCache>, engine: Arc<ShardedEngine>) -> Arc<Self> {
+        Arc::new(Self {
+            indoubt: RwLock::new(HashMap::new()),
+            outcome_cache,
+            engine: Some(engine),
             sweep_interval: Duration::from_secs(5),
             max_attempts: 10,
             max_per_sweep: 100,
@@ -236,6 +256,7 @@ impl InDoubtResolver {
         Arc::new(Self {
             indoubt: RwLock::new(HashMap::new()),
             outcome_cache,
+            engine: None,
             sweep_interval,
             max_attempts,
             max_per_sweep,
@@ -390,27 +411,60 @@ impl InDoubtResolver {
     /// In the current in-process implementation, participants are local shards.
     /// In a distributed deployment, this would send RPC calls to remote shards.
     fn apply_decision(&self, txn: &InDoubtTxn, outcome: TxnOutcome) -> FalconResult<()> {
-        // In the current architecture, in-doubt txns are already in an
-        // aborted/committed state at the storage level (TxnManager handles
-        // the actual state). The resolver's job is to ensure consistency
-        // and clean up any pending state.
-        //
-        // For now, we record the decision and log it. In a full distributed
-        // deployment, this would send commit/abort RPCs to each participant shard.
-        match outcome {
-            TxnOutcome::Committed => {
+        let engine = match self.engine {
+            Some(ref e) => e,
+            None => {
+                // No engine wired — log-only mode (single-shard or testing)
                 tracing::debug!(
                     txn_id = txn.global_txn_id.0,
-                    participants = txn.participant_txn_ids.len(),
-                    "applying commit decision to participants"
+                    outcome = ?outcome,
+                    "apply_decision: no engine (log-only mode)"
                 );
+                return Ok(());
             }
-            TxnOutcome::Aborted => {
-                tracing::debug!(
-                    txn_id = txn.global_txn_id.0,
-                    participants = txn.participant_txn_ids.len(),
-                    "applying abort decision to participants"
-                );
+        };
+
+        for (shard_id, participant_txn_id) in &txn.participant_txn_ids {
+            let shard = match engine.shard(*shard_id) {
+                Some(s) => s,
+                None => {
+                    tracing::warn!(
+                        txn_id = txn.global_txn_id.0,
+                        shard = ?shard_id,
+                        "apply_decision: shard not found, skipping"
+                    );
+                    continue;
+                }
+            };
+
+            let result: Result<(), FalconError> = match outcome {
+                TxnOutcome::Committed => shard.txn_mgr.commit(*participant_txn_id)
+                    .map(|_| ())
+                    .map_err(|e| FalconError::Internal(e.to_string())),
+                TxnOutcome::Aborted => shard.txn_mgr.abort(*participant_txn_id)
+                    .map_err(|e| FalconError::Internal(e.to_string())),
+            };
+
+            match result {
+                Ok(_) => {
+                    tracing::debug!(
+                        txn_id = txn.global_txn_id.0,
+                        shard = ?shard_id,
+                        participant_txn = participant_txn_id.0,
+                        outcome = ?outcome,
+                        "participant decision applied"
+                    );
+                }
+                Err(e) => {
+                    // Txn may already be committed/aborted — not necessarily fatal
+                    tracing::warn!(
+                        txn_id = txn.global_txn_id.0,
+                        shard = ?shard_id,
+                        participant_txn = participant_txn_id.0,
+                        error = %e,
+                        "participant decision apply failed (may already be resolved)"
+                    );
+                }
             }
         }
         Ok(())

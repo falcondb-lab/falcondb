@@ -60,6 +60,9 @@ pub struct FalconConfig {
     /// v1.3.0: Cluster lifecycle, failure detection, self-healing.
     #[serde(default)]
     pub cluster: ClusterSectionConfig,
+    /// v1.3.0: Resource isolation — throttle background I/O and CPU under foreground pressure.
+    #[serde(default)]
+    pub resource_isolation: ResourceIsolationSectionConfig,
 }
 
 const fn default_config_version() -> u32 { CURRENT_CONFIG_VERSION }
@@ -97,6 +100,10 @@ pub struct ClusterSectionConfig {
     /// Max consecutive heartbeat misses before declaring node dead.
     #[serde(default = "default_max_consecutive_misses")]
     pub max_consecutive_misses: u32,
+    /// Peer nodes: list of "node_id:grpc_addr" strings, e.g. ["2:http://10.0.0.2:6543"].
+    /// Used to build the shard map and for active failure detection probing.
+    #[serde(default)]
+    pub peers: Vec<String>,
 }
 
 const fn default_heartbeat_interval_ms() -> u64 { 2000 }
@@ -119,6 +126,7 @@ impl Default for ClusterSectionConfig {
             max_shards: default_max_shards(),
             failure_detector_enabled: true,
             max_consecutive_misses: default_max_consecutive_misses(),
+            peers: vec![],
         }
     }
 }
@@ -335,6 +343,43 @@ impl Default for CdcConfig {
         Self {
             enabled: true,
             buffer_size: default_cdc_buffer_size(),
+        }
+    }
+}
+
+/// Resource Isolation — throttles background I/O and CPU when foreground query
+/// load is high. Prevents compaction/GC from starving OLTP queries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceIsolationSectionConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Sustained background I/O rate limit in bytes/sec (default: 128 MB/s).
+    #[serde(default = "default_ri_io_rate")]
+    pub io_rate_bytes_per_sec: u64,
+    /// Maximum burst I/O budget in bytes (default: 64 MB).
+    #[serde(default = "default_ri_io_burst")]
+    pub io_burst_bytes: u64,
+    /// Max concurrent background threads (compaction + flush + GC, default: 2).
+    #[serde(default = "default_ri_bg_threads")]
+    pub max_bg_threads: u64,
+    /// Foreground inflight query count that triggers background throttling (default: 100).
+    #[serde(default = "default_ri_fg_threshold")]
+    pub fg_pressure_threshold: u64,
+}
+
+const fn default_ri_io_rate() -> u64 { 128 * 1024 * 1024 }
+const fn default_ri_io_burst() -> u64 { 64 * 1024 * 1024 }
+const fn default_ri_bg_threads() -> u64 { 2 }
+const fn default_ri_fg_threshold() -> u64 { 100 }
+
+impl Default for ResourceIsolationSectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            io_rate_bytes_per_sec: default_ri_io_rate(),
+            io_burst_bytes: default_ri_io_burst(),
+            max_bg_threads: default_ri_bg_threads(),
+            fg_pressure_threshold: default_ri_fg_threshold(),
         }
     }
 }
@@ -788,12 +833,19 @@ pub struct SpillConfig {
     /// Default: "soft" — start spilling earlier when memory is under pressure.
     #[serde(default = "default_pressure_spill_trigger")]
     pub pressure_spill_trigger: String,
+    /// Maximum total rows accumulated across all iterations of a recursive CTE.
+    /// Prevents OOM from unbounded recursion over high-cardinality graphs.
+    /// 0 = unlimited (not recommended for production).
+    /// Default: 1_000_000 rows.
+    #[serde(default = "default_recursive_cte_max_rows")]
+    pub recursive_cte_max_rows: usize,
 }
 
 const fn default_spill_memory_rows_threshold() -> usize { 500_000 }
 const fn default_spill_merge_fan_in() -> usize { 16 }
 const fn default_hash_agg_group_limit() -> usize { 1_000_000 }
 fn default_pressure_spill_trigger() -> String { "soft".to_owned() }
+const fn default_recursive_cte_max_rows() -> usize { 1_000_000 }
 
 impl Default for SpillConfig {
     fn default() -> Self {
@@ -803,6 +855,7 @@ impl Default for SpillConfig {
             merge_fan_in: default_spill_merge_fan_in(),
             hash_agg_group_limit: default_hash_agg_group_limit(),
             pressure_spill_trigger: default_pressure_spill_trigger(),
+            recursive_cte_max_rows: default_recursive_cte_max_rows(),
         }
     }
 }
@@ -1006,6 +1059,9 @@ pub struct ReplicationConfig {
     pub connect_timeout_ms: u64,
     /// Number of shards this node is responsible for.
     pub shard_count: u64,
+    /// Unique replica identifier (used for WAL ack tracking). Defaults to 0.
+    #[serde(default)]
+    pub replica_id: u64,
 }
 
 impl ReplicationConfig {
@@ -1053,6 +1109,7 @@ impl Default for ReplicationConfig {
             max_backoff_ms: 30_000,
             connect_timeout_ms: 5_000,
             shard_count: 1,
+            replica_id: 0,
         }
     }
 }
@@ -1256,6 +1313,7 @@ impl Default for FalconConfig {
             rebalance: RebalanceSectionConfig::default(),
             logging: LoggingConfig::default(),
             cluster: ClusterSectionConfig::default(),
+            resource_isolation: ResourceIsolationSectionConfig::default(),
         }
     }
 }

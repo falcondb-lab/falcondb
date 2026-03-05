@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use falcon_common::datum::Datum;
 use falcon_common::types::TableId;
 use falcon_sql_frontend::types::*;
 
@@ -10,6 +11,308 @@ pub type TableRowCounts = HashMap<TableId, u64>;
 /// Planner-level index metadata: maps table_id → list of indexed column indices.
 /// Populated from `StorageEngine::get_indexed_columns()`.
 pub type IndexedColumns = HashMap<TableId, Vec<usize>>;
+
+// ── Planner-level statistics interface ────────────────────────────────────
+
+/// Per-column statistics summary passed from storage to the planner.
+#[derive(Debug, Clone)]
+pub struct ColumnStatsInfo {
+    pub column_idx: usize,
+    pub distinct_count: u64,
+    pub null_fraction: f64,
+    pub min_value: Option<Datum>,
+    pub max_value: Option<Datum>,
+    /// MCV: (value, frequency) pairs sorted by frequency desc.
+    pub mcv: Vec<(Datum, f64)>,
+    /// Equi-depth histogram bucket upper bounds.
+    pub histogram_bounds: Vec<Datum>,
+    pub histogram_rows: u64,
+}
+
+/// Per-table statistics for cost-based planning.
+#[derive(Debug, Clone)]
+pub struct TableStatsInfo {
+    pub table_id: TableId,
+    pub row_count: u64,
+    pub columns: Vec<ColumnStatsInfo>,
+}
+
+impl TableStatsInfo {
+    pub fn column(&self, idx: usize) -> Option<&ColumnStatsInfo> {
+        self.columns.iter().find(|c| c.column_idx == idx)
+    }
+}
+
+/// Map from TableId to full table statistics.
+pub type TableStatsMap = HashMap<TableId, TableStatsInfo>;
+
+// ── Selectivity estimation ────────────────────────────────────────────────
+
+/// Default selectivity when no stats available.
+const DEFAULT_EQ_SEL: f64 = 0.1;
+const DEFAULT_RANGE_SEL: f64 = 0.33;
+const DEFAULT_LIKE_SEL: f64 = 0.05;
+const DEFAULT_IS_NULL_SEL: f64 = 0.01;
+
+/// Estimate selectivity of a filter expression given table stats.
+/// Returns a value in [0.0, 1.0] representing the fraction of rows passing.
+pub fn estimate_selectivity(expr: &BoundExpr, stats: Option<&TableStatsInfo>) -> f64 {
+    match expr {
+        BoundExpr::BinaryOp { left, op, right } => {
+            match op {
+                BinOp::And => {
+                    let l = estimate_selectivity(left, stats);
+                    let r = estimate_selectivity(right, stats);
+                    l * r // independence assumption
+                }
+                BinOp::Or => {
+                    let l = estimate_selectivity(left, stats);
+                    let r = estimate_selectivity(right, stats);
+                    (l + r - l * r).min(1.0)
+                }
+                BinOp::Eq => estimate_comparison_sel(left, right, *op, stats),
+                BinOp::NotEq => 1.0 - estimate_comparison_sel(left, right, BinOp::Eq, stats),
+                BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => {
+                    estimate_comparison_sel(left, right, *op, stats)
+                }
+                _ => 0.5,
+            }
+        }
+        BoundExpr::Not(inner) => 1.0 - estimate_selectivity(inner, stats),
+        BoundExpr::IsNull(_) => DEFAULT_IS_NULL_SEL,
+        BoundExpr::IsNotNull(_) => 1.0 - DEFAULT_IS_NULL_SEL,
+        BoundExpr::Between { expr, low, high, negated } => {
+            let sel = estimate_between_sel(expr, low, high, stats);
+            if *negated { 1.0 - sel } else { sel }
+        }
+        BoundExpr::InList { expr, list, negated } => {
+            let sel = estimate_in_list_sel(expr, list, stats);
+            if *negated { 1.0 - sel } else { sel }
+        }
+        BoundExpr::Like { .. } => DEFAULT_LIKE_SEL,
+        BoundExpr::Literal(Datum::Boolean(true)) => 1.0,
+        BoundExpr::Literal(Datum::Boolean(false)) => 0.0,
+        _ => 0.5,
+    }
+}
+
+fn estimate_comparison_sel(
+    left: &BoundExpr,
+    right: &BoundExpr,
+    op: BinOp,
+    stats: Option<&TableStatsInfo>,
+) -> f64 {
+    let stats = match stats {
+        Some(s) => s,
+        None => return if op == BinOp::Eq { DEFAULT_EQ_SEL } else { DEFAULT_RANGE_SEL },
+    };
+
+    // col = literal or literal = col
+    if let (Some(col_idx), Some(lit)) = (extract_column_ref(left), extract_literal(right)) {
+        return col_literal_sel(col_idx, &lit, op, stats);
+    }
+    if let (Some(lit), Some(col_idx)) = (extract_literal(left), extract_column_ref(right)) {
+        let flipped = match op {
+            BinOp::Lt => BinOp::Gt,
+            BinOp::LtEq => BinOp::GtEq,
+            BinOp::Gt => BinOp::Lt,
+            BinOp::GtEq => BinOp::LtEq,
+            other => other,
+        };
+        return col_literal_sel(col_idx, &lit, flipped, stats);
+    }
+
+    // col = col (join selectivity approximation)
+    if let (Some(l_col), Some(r_col)) = (extract_column_ref(left), extract_column_ref(right)) {
+        if op == BinOp::Eq {
+            let l_ndv = stats.column(l_col).map_or(100, |c| c.distinct_count.max(1));
+            let r_ndv = stats.column(r_col).map_or(100, |c| c.distinct_count.max(1));
+            return 1.0 / l_ndv.max(r_ndv) as f64;
+        }
+    }
+
+    if op == BinOp::Eq { DEFAULT_EQ_SEL } else { DEFAULT_RANGE_SEL }
+}
+
+fn col_literal_sel(col_idx: usize, value: &Datum, op: BinOp, stats: &TableStatsInfo) -> f64 {
+    let cs = match stats.column(col_idx) {
+        Some(c) => c,
+        None => return if op == BinOp::Eq { DEFAULT_EQ_SEL } else { DEFAULT_RANGE_SEL },
+    };
+
+    match op {
+        BinOp::Eq => {
+            // Check MCV first
+            for (v, freq) in &cs.mcv {
+                if datum_eq_loose(v, value) {
+                    return *freq;
+                }
+            }
+            // Histogram-based
+            if !cs.histogram_bounds.is_empty() && cs.histogram_rows > 0 {
+                return histogram_eq_sel(&cs.histogram_bounds, cs.histogram_rows, value);
+            }
+            // 1/NDV
+            if cs.distinct_count > 0 {
+                return 1.0 / cs.distinct_count as f64;
+            }
+            DEFAULT_EQ_SEL
+        }
+        BinOp::Lt | BinOp::LtEq => {
+            if !cs.histogram_bounds.is_empty() && cs.histogram_rows > 0 {
+                let sel = histogram_lt_sel(&cs.histogram_bounds, value);
+                if op == BinOp::LtEq {
+                    return (sel + histogram_eq_sel(&cs.histogram_bounds, cs.histogram_rows, value)).min(1.0);
+                }
+                return sel;
+            }
+            DEFAULT_RANGE_SEL
+        }
+        BinOp::Gt | BinOp::GtEq => {
+            if !cs.histogram_bounds.is_empty() && cs.histogram_rows > 0 {
+                let lt_sel = histogram_lt_sel(&cs.histogram_bounds, value);
+                let eq_sel = histogram_eq_sel(&cs.histogram_bounds, cs.histogram_rows, value);
+                if op == BinOp::GtEq {
+                    return (1.0 - lt_sel).max(0.0);
+                }
+                return (1.0 - lt_sel - eq_sel).max(0.0);
+            }
+            DEFAULT_RANGE_SEL
+        }
+        _ => DEFAULT_RANGE_SEL,
+    }
+}
+
+fn estimate_between_sel(
+    expr: &BoundExpr,
+    low: &BoundExpr,
+    high: &BoundExpr,
+    stats: Option<&TableStatsInfo>,
+) -> f64 {
+    let sel_ge = estimate_comparison_sel(expr, low, BinOp::GtEq, stats);
+    let sel_le = estimate_comparison_sel(expr, high, BinOp::LtEq, stats);
+    (sel_ge * sel_le).max(0.001) // assume some correlation
+}
+
+fn estimate_in_list_sel(
+    expr: &BoundExpr,
+    list: &[BoundExpr],
+    stats: Option<&TableStatsInfo>,
+) -> f64 {
+    if list.is_empty() {
+        return 0.0;
+    }
+    // Each element contributes eq selectivity, combined with OR semantics
+    let mut total = 0.0;
+    for item in list {
+        let s = estimate_comparison_sel(expr, item, BinOp::Eq, stats);
+        total = total + s - total * s;
+    }
+    total.min(1.0)
+}
+
+fn extract_column_ref(expr: &BoundExpr) -> Option<usize> {
+    match expr {
+        BoundExpr::ColumnRef(idx) => Some(*idx),
+        BoundExpr::Cast { expr: inner, .. } => extract_column_ref(inner),
+        _ => None,
+    }
+}
+
+fn extract_literal(expr: &BoundExpr) -> Option<Datum> {
+    match expr {
+        BoundExpr::Literal(d) => Some(d.clone()),
+        _ => None,
+    }
+}
+
+fn histogram_lt_sel(bounds: &[Datum], value: &Datum) -> f64 {
+    if bounds.is_empty() {
+        return DEFAULT_RANGE_SEL;
+    }
+    let n = bounds.len();
+    let mut pos = 0;
+    for (i, b) in bounds.iter().enumerate() {
+        if datum_cmp_loose(value, b) != std::cmp::Ordering::Greater {
+            pos = i;
+            break;
+        }
+        pos = i + 1;
+    }
+    let bucket_frac = 1.0 / n as f64;
+    let base = pos as f64 * bucket_frac;
+    if pos < n {
+        (base + 0.5 * bucket_frac).min(1.0)
+    } else {
+        1.0
+    }
+}
+
+fn histogram_eq_sel(bounds: &[Datum], total_rows: u64, _value: &Datum) -> f64 {
+    if bounds.is_empty() || total_rows == 0 {
+        return DEFAULT_EQ_SEL;
+    }
+    let rows_per_bucket = total_rows as f64 / bounds.len() as f64;
+    // Approximate: 1/distinct_per_bucket ≈ 1/rows_per_bucket
+    (1.0 / rows_per_bucket.max(1.0)).min(0.5)
+}
+
+fn datum_eq_loose(a: &Datum, b: &Datum) -> bool {
+    datum_cmp_loose(a, b) == std::cmp::Ordering::Equal
+}
+
+fn datum_cmp_loose(a: &Datum, b: &Datum) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (Datum::Int32(x), Datum::Int32(y)) => x.cmp(y),
+        (Datum::Int64(x), Datum::Int64(y)) => x.cmp(y),
+        (Datum::Float64(x), Datum::Float64(y)) => x.partial_cmp(y).unwrap_or(Ordering::Equal),
+        (Datum::Text(x), Datum::Text(y)) => x.cmp(y),
+        (Datum::Timestamp(x), Datum::Timestamp(y)) => x.cmp(y),
+        (Datum::Date(x), Datum::Date(y)) => x.cmp(y),
+        (Datum::Boolean(x), Datum::Boolean(y)) => x.cmp(y),
+        _ => Ordering::Equal,
+    }
+}
+
+// ── Scan cost model ───────────────────────────────────────────────────────
+
+/// Cost constants (relative units, not absolute time).
+const SEQ_SCAN_PAGE_COST: f64 = 1.0;
+const RANDOM_PAGE_COST: f64 = 4.0;
+const CPU_TUPLE_COST: f64 = 0.01;
+const CPU_INDEX_TUPLE_COST: f64 = 0.005;
+const CPU_OPERATOR_COST: f64 = 0.0025;
+
+/// Estimated cost of a sequential scan.
+pub fn seq_scan_cost(row_count: u64, filter_sel: f64) -> f64 {
+    let pages = (row_count as f64 / 100.0).max(1.0); // ~100 rows/page
+    let io = pages * SEQ_SCAN_PAGE_COST;
+    let cpu = row_count as f64 * (CPU_TUPLE_COST + CPU_OPERATOR_COST);
+    io + cpu + (row_count as f64 * filter_sel * CPU_TUPLE_COST) // output cost
+}
+
+/// Estimated cost of an index scan.
+pub fn index_scan_cost(row_count: u64, selectivity: f64) -> f64 {
+    let matching = (row_count as f64 * selectivity).max(1.0);
+    let total_pages = (row_count as f64 / 100.0).max(1.0);
+    // B-tree traversal: ~log2(total_pages) random reads
+    let tree_depth = (total_pages.ln() / 2.0_f64.ln()).ceil().max(1.0);
+    // Heap fetches: assume partial correlation — sqrt(matching * total_pages) / total_pages
+    // gives a mix between fully correlated (selectivity * pages) and uncorrelated (matching pages)
+    let heap_pages = (selectivity * total_pages).max(1.0);
+    let io = tree_depth * RANDOM_PAGE_COST + heap_pages * RANDOM_PAGE_COST;
+    let cpu = matching * (CPU_INDEX_TUPLE_COST + CPU_TUPLE_COST + CPU_OPERATOR_COST);
+    io + cpu
+}
+
+/// Should we prefer index scan over seq scan for this selectivity?
+pub fn prefer_index_scan(row_count: u64, selectivity: f64) -> bool {
+    if row_count < 50 {
+        return false; // tiny tables always seq scan
+    }
+    index_scan_cost(row_count, selectivity) < seq_scan_cost(row_count, selectivity)
+}
 
 /// Reorder INNER joins in a query to minimise hash-table build cost.
 ///

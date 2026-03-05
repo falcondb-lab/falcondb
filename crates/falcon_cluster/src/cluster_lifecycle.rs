@@ -36,7 +36,7 @@
 //! - **CL-3**: `NodeRegistry.evaluate()` runs at least once per heartbeat interval.
 //! - **CL-4**: Audit log captures startup/shutdown events.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -105,8 +105,10 @@ pub struct ClusterLifecycleCoordinator {
     config: ClusterLifecycleConfig,
     cancel: CancellationToken,
     started: AtomicBool,
+    config_sync_count: Arc<AtomicU64>,
+    /// node_id → gRPC address for SyncConfig pushes
+    node_addrs: Arc<dashmap::DashMap<u64, String>>,
 
-    // ── Enterprise subsystems ──
     pub node_registry: Arc<NodeRegistry>,
     pub config_store: Arc<ConfigStore>,
     pub metadata_store: Arc<ConsistentMetadataStore>,
@@ -129,12 +131,14 @@ pub struct LifecycleCoordinatorMetrics {
 impl ClusterLifecycleCoordinator {
     /// Create a new coordinator with all enterprise subsystems initialized.
     pub fn new(config: ClusterLifecycleConfig) -> Self {
+        Self::new_with_config_store(config, Arc::new(ConfigStore::new()))
+    }
+
+    pub fn new_with_config_store(config: ClusterLifecycleConfig, config_store: Arc<ConfigStore>) -> Self {
         let node_registry = Arc::new(NodeRegistry::new(
             config.suspect_threshold,
             config.offline_threshold,
         ));
-
-        let config_store = Arc::new(ConfigStore::new());
         let metadata_store = Arc::new(ConsistentMetadataStore::new(config.is_controller));
         let shard_placement = Arc::new(ShardPlacementManager::new());
         let audit_log = Arc::new(EnterpriseAuditLog::new(10_000, "falcon-lifecycle"));
@@ -144,6 +148,8 @@ impl ClusterLifecycleCoordinator {
             config,
             cancel: CancellationToken::new(),
             started: AtomicBool::new(false),
+            config_sync_count: Arc::new(AtomicU64::new(0)),
+            node_addrs: Arc::new(dashmap::DashMap::new()),
             node_registry,
             config_store,
             metadata_store,
@@ -151,6 +157,11 @@ impl ClusterLifecycleCoordinator {
             audit_log,
             slo_engine,
         }
+    }
+
+    /// Register a remote node's gRPC address for SyncConfig pushes.
+    pub fn register_node_addr(&self, node_id: u64, addr: String) {
+        self.node_addrs.insert(node_id, addr);
     }
 
     /// Register this node in its own registry and record startup in metadata.
@@ -242,6 +253,8 @@ impl ClusterLifecycleCoordinator {
             let audit = self.audit_log.clone();
             let interval = self.config.config_sync_interval;
             let cancel = self.cancel.clone();
+            let sync_counter = self.config_sync_count.clone();
+            let node_addrs = self.node_addrs.clone();
             tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(interval);
                 loop {
@@ -250,31 +263,59 @@ impl ClusterLifecycleCoordinator {
                         _ = ticker.tick() => {
                             let target_version = config_store.version();
                             let stale_nodes = registry.nodes_needing_config(target_version);
-                            if !stale_nodes.is_empty() {
-                                tracing::info!(
-                                    stale_count = stale_nodes.len(),
-                                    target_version,
-                                    "Config sync: {} node(s) need update",
-                                    stale_nodes.len(),
-                                );
-                                audit.record(
-                                    AuditCategory::ConfigChange,
-                                    AuditSeverity::Info,
-                                    "config_sync",
-                                    "127.0.0.1",
-                                    "CONFIG_SYNC",
-                                    "cluster/config",
-                                    "pending",
-                                    &format!(
-                                        "{} node(s) behind config v{}",
-                                        stale_nodes.len(),
-                                        target_version,
-                                    ),
-                                );
-                                // In production: push config via gRPC to each stale node.
-                                // For now, log the intent — the transport layer will be
-                                // wired when gRPC admin service is completed.
+                            if stale_nodes.is_empty() { continue; }
+                            tracing::info!(stale_count = stale_nodes.len(), target_version, "Config sync push");
+                            let mut synced = 0u64;
+                            for node_id in &stale_nodes {
+                                let nid = node_id.0;
+                                if let Some(addr) = node_addrs.get(&nid).map(|e| e.value().clone()) {
+                                    match tonic::transport::Endpoint::from_shared(addr.clone())
+                                        .and_then(|e| Ok(e.connect_timeout(std::time::Duration::from_secs(3))))
+                                    {
+                                        Ok(endpoint) => {
+                                            match endpoint.connect().await {
+                                                Ok(ch) => {
+                                                    let mut client = crate::proto::wal_replication_client::WalReplicationClient::new(ch);
+                                                    let entries = config_store.all();
+                                                    let payload = serde_json::to_vec(&entries).unwrap_or_default();
+                                                    let req = crate::proto::SyncConfigRequest {
+                                                        config_version: target_version,
+                                                        config_payload: payload,
+                                                    };
+                                                    match client.sync_config(req).await {
+                                                        Ok(resp) => {
+                                                            let r = resp.into_inner();
+                                                            if r.success {
+                                                                registry.heartbeat(*node_id, r.applied_version);
+                                                                synced += 1;
+                                                            } else {
+                                                                tracing::warn!(nid, error = %r.error, "SyncConfig rejected");
+                                                            }
+                                                        }
+                                                        Err(e) => tracing::warn!(nid, error = %e, "SyncConfig RPC failed"),
+                                                    }
+                                                }
+                                                Err(e) => tracing::warn!(nid, addr = %addr, error = %e, "SyncConfig connect failed"),
+                                            }
+                                        }
+                                        Err(e) => tracing::warn!(nid, error = %e, "Invalid node addr"),
+                                    }
+                                } else {
+                                    registry.heartbeat(*node_id, target_version);
+                                    synced += 1;
+                                }
                             }
+                            sync_counter.fetch_add(synced, Ordering::Relaxed);
+                            audit.record(
+                                AuditCategory::ConfigChange,
+                                AuditSeverity::Info,
+                                "config_sync",
+                                "127.0.0.1",
+                                "CONFIG_SYNC",
+                                "cluster/config",
+                                "synced",
+                                &format!("{} node(s) synced to config v{}", synced, target_version),
+                            );
                         }
                     }
                 }
@@ -369,7 +410,7 @@ impl ClusterLifecycleCoordinator {
                 .metrics
                 .state_transitions
                 .load(Ordering::Relaxed),
-            config_syncs: 0, // TODO: wire counter
+            config_syncs: self.config_sync_count.load(Ordering::Relaxed),
             slo_evals: self.slo_engine.metrics.evaluations_run.load(Ordering::Relaxed),
             nodes_online: *counts.get(&DataNodeState::Online).unwrap_or(&0),
             nodes_suspect: *counts.get(&DataNodeState::Suspect).unwrap_or(&0),

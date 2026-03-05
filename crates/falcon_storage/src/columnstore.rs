@@ -433,6 +433,91 @@ impl ColumnStoreTable {
     }
 }
 
+/// A simple pushdown predicate: col_idx op literal (numeric only).
+#[derive(Debug, Clone)]
+pub struct PushdownPredicate {
+    pub col_idx: usize,
+    pub op: PushdownOp,
+    pub value: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum PushdownOp { Gt, Gte, Lt, Lte, Eq }
+
+impl ColumnStoreTable {
+    /// Multi-column scan with optional zone-map pushdown.
+    /// Returns one Vec<Datum> per requested column index.
+    /// Segments whose zone map proves the predicate cannot match are skipped entirely.
+    pub fn scan_columnar_projected(
+        &self,
+        col_indices: &[usize],
+        predicate: Option<&PushdownPredicate>,
+        _txn_id: TxnId,
+        _read_ts: Timestamp,
+    ) -> Vec<Vec<Datum>> {
+        let num_out = col_indices.len();
+        let mut result: Vec<Vec<Datum>> = (0..num_out).map(|_| Vec::new()).collect();
+
+        let segs = self.segments.read();
+        for seg in segs.iter() {
+            if let Some(pred) = predicate {
+                if can_skip_segment(seg, pred) {
+                    continue;
+                }
+            }
+            let row_count = seg.row_count;
+            for row_idx in 0..row_count {
+                if self.is_deleted(seg.seq, row_idx) {
+                    continue;
+                }
+                for (out_idx, &col_idx) in col_indices.iter().enumerate() {
+                    let val = if col_idx < seg.columns.len() {
+                        seg.columns[col_idx].get(row_idx).unwrap_or(Datum::Null)
+                    } else {
+                        Datum::Null
+                    };
+                    result[out_idx].push(val);
+                }
+            }
+        }
+
+        // Write buffer
+        let buf = self.write_buffer.read();
+        for row in buf.iter() {
+            for (out_idx, &col_idx) in col_indices.iter().enumerate() {
+                result[out_idx].push(row.values.get(col_idx).cloned().unwrap_or(Datum::Null));
+            }
+        }
+        result
+    }
+
+    pub fn segments_skipped_count(
+        &self,
+        predicate: &PushdownPredicate,
+    ) -> usize {
+        let segs = self.segments.read();
+        segs.iter().filter(|s| can_skip_segment(s, predicate)).count()
+    }
+}
+
+fn can_skip_segment(seg: &Segment, pred: &PushdownPredicate) -> bool {
+    if pred.col_idx >= seg.zone_maps.len() {
+        return false;
+    }
+    let zm = &seg.zone_maps[pred.col_idx];
+    let (min, max) = match (&zm.min, &zm.max) {
+        (Datum::Float64(lo), Datum::Float64(hi)) => (*lo, *hi),
+        _ => return false,
+    };
+    match pred.op {
+        PushdownOp::Gt => max <= pred.value,    // all values <= threshold → skip
+        PushdownOp::Gte => max < pred.value,
+        PushdownOp::Lt => min >= pred.value,
+        PushdownOp::Lte => min > pred.value,
+        PushdownOp::Eq => pred.value < min || pred.value > max,
+    }
+}
+
 /// Encode a columnstore "PK" as (segment_seq:row_idx) composite bytes.
 fn encode_cs_pk(segment_seq: u64, row_idx: usize) -> Vec<u8> {
     let mut pk = Vec::with_capacity(16);
@@ -602,5 +687,80 @@ mod tests {
         // Delete row 5 in segment 1
         table.delete_row(1, 5);
         assert_eq!(table.scan(txn, Timestamp(100)).len(), 9);
+    }
+
+    #[test]
+    fn test_scan_columnar_projected() {
+        let table = ColumnStoreTable::new(test_schema());
+        let txn = TxnId(1);
+        for i in 0..50i64 {
+            table.insert(OwnedRow::new(vec![
+                Datum::Int64(i),
+                Datum::Text(format!("n{i}")),
+                Datum::Float64(i as f64 * 2.0),
+            ]), txn).unwrap();
+        }
+        table.freeze_buffer();
+
+        // Project only columns 0 and 2
+        let vecs = table.scan_columnar_projected(&[0, 2], None, txn, Timestamp(100));
+        assert_eq!(vecs.len(), 2);
+        assert_eq!(vecs[0].len(), 50);
+        assert_eq!(vecs[1].len(), 50);
+        assert_eq!(vecs[0][0], Datum::Int64(0));
+        assert_eq!(vecs[1][25], Datum::Float64(50.0));
+    }
+
+    #[test]
+    fn test_zone_map_pushdown_skips_segment() {
+        let table = ColumnStoreTable::new(test_schema());
+        let txn = TxnId(1);
+
+        // Segment 1: scores 0..99
+        for i in 0..100i64 {
+            table.insert(OwnedRow::new(vec![
+                Datum::Int64(i),
+                Datum::Text("a".into()),
+                Datum::Float64(i as f64),
+            ]), txn).unwrap();
+        }
+        table.freeze_buffer();
+        assert_eq!(table.segment_count(), 1);
+
+        // Predicate: score > 200 → should skip the segment (max=99)
+        let pred = super::PushdownPredicate {
+            col_idx: 2,
+            op: super::PushdownOp::Gt,
+            value: 200.0,
+        };
+        assert_eq!(table.segments_skipped_count(&pred), 1);
+
+        let vecs = table.scan_columnar_projected(&[0, 2], Some(&pred), txn, Timestamp(100));
+        assert_eq!(vecs[0].len(), 0, "all rows should be skipped via zone map");
+    }
+
+    #[test]
+    fn test_zone_map_no_skip_when_in_range() {
+        let table = ColumnStoreTable::new(test_schema());
+        let txn = TxnId(1);
+        for i in 0..100i64 {
+            table.insert(OwnedRow::new(vec![
+                Datum::Int64(i),
+                Datum::Text("b".into()),
+                Datum::Float64(i as f64),
+            ]), txn).unwrap();
+        }
+        table.freeze_buffer();
+
+        // Predicate: score > 50 → should NOT skip (max=99 > 50)
+        let pred = super::PushdownPredicate {
+            col_idx: 2,
+            op: super::PushdownOp::Gt,
+            value: 50.0,
+        };
+        assert_eq!(table.segments_skipped_count(&pred), 0);
+
+        let vecs = table.scan_columnar_projected(&[2], Some(&pred), txn, Timestamp(100));
+        assert_eq!(vecs[0].len(), 100, "no segment-level pruning, row-level filter not applied here");
     }
 }

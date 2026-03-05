@@ -412,7 +412,7 @@ impl NodeRegistry {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// A versioned configuration entry.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConfigEntry {
     pub key: String,
     pub value: String,

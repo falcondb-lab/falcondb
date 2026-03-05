@@ -238,6 +238,7 @@ impl Binder {
                     table_name,
                     column_indices,
                     unique: create_idx.unique,
+                    concurrently: create_idx.concurrently,
                 })
             }
             Statement::StartTransaction { .. } => Ok(BoundStatement::Begin),
@@ -477,24 +478,20 @@ impl Binder {
         options: &[ast::CopyOption],
         legacy_options: &[ast::CopyLegacyOption],
     ) -> Result<BoundStatement, SqlError> {
-        // Only support STDIN/STDOUT targets
-        match target {
+        // Resolve target: STDIN/STDOUT or server-side FILE
+        let file_path = match target {
             ast::CopyTarget::Stdin if to => {
                 return Err(SqlError::Unsupported("COPY TO STDIN".into()));
             }
             ast::CopyTarget::Stdout if !to => {
                 return Err(SqlError::Unsupported("COPY FROM STDOUT".into()));
             }
-            ast::CopyTarget::Stdin | ast::CopyTarget::Stdout => {}
-            ast::CopyTarget::File { filename } => {
-                return Err(SqlError::Unsupported(format!(
-                    "COPY to/from file '{filename}'"
-                )));
-            }
+            ast::CopyTarget::Stdin | ast::CopyTarget::Stdout => None,
+            ast::CopyTarget::File { filename } => Some(filename.clone()),
             ast::CopyTarget::Program { command } => {
                 return Err(SqlError::Unsupported(format!("COPY PROGRAM '{command}'")));
             }
-        }
+        };
 
         // Handle COPY (query) TO STDOUT
         if let ast::CopySource::Query(query) = source {
@@ -544,6 +541,7 @@ impl Binder {
                 null_string,
                 quote,
                 escape,
+                file_path: file_path.clone(),
             });
         }
 
@@ -644,6 +642,7 @@ impl Binder {
                 null_string,
                 quote,
                 escape,
+                file_path,
             })
         } else {
             Ok(BoundStatement::CopyFrom {
@@ -656,6 +655,7 @@ impl Binder {
                 null_string,
                 quote,
                 escape,
+                file_path,
             })
         }
     }

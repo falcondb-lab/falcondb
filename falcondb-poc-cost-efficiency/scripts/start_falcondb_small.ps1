@@ -10,7 +10,7 @@ $ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PocRoot    = Split-Path -Parent $ScriptDir
 $OutputDir  = Join-Path $PocRoot "output"
 
-$FalconBin  = if ($env:FALCON_BIN) { $env:FALCON_BIN } else { "target\release\falcon_server.exe" }
+$FalconBin  = if ($env:FALCON_BIN) { $env:FALCON_BIN } else { "target\release\falcon.exe" }
 $FalconPort = 5433
 $FalconUser = "falcon"
 $FalconDb   = "bench"

@@ -47,9 +47,17 @@ Name: "purgedata"; Description: "{cm:PurgeDataTaskDesc}"; Flags: unchecked
 
 [Files]
 Source: "{#StageDir}\bin\falcon.exe";  DestDir: "{app}\bin";  Flags: ignoreversion
+Source: "{#StageDir}\bin\fsql.exe";    DestDir: "{app}\bin";  Flags: ignoreversion
 Source: "{#StageDir}\LICENSE";          DestDir: "{app}";      Flags: ignoreversion
 Source: "{#StageDir}\NOTICE";           DestDir: "{app}";      Flags: ignoreversion
 Source: "{#StageDir}\VERSION";          DestDir: "{app}";      Flags: ignoreversion
+
+[Registry]
+Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; \
+  ValueType: expandsz; ValueName: "Path"; \
+  ValueData: "{olddata};{app}\bin"; \
+  Check: NeedsAddPath(ExpandConstant('{app}\bin')); \
+  Flags: preservestringtype
 
 [Dirs]
 Name: "{commonappdata}\FalconDB\conf"
@@ -63,6 +71,9 @@ Filename: "{sys}\sc.exe"; Parameters: "delete FalconDB"; Flags: runhidden; RunOn
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""FalconDB PostgreSQL"""; Flags: runhidden; RunOnceId: "DelFwPG"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""FalconDB HTTP Admin"""; Flags: runhidden; RunOnceId: "DelFwHTTP"
 
+[UninstallDelete]
+Type: dirifempty; Name: "{app}\bin"
+
 ; ── Pascal Script ─────────────────────────────────────────────────────────────
 [Code]
 
@@ -75,6 +86,41 @@ var
 
 const
   RegKey = 'SOFTWARE\FalconDB';
+  PathRegKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment';
+
+function NeedsAddPath(const NewPath: string): Boolean;
+var
+  OldPath: string;
+begin
+  if not RegQueryStringValue(HKEY_LOCAL_MACHINE, PathRegKey, 'Path', OldPath) then begin
+    Result := True;
+    Exit;
+  end;
+  Result := Pos(';' + Uppercase(NewPath) + ';', ';' + Uppercase(OldPath) + ';') = 0;
+end;
+
+procedure RemoveFromPath(const RemovePath: string);
+var
+  OldPath, NewPath, Up, UpRem: string;
+  P: Integer;
+begin
+  if not RegQueryStringValue(HKEY_LOCAL_MACHINE, PathRegKey, 'Path', OldPath) then Exit;
+  Up    := Uppercase(OldPath);
+  UpRem := Uppercase(RemovePath);
+  P := Pos(';' + UpRem, Up);
+  if P > 0 then begin
+    NewPath := OldPath;
+    Delete(NewPath, P, 1 + Length(RemovePath));
+    RegWriteStringValue(HKEY_LOCAL_MACHINE, PathRegKey, 'Path', NewPath);
+    Exit;
+  end;
+  P := Pos(UpRem + ';', Up);
+  if P > 0 then begin
+    NewPath := OldPath;
+    Delete(NewPath, P, Length(RemovePath) + 1);
+    RegWriteStringValue(HKEY_LOCAL_MACHINE, PathRegKey, 'Path', NewPath);
+  end;
+end;
 
 function IsValidPort(const S: string): Boolean;
 var
@@ -261,6 +307,7 @@ var
   PurgeVal: string;
 begin
   if CurUninstallStep = usPostUninstall then begin
+    RemoveFromPath(ExpandConstant('{app}\bin'));
     if RegQueryStringValue(HKLM, RegKey, 'PurgeOnUninstall', PurgeVal) and (PurgeVal = '1') then
       Exec('cmd.exe', '/c rmdir /s /q "C:\ProgramData\FalconDB"',
         '', SW_HIDE, ewWaitUntilTerminated, RC);

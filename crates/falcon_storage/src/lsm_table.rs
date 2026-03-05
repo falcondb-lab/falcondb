@@ -269,4 +269,34 @@ impl crate::storage_trait::StorageTable for LsmTable {
     fn abort_key(&self, pk: &PrimaryKey, txn_id: TxnId) {
         let _ = self.abort(pk, txn_id);
     }
+
+    fn commit_batch(&self, pks: &[PrimaryKey], txn_id: TxnId, commit_ts: Timestamp) -> Result<(), StorageError> {
+        LsmTable::commit_batch(self, pks, txn_id, commit_ts)
+    }
+    fn abort_batch(&self, pks: &[PrimaryKey], txn_id: TxnId) {
+        let _ = LsmTable::abort_batch(self, pks, txn_id);
+    }
+
+    fn prefetch_hint(&self, table_id: falcon_common::types::TableId, pk: &PrimaryKey, ustm: &crate::ustm::UstmEngine) {
+        let page_id = crate::ustm::page::page_id_for_pk(table_id, pk);
+        ustm.insert_warm(page_id, crate::ustm::PageData::new(pk.clone()), crate::ustm::AccessPriority::HotRow);
+    }
+
+    fn prefetch_evict(&self, table_id: falcon_common::types::TableId, pk: &PrimaryKey, ustm: &crate::ustm::UstmEngine) {
+        ustm.unregister_page(crate::ustm::page::page_id_for_pk(table_id, pk));
+    }
+
+    fn scan_prefetch_hint(&self, table_id: falcon_common::types::TableId, row_count: usize, ustm: &crate::ustm::UstmEngine) {
+        if row_count > 1 {
+            let sst_path = self.engine.data_dir().join(format!("lsm_table_{}", table_id.0));
+            ustm.prefetch_hint(
+                crate::ustm::PrefetchSource::SeqScan {
+                    start_page: crate::ustm::page::page_id_for_table(table_id, 0),
+                    count: row_count.min(16),
+                },
+                sst_path,
+            );
+            ustm.prefetch_tick();
+        }
+    }
 }

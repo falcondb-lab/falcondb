@@ -15,6 +15,8 @@
 //!    (send a speculative retry to a replica).
 
 use std::collections::VecDeque;
+use std::io::{BufRead, Write};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -67,17 +69,18 @@ pub struct DecisionRecord {
 /// Configuration for the coordinator decision log.
 #[derive(Debug, Clone)]
 pub struct DecisionLogConfig {
-    /// Maximum number of decision records to retain.
     pub max_entries: usize,
-    /// How long to retain applied decisions before eviction.
     pub retention: Duration,
+    /// Rewrite journal when this many applied entries accumulate.
+    pub compact_threshold: usize,
 }
 
 impl Default for DecisionLogConfig {
     fn default() -> Self {
         Self {
             max_entries: 10_000,
-            retention: Duration::from_secs(3600), // 1 hour
+            retention: Duration::from_secs(3600),
+            compact_threshold: 1_000,
         }
     }
 }
@@ -99,10 +102,18 @@ pub struct CoordinatorDecisionLog {
     config: DecisionLogConfig,
     records: RwLock<VecDeque<DecisionRecord>>,
     next_seq: AtomicU64,
-    /// Total decisions logged.
     total_logged: AtomicU64,
-    /// Total decisions applied (fully propagated).
     total_applied: AtomicU64,
+    journal_file: Mutex<Option<std::fs::File>>,
+}
+
+/// On-disk journal entry format: one line per event.
+/// "D <seq> <txn_id> <decision:C|A> <shard_ids_csv> <timestamp_ms> <prepare_us>" for decisions
+/// "A <txn_id>" for applied marks
+#[derive(Debug)]
+enum JournalEntry {
+    Decision(DecisionRecord),
+    Applied(TxnId),
 }
 
 impl CoordinatorDecisionLog {
@@ -113,13 +124,108 @@ impl CoordinatorDecisionLog {
             next_seq: AtomicU64::new(1),
             total_logged: AtomicU64::new(0),
             total_applied: AtomicU64::new(0),
+            journal_file: Mutex::new(None),
         })
     }
 
+    /// Create a durable decision log backed by a journal file.
+    /// Recovers unapplied decisions from the journal if it exists.
+    pub fn open(config: DecisionLogConfig, path: &Path) -> Arc<Self> {
+        let mut records = VecDeque::new();
+        let mut max_seq = 0u64;
+
+        // Recover from existing journal
+        if path.exists() {
+            if let Ok(file) = std::fs::File::open(path) {
+                let reader = std::io::BufReader::new(file);
+                for line in reader.lines() {
+                    let line = match line {
+                        Ok(l) => l,
+                        Err(_) => continue,
+                    };
+                    match Self::parse_journal_line(&line) {
+                        Some(JournalEntry::Decision(rec)) => {
+                            if rec.seq > max_seq { max_seq = rec.seq; }
+                            records.push_back(rec);
+                        }
+                        Some(JournalEntry::Applied(txn_id)) => {
+                            for r in records.iter_mut().rev() {
+                                if r.txn_id == txn_id && !r.applied {
+                                    r.applied = true;
+                                    break;
+                                }
+                            }
+                        }
+                        None => {}
+                    }
+                }
+            }
+            let unapplied = records.iter().filter(|r| !r.applied).count();
+            if unapplied > 0 {
+                tracing::warn!(unapplied, "2PC decision journal: recovered unapplied decisions");
+            }
+        }
+
+        let total_logged = records.len() as u64;
+        let total_applied = records.iter().filter(|r| r.applied).count() as u64;
+
+        let journal_file = std::fs::OpenOptions::new()
+            .create(true).append(true).open(path)
+            .ok();
+
+        Arc::new(Self {
+            config,
+            records: RwLock::new(records),
+            next_seq: AtomicU64::new(max_seq + 1),
+            total_logged: AtomicU64::new(total_logged),
+            total_applied: AtomicU64::new(total_applied),
+            journal_file: Mutex::new(journal_file),
+        })
+    }
+
+    fn parse_journal_line(line: &str) -> Option<JournalEntry> {
+        let parts: Vec<&str> = line.splitn(7, ' ').collect();
+        if parts.is_empty() { return None; }
+        match parts[0] {
+            "D" if parts.len() >= 7 => {
+                let seq = parts[1].parse().ok()?;
+                let txn_id = TxnId(parts[2].parse().ok()?);
+                let decision = match parts[3] {
+                    "C" => CoordinatorDecision::Commit,
+                    "A" => CoordinatorDecision::Abort,
+                    _ => return None,
+                };
+                let shards: Vec<ShardId> = parts[4]
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .filter_map(|s| s.parse().ok())
+                    .map(ShardId)
+                    .collect();
+                let timestamp_ms = parts[5].parse().ok()?;
+                let prepare_latency_us = parts[6].parse().ok()?;
+                Some(JournalEntry::Decision(DecisionRecord {
+                    seq, txn_id, decision,
+                    participant_shards: shards,
+                    timestamp_ms, applied: false, prepare_latency_us,
+                }))
+            }
+            "A" if parts.len() >= 2 => {
+                let txn_id = TxnId(parts[1].parse().ok()?);
+                Some(JournalEntry::Applied(txn_id))
+            }
+            _ => None,
+        }
+    }
+
+    fn append_journal_line(&self, line: &str) {
+        let mut guard = self.journal_file.lock();
+        if let Some(ref mut f) = *guard {
+            let _ = writeln!(f, "{}", line);
+            let _ = f.sync_all(); // fsync — actual durable commit point
+        }
+    }
+
     /// Log a coordinator decision. This is the **durable commit point**.
-    ///
-    /// Must be called AFTER all shards have prepared (or any has failed)
-    /// and BEFORE sending commit/abort to participants.
     pub fn log_decision(
         &self,
         txn_id: TxnId,
@@ -128,35 +234,41 @@ impl CoordinatorDecisionLog {
         prepare_latency_us: u64,
     ) -> u64 {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
         let record = DecisionRecord {
-            seq,
-            txn_id,
-            decision,
+            seq, txn_id, decision,
             participant_shards: participant_shards.to_vec(),
-            timestamp_ms: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64,
-            applied: false,
-            prepare_latency_us,
+            timestamp_ms, applied: false, prepare_latency_us,
         };
 
+        // Persist to journal BEFORE adding to in-memory state
+        let decision_char = match decision {
+            CoordinatorDecision::Commit => "C",
+            CoordinatorDecision::Abort => "A",
+        };
+        let shards_csv: String = participant_shards.iter()
+            .map(|s| s.0.to_string()).collect::<Vec<_>>().join(",");
+        self.append_journal_line(&format!(
+            "D {} {} {} {} {} {}",
+            seq, txn_id.0, decision_char, shards_csv, timestamp_ms, prepare_latency_us
+        ));
+
         tracing::info!(
-            seq = seq,
-            txn_id = txn_id.0,
-            decision = %decision,
+            seq, txn_id = txn_id.0, decision = %decision,
             shards = ?participant_shards,
             "2PC decision logged (durable commit point)"
         );
 
         let mut records = self.records.write();
-        // Evict old applied records if at capacity
         while records.len() >= self.config.max_entries {
             if let Some(front) = records.front() {
                 if front.applied {
                     records.pop_front();
                 } else {
-                    break; // Don't evict unapplied decisions
+                    break;
                 }
             } else {
                 break;
@@ -169,15 +281,42 @@ impl CoordinatorDecisionLog {
 
     /// Mark a decision as fully applied (all participants acknowledged).
     pub fn mark_applied(&self, txn_id: TxnId) -> bool {
+        self.append_journal_line(&format!("A {}", txn_id.0));
         let mut records = self.records.write();
         for record in records.iter_mut().rev() {
             if record.txn_id == txn_id && !record.applied {
                 record.applied = true;
-                self.total_applied.fetch_add(1, Ordering::Relaxed);
+                let applied = self.total_applied.fetch_add(1, Ordering::Relaxed) + 1;
+                drop(records);
+                // Compact journal when enough applied entries accumulate
+                if applied % self.config.compact_threshold as u64 == 0 {
+                    self.compact_journal();
+                }
                 return true;
             }
         }
         false
+    }
+
+    /// Rewrite journal keeping only unapplied decisions (truncates file).
+    fn compact_journal(&self) {
+        let mut guard = self.journal_file.lock();
+        let f = match guard.as_mut() { Some(f) => f, None => return };
+        let unapplied: Vec<DecisionRecord> = {
+            let records = self.records.read();
+            records.iter().filter(|r| !r.applied).cloned().collect()
+        };
+        // Seek to start and truncate
+        use std::io::{Seek, SeekFrom};
+        if f.seek(SeekFrom::Start(0)).is_err() { return; }
+        if f.set_len(0).is_err() { return; }
+        for rec in &unapplied {
+            let dc = match rec.decision { CoordinatorDecision::Commit => 'C', CoordinatorDecision::Abort => 'A' };
+            let shards = rec.participant_shards.iter().map(|s| s.0.to_string()).collect::<Vec<_>>().join(",");
+            let _ = writeln!(f, "D {} {} {} {} {} {}", rec.seq, rec.txn_id.0, dc, shards, rec.timestamp_ms, rec.prepare_latency_us);
+        }
+        let _ = f.sync_all();
+        tracing::debug!(unapplied = unapplied.len(), "2PC journal compacted");
     }
 
     /// Get the decision for a transaction (used by in-doubt resolver).
@@ -692,6 +831,7 @@ mod tests {
         let config = DecisionLogConfig {
             max_entries: 3,
             retention: Duration::from_secs(1),
+            compact_threshold: 100,
         };
         let log = CoordinatorDecisionLog::new(config);
 

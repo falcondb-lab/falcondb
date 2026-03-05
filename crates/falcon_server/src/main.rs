@@ -14,6 +14,9 @@ use falcon_cluster::{
     ClusterFailureDetector, ClusterLifecycleConfig, ClusterLifecycleCoordinator,
     DistributedQueryEngine, FailureDetectorConfig, RaftShardCoordinator, ShardedEngine,
     SmartGateway, SmartGatewayConfig, SmartRebalanceConfig, SmartRebalanceRunner,
+    ParticipantIdempotencyRegistry, TwoPcRecoveryCoordinator,
+    deterministic_2pc::{CoordinatorDecisionLog, DecisionLogConfig},
+    indoubt_resolver::InDoubtResolver,
 };
 use falcon_common::config::{FalconConfig, NodeRole};
 use falcon_common::types::ShardId;
@@ -457,6 +460,23 @@ async fn run_server_inner(
         };
 
         apply_engine_config(&mut engine, &config, &replication_log);
+
+        // Wire up group commit syncer if enabled and WAL is present.
+        if config.wal.group_commit {
+            use falcon_storage::group_commit::GroupCommitConfig;
+            let gc_config = GroupCommitConfig {
+                flush_interval_us: config.wal.flush_interval_us,
+                group_commit_window_us: config.wal.group_commit_window_us,
+                ..GroupCommitConfig::default()
+            };
+            engine.setup_group_commit(gc_config)?;
+            tracing::info!(
+                "Group commit enabled (window={}µs, flush_interval={}µs)",
+                config.wal.group_commit_window_us,
+                config.wal.flush_interval_us,
+            );
+        }
+
         Arc::new(engine)
     } else {
         tracing::info!("Running in pure in-memory mode (no WAL)");
@@ -495,9 +515,8 @@ async fn run_server_inner(
 
     // Start PG server — distributed or single-shard
     let num_shards = cli.shards.max(1);
-    let mut pg_server = if num_shards > 1 {
-        tracing::info!("Starting in distributed mode with {} shards", num_shards);
-        let sharded = if config.storage.wal_enabled {
+    let sharded_engine: Option<Arc<ShardedEngine>> = if num_shards > 1 {
+        Some(if config.storage.wal_enabled {
             let base_dir = Path::new(&config.storage.data_dir);
             Arc::new(ShardedEngine::new_with_wal(
                 num_shards,
@@ -508,10 +527,15 @@ async fn run_server_inner(
             )?)
         } else {
             Arc::new(ShardedEngine::new(num_shards))
-        };
+        })
+    } else {
+        None
+    };
+    let mut pg_server = if let Some(ref sharded) = sharded_engine {
+        tracing::info!("Starting in distributed mode with {} shards", num_shards);
         let shard_ids: Vec<ShardId> = (0..num_shards).map(ShardId).collect();
         let dist_engine = Arc::new(DistributedQueryEngine::new(
-            sharded,
+            sharded.clone(),
             std::time::Duration::from_secs(30),
         ));
         PgServer::new_distributed(
@@ -601,6 +625,9 @@ async fn run_server_inner(
     // ═══════════════════════════════════════════════════════════════════
     let coordinator = external_coordinator.unwrap_or_default();
 
+    // Shared config store — injected into gRPC service (SyncConfig handler) and lifecycle coordinator
+    let shared_config_store = Arc::new(falcon_enterprise::control_plane::ConfigStore::new());
+
     // Role-based replication startup
     let mut replica_runner_handle: Option<falcon_cluster::ReplicaRunnerHandle> = None;
     let mut grpc_join_handle: Option<tokio::task::JoinHandle<()>> = None;
@@ -618,6 +645,9 @@ async fn run_server_inner(
                 .ok_or_else(|| anyhow::anyhow!("replication_log must exist for Primary role"))?;
             let svc = falcon_cluster::grpc_transport::WalReplicationService::new();
             svc.set_storage(storage.clone());
+            svc.set_txn_manager(txn_mgr.clone());
+            svc.set_executor(executor.clone());
+            svc.set_config_store(shared_config_store.clone());
             for i in 0..num_shards {
                 svc.register_shard(ShardId(i), log.clone());
             }
@@ -654,7 +684,7 @@ async fn run_server_inner(
             let runner_config = falcon_cluster::ReplicaRunnerConfig {
                 primary_endpoint: config.replication.primary_endpoint.clone(),
                 shard_id: ShardId(0),
-                replica_id: 0,
+                replica_id: config.replication.replica_id as usize,
                 max_records_per_chunk: config.replication.max_records_per_chunk,
                 ack_interval_chunks: 10,
                 initial_backoff: std::time::Duration::from_millis(
@@ -672,10 +702,37 @@ async fn run_server_inner(
 
             let runner = falcon_cluster::ReplicaRunner::new(runner_config, storage.clone());
             let handle = runner.start();
-            // Share metrics with PgServer for SHOW falcon.replica_stats
             pg_server.set_replica_metrics(handle.metrics_arc());
-            // Store handle for graceful shutdown
             replica_runner_handle = Some(handle);
+
+            // Replica also needs a gRPC service to respond to ForwardQuery and SyncConfig
+            let grpc_addr = config.replication.grpc_listen_addr.clone();
+            if !grpc_addr.is_empty() {
+                let svc = falcon_cluster::grpc_transport::WalReplicationService::new();
+                svc.set_storage(storage.clone());
+                svc.set_txn_manager(txn_mgr.clone());
+                svc.set_executor(executor.clone());
+                svc.set_config_store(shared_config_store.clone());
+                let grpc_addr_parsed: std::net::SocketAddr = grpc_addr
+                    .parse()
+                    .map_err(|e| anyhow::anyhow!("Invalid grpc_listen_addr '{grpc_addr}': {e}"))?;
+                let grpc_token = coordinator.child_token();
+                let grpc_port = grpc_addr_parsed.port().to_string();
+                grpc_join_handle = Some(tokio::spawn(async move {
+                    use falcon_cluster::proto::wal_replication_server::WalReplicationServer;
+                    tracing::info!("gRPC service (replica) starting on {}", grpc_addr_parsed);
+                    if let Err(e) = tonic::transport::Server::builder()
+                        .add_service(WalReplicationServer::new(svc))
+                        .serve_with_shutdown(grpc_addr_parsed, async move {
+                            grpc_token.cancelled().await;
+                        })
+                        .await
+                    {
+                        tracing::error!("gRPC replica service error: {}", e);
+                    }
+                    tracing::info!(server = "grpc_replica", port = %grpc_port, "grpc replica server shutdown");
+                }));
+            }
         }
         NodeRole::Analytics => {
             // Analytics nodes behave like replicas (receive WAL, read-only)
@@ -683,7 +740,7 @@ async fn run_server_inner(
             let runner_config = falcon_cluster::ReplicaRunnerConfig {
                 primary_endpoint: config.replication.primary_endpoint.clone(),
                 shard_id: ShardId(0),
-                replica_id: 0,
+                replica_id: config.replication.replica_id as usize,
                 max_records_per_chunk: config.replication.max_records_per_chunk,
                 ack_interval_chunks: 10,
                 initial_backoff: std::time::Duration::from_millis(
@@ -802,7 +859,8 @@ async fn run_server_inner(
     // ═══════════════════════════════════════════════════════════════════
     let is_distributed = num_shards > 1
         || config.replication.role == NodeRole::RaftMember
-        || config.replication.role == NodeRole::Primary;
+        || config.replication.role == NodeRole::Primary
+        || config.replication.role == NodeRole::Replica;
 
     let mut lifecycle_coordinator: Option<Arc<ClusterLifecycleCoordinator>> = None;
     let mut failure_detector: Option<Arc<ClusterFailureDetector>> = None;
@@ -836,7 +894,7 @@ async fn run_server_inner(
             is_controller: config.replication.role == NodeRole::Primary
                 || config.replication.role == NodeRole::RaftMember,
         };
-        let lc = Arc::new(ClusterLifecycleCoordinator::new(lc_config));
+        let lc = Arc::new(ClusterLifecycleCoordinator::new_with_config_store(lc_config, shared_config_store.clone()));
         lc.register_default_slos();
         lc.start();
         tracing::info!("Cluster lifecycle coordinator started");
@@ -862,8 +920,33 @@ async fn run_server_inner(
                 local_node_id,
                 env!("CARGO_PKG_VERSION").to_owned(),
             );
-            let fd_token = coordinator.child_token();
-            _failure_detector_handle = Some(fd.spawn_evaluator(fd_token));
+            // Evaluator is spawned after SmartGateway so the failover callback can capture it
+
+            // Active probing — register peers and start gRPC prober
+            if !config.cluster.peers.is_empty() {
+                let mut peer_addrs: Vec<(falcon_common::types::NodeId, String)> = vec![];
+                for peer_str in &config.cluster.peers {
+                    let parts: Vec<&str> = peer_str.splitn(2, ':').collect();
+                    if parts.len() == 2 {
+                        if let Ok(nid) = parts[0].parse::<u64>() {
+                            let addr = if peer_str[parts[0].len() + 1..].starts_with("http") {
+                                peer_str[parts[0].len() + 1..].to_owned()
+                            } else {
+                                format!("http://{}", &peer_str[parts[0].len() + 1..])
+                            };
+                            let peer_node = falcon_common::types::NodeId(nid);
+                            fd.register_node(peer_node, String::new());
+                            peer_addrs.push((peer_node, addr));
+                        }
+                    }
+                }
+                if !peer_addrs.is_empty() {
+                    let prober_token = coordinator.child_token();
+                    fd.spawn_prober(prober_token, peer_addrs);
+                    tracing::info!("Cluster failure detector prober started");
+                }
+            }
+
             tracing::info!("Cluster failure detector started");
             failure_detector = Some(fd);
         }
@@ -874,7 +957,7 @@ async fn run_server_inner(
             "compute_only" => falcon_cluster::GatewayRole::ComputeOnly,
             _ => falcon_cluster::GatewayRole::SmartGateway,
         };
-        let gw = Arc::new(SmartGateway::new(SmartGatewayConfig {
+        let mut gw = Arc::new(SmartGateway::new(SmartGatewayConfig {
             node_id: local_node_id,
             role: gw_role,
             max_inflight: config.gateway.max_inflight,
@@ -893,10 +976,74 @@ async fn run_server_inner(
                 config.server.pg_listen_addr.clone(),
             );
         }
-        tracing::info!(role = %gw_role, "Smart gateway initialized");
+
+        // Parse peers from config and build shard map for cross-node routing
+        // Format: "node_id:grpc_addr" e.g. "2:http://10.0.0.2:6543"
+        if !config.cluster.peers.is_empty() {
+            let mut shard_map = falcon_cluster::routing::ShardMap::uniform(
+                num_shards as u64,
+                local_node_id,
+            );
+            for peer_str in &config.cluster.peers {
+                let parts: Vec<&str> = peer_str.splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    if let Ok(nid) = parts[0].parse::<u64>() {
+                        let addr = if peer_str[parts[0].len() + 1..].starts_with("http") {
+                            peer_str[parts[0].len() + 1..].to_owned()
+                        } else {
+                            format!("http://{}", &peer_str[parts[0].len() + 1..])
+                        };
+                        let peer_node_id = falcon_common::types::NodeId(nid);
+                        gw.add_node_endpoint(nid, addr.clone());
+                        gw.topology.update_leader(
+                            falcon_common::types::ShardId(nid % num_shards as u64),
+                            peer_node_id,
+                            addr.clone(),
+                        );
+                        shard_map.update_leader(
+                            falcon_common::types::ShardId(nid % num_shards as u64),
+                            peer_node_id,
+                        );
+                        // F3: register peer gRPC addr for config sync pushes
+                        if let Some(ref lc) = lifecycle_coordinator {
+                            lc.register_node_addr(nid, addr.clone());
+                        }
+                        tracing::info!(node_id = nid, addr = %addr, "Registered peer node");
+                    }
+                }
+            }
+            if let Some(g) = Arc::get_mut(&mut gw) {
+                g.set_shard_map(shard_map);
+            }
+        }
+
+        tracing::info!(role = %gw_role, peers = config.cluster.peers.len(), "Smart gateway initialized");
         smart_gateway = Some(gw);
     } else {
         smart_gateway = None;
+    }
+
+    // ── Spawn failure detector evaluator (deferred until after SmartGateway) ──
+    if let Some(ref fd) = failure_detector {
+        let fd_token = coordinator.child_token();
+        let gw_for_failover = smart_gateway.clone();
+        let exec_for_failover = executor.clone();
+        let role = config.replication.role;
+        let on_dead: Option<Arc<dyn Fn(falcon_common::types::NodeId) + Send + Sync>> =
+            Some(Arc::new(move |dead_node: falcon_common::types::NodeId| {
+                tracing::error!(node = dead_node.0, "auto-failover: node declared Dead");
+                if let Some(ref gw) = gw_for_failover {
+                    gw.topology.mark_node_dead(dead_node);
+                    tracing::info!(node = dead_node.0, "marked dead node in gateway topology");
+                }
+                // Self-promote if we are a Replica and the dead node was our Primary
+                if role == NodeRole::Replica {
+                    exec_for_failover.set_read_only(false);
+                    tracing::warn!("self-promoted to writable after primary failure");
+                }
+            }));
+        _failure_detector_handle = Some(fd.spawn_evaluator_with_failover(fd_token, on_dead));
+        tracing::info!("Failure detector evaluator started with auto-failover");
     }
 
     // ── Smart Rebalancer (needs shards > 1) ──
@@ -923,9 +1070,7 @@ async fn run_server_inner(
                 ..Default::default()
             };
             let runner = SmartRebalanceRunner::new(rb_config);
-            // The rebalancer needs access to the ShardedEngine.
-            // Re-create a reference for it if we're in distributed mode.
-            let rb_engine = Arc::new(ShardedEngine::new(num_shards));
+            let rb_engine = sharded_engine.clone().unwrap_or_else(|| Arc::new(ShardedEngine::new(num_shards)));
             match runner.start(rb_engine) {
                 Ok(handle) => {
                     tracing::info!(
@@ -940,6 +1085,51 @@ async fn run_server_inner(
                 }
             }
         }
+    }
+
+    // ── 2PC Decision Log + InDoubt Resolver (distributed mode) ──
+    let mut _indoubt_resolver_handle: Option<falcon_cluster::indoubt_resolver::InDoubtResolverHandle> = None;
+    let mut _recovery_coord: Option<TwoPcRecoveryCoordinator> = None;
+    if let Some(ref engine) = sharded_engine {
+        let data_dir = Path::new(&config.storage.data_dir);
+        let journal_path = data_dir.join("2pc_decision.journal");
+        let decision_log = CoordinatorDecisionLog::open(DecisionLogConfig::default(), &journal_path);
+        tracing::info!(path = ?journal_path, "2PC decision journal opened");
+
+        let outcome_cache = falcon_cluster::indoubt_resolver::TxnOutcomeCache::new(
+            std::time::Duration::from_secs(3600),
+            10_000,
+        );
+        let resolver = InDoubtResolver::with_engine(outcome_cache, engine.clone());
+
+        // Re-register any unapplied decisions from the journal as in-doubt txns
+        for rec in decision_log.unapplied_decisions() {
+            use falcon_cluster::indoubt_resolver::TxnOutcome;
+            use falcon_cluster::deterministic_2pc::CoordinatorDecision;
+            let participant_pairs: Vec<_> = rec.participant_shards.iter()
+                .map(|&s| (s, falcon_common::types::TxnId(rec.txn_id.0)))
+                .collect();
+            resolver.register_indoubt(rec.txn_id, participant_pairs);
+            let outcome = match rec.decision {
+                CoordinatorDecision::Commit => TxnOutcome::Committed,
+                CoordinatorDecision::Abort => TxnOutcome::Aborted,
+            };
+            resolver.record_decision(rec.txn_id, outcome);
+        }
+
+        match resolver.start() {
+            Ok(handle) => {
+                tracing::info!("InDoubt resolver started");
+                _indoubt_resolver_handle = Some(handle);
+            }
+            Err(e) => tracing::error!("Failed to start indoubt resolver: {e}"),
+        }
+
+        // Wire TwoPcRecoveryCoordinator — hoisted to outer scope so it lives until shutdown
+        let idempotency = Arc::new(ParticipantIdempotencyRegistry::new(10_000, std::time::Duration::from_secs(3600)));
+        _recovery_coord = Some(TwoPcRecoveryCoordinator::new(idempotency)
+            .with_engine(engine.clone()));
+        tracing::info!("TwoPc recovery coordinator wired");
     }
 
     // Pass cluster subsystems to PgServer for SHOW commands
@@ -1158,6 +1348,15 @@ async fn run_server_inner(
         }
     }
 
+    // 5b. Flush per-shard WALs (distributed mode)
+    if let Some(ref se) = sharded_engine {
+        match se.flush_wal_all() {
+            Ok(()) => tracing::info!("Shard WAL final flush complete ({} shards)", se.num_shards()),
+            Err(e) => tracing::error!(error = %e, "Shard WAL flush FAILED"),
+        }
+        se.shutdown_wal_all();
+    }
+
     tracing::info!(
         reason = %coordinator.reason(),
         "FalconDB shutdown complete — all ports released, WAL flushed"
@@ -1299,6 +1498,14 @@ fn apply_engine_config(
         &config.tde.key_env_var,
         config.tde.encrypt_wal,
         config.tde.encrypt_data,
+    );
+
+    engine.configure_resource_isolation(
+        config.resource_isolation.enabled,
+        config.resource_isolation.io_rate_bytes_per_sec,
+        config.resource_isolation.io_burst_bytes,
+        config.resource_isolation.max_bg_threads,
+        config.resource_isolation.fg_pressure_threshold,
     );
 
     if let Some(ref log) = replication_log {

@@ -93,14 +93,16 @@ Future (M2+): disaggregate into dedicated compute / storage / meta roles.
 | **Replaceable** | Parser backend (sqlparser-rs vs custom PEG), dialect config |
 | **Open-source reuse** | `sqlparser-rs` (Apache-2.0) for parsing; custom binder/analyzer |
 
-### 2.3 `planner_router` — Query Planner & Distributed Router
+### 2.3 `planner_router` — Query Planner, Cost-Based Optimizer & Distributed Router
 
 | Item | Detail |
 |------|--------|
-| **Responsibility** | Logical plan → physical plan; determine shard targets; push-down filters |
-| **Input** | `BoundStatement` + shard map |
+| **Responsibility** | Logical plan → optimized physical plan; cost-based index/scan selection; join reorder and strategy; determine shard targets; push-down filters |
+| **Input** | `BoundStatement` + shard map + `TableStatsMap` + `IndexedColumns` |
 | **Output** | `PhysicalPlan` (tree of operators with shard annotations) |
-| **Core types** | `LogicalPlan`, `PhysicalPlan`, `ShardTarget`, `PushDown` |
+| **Cost-Based Optimizer** | `plan_optimized()` pipeline: BoundStatement → LogicalPlan → optimizer rules → cost-based physical lowering. Uses `estimate_selectivity()` (NDV, MCV, histogram), `seq_scan_cost()` / `index_scan_cost()` / `prefer_index_scan()` to choose SeqScan vs IndexScan. Join strategy (NL/Hash/MergeSort) and reorder based on row counts. Falls back to `plan_with_indexes()` for unsupported statements. |
+| **Auto-Analyze integration** | `StorageEngine::track_rows_modified()` triggers inline `analyze_table()` after threshold modifications (max(row_count/5, 500)); stats flow to CBO via `build_table_stats()` in `handler_extended.rs`. |
+| **Core types** | `LogicalPlan`, `PhysicalPlan`, `ShardTarget`, `PushDown`, `TableStatsMap`, `TableStatsInfo`, `ColumnStatsInfo`, `IndexedColumns` |
 | **Dependencies** | `sql_frontend`, `cluster_meta`, `common` |
 | **Replaceable** | Optimizer rules, cost model, routing strategy |
 
@@ -108,11 +110,11 @@ Future (M2+): disaggregate into dedicated compute / storage / meta roles.
 
 | Item | Detail |
 |------|--------|
-| **Responsibility** | Execute physical plan operators, produce result rows; enforce per-txn READ ONLY and timeout guards; query governor with structured abort reasons; fused streaming aggregates for large-table scans |
+| **Responsibility** | Execute physical plan operators, produce result rows; enforce per-txn READ ONLY and timeout guards; query governor with structured abort reasons; fused streaming aggregates for large-table scans; vectorized columnstore GROUP BY AGG pushdown |
 | **Input** | `PhysicalPlan` + txn handle |
 | **Output** | `RowStream` (iterator of `Row`) |
 | **Core types** | `Operator` trait, `SeqScan`, `IndexScan`, `Filter`, `Project`, `Sort`, `Agg`, `Insert`, `Update`, `Delete`, `QueryGovernor`, `GovernorAbortReason`, `ProjAccum`, `exec_fused_aggregate` |
-| **Fast paths** | `exec_fused_aggregate` — single-pass WHERE+GROUP BY+aggregate over MVCC chains (zero row clone); `try_streaming_aggs` — simple column-ref aggregates via `compute_simple_aggs`; `try_pk_ordered_limit` — bounded-heap top-K via `scan_top_k_by_pk` |
+| **Fast paths** | `exec_fused_aggregate` — single-pass WHERE+GROUP BY+aggregate over MVCC chains (zero row clone); `try_streaming_aggs` — simple column-ref aggregates via `compute_simple_aggs`; `try_pk_ordered_limit` — bounded-heap top-K via `scan_top_k_by_pk`; `exec_columnar_group_agg` — vectorized hash aggregation on ColumnStore `RecordBatch` with zone-map filter pushdown |
 | **Dependencies** | `storage` (via trait), `txn`, `common` |
 | **Replaceable** | Row-at-a-time ↔ vectorized; push ↔ pull model |
 
@@ -131,13 +133,16 @@ Future (M2+): disaggregate into dedicated compute / storage / meta roles.
 
 | Item | Detail |
 |------|--------|
-| **Responsibility** | Store tuples with MVCC versions across multiple engines; maintain indexes (hash PK + BTree secondary + unique + composite/covering/prefix); WAL write + recovery; MVCC garbage collection; replication stats; zero-copy row iteration; streaming aggregate computation |
-| **Engines** | **Rowstore** (in-memory, default) · **LSM** (disk, default feature) · **RocksDB** (`--features rocksdb`, C++ library) · **redb** (`--features redb`, pure Rust) · DiskRowstore/Columnstore (stubs) |
-| **Input** | Get/Put/Delete/Scan with txn context |
-| **Output** | Tuples (visible version for given txn) |
-| **Core types** | `StorageEngine`, `MemTable`, `VersionChain`, `SecondaryIndex`, `WalWriter`, `WalRecord`, `GcConfig`, `GcStats`, `GcRunner`, `ReplicationStats`, `LsmEngine`, `RocksDbTable`, `RedbTable` |
-| **MVCC fast paths** | `with_visible_data` — zero-copy closure-based row access; `for_each_visible` — streaming DashMap iteration without Vec allocation; `scan_top_k_by_pk` — bounded `BinaryHeap` for O(N log K) top-K; `compute_simple_aggs` — single-pass COUNT/SUM/MIN/MAX; Arc-clone elimination on head version for all visibility checks |
-| **WAL optimizations** | Batch WAL writes (`txn_wal_buf` + `append_multi`); cached flush fd; `WRITE_THROUGH` + leader-follower group commit; double-buffer `flush_split`; WAL recovery counter advancement (`recovered_max_ts`/`recovered_max_txn_id`) |
+| **Responsibility** | Store tuples with MVCC versions across multiple engines; maintain indexes (hash PK + BTree secondary + unique + composite/covering/prefix); WAL write + recovery; MVCC garbage collection; replication stats; zero-copy row iteration; streaming aggregate computation; auto-analyze with CBO stats feed; CDC with before/after images |
+| **Table dispatch** | Single `engine_tables: DashMap<TableId, TableHandle>` holds all tables. `TableHandle` enum dispatches polymorphically: Rowstore has explicit fast paths for DML/WAL/CDC; disk-backed engines (LSM, RocksDB, redb) go through `as_storage_table() → &dyn StorageTable` for unified DML + USTM prefetch. `as_rowstore()` / `as_columnstore()` provide safe downcasting when engine-specific access is needed (e.g., secondary index queries). |
+| **Engines** | **Rowstore** (in-memory, default) · **LSM** (disk, default feature) · **RocksDB** (`--features rocksdb`, C++ library) · **redb** (`--features redb`, pure Rust) · DiskRowstore (stub) · Columnstore (storage + vectorized AGG pushdown) |
+| **StorageTable trait** | Core DML contract (`insert`/`update`/`delete`/`get`/`scan`/`commit_key`/`abort_key`) with default batch and visibility methods. USTM integration via `prefetch_hint`/`prefetch_evict`/`scan_prefetch_hint` (default no-op; LsmTable overrides). Adding a new engine: impl `StorageTable` + add `TableHandle` variant + wire DDL. |
+| **Core types** | `StorageEngine`, `TableHandle`, `StorageTable` (trait), `MemTable`, `VersionChain`, `SecondaryIndex`, `WalWriter`, `WalRecord`, `GcConfig`, `GcStats`, `GcRunner`, `LsmEngine`, `RocksDbTable`, `RedbTable` |
+| **MVCC** | `VersionData` enum: `Hot(Arc<OwnedRow>)` — in-memory; `Cold(ColdHandle)` — compressed in ColdStore, resolved on demand; `Tombstone`. `with_visible_data` — zero-copy closure-based row access; `for_each_visible` — streaming DashMap iteration without Vec allocation; `scan_top_k_by_pk` — bounded `BinaryHeap` for O(N log K) top-K; `compute_simple_aggs` — single-pass COUNT/SUM/MIN/MAX; Arc-clone elimination on head version |
+| **Index encapsulation** | Secondary index queries (`index_scan`, `index_range_scan`, `index_lookup_pks`) encapsulated in `MemTable`; `engine_dml.rs` delegates with OCC read tracking only |
+| **Auto-Analyze** | `rows_modified: DashMap<TableId, AtomicU64>` tracks per-table DML counts; `track_rows_modified()` called after commit; triggers inline `analyze_table()` at threshold max(row_count/5, 500); stats stored in `table_stats` and consumed by CBO |
+| **CDC** | Before/after images: `update()` and `delete()` read old row via `table.get()` before mutation when `cdc_manager.is_enabled()`; `emit_update(old_row, new_row)` and `emit_delete(old_row)` provide full change capture |
+| **WAL optimizations** | 8-shard insertion slots (`WalShard`) with thread-local affinity; batch WAL writes (`txn_wal_buf` + `append_multi`); cached flush fd; `WRITE_THROUGH` + leader-follower group commit with 500-spin fast path; double-buffer `flush_split`; combined per-txn DashMap (`TxnLocalState`); WAL recovery counter advancement (`recovered_max_ts`/`recovered_max_txn_id`) |
 | **Dependencies** | `common`, `falcon_segment_codec` |
 | **Replaceable** | Per-table engine selection via `ENGINE=` clause; index impl (BTree, SkipList, ART) |
 
@@ -379,15 +384,32 @@ falcon/
 ### 6.1 Core Trait Sketches
 
 ```rust
-// StorageEngine — pluggable storage backend
-#[async_trait]
-pub trait StorageEngine: Send + Sync + 'static {
-    async fn get(&self, table: TableId, key: &[u8], txn: &TxnContext) -> Result<Option<OwnedRow>>;
-    async fn scan(&self, table: TableId, range: ScanRange, txn: &TxnContext) -> Result<RowStream>;
-    async fn put(&self, table: TableId, key: &[u8], row: OwnedRow, txn: &TxnContext) -> Result<()>;
-    async fn delete(&self, table: TableId, key: &[u8], txn: &TxnContext) -> Result<()>;
-    async fn create_table(&self, meta: TableMeta) -> Result<()>;
-    async fn drop_table(&self, table: TableId) -> Result<()>;
+// TableHandle — per-table engine dispatch (engine_tables: DashMap<TableId, TableHandle>)
+pub enum TableHandle {
+    Rowstore(Arc<MemTable>),           // fast-path: explicit DML/WAL/CDC branches
+    Lsm(Arc<LsmTable>),               // → dyn StorageTable
+    RocksDb(Arc<RocksDbTable>),        // → dyn StorageTable (feature-gated)
+    Redb(Arc<RedbTable>),             // → dyn StorageTable (feature-gated)
+    // ...
+}
+impl TableHandle {
+    fn as_storage_table(&self) -> Option<&dyn StorageTable>;
+    fn as_rowstore(&self) -> Option<&Arc<MemTable>>;
+}
+
+// StorageTable — core DML contract for disk-backed engines
+pub trait StorageTable: Send + Sync {
+    fn insert(&self, row: &OwnedRow, txn_id: TxnId) -> Result<PrimaryKey, StorageError>;
+    fn update(&self, pk: &PrimaryKey, new_row: &OwnedRow, txn_id: TxnId) -> Result<(), StorageError>;
+    fn delete(&self, pk: &PrimaryKey, txn_id: TxnId) -> Result<(), StorageError>;
+    fn get(&self, pk: &PrimaryKey, txn_id: TxnId, read_ts: Timestamp) -> Result<Option<OwnedRow>, StorageError>;
+    fn scan(&self, txn_id: TxnId, read_ts: Timestamp) -> Vec<(PrimaryKey, OwnedRow)>;
+    fn commit_key(&self, pk: &PrimaryKey, txn_id: TxnId, commit_ts: Timestamp) -> Result<(), StorageError>;
+    fn abort_key(&self, pk: &PrimaryKey, txn_id: TxnId);
+    // USTM prefetch (default no-op; LsmTable overrides)
+    fn prefetch_hint(&self, _table_id: TableId, _pk: &PrimaryKey, _ustm: &UstmEngine) {}
+    fn prefetch_evict(&self, _table_id: TableId, _pk: &PrimaryKey, _ustm: &UstmEngine) {}
+    fn scan_prefetch_hint(&self, _table_id: TableId, _row_count: usize, _ustm: &UstmEngine) {}
 }
 
 // TxnManager — transaction lifecycle

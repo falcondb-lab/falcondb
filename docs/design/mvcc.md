@@ -159,6 +159,26 @@ The head version's row is accessed via `Arc<OwnedRow>`. Visibility checks on the
 head version avoid cloning the Arc when possible, reducing atomic reference
 count contention.
 
+## Cold Store Integration
+
+Version row data can be tiered between hot memory and compressed cold storage
+via the `VersionData` enum:
+
+```rust
+pub enum VersionData {
+    Hot(Arc<OwnedRow>),       // normal in-memory path
+    Cold(ColdHandle),         // compressed in ColdStore
+    Tombstone,                // logical delete
+}
+```
+
+- **Hot → Cold migration**: background process compresses infrequently accessed
+  rows into `ColdStore` and replaces `Hot(row)` with `Cold(handle)`.
+- **Transparent resolution**: `VersionData::resolve(&self, cold_store)` reads
+  cold rows back into `Arc<OwnedRow>` on demand. Callers don't need to know
+  whether a row is hot or cold.
+- **GC compatibility**: cold versions follow the same safepoint rules as hot versions.
+
 ## Garbage Collection
 
 See [ADR-004](../adr/ADR-004-memory-first-adaptive-gc.md) for the GC strategy.

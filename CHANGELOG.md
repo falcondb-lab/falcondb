@@ -9,6 +9,67 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — Cost-Based Query Optimizer (`falcon_planner`)
+
+- **`plan_optimized()` pipeline** — Full `BoundStatement → LogicalPlan → optimize → PhysicalPlan`
+  lowering with cost-based decisions. Uses `TableStatsMap` from ANALYZE stats when available,
+  falls back to `plan_with_indexes()` for unsupported statement types.
+- **Selectivity estimator** (`cost.rs`) — `estimate_selectivity()` handles Eq (MCV → histogram →
+  1/NDV), Lt/Gt (histogram bucket interpolation), BETWEEN, IN list, AND/OR (independence),
+  NOT, IS NULL, LIKE. Planner-level stats types: `TableStatsInfo`, `ColumnStatsInfo`,
+  `TableStatsMap`, `IndexedColumns`.
+- **Scan cost model** — PostgreSQL-style constants (`SEQ_SCAN_PAGE_COST=1.0`,
+  `RANDOM_PAGE_COST=4.0`, `CPU_TUPLE_COST=0.01`). `seq_scan_cost()`, `index_scan_cost()`,
+  `prefer_index_scan()` — crossover at ~10-30% selectivity depending on table size.
+- **Join strategy selection** — NL/Hash/MergeSort based on row counts and equi-join detection.
+  Join reorder using stats-driven smallest-first heuristic.
+- **Handler bridge** (`handler_extended.rs`) — `build_table_stats()` converts storage
+  `TableStatistics` → planner `TableStatsMap`. Wired into `handle_query` so `plan_optimized`
+  is used when ANALYZE stats are available.
+- **20 new tests** — selectivity estimation (14), scan cost model (4), plan_optimized pipeline (3).
+  Total planner tests: 111+.
+
+### Added — Auto-Analyze (`falcon_storage`)
+
+- **`rows_modified: DashMap<TableId, AtomicU64>`** — per-table modification counter in
+  `StorageEngine`, initialized in all 4 constructors.
+- **`track_rows_modified()`** — called after `commit_txn_local` and `commit_txn_global`;
+  triggers inline `analyze_table()` when modifications exceed max(row_count/5, 500).
+- Stats stored in `self.table_stats` and consumed automatically by the CBO path.
+
+### Fixed — CDC Before/After Images (`falcon_storage`)
+
+- **Root cause**: `emit_update` and `emit_delete` always passed `old_row: None`.
+- **Fix**: In `update()` and `delete()`, read old row via `table.get(pk, txn_id, MAX_TS)`
+  before the mutation when `cdc_manager.is_enabled()`. No overhead when CDC is off.
+- 2 new tests: `test_cdc_update_has_old_and_new_row`, `test_cdc_delete_has_old_row`.
+
+### Added — Columnstore GROUP BY AGG Pushdown (`falcon_executor`)
+
+- **`exec_columnar_group_agg`** in `executor_columnar.rs` — vectorized hash aggregation on
+  ColumnStore `RecordBatch` with zone-map filter pushdown. Calls `vectorized_hash_agg()` for
+  pure column-vector GROUP BY, remaps output to match projection order. Supports ORDER BY /
+  LIMIT / OFFSET / DISTINCT post-processing.
+- Wired in `executor_query.rs` after `is_simple_agg` block for columnstore tables with
+  GROUP BY + simple AGG projections. Falls back to row-at-a-time `exec_aggregate` otherwise.
+- 5 new tests: SUM, COUNT, MIN+MAX, single group, empty batch.
+
+### Added — Cold Store MVCC Integration (`falcon_storage`)
+
+- **`VersionData` enum** — `Hot(Arc<OwnedRow>)` (in-memory), `Cold(ColdHandle)` (compressed
+  in ColdStore, resolved on demand via `cold_store.read_row()`), `Tombstone`.
+- `ColdStore` provides compressed row storage; `VersionData::resolve()` transparently reads
+  cold rows back into `Arc<OwnedRow>` when accessed.
+
+### Changed — WAL Performance
+
+- **8-shard WAL insertion** — `WalShard` struct with thread-local affinity via `pick_shard()`.
+  Reduces append contention 8x. Shards collected atomically during flush.
+- **500-spin group commit fast path** — spin-wait before Condvar in `notify_and_wait` reduces
+  Mutex contention at 64c for ~21-30µs FUA writes.
+- **Combined per-txn DashMap** — merged `txn_write_sets`, `txn_write_bytes`, `txn_wal_buf`
+  into single `txn_local: DashMap<TxnId, TxnLocalState>`. 6→2 DashMap ops per autocommit INSERT.
+
 ### Added — DCG Failover PoC (`falcondb-poc-dcg/`)
 
 - **`falcondb-poc-dcg/`** — Customer-facing, black-box PoC proving FalconDB's

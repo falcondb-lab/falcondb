@@ -49,7 +49,8 @@ impl PlanCache {
     /// Look up a cached plan by SQL string.
     /// Returns `Some(plan)` if found and still valid, `None` otherwise.
     pub fn get(&self, sql: &str) -> Option<PhysicalPlan> {
-        let key = sql.trim();
+        let key_owned = normalize_sql(sql);
+        let key = key_owned.as_str();
 
         let inner = self.inner.read().ok()?;
         let gen_valid = inner
@@ -86,7 +87,8 @@ impl PlanCache {
             return;
         }
 
-        let key = sql.trim();
+        let key_owned = normalize_sql(sql);
+        let key = key_owned.as_str();
         let Ok(mut inner) = self.inner.write() else {
             return;
         };
@@ -160,6 +162,7 @@ const fn is_cacheable(plan: &PhysicalPlan) -> bool {
     matches!(
         plan,
         PhysicalPlan::SeqScan { .. }
+            | PhysicalPlan::ColumnScan { .. }
             | PhysicalPlan::NestedLoopJoin { .. }
             | PhysicalPlan::HashJoin { .. }
             | PhysicalPlan::Insert { .. }

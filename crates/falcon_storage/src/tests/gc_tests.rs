@@ -824,3 +824,112 @@
             p99_no_gc,
         );
     }
+
+    // ── Cold Store migration ──
+
+    #[test]
+    fn test_cold_migration_old_versions() {
+        use crate::cold_store::ColdStore;
+        use crate::mvcc::VersionData;
+
+        let chain = VersionChain::new();
+
+        // 3 committed versions
+        chain.prepend(TxnId(1), Some(row(10)));
+        chain.commit(TxnId(1), Timestamp(100));
+        chain.prepend(TxnId(2), Some(row(20)));
+        chain.commit(TxnId(2), Timestamp(200));
+        chain.prepend(TxnId(3), Some(row(30)));
+        chain.commit(TxnId(3), Timestamp(300));
+
+        assert_eq!(chain.version_chain_len(), 3);
+
+        let cold_store = ColdStore::new_in_memory();
+
+        // Migrate versions older than ts=250 → should migrate ts=100 and ts=200
+        let result = chain.migrate_to_cold(&cold_store, Timestamp(250));
+        assert_eq!(result.migrated, 2);
+        assert_eq!(result.errors, 0);
+        assert!(result.hot_bytes_freed > 0);
+        assert!(result.cold_bytes_written > 0);
+
+        // Head (ts=300) should still be Hot
+        {
+            let head = chain.head.read();
+            let ver = head.as_ref().unwrap();
+            assert!(matches!(*ver.data.read(), VersionData::Hot(_)));
+        }
+
+        // Older versions should be Cold
+        {
+            let head = chain.head.read();
+            let v2 = head.as_ref().unwrap().get_prev().unwrap();
+            assert!(matches!(*v2.data.read(), VersionData::Cold(_)));
+            let v1 = v2.get_prev().unwrap();
+            assert!(matches!(*v1.data.read(), VersionData::Cold(_)));
+        }
+
+        // Cold store metrics should reflect 2 stored rows
+        assert_eq!(
+            cold_store.metrics.cold_migrate_total.load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+
+        // Hot read path still works for head version
+        let visible = chain.read_committed(Timestamp(300));
+        assert!(visible.is_some());
+        assert_eq!(visible.unwrap().values[0], Datum::Int32(30));
+
+        // clone_hot returns None for cold versions (expected — cold reads need resolve())
+        let visible_old = chain.read_committed(Timestamp(150));
+        assert!(visible_old.is_none(), "cold version not visible via clone_hot");
+    }
+
+    #[test]
+    fn test_cold_migration_skips_head_and_tombstones() {
+        use crate::cold_store::ColdStore;
+        use crate::mvcc::VersionData;
+
+        let chain = VersionChain::new();
+
+        // Insert → commit → delete → commit
+        chain.prepend(TxnId(1), Some(row(1)));
+        chain.commit(TxnId(1), Timestamp(10));
+        chain.prepend(TxnId(2), None); // tombstone
+        chain.commit(TxnId(2), Timestamp(20));
+
+        let cold_store = ColdStore::new_in_memory();
+        let result = chain.migrate_to_cold(&cold_store, Timestamp(15));
+
+        // ts=10 is Hot and eligible → should be migrated
+        // ts=20 is head → skipped
+        assert_eq!(result.migrated, 1);
+
+        // Head (tombstone) should remain Tombstone
+        let head = chain.head.read();
+        let ver = head.as_ref().unwrap();
+        assert!(matches!(*ver.data.read(), VersionData::Tombstone));
+    }
+
+    #[test]
+    fn test_cold_migration_then_gc_reclaims() {
+        use crate::cold_store::ColdStore;
+
+        let chain = VersionChain::new();
+        chain.prepend(TxnId(1), Some(row(1)));
+        chain.commit(TxnId(1), Timestamp(10));
+        chain.prepend(TxnId(2), Some(row(2)));
+        chain.commit(TxnId(2), Timestamp(20));
+        chain.prepend(TxnId(3), Some(row(3)));
+        chain.commit(TxnId(3), Timestamp(30));
+
+        // First: cold-migrate old versions
+        let cold_store = ColdStore::new_in_memory();
+        let mig = chain.migrate_to_cold(&cold_store, Timestamp(25));
+        assert_eq!(mig.migrated, 2);
+
+        // Then: GC truncates them entirely
+        let gc = chain.gc(Timestamp(25));
+        assert_eq!(gc.reclaimed_versions, 1); // ts=10 dropped (ts=20 is watermark anchor)
+        assert_eq!(chain.version_chain_len(), 2);
+    }

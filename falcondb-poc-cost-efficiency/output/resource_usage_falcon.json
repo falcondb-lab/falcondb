@@ -1,0 +1,16 @@
+{
+  "samples": [
+    {
+      "cpu_percent": 5.0,
+      "disk_write_bytes": 0,
+      "rss_mb": 76.7,
+      "timestamp": "2026-03-04T16:50:25.1361244+08:00",
+      "disk_read_bytes": 0
+    }
+  ],
+  "avg_rss_mb": 76.7,
+  "avg_cpu_percent": 5.0,
+  "label": "falcon",
+  "peak_rss_mb": 76.7,
+  "pid": 42148
+}

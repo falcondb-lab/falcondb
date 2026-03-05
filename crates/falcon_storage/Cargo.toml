@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-default = ["lsm"]
+default = ["lsm", "online_ddl_full"]
 # Non-v1.0 storage engines (STUB / EXPERIMENTAL).
 columnstore = []
 disk_rowstore = []
@@ -15,7 +15,7 @@ redb = ["dep:redb"]
 # Enable with: cargo build --features io_uring
 io_uring = ["dep:io-uring"]
 # Enterprise features (STUB). Default OFF.
-encryption_tde = []
+encryption_tde = ["dep:sha2", "dep:hmac", "dep:pbkdf2", "dep:aes-gcm"]
 pitr = []
 online_ddl_full = []
 resource_isolation = []
@@ -40,10 +40,10 @@ xxhash-rust.workspace = true
 lz4_flex.workspace = true
 zstd.workspace = true
 falcon_segment_codec.workspace = true
-sha2.workspace = true
-hmac.workspace = true
-pbkdf2.workspace = true
-aes-gcm.workspace = true
+sha2 = { workspace = true, optional = true }
+hmac = { workspace = true, optional = true }
+pbkdf2 = { workspace = true, optional = true }
+aes-gcm = { workspace = true, optional = true }
 rand.workspace = true
 rocksdb = { workspace = true, optional = true }
 redb = { workspace = true, optional = true }

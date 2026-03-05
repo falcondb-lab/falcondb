@@ -947,6 +947,7 @@ pub struct DeadlockCycle {
 }
 
 /// Registration for a transaction waiting on a resource held by another txn.
+#[derive(Clone)]
 struct WfgEntry {
     txn_id: u64,
     /// Resources (shard IDs) this txn holds.
@@ -1036,7 +1037,8 @@ impl WaitForGraphDetector {
     ///
     /// Returns all detected deadlock cycles, each with a selected victim.
     pub fn detect_deadlocks(&self) -> Vec<DeadlockCycle> {
-        let entries = self.entries.lock();
+        // Snapshot entries under lock, then release before expensive DFS.
+        let entries: HashMap<u64, WfgEntry> = self.entries.lock().clone();
 
         // Build resource → holder mapping: resource_id → set of txn_ids holding it
         let mut resource_holders: HashMap<u64, Vec<u64>> = HashMap::new();

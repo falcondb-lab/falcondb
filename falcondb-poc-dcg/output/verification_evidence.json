@@ -1,0 +1,14 @@
+{
+  "promote_timestamp": "2026-03-04T07:45:41Z",
+  "surviving_on_replica": 1001,
+  "committed_by_client": 1000,
+  "wal_phantom": 0,
+  "kill_timestamp": "2026-03-04T07:45:36Z",
+  "replica_phantom": 0,
+  "wal_missing": 0,
+  "surviving_on_primary_wal": 1001,
+  "timestamp": "2026-03-04T07:46:45Z",
+  "claim": "If FalconDB returns COMMIT OK, the data survives primary crash + failover.",
+  "verdict": "PASS",
+  "replica_missing": 0
+}

@@ -26,6 +26,18 @@ service WalReplication {
 
   // Unary: forward a SQL query to a remote shard leader for execution.
   rpc ForwardQuery(ForwardQueryRpc) returns (ForwardQueryRpcResponse);
+
+  // Unary: controller pushes config version to a follower node.
+  rpc SyncConfig(SyncConfigRequest) returns (SyncConfigResponse);
+
+  // 2PC: prepare a write on a remote shard (execute but do not commit).
+  rpc Prepare2pc(Prepare2pcRequest) returns (Prepare2pcResponse);
+
+  // 2PC: commit a previously prepared transaction.
+  rpc Commit2pc(Commit2pcRequest) returns (Commit2pcResponse);
+
+  // 2PC: abort a previously prepared transaction.
+  rpc Abort2pc(Abort2pcRequest) returns (Abort2pcResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -126,4 +138,55 @@ message ForwardQueryRpcResponse {
   string error = 2;
   string result_json = 3;
   uint64 rows_affected = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Config Sync (controller → follower push)
+// ---------------------------------------------------------------------------
+
+message SyncConfigRequest {
+  uint64 config_version = 1;
+  // Serialized config payload (JSON or bincode). Empty = version-only ping.
+  bytes config_payload = 2;
+}
+
+message SyncConfigResponse {
+  bool success = 1;
+  uint64 applied_version = 2;
+  string error = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Cross-node 2PC
+// ---------------------------------------------------------------------------
+
+message Prepare2pcRequest {
+  uint64 txn_id = 1;
+  uint64 shard_id = 2;
+  string sql = 3;
+}
+
+message Prepare2pcResponse {
+  bool success = 1;
+  string error = 2;
+  uint64 rows_affected = 3;
+}
+
+message Commit2pcRequest {
+  uint64 txn_id = 1;
+  uint64 shard_id = 2;
+}
+
+message Commit2pcResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message Abort2pcRequest {
+  uint64 txn_id = 1;
+  uint64 shard_id = 2;
+}
+
+message Abort2pcResponse {
+  bool success = 1;
 }

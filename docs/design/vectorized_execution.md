@@ -2,12 +2,24 @@
 
 ## Status: **In Progress** (Phase 1 complete, Phase 2 partially implemented)
 
+## Implemented
+
+- **Columnstore GROUP BY AGG pushdown** (`exec_columnar_group_agg` in
+  `executor_columnar.rs`): vectorized hash aggregation on ColumnStore
+  `RecordBatch` with zone-map filter pushdown. Calls `vectorized_hash_agg()`
+  for pure column-vector GROUP BY (SUM, COUNT, MIN, MAX). Supports ORDER BY /
+  LIMIT / OFFSET / DISTINCT post-processing. 5 unit tests.
+- **Fused streaming aggregates** (`exec_fused_aggregate`): single-pass
+  WHERE+GROUP BY+aggregate over MVCC chains without row materialization.
+- **Cost-based optimizer** feeds statistics to the planner for scan/join strategy
+  selection (see `falcon_planner/src/cost.rs`).
+
 ## Motivation
 
-FalconDB's current executor processes rows one at a time (Volcano-style
-iterator model). While this is simple and correct, it under-performs on
-analytical queries compared to PostgreSQL, which benefits from decades of
-optimizer maturity and JIT compilation.
+FalconDB's current row-at-a-time executor (Volcano-style iterator model)
+handles OLTP workloads efficiently. For analytical queries, the columnstore
+AGG pushdown path provides vectorized execution on columnar data. Further
+vectorization of the row-store path is planned.
 
 **Measured gap**: ~4.3× slower than PostgreSQL on analytical workloads
 (aggregation, hash join, sort-heavy queries). OLTP point-lookup performance

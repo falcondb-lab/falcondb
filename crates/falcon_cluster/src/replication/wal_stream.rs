@@ -24,7 +24,7 @@
 //! - Replica ACK before apply → violates REP-4
 //! - Out-of-order apply on replica → violates REP-3
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex as StdMutex};
 use std::time::Duration;
@@ -520,7 +520,7 @@ const DEFAULT_REPLICATION_LOG_CAPACITY: usize = 128 * 1024;
 /// the oldest records are evicted (ring-buffer). A replica that falls behind
 /// the eviction frontier must re-bootstrap from a checkpoint.
 pub struct ReplicationLog {
-    records: Mutex<Vec<LsnWalRecord>>,
+    records: Mutex<VecDeque<LsnWalRecord>>,
     next_lsn: AtomicU64,
     /// Maximum number of records to retain in memory.
     max_capacity: usize,
@@ -546,7 +546,7 @@ impl ReplicationLog {
     /// Create a log with a custom capacity cap.
     pub fn with_capacity(max_capacity: usize) -> Self {
         Self {
-            records: Mutex::new(Vec::with_capacity(max_capacity.min(4096))),
+            records: Mutex::new(VecDeque::with_capacity(max_capacity.min(4096))),
             next_lsn: AtomicU64::new(1),
             max_capacity,
             evicted_records: AtomicU64::new(0),
@@ -587,11 +587,10 @@ impl ReplicationLog {
         let lsn = self.next_lsn.fetch_add(1, Ordering::SeqCst);
         let mut records = self.records.lock();
         if self.max_capacity > 0 && records.len() >= self.max_capacity {
-            // Evict oldest record to keep memory bounded.
-            records.remove(0);
+            records.pop_front();
             self.evicted_records.fetch_add(1, Ordering::Relaxed);
         }
-        records.push(LsnWalRecord { lsn, record });
+        records.push_back(LsnWalRecord { lsn, record });
         drop(records);
         self.notify.notify_waiters();
         lsn
@@ -645,13 +644,20 @@ impl ReplicationLog {
     /// Returns the number of records discarded.
     pub fn trim_before(&self, safe_lsn: u64) -> usize {
         let mut records = self.records.lock();
-        let before = records.len();
-        records.retain(|r| r.lsn > safe_lsn);
-        before - records.len()
+        let mut trimmed = 0;
+        while let Some(front) = records.front() {
+            if front.lsn <= safe_lsn {
+                records.pop_front();
+                trimmed += 1;
+            } else {
+                break;
+            }
+        }
+        trimmed
     }
 
     /// Minimum LSN still held in the log (0 if empty).
     pub fn min_lsn(&self) -> u64 {
-        self.records.lock().first().map_or(0, |r| r.lsn)
+        self.records.lock().front().map_or(0, |r| r.lsn)
     }
 }

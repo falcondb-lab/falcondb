@@ -1537,24 +1537,419 @@ mod planner_tests {
     }
 
     #[test]
+    fn test_columnstore_table_emits_column_scan() {
+        use falcon_common::schema::StorageType;
+        let mut catalog = test_catalog();
+        catalog.add_table(TableSchema {
+            id: TableId(99),
+            name: "metrics".to_string(),
+            columns: vec![
+                ColumnDef {
+                    id: ColumnId(0),
+                    name: "ts".to_string(),
+                    data_type: DataType::Int64,
+                    nullable: false,
+                    is_primary_key: true,
+                    default_value: None,
+                    is_serial: false,
+                },
+                ColumnDef {
+                    id: ColumnId(1),
+                    name: "value".to_string(),
+                    data_type: DataType::Float64,
+                    nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                    is_serial: false,
+                },
+            ],
+            primary_key_columns: vec![0],
+            storage_type: StorageType::Columnstore,
+            ..Default::default()
+        });
+
+        let stmts = parse_sql("SELECT ts, value FROM metrics WHERE value > 0").unwrap();
+        let mut binder = Binder::new(catalog);
+        let bound = binder.bind(&stmts[0]).unwrap();
+        let plan = Planner::plan(&bound).unwrap();
+        assert!(
+            matches!(plan, PhysicalPlan::ColumnScan { .. }),
+            "columnstore table should produce ColumnScan, got: {:?}",
+            std::mem::discriminant(&plan)
+        );
+    }
+
+    #[test]
+    fn test_rowstore_table_emits_seq_scan() {
+        let catalog = test_catalog();
+        let stmts = parse_sql("SELECT id, name FROM users").unwrap();
+        let mut binder = Binder::new(catalog);
+        let bound = binder.bind(&stmts[0]).unwrap();
+        let plan = Planner::plan(&bound).unwrap();
+        assert!(matches!(plan, PhysicalPlan::SeqScan { .. }));
+    }
+
+    #[test]
     fn test_collect_expr_refs_binary_op() {
         use crate::optimizer::optimize;
         use falcon_sql_frontend::types::*;
         use std::collections::HashSet;
 
-        // Ensure collect_expr_refs properly traverses BinaryOp
         let mut refs = HashSet::new();
-        let expr = BoundExpr::BinaryOp {
+        let _expr = BoundExpr::BinaryOp {
             left: Box::new(BoundExpr::ColumnRef(0)),
             op: BinOp::Eq,
             right: Box::new(BoundExpr::ColumnRef(2)),
         };
-        // We can't call collect_expr_refs directly (it's private),
-        // but we can verify the optimizer doesn't crash on complex expressions
         let _ = optimize;
         refs.insert(0usize);
         refs.insert(2usize);
         assert!(refs.contains(&0));
         assert!(refs.contains(&2));
+    }
+
+    // ── Cost-based optimizer tests ──────────────────────────────────────
+
+    mod cost_optimizer_tests {
+        use crate::cost::*;
+        use falcon_common::datum::Datum;
+        use falcon_common::types::TableId;
+        use falcon_sql_frontend::types::*;
+
+        fn make_stats(table_id: u64, row_count: u64, col_distinct: &[(usize, u64)]) -> TableStatsInfo {
+            TableStatsInfo {
+                table_id: TableId(table_id),
+                row_count,
+                columns: col_distinct.iter().map(|&(idx, ndv)| ColumnStatsInfo {
+                    column_idx: idx,
+                    distinct_count: ndv,
+                    null_fraction: 0.0,
+                    min_value: None,
+                    max_value: None,
+                    mcv: vec![],
+                    histogram_bounds: vec![],
+                    histogram_rows: 0,
+                }).collect(),
+            }
+        }
+
+        fn make_stats_with_histogram(
+            table_id: u64, row_count: u64, col_idx: usize, ndv: u64,
+            bounds: Vec<Datum>,
+        ) -> TableStatsInfo {
+            TableStatsInfo {
+                table_id: TableId(table_id),
+                row_count,
+                columns: vec![ColumnStatsInfo {
+                    column_idx: col_idx,
+                    distinct_count: ndv,
+                    null_fraction: 0.0,
+                    min_value: Some(bounds.first().cloned().unwrap_or(Datum::Null)),
+                    max_value: Some(bounds.last().cloned().unwrap_or(Datum::Null)),
+                    mcv: vec![],
+                    histogram_bounds: bounds.clone(),
+                    histogram_rows: row_count,
+                }],
+            }
+        }
+
+        #[test]
+        fn test_selectivity_no_stats() {
+            let eq = BoundExpr::BinaryOp {
+                left: Box::new(BoundExpr::ColumnRef(0)),
+                op: BinOp::Eq,
+                right: Box::new(BoundExpr::Literal(Datum::Int32(42))),
+            };
+            let sel = estimate_selectivity(&eq, None);
+            assert!((sel - 0.1).abs() < 0.001, "eq without stats should be 0.1, got {sel}");
+        }
+
+        #[test]
+        fn test_selectivity_eq_with_ndv() {
+            let stats = make_stats(1, 1000, &[(0, 100)]);
+            let eq = BoundExpr::BinaryOp {
+                left: Box::new(BoundExpr::ColumnRef(0)),
+                op: BinOp::Eq,
+                right: Box::new(BoundExpr::Literal(Datum::Int32(42))),
+            };
+            let sel = estimate_selectivity(&eq, Some(&stats));
+            assert!((sel - 0.01).abs() < 0.001, "eq with NDV=100 should be ~0.01, got {sel}");
+        }
+
+        #[test]
+        fn test_selectivity_and() {
+            let stats = make_stats(1, 1000, &[(0, 100), (1, 50)]);
+            let and_expr = BoundExpr::BinaryOp {
+                left: Box::new(BoundExpr::BinaryOp {
+                    left: Box::new(BoundExpr::ColumnRef(0)),
+                    op: BinOp::Eq,
+                    right: Box::new(BoundExpr::Literal(Datum::Int32(1))),
+                }),
+                op: BinOp::And,
+                right: Box::new(BoundExpr::BinaryOp {
+                    left: Box::new(BoundExpr::ColumnRef(1)),
+                    op: BinOp::Eq,
+                    right: Box::new(BoundExpr::Literal(Datum::Int32(2))),
+                }),
+            };
+            let sel = estimate_selectivity(&and_expr, Some(&stats));
+            // 1/100 * 1/50 = 0.0002
+            assert!(sel < 0.001, "AND selectivity should be very small, got {sel}");
+        }
+
+        #[test]
+        fn test_selectivity_or() {
+            let stats = make_stats(1, 1000, &[(0, 10)]);
+            let or_expr = BoundExpr::BinaryOp {
+                left: Box::new(BoundExpr::BinaryOp {
+                    left: Box::new(BoundExpr::ColumnRef(0)),
+                    op: BinOp::Eq,
+                    right: Box::new(BoundExpr::Literal(Datum::Int32(1))),
+                }),
+                op: BinOp::Or,
+                right: Box::new(BoundExpr::BinaryOp {
+                    left: Box::new(BoundExpr::ColumnRef(0)),
+                    op: BinOp::Eq,
+                    right: Box::new(BoundExpr::Literal(Datum::Int32(2))),
+                }),
+            };
+            let sel = estimate_selectivity(&or_expr, Some(&stats));
+            // 1/10 + 1/10 - 1/100 = 0.19
+            assert!(sel > 0.15 && sel < 0.25, "OR selectivity should be ~0.19, got {sel}");
+        }
+
+        #[test]
+        fn test_selectivity_not_eq() {
+            let stats = make_stats(1, 1000, &[(0, 100)]);
+            let neq = BoundExpr::BinaryOp {
+                left: Box::new(BoundExpr::ColumnRef(0)),
+                op: BinOp::NotEq,
+                right: Box::new(BoundExpr::Literal(Datum::Int32(42))),
+            };
+            let sel = estimate_selectivity(&neq, Some(&stats));
+            assert!((sel - 0.99).abs() < 0.01, "NEQ should be ~0.99, got {sel}");
+        }
+
+        #[test]
+        fn test_selectivity_histogram_lt() {
+            // 5-bucket histogram over [0..500)
+            let bounds: Vec<Datum> = (0..5).map(|i| Datum::Int32((i + 1) * 100 - 1)).collect();
+            let stats = make_stats_with_histogram(1, 500, 0, 500, bounds);
+            let lt = BoundExpr::BinaryOp {
+                left: Box::new(BoundExpr::ColumnRef(0)),
+                op: BinOp::Lt,
+                right: Box::new(BoundExpr::Literal(Datum::Int32(250))),
+            };
+            let sel = estimate_selectivity(&lt, Some(&stats));
+            assert!(sel > 0.3 && sel < 0.7, "lt(250) on [0..500) should be ~0.5, got {sel}");
+        }
+
+        #[test]
+        fn test_selectivity_between() {
+            let stats = make_stats(1, 1000, &[(0, 100)]);
+            let between = BoundExpr::Between {
+                expr: Box::new(BoundExpr::ColumnRef(0)),
+                low: Box::new(BoundExpr::Literal(Datum::Int32(10))),
+                high: Box::new(BoundExpr::Literal(Datum::Int32(20))),
+                negated: false,
+            };
+            let sel = estimate_selectivity(&between, Some(&stats));
+            assert!(sel > 0.0 && sel <= 1.0, "BETWEEN should produce valid selectivity, got {sel}");
+        }
+
+        #[test]
+        fn test_selectivity_in_list() {
+            let stats = make_stats(1, 1000, &[(0, 100)]);
+            let in_list = BoundExpr::InList {
+                expr: Box::new(BoundExpr::ColumnRef(0)),
+                list: vec![
+                    BoundExpr::Literal(Datum::Int32(1)),
+                    BoundExpr::Literal(Datum::Int32(2)),
+                    BoundExpr::Literal(Datum::Int32(3)),
+                ],
+                negated: false,
+            };
+            let sel = estimate_selectivity(&in_list, Some(&stats));
+            // ~3/100 = 0.03
+            assert!(sel > 0.02 && sel < 0.05, "IN (1,2,3) should be ~0.03, got {sel}");
+        }
+
+        #[test]
+        fn test_selectivity_mcv() {
+            let stats = TableStatsInfo {
+                table_id: TableId(1),
+                row_count: 1000,
+                columns: vec![ColumnStatsInfo {
+                    column_idx: 0,
+                    distinct_count: 10,
+                    null_fraction: 0.0,
+                    min_value: None,
+                    max_value: None,
+                    mcv: vec![
+                        (Datum::Int32(42), 0.30), // 30% of rows have value 42
+                        (Datum::Int32(99), 0.20),
+                    ],
+                    histogram_bounds: vec![],
+                    histogram_rows: 0,
+                }],
+            };
+            let eq = BoundExpr::BinaryOp {
+                left: Box::new(BoundExpr::ColumnRef(0)),
+                op: BinOp::Eq,
+                right: Box::new(BoundExpr::Literal(Datum::Int32(42))),
+            };
+            let sel = estimate_selectivity(&eq, Some(&stats));
+            assert!((sel - 0.30).abs() < 0.001, "MCV value=42 should give 0.30, got {sel}");
+        }
+
+        #[test]
+        fn test_selectivity_literal_true_false() {
+            assert!((estimate_selectivity(&BoundExpr::Literal(Datum::Boolean(true)), None) - 1.0).abs() < 0.001);
+            assert!((estimate_selectivity(&BoundExpr::Literal(Datum::Boolean(false)), None)).abs() < 0.001);
+        }
+
+        #[test]
+        fn test_selectivity_is_null() {
+            let sel = estimate_selectivity(&BoundExpr::IsNull(Box::new(BoundExpr::ColumnRef(0))), None);
+            assert!(sel < 0.1, "IS NULL default should be small, got {sel}");
+        }
+
+        #[test]
+        fn test_selectivity_like() {
+            let like = BoundExpr::Like {
+                expr: Box::new(BoundExpr::ColumnRef(0)),
+                pattern: Box::new(BoundExpr::Literal(Datum::Text("foo%".into()))),
+                negated: false,
+                case_insensitive: false,
+            };
+            let sel = estimate_selectivity(&like, None);
+            assert!((sel - 0.05).abs() < 0.01, "LIKE default should be 0.05, got {sel}");
+        }
+
+        // ── Scan cost model tests ──
+
+        #[test]
+        fn test_seq_scan_cost_increases_with_rows() {
+            let c1 = seq_scan_cost(100, 1.0);
+            let c2 = seq_scan_cost(10000, 1.0);
+            assert!(c2 > c1, "Larger table should cost more");
+        }
+
+        #[test]
+        fn test_index_scan_cheaper_for_low_selectivity() {
+            // 10K rows, 1% selectivity — index should win
+            assert!(prefer_index_scan(10000, 0.01), "1% selectivity on 10K rows should prefer index");
+        }
+
+        #[test]
+        fn test_seq_scan_preferred_for_high_selectivity() {
+            // 10K rows, 80% selectivity — seq scan should win
+            assert!(!prefer_index_scan(10000, 0.80), "80% selectivity should prefer seq scan");
+        }
+
+        #[test]
+        fn test_seq_scan_preferred_for_tiny_tables() {
+            assert!(!prefer_index_scan(10, 0.01), "Tiny tables should always seq scan");
+        }
+
+        #[test]
+        fn test_index_vs_seq_crossover() {
+            // There should be a crossover point around 10-30% selectivity for 10K rows
+            let mut crossover = 0.0;
+            for pct in 1..100 {
+                let sel = pct as f64 / 100.0;
+                if !prefer_index_scan(10000, sel) {
+                    crossover = sel;
+                    break;
+                }
+            }
+            assert!(crossover > 0.05 && crossover < 0.50,
+                "Crossover should be between 5-50%, got {crossover}");
+        }
+
+        // ── plan_optimized tests ──
+
+        #[test]
+        fn test_plan_optimized_dml_passthrough() {
+            use crate::Planner;
+            use falcon_common::schema::{ColumnDef, TableSchema};
+            use falcon_common::types::ColumnId;
+
+            let schema = TableSchema {
+                id: TableId(1),
+                name: "t".into(),
+                columns: vec![ColumnDef {
+                    id: ColumnId(0),
+                    name: "id".into(),
+                    data_type: falcon_common::types::DataType::Int32,
+                    nullable: false,
+                    is_primary_key: true,
+                    default_value: None,
+                    is_serial: false,
+                }],
+                primary_key_columns: vec![0],
+                ..Default::default()
+            };
+            let bound = BoundStatement::Insert(falcon_sql_frontend::types::BoundInsert {
+                table_id: TableId(1),
+                table_name: "t".into(),
+                schema: schema.clone(),
+                columns: vec![0],
+                rows: vec![vec![BoundExpr::Literal(Datum::Int32(1))]],
+                source_select: None,
+                returning: vec![],
+                on_conflict: None,
+            });
+            let stats = TableStatsMap::new();
+            let indexes = IndexedColumns::new();
+            let plan = Planner::plan_optimized(&bound, &stats, &indexes).unwrap();
+            assert!(matches!(plan, crate::PhysicalPlan::Insert { .. }));
+        }
+
+        #[test]
+        fn test_plan_optimized_ddl_passthrough() {
+            use crate::Planner;
+            use falcon_common::schema::{ColumnDef, TableSchema};
+            use falcon_common::types::ColumnId;
+
+            let schema = TableSchema {
+                id: TableId(1),
+                name: "new_table".into(),
+                columns: vec![ColumnDef {
+                    id: ColumnId(0),
+                    name: "id".into(),
+                    data_type: falcon_common::types::DataType::Int32,
+                    nullable: false,
+                    is_primary_key: true,
+                    default_value: None,
+                    is_serial: false,
+                }],
+                primary_key_columns: vec![0],
+                ..Default::default()
+            };
+            let bound = BoundStatement::CreateTable(falcon_sql_frontend::types::BoundCreateTable {
+                schema,
+                if_not_exists: false,
+            });
+            let stats = TableStatsMap::new();
+            let indexes = IndexedColumns::new();
+            let plan = Planner::plan_optimized(&bound, &stats, &indexes).unwrap();
+            assert!(matches!(plan, crate::PhysicalPlan::CreateTable { .. }));
+        }
+
+        #[test]
+        fn test_plan_optimized_falls_back_for_unsupported() {
+            use crate::Planner;
+
+            // CreateDatabase isn't handled by LogicalPlan — should fall back to plan_with_indexes
+            let bound = BoundStatement::CreateDatabase {
+                name: "testdb".into(),
+                if_not_exists: true,
+            };
+            let stats = TableStatsMap::new();
+            let indexes = IndexedColumns::new();
+            let plan = Planner::plan_optimized(&bound, &stats, &indexes).unwrap();
+            assert!(matches!(plan, crate::PhysicalPlan::CreateDatabase { .. }));
+        }
     }
 }

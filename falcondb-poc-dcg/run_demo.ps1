@@ -19,7 +19,7 @@ $ErrorActionPreference = 'Stop'
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-if (-not $env:FALCON_BIN)    { $env:FALCON_BIN    = "target\release\falcon_server.exe" }
+if (-not $env:FALCON_BIN)    { $env:FALCON_BIN    = "target\release\falcon.exe" }
 if (-not $env:ORDER_COUNT)   { $env:ORDER_COUNT   = "1000" }
 if (-not $env:REPL_WAIT_SEC) { $env:REPL_WAIT_SEC = "5" }
 

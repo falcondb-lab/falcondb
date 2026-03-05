@@ -23,6 +23,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use falcon_common::types::{NodeId, ShardId};
+use crate::routing::{ShardMap, ShardRouterClient};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Cluster Access Model
@@ -790,6 +791,9 @@ pub struct SmartGateway {
     pub config: SmartGatewayConfig,
     pub topology: Arc<TopologyCache>,
     pub metrics: SmartGatewayMetrics,
+    /// gRPC client for forwarding queries to remote shard leaders.
+    router_client: Arc<ShardRouterClient>,
+    shard_map: Option<Arc<ShardMap>>,
 }
 
 impl SmartGateway {
@@ -798,6 +802,8 @@ impl SmartGateway {
             config,
             topology: Arc::new(TopologyCache::new()),
             metrics: SmartGatewayMetrics::default(),
+            router_client: Arc::new(ShardRouterClient::new()),
+            shard_map: None,
         }
     }
 
@@ -806,7 +812,42 @@ impl SmartGateway {
             config,
             topology,
             metrics: SmartGatewayMetrics::default(),
+            router_client: Arc::new(ShardRouterClient::new()),
+            shard_map: None,
         }
+    }
+
+    /// Set the shard map for key-based routing decisions.
+    pub fn set_shard_map(&mut self, map: ShardMap) {
+        self.shard_map = Some(Arc::new(map));
+    }
+
+    /// Register a remote node endpoint for gRPC forwarding.
+    pub fn add_node_endpoint(&self, node_id: u64, addr: String) {
+        self.router_client.add_endpoint(node_id, addr);
+    }
+
+    /// Route a query by primary key bytes.
+    /// Returns Ok(None) when the key is local, Ok(Some(json)) when forwarded.
+    pub async fn route_and_execute(
+        &self,
+        pk_bytes: &[u8],
+        sql: &str,
+        txn_id: u64,
+    ) -> Result<Option<crate::routing::ForwardQueryResponse>, String> {
+        let map = match &self.shard_map {
+            Some(m) => m,
+            None => return Ok(None), // no shard map — execute locally
+        };
+        let shard = map.locate_shard(pk_bytes);
+        if shard.leader == self.config.node_id {
+            return Ok(None); // local
+        }
+        let resp = self.router_client
+            .forward_query(map, pk_bytes, sql, txn_id)
+            .await?;
+        self.metrics.forward_total.fetch_add(1, Ordering::Relaxed);
+        Ok(Some(resp))
     }
 
     /// Classify a request: determine whether to execute locally, forward, or reject.
@@ -960,6 +1001,54 @@ impl SmartGateway {
     /// Get topology cache metrics snapshot.
     pub fn topology_metrics(&self) -> TopologyCacheMetricsSnapshot {
         self.topology.metrics_snapshot()
+    }
+
+    /// Distributed write 2PC: coordinate prepare/commit across multiple remote shards.
+    ///
+    /// `participants`: Vec of (node_id, shard_id, sql) for each remote shard involved.
+    /// Returns total rows_affected on success, or error string on failure (all aborted).
+    pub async fn distributed_write_2pc(
+        &self,
+        coord_txn_id: u64,
+        participants: &[(u64, u64, String)],
+    ) -> Result<u64, String> {
+        // Phase 1: Prepare all participants
+        let mut prepared: Vec<(u64, u64)> = Vec::with_capacity(participants.len());
+        let mut total_rows = 0u64;
+
+        for (node_id, shard_id, sql) in participants {
+            match self.router_client
+                .prepare_2pc_remote(*node_id, coord_txn_id, *shard_id, sql)
+                .await
+            {
+                Ok(rows) => {
+                    prepared.push((*node_id, *shard_id));
+                    total_rows += rows;
+                }
+                Err(e) => {
+                    tracing::error!(coord_txn_id, node_id, shard_id, error = %e, "2PC prepare failed, aborting all");
+                    // Abort all already-prepared
+                    for (n, s) in &prepared {
+                        let _ = self.router_client.abort_2pc_remote(*n, coord_txn_id, *s).await;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+
+        // Phase 2: Commit all
+        for (node_id, shard_id) in &prepared {
+            if let Err(e) = self.router_client
+                .commit_2pc_remote(*node_id, coord_txn_id, *shard_id)
+                .await
+            {
+                // Commit failure after prepare is a serious issue — log but continue
+                tracing::error!(coord_txn_id, node_id, shard_id, error = %e, "2PC commit failed (heuristic)");
+            }
+        }
+
+        tracing::debug!(coord_txn_id, participants = prepared.len(), total_rows, "2PC completed");
+        Ok(total_rows)
     }
 }
 

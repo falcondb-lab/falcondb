@@ -225,13 +225,14 @@ impl RocksDbTable {
             }
             if !changed { continue; }
 
-            // GC superseded committed + aborted versions
+            // GC superseded committed + aborted versions.
+            // Keep the first committed version (anchor), drop all older ones.
             let mut keep = Vec::with_capacity(chain.len());
             let mut saw_committed = false;
             for mv in chain {
                 if mv.status == MvccStatus::Aborted { continue; }
                 if mv.status == MvccStatus::Committed {
-                    if saw_committed && !mv.is_tombstone { continue; }
+                    if saw_committed { continue; }
                     saw_committed = true;
                 }
                 keep.push(mv);
@@ -355,5 +356,20 @@ impl crate::storage_trait::StorageTable for RocksDbTable {
 
     fn abort_key(&self, pk: &PrimaryKey, txn_id: TxnId) {
         let _ = self.abort(pk, txn_id);
+    }
+
+    fn commit_batch(&self, pks: &[PrimaryKey], txn_id: TxnId, commit_ts: Timestamp) -> Result<(), StorageError> {
+        RocksDbTable::commit_batch(self, pks, txn_id, commit_ts)
+    }
+    fn abort_batch(&self, pks: &[PrimaryKey], txn_id: TxnId) {
+        let _ = RocksDbTable::abort_batch(self, pks, txn_id);
+    }
+    fn for_each_visible(&self, txn_id: TxnId, read_ts: Timestamp, f: &mut dyn FnMut(&OwnedRow)) {
+        RocksDbTable::for_each_visible(self, txn_id, read_ts, |_, row| f(&row));
+    }
+    fn count_visible(&self, txn_id: TxnId, read_ts: Timestamp) -> usize {
+        let mut n = 0usize;
+        RocksDbTable::for_each_visible(self, txn_id, read_ts, |_, _| n += 1);
+        n
     }
 }

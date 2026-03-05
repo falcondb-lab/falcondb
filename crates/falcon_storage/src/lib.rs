@@ -43,6 +43,10 @@ pub mod wal_win_async;
 // ── Enterprise stubs (always compiled for handler compat, disabled at runtime) ──
 pub mod cdc;
 pub mod cdc_wal_bridge;
+#[cfg(feature = "encryption_tde")]
+pub mod encryption;
+#[cfg(not(feature = "encryption_tde"))]
+#[path = "encryption_stub.rs"]
 pub mod encryption;
 #[cfg(feature = "online_ddl_full")]
 pub mod online_ddl;

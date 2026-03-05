@@ -24,6 +24,7 @@ memory_limit_bytes = 0
 wal_enabled = true
 data_dir = "./falcon_data"
 lsm_sync_writes = false
+default_engine = "rowstore"
 
 
 

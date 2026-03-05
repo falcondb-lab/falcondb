@@ -180,6 +180,102 @@ impl QueryHandler {
             }
         }
 
+        // SELECT falcon_pitr_status() — show PITR archiver status
+        if sql_lower.starts_with("select falcon_pitr_status()") {
+            let (enabled, seg_count, bytes) = self.storage.pitr_stats();
+            return Some(self.single_row_result(
+                vec![
+                    ("enabled", 16 /* bool oid */, -1),
+                    ("segments_archived", 20 /* int8 oid */, 8),
+                    ("bytes_archived", 20, 8),
+                ],
+                vec![vec![
+                    Some(if enabled { "t" } else { "f" }.into()),
+                    Some(seg_count.to_string()),
+                    Some(bytes.to_string()),
+                ]],
+            ));
+        }
+
+        // SELECT falcon_list_restore_points() — list named restore points
+        if sql_lower.starts_with("select falcon_list_restore_points()") {
+            let points = self.storage.list_restore_points();
+            let rows: Vec<Vec<Option<String>>> = points
+                .iter()
+                .map(|rp| {
+                    vec![
+                        Some(rp.name.clone()),
+                        Some(format!("{:X}/{:08X}", rp.lsn.0 >> 32, rp.lsn.0 & 0xFFFF_FFFF)),
+                        Some(rp.created_at_ms.to_string()),
+                    ]
+                })
+                .collect();
+            return Some(self.single_row_result(
+                vec![
+                    ("name", 25, -1),
+                    ("lsn", 25, -1),
+                    ("created_at_ms", 20, 8),
+                ],
+                rows,
+            ));
+        }
+
+        // SELECT falcon_list_backups() — list base backups
+        if sql_lower.starts_with("select falcon_list_backups()") {
+            let backups = self.storage.list_base_backups();
+            let rows: Vec<Vec<Option<String>>> = backups
+                .iter()
+                .map(|b| {
+                    vec![
+                        Some(b.label.clone()),
+                        Some(format!("{:X}/{:08X}", b.start_lsn.0 >> 32, b.start_lsn.0 & 0xFFFF_FFFF)),
+                        Some(format!("{:X}/{:08X}", b.end_lsn.0 >> 32, b.end_lsn.0 & 0xFFFF_FFFF)),
+                        Some(b.size_bytes.to_string()),
+                    ]
+                })
+                .collect();
+            return Some(self.single_row_result(
+                vec![
+                    ("label", 25, -1),
+                    ("start_lsn", 25, -1),
+                    ("end_lsn", 25, -1),
+                    ("size_bytes", 20, 8),
+                ],
+                rows,
+            ));
+        }
+
+        // SELECT falcon_resource_isolation_stats() — show resource isolation metrics
+        if sql_lower.starts_with("select falcon_resource_isolation_stats()") {
+            let stats = self.storage.resource_isolation_stats();
+            return Some(self.single_row_result(
+                vec![
+                    ("fg_inflight", 20, 8),
+                    ("fg_total", 20, 8),
+                    ("bg_throttled", 16, -1),
+                    ("io_consumed_bytes", 20, 8),
+                    ("io_throttles", 20, 8),
+                    ("io_throttle_us", 20, 8),
+                    ("cpu_inflight", 20, 8),
+                    ("cpu_max", 20, 8),
+                    ("cpu_started", 20, 8),
+                    ("cpu_rejected", 20, 8),
+                ],
+                vec![vec![
+                    Some(stats.fg_inflight.to_string()),
+                    Some(stats.fg_total.to_string()),
+                    Some(if stats.bg_throttled { "t" } else { "f" }.into()),
+                    Some(stats.io.total_consumed_bytes.to_string()),
+                    Some(stats.io.total_throttles.to_string()),
+                    Some(stats.io.total_throttle_us.to_string()),
+                    Some(stats.cpu.inflight.to_string()),
+                    Some(stats.cpu.max_concurrent.to_string()),
+                    Some(stats.cpu.total_started.to_string()),
+                    Some(stats.cpu.total_rejected.to_string()),
+                ]],
+            ));
+        }
+
         // RESET falcon.slow_queries — clear the slow query log
         if sql_lower == "reset falcon.slow_queries" {
             self.observability.slow_query_log.clear();
@@ -435,7 +531,7 @@ impl QueryHandler {
                 // Try plan-based path (same as extended query Parse)
                 let (plan, inferred_param_types, row_desc) =
                     match self.prepare_statement(&query) {
-                        Ok((p, ipt, rd)) => (Some(p), ipt, rd),
+                        Ok((p, ipt, rd)) => (Some(std::sync::Arc::new(p)), ipt, rd),
                         Err(_) => (None, vec![], vec![]),
                     };
                 let param_types = inferred_param_types

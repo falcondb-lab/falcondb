@@ -92,15 +92,16 @@
         let records = reader.read_all().unwrap();
         assert_eq!(records.len(), 20);
 
-        // Verify all records are present and ordered
-        for (i, rec) in records.iter().enumerate() {
-            match rec {
-                WalRecord::Insert { row, .. } => {
-                    assert_eq!(row.values[0], Datum::Int32(i as i32));
-                }
-                _ => panic!("Expected Insert at index {}", i),
-            }
-        }
+        // Verify all records are present (order may differ due to sharded WAL)
+        let mut values: Vec<i32> = records.iter().map(|rec| match rec {
+            WalRecord::Insert { row, .. } => match row.values[0] {
+                Datum::Int32(v) => v,
+                _ => panic!("Expected Int32"),
+            },
+            _ => panic!("Expected Insert"),
+        }).collect();
+        values.sort();
+        assert_eq!(values, (0..20).collect::<Vec<i32>>());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -164,6 +165,7 @@
 
     // ── TDE WAL encryption tests ─────────────────────────────────────────
 
+    #[cfg(feature = "encryption_tde")]
     #[test]
     fn test_wal_tde_encrypt_decrypt_roundtrip() {
         use crate::encryption::EncryptionKey;
@@ -217,6 +219,7 @@
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(feature = "encryption_tde")]
     #[test]
     fn test_wal_tde_wrong_key_fails() {
         use crate::encryption::EncryptionKey;
@@ -243,6 +246,7 @@
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(feature = "encryption_tde")]
     #[test]
     fn test_wal_tde_without_decryption_fails() {
         use crate::encryption::EncryptionKey;
@@ -267,6 +271,7 @@
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(feature = "encryption_tde")]
     #[test]
     fn test_wal_tde_segment_rotation() {
         use crate::encryption::EncryptionKey;
@@ -299,18 +304,20 @@
         let records = reader.read_all_encrypted(Some(&dec)).unwrap();
         assert_eq!(records.len(), 20);
 
-        for (i, rec) in records.iter().enumerate() {
-            match rec {
-                WalRecord::Insert { row, .. } => {
-                    assert_eq!(row.values[0], Datum::Int32(i as i32));
-                }
-                other => panic!("Expected Insert at index {}, got {:?}", i, other),
-            }
-        }
+        let mut values: Vec<i32> = records.iter().map(|rec| match rec {
+            WalRecord::Insert { row, .. } => match row.values[0] {
+                Datum::Int32(v) => v,
+                _ => panic!("Expected Int32"),
+            },
+            other => panic!("Expected Insert, got {:?}", other),
+        }).collect();
+        values.sort();
+        assert_eq!(values, (0..20).collect::<Vec<i32>>());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(feature = "encryption_tde")]
     #[test]
     fn test_wal_tde_keymanager_integration() {
         use crate::encryption::{EncryptionScope, KeyManager};

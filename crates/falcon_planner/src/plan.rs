@@ -156,6 +156,23 @@ pub enum PhysicalPlan {
         unions: Vec<(BoundSelect, SetOpKind, bool)>,
         virtual_rows: Vec<falcon_common::datum::OwnedRow>,
     },
+    /// Query over a ColumnStore table: columnar scan → VectorBatch with zone-map pushdown.
+    ColumnScan {
+        table_id: TableId,
+        schema: TableSchema,
+        projections: Vec<BoundProjection>,
+        visible_projection_count: usize,
+        filter: Option<BoundExpr>,
+        group_by: Vec<usize>,
+        grouping_sets: Vec<Vec<usize>>,
+        having: Option<BoundExpr>,
+        order_by: Vec<BoundOrderBy>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+        distinct: DistinctMode,
+        ctes: Vec<BoundCte>,
+        unions: Vec<(BoundSelect, SetOpKind, bool)>,
+    },
     /// Query with JOINs: nested loop join + filter + project + sort + limit
     NestedLoopJoin {
         left_table_id: TableId,
@@ -215,12 +232,13 @@ pub enum PhysicalPlan {
     Truncate {
         table_name: String,
     },
-    /// CREATE INDEX
+    /// CREATE INDEX [CONCURRENTLY]
     CreateIndex {
         index_name: String,
         table_name: String,
         column_indices: Vec<usize>,
         unique: bool,
+        concurrently: bool,
     },
     /// DROP INDEX
     DropIndex {
@@ -340,7 +358,7 @@ pub enum PhysicalPlan {
     ShowGrants {
         role_name: Option<String>,
     },
-    /// COPY table FROM STDIN — bulk import
+    /// COPY table FROM STDIN / FILE
     CopyFrom {
         table_id: TableId,
         schema: TableSchema,
@@ -351,8 +369,9 @@ pub enum PhysicalPlan {
         null_string: String,
         quote: char,
         escape: char,
+        file_path: Option<String>,
     },
-    /// COPY table TO STDOUT — bulk export
+    /// COPY table TO STDOUT / FILE
     CopyTo {
         table_id: TableId,
         schema: TableSchema,
@@ -363,8 +382,9 @@ pub enum PhysicalPlan {
         null_string: String,
         quote: char,
         escape: char,
+        file_path: Option<String>,
     },
-    /// COPY (query) TO STDOUT — export query results
+    /// COPY (query) TO STDOUT / FILE
     CopyQueryTo {
         query: Box<Self>,
         csv: bool,
@@ -373,6 +393,7 @@ pub enum PhysicalPlan {
         null_string: String,
         quote: char,
         escape: char,
+        file_path: Option<String>,
     },
     /// Distributed plan: wraps a local subplan for scatter/gather execution
     /// across multiple shards. The executor dispatches this to the

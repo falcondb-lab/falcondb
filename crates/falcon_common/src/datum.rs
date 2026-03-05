@@ -356,6 +356,7 @@ impl PartialEq for Datum {
                 am == bm && ad == bd && aus == bus
             }
             (Self::Uuid(a), Self::Uuid(b)) => a == b,
+            (Self::Bytea(a), Self::Bytea(b)) => a == b,
             _ => false,
         }
     }

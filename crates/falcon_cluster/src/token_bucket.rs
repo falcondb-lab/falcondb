@@ -85,6 +85,8 @@ impl TokenBucketConfig {
 /// Thread-safe token bucket rate limiter.
 pub struct TokenBucket {
     config: TokenBucketConfig,
+    /// Live rate (mutable via set_rate). Reads in refill/consume use this.
+    live_rate: AtomicU64,
     /// Current available tokens (scaled by 1000 for sub-token precision).
     tokens_milli: Mutex<u64>,
     /// Last refill timestamp.
@@ -104,8 +106,10 @@ pub struct TokenBucket {
 impl TokenBucket {
     pub fn new(config: TokenBucketConfig) -> Arc<Self> {
         let initial_tokens_milli = config.burst * 1000;
+        let rate = config.rate_per_sec;
         Arc::new(Self {
             config,
+            live_rate: AtomicU64::new(rate),
             tokens_milli: Mutex::new(initial_tokens_milli),
             last_refill: Mutex::new(Instant::now()),
             paused: AtomicBool::new(false),
@@ -125,7 +129,8 @@ impl TokenBucket {
             return;
         }
 
-        let new_tokens_milli = (self.config.rate_per_sec * elapsed_us) / 1000;
+        let rate = self.live_rate.load(Ordering::Relaxed);
+        let new_tokens_milli = (rate * elapsed_us) / 1000;
         let max_milli = self.config.burst * 1000;
 
         let mut tokens = self.tokens_milli.lock();
@@ -185,7 +190,7 @@ impl TokenBucket {
             }
 
             // Sleep for a short interval proportional to how many tokens we need
-            let tokens_per_ms = self.config.rate_per_sec as f64 / 1000.0;
+            let tokens_per_ms = self.live_rate.load(Ordering::Relaxed) as f64 / 1000.0;
             let wait_ms = if tokens_per_ms > 0.0 {
                 ((n as f64 / tokens_per_ms) as u64).clamp(1, 100)
             } else {
@@ -222,19 +227,16 @@ impl TokenBucket {
         *self.tokens_milli.lock() / 1000
     }
 
-    /// Update the rate at runtime.
-    pub const fn set_rate(&self, rate_per_sec: u64) {
-        // We can't mutate config directly, but we can refill first
-        // and then the new rate will take effect on next refill.
-        // For a proper implementation, we'd need interior mutability on config.
-        // This is a simplified version that works for the common case.
-        let _ = rate_per_sec;
+    /// Update the rate at runtime. Takes effect on the next refill cycle.
+    pub fn set_rate(&self, rate_per_sec: u64) {
+        self.refill();
+        self.live_rate.store(rate_per_sec, Ordering::Relaxed);
     }
 
     /// Snapshot of token bucket metrics.
     pub fn snapshot(&self) -> TokenBucketSnapshot {
         TokenBucketSnapshot {
-            rate_per_sec: self.config.rate_per_sec,
+            rate_per_sec: self.live_rate.load(Ordering::Relaxed),
             burst: self.config.burst,
             available_tokens: self.available_tokens(),
             paused: self.is_paused(),

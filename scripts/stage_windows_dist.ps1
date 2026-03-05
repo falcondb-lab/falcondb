@@ -44,11 +44,12 @@ if ([string]::IsNullOrWhiteSpace($BinDir)) {
 # ── Build if needed ──
 if (-not $SkipBuild) {
     $FalconExe = Join-Path $BinDir "falcon.exe"
-    if (-not (Test-Path $FalconExe)) {
-        Write-Host "[BUILD] falcon.exe not found — building release..."
+    $FsqlExe   = Join-Path $BinDir "fsql.exe"
+    if (-not (Test-Path $FalconExe) -or -not (Test-Path $FsqlExe)) {
+        Write-Host "[BUILD] Building release binaries..."
         Push-Location $RepoRoot
         try {
-            cargo build --release --bin falcon
+            cargo build --release --bin falcon --bin fsql
             if ($LASTEXITCODE -ne 0) {
                 Write-Host "  ERROR: cargo build failed" -ForegroundColor Red
                 exit 1
@@ -60,11 +61,15 @@ if (-not $SkipBuild) {
 }
 
 $FalconExe = Join-Path $BinDir "falcon.exe"
+$FsqlExe   = Join-Path $BinDir "fsql.exe"
 if (-not (Test-Path $FalconExe)) {
     Write-Host "ERROR: falcon.exe not found at: $FalconExe" -ForegroundColor Red
-    Write-Host "  Build first:  cargo build --release --bin falcon"
+    Write-Host "  Build first:  cargo build --release --bin falcon --bin fsql"
     Write-Host "  Or specify:   -BinDir <path>"
     exit 1
+}
+if (-not (Test-Path $FsqlExe)) {
+    Write-Host "WARNING: fsql.exe not found at: $FsqlExe — CLI will not be staged" -ForegroundColor Yellow
 }
 
 # ── Prepare staging directory ──
@@ -82,6 +87,10 @@ $StageBin = Join-Path $StageDir "bin"
 New-Item -ItemType Directory -Path $StageBin -Force | Out-Null
 Copy-Item $FalconExe (Join-Path $StageBin "falcon.exe") -Force
 Write-Host "  bin\falcon.exe"
+if (Test-Path $FsqlExe) {
+    Copy-Item $FsqlExe (Join-Path $StageBin "fsql.exe") -Force
+    Write-Host "  bin\fsql.exe"
+}
 
 # ── Copy config template ──
 Write-Host "[3/4] Staging configuration and docs..."
@@ -151,6 +160,7 @@ if (Test-Path $ReadmeSrc) {
 Write-Host "[4/4] Verifying staging directory..."
 $requiredFiles = @(
     "bin\falcon.exe",
+    "bin\fsql.exe",
     "conf\falcon.toml",
     "VERSION",
     "LICENSE",
@@ -178,5 +188,5 @@ if ($missing -gt 0) {
 Write-Host ""
 Write-Host "================================================================="
 Write-Host "  Staging complete: $StageDir"
-Write-Host "  Next: .\packaging\wix\build.ps1 -Version $Version"
+Write-Host "  Next: .\packaging\inno\build.ps1 -Version $Version"
 Write-Host "================================================================="

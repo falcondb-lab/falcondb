@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::gc::GcPolicy;
-use super::sst::{SstEntry, SstMeta, SstReader, SstWriter};
+use super::sst::{BlockCrypto, SstEntry, SstMeta, SstReader, SstWriter};
 use super::throttle::RateLimiter;
 
 /// Compaction configuration.
@@ -126,6 +126,7 @@ impl Compactor {
         &self,
         l0_files: &[SstMeta],
         l1_files: &[SstMeta],
+        crypto: Option<&std::sync::Arc<dyn BlockCrypto>>,
     ) -> std::io::Result<CompactionResult> {
         let mut bytes_read = 0u64;
 
@@ -149,7 +150,7 @@ impl Compactor {
         l0_sorted.sort_by(|a, b| b.seq.cmp(&a.seq));
 
         for meta in &l0_sorted {
-            let reader = SstReader::open(&meta.path, meta.id)?;
+            let reader = SstReader::open_with_crypto(&meta.path, meta.id, crypto.cloned())?;
             let entries = reader.scan()?;
             bytes_read += meta.file_size;
             for e in entries {
@@ -161,7 +162,7 @@ impl Compactor {
         let mut consumed_l1: Vec<SstMeta> = Vec::new();
         for meta in l1_files {
             if meta.max_key >= l0_min && meta.min_key <= l0_max {
-                let reader = SstReader::open(&meta.path, meta.id)?;
+                let reader = SstReader::open_with_crypto(&meta.path, meta.id, crypto.cloned())?;
                 let entries = reader.scan()?;
                 bytes_read += meta.file_size;
                 for e in entries {
@@ -189,7 +190,7 @@ impl Compactor {
         if !deduped.is_empty() {
             let seq = self.next_sst_seq.fetch_add(1, Ordering::Relaxed);
             let out_path = self.data_dir.join(format!("sst_L1_{:06}.sst", seq));
-            let mut writer = SstWriter::new(&out_path, deduped.len())?;
+            let mut writer = SstWriter::new_with_crypto(&out_path, deduped.len(), crypto.cloned())?;
 
             for entry in &deduped {
                 writer.add(&entry.key, &entry.value)?;
@@ -317,12 +318,13 @@ impl Compactor {
         gc: Option<&GcPolicy>,
         throttle: Option<&RateLimiter>,
         max_levels: usize,
+        crypto: Option<&std::sync::Arc<dyn BlockCrypto>>,
     ) -> std::io::Result<CompactionResult> {
         let mut all_entries: Vec<SstEntry> = Vec::new();
         let mut bytes_read = 0u64;
 
         // Read source
-        let reader = SstReader::open(&src_file.path, src_file.id)?;
+        let reader = SstReader::open_with_crypto(&src_file.path, src_file.id, crypto.cloned())?;
         let entries = reader.scan()?;
         bytes_read += src_file.file_size;
         all_entries.extend(entries);
@@ -331,7 +333,7 @@ impl Compactor {
         let mut consumed_dst: Vec<SstMeta> = Vec::new();
         for meta in dst_level_files {
             if meta.max_key >= src_file.min_key && meta.min_key <= src_file.max_key {
-                let r = SstReader::open(&meta.path, meta.id)?;
+                let r = SstReader::open_with_crypto(&meta.path, meta.id, crypto.cloned())?;
                 bytes_read += meta.file_size;
                 all_entries.extend(r.scan()?);
                 consumed_dst.push(meta.clone());
@@ -364,7 +366,7 @@ impl Compactor {
         }
 
         // Write output, splitting at target_file_size
-        let produced = self.write_output_ssts(&all_entries, dst_level as u32, throttle)?;
+        let produced = self.write_output_ssts(&all_entries, dst_level as u32, throttle, crypto)?;
         let bytes_written: u64 = produced.iter().map(|m| m.file_size).sum();
 
         let mut consumed = vec![src_file.clone()];
@@ -390,6 +392,7 @@ impl Compactor {
         entries: &[SstEntry],
         level: u32,
         throttle: Option<&RateLimiter>,
+        crypto: Option<&std::sync::Arc<dyn BlockCrypto>>,
     ) -> std::io::Result<Vec<SstMeta>> {
         if entries.is_empty() {
             return Ok(Vec::new());
@@ -403,7 +406,7 @@ impl Compactor {
         for entry in entries {
             let entry_size = (entry.key.len() + entry.value.len() + 8) as u64;
             if current_size + entry_size > target_size && !current_entries.is_empty() {
-                produced.push(self.flush_sst(&current_entries, level, throttle)?);
+                produced.push(self.flush_sst(&current_entries, level, throttle, crypto)?);
                 current_entries.clear();
                 current_size = 0;
             }
@@ -411,7 +414,7 @@ impl Compactor {
             current_size += entry_size;
         }
         if !current_entries.is_empty() {
-            produced.push(self.flush_sst(&current_entries, level, throttle)?);
+            produced.push(self.flush_sst(&current_entries, level, throttle, crypto)?);
         }
 
         Ok(produced)
@@ -422,10 +425,11 @@ impl Compactor {
         entries: &[&SstEntry],
         level: u32,
         throttle: Option<&RateLimiter>,
+        crypto: Option<&std::sync::Arc<dyn BlockCrypto>>,
     ) -> std::io::Result<SstMeta> {
         let seq = self.next_sst_seq.fetch_add(1, Ordering::Relaxed);
         let path = self.data_dir.join(format!("sst_L{}_{:06}.sst", level, seq));
-        let mut writer = SstWriter::new(&path, entries.len())?;
+        let mut writer = SstWriter::new_with_crypto(&path, entries.len(), crypto.cloned())?;
         for e in entries {
             writer.add(&e.key, &e.value)?;
         }
@@ -539,7 +543,7 @@ mod tests {
             2,
         );
 
-        let result = compactor.compact_l0_to_l1(&[l0_1, l0_2], &[]).unwrap();
+        let result = compactor.compact_l0_to_l1(&[l0_1, l0_2], &[], None).unwrap();
 
         assert_eq!(result.consumed.len(), 2);
         assert_eq!(result.produced.len(), 1);
@@ -581,7 +585,7 @@ mod tests {
             3,
         );
 
-        let result = compactor.compact_l0_to_l1(&[l0], &[l1]).unwrap();
+        let result = compactor.compact_l0_to_l1(&[l0], &[l1], None).unwrap();
 
         assert_eq!(result.consumed.len(), 2); // l0 + overlapping l1
         assert_eq!(result.produced.len(), 1);
@@ -600,7 +604,7 @@ mod tests {
 
         let l0 = write_sst(dir.path(), "l0.sst", &[(b"key", b"val")], 0, 1);
 
-        compactor.compact_l0_to_l1(&[l0], &[]).unwrap();
+        compactor.compact_l0_to_l1(&[l0], &[], None).unwrap();
 
         let stats = compactor.stats();
         assert_eq!(stats.runs_completed, 1);

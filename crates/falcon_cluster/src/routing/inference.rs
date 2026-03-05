@@ -229,6 +229,64 @@ impl ShardRouterClient {
         Ok(((columns, rows), remote_exec_us))
     }
 
+    /// Send Prepare2pc RPC to a remote node. Returns rows_affected on success.
+    pub async fn prepare_2pc_remote(
+        &self,
+        node_id: u64,
+        txn_id: u64,
+        shard_id: u64,
+        sql: &str,
+    ) -> Result<u64, String> {
+        let channel = self.get_channel(node_id).await?;
+        let mut client = crate::proto::wal_replication_client::WalReplicationClient::new(channel);
+        let req = crate::proto::Prepare2pcRequest {
+            txn_id, shard_id, sql: sql.to_owned(),
+        };
+        match client.prepare2pc(req).await {
+            Ok(r) => {
+                let r = r.into_inner();
+                if r.success { Ok(r.rows_affected) }
+                else { Err(format!("Prepare2pc failed on node {node_id}: {}", r.error)) }
+            }
+            Err(s) => {
+                self.invalidate_channel(node_id);
+                Err(format!("Prepare2pc RPC to node {node_id}: {s}"))
+            }
+        }
+    }
+
+    /// Send Commit2pc RPC to a remote node.
+    pub async fn commit_2pc_remote(&self, node_id: u64, txn_id: u64, shard_id: u64) -> Result<(), String> {
+        let channel = self.get_channel(node_id).await?;
+        let mut client = crate::proto::wal_replication_client::WalReplicationClient::new(channel);
+        let req = crate::proto::Commit2pcRequest { txn_id, shard_id };
+        match client.commit2pc(req).await {
+            Ok(r) => {
+                let r = r.into_inner();
+                if r.success { Ok(()) }
+                else { Err(format!("Commit2pc failed on node {node_id}: {}", r.error)) }
+            }
+            Err(s) => {
+                self.invalidate_channel(node_id);
+                Err(format!("Commit2pc RPC to node {node_id}: {s}"))
+            }
+        }
+    }
+
+    /// Send Abort2pc RPC to a remote node.
+    pub async fn abort_2pc_remote(&self, node_id: u64, txn_id: u64, shard_id: u64) -> Result<(), String> {
+        let channel = self.get_channel(node_id).await?;
+        let mut client = crate::proto::wal_replication_client::WalReplicationClient::new(channel);
+        let req = crate::proto::Abort2pcRequest { txn_id, shard_id };
+        match client.abort2pc(req).await {
+            Ok(_) => Ok(()),
+            Err(s) => {
+                self.invalidate_channel(node_id);
+                Err(format!("Abort2pc RPC to node {node_id}: {s}"))
+            }
+        }
+    }
+
     /// Check how many nodes have registered endpoints.
     pub fn endpoint_count(&self) -> usize {
         self.endpoints.len()

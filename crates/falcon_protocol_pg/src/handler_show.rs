@@ -69,6 +69,7 @@ impl QueryHandler {
             "falcon.tde_status" => Some(self.show_falcon_tde_status()),
             "falcon.tde_keys" => Some(self.show_falcon_tde_keys()),
             "falcon.raft_stats" => Some(self.show_falcon_raft_stats()),
+            "falcon.membership" => Some(self.show_falcon_membership()),
             _ => None,
         }
     }
@@ -1110,6 +1111,63 @@ impl QueryHandler {
         }
 
         self.single_row_result(vec![("metric", 25, -1), ("value", 25, -1)], rows)
+    }
+
+    fn show_falcon_membership(&self) -> Vec<BackendMessage> {
+        let columns = vec![
+            ("node_id", 23, 4),
+            ("address", 25, -1),
+            ("state", 25, -1),
+            ("config_ver", 20, 8),
+            ("shards", 25, -1),
+            ("heartbeat_age", 25, -1),
+        ];
+
+        let Some(ref lc) = self.cluster.lifecycle_coordinator else {
+            return self.single_row_result(
+                columns,
+                vec![vec![
+                    Some("(no lifecycle coordinator)".into()),
+                    Some(String::new()), Some(String::new()),
+                    Some(String::new()), Some(String::new()),
+                    Some(String::new()),
+                ]],
+            );
+        };
+
+        let nodes = lc.node_registry.all_nodes();
+        if nodes.is_empty() {
+            return self.single_row_result(
+                columns,
+                vec![vec![
+                    Some("(no nodes)".into()),
+                    Some(String::new()), Some(String::new()),
+                    Some(String::new()), Some(String::new()),
+                    Some(String::new()),
+                ]],
+            );
+        }
+
+        let rows: Vec<Vec<Option<String>>> = nodes.iter().map(|n| {
+            let hb_age = n.last_heartbeat
+                .map(|t| format!("{:.1}s", t.elapsed().as_secs_f64()))
+                .unwrap_or_else(|| "never".into());
+            let shards_str = if n.assigned_shards.is_empty() {
+                "none".into()
+            } else {
+                n.assigned_shards.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(",")
+            };
+            vec![
+                Some(n.node_id.0.to_string()),
+                Some(n.address.clone()),
+                Some(format!("{:?}", n.state)),
+                Some(n.config_version.to_string()),
+                Some(shards_str),
+                Some(hb_age),
+            ]
+        }).collect();
+
+        self.single_row_result(columns, rows)
     }
 
     fn show_falcon_shard_stats(&self) -> Vec<BackendMessage> {

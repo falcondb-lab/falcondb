@@ -930,8 +930,10 @@ name = "falcon_cli"
 version = "1.2.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "clap",
  "dirs-next",
+ "futures",
  "libc",
  "rustyline",
  "serde",
@@ -1159,6 +1161,7 @@ dependencies = [
  "clap",
  "falcon_cluster",
  "falcon_common",
+ "falcon_enterprise",
  "falcon_executor",
  "falcon_observability",
  "falcon_planner",

@@ -1,0 +1,36 @@
+{
+  "replica_failover": {
+    "replication_lag_lost": 1543,
+    "client_total": 50000,
+    "phantom_note": "same canary write",
+    "duplicates": 0,
+    "replica_rows": 48458,
+    "phantom": 1
+  },
+  "timestamp": "2026-03-04T07:41:30.198Z",
+  "timeline": {
+    "kill_timestamp": "2026-03-04T05:41:46.954Z",
+    "downtime_seconds": 67.275,
+    "promote_timestamp": "2026-03-04T05:42:54.229Z"
+  },
+  "test": "failover-under-load",
+  "wal_durability": {
+    "missing": 0,
+    "phantom_note": "marker_id=0 is canary write from cluster setup",
+    "verdict": "PASS",
+    "client_committed_to_primary": 9402,
+    "phantom": 1,
+    "primary_wal_rows": 9403
+  },
+  "verdict": {
+    "replication_lag_markers": 1543,
+    "writer_completed": true,
+    "wal_zero_data_loss": true
+  },
+  "config": {
+    "primary_port": 5433,
+    "replication_mode": "async",
+    "marker_count": 50000,
+    "replica_port": 5434
+  }
+}

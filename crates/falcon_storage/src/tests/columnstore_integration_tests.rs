@@ -158,4 +158,3 @@
             .unwrap();
         assert_eq!(after.len(), 1);
     }
-}

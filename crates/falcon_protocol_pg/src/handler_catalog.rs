@@ -129,8 +129,49 @@ impl QueryHandler {
                     vec![],
                 ));
             }
+            // pg_stat_activity — active session info
+            if sql_lower.contains("pg_stat_activity") {
+                return Some(self.handle_pg_stat_activity(_session));
+            }
+            // pg_locks — lock info
+            if sql_lower.contains("pg_locks") {
+                return Some(self.handle_pg_locks());
+            }
+            // pg_prepared_xacts — prepared transactions (stub)
+            if sql_lower.contains("pg_prepared_xacts") {
+                return Some(self.single_row_result(
+                    vec![
+                        ("transaction", 23, 4),
+                        ("gid", 25, -1),
+                        ("prepared", 1114, 8),
+                        ("owner", 25, -1),
+                        ("database", 25, -1),
+                    ],
+                    vec![],
+                ));
+            }
             // Fallback: empty result for unhandled catalog queries
             return Some(self.single_row_result(vec![], vec![]));
+        }
+
+        // Unqualified pg_stat_activity / pg_locks (used by falcon_cli fallback queries)
+        if sql_lower.contains("pg_stat_activity") {
+            return Some(self.handle_pg_stat_activity(_session));
+        }
+        if sql_lower.contains("pg_locks") {
+            return Some(self.handle_pg_locks());
+        }
+        if sql_lower.contains("pg_prepared_xacts") {
+            return Some(self.single_row_result(
+                vec![
+                    ("transaction", 23, 4),
+                    ("gid", 25, -1),
+                    ("prepared", 1114, 8),
+                    ("owner", 25, -1),
+                    ("database", 25, -1),
+                ],
+                vec![],
+            ));
         }
 
         None
@@ -984,6 +1025,111 @@ impl QueryHandler {
                 Some("0".into()),    // relpages
                 Some(has_index.into()),
                 Some("10".into()), // owner OID
+            ]);
+        }
+
+        self.single_row_result(cols, rows)
+    }
+
+    /// pg_catalog.pg_stat_activity — live session info from the session registry.
+    fn handle_pg_stat_activity(&self, session: &PgSession) -> Vec<BackendMessage> {
+        let cols = vec![
+            ("datid", 26, 4i16),      // oid
+            ("datname", 25, -1),
+            ("pid", 23, 4),
+            ("usesysid", 26, 4),
+            ("usename", 25, -1),
+            ("application_name", 25, -1),
+            ("client_addr", 869, -1),  // inet
+            ("client_hostname", 25, -1),
+            ("client_port", 23, 4),
+            ("backend_start", 1184, 8),
+            ("xact_start", 1184, 8),
+            ("query_start", 1184, 8),
+            ("state_change", 1184, 8),
+            ("wait_event_type", 25, -1),
+            ("wait_event", 25, -1),
+            ("state", 25, -1),
+            ("backend_xid", 28, 4),
+            ("backend_xmin", 28, 4),
+            ("query", 25, -1),
+            ("backend_type", 25, -1),
+        ];
+
+        let snapshots = self.session_registry.snapshot();
+        let db = &session.database;
+        let mut rows: Vec<Vec<Option<String>>> = Vec::with_capacity(snapshots.len());
+        for s in &snapshots {
+            let (addr, port) = if let Some(pos) = s.client_addr.rfind(':') {
+                (s.client_addr[..pos].to_string(), s.client_addr[pos+1..].to_string())
+            } else {
+                (s.client_addr.clone(), "0".into())
+            };
+            rows.push(vec![
+                Some("16384".into()),          // datid
+                Some(db.clone()),              // datname
+                Some(s.pid.to_string()),
+                Some("10".into()),             // usesysid
+                Some(s.user.clone()),
+                Some(s.application_name.clone()),
+                Some(addr),
+                None,                          // client_hostname
+                Some(port),
+                None,                          // backend_start (no wall-clock yet)
+                s.xact_start_secs.map(|_| String::new()), // placeholder
+                s.query_start_secs.map(|_| String::new()),
+                None,                          // state_change
+                None, None,                    // wait_event_type, wait_event
+                Some(s.state.to_string()),
+                None, None,                    // backend_xid, backend_xmin
+                Some(s.query.clone()),
+                Some("client backend".into()),
+            ]);
+        }
+
+        self.single_row_result(cols, rows)
+    }
+
+    /// pg_catalog.pg_locks — expose MVCC write-set locks from active transactions.
+    fn handle_pg_locks(&self) -> Vec<BackendMessage> {
+        let cols = vec![
+            ("locktype", 25, -1i16),
+            ("database", 26, 4),
+            ("relation", 26, 4),
+            ("page", 23, 4),
+            ("tuple", 21, 2),
+            ("virtualxid", 25, -1),
+            ("transactionid", 28, 4),
+            ("classid", 26, 4),
+            ("objid", 26, 4),
+            ("objsubid", 21, 2),
+            ("virtualtransaction", 25, -1),
+            ("pid", 23, 4),
+            ("mode", 25, -1),
+            ("granted", 16, 1),
+            ("fastpath", 16, 1),
+            ("waitstart", 1184, 8),
+        ];
+
+        // Snapshot active transactions from the txn manager
+        let snapshots = self.session_registry.snapshot();
+        let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+        for s in &snapshots {
+            // Each connected session with state != idle holds a virtualxid lock
+            rows.push(vec![
+                Some("virtualxid".into()),   // locktype
+                None,                         // database
+                None,                         // relation
+                None, None,                   // page, tuple
+                Some(format!("{}/1", s.pid)), // virtualxid
+                None,                         // transactionid
+                None, None, None,             // classid, objid, objsubid
+                Some(format!("{}/1", s.pid)), // virtualtransaction
+                Some(s.pid.to_string()),
+                Some("ExclusiveLock".into()),
+                Some("t".into()),             // granted
+                Some("t".into()),             // fastpath
+                None,                         // waitstart
             ]);
         }
 

@@ -213,7 +213,10 @@ impl Executor {
                             }
                         }
                         WindowFunc::FirstValue(col_idx) => {
-                            let first_row_idx = indices[0];
+                            let first_row_idx = match indices.first() {
+                                Some(idx) => *idx,
+                                None => continue,
+                            };
                             let val = source_rows[first_row_idx]
                                 .get(*col_idx)
                                 .cloned()
@@ -347,6 +350,11 @@ impl Executor {
             .map(|&i| source_rows[i].get(col_idx).and_then(|d| d.as_f64()))
             .collect();
 
+        // Check if the column is integer-typed for SUM output fidelity.
+        let is_integer_col = indices.iter().find_map(|&i| source_rows[i].get(col_idx))
+            .map(|d| matches!(d, Datum::Int32(_) | Datum::Int64(_)))
+            .unwrap_or(false);
+
         let mut sum: f64 = 0.0;
         let mut count: i64 = 0;
         let mut prev_start: usize = 0;
@@ -383,7 +391,9 @@ impl Executor {
                 Datum::Null
             } else {
                 match agg_func {
-                    AggFunc::Sum => Datum::Float64(sum),
+                    AggFunc::Sum => {
+                        if is_integer_col { Datum::Int64(sum as i64) } else { Datum::Float64(sum) }
+                    }
                     AggFunc::Count => Datum::Int64(count),
                     AggFunc::Avg => Datum::Float64(sum / count as f64),
                     _ => Datum::Null,

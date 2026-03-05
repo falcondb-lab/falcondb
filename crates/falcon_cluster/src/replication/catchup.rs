@@ -138,6 +138,15 @@ pub fn apply_wal_record_to_engine(
                 AlterTableOp::RenameTable { new_name } => {
                     let _ = engine.alter_table_rename(table_name, new_name);
                 }
+                AlterTableOp::ChangeColumnType { column_name, new_type } => {
+                    let _ = engine.alter_table_change_column_type(table_name, column_name, new_type.clone());
+                }
+                AlterTableOp::SetNotNull { column_name } => {
+                    let _ = engine.alter_table_set_not_null(table_name, column_name);
+                }
+                AlterTableOp::DropNotNull { column_name } => {
+                    let _ = engine.alter_table_drop_not_null(table_name, column_name);
+                }
             }
         }
         WalRecord::CreateSequence { name, start } => {

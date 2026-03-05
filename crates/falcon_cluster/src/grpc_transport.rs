@@ -347,14 +347,15 @@ impl AsyncReplicationTransport for GrpcTransport {
 /// Uses `DashMap` for all shared state so the struct is `Send + Sync` and can
 /// be wrapped in `Arc<Self>` as required by tonic's generated server trait.
 pub struct WalReplicationService {
-    /// Replication logs indexed by shard ID.
     logs: DashMap<ShardId, Arc<ReplicationLog>>,
-    /// Ack LSNs per (shard, replica) for lag tracking.
     ack_lsns: DashMap<(ShardId, usize), u64>,
-    /// Storage engine reference for checkpoint serving and subplan execution.
     storage: parking_lot::RwLock<Option<Arc<falcon_storage::engine::StorageEngine>>>,
-    /// Transaction manager for subplan execution.
     txn_mgr: parking_lot::RwLock<Option<Arc<falcon_txn::manager::TxnManager>>>,
+    executor: parking_lot::RwLock<Option<Arc<falcon_executor::Executor>>>,
+    config_store: parking_lot::RwLock<Option<Arc<falcon_enterprise::control_plane::ConfigStore>>>,
+    /// Prepared but not yet committed transactions for cross-node 2PC.
+    /// Key: (coordinator_txn_id, shard_id) → local TxnId
+    prepared_txns: DashMap<(u64, u64), falcon_common::types::TxnId>,
 }
 
 impl WalReplicationService {
@@ -364,7 +365,14 @@ impl WalReplicationService {
             ack_lsns: DashMap::new(),
             storage: parking_lot::RwLock::new(None),
             txn_mgr: parking_lot::RwLock::new(None),
+            executor: parking_lot::RwLock::new(None),
+            config_store: parking_lot::RwLock::new(None),
+            prepared_txns: DashMap::new(),
         }
+    }
+
+    pub fn set_config_store(&self, store: Arc<falcon_enterprise::control_plane::ConfigStore>) {
+        *self.config_store.write() = Some(store);
     }
 
     /// Register a replication log for a shard.
@@ -380,6 +388,11 @@ impl WalReplicationService {
     /// Set the transaction manager for subplan execution.
     pub fn set_txn_manager(&self, txn_mgr: Arc<falcon_txn::manager::TxnManager>) {
         *self.txn_mgr.write() = Some(txn_mgr);
+    }
+
+    /// Set the executor for ForwardQuery SQL execution.
+    pub fn set_executor(&self, executor: Arc<falcon_executor::Executor>) {
+        *self.executor.write() = Some(executor);
     }
 
     /// Handle a SubscribeWal request: return a WalChunk from the given LSN.
@@ -731,16 +744,276 @@ impl crate::proto::wal_replication_server::WalReplication for WalReplicationServ
             "Received ForwardQuery RPC",
         );
 
-        // For now, forward_query returns an error indicating the SQL execution
-        // path should use execute_sub_plan instead (subplan-based execution is
-        // the primary cross-node path). Full SQL forwarding requires the full
-        // SQL frontend pipeline on the remote node.
-        Ok(tonic::Response::new(crate::proto::ForwardQueryRpcResponse {
-            success: false,
-            error: "SQL forwarding not yet implemented; use ExecuteSubPlan RPC instead".into(),
-            result_json: String::new(),
-            rows_affected: 0,
+        let storage_opt = self.storage.read().clone();
+        let storage = storage_opt.ok_or_else(|| {
+            tonic::Status::unavailable("No StorageEngine configured for ForwardQuery")
+        })?;
+        let txn_mgr_opt = self.txn_mgr.read().clone();
+        let txn_mgr = txn_mgr_opt.ok_or_else(|| {
+            tonic::Status::unavailable("No TxnManager configured for ForwardQuery")
+        })?;
+        let executor_opt = self.executor.read().clone();
+        let executor = executor_opt.ok_or_else(|| {
+            tonic::Status::unavailable("No Executor configured for ForwardQuery")
+        })?;
+
+        let start = std::time::Instant::now();
+        let sql = &req.sql;
+
+        // Parse → Bind → Plan → Execute
+        let parsed = match falcon_sql_frontend::parser::parse_sql(sql) {
+            Ok(stmts) if !stmts.is_empty() => stmts,
+            Ok(_) => {
+                return Ok(tonic::Response::new(crate::proto::ForwardQueryRpcResponse {
+                    success: false,
+                    error: "Empty SQL statement".into(),
+                    result_json: String::new(),
+                    rows_affected: 0,
+                }));
+            }
+            Err(e) => {
+                return Ok(tonic::Response::new(crate::proto::ForwardQueryRpcResponse {
+                    success: false,
+                    error: format!("Parse error: {e}"),
+                    result_json: String::new(),
+                    rows_affected: 0,
+                }));
+            }
+        };
+
+        let catalog = storage.get_catalog();
+        let mut binder = falcon_sql_frontend::binder::Binder::new(catalog);
+        let bound = match binder.bind(&parsed[0]) {
+            Ok(b) => b,
+            Err(e) => {
+                return Ok(tonic::Response::new(crate::proto::ForwardQueryRpcResponse {
+                    success: false,
+                    error: format!("Bind error: {e}"),
+                    result_json: String::new(),
+                    rows_affected: 0,
+                }));
+            }
+        };
+
+        let plan = match falcon_planner::Planner::plan(&bound) {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(tonic::Response::new(crate::proto::ForwardQueryRpcResponse {
+                    success: false,
+                    error: format!("Plan error: {e}"),
+                    result_json: String::new(),
+                    rows_affected: 0,
+                }));
+            }
+        };
+
+        let isolation = falcon_common::types::IsolationLevel::SnapshotIsolation;
+        let txn = txn_mgr.begin(isolation);
+        let txn_id = txn.txn_id;
+
+        match executor.execute(&plan, Some(&txn)) {
+            Ok(result) => {
+                let (rows_affected, result_json) = match &result {
+                    falcon_executor::ExecutionResult::Dml { rows_affected, .. } => {
+                        let _ = txn_mgr.commit(txn_id);
+                        (*rows_affected as u64, String::new())
+                    }
+                    falcon_executor::ExecutionResult::Query { rows, columns } => {
+                        let col_names: Vec<&str> = columns.iter().map(|(n, _)| n.as_str()).collect();
+                        let row_count = rows.len() as u64;
+                        let row_data: Vec<Vec<String>> = rows.iter().map(|r| {
+                            r.values.iter().map(|d| d.to_pg_text().unwrap_or_default()).collect()
+                        }).collect();
+                        let json = serde_json::json!({
+                            "columns": col_names,
+                            "rows": row_data,
+                        }).to_string();
+                        let _ = txn_mgr.commit(txn_id);
+                        (row_count, json)
+                    }
+                    falcon_executor::ExecutionResult::Ddl { message } => {
+                        let _ = txn_mgr.commit(txn_id);
+                        (0, message.clone())
+                    }
+                    _ => {
+                        let _ = txn_mgr.commit(txn_id);
+                        (0, String::new())
+                    }
+                };
+
+                tracing::debug!(
+                    sql_len = sql.len(),
+                    rows_affected,
+                    elapsed_us = start.elapsed().as_micros() as u64,
+                    "ForwardQuery executed",
+                );
+
+                Ok(tonic::Response::new(crate::proto::ForwardQueryRpcResponse {
+                    success: true,
+                    error: String::new(),
+                    result_json,
+                    rows_affected,
+                }))
+            }
+            Err(e) => {
+                let _ = txn_mgr.abort(txn_id);
+                Ok(tonic::Response::new(crate::proto::ForwardQueryRpcResponse {
+                    success: false,
+                    error: format!("Execution error: {e}"),
+                    result_json: String::new(),
+                    rows_affected: 0,
+                }))
+            }
+        }
+    }
+
+    async fn sync_config(
+        &self,
+        request: tonic::Request<crate::proto::SyncConfigRequest>,
+    ) -> Result<tonic::Response<crate::proto::SyncConfigResponse>, tonic::Status> {
+        let req = request.into_inner();
+        let version = req.config_version;
+        tracing::info!(config_version = version, payload_bytes = req.config_payload.len(), "Received SyncConfig");
+
+        if !req.config_payload.is_empty() {
+            if let Some(store) = self.config_store.read().clone() {
+                match serde_json::from_slice::<Vec<falcon_enterprise::control_plane::ConfigEntry>>(&req.config_payload) {
+                    Ok(entries) => {
+                        for e in entries {
+                            store.set(&e.key, &e.value, &e.updated_by);
+                        }
+                        tracing::debug!(config_version = version, "Config entries applied");
+                    }
+                    Err(err) => tracing::warn!(error = %err, "Failed to parse config payload"),
+                }
+            }
+        }
+
+        Ok(tonic::Response::new(crate::proto::SyncConfigResponse {
+            success: true,
+            applied_version: version,
+            error: String::new(),
         }))
+    }
+
+    async fn prepare2pc(
+        &self,
+        request: tonic::Request<crate::proto::Prepare2pcRequest>,
+    ) -> Result<tonic::Response<crate::proto::Prepare2pcResponse>, tonic::Status> {
+        let req = request.into_inner();
+        let coord_txn_id = req.txn_id;
+        let shard_id = req.shard_id;
+        let sql = req.sql;
+
+        let txn_mgr = self.txn_mgr.read().clone().ok_or_else(|| {
+            tonic::Status::unavailable("TxnManager not initialized")
+        })?;
+        let executor = self.executor.read().clone().ok_or_else(|| {
+            tonic::Status::unavailable("Executor not initialized")
+        })?;
+        let storage = self.storage.read().clone().ok_or_else(|| {
+            tonic::Status::unavailable("Storage not initialized")
+        })?;
+
+        let parsed = match falcon_sql_frontend::parser::parse_sql(&sql) {
+            Ok(s) if !s.is_empty() => s,
+            Ok(_) => return Ok(tonic::Response::new(crate::proto::Prepare2pcResponse {
+                success: false, error: "empty SQL".into(), rows_affected: 0,
+            })),
+            Err(e) => return Ok(tonic::Response::new(crate::proto::Prepare2pcResponse {
+                success: false, error: format!("Parse: {e}"), rows_affected: 0,
+            })),
+        };
+
+        let catalog = storage.get_catalog();
+        let mut binder = falcon_sql_frontend::binder::Binder::new(catalog);
+        let bound = match binder.bind(&parsed[0]) {
+            Ok(b) => b,
+            Err(e) => return Ok(tonic::Response::new(crate::proto::Prepare2pcResponse {
+                success: false, error: format!("Bind: {e}"), rows_affected: 0,
+            })),
+        };
+
+        let plan = match falcon_planner::Planner::plan(&bound) {
+            Ok(p) => p,
+            Err(e) => return Ok(tonic::Response::new(crate::proto::Prepare2pcResponse {
+                success: false, error: format!("Plan: {e}"), rows_affected: 0,
+            })),
+        };
+
+        let isolation = falcon_common::types::IsolationLevel::SnapshotIsolation;
+        let txn = txn_mgr.begin(isolation);
+        let local_txn_id = txn.txn_id;
+
+        match executor.execute(&plan, Some(&txn)) {
+            Ok(result) => {
+                let rows = match &result {
+                    falcon_executor::ExecutionResult::Dml { rows_affected, .. } => *rows_affected as u64,
+                    _ => 0,
+                };
+                // Hold the transaction open — don't commit yet
+                self.prepared_txns.insert((coord_txn_id, shard_id), local_txn_id);
+                tracing::debug!(coord_txn_id, shard_id, ?local_txn_id, "2PC prepared");
+                Ok(tonic::Response::new(crate::proto::Prepare2pcResponse {
+                    success: true, error: String::new(), rows_affected: rows,
+                }))
+            }
+            Err(e) => {
+                let _ = txn_mgr.abort(local_txn_id);
+                Ok(tonic::Response::new(crate::proto::Prepare2pcResponse {
+                    success: false, error: format!("Exec: {e}"), rows_affected: 0,
+                }))
+            }
+        }
+    }
+
+    async fn commit2pc(
+        &self,
+        request: tonic::Request<crate::proto::Commit2pcRequest>,
+    ) -> Result<tonic::Response<crate::proto::Commit2pcResponse>, tonic::Status> {
+        let req = request.into_inner();
+        let key = (req.txn_id, req.shard_id);
+
+        let local_txn_id = match self.prepared_txns.remove(&key) {
+            Some((_, id)) => id,
+            None => return Ok(tonic::Response::new(crate::proto::Commit2pcResponse {
+                success: false, error: format!("No prepared txn for {:?}", key),
+            })),
+        };
+
+        let txn_mgr = self.txn_mgr.read().clone().ok_or_else(|| {
+            tonic::Status::unavailable("TxnManager not initialized")
+        })?;
+
+        match txn_mgr.commit(local_txn_id) {
+            Ok(_) => {
+                tracing::debug!(coord_txn = key.0, shard = key.1, "2PC committed");
+                Ok(tonic::Response::new(crate::proto::Commit2pcResponse {
+                    success: true, error: String::new(),
+                }))
+            }
+            Err(e) => Ok(tonic::Response::new(crate::proto::Commit2pcResponse {
+                success: false, error: format!("Commit failed: {e}"),
+            })),
+        }
+    }
+
+    async fn abort2pc(
+        &self,
+        request: tonic::Request<crate::proto::Abort2pcRequest>,
+    ) -> Result<tonic::Response<crate::proto::Abort2pcResponse>, tonic::Status> {
+        let req = request.into_inner();
+        let key = (req.txn_id, req.shard_id);
+
+        if let Some((_, local_txn_id)) = self.prepared_txns.remove(&key) {
+            let txn_mgr = self.txn_mgr.read().clone();
+            if let Some(mgr) = txn_mgr {
+                let _ = mgr.abort(local_txn_id);
+            }
+            tracing::debug!(coord_txn = key.0, shard = key.1, "2PC aborted");
+        }
+
+        Ok(tonic::Response::new(crate::proto::Abort2pcResponse { success: true }))
     }
 }
 

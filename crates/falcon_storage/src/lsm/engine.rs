@@ -120,6 +120,8 @@ pub struct LsmEngine {
     flush_lock: Mutex<()>,
     /// Optional background flush/compaction workers (set after construction).
     bg_workers: RwLock<Option<BgWorkers>>,
+    /// Optional TDE block encryption for SST files (interior-mutable for post-Arc setup).
+    block_crypto: RwLock<Option<std::sync::Arc<dyn super::sst::BlockCrypto>>>,
 }
 
 
@@ -172,12 +174,23 @@ impl LsmEngine {
             shutdown: AtomicBool::new(false),
             flush_lock: Mutex::new(()),
             bg_workers: RwLock::new(None),
+            block_crypto: RwLock::new(None),
         })
     }
 
     /// Attach background flush/compaction workers.
     pub fn set_bg_workers(&self, workers: BgWorkers) {
         *self.bg_workers.write() = Some(workers);
+    }
+
+    /// Enable TDE block encryption for SST files.
+    pub fn set_block_crypto(&self, crypto: std::sync::Arc<dyn super::sst::BlockCrypto>) {
+        *self.block_crypto.write() = Some(crypto);
+    }
+
+    /// Get a clone of the block crypto Arc (for passing to SstWriter/SstReader).
+    pub fn block_crypto(&self) -> Option<std::sync::Arc<dyn super::sst::BlockCrypto>> {
+        self.block_crypto.read().clone()
     }
 
     /// Create an in-memory-only LSM engine (for testing).
@@ -327,9 +340,10 @@ impl LsmEngine {
         let sst_path = self.data_dir.join(format!("sst_L0_{:06}.sst", seq));
         let entries = frozen.iter_sorted();
 
-        let mut writer = SstWriter::new(&sst_path, entries.len())?;
+        let mut writer = SstWriter::new_with_crypto(
+            &sst_path, entries.len(), self.block_crypto(),
+        )?;
         for (key, value, _seq) in &entries {
-            // Encode tombstones as empty values in SST
             let val = value.as_deref().unwrap_or(b"");
             writer.add(key, val)?;
         }
@@ -386,7 +400,8 @@ impl LsmEngine {
             )
         };
 
-        let result = self.compactor.compact_l0_to_l1(&l0_files, &l1_files)?;
+        let crypto = self.block_crypto();
+        let result = self.compactor.compact_l0_to_l1(&l0_files, &l1_files, crypto.as_ref())?;
         self.apply_compaction_result(&result, 0, 1)?;
         Ok(())
     }
@@ -417,6 +432,7 @@ impl LsmEngine {
             Some(&self.gc_policy),
             Some(&self.compaction_limiter),
             max_levels,
+            self.block_crypto().as_ref(),
         )?;
         self.apply_compaction_result(&result, src_level, dst_level)?;
         Ok(())
@@ -540,7 +556,7 @@ impl LsmEngine {
                 let virtual_seq = base
                     .saturating_sub(level_idx as u64 * (1 << 20))
                     .saturating_add(meta.seq);
-                let reader = SstReader::open(&meta.path, meta.id)?;
+                let reader = SstReader::open_with_crypto(&meta.path, meta.id, self.block_crypto())?;
                 for e in reader.scan()? {
                     entries.push((e.key, if e.value.is_empty() { None } else { Some(e.value) }, virtual_seq));
                 }
@@ -593,7 +609,7 @@ impl LsmEngine {
                 let virtual_seq = base
                     .saturating_sub(level_idx as u64 * (1 << 20))
                     .saturating_add(meta.seq);
-                let reader = SstReader::open(&meta.path, meta.id)?;
+                let reader = SstReader::open_with_crypto(&meta.path, meta.id, self.block_crypto())?;
                 for e in reader.scan()? {
                     if in_range(&e.key) {
                         entries.push((e.key, if e.value.is_empty() { None } else { Some(e.value) }, virtual_seq));
@@ -621,7 +637,7 @@ impl LsmEngine {
     // ── Internal helpers ────────────────────────────────────────────────
 
     fn get_from_sst(&self, meta: &SstMeta, key: &[u8]) -> io::Result<Option<Vec<u8>>> {
-        let reader = SstReader::open(&meta.path, meta.id)?;
+        let reader = SstReader::open_with_crypto(&meta.path, meta.id, self.block_crypto())?;
 
         // Bloom + index → find the block that may contain the key
         let Some((block_offset, block_len)) = reader.find_block_for_key(key) else {

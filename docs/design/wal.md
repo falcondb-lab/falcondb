@@ -86,22 +86,41 @@ MVCC version made visible
 Client ACK
 ```
 
+### Sharded Insertion
+
+WAL append uses 8 shards (`WalShard`) to reduce contention:
+
+```
+Thread A → pick_shard() → shard[3].lock() → append to shard buf
+Thread B → pick_shard() → shard[7].lock() → append to shard buf
+...
+flush() → lock all 8 shards → collect buffers → release shard locks → write to file
+```
+
+- **Thread-local affinity**: `pick_shard()` uses round-robin initial assignment
+  cached per-thread. Same thread always uses same shard, preserving record
+  ordering within a thread (inserts must precede their commit record).
+- **Flush atomicity**: `flush()` and `flush_split()` lock all shards in a scope
+  block, collect buffers, release shard locks, then take inner lock for file I/O.
+
 ### Group Commit
 
-Multiple concurrent transactions append to a shared buffer. A single leader
+Multiple concurrent transactions append to sharded buffers. A single leader
 thread performs the fsync and wakes all followers. This amortizes the cost of
 fsync across N transactions.
 
 - **Leader election**: first thread to enter the flush window becomes the leader.
-- **Batch timeout**: configurable (`wal.group_commit_timeout_us`, default 100µs).
-- **Batch size cap**: configurable (`wal.group_commit_max_batch`, default 64).
+- **Spin-wait fast path**: 500 iterations of `spin_loop()` before falling back
+  to Condvar. FUA writes take ~21-30µs; most completions land within the spin window.
+- **Double-buffer flush**: `flush_split()` swaps buffers under inner lock (instant),
+  performs FUA write outside lock (~21µs). Concurrent appends proceed into the new buffer.
 
 ### Platform-Specific I/O
 
 | Platform | Implementation | Notes |
 |----------|---------------|-------|
-| Linux/macOS | `std::fs::File` + `fsync` | Direct syscall; io_uring planned |
-| Windows | IOCP async via `WriteFile` + `FlushFileBuffers` | `wal_win_async.rs`; 14 `unsafe` blocks for FFI, all with `// SAFETY:` comments |
+| Linux/macOS | `std::fs::File` + `fdatasync` | Direct syscall; io_uring planned |
+| Windows | `FILE_FLAG_WRITE_THROUGH` (FUA) | Per-write durability without `FlushFileBuffers`; avoids NVMe FLUSH command degradation |
 
 ## Recovery
 

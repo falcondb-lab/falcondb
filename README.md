@@ -103,14 +103,13 @@ Attempting to use them returns a clear `ErrorResponse` with the appropriate SQLS
 | Materialized views | `0A000` | `materialized views are not supported` |
 | Foreign data wrappers (FDW) | `0A000` | `foreign data wrappers are not supported` |
 | Full-text search (tsvector/tsquery) | `0A000` | `full-text search is not supported` |
-| Online DDL (concurrent index build) | `0A000` | `concurrent index operations are not supported` |
-| HTAP / ColumnStore analytics | — | Feature-gated off at compile time |
+| HTAP / ColumnStore analytics | — | ColumnStore storage + vectorized AGG pushdown implemented; full analytics pipeline in progress |
 | Automatic rebalancing | — | Available via `[rebalance]` config section (see below) |
 | Custom types (beyond JSONB) | `0A000` | `custom types are not supported` |
 
-> **Scope Guard**: HTAP, ColumnStore, disk tier/spill, and online DDL are all
-> either `feature = "off"` or stub-only. Raft consensus is available via
-> `replication.role = "raft_member"` (see [ARCHITECTURE.md](ARCHITECTURE.md) §2.7).
+> **Scope Guard**: Full HTAP analytics pipeline is in progress. ColumnStore
+> storage and vectorized GROUP BY AGG pushdown are implemented. Raft consensus
+> is available via `replication.role = "raft_member"` (see [ARCHITECTURE.md](ARCHITECTURE.md) §2.7).
 
 ### Optional / Non-Default Features (implemented, not on default build path)
 
@@ -126,9 +125,8 @@ Attempting to use them returns a clear `ErrorResponse` with the appropriate SQLS
 
 | Feature | Module Status | Target | Notes |
 |---------|:------------:|:------:|-------|
-| Disk spill / tiered storage | STUB | TBD | `disk_rowstore.rs`, `columnstore.rs` — code exists but not on production path |
-| Online DDL (non-blocking ALTER) | STUB | TBD | `online_ddl.rs` — state machine scaffolding only |
-| HTAP / ColumnStore analytics | STUB | TBD | `columnstore.rs` — not wired to query planner |
+| Disk spill / tiered storage | STUB | TBD | `disk_rowstore.rs` — code exists but not on production path |
+| ColumnStore full analytics | PARTIAL | TBD | Storage + vectorized AGG pushdown implemented; full scan/filter pipeline in progress |
 | Transparent Data Encryption | STUB | v1.4 | `encryption.rs` — key manager scaffolding, WAL encryption implemented |
 | Point-in-Time Recovery | STUB | v1.4 | `pitr.rs` — WAL archiver scaffolding only |
 | Multi-tenant resource isolation | STUB | TBD | `resource_isolation.rs`, `tenant_registry.rs` — not enforced |
@@ -557,16 +555,20 @@ See [docs/observability.md](docs/observability.md) for full metric descriptions.
 ├──────────────────────────┴─────────────────────────────┤
 │         SQL Frontend (sqlparser-rs → Binder)            │
 ├────────────────────────────────────────────────────────┤
-│         Planner / Router                               │
+│         Planner / CBO / Router                          │
 ├────────────────────────────────────────────────────────┤
-│         Executor (row-at-a-time + fused streaming agg)  │
+│         Executor (row + vectorized + fused streaming)    │
 ├──────────────────┬─────────────────────────────────────┤
 │   Txn Manager    │   Storage Engine                    │
-│   (MVCC, OCC)    │   (MemTable+LSM+RocksDB+redb+WAL+GC)│
+│   (MVCC, OCC)    │   engine_tables: DashMap<TableHandle>│
+│                  │     ├─ Rowstore(MemTable)  ← fast   │
+│                  │     ├─ Lsm / RocksDb / Redb         │
+│                  │     │    └→ dyn StorageTable trait   │
+│                  │     └─ Columnstore (stub)            │
 │                  ├─────────────────────────────────────┤
 │                  │   USTM — User-Space Tiered Memory   │
 │                  │   Hot(DRAM) │ Warm(LIRS-2) │ Cold   │
-│                  │   IoScheduler │ QueryPrefetcher     │
+│                  │   prefetch_hint / scan_prefetch_hint │
 ├──────────────────┴─────────────────────────────────────┤
 │  Cluster (ShardMap, Replication, Failover, Epoch)      │
 └────────────────────────────────────────────────────────┘
@@ -577,10 +579,10 @@ See [docs/observability.md](docs/observability.md) for full metric descriptions.
 | Crate | Responsibility |
 |-------|---------------|
 | `falcon_common` | Shared types, errors, config, datum, schema, RLS, RBAC |
-| `falcon_storage` | In-memory tables, LSM/RocksDB/redb engines, MVCC, indexes, WAL, GC, TDE, partitioning, PITR, CDC, **USTM page cache** |
+| `falcon_storage` | Multi-engine storage: unified `TableHandle` dispatch → `StorageTable` trait; Rowstore (in-memory), LSM, RocksDB, redb; MVCC, secondary indexes, WAL, GC, USTM prefetch, TDE, CDC |
 | `falcon_txn` | Transaction lifecycle, OCC validation, timestamp allocation |
 | `falcon_sql_frontend` | SQL parsing (sqlparser-rs) + binding/analysis |
-| `falcon_planner` | Logical → physical plan, routing hints |
+| `falcon_planner` | Plan generation, cost-based optimizer (selectivity, scan cost, plan_optimized), routing hints, distributed wrapping, view/DDL plans |
 | `falcon_executor` | Operator execution, expression evaluation, governor, fused streaming aggregates |
 | `falcon_protocol_pg` | PostgreSQL wire protocol codec + TCP server |
 | `falcon_protocol_native` | FalconDB native binary protocol — encode/decode, compression, type mapping |

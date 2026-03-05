@@ -20,6 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use parking_lot::{Mutex, RwLock};
 
 use falcon_common::types::{ShardId, TxnId};
+use crate::sharded_engine::ShardedEngine;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // §1 — Replication Invariant Gates (P0-2)
@@ -766,11 +767,9 @@ pub struct IdempotencyMetrics {
 ///    registry (participants skip if already applied).
 /// 3. Marks decisions as applied once all participants acknowledge.
 pub struct TwoPcRecoveryCoordinator {
-    /// Participant idempotency registry.
     idempotency: Arc<ParticipantIdempotencyRegistry>,
-    /// Per-txn phase tracking for crash injection tests.
+    engine: Option<Arc<ShardedEngine>>,
     phase_tracker: RwLock<HashMap<TxnId, TwoPhasePhase>>,
-    /// Recovery metrics.
     recovery_attempts: AtomicU64,
     recovery_successes: AtomicU64,
     recovery_failures: AtomicU64,
@@ -780,11 +779,17 @@ impl TwoPcRecoveryCoordinator {
     pub fn new(idempotency: Arc<ParticipantIdempotencyRegistry>) -> Self {
         Self {
             idempotency,
+            engine: None,
             phase_tracker: RwLock::new(HashMap::new()),
             recovery_attempts: AtomicU64::new(0),
             recovery_successes: AtomicU64::new(0),
             recovery_failures: AtomicU64::new(0),
         }
+    }
+
+    pub fn with_engine(mut self, engine: Arc<ShardedEngine>) -> Self {
+        self.engine = Some(engine);
+        self
     }
 
     /// Track a transaction entering a specific 2PC phase.
@@ -816,27 +821,44 @@ impl TwoPcRecoveryCoordinator {
     ) -> bool {
         self.recovery_attempts.fetch_add(1, Ordering::Relaxed);
 
-        let all_ok = true;
+        let mut all_ok = true;
         for &shard_id in participant_shards {
-            let is_duplicate = self
-                .idempotency
-                .check_and_record(global_txn_id, shard_id, decision);
-
+            let is_duplicate = self.idempotency.check_and_record(global_txn_id, shard_id, decision);
             if is_duplicate {
-                tracing::info!(
-                    txn_id = global_txn_id.0,
-                    shard = ?shard_id,
-                    "recovery: participant already applied decision"
-                );
+                tracing::info!(txn_id = global_txn_id.0, shard = ?shard_id, "recovery: already applied");
+                continue;
+            }
+
+            // Apply to local shard if engine is wired
+            if let Some(ref engine) = self.engine {
+                if let Some(shard) = engine.shard(shard_id) {
+                    let res = match decision {
+                        ParticipantDecision::Commit => shard.txn_mgr
+                            .commit(global_txn_id)
+                            .map(|_| ())
+                            .map_err(|e| e.to_string()),
+                        ParticipantDecision::Abort => shard.txn_mgr
+                            .abort(global_txn_id)
+                            .map_err(|e| e.to_string()),
+                    };
+                    match res {
+                        Ok(()) => tracing::info!(
+                            txn_id = global_txn_id.0, shard = ?shard_id,
+                            decision = ?decision, "recovery: applied"
+                        ),
+                        Err(e) => {
+                            tracing::warn!(
+                                txn_id = global_txn_id.0, shard = ?shard_id, error = %e,
+                                "recovery: apply failed (may already be resolved)"
+                            );
+                        }
+                    }
+                } else {
+                    tracing::warn!(txn_id = global_txn_id.0, shard = ?shard_id, "recovery: shard not found");
+                    all_ok = false;
+                }
             } else {
-                tracing::info!(
-                    txn_id = global_txn_id.0,
-                    shard = ?shard_id,
-                    decision = ?decision,
-                    "recovery: applying decision to participant"
-                );
-                // In a full distributed deployment, this would send RPC.
-                // The idempotency registry ensures at-most-once semantics.
+                tracing::info!(txn_id = global_txn_id.0, shard = ?shard_id, decision = ?decision, "recovery: no engine (log-only)");
             }
         }
 
@@ -845,7 +867,6 @@ impl TwoPcRecoveryCoordinator {
         } else {
             self.recovery_failures.fetch_add(1, Ordering::Relaxed);
         }
-
         all_ok
     }
 

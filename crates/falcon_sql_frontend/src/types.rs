@@ -23,6 +23,7 @@ pub enum BoundStatement {
         table_name: String,
         column_indices: Vec<usize>,
         unique: bool,
+        concurrently: bool,
     },
     DropIndex {
         index_name: String,
@@ -138,42 +139,43 @@ pub enum BoundStatement {
     ShowGrants {
         role_name: Option<String>,
     },
-    /// COPY table FROM STDIN
+    /// COPY table FROM STDIN / FILE
     CopyFrom {
         table_id: TableId,
         schema: TableSchema,
         columns: Vec<usize>,
-        /// true = CSV, false = text
         csv: bool,
         delimiter: char,
         header: bool,
         null_string: String,
         quote: char,
         escape: char,
+        /// Server-side file path (None = STDIN)
+        file_path: Option<String>,
     },
-    /// COPY table TO STDOUT
+    /// COPY table TO STDOUT / FILE
     CopyTo {
         table_id: TableId,
         schema: TableSchema,
         columns: Vec<usize>,
-        /// true = CSV, false = text
         csv: bool,
         delimiter: char,
         header: bool,
         null_string: String,
         quote: char,
         escape: char,
+        file_path: Option<String>,
     },
-    /// COPY (query) TO STDOUT
+    /// COPY (query) TO STDOUT / FILE
     CopyQueryTo {
         query: Box<BoundSelect>,
-        /// true = CSV, false = text
         csv: bool,
         delimiter: char,
         header: bool,
         null_string: String,
         quote: char,
         escape: char,
+        file_path: Option<String>,
     },
 }
 

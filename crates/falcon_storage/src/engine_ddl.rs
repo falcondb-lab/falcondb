@@ -272,8 +272,7 @@ impl StorageEngine {
         match schema.storage_type {
             StorageType::Rowstore => {
                 let table = Arc::new(MemTable::new(schema.clone()));
-                self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Rowstore(Arc::clone(&table)));
-                self.tables.insert(table_id, table);
+                self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Rowstore(table));
             }
             StorageType::Columnstore => {
                 #[cfg(feature = "columnstore")]
@@ -285,8 +284,7 @@ impl StorageEngine {
                         ))));
                     }
                     let table = Arc::new(ColumnStoreTable::new(schema.clone()));
-                    self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Columnstore(Arc::clone(&table)));
-                    self.columnstore_tables.insert(table_id, table);
+                    self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Columnstore(table));
                 }
                 #[cfg(not(feature = "columnstore"))]
                 {
@@ -310,7 +308,6 @@ impl StorageEngine {
                         .unwrap_or_else(|| std::path::Path::new("."));
                     let table = Arc::new(DiskRowstoreTable::new(schema.clone(), data_dir)?);
                     self.engine_tables.insert(table_id, crate::table_handle::TableHandle::DiskRowstore(Arc::clone(&table)));
-                    self.disk_tables.insert(table_id, table);
                 }
                 #[cfg(not(feature = "disk_rowstore"))]
                 {
@@ -339,7 +336,6 @@ impl StorageEngine {
                     );
                     let table = Arc::new(LsmTable::new(schema.clone(), engine));
                     self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Lsm(Arc::clone(&table)));
-                    self.lsm_tables.insert(table_id, table);
                 }
                 #[cfg(not(feature = "lsm"))]
                 {
@@ -360,7 +356,6 @@ impl StorageEngine {
                         crate::rocksdb_table::RocksDbTable::open(schema.clone(), &rdb_dir)?
                     );
                     self.engine_tables.insert(table_id, crate::table_handle::TableHandle::RocksDb(Arc::clone(&table)));
-                    self.rocksdb_tables.insert(table_id, table);
                 }
                 #[cfg(not(feature = "rocksdb"))]
                 {
@@ -381,7 +376,6 @@ impl StorageEngine {
                         crate::redb_table::RedbTable::open(schema.clone(), &rdb_dir)?
                     );
                     self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Redb(Arc::clone(&table)));
-                    self.redb_tables.insert(table_id, table);
                 }
                 #[cfg(not(feature = "redb"))]
                 {
@@ -422,17 +416,6 @@ impl StorageEngine {
         let table_id = table.id;
         // Remove from whichever storage map holds it
         self.engine_tables.remove(&table_id);
-        self.tables.remove(&table_id);
-        #[cfg(feature = "columnstore")]
-        self.columnstore_tables.remove(&table_id);
-        #[cfg(feature = "disk_rowstore")]
-        self.disk_tables.remove(&table_id);
-        #[cfg(feature = "lsm")]
-        self.lsm_tables.remove(&table_id);
-        #[cfg(feature = "rocksdb")]
-        self.rocksdb_tables.remove(&table_id);
-        #[cfg(feature = "redb")]
-        self.redb_tables.remove(&table_id);
 
         // USTM: unregister table metadata page.
         let meta_page_id = PageId(table_id.0 << 32);
@@ -466,15 +449,13 @@ impl StorageEngine {
         match schema.storage_type {
             StorageType::Rowstore => {
                 let table = Arc::new(MemTable::new(schema));
-                self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Rowstore(Arc::clone(&table)));
-                self.tables.insert(table_id, table);
+                self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Rowstore(table));
             }
             StorageType::Columnstore => {
                 #[cfg(feature = "columnstore")]
                 {
                     let table = Arc::new(ColumnStoreTable::new(schema));
-                    self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Columnstore(Arc::clone(&table)));
-                    self.columnstore_tables.insert(table_id, table);
+                    self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Columnstore(table));
                 }
                 #[cfg(not(feature = "columnstore"))]
                 {
@@ -492,7 +473,6 @@ impl StorageEngine {
                         .unwrap_or_else(|| std::path::Path::new("."));
                     let table = Arc::new(DiskRowstoreTable::new(schema, data_dir)?);
                     self.engine_tables.insert(table_id, crate::table_handle::TableHandle::DiskRowstore(Arc::clone(&table)));
-                    self.disk_tables.insert(table_id, table);
                 }
                 #[cfg(not(feature = "disk_rowstore"))]
                 {
@@ -522,7 +502,6 @@ impl StorageEngine {
                     );
                     let table = Arc::new(LsmTable::new(schema, engine));
                     self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Lsm(Arc::clone(&table)));
-                    self.lsm_tables.insert(table_id, table);
                 }
                 #[cfg(not(feature = "lsm"))]
                 {
@@ -544,7 +523,6 @@ impl StorageEngine {
                         crate::rocksdb_table::RocksDbTable::open(schema, &rdb_dir)?
                     );
                     self.engine_tables.insert(table_id, crate::table_handle::TableHandle::RocksDb(Arc::clone(&table)));
-                    self.rocksdb_tables.insert(table_id, table);
                 }
                 #[cfg(not(feature = "rocksdb"))]
                 {
@@ -566,7 +544,6 @@ impl StorageEngine {
                         crate::redb_table::RedbTable::open(schema, &rdb_dir)?
                     );
                     self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Redb(Arc::clone(&table)));
-                    self.redb_tables.insert(table_id, table);
                 }
                 #[cfg(not(feature = "redb"))]
                 {
@@ -696,26 +673,24 @@ impl StorageEngine {
             if let Some(executor) = &self.ddl_executor {
                 // ── Async backfill path ──
                 // Capture what the closure needs; it will run on a worker thread.
-                let tables = self.tables.clone();
-                let online_ddl = std::sync::Arc::new(self.online_ddl.clone());
+                let memtable_arc = self.engine_tables.get(&table_id)
+                    .and_then(|h| h.as_rowstore().cloned());
+                let Some(memtable_arc) = memtable_arc else {
+                    // Not a rowstore — skip async backfill
+                    return Ok(ddl_id);
+                };
+                let online_ddl = self.online_ddl.clone();
                 let default_val = col
                     .default_value
                     .clone()
                     .unwrap_or(falcon_common::datum::Datum::Null);
 
-                let total = self
-                    .tables
-                    .get(&table_id)
-                    .map(|t| t.value().data.len() as u64)
-                    .unwrap_or(0);
+                let total = memtable_arc.data.len() as u64;
                 self.online_ddl.begin_backfill(ddl_id, total);
 
                 let backfill_fn: crate::online_ddl::BackfillFn = Box::new(
                     move |_ddl_id, cancelled| {
-                        let table_ref = tables.get(&table_id).ok_or_else(|| {
-                            format!("Table {:?} disappeared during async backfill", table_id)
-                        })?;
-                        let memtable = table_ref.value();
+                        let memtable = &memtable_arc;
                         let mut batch_count = 0u64;
                         for entry in &memtable.data {
                             // Check cancellation between batches.
@@ -750,7 +725,7 @@ impl StorageEngine {
                     },
                 );
 
-                let mgr_arc = std::sync::Arc::new(self.online_ddl.clone());
+                let mgr_arc = self.online_ddl.clone();
                 match executor.submit(ddl_id, mgr_arc, backfill_fn) {
                     Ok(_handle) => {
                         tracing::info!(
@@ -773,11 +748,11 @@ impl StorageEngine {
             }
 
             // ── Synchronous backfill path (fallback) ──
-            if let Some(table_ref) = self.tables.get(&table_id) {
+            if let Some(handle) = self.engine_tables.get(&table_id) {
+              if let Some(memtable) = handle.as_rowstore() {
                 let default_val = col
                     .default_value
                     .unwrap_or(falcon_common::datum::Datum::Null);
-                let memtable = table_ref.value();
                 let total = memtable.data.len() as u64;
                 self.online_ddl.begin_backfill(ddl_id, total);
                 let mut batch_count = 0u64;
@@ -802,6 +777,7 @@ impl StorageEngine {
                 if remainder > 0 {
                     self.online_ddl.record_progress(ddl_id, remainder);
                 }
+              }
             }
         }
 
@@ -993,9 +969,17 @@ impl StorageEngine {
         );
         self.online_ddl.start(ddl_id);
 
+        self.append_wal(&WalRecord::AlterTable {
+            table_name: table_name.to_owned(),
+            op: crate::wal::AlterTableOp::ChangeColumnType {
+                column_name: col_name.to_owned(),
+                new_type,
+            },
+        })?;
+
         // Convert existing row data in batches
-        if let Some(table_ref) = self.tables.get(&table_id) {
-            let memtable = table_ref.value();
+        if let Some(handle) = self.engine_tables.get(&table_id) {
+          if let Some(memtable) = handle.as_rowstore() {
             let total = memtable.data.len() as u64;
             self.online_ddl.begin_backfill(ddl_id, total);
             let mut batch_count = 0u64;
@@ -1026,6 +1010,7 @@ impl StorageEngine {
             if remainder > 0 {
                 self.online_ddl.record_progress(ddl_id, remainder);
             }
+          }
         }
 
         self.online_ddl.complete(ddl_id);
@@ -1061,6 +1046,14 @@ impl StorageEngine {
             },
         );
         self.online_ddl.start(ddl_id);
+
+        self.append_wal(&WalRecord::AlterTable {
+            table_name: table_name.to_owned(),
+            op: crate::wal::AlterTableOp::SetNotNull {
+                column_name: col_name.to_owned(),
+            },
+        })?;
+
         self.online_ddl.complete(ddl_id);
         Ok(ddl_id)
     }
@@ -1094,6 +1087,14 @@ impl StorageEngine {
             },
         );
         self.online_ddl.start(ddl_id);
+
+        self.append_wal(&WalRecord::AlterTable {
+            table_name: table_name.to_owned(),
+            op: crate::wal::AlterTableOp::DropNotNull {
+                column_name: col_name.to_owned(),
+            },
+        })?;
+
         self.online_ddl.complete(ddl_id);
         Ok(ddl_id)
     }
@@ -1217,6 +1218,102 @@ impl StorageEngine {
         Ok(())
     }
 
+    /// Non-blocking index build tracked by OnlineDdlManager.
+    /// Scans existing rows in batches, yielding between them to allow concurrent DML.
+    /// Returns the DDL operation ID for progress tracking.
+    pub fn create_index_concurrently(
+        &self,
+        index_name: &str,
+        table_name: &str,
+        column_indices: &[usize],
+        unique: bool,
+    ) -> Result<u64, StorageError> {
+        let catalog = self.catalog.read();
+        let table = catalog
+            .find_table(table_name)
+            .ok_or(StorageError::TableNotFound(TableId(0)))?;
+        let table_id = table.id;
+        drop(catalog);
+
+        let ddl_id = self.online_ddl.register(
+            table_id,
+            DdlOpKind::MetadataOnly {
+                description: format!("CREATE INDEX CONCURRENTLY {index_name} ON {table_name}"),
+            },
+        );
+        self.online_ddl.start(ddl_id);
+
+        if let Some(handle) = self.engine_tables.get(&table_id) {
+          if let Some(memtable) = handle.as_rowstore() {
+            let new_index = if column_indices.len() == 1 {
+                if unique {
+                    crate::memtable::SecondaryIndex::new_unique(column_indices[0])
+                } else {
+                    crate::memtable::SecondaryIndex::new(column_indices[0])
+                }
+            } else {
+                crate::memtable::SecondaryIndex::new_composite(column_indices.to_vec(), unique)
+            };
+
+            let total = memtable.data.len() as u64;
+            self.online_ddl.begin_backfill(ddl_id, total);
+
+            let mut batch_count = 0u64;
+            let mut seen_keys: std::collections::HashSet<Vec<u8>> = if unique {
+                std::collections::HashSet::with_capacity(total as usize)
+            } else {
+                std::collections::HashSet::new()
+            };
+
+            for entry in &memtable.data {
+                let pk = entry.key().clone();
+                let chain = entry.value();
+                if let Some(row) = chain.read_latest() {
+                    let key_bytes = new_index.encode_key(&row);
+                    if unique && !seen_keys.insert(key_bytes.clone()) {
+                        self.online_ddl.fail(ddl_id, "duplicate key violates unique constraint".into());
+                        return Err(StorageError::DuplicateKey);
+                    }
+                    new_index.insert(key_bytes, pk);
+                }
+                batch_count += 1;
+                if batch_count % BACKFILL_BATCH_SIZE as u64 == 0 {
+                    self.online_ddl.record_progress(ddl_id, BACKFILL_BATCH_SIZE as u64);
+                    std::thread::yield_now();
+                }
+            }
+            let remainder = batch_count % BACKFILL_BATCH_SIZE as u64;
+            if remainder > 0 {
+                self.online_ddl.record_progress(ddl_id, remainder);
+            }
+
+            let mut indexes = memtable.secondary_indexes.write();
+            indexes.push(new_index);
+            memtable.has_secondary_idx.store(true, std::sync::atomic::Ordering::Release);
+          }
+        }
+
+        self.index_registry.insert(
+            index_name.to_lowercase(),
+            IndexMeta {
+                table_id,
+                table_name: table_name.to_owned(),
+                column_idx: *column_indices.first().unwrap_or(&0),
+                unique,
+            },
+        );
+
+        self.append_wal(&WalRecord::CreateIndex {
+            index_name: index_name.to_owned(),
+            table_name: table_name.to_owned(),
+            column_idx: *column_indices.first().unwrap_or(&0),
+            unique,
+        })?;
+
+        self.online_ddl.complete(ddl_id);
+        Ok(ddl_id)
+    }
+
     /// Drop a named index. Removes the secondary index from the table and the registry.
     pub fn drop_index(&self, index_name: &str) -> Result<(), StorageError> {
         let key = index_name.to_lowercase();
@@ -1224,11 +1321,12 @@ impl StorageEngine {
             StorageError::Serialization(format!("index \"{index_name}\" does not exist"))
         })?;
 
-        if let Some(table_ref) = self.tables.get(&meta.table_id) {
-            let memtable = table_ref.value();
+        if let Some(handle) = self.engine_tables.get(&meta.table_id) {
+          if let Some(memtable) = handle.as_rowstore() {
             let mut indexes = memtable.secondary_indexes.write();
             indexes.retain(|idx| idx.column_idx != meta.column_idx);
             memtable.has_secondary_idx.store(!indexes.is_empty(), std::sync::atomic::Ordering::Release);
+          }
         }
 
         self.append_wal(&WalRecord::DropIndex {
@@ -1257,15 +1355,15 @@ impl StorageEngine {
         let table_id = table.id;
         drop(catalog);
 
-        if let Some(table_ref) = self.tables.get(&table_id) {
-            let memtable = table_ref.value();
+        if let Some(handle) = self.engine_tables.get(&table_id) {
+          if let Some(memtable) = handle.as_rowstore() {
             {
                 let indexes = memtable.secondary_indexes.read();
                 if indexes
                     .iter()
                     .any(|idx| idx.column_idx == column_idx && idx.column_indices.is_empty())
                 {
-                    return Ok(()); // Already indexed
+                    return Ok(());
                 }
             }
             let new_index = if unique {
@@ -1273,11 +1371,11 @@ impl StorageEngine {
             } else {
                 crate::memtable::SecondaryIndex::new(column_idx)
             };
-            // Backfill existing rows (and check uniqueness for unique indexes)
             self.backfill_index(&new_index, memtable, unique)?;
             let mut indexes = memtable.secondary_indexes.write();
             indexes.push(new_index);
             memtable.has_secondary_idx.store(true, std::sync::atomic::Ordering::Release);
+          }
         }
         Ok(())
     }
@@ -1297,14 +1395,15 @@ impl StorageEngine {
         let table_id = table.id;
         drop(catalog);
 
-        if let Some(table_ref) = self.tables.get(&table_id) {
-            let memtable = table_ref.value();
+        if let Some(handle) = self.engine_tables.get(&table_id) {
+          if let Some(memtable) = handle.as_rowstore() {
             let new_index =
                 crate::memtable::SecondaryIndex::new_composite(column_indices.clone(), unique);
             self.backfill_index(&new_index, memtable, unique)?;
             let mut indexes = memtable.secondary_indexes.write();
             indexes.push(new_index);
             memtable.has_secondary_idx.store(true, std::sync::atomic::Ordering::Release);
+          }
         }
 
         self.index_registry.insert(
@@ -1335,8 +1434,8 @@ impl StorageEngine {
         let table_id = table.id;
         drop(catalog);
 
-        if let Some(table_ref) = self.tables.get(&table_id) {
-            let memtable = table_ref.value();
+        if let Some(handle) = self.engine_tables.get(&table_id) {
+          if let Some(memtable) = handle.as_rowstore() {
             let new_index = crate::memtable::SecondaryIndex::new_covering(
                 column_indices.clone(),
                 covering_columns,
@@ -1346,6 +1445,7 @@ impl StorageEngine {
             let mut indexes = memtable.secondary_indexes.write();
             indexes.push(new_index);
             memtable.has_secondary_idx.store(true, std::sync::atomic::Ordering::Release);
+          }
         }
 
         self.index_registry.insert(
@@ -1375,13 +1475,14 @@ impl StorageEngine {
         let table_id = table.id;
         drop(catalog);
 
-        if let Some(table_ref) = self.tables.get(&table_id) {
-            let memtable = table_ref.value();
+        if let Some(handle) = self.engine_tables.get(&table_id) {
+          if let Some(memtable) = handle.as_rowstore() {
             let new_index = crate::memtable::SecondaryIndex::new_prefix(column_idx, prefix_len);
             self.backfill_index(&new_index, memtable, false)?;
             let mut indexes = memtable.secondary_indexes.write();
             indexes.push(new_index);
             memtable.has_secondary_idx.store(true, std::sync::atomic::Ordering::Release);
+          }
         }
 
         self.index_registry.insert(

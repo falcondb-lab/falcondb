@@ -187,6 +187,61 @@ pub struct SstEntry {
     pub value: Vec<u8>,
 }
 
+// ── Block-level encryption for TDE ──────────────────────────────────────────
+
+/// Block-level encrypt/decrypt for SST data blocks.
+/// Implementations must be Send + Sync for sharing across reader threads.
+pub trait BlockCrypto: Send + Sync {
+    fn encrypt(&self, plaintext: &[u8]) -> io::Result<Vec<u8>>;
+    fn decrypt(&self, ciphertext: &[u8]) -> io::Result<Vec<u8>>;
+}
+
+/// AES-256-GCM block encryption backed by a single DEK.
+#[cfg(feature = "encryption_tde")]
+pub struct AesGcmBlockCrypto {
+    cipher: aes_gcm::Aes256Gcm,
+}
+
+#[cfg(feature = "encryption_tde")]
+impl AesGcmBlockCrypto {
+    pub fn new(key: &crate::encryption::EncryptionKey) -> Self {
+        use aes_gcm::KeyInit;
+        Self {
+            cipher: aes_gcm::Aes256Gcm::new(key.as_bytes().into()),
+        }
+    }
+}
+
+#[cfg(feature = "encryption_tde")]
+impl BlockCrypto for AesGcmBlockCrypto {
+    fn encrypt(&self, plaintext: &[u8]) -> io::Result<Vec<u8>> {
+        use aes_gcm::aead::{Aead, OsRng};
+        use aes_gcm::Nonce;
+        use rand::RngCore;
+        let mut nonce_bytes = [0u8; 12];
+        OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let ct = self.cipher.encrypt(nonce, plaintext)
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "AES-GCM encrypt failed"))?;
+        let mut out = Vec::with_capacity(12 + ct.len());
+        out.extend_from_slice(&nonce_bytes);
+        out.extend_from_slice(&ct);
+        Ok(out)
+    }
+
+    fn decrypt(&self, ciphertext: &[u8]) -> io::Result<Vec<u8>> {
+        use aes_gcm::aead::Aead;
+        use aes_gcm::Nonce;
+        if ciphertext.len() < 12 + 16 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "SST block too short for TDE"));
+        }
+        let (nonce_bytes, ct) = ciphertext.split_at(12);
+        let nonce = Nonce::from_slice(nonce_bytes);
+        self.cipher.decrypt(nonce, ct)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "AES-GCM decrypt failed (tampered?)"))
+    }
+}
+
 // ── SST Writer ──────────────────────────────────────────────────────────────
 
 /// Writes a new SST file from sorted key-value pairs.
@@ -209,12 +264,23 @@ pub struct SstWriter {
     last_key: Option<Vec<u8>>,
     /// Target block size.
     target_block_size: usize,
+    /// Optional TDE block encryption.
+    block_crypto: Option<std::sync::Arc<dyn BlockCrypto>>,
 }
 
 impl SstWriter {
     /// Create a new SST writer at the given path.
     /// `expected_entries` is used to size the bloom filter.
     pub fn new(path: &Path, expected_entries: usize) -> io::Result<Self> {
+        Self::new_with_crypto(path, expected_entries, None)
+    }
+
+    /// Create an SST writer with optional TDE block encryption.
+    pub fn new_with_crypto(
+        path: &Path,
+        expected_entries: usize,
+        crypto: Option<std::sync::Arc<dyn BlockCrypto>>,
+    ) -> io::Result<Self> {
         let file = File::create(path)?;
         let writer = BufWriter::with_capacity(64 * 1024, file);
         let bloom = BloomFilter::new(expected_entries.max(1), 0.01);
@@ -231,6 +297,7 @@ impl SstWriter {
             first_key: None,
             last_key: None,
             target_block_size: TARGET_BLOCK_SIZE,
+            block_crypto: crypto,
         })
     }
 
@@ -321,24 +388,29 @@ impl SstWriter {
 
         let block_offset = self.offset;
 
-        // Write block header: entry count
+        // Build raw block: header (entry_count) + data
         let header = self.block_entry_count.to_le_bytes();
-        self.writer.write_all(&header)?;
-        self.offset += 4;
+        let mut raw_block = Vec::with_capacity(4 + self.block_buf.len());
+        raw_block.extend_from_slice(&header);
+        raw_block.extend_from_slice(&self.block_buf);
+
+        // Optionally encrypt the raw block
+        let write_data = if let Some(ref crypto) = self.block_crypto {
+            crypto.encrypt(&raw_block)?
+        } else {
+            raw_block
+        };
 
         // Write block data
-        self.writer.write_all(&self.block_buf)?;
-        self.offset += self.block_buf.len() as u64;
+        self.writer.write_all(&write_data)?;
+        self.offset += write_data.len() as u64;
 
-        // Write block CRC32 (over header + data)
-        let mut crc_input = Vec::with_capacity(4 + self.block_buf.len());
-        crc_input.extend_from_slice(&header);
-        crc_input.extend_from_slice(&self.block_buf);
-        let crc = block_crc32(&crc_input);
+        // Write block CRC32 (over the on-disk bytes, encrypted or not)
+        let crc = block_crc32(&write_data);
         self.writer.write_all(&crc.to_le_bytes())?;
         self.offset += 4;
 
-        let block_len = 4 + self.block_buf.len() as u32 + 4; // header + data + crc
+        let block_len = write_data.len() as u32 + 4; // data + crc
 
         // Record index entry (last key in this block)
         let last_key = self.last_key.clone().unwrap_or_default();
@@ -382,6 +454,8 @@ pub struct SstReader {
     bloom: BloomFilter,
     /// Persistent file handle — reused across read_block calls to avoid open() per block.
     file: Mutex<BufReader<File>>,
+    /// Optional TDE block decryption.
+    block_crypto: Option<std::sync::Arc<dyn BlockCrypto>>,
 }
 
 impl std::fmt::Debug for SstReader {
@@ -394,6 +468,15 @@ impl SstReader {
     /// Open an SST file and read its index + bloom filter into memory.
     /// Returns `SstReadError` variants for all failure modes (never panics).
     pub fn open(path: &Path, sst_id: u64) -> io::Result<Self> {
+        Self::open_with_crypto(path, sst_id, None)
+    }
+
+    /// Open an SST file with optional TDE block decryption.
+    pub fn open_with_crypto(
+        path: &Path,
+        sst_id: u64,
+        crypto: Option<std::sync::Arc<dyn BlockCrypto>>,
+    ) -> io::Result<Self> {
         let sst_path = path.display().to_string();
         let file_len = fs::metadata(path).map_err(|e| SstReadError::Io {
             sst_path: sst_path.clone(),
@@ -578,11 +661,18 @@ impl SstReader {
             detail: "invalid bloom filter encoding".into(),
         })?;
 
-        // Derive min/max key from index
-        let min_key = if let Some(first_block) = index.first() {
-            Self::read_first_key_from_block(path, first_block.block_offset)?
+        // Derive min/max key from index.
+        // When crypto is active we cannot use read_first_key_from_block (raw I/O,
+        // no decryption), so we defer min_key to after construction and read
+        // through the normal read_block path.
+        let min_key_raw = if crypto.is_none() {
+            if let Some(first_block) = index.first() {
+                Self::read_first_key_from_block(path, first_block.block_offset)?
+            } else {
+                Vec::new()
+            }
         } else {
-            Vec::new()
+            Vec::new() // will be populated below
         };
         let max_key = index.last().map(|e| e.last_key.clone()).unwrap_or_default();
 
@@ -590,7 +680,7 @@ impl SstReader {
             id: sst_id,
             path: path.to_path_buf(),
             level: 0,
-            min_key,
+            min_key: min_key_raw,
             max_key,
             entry_count,
             file_size: file_len,
@@ -604,13 +694,31 @@ impl SstReader {
             detail: "open file for block reads".into(),
         })?);
 
-        Ok(Self {
+        let mut reader = Self {
             path: path.to_path_buf(),
             meta,
             index,
             bloom,
             file: Mutex::new(data_file),
-        })
+            block_crypto: crypto,
+        };
+
+        // Derive min_key from decrypted first block when crypto is active.
+        if reader.block_crypto.is_some() {
+            if let Some(first) = reader.index.first().cloned() {
+                let block_data = reader.read_block(first.block_offset, first.block_len)?;
+                if block_data.len() >= 12 {
+                    let key_len = u32::from_le_bytes(
+                        [block_data[4], block_data[5], block_data[6], block_data[7]]
+                    ) as usize;
+                    if 8 + key_len <= block_data.len() {
+                        reader.meta.min_key = block_data[8..8 + key_len].to_vec();
+                    }
+                }
+            }
+        }
+
+        Ok(reader)
     }
 
     /// Point lookup: returns the value for the given key, or None.
@@ -710,6 +818,13 @@ impl SstReader {
                     .into());
                 }
             }
+        }
+
+        // Decrypt block data if TDE is active (after CRC, which covers on-disk bytes)
+        if let Some(ref crypto) = self.block_crypto {
+            let data_len = (len - 4) as usize;
+            let decrypted = crypto.decrypt(&buf[..data_len])?;
+            return Ok(decrypted);
         }
 
         Ok(buf)
@@ -1073,6 +1188,59 @@ mod tests {
                 result.is_err() || result.unwrap() != Some(b"val_a".to_vec()),
                 "corrupted block should be detected or data should differ"
             );
+        }
+    }
+
+    /// Simple XOR cipher for testing BlockCrypto without the TDE feature.
+    struct XorBlockCrypto(u8);
+    impl BlockCrypto for XorBlockCrypto {
+        fn encrypt(&self, plaintext: &[u8]) -> io::Result<Vec<u8>> {
+            Ok(plaintext.iter().map(|b| b ^ self.0).collect())
+        }
+        fn decrypt(&self, ciphertext: &[u8]) -> io::Result<Vec<u8>> {
+            Ok(ciphertext.iter().map(|b| b ^ self.0).collect())
+        }
+    }
+
+    #[test]
+    fn test_sst_tde_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("encrypted.sst");
+        let crypto: std::sync::Arc<dyn BlockCrypto> =
+            std::sync::Arc::new(XorBlockCrypto(0xAB));
+
+        let mut writer =
+            SstWriter::new_with_crypto(&path, 3, Some(crypto.clone())).unwrap();
+        writer.add(b"alpha", b"v1").unwrap();
+        writer.add(b"beta", b"v2").unwrap();
+        writer.add(b"gamma", b"v3").unwrap();
+        let meta = writer.finish(0, 1).unwrap();
+        assert_eq!(meta.entry_count, 3);
+
+        // Read with decryption — should round-trip correctly
+        let reader =
+            SstReader::open_with_crypto(&meta.path, meta.id, Some(crypto.clone())).unwrap();
+        assert_eq!(reader.get(b"alpha").unwrap(), Some(b"v1".to_vec()));
+        assert_eq!(reader.get(b"beta").unwrap(), Some(b"v2".to_vec()));
+        assert_eq!(reader.get(b"gamma").unwrap(), Some(b"v3".to_vec()));
+        assert_eq!(reader.get(b"delta").unwrap(), None);
+
+        // Scan should also work
+        let entries = reader.scan().unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].key, b"alpha");
+        assert_eq!(entries[2].value, b"v3");
+
+        // Read WITHOUT decryption — should fail (either at open or at get)
+        match SstReader::open(&meta.path, meta.id) {
+            Err(_) => {} // expected: can't parse encrypted block header
+            Ok(plain_reader) => {
+                let result = plain_reader.get(b"alpha");
+                assert!(
+                    result.is_err() || result.unwrap() != Some(b"v1".to_vec()),
+                    "reading encrypted SST without decryption should not return correct data"
+                );
+            }
         }
     }
 

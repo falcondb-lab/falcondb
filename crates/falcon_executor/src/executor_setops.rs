@@ -141,10 +141,19 @@ impl Executor {
                 // a full cte_data.clone() per iteration.
                 let mut recursive_cte_data = cte_data.clone();
 
+                let max_rows = self.recursive_cte_max_rows;
                 const MAX_ITERATIONS: usize = 1000;
                 for _ in 0..MAX_ITERATIONS {
                     if working_rows.is_empty() {
                         break;
+                    }
+                    if max_rows > 0 && all_rows.len() >= max_rows {
+                        return Err(FalconError::Execution(
+                            falcon_common::error::ExecutionError::ResourceExhausted(format!(
+                                "recursive CTE exceeded max row limit ({max_rows}). \
+                                 Increase falcon.spill.recursive_cte_max_rows or check for unbounded recursion."
+                            )),
+                        ));
                     }
                     recursive_cte_data.insert(cte.table_id, working_rows);
 

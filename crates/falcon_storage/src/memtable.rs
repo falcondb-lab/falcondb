@@ -32,6 +32,12 @@ use falcon_common::types::{TableId, Timestamp, TxnId};
 
 use crate::mvcc::VersionChain;
 
+/// Extract OwnedRow from Arc without cloning when ref count is 1.
+#[inline]
+fn unwrap_arc_row(arc: Arc<OwnedRow>) -> OwnedRow {
+    Arc::try_unwrap(arc).unwrap_or_else(|a| (*a).clone())
+}
+
 /// Hex-encode a byte slice for diagnostic/observability output.
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -507,6 +513,14 @@ impl MemTable {
         self.data
             .get(pk)
             .and_then(|chain| chain.read_for_txn(txn_id, read_ts))
+            .map(unwrap_arc_row)
+    }
+
+    /// Point read returning Arc (zero-copy).
+    pub fn get_arc(&self, pk: &PrimaryKey, txn_id: TxnId, read_ts: Timestamp) -> Option<Arc<OwnedRow>> {
+        self.data
+            .get(pk)
+            .and_then(|chain| chain.read_for_txn(txn_id, read_ts))
     }
 
     /// Stream through all visible rows without cloning.
@@ -596,7 +610,7 @@ impl MemTable {
         let mut results = Vec::with_capacity(self.data.len());
         for entry in &self.data {
             if let Some(row) = entry.value().read_for_txn(txn_id, read_ts) {
-                results.push((entry.key().clone(), row));
+                results.push((entry.key().clone(), unwrap_arc_row(row)));
             }
         }
         results
@@ -608,7 +622,73 @@ impl MemTable {
         let mut results = Vec::with_capacity(self.data.len());
         for entry in &self.data {
             if let Some(row) = entry.value().read_for_txn(txn_id, read_ts) {
-                results.push(row);
+                results.push(unwrap_arc_row(row));
+            }
+        }
+        results
+    }
+
+    /// Secondary index point scan: look up PKs via index, then fetch visible rows.
+    pub fn index_scan(&self, column_idx: usize, key: &[u8], txn_id: TxnId, read_ts: Timestamp) -> Vec<(PrimaryKey, OwnedRow)> {
+        let pks = {
+            let indexes = self.secondary_indexes.read();
+            let mut found = Vec::new();
+            for idx in indexes.iter() {
+                if idx.column_idx == column_idx {
+                    let tree = idx.tree.read();
+                    if let Some(pk_list) = tree.get(key) {
+                        found = pk_list.clone();
+                    }
+                    break;
+                }
+            }
+            found
+        };
+        self.fetch_visible(pks, txn_id, read_ts)
+    }
+
+    /// Secondary index range scan: look up PKs in range, then fetch visible rows.
+    pub fn index_range_scan(
+        &self,
+        column_idx: usize,
+        lower: Option<(&[u8], bool)>,
+        upper: Option<(&[u8], bool)>,
+        txn_id: TxnId,
+        read_ts: Timestamp,
+    ) -> Vec<(PrimaryKey, OwnedRow)> {
+        let pks = {
+            let indexes = self.secondary_indexes.read();
+            let mut found = Vec::new();
+            for idx in indexes.iter() {
+                if idx.column_idx == column_idx {
+                    found = idx.range_scan(lower, upper);
+                    break;
+                }
+            }
+            found
+        };
+        self.fetch_visible(pks, txn_id, read_ts)
+    }
+
+    /// Secondary index PK lookup (no row fetch).
+    pub fn index_lookup_pks(&self, column_idx: usize, key: &[u8]) -> Vec<PrimaryKey> {
+        let indexes = self.secondary_indexes.read();
+        for idx in indexes.iter() {
+            if idx.column_idx == column_idx {
+                let tree = idx.tree.read();
+                return tree.get(key).cloned().unwrap_or_default();
+            }
+        }
+        vec![]
+    }
+
+    fn fetch_visible(&self, pks: Vec<PrimaryKey>, txn_id: TxnId, read_ts: Timestamp) -> Vec<(PrimaryKey, OwnedRow)> {
+        let mut results = Vec::new();
+        for pk in pks {
+            if let Some(chain) = self.data.get(&pk) {
+                if let Some(row) = chain.read_for_txn(txn_id, read_ts) {
+                    results.push((pk, unwrap_arc_row(row)));
+                }
             }
         }
         results
@@ -632,7 +712,7 @@ impl MemTable {
                 (false, true) => { row_delta -= 1; pk_deletes.push(pk.clone()); }
                 _ => {}
             }
-            self.index_update_on_commit(&pk, new_data.as_ref(), old_data.as_ref());
+            self.index_update_on_commit(&pk, new_data.as_deref(), old_data.as_deref());
         }
 
         if row_delta > 0 {
@@ -671,7 +751,7 @@ impl MemTable {
                     (false, true) => row_delta -= 1,
                     _ => {}
                 }
-                self.index_update_on_commit(pk, new_data.as_ref(), old_data.as_ref());
+                self.index_update_on_commit(pk, new_data.as_deref(), old_data.as_deref());
             }
         }
 
@@ -958,7 +1038,7 @@ impl MemTable {
     /// check all unique indexes to ensure no *other* committed PK holds the
     /// same index key. This catches concurrent-insert races that the eager
     /// insert-time check cannot detect under 方案A.
-    fn validate_unique_constraints_for_commit(
+    pub(crate) fn validate_unique_constraints_for_commit(
         &self,
         txn_id: TxnId,
         keys: &[PrimaryKey],
@@ -1134,6 +1214,13 @@ impl crate::storage_trait::StorageTable for MemTable {
 
     fn abort_key(&self, pk: &PrimaryKey, txn_id: TxnId) {
         self.abort_keys(txn_id, std::slice::from_ref(pk));
+    }
+
+    fn commit_batch(&self, pks: &[PrimaryKey], txn_id: TxnId, commit_ts: Timestamp) -> Result<(), falcon_common::error::StorageError> {
+        self.commit_keys(txn_id, commit_ts, pks)
+    }
+    fn abort_batch(&self, pks: &[PrimaryKey], txn_id: TxnId) {
+        self.abort_keys(txn_id, pks);
     }
 }
 

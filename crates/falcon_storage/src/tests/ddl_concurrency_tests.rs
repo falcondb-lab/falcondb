@@ -252,3 +252,293 @@
         assert!(dbs.iter().any(|db| db.name == "db1"));
         assert!(dbs.iter().any(|db| db.name == "db2"));
     }
+
+    // ── ALTER TABLE ADD COLUMN ──────────────────────────────────────
+
+    #[test]
+    fn test_alter_table_add_column_no_default() {
+        let engine = StorageEngine::new_in_memory();
+        engine.create_table(schema(900, "alt_add")).unwrap();
+
+        // Insert a row before adding column
+        engine
+            .insert(
+                TableId(900),
+                OwnedRow::new(vec![Datum::Int32(1), Datum::Text("hello".into())]),
+                TxnId(1),
+            )
+            .unwrap();
+        engine.commit_txn(TxnId(1), Timestamp(5), TxnType::Local).unwrap();
+
+        // Add column without default
+        let new_col = ColumnDef {
+            id: ColumnId(0), // will be reassigned
+            name: "score".into(),
+            data_type: DataType::Int64,
+            nullable: true,
+            is_primary_key: false,
+            default_value: None,
+            is_serial: false,
+        };
+        let ddl_id = engine.alter_table_add_column("alt_add", new_col).unwrap();
+        assert!(ddl_id > 0);
+
+        // Schema should now have 3 columns
+        let cat = engine.get_catalog();
+        let tbl = cat.find_table("alt_add").unwrap();
+        assert_eq!(tbl.columns.len(), 3);
+        assert_eq!(tbl.columns[2].name, "score");
+
+        // Existing row still readable (shorter than schema — OK)
+        let rows = engine.scan(TableId(900), TxnId(99), Timestamp(10)).unwrap();
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn test_alter_table_add_column_with_default_backfills() {
+        let engine = StorageEngine::new_in_memory();
+        engine.create_table(schema(901, "alt_def")).unwrap();
+
+        // Insert 3 rows
+        for i in 0..3i32 {
+            engine
+                .insert(
+                    TableId(901),
+                    OwnedRow::new(vec![Datum::Int32(i), Datum::Text(format!("r{i}"))]),
+                    TxnId(10 + i as u64),
+                )
+                .unwrap();
+            engine
+                .commit_txn(TxnId(10 + i as u64), Timestamp(10 + i as u64), TxnType::Local)
+                .unwrap();
+        }
+
+        // Add column with default value → triggers backfill
+        let new_col = ColumnDef {
+            id: ColumnId(0),
+            name: "status".into(),
+            data_type: DataType::Text,
+            nullable: false,
+            is_primary_key: false,
+            default_value: Some(Datum::Text("active".into())),
+            is_serial: false,
+        };
+        engine.alter_table_add_column("alt_def", new_col).unwrap();
+
+        // All existing rows should now have the default value backfilled
+        let rows = engine.scan(TableId(901), TxnId(99), Timestamp(50)).unwrap();
+        assert_eq!(rows.len(), 3);
+        for row in &rows {
+            assert_eq!(row.1.values.len(), 3, "row should have 3 columns after ADD COLUMN");
+            assert_eq!(row.1.values[2], Datum::Text("active".into()));
+        }
+    }
+
+    // ── ALTER TABLE DROP COLUMN ─────────────────────────────────────
+
+    #[test]
+    fn test_alter_table_drop_column() {
+        let engine = StorageEngine::new_in_memory();
+        engine.create_table(schema(902, "alt_drop")).unwrap();
+
+        engine
+            .insert(
+                TableId(902),
+                OwnedRow::new(vec![Datum::Int32(1), Datum::Text("bye".into())]),
+                TxnId(1),
+            )
+            .unwrap();
+        engine.commit_txn(TxnId(1), Timestamp(5), TxnType::Local).unwrap();
+
+        // Drop the "val" column
+        let ddl_id = engine.alter_table_drop_column("alt_drop", "val").unwrap();
+        assert!(ddl_id > 0);
+
+        // Schema should now have 1 column
+        let cat = engine.get_catalog();
+        let tbl = cat.find_table("alt_drop").unwrap();
+        assert_eq!(tbl.columns.len(), 1);
+        assert_eq!(tbl.columns[0].name, "id");
+    }
+
+    #[test]
+    fn test_alter_table_drop_pk_column_rejected() {
+        let engine = StorageEngine::new_in_memory();
+        engine.create_table(schema(903, "alt_drop_pk")).unwrap();
+
+        let result = engine.alter_table_drop_column("alt_drop_pk", "id");
+        assert!(result.is_err(), "dropping PK column should fail");
+    }
+
+    #[test]
+    fn test_alter_table_drop_nonexistent_column() {
+        let engine = StorageEngine::new_in_memory();
+        engine.create_table(schema(904, "alt_drop_ne")).unwrap();
+
+        let result = engine.alter_table_drop_column("alt_drop_ne", "nosuch");
+        assert!(result.is_err(), "dropping nonexistent column should fail");
+    }
+
+    // ── ALTER TABLE RENAME COLUMN ───────────────────────────────────
+
+    #[test]
+    fn test_alter_table_rename_column() {
+        let engine = StorageEngine::new_in_memory();
+        engine.create_table(schema(905, "alt_ren")).unwrap();
+
+        engine.alter_table_rename_column("alt_ren", "val", "description").unwrap();
+
+        let cat = engine.get_catalog();
+        let tbl = cat.find_table("alt_ren").unwrap();
+        assert_eq!(tbl.columns[1].name, "description");
+    }
+
+    // ── ALTER TABLE RENAME TABLE ────────────────────────────────────
+
+    #[test]
+    fn test_alter_table_rename() {
+        let engine = StorageEngine::new_in_memory();
+        engine.create_table(schema(906, "old_name")).unwrap();
+
+        engine.alter_table_rename("old_name", "new_name").unwrap();
+
+        let cat = engine.get_catalog();
+        assert!(cat.find_table("old_name").is_none());
+        assert!(cat.find_table("new_name").is_some());
+    }
+
+    #[test]
+    fn test_alter_table_rename_conflict() {
+        let engine = StorageEngine::new_in_memory();
+        engine.create_table(schema(907, "tbl_a")).unwrap();
+        engine.create_table(schema(908, "tbl_b")).unwrap();
+
+        let result = engine.alter_table_rename("tbl_a", "tbl_b");
+        assert!(result.is_err(), "rename to existing table should fail");
+    }
+
+    // ── CREATE INDEX CONCURRENTLY ───────────────────────────────────
+
+    #[test]
+    fn test_create_index_concurrently_basic() {
+        let engine = StorageEngine::new_in_memory();
+        engine.create_table(schema(910, "cidx_t")).unwrap();
+
+        // Insert rows first
+        for i in 0..100i32 {
+            engine
+                .insert(
+                    TableId(910),
+                    OwnedRow::new(vec![Datum::Int32(i), Datum::Text(format!("v{i}"))]),
+                    TxnId(200 + i as u64),
+                )
+                .unwrap();
+            engine
+                .commit_txn(TxnId(200 + i as u64), Timestamp(200 + i as u64), TxnType::Local)
+                .unwrap();
+        }
+
+        let ddl_id = engine
+            .create_index_concurrently("idx_cidx_val", "cidx_t", &[1], false)
+            .unwrap();
+        assert!(ddl_id > 0);
+        assert!(engine.index_exists("idx_cidx_val"));
+    }
+
+    #[test]
+    fn test_create_unique_index_concurrently_duplicate_rejected() {
+        let engine = StorageEngine::new_in_memory();
+        engine.create_table(schema(911, "uidx_t")).unwrap();
+
+        // Insert duplicate values in column 1
+        engine
+            .insert(
+                TableId(911),
+                OwnedRow::new(vec![Datum::Int32(1), Datum::Text("dup".into())]),
+                TxnId(1),
+            )
+            .unwrap();
+        engine.commit_txn(TxnId(1), Timestamp(1), TxnType::Local).unwrap();
+        engine
+            .insert(
+                TableId(911),
+                OwnedRow::new(vec![Datum::Int32(2), Datum::Text("dup".into())]),
+                TxnId(2),
+            )
+            .unwrap();
+        engine.commit_txn(TxnId(2), Timestamp(2), TxnType::Local).unwrap();
+
+        let result = engine.create_index_concurrently("uidx_dup", "uidx_t", &[1], true);
+        assert!(result.is_err(), "unique index with duplicates should fail");
+    }
+
+    // ── ALTER TABLE + DML concurrency ───────────────────────────────
+
+    #[test]
+    fn test_alter_add_column_concurrent_inserts() {
+        let engine = Arc::new(StorageEngine::new_in_memory());
+        engine.create_table(schema(920, "conc_alt")).unwrap();
+
+        // Pre-populate
+        for i in 0..50i32 {
+            engine
+                .insert(
+                    TableId(920),
+                    OwnedRow::new(vec![Datum::Int32(i), Datum::Text(format!("v{i}"))]),
+                    TxnId(300 + i as u64),
+                )
+                .unwrap();
+            engine
+                .commit_txn(TxnId(300 + i as u64), Timestamp(300 + i as u64), TxnType::Local)
+                .unwrap();
+        }
+
+        // Concurrent: ADD COLUMN + inserts
+        let e1 = engine.clone();
+        let ddl_handle = std::thread::spawn(move || {
+            let col = ColumnDef {
+                id: ColumnId(0),
+                name: "extra".into(),
+                data_type: DataType::Int32,
+                nullable: true,
+                is_primary_key: false,
+                default_value: Some(Datum::Int32(42)),
+                is_serial: false,
+            };
+            e1.alter_table_add_column("conc_alt", col)
+        });
+
+        let e2 = engine.clone();
+        let insert_handle = std::thread::spawn(move || {
+            let mut ok = 0;
+            for i in 50..70i32 {
+                if engine
+                    .insert(
+                        TableId(920),
+                        OwnedRow::new(vec![Datum::Int32(i), Datum::Text(format!("new{i}"))]),
+                        TxnId(500 + i as u64),
+                    )
+                    .is_ok()
+                {
+                    let _ = engine.commit_txn(
+                        TxnId(500 + i as u64),
+                        Timestamp(500 + i as u64),
+                        TxnType::Local,
+                    );
+                    ok += 1;
+                }
+            }
+            ok
+        });
+
+        let ddl_result = ddl_handle.join().unwrap();
+        assert!(ddl_result.is_ok(), "ADD COLUMN should succeed");
+
+        let inserted = insert_handle.join().unwrap();
+        assert!(inserted > 0, "some concurrent inserts should succeed");
+
+        // Schema should have 3 columns
+        let cat = e2.get_catalog();
+        let tbl = cat.find_table("conc_alt").unwrap();
+        assert_eq!(tbl.columns.len(), 3);
+    }

@@ -1,14 +1,13 @@
 //! Unified table handle — one enum that wraps every storage engine variant.
 //!
-//! `StorageEngine` keeps a `DashMap<TableId, TableHandle>` alongside the existing
-//! per-engine maps.  DDL registers the new table in both places; DML uses the
-//! unified map for O(1) dispatch without walking a chain of `if let Some(...)`.
+//! `StorageEngine` keeps a single `DashMap<TableId, TableHandle>` (`engine_tables`)
+//! for O(1) dispatch. All DML/commit/abort operations route through `as_storage_table()`
+//! which returns `&dyn StorageTable` for MVCC-capable engines.
 //!
-//! Adding a new engine requires:
-//!   1. Add a variant here.
-//!   2. Insert into `engine_tables` in `engine_ddl.rs` `create_table` /
-//!      `truncate_table` / `drop_table`.
-//!   3. Implement the dispatch arms in `engine_dml.rs` helper methods below.
+//! Adding a new engine:
+//!   1. Add a variant here + impl `StorageTable`.
+//!   2. Return `Some` from `as_storage_table()`.
+//!   3. Wire DDL in `engine_ddl.rs`.
 
 use std::sync::Arc;
 
@@ -40,14 +39,8 @@ impl TableHandle {
             TableHandle::Rowstore(t) => &t.schema,
             #[cfg(feature = "columnstore")]
             TableHandle::Columnstore(t) => &t.schema,
-            #[cfg(feature = "disk_rowstore")]
-            TableHandle::DiskRowstore(t) => &t.schema,
-            #[cfg(feature = "lsm")]
-            TableHandle::Lsm(t) => &t.schema,
-            #[cfg(feature = "rocksdb")]
-            TableHandle::RocksDb(t) => &t.schema,
-            #[cfg(feature = "redb")]
-            TableHandle::Redb(t) => &t.schema,
+            #[allow(unreachable_patterns)]
+            _ => self.as_storage_table().expect("unknown TableHandle variant").schema(),
         }
     }
 
@@ -61,14 +54,10 @@ impl TableHandle {
                 let _ = t.insert(row.clone(), txn_id);
                 Ok(pk)
             }
-            #[cfg(feature = "disk_rowstore")]
-            TableHandle::DiskRowstore(t) => t.insert(row.clone(), txn_id),
-            #[cfg(feature = "lsm")]
-            TableHandle::Lsm(t) => t.insert(row, txn_id),
-            #[cfg(feature = "rocksdb")]
-            TableHandle::RocksDb(t) => t.insert(row, txn_id),
-            #[cfg(feature = "redb")]
-            TableHandle::Redb(t) => t.insert(row, txn_id),
+            #[allow(unreachable_patterns)]
+            _ => self.as_storage_table()
+                .ok_or(StorageError::TableNotFound(falcon_common::types::TableId(0)))
+                .and_then(|t| t.insert(row, txn_id)),
         }
     }
 
@@ -85,14 +74,10 @@ impl TableHandle {
             TableHandle::Columnstore(_) => Err(StorageError::Io(std::io::Error::other(
                 "UPDATE not supported on COLUMNSTORE tables",
             ))),
-            #[cfg(feature = "disk_rowstore")]
-            TableHandle::DiskRowstore(t) => t.update(pk, new_row.clone(), txn_id),
-            #[cfg(feature = "lsm")]
-            TableHandle::Lsm(t) => t.update(pk, new_row, txn_id),
-            #[cfg(feature = "rocksdb")]
-            TableHandle::RocksDb(t) => t.update(pk, new_row, txn_id),
-            #[cfg(feature = "redb")]
-            TableHandle::Redb(t) => t.update(pk, new_row, txn_id),
+            #[allow(unreachable_patterns)]
+            _ => self.as_storage_table()
+                .ok_or(StorageError::Io(std::io::Error::other("UPDATE not supported on this engine")))
+                .and_then(|t| t.update(pk, new_row, txn_id)),
         }
     }
 
@@ -104,14 +89,10 @@ impl TableHandle {
             TableHandle::Columnstore(_) => Err(StorageError::Io(std::io::Error::other(
                 "DELETE not supported on COLUMNSTORE tables",
             ))),
-            #[cfg(feature = "disk_rowstore")]
-            TableHandle::DiskRowstore(t) => t.delete(pk, txn_id),
-            #[cfg(feature = "lsm")]
-            TableHandle::Lsm(t) => t.delete(pk, txn_id),
-            #[cfg(feature = "rocksdb")]
-            TableHandle::RocksDb(t) => t.delete(pk, txn_id),
-            #[cfg(feature = "redb")]
-            TableHandle::Redb(t) => t.delete(pk, txn_id),
+            #[allow(unreachable_patterns)]
+            _ => self.as_storage_table()
+                .ok_or(StorageError::Io(std::io::Error::other("DELETE not supported on this engine")))
+                .and_then(|t| t.delete(pk, txn_id)),
         }
     }
 
@@ -126,14 +107,9 @@ impl TableHandle {
             TableHandle::Rowstore(t) => Ok(t.get(pk, txn_id, read_ts)),
             #[cfg(feature = "columnstore")]
             TableHandle::Columnstore(_) => Ok(None),
-            #[cfg(feature = "disk_rowstore")]
-            TableHandle::DiskRowstore(t) => Ok(t.get(pk, txn_id, read_ts)),
-            #[cfg(feature = "lsm")]
-            TableHandle::Lsm(t) => t.get(pk, txn_id, read_ts),
-            #[cfg(feature = "rocksdb")]
-            TableHandle::RocksDb(t) => t.get(pk, txn_id, read_ts),
-            #[cfg(feature = "redb")]
-            TableHandle::Redb(t) => t.get(pk, txn_id, read_ts),
+            #[allow(unreachable_patterns)]
+            _ => self.as_storage_table()
+                .map_or(Ok(None), |t| t.get(pk, txn_id, read_ts)),
         }
     }
 
@@ -143,14 +119,9 @@ impl TableHandle {
             TableHandle::Rowstore(t) => t.scan(txn_id, read_ts),
             #[cfg(feature = "columnstore")]
             TableHandle::Columnstore(t) => t.scan(txn_id, read_ts),
-            #[cfg(feature = "disk_rowstore")]
-            TableHandle::DiskRowstore(t) => t.scan(txn_id, read_ts),
-            #[cfg(feature = "lsm")]
-            TableHandle::Lsm(t) => t.scan(txn_id, read_ts),
-            #[cfg(feature = "rocksdb")]
-            TableHandle::RocksDb(t) => t.scan(txn_id, read_ts),
-            #[cfg(feature = "redb")]
-            TableHandle::Redb(t) => t.scan(txn_id, read_ts),
+            #[allow(unreachable_patterns)]
+            _ => self.as_storage_table()
+                .map_or_else(Vec::new, |t| t.scan(txn_id, read_ts)),
         }
     }
 
@@ -161,12 +132,11 @@ impl TableHandle {
     {
         match self {
             TableHandle::Rowstore(t) => t.for_each_visible(txn_id, read_ts, |r| f(r)),
-            #[cfg(feature = "rocksdb")]
-            TableHandle::RocksDb(t) => t.for_each_visible(txn_id, read_ts, |_, row| f(&row)),
-            _ => {
-                for (_, row) in self.scan(txn_id, read_ts) {
-                    f(&row);
-                }
+            #[allow(unreachable_patterns)]
+            _ => if let Some(t) = self.as_storage_table() {
+                t.for_each_visible(txn_id, read_ts, &mut f);
+            } else {
+                for (_, row) in self.scan(txn_id, read_ts) { f(&row); }
             }
         }
     }
@@ -175,18 +145,13 @@ impl TableHandle {
     pub fn count_visible(&self, txn_id: TxnId, read_ts: Timestamp) -> usize {
         match self {
             TableHandle::Rowstore(t) => t.count_visible(txn_id, read_ts),
-            #[cfg(feature = "rocksdb")]
-            TableHandle::RocksDb(t) => {
-                let mut n = 0usize;
-                t.for_each_visible(txn_id, read_ts, |_, _| n += 1);
-                n
-            }
-            _ => self.scan(txn_id, read_ts).len(),
+            #[allow(unreachable_patterns)]
+            _ => self.as_storage_table()
+                .map_or_else(|| self.scan(txn_id, read_ts).len(), |t| t.count_visible(txn_id, read_ts)),
         }
     }
 
     /// Commit MVCC versions for the given keys.
-    #[allow(unreachable_patterns)]
     pub fn commit_key(
         &self,
         pk: &PrimaryKey,
@@ -195,101 +160,99 @@ impl TableHandle {
     ) -> Result<(), StorageError> {
         match self {
             TableHandle::Rowstore(t) => t.commit_keys(txn_id, commit_ts, &[pk.clone()]),
-            #[cfg(feature = "lsm")]
-            TableHandle::Lsm(t) => t.commit(pk, txn_id, commit_ts),
-            #[cfg(feature = "rocksdb")]
-            TableHandle::RocksDb(t) => t.commit(pk, txn_id, commit_ts),
-            #[cfg(feature = "redb")]
-            TableHandle::Redb(t) => t.commit(pk, txn_id, commit_ts),
-            _ => Ok(()),
+            #[allow(unreachable_patterns)]
+            _ => self.as_storage_table()
+                .map_or(Ok(()), |t| t.commit_key(pk, txn_id, commit_ts)),
         }
     }
 
     /// Abort MVCC versions for the given key.
-    #[allow(unreachable_patterns)]
     pub fn abort_key(&self, pk: &PrimaryKey, txn_id: TxnId) {
         match self {
             TableHandle::Rowstore(t) => t.abort_keys(txn_id, &[pk.clone()]),
-            #[cfg(feature = "lsm")]
-            TableHandle::Lsm(t) => { let _ = t.abort(pk, txn_id); }
-            #[cfg(feature = "rocksdb")]
-            TableHandle::RocksDb(t) => { let _ = t.abort(pk, txn_id); }
-            #[cfg(feature = "redb")]
-            TableHandle::Redb(t) => { let _ = t.abort(pk, txn_id); }
-            _ => {}
+            #[allow(unreachable_patterns)]
+            _ => if let Some(t) = self.as_storage_table() { t.abort_key(pk, txn_id); }
         }
     }
 
-    /// Batch insert for non-rowstore engines (no WAL/CDC/memory tracking).
-    /// Returns None if this variant needs special handling (Rowstore, Columnstore, DiskRowstore).
-    pub fn batch_insert_disk(
-        &self,
-        rows: Vec<OwnedRow>,
-        txn_id: TxnId,
-    ) -> Option<Result<Vec<crate::memtable::PrimaryKey>, StorageError>> {
-        fn bulk<T: crate::storage_trait::StorageTable>(
-            t: &T,
-            rows: Vec<OwnedRow>,
-            txn_id: TxnId,
-        ) -> Result<Vec<crate::memtable::PrimaryKey>, StorageError> {
-            let mut pks = Vec::with_capacity(rows.len());
-            for row in &rows {
-                pks.push(t.insert(row, txn_id)?);
-            }
-            Ok(pks)
-        }
-
+    /// Returns the StorageTable trait object for engines that implement the trait.
+    /// Only Rowstore and Columnstore return None (handled explicitly).
+    #[allow(unreachable_patterns)]
+    pub fn as_storage_table(&self) -> Option<&dyn crate::storage_trait::StorageTable> {
         match self {
             TableHandle::Rowstore(_) => None,
             #[cfg(feature = "columnstore")]
             TableHandle::Columnstore(_) => None,
             #[cfg(feature = "disk_rowstore")]
-            TableHandle::DiskRowstore(_) => None,
+            TableHandle::DiskRowstore(t) => Some(t.as_ref()),
             #[cfg(feature = "lsm")]
-            TableHandle::Lsm(t) => Some(bulk(t.as_ref(), rows, txn_id)),
+            TableHandle::Lsm(t) => Some(t.as_ref()),
             #[cfg(feature = "rocksdb")]
-            TableHandle::RocksDb(t) => Some(bulk(t.as_ref(), rows, txn_id)),
+            TableHandle::RocksDb(t) => Some(t.as_ref()),
             #[cfg(feature = "redb")]
-            TableHandle::Redb(t) => Some(bulk(t.as_ref(), rows, txn_id)),
+            TableHandle::Redb(t) => Some(t.as_ref()),
         }
+    }
+
+    /// Returns true if this is an LSM-backed table (needs USTM tracking).
+    pub fn is_lsm(&self) -> bool {
+        #[cfg(feature = "lsm")]
+        return matches!(self, TableHandle::Lsm(_));
+        #[cfg(not(feature = "lsm"))]
+        false
+    }
+
+    /// Batch insert for non-rowstore engines (no WAL/CDC/memory tracking).
+    /// Returns None for Rowstore and Columnstore (need special handling).
+    pub fn batch_insert_disk(
+        &self,
+        rows: Vec<OwnedRow>,
+        txn_id: TxnId,
+    ) -> Option<Result<Vec<crate::memtable::PrimaryKey>, StorageError>> {
+        self.as_storage_table().map(|t| {
+            let mut pks = Vec::with_capacity(rows.len());
+            for row in &rows { pks.push(t.insert(row, txn_id)?); }
+            Ok(pks)
+        })
     }
 
     /// Batch commit for disk-backed engines. No-op for rowstore (handled separately).
-    #[allow(unreachable_patterns)]
     pub fn commit_keys_batch(&self, pks: &[PrimaryKey], txn_id: TxnId, commit_ts: Timestamp) -> Result<(), StorageError> {
-        match self {
-            #[cfg(feature = "lsm")]
-            TableHandle::Lsm(t) => t.commit_batch(pks, txn_id, commit_ts),
-            #[cfg(feature = "rocksdb")]
-            TableHandle::RocksDb(t) => t.commit_batch(pks, txn_id, commit_ts),
-            #[cfg(feature = "redb")]
-            TableHandle::Redb(t) => {
-                for pk in pks { t.commit(pk, txn_id, commit_ts)?; }
-                Ok(())
-            }
-            _ => Ok(()),
-        }
+        self.as_storage_table().map_or(Ok(()), |t| t.commit_batch(pks, txn_id, commit_ts))
     }
 
     /// Batch abort for disk-backed engines. No-op for rowstore (handled separately).
-    #[allow(unreachable_patterns)]
     pub fn abort_keys_batch(&self, pks: &[PrimaryKey], txn_id: TxnId) {
-        match self {
-            #[cfg(feature = "lsm")]
-            TableHandle::Lsm(t) => { let _ = t.abort_batch(pks, txn_id); }
-            #[cfg(feature = "rocksdb")]
-            TableHandle::RocksDb(t) => { let _ = t.abort_batch(pks, txn_id); }
-            #[cfg(feature = "redb")]
-            TableHandle::Redb(t) => {
-                for pk in pks { let _ = t.abort(pk, txn_id); }
-            }
-            _ => {}
-        }
+        if let Some(t) = self.as_storage_table() { t.abort_batch(pks, txn_id); }
     }
 
     /// Returns true if this handle wraps an in-memory rowstore.
     pub fn is_rowstore(&self) -> bool {
         matches!(self, TableHandle::Rowstore(_))
+    }
+
+    /// Extract the inner `Arc<MemTable>` if this is a Rowstore handle.
+    pub fn as_rowstore(&self) -> Option<&Arc<MemTable>> {
+        match self {
+            TableHandle::Rowstore(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    #[cfg(feature = "columnstore")]
+    pub fn as_columnstore(&self) -> Option<&Arc<crate::columnstore::ColumnStoreTable>> {
+        match self {
+            TableHandle::Columnstore(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// Returns true if this is a disk rowstore table.
+    pub fn is_disk_rowstore(&self) -> bool {
+        #[cfg(feature = "disk_rowstore")]
+        return matches!(self, TableHandle::DiskRowstore(_));
+        #[cfg(not(feature = "disk_rowstore"))]
+        false
     }
 
     /// Returns true if this is a columnstore table.

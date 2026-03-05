@@ -115,6 +115,8 @@ fn test_schema() -> TableSchema {
         storage_type: Default::default(),
         shard_key: vec![],
         sharding_policy: Default::default(),
+        range_bounds: vec![],
+        dynamic_defaults: Default::default(),
     }
 }
 

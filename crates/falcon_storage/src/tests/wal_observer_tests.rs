@@ -50,95 +50,41 @@
             counter_clone.fetch_add(1, Ordering::SeqCst);
         }));
 
-        // DDL: create_table (1 WAL record)
+        // DDL: create_table (immediate WAL)
         let schema = test_schema("t1");
         let table_id = engine.create_table(schema).unwrap();
-        assert_eq!(
-            counter.load(Ordering::SeqCst),
-            1,
-            "create_table should fire observer"
-        );
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "create_table should fire observer");
 
-        // DML: insert (1 WAL record)
+        // DML: inserts are deferred to txn_wal_buf — observer fires at commit
         let txn1 = TxnId(1);
-        engine
-            .insert(
-                table_id,
-                OwnedRow::new(vec![Datum::Int32(1), Datum::Int32(100)]),
-                txn1,
-            )
-            .unwrap();
-        assert_eq!(
-            counter.load(Ordering::SeqCst),
-            2,
-            "insert should fire observer"
-        );
+        engine.insert(table_id, OwnedRow::new(vec![Datum::Int32(1), Datum::Int32(100)]), txn1).unwrap();
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "insert deferred — no observer yet");
 
-        // DML: update (1 WAL record)
-        let pk = engine
-            .insert(
-                table_id,
-                OwnedRow::new(vec![Datum::Int32(2), Datum::Int32(200)]),
-                txn1,
-            )
-            .unwrap();
-        assert_eq!(counter.load(Ordering::SeqCst), 3);
-        engine
-            .update(
-                table_id,
-                &pk,
-                OwnedRow::new(vec![Datum::Int32(2), Datum::Int32(999)]),
-                txn1,
-            )
-            .unwrap();
-        assert_eq!(
-            counter.load(Ordering::SeqCst),
-            4,
-            "update should fire observer"
-        );
+        let pk = engine.insert(table_id, OwnedRow::new(vec![Datum::Int32(2), Datum::Int32(200)]), txn1).unwrap();
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "second insert also deferred");
 
-        // DML: delete (1 WAL record)
+        // DML: update fires immediately
+        engine.update(table_id, &pk, OwnedRow::new(vec![Datum::Int32(2), Datum::Int32(999)]), txn1).unwrap();
+        assert_eq!(counter.load(Ordering::SeqCst), 2, "update should fire observer");
+
+        // DML: delete fires immediately
         engine.delete(table_id, &pk, txn1).unwrap();
-        assert_eq!(
-            counter.load(Ordering::SeqCst),
-            5,
-            "delete should fire observer"
-        );
+        assert_eq!(counter.load(Ordering::SeqCst), 3, "delete should fire observer");
 
-        // Txn: commit_local (1 WAL record)
-        engine
-            .commit_txn(txn1, Timestamp(10), TxnType::Local)
-            .unwrap();
-        assert_eq!(
-            counter.load(Ordering::SeqCst),
-            6,
-            "commit should fire observer"
-        );
+        // Commit flushes 2 deferred inserts + 1 commit record = 3 observer fires
+        engine.commit_txn(txn1, Timestamp(10), TxnType::Local).unwrap();
+        assert_eq!(counter.load(Ordering::SeqCst), 6, "commit should flush deferred + fire");
 
-        // Txn: abort_local (1 WAL record)
+        // Abort: deferred insert discarded, only abort record fires
         let txn2 = TxnId(2);
-        engine
-            .insert(
-                table_id,
-                OwnedRow::new(vec![Datum::Int32(3), Datum::Int32(300)]),
-                txn2,
-            )
-            .unwrap();
-        assert_eq!(counter.load(Ordering::SeqCst), 7);
+        engine.insert(table_id, OwnedRow::new(vec![Datum::Int32(3), Datum::Int32(300)]), txn2).unwrap();
+        assert_eq!(counter.load(Ordering::SeqCst), 6, "insert deferred — no observer yet");
         engine.abort_txn(txn2, TxnType::Local).unwrap();
-        assert_eq!(
-            counter.load(Ordering::SeqCst),
-            8,
-            "abort should fire observer"
-        );
+        assert_eq!(counter.load(Ordering::SeqCst), 7, "abort should fire observer");
 
-        // DDL: drop_table (1 WAL record)
+        // DDL: drop_table (immediate WAL)
         engine.drop_table("t1").unwrap();
-        assert_eq!(
-            counter.load(Ordering::SeqCst),
-            9,
-            "drop_table should fire observer"
-        );
+        assert_eq!(counter.load(Ordering::SeqCst), 8, "drop_table should fire observer");
     }
 
     #[test]

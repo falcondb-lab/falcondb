@@ -49,6 +49,7 @@ fn spill_config(threshold: usize) -> SpillConfig {
         merge_fan_in: 4,
         hash_agg_group_limit: 0,
         pressure_spill_trigger: "none".to_string(),
+        recursive_cte_max_rows: 0,
     }
 }
 
@@ -131,6 +132,7 @@ fn sp4_spill_cleans_up_temp_files() {
         merge_fan_in: 2,
         hash_agg_group_limit: 0,
         pressure_spill_trigger: "none".to_string(),
+        recursive_cte_max_rows: 0,
     };
     let sorter = ExternalSorter::from_config(&config).unwrap();
     let mut rows = make_rows(50);

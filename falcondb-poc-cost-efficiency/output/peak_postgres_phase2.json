@@ -1,0 +1,17 @@
+{
+  "label": "postgres_peak_2x",
+  "host": "127.0.0.1",
+  "port": 5432,
+  "target_rate": 2000,
+  "actual_rate": 1872.5,
+  "duration_sec": 5,
+  "total_committed": 9371,
+  "total_errors": 0,
+  "latency_min_us": 316,
+  "latency_max_us": 1823,
+  "latency_avg_us": 437,
+  "latency_p50_us": 417,
+  "latency_p95_us": 600,
+  "latency_p99_us": 791,
+  "timestamp": "2026-03-04T08:51:21.744246+00:00"
+}

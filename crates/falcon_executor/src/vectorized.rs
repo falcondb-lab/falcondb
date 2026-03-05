@@ -139,6 +139,12 @@ pub enum ColumnVector {
         values: Vec<String>,
         nulls: NullBitmap,
     },
+    /// Timestamp column (microseconds since epoch).
+    Timestamps { values: Vec<i64>, nulls: NullBitmap },
+    /// Date column (days since epoch).
+    Dates { values: Vec<i32>, nulls: NullBitmap },
+    /// Bytea column.
+    Byteas { values: Vec<Vec<u8>>, nulls: NullBitmap },
     /// Fallback: heterogeneous Datum column (for mixed / unsupported types).
     Mixed(Vec<Datum>),
 }
@@ -157,6 +163,9 @@ impl ColumnVector {
             Self::Int64s { values, .. } => values.len(),
             Self::Float64s { values, .. } => values.len(),
             Self::Texts { values, .. } => values.len(),
+            Self::Timestamps { values, .. } => values.len(),
+            Self::Dates { values, .. } => values.len(),
+            Self::Byteas { values, .. } => values.len(),
             Self::Mixed(v) => v.len(),
         }
     }
@@ -198,6 +207,15 @@ impl ColumnVector {
                 } else {
                     Datum::Text(values[idx].clone())
                 }
+            }
+            Self::Timestamps { values, nulls } => {
+                if nulls[idx] { Datum::Null } else { Datum::Timestamp(values[idx]) }
+            }
+            Self::Dates { values, nulls } => {
+                if nulls[idx] { Datum::Null } else { Datum::Date(values[idx]) }
+            }
+            Self::Byteas { values, nulls } => {
+                if nulls[idx] { Datum::Null } else { Datum::Bytea(values[idx].clone()) }
             }
             Self::Mixed(v) => v[idx].clone(),
         }
@@ -326,6 +344,42 @@ impl ColumnVector {
                 }
                 Self::Texts { values, nulls }
             }
+            Some(Datum::Timestamp(_)) => {
+                let mut values = Vec::with_capacity(datums.len());
+                let mut nulls = NullBitmap::with_capacity(datums.len());
+                for d in datums {
+                    match d {
+                        Datum::Timestamp(v) => { values.push(*v); nulls.push(false); }
+                        Datum::Null => { values.push(0); nulls.push(true); }
+                        _ => return Self::Mixed(datums.to_vec()),
+                    }
+                }
+                Self::Timestamps { values, nulls }
+            }
+            Some(Datum::Date(_)) => {
+                let mut values = Vec::with_capacity(datums.len());
+                let mut nulls = NullBitmap::with_capacity(datums.len());
+                for d in datums {
+                    match d {
+                        Datum::Date(v) => { values.push(*v); nulls.push(false); }
+                        Datum::Null => { values.push(0); nulls.push(true); }
+                        _ => return Self::Mixed(datums.to_vec()),
+                    }
+                }
+                Self::Dates { values, nulls }
+            }
+            Some(Datum::Bytea(_)) => {
+                let mut values = Vec::with_capacity(datums.len());
+                let mut nulls = NullBitmap::with_capacity(datums.len());
+                for d in datums {
+                    match d {
+                        Datum::Bytea(v) => { values.push(v.clone()); nulls.push(false); }
+                        Datum::Null => { values.push(Vec::new()); nulls.push(true); }
+                        _ => return Self::Mixed(datums.to_vec()),
+                    }
+                }
+                Self::Byteas { values, nulls }
+            }
             _ => Self::Mixed(datums.to_vec()),
         }
     }
@@ -382,6 +436,24 @@ impl ColumnVector {
                     nl.push(nulls[i]);
                 }
                 Self::Texts { values: v, nulls: nl }
+            }
+            Self::Timestamps { values, nulls } => {
+                let mut v = Vec::with_capacity(n);
+                let mut nl = NullBitmap::with_capacity(n);
+                for &i in indices { v.push(values[i]); nl.push(nulls[i]); }
+                Self::Timestamps { values: v, nulls: nl }
+            }
+            Self::Dates { values, nulls } => {
+                let mut v = Vec::with_capacity(n);
+                let mut nl = NullBitmap::with_capacity(n);
+                for &i in indices { v.push(values[i]); nl.push(nulls[i]); }
+                Self::Dates { values: v, nulls: nl }
+            }
+            Self::Byteas { values, nulls } => {
+                let mut v = Vec::with_capacity(n);
+                let mut nl = NullBitmap::with_capacity(n);
+                for &i in indices { v.push(values[i].clone()); nl.push(nulls[i]); }
+                Self::Byteas { values: v, nulls: nl }
             }
             Self::Mixed(data) => {
                 let mut v = Vec::with_capacity(n);
@@ -1241,6 +1313,24 @@ fn extract_column(col: &ColumnVector, indices: &[usize]) -> ColumnVector {
                 nulls: n,
             }
         }
+        ColumnVector::Timestamps { values, nulls } => {
+            let mut v = Vec::with_capacity(indices.len());
+            let mut n = NullBitmap::with_capacity(indices.len());
+            for &i in indices { v.push(values[i]); n.push(nulls[i]); }
+            ColumnVector::Timestamps { values: v, nulls: n }
+        }
+        ColumnVector::Dates { values, nulls } => {
+            let mut v = Vec::with_capacity(indices.len());
+            let mut n = NullBitmap::with_capacity(indices.len());
+            for &i in indices { v.push(values[i]); n.push(nulls[i]); }
+            ColumnVector::Dates { values: v, nulls: n }
+        }
+        ColumnVector::Byteas { values, nulls } => {
+            let mut v = Vec::with_capacity(indices.len());
+            let mut n = NullBitmap::with_capacity(indices.len());
+            for &i in indices { v.push(values[i].clone()); n.push(nulls[i]); }
+            ColumnVector::Byteas { values: v, nulls: n }
+        }
         ColumnVector::Mixed(vals) => {
             ColumnVector::Mixed(indices.iter().map(|&i| vals[i].clone()).collect())
         }
@@ -1772,6 +1862,37 @@ pub fn vectorized_hash_agg(
 }
 
 // ---------------------------------------------------------------------------
+// Vectorized LIMIT / OFFSET
+// ---------------------------------------------------------------------------
+
+/// Apply LIMIT and OFFSET to a RecordBatch without materializing rows.
+/// Adjusts the selection vector to skip `offset` active rows and keep at most `limit`.
+pub fn vectorized_limit_offset(
+    batch: &mut RecordBatch,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) {
+    let off = offset.unwrap_or(0);
+    let indices = batch.active_indices();
+    let total = indices.len();
+
+    if off >= total {
+        batch.selection = Some(Vec::new());
+        return;
+    }
+
+    let remaining = total - off;
+    let take = limit.map_or(remaining, |l| l.min(remaining));
+
+    if off == 0 && take == total {
+        return; // no-op
+    }
+
+    let new_sel: Vec<usize> = indices[off..off + take].to_vec();
+    batch.selection = Some(new_sel);
+}
+
+// ---------------------------------------------------------------------------
 // Batch size configuration
 // ---------------------------------------------------------------------------
 
@@ -2170,5 +2291,118 @@ mod tests {
         assert_eq!(extracted.get_datum(0), Datum::Int32(10));
         assert!(extracted.get_datum(1).is_null());
         assert_eq!(extracted.get_datum(2), Datum::Int32(40));
+    }
+
+    #[test]
+    fn test_column_vector_timestamp() {
+        let datums = vec![Datum::Timestamp(1000), Datum::Null, Datum::Timestamp(3000)];
+        let col = ColumnVector::from_datums(&datums);
+        assert!(matches!(col, ColumnVector::Timestamps { .. }));
+        assert_eq!(col.len(), 3);
+        assert_eq!(col.get_datum(0), Datum::Timestamp(1000));
+        assert!(col.get_datum(1).is_null());
+        assert_eq!(col.get_datum(2), Datum::Timestamp(3000));
+
+        let gathered = col.gather(&[2, 0]);
+        assert_eq!(gathered.len(), 2);
+        assert_eq!(gathered.get_datum(0), Datum::Timestamp(3000));
+        assert_eq!(gathered.get_datum(1), Datum::Timestamp(1000));
+    }
+
+    #[test]
+    fn test_column_vector_date() {
+        let datums = vec![Datum::Date(19000), Datum::Date(19500)];
+        let col = ColumnVector::from_datums(&datums);
+        assert!(matches!(col, ColumnVector::Dates { .. }));
+        assert_eq!(col.get_datum(0), Datum::Date(19000));
+        assert_eq!(col.get_datum(1), Datum::Date(19500));
+    }
+
+    #[test]
+    fn test_column_vector_bytea() {
+        let datums = vec![
+            Datum::Bytea(vec![0xDE, 0xAD]),
+            Datum::Null,
+            Datum::Bytea(vec![0xBE, 0xEF]),
+        ];
+        let col = ColumnVector::from_datums(&datums);
+        assert!(matches!(col, ColumnVector::Byteas { .. }));
+        assert_eq!(col.get_datum(0), Datum::Bytea(vec![0xDE, 0xAD]));
+        assert!(col.get_datum(1).is_null());
+
+        let extracted = extract_column(&col, &[0, 2]);
+        assert_eq!(extracted.len(), 2);
+        assert_eq!(extracted.get_datum(1), Datum::Bytea(vec![0xBE, 0xEF]));
+    }
+
+    #[test]
+    fn test_record_batch_timestamp_roundtrip() {
+        let rows = vec![
+            OwnedRow::new(vec![Datum::Timestamp(100), Datum::Date(200)]),
+            OwnedRow::new(vec![Datum::Timestamp(300), Datum::Date(400)]),
+        ];
+        let batch = RecordBatch::from_rows(&rows, 2);
+        let back = batch.to_rows();
+        assert_eq!(back[0].values[0], Datum::Timestamp(100));
+        assert_eq!(back[1].values[1], Datum::Date(400));
+    }
+
+    #[test]
+    fn test_vectorized_limit_offset() {
+        let rows: Vec<OwnedRow> = (0..10)
+            .map(|i| OwnedRow::new(vec![Datum::Int64(i)]))
+            .collect();
+        let mut batch = RecordBatch::from_rows(&rows, 1);
+
+        // OFFSET 3, LIMIT 4 → rows 3..7
+        vectorized_limit_offset(&mut batch, Some(4), Some(3));
+        assert_eq!(batch.active_count(), 4);
+        let out = batch.to_rows();
+        assert_eq!(out[0].values[0], Datum::Int64(3));
+        assert_eq!(out[3].values[0], Datum::Int64(6));
+    }
+
+    #[test]
+    fn test_vectorized_limit_offset_only_limit() {
+        let rows: Vec<OwnedRow> = (0..5)
+            .map(|i| OwnedRow::new(vec![Datum::Int64(i)]))
+            .collect();
+        let mut batch = RecordBatch::from_rows(&rows, 1);
+        vectorized_limit_offset(&mut batch, Some(2), None);
+        assert_eq!(batch.active_count(), 2);
+        let out = batch.to_rows();
+        assert_eq!(out[0].values[0], Datum::Int64(0));
+        assert_eq!(out[1].values[0], Datum::Int64(1));
+    }
+
+    #[test]
+    fn test_vectorized_limit_offset_beyond() {
+        let rows = vec![OwnedRow::new(vec![Datum::Int64(1)])];
+        let mut batch = RecordBatch::from_rows(&rows, 1);
+        vectorized_limit_offset(&mut batch, Some(10), Some(100));
+        assert_eq!(batch.active_count(), 0);
+    }
+
+    #[test]
+    fn test_vectorized_limit_on_filtered_batch() {
+        let rows: Vec<OwnedRow> = (0..10)
+            .map(|i| OwnedRow::new(vec![Datum::Int64(i)]))
+            .collect();
+        let mut batch = RecordBatch::from_rows(&rows, 1);
+        // Filter: keep even numbers (0,2,4,6,8)
+        let filter = BoundExpr::BinaryOp {
+            left: Box::new(BoundExpr::ColumnRef(0)),
+            op: BinOp::Lt,
+            right: Box::new(BoundExpr::Literal(Datum::Int64(6))),
+        };
+        vectorized_filter(&mut batch, &filter);
+        assert_eq!(batch.active_count(), 6); // 0..5
+
+        // OFFSET 2 LIMIT 2 on the filtered set → rows at indices 2,3
+        vectorized_limit_offset(&mut batch, Some(2), Some(2));
+        assert_eq!(batch.active_count(), 2);
+        let out = batch.to_rows();
+        assert_eq!(out[0].values[0], Datum::Int64(2));
+        assert_eq!(out[1].values[0], Datum::Int64(3));
     }
 }

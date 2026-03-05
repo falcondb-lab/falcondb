@@ -38,7 +38,7 @@ fn subst_assignments(
         .collect()
 }
 
-fn subst_rows(rows: &[Vec<BoundExpr>], p: &[Datum]) -> Result<Vec<Vec<BoundExpr>>, ExecutionError> {
+pub fn subst_rows(rows: &[Vec<BoundExpr>], p: &[Datum]) -> Result<Vec<Vec<BoundExpr>>, ExecutionError> {
     rows.iter()
         .map(|row| row.iter().map(|e| substitute_params_expr(e, p)).collect())
         .collect()
@@ -97,7 +97,7 @@ fn subst_joins(joins: &[BoundJoin], p: &[Datum]) -> Result<Vec<BoundJoin>, Execu
     joins.iter().map(|j| subst_join(j, p)).collect()
 }
 
-fn subst_on_conflict(
+pub fn subst_on_conflict(
     oc: &Option<OnConflictAction>,
     p: &[Datum],
 ) -> Result<Option<OnConflictAction>, ExecutionError> {
@@ -161,6 +161,13 @@ fn subst_unions(
         .iter()
         .map(|(s, k, a)| Ok((subst_select(s, p)?, *k, *a)))
         .collect()
+}
+
+pub fn subst_returning(
+    exprs: &[(BoundExpr, String)],
+    p: &[Datum],
+) -> Result<Vec<(BoundExpr, String)>, ExecutionError> {
+    subst_vec(exprs, p)
 }
 
 // ── Public API ───────────────────────────────────────────────────────
@@ -367,6 +374,37 @@ pub fn substitute_params_plan(
             unions: subst_unions(unions, params)?,
             virtual_rows: virtual_rows.clone(),
         }),
+        PhysicalPlan::ColumnScan {
+            table_id,
+            schema,
+            projections,
+            visible_projection_count,
+            filter,
+            group_by,
+            grouping_sets,
+            having,
+            order_by,
+            limit,
+            offset,
+            distinct,
+            ctes,
+            unions,
+        } => Ok(PhysicalPlan::ColumnScan {
+            table_id: *table_id,
+            schema: schema.clone(),
+            projections: subst_projections(projections, params)?,
+            visible_projection_count: *visible_projection_count,
+            filter: subst_opt(filter, params)?,
+            group_by: group_by.clone(),
+            grouping_sets: grouping_sets.clone(),
+            having: subst_opt(having, params)?,
+            order_by: order_by.clone(),
+            limit: *limit,
+            offset: *offset,
+            distinct: distinct.clone(),
+            ctes: subst_ctes(ctes, params)?,
+            unions: subst_unions(unions, params)?,
+        }),
         PhysicalPlan::NestedLoopJoin {
             left_table_id,
             left_schema,
@@ -452,6 +490,7 @@ pub fn substitute_params_plan(
             null_string,
             quote,
             escape,
+            file_path,
         } => Ok(PhysicalPlan::CopyQueryTo {
             query: Box::new(substitute_params_plan(query, params)?),
             csv: *csv,
@@ -460,6 +499,7 @@ pub fn substitute_params_plan(
             null_string: null_string.clone(),
             quote: *quote,
             escape: *escape,
+            file_path: file_path.clone(),
         }),
 
         // Catch-all: any remaining variants without BoundExpr

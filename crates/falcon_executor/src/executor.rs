@@ -44,7 +44,7 @@ pub struct Executor {
     pub(crate) txn_mgr: Arc<TxnManager>,
     /// When true, the executor rejects all DDL and DML writes.
     /// Used on replica nodes to enforce read-only mode.
-    read_only: bool,
+    read_only: std::sync::atomic::AtomicBool,
     /// Optional handle to active connection counter for SHOW falcon.connections.
     active_connections: Option<Arc<std::sync::atomic::AtomicUsize>>,
     /// Maximum connections setting for SHOW falcon.connections.
@@ -53,6 +53,8 @@ pub struct Executor {
     pub(crate) external_sorter: Option<ExternalSorter>,
     /// Maximum groups allowed in hash aggregation (0 = unlimited).
     pub(crate) hash_agg_group_limit: usize,
+    /// Maximum total rows accumulated in a recursive CTE (0 = unlimited).
+    pub(crate) recursive_cte_max_rows: usize,
     /// Parallel execution configuration.
     pub(crate) parallel_config: ParallelConfig,
     /// RBAC: role catalog for inheritance resolution.
@@ -68,11 +70,12 @@ impl Executor {
         Self {
             storage,
             txn_mgr,
-            read_only: false,
+            read_only: std::sync::atomic::AtomicBool::new(false),
             active_connections: None,
             max_connections: 0,
             external_sorter: None,
             hash_agg_group_limit: 0,
+            recursive_cte_max_rows: 0,
             parallel_config: ParallelConfig::default(),
             role_catalog: None,
             privilege_manager: None,
@@ -85,11 +88,12 @@ impl Executor {
         Self {
             storage,
             txn_mgr,
-            read_only: true,
+            read_only: std::sync::atomic::AtomicBool::new(true),
             active_connections: None,
             max_connections: 0,
             external_sorter: None,
             hash_agg_group_limit: 0,
+            recursive_cte_max_rows: 0,
             parallel_config: ParallelConfig::default(),
             role_catalog: None,
             privilege_manager: None,
@@ -126,14 +130,15 @@ impl Executor {
     }
 
     /// Whether this executor is in read-only mode.
-    pub const fn is_read_only(&self) -> bool {
-        self.read_only
+    pub fn is_read_only(&self) -> bool {
+        self.read_only.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Configure spill-to-disk from SpillConfig.
     pub fn set_spill_config(&mut self, config: &SpillConfig) {
         self.external_sorter = ExternalSorter::from_config(config);
         self.hash_agg_group_limit = config.hash_agg_group_limit;
+        self.recursive_cte_max_rows = config.recursive_cte_max_rows;
     }
 
     /// Get the spill metrics snapshot (None if spill is disabled).
@@ -142,13 +147,13 @@ impl Executor {
     }
 
     /// Set read-only mode (e.g. after failover role change).
-    pub const fn set_read_only(&mut self, read_only: bool) {
-        self.read_only = read_only;
+    pub fn set_read_only(&self, val: bool) {
+        self.read_only.store(val, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Guard: reject the operation if this executor is read-only.
     fn reject_if_read_only(&self, op: &str) -> Result<(), FalconError> {
-        if self.read_only {
+        if self.is_read_only() {
             Err(FalconError::ReadOnly(format!(
                 "cannot execute {op} on a read-only replica"
             )))
@@ -268,6 +273,32 @@ impl Executor {
     ) -> Result<ExecutionResult, FalconError> {
         if params.is_empty() {
             return self.execute(plan, txn);
+        }
+        // Fast path for simple INSERT: substitute row exprs without cloning schema
+        if let PhysicalPlan::Insert {
+            table_id, schema, columns, rows,
+            source_select, returning, on_conflict,
+        } = plan
+        {
+            if source_select.is_none() {
+                let subst_rows = crate::param_subst::subst_rows(rows, params)
+                    .map_err(FalconError::Execution)?;
+                let subst_returning = if returning.is_empty() {
+                    Vec::new()
+                } else {
+                    crate::param_subst::subst_returning(returning, params)
+                        .map_err(FalconError::Execution)?
+                };
+                let subst_on_conflict = crate::param_subst::subst_on_conflict(on_conflict, params)
+                    .map_err(FalconError::Execution)?;
+                let txn = txn.ok_or_else(|| FalconError::Execution(
+                    falcon_common::error::ExecutionError::TypeError("INSERT requires a transaction".into()),
+                ))?;
+                return self.exec_insert(
+                    *table_id, schema, columns, &subst_rows,
+                    &subst_returning, &subst_on_conflict, txn,
+                );
+            }
         }
         let substituted = crate::param_subst::substitute_params_plan(plan, params)
             .map_err(FalconError::Execution)?;
@@ -655,6 +686,52 @@ impl Executor {
                 }
                 Ok(result)
             }
+            PhysicalPlan::ColumnScan {
+                table_id,
+                schema,
+                projections,
+                visible_projection_count,
+                filter,
+                group_by,
+                grouping_sets,
+                having,
+                order_by,
+                limit,
+                offset,
+                distinct,
+                ctes,
+                unions,
+            } => {
+                self.check_privilege(Privilege::Select, ObjectType::Table, &schema.name)?;
+                let txn = txn.ok_or_else(|| FalconError::Internal(
+                    "SELECT requires active transaction".into(),
+                ))?;
+
+                // All columnar paths (pure AGG, GROUP BY AGG, plain scan) are
+                // handled inside exec_seq_scan to avoid calling scan_columnar twice.
+                let cte_data = self.materialize_ctes(ctes, txn)?;
+                let mut result = self.exec_seq_scan(
+                    *table_id,
+                    schema,
+                    projections,
+                    *visible_projection_count,
+                    filter.as_ref(),
+                    group_by,
+                    grouping_sets,
+                    having.as_ref(),
+                    order_by,
+                    *limit,
+                    *offset,
+                    distinct,
+                    txn,
+                    &cte_data,
+                    &[],
+                )?;
+                if !unions.is_empty() {
+                    result = self.exec_union(result, unions, txn)?;
+                }
+                Ok(result)
+            }
             PhysicalPlan::IndexScan {
                 table_id,
                 schema,
@@ -917,15 +994,25 @@ impl Executor {
                 table_name,
                 column_indices,
                 unique,
+                concurrently,
             } => {
                 self.reject_if_read_only("CREATE INDEX")?;
-                for &col_idx in column_indices {
-                    self.storage
-                        .create_named_index(index_name, table_name, col_idx, *unique)?;
+                if *concurrently {
+                    let ddl_id = self.storage.create_index_concurrently(
+                        index_name, table_name, column_indices, *unique,
+                    )?;
+                    Ok(ExecutionResult::Ddl {
+                        message: format!("CREATE INDEX CONCURRENTLY {index_name} (ddl_id={ddl_id})"),
+                    })
+                } else {
+                    for &col_idx in column_indices {
+                        self.storage
+                            .create_named_index(index_name, table_name, col_idx, *unique)?;
+                    }
+                    Ok(ExecutionResult::Ddl {
+                        message: format!("CREATE INDEX {index_name}"),
+                    })
                 }
-                Ok(ExecutionResult::Ddl {
-                    message: format!("CREATE INDEX {index_name}"),
-                })
             }
             PhysicalPlan::CreateView {
                 name,
@@ -1213,6 +1300,7 @@ impl Executor {
                 null_string,
                 quote,
                 escape,
+                file_path: _,
             } => {
                 let txn = txn.ok_or_else(|| FalconError::Internal(
                     "COPY TO requires active transaction".into(),
@@ -1238,6 +1326,7 @@ impl Executor {
                 null_string,
                 quote,
                 escape,
+                file_path: _,
             } => {
                 let txn = txn.ok_or_else(|| FalconError::Internal(
                     "COPY TO requires active transaction".into(),
@@ -1503,6 +1592,32 @@ impl Executor {
                         pad,
                         unions.len()
                     ));
+                }
+                lines
+            }
+            PhysicalPlan::ColumnScan {
+                schema,
+                filter,
+                order_by,
+                limit,
+                offset,
+                ..
+            } => {
+                let mut lines = vec![format!(
+                    "{}Column Scan on {}",
+                    pad, schema.name,
+                )];
+                if let Some(f) = filter {
+                    lines.push(format!("{pad}  Filter: {f:?}"));
+                }
+                if !order_by.is_empty() {
+                    lines.push(format!("{}  Sort Key: {} column(s)", pad, order_by.len()));
+                }
+                if let Some(l) = limit {
+                    lines.push(format!("{pad}  Limit: {l}"));
+                }
+                if let Some(o) = offset {
+                    lines.push(format!("{pad}  Offset: {o}"));
                 }
                 lines
             }

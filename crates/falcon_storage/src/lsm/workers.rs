@@ -5,6 +5,7 @@ use std::time::Duration;
 use tokio::sync::Notify;
 
 use super::engine::LsmEngine;
+use crate::resource_isolation::ResourceIsolator;
 
 /// Background worker handles for flush and compaction.
 pub struct BgWorkers {
@@ -17,7 +18,12 @@ pub struct BgWorkers {
 
 impl BgWorkers {
     /// Spawn background flush and compaction workers for the given engine.
-    pub fn spawn(engine: Arc<LsmEngine>, flush_interval: Duration, compaction_interval: Duration) -> Self {
+    pub fn spawn(
+        engine: Arc<LsmEngine>,
+        flush_interval: Duration,
+        compaction_interval: Duration,
+        isolator: Arc<ResourceIsolator>,
+    ) -> Self {
         let shutdown = Arc::new(AtomicBool::new(false));
         let flush_notify = Arc::new(Notify::new());
         let compaction_notify = Arc::new(Notify::new());
@@ -27,8 +33,9 @@ impl BgWorkers {
             let shutdown = shutdown.clone();
             let notify = flush_notify.clone();
             let compaction_notify = compaction_notify.clone();
+            let isolator = isolator.clone();
             tokio::spawn(async move {
-                flush_loop(engine, shutdown, notify, compaction_notify, flush_interval).await;
+                flush_loop(engine, shutdown, notify, compaction_notify, flush_interval, isolator).await;
             })
         };
 
@@ -36,8 +43,9 @@ impl BgWorkers {
             let engine = engine.clone();
             let shutdown = shutdown.clone();
             let notify = compaction_notify.clone();
+            let isolator = isolator.clone();
             tokio::spawn(async move {
-                compaction_loop(engine, shutdown, notify, compaction_interval).await;
+                compaction_loop(engine, shutdown, notify, compaction_interval, isolator).await;
             })
         };
 
@@ -80,6 +88,7 @@ async fn flush_loop(
     notify: Arc<Notify>,
     compaction_notify: Arc<Notify>,
     interval: Duration,
+    isolator: Arc<ResourceIsolator>,
 ) {
     loop {
         tokio::select! {
@@ -87,17 +96,29 @@ async fn flush_loop(
             _ = tokio::time::sleep(interval) => {}
         }
         if shutdown.load(Ordering::SeqCst) {
-            // Final flush before exit
             let eng = engine.clone();
             let _ = tokio::task::spawn_blocking(move || eng.flush()).await;
             break;
         }
 
+        // Acquire CPU slot for background flush
+        let guard = isolator.cpu.try_acquire();
+        if guard.is_none() {
+            tracing::trace!("bg flush skipped: CPU slots exhausted");
+            continue;
+        }
+
         let eng = engine.clone();
-        let result = tokio::task::spawn_blocking(move || eng.flush()).await;
+        let iso = isolator.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let r = eng.flush();
+            // Charge estimated flush I/O (memtable size estimate)
+            iso.io.consume_blocking(eng.stats().memtable_bytes);
+            r
+        }).await;
+        drop(guard);
         match result {
             Ok(Ok(())) => {
-                // Flush succeeded — wake compaction in case L0 count grew
                 compaction_notify.notify_one();
             }
             Ok(Err(e)) => {
@@ -115,6 +136,7 @@ async fn compaction_loop(
     shutdown: Arc<AtomicBool>,
     notify: Arc<Notify>,
     interval: Duration,
+    isolator: Arc<ResourceIsolator>,
 ) {
     loop {
         tokio::select! {
@@ -125,8 +147,15 @@ async fn compaction_loop(
             break;
         }
 
+        let guard = isolator.cpu.try_acquire();
+        if guard.is_none() {
+            tracing::trace!("bg compaction skipped: CPU slots exhausted");
+            continue;
+        }
+
         let eng = engine.clone();
         let result = tokio::task::spawn_blocking(move || eng.maybe_trigger_compaction()).await;
+        drop(guard);
         match result {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {

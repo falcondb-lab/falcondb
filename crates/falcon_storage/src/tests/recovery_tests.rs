@@ -601,7 +601,7 @@
             c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }));
 
-        // Insert 鈫?must fire WAL observer before returning
+        // Insert is deferred to txn_wal_buf — observer fires at commit, not here
         let pk = engine
             .insert(
                 TableId(1),
@@ -609,17 +609,21 @@
                 TxnId(1),
             )
             .unwrap();
-        assert!(
-            counter.load(std::sync::atomic::Ordering::SeqCst) >= 1,
-            "WAL observer must fire on insert"
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst), 0,
+            "insert is deferred — observer should not fire yet"
         );
 
-        // Commit T1 so update by T2 can proceed
+        // Commit T1: flushes deferred insert + commit record = 2 observer fires
         engine
             .commit_txn(TxnId(1), Timestamp(5), falcon_common::types::TxnType::Local)
             .unwrap();
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst), 2,
+            "commit should flush deferred insert + commit (2 fires)"
+        );
 
-        // Update 鈫?must fire WAL observer
+        // Update fires immediately
         engine
             .update(
                 TableId(1),
@@ -628,9 +632,9 @@
                 TxnId(2),
             )
             .unwrap();
-        assert!(
-            counter.load(std::sync::atomic::Ordering::SeqCst) >= 3,
-            "WAL observer must fire on update (insert + commit + update = 3)"
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst), 3,
+            "update fires observer immediately"
         );
 
         // Commit T2 before T3 can delete
@@ -642,10 +646,10 @@
             )
             .unwrap();
 
-        // Delete 鈫?must fire WAL observer
+        // Delete fires immediately
         engine.delete(TableId(1), &pk, TxnId(3)).unwrap();
-        assert!(
-            counter.load(std::sync::atomic::Ordering::SeqCst) >= 5,
-            "WAL observer must fire on delete (insert+commit+update+commit+delete = 5)"
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst), 5,
+            "delete fires observer immediately"
         );
     }

@@ -1,6 +1,7 @@
 use crate::client::DbClient;
 use crate::csv::{quote_field, CsvOptions};
 use anyhow::{bail, Context, Result};
+use futures::TryStreamExt;
 use std::io::{BufWriter, Write};
 use tracing::debug;
 
@@ -11,6 +12,8 @@ pub struct ExportCmd {
     pub file: String,
     pub opts: CsvOptions,
     pub overwrite: bool,
+    /// Use COPY TO STDOUT for streaming (fast path). Falls back to SELECT if false.
+    pub use_copy: bool,
 }
 
 /// Parse a \export command line.
@@ -45,18 +48,22 @@ pub fn parse_export(line: &str) -> Result<ExportCmd> {
     parse_options(remainder, &mut opts, &mut overwrite)?;
 
     let query = strip_outer_quotes(query_part);
+    // Detect whether the query is a bare table name or a SELECT — COPY only works with table names
+    // or SELECT; we always emit COPY (SELECT ...) TO STDOUT which works for both.
+    let use_copy = true;
 
     Ok(ExportCmd {
         query,
         file,
         opts,
         overwrite,
+        use_copy,
     })
 }
 
-/// Execute an export: run the query, stream rows to a CSV file.
+/// Execute an export. Fast path: COPY (query) TO STDOUT CSV — streams directly to disk.
+/// Fallback (use_copy=false): SELECT all rows into memory then write.
 pub async fn run_export(client: &DbClient, cmd: &ExportCmd) -> Result<u64> {
-    // Safety: check file writability before executing query
     let path = std::path::Path::new(&cmd.file);
     if path.exists() && !cmd.overwrite {
         bail!(
@@ -70,7 +77,73 @@ pub async fn run_export(client: &DbClient, cmd: &ExportCmd) -> Result<u64> {
         }
     }
 
-    debug!("EXPORT: executing query: {}", cmd.query);
+    if cmd.use_copy {
+        run_export_copy(client, cmd).await
+    } else {
+        run_export_select(client, cmd).await
+    }
+}
+
+/// Fast path: COPY (query) TO STDOUT WITH (FORMAT CSV, ...) — server streams CSV bytes directly.
+async fn run_export_copy(client: &DbClient, cmd: &ExportCmd) -> Result<u64> {
+    let delim = cmd.opts.delimiter as char;
+    let quote = cmd.opts.quote as char;
+    let null_str = if cmd.opts.null_as.is_empty() {
+        String::new()
+    } else {
+        format!(", NULL '{}'", cmd.opts.null_as.replace('\'', "''"))
+    };
+    let header_opt = if cmd.opts.header { ", HEADER" } else { "" };
+
+    // Wrap any query in parens for COPY; if it's already a simple table name, COPY handles it too.
+    let source = if looks_like_table_name(&cmd.query) {
+        cmd.query.clone()
+    } else {
+        format!("({})", cmd.query)
+    };
+
+    let copy_sql = format!(
+        "COPY {source} TO STDOUT WITH (FORMAT CSV, DELIMITER '{delim}', QUOTE '{quote}'{null_str}{header_opt})"
+    );
+
+    debug!("EXPORT COPY: {}", copy_sql);
+
+    let file = std::fs::File::create(&cmd.file)
+        .with_context(|| format!("EXPORT: cannot create file '{}'", cmd.file))?;
+    // 1 MB write buffer — amortises syscall cost for large exports
+    let mut writer = BufWriter::with_capacity(1 << 20, file);
+
+    let stream = client
+        .client
+        .copy_out(&copy_sql)
+        .await
+        .context("EXPORT: COPY TO STDOUT failed")?;
+
+    let mut stream = Box::pin(stream);
+    let mut bytes_written: u64 = 0;
+    while let Some(chunk) = stream.as_mut().try_next().await.context("EXPORT: stream read error")? {
+        writer.write_all(&chunk).context("EXPORT: write error")?;
+        bytes_written += chunk.len() as u64;
+    }
+    writer.flush().context("EXPORT: flush error")?;
+
+    // Count rows by counting newlines (each CSV row ends with \n).
+    // This avoids re-reading the file; not 100% accurate for multi-line fields but good enough.
+    let rows = if bytes_written == 0 {
+        0
+    } else {
+        // Re-open and count — only for small overhead reporting
+        let content = std::fs::read(&cmd.file).unwrap_or_default();
+        let n = content.iter().filter(|&&b| b == b'\n').count() as u64;
+        if cmd.opts.header && n > 0 { n - 1 } else { n }
+    };
+
+    Ok(rows)
+}
+
+/// Slow path: SELECT all rows into memory, write manually (used when COPY is unavailable).
+async fn run_export_select(client: &DbClient, cmd: &ExportCmd) -> Result<u64> {
+    debug!("EXPORT SELECT: {}", cmd.query);
     let (rows, _tag) = client
         .query_simple(&cmd.query)
         .await
@@ -78,30 +151,18 @@ pub async fn run_export(client: &DbClient, cmd: &ExportCmd) -> Result<u64> {
 
     let file = std::fs::File::create(&cmd.file)
         .with_context(|| format!("EXPORT: cannot create file '{}'", cmd.file))?;
-    let mut writer = BufWriter::new(file);
+    let mut writer = BufWriter::with_capacity(1 << 20, file);
 
     let col_names: Vec<String> = if rows.is_empty() {
         Vec::new()
     } else {
-        rows[0]
-            .columns()
-            .iter()
-            .map(|c| c.name().to_owned())
-            .collect()
+        rows[0].columns().iter().map(|c| c.name().to_owned()).collect()
     };
 
-    // Write header
     if cmd.opts.header && !col_names.is_empty() {
-        let header: Vec<String> = col_names
-            .iter()
-            .map(|c| quote_field(c, &cmd.opts))
-            .collect();
-        writeln!(
-            writer,
-            "{}",
-            header.join(&(cmd.opts.delimiter as char).to_string())
-        )
-        .context("EXPORT: write error")?;
+        let delim_str = (cmd.opts.delimiter as char).to_string();
+        let header: Vec<String> = col_names.iter().map(|c| quote_field(c, &cmd.opts)).collect();
+        writeln!(writer, "{}", header.join(&delim_str)).context("EXPORT: write error")?;
     }
 
     let ncols = col_names.len();
@@ -113,8 +174,6 @@ pub async fn run_export(client: &DbClient, cmd: &ExportCmd) -> Result<u64> {
             .map(|i| {
                 let v = row.get(i).unwrap_or("");
                 if v.is_empty() && !cmd.opts.null_as.is_empty() {
-                    // We can't distinguish NULL from empty string via SimpleQueryRow,
-                    // so we use the raw value as-is (NULL comes as None → "")
                     cmd.opts.null_as.clone()
                 } else {
                     quote_field(v, &cmd.opts)
@@ -127,6 +186,12 @@ pub async fn run_export(client: &DbClient, cmd: &ExportCmd) -> Result<u64> {
 
     writer.flush().context("EXPORT: flush error")?;
     Ok(exported)
+}
+
+/// Heuristic: does the string look like a plain table name (no spaces, no parens)?
+fn looks_like_table_name(s: &str) -> bool {
+    let s = s.trim();
+    !s.is_empty() && !s.contains(' ') && !s.contains('(') && !s.contains('\n')
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

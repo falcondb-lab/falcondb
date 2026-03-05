@@ -1016,18 +1016,58 @@ impl Binder {
             }
         };
 
-        // Build named window map from WINDOW clause (e.g. WINDOW w AS (...))
-        let named_windows: std::collections::HashMap<String, ast::WindowSpec> = select
-            .named_window
-            .iter()
-            .filter_map(|nwd| {
-                let name = nwd.0.value.to_lowercase();
-                match &nwd.1 {
-                    ast::NamedWindowExpr::WindowSpec(spec) => Some((name, spec.clone())),
-                    ast::NamedWindowExpr::NamedWindow(_) => None, // chained refs not supported
+        // Build named window map from WINDOW clause, resolving chained refs.
+        let mut named_windows: std::collections::HashMap<String, ast::WindowSpec> =
+            std::collections::HashMap::new();
+        let mut deferred: Vec<(String, String)> = Vec::new();
+        for nwd in &select.named_window {
+            let name = nwd.0.value.to_lowercase();
+            match &nwd.1 {
+                ast::NamedWindowExpr::WindowSpec(spec) => {
+                    named_windows.insert(name, spec.clone());
                 }
-            })
-            .collect();
+                ast::NamedWindowExpr::NamedWindow(parent_ident) => {
+                    deferred.push((name, parent_ident.value.to_lowercase()));
+                }
+            }
+        }
+        // Resolve bare aliases: WINDOW w2 AS w1
+        let mut limit = deferred.len() * 2 + 1;
+        while !deferred.is_empty() && limit > 0 {
+            limit -= 1;
+            deferred.retain(|(name, parent)| {
+                if let Some(parent_spec) = named_windows.get(parent).cloned() {
+                    named_windows.insert(name.clone(), parent_spec);
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        // Resolve WindowSpec.window_name refs: WINDOW w2 AS (w1 ORDER BY y)
+        // Merge parent's PARTITION BY / ORDER BY into child where child is empty.
+        let keys: Vec<String> = named_windows.keys().cloned().collect();
+        for key in keys {
+            let parent_name = match named_windows.get(&key) {
+                Some(spec) => spec.window_name.as_ref().map(|id| id.value.to_lowercase()),
+                None => None,
+            };
+            if let Some(pname) = parent_name {
+                if let Some(parent_spec) = named_windows.get(&pname).cloned() {
+                    let child = named_windows.get_mut(&key).unwrap();
+                    if child.partition_by.is_empty() {
+                        child.partition_by = parent_spec.partition_by;
+                    }
+                    if child.order_by.is_empty() {
+                        child.order_by = parent_spec.order_by;
+                    }
+                    if child.window_frame.is_none() {
+                        child.window_frame = parent_spec.window_frame;
+                    }
+                    child.window_name = None;
+                }
+            }
+        }
 
         // Resolve projections
         let mut projections = Vec::new();
@@ -1512,7 +1552,30 @@ impl Binder {
 
                 // Parse OVER clause — resolve named window references
                 let window_spec = match func.over.as_ref().ok_or_else(|| SqlError::Unsupported("window function missing OVER clause".into()))? {
-                    ast::WindowType::WindowSpec(spec) => std::borrow::Cow::Borrowed(spec),
+                    ast::WindowType::WindowSpec(spec) => {
+                        // Handle inline spec that references a named window via window_name
+                        if let Some(ref wn) = spec.window_name {
+                            let parent_name = wn.value.to_lowercase();
+                            if let Some(parent) = named_windows.get(&parent_name) {
+                                let mut merged = spec.clone();
+                                if merged.partition_by.is_empty() {
+                                    merged.partition_by = parent.partition_by.clone();
+                                }
+                                if merged.order_by.is_empty() {
+                                    merged.order_by = parent.order_by.clone();
+                                }
+                                if merged.window_frame.is_none() {
+                                    merged.window_frame = parent.window_frame.clone();
+                                }
+                                merged.window_name = None;
+                                std::borrow::Cow::Owned(merged)
+                            } else {
+                                return Err(SqlError::UnknownColumn(format!("window '{parent_name}'")));
+                            }
+                        } else {
+                            std::borrow::Cow::Borrowed(spec)
+                        }
+                    }
                     ast::WindowType::NamedWindow(ident) => {
                         let name = ident.value.to_lowercase();
                         let spec = named_windows

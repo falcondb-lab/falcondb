@@ -290,12 +290,18 @@ impl ClusterFailureDetector {
     }
 
     /// Spawn a background evaluator that periodically calls `evaluate()`.
-    ///
-    /// Returns a `FailureDetectorHandle` that stops the evaluator on drop.
-    /// State transitions are logged via `tracing`.
     pub fn spawn_evaluator(
         self: &Arc<Self>,
         cancel: CancellationToken,
+    ) -> FailureDetectorHandle {
+        self.spawn_evaluator_with_failover(cancel, None)
+    }
+
+    /// Spawn evaluator with an optional failover callback invoked when a node becomes Dead.
+    pub fn spawn_evaluator_with_failover(
+        self: &Arc<Self>,
+        cancel: CancellationToken,
+        on_dead: Option<Arc<dyn Fn(NodeId) + Send + Sync>>,
     ) -> FailureDetectorHandle {
         let detector = Arc::clone(self);
         let interval = detector.config.heartbeat_interval;
@@ -317,6 +323,87 @@ impl ClusterFailureDetector {
                                 new_state = ?new,
                                 "node liveness transition",
                             );
+                            if *new == NodeLiveness::Dead {
+                                if let Some(ref cb) = on_dead {
+                                    cb(*node_id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        FailureDetectorHandle {
+            _cancel: cancel,
+            _join: handle,
+        }
+    }
+
+    /// Spawn active gRPC prober: sends Heartbeat RPC to each peer and records result.
+    /// `peer_addrs`: list of (node_id, grpc_addr) to probe.
+    pub fn spawn_prober(
+        self: &Arc<Self>,
+        cancel: CancellationToken,
+        peer_addrs: Vec<(NodeId, String)>,
+    ) -> FailureDetectorHandle {
+        let detector = Arc::clone(self);
+        let interval = detector.config.heartbeat_interval;
+        let token = cancel.clone();
+        let handle = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(interval);
+            let channels: dashmap::DashMap<u64, tonic::transport::Channel> = dashmap::DashMap::new();
+            loop {
+                tokio::select! {
+                    _ = token.cancelled() => break,
+                    _ = tick.tick() => {
+                        for (node_id, addr) in &peer_addrs {
+                            let nid = node_id.0;
+                            // Get or create channel
+                            let ch = if let Some(c) = channels.get(&nid) {
+                                c.value().clone()
+                            } else {
+                                match tonic::transport::Endpoint::from_shared(addr.clone())
+                                    .map(|e| e.connect_timeout(std::time::Duration::from_secs(2)))
+                                {
+                                    Ok(ep) => match ep.connect().await {
+                                        Ok(c) => { channels.insert(nid, c.clone()); c }
+                                        Err(e) => {
+                                            tracing::debug!(nid, error = %e, "probe connect failed");
+                                            let mut nodes = detector.nodes.write();
+                                            if let Some(r) = nodes.get_mut(node_id) {
+                                                r.consecutive_misses += 1;
+                                            }
+                                            continue;
+                                        }
+                                    },
+                                    Err(e) => {
+                                        tracing::warn!(nid, error = %e, "invalid probe addr");
+                                        continue;
+                                    }
+                                }
+                            };
+
+                            let mut client = crate::proto::wal_replication_client::WalReplicationClient::new(ch);
+                            // Use SyncConfig(version=0) as a lightweight ping
+                            let req = crate::proto::SyncConfigRequest {
+                                config_version: 0,
+                                config_payload: vec![],
+                            };
+                            match client.sync_config(req).await {
+                                Ok(_) => {
+                                    detector.record_heartbeat(*node_id, 0, 0);
+                                    tracing::trace!(nid, "probe ok");
+                                }
+                                Err(e) => {
+                                    tracing::debug!(nid, error = %e, "probe failed");
+                                    channels.remove(&nid);
+                                    // Bump consecutive_misses so evaluate() can transition to Dead
+                                    let mut nodes = detector.nodes.write();
+                                    if let Some(r) = nodes.get_mut(node_id) {
+                                        r.consecutive_misses += 1;
+                                    }
+                                }
+                            }
                         }
                     }
                 }

@@ -27,7 +27,7 @@ pub struct PreparedStatement {
     /// Parameter type OIDs declared at Parse time (0 = unspecified/infer).
     pub param_types: Vec<i32>,
     /// Physical plan produced by parse+bind+plan (None for legacy text-mode).
-    pub plan: Option<PhysicalPlan>,
+    pub plan: Option<Arc<PhysicalPlan>>,
     /// Inferred parameter types from the binder's ParamEnv.
     pub inferred_param_types: Vec<Option<DataType>>,
     /// Output column descriptions (for Describe responses).
@@ -47,7 +47,7 @@ pub struct FieldDescriptionCompact {
 #[derive(Debug, Clone)]
 pub struct Portal {
     /// The physical plan to execute.
-    pub plan: Option<PhysicalPlan>,
+    pub plan: Option<Arc<PhysicalPlan>>,
     /// Concrete parameter values (1-indexed: $1 = params[0]).
     pub params: Vec<Datum>,
     /// Fallback: bound SQL string (for legacy text-substitution path).

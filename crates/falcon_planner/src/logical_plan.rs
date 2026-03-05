@@ -148,6 +148,7 @@ pub enum LogicalPlan {
         table_name: String,
         column_indices: Vec<usize>,
         unique: bool,
+        concurrently: bool,
     },
     DropIndex {
         index_name: String,
@@ -210,6 +211,7 @@ pub enum LogicalPlan {
         null_string: String,
         quote: char,
         escape: char,
+        file_path: Option<String>,
     },
     CopyTo {
         table_id: TableId,
@@ -221,6 +223,7 @@ pub enum LogicalPlan {
         null_string: String,
         quote: char,
         escape: char,
+        file_path: Option<String>,
     },
     CopyQueryTo {
         query: Box<Self>,
@@ -230,6 +233,7 @@ pub enum LogicalPlan {
         null_string: String,
         quote: char,
         escape: char,
+        file_path: Option<String>,
     },
 }
 
@@ -269,11 +273,13 @@ impl LogicalPlan {
                 table_name,
                 column_indices,
                 unique,
+                concurrently,
             } => Ok(Self::CreateIndex {
                 index_name: index_name.clone(),
                 table_name: table_name.clone(),
                 column_indices: column_indices.clone(),
                 unique: *unique,
+                concurrently: *concurrently,
             }),
             BoundStatement::DropIndex { index_name } => Ok(Self::DropIndex {
                 index_name: index_name.clone(),
@@ -381,6 +387,7 @@ impl LogicalPlan {
                 null_string,
                 quote,
                 escape,
+                file_path,
             } => Ok(Self::CopyFrom {
                 table_id: *table_id,
                 schema: schema.clone(),
@@ -391,6 +398,7 @@ impl LogicalPlan {
                 null_string: null_string.clone(),
                 quote: *quote,
                 escape: *escape,
+                file_path: file_path.clone(),
             }),
             BoundStatement::CopyTo {
                 table_id,
@@ -402,6 +410,7 @@ impl LogicalPlan {
                 null_string,
                 quote,
                 escape,
+                file_path,
             } => Ok(Self::CopyTo {
                 table_id: *table_id,
                 schema: schema.clone(),
@@ -412,6 +421,7 @@ impl LogicalPlan {
                 null_string: null_string.clone(),
                 quote: *quote,
                 escape: *escape,
+                file_path: file_path.clone(),
             }),
             BoundStatement::CopyQueryTo {
                 query,
@@ -421,6 +431,7 @@ impl LogicalPlan {
                 null_string,
                 quote,
                 escape,
+                file_path,
             } => {
                 let inner = Self::from_bound_select(query);
                 Ok(Self::CopyQueryTo {
@@ -431,6 +442,7 @@ impl LogicalPlan {
                     null_string: null_string.clone(),
                     quote: *quote,
                     escape: *escape,
+                    file_path: file_path.clone(),
                 })
             }
             // ── Schema / Role / Grant DDL (pass-through to legacy planner) ──

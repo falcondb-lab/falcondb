@@ -19,7 +19,7 @@
 //! - Append-only, never mutated after write
 //! - Each block: `[codec:u8][original_len:u32][compressed_len:u32][data...]`
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -163,8 +163,8 @@ fn decode_block(block: &[u8]) -> Result<Vec<u8>, StorageError> {
 // Row serialization (OwnedRow ↔ bytes)
 // ═══════════════════════════════════════════════════════════════════════════
 
-fn serialize_row(row: &OwnedRow) -> Vec<u8> {
-    bincode::serialize(row).unwrap_or_default()
+fn serialize_row(row: &OwnedRow) -> Result<Vec<u8>, StorageError> {
+    bincode::serialize(row).map_err(|e| StorageError::ColdStore(format!("row serialize error: {e}")))
 }
 
 fn deserialize_row(data: &[u8]) -> Result<OwnedRow, StorageError> {
@@ -233,7 +233,7 @@ pub struct BlockCache {
 
 struct BlockCacheInner {
     map: HashMap<ColdHandle, CacheEntry>,
-    insertion_order: Vec<ColdHandle>,
+    insertion_order: VecDeque<ColdHandle>,
     current_bytes: u64,
 }
 
@@ -242,7 +242,7 @@ impl BlockCache {
         Self {
             entries: parking_lot::Mutex::new(BlockCacheInner {
                 map: HashMap::new(),
-                insertion_order: Vec::new(),
+                insertion_order: VecDeque::new(),
                 current_bytes: 0,
             }),
             capacity,
@@ -270,14 +270,14 @@ impl BlockCache {
         // Evict oldest entries until we have space
         while inner.current_bytes + size as u64 > self.capacity && !inner.insertion_order.is_empty()
         {
-            let oldest = inner.insertion_order.remove(0);
+            let oldest = inner.insertion_order.pop_front().unwrap();
             if let Some(evicted) = inner.map.remove(&oldest) {
                 inner.current_bytes -= evicted.size as u64;
             }
         }
 
         inner.current_bytes += size as u64;
-        inner.insertion_order.push(handle);
+        inner.insertion_order.push_back(handle);
         inner.map.insert(
             handle,
             CacheEntry {
@@ -429,7 +429,7 @@ impl ColdStore {
 
     /// Store a row payload in the cold store. Returns a ColdHandle.
     pub fn store_row(&self, row: &OwnedRow) -> Result<ColdHandle, StorageError> {
-        let raw_bytes = serialize_row(row);
+        let raw_bytes = serialize_row(row)?;
         let original_len = raw_bytes.len() as u64;
         let block = encode_block(&raw_bytes, self.config.codec, self.config.compression_enabled);
         let block_len = block.len() as u64;

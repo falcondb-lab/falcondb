@@ -13,6 +13,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use falcon_common::types::TxnId;
+
 use falcon_common::error::FalconError;
 use falcon_common::types::ShardId;
 use falcon_storage::engine::StorageEngine;
@@ -24,6 +26,7 @@ use crate::cross_shard::{
     ShardConflictTracker, TimeoutPhase, TimeoutPolicy, VictimSelectionPolicy,
     WaitForGraphDetector, WaitReason,
 };
+use crate::deterministic_2pc::{CoordinatorDecision, CoordinatorDecisionLog};
 use crate::sharded_engine::ShardedEngine;
 
 /// Outcome of a single shard's participation in a 2PC transaction.
@@ -233,6 +236,9 @@ pub struct HardenedTwoPhaseCoordinator {
     conflict_tracker: ShardConflictTracker,
     deadlock_detector: DeadlockDetector,
     wfg_detector: WaitForGraphDetector,
+    decision_log: Option<Arc<CoordinatorDecisionLog>>,
+    /// Coordinator-owned global txn sequence — avoids per-shard id collisions.
+    global_txn_seq: AtomicU64,
     total_attempted: AtomicU64,
     total_committed: AtomicU64,
     total_aborted: AtomicU64,
@@ -251,11 +257,18 @@ impl HardenedTwoPhaseCoordinator {
             wfg_detector: WaitForGraphDetector::new(
                 config.victim_selection.unwrap_or_default(),
             ),
+            decision_log: None,
+            global_txn_seq: AtomicU64::new(1),
             config,
             total_attempted: AtomicU64::new(0),
             total_committed: AtomicU64::new(0),
             total_aborted: AtomicU64::new(0),
         }
+    }
+
+    /// Set the durable decision log for crash recovery.
+    pub fn set_decision_log(&mut self, log: Arc<CoordinatorDecisionLog>) {
+        self.decision_log = Some(log);
     }
 
     /// Execute a hardened cross-shard write transaction.
@@ -530,6 +543,19 @@ impl HardenedTwoPhaseCoordinator {
         // ── Phase 2: Commit or Abort ──
         let commit_start = Instant::now();
 
+        let global_txn_id = TxnId(self.global_txn_seq.fetch_add(1, Ordering::Relaxed));
+        let decision = if all_prepared { CoordinatorDecision::Commit } else { CoordinatorDecision::Abort };
+
+        // Log decision BEFORE applying — this is the durable commit point
+        if let Some(ref log) = self.decision_log {
+            log.log_decision(
+                global_txn_id,
+                decision,
+                target_shards,
+                latency.prepare_wal_us,
+            );
+        }
+
         if all_prepared {
             for p in &participants {
                 let shard = if let Some(s) = self.engine.shard(p.shard_id) { s } else {
@@ -547,10 +573,21 @@ impl HardenedTwoPhaseCoordinator {
                     );
                 }
             }
+
+            // Mark decision as applied
+            if let Some(ref log) = self.decision_log {
+                log.mark_applied(global_txn_id);
+            }
+
             latency.commit_wal_us = commit_start.elapsed().as_micros() as u64;
             Ok(true)
         } else {
             self.abort_all(&participants);
+
+            if let Some(ref log) = self.decision_log {
+                log.mark_applied(global_txn_id);
+            }
+
             latency.commit_wal_us = commit_start.elapsed().as_micros() as u64;
             Ok(false)
         }
