@@ -264,7 +264,7 @@ fn encode_datum_into(buf: &mut Vec<u8>, datum: &Datum) {
         Datum::Int32(v) => { buf.push(2); buf.extend_from_slice(&v.to_le_bytes()); }
         Datum::Int64(v) => { buf.push(3); buf.extend_from_slice(&v.to_le_bytes()); }
         Datum::Float64(v) => { buf.push(4); buf.extend_from_slice(&v.to_le_bytes()); }
-        Datum::Text(s) => { buf.push(5); buf.extend_from_slice(s.as_bytes()); buf.push(0); }
+        Datum::Text(s) => { buf.push(5); for b in s.as_bytes() { buf.push(*b); if *b == 0x00 { buf.push(0x01); } } buf.push(0x00); buf.push(0x00); }
         Datum::Timestamp(v) => { buf.push(6); buf.extend_from_slice(&v.to_le_bytes()); }
         Datum::Date(v) => { buf.push(7); buf.extend_from_slice(&v.to_le_bytes()); }
         Datum::Time(v) => { buf.push(8); buf.extend_from_slice(&v.to_le_bytes()); }
@@ -1030,15 +1030,17 @@ impl Executor {
 
         // Helper: collect distinct non-null values
         let distinct_vals = |expr: &BoundExpr| -> Result<Vec<Datum>, FalconError> {
-            let mut seen = std::collections::HashSet::new();
+            let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
             let mut vals = Vec::new();
+            let mut key_buf = Vec::with_capacity(32);
             for row in rows {
                 let v = ExprEngine::eval_row(expr, row).map_err(FalconError::Execution)?;
                 if v.is_null() {
                     continue;
                 }
-                let key = format!("{v}");
-                if seen.insert(key) {
+                key_buf.clear();
+                encode_datum_into(&mut key_buf, &v);
+                if seen.insert(key_buf.clone()) {
                     vals.push(v);
                 }
             }

@@ -76,6 +76,16 @@ pub struct ColumnDef {
     pub is_primary_key: bool,
     pub default_value: Option<Datum>,
     pub is_serial: bool,
+    /// CHAR(n)/VARCHAR(n) max character length. None = unlimited (TEXT).
+    #[serde(default)]
+    pub max_length: Option<u32>,
+}
+
+impl ColumnDef {
+    /// Shorthand constructor — sets max_length to None.
+    pub fn new(id: ColumnId, name: String, data_type: DataType, nullable: bool, is_primary_key: bool, default_value: Option<Datum>, is_serial: bool) -> Self {
+        Self { id, name, data_type, nullable, is_primary_key, default_value, is_serial, max_length: None }
+    }
 }
 
 /// Table schema metadata.
@@ -226,6 +236,14 @@ pub struct ViewDef {
     pub query_sql: String,
 }
 
+/// A materialized view: stores query SQL + the backing table ID that holds the data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaterializedViewDef {
+    pub name: String,
+    pub query_sql: String,
+    pub backing_table_id: TableId,
+}
+
 /// A schema (namespace) entry in the catalog.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaEntry {
@@ -258,6 +276,45 @@ pub struct GrantEntryCompact {
     pub grantor_id: u64,
 }
 
+/// Function parameter definition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionParam {
+    pub name: Option<String>,
+    pub data_type: DataType,
+}
+
+/// Language for user-defined functions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FunctionLanguage {
+    Sql,
+    PlPgSql,
+}
+
+/// Volatility category (matches PostgreSQL semantics).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FunctionVolatility {
+    Immutable,
+    Stable,
+    Volatile,
+}
+
+impl Default for FunctionVolatility {
+    fn default() -> Self { Self::Volatile }
+}
+
+/// Stored definition of a user-defined function or procedure.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionDef {
+    pub name: String,
+    pub params: Vec<FunctionParam>,
+    pub return_type: Option<DataType>,
+    pub language: FunctionLanguage,
+    pub body: String,
+    pub volatility: FunctionVolatility,
+    pub is_strict: bool,
+    pub or_replace: bool,
+}
+
 /// In-memory catalog: all known tables, views, schemas, roles, and privileges.
 ///
 /// Thread-safe via external synchronization (RwLock in storage).
@@ -268,6 +325,8 @@ pub struct Catalog {
     next_table_id: u64,
     #[serde(default)]
     pub views: Vec<ViewDef>,
+    #[serde(default)]
+    pub materialized_views: Vec<MaterializedViewDef>,
     #[serde(default = "Catalog::default_databases")]
     databases: Vec<DatabaseEntry>,
     #[serde(default = "Catalog::default_next_db_oid")]
@@ -287,6 +346,9 @@ pub struct Catalog {
     /// In-memory role catalog (not serialized — rebuilt from role_entries).
     #[serde(skip)]
     role_catalog: Option<RoleCatalog>,
+    /// User-defined functions, keyed by lowercase name.
+    #[serde(default)]
+    functions: HashMap<String, FunctionDef>,
 }
 
 impl Catalog {
@@ -333,6 +395,7 @@ impl Catalog {
             tables: HashMap::new(),
             next_table_id: 1,
             views: Vec::new(),
+            materialized_views: Vec::new(),
             databases: Self::default_databases(),
             next_database_oid: 2,
             schemas: Self::default_schemas(),
@@ -340,6 +403,7 @@ impl Catalog {
             next_role_id: 1,
             grant_entries: Vec::new(),
             role_catalog: None,
+            functions: HashMap::new(),
         };
         catalog.rebuild_role_catalog();
         catalog
@@ -463,6 +527,24 @@ impl Catalog {
 
     pub fn list_views(&self) -> &[ViewDef] {
         &self.views
+    }
+
+    // ── Materialized view management ──
+
+    pub fn add_materialized_view(&mut self, mv: MaterializedViewDef) {
+        self.materialized_views.push(mv);
+    }
+
+    pub fn find_materialized_view(&self, name: &str) -> Option<&MaterializedViewDef> {
+        let lower = name.to_lowercase();
+        self.materialized_views.iter().find(|v| v.name.to_lowercase() == lower)
+    }
+
+    pub fn drop_materialized_view(&mut self, name: &str) -> bool {
+        let lower = name.to_lowercase();
+        let before = self.materialized_views.len();
+        self.materialized_views.retain(|v| v.name.to_lowercase() != lower);
+        self.materialized_views.len() < before
     }
 
     // ── Database management ──
@@ -735,6 +817,34 @@ impl Catalog {
 
     pub fn list_grants(&self) -> &[GrantEntryCompact] {
         &self.grant_entries
+    }
+
+    // ── Function management ──
+
+    pub fn create_function(&mut self, func: FunctionDef) -> Result<(), String> {
+        let key = func.name.to_lowercase();
+        if self.functions.contains_key(&key) && !func.or_replace {
+            return Err(format!("function \"{}\" already exists", func.name));
+        }
+        self.functions.insert(key, func);
+        Ok(())
+    }
+
+    pub fn drop_function(&mut self, name: &str) -> Result<(), String> {
+        let key = name.to_lowercase();
+        if self.functions.remove(&key).is_some() {
+            Ok(())
+        } else {
+            Err(format!("function \"{name}\" does not exist"))
+        }
+    }
+
+    pub fn find_function(&self, name: &str) -> Option<&FunctionDef> {
+        self.functions.get(&name.to_lowercase())
+    }
+
+    pub fn list_functions(&self) -> Vec<&FunctionDef> {
+        self.functions.values().collect()
     }
 
     /// Check if a role has a specific privilege on an object.

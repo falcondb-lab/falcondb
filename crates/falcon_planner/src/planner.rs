@@ -82,6 +82,7 @@ impl Planner {
                 returning: del.returning.clone(),
                 using_table: del.using_table.clone(),
             }),
+            BoundStatement::Merge(m) => Ok(PhysicalPlan::Merge(m.clone())),
             BoundStatement::Select(sel) => {
                 if sel.joins.is_empty() {
                     // Columnstore tables use ColumnScan for vectorized execution
@@ -101,6 +102,7 @@ impl Planner {
                             distinct: sel.distinct.clone(),
                             ctes: sel.ctes.clone(),
                             unions: sel.unions.clone(),
+                            for_lock: sel.for_lock,
                         });
                     }
                     Ok(PhysicalPlan::SeqScan {
@@ -119,6 +121,7 @@ impl Planner {
                         ctes: sel.ctes.clone(),
                         unions: sel.unions.clone(),
                         virtual_rows: sel.virtual_rows.clone(),
+                        for_lock: sel.for_lock,
                     })
                 } else {
                     // Use HashJoin for equi-joins (all joins have equality conditions)
@@ -201,6 +204,23 @@ impl Planner {
                 name: name.clone(),
                 if_exists: *if_exists,
             }),
+            BoundStatement::CreateMaterializedView { name, query_sql } => {
+                Ok(PhysicalPlan::CreateMaterializedView {
+                    name: name.clone(),
+                    query_sql: query_sql.clone(),
+                })
+            }
+            BoundStatement::DropMaterializedView { name, if_exists } => {
+                Ok(PhysicalPlan::DropMaterializedView {
+                    name: name.clone(),
+                    if_exists: *if_exists,
+                })
+            }
+            BoundStatement::RefreshMaterializedView { name } => {
+                Ok(PhysicalPlan::RefreshMaterializedView {
+                    name: name.clone(),
+                })
+            }
             BoundStatement::Begin => Ok(PhysicalPlan::Begin),
             BoundStatement::Commit => Ok(PhysicalPlan::Commit),
             BoundStatement::Rollback => Ok(PhysicalPlan::Rollback),
@@ -379,6 +399,17 @@ impl Planner {
                     file_path: file_path.clone(),
                 })
             }
+            BoundStatement::CreateFunction { def } => Ok(PhysicalPlan::CreateFunction {
+                def: def.clone(),
+            }),
+            BoundStatement::DropFunction { name, if_exists } => Ok(PhysicalPlan::DropFunction {
+                name: name.clone(),
+                if_exists: *if_exists,
+            }),
+            BoundStatement::CallProcedure { name, args } => Ok(PhysicalPlan::CallProcedure {
+                name: name.clone(),
+                args: args.clone(),
+            }),
         }
     }
 
@@ -791,6 +822,7 @@ impl Planner {
                 Self::expr_has_subquery(expr) || list.iter().any(Self::expr_has_subquery)
             }
             BoundExpr::Function { args: exprs, .. }
+            | BoundExpr::UserFunction { args: exprs, .. }
             | BoundExpr::Coalesce(exprs)
             | BoundExpr::ArrayLiteral(exprs) => exprs.iter().any(Self::expr_has_subquery),
             BoundExpr::AggregateExpr {
@@ -1427,6 +1459,7 @@ impl Planner {
             ctes: sel.ctes.clone(),
             unions: sel.unions.clone(),
             virtual_rows: sel.virtual_rows.clone(),
+            for_lock: sel.for_lock,
         })
     }
 
@@ -1464,6 +1497,7 @@ impl Planner {
             ctes: sel.ctes.clone(),
             unions: sel.unions.clone(),
             virtual_rows: sel.virtual_rows.clone(),
+            for_lock: sel.for_lock,
         })
     }
 
@@ -1749,7 +1783,7 @@ impl Planner {
                     table_id, schema, projections, visible_count,
                     filter, group_by, grouping_sets, having, order_by,
                     limit, offset, distinct, ctes, unions, virtual_rows,
-                    stats, indexes,
+                    RowLockMode::None, stats, indexes,
                 )
             }
 
@@ -1842,7 +1876,7 @@ impl Planner {
             table_id, schema, projections, visible_count,
             filter, group_by, grouping_sets, having, order_by,
             limit, offset, distinct, ctes, unions, virtual_rows,
-            stats, indexes,
+            RowLockMode::None, stats, indexes,
         )
     }
 
@@ -1953,6 +1987,7 @@ impl Planner {
         ctes: Vec<BoundCte>,
         unions: Vec<(BoundSelect, SetOpKind, bool)>,
         virtual_rows: Vec<falcon_common::datum::OwnedRow>,
+        for_lock: RowLockMode,
         stats: &TableStatsMap,
         indexes: &IndexedColumns,
     ) -> Result<PhysicalPlan, SqlError> {
@@ -1961,7 +1996,7 @@ impl Planner {
             return Ok(PhysicalPlan::ColumnScan {
                 table_id, schema, projections, visible_projection_count: visible_projection_count,
                 filter, group_by, grouping_sets, having, order_by,
-                limit, offset, distinct, ctes, unions,
+                limit, offset, distinct, ctes, unions, for_lock,
             });
         }
 
@@ -1985,7 +2020,7 @@ impl Planner {
                                 projections, visible_projection_count,
                                 filter: residual,
                                 group_by, grouping_sets, having, order_by,
-                                limit, offset, distinct, ctes, unions, virtual_rows,
+                                limit, offset, distinct, ctes, unions, virtual_rows, for_lock,
                             });
                         }
                         // Try range scan
@@ -1998,7 +2033,7 @@ impl Planner {
                                 projections, visible_projection_count,
                                 filter: residual,
                                 group_by, grouping_sets, having, order_by,
-                                limit, offset, distinct, ctes, unions, virtual_rows,
+                                limit, offset, distinct, ctes, unions, virtual_rows, for_lock,
                             });
                         }
                     }
@@ -2010,7 +2045,7 @@ impl Planner {
         Ok(PhysicalPlan::SeqScan {
             table_id, schema, projections, visible_projection_count,
             filter, group_by, grouping_sets, having, order_by,
-            limit, offset, distinct, ctes, unions, virtual_rows,
+            limit, offset, distinct, ctes, unions, virtual_rows, for_lock,
         })
     }
 
@@ -2098,7 +2133,7 @@ impl Planner {
             table_id, schema, vec![], 0,
             filter, vec![], vec![], None, order_by,
             limit, offset, distinct, ctes, unions, virtual_rows,
-            stats, indexes,
+            RowLockMode::None, stats, indexes,
         )
     }
 }

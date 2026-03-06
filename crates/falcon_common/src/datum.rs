@@ -32,6 +32,11 @@ pub enum Datum {
     Uuid(u128),
     /// BYTEA: arbitrary binary data.
     Bytea(Vec<u8>),
+    /// TSVECTOR: sorted list of (lexeme, positions) pairs.
+    /// Each entry: (word, vec of 1-indexed positions).
+    TsVector(Vec<(String, Vec<u16>)>),
+    /// TSQUERY: full-text search query tree serialized as string.
+    TsQuery(String),
 }
 
 impl Datum {
@@ -59,6 +64,8 @@ impl Datum {
             Self::Interval(_, _, _) => Some(DataType::Interval),
             Self::Uuid(_) => Some(DataType::Uuid),
             Self::Bytea(_) => Some(DataType::Bytea),
+            Self::TsVector(_) => Some(DataType::TsVector),
+            Self::TsQuery(_) => Some(DataType::TsQuery),
         }
     }
 
@@ -144,6 +151,18 @@ impl Datum {
                 let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
                 Some(format!("\\x{hex}"))
             }
+            Self::TsVector(entries) => {
+                let parts: Vec<String> = entries.iter().map(|(word, positions)| {
+                    if positions.is_empty() {
+                        format!("'{word}'")
+                    } else {
+                        let pos_str: Vec<String> = positions.iter().map(|p| p.to_string()).collect();
+                        format!("'{word}':{}", pos_str.join(","))
+                    }
+                }).collect();
+                Some(parts.join(" "))
+            }
+            Self::TsQuery(q) => Some(q.clone()),
         }
     }
 
@@ -298,6 +317,19 @@ impl fmt::Display for Datum {
                 }
                 Ok(())
             }
+            Self::TsVector(entries) => {
+                for (i, (word, positions)) in entries.iter().enumerate() {
+                    if i > 0 { write!(f, " ")?; }
+                    if positions.is_empty() {
+                        write!(f, "'{word}'")?;
+                    } else {
+                        let pos_str: Vec<String> = positions.iter().map(|p| p.to_string()).collect();
+                        write!(f, "'{word}':{}", pos_str.join(","))?;
+                    }
+                }
+                Ok(())
+            }
+            Self::TsQuery(q) => write!(f, "{q}"),
         }
     }
 }
@@ -437,6 +469,15 @@ impl Hash for Datum {
                 13u8.hash(state);
                 bytes.hash(state);
             }
+            Self::TsVector(entries) => {
+                14u8.hash(state);
+                entries.len().hash(state);
+                for (w, _) in entries { w.hash(state); }
+            }
+            Self::TsQuery(q) => {
+                15u8.hash(state);
+                q.hash(state);
+            }
         }
     }
 }
@@ -513,7 +554,12 @@ impl PartialOrd for Datum {
 
 impl Ord for Datum {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.partial_cmp(other).unwrap_or(Ordering::Equal)
+        match (self.is_null(), other.is_null()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater, // NULL sorts last
+            (false, true) => Ordering::Less,
+            (false, false) => self.partial_cmp(other).unwrap_or(Ordering::Equal),
+        }
     }
 }
 

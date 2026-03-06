@@ -3,26 +3,44 @@ use falcon_common::datum::Datum;
 use falcon_common::error::ExecutionError;
 use falcon_sql_frontend::types::ScalarFunc;
 
+use std::cell::Cell;
+
+thread_local! {
+    static STMT_TS_US: Cell<i64> = const { Cell::new(0) };
+}
+
+pub fn set_statement_ts(us: i64) {
+    STMT_TS_US.with(|c| c.set(us));
+}
+
+fn statement_ts() -> i64 {
+    STMT_TS_US.with(|c| {
+        let v = c.get();
+        if v != 0 { v } else { chrono::Utc::now().timestamp_micros() }
+    })
+}
+
 /// Dispatch a time/date-domain scalar function.
 pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionError> {
     match func {
-        ScalarFunc::Now => {
-            let now = chrono::Utc::now();
-            let us = now.timestamp_micros();
-            Ok(Datum::Timestamp(us))
-        }
+        ScalarFunc::Now => Ok(Datum::Timestamp(statement_ts())),
         ScalarFunc::CurrentDate => {
-            let now = chrono::Utc::now();
+            let us = statement_ts();
+            let secs = us / 1_000_000;
+            let dt = chrono::DateTime::from_timestamp(secs, 0)
+                .ok_or(ExecutionError::NumericOverflow)?;
             let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
                 .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or(chrono::NaiveDate::MIN));
-            let days = i32::try_from((now.date_naive() - epoch).num_days())
+            let days = i32::try_from((dt.date_naive() - epoch).num_days())
                 .map_err(|_| ExecutionError::NumericOverflow)?;
             Ok(Datum::Date(days))
         }
         ScalarFunc::CurrentTime => {
-            let now = chrono::Utc::now();
-            let time_str = now.format("%H:%M:%S").to_string();
-            Ok(Datum::Text(time_str))
+            let us = statement_ts();
+            let secs = us / 1_000_000;
+            let dt = chrono::DateTime::from_timestamp(secs, 0)
+                .ok_or(ExecutionError::NumericOverflow)?;
+            Ok(Datum::Text(dt.format("%H:%M:%S").to_string()))
         }
         ScalarFunc::Extract => {
             // EXTRACT(field FROM timestamp) — args: [field_text, timestamp]

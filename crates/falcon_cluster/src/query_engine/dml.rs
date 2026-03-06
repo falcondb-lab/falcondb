@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use falcon_common::datum::{Datum, OwnedRow};
 use falcon_common::error::FalconError;
-use falcon_common::types::{DataType, IsolationLevel, ShardId};
+use falcon_common::types::{DataType, IsolationLevel, ShardId, TxnId};
 use falcon_executor::executor::{ExecutionResult, Executor};
 use falcon_planner::plan::PhysicalPlan;
 use falcon_sql_frontend::types::BoundExpr;
@@ -156,9 +156,12 @@ impl super::DistributedQueryEngine {
             return self.execute_on_shard_auto_txn(*sid, sp);
         }
 
-        // Execute per-shard INSERTs in parallel
+        // Two-phase execution for cross-shard atomicity:
+        // Phase 1: execute on all shards without committing
         let shard_count = shard_plans.len();
-        let results: Vec<(ShardId, Result<ExecutionResult, FalconError>)> =
+        let snapshot_ts = self.engine.consistent_snapshot_ts();
+
+        let phase1: Vec<(ShardId, TxnId, Result<ExecutionResult, FalconError>)> =
             std::thread::scope(|s| {
                 let handles: Vec<_> = shard_plans
                     .iter()
@@ -166,81 +169,99 @@ impl super::DistributedQueryEngine {
                         let engine = &self.engine;
                         let sid = *shard_id;
                         s.spawn(move || {
-                            let shard = engine.shard(sid).ok_or_else(|| {
-                                FalconError::internal_bug(
-                                    "E-QE-012",
-                                    format!("Shard {sid:?} not found"),
-                                    "exec_insert_split parallel",
-                                )
-                            })?;
+                            let shard = match engine.shard(sid) {
+                                Some(s) => s,
+                                None => {
+                                    return (
+                                        sid,
+                                        TxnId(0),
+                                        Err(FalconError::internal_bug(
+                                            "E-QE-012",
+                                            format!("Shard {sid:?} not found"),
+                                            "exec_insert_split parallel",
+                                        )),
+                                    )
+                                }
+                            };
                             let local_exec =
                                 Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
-                            let txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
+                            let txn = shard.txn_mgr.begin_at_snapshot_on_shard(snapshot_ts, IsolationLevel::ReadCommitted, sid);
+                            let txn_id = txn.txn_id;
                             let result = local_exec.execute(shard_plan, Some(&txn));
-                            match &result {
-                                Ok(_) => {
-                                    let _ = shard.txn_mgr.commit(txn.txn_id);
-                                }
-                                Err(_) => {
-                                    let _ = shard.txn_mgr.abort(txn.txn_id);
-                                }
-                            }
-                            result
+                            shard.storage.flush_local_cache();
+                            (sid, txn_id, result)
                         })
                     })
                     .collect();
-                shard_plans
-                    .iter()
-                    .map(|(sid, _)| *sid)
-                    .zip(handles.into_iter().map(|h| {
+                handles
+                    .into_iter()
+                    .map(|h| {
                         h.join().unwrap_or_else(|_| {
-                            Err(FalconError::internal_bug(
-                                "E-QE-002",
-                                "shard thread panicked",
-                                "exec_dist_plan scatter",
-                            ))
+                            (
+                                ShardId(0),
+                                TxnId(0),
+                                Err(FalconError::internal_bug(
+                                    "E-QE-002",
+                                    "shard thread panicked",
+                                    "exec_insert_split phase1",
+                                )),
+                            )
                         })
-                    }))
+                    })
                     .collect()
             });
 
-        let mut total_rows_affected = 0u64;
-        let mut tag: &'static str = "INSERT";
-        let mut errors: Vec<String> = Vec::new();
-        let mut succeeded = 0usize;
+        // Phase 2: commit all on success, abort all on any failure
+        let mut all_ok = phase1.iter().all(|(_, _, r)| r.is_ok());
 
-        for (sid, result) in results {
-            match result {
-                Ok(ExecutionResult::Dml {
-                    rows_affected,
-                    tag: t,
-                }) => {
-                    total_rows_affected += rows_affected;
-                    tag = t;
-                    succeeded += 1;
+        // WAL prepare before decision — if any prepare fails, downgrade to abort
+        if all_ok {
+            for (sid, txn_id, _) in &phase1 {
+                if *txn_id != TxnId(0) {
+                    if let Some(shard) = self.engine.shard(*sid) {
+                        if let Err(e) = shard.storage.prepare_txn(*txn_id) {
+                            tracing::error!(shard = ?sid, txn = txn_id.0, error = %e, "WAL prepare failed — aborting all");
+                            all_ok = false;
+                            break;
+                        }
+                    }
                 }
-                Ok(other) => return Ok(other),
-                Err(e) => errors.push(format!("shard {sid:?}: {e}")),
             }
         }
 
-        if !errors.is_empty() {
-            return Err(FalconError::Transient {
-                reason: format!(
-                    "INSERT failed on {}/{} shards ({} succeeded): {}",
-                    errors.len(),
-                    shard_count,
-                    succeeded,
-                    errors.join("; ")
-                ),
-                retry_after_ms: 100,
-            });
+        // Log coordinator decision durably BEFORE applying
+        let shard_ids: Vec<ShardId> = phase1.iter().map(|(sid, _, _)| *sid).collect();
+        let global_txn_id = self.two_pc.alloc_global_txn_id();
+        let decision = if all_ok {
+            crate::deterministic_2pc::CoordinatorDecision::Commit
+        } else {
+            crate::deterministic_2pc::CoordinatorDecision::Abort
+        };
+        if let Some(log) = self.two_pc.decision_log() {
+            log.log_decision(global_txn_id, decision, &shard_ids, 0);
         }
 
-        Ok(ExecutionResult::Dml {
-            rows_affected: total_rows_affected,
-            tag,
-        })
+        for (sid, txn_id, _) in &phase1 {
+            if let Some(shard) = self.engine.shard(*sid) {
+                if *txn_id != TxnId(0) {
+                    if all_ok {
+                        let _ = shard.txn_mgr.commit(*txn_id);
+                    } else {
+                        let _ = shard.txn_mgr.abort(*txn_id);
+                    }
+                }
+            }
+        }
+
+        if let Some(log) = self.two_pc.decision_log() {
+            log.mark_applied(global_txn_id);
+        }
+
+        let results: Vec<(ShardId, Result<ExecutionResult, FalconError>)> = phase1
+            .into_iter()
+            .map(|(sid, _, r)| (sid, r))
+            .collect();
+        Self::merge_dml_results(results, shard_count)
     }
 
     /// Execute INSERT ... SELECT at coordinator level: run the SELECT across
@@ -378,13 +399,21 @@ impl super::DistributedQueryEngine {
     }
 
     /// Execute a DML plan on a specific subset of shards (IN-list pruning).
+    ///
+    /// fix58: All shard transactions start at the same consistent snapshot timestamp.
+    /// fix59: Two-phase execution — run DML on all shards first, then commit all on
+    ///        success or abort all on any failure, ensuring cross-shard atomicity.
     pub(crate) fn exec_dml_on_shards(
         &self,
         plan: &PhysicalPlan,
         shards: &[ShardId],
     ) -> Result<ExecutionResult, FalconError> {
         let shard_count = shards.len();
-        let results: Vec<(u64, Result<ExecutionResult, FalconError>)> = std::thread::scope(|s| {
+        // fix58: consistent snapshot across all shards
+        let snapshot_ts = self.engine.consistent_snapshot_ts();
+
+        // Phase 1: execute on all shards, do not commit yet
+        let phase1: Vec<(u64, TxnId, Result<ExecutionResult, FalconError>)> = std::thread::scope(|s| {
             let handles: Vec<_> = shards
                 .iter()
                 .map(|sid| {
@@ -397,27 +426,22 @@ impl super::DistributedQueryEngine {
                             None => {
                                 return (
                                     shard_id,
+                                    TxnId(0),
                                     Err(FalconError::internal_bug(
                                         "E-QE-004",
                                         format!("DML dispatch: shard {shard_id} not found"),
-                                        "execute_dml_on_shards",
+                                        "exec_dml_on_shards",
                                     )),
                                 )
                             }
                         };
                         let local_exec =
                             Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
-                        let txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
+                        let txn = shard.txn_mgr.begin_at_snapshot_on_shard(snapshot_ts, IsolationLevel::ReadCommitted, *sid);
+                        let txn_id = txn.txn_id;
                         let result = local_exec.execute(plan_ref, Some(&txn));
-                        match &result {
-                            Ok(_) => {
-                                let _ = shard.txn_mgr.commit(txn.txn_id);
-                            }
-                            Err(_) => {
-                                let _ = shard.txn_mgr.abort(txn.txn_id);
-                            }
-                        }
-                        (shard_id, result)
+                        shard.storage.flush_local_cache();
+                        (shard_id, txn_id, result)
                     })
                 })
                 .collect();
@@ -427,10 +451,11 @@ impl super::DistributedQueryEngine {
                     h.join().unwrap_or_else(|_| {
                         (
                             0,
+                            TxnId(0),
                             Err(FalconError::internal_bug(
                                 "E-QE-005",
                                 "DML dispatch: shard thread panicked",
-                                "std::thread::JoinHandle returned Err",
+                                "exec_dml_on_shards phase1",
                             )),
                         )
                     })
@@ -438,6 +463,56 @@ impl super::DistributedQueryEngine {
                 .collect()
         });
 
+        // Phase 2: fix59 — commit all on success, abort all on any failure
+        let mut all_ok = phase1.iter().all(|(_, _, r)| r.is_ok());
+
+        // WAL prepare before decision — if any prepare fails, downgrade to abort
+        if all_ok {
+            for (shard_id, txn_id, _) in &phase1 {
+                if *txn_id != TxnId(0) {
+                    if let Some(shard) = self.engine.shard(ShardId(*shard_id)) {
+                        if let Err(e) = shard.storage.prepare_txn(*txn_id) {
+                            tracing::error!(shard = shard_id, txn = txn_id.0, error = %e, "WAL prepare failed — aborting all");
+                            all_ok = false;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Log coordinator decision durably BEFORE applying
+        let dml_shard_ids: Vec<ShardId> = phase1.iter().map(|(sid, _, _)| ShardId(*sid)).collect();
+        let global_txn_id = self.two_pc.alloc_global_txn_id();
+        let decision = if all_ok {
+            crate::deterministic_2pc::CoordinatorDecision::Commit
+        } else {
+            crate::deterministic_2pc::CoordinatorDecision::Abort
+        };
+        if let Some(log) = self.two_pc.decision_log() {
+            log.log_decision(global_txn_id, decision, &dml_shard_ids, 0);
+        }
+
+        for (shard_id, txn_id, _) in &phase1 {
+            if let Some(shard) = self.engine.shard(ShardId(*shard_id)) {
+                if *txn_id != TxnId(0) {
+                    if all_ok {
+                        let _ = shard.txn_mgr.commit(*txn_id);
+                    } else {
+                        let _ = shard.txn_mgr.abort(*txn_id);
+                    }
+                }
+            }
+        }
+
+        if let Some(log) = self.two_pc.decision_log() {
+            log.mark_applied(global_txn_id);
+        }
+
+        let results: Vec<(u64, Result<ExecutionResult, FalconError>)> = phase1
+            .into_iter()
+            .map(|(sid, _, r)| (sid, r))
+            .collect();
         Self::merge_dml_results(results, shard_count)
     }
 
@@ -509,11 +584,17 @@ impl super::DistributedQueryEngine {
     }
 
     /// Execute a DML plan (UPDATE/DELETE) on ALL shards in parallel, summing rows_affected.
-    /// Collects partial results even when some shards fail, reporting all errors.
+    ///
+    /// fix58: consistent snapshot timestamp across all shards.
+    /// fix59: Two-phase execution — commit all on success, abort all on failure.
     pub(crate) fn exec_dml_all_shards(&self, plan: &PhysicalPlan) -> Result<ExecutionResult, FalconError> {
         let shard_count = self.engine.all_shards().len();
-        let results: Vec<(usize, Result<ExecutionResult, FalconError>)> = std::thread::scope(|s| {
-            #[allow(clippy::needless_collect)] // scoped JoinHandles must be stored before joining
+        // fix58: consistent snapshot
+        let snapshot_ts = self.engine.consistent_snapshot_ts();
+
+        // Phase 1: execute DML on all shards without committing
+        let phase1: Vec<(usize, TxnId, Result<ExecutionResult, FalconError>)> = std::thread::scope(|s| {
+            #[allow(clippy::needless_collect)]
             let handles: Vec<_> = self
                 .engine
                 .all_shards()
@@ -524,17 +605,11 @@ impl super::DistributedQueryEngine {
                     s.spawn(move || {
                         let local_exec =
                             Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
-                        let txn = shard.txn_mgr.begin(IsolationLevel::ReadCommitted);
+                        let txn = shard.txn_mgr.begin_at_snapshot_on_shard(snapshot_ts, IsolationLevel::ReadCommitted, shard.shard_id);
+                        let txn_id = txn.txn_id;
                         let result = local_exec.execute(plan_ref, Some(&txn));
-                        match &result {
-                            Ok(_) => {
-                                let _ = shard.txn_mgr.commit(txn.txn_id);
-                            }
-                            Err(_) => {
-                                let _ = shard.txn_mgr.abort(txn.txn_id);
-                            }
-                        }
-                        (idx, result)
+                        shard.storage.flush_local_cache();
+                        (idx, txn_id, result)
                     })
                 })
                 .collect();
@@ -544,10 +619,11 @@ impl super::DistributedQueryEngine {
                     h.join().unwrap_or_else(|_| {
                         (
                             usize::MAX,
+                            TxnId(0),
                             Err(FalconError::internal_bug(
                                 "E-QE-004",
                                 "shard thread panicked",
-                                "exec_dml_all_shards",
+                                "exec_dml_all_shards phase1",
                             )),
                         )
                     })
@@ -555,6 +631,58 @@ impl super::DistributedQueryEngine {
                 .collect()
         });
 
+        // Phase 2: fix59 — commit all on success, abort all on any failure
+        let mut all_ok = phase1.iter().all(|(_, _, r)| r.is_ok());
+
+        // WAL prepare before decision — if any prepare fails, downgrade to abort
+        if all_ok {
+            for (idx, txn_id, _) in &phase1 {
+                if *txn_id != TxnId(0) {
+                    if let Some(shard) = self.engine.shard_by_index(*idx) {
+                        if let Err(e) = shard.storage.prepare_txn(*txn_id) {
+                            tracing::error!(shard = idx, txn = txn_id.0, error = %e, "WAL prepare failed — aborting all");
+                            all_ok = false;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Log coordinator decision durably BEFORE applying
+        let all_shard_ids: Vec<ShardId> = self.engine.all_shards().iter().map(|s| s.shard_id).collect();
+        let global_txn_id = self.two_pc.alloc_global_txn_id();
+        let decision = if all_ok {
+            crate::deterministic_2pc::CoordinatorDecision::Commit
+        } else {
+            crate::deterministic_2pc::CoordinatorDecision::Abort
+        };
+        if let Some(log) = self.two_pc.decision_log() {
+            log.log_decision(global_txn_id, decision, &all_shard_ids, 0);
+        }
+
+        for (idx, txn_id, _) in &phase1 {
+            if let Some(shard) = self.engine.shard_by_index(*idx) {
+                if *txn_id != TxnId(0) {
+                    if all_ok {
+                        if let Err(e) = shard.txn_mgr.commit(*txn_id) {
+                            tracing::error!(shard = idx, txn = txn_id.0, error = %e, "commit failed in exec_dml_all_shards");
+                        }
+                    } else {
+                        let _ = shard.txn_mgr.abort(*txn_id);
+                    }
+                }
+            }
+        }
+
+        if let Some(log) = self.two_pc.decision_log() {
+            log.mark_applied(global_txn_id);
+        }
+
+        let results: Vec<(usize, Result<ExecutionResult, FalconError>)> = phase1
+            .into_iter()
+            .map(|(idx, _, r)| (idx, r))
+            .collect();
         Self::merge_dml_results(results, shard_count)
     }
 }

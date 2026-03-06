@@ -318,6 +318,12 @@ fn encode_datum_for_hash(buf: &mut Vec<u8>, datum: &Datum) {
             buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
             buf.extend_from_slice(bytes);
         }
+        Datum::TsVector(_) | Datum::TsQuery(_) => {
+            buf.push(0x0F);
+            let s = format!("{datum}");
+            buf.extend_from_slice(s.as_bytes());
+            buf.push(0x00);
+        }
     }
 }
 
@@ -346,7 +352,7 @@ mod tests {
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(1),
@@ -355,7 +361,7 @@ mod tests {
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 },
             ],
             primary_key_columns: vec![0],
@@ -428,7 +434,7 @@ mod tests {
                 nullable: false,
                 is_primary_key: true,
                 default_value: None,
-                is_serial: false,
+                is_serial: false, max_length: None,
             }],
             primary_key_columns: vec![0],
             shard_key: vec![0],
@@ -514,7 +520,7 @@ mod tests {
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(1),
@@ -523,7 +529,7 @@ mod tests {
                     nullable: false,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(2),
@@ -532,7 +538,7 @@ mod tests {
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 },
             ],
             primary_key_columns: vec![0],
@@ -553,7 +559,7 @@ mod tests {
                 nullable: false,
                 is_primary_key: true,
                 default_value: None,
-                is_serial: false,
+                is_serial: false, max_length: None,
             }],
             primary_key_columns: vec![0],
             sharding_policy: ShardingPolicy::Reference,

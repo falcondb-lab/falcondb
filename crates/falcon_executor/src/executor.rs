@@ -312,6 +312,7 @@ impl Executor {
         plan: &PhysicalPlan,
         txn: Option<&TxnHandle>,
     ) -> Result<ExecutionResult, FalconError> {
+        crate::eval::scalar_time::set_statement_ts(chrono::Utc::now().timestamp_micros());
         match plan {
             PhysicalPlan::CreateDatabase {
                 name,
@@ -641,6 +642,18 @@ impl Executor {
                     txn,
                 )
             }
+            PhysicalPlan::Merge(merge) => {
+                self.reject_if_read_only("MERGE")?;
+                self.check_privilege(Privilege::Insert, ObjectType::Table, &merge.target_name)?;
+                self.check_privilege(Privilege::Update, ObjectType::Table, &merge.target_name)?;
+                self.check_privilege(Privilege::Delete, ObjectType::Table, &merge.target_name)?;
+                let txn = txn.ok_or_else(|| FalconError::Internal(
+                    "MERGE requires active transaction".into(),
+                ))?;
+                Self::reject_if_txn_read_only(txn, "MERGE")?;
+                Self::check_txn_timeout(txn)?;
+                self.exec_merge(merge, txn)
+            }
             PhysicalPlan::SeqScan {
                 table_id,
                 schema,
@@ -657,11 +670,13 @@ impl Executor {
                 ctes,
                 unions,
                 virtual_rows,
+                for_lock,
             } => {
                 self.check_privilege(Privilege::Select, ObjectType::Table, &schema.name)?;
                 let txn = txn.ok_or_else(|| FalconError::Internal(
                     "SELECT requires active transaction".into(),
                 ))?;
+                self.register_row_locks(*table_id, for_lock, txn)?;
                 // Materialize CTEs
                 let cte_data = self.materialize_ctes(ctes, txn)?;
                 let mut result = self.exec_seq_scan(
@@ -701,11 +716,13 @@ impl Executor {
                 distinct,
                 ctes,
                 unions,
+                for_lock,
             } => {
                 self.check_privilege(Privilege::Select, ObjectType::Table, &schema.name)?;
                 let txn = txn.ok_or_else(|| FalconError::Internal(
                     "SELECT requires active transaction".into(),
                 ))?;
+                self.register_row_locks(*table_id, for_lock, txn)?;
 
                 // All columnar paths (pure AGG, GROUP BY AGG, plain scan) are
                 // handled inside exec_seq_scan to avoid calling scan_columnar twice.
@@ -750,10 +767,12 @@ impl Executor {
                 ctes,
                 unions,
                 virtual_rows,
+                for_lock,
             } => {
                 let txn = txn.ok_or_else(|| FalconError::Internal(
                     "SELECT requires active transaction".into(),
                 ))?;
+                self.register_row_locks(*table_id, for_lock, txn)?;
                 let cte_data = self.materialize_ctes(ctes, txn)?;
                 let mut result = self.exec_index_scan(
                     *table_id,
@@ -798,10 +817,12 @@ impl Executor {
                 ctes,
                 unions,
                 virtual_rows,
+                for_lock,
             } => {
                 let txn = txn.ok_or_else(|| FalconError::Internal(
                     "SELECT requires active transaction".into(),
                 ))?;
+                self.register_row_locks(*table_id, for_lock, txn)?;
                 let cte_data = self.materialize_ctes(ctes, txn)?;
                 let mut result = self.exec_index_range_scan(
                     *table_id,
@@ -1030,6 +1051,33 @@ impl Executor {
                 self.storage.drop_view(name, *if_exists)?;
                 Ok(ExecutionResult::Ddl {
                     message: format!("DROP VIEW {name}"),
+                })
+            }
+            PhysicalPlan::CreateMaterializedView { name, query_sql } => {
+                self.reject_if_read_only("CREATE MATERIALIZED VIEW")?;
+                let txn = txn.ok_or_else(|| FalconError::Internal(
+                    "CREATE MATERIALIZED VIEW requires active transaction".into(),
+                ))?;
+                self.exec_create_materialized_view(name, query_sql, txn)?;
+                Ok(ExecutionResult::Ddl {
+                    message: format!("CREATE MATERIALIZED VIEW {name}"),
+                })
+            }
+            PhysicalPlan::DropMaterializedView { name, if_exists } => {
+                self.reject_if_read_only("DROP MATERIALIZED VIEW")?;
+                self.storage.drop_materialized_view(name, *if_exists)?;
+                Ok(ExecutionResult::Ddl {
+                    message: format!("DROP MATERIALIZED VIEW {name}"),
+                })
+            }
+            PhysicalPlan::RefreshMaterializedView { name } => {
+                self.reject_if_read_only("REFRESH MATERIALIZED VIEW")?;
+                let txn = txn.ok_or_else(|| FalconError::Internal(
+                    "REFRESH MATERIALIZED VIEW requires active transaction".into(),
+                ))?;
+                self.exec_refresh_materialized_view(name, txn)?;
+                Ok(ExecutionResult::Ddl {
+                    message: format!("REFRESH MATERIALIZED VIEW {name}"),
                 })
             }
             PhysicalPlan::DropIndex { index_name } => {
@@ -1342,11 +1390,232 @@ impl Executor {
                     txn,
                 )
             }
+            PhysicalPlan::CreateFunction { def } => {
+                self.reject_if_read_only("CREATE FUNCTION")?;
+                self.storage
+                    .create_function(def.clone())
+                    .map_err(FalconError::Storage)?;
+                Ok(ExecutionResult::Ddl {
+                    message: "CREATE FUNCTION".to_owned(),
+                })
+            }
+            PhysicalPlan::DropFunction { name, if_exists } => {
+                self.reject_if_read_only("DROP FUNCTION")?;
+                match self.storage.drop_function(name) {
+                    Ok(()) => Ok(ExecutionResult::Ddl {
+                        message: "DROP FUNCTION".to_owned(),
+                    }),
+                    Err(falcon_common::error::StorageError::FunctionNotFound(_))
+                        if *if_exists =>
+                    {
+                        Ok(ExecutionResult::Ddl {
+                            message: "DROP FUNCTION".to_owned(),
+                        })
+                    }
+                    Err(e) => Err(e.into()),
+                }
+            }
+            PhysicalPlan::CallProcedure { name, args } => {
+                let txn = txn.ok_or_else(|| FalconError::Internal(
+                    "CALL requires active transaction".into(),
+                ))?;
+                self.exec_call_procedure(name, args, txn)
+            }
             PhysicalPlan::DistPlan { .. } => Err(FalconError::Internal(
                 "DistPlan must be executed via DistributedQueryEngine, not the local Executor"
                     .into(),
             )),
         }
+    }
+
+    fn datum_to_sql_literal(d: &Datum) -> String {
+        match d {
+            Datum::Null => "NULL".to_owned(),
+            Datum::Boolean(b) => if *b { "TRUE".to_owned() } else { "FALSE".to_owned() },
+            Datum::Int32(i) => i.to_string(),
+            Datum::Int64(i) => i.to_string(),
+            Datum::Float64(f) => format!("{}", f),
+            Datum::Text(s) => format!("'{}'", s.replace('\'', "''")),
+            other => format!("'{}'", other),
+        }
+    }
+
+    pub(crate) fn eval_user_function(
+        &self,
+        name: &str,
+        args: &[BoundExpr],
+        row: &OwnedRow,
+    ) -> Result<Datum, FalconError> {
+        use falcon_common::schema::FunctionLanguage;
+
+        let catalog = self.storage.get_catalog();
+        let func_def = catalog.find_function(name).ok_or_else(|| {
+            FalconError::Execution(ExecutionError::TypeError(format!(
+                "function \"{}\" does not exist", name
+            )))
+        })?.clone();
+
+        let arg_vals: Vec<Datum> = args
+            .iter()
+            .map(|a| self.eval_expr_with_sequences(a, row))
+            .collect::<Result<_, _>>()?;
+
+        let eval_sql = |sql: &str, vars: &std::collections::HashMap<String, Datum>| -> Result<Datum, ExecutionError> {
+            let mut resolved = sql.to_owned();
+            for (k, v) in vars {
+                resolved = resolved.replace(k, &Self::datum_to_sql_literal(v));
+            }
+            let select_sql = if resolved.to_uppercase().starts_with("SELECT ") {
+                resolved
+            } else {
+                format!("SELECT {}", resolved)
+            };
+            let dialect = sqlparser::dialect::PostgreSqlDialect {};
+            let stmts = sqlparser::parser::Parser::parse_sql(&dialect, &select_sql)
+                .map_err(|e| ExecutionError::TypeError(format!("SQL parse: {e}")))?;
+            let stmt = stmts.into_iter().next()
+                .ok_or_else(|| ExecutionError::TypeError("empty SQL".into()))?;
+            let cat = self.storage.get_catalog();
+            let mut binder = falcon_sql_frontend::binder::Binder::new(cat);
+            let bound = binder.bind(&stmt)
+                .map_err(|e| ExecutionError::TypeError(format!("bind: {e}")))?;
+            let plan = falcon_planner::Planner::plan(&bound)
+                .map_err(|e| ExecutionError::TypeError(format!("plan: {e}")))?;
+            let result = self.execute(&plan, None)
+                .map_err(|e| ExecutionError::TypeError(format!("exec: {e}")))?;
+            match result {
+                ExecutionResult::Query { rows, .. } => {
+                    Ok(rows.into_iter().next()
+                        .and_then(|r| r.values.into_iter().next())
+                        .unwrap_or(Datum::Null))
+                }
+                _ => Ok(Datum::Null),
+            }
+        };
+
+        let result = match func_def.language {
+            FunctionLanguage::Sql => {
+                crate::plpgsql::execute_sql_function(&func_def, &arg_vals, eval_sql)
+                    .map_err(FalconError::Execution)?
+            }
+            FunctionLanguage::PlPgSql => {
+                crate::plpgsql::execute_plpgsql(&func_def, &arg_vals, eval_sql)
+                    .map_err(FalconError::Execution)?
+            }
+        };
+        Ok(result)
+    }
+
+    fn exec_call_procedure(
+        &self,
+        name: &str,
+        args: &[BoundExpr],
+        txn: &TxnHandle,
+    ) -> Result<ExecutionResult, FalconError> {
+        use falcon_common::schema::FunctionLanguage;
+
+        let catalog = self.storage.get_catalog();
+        let func_def = catalog.find_function(name).ok_or_else(|| {
+            FalconError::Execution(ExecutionError::TypeError(format!(
+                "function \"{}\" does not exist", name
+            )))
+        })?.clone();
+
+        let empty_row = OwnedRow::empty();
+        let arg_vals: Vec<Datum> = args
+            .iter()
+            .map(|a| crate::eval::eval_expr(a, &empty_row))
+            .collect::<Result<_, _>>()
+            .map_err(FalconError::Execution)?;
+
+        let eval_sql = |sql: &str, vars: &std::collections::HashMap<String, Datum>| -> Result<Datum, ExecutionError> {
+            // Substitute PL/pgSQL variables ($1, $2, named) in the SQL string
+            let mut resolved = sql.to_owned();
+            for (k, v) in vars {
+                let placeholder = if k.starts_with('$') { k.clone() } else { k.clone() };
+                resolved = resolved.replace(&placeholder, &Self::datum_to_sql_literal(v));
+            }
+            // Try evaluating as a simple SELECT expression
+            let select_sql = if resolved.to_uppercase().starts_with("SELECT ") {
+                resolved.clone()
+            } else {
+                format!("SELECT {}", resolved)
+            };
+            // Parse + bind + plan + execute within current txn
+            match self.eval_sql_expr_in_txn(&select_sql, txn) {
+                Ok(val) => Ok(val),
+                Err(_) => {
+                    // If it fails as expression, try as statement
+                    match self.eval_sql_stmt_in_txn(&resolved, txn) {
+                        Ok(_) => Ok(Datum::Null),
+                        Err(e) => Err(ExecutionError::TypeError(format!(
+                            "PL/pgSQL eval error: {e}"
+                        ))),
+                    }
+                }
+            }
+        };
+
+        let result = match func_def.language {
+            FunctionLanguage::Sql => {
+                crate::plpgsql::execute_sql_function(&func_def, &arg_vals, eval_sql)
+                    .map_err(FalconError::Execution)?
+            }
+            FunctionLanguage::PlPgSql => {
+                crate::plpgsql::execute_plpgsql(&func_def, &arg_vals, eval_sql)
+                    .map_err(FalconError::Execution)?
+            }
+        };
+
+        Ok(ExecutionResult::Ddl {
+            message: format!("CALL {}", result),
+        })
+    }
+
+    fn eval_sql_expr_in_txn(
+        &self,
+        sql: &str,
+        txn: &TxnHandle,
+    ) -> Result<Datum, FalconError> {
+        let dialect = sqlparser::dialect::PostgreSqlDialect {};
+        let stmts = sqlparser::parser::Parser::parse_sql(&dialect, sql)
+            .map_err(|e| FalconError::Execution(ExecutionError::TypeError(format!("SQL parse: {e}"))))?;
+        let stmt = stmts.into_iter().next()
+            .ok_or_else(|| FalconError::Execution(ExecutionError::TypeError("empty SQL".into())))?;
+        let catalog = self.storage.get_catalog();
+        let mut binder = falcon_sql_frontend::binder::Binder::new(catalog);
+        let bound = binder.bind(&stmt)
+            .map_err(|e| FalconError::Execution(ExecutionError::TypeError(format!("bind: {e}"))))?;
+        let plan = falcon_planner::Planner::plan(&bound)
+            .map_err(|e| FalconError::Execution(ExecutionError::TypeError(format!("plan: {e}"))))?;
+        let result = self.execute(&plan, Some(txn))?;
+        match result {
+            ExecutionResult::Query { rows, .. } => {
+                Ok(rows.into_iter().next()
+                    .and_then(|r| r.values.into_iter().next())
+                    .unwrap_or(Datum::Null))
+            }
+            _ => Ok(Datum::Null),
+        }
+    }
+
+    fn eval_sql_stmt_in_txn(
+        &self,
+        sql: &str,
+        txn: &TxnHandle,
+    ) -> Result<ExecutionResult, FalconError> {
+        let dialect = sqlparser::dialect::PostgreSqlDialect {};
+        let stmts = sqlparser::parser::Parser::parse_sql(&dialect, sql)
+            .map_err(|e| FalconError::Execution(ExecutionError::TypeError(format!("SQL parse: {e}"))))?;
+        let stmt = stmts.into_iter().next()
+            .ok_or_else(|| FalconError::Execution(ExecutionError::TypeError("empty SQL".into())))?;
+        let catalog = self.storage.get_catalog();
+        let mut binder = falcon_sql_frontend::binder::Binder::new(catalog);
+        let bound = binder.bind(&stmt)
+            .map_err(|e| FalconError::Execution(ExecutionError::TypeError(format!("bind: {e}"))))?;
+        let plan = falcon_planner::Planner::plan(&bound)
+            .map_err(|e| FalconError::Execution(ExecutionError::TypeError(format!("plan: {e}"))))?;
+        self.execute(&plan, Some(txn))
     }
 
     fn exec_create_table(
@@ -1984,6 +2253,21 @@ impl Executor {
                     lines.push(format!("{}  Returning: {} column(s)", pad, returning.len()));
                 }
                 lines
+            }
+            PhysicalPlan::Merge(m) => {
+                vec![format!(
+                    "{}Merge on {} using {} ({} clauses)",
+                    pad, m.target_name, m.source_name, m.clauses.len()
+                )]
+            }
+            PhysicalPlan::CreateMaterializedView { name, .. } => {
+                vec![format!("{}CreateMaterializedView {}", pad, name)]
+            }
+            PhysicalPlan::DropMaterializedView { name, .. } => {
+                vec![format!("{}DropMaterializedView {}", pad, name)]
+            }
+            PhysicalPlan::RefreshMaterializedView { name } => {
+                vec![format!("{}RefreshMaterializedView {}", pad, name)]
             }
             PhysicalPlan::CreateDatabase {
                 name,

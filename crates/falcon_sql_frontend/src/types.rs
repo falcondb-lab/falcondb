@@ -12,6 +12,7 @@ pub enum BoundStatement {
     Insert(BoundInsert),
     Update(BoundUpdate),
     Delete(BoundDelete),
+    Merge(BoundMerge),
     Select(BoundSelect),
     Explain(Box<Self>),
     ExplainAnalyze(Box<Self>),
@@ -36,6 +37,17 @@ pub enum BoundStatement {
     DropView {
         name: String,
         if_exists: bool,
+    },
+    CreateMaterializedView {
+        name: String,
+        query_sql: String,
+    },
+    DropMaterializedView {
+        name: String,
+        if_exists: bool,
+    },
+    RefreshMaterializedView {
+        name: String,
     },
     Begin,
     Commit,
@@ -177,6 +189,20 @@ pub enum BoundStatement {
         escape: char,
         file_path: Option<String>,
     },
+    /// DDL: CREATE [OR REPLACE] FUNCTION
+    CreateFunction {
+        def: falcon_common::schema::FunctionDef,
+    },
+    /// DDL: DROP FUNCTION
+    DropFunction {
+        name: String,
+        if_exists: bool,
+    },
+    /// CALL procedure(args)
+    CallProcedure {
+        name: String,
+        args: Vec<BoundExpr>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -230,7 +256,8 @@ pub struct BoundAlterTable {
 #[derive(Debug, Clone)]
 pub enum OnConflictAction {
     DoNothing,
-    DoUpdate(Vec<(usize, BoundExpr)>), // (col_idx, expr) assignments
+    /// (assignments, optional WHERE filter over extended schema [target ++ excluded])
+    DoUpdate(Vec<(usize, BoundExpr)>, Option<BoundExpr>),
 }
 
 #[derive(Debug, Clone)]
@@ -283,6 +310,41 @@ pub struct BoundDelete {
     pub using_table: Option<BoundFromTable>,
 }
 
+/// A single MERGE clause (WHEN MATCHED / WHEN NOT MATCHED).
+#[derive(Debug, Clone)]
+pub struct BoundMergeClause {
+    pub kind: MergeClauseKind,
+    pub predicate: Option<BoundExpr>,
+    pub action: BoundMergeAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeClauseKind {
+    Matched,
+    NotMatched,
+}
+
+#[derive(Debug, Clone)]
+pub enum BoundMergeAction {
+    Insert(Vec<usize>, Vec<BoundExpr>), // (target col indices, value exprs)
+    Update(Vec<(usize, BoundExpr)>),    // assignments
+    Delete,
+}
+
+#[derive(Debug, Clone)]
+pub struct BoundMerge {
+    pub target_table_id: TableId,
+    pub target_name: String,
+    pub target_schema: TableSchema,
+    pub source_table_id: TableId,
+    pub source_name: String,
+    pub source_schema: TableSchema,
+    pub on_expr: BoundExpr,
+    pub clauses: Vec<BoundMergeClause>,
+    /// Column offset where source columns begin in the combined row.
+    pub source_col_offset: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct BoundCte {
     pub name: String,
@@ -320,6 +382,24 @@ pub struct BoundSelect {
     pub unions: Vec<(Self, SetOpKind, bool)>,
     /// Inline virtual rows (for GENERATE_SERIES etc.)
     pub virtual_rows: Vec<falcon_common::datum::OwnedRow>,
+    /// Row-level locking mode (FOR UPDATE / FOR SHARE / FOR NO KEY UPDATE / FOR KEY SHARE).
+    pub for_lock: RowLockMode,
+}
+
+/// Row-level lock mode for SELECT ... FOR UPDATE/SHARE.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowLockMode {
+    None,
+    Update(LockWait),
+    Share(LockWait),
+}
+
+/// NOWAIT / SKIP LOCKED modifier on FOR UPDATE/SHARE.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockWait {
+    Block,
+    Nowait,
+    SkipLocked,
 }
 
 /// How DISTINCT is applied to a SELECT.
@@ -715,6 +795,21 @@ pub enum ScalarFunc {
     JsonbEachText,
     RowToJson,
     // ── Generated extended functions (pattern-based) ──
+    // ── Full-text search functions (PG-standard) ──
+    ToTsvector,
+    ToTsquery,
+    PlaintoTsquery,
+    PhrastoTsquery,
+    TsRank,
+    TsRankCd,
+    TsHeadline,
+    Numnode,
+    Querytree,
+    Setweight,
+    Strip,
+    TsvectorLength,
+    ArrayToTsvector,
+    TsvectorConcat,
     /// ARRAY_MATRIX_{ROW|COLUMN}_{operation}{suffix}(arr, rows, cols, idx)
     ArrayMatrixFunc(String),
     /// STRING_{name}_ENCODE(fields...) / STRING_{name}_DECODE(line, idx)
@@ -728,6 +823,7 @@ pub enum ScalarFunc {
 pub struct BoundOrderBy {
     pub column_idx: usize, // index in output projections
     pub asc: bool,
+    pub nulls_first: bool,
 }
 
 /// Bound expression tree.
@@ -853,6 +949,11 @@ pub enum BoundExpr {
     /// super-aggregate NULLs in a GROUPING SETS / CUBE / ROLLUP result.
     /// Each usize is a column index in the source table.
     Grouping(Vec<usize>),
+    /// User-defined function call (SQL or PL/pgSQL).
+    UserFunction {
+        name: String,
+        args: Vec<Self>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -879,4 +980,5 @@ pub enum BinOp {
     JsonContains,      // @> (left contains right)
     JsonContainedBy,   // <@ (left contained by right)
     JsonExists,        // ? (key exists in jsonb)
+    TsMatch,           // @@ (tsvector matches tsquery)
 }

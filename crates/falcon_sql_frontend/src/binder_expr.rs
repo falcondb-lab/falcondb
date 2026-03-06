@@ -616,13 +616,23 @@ impl Binder {
                     _ => {}
                 }
                 // Resolve function name to ScalarFunc variant
-                let scalar_func = crate::resolve_function::resolve_scalar_func(&func_name)
-                    .ok_or_else(|| SqlError::Unsupported(format!("Function: {func_name}")))?;
-                let bound_args = self.bind_func_args_full(func, schema, aliases, outer_schema)?;
-                Ok(BoundExpr::Function {
-                    func: scalar_func,
-                    args: bound_args,
-                })
+                if let Some(scalar_func) = crate::resolve_function::resolve_scalar_func(&func_name) {
+                    let bound_args = self.bind_func_args_full(func, schema, aliases, outer_schema)?;
+                    return Ok(BoundExpr::Function {
+                        func: scalar_func,
+                        args: bound_args,
+                    });
+                }
+                // Fall back to user-defined function from catalog
+                let lower_name = func.name.to_string().to_lowercase();
+                if self.catalog.find_function(&lower_name).is_some() {
+                    let bound_args = self.bind_func_args_full(func, schema, aliases, outer_schema)?;
+                    return Ok(BoundExpr::UserFunction {
+                        name: lower_name,
+                        args: bound_args,
+                    });
+                }
+                Err(SqlError::Unsupported(format!("Function: {func_name}")))
             }
             Expr::Extract {
                 field,

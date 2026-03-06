@@ -346,6 +346,8 @@ pub enum WalRecord {
     BeginTxn { txn_id: TxnId },
     /// Prepare a global transaction (2PC phase-1).
     PrepareTxn { txn_id: TxnId },
+    /// Prepare with coordinator mapping for cross-node 2PC recovery.
+    PrepareTxn2pc { txn_id: TxnId, coord_txn_id: u64, shard_id: u64 },
     /// Insert a row.
     Insert {
         txn_id: TxnId,
@@ -395,6 +397,10 @@ pub enum WalRecord {
     CreateView { name: String, query_sql: String },
     /// DDL: drop view.
     DropView { name: String },
+    /// DDL: create materialized view.
+    CreateMaterializedView { name: String, query_sql: String, backing_table_id: TableId },
+    /// DDL: drop materialized view.
+    DropMaterializedView { name: String },
     /// DDL: alter table (typed operation, bincode-serialized).
     AlterTable {
         table_name: String,
@@ -456,6 +462,10 @@ pub enum WalRecord {
         object_type: String,
         object_name: String,
     },
+    /// DDL: create function.
+    CreateFunction { def: falcon_common::schema::FunctionDef },
+    /// DDL: drop function.
+    DropFunction { name: String },
     /// DCL: grant role membership.
     GrantRole { member: String, group: String },
     /// DCL: revoke role membership.
@@ -504,14 +514,13 @@ pub struct WalWriter {
     encryption_enabled: std::sync::atomic::AtomicBool,
     sync_mode: SyncMode,
     max_segment_size: u64,
-    group_commit_size: usize,
     encryption: parking_lot::RwLock<Option<WalEncryption>>,
     segment_rotate_callback: parking_lot::RwLock<Option<SegmentRotateCallback>>,
     flush_fd_cache: Mutex<Option<File>>,
     flush_buf: Mutex<Vec<u8>>,
     pub(crate) flushed_lsn: AtomicU64,
     flush_mu: Mutex<()>,
-    flush_cvar: parking_lot::Condvar,
+    pub(crate) flush_cvar: parking_lot::Condvar,
     flush_shutdown: std::sync::atomic::AtomicBool,
 }
 
@@ -533,8 +542,6 @@ pub enum SyncMode {
 
 /// Default segment size: 64 MB.
 const DEFAULT_SEGMENT_SIZE: u64 = 64 * 1024 * 1024;
-/// Default group commit batch: 32 records.
-const DEFAULT_GROUP_COMMIT_SIZE: usize = 32;
 
 pub fn segment_filename(segment_id: u64) -> String {
     format!("falcon_{segment_id:06}.wal")
@@ -542,12 +549,7 @@ pub fn segment_filename(segment_id: u64) -> String {
 
 impl WalWriter {
     pub fn open(dir: &Path, sync_mode: SyncMode) -> Result<Self, StorageError> {
-        Self::open_with_options(
-            dir,
-            sync_mode,
-            DEFAULT_SEGMENT_SIZE,
-            DEFAULT_GROUP_COMMIT_SIZE,
-        )
+        Self::open_with_options(dir, sync_mode, DEFAULT_SEGMENT_SIZE, 0)
     }
 
     /// Register a callback to be invoked on each WAL segment rotation.
@@ -561,7 +563,7 @@ impl WalWriter {
         dir: &Path,
         sync_mode: SyncMode,
         max_segment_size: u64,
-        group_commit_size: usize,
+        _group_commit_size: usize,
     ) -> Result<Self, StorageError> {
         fs::create_dir_all(dir)?;
 
@@ -612,7 +614,6 @@ impl WalWriter {
             encryption_enabled: std::sync::atomic::AtomicBool::new(false),
             sync_mode,
             max_segment_size,
-            group_commit_size,
             encryption: parking_lot::RwLock::new(None),
             flush_fd_cache: Mutex::new(None),
             flush_buf: Mutex::new(Vec::with_capacity(8 * 1024)),
@@ -638,7 +639,7 @@ impl WalWriter {
 
     /// Spawn a dedicated flush thread that does back-to-back FUA writes.
     /// Returns the JoinHandle. Caller should store it and call shutdown_flush_thread() on drop.
-    pub fn start_flush_thread(self: &Arc<Self>) -> std::thread::JoinHandle<()> {
+    pub fn start_flush_thread(self: &Arc<Self>) -> Result<std::thread::JoinHandle<()>, StorageError> {
         let wal = Arc::clone(self);
         std::thread::Builder::new()
             .name("wal-flush".into())
@@ -671,7 +672,7 @@ impl WalWriter {
                     wal.flush_cvar.notify_all();
                 }
             })
-            .expect("spawn wal-flush thread")
+            .map_err(|e| StorageError::Wal(format!("failed to spawn wal-flush thread: {e}")))
     }
 
     pub fn shutdown_flush_thread(&self) {
@@ -842,6 +843,56 @@ impl WalWriter {
             }
             let last_lsn = base_lsn + count - 1;
             shard.max_lsn = last_lsn;
+            Ok(last_lsn)
+        })
+    }
+
+    /// Pre-serialize a WAL record into header+payload bytes (for deferred append).
+    pub fn serialize_record(record: &WalRecord) -> Result<Vec<u8>, StorageError> {
+        let data = bincode::serialize(record)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let checksum = crc32fast::hash(&data);
+        let len = data.len() as u32;
+        let mut out = Vec::with_capacity(8 + data.len());
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&checksum.to_le_bytes());
+        out.extend_from_slice(&data);
+        Ok(out)
+    }
+
+    /// Append pre-serialized bytes + one record under a single shard lock.
+    /// `pre` contains already-framed (header+payload) WAL entries.
+    /// `record` is serialized inline (typically CommitTxnLocal, ~20 bytes).
+    pub fn append_preserialized(&self, pre: &[u8], pre_count: usize, record: &WalRecord) -> Result<u64, StorageError> {
+        thread_local! {
+            static SER_BUF: std::cell::RefCell<Vec<u8>> = std::cell::RefCell::new(Vec::with_capacity(64));
+        }
+        SER_BUF.with(|cell| -> Result<u64, StorageError> {
+            let mut buf = cell.borrow_mut();
+            buf.clear();
+            bincode::serialize_into(&mut *buf, record)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let checksum = crc32fast::hash(&buf);
+            let len = buf.len() as u32;
+
+            let total_records = (pre_count + 1) as u64;
+            let shard_idx = self.pick_shard();
+            let mut shard = self.shards[shard_idx].lock();
+            let base_lsn = self.lsn.fetch_add(total_records, Ordering::Relaxed);
+
+            // Copy pre-serialized entries
+            shard.buf.extend_from_slice(pre);
+            // Append inline-serialized commit record
+            let mut header = [0u8; 8];
+            header[..4].copy_from_slice(&len.to_le_bytes());
+            header[4..].copy_from_slice(&checksum.to_le_bytes());
+            shard.buf.extend_from_slice(&header);
+            shard.buf.extend_from_slice(&buf);
+
+            shard.pending_count += total_records as usize;
+            let last_lsn = base_lsn + total_records - 1;
+            shard.max_lsn = last_lsn;
+            self.atomic_pending.fetch_add(total_records as usize, Ordering::Relaxed);
             Ok(last_lsn)
         })
     }
@@ -1247,16 +1298,25 @@ impl CheckpointData {
         let data =
             bincode::serialize(self).map_err(|e| StorageError::Serialization(e.to_string()))?;
         let tmp_path = dir.join("checkpoint.tmp");
-        fs::write(&tmp_path, &data)?;
-        // Sync the temp file to ensure data is durable before replacing
-        let f = fs::File::open(&tmp_path)?;
-        f.sync_all()?;
+        fs::write(&tmp_path, &data).map_err(|e| {
+            StorageError::Wal(format!("write checkpoint.tmp ({}): {e}", tmp_path.display()))
+        })?;
+        // Sync the temp file to ensure data is durable before replacing.
+        // On Windows, FlushFileBuffers requires write access — open with write(true).
+        let f = fs::OpenOptions::new().write(true).open(&tmp_path).map_err(|e| {
+            StorageError::Wal(format!("open checkpoint.tmp for sync: {e}"))
+        })?;
+        f.sync_all().map_err(|e| {
+            StorageError::Wal(format!("sync_all checkpoint.tmp: {e}"))
+        })?;
         drop(f);
         // On Windows fs::rename fails if target exists; remove it first
         if path.exists() {
             let _ = fs::remove_file(&path);
         }
-        fs::rename(&tmp_path, &path)?;
+        fs::rename(&tmp_path, &path).map_err(|e| {
+            StorageError::Wal(format!("rename checkpoint.tmp -> checkpoint.bin: {e}"))
+        })?;
         Ok(())
     }
 

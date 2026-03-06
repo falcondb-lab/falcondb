@@ -13,12 +13,7 @@ impl QueryHandler {
         _session: &mut PgSession,
     ) -> Option<Vec<BackendMessage>> {
         // information_schema queries
-        if sql_lower.contains("information_schema.tables")
-            || sql_lower.contains("information_schema.columns")
-            || sql_lower.contains("information_schema.schemata")
-            || sql_lower.contains("information_schema.table_constraints")
-            || sql_lower.contains("information_schema.key_column_usage")
-        {
+        if sql_lower.contains("information_schema.") {
             if sql_lower.contains("information_schema.columns") {
                 return Some(self.handle_information_schema_columns(sql_lower));
             }
@@ -33,6 +28,12 @@ impl QueryHandler {
             }
             if sql_lower.contains("information_schema.key_column_usage") {
                 return Some(self.handle_information_schema_key_column_usage());
+            }
+            if sql_lower.contains("information_schema.referential_constraints") {
+                return Some(self.handle_information_schema_referential_constraints());
+            }
+            if sql_lower.contains("information_schema.constraint_column_usage") {
+                return Some(self.handle_information_schema_constraint_column_usage());
             }
             return Some(self.single_row_result(vec![], vec![]));
         }
@@ -129,6 +130,14 @@ impl QueryHandler {
                     vec![],
                 ));
             }
+            // pg_stat_database — database-level aggregate stats
+            if sql_lower.contains("pg_stat_database") {
+                return Some(self.handle_pg_stat_database(_session));
+            }
+            // pg_stat_bgwriter — background writer stats
+            if sql_lower.contains("pg_stat_bgwriter") {
+                return Some(self.handle_pg_stat_bgwriter());
+            }
             // pg_stat_activity — active session info
             if sql_lower.contains("pg_stat_activity") {
                 return Some(self.handle_pg_stat_activity(_session));
@@ -146,6 +155,79 @@ impl QueryHandler {
                         ("prepared", 1114, 8),
                         ("owner", 25, -1),
                         ("database", 25, -1),
+                    ],
+                    vec![],
+                ));
+            }
+            // pg_tables — table listing (used by Hibernate and some ORMs)
+            if sql_lower.contains("pg_tables") {
+                return Some(self.handle_pg_tables(sql_lower));
+            }
+            // pg_sequences — sequence info (Hibernate schema validation)
+            if sql_lower.contains("pg_sequences") {
+                return Some(self.handle_pg_sequences());
+            }
+            // pg_inherits — table inheritance (Hibernate schema tool)
+            if sql_lower.contains("pg_inherits") {
+                return Some(self.single_row_result(
+                    vec![("inhrelid", 26, 4i16), ("inhparent", 26, 4), ("inhseqno", 23, 4)],
+                    vec![],
+                ));
+            }
+            // pg_roles / pg_user
+            if sql_lower.contains("pg_roles") || sql_lower.contains("pg_user") {
+                return Some(self.handle_pg_roles());
+            }
+            // pg_attrdef — column defaults (Hibernate, Django, SQLAlchemy)
+            if sql_lower.contains("pg_attrdef") {
+                return Some(self.single_row_result(
+                    vec![("oid", 26, 4i16), ("adrelid", 26, 4), ("adnum", 21, 2), ("adbin", 25, -1)],
+                    vec![],
+                ));
+            }
+            // pg_depend — object dependencies (pg_dump, ORMs)
+            if sql_lower.contains("pg_depend") {
+                return Some(self.single_row_result(
+                    vec![
+                        ("classid", 26, 4i16), ("objid", 26, 4), ("objsubid", 23, 4),
+                        ("refclassid", 26, 4), ("refobjid", 26, 4), ("refobjsubid", 23, 4),
+                        ("deptype", 18, 1),
+                    ],
+                    vec![],
+                ));
+            }
+            // pg_collation — collation info
+            if sql_lower.contains("pg_collation") {
+                return Some(self.single_row_result(
+                    vec![
+                        ("oid", 26, 4i16), ("collname", 25, -1), ("collnamespace", 26, 4),
+                        ("collowner", 26, 4), ("collencoding", 23, 4),
+                    ],
+                    vec![
+                        vec![Some("100".into()), Some("default".into()), Some("11".into()), Some("10".into()), Some("-1".into())],
+                        vec![Some("950".into()), Some("C".into()), Some("11".into()), Some("10".into()), Some("-1".into())],
+                        vec![Some("951".into()), Some("POSIX".into()), Some("11".into()), Some("10".into()), Some("-1".into())],
+                    ],
+                ));
+            }
+            // pg_extension — installed extensions
+            if sql_lower.contains("pg_extension") {
+                return Some(self.single_row_result(
+                    vec![
+                        ("oid", 26, 4i16), ("extname", 25, -1), ("extowner", 26, 4),
+                        ("extnamespace", 26, 4), ("extversion", 25, -1),
+                    ],
+                    vec![
+                        vec![Some("13823".into()), Some("plpgsql".into()), Some("10".into()), Some("11".into()), Some("1.0".into())],
+                    ],
+                ));
+            }
+            // pg_range — range type info
+            if sql_lower.contains("pg_range") {
+                return Some(self.single_row_result(
+                    vec![
+                        ("rngtypid", 26, 4i16), ("rngsubtype", 26, 4), ("rngmultitypid", 26, 4),
+                        ("rngcollation", 26, 4), ("rngsubopc", 26, 4),
                     ],
                     vec![],
                 ));
@@ -490,51 +572,92 @@ impl QueryHandler {
 
     /// pg_catalog.pg_type — type OID mapping for ORMs and drivers.
     fn handle_pg_type(&self, sql_lower: &str) -> Vec<BackendMessage> {
-        // Static list of Falcon-supported types mapped to PG OIDs.
-        let builtin_types: Vec<(i32, &str, i16, &str, &str)> = vec![
-            // (oid, typname, typlen, typtype, typnamespace_nspname)
-            (16, "bool", 1, "b", "pg_catalog"),
-            (20, "int8", 8, "b", "pg_catalog"),
-            (23, "int4", 4, "b", "pg_catalog"),
-            (25, "text", -1, "b", "pg_catalog"),
-            (701, "float8", 8, "b", "pg_catalog"),
-            (1082, "date", 4, "b", "pg_catalog"),
-            (1114, "timestamp", 8, "b", "pg_catalog"),
-            (3802, "jsonb", -1, "b", "pg_catalog"),
-            (1007, "_int4", -1, "b", "pg_catalog"),
-            (1016, "_int8", -1, "b", "pg_catalog"),
-            (1009, "_text", -1, "b", "pg_catalog"),
-            (1022, "_float8", -1, "b", "pg_catalog"),
-            (1000, "_bool", -1, "b", "pg_catalog"),
-            (2277, "anyarray", -1, "p", "pg_catalog"),
+        // (typname, oid, typarray, typlen, typtype)
+        // Column order matches pgjdbc TypeInfoCache expectation: col1=typname, col2=oid, col3=typarray
+        let builtin_types: &[(&str, i32, i32, i16, &str)] = &[
+            ("bool",          16,   1000,   1, "b"),
+            ("bytea",         17,   1001,  -1, "b"),
+            ("char",          18,   1002,   1, "b"),
+            ("name",          19,   1003,  64, "b"),
+            ("int8",          20,   1016,   8, "b"),
+            ("int2",          21,   1005,   2, "b"),
+            ("int4",          23,   1007,   4, "b"),
+            ("text",          25,   1009,  -1, "b"),
+            ("oid",           26,   1028,   4, "b"),
+            ("json",         114,    199,  -1, "b"),
+            ("xml",          142,    143,  -1, "b"),
+            ("float4",       700,   1021,   4, "b"),
+            ("float8",       701,   1022,   8, "b"),
+            ("money",        790,    791,   8, "b"),
+            ("bpchar",      1042,   1014,  -1, "b"),
+            ("varchar",     1043,   1015,  -1, "b"),
+            ("date",        1082,   1182,   4, "b"),
+            ("time",        1083,   1183,   8, "b"),
+            ("timestamp",   1114,   1115,   8, "b"),
+            ("timestamptz", 1184,   1185,   8, "b"),
+            ("interval",    1186,   1187,  16, "b"),
+            ("timetz",      1266,   1270,  12, "b"),
+            ("bit",         1560,   1561,  -1, "b"),
+            ("varbit",      1562,   1563,  -1, "b"),
+            ("numeric",     1700,   1231,  -1, "b"),
+            ("void",        2278,      0,   4, "p"),
+            ("uuid",        2950,   2951,  16, "b"),
+            ("jsonb",       3802,   3807,  -1, "b"),
+            // array types
+            ("_bool",       1000,      0,  -1, "b"),
+            ("_bytea",      1001,      0,  -1, "b"),
+            ("_char",       1002,      0,  -1, "b"),
+            ("_name",       1003,      0,  -1, "b"),
+            ("_int2",       1005,      0,  -1, "b"),
+            ("_int4",       1007,      0,  -1, "b"),
+            ("_int8",       1016,      0,  -1, "b"),
+            ("_text",       1009,      0,  -1, "b"),
+            ("_oid",        1028,      0,  -1, "b"),
+            ("_float4",     1021,      0,  -1, "b"),
+            ("_float8",     1022,      0,  -1, "b"),
+            ("_bpchar",     1014,      0,  -1, "b"),
+            ("_varchar",    1015,      0,  -1, "b"),
+            ("_date",       1182,      0,  -1, "b"),
+            ("_time",       1183,      0,  -1, "b"),
+            ("_timestamp",  1115,      0,  -1, "b"),
+            ("_timestamptz",1185,      0,  -1, "b"),
+            ("_interval",   1187,      0,  -1, "b"),
+            ("_numeric",    1231,      0,  -1, "b"),
+            ("_uuid",       2951,      0,  -1, "b"),
+            ("_jsonb",      3807,      0,  -1, "b"),
+            ("anyarray",    2277,      0,  -1, "p"),
         ];
 
         let filter_oid = extract_where_eq(sql_lower, "oid").and_then(|s| s.parse::<i32>().ok());
         let filter_name = extract_where_eq(sql_lower, "typname");
 
         let cols = vec![
-            ("oid", 23, 4i16),
-            ("typname", 25, -1),
+            ("typname", 25, -1i16),
+            ("oid", 23, 4),
+            ("typarray", 23, 4),
             ("typlen", 21, 2),
             ("typtype", 18, 1),
             ("typnamespace", 23, 4),
             ("typnotnull", 16, 1),
+            ("typbasetype", 23, 4),
         ];
 
         let rows: Vec<Vec<Option<String>>> = builtin_types
             .iter()
-            .filter(|(oid, name, _, _, _)| {
+            .filter(|(name, oid, _, _, _)| {
                 filter_oid.as_ref().is_none_or(|f| f == oid)
                     && filter_name.as_ref().is_none_or(|f| f == name)
             })
-            .map(|(oid, name, len, typtype, _)| {
+            .map(|(name, oid, typarray, len, typtype)| {
                 vec![
-                    Some(oid.to_string()),
                     Some(name.to_string()),
+                    Some(oid.to_string()),
+                    Some(typarray.to_string()),
                     Some(len.to_string()),
                     Some(typtype.to_string()),
-                    Some("11".into()), // pg_catalog namespace OID
+                    Some("11".into()),
                     Some("f".into()),
+                    Some("0".into()),
                 ]
             })
             .collect();
@@ -1133,6 +1256,253 @@ impl QueryHandler {
             ]);
         }
 
+        self.single_row_result(cols, rows)
+    }
+
+    fn handle_pg_tables(&self, sql_lower: &str) -> Vec<BackendMessage> {
+        let catalog = self.storage.get_catalog();
+        let tables = catalog.list_tables();
+        let filter = extract_where_eq(sql_lower, "tablename")
+            .or_else(|| extract_where_eq(sql_lower, "schemaname"));
+        let cols = vec![
+            ("schemaname", 25, -1i16),
+            ("tablename", 25, -1),
+            ("tableowner", 25, -1),
+            ("hasindexes", 16, 1),
+            ("hasrules", 16, 1),
+            ("hastriggers", 16, 1),
+            ("rowsecurity", 16, 1),
+        ];
+        let rows: Vec<Vec<Option<String>>> = tables
+            .iter()
+            .filter(|t| filter.as_ref().is_none_or(|f| t.name.to_lowercase() == *f))
+            .map(|t| vec![
+                Some("public".into()),
+                Some(t.name.clone()),
+                Some("falcon".into()),
+                Some("t".into()),
+                Some("f".into()),
+                Some("f".into()),
+                Some("f".into()),
+            ])
+            .collect();
+        self.single_row_result(cols, rows)
+    }
+
+    fn handle_pg_sequences(&self) -> Vec<BackendMessage> {
+        let catalog = self.storage.get_catalog();
+        let tables = catalog.list_tables();
+        let cols = vec![
+            ("schemaname", 25, -1i16),
+            ("sequencename", 25, -1),
+            ("data_type", 25, -1),
+            ("start_value", 20, 8),
+            ("minimum_value", 20, 8),
+            ("maximum_value", 20, 8),
+            ("increment", 20, 8),
+            ("cycle_option", 25, -1),
+            ("cache_size", 20, 8),
+        ];
+        let mut rows = Vec::new();
+        for t in &tables {
+            for col in &t.columns {
+                if col.is_serial {
+                    rows.push(vec![
+                        Some("public".into()),
+                        Some(format!("{}_{}_seq", t.name, col.name)),
+                        Some("bigint".into()),
+                        Some("1".into()),
+                        Some("1".into()),
+                        Some("9223372036854775807".into()),
+                        Some("1".into()),
+                        Some("NO".into()),
+                        Some("1".into()),
+                    ]);
+                }
+            }
+        }
+        self.single_row_result(cols, rows)
+    }
+
+    fn handle_pg_roles(&self) -> Vec<BackendMessage> {
+        let cols = vec![
+            ("oid", 26, 4i16),
+            ("rolname", 25, -1),
+            ("rolsuper", 16, 1),
+            ("rolinherit", 16, 1),
+            ("rolcreaterole", 16, 1),
+            ("rolcreatedb", 16, 1),
+            ("rolcanlogin", 16, 1),
+            ("rolreplication", 16, 1),
+            ("rolconnlimit", 23, 4),
+            ("rolpassword", 25, -1),
+            ("rolvaliduntil", 1114, 8),
+            ("rolbypassrls", 16, 1),
+        ];
+        let rows = vec![vec![
+            Some("10".into()),
+            Some("falcon".into()),
+            Some("t".into()),
+            Some("t".into()),
+            Some("t".into()),
+            Some("t".into()),
+            Some("t".into()),
+            Some("t".into()),
+            Some("-1".into()),
+            None,
+            None,
+            Some("f".into()),
+        ]];
+        self.single_row_result(cols, rows)
+    }
+
+    /// pg_stat_database — database-level aggregate statistics.
+    fn handle_pg_stat_database(&self, session: &PgSession) -> Vec<BackendMessage> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let ds = falcon_common::globals::db_stats();
+        let cols = vec![
+            ("datid", 26, 4i16),
+            ("datname", 25, -1),
+            ("numbackends", 23, 4),
+            ("xact_commit", 20, 8),
+            ("xact_rollback", 20, 8),
+            ("blks_read", 20, 8),
+            ("blks_hit", 20, 8),
+            ("tup_returned", 20, 8),
+            ("tup_fetched", 20, 8),
+            ("tup_inserted", 20, 8),
+            ("tup_updated", 20, 8),
+            ("tup_deleted", 20, 8),
+            ("temp_files", 20, 8),
+            ("temp_bytes", 20, 8),
+            ("deadlocks", 20, 8),
+            ("blk_read_time", 701, 8),
+            ("blk_write_time", 701, 8),
+            ("session_time", 701, 8),
+            ("active_time", 701, 8),
+            ("sessions", 20, 8),
+            ("stats_reset", 1184, 8),
+        ];
+        let num_backends = self.session_registry.snapshot().len();
+        let active_ms = ds.active_time_us.load(Relaxed) as f64 / 1000.0;
+        let uptime_ms = falcon_common::globals::server_uptime_secs() * 1000.0;
+        let rows = vec![vec![
+            Some("16384".into()),
+            Some(session.database.clone()),
+            Some(num_backends.to_string()),
+            Some(ds.xact_commit.load(Relaxed).to_string()),
+            Some(ds.xact_rollback.load(Relaxed).to_string()),
+            Some(ds.blks_read.load(Relaxed).to_string()),
+            Some(ds.blks_hit.load(Relaxed).to_string()),
+            Some(ds.tup_returned.load(Relaxed).to_string()),
+            Some(ds.tup_fetched.load(Relaxed).to_string()),
+            Some(ds.tup_inserted.load(Relaxed).to_string()),
+            Some(ds.tup_updated.load(Relaxed).to_string()),
+            Some(ds.tup_deleted.load(Relaxed).to_string()),
+            Some(ds.temp_files.load(Relaxed).to_string()),
+            Some(ds.temp_bytes.load(Relaxed).to_string()),
+            Some(ds.deadlocks.load(Relaxed).to_string()),
+            Some(format!("{:.3}", ds.blk_read_time_us.load(Relaxed) as f64 / 1000.0)),
+            Some(format!("{:.3}", ds.blk_write_time_us.load(Relaxed) as f64 / 1000.0)),
+            Some(format!("{:.3}", uptime_ms)),
+            Some(format!("{:.3}", active_ms)),
+            Some(ds.sessions.load(Relaxed).to_string()),
+            None, // stats_reset
+        ]];
+        self.single_row_result(cols, rows)
+    }
+
+    /// pg_stat_bgwriter — background writer / checkpoint stats.
+    fn handle_pg_stat_bgwriter(&self) -> Vec<BackendMessage> {
+        let ws = self.storage.wal_stats_snapshot();
+        let cols = vec![
+            ("checkpoints_timed", 20, 8i16),
+            ("checkpoints_req", 20, 8),
+            ("checkpoint_write_time", 701, 8),
+            ("checkpoint_sync_time", 701, 8),
+            ("buffers_checkpoint", 20, 8),
+            ("buffers_clean", 20, 8),
+            ("maxwritten_clean", 20, 8),
+            ("buffers_backend", 20, 8),
+            ("buffers_backend_fsync", 20, 8),
+            ("buffers_alloc", 20, 8),
+            ("stats_reset", 1184, 8),
+        ];
+        let rows = vec![vec![
+            Some("0".into()),
+            Some("0".into()),
+            Some("0".into()),
+            Some(format!("{:.3}", ws.fsync_total_us as f64 / 1000.0)),
+            Some("0".into()),
+            Some("0".into()),
+            Some("0".into()),
+            Some(ws.flushes.to_string()),
+            Some("0".into()),
+            Some("0".into()),
+            None,
+        ]];
+        self.single_row_result(cols, rows)
+    }
+
+    fn handle_information_schema_referential_constraints(&self) -> Vec<BackendMessage> {
+        let catalog = self.storage.get_catalog();
+        let tables = catalog.list_tables();
+        let cols = vec![
+            ("constraint_catalog", 25, -1i16),
+            ("constraint_schema", 25, -1),
+            ("constraint_name", 25, -1),
+            ("unique_constraint_catalog", 25, -1),
+            ("unique_constraint_schema", 25, -1),
+            ("unique_constraint_name", 25, -1),
+            ("match_option", 25, -1),
+            ("update_rule", 25, -1),
+            ("delete_rule", 25, -1),
+        ];
+        let mut rows = Vec::new();
+        for t in &tables {
+            for (i, fk) in t.foreign_keys.iter().enumerate() {
+                rows.push(vec![
+                    Some("falcon".into()),
+                    Some("public".into()),
+                    Some(format!("{}_fkey_{}", t.name, i)),
+                    Some("falcon".into()),
+                    Some("public".into()),
+                    Some(format!("{}_pkey", fk.ref_table)),
+                    Some("NONE".into()),
+                    Some("NO ACTION".into()),
+                    Some("NO ACTION".into()),
+                ]);
+            }
+        }
+        self.single_row_result(cols, rows)
+    }
+
+    fn handle_information_schema_constraint_column_usage(&self) -> Vec<BackendMessage> {
+        let catalog = self.storage.get_catalog();
+        let tables = catalog.list_tables();
+        let cols = vec![
+            ("table_catalog", 25, -1i16),
+            ("table_schema", 25, -1),
+            ("table_name", 25, -1),
+            ("column_name", 25, -1),
+            ("constraint_catalog", 25, -1),
+            ("constraint_schema", 25, -1),
+            ("constraint_name", 25, -1),
+        ];
+        let mut rows = Vec::new();
+        for t in &tables {
+            for &col_idx in &t.primary_key_columns {
+                rows.push(vec![
+                    Some("falcon".into()),
+                    Some("public".into()),
+                    Some(t.name.clone()),
+                    Some(t.columns[col_idx].name.clone()),
+                    Some("falcon".into()),
+                    Some("public".into()),
+                    Some(format!("{}_pkey", t.name)),
+                ]);
+            }
+        }
         self.single_row_result(cols, rows)
     }
 }

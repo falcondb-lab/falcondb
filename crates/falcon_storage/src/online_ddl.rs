@@ -551,7 +551,7 @@ impl DdlBackgroundExecutor {
                         };
 
                         let ddl_id = task.ddl_id;
-                        if task.cancelled.load(Ordering::Relaxed) {
+                        if task.cancelled.load(Ordering::Acquire) {
                             task.manager.fail(ddl_id, "Cancelled before start".into());
                             continue;
                         }
@@ -572,7 +572,11 @@ impl DdlBackgroundExecutor {
                         tracing::info!(ddl_id, "DdlBackgroundExecutor: backfill finished");
                     }
                 })
-                .expect("failed to spawn DDL backfill thread");
+                .unwrap_or_else(|e| {
+                    tracing::error!("failed to spawn DDL backfill thread {i}: {e}");
+                    // Return a dummy thread that immediately exits so the Vec stays consistent
+                    std::thread::spawn(|| {})
+                });
             workers.push(handle);
         }
 

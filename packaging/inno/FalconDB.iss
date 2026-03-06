@@ -47,7 +47,9 @@ Name: "purgedata"; Description: "{cm:PurgeDataTaskDesc}"; Flags: unchecked
 
 [Files]
 Source: "{#StageDir}\bin\falcon.exe";  DestDir: "{app}\bin";  Flags: ignoreversion
-Source: "{#StageDir}\bin\fsql.exe";    DestDir: "{app}\bin";  Flags: ignoreversion
+Source: "{#StageDir}\bin\fsql.exe";     DestDir: "{app}\bin";  Flags: ignoreversion
+Source: "{#StageDir}\bin\fimport.exe";  DestDir: "{app}\bin";  Flags: ignoreversion
+Source: "{#StageDir}\bin\fexport.exe";  DestDir: "{app}\bin";  Flags: ignoreversion
 Source: "{#StageDir}\LICENSE";          DestDir: "{app}";      Flags: ignoreversion
 Source: "{#StageDir}\NOTICE";           DestDir: "{app}";      Flags: ignoreversion
 Source: "{#StageDir}\VERSION";          DestDir: "{app}";      Flags: ignoreversion
@@ -64,6 +66,15 @@ Name: "{commonappdata}\FalconDB\conf"
 Name: "{commonappdata}\FalconDB\data"
 Name: "{commonappdata}\FalconDB\logs"
 Name: "{commonappdata}\FalconDB\certs"
+
+[Icons]
+Name: "{group}\FalconDB Shell";            Filename: "{sys}\cmd.exe";       Parameters: "/k fsql.exe"; WorkingDir: "{app}\bin"; IconFilename: "{app}\bin\falcon.exe"; Comment: "Open FalconDB interactive shell (fsql)"
+Name: "{group}\FalconDB Import (fimport)"; Filename: "{app}\bin\fimport.exe";                        WorkingDir: "{app}\bin"; IconFilename: "{app}\bin\falcon.exe"; Comment: "Import CSV data into FalconDB"
+Name: "{group}\FalconDB Export (fexport)"; Filename: "{app}\bin\fexport.exe";                        WorkingDir: "{app}\bin"; IconFilename: "{app}\bin\falcon.exe"; Comment: "Export FalconDB data to CSV"
+Name: "{group}\Uninstall FalconDB";        Filename: "{uninstallexe}"
+Name: "{commondesktop}\FalconDB Shell";    Filename: "{sys}\cmd.exe";       Parameters: "/k fsql.exe"; WorkingDir: "{app}\bin"; IconFilename: "{app}\bin\falcon.exe"; Comment: "Open FalconDB interactive shell (fsql)"
+Name: "{commondesktop}\FalconDB Import";   Filename: "{app}\bin\fimport.exe";                        WorkingDir: "{app}\bin"; IconFilename: "{app}\bin\falcon.exe"; Comment: "Import CSV data into FalconDB"
+Name: "{commondesktop}\FalconDB Export";   Filename: "{app}\bin\fexport.exe";                        WorkingDir: "{app}\bin"; IconFilename: "{app}\bin\falcon.exe"; Comment: "Export FalconDB data to CSV"
 
 [UninstallRun]
 Filename: "{sys}\sc.exe"; Parameters: "stop FalconDB"; Flags: runhidden; RunOnceId: "StopSvc"

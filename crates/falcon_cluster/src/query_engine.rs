@@ -27,6 +27,7 @@ use falcon_executor::executor::{ExecutionResult, Executor};
 use falcon_planner::plan::PhysicalPlan;
 use falcon_txn::TxnHandle;
 
+use crate::deterministic_2pc::CoordinatorDecisionLog;
 use crate::distributed_exec::DistributedExecutor;
 use crate::sharded_engine::ShardedEngine;
 use crate::two_phase::TwoPhaseCoordinator;
@@ -84,6 +85,11 @@ impl DistributedQueryEngine {
             gateway_metrics: GatewayMetrics::new(),
             admission: GatewayAdmissionControl::new(admission_config),
         }
+    }
+
+    /// Wire a durable decision log for 2PC crash recovery.
+    pub fn set_decision_log(&self, log: Arc<CoordinatorDecisionLog>) {
+        self.two_pc.set_decision_log(log);
     }
 
     /// Get the last scatter/gather stats for observability.

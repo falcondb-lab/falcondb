@@ -157,8 +157,12 @@ pub struct PgSession {
     pub prepared_statements: HashMap<String, PreparedStatement>,
     /// Portals: name → Portal (plan + param values).
     pub portals: HashMap<String, Portal>,
+    /// Fast path for unnamed portal (most common case).
+    pub unnamed_portal: Option<Portal>,
     /// Statement timeout in milliseconds (0 = no timeout).
     pub statement_timeout_ms: u64,
+    /// Lock timeout in milliseconds (0 = no timeout). Controls max wait for row locks.
+    pub lock_timeout_ms: u64,
     /// Active COPY FROM STDIN state, if any.
     pub copy_state: Option<CopyState>,
     /// Session-level GUC variables (SET/SHOW/RESET).
@@ -167,6 +171,9 @@ pub struct PgSession {
     pub savepoints: Vec<SavepointEntry>,
     /// Server-side cursors: name → CursorState (DECLARE/FETCH/CLOSE).
     pub cursors: HashMap<String, CursorState>,
+    /// Transaction-scoped GUC overrides (SET LOCAL). key → previous value (None if didn't exist).
+    /// On COMMIT/ROLLBACK these are reverted automatically.
+    pub local_gucs: Vec<(String, Option<String>)>,
     /// Per-session LISTEN/NOTIFY subscriptions.
     pub notifications: SessionNotifications,
     /// Shared notification hub (Arc so multiple sessions can share).
@@ -200,11 +207,14 @@ impl PgSession {
             default_isolation: IsolationLevel::ReadCommitted,
             prepared_statements: HashMap::new(),
             portals: HashMap::new(),
+            unnamed_portal: None,
             statement_timeout_ms: 0,
+            lock_timeout_ms: 0,
             copy_state: None,
             guc_vars: default_guc_vars(),
             savepoints: Vec::new(),
             cursors: HashMap::new(),
+            local_gucs: Vec::new(),
             notifications: SessionNotifications::new(),
             notification_hub: Arc::new(NotificationHub::new()),
             peer_addr: String::new(),
@@ -250,11 +260,14 @@ impl PgSession {
             default_isolation: self.default_isolation,
             prepared_statements: std::mem::take(&mut self.prepared_statements),
             portals: std::mem::take(&mut self.portals),
+            unnamed_portal: self.unnamed_portal.take(),
             statement_timeout_ms: self.statement_timeout_ms,
+            lock_timeout_ms: self.lock_timeout_ms,
             copy_state: self.copy_state.take(),
             guc_vars: self.guc_vars.clone(),
             savepoints: std::mem::take(&mut self.savepoints),
             cursors: std::mem::take(&mut self.cursors),
+            local_gucs: std::mem::take(&mut self.local_gucs),
             notifications: std::mem::take(&mut self.notifications),
             notification_hub: self.notification_hub.clone(),
             peer_addr: self.peer_addr.clone(),
@@ -267,10 +280,12 @@ impl PgSession {
         self.autocommit = other.autocommit;
         self.prepared_statements = other.prepared_statements;
         self.portals = other.portals;
+        self.unnamed_portal = other.unnamed_portal;
         self.copy_state = other.copy_state;
         self.guc_vars = other.guc_vars;
         self.savepoints = other.savepoints;
         self.cursors = other.cursors;
+        self.local_gucs = other.local_gucs;
         self.notifications = other.notifications;
     }
 
@@ -298,5 +313,36 @@ impl PgSession {
     /// Reset all GUC variables to defaults.
     pub fn reset_all_gucs(&mut self) {
         self.guc_vars = default_guc_vars();
+    }
+
+    /// SET LOCAL: set a GUC for the current transaction only.
+    /// Saves the previous value so it can be reverted on COMMIT/ROLLBACK.
+    pub fn set_local_guc(&mut self, name: &str, value: &str) {
+        let key = name.to_lowercase();
+        let prev = self.guc_vars.get(&key).cloned();
+        self.local_gucs.push((key.clone(), prev));
+        self.guc_vars.insert(key, value.to_owned());
+    }
+
+    /// Revert all SET LOCAL overrides (called on COMMIT/ROLLBACK).
+    pub fn revert_local_gucs(&mut self) {
+        for (key, prev) in self.local_gucs.drain(..).rev() {
+            match prev {
+                Some(v) => { self.guc_vars.insert(key, v); }
+                None => { self.guc_vars.remove(&key); }
+            }
+        }
+    }
+
+    /// DISCARD ALL: reset session to initial state.
+    pub fn discard_all(&mut self) {
+        self.guc_vars = default_guc_vars();
+        self.prepared_statements.clear();
+        self.portals.clear();
+        self.unnamed_portal = None;
+        self.cursors.clear();
+        self.savepoints.clear();
+        self.local_gucs.clear();
+        self.notifications.unlisten_all(&self.notification_hub);
     }
 }

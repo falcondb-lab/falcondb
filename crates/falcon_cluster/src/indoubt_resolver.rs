@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
@@ -201,6 +201,8 @@ pub struct InDoubtResolver {
     outcome_cache: Arc<TxnOutcomeCache>,
     /// ShardedEngine for applying commit/abort to participant shards.
     engine: Option<Arc<ShardedEngine>>,
+    /// Coordinator decision log — mark_applied after resolution.
+    decision_log: OnceLock<Arc<crate::deterministic_2pc::CoordinatorDecisionLog>>,
     /// Sweep interval.
     sweep_interval: Duration,
     /// Max resolution attempts before giving up (and alerting).
@@ -222,6 +224,7 @@ impl InDoubtResolver {
             indoubt: RwLock::new(HashMap::new()),
             outcome_cache,
             engine: None,
+            decision_log: OnceLock::new(),
             sweep_interval: Duration::from_secs(5),
             max_attempts: 10,
             max_per_sweep: 100,
@@ -237,6 +240,7 @@ impl InDoubtResolver {
             indoubt: RwLock::new(HashMap::new()),
             outcome_cache,
             engine: Some(engine),
+            decision_log: OnceLock::new(),
             sweep_interval: Duration::from_secs(5),
             max_attempts: 10,
             max_per_sweep: 100,
@@ -257,6 +261,7 @@ impl InDoubtResolver {
             indoubt: RwLock::new(HashMap::new()),
             outcome_cache,
             engine: None,
+            decision_log: OnceLock::new(),
             sweep_interval,
             max_attempts,
             max_per_sweep,
@@ -264,6 +269,11 @@ impl InDoubtResolver {
             signal: ShutdownSignal::new(),
             total_resolved: AtomicU64::new(0),
         })
+    }
+
+    /// Wire a coordinator decision log so resolved txns get mark_applied.
+    pub fn set_decision_log(&self, log: Arc<crate::deterministic_2pc::CoordinatorDecisionLog>) {
+        let _ = self.decision_log.set(log);
     }
 
     /// Register a new in-doubt transaction after coordinator crash.
@@ -289,10 +299,59 @@ impl InDoubtResolver {
         );
     }
 
+    /// Seed the resolver with locally-prepared txns recovered from WAL.
+    /// These are participant-side txns that had PrepareTxn but no Commit/Abort.
+    /// We use the local TxnId as the global_txn_id placeholder since we don't
+    /// know the coordinator mapping — the resolver will eventually abort them
+    /// (safe default) if no coordinator decision arrives.
+    pub fn seed_from_recovered(&self, recovered_txn_ids: &[TxnId]) {
+        if recovered_txn_ids.is_empty() {
+            return;
+        }
+        let mut indoubt = self.indoubt.write();
+        for &txn_id in recovered_txn_ids {
+            indoubt.entry(txn_id).or_insert_with(|| InDoubtTxn {
+                global_txn_id: txn_id,
+                participant_txn_ids: Vec::new(),
+                prepared_at: Instant::now(),
+                attempts: 0,
+                last_error: None,
+            });
+        }
+        tracing::warn!(
+            count = recovered_txn_ids.len(),
+            "seeded in-doubt resolver with WAL-recovered prepared txns"
+        );
+    }
+
     /// Record a coordinator decision for a transaction.
     /// Call this when the coordinator's WAL decision is replayed.
     pub fn record_decision(&self, txn_id: TxnId, outcome: TxnOutcome) {
         self.outcome_cache.record(txn_id, outcome);
+    }
+
+    /// Seed the outcome cache from a CoordinatorDecisionLog's unapplied decisions.
+    /// Call this on startup so the resolver can immediately resolve in-doubt txns
+    /// that have a durable decision but weren't fully applied before crash.
+    pub fn seed_from_decision_log(&self, log: &crate::deterministic_2pc::CoordinatorDecisionLog) {
+        let unapplied = log.unapplied_decisions();
+        if unapplied.is_empty() {
+            return;
+        }
+        let mut seeded = 0usize;
+        for rec in &unapplied {
+            let outcome = match rec.decision {
+                crate::deterministic_2pc::CoordinatorDecision::Commit => TxnOutcome::Committed,
+                crate::deterministic_2pc::CoordinatorDecision::Abort => TxnOutcome::Aborted,
+            };
+            self.outcome_cache.record(rec.txn_id, outcome);
+            seeded += 1;
+        }
+        tracing::info!(
+            seeded,
+            "in-doubt resolver: seeded outcome cache from {} unapplied coordinator decisions",
+            seeded
+        );
     }
 
     /// Run one resolution sweep. Returns number of transactions resolved.
@@ -324,11 +383,32 @@ impl InDoubtResolver {
         let mut to_update: Vec<(TxnId, u32, String)> = Vec::new(); // (id, attempts, error)
 
         for txn in &candidates {
-            // Determine outcome: cached decision or default to abort
-            let outcome = self
-                .outcome_cache
-                .lookup(txn.global_txn_id)
-                .unwrap_or(TxnOutcome::Aborted);
+            // Determine outcome: use cached decision.
+            // If no decision is cached, skip this txn (avoid aborting a
+            // potentially-committed txn whose cache entry was TTL-evicted).
+            // Only force-abort once max_attempts is exhausted, indicating the
+            // coordinator is truly lost and never wrote a Commit decision.
+            let outcome = match self.outcome_cache.lookup(txn.global_txn_id) {
+                Some(o) => o,
+                None => {
+                    if txn.attempts + 1 >= self.max_attempts {
+                        tracing::warn!(
+                            txn_id = txn.global_txn_id.0,
+                            attempts = txn.attempts + 1,
+                            "no coordinator decision after max attempts — safe-aborting in-doubt txn"
+                        );
+                        TxnOutcome::Aborted
+                    } else {
+                        // No decision yet; bump attempts and retry next sweep
+                        to_update.push((
+                            txn.global_txn_id,
+                            txn.attempts + 1,
+                            "no cached decision".to_owned(),
+                        ));
+                        continue;
+                    }
+                }
+            };
 
             // Apply decision to all participants
             let result = self.apply_decision(txn, outcome);
@@ -385,6 +465,13 @@ impl InDoubtResolver {
             }
         }
 
+        // Mark resolved decisions as applied in the coordinator journal
+        if let Some(log) = self.decision_log.get() {
+            for id in &to_remove {
+                log.mark_applied(*id);
+            }
+        }
+
         // Update metrics
         let elapsed_us = start.elapsed().as_micros() as u64;
         {
@@ -424,15 +511,44 @@ impl InDoubtResolver {
             }
         };
 
+        let mut first_err: Option<FalconError> = None;
+
+        // Recovered txns have empty participant_txn_ids — the global_txn_id
+        // is actually the local TxnId. Try to resolve it on all shards.
+        if txn.participant_txn_ids.is_empty() {
+            let local_txn_id = txn.global_txn_id;
+            for shard in engine.all_shards() {
+                let result = match outcome {
+                    TxnOutcome::Committed => shard.txn_mgr.commit(local_txn_id)
+                        .map(|_| ())
+                        .map_err(|e| FalconError::Internal(e.to_string())),
+                    TxnOutcome::Aborted => shard.txn_mgr.abort(local_txn_id)
+                        .map_err(|e| FalconError::Internal(e.to_string())),
+                };
+                // Ignore "txn not found" — it may only exist on one shard
+                if let Err(ref e) = result {
+                    tracing::debug!(
+                        txn_id = local_txn_id.0, shard = ?shard.shard_id,
+                        error = %e, "recovered txn resolution attempt (may not exist on this shard)"
+                    );
+                }
+            }
+            return Ok(());
+        }
+
         for (shard_id, participant_txn_id) in &txn.participant_txn_ids {
             let shard = match engine.shard(*shard_id) {
                 Some(s) => s,
                 None => {
+                    let e = FalconError::Internal(format!(
+                        "shard {:?} not found for txn {}", shard_id, txn.global_txn_id.0
+                    ));
                     tracing::warn!(
                         txn_id = txn.global_txn_id.0,
                         shard = ?shard_id,
-                        "apply_decision: shard not found, skipping"
+                        "apply_decision: shard not found"
                     );
+                    if first_err.is_none() { first_err = Some(e); }
                     continue;
                 }
             };
@@ -456,18 +572,22 @@ impl InDoubtResolver {
                     );
                 }
                 Err(e) => {
-                    // Txn may already be committed/aborted — not necessarily fatal
                     tracing::warn!(
                         txn_id = txn.global_txn_id.0,
                         shard = ?shard_id,
                         participant_txn = participant_txn_id.0,
                         error = %e,
-                        "participant decision apply failed (may already be resolved)"
+                        "participant decision apply failed"
                     );
+                    if first_err.is_none() { first_err = Some(e); }
                 }
             }
         }
-        Ok(())
+
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     /// Start the background resolver thread. Returns a handle to stop it.
@@ -834,9 +954,10 @@ mod tests {
     fn test_sweep_defaults_to_abort_when_no_cached_decision() {
         let resolver = make_resolver();
         resolver.register_indoubt(TxnId(30), vec![(ShardId(0), TxnId(300))]);
-        // No cached decision → should abort
-        let resolved = resolver.sweep();
-        assert_eq!(resolved, 1);
+        // No cached decision → force-abort after max_attempts sweeps
+        for _ in 0..5 {
+            resolver.sweep();
+        }
         assert_eq!(resolver.indoubt_count(), 0);
         let m = resolver.metrics();
         assert_eq!(m.resolved_aborted, 1);
@@ -855,8 +976,10 @@ mod tests {
             resolver.register_indoubt(TxnId(i), vec![(ShardId(0), TxnId(i * 100))]);
         }
         assert_eq!(resolver.indoubt_count(), 10);
-        let resolved = resolver.sweep();
-        assert_eq!(resolved, 10);
+        // sweep max_attempts times to reach force-abort threshold
+        for _ in 0..5 {
+            resolver.sweep();
+        }
         assert_eq!(resolver.indoubt_count(), 0);
     }
 
@@ -875,7 +998,9 @@ mod tests {
         let resolver = make_resolver();
         resolver.register_indoubt(TxnId(1), vec![]);
         resolver.register_indoubt(TxnId(2), vec![]);
-        resolver.sweep();
+        for _ in 0..5 {
+            resolver.sweep();
+        }
         assert_eq!(resolver.total_resolved(), 2);
     }
 
@@ -995,7 +1120,9 @@ mod tests {
         let resolver = make_resolver();
         resolver.register_indoubt(TxnId(1), vec![]);
         resolver.register_indoubt(TxnId(2), vec![]);
-        resolver.sweep();
+        for _ in 0..5 {
+            resolver.sweep();
+        }
 
         let status = resolver.convergence_status();
         assert!(status.is_converged);

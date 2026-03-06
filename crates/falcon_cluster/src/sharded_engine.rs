@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use falcon_common::datum::OwnedRow;
 use falcon_common::error::FalconError;
+use falcon_common::hlc::HybridClock;
 use falcon_common::schema::TableSchema;
 use falcon_common::types::{DataType, ShardId};
 use falcon_storage::engine::StorageEngine;
@@ -33,14 +34,20 @@ pub struct ShardInstance {
 pub struct ShardedEngine {
     shards: Vec<ShardInstance>,
     num_shards: u64,
+    /// Cluster-level HLC for cross-node causal ordering.
+    pub hlc: Arc<HybridClock>,
+    /// Whether TxnManagers use HLC (true for WAL/production, false for in-memory/test).
+    hlc_enabled: bool,
 }
 
 impl ShardedEngine {
     /// Create N in-memory shards, each with independent storage and txn manager.
     pub fn new(num_shards: u64) -> Self {
+        let hlc = Arc::new(HybridClock::new());
         let shards = (0..num_shards)
             .map(|i| {
                 let storage = Arc::new(StorageEngine::new_in_memory());
+                // In-memory shards use plain monotonic counter (test-friendly)
                 let txn_mgr = Arc::new(TxnManager::new(storage.clone()));
                 ShardInstance {
                     shard_id: ShardId(i),
@@ -49,7 +56,7 @@ impl ShardedEngine {
                 }
             })
             .collect();
-        Self { shards, num_shards }
+        Self { shards, num_shards, hlc, hlc_enabled: false }
     }
 
     /// Create N WAL-backed shards under `base_dir/shard_<i>/`.
@@ -60,6 +67,7 @@ impl ShardedEngine {
         wal_mode: &str,
         no_buffering: bool,
     ) -> Result<Self, FalconError> {
+        let hlc = Arc::new(HybridClock::new());
         let mut shards = Vec::with_capacity(num_shards as usize);
         for i in 0..num_shards {
             let shard_dir = base_dir.join(format!("shard_{i}"));
@@ -93,7 +101,7 @@ impl ShardedEngine {
                 })?
             };
             let storage = Arc::new(storage);
-            let txn_mgr = Arc::new(TxnManager::new(storage.clone()));
+            let txn_mgr = Arc::new(TxnManager::new_with_hlc(storage.clone(), hlc.clone()));
 
             // Advance counters past recovered state
             let max_ts = storage.recovered_max_ts.load(std::sync::atomic::Ordering::Relaxed);
@@ -108,7 +116,7 @@ impl ShardedEngine {
                 txn_mgr,
             });
         }
-        Ok(Self { shards, num_shards })
+        Ok(Self { shards, num_shards, hlc, hlc_enabled: true })
     }
 
     /// Get a shard instance by ShardId.
@@ -185,6 +193,27 @@ impl ShardedEngine {
     /// Get all shard instances.
     pub fn all_shards(&self) -> &[ShardInstance] {
         &self.shards
+    }
+
+    /// Return a consistent snapshot timestamp for cross-shard reads.
+    /// In production (WAL mode with HLC), delegates to HLC for causal ordering.
+    /// In test (in-memory), takes max of shard timestamps.
+    pub fn consistent_snapshot_ts(&self) -> falcon_common::types::Timestamp {
+        if self.hlc_enabled {
+            self.hlc.now()
+        } else {
+            self.shards
+                .iter()
+                .map(|s| s.txn_mgr.current_ts())
+                .max()
+                .unwrap_or(falcon_common::types::Timestamp(1))
+        }
+    }
+
+    /// Update the HLC on receiving a timestamp from a remote node.
+    /// Call this on every cross-node RPC response to maintain causal order.
+    pub fn recv_remote_ts(&self, remote_ts: falcon_common::types::Timestamp) -> falcon_common::types::Timestamp {
+        self.hlc.recv(remote_ts)
     }
 
     /// Flush WAL on all shards. Returns the first error encountered, if any.

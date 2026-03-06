@@ -404,6 +404,7 @@ async fn run_server_inner(
     falcon_common::globals::set_node_role(
         format!("{:?}", config.replication.role).to_lowercase(),
     );
+    falcon_common::globals::init_server_start_time();
 
     // Initialize metrics
     if let Err(e) = falcon_observability::init_metrics(&cli.metrics_addr) {
@@ -477,12 +478,16 @@ async fn run_server_inner(
             );
         }
 
-        Arc::new(engine)
+        let storage = Arc::new(engine);
+        storage.register_arc();
+        storage
     } else {
         tracing::info!("Running in pure in-memory mode (no WAL)");
         let mut engine = StorageEngine::new_in_memory();
         apply_engine_config(&mut engine, &config, &replication_log);
-        Arc::new(engine)
+        let storage = Arc::new(engine);
+        storage.register_arc();
+        storage
     };
 
     // Initialize transaction manager
@@ -531,6 +536,7 @@ async fn run_server_inner(
     } else {
         None
     };
+    let mut dist_engine_ref: Option<Arc<DistributedQueryEngine>> = None;
     let mut pg_server = if let Some(ref sharded) = sharded_engine {
         tracing::info!("Starting in distributed mode with {} shards", num_shards);
         let shard_ids: Vec<ShardId> = (0..num_shards).map(ShardId).collect();
@@ -538,6 +544,7 @@ async fn run_server_inner(
             sharded.clone(),
             std::time::Duration::from_secs(30),
         ));
+        dist_engine_ref = Some(dist_engine.clone());
         PgServer::new_distributed(
             config.server.pg_listen_addr.clone(),
             storage.clone(),
@@ -1096,25 +1103,29 @@ async fn run_server_inner(
         let decision_log = CoordinatorDecisionLog::open(DecisionLogConfig::default(), &journal_path);
         tracing::info!(path = ?journal_path, "2PC decision journal opened");
 
+        // Wire decision log to the distributed query engine's 2PC coordinator
+        if let Some(ref de) = dist_engine_ref {
+            de.set_decision_log(decision_log.clone());
+        }
+
         let outcome_cache = falcon_cluster::indoubt_resolver::TxnOutcomeCache::new(
             std::time::Duration::from_secs(3600),
             10_000,
         );
         let resolver = InDoubtResolver::with_engine(outcome_cache, engine.clone());
 
-        // Re-register any unapplied decisions from the journal as in-doubt txns
-        for rec in decision_log.unapplied_decisions() {
-            use falcon_cluster::indoubt_resolver::TxnOutcome;
-            use falcon_cluster::deterministic_2pc::CoordinatorDecision;
-            let participant_pairs: Vec<_> = rec.participant_shards.iter()
-                .map(|&s| (s, falcon_common::types::TxnId(rec.txn_id.0)))
-                .collect();
-            resolver.register_indoubt(rec.txn_id, participant_pairs);
-            let outcome = match rec.decision {
-                CoordinatorDecision::Commit => TxnOutcome::Committed,
-                CoordinatorDecision::Abort => TxnOutcome::Aborted,
-            };
-            resolver.record_decision(rec.txn_id, outcome);
+        // Wire decision log so resolver calls mark_applied after resolving
+        resolver.set_decision_log(decision_log.clone());
+
+        // Seed outcome cache from unapplied coordinator decisions (durable log)
+        resolver.seed_from_decision_log(&decision_log);
+
+        // Seed WAL-recovered prepared txns from each shard as in-doubt
+        for shard in engine.all_shards() {
+            let recovered = shard.storage.recovered_prepared_txns.read().clone();
+            if !recovered.is_empty() {
+                resolver.seed_from_recovered(&recovered);
+            }
         }
 
         match resolver.start() {

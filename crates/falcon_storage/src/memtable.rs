@@ -115,8 +115,14 @@ fn encode_datum_to_bytes(datum: &Datum, buf: &mut Vec<u8>) {
         }
         Datum::Text(s) => {
             buf.push(0x05);
-            buf.extend_from_slice(s.as_bytes());
-            buf.push(0x00); // null terminator for ordering
+            for b in s.as_bytes() {
+                buf.push(*b);
+                if *b == 0x00 {
+                    buf.push(0x01); // escape NUL: 0x00 0x01 in string
+                }
+            }
+            buf.push(0x00); // terminator: 0x00 0x00 marks end
+            buf.push(0x00);
         }
         Datum::Timestamp(v) => {
             buf.push(0x06);
@@ -172,6 +178,17 @@ fn encode_datum_to_bytes(datum: &Datum, buf: &mut Vec<u8>) {
             buf.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
             buf.extend_from_slice(bytes);
         }
+        Datum::TsVector(entries) => {
+            buf.push(0x0F);
+            let s = format!("{}", Datum::TsVector(entries.clone()));
+            buf.extend_from_slice(&(s.len() as u32).to_be_bytes());
+            buf.extend_from_slice(s.as_bytes());
+        }
+        Datum::TsQuery(q) => {
+            buf.push(0x10);
+            buf.extend_from_slice(&(q.len() as u32).to_be_bytes());
+            buf.extend_from_slice(q.as_bytes());
+        }
     }
 }
 
@@ -194,6 +211,10 @@ pub struct MemTable {
     /// Incremented on INSERT commit, decremented on DELETE commit.
     /// Enables O(1) COUNT(*) without WHERE clause.
     pub(crate) committed_row_count: AtomicI64,
+    /// Modification counter for auto-analyze. Avoids DashMap lookup per commit.
+    pub(crate) rows_modified: AtomicU64,
+    /// Cached auto-analyze threshold. Updated after each analyze_table() run.
+    pub(crate) analyze_threshold: AtomicU64,
     /// Ordered PK index: maintained at commit time.
     /// Enables O(K) scan_top_k_by_pk instead of O(N) full DashMap scan.
     pk_order: RwLock<BTreeSet<PrimaryKey>>,
@@ -421,6 +442,8 @@ impl MemTable {
             has_secondary_idx: AtomicBool::new(false),
             gc_candidates: AtomicU64::new(0),
             committed_row_count: AtomicI64::new(0),
+            rows_modified: AtomicU64::new(0),
+            analyze_threshold: AtomicU64::new(500),
             pk_order: RwLock::new(BTreeSet::new()),
         }
     }
@@ -462,6 +485,39 @@ impl MemTable {
                 self.check_unique_indexes(&pk, &row)?;
                 let chain = Arc::new(VersionChain::new());
                 chain.prepend(txn_id, Some(row));
+                e.insert(chain);
+            }
+        }
+
+        Ok(pk)
+    }
+
+    /// Insert with pre-wrapped Arc<OwnedRow> — avoids deep clone when sharing row with WAL buffer.
+    pub fn insert_arc(
+        &self,
+        row: Arc<OwnedRow>,
+        txn_id: TxnId,
+    ) -> Result<PrimaryKey, falcon_common::error::StorageError> {
+        let pk = encode_pk(&row, self.schema.pk_indices());
+
+        let entry = self.data.entry(pk.clone());
+        match entry {
+            dashmap::mapref::entry::Entry::Occupied(e) => {
+                let chain = e.get();
+                if chain.has_write_conflict(txn_id) {
+                    return Err(falcon_common::error::StorageError::WriteConflict);
+                }
+                if chain.has_live_version(txn_id) {
+                    return Err(falcon_common::error::StorageError::DuplicateKey);
+                }
+                self.check_unique_indexes(&pk, &row)?;
+                chain.prepend_arc(txn_id, Some(row));
+                self.gc_candidates.fetch_add(1, AtomicOrdering::Relaxed);
+            }
+            dashmap::mapref::entry::Entry::Vacant(e) => {
+                self.check_unique_indexes(&pk, &row)?;
+                let chain = Arc::new(VersionChain::new());
+                chain.prepend_arc(txn_id, Some(row));
                 e.insert(chain);
             }
         }
@@ -599,7 +655,13 @@ impl MemTable {
                 })
                 .collect();
 
-            let results: Vec<T> = handles.into_iter().map(|h| h.join().expect("parallel_aggregate worker thread panicked")).collect();
+            let results: Vec<T> = handles
+                .into_iter()
+                .map(|h| match h.join() {
+                    Ok(v) => v,
+                    Err(payload) => std::panic::resume_unwind(payload),
+                })
+                .collect();
             let merged = results.into_iter().reduce(|a, b| reduce(a, b));
             merged.unwrap_or_else(|| init())
         })
@@ -798,14 +860,13 @@ impl MemTable {
     /// committed_row_count is exact and avoids the O(N) DashMap scan entirely.
     pub fn count_visible(&self, txn_id: TxnId, read_ts: Timestamp) -> usize {
         let count = self.committed_row_count.load(AtomicOrdering::Acquire);
-        // Fast path only when count is non-negative and no GC candidates exist.
-        // A negative count indicates a transient race (e.g. abort interleaved with
-        // commit); fall through to the slow path which always returns the true count.
-        if count > 0 && self.gc_candidates.load(AtomicOrdering::Relaxed) == 0 {
+        // Fast path only when count matches data.len() (no uncommitted inserts)
+        // and there are no GC candidates (no uncommitted deletes/updates).
+        if count >= 0
+            && self.gc_candidates.load(AtomicOrdering::Relaxed) == 0
+            && self.data.len() == count as usize
+        {
             return count as usize;
-        }
-        if count == 0 && self.gc_candidates.load(AtomicOrdering::Relaxed) == 0 {
-            return 0;
         }
         // Slow path: full scan with per-row visibility checks
         let mut n = 0;
@@ -859,7 +920,11 @@ impl MemTable {
                                     }
                                     Some(Datum::Int64(v)) => {
                                         counts[i] += 1;
-                                        sums_i[i] += *v;
+                                        if let Some(s) = sums_i[i].checked_add(*v) {
+                                            sums_i[i] = s;
+                                        } else {
+                                            is_float[i] = true;
+                                        }
                                         sums_f[i] += *v as f64;
                                     }
                                     Some(Datum::Float64(v)) => {
@@ -1171,16 +1236,20 @@ impl MemTable {
             let mut tree = idx.tree.write();
             tree.clear();
         }
-        // Re-insert from current data
+        // Re-insert from current data — only committed non-tombstone versions
         for entry in &self.data {
             let pk = entry.key().clone();
             let chain = entry.value();
-            if let Some(row) = chain.read_latest() {
-                for idx in indexes.iter() {
-                    let key_bytes = idx.encode_key(&row);
-                    idx.insert(key_bytes, pk.clone());
-                }
-            }
+            chain.with_visible_data(
+                falcon_common::types::TxnId(u64::MAX),
+                falcon_common::types::Timestamp(u64::MAX - 1),
+                |row| {
+                    for idx in indexes.iter() {
+                        let key_bytes = idx.encode_key(row);
+                        idx.insert(key_bytes, pk.clone());
+                    }
+                },
+            );
         }
     }
 }
@@ -1239,7 +1308,7 @@ mod index_tests {
             nullable: !pk,
             is_primary_key: pk,
             default_value: None,
-            is_serial: false,
+            is_serial: false, max_length: None,
         }
     }
 

@@ -346,6 +346,12 @@ pub(crate) fn encode_group_key(group_by_indices: &[usize], values: &[Datum]) -> 
                 key.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
                 key.extend_from_slice(bytes);
             }
+            Datum::TsVector(_) | Datum::TsQuery(_) => {
+                key.push(15);
+                let s = format!("{datum}");
+                key.extend_from_slice(&(s.len() as u32).to_be_bytes());
+                key.extend_from_slice(s.as_bytes());
+            }
         }
     }
     key

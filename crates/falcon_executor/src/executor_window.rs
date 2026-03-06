@@ -198,44 +198,42 @@ impl Executor {
                             }
                         }
                         WindowFunc::NthValue(col_idx, n) => {
-                            let nth_idx = (*n as usize).saturating_sub(1); // 1-indexed to 0-indexed
-                            let val = if nth_idx < indices.len() {
-                                let target_row_idx = indices[nth_idx];
-                                source_rows[target_row_idx]
-                                    .get(*col_idx)
-                                    .cloned()
-                                    .unwrap_or(Datum::Null)
-                            } else {
-                                Datum::Null
-                            };
-                            for &row_idx in &indices {
-                                result_rows[row_idx].values[proj_idx] = val.clone();
+                            let n_zero = (*n as usize).saturating_sub(1);
+                            let part_len = indices.len();
+                            for (pos, &row_idx) in indices.iter().enumerate() {
+                                let start = Self::resolve_frame_start(&wf.frame, pos, part_len);
+                                let end = Self::resolve_frame_end(&wf.frame, pos, part_len);
+                                let frame_idx = start + n_zero;
+                                let val = if frame_idx <= end && frame_idx < part_len {
+                                    source_rows[indices[frame_idx]].get(*col_idx).cloned().unwrap_or(Datum::Null)
+                                } else {
+                                    Datum::Null
+                                };
+                                result_rows[row_idx].values[proj_idx] = val;
                             }
                         }
                         WindowFunc::FirstValue(col_idx) => {
-                            let first_row_idx = match indices.first() {
-                                Some(idx) => *idx,
-                                None => continue,
-                            };
-                            let val = source_rows[first_row_idx]
-                                .get(*col_idx)
-                                .cloned()
-                                .unwrap_or(Datum::Null);
-                            for &row_idx in &indices {
-                                result_rows[row_idx].values[proj_idx] = val.clone();
+                            let part_len = indices.len();
+                            for (pos, &row_idx) in indices.iter().enumerate() {
+                                let start = Self::resolve_frame_start(&wf.frame, pos, part_len);
+                                let val = if start < part_len {
+                                    source_rows[indices[start]].get(*col_idx).cloned().unwrap_or(Datum::Null)
+                                } else {
+                                    Datum::Null
+                                };
+                                result_rows[row_idx].values[proj_idx] = val;
                             }
                         }
                         WindowFunc::LastValue(col_idx) => {
-                            let last_row_idx = match indices.last() {
-                                Some(idx) => *idx,
-                                None => continue, // empty partition — skip
-                            };
-                            let val = source_rows[last_row_idx]
-                                .get(*col_idx)
-                                .cloned()
-                                .unwrap_or(Datum::Null);
-                            for &row_idx in &indices {
-                                result_rows[row_idx].values[proj_idx] = val.clone();
+                            let part_len = indices.len();
+                            for (pos, &row_idx) in indices.iter().enumerate() {
+                                let end = Self::resolve_frame_end(&wf.frame, pos, part_len);
+                                let val = if end < part_len {
+                                    source_rows[indices[end]].get(*col_idx).cloned().unwrap_or(Datum::Null)
+                                } else {
+                                    Datum::Null
+                                };
+                                result_rows[row_idx].values[proj_idx] = val;
                             }
                         }
                         WindowFunc::Agg(agg_func, col_idx) => {
@@ -344,61 +342,125 @@ impl Executor {
             return;
         }
 
-        // Extract f64 values (None for NULL) — single pass over the partition.
-        let vals: Vec<Option<f64>> = indices
-            .iter()
-            .map(|&i| source_rows[i].get(col_idx).and_then(|d| d.as_f64()))
-            .collect();
-
-        // Check if the column is integer-typed for SUM output fidelity.
+        // Determine column type from first non-null value.
         let is_integer_col = indices.iter().find_map(|&i| source_rows[i].get(col_idx))
             .map(|d| matches!(d, Datum::Int32(_) | Datum::Int64(_)))
             .unwrap_or(false);
 
-        let mut sum: f64 = 0.0;
-        let mut count: i64 = 0;
-        let mut prev_start: usize = 0;
-        let mut prev_end_plus1: usize = 0; // exclusive end of the previous frame
+        // For integer columns keep a lossless i64 sum; fall back to f64 on overflow.
+        // For float columns use f64 directly.
+        enum SumAcc { Int(i64), Float(f64) }
 
-        for (pos, &row_idx) in indices.iter().enumerate().take(n) {
-            let start = Self::resolve_frame_start(frame, pos, n).min(n);
-            let end = Self::resolve_frame_end(frame, pos, n).min(n.saturating_sub(1));
-            let end_plus1 = end + 1; // exclusive
+        let extract_i64 = |i: usize| -> Option<i64> {
+            source_rows[i].get(col_idx).and_then(|d| match d {
+                Datum::Int32(v) => Some(i64::from(*v)),
+                Datum::Int64(v) => Some(*v),
+                _ => None,
+            })
+        };
+        let extract_f64 = |i: usize| -> Option<f64> {
+            source_rows[i].get(col_idx).and_then(|d| d.as_f64())
+        };
 
-            if pos == 0 {
-                // Initial frame: compute from scratch
-                for v in vals[start..end_plus1].iter().flatten() {
-                    sum += v;
-                    count += 1;
-                }
-            } else {
-                // Subtract values that left the frame (prev_start..start)
-                for v in vals[prev_start..start.min(prev_end_plus1)].iter().flatten() {
-                    sum -= v;
-                    count -= 1;
-                }
-                // Add values that entered the frame (prev_end_plus1..end_plus1)
-                for v in vals[prev_end_plus1.max(start)..end_plus1].iter().flatten() {
-                    sum += v;
-                    count += 1;
-                }
-            }
+        // Two separate sliding-window loops to keep the hot path branch-free.
+        if is_integer_col {
+            let vals: Vec<Option<i64>> = indices.iter().map(|&i| extract_i64(i)).collect();
+            let mut acc = SumAcc::Int(0i64);
+            let mut count: i64 = 0;
+            let mut prev_start = 0usize;
+            let mut prev_end_plus1 = 0usize;
 
-            prev_start = start;
-            prev_end_plus1 = end_plus1;
-
-            result_rows[row_idx].values[proj_idx] = if count == 0 {
-                Datum::Null
-            } else {
-                match agg_func {
-                    AggFunc::Sum => {
-                        if is_integer_col { Datum::Int64(sum as i64) } else { Datum::Float64(sum) }
-                    }
-                    AggFunc::Count => Datum::Int64(count),
-                    AggFunc::Avg => Datum::Float64(sum / count as f64),
-                    _ => Datum::Null,
+            let add = |acc: &mut SumAcc, v: i64| {
+                match acc {
+                    SumAcc::Int(s) => match s.checked_add(v) {
+                        Some(r) => *s = r,
+                        None => { *acc = SumAcc::Float(*s as f64 + v as f64); }
+                    },
+                    SumAcc::Float(s) => *s += v as f64,
                 }
             };
+            let sub = |acc: &mut SumAcc, v: i64| {
+                match acc {
+                    SumAcc::Int(s) => match s.checked_sub(v) {
+                        Some(r) => *s = r,
+                        None => { *acc = SumAcc::Float(*s as f64 - v as f64); }
+                    },
+                    SumAcc::Float(s) => *s -= v as f64,
+                }
+            };
+
+            for (pos, &row_idx) in indices.iter().enumerate().take(n) {
+                let start = Self::resolve_frame_start(frame, pos, n).min(n);
+                let end = Self::resolve_frame_end(frame, pos, n).min(n.saturating_sub(1));
+                let end_plus1 = end + 1;
+
+                if pos == 0 {
+                    for v in vals[start..end_plus1].iter().flatten() {
+                        add(&mut acc, *v);
+                        count += 1;
+                    }
+                } else {
+                    for v in vals[prev_start..start.min(prev_end_plus1)].iter().flatten() {
+                        sub(&mut acc, *v);
+                        count -= 1;
+                    }
+                    for v in vals[prev_end_plus1.max(start)..end_plus1].iter().flatten() {
+                        add(&mut acc, *v);
+                        count += 1;
+                    }
+                }
+                prev_start = start;
+                prev_end_plus1 = end_plus1;
+
+                result_rows[row_idx].values[proj_idx] = if count == 0 {
+                    Datum::Null
+                } else {
+                    match agg_func {
+                        AggFunc::Sum => match acc {
+                            SumAcc::Int(s) => Datum::Int64(s),
+                            SumAcc::Float(s) => Datum::Float64(s),
+                        },
+                        AggFunc::Count => Datum::Int64(count),
+                        AggFunc::Avg => {
+                            let s = match acc { SumAcc::Int(s) => s as f64, SumAcc::Float(s) => s };
+                            Datum::Float64(s / count as f64)
+                        }
+                        _ => Datum::Null,
+                    }
+                };
+            }
+        } else {
+            let vals: Vec<Option<f64>> = indices.iter().map(|&i| extract_f64(i)).collect();
+            let mut sum: f64 = 0.0;
+            let mut count: i64 = 0;
+            let mut prev_start = 0usize;
+            let mut prev_end_plus1 = 0usize;
+
+            for (pos, &row_idx) in indices.iter().enumerate().take(n) {
+                let start = Self::resolve_frame_start(frame, pos, n).min(n);
+                let end = Self::resolve_frame_end(frame, pos, n).min(n.saturating_sub(1));
+                let end_plus1 = end + 1;
+
+                if pos == 0 {
+                    for v in vals[start..end_plus1].iter().flatten() { sum += v; count += 1; }
+                } else {
+                    for v in vals[prev_start..start.min(prev_end_plus1)].iter().flatten() { sum -= v; count -= 1; }
+                    for v in vals[prev_end_plus1.max(start)..end_plus1].iter().flatten() { sum += v; count += 1; }
+                }
+                prev_start = start;
+                prev_end_plus1 = end_plus1;
+
+                result_rows[row_idx].values[proj_idx] = if count == 0 {
+                    Datum::Null
+                } else {
+                    match agg_func {
+                        AggFunc::Sum => Datum::Float64(sum),
+                        AggFunc::Count => Datum::Int64(count),
+                        AggFunc::Avg => Datum::Float64(sum / count as f64),
+                        _ => Datum::Null,
+                    }
+                };
+            }
         }
     }
 

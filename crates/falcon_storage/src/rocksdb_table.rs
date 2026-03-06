@@ -63,7 +63,7 @@ fn decode_chain(raw: &[u8]) -> Vec<MvccValue> {
     let mut out = Vec::with_capacity(count);
     for _ in 0..count {
         if pos + 4 > raw.len() { break; }
-        let len = u32::from_le_bytes(raw[pos..pos + 4].try_into().unwrap()) as usize;
+        let len = u32::from_le_bytes([raw[pos], raw[pos+1], raw[pos+2], raw[pos+3]]) as usize;
         pos += 4;
         if pos + len > raw.len() { break; }
         if let Some(mv) = MvccValue::decode(&raw[pos..pos + len]) {
@@ -156,9 +156,15 @@ impl RocksDbTable {
         let mv = MvccValue::prepared(txn_id, Self::ser(row)?);
         let _guard = self.pk_locks[pk_shard(&pk)].lock().unwrap();
         let mut chain = self.read_chain(&pk)?;
-        if let Some(head) = chain.first() {
-            if head.status == MvccStatus::Prepared && head.txn_id != txn_id {
+        for entry in &chain {
+            if entry.status == MvccStatus::Prepared && entry.txn_id != txn_id {
                 return Err(StorageError::WriteConflict);
+            }
+            if entry.status == MvccStatus::Committed {
+                if !entry.is_tombstone {
+                    return Err(StorageError::DuplicateKey);
+                }
+                break; // latest committed is tombstone — key was deleted, allow insert
             }
         }
         chain.insert(0, mv);
@@ -225,18 +231,10 @@ impl RocksDbTable {
             }
             if !changed { continue; }
 
-            // GC superseded committed + aborted versions.
-            // Keep the first committed version (anchor), drop all older ones.
-            let mut keep = Vec::with_capacity(chain.len());
-            let mut saw_committed = false;
-            for mv in chain {
-                if mv.status == MvccStatus::Aborted { continue; }
-                if mv.status == MvccStatus::Committed {
-                    if saw_committed { continue; }
-                    saw_committed = true;
-                }
-                keep.push(mv);
-            }
+            // GC only aborted versions; keep all committed versions for MVCC visibility.
+            let keep: Vec<MvccValue> = chain.into_iter()
+                .filter(|mv| mv.status != MvccStatus::Aborted)
+                .collect();
             if keep.is_empty() {
                 batch.delete(pk);
             } else {

@@ -55,6 +55,19 @@ pub enum FrontendMessage {
     SASLResponse { data: Vec<u8> },
 }
 
+/// Extended PG error/notice fields (detail, hint, position, etc.).
+#[derive(Debug, Clone, Default)]
+pub struct ErrorFields {
+    pub detail: Option<String>,
+    pub hint: Option<String>,
+    pub position: Option<i32>,
+    pub schema_name: Option<String>,
+    pub table_name: Option<String>,
+    pub column_name: Option<String>,
+    pub constraint_name: Option<String>,
+    pub where_: Option<String>,
+}
+
 /// Raw PG backend (server→client) message types.
 #[derive(Debug)]
 pub enum BackendMessage {
@@ -114,6 +127,13 @@ pub enum BackendMessage {
         code: String,
         message: String,
     },
+    /// Error response with extended PG fields (detail, hint, position, etc.).
+    ErrorResponseExt {
+        severity: String,
+        code: String,
+        message: String,
+        fields: ErrorFields,
+    },
     /// Notice response ('N').
     NoticeResponse {
         message: String,
@@ -151,6 +171,16 @@ pub enum BackendMessage {
     CopyData(Vec<u8>),
     /// CopyDone ('c') — end of COPY output.
     CopyDone,
+}
+
+impl BackendMessage {
+    pub fn error(severity: impl Into<String>, code: impl Into<String>, message: impl Into<String>) -> Self {
+        BackendMessage::ErrorResponse {
+            severity: severity.into(),
+            code: code.into(),
+            message: message.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -581,9 +611,7 @@ pub fn encode_message_into(buf: &mut BytesMut, msg: &BackendMessage) {
             write_cstring(buf, tag);
         }
         BackendMessage::ErrorResponse {
-            severity,
-            code,
-            message,
+            severity, code, message,
         } => {
             let mut body = BytesMut::new();
             body.put_u8(b'S');
@@ -594,7 +622,33 @@ pub fn encode_message_into(buf: &mut BytesMut, msg: &BackendMessage) {
             write_cstring(&mut body, code);
             body.put_u8(b'M');
             write_cstring(&mut body, message);
-            body.put_u8(0); // terminator
+            body.put_u8(0);
+
+            buf.put_u8(b'E');
+            buf.put_i32(4 + body.len() as i32);
+            buf.extend_from_slice(&body);
+        }
+        BackendMessage::ErrorResponseExt {
+            severity, code, message, fields: ef,
+        } => {
+            let mut body = BytesMut::new();
+            body.put_u8(b'S');
+            write_cstring(&mut body, severity);
+            body.put_u8(b'V');
+            write_cstring(&mut body, severity);
+            body.put_u8(b'C');
+            write_cstring(&mut body, code);
+            body.put_u8(b'M');
+            write_cstring(&mut body, message);
+            if let Some(ref d) = ef.detail { body.put_u8(b'D'); write_cstring(&mut body, d); }
+            if let Some(ref h) = ef.hint { body.put_u8(b'H'); write_cstring(&mut body, h); }
+            if let Some(p) = ef.position { body.put_u8(b'P'); write_cstring(&mut body, &p.to_string()); }
+            if let Some(ref s) = ef.schema_name { body.put_u8(b's'); write_cstring(&mut body, s); }
+            if let Some(ref t) = ef.table_name { body.put_u8(b't'); write_cstring(&mut body, t); }
+            if let Some(ref c) = ef.column_name { body.put_u8(b'c'); write_cstring(&mut body, c); }
+            if let Some(ref n) = ef.constraint_name { body.put_u8(b'n'); write_cstring(&mut body, n); }
+            if let Some(ref w) = ef.where_ { body.put_u8(b'W'); write_cstring(&mut body, w); }
+            body.put_u8(0);
 
             buf.put_u8(b'E');
             buf.put_i32(4 + body.len() as i32);
@@ -604,6 +658,10 @@ pub fn encode_message_into(buf: &mut BytesMut, msg: &BackendMessage) {
             let mut body = BytesMut::new();
             body.put_u8(b'S');
             write_cstring(&mut body, "NOTICE");
+            body.put_u8(b'V');
+            write_cstring(&mut body, "NOTICE");
+            body.put_u8(b'C');
+            write_cstring(&mut body, "00000");
             body.put_u8(b'M');
             write_cstring(&mut body, message);
             body.put_u8(0);

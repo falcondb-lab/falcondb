@@ -16,7 +16,7 @@
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(1),
@@ -25,7 +25,7 @@
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 },
             ],
             primary_key_columns: vec![0],
@@ -278,7 +278,7 @@
             nullable: true,
             is_primary_key: false,
             default_value: None,
-            is_serial: false,
+            is_serial: false, max_length: None,
         };
         let ddl_id = engine.alter_table_add_column("alt_add", new_col).unwrap();
         assert!(ddl_id > 0);
@@ -321,7 +321,7 @@
             nullable: false,
             is_primary_key: false,
             default_value: Some(Datum::Text("active".into())),
-            is_serial: false,
+            is_serial: false, max_length: None,
         };
         engine.alter_table_add_column("alt_def", new_col).unwrap();
 
@@ -503,7 +503,7 @@
                 nullable: true,
                 is_primary_key: false,
                 default_value: Some(Datum::Int32(42)),
-                is_serial: false,
+                is_serial: false, max_length: None,
             };
             e1.alter_table_add_column("conc_alt", col)
         });

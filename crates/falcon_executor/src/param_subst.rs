@@ -104,9 +104,13 @@ pub fn subst_on_conflict(
     match oc {
         None => Ok(None),
         Some(OnConflictAction::DoNothing) => Ok(Some(OnConflictAction::DoNothing)),
-        Some(OnConflictAction::DoUpdate(assignments)) => Ok(Some(OnConflictAction::DoUpdate(
-            subst_assignments(assignments, p)?,
-        ))),
+        Some(OnConflictAction::DoUpdate(assignments, where_clause)) => {
+            let new_where = subst_opt(where_clause, p)?;
+            Ok(Some(OnConflictAction::DoUpdate(
+                subst_assignments(assignments, p)?,
+                new_where,
+            )))
+        }
     }
 }
 
@@ -133,6 +137,7 @@ fn subst_select(sel: &BoundSelect, p: &[Datum]) -> Result<BoundSelect, Execution
             .map(|(s, k, a)| Ok((subst_select(s, p)?, *k, *a)))
             .collect::<Result<_, ExecutionError>>()?,
         virtual_rows: sel.virtual_rows.clone(),
+        for_lock: sel.for_lock,
     })
 }
 
@@ -258,6 +263,14 @@ pub fn substitute_params_plan(
             using_table: using_table.clone(),
         }),
 
+        // MERGE — pass through
+        PhysicalPlan::Merge(m) => Ok(PhysicalPlan::Merge(m.clone())),
+
+        // Materialized views — pass through
+        PhysicalPlan::CreateMaterializedView { .. }
+        | PhysicalPlan::DropMaterializedView { .. }
+        | PhysicalPlan::RefreshMaterializedView { .. } => Ok(plan.clone()),
+
         // ── Scans / joins ──
         PhysicalPlan::SeqScan {
             table_id,
@@ -275,6 +288,7 @@ pub fn substitute_params_plan(
             ctes,
             unions,
             virtual_rows,
+            for_lock,
         } => Ok(PhysicalPlan::SeqScan {
             table_id: *table_id,
             schema: schema.clone(),
@@ -291,6 +305,7 @@ pub fn substitute_params_plan(
             ctes: subst_ctes(ctes, params)?,
             unions: subst_unions(unions, params)?,
             virtual_rows: virtual_rows.clone(),
+            for_lock: *for_lock,
         }),
         PhysicalPlan::IndexScan {
             table_id,
@@ -310,6 +325,7 @@ pub fn substitute_params_plan(
             ctes,
             unions,
             virtual_rows,
+            for_lock,
         } => Ok(PhysicalPlan::IndexScan {
             table_id: *table_id,
             schema: schema.clone(),
@@ -328,6 +344,7 @@ pub fn substitute_params_plan(
             ctes: subst_ctes(ctes, params)?,
             unions: subst_unions(unions, params)?,
             virtual_rows: virtual_rows.clone(),
+            for_lock: *for_lock,
         }),
         PhysicalPlan::IndexRangeScan {
             table_id,
@@ -348,6 +365,7 @@ pub fn substitute_params_plan(
             ctes,
             unions,
             virtual_rows,
+            for_lock,
         } => Ok(PhysicalPlan::IndexRangeScan {
             table_id: *table_id,
             schema: schema.clone(),
@@ -373,6 +391,7 @@ pub fn substitute_params_plan(
             ctes: subst_ctes(ctes, params)?,
             unions: subst_unions(unions, params)?,
             virtual_rows: virtual_rows.clone(),
+            for_lock: *for_lock,
         }),
         PhysicalPlan::ColumnScan {
             table_id,
@@ -389,6 +408,7 @@ pub fn substitute_params_plan(
             distinct,
             ctes,
             unions,
+            for_lock,
         } => Ok(PhysicalPlan::ColumnScan {
             table_id: *table_id,
             schema: schema.clone(),
@@ -404,6 +424,7 @@ pub fn substitute_params_plan(
             distinct: distinct.clone(),
             ctes: subst_ctes(ctes, params)?,
             unions: subst_unions(unions, params)?,
+            for_lock: *for_lock,
         }),
         PhysicalPlan::NestedLoopJoin {
             left_table_id,

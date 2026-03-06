@@ -106,19 +106,37 @@ impl GcPolicy {
                 continue;
             }
 
-            // Keep the latest version always; GC older ones below gc_ts
+            // Keep the latest committed version always; GC older ones below gc_ts.
+            // Prepared versions are always kept (resolver must handle them).
+            // Aborted versions are always dropped.
             let mut kept_latest = false;
             for v in versions {
                 if let Some(mv) = MvccValue::decode(&v.value) {
                     if mv.status == MvccStatus::Aborted {
                         self.versions_dropped.fetch_add(1, Ordering::Relaxed);
+                        self.bytes_reclaimed.fetch_add(
+                            v.key.len() as u64 + v.value.len() as u64, Ordering::Relaxed);
                         continue;
                     }
-                    if !kept_latest {
+                    if mv.status == MvccStatus::Prepared {
                         result.push(v);
-                        kept_latest = true;
+                        continue;
+                    }
+                    // Committed
+                    if !kept_latest {
+                        // Drop tombstones at bottom level (no older data can exist below)
+                        if mv.is_tombstone && mv.commit_ts.0 < gc_ts && is_bottom_level {
+                            self.tombstones_dropped.fetch_add(1, Ordering::Relaxed);
+                            self.bytes_reclaimed.fetch_add(
+                                v.key.len() as u64 + v.value.len() as u64, Ordering::Relaxed);
+                        } else {
+                            result.push(v);
+                            kept_latest = true;
+                        }
                     } else if mv.commit_ts.0 < gc_ts {
                         self.versions_dropped.fetch_add(1, Ordering::Relaxed);
+                        self.bytes_reclaimed.fetch_add(
+                            v.key.len() as u64 + v.value.len() as u64, Ordering::Relaxed);
                     } else {
                         result.push(v);
                     }

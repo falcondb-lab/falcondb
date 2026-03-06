@@ -10,4 +10,5 @@ tracing-appender.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 chrono.workspace = true
+parking_lot.workspace = true
 falcon_common = { path = "../falcon_common" }

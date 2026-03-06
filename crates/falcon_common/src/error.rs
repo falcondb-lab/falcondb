@@ -134,6 +134,12 @@ pub enum StorageError {
 
     #[error("Cold store error: {0}")]
     ColdStore(String),
+
+    #[error("Function not found: {0}")]
+    FunctionNotFound(String),
+
+    #[error("{0}")]
+    Other(String),
 }
 
 /// Transaction layer errors.

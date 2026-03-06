@@ -41,6 +41,13 @@ impl Executor {
                     return Ok(expr.clone());
                 }
                 let rows = self.exec_subquery(sub, txn)?;
+                if rows.len() > 1 {
+                    return Err(FalconError::Execution(
+                        falcon_common::error::ExecutionError::TypeError(
+                            "more than one row returned by a subquery used as an expression".into(),
+                        ),
+                    ));
+                }
                 let val = rows
                     .first()
                     .and_then(|r| r.get(0).cloned())
@@ -204,6 +211,16 @@ impl Executor {
                     args: ma,
                 })
             }
+            BoundExpr::UserFunction { name, args } => {
+                let ma: Vec<BoundExpr> = args
+                    .iter()
+                    .map(|e| self.materialize_subqueries(e, txn))
+                    .collect::<Result<_, _>>()?;
+                Ok(BoundExpr::UserFunction {
+                    name: name.clone(),
+                    args: ma,
+                })
+            }
             // AggregateExpr — pass through (evaluated later in HAVING)
             BoundExpr::AggregateExpr {
                 func,
@@ -359,6 +376,7 @@ impl Executor {
                     || else_result.as_deref().is_some_and(Self::expr_has_outer_ref)
             }
             BoundExpr::Function { args, .. }
+            | BoundExpr::UserFunction { args, .. }
             | BoundExpr::Coalesce(args)
             | BoundExpr::ArrayLiteral(args) => args.iter().any(Self::expr_has_outer_ref),
             BoundExpr::AggregateExpr { arg, .. } => {
@@ -504,6 +522,13 @@ impl Executor {
             ),
             BoundExpr::Function { func, args } => BoundExpr::Function {
                 func: func.clone(),
+                args: args
+                    .iter()
+                    .map(|e| Self::substitute_outer_refs(e, outer_row))
+                    .collect(),
+            },
+            BoundExpr::UserFunction { name, args } => BoundExpr::UserFunction {
+                name: name.clone(),
                 args: args
                     .iter()
                     .map(|e| Self::substitute_outer_refs(e, outer_row))

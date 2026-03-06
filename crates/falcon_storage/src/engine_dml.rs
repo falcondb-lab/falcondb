@@ -4,8 +4,17 @@
 //! Rowstore/Columnstore/DiskRowstore have explicit branches for special semantics;
 //! LSM/RocksDB/redb go through `TableHandle::as_storage_table()` unified path.
 
+use std::sync::Arc;
+
+use crate::memtable::MemTable;
+
 #[cfg(any(feature = "columnstore", feature = "disk_rowstore"))]
 use std::sync::atomic::Ordering as AtomicOrdering;
+
+thread_local! {
+    /// (engine_id, table_id, Arc<MemTable>) — skip engine_tables DashMap lookup.
+    static TABLE_CACHE: std::cell::RefCell<Option<(u64, TableId, Arc<MemTable>)>> = const { std::cell::RefCell::new(None) };
+}
 
 #[cfg(any(feature = "columnstore", feature = "disk_rowstore"))]
 use falcon_common::config::NodeRole;
@@ -47,31 +56,25 @@ impl StorageEngine {
 
         self.check_write_pressure()?;
 
+        let eid = self.engine_id;
+        let cached = TABLE_CACHE.with(|c| {
+            let slot = c.borrow();
+            match slot.as_ref() {
+                Some((e, id, t)) if *e == eid && *id == table_id => Some(Arc::clone(t)),
+                _ => None,
+            }
+        });
+        if let Some(table) = cached {
+            return self.insert_rowstore(&table, table_id, row, txn_id);
+        }
+
         let handle = self.engine_tables.get(&table_id)
             .ok_or(StorageError::TableNotFound(table_id))?;
 
         match handle.value() {
             TableHandle::Rowstore(table) => {
-                let row_bytes = crate::mvcc::estimate_row_bytes(&row);
-                self.memory_tracker.alloc_write_buffer(row_bytes);
-                let wal_row = if self.wal.is_some() || self.wal_observer.is_some() {
-                    Some(row.clone())
-                } else { None };
-                let cdc_row = if self.ext.cdc_manager.is_enabled() { Some(row.clone()) } else { None };
-                // Single DashMap entry for all three: write_bytes + wal_buf + write_set
-                let mut state = self.txn_local.entry(txn_id).or_default();
-                state.write_bytes += row_bytes;
-                if let Some(wr) = wal_row {
-                    state.wal_buf.push(WalRecord::Insert { txn_id, table_id, row: wr });
-                }
-                let pk = table.insert(row, txn_id)?;
-                state.write_set.push(crate::engine::TxnWriteOp { table_id, pk: pk.clone() });
-                drop(state);
-                if let Some(cdc_row) = cdc_row {
-                    let tname = self.cdc_table_name(table_id);
-                    self.ext.cdc_manager.emit_insert(txn_id, table_id, &tname, cdc_row, Some(format!("{pk:?}")));
-                }
-                Ok(pk)
+                TABLE_CACHE.with(|c| *c.borrow_mut() = Some((eid, table_id, Arc::clone(table))));
+                self.insert_rowstore(table, table_id, row, txn_id)
             }
             #[cfg(feature = "columnstore")]
             TableHandle::Columnstore(cs) => {
@@ -96,6 +99,78 @@ impl StorageEngine {
                 }
             }
         }
+    }
+
+    fn insert_rowstore(
+        &self,
+        table: &Arc<MemTable>,
+        table_id: TableId,
+        row: OwnedRow,
+        txn_id: TxnId,
+    ) -> Result<PrimaryKey, StorageError> {
+        let row_bytes = crate::mvcc::estimate_row_bytes(&row);
+        self.memory_tracker.alloc_write_buffer(row_bytes);
+        let wal_row = if self.wal.is_some() || self.wal_observer.is_some() {
+            Some(row.clone())
+        } else { None };
+        let cdc_row = if self.ext.cdc_manager.is_enabled() { Some(row.clone()) } else { None };
+        let pk = table.insert(row, txn_id)?;
+        let wal_rec = wal_row.map(|r| WalRecord::Insert { txn_id, table_id, row: r });
+        // Pre-serialize WAL record when no observer needs the original WalRecord
+        let pre_bytes = if self.wal_observer.is_none() {
+            wal_rec.as_ref().and_then(|wr| crate::wal::WalWriter::serialize_record(wr).ok())
+        } else { None };
+        // Try thread-local fast path. Returns true if consumed, false if DashMap needed.
+        let consumed = crate::engine::TXN_LOCAL_CACHE.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            if slot.is_none() {
+                return true; // will fill below
+            }
+            let prev_eid = slot.as_ref().unwrap().0;
+            if prev_eid == self.engine_id {
+                let (_, prev_id, prev) = slot.take().unwrap();
+                let mut state = self.txn_local.entry(prev_id).or_default();
+                state.write_bytes += prev.write_bytes;
+                state.wal_buf.extend(prev.wal_buf);
+                state.write_set.extend(prev.write_set);
+                if state.cached_table.is_none() {
+                    state.cached_table = prev.cached_table;
+                }
+                drop(state);
+            }
+            false
+        });
+        if consumed {
+            crate::engine::TXN_LOCAL_CACHE.with(|cell| {
+                let mut s = crate::engine::TxnLocalState::default();
+                s.write_bytes = row_bytes;
+                if let Some(wr) = wal_rec {
+                    s.wal_buf.push(wr);
+                }
+                if let Some(bytes) = pre_bytes {
+                    s.wal_preserialized = bytes;
+                    s.wal_pre_count = 1;
+                }
+                s.write_set.push(crate::engine::TxnWriteOp { table_id, pk: pk.clone() });
+                s.cached_table = Some(Arc::clone(table));
+                *cell.borrow_mut() = Some((self.engine_id, txn_id, s));
+            });
+        } else {
+            let mut state = self.txn_local.entry(txn_id).or_default();
+            state.write_bytes += row_bytes;
+            if let Some(wr) = wal_rec {
+                state.wal_buf.push(wr);
+            }
+            state.write_set.push(crate::engine::TxnWriteOp { table_id, pk: pk.clone() });
+            if state.cached_table.is_none() {
+                state.cached_table = Some(Arc::clone(table));
+            }
+        }
+        if let Some(cdc_row) = cdc_row {
+            let tname = self.cdc_table_name(table_id);
+            self.ext.cdc_manager.emit_insert(txn_id, table_id, &tname, cdc_row, Some(format!("{pk:?}")));
+        }
+        Ok(pk)
     }
 
     /// Batch insert multiple rows with a single WAL record.
@@ -519,6 +594,15 @@ impl StorageEngine {
     {
         let handle = self.engine_tables.get(&table_id)
             .ok_or(StorageError::TableNotFound(table_id))?;
+        if let Some(table) = handle.as_rowstore() {
+            let results = table.scan(txn_id, read_ts);
+            for (pk, _) in &results {
+                self.record_read(txn_id, table_id, pk.clone());
+            }
+            let mut f = f;
+            for (_, row) in results { f(&row); }
+            return Ok(());
+        }
         handle.for_each_visible(txn_id, read_ts, f);
         Ok(())
     }
@@ -571,7 +655,11 @@ impl StorageEngine {
         let handle = self.engine_tables.get(&table_id)
             .ok_or(StorageError::TableNotFound(table_id))?;
         if let Some(table) = handle.as_rowstore() {
-            return Ok(table.scan_rows_only(txn_id, read_ts));
+            let results = table.scan(txn_id, read_ts);
+            for (pk, _) in &results {
+                self.record_read(txn_id, table_id, pk.clone());
+            }
+            return Ok(results.into_iter().map(|(_, row)| row).collect());
         }
         Ok(handle.scan(txn_id, read_ts).into_iter().map(|(_, row)| row).collect())
     }
@@ -840,7 +928,7 @@ mod cdc_before_after_tests {
             nullable: !pk,
             is_primary_key: pk,
             default_value: None,
-            is_serial: false,
+            is_serial: false, max_length: None,
         }
     }
 

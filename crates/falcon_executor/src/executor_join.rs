@@ -331,8 +331,9 @@ impl Executor {
                 let mut key_buf = Vec::with_capacity(key_pairs.len() * 9);
                 for (ri, right_row) in right_data.iter().enumerate() {
                     key_buf.clear();
-                    Self::encode_join_key_into(right_row, &right_key_cols, &mut key_buf);
-                    // Two-step lookup: avoid cloning key_buf when key already exists
+                    if !Self::encode_join_key_into(right_row, &right_key_cols, &mut key_buf) {
+                        continue; // NULL key never matches
+                    }
                     if let Some(bucket) = hash_table.get_mut(key_buf.as_slice()) {
                         bucket.push(ri);
                     } else {
@@ -365,7 +366,9 @@ impl Executor {
                     JoinType::Inner => {
                         for left_row in &combined_rows {
                             probe_buf.clear();
-                            Self::encode_join_key_into(left_row, &left_key_cols, &mut probe_buf);
+                            if !Self::encode_join_key_into(left_row, &left_key_cols, &mut probe_buf) {
+                                continue;
+                            }
                             if let Some(indices) = hash_table.get(probe_buf.as_slice()) {
                                 for &ri in indices {
                                     let merged = self.merge_rows_into(left_row, &right_data[ri], &mut merge_buf);
@@ -387,7 +390,11 @@ impl Executor {
                     JoinType::Left => {
                         for left_row in &combined_rows {
                             probe_buf.clear();
-                            Self::encode_join_key_into(left_row, &left_key_cols, &mut probe_buf);
+                            if !Self::encode_join_key_into(left_row, &left_key_cols, &mut probe_buf) {
+                                // NULL key on left: no match, emit null-extended row for LEFT JOIN
+                                new_combined.push(self.merge_rows(left_row, &null_right));
+                                continue;
+                            }
                             let mut matched = false;
                             if let Some(indices) = hash_table.get(probe_buf.as_slice()) {
                                 for &ri in indices {
@@ -417,7 +424,9 @@ impl Executor {
                             HashMap::with_capacity(combined_rows.len());
                         for (li, left_row) in combined_rows.iter().enumerate() {
                             key_buf.clear();
-                            Self::encode_join_key_into(left_row, &left_key_cols, &mut key_buf);
+                            if !Self::encode_join_key_into(left_row, &left_key_cols, &mut key_buf) {
+                                continue;
+                            }
                             if let Some(bucket) = left_hash.get_mut(key_buf.as_slice()) {
                                 bucket.push(li);
                             } else {
@@ -426,7 +435,11 @@ impl Executor {
                         }
                         for right_row in &right_data {
                             probe_buf.clear();
-                            Self::encode_join_key_into(right_row, &right_key_cols, &mut probe_buf);
+                            if !Self::encode_join_key_into(right_row, &right_key_cols, &mut probe_buf) {
+                                // NULL key on right: no match, emit null-extended row for RIGHT JOIN
+                                new_combined.push(self.merge_rows(&null_left, right_row));
+                                continue;
+                            }
                             let mut matched = false;
                             if let Some(indices) = left_hash.get(probe_buf.as_slice()) {
                                 for &li in indices {
@@ -455,7 +468,10 @@ impl Executor {
                         let mut right_matched = vec![false; right_data.len()];
                         for left_row in &combined_rows {
                             probe_buf.clear();
-                            Self::encode_join_key_into(left_row, &left_key_cols, &mut probe_buf);
+                            if !Self::encode_join_key_into(left_row, &left_key_cols, &mut probe_buf) {
+                                new_combined.push(self.merge_rows(left_row, &null_right));
+                                continue;
+                            }
                             let mut left_matched = false;
                             if let Some(indices) = hash_table.get(probe_buf.as_slice()) {
                                 for &ri in indices {
@@ -567,28 +583,64 @@ impl Executor {
                         }
                     }
                     _ => {
-                        for left_row in &combined_rows {
-                            let mut matched = false;
-                            for right_row in &right_data {
-                                let merged = self.merge_rows(left_row, right_row);
-                                if let Some(ref cond) = join.condition {
-                                    if !ExprEngine::eval_filter(cond, &merged)
-                                        .map_err(FalconError::Execution)?
-                                    {
-                                        continue;
+                        let right_width = right_data.first().map_or(join.right_schema.columns.len(), |r| r.values.len());
+                        let null_right = OwnedRow::new(vec![Datum::Null; right_width]);
+                        let null_left = OwnedRow::new(vec![Datum::Null; left_width]);
+                        match join.join_type {
+                            JoinType::Right => {
+                                for right_row in &right_data {
+                                    let mut matched = false;
+                                    for left_row in &combined_rows {
+                                        let merged = self.merge_rows(left_row, right_row);
+                                        if let Some(ref cond) = join.condition {
+                                            if !ExprEngine::eval_filter(cond, &merged).map_err(FalconError::Execution)? { continue; }
+                                        }
+                                        matched = true;
+                                        new_combined.push(merged);
+                                    }
+                                    if !matched {
+                                        new_combined.push(self.merge_rows(&null_left, right_row));
                                     }
                                 }
-                                matched = true;
-                                new_combined.push(merged);
                             }
-                            if !matched
-                                && matches!(join.join_type, JoinType::Left | JoinType::FullOuter)
-                            {
-                                let null_right = OwnedRow::new(vec![
-                                    Datum::Null;
-                                    join.right_schema.columns.len()
-                                ]);
-                                new_combined.push(self.merge_rows(left_row, &null_right));
+                            JoinType::FullOuter => {
+                                let mut right_matched = vec![false; right_data.len()];
+                                for left_row in &combined_rows {
+                                    let mut left_matched = false;
+                                    for (ri, right_row) in right_data.iter().enumerate() {
+                                        let merged = self.merge_rows(left_row, right_row);
+                                        if let Some(ref cond) = join.condition {
+                                            if !ExprEngine::eval_filter(cond, &merged).map_err(FalconError::Execution)? { continue; }
+                                        }
+                                        left_matched = true;
+                                        right_matched[ri] = true;
+                                        new_combined.push(merged);
+                                    }
+                                    if !left_matched {
+                                        new_combined.push(self.merge_rows(left_row, &null_right));
+                                    }
+                                }
+                                for (ri, right_row) in right_data.iter().enumerate() {
+                                    if !right_matched[ri] {
+                                        new_combined.push(self.merge_rows(&null_left, right_row));
+                                    }
+                                }
+                            }
+                            _ => {
+                                for left_row in &combined_rows {
+                                    let mut matched = false;
+                                    for right_row in &right_data {
+                                        let merged = self.merge_rows(left_row, right_row);
+                                        if let Some(ref cond) = join.condition {
+                                            if !ExprEngine::eval_filter(cond, &merged).map_err(FalconError::Execution)? { continue; }
+                                        }
+                                        matched = true;
+                                        new_combined.push(merged);
+                                    }
+                                    if !matched {
+                                        new_combined.push(self.merge_rows(left_row, &null_right));
+                                    }
+                                }
                             }
                         }
                     }
@@ -784,9 +836,9 @@ impl Executor {
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> Result<ExecutionResult, FalconError> {
-        self.apply_distinct(distinct, &mut result_rows);
-
         crate::external_sort::sort_rows(&mut result_rows, order_by, self.external_sorter.as_ref())?;
+
+        self.apply_distinct(distinct, &mut result_rows);
 
         if let Some(off) = offset {
             if off < result_rows.len() {
@@ -910,11 +962,12 @@ impl Executor {
     /// Uses a compact binary format: tag byte + fixed-width payload per datum variant.
     /// This allows the caller to `clear()` and reuse `buf` across rows, achieving
     /// zero heap allocations on the probe side of a hash join.
+    /// Returns false if any key column is NULL (caller should skip the row).
     #[inline]
-    fn encode_join_key_into(row: &OwnedRow, col_indices: &[(usize, bool)], buf: &mut Vec<u8>) {
+    fn encode_join_key_into(row: &OwnedRow, col_indices: &[(usize, bool)], buf: &mut Vec<u8>) -> bool {
         for &(col, _) in col_indices {
             match row.get(col).unwrap_or(&Datum::Null) {
-                Datum::Null => buf.push(0x00),
+                Datum::Null => return false,
                 Datum::Boolean(v) => {
                     buf.push(0x01);
                     buf.push(*v as u8);
@@ -970,8 +1023,8 @@ impl Executor {
                     buf.extend_from_slice(&days.to_be_bytes());
                     buf.extend_from_slice(&us.to_be_bytes());
                 }
-                Datum::Array(_) | Datum::Jsonb(_) => {
-                    // Rare in join keys: fall back to debug repr for correctness
+                Datum::Array(_) | Datum::Jsonb(_)
+                | Datum::TsVector(_) | Datum::TsQuery(_) => {
                     buf.push(0x0C);
                     let s = format!("{:?}", row.get(col).unwrap_or(&Datum::Null));
                     buf.extend_from_slice(&(s.len() as u32).to_be_bytes());
@@ -979,5 +1032,6 @@ impl Executor {
                 }
             }
         }
+        true
     }
 }

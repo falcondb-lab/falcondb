@@ -86,12 +86,23 @@ type RowCmp = Box<dyn Fn(&OwnedRow, &OwnedRow) -> Ordering + Send>;
 
 /// Build a comparator from `BoundOrderBy` specs.
 fn make_comparator(order_by: &[BoundOrderBy]) -> RowCmp {
-    let specs: Vec<(usize, bool)> = order_by.iter().map(|ob| (ob.column_idx, ob.asc)).collect();
+    let specs: Vec<(usize, bool, bool)> = order_by
+        .iter()
+        .map(|ob| (ob.column_idx, ob.asc, ob.nulls_first))
+        .collect();
     Box::new(move |a: &OwnedRow, b: &OwnedRow| {
-        for &(idx, asc) in &specs {
+        for &(idx, asc, nulls_first) in &specs {
             let av = a.get(idx).unwrap_or(&Datum::Null);
             let bv = b.get(idx).unwrap_or(&Datum::Null);
-            let cmp = if asc { av.cmp(bv) } else { bv.cmp(av) };
+            let cmp = match (av.is_null(), bv.is_null()) {
+                (true, true) => Ordering::Equal,
+                (true, false) => if nulls_first { Ordering::Less } else { Ordering::Greater },
+                (false, true) => if nulls_first { Ordering::Greater } else { Ordering::Less },
+                (false, false) => {
+                    let c = av.partial_cmp(bv).unwrap_or(Ordering::Equal);
+                    if asc { c } else { c.reverse() }
+                }
+            };
             if cmp != Ordering::Equal {
                 return cmp;
             }
@@ -480,6 +491,7 @@ mod tests {
         vec![BoundOrderBy {
             column_idx: 0,
             asc: true,
+            nulls_first: false,
         }]
     }
 
@@ -487,6 +499,7 @@ mod tests {
         vec![BoundOrderBy {
             column_idx: 0,
             asc: false,
+            nulls_first: true,
         }]
     }
 
@@ -605,10 +618,12 @@ mod tests {
             BoundOrderBy {
                 column_idx: 0,
                 asc: true,
+                nulls_first: false,
             },
             BoundOrderBy {
                 column_idx: 1,
                 asc: true,
+                nulls_first: false,
             },
         ];
         sort_rows(&mut rows, &order, None).unwrap();

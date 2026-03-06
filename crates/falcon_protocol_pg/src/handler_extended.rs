@@ -186,15 +186,38 @@ impl QueryHandler {
         params: &[Datum],
         session: &mut PgSession,
     ) -> Vec<BackendMessage> {
-        let rctx = falcon_common::request_context::RequestContext::new(session.id as u64);
-        let ctx = format!("session_id={}", session.id);
-        let result = falcon_common::crash_domain::catch_request("execute_plan", &ctx, || {
+        let t0 = std::time::Instant::now();
+        // Skip crash domain for DML — matches simple query fast path behavior
+        let msgs = if matches!(plan,
+            PhysicalPlan::Insert { .. } | PhysicalPlan::Update { .. } | PhysicalPlan::Delete { .. }
+        ) {
             self.execute_plan_inner(plan, params, session)
-        });
-        match result {
-            Ok(msgs) => msgs,
-            Err(e) => vec![self.error_response(&e.with_request_context(&rctx))],
+        } else {
+            let rctx = falcon_common::request_context::RequestContext::new(session.id as u64);
+            let ctx = format!("session_id={}", session.id);
+            let result = falcon_common::crash_domain::catch_request("execute_plan", &ctx, || {
+                self.execute_plan_inner(plan, params, session)
+            });
+            match result {
+                Ok(msgs) => msgs,
+                Err(e) => vec![self.error_response(&e.with_request_context(&rctx))],
+            }
+        };
+        // pg_stat_statements for extended query path
+        if !matches!(plan, PhysicalPlan::Begin | PhysicalPlan::Commit | PhysicalPlan::Rollback) {
+            let elapsed_us = t0.elapsed().as_micros() as u64;
+            let rows = super::handler::extract_row_count_from_msgs(&msgs);
+            let label = match plan {
+                PhysicalPlan::Insert { schema, .. } => format!("INSERT INTO {}", schema.name),
+                PhysicalPlan::Update { schema, .. } => format!("UPDATE {}", schema.name),
+                PhysicalPlan::Delete { schema, .. } => format!("DELETE FROM {}", schema.name),
+                PhysicalPlan::SeqScan { schema, .. } => format!("SELECT FROM {}", schema.name),
+                PhysicalPlan::IndexScan { schema, .. } => format!("SELECT FROM {} (idx)", schema.name),
+                _ => "STMT".into(),
+            };
+            self.observability.stmt_stats.record(&label, elapsed_us, rows);
         }
+        msgs
     }
 
     fn execute_plan_inner(
@@ -218,9 +241,8 @@ impl QueryHandler {
             _ => {}
         }
 
-        let routing_hint = plan.routing_hint();
-
         if let Some(ref txn) = session.txn {
+            let routing_hint = plan.routing_hint();
             let _ = self
                 .txn_mgr
                 .observe_involved_shards(txn.txn_id, &routing_hint.involved_shards);
@@ -391,6 +413,8 @@ impl QueryHandler {
             Some(DataType::Interval) => 1186,      // INTERVAL
             Some(DataType::Uuid) => 2950,          // UUID
             Some(DataType::Bytea) => 17,           // BYTEA
+            Some(DataType::TsVector) => 3614,      // TSVECTOR
+            Some(DataType::TsQuery) => 3615,       // TSQUERY
             None => 0,                             // unspecified
         }
     }
@@ -430,6 +454,7 @@ impl QueryHandler {
                         BinOp::StringConcat
                         | BinOp::JsonArrowText
                         | BinOp::JsonHashArrowText => DataType::Text,
+                        BinOp::TsMatch => DataType::Boolean,
                         BinOp::JsonArrow
                         | BinOp::JsonHashArrow
                         | BinOp::JsonContains

@@ -88,9 +88,11 @@ impl Binder {
                     &alias_map,
                 )?;
                 let asc = ob.asc.unwrap_or(true);
+                let nulls_first = ob.nulls_first.unwrap_or(!asc);
                 order_by.push(BoundOrderBy {
                     column_idx: col_idx,
                     asc,
+                    nulls_first,
                 });
             }
 
@@ -304,7 +306,7 @@ impl Binder {
                         nullable: true,
                         is_primary_key: false,
                         default_value: None,
-                        is_serial: false,
+                        is_serial: false, max_length: None,
                     });
                 }
                 let derived_schema = TableSchema {
@@ -387,7 +389,7 @@ impl Binder {
                             nullable: false,
                             is_primary_key: false,
                             default_value: None,
-                            is_serial: false,
+                            is_serial: false, max_length: None,
                         }],
                         primary_key_columns: vec![],
                         next_serial_values: std::collections::HashMap::new(),
@@ -446,6 +448,7 @@ impl Binder {
                             .iter()
                             .map(|v| OwnedRow::new(vec![Datum::Int64(*v)]))
                             .collect(),
+                        for_lock: RowLockMode::None,
                     };
 
                     cte_schemas.insert(tvf_alias.to_lowercase(), tvf_schema.clone());
@@ -515,7 +518,7 @@ impl Binder {
                             nullable: true,
                             is_primary_key: false,
                             default_value: None,
-                            is_serial: false,
+                            is_serial: false, max_length: None,
                         }],
                         primary_key_columns: vec![],
                         next_serial_values: std::collections::HashMap::new(),
@@ -547,15 +550,8 @@ impl Binder {
                             .into_iter()
                             .map(|d| OwnedRow::new(vec![d]))
                             .collect(),
+                        for_lock: RowLockMode::None,
                     };
-
-                    cte_schemas.insert(unnest_alias.to_lowercase(), unnest_schema.clone());
-                    bound_ctes.push(BoundCte {
-                        name: unnest_alias.to_lowercase(),
-                        table_id: unnest_table_id,
-                        select: unnest_select,
-                        recursive_select: None,
-                    });
 
                     table_name = unnest_alias.clone();
                     left_schema = unnest_schema;
@@ -610,7 +606,7 @@ impl Binder {
                         nullable: true,
                         is_primary_key: false,
                         default_value: None,
-                        is_serial: false,
+                        is_serial: false, max_length: None,
                     }],
                     primary_key_columns: vec![],
                     next_serial_values: std::collections::HashMap::new(),
@@ -642,6 +638,7 @@ impl Binder {
                         .into_iter()
                         .map(|d| OwnedRow::new(vec![d]))
                         .collect(),
+                    for_lock: RowLockMode::None,
                 };
 
                 cte_schemas.insert(unnest_alias.to_lowercase(), unnest_schema.clone());
@@ -700,6 +697,7 @@ impl Binder {
                         ctes: vec![],
                         unions: vec![],
                         virtual_rows: vt_rows,
+                        for_lock: RowLockMode::None,
                     };
                     cte_schemas.insert(vt_alias.to_lowercase(), vt_table_schema.clone());
                     bound_ctes.push(BoundCte {
@@ -723,6 +721,11 @@ impl Binder {
                                 &mut cte_schemas,
                                 &mut bound_ctes,
                             )?
+                        } else if let Some(mv) = self.catalog.find_materialized_view(&table_name) {
+                            let backing_id = mv.backing_table_id;
+                            self.catalog.find_table_by_id(backing_id)
+                                .ok_or_else(|| SqlError::UnknownTable(format!("backing table for matview '{table_name}' not found")))?
+                                .clone()
                         } else {
                             self.catalog
                                 .find_table(&table_name)
@@ -756,6 +759,11 @@ impl Binder {
                     &mut cte_schemas,
                     &mut bound_ctes,
                 )?
+            } else if let Some(mv) = self.catalog.find_materialized_view(&extra_name) {
+                let backing_id = mv.backing_table_id;
+                self.catalog.find_table_by_id(backing_id)
+                    .ok_or_else(|| SqlError::UnknownTable(format!("backing table for matview '{extra_name}' not found")))?
+                    .clone()
             } else {
                 self.catalog
                     .find_table(&extra_name)
@@ -810,7 +818,7 @@ impl Binder {
                         nullable: true,
                         is_primary_key: false,
                         default_value: None,
-                        is_serial: false,
+                        is_serial: false, max_length: None,
                     });
                 }
                 let d_schema = TableSchema {
@@ -844,6 +852,11 @@ impl Binder {
                         &mut cte_schemas,
                         &mut bound_ctes,
                     )?
+                } else if let Some(mv) = self.catalog.find_materialized_view(&right_table_name) {
+                    let backing_id = mv.backing_table_id;
+                    self.catalog.find_table_by_id(backing_id)
+                        .ok_or_else(|| SqlError::UnknownTable(format!("backing table for matview '{right_table_name}' not found")))?
+                        .clone()
                 } else {
                     self.catalog
                         .find_table(&right_table_name)
@@ -1324,9 +1337,11 @@ impl Binder {
             let col_idx =
                 self.resolve_order_by_expr(&ob.expr, &mut projections, &schema, &alias_map)?;
             let asc = ob.asc.unwrap_or(true);
+            let nulls_first = ob.nulls_first.unwrap_or(!asc);
             order_by.push(BoundOrderBy {
                 column_idx: col_idx,
                 asc,
+                nulls_first,
             });
         }
 
@@ -1378,7 +1393,24 @@ impl Binder {
             ctes: bound_ctes,
             unions: vec![],
             virtual_rows: vec![],
+            for_lock: Self::resolve_lock_mode(&query.locks),
         })
+    }
+
+    /// Convert sqlparser lock clauses to our RowLockMode.
+    fn resolve_lock_mode(locks: &[ast::LockClause]) -> RowLockMode {
+        for lc in locks {
+            let wait = match lc.nonblock {
+                Some(ast::NonBlock::Nowait) => LockWait::Nowait,
+                Some(ast::NonBlock::SkipLocked) => LockWait::SkipLocked,
+                None => LockWait::Block,
+            };
+            match lc.lock_type {
+                ast::LockType::Update => return RowLockMode::Update(wait),
+                ast::LockType::Share => return RowLockMode::Share(wait),
+            }
+        }
+        RowLockMode::None
     }
 
     /// Build a temporary combined schema for resolving JOIN ON conditions.
@@ -1611,17 +1643,23 @@ impl Binder {
                     .map(|ob| {
                         let bound = self.bind_expr_with_aliases(&ob.expr, schema, aliases)?;
                         match bound {
-                            BoundExpr::ColumnRef(idx) => Ok(BoundOrderBy {
-                                column_idx: idx,
-                                asc: ob.asc.unwrap_or(true),
-                            }),
+                            BoundExpr::ColumnRef(idx) => {
+                                let asc = ob.asc.unwrap_or(true);
+                                Ok(BoundOrderBy {
+                                    column_idx: idx,
+                                    asc,
+                                    nulls_first: ob.nulls_first.unwrap_or(!asc),
+                                })
+                            }
                             // Allow positional reference: ORDER BY 1
                             BoundExpr::Literal(Datum::Int32(n))
                                 if n >= 1 && (n as usize) <= schema.columns.len() =>
                             {
+                                let asc = ob.asc.unwrap_or(true);
                                 Ok(BoundOrderBy {
                                     column_idx: (n - 1) as usize,
-                                    asc: ob.asc.unwrap_or(true),
+                                    asc,
+                                    nulls_first: ob.nulls_first.unwrap_or(!asc),
                                 })
                             }
                             _ => Err(SqlError::Unsupported(
@@ -1884,7 +1922,7 @@ impl Binder {
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 }
             })
             .collect();
@@ -1946,6 +1984,7 @@ impl Binder {
             ctes: vec![],
             unions: vec![],
             virtual_rows,
+            for_lock: RowLockMode::None,
         })
     }
 
@@ -2329,7 +2368,7 @@ impl Binder {
                 nullable: true,
                 is_primary_key: false,
                 default_value: None,
-                is_serial: false,
+                is_serial: false, max_length: None,
             });
         }
         columns
@@ -2581,7 +2620,7 @@ impl Binder {
             nullable: true,
             is_primary_key: false,
             default_value: None,
-            is_serial: false,
+            is_serial: false, max_length: None,
         }
     }
 }

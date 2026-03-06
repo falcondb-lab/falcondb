@@ -43,7 +43,7 @@ fn decode_chain(raw: &[u8]) -> Vec<MvccValue> {
     let mut out = Vec::with_capacity(count);
     for _ in 0..count {
         if pos + 4 > raw.len() { break; }
-        let len = u32::from_le_bytes(raw[pos..pos + 4].try_into().unwrap()) as usize;
+        let len = u32::from_le_bytes([raw[pos], raw[pos+1], raw[pos+2], raw[pos+3]]) as usize;
         pos += 4;
         if pos + len > raw.len() { break; }
         if let Some(mv) = MvccValue::decode(&raw[pos..pos + len]) {

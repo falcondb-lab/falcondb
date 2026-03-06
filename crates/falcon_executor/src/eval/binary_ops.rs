@@ -115,6 +115,7 @@ pub fn eval_binary_op(
                 Ok(Datum::Text(format!("{ls}{rs}")))
             }
         },
+        BinOp::TsMatch => crate::fts::ts_match_datums(left, right),
     }
 }
 
@@ -191,6 +192,7 @@ fn eval_binary_op_same(
         BinOp::JsonContains => eval_json_contains(left, right),
         BinOp::JsonContainedBy => eval_json_contains(right, left),
         BinOp::JsonExists => eval_json_exists(left, right),
+        BinOp::TsMatch => crate::fts::ts_match_datums(left, right),
         BinOp::StringConcat => match (left, right) {
             (Datum::Array(a), Datum::Array(b)) => {
                 let mut result = a.clone();

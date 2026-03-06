@@ -1,6 +1,7 @@
 pub mod bg_supervisor;
 pub mod globals;
 pub mod cloud;
+pub mod hlc;
 pub mod compat;
 pub mod config;
 pub mod consistency;

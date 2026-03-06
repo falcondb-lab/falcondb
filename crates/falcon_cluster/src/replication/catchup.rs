@@ -25,6 +25,7 @@ pub fn apply_wal_record_to_engine(
     match record {
         WalRecord::BeginTxn { .. }
         | WalRecord::PrepareTxn { .. }
+        | WalRecord::PrepareTxn2pc { .. }
         | WalRecord::Checkpoint { .. }
         | WalRecord::CoordinatorPrepare { .. }
         | WalRecord::CoordinatorCommit { .. }
@@ -119,6 +120,12 @@ pub fn apply_wal_record_to_engine(
         }
         WalRecord::DropView { name } => {
             let _ = engine.drop_view(name, true);
+        }
+        WalRecord::CreateMaterializedView { name, query_sql, backing_table_id } => {
+            let _ = engine.create_materialized_view(name, query_sql, *backing_table_id);
+        }
+        WalRecord::DropMaterializedView { name } => {
+            let _ = engine.drop_materialized_view(name, true);
         }
         WalRecord::AlterTable {
             table_name,
@@ -218,6 +225,12 @@ pub fn apply_wal_record_to_engine(
         }
         WalRecord::RevokeRole { member, group } => {
             let _ = engine.revoke_role_membership(member, group);
+        }
+        WalRecord::CreateFunction { def } => {
+            let _ = engine.create_function(def.clone());
+        }
+        WalRecord::DropFunction { name } => {
+            let _ = engine.drop_function(name);
         }
     }
     Ok(())

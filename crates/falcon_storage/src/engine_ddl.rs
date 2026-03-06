@@ -93,6 +93,37 @@ impl StorageEngine {
         Ok(())
     }
 
+    // ── Function DDL ──────────────────────────────────────────────────
+
+    pub fn create_function(&self, def: falcon_common::schema::FunctionDef) -> Result<(), StorageError> {
+        let name = def.name.clone();
+        let mut catalog = self.catalog.write();
+        catalog
+            .create_function(def.clone())
+            .map_err(|e| StorageError::Other(e))?;
+        drop(catalog);
+
+        self.append_wal(&WalRecord::CreateFunction { def })?;
+
+        tracing::info!("Created function '{}'", name);
+        Ok(())
+    }
+
+    pub fn drop_function(&self, name: &str) -> Result<(), StorageError> {
+        let mut catalog = self.catalog.write();
+        catalog
+            .drop_function(name)
+            .map_err(|_| StorageError::FunctionNotFound(name.to_owned()))?;
+        drop(catalog);
+
+        self.append_wal(&WalRecord::DropFunction {
+            name: name.to_owned(),
+        })?;
+
+        tracing::info!("Dropped function '{}'", name);
+        Ok(())
+    }
+
     // ── Role DDL ─────────────────────────────────────────────────────
 
     pub fn create_role(
@@ -619,6 +650,64 @@ impl StorageEngine {
         Ok(())
     }
 
+    // ── Materialized View DDL ─────────────────────────────────────────
+
+    pub fn create_materialized_view(
+        &self,
+        name: &str,
+        query_sql: &str,
+        backing_table_id: TableId,
+    ) -> Result<(), StorageError> {
+        let mut catalog = self.catalog.write();
+        if catalog.find_materialized_view(name).is_some() {
+            return Err(StorageError::TableAlreadyExists(format!("materialized view '{name}'")));
+        }
+        if catalog.find_table(name).is_some() {
+            return Err(StorageError::TableAlreadyExists(format!(
+                "relation '{name}' already exists as a table"
+            )));
+        }
+        catalog.add_materialized_view(falcon_common::schema::MaterializedViewDef {
+            name: name.to_owned(),
+            query_sql: query_sql.to_owned(),
+            backing_table_id,
+        });
+        drop(catalog);
+
+        self.append_wal(&WalRecord::CreateMaterializedView {
+            name: name.to_owned(),
+            query_sql: query_sql.to_owned(),
+            backing_table_id,
+        })?;
+        Ok(())
+    }
+
+    pub fn drop_materialized_view(&self, name: &str, if_exists: bool) -> Result<(), StorageError> {
+        let mut catalog = self.catalog.write();
+        let mv = catalog.find_materialized_view(name);
+        if mv.is_none() {
+            if if_exists { return Ok(()); }
+            return Err(StorageError::TableNotFound(TableId(0)));
+        }
+        let backing_id = mv.unwrap().backing_table_id;
+        let backing_name = catalog.list_tables()
+            .iter()
+            .find(|t| t.id == backing_id)
+            .map(|t| t.name.clone());
+        catalog.drop_materialized_view(name);
+        if let Some(ref tname) = backing_name {
+            catalog.drop_table(tname);
+        }
+        drop(catalog);
+
+        self.engine_tables.remove(&backing_id);
+
+        self.append_wal(&WalRecord::DropMaterializedView {
+            name: name.to_owned(),
+        })?;
+        Ok(())
+    }
+
     // ── ALTER TABLE ──────────────────────────────────────────────────
 
     pub fn alter_table_add_column(
@@ -810,20 +899,50 @@ impl StorageEngine {
             ));
         }
         schema.columns.remove(idx);
+
+        let remap = |col: usize| -> Option<usize> {
+            if col == idx { None } else if col > idx { Some(col - 1) } else { Some(col) }
+        };
+
         // Update PK indices
-        schema.primary_key_columns = schema
-            .primary_key_columns
-            .iter()
-            .filter_map(|&pk| {
-                if pk == idx {
-                    None
-                } else if pk > idx {
-                    Some(pk - 1)
-                } else {
-                    Some(pk)
-                }
+        schema.primary_key_columns = schema.primary_key_columns
+            .iter().filter_map(|&c| remap(c)).collect();
+
+        // Update UNIQUE constraint column groups; drop constraints that referenced the dropped column
+        schema.unique_constraints = schema.unique_constraints
+            .drain(..)
+            .filter_map(|grp| {
+                let remapped: Vec<usize> = grp.iter().filter_map(|&c| remap(c)).collect();
+                if remapped.is_empty() { None } else { Some(remapped) }
             })
             .collect();
+
+        // Update FK local column indices; drop FKs that referenced the dropped column
+        schema.foreign_keys = schema.foreign_keys
+            .drain(..)
+            .filter_map(|mut fk| {
+                let remapped: Vec<usize> = fk.columns.iter().filter_map(|&c| remap(c)).collect();
+                if remapped.is_empty() { return None; }
+                fk.columns = remapped;
+                Some(fk)
+            })
+            .collect();
+
+        // Update shard key column indices
+        schema.shard_key = schema.shard_key.iter().filter_map(|&c| remap(c)).collect();
+
+        // Remap next_serial_values keys
+        schema.next_serial_values = schema.next_serial_values
+            .drain()
+            .filter_map(|(k, v)| remap(k).map(|nk| (nk, v)))
+            .collect();
+
+        // Remap dynamic_defaults keys
+        schema.dynamic_defaults = schema.dynamic_defaults
+            .drain()
+            .filter_map(|(k, v)| remap(k).map(|nk| (nk, v)))
+            .collect();
+
         drop(catalog);
 
         let ddl_id = self.online_ddl.register(
@@ -1567,7 +1686,13 @@ impl StorageEngine {
             .sequences
             .get(name)
             .ok_or(StorageError::TableNotFound(TableId(0)))?;
-        Ok(entry.value().fetch_add(1, AtomicOrdering::SeqCst) + 1)
+        let value = entry.value().fetch_add(1, AtomicOrdering::SeqCst) + 1;
+        drop(entry);
+        self.append_wal(&WalRecord::SetSequenceValue {
+            name: name.to_owned(),
+            value,
+        })?;
+        Ok(value)
     }
 
     pub fn sequence_currval(&self, name: &str) -> Result<i64, StorageError> {

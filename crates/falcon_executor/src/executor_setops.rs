@@ -143,8 +143,10 @@ impl Executor {
 
                 let max_rows = self.recursive_cte_max_rows;
                 const MAX_ITERATIONS: usize = 1000;
+                let mut converged = false;
                 for _ in 0..MAX_ITERATIONS {
                     if working_rows.is_empty() {
+                        converged = true;
                         break;
                     }
                     if max_rows > 0 && all_rows.len() >= max_rows {
@@ -161,12 +163,21 @@ impl Executor {
                     if new_rows.is_empty() {
                         // Reclaim the working rows we inserted
                         recursive_cte_data.remove(&cte.table_id);
+                        converged = true;
                         break;
                     }
                     // Move new_rows: extend all_rows, then assign working_rows
                     // without cloning by cloning only once into working_rows.
                     working_rows = new_rows.clone();
                     all_rows.extend(new_rows);
+                }
+                if !converged {
+                    return Err(FalconError::Execution(
+                        falcon_common::error::ExecutionError::ResourceExhausted(format!(
+                            "recursive CTE exceeded iteration limit ({MAX_ITERATIONS}). \
+                             Check for unbounded recursion or set falcon.spill.recursive_cte_max_rows."
+                        )),
+                    ));
                 }
                 cte_data.insert(cte.table_id, all_rows);
                 continue;

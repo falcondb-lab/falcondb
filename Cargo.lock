@@ -1059,6 +1059,7 @@ dependencies = [
  "falcon_common",
  "metrics",
  "metrics-exporter-prometheus",
+ "parking_lot",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",

@@ -12,7 +12,8 @@ fn float64_to_i32(v: f64) -> Result<i32, ExecutionError> {
 
 /// Safely convert f64 to i64, rejecting NaN, infinities, and out-of-range values.
 fn float64_to_i64(v: f64) -> Result<i64, ExecutionError> {
-    if v.is_nan() || v.is_infinite() || v < (i64::MIN as f64) || v > (i64::MAX as f64) {
+    // i64::MAX as f64 rounds up to 2^63 — use >= instead of > on upper bound
+    if v.is_nan() || v.is_infinite() || v < (i64::MIN as f64) || v >= (i64::MAX as f64) {
         Err(ExecutionError::NumericOverflow)
     } else {
         Ok(v as i64)

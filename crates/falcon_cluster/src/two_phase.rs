@@ -10,7 +10,7 @@
 //!    the inconsistency (in production, a recovery log resolves this).
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use falcon_common::types::TxnId;
@@ -52,11 +52,30 @@ pub struct TwoPhaseResult {
 pub struct TwoPhaseCoordinator {
     engine: Arc<ShardedEngine>,
     timeout: Duration,
+    decision_log: OnceLock<Arc<CoordinatorDecisionLog>>,
+    global_txn_seq: AtomicU64,
 }
 
 impl TwoPhaseCoordinator {
-    pub const fn new(engine: Arc<ShardedEngine>, timeout: Duration) -> Self {
-        Self { engine, timeout }
+    pub fn new(engine: Arc<ShardedEngine>, timeout: Duration) -> Self {
+        Self {
+            engine,
+            timeout,
+            decision_log: OnceLock::new(),
+            global_txn_seq: AtomicU64::new(1),
+        }
+    }
+
+    pub fn set_decision_log(&self, log: Arc<CoordinatorDecisionLog>) {
+        let _ = self.decision_log.set(log);
+    }
+
+    pub fn decision_log(&self) -> Option<&Arc<CoordinatorDecisionLog>> {
+        self.decision_log.get()
+    }
+
+    pub fn alloc_global_txn_id(&self) -> TxnId {
+        TxnId(self.global_txn_seq.fetch_add(1, Ordering::Relaxed))
     }
 
     /// Upgrade to a hardened coordinator with all production primitives.
@@ -134,9 +153,16 @@ impl TwoPhaseCoordinator {
 
         // ── Phase 2: Commit or Abort ──
         let commit_start = Instant::now();
+        let global_txn_id = TxnId(self.global_txn_seq.fetch_add(1, Ordering::Relaxed));
+        let decision = if all_prepared { CoordinatorDecision::Commit } else { CoordinatorDecision::Abort };
+        let shard_ids: Vec<ShardId> = participants.iter().map(|p| p.shard_id).collect();
+
+        // Log decision BEFORE applying — durable commit point
+        if let Some(log) = self.decision_log.get() {
+            log.log_decision(global_txn_id, decision, &shard_ids, prepare_latency_us);
+        }
 
         if all_prepared {
-            // All shards prepared — commit all.
             for p in &participants {
                 let shard = if let Some(s) = self.engine.shard(p.shard_id) { s } else {
                     tracing::error!(
@@ -147,24 +173,26 @@ impl TwoPhaseCoordinator {
                     continue;
                 };
                 if let Err(e) = shard.txn_mgr.commit(p.txn_id) {
-                    // In production, this would be logged to a recovery journal.
-                    // The coordinator would retry or trigger manual resolution.
                     tracing::error!(
                         "2PC commit failed on shard {:?} after prepare: {}",
                         p.shard_id,
                         e
                     );
-                    // Continue committing other shards — cannot undo a commit.
                 }
             }
+            if let Some(log) = self.decision_log.get() {
+                log.mark_applied(global_txn_id);
+            }
         } else {
-            // At least one shard failed — abort all.
             for p in &participants {
                 if p.prepared {
                     if let Some(shard) = self.engine.shard(p.shard_id) {
                         let _ = shard.txn_mgr.abort(p.txn_id);
                     }
                 }
+            }
+            if let Some(log) = self.decision_log.get() {
+                log.mark_applied(global_txn_id);
             }
         }
 

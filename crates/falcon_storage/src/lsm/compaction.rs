@@ -126,6 +126,9 @@ impl Compactor {
         &self,
         l0_files: &[SstMeta],
         l1_files: &[SstMeta],
+        gc: Option<&GcPolicy>,
+        max_levels: usize,
+        throttle: Option<&RateLimiter>,
         crypto: Option<&std::sync::Arc<dyn BlockCrypto>>,
     ) -> std::io::Result<CompactionResult> {
         let mut bytes_read = 0u64;
@@ -183,6 +186,20 @@ impl Compactor {
             deduped.push(SstEntry { key, value });
         }
 
+        // GC filter (L1 is bottom only when max_levels <= 2)
+        if let Some(gc) = gc {
+            let is_bottom = 1 + 1 >= max_levels;
+            deduped = gc.filter(deduped, is_bottom);
+        }
+
+        // Throttle reads
+        if let Some(rl) = throttle {
+            let d = rl.request(bytes_read);
+            if !d.is_zero() {
+                std::thread::sleep(d);
+            }
+        }
+
         // Write output SST(s) at L1
         let mut produced = Vec::new();
         let mut bytes_written = 0u64;
@@ -199,6 +216,13 @@ impl Compactor {
             let mut meta = writer.finish(1, seq)?;
             meta.level = 1;
             bytes_written += meta.file_size;
+            // Throttle writes
+            if let Some(rl) = throttle {
+                let d = rl.request(bytes_written);
+                if !d.is_zero() {
+                    std::thread::sleep(d);
+                }
+            }
             produced.push(meta);
         }
 
@@ -348,21 +372,24 @@ impl Compactor {
             }
         }
 
-        // Sort + dedup (keep first = newer for same key)
+        // Sort by key (stable: entries are already newest-first within same key from read order)
         all_entries.sort_by(|a, b| a.key.cmp(&b.key));
-        all_entries.dedup_by(|a, b| {
-            if a.key == b.key {
-                // keep b (first occurrence), discard a
-                true
-            } else {
-                false
-            }
-        });
 
-        // GC filter
         let is_bottom = dst_level + 1 >= max_levels;
         if let Some(gc) = gc {
-            all_entries = gc.filter(all_entries, is_bottom);
+            // Group by key, apply multi-version aware GC (tracks bytes_reclaimed, Prepared kept)
+            let mut grouped: Vec<(Vec<u8>, Vec<SstEntry>)> = Vec::new();
+            for entry in all_entries {
+                if grouped.last().map(|(k, _)| k == &entry.key).unwrap_or(false) {
+                    grouped.last_mut().unwrap().1.push(entry);
+                } else {
+                    grouped.push((entry.key.clone(), vec![entry]));
+                }
+            }
+            all_entries = gc.filter_multiversion(grouped, is_bottom);
+        } else {
+            // No GC: simple dedup, keep first (newest) occurrence per key
+            all_entries.dedup_by(|a, b| a.key == b.key);
         }
 
         // Write output, splitting at target_file_size
@@ -543,7 +570,7 @@ mod tests {
             2,
         );
 
-        let result = compactor.compact_l0_to_l1(&[l0_1, l0_2], &[], None).unwrap();
+        let result = compactor.compact_l0_to_l1(&[l0_1, l0_2], &[], None, 7, None, None).unwrap();
 
         assert_eq!(result.consumed.len(), 2);
         assert_eq!(result.produced.len(), 1);
@@ -585,7 +612,7 @@ mod tests {
             3,
         );
 
-        let result = compactor.compact_l0_to_l1(&[l0], &[l1], None).unwrap();
+        let result = compactor.compact_l0_to_l1(&[l0], &[l1], None, 7, None, None).unwrap();
 
         assert_eq!(result.consumed.len(), 2); // l0 + overlapping l1
         assert_eq!(result.produced.len(), 1);
@@ -604,7 +631,7 @@ mod tests {
 
         let l0 = write_sst(dir.path(), "l0.sst", &[(b"key", b"val")], 0, 1);
 
-        compactor.compact_l0_to_l1(&[l0], &[], None).unwrap();
+        compactor.compact_l0_to_l1(&[l0], &[], None, 7, None, None).unwrap();
 
         let stats = compactor.stats();
         assert_eq!(stats.runs_completed, 1);

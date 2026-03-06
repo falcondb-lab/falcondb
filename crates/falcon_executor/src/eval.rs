@@ -136,6 +136,22 @@ fn try_dispatch_domain(func: &ScalarFunc, args: &[Datum]) -> Option<Result<Datum
         | ScalarFunc::JsonbEachText
         | ScalarFunc::RowToJson => Some(super::scalar_jsonb::dispatch(func, args)),
 
+        // Full-text search domain
+        ScalarFunc::ToTsvector
+        | ScalarFunc::ToTsquery
+        | ScalarFunc::PlaintoTsquery
+        | ScalarFunc::PhrastoTsquery
+        | ScalarFunc::TsRank
+        | ScalarFunc::TsRankCd
+        | ScalarFunc::TsHeadline
+        | ScalarFunc::Numnode
+        | ScalarFunc::Querytree
+        | ScalarFunc::Setweight
+        | ScalarFunc::Strip
+        | ScalarFunc::TsvectorLength
+        | ScalarFunc::ArrayToTsvector
+        | ScalarFunc::TsvectorConcat => Some(super::scalar_fts::dispatch(func, args)),
+
         _ => None,
     }
 }
@@ -171,7 +187,7 @@ fn expr_has_params(expr: &BoundExpr) -> bool {
                 || else_result.as_ref().is_some_and(|e| expr_has_params(e))
         }
         BoundExpr::Coalesce(args) | BoundExpr::ArrayLiteral(args) => args.iter().any(expr_has_params),
-        BoundExpr::Function { args, .. } => args.iter().any(expr_has_params),
+        BoundExpr::Function { args, .. } | BoundExpr::UserFunction { args, .. } => args.iter().any(expr_has_params),
         BoundExpr::AggregateExpr { arg, .. } => arg.as_ref().is_some_and(|e| expr_has_params(e)),
         BoundExpr::ArrayIndex { array, index } => expr_has_params(array) || expr_has_params(index),
         BoundExpr::AnyOp { left, right, .. } | BoundExpr::AllOp { left, right, .. } => {
@@ -297,6 +313,13 @@ pub fn substitute_params_expr(
         )),
         BoundExpr::Function { func, args } => Ok(BoundExpr::Function {
             func: func.clone(),
+            args: args
+                .iter()
+                .map(|e| substitute_params_expr(e, params))
+                .collect::<Result<_, _>>()?,
+        }),
+        BoundExpr::UserFunction { name, args } => Ok(BoundExpr::UserFunction {
+            name: name.clone(),
             args: args
                 .iter()
                 .map(|e| substitute_params_expr(e, params))
@@ -474,17 +497,20 @@ pub fn eval_expr_with_params(
             // Use direct comparison with early exit — faster than rebuilding
             // a HashSet on every row for typical list sizes.
             let all_literals = list.iter().all(|e| matches!(e, BoundExpr::Literal(_)));
-            let found = if all_literals {
-                list.iter().any(|e| match e {
+            let (found, list_has_null) = if all_literals {
+                let f = list.iter().any(|e| match e {
                     BoundExpr::Literal(d) if !d.is_null() => *d == val,
                     _ => false,
-                })
+                });
+                let n = list.iter().any(|e| matches!(e, BoundExpr::Literal(d) if d.is_null()));
+                (f, n)
             } else {
-                // General case: evaluate each expression
                 let mut found = false;
+                let mut has_null = false;
                 for item in list {
                     let item_val = eval_expr_with_params(item, row, params)?;
                     if item_val.is_null() {
+                        has_null = true;
                         continue;
                     }
                     if val == item_val {
@@ -492,8 +518,11 @@ pub fn eval_expr_with_params(
                         break;
                     }
                 }
-                found
+                (found, has_null)
             };
+            if *negated && !found && list_has_null {
+                return Ok(Datum::Null);
+            }
             Ok(Datum::Boolean(if *negated { !found } else { found }))
         }
         BoundExpr::Cast { expr, target_type } => {
@@ -554,6 +583,11 @@ pub fn eval_expr_with_params(
                     .collect::<Result<_, _>>()?;
                 eval_scalar_func(func, &vals)
             }
+        }
+        BoundExpr::UserFunction { name, .. } => {
+            Err(ExecutionError::TypeError(format!(
+                "user-defined function '{}' cannot be evaluated in this context", name
+            )))
         }
         BoundExpr::ArrayLiteral(elems) => {
             let vals: Vec<Datum> = elems
@@ -927,7 +961,11 @@ pub fn eval_filter(expr: &BoundExpr, row: &OwnedRow) -> Result<bool, ExecutionEr
             })
         }
         // NOT
-        BoundExpr::Not(inner) => Ok(!eval_filter(inner, row)?),
+        BoundExpr::Not(inner) => match eval_expr(inner, row)? {
+            Datum::Null => Ok(false),
+            Datum::Boolean(b) => Ok(!b),
+            _ => Ok(false),
+        },
         // IS NULL / IS NOT NULL — borrow, no clone
         BoundExpr::IsNull(inner) => {
             if let BoundExpr::ColumnRef(idx) = inner.as_ref() {
@@ -962,6 +1000,9 @@ pub fn eval_filter(expr: &BoundExpr, row: &OwnedRow) -> Result<bool, ExecutionEr
                 BoundExpr::Literal(d) if !d.is_null() => d == val,
                 _ => false,
             });
+            if *negated && !found && list.iter().any(|e| matches!(e, BoundExpr::Literal(d) if d.is_null())) {
+                return Ok(false); // x NOT IN (..., NULL) = NULL → false in filter
+            }
             Ok(if *negated { !found } else { found })
         }
         // BETWEEN: col BETWEEN lit AND lit — borrow column value, compare directly

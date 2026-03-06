@@ -86,7 +86,7 @@ fn test_schema() -> TableSchema {
                 nullable: false,
                 is_primary_key: true,
                 default_value: None,
-                is_serial: false,
+                is_serial: false, max_length: None,
             },
             ColumnDef {
                 id: ColumnId(1),
@@ -95,7 +95,7 @@ fn test_schema() -> TableSchema {
                 nullable: false,
                 is_primary_key: false,
                 default_value: None,
-                is_serial: false,
+                is_serial: false, max_length: None,
             },
             ColumnDef {
                 id: ColumnId(2),
@@ -104,7 +104,7 @@ fn test_schema() -> TableSchema {
                 nullable: true,
                 is_primary_key: false,
                 default_value: None,
-                is_serial: false,
+                is_serial: false, max_length: None,
             },
         ],
         primary_key_columns: vec![0],

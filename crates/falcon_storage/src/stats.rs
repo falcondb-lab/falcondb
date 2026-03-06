@@ -288,6 +288,8 @@ impl Hash for DatumKey {
             }
             Datum::Uuid(v) => v.hash(state),
             Datum::Bytea(bytes) => bytes.hash(state),
+            Datum::TsVector(v) => v.len().hash(state),
+            Datum::TsQuery(q) => q.hash(state),
         }
     }
 }
@@ -348,6 +350,8 @@ fn datum_width(d: &Datum) -> usize {
         Datum::Interval(_, _, _) => 16,
         Datum::Uuid(_) => 16,
         Datum::Bytea(bytes) => bytes.len(),
+        Datum::TsVector(v) => v.len() * 32,
+        Datum::TsQuery(q) => q.len(),
     }
 }
 

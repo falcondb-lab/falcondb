@@ -70,6 +70,9 @@ pub struct Version {
     /// Row payload: Hot (in-memory), Cold (compressed handle), or Tombstone.
     /// RwLock allows cold migration to swap Hot→Cold without rebuilding the chain.
     pub data: RwLock<VersionData>,
+    /// Lock-free tombstone flag — set at creation, never changes.
+    /// Avoids data.read() on commit hot path.
+    is_tombstone: bool,
     /// Fast check: true when prev is Some. Avoids RwLock read in commit_no_report.
     has_prev: AtomicBool,
     /// Link to the previous (older) version (RwLock for safe GC truncation).
@@ -98,6 +101,16 @@ impl Version {
     #[inline]
     pub fn set_commit_ts(&self, ts: Timestamp) {
         self.commit_ts.store(ts.0, Ordering::Release);
+    }
+
+    #[inline]
+    pub fn is_tombstone(&self) -> bool {
+        self.is_tombstone
+    }
+
+    #[inline]
+    pub fn is_live(&self) -> bool {
+        !self.is_tombstone
     }
 
     /// Fast check: true when this version has a predecessor.
@@ -164,6 +177,7 @@ impl VersionChain {
 
     /// Prepend with pre-wrapped Arc data (avoids double-wrapping).
     pub fn prepend_arc(&self, txn_id: TxnId, data: Option<Arc<OwnedRow>>) {
+        let tombstone = data.is_none();
         let vdata = match data {
             Some(row) => VersionData::Hot(row),
             None => VersionData::Tombstone,
@@ -176,6 +190,7 @@ impl VersionChain {
             created_by: txn_id,
             commit_ts: AtomicU64::new(0),
             data: RwLock::new(vdata),
+            is_tombstone: tombstone,
             has_prev: AtomicBool::new(has),
             prev: RwLock::new(prev),
         });
@@ -253,23 +268,37 @@ impl VersionChain {
         self.commit_and_report(txn_id, commit_ts);
     }
 
-    /// Commit without cloning row data. Returns true if a non-tombstone INSERT was committed.
-    pub fn commit_no_report(&self, txn_id: TxnId, commit_ts: Timestamp) -> bool {
+    /// Commit without cloning row data.
+    /// Returns row-count delta: +1 = insert, -1 = delete, 0 = update or no-op.
+    pub fn commit_no_report(&self, txn_id: TxnId, commit_ts: Timestamp) -> i8 {
         let head = self.head.read();
         if let Some(ref ver) = *head {
             if ver.created_by == txn_id && ver.get_commit_ts().0 == 0 {
                 ver.set_commit_ts(commit_ts);
-                if ver.data.read().is_some() && !ver.has_prev() {
+                let is_live = ver.is_live();
+                if is_live && !ver.has_prev() {
+                    // Fresh INSERT — no prev, no need to check anything else
                     self.fast_commit_ts.store(commit_ts.0, Ordering::Release);
+                    return 1;
                 }
-                return ver.data.read().is_some();
+                let has_prev_committed = ver.has_prev() && {
+                    ver.get_prev().is_some_and(|p| {
+                        let cts = p.get_commit_ts();
+                        cts.0 > 0 && cts != Timestamp::MAX && p.is_live()
+                    })
+                };
+                return match (is_live, has_prev_committed) {
+                    (true, false) => 1,   // INSERT (re-insert after delete)
+                    (false, true) => -1,  // DELETE
+                    _ => 0,              // UPDATE or no previous committed row
+                };
             }
         }
-        false
+        0
     }
 
     /// Commit without cloning, resolving cold data if needed.
-    pub fn commit_no_report_cold(&self, txn_id: TxnId, commit_ts: Timestamp) -> bool {
+    pub fn commit_no_report_cold(&self, txn_id: TxnId, commit_ts: Timestamp) -> i8 {
         self.commit_no_report(txn_id, commit_ts)
     }
 
@@ -346,7 +375,13 @@ impl VersionChain {
             current = ver.get_prev();
         }
         let restored = match *head {
-            Some(ref ver) if ver.data.read().is_some() => ver.data.read().clone_hot(),
+            Some(ref ver) if ver.is_live() => {
+                let cts = ver.get_commit_ts();
+                if cts.0 > 0 && cts != Timestamp::MAX && !ver.has_prev() {
+                    self.fast_commit_ts.store(cts.0, Ordering::Release);
+                }
+                ver.data.read().clone_hot()
+            }
             _ => None,
         };
         (aborted, restored)
@@ -513,6 +548,7 @@ impl VersionChain {
                 created_by: ver.created_by,
                 commit_ts: AtomicU64::new(ver.get_commit_ts().0),
                 data: RwLock::new(VersionData::Hot(Arc::new(new_row))),
+                is_tombstone: false,
                 has_prev: AtomicBool::new(has),
                 prev: RwLock::new(old_prev),
             });
@@ -559,24 +595,22 @@ impl VersionChain {
             return true;
         }
         let head = self.head.read();
-        // Fast path: check head version without Arc clone
         if let Some(ref ver) = *head {
             if ver.created_by == txn_id {
-                return ver.data.read().is_some();
+                return ver.is_live();
             }
             let cts = ver.get_commit_ts();
             if cts.0 > 0 && cts <= read_ts {
-                return ver.data.read().is_some();
+                return ver.is_live();
             }
-            // Slow path: traverse prev chain
             let mut current = ver.get_prev();
             while let Some(ver) = current {
                 if ver.created_by == txn_id {
-                    return ver.data.read().is_some();
+                    return ver.is_live();
                 }
                 let cts = ver.get_commit_ts();
                 if cts.0 > 0 && cts <= read_ts {
-                    return ver.data.read().is_some();
+                    return ver.is_live();
                 }
                 current = ver.get_prev();
             }
@@ -634,13 +668,20 @@ impl VersionChain {
         drop(head);
         while let Some(ver) = current {
             let cts = ver.get_commit_ts();
-            if cts.0 == 0 && ver.created_by == txn_id && ver.data.read().is_some() {
+            if cts.0 == 0 && ver.created_by == txn_id && ver.is_live() {
                 return true;
             }
-            if cts.0 != 0 && cts != Timestamp::MAX && ver.data.read().is_some() {
+            if cts.0 != 0 && cts != Timestamp::MAX && ver.is_live() {
                 return true;
             }
-            if cts == Timestamp::MAX || ver.data.read().is_tombstone() {
+            if cts == Timestamp::MAX {
+                current = ver.get_prev();
+                continue;
+            }
+            if ver.is_tombstone() {
+                if cts.0 != 0 {
+                    return false;
+                }
                 current = ver.get_prev();
                 continue;
             }
@@ -673,6 +714,8 @@ fn estimate_datum_bytes(d: &falcon_common::datum::Datum) -> u64 {
         Datum::Bytea(b) => b.len() as u64 + 24, // Vec<u8> heap + ptr/len/cap
         Datum::Jsonb(v) => v.to_string().len() as u64 + 24,
         Datum::Array(a) => (a.len() as u64) * 16 + 24, // Vec<Datum> overhead
+        Datum::TsVector(v) => (v.len() as u64) * 48 + 24,
+        Datum::TsQuery(q) => q.len() as u64 + 24,
     }
 }
 

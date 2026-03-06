@@ -675,6 +675,9 @@ pub fn datum_to_encoded(d: &Datum) -> EncodedValue {
             let elem_type = encoded.first().map_or(TYPE_NULL, value_type_id);
             EncodedValue::Array(elem_type, encoded)
         }
+        Datum::TsVector(_) | Datum::TsQuery(_) => {
+            EncodedValue::Text(format!("{d}"))
+        }
     }
 }
 
@@ -720,6 +723,7 @@ pub const fn datatype_to_type_id(dt: &DataType) -> u8 {
         DataType::Uuid => TYPE_UUID,
         DataType::Bytea => TYPE_BYTEA,
         DataType::Array(_) => TYPE_ARRAY,
+        DataType::TsVector | DataType::TsQuery => TYPE_TEXT,
     }
 }
 

@@ -314,6 +314,7 @@ impl super::DistributedQueryEngine {
                 }
             }
             BoundExpr::Function { args: exprs, .. }
+            | BoundExpr::UserFunction { args: exprs, .. }
             | BoundExpr::Coalesce(exprs)
             | BoundExpr::ArrayLiteral(exprs) => {
                 for e in exprs {
@@ -400,6 +401,7 @@ impl super::DistributedQueryEngine {
                 Self::expr_has_subquery(expr) || list.iter().any(Self::expr_has_subquery)
             }
             BoundExpr::Function { args: exprs, .. }
+            | BoundExpr::UserFunction { args: exprs, .. }
             | BoundExpr::Coalesce(exprs)
             | BoundExpr::ArrayLiteral(exprs) => exprs.iter().any(Self::expr_has_subquery),
             BoundExpr::ArrayIndex { array, index } => {

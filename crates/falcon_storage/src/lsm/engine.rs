@@ -349,6 +349,12 @@ impl LsmEngine {
         }
         let meta = writer.finish(0, seq)?;
 
+        // Throttle flush I/O
+        let d = self.flush_limiter.request(meta.file_size);
+        if !d.is_zero() {
+            std::thread::sleep(d);
+        }
+
         // Record in manifest
         self.manifest.lock().record_add(&meta)?;
 
@@ -400,8 +406,16 @@ impl LsmEngine {
             )
         };
 
+        let max_levels = self.config.compaction.max_levels as usize;
         let crypto = self.block_crypto();
-        let result = self.compactor.compact_l0_to_l1(&l0_files, &l1_files, crypto.as_ref())?;
+        let result = self.compactor.compact_l0_to_l1(
+            &l0_files,
+            &l1_files,
+            Some(&self.gc_policy),
+            max_levels,
+            Some(&self.compaction_limiter),
+            crypto.as_ref(),
+        )?;
         self.apply_compaction_result(&result, 0, 1)?;
         Ok(())
     }

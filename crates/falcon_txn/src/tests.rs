@@ -24,7 +24,7 @@ mod txn_manager_tests {
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(1),
@@ -33,7 +33,7 @@ mod txn_manager_tests {
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 },
             ],
             primary_key_columns: vec![0],
@@ -48,8 +48,9 @@ mod txn_manager_tests {
     fn setup() -> (Arc<StorageEngine>, Arc<TxnManager>) {
         let storage = Arc::new(StorageEngine::new_in_memory());
         storage.create_table(test_schema()).unwrap();
-        let mgr = Arc::new(TxnManager::new(storage.clone()));
-        (storage, mgr)
+        let mut mgr = TxnManager::new(storage.clone());
+        mgr.set_latency_sample_divisor(1);
+        (storage, Arc::new(mgr))
     }
 
     // ── Fast-path (LocalTxn) tests ──
@@ -395,8 +396,9 @@ mod txn_manager_tests {
     fn setup_mgr() -> (Arc<StorageEngine>, Arc<TxnManager>) {
         let storage = Arc::new(StorageEngine::new_in_memory());
         storage.create_table(test_schema()).unwrap();
-        let mgr = Arc::new(TxnManager::new(storage.clone()));
-        (storage, mgr)
+        let mut mgr = TxnManager::new(storage.clone());
+        mgr.set_latency_sample_divisor(1);
+        (storage, Arc::new(mgr))
     }
 
     fn setup_with_unique_index() -> (Arc<StorageEngine>, Arc<TxnManager>) {

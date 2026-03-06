@@ -11,6 +11,8 @@ mod executor_setops;
 mod executor_subquery;
 mod executor_window;
 pub mod expr_engine;
+pub mod plpgsql;
+pub mod fts;
 pub mod external_sort;
 pub mod governor;
 pub mod parallel;

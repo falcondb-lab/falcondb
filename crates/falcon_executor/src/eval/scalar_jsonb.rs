@@ -284,6 +284,7 @@ fn datum_to_json_value(d: &Datum) -> JsonValue {
             let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
             JsonValue::String(format!("\\x{hex}"))
         }
+        Datum::TsVector(_) | Datum::TsQuery(_) => JsonValue::String(format!("{d}")),
     }
 }
 

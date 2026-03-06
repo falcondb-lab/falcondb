@@ -22,14 +22,50 @@ impl QueryHandler {
         let sql_lower = sql.to_lowercase();
         let sql_lower = sql_lower.trim().trim_end_matches(';').trim();
 
-        // SELECT version()
-        if sql_lower == "select version()" || sql_lower.starts_with("select version()") {
+        // SELECT version() / SELECT pg_catalog.version()
+        if sql_lower == "select version()"
+            || sql_lower.starts_with("select version()")
+            || sql_lower.contains("pg_catalog.version()")
+        {
             return Some(self.single_row_result(
                 vec![("version", 25, -1)],
                 vec![vec![Some(
                     "PostgreSQL 18.0.0 on FalconDB (in-memory OLTP)".into(),
                 )]],
             ));
+        }
+
+        // SELECT current_setting('param') — pgjdbc and Hibernate use this
+        if sql_lower.contains("current_setting(") {
+            if let Some(after_open) = sql_lower
+                .find("current_setting(")
+                .map(|i| i + "current_setting(".len())
+            {
+                let rest = &sql_lower[after_open..];
+                let rest = rest.trim_start_matches(['\'', '"']);
+                let param = rest
+                    .split(|c: char| c == '\'' || c == '"' || c == ')' || c == ',')
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                let value = session.get_guc(param).map_or_else(
+                    || match param {
+                        "transaction_isolation" => "read committed".into(),
+                        "datestyle" => "ISO, MDY".into(),
+                        "standard_conforming_strings" => "on".into(),
+                        "integer_datetimes" => "on".into(),
+                        "max_identifier_length" => "63".into(),
+                        "server_encoding" | "client_encoding" => "UTF8".into(),
+                        "timezone" => "UTC".into(),
+                        _ => String::new(),
+                    },
+                    std::string::ToString::to_string,
+                );
+                return Some(self.single_row_result(
+                    vec![("current_setting", 25, -1)],
+                    vec![vec![Some(value)]],
+                ));
+            }
         }
 
         // SELECT current_schema() / current_database() / current_user
@@ -53,6 +89,117 @@ impl QueryHandler {
                 vec![("current_user", 25, -1)],
                 vec![vec![Some("falcon".into())]],
             ));
+        }
+
+        // SELECT pg_postmaster_start_time()
+        if sql_lower.contains("pg_postmaster_start_time") {
+            let epoch_ms = falcon_common::globals::server_start_epoch_ms();
+            let ts = chrono::DateTime::from_timestamp_millis(epoch_ms)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.3f+00").to_string())
+                .unwrap_or_else(|| "unknown".into());
+            return Some(self.single_row_result(
+                vec![("pg_postmaster_start_time", 1184, 8)],
+                vec![vec![Some(ts)]],
+            ));
+        }
+
+        // SHOW falcon.uptime
+        if sql_lower == "show falcon.uptime" {
+            let secs = falcon_common::globals::server_uptime_secs();
+            let h = secs as u64 / 3600;
+            let m = (secs as u64 % 3600) / 60;
+            let s = secs as u64 % 60;
+            return Some(self.single_row_result(
+                vec![("uptime", 25, -1)],
+                vec![vec![Some(format!("{h}h {m}m {s}s ({secs:.1}s)"))]],
+            ));
+        }
+
+        // SHOW falcon.memory
+        if sql_lower == "show falcon.memory" {
+            let snap = self.storage.memory_snapshot();
+            let rows = vec![
+                vec![Some("mvcc_bytes".into()), Some(snap.mvcc_bytes.to_string())],
+                vec![Some("index_bytes".into()), Some(snap.index_bytes.to_string())],
+                vec![Some("write_buffer_bytes".into()), Some(snap.write_buffer_bytes.to_string())],
+                vec![Some("total_bytes".into()), Some(snap.total_bytes.to_string())],
+            ];
+            return Some(self.single_row_result(
+                vec![("metric", 25, -1), ("value", 25, -1)],
+                rows,
+            ));
+        }
+
+        // SHOW falcon.replication
+        if sql_lower == "show falcon.replication" {
+            let role = falcon_common::globals::node_role().to_owned();
+            let ws = self.storage.wal_stats_snapshot();
+            let rows = vec![
+                vec![Some("node_role".into()), Some(role)],
+                vec![Some("wal_records_written".into()), Some(ws.records_written.to_string())],
+                vec![Some("wal_flushes".into()), Some(ws.flushes.to_string())],
+                vec![Some("wal_fsync_total_us".into()), Some(ws.fsync_total_us.to_string())],
+                vec![Some("wal_fsync_max_us".into()), Some(ws.fsync_max_us.to_string())],
+                vec![Some("wal_fsync_avg_us".into()), Some(ws.fsync_avg_us.to_string())],
+                vec![Some("wal_backlog_bytes".into()), Some(ws.backlog_bytes.to_string())],
+            ];
+            return Some(self.single_row_result(
+                vec![("metric", 25, -1), ("value", 25, -1)],
+                rows,
+            ));
+        }
+
+        // SHOW falcon.config
+        if sql_lower == "show falcon.config" {
+            let wal_enabled = self.storage.is_wal_enabled();
+            let role = falcon_common::globals::node_role().to_owned();
+            let engine = falcon_common::globals::default_table_engine().to_owned();
+            let rows = vec![
+                vec![Some("node_role".into()), Some(role)],
+                vec![Some("default_table_engine".into()), Some(engine)],
+                vec![Some("wal_enabled".into()), Some(wal_enabled.to_string())],
+            ];
+            return Some(self.single_row_result(
+                vec![("parameter", 25, -1), ("value", 25, -1)],
+                rows,
+            ));
+        }
+
+        // REFRESH MATERIALIZED VIEW <name>
+        if sql_lower.starts_with("refresh materialized view") {
+            let mv_name = sql_lower
+                .strip_prefix("refresh materialized view")
+                .unwrap_or("")
+                .trim()
+                .to_owned();
+            if mv_name.is_empty() {
+                return Some(vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "42601".into(),
+                    message: "REFRESH MATERIALIZED VIEW requires a view name".into(),
+                }]);
+            }
+            let bound = falcon_sql_frontend::types::BoundStatement::RefreshMaterializedView {
+                name: mv_name.clone(),
+            };
+            let plan = match Planner::plan(&bound) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Some(vec![BackendMessage::ErrorResponse {
+                        severity: "ERROR".into(),
+                        code: "42P01".into(),
+                        message: format!("{e}"),
+                    }]);
+                }
+            };
+            return Some(match self.execute_single_plan(sql, plan, session) {
+                Ok(msgs) => msgs,
+                Err(e) => vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "XX000".into(),
+                    message: format!("{e}"),
+                }],
+            });
         }
 
         // SET log_min_duration_statement = <ms>
@@ -284,6 +431,164 @@ impl QueryHandler {
             }]);
         }
 
+        // ── PG utility functions ──
+
+        // SELECT pg_backend_pid()
+        if sql_lower.contains("pg_backend_pid()") {
+            return Some(self.single_row_result(
+                vec![("pg_backend_pid", 23, 4)],
+                vec![vec![Some(session.id.to_string())]],
+            ));
+        }
+
+        // SELECT pg_is_in_recovery()
+        if sql_lower.contains("pg_is_in_recovery()") {
+            let in_recovery = falcon_common::globals::node_role() != "leader";
+            return Some(self.single_row_result(
+                vec![("pg_is_in_recovery", 16, 1)],
+                vec![vec![Some(if in_recovery { "t" } else { "f" }.into())]],
+            ));
+        }
+
+        // SELECT txid_current() / pg_current_xact_id()
+        if sql_lower.contains("txid_current()") || sql_lower.contains("pg_current_xact_id()") {
+            let xid = session.txn.as_ref().map_or(0u64, |t| t.txn_id.0);
+            return Some(self.single_row_result(
+                vec![("txid_current", 20, 8)],
+                vec![vec![Some(xid.to_string())]],
+            ));
+        }
+
+        // SELECT pg_sleep(seconds)
+        if sql_lower.contains("pg_sleep(") {
+            if let Some(secs) = extract_numeric_arg(sql_lower, "pg_sleep(") {
+                let dur = std::time::Duration::from_secs_f64(secs);
+                std::thread::sleep(dur);
+            }
+            return Some(self.single_row_result(
+                vec![("pg_sleep", 2278, -1)],
+                vec![vec![Some(String::new())]],
+            ));
+        }
+
+        // SELECT pg_cancel_backend(pid)
+        if sql_lower.contains("pg_cancel_backend(") {
+            return Some(self.single_row_result(
+                vec![("pg_cancel_backend", 16, 1)],
+                vec![vec![Some("t".into())]],
+            ));
+        }
+
+        // SELECT pg_terminate_backend(pid)
+        if sql_lower.contains("pg_terminate_backend(") {
+            return Some(self.single_row_result(
+                vec![("pg_terminate_backend", 16, 1)],
+                vec![vec![Some("t".into())]],
+            ));
+        }
+
+        // SELECT pg_table_size(regclass) / pg_total_relation_size(regclass) / pg_relation_size(regclass)
+        if sql_lower.contains("pg_table_size(")
+            || sql_lower.contains("pg_total_relation_size(")
+            || sql_lower.contains("pg_relation_size(")
+        {
+            let table_name = extract_string_arg_from(sql_lower, "pg_table_size(")
+                .or_else(|| extract_string_arg_from(sql_lower, "pg_total_relation_size("))
+                .or_else(|| extract_string_arg_from(sql_lower, "pg_relation_size("))
+                .unwrap_or_default();
+            let size = if !table_name.is_empty() {
+                let catalog = self.storage.get_catalog();
+                catalog.find_table(&table_name).map_or(0i64, |schema| {
+                    self.storage.estimate_table_size_bytes(schema.id) as i64
+                })
+            } else {
+                0
+            };
+            let col_name = if sql_lower.contains("pg_total_relation_size(") {
+                "pg_total_relation_size"
+            } else if sql_lower.contains("pg_relation_size(") {
+                "pg_relation_size"
+            } else {
+                "pg_table_size"
+            };
+            return Some(self.single_row_result(
+                vec![(col_name, 20, 8)],
+                vec![vec![Some(size.to_string())]],
+            ));
+        }
+
+        // SELECT pg_database_size(name|oid)
+        if sql_lower.contains("pg_database_size(") {
+            let total: i64 = self.storage.estimate_total_size_bytes() as i64;
+            return Some(self.single_row_result(
+                vec![("pg_database_size", 20, 8)],
+                vec![vec![Some(total.to_string())]],
+            ));
+        }
+
+        // SELECT pg_size_pretty(bigint)
+        if sql_lower.contains("pg_size_pretty(") {
+            let bytes = extract_numeric_arg(sql_lower, "pg_size_pretty(")
+                .map(|n| n as i64)
+                .unwrap_or(0);
+            let pretty = format_size_pretty(bytes);
+            return Some(self.single_row_result(
+                vec![("pg_size_pretty", 25, -1)],
+                vec![vec![Some(pretty)]],
+            ));
+        }
+
+        // pg_advisory_lock / pg_advisory_unlock / pg_try_advisory_lock — stubs
+        if sql_lower.contains("pg_advisory_lock(") || sql_lower.contains("pg_advisory_xact_lock(") {
+            return Some(self.single_row_result(
+                vec![("pg_advisory_lock", 2278, -1)],
+                vec![vec![Some(String::new())]],
+            ));
+        }
+        if sql_lower.contains("pg_try_advisory_lock(") || sql_lower.contains("pg_try_advisory_xact_lock(") {
+            return Some(self.single_row_result(
+                vec![("pg_try_advisory_lock", 16, 1)],
+                vec![vec![Some("t".into())]],
+            ));
+        }
+        if sql_lower.contains("pg_advisory_unlock(") || sql_lower.contains("pg_advisory_unlock_all()") {
+            return Some(self.single_row_result(
+                vec![("pg_advisory_unlock", 16, 1)],
+                vec![vec![Some("t".into())]],
+            ));
+        }
+
+        // DO $$ ... $$ — anonymous code block (stub: accept and return success)
+        if sql_lower.starts_with("do ") {
+            return Some(vec![BackendMessage::CommandComplete { tag: "DO".into() }]);
+        }
+
+        // DISCARD ALL / PLANS / TEMP / SEQUENCES
+        if sql_lower.starts_with("discard ") {
+            let what = sql_lower.trim_start_matches("discard ").trim();
+            match what {
+                "all" => session.discard_all(),
+                "plans" => {
+                    session.prepared_statements.clear();
+                    session.portals.clear();
+                    session.unnamed_portal = None;
+                }
+                "temp" | "temporary" => {} // no temp tables yet
+                "sequences" => {}          // no session sequences yet
+                _ => {}
+            }
+            return Some(vec![BackendMessage::CommandComplete {
+                tag: "DISCARD".into(),
+            }]);
+        }
+
+        // COMMENT ON ... — accept and ignore (metadata storage not implemented)
+        if sql_lower.starts_with("comment on ") {
+            return Some(vec![BackendMessage::CommandComplete {
+                tag: "COMMENT".into(),
+            }]);
+        }
+
         // SET SESSION CHARACTERISTICS AS TRANSACTION ... (pgjdbc setReadOnly / setTransactionIsolation)
         // Also handles: SET TRANSACTION READ ONLY/WRITE, SET TRANSACTION ISOLATION LEVEL ...
         if sql_lower.contains("session characteristics as transaction")
@@ -306,6 +611,15 @@ impl QueryHandler {
                 };
                 session.set_guc("default_transaction_isolation", level);
                 session.set_guc("transaction_isolation", level);
+            }
+            return Some(vec![BackendMessage::CommandComplete { tag: "SET".into() }]);
+        }
+
+        // SET LOCAL var = value — transaction-scoped GUC override
+        if sql_lower.starts_with("set local ") {
+            let rest = sql_lower.trim_start_matches("set local ").trim();
+            if let Some((name, value)) = parse_set_command(rest) {
+                session.set_local_guc(&name, &value);
             }
             return Some(vec![BackendMessage::CommandComplete { tag: "SET".into() }]);
         }
@@ -501,6 +815,10 @@ impl QueryHandler {
         if sql_lower.starts_with("show ") {
             let param = sql_lower.trim_start_matches("show ").trim();
 
+            if param == "all" {
+                return Some(self.handle_show_all(session));
+            }
+
             // Delegate falcon.* SHOW commands to handler_show module
             if param.starts_with("falcon.") {
                 if let Some(result) = self.handle_show_falcon(param, session) {
@@ -508,21 +826,156 @@ impl QueryHandler {
                 }
             }
 
+            // Normalize multi-word SHOW params to underscore form
+            let normalized = match param {
+                "transaction isolation level" => "transaction_isolation",
+                "default transaction isolation" => "transaction_isolation",
+                "default transaction read only" => "default_transaction_read_only",
+                _ => param,
+            };
             // Look up GUC variable from session, with hardcoded fallbacks
-            let value = session.get_guc(param).map_or_else(
-                || match param {
+            let value = session.get_guc(normalized).map_or_else(
+                || match normalized {
                     "transaction_isolation" => "read committed".into(),
                     "max_identifier_length" => "63".into(),
+                    "standard_conforming_strings" => "on".into(),
+                    "integer_datetimes" => "on".into(),
+                    "server_encoding" | "client_encoding" => "UTF8".into(),
+                    "datestyle" => "ISO, MDY".into(),
                     _ => String::new(),
                 },
                 std::string::ToString::to_string,
             );
-            return Some(self.single_row_result(vec![(param, 25, -1)], vec![vec![Some(value)]]));
+            return Some(self.single_row_result(vec![(normalized, 25, -1)], vec![vec![Some(value)]]));
+        }
+
+        // SELECT * FROM pg_stat_statements
+        if sql_lower.contains("pg_stat_statements") && !sql_lower.contains("reset") {
+            let snap = self.observability.stmt_stats.snapshot();
+            let mut rows: Vec<Vec<Option<String>>> = snap.iter().map(|(qid, query, calls, total, min, max, nrows)| {
+                let mean = if *calls > 0 { *total as f64 / *calls as f64 } else { 0.0 };
+                vec![
+                    Some(qid.to_string()),
+                    Some(query.clone()),
+                    Some(calls.to_string()),
+                    Some(format!("{:.3}", *total as f64 / 1000.0)),   // total_time ms
+                    Some(format!("{:.3}", *min as f64 / 1000.0)),     // min_time ms
+                    Some(format!("{:.3}", *max as f64 / 1000.0)),     // max_time ms
+                    Some(format!("{:.3}", mean / 1000.0)),            // mean_time ms
+                    Some(nrows.to_string()),
+                ]
+            }).collect();
+            rows.sort_by(|a, b| {
+                let ta: f64 = a[3].as_deref().unwrap_or("0").parse().unwrap_or(0.0);
+                let tb: f64 = b[3].as_deref().unwrap_or("0").parse().unwrap_or(0.0);
+                tb.partial_cmp(&ta).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            return Some(self.single_row_result(
+                vec![
+                    ("queryid", 20, 8),       // int8
+                    ("query", 25, -1),        // text
+                    ("calls", 20, 8),         // int8
+                    ("total_time", 701, -1),  // float8 (ms)
+                    ("min_time", 701, -1),
+                    ("max_time", 701, -1),
+                    ("mean_time", 701, -1),
+                    ("rows", 20, 8),
+                ],
+                rows,
+            ));
+        }
+
+        // SELECT pg_stat_statements_reset()
+        if sql_lower.contains("pg_stat_statements_reset") {
+            self.observability.stmt_stats.reset();
+            return Some(self.single_row_result(
+                vec![("pg_stat_statements_reset", 25, -1)],
+                vec![vec![Some("".into())]],
+            ));
         }
 
         // Delegate information_schema and pg_catalog queries to handler_catalog module
         if let Some(result) = self.handle_catalog_query(sql_lower, session) {
             return Some(result);
+        }
+
+        // PREPARE TRANSACTION 'gid'
+        if sql_lower.starts_with("prepare transaction ") {
+            let gid = sql[19..].trim().trim_end_matches(';').trim()
+                .trim_matches('\'').trim_matches('"').to_owned();
+            if gid.is_empty() {
+                return Some(vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "42601".into(),
+                    message: "PREPARE TRANSACTION requires a transaction identifier".into(),
+                }]);
+            }
+            let txn = match session.txn.as_ref() {
+                Some(t) => t,
+                None => {
+                    return Some(vec![BackendMessage::ErrorResponse {
+                        severity: "ERROR".into(),
+                        code: "25P01".into(),
+                        message: "there is no transaction in progress".into(),
+                    }]);
+                }
+            };
+            match self.txn_mgr.prepare_named(txn.txn_id, gid) {
+                Ok(()) => {
+                    session.txn = None;
+                    session.autocommit = true;
+                    return Some(vec![BackendMessage::CommandComplete {
+                        tag: "PREPARE TRANSACTION".into(),
+                    }]);
+                }
+                Err(e) => {
+                    return Some(vec![BackendMessage::ErrorResponse {
+                        severity: "ERROR".into(),
+                        code: "55000".into(),
+                        message: format!("{e}"),
+                    }]);
+                }
+            }
+        }
+
+        // COMMIT PREPARED 'gid'
+        if sql_lower.starts_with("commit prepared ") {
+            let gid = sql[16..].trim().trim_end_matches(';').trim()
+                .trim_matches('\'').trim_matches('"');
+            match self.txn_mgr.commit_prepared(gid) {
+                Ok(_ts) => {
+                    return Some(vec![BackendMessage::CommandComplete {
+                        tag: "COMMIT PREPARED".into(),
+                    }]);
+                }
+                Err(e) => {
+                    return Some(vec![BackendMessage::ErrorResponse {
+                        severity: "ERROR".into(),
+                        code: "42704".into(),
+                        message: format!("{e}"),
+                    }]);
+                }
+            }
+        }
+
+        // ROLLBACK PREPARED 'gid'
+        if sql_lower.starts_with("rollback prepared ") {
+            let gid = sql[18..].trim().trim_end_matches(';').trim()
+                .trim_matches('\'').trim_matches('"');
+            match self.txn_mgr.rollback_prepared(gid) {
+                Ok(()) => {
+                    return Some(vec![BackendMessage::CommandComplete {
+                        tag: "ROLLBACK PREPARED".into(),
+                    }]);
+                }
+                Err(e) => {
+                    return Some(vec![BackendMessage::ErrorResponse {
+                        severity: "ERROR".into(),
+                        code: "42704".into(),
+                        message: format!("{e}"),
+                    }]);
+                }
+            }
         }
 
         // PREPARE name [(type, ...)] AS query
@@ -1184,6 +1637,48 @@ impl QueryHandler {
             }
         }
     }
+
+    fn handle_show_all(&self, session: &PgSession) -> Vec<BackendMessage> {
+        static DEFAULTS: &[(&str, &str, &str)] = &[
+            ("application_name", "", ""),
+            ("client_encoding", "UTF8", ""),
+            ("DateStyle", "ISO, MDY", ""),
+            ("default_transaction_isolation", "read committed", ""),
+            ("default_transaction_read_only", "off", ""),
+            ("extra_float_digits", "1", ""),
+            ("integer_datetimes", "on", ""),
+            ("IntervalStyle", "postgres", ""),
+            ("is_superuser", "on", ""),
+            ("max_identifier_length", "63", ""),
+            ("search_path", "\"$user\", public", ""),
+            ("server_encoding", "UTF8", ""),
+            ("server_version", crate::session::PG_COMPAT_VERSION, ""),
+            ("standard_conforming_strings", "on", ""),
+            ("TimeZone", "UTC", ""),
+            ("transaction_isolation", "read committed", ""),
+        ];
+
+        let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        // Session overrides first
+        for (k, v) in &session.guc_vars {
+            seen.insert(k.as_str().to_owned());
+            rows.push(vec![Some(k.clone()), Some(v.clone()), Some(String::new())]);
+        }
+        // Defaults for anything not overridden
+        for &(name, val, desc) in DEFAULTS {
+            if !seen.contains(name) {
+                rows.push(vec![Some(name.into()), Some(val.into()), Some(desc.into())]);
+            }
+        }
+        rows.sort_by(|a, b| a[0].cmp(&b[0]));
+
+        self.single_row_result(
+            vec![("name", 25, -1i16), ("setting", 25, -1), ("description", 25, -1)],
+            rows,
+        )
+    }
 }
 
 /// Extract the first string argument from a SQL function call like `prefix('value')`.
@@ -1192,6 +1687,41 @@ fn extract_string_arg(sql_lower: &str, prefix: &str) -> String {
     let after = sql_lower.trim_start_matches(prefix);
     let inner = after.trim_end_matches(')').trim_end_matches(';').trim();
     inner.trim_matches('\'').trim_matches('"').to_owned()
+}
+
+/// Extract a numeric argument from a SQL function call like `pg_sleep(1.5)`.
+fn extract_numeric_arg(sql: &str, func_prefix: &str) -> Option<f64> {
+    let start = sql.find(func_prefix)? + func_prefix.len();
+    let rest = &sql[start..];
+    let end = rest.find(')')?;
+    rest[..end].trim().parse::<f64>().ok()
+}
+
+/// Extract a string argument from a function call found anywhere in the SQL.
+/// Searches for `prefix` and extracts the quoted argument inside parens.
+fn extract_string_arg_from(sql: &str, func_prefix: &str) -> Option<String> {
+    let start = sql.find(func_prefix)? + func_prefix.len();
+    let rest = &sql[start..];
+    let end = rest.find(')')?;
+    let inner = rest[..end].trim().trim_matches('\'').trim_matches('"');
+    if inner.is_empty() { None } else { Some(inner.to_owned()) }
+}
+
+/// Format bytes into a human-readable string like PG's pg_size_pretty.
+fn format_size_pretty(bytes: i64) -> String {
+    let abs = bytes.unsigned_abs();
+    let sign = if bytes < 0 { "-" } else { "" };
+    if abs < 1024 {
+        format!("{sign}{abs} bytes")
+    } else if abs < 1024 * 1024 {
+        format!("{sign}{} kB", abs / 1024)
+    } else if abs < 1024 * 1024 * 1024 {
+        format!("{sign}{} MB", abs / (1024 * 1024))
+    } else if abs < 1024 * 1024 * 1024 * 1024 {
+        format!("{sign}{} GB", abs / (1024 * 1024 * 1024))
+    } else {
+        format!("{sign}{} TB", abs / (1024 * 1024 * 1024 * 1024))
+    }
 }
 
 /// Parse an encryption scope string like "wal", "table_5", "sst_3", "backup".

@@ -93,6 +93,10 @@ pub enum DataType {
     Uuid,
     /// BYTEA: arbitrary binary data.
     Bytea,
+    /// TSVECTOR: full-text search document representation.
+    TsVector,
+    /// TSQUERY: full-text search query.
+    TsQuery,
 }
 
 impl DataType {
@@ -115,6 +119,8 @@ impl DataType {
             Self::Interval => 1186,
             Self::Uuid => 2950,
             Self::Bytea => 17, // bytea OID
+            Self::TsVector => 3614,
+            Self::TsQuery => 3615,
         }
     }
 
@@ -127,7 +133,8 @@ impl DataType {
             Self::Int64 | Self::Float64 | Self::Timestamp | Self::Time => 8,
             Self::Interval | Self::Uuid => 16,
             Self::Text | Self::Array(_) | Self::Jsonb
-            | Self::Decimal(_, _) | Self::Bytea => -1, // variable length
+            | Self::Decimal(_, _) | Self::Bytea
+            | Self::TsVector | Self::TsQuery => -1, // variable length
         }
     }
 
@@ -159,6 +166,8 @@ impl DataType {
             Self::Interval => 1186,
             Self::Uuid => 2950,
             Self::Bytea => 17,
+            Self::TsVector => 3614,
+            Self::TsQuery => 3615,
         }
     }
 
@@ -190,6 +199,8 @@ impl DataType {
             Self::Interval => "interval",
             Self::Uuid => "uuid",
             Self::Bytea => "bytea",
+            Self::TsVector => "tsvector",
+            Self::TsQuery => "tsquery",
         }
     }
 
@@ -243,6 +254,8 @@ impl DataType {
             Self::Interval => "interval",
             Self::Uuid => "uuid",
             Self::Bytea => "bytea",
+            Self::TsVector => "tsvector",
+            Self::TsQuery => "tsquery",
         }
     }
 }
@@ -266,6 +279,8 @@ impl fmt::Display for DataType {
             Self::Interval => write!(f, "INTERVAL"),
             Self::Uuid => write!(f, "UUID"),
             Self::Bytea => write!(f, "BYTEA"),
+            Self::TsVector => write!(f, "TSVECTOR"),
+            Self::TsQuery => write!(f, "TSQUERY"),
         }
     }
 }

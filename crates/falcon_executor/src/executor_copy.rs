@@ -34,26 +34,62 @@ impl Executor {
 
         let mut rows_inserted: u64 = 0;
 
-        // Build default-values template once; clone per row instead of
-        // rebuilding from schema on every iteration.
         let default_values: Vec<Datum> = schema
             .columns
             .iter()
             .map(|c| c.default_value.clone().unwrap_or(Datum::Null))
             .collect();
 
+        let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+
+        // Pre-scan existing rows once for UNIQUE checks
+        let mut unique_sets: Vec<std::collections::HashSet<Vec<Datum>>> =
+            if !schema.unique_constraints.is_empty() {
+                let existing = self.storage.scan(table_id, txn.txn_id, read_ts).map_err(FalconError::Storage)?;
+                schema.unique_constraints.iter().map(|uniq_cols| {
+                    existing.iter().filter_map(|(_, row)| {
+                        let key: Vec<Datum> = uniq_cols.iter().map(|&idx| row.values[idx].clone()).collect();
+                        if key.iter().any(Datum::is_null) { None } else { Some(key) }
+                    }).collect()
+                }).collect()
+            } else {
+                vec![]
+            };
+
+        // Pre-build FK lookup sets once
+        let fk_lookup: Vec<(Vec<usize>, std::collections::HashSet<Vec<Datum>>)> =
+            if !schema.foreign_keys.is_empty() {
+                schema.foreign_keys.iter().map(|fk| {
+                    let ref_schema = self.storage.get_table_schema(&fk.ref_table).ok_or_else(|| {
+                        FalconError::Execution(ExecutionError::TypeError(format!(
+                            "Referenced table '{}' not found", fk.ref_table
+                        )))
+                    })?;
+                    let ref_col_indices: Vec<usize> = fk.ref_columns.iter().map(|name| {
+                        ref_schema.find_column(name).ok_or_else(|| {
+                            FalconError::Execution(ExecutionError::TypeError(format!(
+                                "Referenced column '{}' not found in '{}'", name, fk.ref_table
+                            )))
+                        })
+                    }).collect::<Result<Vec<_>, _>>()?;
+                    let ref_rows = self.storage.scan(ref_schema.id, txn.txn_id, read_ts).map_err(FalconError::Storage)?;
+                    let fk_set: std::collections::HashSet<Vec<Datum>> = ref_rows.iter().map(|(_, r)| {
+                        ref_col_indices.iter().map(|&idx| r.values[idx].clone()).collect()
+                    }).collect();
+                    Ok((fk.columns.clone(), fk_set))
+                }).collect::<Result<Vec<_>, FalconError>>()?
+            } else {
+                vec![]
+            };
+
         for (line_idx, line) in text.lines().enumerate() {
-            // Skip header row
             if header && line_idx == 0 {
                 continue;
             }
-
-            // Skip empty lines
             if line.is_empty() {
                 continue;
             }
 
-            // Parse fields from the line
             let fields = if csv {
                 parse_csv_line(line, delimiter, quote, escape)
             } else {
@@ -71,7 +107,6 @@ impl Executor {
 
             let mut values: Vec<Datum> = default_values.clone();
 
-            // Parse each field into the appropriate Datum type
             for (i, field) in fields.iter().enumerate() {
                 let col_idx = columns[i];
                 let col_type = &schema.columns[col_idx].data_type;
@@ -90,13 +125,40 @@ impl Executor {
                 }
             }
 
-            // NOT NULL constraint check
+            // NOT NULL
             for (col_idx, col) in schema.columns.iter().enumerate() {
                 if !col.nullable && values[col_idx].is_null() {
                     return Err(FalconError::Execution(ExecutionError::TypeError(format!(
                         "COPY: NOT NULL constraint violated for column '{}'",
                         col.name,
                     ))));
+                }
+            }
+
+            // CHECK
+            let check_row = OwnedRow::new(values.clone());
+            self.eval_check_constraints(schema, &check_row)?;
+
+            // UNIQUE
+            for (set_idx, uniq_cols) in schema.unique_constraints.iter().enumerate() {
+                let key: Vec<Datum> = uniq_cols.iter().map(|&idx| values[idx].clone()).collect();
+                if key.iter().any(Datum::is_null) { continue; }
+                if !unique_sets[set_idx].insert(key) {
+                    let col_names: Vec<&str> = uniq_cols.iter().map(|&idx| schema.columns[idx].name.as_str()).collect();
+                    return Err(FalconError::Execution(ExecutionError::TypeError(format!(
+                        "COPY: UNIQUE constraint violated on column(s): {}", col_names.join(", ")
+                    ))));
+                }
+            }
+
+            // FK
+            for (fk_cols, fk_set) in &fk_lookup {
+                let fk_vals: Vec<Datum> = fk_cols.iter().map(|&idx| values[idx].clone()).collect();
+                if fk_vals.iter().any(Datum::is_null) { continue; }
+                if !fk_set.contains(&fk_vals) {
+                    return Err(FalconError::Execution(ExecutionError::TypeError(
+                        "COPY: FOREIGN KEY constraint violated".into(),
+                    )));
                 }
             }
 
@@ -436,6 +498,7 @@ fn parse_datum(field: &str, data_type: &DataType) -> Result<Datum, String> {
                 .map_err(|e| format!("Cannot parse '{field}' as BYTEA: {e}"))?;
             Ok(Datum::Bytea(bytes))
         }
+        DataType::TsVector | DataType::TsQuery => Ok(Datum::Text(field.to_owned())),
     }
 }
 
@@ -475,5 +538,6 @@ fn datum_to_text(datum: &Datum) -> String {
             let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
             format!("\\x{hex}")
         }
+        Datum::TsVector(_) | Datum::TsQuery(_) => format!("{datum}"),
     }
 }

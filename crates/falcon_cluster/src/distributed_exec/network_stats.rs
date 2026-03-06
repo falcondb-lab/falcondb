@@ -94,6 +94,8 @@ fn estimate_datum_wire_bytes(d: &Datum) -> u64 {
         Datum::Array(a) => {
             5 + a.iter().map(estimate_datum_wire_bytes).sum::<u64>()
         }
+        Datum::TsVector(v) => 5 + (v.len() as u64) * 32,
+        Datum::TsQuery(q) => 5 + q.len() as u64,
     }
 }
 

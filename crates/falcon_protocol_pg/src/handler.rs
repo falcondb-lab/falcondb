@@ -17,7 +17,7 @@ use falcon_cluster::{
 };
 use falcon_common::consistency::CommitPolicy;
 use falcon_common::datum::Datum;
-use falcon_common::error::FalconError;
+use falcon_common::error::{ExecutionError, FalconError, StorageError, TxnError};
 use falcon_common::types::ShardId;
 use falcon_executor::{ExecutionResult, Executor, PriorityScheduler, PrioritySchedulerConfig};
 use falcon_planner::{IndexedColumns, PhysicalPlan, PlannedTxnType, Planner, TableRowCounts};
@@ -80,6 +80,7 @@ pub(crate) struct ObservabilityContext {
     pub(crate) hotspot_detector: Arc<falcon_storage::hotspot::HotspotDetector>,
     pub(crate) consistency_verifier: Arc<falcon_storage::verification::ConsistencyVerifier>,
     pub(crate) priority_scheduler: Arc<PriorityScheduler>,
+    pub(crate) stmt_stats: Arc<falcon_observability::stmt_stats::StmtStatsStore>,
 }
 
 /// Handles a single SQL query within a session, producing PG backend messages.
@@ -154,6 +155,7 @@ impl QueryHandler {
                     falcon_storage::verification::ConsistencyVerifier::default(),
                 ),
                 priority_scheduler: PriorityScheduler::new(PrioritySchedulerConfig::default()),
+                stmt_stats: Arc::new(falcon_observability::stmt_stats::StmtStatsStore::new()),
             },
             session_registry: SessionRegistry::new(),
         }
@@ -217,6 +219,7 @@ impl QueryHandler {
                     falcon_storage::verification::ConsistencyVerifier::default(),
                 ),
                 priority_scheduler: PriorityScheduler::new(PrioritySchedulerConfig::default()),
+                stmt_stats: Arc::new(falcon_observability::stmt_stats::StmtStatsStore::new()),
             },
             session_registry: SessionRegistry::new(),
         }
@@ -304,6 +307,23 @@ impl QueryHandler {
         };
         let ok = !msgs.iter().any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
         falcon_observability::record_query_metrics(elapsed_us, qtype, ok);
+        // pg_stat_database counters
+        {
+            let ds = falcon_common::globals::db_stats();
+            let rows = extract_row_count_from_msgs(&msgs);
+            ds.active_time_us.fetch_add(elapsed_us, std::sync::atomic::Ordering::Relaxed);
+            match qtype {
+                "insert" => ds.tup_inserted.fetch_add(rows, std::sync::atomic::Ordering::Relaxed),
+                "update" => ds.tup_updated.fetch_add(rows, std::sync::atomic::Ordering::Relaxed),
+                "delete" => ds.tup_deleted.fetch_add(rows, std::sync::atomic::Ordering::Relaxed),
+                "select" => ds.tup_returned.fetch_add(rows, std::sync::atomic::Ordering::Relaxed),
+                _ => 0,
+            };
+            // pg_stat_statements: skip txn control
+            if !matches!(qtype, "txn_control") {
+                self.observability.stmt_stats.record(sql, elapsed_us, rows);
+            }
+        }
         msgs
     }
 
@@ -317,6 +337,12 @@ impl QueryHandler {
                     || rest.eq_ignore_ascii_case("WORK")
                 {
                     return self.fast_begin(session);
+                }
+                // BEGIN ISOLATION LEVEL ... / READ ONLY / READ WRITE
+                let lower = rest.to_lowercase();
+                let opts = lower.strip_prefix("transaction").map(|s| s.trim()).unwrap_or(&lower);
+                if let Some(parsed) = parse_begin_options(opts) {
+                    return self.fast_begin_with_options(session, parsed);
                 }
             }
             b'C' | b'c' if sql.len() >= 6 && sql.as_bytes()[..6].eq_ignore_ascii_case(b"COMMIT") => {
@@ -1178,23 +1204,62 @@ impl QueryHandler {
     }
 
 
-    pub(crate) fn error_response(&self, err: &FalconError) -> BackendMessage {
-        let mut message = err.to_string();
-        // Append routing hints for retryable errors so PG-aware proxies can act.
-        if let FalconError::Retryable {
-            leader_hint: Some(ref hint),
-            retry_after_ms,
-            ..
-        } = err
-        {
-            message = format!(
-                "{message} HINT: leader={hint}, retry_after={retry_after_ms}ms"
-            );
+}
+
+/// Extract row count from CommandComplete tags in response messages.
+pub(crate) fn extract_row_count_from_msgs(msgs: &[BackendMessage]) -> u64 {
+    for m in msgs {
+        if let BackendMessage::CommandComplete { tag } = m {
+            // "SELECT 42" → 42, "INSERT 0 5" → 5, "UPDATE 3" → 3, "DELETE 1" → 1
+            if let Some(last) = tag.rsplit(' ').next() {
+                if let Ok(n) = last.parse::<u64>() {
+                    return n;
+                }
+            }
         }
-        BackendMessage::ErrorResponse {
-            severity: err.pg_severity().into(),
-            code: err.pg_sqlstate().into(),
-            message,
+    }
+    0
+}
+
+impl QueryHandler {
+    pub(crate) fn error_response(&self, err: &FalconError) -> BackendMessage {
+        let message = err.to_string();
+        let severity: String = err.pg_severity().into();
+        let code: String = err.pg_sqlstate().into();
+
+        let extra = match err {
+            FalconError::Storage(StorageError::UniqueViolation { column_idx, index_key_hex }) => {
+                Some(crate::codec::ErrorFields {
+                    detail: Some(format!("Key collision on column index {column_idx} (key {index_key_hex})")),
+                    constraint_name: Some(format!("unique_{column_idx}")),
+                    ..Default::default()
+                })
+            }
+            FalconError::Txn(TxnError::ConstraintViolation(_, desc)) => {
+                Some(crate::codec::ErrorFields {
+                    detail: Some(desc.clone()),
+                    ..Default::default()
+                })
+            }
+            FalconError::Execution(ExecutionError::CheckConstraintViolation(name)) => {
+                Some(crate::codec::ErrorFields {
+                    constraint_name: Some(name.clone()),
+                    ..Default::default()
+                })
+            }
+            FalconError::Retryable { leader_hint: Some(hint), retry_after_ms, .. } => {
+                Some(crate::codec::ErrorFields {
+                    hint: Some(format!("leader={hint}, retry_after={retry_after_ms}ms")),
+                    ..Default::default()
+                })
+            }
+            _ => None,
+        };
+
+        if let Some(fields) = extra {
+            BackendMessage::ErrorResponseExt { severity, code, message, fields }
+        } else {
+            BackendMessage::ErrorResponse { severity, code, message }
         }
     }
 
@@ -1217,6 +1282,57 @@ impl QueryHandler {
     }
 }
 
+
+/// Parsed options from BEGIN TRANSACTION ... clauses.
+pub(crate) struct BeginOptions {
+    pub isolation: Option<falcon_common::types::IsolationLevel>,
+    pub read_only: Option<bool>,
+}
+
+/// Parse lowercased BEGIN options like "isolation level serializable read only".
+/// Returns None if the string is not a valid set of BEGIN options.
+pub(crate) fn parse_begin_options(s: &str) -> Option<BeginOptions> {
+    use falcon_common::types::IsolationLevel;
+    let mut opts = BeginOptions { isolation: None, read_only: None };
+    let mut rest = s.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    while !rest.is_empty() {
+        if let Some(r) = rest.strip_prefix("isolation level") {
+            let r = r.trim();
+            if let Some(r2) = r.strip_prefix("serializable") {
+                opts.isolation = Some(IsolationLevel::Serializable);
+                rest = r2.trim().trim_start_matches(',').trim();
+            } else if let Some(r2) = r.strip_prefix("repeatable read") {
+                opts.isolation = Some(IsolationLevel::SnapshotIsolation);
+                rest = r2.trim().trim_start_matches(',').trim();
+            } else if let Some(r2) = r.strip_prefix("read committed") {
+                opts.isolation = Some(IsolationLevel::ReadCommitted);
+                rest = r2.trim().trim_start_matches(',').trim();
+            } else if let Some(r2) = r.strip_prefix("read uncommitted") {
+                opts.isolation = Some(IsolationLevel::ReadCommitted);
+                rest = r2.trim().trim_start_matches(',').trim();
+            } else {
+                return None;
+            }
+        } else if let Some(r) = rest.strip_prefix("read only") {
+            opts.read_only = Some(true);
+            rest = r.trim().trim_start_matches(',').trim();
+        } else if let Some(r) = rest.strip_prefix("read write") {
+            opts.read_only = Some(false);
+            rest = r.trim().trim_start_matches(',').trim();
+        } else if let Some(r) = rest.strip_prefix("deferrable") {
+            // Accepted but ignored (only meaningful for serializable read-only in PG)
+            rest = r.trim().trim_start_matches(',').trim();
+        } else if let Some(r) = rest.strip_prefix("not deferrable") {
+            rest = r.trim().trim_start_matches(',').trim();
+        } else {
+            return None;
+        }
+    }
+    Some(opts)
+}
 
 #[cfg(test)]
 mod tests {

@@ -30,6 +30,7 @@ fn asc_order() -> Vec<BoundOrderBy> {
     vec![BoundOrderBy {
         column_idx: 0,
         asc: true,
+        nulls_first: false,
     }]
 }
 
@@ -360,6 +361,7 @@ fn sp16_multi_column_spill_sort() {
     let order = vec![BoundOrderBy {
         column_idx: 0,
         asc: true,
+        nulls_first: false,
     }];
     sorter.sort(&mut rows, &order).unwrap();
 

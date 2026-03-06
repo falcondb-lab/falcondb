@@ -1204,6 +1204,7 @@ async fn handle_connection_with_timeout(
                     &session.peer_addr,
                     session.get_guc("application_name").unwrap_or(""),
                 );
+                falcon_common::globals::db_stats().sessions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 struct RegGuard(SessionRegistry, i32);
                 impl Drop for RegGuard { fn drop(&mut self) { self.0.deregister(self.1); } }
                 let _sess_guard = RegGuard(sess_registry.clone(), session_id);
@@ -1273,16 +1274,20 @@ async fn handle_connection_with_timeout(
                     ),
                 };
                 let _ = send_message(&mut stream, &msg).await;
+                if let Some(ref txn) = session.txn {
+                    let _ = handler.txn_mgr.abort(txn.txn_id);
+                    session.txn = None;
+                }
                 return Ok(());
             }
         } else {
             stream.read_buf(&mut buf).await?
         };
         if n == 0 {
-            // Connection closed by client
             if let Some(ref txn) = session.txn {
-                // Abort any open transaction
                 tracing::debug!("Aborting open transaction on disconnect: {}", txn.txn_id);
+                let _ = handler.txn_mgr.abort(txn.txn_id);
+                session.txn = None;
             }
             return Ok(());
         }
@@ -1354,41 +1359,62 @@ async fn handle_connection_with_timeout(
                         continue;
                     }
 
+                    // Check for SET lock_timeout
+                    if let Some(ms) = parse_set_lock_timeout(&sql) {
+                        session.lock_timeout_ms = ms;
+                        send_message(&mut stream, &BackendMessage::CommandComplete { tag: "SET".into() }).await?;
+                        send_message(&mut stream, &BackendMessage::ReadyForQuery { txn_status: session.txn_status_byte() }).await?;
+                        continue;
+                    }
+
+                    // Check for SET idle_in_transaction_session_timeout
+                    if let Some(ms) = parse_set_idle_in_transaction_session_timeout(&sql) {
+                        handler.txn_mgr.set_idle_in_txn_timeout_ms(ms);
+                        send_message(&mut stream, &BackendMessage::CommandComplete { tag: "SET".into() }).await?;
+                        send_message(&mut stream, &BackendMessage::ReadyForQuery { txn_status: session.txn_status_byte() }).await?;
+                        continue;
+                    }
+
                     let responses = if session.statement_timeout_ms > 0 {
                         let timeout_dur =
                             std::time::Duration::from_millis(session.statement_timeout_ms);
                         let handler_ref = &handler;
-                        match tokio::time::timeout(
-                            timeout_dur,
-                            tokio::task::spawn_blocking({
-                                let sql = sql.clone();
-                                let handler = handler_ref.clone();
-                                let mut sess = session.take_for_timeout();
-                                move || {
-                                    let responses = handler.handle_query(&sql, &mut sess);
-                                    (responses, sess)
-                                }
-                            }),
-                        )
-                        .await
-                        {
-                            Ok(Ok((responses, returned_session))) => {
-                                session.restore_from_timeout(returned_session);
-                                responses
+                        let mut task = tokio::task::spawn_blocking({
+                            let sql = sql.clone();
+                            let handler = handler_ref.clone();
+                            let mut sess = session.take_for_timeout();
+                            move || {
+                                let responses = handler.handle_query(&sql, &mut sess);
+                                (responses, sess)
                             }
-                            Ok(Err(e)) => {
-                                vec![BackendMessage::ErrorResponse {
+                        });
+                        tokio::select! {
+                            result = &mut task => match result {
+                                Ok((responses, returned_session)) => {
+                                    session.restore_from_timeout(returned_session);
+                                    responses
+                                }
+                                Err(e) => vec![BackendMessage::ErrorResponse {
                                     severity: "ERROR".into(),
                                     code: "XX000".into(),
                                     message: format!("Internal error: {e}"),
-                                }]
-                            }
-                            Err(_) => {
+                                }],
+                            },
+                            _ = tokio::time::sleep(timeout_dur) => {
                                 tracing::warn!(
                                     "Statement timeout ({}ms) for session {}",
                                     session.statement_timeout_ms,
                                     session_id
                                 );
+                                // spawn_blocking cannot be cancelled. Wait for it so we can
+                                // recover session state (including open transaction) from it.
+                                if let Ok((_, returned_session)) = task.await {
+                                    session.restore_from_timeout(returned_session);
+                                }
+                                if let Some(ref txn) = session.txn {
+                                    let _ = handler.txn_mgr.abort(txn.txn_id);
+                                    session.txn = None;
+                                }
                                 vec![BackendMessage::ErrorResponse {
                                     severity: "ERROR".into(),
                                     code: "57014".into(),
@@ -1448,8 +1474,11 @@ async fn handle_connection_with_timeout(
                         loop {
                             let cn = stream.read_buf(&mut buf).await?;
                             if cn == 0 {
-                                // Connection closed during COPY
                                 session.copy_state = None;
+                                if let Some(ref txn) = session.txn {
+                                    let _ = handler.txn_mgr.abort(txn.txn_id);
+                                    session.txn = None;
+                                }
                                 return Ok(());
                             }
                             while let Some(copy_msg) = codec::decode_message(&mut buf)? {
@@ -1537,18 +1566,36 @@ async fn handle_connection_with_timeout(
                         query,
                         param_types.len()
                     );
-                    let (plan, inferred_param_types, row_desc) = match handler
-                        .prepare_statement(&query)
-                    {
-                        Ok((p, ipt, rd)) => {
-                            falcon_observability::record_prepared_stmt_op("parse", "plan");
-                            (Some(std::sync::Arc::new(p)), ipt, rd)
-                        }
-                        Err(_e) => {
-                            falcon_observability::record_prepared_stmt_op("parse", "legacy");
+                    let (plan, inferred_param_types, row_desc) =
+                        if is_system_query(&query) {
+                            // System queries (SET/SHOW/DISCARD/pg_catalog introspection)
+                            // are handled by handle_system_query at Execute time.
+                            falcon_observability::record_prepared_stmt_op("parse", "system");
                             (None, vec![], vec![])
-                        }
-                    };
+                        } else if let Some(cached) = handler.observability.plan_cache.get_prepared(&query) {
+                            falcon_observability::record_prepared_stmt_op("parse", "cached");
+                            (Some(cached.plan), cached.inferred_param_types, cached.row_desc)
+                        } else {
+                            match handler.prepare_statement(&query) {
+                                Ok((p, ipt, rd)) => {
+                                    falcon_observability::record_prepared_stmt_op("parse", "plan");
+                                    let arc_plan = std::sync::Arc::new(p);
+                                    handler.observability.plan_cache.put_prepared(
+                                        &query,
+                                        crate::plan_cache::CachedPrepared {
+                                            plan: arc_plan.clone(),
+                                            inferred_param_types: ipt.clone(),
+                                            row_desc: rd.clone(),
+                                        },
+                                    );
+                                    (Some(arc_plan), ipt, rd)
+                                }
+                                Err(_e) => {
+                                    falcon_observability::record_prepared_stmt_op("parse", "legacy");
+                                    (None, vec![], vec![])
+                                }
+                            }
+                        };
                     let effective_param_oids = if !param_types.is_empty() {
                         param_types // move, not clone
                     } else {
@@ -1570,7 +1617,8 @@ async fn handle_connection_with_timeout(
                     falcon_observability::record_prepared_stmt_active(
                         session.prepared_statements.len(),
                     );
-                    send_message_no_flush(&mut stream, &BackendMessage::ParseComplete).await?;
+                    // ParseComplete: type='1'(0x31) + len=4
+                    stream.write_all(&[0x31, 0, 0, 0, 4]).await?;
                 }
                 FrontendMessage::Bind {
                     portal,
@@ -1614,16 +1662,19 @@ async fn handle_connection_with_timeout(
                         (None, vec![], String::new())
                     };
                     let path = if plan.is_some() { "plan" } else { "legacy" };
-                    session.portals.insert(
-                        portal.clone(),
-                        crate::session::Portal {
-                            plan,
-                            params: params_datum,
-                            bound_sql,
-                        },
-                    );
+                    let p = crate::session::Portal {
+                        plan,
+                        params: params_datum,
+                        bound_sql,
+                    };
+                    if portal.is_empty() {
+                        session.unnamed_portal = Some(p);
+                    } else {
+                        session.portals.insert(portal.clone(), p);
+                    }
                     falcon_observability::record_prepared_stmt_op("bind", path);
-                    send_message_no_flush(&mut stream, &BackendMessage::BindComplete).await?;
+                    // BindComplete: type='2'(0x32) + len=4 — 5 bytes, skip encode_message alloc
+                    stream.write_all(&[0x32, 0, 0, 0, 4]).await?;
                 }
                 FrontendMessage::Describe { kind, name } => {
                     tracing::debug!(
@@ -1692,8 +1743,11 @@ async fn handle_connection_with_timeout(
                         }
                     } else {
                         // Portal describe
-                        let sql_for_describe =
-                            session.portals.get(&name).map(|p| p.bound_sql.clone());
+                        let sql_for_describe = if name.is_empty() {
+                            session.unnamed_portal.as_ref().map(|p| p.bound_sql.clone())
+                        } else {
+                            session.portals.get(&name).map(|p| p.bound_sql.clone())
+                        };
                         if let Some(ref sql) = sql_for_describe {
                             if !sql.is_empty() {
                                 match handler.describe_query(sql) {
@@ -1735,9 +1789,8 @@ async fn handle_connection_with_timeout(
                         continue;
                     }
 
-                    // Take unnamed portal (pgbench default) to avoid clone; fall back to clone for named
                     let portal_data = if portal.is_empty() {
-                        session.portals.remove("")
+                        session.unnamed_portal.take()
                     } else {
                         session.portals.get(&portal).cloned()
                     };
@@ -1746,49 +1799,54 @@ async fn handle_connection_with_timeout(
                             let timeout_dur =
                                 std::time::Duration::from_millis(session.statement_timeout_ms);
                             let handler_ref = &handler;
-                            match tokio::time::timeout(
-                                timeout_dur,
-                                tokio::task::spawn_blocking({
-                                    let handler = handler_ref.clone();
-                                    let mut sess = session.take_for_timeout();
-                                    move || {
-                                        let responses = if let Some(ref plan) = p.plan {
-                                            falcon_observability::record_prepared_stmt_op(
-                                                "execute", "plan",
-                                            );
-                                            handler.execute_plan(plan, &p.params, &mut sess)
-                                        } else if !p.bound_sql.is_empty() {
-                                            falcon_observability::record_prepared_stmt_op(
-                                                "execute", "legacy",
-                                            );
-                                            handler.handle_query(&p.bound_sql, &mut sess)
-                                        } else {
-                                            falcon_observability::record_prepared_stmt_op(
-                                                "execute", "empty",
-                                            );
-                                            vec![BackendMessage::EmptyQueryResponse]
-                                        };
-                                        (responses, sess)
-                                    }
-                                }),
-                            )
-                            .await
-                            {
-                                Ok(Ok((responses, returned_session))) => {
-                                    session.restore_from_timeout(returned_session);
-                                    responses
+                            let mut task = tokio::task::spawn_blocking({
+                                let handler = handler_ref.clone();
+                                let mut sess = session.take_for_timeout();
+                                move || {
+                                    let responses = if let Some(ref plan) = p.plan {
+                                        falcon_observability::record_prepared_stmt_op(
+                                            "execute", "plan",
+                                        );
+                                        handler.execute_plan(plan, &p.params, &mut sess)
+                                    } else if !p.bound_sql.is_empty() {
+                                        falcon_observability::record_prepared_stmt_op(
+                                            "execute", "legacy",
+                                        );
+                                        handler.handle_query(&p.bound_sql, &mut sess)
+                                    } else {
+                                        falcon_observability::record_prepared_stmt_op(
+                                            "execute", "empty",
+                                        );
+                                        vec![BackendMessage::EmptyQueryResponse]
+                                    };
+                                    (responses, sess)
                                 }
-                                Ok(Err(e)) => vec![BackendMessage::ErrorResponse {
-                                    severity: "ERROR".into(),
-                                    code: "XX000".into(),
-                                    message: format!("Internal error: {e}"),
-                                }],
-                                Err(_) => {
+                            });
+                            tokio::select! {
+                                result = &mut task => match result {
+                                    Ok((responses, returned_session)) => {
+                                        session.restore_from_timeout(returned_session);
+                                        responses
+                                    }
+                                    Err(e) => vec![BackendMessage::ErrorResponse {
+                                        severity: "ERROR".into(),
+                                        code: "XX000".into(),
+                                        message: format!("Internal error: {e}"),
+                                    }],
+                                },
+                                _ = tokio::time::sleep(timeout_dur) => {
                                     tracing::warn!(
                                         "Execute timeout ({}ms) for session {}",
                                         session.statement_timeout_ms,
                                         session_id
                                     );
+                                    if let Ok((_, returned_session)) = task.await {
+                                        session.restore_from_timeout(returned_session);
+                                    }
+                                    if let Some(ref txn) = session.txn {
+                                        let _ = handler.txn_mgr.abort(txn.txn_id);
+                                        session.txn = None;
+                                    }
                                     vec![BackendMessage::ErrorResponse {
                                         severity: "ERROR".into(),
                                         code: "57014".into(),
@@ -1847,7 +1905,11 @@ async fn handle_connection_with_timeout(
                             session.prepared_statements.len(),
                         );
                     } else {
-                        session.portals.remove(&name);
+                        if name.is_empty() {
+                            session.unnamed_portal = None;
+                        } else {
+                            session.portals.remove(&name);
+                        }
                         falcon_observability::record_prepared_stmt_op("close", "portal");
                         falcon_observability::record_prepared_stmt_portals_active(
                             session.portals.len(),
@@ -2214,8 +2276,10 @@ fn decode_param_value(
         None => return Datum::Null,
     };
 
-    let text = String::from_utf8_lossy(bytes);
-    let s = text.as_ref();
+    let s = match std::str::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(_) => return Datum::Text(String::from_utf8_lossy(bytes).into_owned()),
+    };
 
     match type_hint {
         Some(DataType::Int16) => s
@@ -2291,6 +2355,9 @@ fn decode_param_value(
                 })
                 .collect();
             Datum::Bytea(bytes)
+        }
+        Some(DataType::TsVector) | Some(DataType::TsQuery) => {
+            Datum::Text(s.to_owned())
         }
         None => {
             // No type hint: try integer, then float, then text
@@ -2445,6 +2512,9 @@ fn decode_param_value_binary(
             let s = String::from_utf8_lossy(bytes);
             Datum::parse_decimal(&s).unwrap_or_else(|| Datum::Text(s.into_owned()))
         }
+        Some(DataType::TsVector) | Some(DataType::TsQuery) => {
+            Datum::Text(String::from_utf8_lossy(bytes).into_owned())
+        }
         None => {
             // No type hint: try to infer from byte length
             match bytes.len() {
@@ -2463,6 +2533,34 @@ fn decode_param_value_binary(
                 _ => Datum::Text(String::from_utf8_lossy(bytes).into_owned()),
             }
         }
+    }
+}
+
+/// Quick check: is this a system/session query that handle_system_query() intercepts?
+/// Used in the Parse handler to skip prepare_statement() for queries that will fail
+/// in sqlparser anyway (SET, SHOW, DISCARD, pg_catalog introspection, etc.).
+fn is_system_query(sql: &str) -> bool {
+    let b = sql.as_bytes();
+    if b.is_empty() { return false; }
+    match b[0] | 0x20 {
+        b's' => {
+            let lower = &sql[..sql.len().min(30)];
+            let l = lower.to_ascii_lowercase();
+            l.starts_with("set ") || l.starts_with("show ") 
+                || l.starts_with("select version(")
+                || l.starts_with("select current_setting(")
+                || l.starts_with("select current_database(")
+                || l.starts_with("select current_schema")
+                || l.starts_with("select current_user")
+                || l.starts_with("select pg_catalog.")
+                || l.starts_with("select typname")
+        }
+        b'd' => {
+            let l = sql[..sql.len().min(12)].to_ascii_lowercase();
+            l.starts_with("discard ") || l.starts_with("deallocate ")
+        }
+        b'r' => sql[..sql.len().min(6)].eq_ignore_ascii_case("reset "),
+        _ => false,
     }
 }
 
@@ -2489,6 +2587,35 @@ fn parse_set_statement_timeout(sql: &str) -> Option<u64> {
         .trim_matches('\'')
         .trim_matches('"');
     // "0" or "default" means no timeout
+    if value == "default" || value == "0" {
+        return Some(0);
+    }
+    value.parse::<u64>().ok()
+}
+
+/// Parse `SET lock_timeout = <ms>` or `SET lock_timeout TO <ms>`.
+fn parse_set_lock_timeout(sql: &str) -> Option<u64> {
+    parse_set_guc_ms(sql, "lock_timeout")
+}
+
+/// Parse `SET idle_in_transaction_session_timeout = <ms>`.
+fn parse_set_idle_in_transaction_session_timeout(sql: &str) -> Option<u64> {
+    parse_set_guc_ms(sql, "idle_in_transaction_session_timeout")
+}
+
+/// Generic: parse `SET <guc_name> = <value>` where value is milliseconds.
+fn parse_set_guc_ms(sql: &str, guc_name: &str) -> Option<u64> {
+    let sql = sql.trim().to_lowercase();
+    let rest = sql.strip_prefix("set")?.trim();
+    let rest = rest.strip_prefix(guc_name)?.trim();
+    let rest = if let Some(r) = rest.strip_prefix('=') {
+        r.trim()
+    } else if let Some(r) = rest.strip_prefix("to") {
+        r.trim()
+    } else {
+        return None;
+    };
+    let value = rest.trim_end_matches(';').trim().trim_matches('\'').trim_matches('"');
     if value == "default" || value == "0" {
         return Some(0);
     }

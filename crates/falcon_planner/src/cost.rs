@@ -578,7 +578,7 @@ mod tests {
                     nullable: false,
                     is_primary_key: i == 0,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 })
                 .collect(),
             primary_key_columns: vec![0],

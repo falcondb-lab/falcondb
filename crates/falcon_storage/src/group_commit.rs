@@ -410,11 +410,17 @@ impl GroupCommitSyncer {
 
     /// Perform the actual flush + fsync and notify all waiters.
     fn do_flush(&self) -> Result<(), StorageError> {
-        // Snapshot pending count under lock, then flush outside lock
+        // Capture the exact sequence boundary and drain pending_count atomically.
+        // Both must happen under the same lock acquisition so that any appender
+        // arriving after this point gets a seq > lsn_snapshot and will NOT be
+        // woken up by this flush's cvar.notify_all().
         let (batch_size, lsn_snapshot) = {
             let (lock, _) = &*self.state;
-            let state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            (state.pending_count, self.next_lsn.load(Ordering::Relaxed))
+            let mut state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let snap = self.next_lsn.load(Ordering::Relaxed);
+            let batch = state.pending_count;
+            state.pending_count = 0;
+            (batch, snap)
         };
 
         if batch_size == 0 {
@@ -425,16 +431,12 @@ impl GroupCommitSyncer {
         let backlog_before = self.pending_bytes.load(Ordering::Relaxed);
         let _flushed_lsn = self.wal.flush_split()?;
 
-        // Reset backlog — all pending bytes are now durable
         self.pending_bytes.store(0, Ordering::Relaxed);
 
         {
             let (lock, cvar) = &*self.state;
             let mut state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            // Advance fsynced_lsn past all LSNs that were pending
             state.fsynced_lsn = lsn_snapshot;
-            state.pending_count = state.pending_count.saturating_sub(batch_size);
-            // Update atomic mirror before notifying waiters (Release ensures visibility).
             self.atomic_fsynced_lsn.store(lsn_snapshot, Ordering::Release);
             cvar.notify_all();
         }

@@ -39,6 +39,23 @@ impl Executor {
         }
     }
 
+    /// Enforce VARCHAR(n)/CHAR(n) max_length on text columns.
+    fn enforce_max_length(schema: &TableSchema, values: &[Datum]) -> Result<(), FalconError> {
+        for (i, col) in schema.columns.iter().enumerate() {
+            if let Some(max_len) = col.max_length {
+                if let Datum::Text(ref s) = values[i] {
+                    let char_count = s.chars().count() as u32;
+                    if char_count > max_len {
+                        return Err(FalconError::Execution(ExecutionError::TypeError(format!(
+                            "value too long for type character varying({})", max_len
+                        ))));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Evaluate a single row's expressions, apply defaults, coerce types, fill serials.
     fn build_insert_row(
         &self,
@@ -115,6 +132,9 @@ impl Executor {
                 }
             }
         }
+
+        // Enforce VARCHAR(n)/CHAR(n) max length
+        Self::enforce_max_length(schema, &values)?;
 
         // Enforce NOT NULL constraints
         for (i, val) in values.iter().enumerate() {
@@ -472,7 +492,7 @@ impl Executor {
                         Some(OnConflictAction::DoNothing) => {
                             // Skip this row silently
                         }
-                        Some(OnConflictAction::DoUpdate(assignments)) => {
+                        Some(OnConflictAction::DoUpdate(assignments, where_clause)) => {
                             // Find the existing row by PK and update it
                             let pk_values: Vec<Datum> = schema
                                 .primary_key_columns
@@ -489,10 +509,17 @@ impl Executor {
                                     .collect();
                                 if existing_pk == pk_values {
                                     // Build combined row: [existing cols] ++ [excluded cols]
-                                    // so excluded.col references (ColumnRef(num_cols + idx)) resolve correctly
                                     let mut combined_values = existing_row.values.clone();
                                     combined_values.extend(values.iter().cloned());
                                     let combined_row = OwnedRow::new(combined_values);
+
+                                    // Evaluate WHERE clause — skip update if false
+                                    if let Some(ref wc) = where_clause {
+                                        if !ExprEngine::eval_filter(wc, &combined_row)
+                                            .map_err(FalconError::Execution)? {
+                                            break;
+                                        }
+                                    }
 
                                     let mut new_values = existing_row.values.clone();
                                     for (col_idx, expr) in assignments {
@@ -608,6 +635,48 @@ impl Executor {
             }
         };
 
+        let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+
+        // Pre-scan existing rows once for UNIQUE checks
+        let mut unique_sets: Vec<std::collections::HashSet<Vec<Datum>>> =
+            if !schema.unique_constraints.is_empty() {
+                let existing = self.storage.scan(table_id, txn.txn_id, read_ts)?;
+                schema.unique_constraints.iter().map(|uniq_cols| {
+                    existing.iter().filter_map(|(_, row)| {
+                        let key: Vec<Datum> = uniq_cols.iter().map(|&idx| row.values[idx].clone()).collect();
+                        if key.iter().any(falcon_common::datum::Datum::is_null) { None } else { Some(key) }
+                    }).collect()
+                }).collect()
+            } else {
+                vec![]
+            };
+
+        // Pre-build FK lookup sets once
+        let fk_lookup: Vec<(Vec<usize>, std::collections::HashSet<Vec<Datum>>)> =
+            if !schema.foreign_keys.is_empty() {
+                schema.foreign_keys.iter().map(|fk| {
+                    let ref_schema = self.storage.get_table_schema(&fk.ref_table).ok_or_else(|| {
+                        FalconError::Execution(ExecutionError::TypeError(format!(
+                            "Referenced table '{}' not found", fk.ref_table
+                        )))
+                    })?;
+                    let ref_col_indices: Vec<usize> = fk.ref_columns.iter().map(|name| {
+                        ref_schema.find_column(name).ok_or_else(|| {
+                            FalconError::Execution(ExecutionError::TypeError(format!(
+                                "Referenced column '{}' not found in table '{}'", name, fk.ref_table
+                            )))
+                        })
+                    }).collect::<Result<Vec<_>, _>>()?;
+                    let ref_rows = self.storage.scan(ref_schema.id, txn.txn_id, read_ts)?;
+                    let fk_set: std::collections::HashSet<Vec<Datum>> = ref_rows.iter().map(|(_, r)| {
+                        ref_col_indices.iter().map(|&idx| r.values[idx].clone()).collect()
+                    }).collect();
+                    Ok((fk.columns.clone(), fk_set))
+                }).collect::<Result<Vec<_>, FalconError>>()?
+            } else {
+                vec![]
+            };
+
         let mut count = 0u64;
         for source_row in &source_rows {
             if source_row.values.len() != columns.len() {
@@ -657,6 +726,29 @@ impl Executor {
             // Enforce CHECK constraints
             let check_row = OwnedRow::new(values.clone());
             self.eval_check_constraints(schema, &check_row)?;
+
+            // Enforce UNIQUE constraints
+            for (set_idx, uniq_cols) in schema.unique_constraints.iter().enumerate() {
+                let key: Vec<Datum> = uniq_cols.iter().map(|&idx| values[idx].clone()).collect();
+                if key.iter().any(falcon_common::datum::Datum::is_null) { continue; }
+                if !unique_sets[set_idx].insert(key) {
+                    let col_names: Vec<&str> = uniq_cols.iter().map(|&idx| schema.columns[idx].name.as_str()).collect();
+                    return Err(FalconError::Execution(ExecutionError::TypeError(format!(
+                        "UNIQUE constraint violated on column(s): {}", col_names.join(", ")
+                    ))));
+                }
+            }
+
+            // Enforce FK constraints
+            for (fk_cols, fk_set) in &fk_lookup {
+                let fk_vals: Vec<Datum> = fk_cols.iter().map(|&idx| values[idx].clone()).collect();
+                if fk_vals.iter().any(falcon_common::datum::Datum::is_null) { continue; }
+                if !fk_set.contains(&fk_vals) {
+                    return Err(FalconError::Execution(ExecutionError::TypeError(
+                        "FOREIGN KEY constraint violated".into(),
+                    )));
+                }
+            }
 
             let row = OwnedRow::new(values);
             self.storage.insert(table_id, row, txn.txn_id)?;
@@ -718,8 +810,9 @@ impl Executor {
         let mut returning_rows = Vec::new();
 
         // Pre-scan all rows once for UNIQUE constraint checks (avoid per-row O(n) rescan)
+        // Use current_ts to catch concurrent committed conflicts beyond txn start snapshot
         let all_rows_for_uniq = if !schema.unique_constraints.is_empty() {
-            Some(self.storage.scan(table_id, txn.txn_id, read_ts)?)
+            Some(self.storage.scan(table_id, txn.txn_id, self.txn_mgr.current_ts())?)
         } else {
             None
         };
@@ -738,6 +831,9 @@ impl Executor {
                 let val = ExprEngine::eval_row(expr, row).map_err(FalconError::Execution)?;
                 new_values[*col_idx] = val;
             }
+
+            // Enforce VARCHAR(n)/CHAR(n) max length
+            Self::enforce_max_length(schema, &new_values)?;
 
             // Enforce NOT NULL constraints
             for (i, val) in new_values.iter().enumerate() {
@@ -965,6 +1061,12 @@ impl Executor {
                 let read_ts = txn.read_ts(self.txn_mgr.current_ts());
                 let child_rows = self.storage.scan(child_table.id, txn.txn_id, read_ts)?;
 
+                // Cycle detection for CASCADE: mark at table level before row loop
+                // so all matching rows are processed, not just the first one.
+                if matches!(fk.on_delete, FkAction::Cascade) && !visited.insert(child_table.id) {
+                    continue;
+                }
+
                 for (child_pk, child_row) in &child_rows {
                     let child_vals: Vec<&Datum> = fk
                         .columns
@@ -984,10 +1086,6 @@ impl Executor {
                     // Matching child row found — apply the action
                     match fk.on_delete {
                         FkAction::Cascade => {
-                            // Cycle detection: skip if we've already visited this child table
-                            if !visited.insert(child_table.id) {
-                                continue;
-                            }
                             // Recursively apply cascading for grandchild tables
                             self.apply_fk_on_delete_inner(child_table, child_row, txn, visited)?;
                             self.storage.delete(child_table.id, child_pk, txn.txn_id)?;
@@ -1108,16 +1206,13 @@ impl Executor {
                             for (i, &fk_col) in fk.columns.iter().enumerate() {
                                 updated_child[fk_col] = new_ref_vals[i].clone();
                             }
-                            // Recursively propagate CASCADE to grandchild tables (with cycle detection)
-                            if visited.insert(child_table.id) {
-                                self.apply_fk_on_update_inner(
-                                    child_table,
-                                    child_row,
-                                    &updated_child,
-                                    txn,
-                                    visited,
-                                )?;
-                            }
+                            self.apply_fk_on_update_inner(
+                                child_table,
+                                child_row,
+                                &updated_child,
+                                txn,
+                                visited,
+                            )?;
                             let new_row = OwnedRow::new(updated_child);
                             self.storage
                                 .update(child_table.id, child_pk, new_row, txn.txn_id)?;
@@ -1206,6 +1301,9 @@ impl Executor {
                         .map_err(FalconError::Execution)?;
                     new_values[*col_idx] = val;
                 }
+
+                // Enforce VARCHAR(n)/CHAR(n) max length
+                Self::enforce_max_length(schema, &new_values)?;
 
                 // Enforce NOT NULL constraints
                 for (i, val) in new_values.iter().enumerate() {
@@ -1350,6 +1448,270 @@ impl Executor {
             })
         }
     }
+
+    /// Execute a MERGE statement (SQL:2003).
+    pub(crate) fn exec_merge(
+        &self,
+        merge: &BoundMerge,
+        txn: &TxnHandle,
+    ) -> Result<ExecutionResult, FalconError> {
+        let target_id = merge.target_table_id;
+        let source_id = merge.source_table_id;
+        let target_schema = &merge.target_schema;
+
+        let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+        let source_rows = self.storage.scan(source_id, txn.txn_id, read_ts)?;
+        let target_rows = self.storage.scan(target_id, txn.txn_id, read_ts)?;
+
+        let mut count: u64 = 0;
+
+        for (_src_pk, src_row) in &source_rows {
+            // Find matching target row via ON condition
+            let mut matched_target: Option<(&Vec<u8>, &OwnedRow)> = None;
+            for (tgt_pk, tgt_row) in &target_rows {
+                let mut combined = tgt_row.values.clone();
+                combined.extend(src_row.values.iter().cloned());
+                let combined_row = OwnedRow::new(combined);
+                if ExprEngine::eval_filter(&merge.on_expr, &combined_row)
+                    .map_err(FalconError::Execution)?
+                {
+                    matched_target = Some((tgt_pk, tgt_row));
+                    break;
+                }
+            }
+
+            if let Some((tgt_pk, tgt_row)) = matched_target {
+                // WHEN MATCHED clauses
+                for clause in &merge.clauses {
+                    if clause.kind != MergeClauseKind::Matched {
+                        continue;
+                    }
+                    let mut combined = tgt_row.values.clone();
+                    combined.extend(src_row.values.iter().cloned());
+                    let combined_row = OwnedRow::new(combined);
+
+                    if let Some(ref pred) = clause.predicate {
+                        if !ExprEngine::eval_filter(pred, &combined_row)
+                            .map_err(FalconError::Execution)? {
+                            continue;
+                        }
+                    }
+                    match &clause.action {
+                        BoundMergeAction::Update(assignments) => {
+                            let mut new_values = tgt_row.values.clone();
+                            for (col_idx, expr) in assignments {
+                                let val = ExprEngine::eval_row(expr, &combined_row)
+                                    .map_err(FalconError::Execution)?;
+                                new_values[*col_idx] = val;
+                            }
+                            Self::enforce_max_length(target_schema, &new_values)?;
+                            let new_row = OwnedRow::new(new_values);
+                            self.storage.update(target_id, tgt_pk, new_row, txn.txn_id)?;
+                            count += 1;
+                        }
+                        BoundMergeAction::Delete => {
+                            self.storage.delete(target_id, tgt_pk, txn.txn_id)?;
+                            count += 1;
+                        }
+                        BoundMergeAction::Insert(..) => {
+                            return Err(FalconError::Execution(ExecutionError::TypeError(
+                                "INSERT not allowed in WHEN MATCHED".into(),
+                            )));
+                        }
+                    }
+                    break;
+                }
+            } else {
+                // WHEN NOT MATCHED clauses
+                for clause in &merge.clauses {
+                    if clause.kind != MergeClauseKind::NotMatched {
+                        continue;
+                    }
+                    let nulls: Vec<Datum> = target_schema.columns.iter()
+                        .map(|_| Datum::Null)
+                        .collect();
+                    let mut combined = nulls;
+                    combined.extend(src_row.values.iter().cloned());
+                    let combined_row = OwnedRow::new(combined);
+
+                    if let Some(ref pred) = clause.predicate {
+                        if !ExprEngine::eval_filter(pred, &combined_row)
+                            .map_err(FalconError::Execution)? {
+                            continue;
+                        }
+                    }
+                    match &clause.action {
+                        BoundMergeAction::Insert(cols, value_exprs) => {
+                            let mut values: Vec<Datum> = target_schema.columns.iter()
+                                .map(|c| c.default_value.clone().unwrap_or(Datum::Null))
+                                .collect();
+                            for (i, col_idx) in cols.iter().enumerate() {
+                                let val = ExprEngine::eval_row(&value_exprs[i], &combined_row)
+                                    .map_err(FalconError::Execution)?;
+                                values[*col_idx] = val;
+                            }
+                            for (i, col) in target_schema.columns.iter().enumerate() {
+                                if values[i].is_null() { continue; }
+                                if let Some(vt) = values[i].data_type() {
+                                    if vt != col.data_type {
+                                        let target = datatype_to_cast_target(&col.data_type);
+                                        if let Ok(cv) = crate::eval::cast::eval_cast(values[i].clone(), &target) {
+                                            values[i] = cv;
+                                        }
+                                    }
+                                }
+                            }
+                            Self::enforce_max_length(target_schema, &values)?;
+                            Self::eval_dynamic_defaults(target_schema, &mut values);
+                            let row = OwnedRow::new(values);
+                            self.storage.insert(target_id, row, txn.txn_id)?;
+                            count += 1;
+                        }
+                        _ => {
+                            return Err(FalconError::Execution(ExecutionError::TypeError(
+                                "Only INSERT allowed in WHEN NOT MATCHED".into(),
+                            )));
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        Ok(ExecutionResult::Dml {
+            tag: "MERGE",
+            rows_affected: count,
+        })
+    }
+
+    /// CREATE MATERIALIZED VIEW: parse query, create backing table, populate.
+    pub(crate) fn exec_create_materialized_view(
+        &self,
+        name: &str,
+        query_sql: &str,
+        txn: &TxnHandle,
+    ) -> Result<(), FalconError> {
+        // Execute the query to get column metadata and rows
+        let (columns, rows) = self.run_internal_query(query_sql, txn)?;
+
+        // Build a backing table schema with a synthetic rowid PK
+        let backing_table_name = format!("_mv_{}", name.to_lowercase());
+        let mut col_defs = vec![falcon_common::schema::ColumnDef {
+            id: falcon_common::types::ColumnId(0),
+            name: "_rowid".to_owned(),
+            data_type: DataType::Int64,
+            nullable: false,
+            is_primary_key: true,
+            default_value: None,
+            is_serial: true,
+            max_length: None,
+        }];
+        for (i, (col_name, col_type)) in columns.iter().enumerate() {
+            col_defs.push(falcon_common::schema::ColumnDef {
+                id: falcon_common::types::ColumnId((i + 1) as u32),
+                name: col_name.clone(),
+                data_type: col_type.clone(),
+                nullable: true,
+                is_primary_key: false,
+                default_value: None,
+                is_serial: false,
+                max_length: None,
+            });
+        }
+
+        let backing_schema = TableSchema {
+            name: backing_table_name.clone(),
+            columns: col_defs,
+            primary_key_columns: vec![0],
+            ..Default::default()
+        };
+
+        // Create the backing table
+        let table_id = self.storage.create_table(backing_schema)?;
+
+        // Insert rows
+        let mut rowid: i64 = 1;
+        for row in &rows {
+            let mut values = vec![Datum::Int64(rowid)];
+            values.extend(row.values.iter().cloned());
+            let ins_row = OwnedRow::new(values);
+            self.storage.insert(table_id, ins_row, txn.txn_id)?;
+            rowid += 1;
+        }
+
+        // Register the materialized view definition
+        self.storage.create_materialized_view(name, query_sql, table_id)?;
+        Ok(())
+    }
+
+    /// REFRESH MATERIALIZED VIEW: truncate backing table, re-populate from query.
+    pub(crate) fn exec_refresh_materialized_view(
+        &self,
+        name: &str,
+        txn: &TxnHandle,
+    ) -> Result<(), FalconError> {
+        let (backing_id, query_sql) = {
+            let catalog = self.storage.get_catalog();
+            let mv = catalog.find_materialized_view(name)
+                .ok_or_else(|| FalconError::Execution(ExecutionError::TypeError(
+                    format!("materialized view '{name}' does not exist"),
+                )))?;
+            (mv.backing_table_id, mv.query_sql.clone())
+        };
+
+        // Truncate backing table
+        let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+        let existing = self.storage.scan(backing_id, txn.txn_id, read_ts)?;
+        for (pk, _) in &existing {
+            self.storage.delete(backing_id, pk, txn.txn_id)?;
+        }
+
+        // Re-execute query and insert
+        let (_columns, rows) = self.run_internal_query(&query_sql, txn)?;
+        let mut rowid: i64 = 1;
+        for row in &rows {
+            let mut values = vec![Datum::Int64(rowid)];
+            values.extend(row.values.iter().cloned());
+            let ins_row = OwnedRow::new(values);
+            self.storage.insert(backing_id, ins_row, txn.txn_id)?;
+            rowid += 1;
+        }
+        Ok(())
+    }
+
+    /// Execute a SQL query internally and return (columns, rows).
+    fn run_internal_query(
+        &self,
+        sql: &str,
+        txn: &TxnHandle,
+    ) -> Result<(Vec<(String, DataType)>, Vec<OwnedRow>), FalconError> {
+        use falcon_sql_frontend::binder::Binder;
+        use falcon_planner::planner::Planner;
+        use sqlparser::dialect::PostgreSqlDialect;
+        use sqlparser::parser::Parser;
+
+        let dialect = PostgreSqlDialect {};
+        let stmts = Parser::parse_sql(&dialect, sql).map_err(|e| FalconError::Execution(
+            ExecutionError::TypeError(format!("matview query parse error: {e}"))
+        ))?;
+        let stmt = stmts.into_iter().next().ok_or_else(|| FalconError::Execution(
+            ExecutionError::TypeError("empty query".into())
+        ))?;
+        let catalog = self.storage.get_catalog();
+        let mut binder = Binder::new(catalog);
+        let bound = binder.bind(&stmt).map_err(|e| FalconError::Execution(
+            ExecutionError::TypeError(format!("matview query bind error: {e}"))
+        ))?;
+        let plan = Planner::plan(&bound).map_err(|e| FalconError::Execution(
+            ExecutionError::TypeError(format!("matview query plan error: {e}"))
+        ))?;
+        match self.execute(&plan, Some(txn))? {
+            ExecutionResult::Query { columns, rows } => Ok((columns, rows)),
+            _ => Err(FalconError::Execution(ExecutionError::TypeError(
+                "materialized view query must be a SELECT".into(),
+            ))),
+        }
+    }
 }
 
 /// Map a DataType to the cast target string used by eval_cast.
@@ -1371,5 +1733,7 @@ fn datatype_to_cast_target(dt: &DataType) -> String {
         DataType::Interval => "interval".into(),
         DataType::Uuid => "uuid".into(),
         DataType::Bytea => "bytea".into(),
+        DataType::TsVector => "tsvector".into(),
+        DataType::TsQuery => "tsquery".into(),
     }
 }

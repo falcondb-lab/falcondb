@@ -208,6 +208,21 @@ pub fn resolve_scalar_func(name: &str) -> Option<ScalarFunc> {
         "JSONB_EACH" | "JSON_EACH" => ScalarFunc::JsonbEach,
         "JSONB_EACH_TEXT" | "JSON_EACH_TEXT" => ScalarFunc::JsonbEachText,
         "ROW_TO_JSON" => ScalarFunc::RowToJson,
+        // ── Full-text search ──
+        "TO_TSVECTOR" => ScalarFunc::ToTsvector,
+        "TO_TSQUERY" => ScalarFunc::ToTsquery,
+        "PLAINTO_TSQUERY" => ScalarFunc::PlaintoTsquery,
+        "PHRASETO_TSQUERY" => ScalarFunc::PhrastoTsquery,
+        "TS_RANK" => ScalarFunc::TsRank,
+        "TS_RANK_CD" => ScalarFunc::TsRankCd,
+        "TS_HEADLINE" => ScalarFunc::TsHeadline,
+        "NUMNODE" => ScalarFunc::Numnode,
+        "QUERYTREE" => ScalarFunc::Querytree,
+        "SETWEIGHT" => ScalarFunc::Setweight,
+        "STRIP" => ScalarFunc::Strip,
+        "LENGTH_TSVECTOR" | "TSVECTOR_LENGTH" => ScalarFunc::TsvectorLength,
+        "ARRAY_TO_TSVECTOR" => ScalarFunc::ArrayToTsvector,
+        "TSVECTOR_CONCAT" => ScalarFunc::TsvectorConcat,
         _ => {
             // Pattern-based resolution for generated extended functions
             if name.starts_with("ARRAY_MATRIX_") {

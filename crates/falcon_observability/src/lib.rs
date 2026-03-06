@@ -1,6 +1,8 @@
 //! Observability setup: structured logging, metrics (Prometheus), tracing.
 #![allow(clippy::too_many_arguments)]
 
+pub mod stmt_stats;
+
 use metrics_exporter_prometheus::PrometheusBuilder;
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;

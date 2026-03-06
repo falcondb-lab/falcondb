@@ -1,8 +1,12 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use falcon_common::types::DataType;
 use falcon_planner::PhysicalPlan;
+
+use crate::session::FieldDescriptionCompact;
 
 /// Thread-safe LRU-like query plan cache.
 /// Caches `PhysicalPlan` by normalized SQL string.
@@ -11,11 +15,30 @@ pub struct PlanCache {
     inner: RwLock<PlanCacheInner>,
     hits: AtomicU64,
     misses: AtomicU64,
+    /// Prepared statement cache for extended query protocol Parse.
+    prepared: RwLock<PreparedCacheInner>,
+    prepared_hits: AtomicU64,
+    prepared_misses: AtomicU64,
 }
 
 struct PlanCacheInner {
     /// SQL -> (plan, access_count)
     entries: HashMap<String, (PhysicalPlan, u64)>,
+    capacity: usize,
+    schema_generation: u64,
+    entry_generations: HashMap<String, u64>,
+}
+
+/// Cached result of prepare_statement() for extended query Parse.
+#[derive(Clone)]
+pub struct CachedPrepared {
+    pub plan: Arc<PhysicalPlan>,
+    pub inferred_param_types: Vec<Option<DataType>>,
+    pub row_desc: Vec<FieldDescriptionCompact>,
+}
+
+struct PreparedCacheInner {
+    entries: HashMap<String, (CachedPrepared, u64)>,
     capacity: usize,
     schema_generation: u64,
     entry_generations: HashMap<String, u64>,
@@ -43,6 +66,14 @@ impl PlanCache {
             }),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
+            prepared: RwLock::new(PreparedCacheInner {
+                entries: HashMap::with_capacity(capacity),
+                capacity,
+                schema_generation: 0,
+                entry_generations: HashMap::with_capacity(capacity),
+            }),
+            prepared_hits: AtomicU64::new(0),
+            prepared_misses: AtomicU64::new(0),
         }
     }
 
@@ -115,7 +146,9 @@ impl PlanCache {
     pub fn invalidate(&self) {
         if let Ok(mut inner) = self.inner.write() {
             inner.schema_generation += 1;
-            // Lazily invalidated on next get()
+        }
+        if let Ok(mut p) = self.prepared.write() {
+            p.schema_generation += 1;
         }
     }
 
@@ -126,6 +159,57 @@ impl PlanCache {
             inner.entry_generations.clear();
             inner.schema_generation += 1;
         }
+        if let Ok(mut p) = self.prepared.write() {
+            p.entries.clear();
+            p.entry_generations.clear();
+            p.schema_generation += 1;
+        }
+    }
+
+    /// Look up a cached prepared statement result by SQL.
+    pub fn get_prepared(&self, sql: &str) -> Option<CachedPrepared> {
+        let key = normalize_sql(sql);
+        let inner = self.prepared.read().ok()?;
+        let gen_valid = inner.entry_generations.get(key.as_str())
+            .map(|g| *g == inner.schema_generation);
+        match gen_valid {
+            Some(true) => {
+                if let Some((cached, _)) = inner.entries.get(key.as_str()) {
+                    self.prepared_hits.fetch_add(1, Ordering::Relaxed);
+                    return Some(cached.clone());
+                }
+            }
+            Some(false) => {
+                drop(inner);
+                if let Ok(mut w) = self.prepared.write() {
+                    w.entries.remove(key.as_str());
+                    w.entry_generations.remove(key.as_str());
+                }
+                self.prepared_misses.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+            None => {}
+        }
+        self.prepared_misses.fetch_add(1, Ordering::Relaxed);
+        None
+    }
+
+    /// Cache a prepared statement result.
+    pub fn put_prepared(&self, sql: &str, entry: CachedPrepared) {
+        let key = normalize_sql(sql);
+        let Ok(mut inner) = self.prepared.write() else { return };
+        if inner.entries.len() >= inner.capacity && !inner.entries.contains_key(key.as_str()) {
+            if let Some(evict_key) = inner.entries.iter()
+                .min_by_key(|(_, (_, count))| *count)
+                .map(|(k, _)| k.clone())
+            {
+                inner.entries.remove(&evict_key);
+                inner.entry_generations.remove(&evict_key);
+            }
+        }
+        let gen = inner.schema_generation;
+        inner.entry_generations.insert(key.clone(), gen);
+        inner.entries.insert(key, (entry, 1));
     }
 
     /// Get cache statistics.
@@ -148,13 +232,62 @@ impl PlanCache {
     }
 }
 
-/// Normalize SQL for cache key: trim, lowercase, collapse whitespace.
+/// Normalize SQL for cache key: strip comments, trim, lowercase, collapse whitespace.
 fn normalize_sql(sql: &str) -> String {
-    sql.trim()
+    let s = strip_comments(sql);
+    s.trim()
         .to_lowercase()
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn strip_comments(sql: &str) -> String {
+    let bytes = sql.as_bytes();
+    let len = bytes.len();
+    let mut out = String::with_capacity(len);
+    let mut i = 0;
+    while i < len {
+        if i + 1 < len && bytes[i] == b'-' && bytes[i + 1] == b'-' {
+            // line comment: skip until newline
+            i += 2;
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            out.push(' ');
+        } else if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            // block comment: skip until */
+            i += 2;
+            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i += 2; // skip */
+            out.push(' ');
+        } else if bytes[i] == b'\'' {
+            // string literal: pass through verbatim so normalization stays stable
+            out.push('\'');
+            i += 1;
+            while i < len {
+                if bytes[i] == b'\'' {
+                    out.push('\'');
+                    i += 1;
+                    if i < len && bytes[i] == b'\'' {
+                        out.push('\'');
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                } else {
+                    out.push(bytes[i] as char);
+                    i += 1;
+                }
+            }
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Only cache SELECT/INSERT/UPDATE/DELETE plans, not DDL/txn control.
@@ -190,7 +323,7 @@ mod tests {
                 nullable: false,
                 is_primary_key: true,
                 default_value: None,
-                is_serial: false,
+                is_serial: false, max_length: None,
             }],
             primary_key_columns: vec![0],
             next_serial_values: std::collections::HashMap::new(),
@@ -215,6 +348,7 @@ mod tests {
             ctes: vec![],
             unions: vec![],
             virtual_rows: vec![],
+            for_lock: falcon_sql_frontend::types::RowLockMode::None,
         }
     }
 

@@ -20,7 +20,7 @@ mod binder_tests {
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(1),
@@ -29,7 +29,7 @@ mod binder_tests {
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(2),
@@ -38,7 +38,7 @@ mod binder_tests {
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 },
             ],
             primary_key_columns: vec![0],
@@ -537,7 +537,7 @@ mod parameter_tests {
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(1),
@@ -546,7 +546,7 @@ mod parameter_tests {
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 },
             ],
             primary_key_columns: vec![0],
@@ -854,7 +854,7 @@ mod param_type_inference_tests {
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(1),
@@ -863,7 +863,7 @@ mod param_type_inference_tests {
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(2),
@@ -872,7 +872,7 @@ mod param_type_inference_tests {
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 },
             ],
             primary_key_columns: vec![0],
@@ -1220,7 +1220,7 @@ mod new_feature_tests {
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(1),
@@ -1229,7 +1229,7 @@ mod new_feature_tests {
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(2),
@@ -1238,7 +1238,7 @@ mod new_feature_tests {
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 },
             ],
             primary_key_columns: vec![0],
@@ -1541,7 +1541,7 @@ mod new_feature_tests {
         match stmt {
             BoundStatement::Insert(ins) => {
                 match &ins.on_conflict {
-                    Some(OnConflictAction::DoUpdate(assignments)) => {
+                    Some(OnConflictAction::DoUpdate(assignments, _where)) => {
                         assert_eq!(assignments.len(), 2);
                         // name is col 1, age is col 2
                         assert_eq!(assignments[0].0, 1);
@@ -1569,7 +1569,7 @@ mod new_feature_tests {
         match stmt {
             BoundStatement::Insert(ins) => {
                 match &ins.on_conflict {
-                    Some(OnConflictAction::DoUpdate(assignments)) => {
+                    Some(OnConflictAction::DoUpdate(assignments, _where)) => {
                         assert_eq!(assignments.len(), 1);
                         assert_eq!(assignments[0].0, 1); // name is col 1
                     }
@@ -1823,7 +1823,7 @@ mod new_feature_tests {
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(1),
@@ -1832,7 +1832,7 @@ mod new_feature_tests {
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 },
             ],
             primary_key_columns: vec![0],
@@ -1871,7 +1871,7 @@ mod new_feature_tests {
                 nullable: false,
                 is_primary_key: true,
                 default_value: None,
-                is_serial: false,
+                is_serial: false, max_length: None,
             }],
             primary_key_columns: vec![0],
             next_serial_values: Default::default(),

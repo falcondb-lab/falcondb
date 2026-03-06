@@ -105,6 +105,7 @@ pub struct CoordinatorDecisionLog {
     total_logged: AtomicU64,
     total_applied: AtomicU64,
     journal_file: Mutex<Option<std::fs::File>>,
+    journal_path: Option<std::path::PathBuf>,
 }
 
 /// On-disk journal entry format: one line per event.
@@ -125,6 +126,7 @@ impl CoordinatorDecisionLog {
             total_logged: AtomicU64::new(0),
             total_applied: AtomicU64::new(0),
             journal_file: Mutex::new(None),
+            journal_path: None,
         })
     }
 
@@ -180,6 +182,7 @@ impl CoordinatorDecisionLog {
             total_logged: AtomicU64::new(total_logged),
             total_applied: AtomicU64::new(total_applied),
             journal_file: Mutex::new(journal_file),
+            journal_path: Some(path.to_path_buf()),
         })
     }
 
@@ -298,25 +301,50 @@ impl CoordinatorDecisionLog {
         false
     }
 
-    /// Rewrite journal keeping only unapplied decisions (truncates file).
+    /// Rewrite journal keeping only unapplied decisions.
+    /// Uses temp-file + rename for atomicity: crash during compaction leaves
+    /// the original journal intact.
     fn compact_journal(&self) {
-        let mut guard = self.journal_file.lock();
-        let f = match guard.as_mut() { Some(f) => f, None => return };
+        let journal_path = match &self.journal_path {
+            Some(p) => p,
+            None => return,
+        };
         let unapplied: Vec<DecisionRecord> = {
             let records = self.records.read();
             records.iter().filter(|r| !r.applied).cloned().collect()
         };
-        // Seek to start and truncate
-        use std::io::{Seek, SeekFrom};
-        if f.seek(SeekFrom::Start(0)).is_err() { return; }
-        if f.set_len(0).is_err() { return; }
-        for rec in &unapplied {
-            let dc = match rec.decision { CoordinatorDecision::Commit => 'C', CoordinatorDecision::Abort => 'A' };
-            let shards = rec.participant_shards.iter().map(|s| s.0.to_string()).collect::<Vec<_>>().join(",");
-            let _ = writeln!(f, "D {} {} {} {} {} {}", rec.seq, rec.txn_id.0, dc, shards, rec.timestamp_ms, rec.prepare_latency_us);
+        let tmp_path = journal_path.with_extension("tmp");
+        let write_result = (|| -> std::io::Result<()> {
+            let mut tmp = std::fs::File::create(&tmp_path)?;
+            for rec in &unapplied {
+                let dc = match rec.decision {
+                    CoordinatorDecision::Commit => 'C',
+                    CoordinatorDecision::Abort => 'A',
+                };
+                let shards = rec.participant_shards.iter()
+                    .map(|s| s.0.to_string()).collect::<Vec<_>>().join(",");
+                writeln!(tmp, "D {} {} {} {} {} {}",
+                    rec.seq, rec.txn_id.0, dc, shards,
+                    rec.timestamp_ms, rec.prepare_latency_us)?;
+            }
+            tmp.sync_all()?;
+            drop(tmp);
+            // Atomic replace: close old fd first, then rename
+            let mut guard = self.journal_file.lock();
+            *guard = None; // close old file
+            std::fs::rename(&tmp_path, journal_path)?;
+            // Reopen in append mode
+            let new_file = std::fs::OpenOptions::new()
+                .append(true).open(journal_path)?;
+            *guard = Some(new_file);
+            Ok(())
+        })();
+        if let Err(e) = write_result {
+            tracing::warn!(error = %e, "2PC journal compact failed; original preserved");
+            let _ = std::fs::remove_file(&tmp_path);
+        } else {
+            tracing::debug!(unapplied = unapplied.len(), "2PC journal compacted");
         }
-        let _ = f.sync_all();
-        tracing::debug!(unapplied = unapplied.len(), "2PC journal compacted");
     }
 
     /// Get the decision for a transaction (used by in-doubt resolver).

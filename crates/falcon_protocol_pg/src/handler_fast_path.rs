@@ -5,7 +5,7 @@ use falcon_planner::PhysicalPlan;
 use falcon_sql_frontend::types::{BinOp, BoundExpr, BoundInsert, OnConflictAction};
 
 use crate::codec::{BackendMessage, FieldDescription};
-use crate::handler::QueryHandler;
+use crate::handler::{BeginOptions, QueryHandler};
 use crate::session::PgSession;
 use falcon_executor::ExecutionResult;
 use falcon_txn::TxnClassification;
@@ -595,6 +595,7 @@ impl QueryHandler {
         if auto_txn {
             if let Some(ref txn) = session.txn {
                 let _ = self.txn_mgr.commit_autocommit(txn.txn_id);
+                falcon_common::globals::db_stats().xact_commit.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             session.txn = None;
         }
@@ -635,6 +636,41 @@ impl QueryHandler {
         vec![BackendMessage::CommandComplete { tag: "BEGIN".into() }]
     }
 
+    pub(crate) fn fast_begin_with_options(&self, session: &mut PgSession, opts: BeginOptions) -> Vec<BackendMessage> {
+        if session.in_transaction() {
+            return vec![
+                BackendMessage::NoticeResponse {
+                    message: "there is already a transaction in progress".into(),
+                },
+                BackendMessage::CommandComplete { tag: "BEGIN".into() },
+            ];
+        }
+        if let Err(reason) = self.storage.check_tenant_quota(session.tenant_id) {
+            return vec![BackendMessage::ErrorResponse {
+                severity: "ERROR".into(),
+                code: "53400".into(),
+                message: reason,
+            }];
+        }
+        let isolation = opts.isolation.unwrap_or(session.default_isolation);
+        let txn = match self.txn_mgr.try_begin_with_classification(
+            isolation,
+            TxnClassification::local(ShardId(0)),
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                let ce: FalconError = e.into();
+                return vec![self.error_response(&ce)];
+            }
+        };
+        self.storage.ext.cdc_manager.emit_begin(txn.txn_id);
+        self.storage.record_tenant_txn_begin(session.tenant_id);
+        session.txn = Some(txn);
+        session.autocommit = false;
+        // read_only is accepted but not enforced (no write barrier yet)
+        vec![BackendMessage::CommandComplete { tag: "BEGIN".into() }]
+    }
+
     pub(crate) fn fast_commit(&self, session: &mut PgSession) -> Vec<BackendMessage> {
         if let Some(ref txn) = session.txn {
             match self.txn_mgr.commit(txn.txn_id) {
@@ -650,16 +686,20 @@ impl QueryHandler {
                     }
                     self.storage.record_tenant_txn_commit(session.tenant_id);
                     falcon_observability::record_txn_metrics("committed");
+                    falcon_common::globals::db_stats().xact_commit.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     session.txn = None;
                     session.autocommit = true;
+                    session.revert_local_gucs();
                     self.flush_txn_stats();
                     vec![BackendMessage::CommandComplete { tag: "COMMIT".into() }]
                 }
                 Err(e) => {
                     self.storage.record_tenant_txn_abort(session.tenant_id);
                     falcon_observability::record_txn_metrics("aborted");
+                    falcon_common::globals::db_stats().xact_rollback.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     session.txn = None;
                     session.autocommit = true;
+                    session.revert_local_gucs();
                     self.flush_txn_stats();
                     vec![self.error_response(&FalconError::Txn(e))]
                 }
@@ -679,8 +719,10 @@ impl QueryHandler {
             let _ = self.txn_mgr.abort(txn.txn_id);
             self.storage.record_tenant_txn_abort(session.tenant_id);
             falcon_observability::record_txn_metrics("aborted");
+            falcon_common::globals::db_stats().xact_rollback.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             session.txn = None;
             session.autocommit = true;
+            session.revert_local_gucs();
             self.flush_txn_stats();
         }
         vec![BackendMessage::CommandComplete { tag: "ROLLBACK".into() }]

@@ -1366,10 +1366,15 @@ pub fn vectorized_hash_join(
     let mut key_buf: Vec<u64> = Vec::with_capacity(right_key_cols.len());
     for &ri in &*right_indices {
         key_buf.clear();
+        let mut has_null = false;
         for &c in right_key_cols {
-            key_buf.push(hash_datum(&right.columns[c].get_datum_ref(ri)));
+            let d = right.columns[c].get_datum_ref(ri);
+            if matches!(*d, Datum::Null) { has_null = true; break; }
+            key_buf.push(hash_datum(&d));
         }
-        hash_table.entry(key_buf.clone()).or_default().push(ri);
+        if !has_null {
+            hash_table.entry(key_buf.clone()).or_default().push(ri);
+        }
     }
 
     // Probe phase: for each left row, look up matching right rows.
@@ -1379,9 +1384,13 @@ pub fn vectorized_hash_join(
 
     for &li in &*left_indices {
         key_buf.clear();
+        let mut has_null = false;
         for &c in left_key_cols {
-            key_buf.push(hash_datum(&left.columns[c].get_datum_ref(li)));
+            let d = left.columns[c].get_datum_ref(li);
+            if matches!(*d, Datum::Null) { has_null = true; break; }
+            key_buf.push(hash_datum(&d));
         }
+        if has_null { continue; }
         if let Some(matches) = hash_table.get(&key_buf) {
             for &ri in matches {
                 // Verify actual equality (hash collision check)
@@ -1456,6 +1465,8 @@ fn hash_datum(d: &Datum) -> u64 {
         }
         Datum::Uuid(v) => v.hash(&mut hasher),
         Datum::Bytea(bytes) => bytes.hash(&mut hasher),
+        Datum::TsVector(v) => v.len().hash(&mut hasher),
+        Datum::TsQuery(q) => q.hash(&mut hasher),
     }
     hasher.finish()
 }
@@ -1463,7 +1474,7 @@ fn hash_datum(d: &Datum) -> u64 {
 /// Check if two Datum values are equal (for hash join collision verification).
 fn datum_equal(a: &Datum, b: &Datum) -> bool {
     match (a, b) {
-        (Datum::Null, Datum::Null) => true,
+        (Datum::Null, _) | (_, Datum::Null) => false,
         (Datum::Boolean(x), Datum::Boolean(y)) => x == y,
         (Datum::Int32(x), Datum::Int32(y)) => x == y,
         (Datum::Int64(x), Datum::Int64(y)) => x == y,

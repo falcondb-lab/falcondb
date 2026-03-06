@@ -50,7 +50,7 @@ fn simple_schema() -> TableSchema {
             nullable: false,
             is_primary_key: true,
             default_value: None,
-            is_serial: false,
+            is_serial: false, max_length: None,
         }],
         primary_key_columns: vec![0],
         ..Default::default()

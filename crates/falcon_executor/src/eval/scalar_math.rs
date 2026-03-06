@@ -6,8 +6,12 @@ use falcon_sql_frontend::types::ScalarFunc;
 pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionError> {
     match func {
         ScalarFunc::Abs => match args.first() {
-            Some(Datum::Int32(n)) => Ok(Datum::Int32(n.abs())),
-            Some(Datum::Int64(n)) => Ok(Datum::Int64(n.abs())),
+            Some(Datum::Int32(n)) => n.checked_abs()
+                .map(Datum::Int32)
+                .ok_or(ExecutionError::NumericOverflow),
+            Some(Datum::Int64(n)) => n.checked_abs()
+                .map(Datum::Int64)
+                .ok_or(ExecutionError::NumericOverflow),
             Some(Datum::Float64(f)) => Ok(Datum::Float64(f.abs())),
             Some(Datum::Null) | None => Ok(Datum::Null),
             _ => Err(ExecutionError::TypeError(

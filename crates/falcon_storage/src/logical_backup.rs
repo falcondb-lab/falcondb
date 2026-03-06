@@ -181,6 +181,14 @@ fn datum_to_sql_literal(datum: &Datum, _col: &ColumnDef) -> String {
                 .collect();
             format!("ARRAY[{}]", elements.join(", "))
         }
+        Datum::TsVector(v) => {
+            let s = format!("{}", Datum::TsVector(v.clone())).replace('\'', "''");
+            format!("'{s}'::tsvector")
+        }
+        Datum::TsQuery(q) => {
+            let s = q.replace('\'', "''");
+            format!("'{s}'::tsquery")
+        }
     }
 }
 
@@ -237,7 +245,7 @@ mod tests {
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(1),
@@ -246,7 +254,7 @@ mod tests {
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(2),
@@ -255,7 +263,7 @@ mod tests {
                     nullable: false,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 },
             ],
             primary_key_columns: vec![0],

@@ -331,6 +331,14 @@ impl LogicalPlan {
                 returning: del.returning.clone(),
                 using_table: del.using_table.clone(),
             }),
+            BoundStatement::Merge(_)
+            | BoundStatement::CreateMaterializedView { .. }
+            | BoundStatement::DropMaterializedView { .. }
+            | BoundStatement::RefreshMaterializedView { .. } => {
+                Err(falcon_common::error::SqlError::Unsupported(
+                    "uses legacy planner path".into(),
+                ))
+            }
 
             // ── SELECT ──────────────────────────────────────────────
             BoundStatement::Select(sel) => Ok(Self::from_bound_select(sel)),
@@ -455,9 +463,12 @@ impl LogicalPlan {
             | BoundStatement::Revoke { .. }
             | BoundStatement::ShowRoles
             | BoundStatement::ShowSchemas
-            | BoundStatement::ShowGrants { .. } => {
+            | BoundStatement::ShowGrants { .. }
+            | BoundStatement::CreateFunction { .. }
+            | BoundStatement::DropFunction { .. }
+            | BoundStatement::CallProcedure { .. } => {
                 Err(falcon_common::error::SqlError::Unsupported(
-                    "Schema/Role/Grant DDL uses legacy planner path".into(),
+                    "Schema/Role/Grant/Function DDL uses legacy planner path".into(),
                 ))
             }
         }

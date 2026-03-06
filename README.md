@@ -6,6 +6,8 @@
 
 <h1 align="center">FalconDB</h1>
 
+<p align="center">English | <a href="README_CN.md">简体中文</a></p>
+
 <p align="center">
   <strong>PG-Compatible · Distributed · Memory-First · Deterministic Transaction Semantics</strong>
 </p>
@@ -89,7 +91,7 @@ It is not a configuration option — it is the default behavior under the `Local
 | **Types** | INT, BIGINT, FLOAT8, DECIMAL/NUMERIC, TEXT, BOOLEAN, TIMESTAMP, DATE, JSONB, ARRAY, SERIAL/BIGSERIAL |
 | **Transactions** | BEGIN/COMMIT/ROLLBACK, READ ONLY/READ WRITE, per-txn timeout, Read Committed, Snapshot Isolation |
 | **Functions** | 500+ scalar functions (string, math, date/time, crypto, JSON, array) |
-| **Observability** | SHOW falcon.*, EXPLAIN, EXPLAIN ANALYZE, CHECKPOINT, ANALYZE TABLE |
+| **Observability** | SHOW falcon.*, EXPLAIN, EXPLAIN ANALYZE, CHECKPOINT, ANALYZE TABLE, pg_stat_statements |
 
 ### <a id="not-supported"></a>Not Supported (v1.2)
 
@@ -102,7 +104,7 @@ Attempting to use them returns a clear `ErrorResponse` with the appropriate SQLS
 | Triggers | `0A000` | `triggers are not supported` |
 | Materialized views | `0A000` | `materialized views are not supported` |
 | Foreign data wrappers (FDW) | `0A000` | `foreign data wrappers are not supported` |
-| Full-text search (tsvector/tsquery) | `0A000` | `full-text search is not supported` |
+| ~~Full-text search~~ | ✅ | **Implemented** — `tsvector`/`tsquery` types, `@@` operator, `to_tsvector`/`to_tsquery`/`ts_rank`/`ts_headline` + 10 more FTS functions |
 | HTAP / ColumnStore analytics | — | ColumnStore storage + vectorized AGG pushdown implemented; full analytics pipeline in progress |
 | Automatic rebalancing | — | Available via `[rebalance]` config section (see below) |
 | Custom types (beyond JSONB) | `0A000` | `custom types are not supported` |
@@ -150,7 +152,7 @@ cargo build --release -p falcon_server --features rocksdb
 # Build with redb engine (pure Rust, no C deps)
 cargo build --release -p falcon_server --features redb
 
-# Run tests (4,200+ tests across 18 crates + root integration)
+# Run tests (4,350+ tests across 18 crates + root integration)
 cargo test --workspace
 
 # Lint
@@ -578,18 +580,18 @@ See [docs/observability.md](docs/observability.md) for full metric descriptions.
 
 | Crate | Responsibility |
 |-------|---------------|
-| `falcon_common` | Shared types, errors, config, datum, schema, RLS, RBAC |
+| `falcon_common` | Shared types, errors, config, datum (incl. Decimal), schema, RLS, RBAC |
 | `falcon_storage` | Multi-engine storage: unified `TableHandle` dispatch → `StorageTable` trait; Rowstore (in-memory), LSM, RocksDB, redb; MVCC, secondary indexes, WAL, GC, USTM prefetch, TDE, CDC |
 | `falcon_txn` | Transaction lifecycle, OCC validation, timestamp allocation |
 | `falcon_sql_frontend` | SQL parsing (sqlparser-rs) + binding/analysis |
 | `falcon_planner` | Plan generation, cost-based optimizer (selectivity, scan cost, plan_optimized), routing hints, distributed wrapping, view/DDL plans |
-| `falcon_executor` | Operator execution, expression evaluation, governor, fused streaming aggregates |
+| `falcon_executor` | Operator execution, expression evaluation, governor, fused streaming aggregates, FTS engine, vectorized columnstore AGG |
 | `falcon_protocol_pg` | PostgreSQL wire protocol codec + TCP server |
 | `falcon_protocol_native` | FalconDB native binary protocol — encode/decode, compression, type mapping |
 | `falcon_native_server` | Native protocol server — session management, executor bridge, nonce anti-replay |
 | `falcon_raft` | Raft consensus — `SingleNodeConsensus` (standalone default) or `RaftConsensus` (production multi-node via `role = raft_member`) |
 | `falcon_cluster` | Shard map, replication, failover, scatter/gather, epoch, migration, supervisor, stability hardening, failover×txn test matrix |
-| `falcon_observability` | Metrics (Prometheus), structured logging, tracing |
+| `falcon_observability` | Metrics (Prometheus), structured logging, tracing, pg_stat_statements |
 | `falcon_proto` | Protobuf definitions + tonic gRPC codegen (replication, Raft) |
 | `falcon_segment_codec` | Segment-level compression (Zstd, LZ4, dictionary, streaming, CRC) |
 | `falcon_enterprise` | Enterprise features: control plane HA, security (AuthN/AuthZ, TLS rotation), ops (auto-rebalance, SLO engine) |
@@ -681,7 +683,7 @@ cargo build --workspace
 
 ## Roadmap
 
-All milestones through v1.2 are released. Current test count: **4,200+** across 18 crates.
+All milestones through v1.2 are released. Current test count: **4,350+** across 18 crates (432 `.rs` files, ~246K lines of Rust).
 
 | Milestone | Highlights |
 |-----------|------------|
@@ -729,13 +731,14 @@ and `sync-replica` (primary waits for replica WAL ack, RPO ≈ 0). See [docs/rpo
 ## Testing
 
 ```bash
-# Run all tests (4,200+ total)
+# Run all tests (4,350+ total)
 cargo test --workspace
 
 # By crate (key ones)
-cargo test -p falcon_cluster   # 1,000+ tests
-cargo test -p falcon_storage   # 800+ tests
-cargo test -p falcon_server    # 400+ tests
+cargo test -p falcon_cluster   # 1,050+ tests
+cargo test -p falcon_storage   # 820+ tests
+cargo test -p falcon_server    # 420+ tests
+cargo test -p falcon_executor  # 300+ tests
 cargo test -p falcon_common    # 250+ tests
 
 # Lint

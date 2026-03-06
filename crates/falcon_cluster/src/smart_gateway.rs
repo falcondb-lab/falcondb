@@ -1036,14 +1036,43 @@ impl SmartGateway {
             }
         }
 
-        // Phase 2: Commit all
+        // Phase 2: Commit all (with retry on failure)
+        const MAX_COMMIT_RETRIES: u32 = 3;
+        const BASE_RETRY_MS: u64 = 50;
+
         for (node_id, shard_id) in &prepared {
-            if let Err(e) = self.router_client
-                .commit_2pc_remote(*node_id, coord_txn_id, *shard_id)
-                .await
-            {
-                // Commit failure after prepare is a serious issue — log but continue
-                tracing::error!(coord_txn_id, node_id, shard_id, error = %e, "2PC commit failed (heuristic)");
+            let mut last_err = String::new();
+            let mut committed = false;
+            for attempt in 0..=MAX_COMMIT_RETRIES {
+                match self.router_client
+                    .commit_2pc_remote(*node_id, coord_txn_id, *shard_id)
+                    .await
+                {
+                    Ok(_) => {
+                        committed = true;
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = e.clone();
+                        if attempt < MAX_COMMIT_RETRIES {
+                            let delay = BASE_RETRY_MS * (1u64 << attempt);
+                            tracing::warn!(
+                                coord_txn_id, node_id, shard_id,
+                                attempt = attempt + 1, delay_ms = delay,
+                                error = %e, "2PC commit failed, retrying"
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                        }
+                    }
+                }
+            }
+            if !committed {
+                tracing::error!(
+                    coord_txn_id, node_id, shard_id,
+                    error = %last_err,
+                    "2PC commit failed after {} retries — in-doubt on participant",
+                    MAX_COMMIT_RETRIES
+                );
             }
         }
 

@@ -21,6 +21,8 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
                 Some(Datum::Interval(_, _, _)) => "interval",
                 Some(Datum::Uuid(_)) => "uuid",
                 Some(Datum::Bytea(_)) => "bytea",
+                Some(Datum::TsVector(_)) => "tsvector",
+                Some(Datum::TsQuery(_)) => "tsquery",
                 Some(Datum::Null) | None => "unknown",
             };
             Ok(Datum::Text(type_name.to_owned()))

@@ -1418,7 +1418,39 @@ impl Executor {
                     .map_err(FalconError::Storage)?;
                 Ok(Datum::Int64(val))
             }
+            BoundExpr::UserFunction { name, args } => {
+                self.eval_user_function(name, args, row)
+            }
             _ => ExprEngine::eval_row(expr, row).map_err(FalconError::Execution),
         }
+    }
+
+    /// Register row-level locks for FOR UPDATE / FOR SHARE.
+    /// Under OCC, FOR UPDATE adds scanned PKs to the write-set so concurrent
+    /// writers to the same rows will conflict at commit time.
+    pub(crate) fn register_row_locks(
+        &self,
+        table_id: TableId,
+        for_lock: &RowLockMode,
+        txn: &TxnHandle,
+    ) -> Result<(), FalconError> {
+        match for_lock {
+            RowLockMode::None => return Ok(()),
+            RowLockMode::Share(_) => {
+                // FOR SHARE: rows are already in the read-set from the scan,
+                // validated under SI/Serializable at commit.
+                return Ok(());
+            }
+            RowLockMode::Update(_wait) => {}
+        }
+        // FOR UPDATE: add scanned PKs to write-set for OCC conflict detection
+        let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+        let rows = self.storage.scan(table_id, txn.txn_id, read_ts)?;
+        for (pk, _row) in &rows {
+            if !pk.is_empty() {
+                self.storage.record_write(txn.txn_id, table_id, pk.clone());
+            }
+        }
+        Ok(())
     }
 }

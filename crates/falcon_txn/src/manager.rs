@@ -705,6 +705,13 @@ pub struct TxnManager {
     /// Max age for idle-in-transaction sessions (ms, 0 = disabled).
     /// Transactions exceeding this are auto-aborted by the GC reaper.
     idle_in_txn_timeout_ms: AtomicU64,
+    /// Optional HLC for cross-node causal ordering.
+    /// When set, alloc_ts() delegates to HLC instead of the monotonic counter.
+    hlc: Option<std::sync::Arc<falcon_common::hlc::HybridClock>>,
+    /// Sampling divisor for latency/history recording (1 = record all, 64 = 1-in-64).
+    latency_sample_divisor: u64,
+    /// Named prepared transactions: GID → TxnId (for PREPARE TRANSACTION / COMMIT PREPARED).
+    prepared_gids: DashMap<String, TxnId>,
 }
 
 impl TxnManager {
@@ -723,6 +730,31 @@ impl TxnManager {
             wal_backlog_threshold_bytes: AtomicU64::new(0),
             replication_lag_threshold_ms: AtomicU64::new(0),
             idle_in_txn_timeout_ms: AtomicU64::new(0),
+            hlc: None,
+            latency_sample_divisor: 64,
+            prepared_gids: DashMap::new(),
+        }
+    }
+
+    /// Create a TxnManager with HLC-based timestamp allocation.
+    pub fn new_with_hlc(storage: Arc<StorageEngine>, hlc: std::sync::Arc<falcon_common::hlc::HybridClock>) -> Self {
+        Self {
+            ts_counter: AtomicU64::new(1),
+            local_ts_counter: AtomicU64::new(1),
+            txn_counter: AtomicU64::new(1),
+            active_txns: DashMap::new(),
+            storage,
+            stats: TxnStatsCollector::new(),
+            history: Mutex::new(TxnHistory::new(TXN_HISTORY_CAPACITY)),
+            latency: Mutex::new(LatencyRecorder::new()),
+            slow_txn_log: Mutex::new(TxnHistory::new(SLOW_TXN_LOG_CAPACITY)),
+            slow_txn_threshold_us: AtomicU64::new(DEFAULT_SLOW_TXN_THRESHOLD_US),
+            wal_backlog_threshold_bytes: AtomicU64::new(0),
+            replication_lag_threshold_ms: AtomicU64::new(0),
+            idle_in_txn_timeout_ms: AtomicU64::new(0),
+            hlc: Some(hlc),
+            latency_sample_divisor: 64,
+            prepared_gids: DashMap::new(),
         }
     }
 
@@ -742,8 +774,16 @@ impl TxnManager {
     }
 
     /// Allocate a new timestamp.
+    /// Uses HLC when available (cluster mode), monotonic counter otherwise.
     pub fn alloc_ts(&self) -> Timestamp {
-        Timestamp(self.ts_counter.fetch_add(1, Ordering::Relaxed))
+        if let Some(ref hlc) = self.hlc {
+            let ts = hlc.now();
+            // Keep monotonic counter in sync so current_ts() stays valid
+            self.ts_counter.fetch_max(ts.0 + 1, Ordering::Relaxed);
+            ts
+        } else {
+            Timestamp(self.ts_counter.fetch_add(1, Ordering::Relaxed))
+        }
     }
 
     fn alloc_local_ts(&self) -> Timestamp {
@@ -761,6 +801,9 @@ impl TxnManager {
         if max_ts > 0 {
             self.ts_counter.fetch_max(max_ts + 1, Ordering::Relaxed);
             self.local_ts_counter.fetch_max(max_ts + 1, Ordering::Relaxed);
+            if let Some(ref hlc) = self.hlc {
+                hlc.advance_past(Timestamp(max_ts));
+            }
         }
         if max_txn_id > 0 {
             self.txn_counter.fetch_max(max_txn_id + 1, Ordering::Relaxed);
@@ -943,6 +986,40 @@ impl TxnManager {
         handle
     }
 
+    /// Begin a read-only transaction pinned to an externally supplied snapshot timestamp.
+    /// Used for consistent cross-shard reads: all shards receive the same `snapshot_ts`
+    /// so they observe the same committed state.
+    pub fn begin_at_snapshot(&self, snapshot_ts: Timestamp, isolation: IsolationLevel) -> TxnHandle {
+        self.begin_at_snapshot_on_shard(snapshot_ts, isolation, ShardId(0))
+    }
+
+    /// Begin a transaction pinned to an external snapshot, assigned to a specific shard.
+    pub fn begin_at_snapshot_on_shard(&self, snapshot_ts: Timestamp, isolation: IsolationLevel, shard_id: ShardId) -> TxnHandle {
+        let txn_id = TxnId(self.txn_counter.fetch_add(1, Ordering::Relaxed));
+        let handle = TxnHandle {
+            txn_id,
+            start_ts: snapshot_ts,
+            isolation,
+            txn_type: TxnType::Local,
+            path: TxnPath::Fast,
+            slow_path_mode: SlowPathMode::Xa2Pc,
+            involved_shards: vec![shard_id],
+            degraded: false,
+            state: TxnState::Active,
+            begin_instant: Some(Instant::now()),
+            trace_id: txn_id.0,
+            occ_retry_count: 0,
+            tenant_id: SYSTEM_TENANT_ID,
+            priority: TxnPriority::Normal,
+            latency_breakdown: TxnLatencyBreakdown::default(),
+            read_only: false,
+            timeout_ms: 0,
+            exec_summary: TxnExecSummary::default(),
+        };
+        self.active_txns.insert(txn_id, handle.clone());
+        handle
+    }
+
     /// Lightweight begin for autocommit queries. Skips DashMap insert,
     /// Instant::now(), and admission control. Caller must use commit_autocommit.
     pub fn begin_autocommit(&self, isolation: IsolationLevel) -> TxnHandle {
@@ -1095,6 +1172,69 @@ impl TxnManager {
         Ok(())
     }
 
+    /// PREPARE TRANSACTION 'gid': prepare the current txn and associate it with a global ID.
+    /// The session detaches from the transaction; it can later be resolved via
+    /// COMMIT PREPARED or ROLLBACK PREPARED from any session.
+    pub fn prepare_named(&self, txn_id: TxnId, gid: String) -> Result<(), TxnError> {
+        if self.prepared_gids.contains_key(&gid) {
+            return Err(TxnError::InvariantViolation(
+                txn_id,
+                format!("transaction identifier \"{gid}\" is already in use"),
+            ));
+        }
+        let entry = self
+            .active_txns
+            .get(&txn_id)
+            .ok_or(TxnError::NotFound(txn_id))?;
+        if entry.state == TxnState::Prepared {
+            // Already prepared — just register the GID
+            drop(entry);
+            self.prepared_gids.insert(gid, txn_id);
+            return Ok(());
+        }
+        if entry.state != TxnState::Active {
+            return Err(TxnError::AlreadyCommitted(txn_id));
+        }
+        drop(entry);
+
+        // Persist the prepare to storage (WAL)
+        self.storage
+            .prepare_txn(txn_id)
+            .map_err(|_| TxnError::Aborted(txn_id))?;
+
+        if let Some(mut e) = self.active_txns.get_mut(&txn_id) {
+            e.state = TxnState::Prepared;
+        }
+        self.prepared_gids.insert(gid, txn_id);
+        Ok(())
+    }
+
+    /// COMMIT PREPARED 'gid': resolve a previously prepared transaction.
+    pub fn commit_prepared(&self, gid: &str) -> Result<Timestamp, TxnError> {
+        let txn_id = self
+            .prepared_gids
+            .remove(gid)
+            .map(|(_, id)| id)
+            .ok_or_else(|| TxnError::InvariantViolation(
+                TxnId(0),
+                format!("prepared transaction \"{gid}\" does not exist"),
+            ))?;
+        self.commit(txn_id)
+    }
+
+    /// ROLLBACK PREPARED 'gid': abort a previously prepared transaction.
+    pub fn rollback_prepared(&self, gid: &str) -> Result<(), TxnError> {
+        let txn_id = self
+            .prepared_gids
+            .remove(gid)
+            .map(|(_, id)| id)
+            .ok_or_else(|| TxnError::InvariantViolation(
+                TxnId(0),
+                format!("prepared transaction \"{gid}\" does not exist"),
+            ))?;
+        self.abort(txn_id)
+    }
+
     /// Commit a transaction.
     ///
     /// For LocalTxn under SI/Serializable: validates the read-set (OCC) before
@@ -1142,14 +1282,6 @@ impl TxnManager {
         let latency_breakdown = entry.latency_breakdown.clone();
 
         if local_fast_path {
-            // ── Invariant: LocalTxn never enters Prepared ──
-            if entry.state == TxnState::Prepared {
-                return Err(TxnError::InvariantViolation(
-                    txn_id,
-                    "LocalTxn must never enter Prepared state".into(),
-                ));
-            }
-
             // ── OCC validation under SI / Serializable ──
             // Allocate commit_ts FIRST, then validate. This closes the TOCTOU
             // window: any concurrent commit that obtains a higher ts cannot
@@ -1250,6 +1382,13 @@ impl TxnManager {
             "consistency commit point: prepare WAL logged"
         );
 
+        // Allocate commit_ts BEFORE OCC validation to close the TOCTOU window,
+        // matching the local fast-path ordering. Any concurrent commit that
+        // obtains a higher ts after this point cannot have been visible at
+        // start_ts, and any commit with ts in (start_ts, commit_ts) is
+        // caught by validate_read_set.
+        let commit_ts = self.alloc_ts();
+
         // OCC validation for global path under SI/Serializable.
         if matches!(
             isolation,
@@ -1260,8 +1399,6 @@ impl TxnManager {
             self.abort(txn_id)?;
             return Err(TxnError::SerializationConflict(txn_id));
         }
-
-        let commit_ts = self.alloc_ts();
 
         if let Err(e) = self.storage.commit_txn(txn_id, commit_ts, TxnType::Global) {
             let latency_us = entry_begin_instant
@@ -1488,9 +1625,13 @@ impl TxnManager {
         self.latency.lock().reset();
     }
 
+    /// Set sampling divisor for latency/history (1 = record every txn).
+    pub fn set_latency_sample_divisor(&mut self, d: u64) {
+        self.latency_sample_divisor = d.max(1);
+    }
+
     fn record_completed(&self, record: TxnRecord) {
-        // Sample 1-in-64 commits for latency/history to avoid mutex contention on hot path.
-        let sample = record.txn_id.0 % 64 == 0;
+        let sample = self.latency_sample_divisor <= 1 || record.txn_id.0 % self.latency_sample_divisor == 0;
         if sample {
             if record.outcome == TxnOutcome::Committed {
                 let mut lat = self.latency.lock();

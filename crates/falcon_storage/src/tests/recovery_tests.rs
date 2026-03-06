@@ -16,7 +16,7 @@
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(1),
@@ -25,7 +25,7 @@
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false,
+                    is_serial: false, max_length: None,
                 },
             ],
             primary_key_columns: vec![0],
@@ -652,4 +652,63 @@
             counter.load(std::sync::atomic::Ordering::SeqCst), 5,
             "delete fires observer immediately"
         );
+    }
+
+    #[test]
+    fn test_recovery_prepared_txn_tracked_as_indoubt() {
+        let dir = std::env::temp_dir().join(format!(
+            "falcon_recovery_indoubt_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        {
+            let wal = WalWriter::open(&dir, SyncMode::None).unwrap();
+            wal.append(&WalRecord::CreateTable { schema: recovery_schema() }).unwrap();
+
+            // Txn 1: prepared and committed — should NOT be in-doubt
+            wal.append(&WalRecord::Insert {
+                txn_id: TxnId(1), table_id: TableId(1),
+                row: OwnedRow::new(vec![Datum::Int32(1), Datum::Text("committed".into())]),
+            }).unwrap();
+            wal.append(&WalRecord::PrepareTxn { txn_id: TxnId(1) }).unwrap();
+            wal.append(&WalRecord::CommitTxnGlobal { txn_id: TxnId(1), commit_ts: Timestamp(10) }).unwrap();
+
+            // Txn 2: prepared but no commit/abort — should be in-doubt
+            wal.append(&WalRecord::Insert {
+                txn_id: TxnId(2), table_id: TableId(1),
+                row: OwnedRow::new(vec![Datum::Int32(2), Datum::Text("indoubt".into())]),
+            }).unwrap();
+            wal.append(&WalRecord::PrepareTxn { txn_id: TxnId(2) }).unwrap();
+
+            // Txn 3: prepared then aborted — should NOT be in-doubt
+            wal.append(&WalRecord::Insert {
+                txn_id: TxnId(3), table_id: TableId(1),
+                row: OwnedRow::new(vec![Datum::Int32(3), Datum::Text("aborted".into())]),
+            }).unwrap();
+            wal.append(&WalRecord::PrepareTxn { txn_id: TxnId(3) }).unwrap();
+            wal.append(&WalRecord::AbortTxnGlobal { txn_id: TxnId(3) }).unwrap();
+
+            // Txn 4: no prepare, no commit — regular uncommitted, should be aborted
+            wal.append(&WalRecord::Insert {
+                txn_id: TxnId(4), table_id: TableId(1),
+                row: OwnedRow::new(vec![Datum::Int32(4), Datum::Text("uncommitted".into())]),
+            }).unwrap();
+
+            wal.flush().unwrap();
+        }
+
+        let engine = StorageEngine::recover(&dir).unwrap();
+
+        // Only txn 2 should be in recovered_prepared_txns
+        let prepared = engine.recovered_prepared_txns.read();
+        assert_eq!(prepared.len(), 1, "only 1 in-doubt prepared txn expected");
+        assert!(prepared.contains(&TxnId(2)), "txn 2 should be in-doubt");
+
+        // Txn 1 committed → visible
+        let rows = engine.scan(TableId(1), TxnId(99), Timestamp(100)).unwrap();
+        assert_eq!(rows.len(), 1, "only committed txn 1 should be visible");
+        assert_eq!(rows[0].1.values[1], Datum::Text("committed".into()));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }

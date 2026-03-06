@@ -381,7 +381,34 @@ impl WalReplicationService {
     }
 
     /// Set the storage engine for checkpoint serving and subplan execution.
+    /// Rebuilds prepared_txns DashMap from WAL-recovered 2PC mappings and logs
+    /// any in-doubt prepared txns that lack coordinator mapping.
     pub fn set_storage(&self, storage: Arc<falcon_storage::engine::StorageEngine>) {
+        // Rebuild prepared_txns from 2PC coordinator mappings
+        let mappings_2pc = storage.recovered_prepared_2pc.read().clone();
+        for (coord_txn_id, shard_id, local_txn_id) in &mappings_2pc {
+            self.prepared_txns.insert(
+                (*coord_txn_id, *shard_id),
+                *local_txn_id,
+            );
+        }
+        if !mappings_2pc.is_empty() {
+            tracing::info!(
+                count = mappings_2pc.len(),
+                "grpc_transport: rebuilt {} prepared_txns entries from WAL recovery",
+                mappings_2pc.len()
+            );
+        }
+
+        let recovered = storage.recovered_prepared_txns.read().clone();
+        if !recovered.is_empty() {
+            tracing::warn!(
+                count = recovered.len(),
+                "grpc_transport: {} in-doubt prepared txn(s) from WAL recovery — \
+                 awaiting coordinator resolution via InDoubtResolver",
+                recovered.len()
+            );
+        }
         *self.storage.write() = Some(storage);
     }
 
@@ -951,9 +978,16 @@ impl crate::proto::wal_replication_server::WalReplication for WalReplicationServ
                     falcon_executor::ExecutionResult::Dml { rows_affected, .. } => *rows_affected as u64,
                     _ => 0,
                 };
+                // Persist prepare with coordinator mapping to WAL for crash recovery
+                if let Err(e) = storage.prepare_txn_2pc(local_txn_id, coord_txn_id, shard_id) {
+                    let _ = txn_mgr.abort(local_txn_id);
+                    return Ok(tonic::Response::new(crate::proto::Prepare2pcResponse {
+                        success: false, error: format!("WAL prepare: {e}"), rows_affected: 0,
+                    }));
+                }
                 // Hold the transaction open — don't commit yet
                 self.prepared_txns.insert((coord_txn_id, shard_id), local_txn_id);
-                tracing::debug!(coord_txn_id, shard_id, ?local_txn_id, "2PC prepared");
+                tracing::debug!(coord_txn_id, shard_id, ?local_txn_id, "2PC prepared (WAL durable)");
                 Ok(tonic::Response::new(crate::proto::Prepare2pcResponse {
                     success: true, error: String::new(), rows_affected: rows,
                 }))

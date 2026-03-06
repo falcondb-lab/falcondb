@@ -87,6 +87,8 @@ pub enum PhysicalPlan {
         returning: Vec<(BoundExpr, String)>,
         using_table: Option<BoundFromTable>,
     },
+    /// DML: MERGE (SQL:2003)
+    Merge(BoundMerge),
     /// Query: scan + filter + project + group + sort + limit
     SeqScan {
         table_id: TableId,
@@ -104,6 +106,7 @@ pub enum PhysicalPlan {
         ctes: Vec<BoundCte>,
         unions: Vec<(BoundSelect, SetOpKind, bool)>,
         virtual_rows: Vec<falcon_common::datum::OwnedRow>,
+        for_lock: RowLockMode,
     },
     /// Query: index scan + residual filter + project + group + sort + limit
     /// Used when the planner detects a `col = literal` predicate on an indexed column.
@@ -128,6 +131,7 @@ pub enum PhysicalPlan {
         ctes: Vec<BoundCte>,
         unions: Vec<(BoundSelect, SetOpKind, bool)>,
         virtual_rows: Vec<falcon_common::datum::OwnedRow>,
+        for_lock: RowLockMode,
     },
     /// Query: index range scan + residual filter + project + group + sort + limit
     /// Used when the planner detects a range predicate (>, <, >=, <=, BETWEEN)
@@ -155,6 +159,7 @@ pub enum PhysicalPlan {
         ctes: Vec<BoundCte>,
         unions: Vec<(BoundSelect, SetOpKind, bool)>,
         virtual_rows: Vec<falcon_common::datum::OwnedRow>,
+        for_lock: RowLockMode,
     },
     /// Query over a ColumnStore table: columnar scan → VectorBatch with zone-map pushdown.
     ColumnScan {
@@ -172,6 +177,7 @@ pub enum PhysicalPlan {
         distinct: DistinctMode,
         ctes: Vec<BoundCte>,
         unions: Vec<(BoundSelect, SetOpKind, bool)>,
+        for_lock: RowLockMode,
     },
     /// Query with JOINs: nested loop join + filter + project + sort + limit
     NestedLoopJoin {
@@ -254,6 +260,20 @@ pub enum PhysicalPlan {
     DropView {
         name: String,
         if_exists: bool,
+    },
+    /// CREATE MATERIALIZED VIEW
+    CreateMaterializedView {
+        name: String,
+        query_sql: String,
+    },
+    /// DROP MATERIALIZED VIEW
+    DropMaterializedView {
+        name: String,
+        if_exists: bool,
+    },
+    /// REFRESH MATERIALIZED VIEW
+    RefreshMaterializedView {
+        name: String,
     },
     /// Transaction control
     Begin,
@@ -394,6 +414,20 @@ pub enum PhysicalPlan {
         quote: char,
         escape: char,
         file_path: Option<String>,
+    },
+    /// DDL: CREATE [OR REPLACE] FUNCTION
+    CreateFunction {
+        def: falcon_common::schema::FunctionDef,
+    },
+    /// DDL: DROP FUNCTION
+    DropFunction {
+        name: String,
+        if_exists: bool,
+    },
+    /// CALL procedure(args)
+    CallProcedure {
+        name: String,
+        args: Vec<BoundExpr>,
     },
     /// Distributed plan: wraps a local subplan for scatter/gather execution
     /// across multiple shards. The executor dispatches this to the

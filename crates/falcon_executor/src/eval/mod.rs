@@ -12,6 +12,7 @@ pub(crate) mod scalar_regex;
 pub(crate) mod scalar_string;
 pub(crate) mod scalar_time;
 pub(crate) mod scalar_time_ext;
+pub(crate) mod scalar_fts;
 pub(crate) mod scalar_utility;
 
 #[path = "../eval.rs"]

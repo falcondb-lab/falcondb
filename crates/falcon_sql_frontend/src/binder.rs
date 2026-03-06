@@ -152,10 +152,18 @@ impl Binder {
                     let name = names
                         .first()
                         .ok_or_else(|| SqlError::Parse("DROP VIEW requires a name".into()))?;
-                    Ok(BoundStatement::DropView {
-                        name: name.to_string(),
-                        if_exists: *if_exists,
-                    })
+                    let name_str = name.to_string();
+                    if self.catalog.find_materialized_view(&name_str).is_some() {
+                        Ok(BoundStatement::DropMaterializedView {
+                            name: name_str,
+                            if_exists: *if_exists,
+                        })
+                    } else {
+                        Ok(BoundStatement::DropView {
+                            name: name_str,
+                            if_exists: *if_exists,
+                        })
+                    }
                 }
                 ast::ObjectType::Sequence => {
                     let name = names
@@ -190,6 +198,9 @@ impl Binder {
                 ..
             } => self.bind_update(table, assignments, selection, returning, from),
             Statement::Delete(delete) => self.bind_delete(delete),
+            Statement::Merge { table, source, on, clauses, .. } => {
+                self.bind_merge(table, source, on, clauses)
+            }
             Statement::Query(query) => self.bind_select(query),
             Statement::Explain {
                 statement, analyze, ..
@@ -263,15 +274,23 @@ impl Binder {
                 name,
                 query,
                 or_replace,
+                materialized,
                 ..
             } => {
                 let view_name = name.to_string();
                 let query_sql = format!("{query}");
-                Ok(BoundStatement::CreateView {
-                    name: view_name,
-                    query_sql,
-                    or_replace: *or_replace,
-                })
+                if *materialized {
+                    Ok(BoundStatement::CreateMaterializedView {
+                        name: view_name,
+                        query_sql,
+                    })
+                } else {
+                    Ok(BoundStatement::CreateView {
+                        name: view_name,
+                        query_sql,
+                        or_replace: *or_replace,
+                    })
+                }
             }
             Statement::CreateSequence {
                 name,
@@ -463,6 +482,28 @@ impl Binder {
                     if_not_exists: *if_not_exists,
                 })
             }
+            Statement::DropFunction { if_exists, func_desc, .. } => {
+                let desc = func_desc
+                    .first()
+                    .ok_or_else(|| SqlError::Parse("DROP FUNCTION requires a name".into()))?;
+                Ok(BoundStatement::DropFunction {
+                    name: desc.name.to_string(),
+                    if_exists: *if_exists,
+                })
+            }
+            Statement::CreateFunction {
+                or_replace,
+                name,
+                args,
+                return_type,
+                function_body,
+                language,
+                behavior,
+                called_on_null,
+                ..
+            } => self.bind_create_function(
+                *or_replace, name, args, return_type, function_body, language, behavior, called_on_null,
+            ),
             _ => Err(SqlError::Unsupported(format!(
                 "Statement type: {:?}",
                 std::mem::discriminant(stmt)
@@ -749,6 +790,7 @@ impl Binder {
             if let Some(dfn) = default_fn {
                 dynamic_defaults.insert(i, dfn);
             }
+            let max_length = Self::extract_char_length(&col_def.data_type);
             columns.push(ColumnDef {
                 id: ColumnId(i as u32),
                 name: col_def.name.value.clone(),
@@ -757,6 +799,7 @@ impl Binder {
                 is_primary_key: is_pk,
                 default_value,
                 is_serial,
+                max_length,
             });
         }
 
@@ -1020,7 +1063,7 @@ impl Binder {
                         nullable,
                         is_primary_key: false,
                         default_value: None,
-                        is_serial: false,
+                        is_serial: false, max_length: None,
                     })
                 }
                 ast::AlterTableOperation::DropColumn { column_name, .. } => {
@@ -1457,6 +1500,7 @@ impl Binder {
             ast::BinaryOperator::AtArrow => Ok(BinOp::JsonContains),
             ast::BinaryOperator::ArrowAt => Ok(BinOp::JsonContainedBy),
             ast::BinaryOperator::Question => Ok(BinOp::JsonExists),
+            ast::BinaryOperator::AtAt => Ok(BinOp::TsMatch),
             _ => Err(SqlError::Unsupported(format!("Operator: {op:?}"))),
         }
     }
@@ -1472,6 +1516,19 @@ impl Binder {
             Some(ast::ReferentialAction::NoAction) | None => {
                 falcon_common::schema::FkAction::NoAction
             }
+        }
+    }
+
+    /// Extract character max length from VARCHAR(n)/CHAR(n) AST types.
+    fn extract_char_length(dt: &ast::DataType) -> Option<u32> {
+        match dt {
+            ast::DataType::Varchar(Some(ast::CharacterLength::IntegerLength { length, .. }))
+            | ast::DataType::CharVarying(Some(ast::CharacterLength::IntegerLength { length, .. }))
+            | ast::DataType::Char(Some(ast::CharacterLength::IntegerLength { length, .. }))
+            | ast::DataType::Character(Some(ast::CharacterLength::IntegerLength { length, .. })) => {
+                Some(*length as u32)
+            }
+            _ => None,
         }
     }
 
@@ -1549,11 +1606,99 @@ impl Binder {
                     "money" | "float8" | "double precision" => Ok(DataType::Float64),
                     "numeric" | "decimal" => Ok(DataType::Decimal(38, 10)),
                     "timestamp" | "timestamptz" => Ok(DataType::Timestamp),
+                    "tsvector" => Ok(DataType::TsVector),
+                    "tsquery" => Ok(DataType::TsQuery),
                     _ => Err(SqlError::Unsupported(format!("Data type: {type_name}"))),
                 }
             }
             _ => Err(SqlError::Unsupported(format!("Data type: {dt:?}"))),
         }
+    }
+
+    fn bind_create_function(
+        &self,
+        or_replace: bool,
+        name: &ast::ObjectName,
+        args: &Option<Vec<ast::OperateFunctionArg>>,
+        return_type: &Option<ast::DataType>,
+        function_body: &Option<ast::CreateFunctionBody>,
+        language: &Option<ast::Ident>,
+        behavior: &Option<ast::FunctionBehavior>,
+        called_on_null: &Option<ast::FunctionCalledOnNull>,
+    ) -> Result<BoundStatement, SqlError> {
+        use falcon_common::schema::{FunctionDef, FunctionLanguage, FunctionParam, FunctionVolatility};
+
+        let func_name = name.to_string();
+
+        // Parse parameters
+        let params = if let Some(arg_list) = args {
+            arg_list
+                .iter()
+                .map(|arg| {
+                    let param_name = arg.name.as_ref().map(|n| n.value.clone());
+                    let data_type = self.resolve_data_type(&arg.data_type)?;
+                    Ok(FunctionParam { name: param_name, data_type })
+                })
+                .collect::<Result<Vec<_>, SqlError>>()?
+        } else {
+            Vec::new()
+        };
+
+        // Parse return type
+        let ret_type = return_type
+            .as_ref()
+            .map(|dt| self.resolve_data_type(dt))
+            .transpose()?;
+
+        // Parse language
+        let lang_str = language
+            .as_ref()
+            .map(|l| l.value.to_lowercase())
+            .unwrap_or_else(|| "sql".to_owned());
+        let lang = match lang_str.as_str() {
+            "sql" => FunctionLanguage::Sql,
+            "plpgsql" => FunctionLanguage::PlPgSql,
+            other => return Err(SqlError::Unsupported(format!("LANGUAGE {other}"))),
+        };
+
+        // Extract function body
+        let body = match function_body {
+            Some(ast::CreateFunctionBody::AsBeforeOptions(expr))
+            | Some(ast::CreateFunctionBody::AsAfterOptions(expr)) => {
+                format!("{expr}")
+            }
+            Some(ast::CreateFunctionBody::Return(expr)) => {
+                format!("RETURN {expr}")
+            }
+            None => return Err(SqlError::Parse("CREATE FUNCTION requires a body".into())),
+        };
+        // Strip surrounding single-quotes if present (dollar-quoted strings arrive as string literals)
+        let body = body.trim_matches('\'').to_owned();
+
+        let volatility = match behavior {
+            Some(ast::FunctionBehavior::Immutable) => FunctionVolatility::Immutable,
+            Some(ast::FunctionBehavior::Stable) => FunctionVolatility::Stable,
+            Some(ast::FunctionBehavior::Volatile) | None => FunctionVolatility::Volatile,
+        };
+
+        let is_strict = matches!(
+            called_on_null,
+            Some(ast::FunctionCalledOnNull::Strict)
+            | Some(ast::FunctionCalledOnNull::ReturnsNullOnNullInput)
+        );
+
+        Ok(BoundStatement::CreateFunction {
+            def: FunctionDef {
+                name: func_name,
+                params,
+                return_type: ret_type,
+                language: lang,
+                body,
+                volatility,
+                is_strict,
+                or_replace,
+            },
+        })
     }
 
     /// Extract optional column index from aggregate/window function args.
@@ -1707,7 +1852,7 @@ impl Binder {
                 nullable: true,
                 is_primary_key: false,
                 default_value: None,
-                is_serial: false,
+                is_serial: false, max_length: None,
             });
         }
 
@@ -1738,6 +1883,141 @@ impl Binder {
     /// Supports `excluded.col` references: the expression schema is extended with
     /// a duplicate set of columns at offset `num_cols`, and `excluded` is registered
     /// as a table alias pointing to that offset.
+    fn bind_merge(
+        &self,
+        table: &ast::TableFactor,
+        source: &ast::TableFactor,
+        on: &ast::Expr,
+        clauses: &[ast::MergeClause],
+    ) -> Result<BoundStatement, SqlError> {
+        // Resolve target table
+        let target_name = match table {
+            ast::TableFactor::Table { name, .. } => name.to_string(),
+            _ => return Err(SqlError::Unsupported("MERGE non-table target".into())),
+        };
+        let target_schema = self.catalog.find_table(&target_name)
+            .ok_or_else(|| SqlError::UnknownTable(target_name.clone()))?
+            .clone();
+
+        // Resolve source table
+        let (source_name, source_alias) = match source {
+            ast::TableFactor::Table { name, alias, .. } => {
+                let n = name.to_string();
+                let a = alias.as_ref().map(|a| a.name.value.clone());
+                (n, a)
+            }
+            _ => return Err(SqlError::Unsupported("MERGE non-table source".into())),
+        };
+        let source_schema = self.catalog.find_table(&source_name)
+            .ok_or_else(|| SqlError::UnknownTable(source_name.clone()))?
+            .clone();
+
+        // Build combined schema: [target cols] ++ [source cols]
+        let target_ncols = target_schema.columns.len();
+        let mut combined_columns = target_schema.columns.clone();
+        for col in &source_schema.columns {
+            combined_columns.push(falcon_common::schema::ColumnDef {
+                id: falcon_common::types::ColumnId(combined_columns.len() as u32),
+                name: col.name.clone(),
+                data_type: col.data_type.clone(),
+                nullable: col.nullable,
+                is_primary_key: false,
+                default_value: col.default_value.clone(),
+                is_serial: false,
+                max_length: col.max_length,
+            });
+        }
+        let combined_schema = TableSchema {
+            id: target_schema.id,
+            name: target_schema.name.clone(),
+            columns: combined_columns,
+            primary_key_columns: target_schema.primary_key_columns.clone(),
+            next_serial_values: std::collections::HashMap::new(),
+            check_constraints: vec![],
+            unique_constraints: vec![],
+            foreign_keys: vec![],
+            ..Default::default()
+        };
+
+        // Register aliases so source.col / target.col resolve correctly
+        let mut aliases: AliasMap = std::collections::HashMap::new();
+        aliases.insert(target_name.to_lowercase(), (target_schema.name.clone(), 0));
+        let src_key = source_alias.as_deref().unwrap_or(&source_name).to_lowercase();
+        aliases.insert(src_key, (target_schema.name.clone(), target_ncols));
+
+        // Bind ON expression
+        let on_expr = self.bind_expr_with_aliases(on, &combined_schema, &aliases)?;
+
+        // Bind clauses
+        let mut bound_clauses = Vec::new();
+        for clause in clauses {
+            let kind = match clause.clause_kind {
+                ast::MergeClauseKind::Matched => MergeClauseKind::Matched,
+                ast::MergeClauseKind::NotMatched
+                | ast::MergeClauseKind::NotMatchedByTarget => MergeClauseKind::NotMatched,
+                ast::MergeClauseKind::NotMatchedBySource => {
+                    return Err(SqlError::Unsupported("NOT MATCHED BY SOURCE".into()));
+                }
+            };
+            let predicate = clause.predicate.as_ref()
+                .map(|e| self.bind_expr_with_aliases(e, &combined_schema, &aliases))
+                .transpose()?;
+            let action = match &clause.action {
+                ast::MergeAction::Delete => BoundMergeAction::Delete,
+                ast::MergeAction::Update { assignments } => {
+                    let mut bound_assignments = Vec::new();
+                    for assign in assignments {
+                        let col_name = match &assign.target {
+                            ast::AssignmentTarget::ColumnName(name) => name.to_string(),
+                            _ => return Err(SqlError::Unsupported("Tuple assignment".into())),
+                        };
+                        let col_idx = target_schema.find_column(&col_name)
+                            .ok_or_else(|| SqlError::UnknownColumn(col_name.clone()))?;
+                        let expr = self.bind_expr_with_aliases(
+                            &assign.value, &combined_schema, &aliases,
+                        )?;
+                        bound_assignments.push((col_idx, expr));
+                    }
+                    BoundMergeAction::Update(bound_assignments)
+                }
+                ast::MergeAction::Insert(insert_expr) => {
+                    let cols: Vec<usize> = if insert_expr.columns.is_empty() {
+                        (0..target_schema.columns.len()).collect()
+                    } else {
+                        insert_expr.columns.iter().map(|ident| {
+                            target_schema.find_column(&ident.value)
+                                .ok_or_else(|| SqlError::UnknownColumn(ident.value.clone()))
+                        }).collect::<Result<Vec<_>, _>>()?
+                    };
+                    let values = match &insert_expr.kind {
+                        ast::MergeInsertKind::Values(vals) => {
+                            let row = vals.rows.first()
+                                .ok_or_else(|| SqlError::Parse("MERGE INSERT requires VALUES".into()))?;
+                            row.iter()
+                                .map(|e| self.bind_expr_with_aliases(e, &combined_schema, &aliases))
+                                .collect::<Result<Vec<_>, _>>()?
+                        }
+                        _ => return Err(SqlError::Unsupported("MERGE INSERT ROW".into())),
+                    };
+                    BoundMergeAction::Insert(cols, values)
+                }
+            };
+            bound_clauses.push(BoundMergeClause { kind, predicate, action });
+        }
+
+        Ok(BoundStatement::Merge(BoundMerge {
+            target_table_id: target_schema.id,
+            target_name: target_schema.name.clone(),
+            target_schema: target_schema.clone(),
+            source_table_id: source_schema.id,
+            source_name: source_schema.name.clone(),
+            source_schema: source_schema.clone(),
+            on_expr,
+            clauses: bound_clauses,
+            source_col_offset: target_ncols,
+        }))
+    }
+
     pub(crate) fn bind_on_conflict(
         &self,
         on: &Option<ast::OnInsert>,
@@ -1764,7 +2044,7 @@ impl Binder {
                                 nullable: col.nullable,
                                 is_primary_key: false,
                                 default_value: col.default_value.clone(),
-                                is_serial: false,
+                                is_serial: false, max_length: None,
                             });
                         }
                         let extended_schema = TableSchema {
@@ -1801,7 +2081,10 @@ impl Binder {
                             )?;
                             assignments.push((col_idx, expr));
                         }
-                        Ok(Some(OnConflictAction::DoUpdate(assignments)))
+                        let where_clause = do_update.selection.as_ref()
+                            .map(|expr| self.bind_expr_with_aliases(expr, &extended_schema, &aliases))
+                            .transpose()?;
+                        Ok(Some(OnConflictAction::DoUpdate(assignments, where_clause)))
                     }
                 }
             }
