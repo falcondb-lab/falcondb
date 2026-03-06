@@ -100,13 +100,13 @@ Attempting to use them returns a clear `ErrorResponse` with the appropriate SQLS
 
 | Feature | Error Code | Error Message |
 |---------|-----------|---------------|
-| Stored procedures / PL/pgSQL | `0A000` | `stored procedures are not supported` |
+| ~~Stored procedures / PL/pgSQL~~ | ✅ | **Implemented** — `CREATE [OR REPLACE] FUNCTION ... LANGUAGE SQL/plpgsql`, `DROP FUNCTION`, `CALL`, PL/pgSQL: DECLARE, IF/ELSIF/ELSE, WHILE/FOR LOOP, RETURN, RAISE, PERFORM |
 | Triggers | `0A000` | `triggers are not supported` |
-| Materialized views | `0A000` | `materialized views are not supported` |
+| ~~Materialized views~~ | ✅ | **Implemented** — `CREATE MATERIALIZED VIEW ... AS SELECT`, `DROP MATERIALIZED VIEW [IF EXISTS]`, `REFRESH MATERIALIZED VIEW` |
 | Foreign data wrappers (FDW) | `0A000` | `foreign data wrappers are not supported` |
 | ~~Full-text search~~ | ✅ | **Implemented** — `tsvector`/`tsquery` types, `@@` operator, `to_tsvector`/`to_tsquery`/`ts_rank`/`ts_headline` + 10 more FTS functions |
 | HTAP / ColumnStore analytics | — | ColumnStore storage + vectorized AGG pushdown implemented; full analytics pipeline in progress |
-| Automatic rebalancing | — | Available via `[rebalance]` config section (see below) |
+| ~~Automatic rebalancing~~ | ✅ | **Implemented** — production-grade `RebalanceRunner` with policy-driven shard migration, batched row transfer, pause/resume, Prometheus metrics, Raft-aware rebalance, 47 chaos tests. Enable via `[rebalance]` config section. |
 | Custom types (beyond JSONB) | `0A000` | `custom types are not supported` |
 
 > **Scope Guard**: Full HTAP analytics pipeline is in progress. ColumnStore
@@ -123,15 +123,15 @@ Attempting to use them returns a clear `ErrorResponse` with the appropriate SQLS
 | redb storage engine | EXPERIMENTAL | `redb_table.rs` — compile-gated (`--features redb`); pure Rust, zero C deps |
 | Auto shard rebalancing | PRODUCTION | `rebalancer.rs` + `raft_rebalance.rs` — policy-driven background rebalancer with batched row migration, pause/resume, Prometheus metrics, exponential backoff. Enable via `[rebalance]` config section. |
 
-### Planned — NOT Implemented (P2 roadmap, stub or scaffolding only)
+### Non-Default Features (implemented, feature-gated or not yet on default production path)
 
-| Feature | Module Status | Target | Notes |
-|---------|:------------:|:------:|-------|
-| Disk spill / tiered storage | STUB | TBD | `disk_rowstore.rs` — code exists but not on production path |
-| ColumnStore full analytics | PARTIAL | TBD | Storage + vectorized AGG pushdown implemented; full scan/filter pipeline in progress |
-| Transparent Data Encryption | STUB | v1.4 | `encryption.rs` — key manager scaffolding, WAL encryption implemented |
-| Point-in-Time Recovery | STUB | v1.4 | `pitr.rs` — WAL archiver scaffolding only |
-| Multi-tenant resource isolation | STUB | TBD | `resource_isolation.rs`, `tenant_registry.rs` — not enforced |
+| Feature | Module Status | Notes |
+|---------|:------------:|-------|
+| Disk B-tree rowstore | EXPERIMENTAL | `disk_rowstore.rs` — 966-line page-based B-tree engine with page splits, LRU buffer pool, leaf chain scan, 9 tests. Feature-gated (`--features disk_rowstore`). |
+| ColumnStore analytics | PARTIAL | `columnstore.rs` storage + `executor_columnar.rs` vectorized GROUP BY AGG pushdown implemented; full scan/filter pipeline in progress |
+| Transparent Data Encryption (TDE) | IMPLEMENTED | `encryption.rs` — 886 lines, 22 tests. AES-256-GCM with PBKDF2 key derivation, per-scope DEKs, key rotation, re-encryption. Wired into WAL + SST + engine. Feature-gated (`--features encryption_tde`). |
+| Point-in-Time Recovery (PITR) | IMPLEMENTED | `pitr.rs` — 598 lines, 9 tests. WAL archiver, base backup management, named restore points, recovery executor with 4 targets (Latest/Time/LSN/XID). Feature-gated (`--features pitr`). |
+| Multi-tenant resource isolation | EXPERIMENTAL | `resource_isolation.rs` (547 lines) — I/O token-bucket + CPU concurrency limiter. `tenant_registry.rs` (515 lines) — tenant lifecycle, QPS/memory/txn quota enforcement. Feature-gated (`--features resource_isolation,tenant`). |
 
 ---
 
