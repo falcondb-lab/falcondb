@@ -12,3 +12,16 @@ Thumbs.db
 
 /dist/windows/*.exe
 /dist/windows/stage/
+/fua_bench.exe
+/fua_bench.pdb
+
+# runtime data directories
+/data/
+/falcon_data/
+/falcon_bench_data/
+/cost_data_falcon/
+/mig_data_falcon/
+/obs_data_node1/
+/obs_data_node2/
+/poc_data_primary/
+/poc_data_replica/
