@@ -81,13 +81,30 @@ pub fn estimate_selectivity(expr: &BoundExpr, stats: Option<&TableStatsInfo>) ->
         BoundExpr::Not(inner) => 1.0 - estimate_selectivity(inner, stats),
         BoundExpr::IsNull(_) => DEFAULT_IS_NULL_SEL,
         BoundExpr::IsNotNull(_) => 1.0 - DEFAULT_IS_NULL_SEL,
-        BoundExpr::Between { expr, low, high, negated } => {
+        BoundExpr::Between {
+            expr,
+            low,
+            high,
+            negated,
+        } => {
             let sel = estimate_between_sel(expr, low, high, stats);
-            if *negated { 1.0 - sel } else { sel }
+            if *negated {
+                1.0 - sel
+            } else {
+                sel
+            }
         }
-        BoundExpr::InList { expr, list, negated } => {
+        BoundExpr::InList {
+            expr,
+            list,
+            negated,
+        } => {
             let sel = estimate_in_list_sel(expr, list, stats);
-            if *negated { 1.0 - sel } else { sel }
+            if *negated {
+                1.0 - sel
+            } else {
+                sel
+            }
         }
         BoundExpr::Like { .. } => DEFAULT_LIKE_SEL,
         BoundExpr::Literal(Datum::Boolean(true)) => 1.0,
@@ -104,7 +121,13 @@ fn estimate_comparison_sel(
 ) -> f64 {
     let stats = match stats {
         Some(s) => s,
-        None => return if op == BinOp::Eq { DEFAULT_EQ_SEL } else { DEFAULT_RANGE_SEL },
+        None => {
+            return if op == BinOp::Eq {
+                DEFAULT_EQ_SEL
+            } else {
+                DEFAULT_RANGE_SEL
+            }
+        }
     };
 
     // col = literal or literal = col
@@ -131,13 +154,23 @@ fn estimate_comparison_sel(
         }
     }
 
-    if op == BinOp::Eq { DEFAULT_EQ_SEL } else { DEFAULT_RANGE_SEL }
+    if op == BinOp::Eq {
+        DEFAULT_EQ_SEL
+    } else {
+        DEFAULT_RANGE_SEL
+    }
 }
 
 fn col_literal_sel(col_idx: usize, value: &Datum, op: BinOp, stats: &TableStatsInfo) -> f64 {
     let cs = match stats.column(col_idx) {
         Some(c) => c,
-        None => return if op == BinOp::Eq { DEFAULT_EQ_SEL } else { DEFAULT_RANGE_SEL },
+        None => {
+            return if op == BinOp::Eq {
+                DEFAULT_EQ_SEL
+            } else {
+                DEFAULT_RANGE_SEL
+            }
+        }
     };
 
     match op {
@@ -162,7 +195,9 @@ fn col_literal_sel(col_idx: usize, value: &Datum, op: BinOp, stats: &TableStatsI
             if !cs.histogram_bounds.is_empty() && cs.histogram_rows > 0 {
                 let sel = histogram_lt_sel(&cs.histogram_bounds, value);
                 if op == BinOp::LtEq {
-                    return (sel + histogram_eq_sel(&cs.histogram_bounds, cs.histogram_rows, value)).min(1.0);
+                    return (sel
+                        + histogram_eq_sel(&cs.histogram_bounds, cs.histogram_rows, value))
+                    .min(1.0);
                 }
                 return sel;
             }
@@ -578,7 +613,8 @@ mod tests {
                     nullable: false,
                     is_primary_key: i == 0,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 })
                 .collect(),
             primary_key_columns: vec![0],

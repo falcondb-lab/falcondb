@@ -1,11 +1,22 @@
+use std::sync::OnceLock;
+
 use falcon_common::error::SqlError;
 use falcon_common::types::ShardId;
 use falcon_sql_frontend::types::*;
 
+use crate::ai_optimizer::{extract_features, AiOptimizer, FeatureContext};
 use crate::cost::{self, IndexedColumns, TableRowCounts, TableStatsMap};
 use crate::logical_plan::LogicalPlan;
 use crate::optimizer::{self, OptimizerConfig, OptimizerContext};
 use crate::plan::{DistAggMerge, DistGather, PhysicalPlan};
+
+/// Process-global AI optimizer instance.
+static AI_OPTIMIZER: OnceLock<AiOptimizer> = OnceLock::new();
+
+/// Get (or lazily initialize) the global AI optimizer.
+pub fn global_ai_optimizer() -> &'static AiOptimizer {
+    AI_OPTIMIZER.get_or_init(AiOptimizer::new)
+}
 
 /// Join algorithm strategy selected by the cost-based optimizer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,18 +44,17 @@ pub struct Planner;
 impl Planner {
     pub fn plan(stmt: &BoundStatement) -> Result<PhysicalPlan, SqlError> {
         match stmt {
-            BoundStatement::CreateDatabase { name, if_not_exists } => {
-                Ok(PhysicalPlan::CreateDatabase {
-                    name: name.clone(),
-                    if_not_exists: *if_not_exists,
-                })
-            }
-            BoundStatement::DropDatabase { name, if_exists } => {
-                Ok(PhysicalPlan::DropDatabase {
-                    name: name.clone(),
-                    if_exists: *if_exists,
-                })
-            }
+            BoundStatement::CreateDatabase {
+                name,
+                if_not_exists,
+            } => Ok(PhysicalPlan::CreateDatabase {
+                name: name.clone(),
+                if_not_exists: *if_not_exists,
+            }),
+            BoundStatement::DropDatabase { name, if_exists } => Ok(PhysicalPlan::DropDatabase {
+                name: name.clone(),
+                if_exists: *if_exists,
+            }),
             BoundStatement::CreateTable(ct) => Ok(PhysicalPlan::CreateTable {
                 schema: ct.schema.clone(),
                 if_not_exists: ct.if_not_exists,
@@ -217,9 +227,7 @@ impl Planner {
                 })
             }
             BoundStatement::RefreshMaterializedView { name } => {
-                Ok(PhysicalPlan::RefreshMaterializedView {
-                    name: name.clone(),
-                })
+                Ok(PhysicalPlan::RefreshMaterializedView { name: name.clone() })
             }
             BoundStatement::Begin => Ok(PhysicalPlan::Begin),
             BoundStatement::Commit => Ok(PhysicalPlan::Commit),
@@ -258,18 +266,17 @@ impl Planner {
             BoundStatement::DropTenant { name } => {
                 Ok(PhysicalPlan::DropTenant { name: name.clone() })
             }
-            BoundStatement::CreateSchema { name, if_not_exists } => {
-                Ok(PhysicalPlan::CreateSchema {
-                    name: name.clone(),
-                    if_not_exists: *if_not_exists,
-                })
-            }
-            BoundStatement::DropSchema { name, if_exists } => {
-                Ok(PhysicalPlan::DropSchema {
-                    name: name.clone(),
-                    if_exists: *if_exists,
-                })
-            }
+            BoundStatement::CreateSchema {
+                name,
+                if_not_exists,
+            } => Ok(PhysicalPlan::CreateSchema {
+                name: name.clone(),
+                if_not_exists: *if_not_exists,
+            }),
+            BoundStatement::DropSchema { name, if_exists } => Ok(PhysicalPlan::DropSchema {
+                name: name.clone(),
+                if_exists: *if_exists,
+            }),
             BoundStatement::CreateRole {
                 name,
                 can_login,
@@ -399,9 +406,9 @@ impl Planner {
                     file_path: file_path.clone(),
                 })
             }
-            BoundStatement::CreateFunction { def } => Ok(PhysicalPlan::CreateFunction {
-                def: def.clone(),
-            }),
+            BoundStatement::CreateFunction { def } => {
+                Ok(PhysicalPlan::CreateFunction { def: def.clone() })
+            }
             BoundStatement::DropFunction { name, if_exists } => Ok(PhysicalPlan::DropFunction {
                 name: name.clone(),
                 if_exists: *if_exists,
@@ -410,6 +417,47 @@ impl Planner {
                 name: name.clone(),
                 args: args.clone(),
             }),
+            BoundStatement::CreateTableAs {
+                table_name,
+                if_not_exists,
+                query,
+            } => Ok(PhysicalPlan::CreateTableAs {
+                table_name: table_name.clone(),
+                if_not_exists: *if_not_exists,
+                query: query.clone(),
+            }),
+            BoundStatement::NoOp => Ok(PhysicalPlan::NoOp),
+            BoundStatement::ShowPgVar { name, value } => Ok(PhysicalPlan::ShowPgVar {
+                name: name.clone(),
+                value: value.clone(),
+            }),
+            BoundStatement::ShowDdlStatus => Ok(PhysicalPlan::ShowDdlStatus),
+            BoundStatement::Backup {
+                dest_dir,
+                incremental,
+                label,
+            } => Ok(PhysicalPlan::Backup {
+                dest_dir: dest_dir.clone(),
+                incremental: *incremental,
+                label: label.clone(),
+            }),
+            BoundStatement::Restore { src_dir } => Ok(PhysicalPlan::Restore {
+                src_dir: src_dir.clone(),
+            }),
+            BoundStatement::CreateJob {
+                name,
+                backup_type,
+                dest_dir,
+                interval_secs,
+            } => Ok(PhysicalPlan::CreateJob {
+                name: name.clone(),
+                backup_type: backup_type.clone(),
+                dest_dir: dest_dir.clone(),
+                interval_secs: *interval_secs,
+            }),
+            BoundStatement::DropJob { job_id } => Ok(PhysicalPlan::DropJob { job_id: *job_id }),
+            BoundStatement::ShowJobs => Ok(PhysicalPlan::ShowJobs),
+            BoundStatement::ShowBackupStatus => Ok(PhysicalPlan::ShowBackupStatus),
         }
     }
 
@@ -1316,9 +1364,9 @@ impl Planner {
         // Check if ORDER BY matches any join key (merge join can avoid sort)
         let order_by_matches_join_key = !sel.order_by.is_empty()
             && sel.joins.iter().any(|j| {
-                j.condition.as_ref().is_some_and(|cond| {
-                    Self::order_by_matches_join_condition(&sel.order_by, cond)
-                })
+                j.condition
+                    .as_ref()
+                    .is_some_and(|cond| Self::order_by_matches_join_condition(&sel.order_by, cond))
             });
 
         let strategy = if !all_equi {
@@ -1504,10 +1552,16 @@ impl Planner {
     /// Extract range predicates from a filter expression that match an indexed column.
     /// Returns (column_idx, lower_bound, upper_bound, residual_filter).
     /// Each bound is `Option<(literal_expr, inclusive)>`.
+    #[allow(clippy::type_complexity)]
     fn try_extract_range_predicate(
         filter: &BoundExpr,
         indexed_cols: &[usize],
-    ) -> Option<(usize, Option<(BoundExpr, bool)>, Option<(BoundExpr, bool)>, Option<BoundExpr>)> {
+    ) -> Option<(
+        usize,
+        Option<(BoundExpr, bool)>,
+        Option<(BoundExpr, bool)>,
+        Option<BoundExpr>,
+    )> {
         // Flatten AND tree
         let mut conjuncts: Vec<&BoundExpr> = Vec::new();
         Self::flatten_and_refs(filter, &mut conjuncts);
@@ -1560,6 +1614,7 @@ impl Planner {
 
     /// Extract a single range bound from a comparison expression.
     /// Returns (col_idx, optional_lower_bound, optional_upper_bound).
+    #[allow(clippy::type_complexity)]
     fn try_extract_single_range_bound(
         expr: &BoundExpr,
     ) -> Option<(usize, Option<(BoundExpr, bool)>, Option<(BoundExpr, bool)>)> {
@@ -1741,7 +1796,11 @@ impl Planner {
             }
         };
 
-        // Optimize
+        // Extract AI features before rule-based optimization (captures original shape)
+        let ai_ctx = FeatureContext { stats, indexes };
+        let features = extract_features(&logical, &ai_ctx);
+
+        // Rule-based optimization
         let config = OptimizerConfig::default();
         let ctx = OptimizerContext {
             stats: &row_counts,
@@ -1750,8 +1809,16 @@ impl Planner {
         };
         let optimized = optimizer::optimize(logical, &ctx);
 
-        // Lower to physical plan with cost-based decisions
-        Self::lower_to_physical(optimized, stats, indexes)
+        // Lower to physical plan
+        let plan = Self::lower_to_physical(optimized, stats, indexes)?;
+
+        // AI plan selection: score the plan and record for future learning.
+        // Currently a single-candidate pass — the model scores the plan and
+        // the features are stored for feedback association.
+        let ai = global_ai_optimizer();
+        let _ = ai.select_plan(&[(plan.clone(), features)]);
+
+        Ok(plan)
     }
 
     /// Lower an optimized `LogicalPlan` tree to a `PhysicalPlan`.
@@ -1765,50 +1832,171 @@ impl Planner {
             // The optimizer decomposes SELECT into Scan → Filter → Join → Agg → Sort → Limit → Project.
             // We need to re-compose these into the flat PhysicalPlan variants the executor expects.
             // Strategy: walk down collecting components, then emit the right physical operator.
-            LogicalPlan::Project { input, projections, visible_count } => {
-                Self::lower_select_tree(*input, projections, visible_count, stats, indexes)
-            }
-            LogicalPlan::Aggregate { input, group_by, grouping_sets, projections, visible_count, having } => {
+            LogicalPlan::Project {
+                input,
+                projections,
+                visible_count,
+            } => Self::lower_select_tree(*input, projections, visible_count, stats, indexes),
+            LogicalPlan::Aggregate {
+                input,
+                group_by,
+                grouping_sets,
+                projections,
+                visible_count,
+                having,
+            } => {
                 // Aggregate at top level (no outer Project wrapping it)
-                let (table_id, schema, filter, virtual_rows, joins, ctes, unions, order_by, limit, offset, distinct) =
-                    Self::collect_scan_components(*input);
+                let (
+                    table_id,
+                    schema,
+                    filter,
+                    virtual_rows,
+                    joins,
+                    ctes,
+                    unions,
+                    order_by,
+                    limit,
+                    offset,
+                    distinct,
+                ) = Self::collect_scan_components(*input);
                 if !joins.is_empty() {
                     return Self::build_join_plan(
-                        table_id, schema, joins, projections, visible_count,
-                        filter, group_by, grouping_sets, having, order_by,
-                        limit, offset, distinct, ctes, unions, stats,
+                        table_id,
+                        schema,
+                        joins,
+                        projections,
+                        visible_count,
+                        filter,
+                        group_by,
+                        grouping_sets,
+                        having,
+                        order_by,
+                        limit,
+                        offset,
+                        distinct,
+                        ctes,
+                        unions,
+                        stats,
                     );
                 }
                 Self::build_scan_plan(
-                    table_id, schema, projections, visible_count,
-                    filter, group_by, grouping_sets, having, order_by,
-                    limit, offset, distinct, ctes, unions, virtual_rows,
-                    RowLockMode::None, stats, indexes,
+                    table_id,
+                    schema,
+                    projections,
+                    visible_count,
+                    filter,
+                    group_by,
+                    grouping_sets,
+                    having,
+                    order_by,
+                    limit,
+                    offset,
+                    distinct,
+                    ctes,
+                    unions,
+                    virtual_rows,
+                    RowLockMode::None,
+                    stats,
+                    indexes,
                 )
             }
 
             // ── DML / DDL pass-through ───────────────────────────────
-            LogicalPlan::Insert { table_id, schema, columns, rows, source_select, returning, on_conflict } => {
-                Ok(PhysicalPlan::Insert { table_id, schema, columns, rows, source_select, returning, on_conflict })
+            LogicalPlan::Insert {
+                table_id,
+                schema,
+                columns,
+                rows,
+                source_select,
+                returning,
+                on_conflict,
+            } => Ok(PhysicalPlan::Insert {
+                table_id,
+                schema,
+                columns,
+                rows,
+                source_select,
+                returning,
+                on_conflict,
+            }),
+            LogicalPlan::Update {
+                table_id,
+                schema,
+                assignments,
+                filter,
+                returning,
+                from_table,
+            } => Ok(PhysicalPlan::Update {
+                table_id,
+                schema,
+                assignments,
+                filter,
+                returning,
+                from_table,
+            }),
+            LogicalPlan::Delete {
+                table_id,
+                schema,
+                filter,
+                returning,
+                using_table,
+            } => Ok(PhysicalPlan::Delete {
+                table_id,
+                schema,
+                filter,
+                returning,
+                using_table,
+            }),
+            LogicalPlan::CreateTable {
+                schema,
+                if_not_exists,
+            } => Ok(PhysicalPlan::CreateTable {
+                schema,
+                if_not_exists,
+            }),
+            LogicalPlan::DropTable {
+                table_name,
+                if_exists,
+            } => Ok(PhysicalPlan::DropTable {
+                table_name,
+                if_exists,
+            }),
+            LogicalPlan::AlterTable { table_name, ops } => {
+                Ok(PhysicalPlan::AlterTable { table_name, ops })
             }
-            LogicalPlan::Update { table_id, schema, assignments, filter, returning, from_table } => {
-                Ok(PhysicalPlan::Update { table_id, schema, assignments, filter, returning, from_table })
-            }
-            LogicalPlan::Delete { table_id, schema, filter, returning, using_table } => {
-                Ok(PhysicalPlan::Delete { table_id, schema, filter, returning, using_table })
-            }
-            LogicalPlan::CreateTable { schema, if_not_exists } => Ok(PhysicalPlan::CreateTable { schema, if_not_exists }),
-            LogicalPlan::DropTable { table_name, if_exists } => Ok(PhysicalPlan::DropTable { table_name, if_exists }),
-            LogicalPlan::AlterTable { table_name, ops } => Ok(PhysicalPlan::AlterTable { table_name, ops }),
             LogicalPlan::Truncate { table_name } => Ok(PhysicalPlan::Truncate { table_name }),
-            LogicalPlan::CreateIndex { index_name, table_name, column_indices, unique, concurrently } => {
-                Ok(PhysicalPlan::CreateIndex { index_name, table_name, column_indices, unique, concurrently })
-            }
+            LogicalPlan::CreateIndex {
+                index_name,
+                table_name,
+                column_indices,
+                unique,
+                concurrently,
+            } => Ok(PhysicalPlan::CreateIndex {
+                index_name,
+                table_name,
+                column_indices,
+                unique,
+                concurrently,
+            }),
             LogicalPlan::DropIndex { index_name } => Ok(PhysicalPlan::DropIndex { index_name }),
-            LogicalPlan::CreateView { name, query_sql, or_replace } => Ok(PhysicalPlan::CreateView { name, query_sql, or_replace }),
-            LogicalPlan::DropView { name, if_exists } => Ok(PhysicalPlan::DropView { name, if_exists }),
-            LogicalPlan::CreateSequence { name, start } => Ok(PhysicalPlan::CreateSequence { name, start }),
-            LogicalPlan::DropSequence { name, if_exists } => Ok(PhysicalPlan::DropSequence { name, if_exists }),
+            LogicalPlan::CreateView {
+                name,
+                query_sql,
+                or_replace,
+            } => Ok(PhysicalPlan::CreateView {
+                name,
+                query_sql,
+                or_replace,
+            }),
+            LogicalPlan::DropView { name, if_exists } => {
+                Ok(PhysicalPlan::DropView { name, if_exists })
+            }
+            LogicalPlan::CreateSequence { name, start } => {
+                Ok(PhysicalPlan::CreateSequence { name, start })
+            }
+            LogicalPlan::DropSequence { name, if_exists } => {
+                Ok(PhysicalPlan::DropSequence { name, if_exists })
+            }
             LogicalPlan::Explain(inner) => {
                 let p = Self::lower_to_physical(*inner, stats, indexes)?;
                 Ok(PhysicalPlan::Explain(Box::new(p)))
@@ -1826,23 +2014,89 @@ impl Planner {
             LogicalPlan::ShowConnections => Ok(PhysicalPlan::ShowConnections),
             LogicalPlan::RunGc => Ok(PhysicalPlan::RunGc),
             LogicalPlan::Analyze { table_name } => Ok(PhysicalPlan::Analyze { table_name }),
-            LogicalPlan::ShowTableStats { table_name } => Ok(PhysicalPlan::ShowTableStats { table_name }),
+            LogicalPlan::ShowTableStats { table_name } => {
+                Ok(PhysicalPlan::ShowTableStats { table_name })
+            }
             LogicalPlan::ShowSequences => Ok(PhysicalPlan::ShowSequences),
             LogicalPlan::ShowTenants => Ok(PhysicalPlan::ShowTenants),
             LogicalPlan::ShowTenantUsage => Ok(PhysicalPlan::ShowTenantUsage),
-            LogicalPlan::CreateTenant { name, max_qps, max_storage_bytes } => {
-                Ok(PhysicalPlan::CreateTenant { name, max_qps, max_storage_bytes })
-            }
+            LogicalPlan::CreateTenant {
+                name,
+                max_qps,
+                max_storage_bytes,
+            } => Ok(PhysicalPlan::CreateTenant {
+                name,
+                max_qps,
+                max_storage_bytes,
+            }),
             LogicalPlan::DropTenant { name } => Ok(PhysicalPlan::DropTenant { name }),
-            LogicalPlan::CopyFrom { table_id, schema, columns, csv, delimiter, header, null_string, quote, escape, file_path } => {
-                Ok(PhysicalPlan::CopyFrom { table_id, schema, columns, csv, delimiter, header, null_string, quote, escape, file_path })
-            }
-            LogicalPlan::CopyTo { table_id, schema, columns, csv, delimiter, header, null_string, quote, escape, file_path } => {
-                Ok(PhysicalPlan::CopyTo { table_id, schema, columns, csv, delimiter, header, null_string, quote, escape, file_path })
-            }
-            LogicalPlan::CopyQueryTo { query, csv, delimiter, header, null_string, quote, escape, file_path } => {
+            LogicalPlan::CopyFrom {
+                table_id,
+                schema,
+                columns,
+                csv,
+                delimiter,
+                header,
+                null_string,
+                quote,
+                escape,
+                file_path,
+            } => Ok(PhysicalPlan::CopyFrom {
+                table_id,
+                schema,
+                columns,
+                csv,
+                delimiter,
+                header,
+                null_string,
+                quote,
+                escape,
+                file_path,
+            }),
+            LogicalPlan::CopyTo {
+                table_id,
+                schema,
+                columns,
+                csv,
+                delimiter,
+                header,
+                null_string,
+                quote,
+                escape,
+                file_path,
+            } => Ok(PhysicalPlan::CopyTo {
+                table_id,
+                schema,
+                columns,
+                csv,
+                delimiter,
+                header,
+                null_string,
+                quote,
+                escape,
+                file_path,
+            }),
+            LogicalPlan::CopyQueryTo {
+                query,
+                csv,
+                delimiter,
+                header,
+                null_string,
+                quote,
+                escape,
+                file_path,
+            } => {
                 let inner = Self::lower_to_physical(*query, stats, indexes)?;
-                Ok(PhysicalPlan::CopyQueryTo { query: Box::new(inner), csv, delimiter, header, null_string, quote, escape, file_path })
+                Ok(PhysicalPlan::CopyQueryTo {
+                    query: Box::new(inner),
+                    csv,
+                    delimiter,
+                    header,
+                    null_string,
+                    quote,
+                    escape,
+                    file_path,
+                })
             }
             // For remaining logical nodes not directly mapped, fall through to a scan
             other => Self::lower_remaining(other, stats, indexes),
@@ -1857,8 +2111,19 @@ impl Planner {
         stats: &TableStatsMap,
         indexes: &IndexedColumns,
     ) -> Result<PhysicalPlan, SqlError> {
-        let (table_id, schema, filter, virtual_rows, joins, ctes, unions, order_by, limit, offset, distinct) =
-            Self::collect_scan_components(input);
+        let (
+            table_id,
+            schema,
+            filter,
+            virtual_rows,
+            joins,
+            ctes,
+            unions,
+            order_by,
+            limit,
+            offset,
+            distinct,
+        ) = Self::collect_scan_components(input);
 
         let group_by = vec![];
         let grouping_sets = vec![];
@@ -1866,34 +2131,63 @@ impl Planner {
 
         if !joins.is_empty() {
             return Self::build_join_plan(
-                table_id, schema, joins, projections, visible_count,
-                filter, group_by, grouping_sets, having, order_by,
-                limit, offset, distinct, ctes, unions, stats,
+                table_id,
+                schema,
+                joins,
+                projections,
+                visible_count,
+                filter,
+                group_by,
+                grouping_sets,
+                having,
+                order_by,
+                limit,
+                offset,
+                distinct,
+                ctes,
+                unions,
+                stats,
             );
         }
 
         Self::build_scan_plan(
-            table_id, schema, projections, visible_count,
-            filter, group_by, grouping_sets, having, order_by,
-            limit, offset, distinct, ctes, unions, virtual_rows,
-            RowLockMode::None, stats, indexes,
+            table_id,
+            schema,
+            projections,
+            visible_count,
+            filter,
+            group_by,
+            grouping_sets,
+            having,
+            order_by,
+            limit,
+            offset,
+            distinct,
+            ctes,
+            unions,
+            virtual_rows,
+            RowLockMode::None,
+            stats,
+            indexes,
         )
     }
 
     /// Walk down a logical plan tree, extracting components needed for physical plan construction.
     #[allow(clippy::type_complexity)]
-    fn collect_scan_components(plan: LogicalPlan) -> (
+    fn collect_scan_components(
+        plan: LogicalPlan,
+    ) -> (
         falcon_common::types::TableId,
         falcon_common::schema::TableSchema,
-        Option<BoundExpr>,           // filter
+        Option<BoundExpr>,                   // filter
         Vec<falcon_common::datum::OwnedRow>, // virtual_rows
-        Vec<BoundJoin>,              // joins
-        Vec<BoundCte>,               // ctes
+        Vec<BoundJoin>,                      // joins
+        Vec<BoundCte>,                       // ctes
         Vec<(BoundSelect, SetOpKind, bool)>, // unions
-        Vec<BoundOrderBy>,           // order_by
-        Option<usize>,               // limit
-        Option<usize>,               // offset
-        DistinctMode,                // distinct
+        Vec<BoundOrderBy>,                   // order_by
+        Option<usize>,                       // limit
+        Option<usize>,                       // offset
+        DistinctMode,                        // distinct
     ) {
         let mut filter = None;
         let mut order_by = vec![];
@@ -1920,15 +2214,26 @@ impl Planner {
                     });
                     current = *input;
                 }
-                LogicalPlan::Sort { input, order_by: ob } => {
+                LogicalPlan::Sort {
+                    input,
+                    order_by: ob,
+                } => {
                     if order_by.is_empty() {
                         order_by = ob;
                     }
                     current = *input;
                 }
-                LogicalPlan::Limit { input, limit: l, offset: o } => {
-                    if limit.is_none() { limit = l; }
-                    if offset.is_none() { offset = o; }
+                LogicalPlan::Limit {
+                    input,
+                    limit: l,
+                    offset: o,
+                } => {
+                    if limit.is_none() {
+                        limit = l;
+                    }
+                    if offset.is_none() {
+                        offset = o;
+                    }
                     current = *input;
                 }
                 LogicalPlan::Distinct { input, mode } => {
@@ -1943,26 +2248,62 @@ impl Planner {
                     ctes = c;
                     current = *input;
                 }
-                LogicalPlan::SetOp { left, right: _, kind: _, all: _ } => {
+                LogicalPlan::SetOp {
+                    left,
+                    right: _,
+                    kind: _,
+                    all: _,
+                } => {
                     // TODO: handle set ops properly; for now just descend left
                     current = *left;
                 }
-                LogicalPlan::Aggregate { input, group_by: _, grouping_sets: _, projections: _, visible_count: _, having: _ } => {
+                LogicalPlan::Aggregate {
+                    input,
+                    group_by: _,
+                    grouping_sets: _,
+                    projections: _,
+                    visible_count: _,
+                    having: _,
+                } => {
                     // Aggregate should be handled by caller before this point
                     current = *input;
                 }
                 LogicalPlan::Project { input, .. } => {
                     current = *input;
                 }
-                LogicalPlan::Scan { table_id, schema, virtual_rows } => {
-                    return (table_id, schema, filter, virtual_rows, joins, ctes, unions, order_by, limit, offset, distinct);
+                LogicalPlan::Scan {
+                    table_id,
+                    schema,
+                    virtual_rows,
+                } => {
+                    return (
+                        table_id,
+                        schema,
+                        filter,
+                        virtual_rows,
+                        joins,
+                        ctes,
+                        unions,
+                        order_by,
+                        limit,
+                        offset,
+                        distinct,
+                    );
                 }
                 _ => {
                     // Fallback for unexpected nodes
                     return (
                         falcon_common::types::TableId(0),
                         falcon_common::schema::TableSchema::default(),
-                        filter, vec![], joins, ctes, unions, order_by, limit, offset, distinct,
+                        filter,
+                        vec![],
+                        joins,
+                        ctes,
+                        unions,
+                        order_by,
+                        limit,
+                        offset,
+                        distinct,
                     );
                 }
             }
@@ -1994,9 +2335,21 @@ impl Planner {
         // Columnstore tables use ColumnScan
         if schema.storage_type == falcon_common::schema::StorageType::Columnstore {
             return Ok(PhysicalPlan::ColumnScan {
-                table_id, schema, projections, visible_projection_count: visible_projection_count,
-                filter, group_by, grouping_sets, having, order_by,
-                limit, offset, distinct, ctes, unions, for_lock,
+                table_id,
+                schema,
+                projections,
+                visible_projection_count,
+                filter,
+                group_by,
+                grouping_sets,
+                having,
+                order_by,
+                limit,
+                offset,
+                distinct,
+                ctes,
+                unions,
+                for_lock,
             });
         }
 
@@ -2016,11 +2369,24 @@ impl Planner {
                             Self::try_extract_index_predicate(f, indexed_cols)
                         {
                             return Ok(PhysicalPlan::IndexScan {
-                                table_id, schema, index_col: col_idx, index_value: value,
-                                projections, visible_projection_count,
+                                table_id,
+                                schema,
+                                index_col: col_idx,
+                                index_value: value,
+                                projections,
+                                visible_projection_count,
                                 filter: residual,
-                                group_by, grouping_sets, having, order_by,
-                                limit, offset, distinct, ctes, unions, virtual_rows, for_lock,
+                                group_by,
+                                grouping_sets,
+                                having,
+                                order_by,
+                                limit,
+                                offset,
+                                distinct,
+                                ctes,
+                                unions,
+                                virtual_rows,
+                                for_lock,
                             });
                         }
                         // Try range scan
@@ -2028,12 +2394,25 @@ impl Planner {
                             Self::try_extract_range_predicate(f, indexed_cols)
                         {
                             return Ok(PhysicalPlan::IndexRangeScan {
-                                table_id, schema, index_col: col_idx,
-                                lower_bound: lower, upper_bound: upper,
-                                projections, visible_projection_count,
+                                table_id,
+                                schema,
+                                index_col: col_idx,
+                                lower_bound: lower,
+                                upper_bound: upper,
+                                projections,
+                                visible_projection_count,
                                 filter: residual,
-                                group_by, grouping_sets, having, order_by,
-                                limit, offset, distinct, ctes, unions, virtual_rows, for_lock,
+                                group_by,
+                                grouping_sets,
+                                having,
+                                order_by,
+                                limit,
+                                offset,
+                                distinct,
+                                ctes,
+                                unions,
+                                virtual_rows,
+                                for_lock,
                             });
                         }
                     }
@@ -2043,9 +2422,22 @@ impl Planner {
 
         // Default: SeqScan
         Ok(PhysicalPlan::SeqScan {
-            table_id, schema, projections, visible_projection_count,
-            filter, group_by, grouping_sets, having, order_by,
-            limit, offset, distinct, ctes, unions, virtual_rows, for_lock,
+            table_id,
+            schema,
+            projections,
+            visible_projection_count,
+            filter,
+            group_by,
+            grouping_sets,
+            having,
+            order_by,
+            limit,
+            offset,
+            distinct,
+            ctes,
+            unions,
+            virtual_rows,
+            for_lock,
         })
     }
 
@@ -2075,15 +2467,16 @@ impl Planner {
         let left_col_count = joins.first().map_or(0, |j| j.right_col_offset);
         let reordered = cost::reorder_joins(left_col_count, &joins, &row_counts);
 
-        let all_equi = reordered.iter().all(|j| Self::is_equi_join_condition(j.condition.as_ref()));
+        let all_equi = reordered
+            .iter()
+            .all(|j| Self::is_equi_join_condition(j.condition.as_ref()));
         let left_rows = stats.get(&table_id).map_or(1000, |s| s.row_count);
-        let right_rows_sum: u64 = reordered.iter()
+        let right_rows_sum: u64 = reordered
+            .iter()
             .map(|j| stats.get(&j.right_table_id).map_or(1000, |s| s.row_count))
             .sum();
 
-        let strategy = if !all_equi {
-            JoinStrategy::NestedLoop
-        } else if right_rows_sum < 100 {
+        let strategy = if !all_equi || right_rows_sum < 100 {
             JoinStrategy::NestedLoop
         } else if left_rows > 50_000 && right_rows_sum > 50_000 {
             JoinStrategy::MergeSort
@@ -2093,22 +2486,49 @@ impl Planner {
 
         match strategy {
             JoinStrategy::NestedLoop => Ok(PhysicalPlan::NestedLoopJoin {
-                left_table_id: table_id, left_schema: schema.clone(),
-                joins: reordered, combined_schema: schema,
-                projections, visible_projection_count,
-                filter, order_by, limit, offset, distinct, ctes, unions,
+                left_table_id: table_id,
+                left_schema: schema.clone(),
+                joins: reordered,
+                combined_schema: schema,
+                projections,
+                visible_projection_count,
+                filter,
+                order_by,
+                limit,
+                offset,
+                distinct,
+                ctes,
+                unions,
             }),
             JoinStrategy::Hash => Ok(PhysicalPlan::HashJoin {
-                left_table_id: table_id, left_schema: schema.clone(),
-                joins: reordered, combined_schema: schema,
-                projections, visible_projection_count,
-                filter, order_by, limit, offset, distinct, ctes, unions,
+                left_table_id: table_id,
+                left_schema: schema.clone(),
+                joins: reordered,
+                combined_schema: schema,
+                projections,
+                visible_projection_count,
+                filter,
+                order_by,
+                limit,
+                offset,
+                distinct,
+                ctes,
+                unions,
             }),
             JoinStrategy::MergeSort => Ok(PhysicalPlan::MergeSortJoin {
-                left_table_id: table_id, left_schema: schema.clone(),
-                joins: reordered, combined_schema: schema,
-                projections, visible_projection_count,
-                filter, order_by, limit, offset, distinct, ctes, unions,
+                left_table_id: table_id,
+                left_schema: schema.clone(),
+                joins: reordered,
+                combined_schema: schema,
+                projections,
+                visible_projection_count,
+                filter,
+                order_by,
+                limit,
+                offset,
+                distinct,
+                ctes,
+                unions,
             }),
         }
     }
@@ -2120,20 +2540,58 @@ impl Planner {
         indexes: &IndexedColumns,
     ) -> Result<PhysicalPlan, SqlError> {
         // For nodes like bare Scan, Filter, Sort, etc., collect components and build scan
-        let (table_id, schema, filter, virtual_rows, joins, ctes, unions, order_by, limit, offset, distinct) =
-            Self::collect_scan_components(plan);
+        let (
+            table_id,
+            schema,
+            filter,
+            virtual_rows,
+            joins,
+            ctes,
+            unions,
+            order_by,
+            limit,
+            offset,
+            distinct,
+        ) = Self::collect_scan_components(plan);
         if !joins.is_empty() {
             return Self::build_join_plan(
-                table_id, schema, joins, vec![], 0,
-                filter, vec![], vec![], None, order_by,
-                limit, offset, distinct, ctes, unions, stats,
+                table_id,
+                schema,
+                joins,
+                vec![],
+                0,
+                filter,
+                vec![],
+                vec![],
+                None,
+                order_by,
+                limit,
+                offset,
+                distinct,
+                ctes,
+                unions,
+                stats,
             );
         }
         Self::build_scan_plan(
-            table_id, schema, vec![], 0,
-            filter, vec![], vec![], None, order_by,
-            limit, offset, distinct, ctes, unions, virtual_rows,
-            RowLockMode::None, stats, indexes,
+            table_id,
+            schema,
+            vec![],
+            0,
+            filter,
+            vec![],
+            vec![],
+            None,
+            order_by,
+            limit,
+            offset,
+            distinct,
+            ctes,
+            unions,
+            virtual_rows,
+            RowLockMode::None,
+            stats,
+            indexes,
         )
     }
 }

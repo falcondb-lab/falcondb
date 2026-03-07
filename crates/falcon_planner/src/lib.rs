@@ -1,3 +1,4 @@
+pub mod ai_optimizer;
 pub mod cost;
 pub mod logical_plan;
 pub mod optimizer;
@@ -6,9 +7,13 @@ pub mod planner;
 #[cfg(test)]
 mod tests;
 
+pub use ai_optimizer::{
+    AiOptimizer, AiOptimizerDiagnostics, FeatureVec, FeedbackRecord, PlanKind, QueryFingerprint,
+    FEATURE_DIM,
+};
 pub use cost::{
-    ColumnStatsInfo, IndexedColumns, TableRowCounts, TableStatsInfo, TableStatsMap,
-    estimate_selectivity, prefer_index_scan, seq_scan_cost, index_scan_cost,
+    estimate_selectivity, index_scan_cost, prefer_index_scan, seq_scan_cost, ColumnStatsInfo,
+    IndexedColumns, TableRowCounts, TableStatsInfo, TableStatsMap,
 };
 pub use plan::*;
-pub use planner::Planner;
+pub use planner::{global_ai_optimizer, Planner};

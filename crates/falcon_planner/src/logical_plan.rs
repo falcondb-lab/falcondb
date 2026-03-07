@@ -334,11 +334,9 @@ impl LogicalPlan {
             BoundStatement::Merge(_)
             | BoundStatement::CreateMaterializedView { .. }
             | BoundStatement::DropMaterializedView { .. }
-            | BoundStatement::RefreshMaterializedView { .. } => {
-                Err(falcon_common::error::SqlError::Unsupported(
-                    "uses legacy planner path".into(),
-                ))
-            }
+            | BoundStatement::RefreshMaterializedView { .. } => Err(
+                falcon_common::error::SqlError::Unsupported("uses legacy planner path".into()),
+            ),
 
             // ── SELECT ──────────────────────────────────────────────
             BoundStatement::Select(sel) => Ok(Self::from_bound_select(sel)),
@@ -380,9 +378,7 @@ impl LogicalPlan {
                 max_qps: *max_qps,
                 max_storage_bytes: *max_storage_bytes,
             }),
-            BoundStatement::DropTenant { name } => {
-                Ok(Self::DropTenant { name: name.clone() })
-            }
+            BoundStatement::DropTenant { name } => Ok(Self::DropTenant { name: name.clone() }),
 
             // ── COPY ─────────────────────────────────────────────────
             BoundStatement::CopyFrom {
@@ -471,6 +467,28 @@ impl LogicalPlan {
                     "Schema/Role/Grant/Function DDL uses legacy planner path".into(),
                 ))
             }
+            BoundStatement::CreateTableAs { .. } => {
+                Err(falcon_common::error::SqlError::Unsupported(
+                    "CreateTableAs uses legacy planner path".into(),
+                ))
+            }
+            BoundStatement::NoOp => Err(falcon_common::error::SqlError::Unsupported(
+                "NoOp uses legacy planner path".into(),
+            )),
+            BoundStatement::ShowPgVar { .. } => Err(falcon_common::error::SqlError::Unsupported(
+                "ShowPgVar uses legacy planner path".into(),
+            )),
+            BoundStatement::ShowDdlStatus => Err(falcon_common::error::SqlError::Unsupported(
+                "ShowDdlStatus uses legacy planner path".into(),
+            )),
+            BoundStatement::Backup { .. }
+            | BoundStatement::Restore { .. }
+            | BoundStatement::CreateJob { .. }
+            | BoundStatement::DropJob { .. }
+            | BoundStatement::ShowJobs
+            | BoundStatement::ShowBackupStatus => Err(falcon_common::error::SqlError::Unsupported(
+                "Backup/Job commands use legacy planner path".into(),
+            )),
         }
     }
 

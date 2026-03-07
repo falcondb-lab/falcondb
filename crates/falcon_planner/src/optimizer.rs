@@ -133,9 +133,7 @@ fn rule_predicate_pushdown(plan: LogicalPlan) -> LogicalPlan {
                     let mut remaining = Vec::new();
 
                     // Determine max column index in the base scan
-                    let base_col_count = joins
-                        .first()
-                        .map_or(usize::MAX, |j| j.right_col_offset);
+                    let base_col_count = joins.first().map_or(usize::MAX, |j| j.right_col_offset);
 
                     for conj in conjuncts {
                         if max_column_ref(&conj) < base_col_count {
@@ -780,8 +778,7 @@ fn collect_expr_refs(expr: &BoundExpr, out: &mut HashSet<usize>) {
             collect_expr_refs(expr, out);
             collect_expr_refs(pattern, out);
         }
-        BoundExpr::Function { args, .. }
-        | BoundExpr::Coalesce(args) => {
+        BoundExpr::Function { args, .. } | BoundExpr::Coalesce(args) => {
             for a in args {
                 collect_expr_refs(a, out);
             }
@@ -835,7 +832,9 @@ fn collect_expr_refs(expr: &BoundExpr, out: &mut HashSet<usize>) {
 }
 
 fn merge_required(parent: &Option<HashSet<usize>>, extra: &HashSet<usize>) -> HashSet<usize> {
-    parent.as_ref().map_or_else(|| extra.clone(), |p| p.union(extra).copied().collect())
+    parent
+        .as_ref()
+        .map_or_else(|| extra.clone(), |p| p.union(extra).copied().collect())
 }
 
 // ── Rule 5: Subquery Decorrelation ──────────────────────────────────────
@@ -1191,8 +1190,9 @@ fn extract_pairs_recursive(expr: &BoundExpr, pairs: &mut Vec<(usize, usize)>) {
 fn count_output_columns(plan: &LogicalPlan) -> usize {
     match plan {
         LogicalPlan::Scan { schema, .. } => schema.columns.len(),
-        LogicalPlan::Project { projections, .. }
-        | LogicalPlan::Aggregate { projections, .. } => projections.len(),
+        LogicalPlan::Project { projections, .. } | LogicalPlan::Aggregate { projections, .. } => {
+            projections.len()
+        }
         LogicalPlan::Filter { input, .. }
         | LogicalPlan::Sort { input, .. }
         | LogicalPlan::Limit { input, .. }
@@ -1246,8 +1246,7 @@ fn build_correlation_condition(pairs: &[(usize, usize)], right_offset: usize) ->
 fn predicate_uses_only_column_refs(expr: &BoundExpr) -> bool {
     match expr {
         BoundExpr::ColumnRef(_) | BoundExpr::Literal(_) | BoundExpr::Parameter(_) => true,
-        BoundExpr::BinaryOp { left, right, .. }
-        | BoundExpr::IsNotDistinctFrom { left, right } => {
+        BoundExpr::BinaryOp { left, right, .. } | BoundExpr::IsNotDistinctFrom { left, right } => {
             predicate_uses_only_column_refs(left) && predicate_uses_only_column_refs(right)
         }
         BoundExpr::Not(inner)
@@ -1312,8 +1311,7 @@ fn combine_conjuncts(mut preds: Vec<BoundExpr>) -> BoundExpr {
 fn max_column_ref(expr: &BoundExpr) -> usize {
     match expr {
         BoundExpr::ColumnRef(idx) => *idx,
-        BoundExpr::BinaryOp { left, right, .. }
-        | BoundExpr::IsNotDistinctFrom { left, right } => {
+        BoundExpr::BinaryOp { left, right, .. } | BoundExpr::IsNotDistinctFrom { left, right } => {
             max_column_ref(left).max(max_column_ref(right))
         }
         BoundExpr::Not(inner)
@@ -1330,8 +1328,9 @@ fn max_column_ref(expr: &BoundExpr) -> usize {
             max_column_ref(expr).max(max_list)
         }
         BoundExpr::Like { expr, pattern, .. } => max_column_ref(expr).max(max_column_ref(pattern)),
-        BoundExpr::Function { args, .. }
-        | BoundExpr::Coalesce(args) => args.iter().map(max_column_ref).max().unwrap_or(0),
+        BoundExpr::Function { args, .. } | BoundExpr::Coalesce(args) => {
+            args.iter().map(max_column_ref).max().unwrap_or(0)
+        }
         _ => 0,
     }
 }
@@ -1355,38 +1354,67 @@ fn rule_constant_fold(plan: LogicalPlan) -> LogicalPlan {
             // Eliminate tautology filter
             match &folded {
                 BoundExpr::Literal(Datum::Boolean(true)) => *input,
-                _ => LogicalPlan::Filter { input, predicate: folded },
+                _ => LogicalPlan::Filter {
+                    input,
+                    predicate: folded,
+                },
             }
         }
-        LogicalPlan::Project { input, projections, visible_count } => {
-            let projections = projections.into_iter().map(|p| match p {
-                BoundProjection::Expr(e, alias) => BoundProjection::Expr(fold_expr(e), alias),
-                other => other,
-            }).collect();
+        LogicalPlan::Project {
+            input,
+            projections,
+            visible_count,
+        } => {
+            let projections = projections
+                .into_iter()
+                .map(|p| match p {
+                    BoundProjection::Expr(e, alias) => BoundProjection::Expr(fold_expr(e), alias),
+                    other => other,
+                })
+                .collect();
             LogicalPlan::Project {
                 input: Box::new(rule_constant_fold(*input)),
                 projections,
                 visible_count,
             }
         }
-        LogicalPlan::Aggregate { input, group_by, grouping_sets, projections, visible_count, having } => {
-            let projections = projections.into_iter().map(|p| match p {
-                BoundProjection::Expr(e, alias) => BoundProjection::Expr(fold_expr(e), alias),
-                other => other,
-            }).collect();
+        LogicalPlan::Aggregate {
+            input,
+            group_by,
+            grouping_sets,
+            projections,
+            visible_count,
+            having,
+        } => {
+            let projections = projections
+                .into_iter()
+                .map(|p| match p {
+                    BoundProjection::Expr(e, alias) => BoundProjection::Expr(fold_expr(e), alias),
+                    other => other,
+                })
+                .collect();
             let having = having.map(fold_expr);
             LogicalPlan::Aggregate {
                 input: Box::new(rule_constant_fold(*input)),
-                group_by, grouping_sets, projections, visible_count, having,
+                group_by,
+                grouping_sets,
+                projections,
+                visible_count,
+                having,
             }
         }
         LogicalPlan::Sort { input, order_by } => LogicalPlan::Sort {
             input: Box::new(rule_constant_fold(*input)),
             order_by,
         },
-        LogicalPlan::Limit { input, limit, offset } => LogicalPlan::Limit {
+        LogicalPlan::Limit {
+            input,
+            limit,
+            offset,
+        } => LogicalPlan::Limit {
             input: Box::new(rule_constant_fold(*input)),
-            limit, offset,
+            limit,
+            offset,
         },
         LogicalPlan::Distinct { input, mode } => LogicalPlan::Distinct {
             input: Box::new(rule_constant_fold(*input)),
@@ -1396,32 +1424,53 @@ fn rule_constant_fold(plan: LogicalPlan) -> LogicalPlan {
             base: Box::new(rule_constant_fold(*base)),
             joins,
         },
-        LogicalPlan::Join { left, right, join_info } => LogicalPlan::Join {
+        LogicalPlan::Join {
+            left,
+            right,
+            join_info,
+        } => LogicalPlan::Join {
             left: Box::new(rule_constant_fold(*left)),
             right: Box::new(rule_constant_fold(*right)),
             join_info,
         },
-        LogicalPlan::SetOp { left, right, kind, all } => LogicalPlan::SetOp {
+        LogicalPlan::SetOp {
+            left,
+            right,
+            kind,
+            all,
+        } => LogicalPlan::SetOp {
             left: Box::new(rule_constant_fold(*left)),
             right: Box::new(rule_constant_fold(*right)),
-            kind, all,
+            kind,
+            all,
         },
         LogicalPlan::WithCtes { ctes, input } => LogicalPlan::WithCtes {
             ctes,
             input: Box::new(rule_constant_fold(*input)),
         },
-        LogicalPlan::Explain(inner) => {
-            LogicalPlan::Explain(Box::new(rule_constant_fold(*inner)))
-        }
+        LogicalPlan::Explain(inner) => LogicalPlan::Explain(Box::new(rule_constant_fold(*inner))),
         LogicalPlan::ExplainAnalyze(inner) => {
             LogicalPlan::ExplainAnalyze(Box::new(rule_constant_fold(*inner)))
         }
-        LogicalPlan::CopyQueryTo { query, csv, delimiter, header, null_string, quote, escape, file_path } => {
-            LogicalPlan::CopyQueryTo {
-                query: Box::new(rule_constant_fold(*query)),
-                csv, delimiter, header, null_string, quote, escape, file_path,
-            }
-        }
+        LogicalPlan::CopyQueryTo {
+            query,
+            csv,
+            delimiter,
+            header,
+            null_string,
+            quote,
+            escape,
+            file_path,
+        } => LogicalPlan::CopyQueryTo {
+            query: Box::new(rule_constant_fold(*query)),
+            csv,
+            delimiter,
+            header,
+            null_string,
+            quote,
+            escape,
+            file_path,
+        },
         other => other,
     }
 }
@@ -1438,15 +1487,15 @@ fn expr_has_foldable(expr: &BoundExpr) -> bool {
         BoundExpr::IsNull(inner)
         | BoundExpr::IsNotNull(inner)
         | BoundExpr::Cast { expr: inner, .. } => expr_has_foldable(inner),
-        BoundExpr::Between { expr: e, low, high, .. } => {
-            expr_has_foldable(e) || expr_has_foldable(low) || expr_has_foldable(high)
-        }
+        BoundExpr::Between {
+            expr: e, low, high, ..
+        } => expr_has_foldable(e) || expr_has_foldable(low) || expr_has_foldable(high),
         BoundExpr::InList { expr: e, list, .. } => {
             expr_has_foldable(e) || list.iter().any(expr_has_foldable)
         }
-        BoundExpr::Like { expr: e, pattern, .. } => {
-            expr_has_foldable(e) || expr_has_foldable(pattern)
-        }
+        BoundExpr::Like {
+            expr: e, pattern, ..
+        } => expr_has_foldable(e) || expr_has_foldable(pattern),
         BoundExpr::IsNotDistinctFrom { left, right } => {
             expr_has_foldable(left) || expr_has_foldable(right)
         }
@@ -1466,28 +1515,30 @@ fn fold_expr(expr: BoundExpr) -> BoundExpr {
             let r = fold_expr(*right);
             match (&l, &op, &r) {
                 // AND short-circuits
-                (BoundExpr::Literal(Datum::Boolean(false)), BinOp::And, _) =>
-                    BoundExpr::Literal(Datum::Boolean(false)),
-                (_, BinOp::And, BoundExpr::Literal(Datum::Boolean(false))) =>
-                    BoundExpr::Literal(Datum::Boolean(false)),
-                (BoundExpr::Literal(Datum::Boolean(true)), BinOp::And, other) =>
-                    other.clone(),
-                (other, BinOp::And, BoundExpr::Literal(Datum::Boolean(true))) =>
-                    other.clone(),
+                (BoundExpr::Literal(Datum::Boolean(false)), BinOp::And, _) => {
+                    BoundExpr::Literal(Datum::Boolean(false))
+                }
+                (_, BinOp::And, BoundExpr::Literal(Datum::Boolean(false))) => {
+                    BoundExpr::Literal(Datum::Boolean(false))
+                }
+                (BoundExpr::Literal(Datum::Boolean(true)), BinOp::And, other) => other.clone(),
+                (other, BinOp::And, BoundExpr::Literal(Datum::Boolean(true))) => other.clone(),
                 // OR short-circuits
-                (BoundExpr::Literal(Datum::Boolean(true)), BinOp::Or, _) =>
-                    BoundExpr::Literal(Datum::Boolean(true)),
-                (_, BinOp::Or, BoundExpr::Literal(Datum::Boolean(true))) =>
-                    BoundExpr::Literal(Datum::Boolean(true)),
-                (BoundExpr::Literal(Datum::Boolean(false)), BinOp::Or, other) =>
-                    other.clone(),
-                (other, BinOp::Or, BoundExpr::Literal(Datum::Boolean(false))) =>
-                    other.clone(),
+                (BoundExpr::Literal(Datum::Boolean(true)), BinOp::Or, _) => {
+                    BoundExpr::Literal(Datum::Boolean(true))
+                }
+                (_, BinOp::Or, BoundExpr::Literal(Datum::Boolean(true))) => {
+                    BoundExpr::Literal(Datum::Boolean(true))
+                }
+                (BoundExpr::Literal(Datum::Boolean(false)), BinOp::Or, other) => other.clone(),
+                (other, BinOp::Or, BoundExpr::Literal(Datum::Boolean(false))) => other.clone(),
                 // Literal = Literal comparisons
-                (BoundExpr::Literal(a), BinOp::Eq, BoundExpr::Literal(b)) =>
-                    BoundExpr::Literal(Datum::Boolean(a == b)),
-                (BoundExpr::Literal(a), BinOp::NotEq, BoundExpr::Literal(b)) =>
-                    BoundExpr::Literal(Datum::Boolean(a != b)),
+                (BoundExpr::Literal(a), BinOp::Eq, BoundExpr::Literal(b)) => {
+                    BoundExpr::Literal(Datum::Boolean(a == b))
+                }
+                (BoundExpr::Literal(a), BinOp::NotEq, BoundExpr::Literal(b)) => {
+                    BoundExpr::Literal(Datum::Boolean(a != b))
+                }
                 _ => BoundExpr::BinaryOp {
                     left: Box::new(l),
                     op,
@@ -1498,28 +1549,46 @@ fn fold_expr(expr: BoundExpr) -> BoundExpr {
         BoundExpr::Not(inner) => {
             let folded = fold_expr(*inner);
             match folded {
-                BoundExpr::Literal(Datum::Boolean(b)) =>
-                    BoundExpr::Literal(Datum::Boolean(!b)),
+                BoundExpr::Literal(Datum::Boolean(b)) => BoundExpr::Literal(Datum::Boolean(!b)),
                 BoundExpr::Not(double_inner) => *double_inner, // NOT NOT x = x
                 other => BoundExpr::Not(Box::new(other)),
             }
         }
         BoundExpr::IsNull(inner) => BoundExpr::IsNull(Box::new(fold_expr(*inner))),
         BoundExpr::IsNotNull(inner) => BoundExpr::IsNotNull(Box::new(fold_expr(*inner))),
-        BoundExpr::Cast { expr: inner, target_type } =>
-            BoundExpr::Cast { expr: Box::new(fold_expr(*inner)), target_type },
-        BoundExpr::Between { expr, negated, low, high } => BoundExpr::Between {
+        BoundExpr::Cast {
+            expr: inner,
+            target_type,
+        } => BoundExpr::Cast {
+            expr: Box::new(fold_expr(*inner)),
+            target_type,
+        },
+        BoundExpr::Between {
+            expr,
+            negated,
+            low,
+            high,
+        } => BoundExpr::Between {
             expr: Box::new(fold_expr(*expr)),
             negated,
             low: Box::new(fold_expr(*low)),
             high: Box::new(fold_expr(*high)),
         },
-        BoundExpr::InList { expr, list, negated } => BoundExpr::InList {
+        BoundExpr::InList {
+            expr,
+            list,
+            negated,
+        } => BoundExpr::InList {
             expr: Box::new(fold_expr(*expr)),
             list: list.into_iter().map(fold_expr).collect(),
             negated,
         },
-        BoundExpr::Like { expr, pattern, negated, case_insensitive } => BoundExpr::Like {
+        BoundExpr::Like {
+            expr,
+            pattern,
+            negated,
+            case_insensitive,
+        } => BoundExpr::Like {
             expr: Box::new(fold_expr(*expr)),
             pattern: Box::new(fold_expr(*pattern)),
             negated,
@@ -1549,32 +1618,53 @@ fn rule_common_subexpr_elimination(plan: LogicalPlan) -> LogicalPlan {
             let deduped = dedup_conjuncts(predicate);
             match deduped {
                 // All conjuncts were duplicates of each other → tautology or single pred
-                Some(pred) => LogicalPlan::Filter { input, predicate: pred },
+                Some(pred) => LogicalPlan::Filter {
+                    input,
+                    predicate: pred,
+                },
                 // Should not happen (split_conjuncts always returns ≥1), but be safe
                 None => *input,
             }
         }
-        LogicalPlan::Project { input, projections, visible_count } => {
-            LogicalPlan::Project {
-                input: Box::new(rule_common_subexpr_elimination(*input)),
-                projections,
-                visible_count,
-            }
-        }
-        LogicalPlan::Aggregate { input, group_by, grouping_sets, projections, visible_count, having } => {
+        LogicalPlan::Project {
+            input,
+            projections,
+            visible_count,
+        } => LogicalPlan::Project {
+            input: Box::new(rule_common_subexpr_elimination(*input)),
+            projections,
+            visible_count,
+        },
+        LogicalPlan::Aggregate {
+            input,
+            group_by,
+            grouping_sets,
+            projections,
+            visible_count,
+            having,
+        } => {
             let having = having.and_then(dedup_conjuncts);
             LogicalPlan::Aggregate {
                 input: Box::new(rule_common_subexpr_elimination(*input)),
-                group_by, grouping_sets, projections, visible_count, having,
+                group_by,
+                grouping_sets,
+                projections,
+                visible_count,
+                having,
             }
         }
         LogicalPlan::Sort { input, order_by } => LogicalPlan::Sort {
             input: Box::new(rule_common_subexpr_elimination(*input)),
             order_by,
         },
-        LogicalPlan::Limit { input, limit, offset } => LogicalPlan::Limit {
+        LogicalPlan::Limit {
+            input,
+            limit,
+            offset,
+        } => LogicalPlan::Limit {
             input: Box::new(rule_common_subexpr_elimination(*input)),
-            limit, offset,
+            limit,
+            offset,
         },
         LogicalPlan::Distinct { input, mode } => LogicalPlan::Distinct {
             input: Box::new(rule_common_subexpr_elimination(*input)),
@@ -1584,15 +1674,25 @@ fn rule_common_subexpr_elimination(plan: LogicalPlan) -> LogicalPlan {
             base: Box::new(rule_common_subexpr_elimination(*base)),
             joins,
         },
-        LogicalPlan::Join { left, right, join_info } => LogicalPlan::Join {
+        LogicalPlan::Join {
+            left,
+            right,
+            join_info,
+        } => LogicalPlan::Join {
             left: Box::new(rule_common_subexpr_elimination(*left)),
             right: Box::new(rule_common_subexpr_elimination(*right)),
             join_info,
         },
-        LogicalPlan::SetOp { left, right, kind, all } => LogicalPlan::SetOp {
+        LogicalPlan::SetOp {
+            left,
+            right,
+            kind,
+            all,
+        } => LogicalPlan::SetOp {
             left: Box::new(rule_common_subexpr_elimination(*left)),
             right: Box::new(rule_common_subexpr_elimination(*right)),
-            kind, all,
+            kind,
+            all,
         },
         LogicalPlan::WithCtes { ctes, input } => LogicalPlan::WithCtes {
             ctes,
@@ -1604,12 +1704,25 @@ fn rule_common_subexpr_elimination(plan: LogicalPlan) -> LogicalPlan {
         LogicalPlan::ExplainAnalyze(inner) => {
             LogicalPlan::ExplainAnalyze(Box::new(rule_common_subexpr_elimination(*inner)))
         }
-        LogicalPlan::CopyQueryTo { query, csv, delimiter, header, null_string, quote, escape, file_path } => {
-            LogicalPlan::CopyQueryTo {
-                query: Box::new(rule_common_subexpr_elimination(*query)),
-                csv, delimiter, header, null_string, quote, escape, file_path,
-            }
-        }
+        LogicalPlan::CopyQueryTo {
+            query,
+            csv,
+            delimiter,
+            header,
+            null_string,
+            quote,
+            escape,
+            file_path,
+        } => LogicalPlan::CopyQueryTo {
+            query: Box::new(rule_common_subexpr_elimination(*query)),
+            csv,
+            delimiter,
+            header,
+            null_string,
+            quote,
+            escape,
+            file_path,
+        },
         other => other,
     }
 }
@@ -1642,8 +1755,16 @@ fn expr_structurally_eq(a: &BoundExpr, b: &BoundExpr) -> bool {
         (BoundExpr::OuterColumnRef(ia), BoundExpr::OuterColumnRef(ib)) => ia == ib,
         (BoundExpr::Parameter(ia), BoundExpr::Parameter(ib)) => ia == ib,
         (
-            BoundExpr::BinaryOp { left: la, op: oa, right: ra },
-            BoundExpr::BinaryOp { left: lb, op: ob, right: rb },
+            BoundExpr::BinaryOp {
+                left: la,
+                op: oa,
+                right: ra,
+            },
+            BoundExpr::BinaryOp {
+                left: lb,
+                op: ob,
+                right: rb,
+            },
         ) => oa == ob && expr_structurally_eq(la, lb) && expr_structurally_eq(ra, rb),
         (BoundExpr::Not(a_inner), BoundExpr::Not(b_inner)) => {
             expr_structurally_eq(a_inner, b_inner)
@@ -1651,8 +1772,14 @@ fn expr_structurally_eq(a: &BoundExpr, b: &BoundExpr) -> bool {
         (BoundExpr::IsNull(ai), BoundExpr::IsNull(bi)) => expr_structurally_eq(ai, bi),
         (BoundExpr::IsNotNull(ai), BoundExpr::IsNotNull(bi)) => expr_structurally_eq(ai, bi),
         (
-            BoundExpr::Cast { expr: ea, target_type: ta },
-            BoundExpr::Cast { expr: eb, target_type: tb },
+            BoundExpr::Cast {
+                expr: ea,
+                target_type: ta,
+            },
+            BoundExpr::Cast {
+                expr: eb,
+                target_type: tb,
+            },
         ) => ta == tb && expr_structurally_eq(ea, eb),
         (
             BoundExpr::Function { func: fa, args: aa },
@@ -1660,7 +1787,10 @@ fn expr_structurally_eq(a: &BoundExpr, b: &BoundExpr) -> bool {
         ) => {
             std::mem::discriminant(fa) == std::mem::discriminant(fb)
                 && aa.len() == ab.len()
-                && aa.iter().zip(ab.iter()).all(|(x, y)| expr_structurally_eq(x, y))
+                && aa
+                    .iter()
+                    .zip(ab.iter())
+                    .all(|(x, y)| expr_structurally_eq(x, y))
         }
         _ => false, // Different variants → not equal
     }

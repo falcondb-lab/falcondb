@@ -20,7 +20,8 @@ mod planner_tests {
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(1),
@@ -29,7 +30,8 @@ mod planner_tests {
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(2),
@@ -38,7 +40,8 @@ mod planner_tests {
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
             ],
             primary_key_columns: vec![0],
@@ -59,7 +62,8 @@ mod planner_tests {
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(1),
@@ -68,7 +72,8 @@ mod planner_tests {
                     nullable: false,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(2),
@@ -77,7 +82,8 @@ mod planner_tests {
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
             ],
             primary_key_columns: vec![0],
@@ -1551,7 +1557,8 @@ mod planner_tests {
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(1),
@@ -1560,7 +1567,8 @@ mod planner_tests {
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
             ],
             primary_key_columns: vec![0],
@@ -1616,25 +1624,35 @@ mod planner_tests {
         use falcon_common::types::TableId;
         use falcon_sql_frontend::types::*;
 
-        fn make_stats(table_id: u64, row_count: u64, col_distinct: &[(usize, u64)]) -> TableStatsInfo {
+        fn make_stats(
+            table_id: u64,
+            row_count: u64,
+            col_distinct: &[(usize, u64)],
+        ) -> TableStatsInfo {
             TableStatsInfo {
                 table_id: TableId(table_id),
                 row_count,
-                columns: col_distinct.iter().map(|&(idx, ndv)| ColumnStatsInfo {
-                    column_idx: idx,
-                    distinct_count: ndv,
-                    null_fraction: 0.0,
-                    min_value: None,
-                    max_value: None,
-                    mcv: vec![],
-                    histogram_bounds: vec![],
-                    histogram_rows: 0,
-                }).collect(),
+                columns: col_distinct
+                    .iter()
+                    .map(|&(idx, ndv)| ColumnStatsInfo {
+                        column_idx: idx,
+                        distinct_count: ndv,
+                        null_fraction: 0.0,
+                        min_value: None,
+                        max_value: None,
+                        mcv: vec![],
+                        histogram_bounds: vec![],
+                        histogram_rows: 0,
+                    })
+                    .collect(),
             }
         }
 
         fn make_stats_with_histogram(
-            table_id: u64, row_count: u64, col_idx: usize, ndv: u64,
+            table_id: u64,
+            row_count: u64,
+            col_idx: usize,
+            ndv: u64,
             bounds: Vec<Datum>,
         ) -> TableStatsInfo {
             TableStatsInfo {
@@ -1661,7 +1679,10 @@ mod planner_tests {
                 right: Box::new(BoundExpr::Literal(Datum::Int32(42))),
             };
             let sel = estimate_selectivity(&eq, None);
-            assert!((sel - 0.1).abs() < 0.001, "eq without stats should be 0.1, got {sel}");
+            assert!(
+                (sel - 0.1).abs() < 0.001,
+                "eq without stats should be 0.1, got {sel}"
+            );
         }
 
         #[test]
@@ -1673,7 +1694,10 @@ mod planner_tests {
                 right: Box::new(BoundExpr::Literal(Datum::Int32(42))),
             };
             let sel = estimate_selectivity(&eq, Some(&stats));
-            assert!((sel - 0.01).abs() < 0.001, "eq with NDV=100 should be ~0.01, got {sel}");
+            assert!(
+                (sel - 0.01).abs() < 0.001,
+                "eq with NDV=100 should be ~0.01, got {sel}"
+            );
         }
 
         #[test]
@@ -1694,7 +1718,10 @@ mod planner_tests {
             };
             let sel = estimate_selectivity(&and_expr, Some(&stats));
             // 1/100 * 1/50 = 0.0002
-            assert!(sel < 0.001, "AND selectivity should be very small, got {sel}");
+            assert!(
+                sel < 0.001,
+                "AND selectivity should be very small, got {sel}"
+            );
         }
 
         #[test]
@@ -1715,7 +1742,10 @@ mod planner_tests {
             };
             let sel = estimate_selectivity(&or_expr, Some(&stats));
             // 1/10 + 1/10 - 1/100 = 0.19
-            assert!(sel > 0.15 && sel < 0.25, "OR selectivity should be ~0.19, got {sel}");
+            assert!(
+                sel > 0.15 && sel < 0.25,
+                "OR selectivity should be ~0.19, got {sel}"
+            );
         }
 
         #[test]
@@ -1741,7 +1771,10 @@ mod planner_tests {
                 right: Box::new(BoundExpr::Literal(Datum::Int32(250))),
             };
             let sel = estimate_selectivity(&lt, Some(&stats));
-            assert!(sel > 0.3 && sel < 0.7, "lt(250) on [0..500) should be ~0.5, got {sel}");
+            assert!(
+                sel > 0.3 && sel < 0.7,
+                "lt(250) on [0..500) should be ~0.5, got {sel}"
+            );
         }
 
         #[test]
@@ -1754,7 +1787,10 @@ mod planner_tests {
                 negated: false,
             };
             let sel = estimate_selectivity(&between, Some(&stats));
-            assert!(sel > 0.0 && sel <= 1.0, "BETWEEN should produce valid selectivity, got {sel}");
+            assert!(
+                sel > 0.0 && sel <= 1.0,
+                "BETWEEN should produce valid selectivity, got {sel}"
+            );
         }
 
         #[test]
@@ -1771,7 +1807,10 @@ mod planner_tests {
             };
             let sel = estimate_selectivity(&in_list, Some(&stats));
             // ~3/100 = 0.03
-            assert!(sel > 0.02 && sel < 0.05, "IN (1,2,3) should be ~0.03, got {sel}");
+            assert!(
+                sel > 0.02 && sel < 0.05,
+                "IN (1,2,3) should be ~0.03, got {sel}"
+            );
         }
 
         #[test]
@@ -1799,18 +1838,28 @@ mod planner_tests {
                 right: Box::new(BoundExpr::Literal(Datum::Int32(42))),
             };
             let sel = estimate_selectivity(&eq, Some(&stats));
-            assert!((sel - 0.30).abs() < 0.001, "MCV value=42 should give 0.30, got {sel}");
+            assert!(
+                (sel - 0.30).abs() < 0.001,
+                "MCV value=42 should give 0.30, got {sel}"
+            );
         }
 
         #[test]
         fn test_selectivity_literal_true_false() {
-            assert!((estimate_selectivity(&BoundExpr::Literal(Datum::Boolean(true)), None) - 1.0).abs() < 0.001);
-            assert!((estimate_selectivity(&BoundExpr::Literal(Datum::Boolean(false)), None)).abs() < 0.001);
+            assert!(
+                (estimate_selectivity(&BoundExpr::Literal(Datum::Boolean(true)), None) - 1.0).abs()
+                    < 0.001
+            );
+            assert!(
+                (estimate_selectivity(&BoundExpr::Literal(Datum::Boolean(false)), None)).abs()
+                    < 0.001
+            );
         }
 
         #[test]
         fn test_selectivity_is_null() {
-            let sel = estimate_selectivity(&BoundExpr::IsNull(Box::new(BoundExpr::ColumnRef(0))), None);
+            let sel =
+                estimate_selectivity(&BoundExpr::IsNull(Box::new(BoundExpr::ColumnRef(0))), None);
             assert!(sel < 0.1, "IS NULL default should be small, got {sel}");
         }
 
@@ -1823,7 +1872,10 @@ mod planner_tests {
                 case_insensitive: false,
             };
             let sel = estimate_selectivity(&like, None);
-            assert!((sel - 0.05).abs() < 0.01, "LIKE default should be 0.05, got {sel}");
+            assert!(
+                (sel - 0.05).abs() < 0.01,
+                "LIKE default should be 0.05, got {sel}"
+            );
         }
 
         // ── Scan cost model tests ──
@@ -1838,18 +1890,27 @@ mod planner_tests {
         #[test]
         fn test_index_scan_cheaper_for_low_selectivity() {
             // 10K rows, 1% selectivity — index should win
-            assert!(prefer_index_scan(10000, 0.01), "1% selectivity on 10K rows should prefer index");
+            assert!(
+                prefer_index_scan(10000, 0.01),
+                "1% selectivity on 10K rows should prefer index"
+            );
         }
 
         #[test]
         fn test_seq_scan_preferred_for_high_selectivity() {
             // 10K rows, 80% selectivity — seq scan should win
-            assert!(!prefer_index_scan(10000, 0.80), "80% selectivity should prefer seq scan");
+            assert!(
+                !prefer_index_scan(10000, 0.80),
+                "80% selectivity should prefer seq scan"
+            );
         }
 
         #[test]
         fn test_seq_scan_preferred_for_tiny_tables() {
-            assert!(!prefer_index_scan(10, 0.01), "Tiny tables should always seq scan");
+            assert!(
+                !prefer_index_scan(10, 0.01),
+                "Tiny tables should always seq scan"
+            );
         }
 
         #[test]
@@ -1863,8 +1924,10 @@ mod planner_tests {
                     break;
                 }
             }
-            assert!(crossover > 0.05 && crossover < 0.50,
-                "Crossover should be between 5-50%, got {crossover}");
+            assert!(
+                crossover > 0.05 && crossover < 0.50,
+                "Crossover should be between 5-50%, got {crossover}"
+            );
         }
 
         // ── plan_optimized tests ──
@@ -1885,7 +1948,8 @@ mod planner_tests {
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 }],
                 primary_key_columns: vec![0],
                 ..Default::default()
@@ -1922,7 +1986,8 @@ mod planner_tests {
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 }],
                 primary_key_columns: vec![0],
                 ..Default::default()

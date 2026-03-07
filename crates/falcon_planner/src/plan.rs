@@ -50,6 +50,12 @@ pub enum PhysicalPlan {
         schema: TableSchema,
         if_not_exists: bool,
     },
+    /// DDL: create table as
+    CreateTableAs {
+        table_name: String,
+        if_not_exists: bool,
+        query: Box<BoundSelect>,
+    },
     /// DDL: drop table
     DropTable {
         table_name: String,
@@ -429,6 +435,39 @@ pub enum PhysicalPlan {
         name: String,
         args: Vec<BoundExpr>,
     },
+    /// Accepted but produces no effect (CREATE EXTENSION, CREATE TYPE, ALTER INDEX, etc.)
+    NoOp,
+    ShowPgVar {
+        name: String,
+        value: String,
+    },
+    /// SHOW DDL STATUS — returns progress of all active online DDL operations.
+    ShowDdlStatus,
+    /// BACKUP DATABASE TO <dest_dir>
+    Backup {
+        dest_dir: String,
+        incremental: bool,
+        label: String,
+    },
+    /// RESTORE DATABASE FROM <src_dir>
+    Restore {
+        src_dir: String,
+    },
+    /// CREATE JOB — register a recurring backup job
+    CreateJob {
+        name: String,
+        backup_type: String,
+        dest_dir: String,
+        interval_secs: u64,
+    },
+    /// DROP JOB <id>
+    DropJob {
+        job_id: u64,
+    },
+    /// SHOW JOBS
+    ShowJobs,
+    /// SHOW BACKUP STATUS
+    ShowBackupStatus,
     /// Distributed plan: wraps a local subplan for scatter/gather execution
     /// across multiple shards. The executor dispatches this to the
     /// DistributedExecutor for parallel execution + merge.
@@ -520,10 +559,9 @@ impl std::fmt::Display for DistAggMerge {
             Self::CountDistinct(i) => write!(f, "COUNT(DISTINCT col{i}) [collect-dedup]"),
             Self::SumDistinct(i) => write!(f, "SUM(DISTINCT col{i}) [collect-dedup]"),
             Self::AvgDistinct(i) => write!(f, "AVG(DISTINCT col{i}) [collect-dedup]"),
-            Self::StringAggDistinct(i, sep) => write!(
-                f,
-                "STRING_AGG(DISTINCT col{i}, '{sep}') [collect-dedup]"
-            ),
+            Self::StringAggDistinct(i, sep) => {
+                write!(f, "STRING_AGG(DISTINCT col{i}, '{sep}') [collect-dedup]")
+            }
             Self::ArrayAggDistinct(i) => {
                 write!(f, "ARRAY_AGG(DISTINCT col{i}) [collect-dedup]")
             }
