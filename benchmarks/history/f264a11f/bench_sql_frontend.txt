@@ -1,0 +1,26 @@
+[1m[92m Downloading[0m crates ...
+[1m[92m  Downloaded[0m log v0.4.29
+[1m[92m  Downloaded[0m sqlparser_derive v0.2.2
+[1m[92m  Downloaded[0m sqlparser v0.50.0
+[1m[92m   Compiling[0m getrandom v0.3.4
+[1m[92m   Compiling[0m getrandom v0.4.1
+[1m[92m   Compiling[0m ppv-lite86 v0.2.21
+[1m[92m   Compiling[0m sqlparser_derive v0.2.2
+[1m[92m   Compiling[0m rand_core v0.9.5
+[1m[92m   Compiling[0m uuid v1.20.0
+[1m[92m   Compiling[0m tempfile v3.25.0
+[1m[92m   Compiling[0m wait-timeout v0.2.1
+[1m[92m   Compiling[0m log v0.4.29
+[1m[92m   Compiling[0m falcon_common v1.2.0 (/home/runner/work/falcondb/falcondb/crates/falcon_common)
+[1m[92m   Compiling[0m rusty-fork v0.3.1
+[1m[92m   Compiling[0m rand_chacha v0.9.0
+[1m[92m   Compiling[0m rand v0.9.2
+[1m[92m   Compiling[0m rand_xorshift v0.4.0
+[1m[92m   Compiling[0m criterion v0.5.1
+[1m[92m   Compiling[0m proptest v1.10.0
+[1m[92m   Compiling[0m sqlparser v0.50.0
+[1m[92m   Compiling[0m falcon_sql_frontend v1.2.0 (/home/runner/work/falcondb/falcondb/crates/falcon_sql_frontend)
+[1m[92m    Finished[0m `bench` profile [optimized] target(s) in 41.59s
+[1m[92m     Running[0m unittests src/lib.rs (target/release/deps/falcon_sql_frontend-de832bb9171d480a)
+error: Unrecognized option: 'output-format'
+[1m[91merror[0m: bench failed, to rerun pass `-p falcon_sql_frontend --lib`
