@@ -1,0 +1,13 @@
+[1m[92m   Compiling[0m libc v0.2.181
+[1m[92m   Compiling[0m getrandom v0.3.4
+[1m[92m   Compiling[0m regex-syntax v0.8.9
+[1m[92m   Compiling[0m is-terminal v0.4.17
+[1m[92m   Compiling[0m uuid v1.20.0
+[1m[92m   Compiling[0m falcon_common v1.2.0 (/home/runner/work/falcondb/falcondb/crates/falcon_common)
+[1m[92m   Compiling[0m regex-automata v0.4.14
+[1m[92m   Compiling[0m regex v1.12.3
+[1m[92m   Compiling[0m criterion v0.5.1
+[1m[92m    Finished[0m `bench` profile [optimized] target(s) in 20.10s
+[1m[92m     Running[0m unittests src/lib.rs (target/release/deps/falcon_common-e86d6cff82758da9)
+error: Unrecognized option: 'output-format'
+[1m[91merror[0m: bench failed, to rerun pass `-p falcon_common --lib`
