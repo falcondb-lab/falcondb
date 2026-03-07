@@ -126,7 +126,10 @@ impl TokenBucket {
     /// Force-acquire (for Query priority — never rate-limited).
     pub fn force_acquire(&self, n: u64) {
         self.maybe_refill();
-        self.tokens.fetch_sub(n.min(self.tokens.load(Ordering::Relaxed)), Ordering::Relaxed);
+        self.tokens.fetch_sub(
+            n.min(self.tokens.load(Ordering::Relaxed)),
+            Ordering::Relaxed,
+        );
     }
 
     fn maybe_refill(&self) {
@@ -354,7 +357,11 @@ impl IoScheduler {
 
     /// Cancel all pending requests for a specific page.
     pub fn cancel_page(&self, page_id: PageId) {
-        for q in [&self.query_queue, &self.prefetch_queue, &self.background_queue] {
+        for q in [
+            &self.query_queue,
+            &self.prefetch_queue,
+            &self.background_queue,
+        ] {
             q.lock().retain(|r| r.page_id != page_id);
         }
     }
@@ -395,32 +402,38 @@ mod tests {
         });
 
         // Submit background first, then prefetch, then query.
-        sched.submit(IoRequest {
-            page_id: PageId(1),
-            file_path: PathBuf::from("bg.dat"),
-            offset: 0,
-            length: 4096,
-            priority: IoPriority::Background,
-            submitted_at: Instant::now(),
-        }).unwrap();
+        sched
+            .submit(IoRequest {
+                page_id: PageId(1),
+                file_path: PathBuf::from("bg.dat"),
+                offset: 0,
+                length: 4096,
+                priority: IoPriority::Background,
+                submitted_at: Instant::now(),
+            })
+            .unwrap();
 
-        sched.submit(IoRequest {
-            page_id: PageId(2),
-            file_path: PathBuf::from("pf.dat"),
-            offset: 0,
-            length: 4096,
-            priority: IoPriority::Prefetch,
-            submitted_at: Instant::now(),
-        }).unwrap();
+        sched
+            .submit(IoRequest {
+                page_id: PageId(2),
+                file_path: PathBuf::from("pf.dat"),
+                offset: 0,
+                length: 4096,
+                priority: IoPriority::Prefetch,
+                submitted_at: Instant::now(),
+            })
+            .unwrap();
 
-        sched.submit(IoRequest {
-            page_id: PageId(3),
-            file_path: PathBuf::from("q.dat"),
-            offset: 0,
-            length: 4096,
-            priority: IoPriority::Query,
-            submitted_at: Instant::now(),
-        }).unwrap();
+        sched
+            .submit(IoRequest {
+                page_id: PageId(3),
+                file_path: PathBuf::from("q.dat"),
+                offset: 0,
+                length: 4096,
+                priority: IoPriority::Query,
+                submitted_at: Instant::now(),
+            })
+            .unwrap();
 
         // Drain — query should come first regardless of submission order.
         let batch = sched.drain_batch(10);
@@ -439,14 +452,16 @@ mod tests {
         });
 
         for i in 0..2 {
-            sched.submit(IoRequest {
-                page_id: PageId(i),
-                file_path: PathBuf::from("test.dat"),
-                offset: 0,
-                length: 4096,
-                priority: IoPriority::Query,
-                submitted_at: Instant::now(),
-            }).unwrap();
+            sched
+                .submit(IoRequest {
+                    page_id: PageId(i),
+                    file_path: PathBuf::from("test.dat"),
+                    offset: 0,
+                    length: 4096,
+                    priority: IoPriority::Query,
+                    submitted_at: Instant::now(),
+                })
+                .unwrap();
         }
 
         // Third submission should fail.
@@ -465,14 +480,16 @@ mod tests {
     fn test_cancel_page() {
         let sched = IoScheduler::new(IoSchedulerConfig::default());
         for i in 0..5 {
-            sched.submit(IoRequest {
-                page_id: PageId(i % 2), // pages 0 and 1 alternating
-                file_path: PathBuf::from("test.dat"),
-                offset: 0,
-                length: 4096,
-                priority: IoPriority::Query,
-                submitted_at: Instant::now(),
-            }).unwrap();
+            sched
+                .submit(IoRequest {
+                    page_id: PageId(i % 2), // pages 0 and 1 alternating
+                    file_path: PathBuf::from("test.dat"),
+                    offset: 0,
+                    length: 4096,
+                    priority: IoPriority::Query,
+                    submitted_at: Instant::now(),
+                })
+                .unwrap();
         }
         sched.cancel_page(PageId(0));
         let batch = sched.drain_batch(100);

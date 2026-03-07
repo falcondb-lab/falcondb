@@ -268,7 +268,8 @@ impl TxnHandle {
         if self.timeout_ms == 0 {
             return false;
         }
-        self.begin_instant.is_some_and(|begin| begin.elapsed().as_millis() as u64 >= self.timeout_ms)
+        self.begin_instant
+            .is_some_and(|begin| begin.elapsed().as_millis() as u64 >= self.timeout_ms)
     }
 
     /// Elapsed time since transaction began, in milliseconds.
@@ -503,11 +504,7 @@ impl LatencyRecorder {
     fn compute_stats(&self) -> LatencyStats {
         let fast_snap = self.fast_path.snapshot();
         let slow_snap = self.slow_path.snapshot();
-        let mut all: Vec<u64> = fast_snap
-            .iter()
-            .chain(slow_snap.iter())
-            .copied()
-            .collect();
+        let mut all: Vec<u64> = fast_snap.iter().chain(slow_snap.iter()).copied().collect();
         LatencyStats {
             fast_path: percentile_set(&fast_snap),
             slow_path: percentile_set(&slow_snap),
@@ -561,7 +558,7 @@ fn compute_percentiles(sorted: &[u64]) -> PercentileSet {
     let n = sorted.len();
     // Nearest-rank method: index = ceil(n * p / 100) - 1, clamped to [0, n-1].
     let pct = |p_num: usize, p_den: usize| -> usize {
-        let rank = (n * p_num + p_den - 1) / p_den; // ceiling division
+        let rank = (n * p_num).div_ceil(p_den); // ceiling division
         std::cmp::min(rank.saturating_sub(1), n - 1)
     };
     PercentileSet {
@@ -737,7 +734,10 @@ impl TxnManager {
     }
 
     /// Create a TxnManager with HLC-based timestamp allocation.
-    pub fn new_with_hlc(storage: Arc<StorageEngine>, hlc: std::sync::Arc<falcon_common::hlc::HybridClock>) -> Self {
+    pub fn new_with_hlc(
+        storage: Arc<StorageEngine>,
+        hlc: std::sync::Arc<falcon_common::hlc::HybridClock>,
+    ) -> Self {
         Self {
             ts_counter: AtomicU64::new(1),
             local_ts_counter: AtomicU64::new(1),
@@ -786,6 +786,7 @@ impl TxnManager {
         }
     }
 
+    #[allow(dead_code)]
     fn alloc_local_ts(&self) -> Timestamp {
         Timestamp(self.local_ts_counter.fetch_add(1, Ordering::Relaxed))
     }
@@ -795,18 +796,27 @@ impl TxnManager {
         Timestamp(self.ts_counter.load(Ordering::Relaxed))
     }
 
+    /// Seed prepared_gids from recovered WAL data after crash recovery.
+    pub fn seed_prepared_gids(&self, gids: std::collections::HashMap<String, TxnId>) {
+        for (gid, txn_id) in gids {
+            self.prepared_gids.insert(gid, txn_id);
+        }
+    }
+
     /// Advance counters past recovered WAL values so new transactions
     /// get timestamps/ids higher than anything replayed during recovery.
     pub fn advance_counters_past(&self, max_ts: u64, max_txn_id: u64) {
         if max_ts > 0 {
             self.ts_counter.fetch_max(max_ts + 1, Ordering::Relaxed);
-            self.local_ts_counter.fetch_max(max_ts + 1, Ordering::Relaxed);
+            self.local_ts_counter
+                .fetch_max(max_ts + 1, Ordering::Relaxed);
             if let Some(ref hlc) = self.hlc {
                 hlc.advance_past(Timestamp(max_ts));
             }
         }
         if max_txn_id > 0 {
-            self.txn_counter.fetch_max(max_txn_id + 1, Ordering::Relaxed);
+            self.txn_counter
+                .fetch_max(max_txn_id + 1, Ordering::Relaxed);
         }
     }
 
@@ -853,7 +863,9 @@ impl TxnManager {
                 // because the transaction access mode is not yet known at begin time.
                 if classification.txn_type == TxnType::Global {
                     self.stats.record_admission_rejection();
-                    tracing::warn!("Admission control: rejecting global txn (PRESSURE memory state)");
+                    tracing::warn!(
+                        "Admission control: rejecting global txn (PRESSURE memory state)"
+                    );
                     return Err(TxnError::MemoryPressure(dummy_txn_id));
                 }
                 tracing::debug!("Admission control: allowing local txn under PRESSURE");
@@ -931,12 +943,14 @@ impl TxnManager {
         if timeout_ms == 0 {
             return 0;
         }
-        let victims: Vec<TxnId> = self.active_txns.iter()
+        let victims: Vec<TxnId> = self
+            .active_txns
+            .iter()
             .filter(|e| {
                 let h = e.value();
                 h.state == TxnState::Active && h.elapsed_ms() > timeout_ms
             })
-            .map(|e| e.key().clone())
+            .map(|e| *e.key())
             .collect();
 
         let mut reaped = 0;
@@ -989,12 +1003,21 @@ impl TxnManager {
     /// Begin a read-only transaction pinned to an externally supplied snapshot timestamp.
     /// Used for consistent cross-shard reads: all shards receive the same `snapshot_ts`
     /// so they observe the same committed state.
-    pub fn begin_at_snapshot(&self, snapshot_ts: Timestamp, isolation: IsolationLevel) -> TxnHandle {
+    pub fn begin_at_snapshot(
+        &self,
+        snapshot_ts: Timestamp,
+        isolation: IsolationLevel,
+    ) -> TxnHandle {
         self.begin_at_snapshot_on_shard(snapshot_ts, isolation, ShardId(0))
     }
 
     /// Begin a transaction pinned to an external snapshot, assigned to a specific shard.
-    pub fn begin_at_snapshot_on_shard(&self, snapshot_ts: Timestamp, isolation: IsolationLevel, shard_id: ShardId) -> TxnHandle {
+    pub fn begin_at_snapshot_on_shard(
+        &self,
+        snapshot_ts: Timestamp,
+        isolation: IsolationLevel,
+        shard_id: ShardId,
+    ) -> TxnHandle {
         let txn_id = TxnId(self.txn_counter.fetch_add(1, Ordering::Relaxed));
         let handle = TxnHandle {
             txn_id,
@@ -1197,9 +1220,9 @@ impl TxnManager {
         }
         drop(entry);
 
-        // Persist the prepare to storage (WAL)
+        // Persist the prepare with GID to WAL for crash recovery
         self.storage
-            .prepare_txn(txn_id)
+            .prepare_txn_named(txn_id, gid.clone())
             .map_err(|_| TxnError::Aborted(txn_id))?;
 
         if let Some(mut e) = self.active_txns.get_mut(&txn_id) {
@@ -1215,10 +1238,12 @@ impl TxnManager {
             .prepared_gids
             .remove(gid)
             .map(|(_, id)| id)
-            .ok_or_else(|| TxnError::InvariantViolation(
-                TxnId(0),
-                format!("prepared transaction \"{gid}\" does not exist"),
-            ))?;
+            .ok_or_else(|| {
+                TxnError::InvariantViolation(
+                    TxnId(0),
+                    format!("prepared transaction \"{gid}\" does not exist"),
+                )
+            })?;
         self.commit(txn_id)
     }
 
@@ -1228,10 +1253,12 @@ impl TxnManager {
             .prepared_gids
             .remove(gid)
             .map(|(_, id)| id)
-            .ok_or_else(|| TxnError::InvariantViolation(
-                TxnId(0),
-                format!("prepared transaction \"{gid}\" does not exist"),
-            ))?;
+            .ok_or_else(|| {
+                TxnError::InvariantViolation(
+                    TxnId(0),
+                    format!("prepared transaction \"{gid}\" does not exist"),
+                )
+            })?;
         self.abort(txn_id)
     }
 
@@ -1262,8 +1289,29 @@ impl TxnManager {
         }
 
         // ── Hard invariant validation (M1: not bypassable) ──
-        let ctx = entry.to_context();
-        if let Err(msg) = ctx.validate_commit_invariants() {
+        // Inlined from TxnContext::validate_commit_invariants to avoid Vec clone
+        if entry.txn_type == TxnType::Local && entry.involved_shards.len() != 1 {
+            let msg = format!(
+                "LocalTxn {} has {} involved shards (must be exactly 1)",
+                txn_id,
+                entry.involved_shards.len()
+            );
+            tracing::error!("TXN invariant violation at commit: {}", msg);
+            return Err(TxnError::InvariantViolation(txn_id, msg));
+        }
+        if entry.txn_type == TxnType::Local && entry.path == TxnPath::Slow {
+            let msg = format!(
+                "LocalTxn {} is on slow path (invariant: must be fast)",
+                txn_id
+            );
+            tracing::error!("TXN invariant violation at commit: {}", msg);
+            return Err(TxnError::InvariantViolation(txn_id, msg));
+        }
+        if entry.txn_type == TxnType::Global && entry.path == TxnPath::Fast {
+            let msg = format!(
+                "GlobalTxn {} is on fast path (invariant: must be slow)",
+                txn_id
+            );
             tracing::error!("TXN invariant violation at commit: {}", msg);
             return Err(TxnError::InvariantViolation(txn_id, msg));
         }
@@ -1279,7 +1327,7 @@ impl TxnManager {
         let occ_retry_count = entry.occ_retry_count;
         let tenant_id = entry.tenant_id;
         let priority = entry.priority;
-        let latency_breakdown = entry.latency_breakdown.clone();
+        let latency_breakdown = entry.latency_breakdown;
 
         if local_fast_path {
             // ── OCC validation under SI / Serializable ──
@@ -1310,8 +1358,7 @@ impl TxnManager {
             drop(entry);
 
             if let Err(e) = self.storage.commit_txn(txn_id, commit_ts, TxnType::Local) {
-                let latency_us = entry_begin_instant
-                    .map_or(0, |i| i.elapsed().as_micros() as u64);
+                let latency_us = entry_begin_instant.map_or(0, |i| i.elapsed().as_micros() as u64);
                 self.record_completed(TxnRecord {
                     txn_id,
                     txn_type: TxnType::Local,
@@ -1335,12 +1382,9 @@ impl TxnManager {
                 return Err(Self::storage_err_to_txn_err(txn_id, e));
             }
 
-            if let Some(mut e) = self.active_txns.get_mut(&txn_id) {
-                e.state = TxnState::Committed;
-            }
-
-            let latency_us = entry_begin_instant
-                .map_or(0, |i| i.elapsed().as_micros() as u64);
+            // Skip redundant get_mut for state update — we remove immediately
+            let latency_us = entry_begin_instant.map_or(0, |i| i.elapsed().as_micros() as u64);
+            self.active_txns.remove(&txn_id);
             self.record_completed(TxnRecord {
                 txn_id,
                 txn_type: TxnType::Local,
@@ -1357,7 +1401,6 @@ impl TxnManager {
                 priority,
                 latency_breakdown,
             });
-            self.active_txns.remove(&txn_id);
             self.stats.record_fast_commit();
             return Ok(commit_ts);
         }
@@ -1401,8 +1444,7 @@ impl TxnManager {
         }
 
         if let Err(e) = self.storage.commit_txn(txn_id, commit_ts, TxnType::Global) {
-            let latency_us = entry_begin_instant
-                .map_or(0, |i| i.elapsed().as_micros() as u64);
+            let latency_us = entry_begin_instant.map_or(0, |i| i.elapsed().as_micros() as u64);
             self.record_completed(TxnRecord {
                 txn_id,
                 txn_type: TxnType::Global,
@@ -1426,8 +1468,7 @@ impl TxnManager {
             return Err(Self::storage_err_to_txn_err(txn_id, e));
         }
 
-        let latency_us = entry_begin_instant
-            .map_or(0, |i| i.elapsed().as_micros() as u64);
+        let latency_us = entry_begin_instant.map_or(0, |i| i.elapsed().as_micros() as u64);
         self.record_completed(TxnRecord {
             txn_id,
             txn_type: TxnType::Global,
@@ -1453,10 +1494,8 @@ impl TxnManager {
             "consistency commit point: WAL durable"
         );
 
-        // CP-V: mark as Committed — visible to readers.
-        if let Some(mut prepared) = self.active_txns.get_mut(&txn_id) {
-            prepared.state = TxnState::Committed;
-        }
+        // CP-V: visible to readers — remove from active set directly
+        self.active_txns.remove(&txn_id);
         tracing::debug!(
             txn_id = txn_id.0,
             commit_ts = commit_ts.0,
@@ -1464,8 +1503,6 @@ impl TxnManager {
             path = "slow",
             "consistency commit point: visible to readers"
         );
-
-        self.active_txns.remove(&txn_id);
         self.stats.record_slow_commit();
         tracing::debug!(
             "TXN slow-commit(global): {} at {} latency={}us",
@@ -1508,7 +1545,7 @@ impl TxnManager {
         let occ_retry_count = entry.occ_retry_count;
         let tenant_id = entry.tenant_id;
         let priority = entry.priority;
-        let latency_breakdown = entry.latency_breakdown.clone();
+        let latency_breakdown = entry.latency_breakdown;
         entry.state = TxnState::Aborted;
         drop(entry);
 
@@ -1520,8 +1557,7 @@ impl TxnManager {
         };
         let _ = self.storage.abort_txn(txn_id, txn_type);
 
-        let latency_us = begin_instant
-            .map_or(0, |i| i.elapsed().as_micros() as u64);
+        let latency_us = begin_instant.map_or(0, |i| i.elapsed().as_micros() as u64);
         self.record_completed(TxnRecord {
             txn_id,
             txn_type: txn_type_snap,
@@ -1631,17 +1667,31 @@ impl TxnManager {
     }
 
     fn record_completed(&self, record: TxnRecord) {
-        let sample = self.latency_sample_divisor <= 1 || record.txn_id.0 % self.latency_sample_divisor == 0;
+        let threshold = self.slow_txn_threshold_us.load(Ordering::Relaxed);
+        let is_slow = threshold > 0 && record.commit_latency_us >= threshold;
+        let sample = self.latency_sample_divisor <= 1
+            || record.txn_id.0.is_multiple_of(self.latency_sample_divisor);
+
         if sample {
             if record.outcome == TxnOutcome::Committed {
                 let mut lat = self.latency.lock();
                 lat.record(record.txn_path, record.commit_latency_us);
                 lat.record_priority(record.priority, record.commit_latency_us);
             }
-            self.history.lock().push(record.clone());
-        }
-        let threshold = self.slow_txn_threshold_us.load(Ordering::Relaxed);
-        if threshold > 0 && record.commit_latency_us >= threshold {
+            if is_slow {
+                // Both history and slow_txn_log need it — clone once
+                self.history.lock().push(record.clone());
+                tracing::warn!(
+                    txn_id = %record.txn_id,
+                    latency_us = record.commit_latency_us,
+                    "Slow transaction detected (threshold={}us)", threshold,
+                );
+                self.slow_txn_log.lock().push(record);
+            } else {
+                // Only history — move without clone
+                self.history.lock().push(record);
+            }
+        } else if is_slow {
             tracing::warn!(
                 txn_id = %record.txn_id,
                 latency_us = record.commit_latency_us,
@@ -1649,6 +1699,7 @@ impl TxnManager {
             );
             self.slow_txn_log.lock().push(record);
         }
+        // Common case: !sample && !is_slow → record is dropped, zero allocation
     }
 
     /// B7: List transactions running longer than `threshold_us` microseconds.

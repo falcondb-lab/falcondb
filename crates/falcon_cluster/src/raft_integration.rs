@@ -104,19 +104,22 @@ impl RaftWalGroup {
         let records_applied_cb = records_applied.clone();
         let storage_cb = storage.clone();
 
-        let apply_fn: falcon_raft::store::ApplyFn = Arc::new(move |data: &[u8]| {
-            match bincode::deserialize::<RaftWalEntry>(data) {
-                Ok(entry) => {
-                    let mut write_sets = std::collections::HashMap::new();
-                    if let Err(e) = apply_wal_record_to_engine(&storage_cb, &entry.record, &mut write_sets) {
-                        return Err(format!("WAL apply failed: {e}"));
+        let apply_fn: falcon_raft::store::ApplyFn =
+            Arc::new(
+                move |data: &[u8]| match bincode::deserialize::<RaftWalEntry>(data) {
+                    Ok(entry) => {
+                        let mut write_sets = std::collections::HashMap::new();
+                        if let Err(e) =
+                            apply_wal_record_to_engine(&storage_cb, &entry.record, &mut write_sets)
+                        {
+                            return Err(format!("WAL apply failed: {e}"));
+                        }
+                        records_applied_cb.fetch_add(1, Ordering::Relaxed);
+                        Ok(())
                     }
-                    records_applied_cb.fetch_add(1, Ordering::Relaxed);
-                    Ok(())
-                }
-                Err(e) => Err(format!("Raft WAL entry decode failed: {e}")),
-            }
-        });
+                    Err(e) => Err(format!("Raft WAL entry decode failed: {e}")),
+                },
+            );
 
         let raft_group =
             falcon_raft::RaftGroup::new_cluster_with_callback(node_ids, Some(apply_fn))
@@ -306,7 +309,10 @@ impl RaftFailoverWatcher {
             tracing::info!("RaftFailoverWatcher stopped");
         });
 
-        RaftFailoverWatcherHandle { stop_tx: tx, task: Some(task) }
+        RaftFailoverWatcherHandle {
+            stop_tx: tx,
+            task: Some(task),
+        }
     }
 
     /// Snapshot of watcher metrics.
@@ -406,27 +412,26 @@ impl RaftShardCoordinator {
     pub fn start_failover_watcher(self: &Arc<Self>, poll_interval: Duration) {
         let groups: Vec<(ShardId, Arc<RaftWalGroup>)> = self
             .groups
-            .read().values().map(|g| (g.shard_id, g.clone()))
+            .read()
+            .values()
+            .map(|g| (g.shard_id, g.clone()))
             .collect();
 
-        let watcher =
-            RaftFailoverWatcher::new(groups, self.shard_map.clone());
+        let watcher = RaftFailoverWatcher::new(groups, self.shard_map.clone());
         let handle = watcher.start(poll_interval);
         *self._watcher_handle.lock() = Some(handle);
     }
 
     /// Propose a WAL record to the Raft group for `shard_id`.
-    pub async fn propose(
-        &self,
-        shard_id: ShardId,
-        record: WalRecord,
-    ) -> Result<(), FalconError> {
+    pub async fn propose(&self, shard_id: ShardId, record: WalRecord) -> Result<(), FalconError> {
         let group = self
             .groups
             .read()
             .get(&shard_id.0)
             .cloned()
-            .ok_or_else(|| FalconError::Internal(format!("No Raft group for shard {}", shard_id.0)))?;
+            .ok_or_else(|| {
+                FalconError::Internal(format!("No Raft group for shard {}", shard_id.0))
+            })?;
 
         group.propose_wal_record(record).await?;
         self.total_proposed.fetch_add(1, Ordering::Relaxed);
@@ -441,17 +446,12 @@ impl RaftShardCoordinator {
 
     /// Wait for all registered shards to have a leader.
     pub async fn wait_all_leaders_elected(&self, timeout: Duration) -> Result<(), FalconError> {
-        let groups: Vec<Arc<RaftWalGroup>> =
-            self.groups.read().values().cloned().collect();
+        let groups: Vec<Arc<RaftWalGroup>> = self.groups.read().values().cloned().collect();
 
         for group in groups {
-            group
-                .wait_for_leader(timeout)
-                .await
-                .map_err(|e| FalconError::Internal(format!(
-                    "Shard {} leader timeout: {e}",
-                    group.shard_id.0
-                )))?;
+            group.wait_for_leader(timeout).await.map_err(|e| {
+                FalconError::Internal(format!("Shard {} leader timeout: {e}", group.shard_id.0))
+            })?;
         }
         Ok(())
     }
@@ -545,12 +545,7 @@ pub struct RaftStatRow {
 
 /// Collect `SHOW falcon.raft_stats` data from a coordinator.
 pub async fn collect_raft_stats(coordinator: &RaftShardCoordinator) -> Vec<RaftStatRow> {
-    let groups: Vec<Arc<RaftWalGroup>> = coordinator
-        .groups
-        .read()
-        .values()
-        .cloned()
-        .collect();
+    let groups: Vec<Arc<RaftWalGroup>> = coordinator.groups.read().values().cloned().collect();
 
     let mut rows = Vec::with_capacity(groups.len());
     for group in groups {
@@ -588,7 +583,8 @@ mod tests {
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(1),
@@ -597,7 +593,8 @@ mod tests {
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
             ],
             primary_key_columns: vec![0],
@@ -614,10 +611,7 @@ mod tests {
             .await
             .unwrap();
 
-        let leader = group
-            .wait_for_leader(Duration::from_secs(5))
-            .await
-            .unwrap();
+        let leader = group.wait_for_leader(Duration::from_secs(5)).await.unwrap();
 
         assert!(
             [1u64, 2, 3].contains(&leader),
@@ -637,10 +631,7 @@ mod tests {
             .await
             .unwrap();
 
-        group
-            .wait_for_leader(Duration::from_secs(5))
-            .await
-            .unwrap();
+        group.wait_for_leader(Duration::from_secs(5)).await.unwrap();
 
         // Propose an Insert WAL record
         let row = OwnedRow::new(vec![Datum::Int32(42), Datum::Text("hello".into())]);
@@ -686,10 +677,7 @@ mod tests {
             .await
             .unwrap();
 
-        group
-            .wait_for_leader(Duration::from_secs(5))
-            .await
-            .unwrap();
+        group.wait_for_leader(Duration::from_secs(5)).await.unwrap();
 
         let row = OwnedRow::new(vec![Datum::Int32(7), Datum::Text("raft-row".into())]);
         group
@@ -715,7 +703,8 @@ mod tests {
             .scan(TableId(1), TxnId(999), Timestamp(100))
             .unwrap();
         assert!(
-            rows.iter().any(|(_pk, r)| r.values.first() == Some(&Datum::Int32(7))),
+            rows.iter()
+                .any(|(_pk, r)| r.values.first() == Some(&Datum::Int32(7))),
             "row id=7 should be visible after Raft commit"
         );
     }
@@ -729,10 +718,7 @@ mod tests {
             .await
             .unwrap();
 
-        let old_leader = group
-            .wait_for_leader(Duration::from_secs(5))
-            .await
-            .unwrap();
+        let old_leader = group.wait_for_leader(Duration::from_secs(5)).await.unwrap();
 
         // Partition the current leader from the router
         group.raft_group.partition_node(old_leader);
@@ -765,13 +751,16 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         };
 
-        assert_ne!(new_leader, old_leader, "a different node must become leader");
+        assert_ne!(
+            new_leader, old_leader,
+            "a different node must become leader"
+        );
     }
 
     #[tokio::test]
     async fn test_raft_shard_coordinator_multi_shard() {
-        use falcon_storage::wal::WalRecord;
         use falcon_common::datum::{Datum, OwnedRow};
+        use falcon_storage::wal::WalRecord;
 
         let shard_map = Arc::new(RwLock::new(ShardMap::uniform(2, NodeId(1))));
         let coordinator = RaftShardCoordinator::new(shard_map.clone());
@@ -838,15 +827,9 @@ mod tests {
             .await
             .unwrap();
 
-        group
-            .wait_for_leader(Duration::from_secs(5))
-            .await
-            .unwrap();
+        group.wait_for_leader(Duration::from_secs(5)).await.unwrap();
 
-        let watcher = RaftFailoverWatcher::new(
-            vec![(ShardId(0), group)],
-            shard_map.clone(),
-        );
+        let watcher = RaftFailoverWatcher::new(vec![(ShardId(0), group)], shard_map.clone());
 
         // Poll once — should update the shard map with the elected leader
         watcher.poll_once().await;
@@ -867,24 +850,13 @@ mod tests {
             .await
             .unwrap();
 
-        group
-            .wait_for_leader(Duration::from_secs(5))
-            .await
-            .unwrap();
+        group.wait_for_leader(Duration::from_secs(5)).await.unwrap();
 
         // Add node 4 as a new voter
-        group
-            .raft_group
-            .add_voter(4, "node-4")
-            .await
-            .unwrap();
+        group.raft_group.add_voter(4, "node-4").await.unwrap();
 
         // Remove node 4
-        group
-            .raft_group
-            .remove_voter(4)
-            .await
-            .unwrap();
+        group.raft_group.remove_voter(4).await.unwrap();
     }
 
     #[tokio::test]
@@ -897,10 +869,7 @@ mod tests {
         let group = RaftWalGroup::new(ShardId(0), vec![1, 2, 3], storage)
             .await
             .unwrap();
-        group
-            .wait_for_leader(Duration::from_secs(5))
-            .await
-            .unwrap();
+        group.wait_for_leader(Duration::from_secs(5)).await.unwrap();
         coordinator.register_shard(group);
 
         let stats = collect_raft_stats(&coordinator).await;
@@ -945,8 +914,8 @@ mod tests {
     #[test]
     fn test_shard_map_leader_change_callback() {
         use crate::routing::shard_map::ShardMap;
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
 
         let mut map = ShardMap::single_shard(NodeId(1));
         let callback_count = Arc::new(AtomicU64::new(0));

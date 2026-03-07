@@ -1,6 +1,10 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use falcon_cli::{client::DbClient, csv::CsvOptions, import::{ImportCmd, run_import}};
+use falcon_cli::{
+    client::DbClient,
+    csv::CsvOptions,
+    import::{run_import, ImportCmd},
+};
 
 /// FalconDB high-performance import tool.
 ///
@@ -122,7 +126,9 @@ fn parse_single_char(s: &str, name: &str) -> Result<char> {
         other => other,
     };
     let mut chars = s.chars();
-    let c = chars.next().ok_or_else(|| anyhow::anyhow!("{name} must not be empty"))?;
+    let c = chars
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("{name} must not be empty"))?;
     if chars.next().is_some() {
         anyhow::bail!("{name} must be a single character, got {:?}", s);
     }

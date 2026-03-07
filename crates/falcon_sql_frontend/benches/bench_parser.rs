@@ -27,7 +27,8 @@ fn bench_parse_insert(c: &mut Criterion) {
 }
 
 fn bench_parse_update(c: &mut Criterion) {
-    let sql = "UPDATE accounts SET balance = balance - 100 WHERE account_id = 42 AND balance >= 100";
+    let sql =
+        "UPDATE accounts SET balance = balance - 100 WHERE account_id = 42 AND balance >= 100";
     c.bench_function("parse/update", |b| {
         b.iter(|| parse_sql(black_box(sql)).unwrap())
     });

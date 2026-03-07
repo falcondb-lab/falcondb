@@ -67,7 +67,9 @@ impl SpillMetrics {
 }
 
 impl Default for SpillMetrics {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Immutable snapshot of spill metrics.
@@ -96,11 +98,27 @@ fn make_comparator(order_by: &[BoundOrderBy]) -> RowCmp {
             let bv = b.get(idx).unwrap_or(&Datum::Null);
             let cmp = match (av.is_null(), bv.is_null()) {
                 (true, true) => Ordering::Equal,
-                (true, false) => if nulls_first { Ordering::Less } else { Ordering::Greater },
-                (false, true) => if nulls_first { Ordering::Greater } else { Ordering::Less },
+                (true, false) => {
+                    if nulls_first {
+                        Ordering::Less
+                    } else {
+                        Ordering::Greater
+                    }
+                }
+                (false, true) => {
+                    if nulls_first {
+                        Ordering::Greater
+                    } else {
+                        Ordering::Less
+                    }
+                }
                 (false, false) => {
                     let c = av.partial_cmp(bv).unwrap_or(Ordering::Equal);
-                    if asc { c } else { c.reverse() }
+                    if asc {
+                        c
+                    } else {
+                        c.reverse()
+                    }
                 }
             };
             if cmp != Ordering::Equal {
@@ -158,7 +176,9 @@ impl ExternalSorter {
         if rows.len() <= self.threshold {
             let cmp = make_comparator(order_by);
             rows.sort_unstable_by(|a, b| cmp(a, b));
-            self.metrics.in_memory_count.fetch_add(1, AtomicOrdering::Relaxed);
+            self.metrics
+                .in_memory_count
+                .fetch_add(1, AtomicOrdering::Relaxed);
             return Ok(());
         }
 
@@ -169,8 +189,12 @@ impl ExternalSorter {
         // Always clean up temp files
         let _ = fs::remove_dir_all(&run_dir);
         let elapsed_us = spill_start.elapsed().as_micros() as u64;
-        self.metrics.spill_duration_us.fetch_add(elapsed_us, AtomicOrdering::Relaxed);
-        self.metrics.spill_count.fetch_add(1, AtomicOrdering::Relaxed);
+        self.metrics
+            .spill_duration_us
+            .fetch_add(elapsed_us, AtomicOrdering::Relaxed);
+        self.metrics
+            .spill_count
+            .fetch_add(1, AtomicOrdering::Relaxed);
         result
     }
 
@@ -194,8 +218,12 @@ impl ExternalSorter {
             chunk.sort_unstable_by(|a, b| cmp(a, b));
             let path = run_dir.join(format!("run_{run_idx:06}.bin"));
             let bytes_written = write_run(&path, &chunk)?;
-            self.metrics.bytes_spilled.fetch_add(bytes_written, AtomicOrdering::Relaxed);
-            self.metrics.runs_created.fetch_add(1, AtomicOrdering::Relaxed);
+            self.metrics
+                .bytes_spilled
+                .fetch_add(bytes_written, AtomicOrdering::Relaxed);
+            self.metrics
+                .runs_created
+                .fetch_add(1, AtomicOrdering::Relaxed);
             run_paths.push(path);
             run_idx += 1;
         }
@@ -208,8 +236,7 @@ impl ExternalSorter {
                 if group.len() == 1 {
                     next_paths.push(group[0].clone());
                 } else {
-                    let merged_path =
-                        run_dir.join(format!("merge_g{merge_gen}_i{group_idx}.bin"));
+                    let merged_path = run_dir.join(format!("merge_g{merge_gen}_i{group_idx}.bin"));
                     merge_runs(group, &merged_path, order_by)?;
                     // Remove consumed input runs
                     for p in group {
@@ -225,7 +252,9 @@ impl ExternalSorter {
         // Phase 3: Read final sorted run back into memory
         if let Some(final_path) = run_paths.first() {
             let (loaded, bytes_read) = read_run_tracked(final_path)?;
-            self.metrics.bytes_read_back.fetch_add(bytes_read, AtomicOrdering::Relaxed);
+            self.metrics
+                .bytes_read_back
+                .fetch_add(bytes_read, AtomicOrdering::Relaxed);
             *rows = loaded;
         }
 
@@ -254,9 +283,8 @@ impl ExternalSorter {
 /// Format: [row_count: u64] then for each row [byte_len: u32][bincode bytes].
 /// Returns total bytes written.
 fn write_run(path: &Path, rows: &[OwnedRow]) -> Result<u64, FalconError> {
-    let file = File::create(path).map_err(|e| {
-        FalconError::Internal(format!("Failed to create spill file {path:?}: {e}"))
-    })?;
+    let file = File::create(path)
+        .map_err(|e| FalconError::Internal(format!("Failed to create spill file {path:?}: {e}")))?;
     let mut w = BufWriter::new(file);
     let mut total_bytes: u64 = 8; // row_count header
 
@@ -287,9 +315,8 @@ fn read_run(path: &Path) -> Result<Vec<OwnedRow>, FalconError> {
 
 /// Read an entire sorted run, tracking bytes read.
 fn read_run_tracked(path: &Path) -> Result<(Vec<OwnedRow>, u64), FalconError> {
-    let file = File::open(path).map_err(|e| {
-        FalconError::Internal(format!("Failed to open spill file {path:?}: {e}"))
-    })?;
+    let file = File::open(path)
+        .map_err(|e| FalconError::Internal(format!("Failed to open spill file {path:?}: {e}")))?;
     let mut r = BufReader::new(file);
     let count = read_u64(&mut r)?;
     let mut rows = Vec::with_capacity(count as usize);
@@ -364,9 +391,7 @@ fn merge_runs(
 
     // Open output
     let file = File::create(output_path).map_err(|e| {
-        FalconError::Internal(format!(
-            "Failed to create merge file {output_path:?}: {e}"
-        ))
+        FalconError::Internal(format!("Failed to create merge file {output_path:?}: {e}"))
     })?;
     let mut w = BufWriter::new(file);
     w.write_all(&total.to_le_bytes()).map_err(io_err)?;

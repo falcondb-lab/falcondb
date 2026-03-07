@@ -79,13 +79,15 @@ impl WalEncryption {
     fn decrypt(&self, encrypted: &[u8]) -> Result<Vec<u8>, StorageError> {
         use aes_gcm::aead::Aead;
         if encrypted.len() < crate::encryption::NONCE_LEN + crate::encryption::GCM_TAG_LEN {
-            return Err(StorageError::Wal("TDE: encrypted WAL record too short".into()));
+            return Err(StorageError::Wal(
+                "TDE: encrypted WAL record too short".into(),
+            ));
         }
         let (nonce_bytes, ciphertext) = encrypted.split_at(crate::encryption::NONCE_LEN);
         let nonce = aes_gcm::Nonce::from_slice(nonce_bytes);
-        self.cipher
-            .decrypt(nonce, ciphertext)
-            .map_err(|_| StorageError::Wal("TDE: AES-256-GCM decryption failed (auth mismatch)".into()))
+        self.cipher.decrypt(nonce, ciphertext).map_err(|_| {
+            StorageError::Wal("TDE: AES-256-GCM decryption failed (auth mismatch)".into())
+        })
     }
 }
 
@@ -325,6 +327,13 @@ pub enum AlterTableOp {
     SetNotNull { column_name: String },
     /// Drop NOT NULL constraint from a column.
     DropNotNull { column_name: String },
+    /// Set a default value for a column.
+    SetDefault {
+        column_name: String,
+        default_value: falcon_common::datum::Datum,
+    },
+    /// Drop the default value from a column.
+    DropDefault { column_name: String },
 }
 
 /// Typed ALTER ROLE options for WAL serialization.
@@ -346,8 +355,14 @@ pub enum WalRecord {
     BeginTxn { txn_id: TxnId },
     /// Prepare a global transaction (2PC phase-1).
     PrepareTxn { txn_id: TxnId },
+    /// Prepare with named GID for `PREPARE TRANSACTION 'gid'` crash recovery.
+    PrepareTxnNamed { txn_id: TxnId, gid: String },
     /// Prepare with coordinator mapping for cross-node 2PC recovery.
-    PrepareTxn2pc { txn_id: TxnId, coord_txn_id: u64, shard_id: u64 },
+    PrepareTxn2pc {
+        txn_id: TxnId,
+        coord_txn_id: u64,
+        shard_id: u64,
+    },
     /// Insert a row.
     Insert {
         txn_id: TxnId,
@@ -363,6 +378,13 @@ pub enum WalRecord {
     /// Update a row (full row replacement).
     Update {
         txn_id: TxnId,
+        table_id: TableId,
+        pk: Vec<u8>,
+        new_row: OwnedRow,
+    },
+    /// DDL backfill: in-place replace of committed row data (no MVCC txn).
+    /// Replayed by calling replace_latest() — safe to re-apply idempotently.
+    DdlBackfillUpdate {
         table_id: TableId,
         pk: Vec<u8>,
         new_row: OwnedRow,
@@ -398,7 +420,11 @@ pub enum WalRecord {
     /// DDL: drop view.
     DropView { name: String },
     /// DDL: create materialized view.
-    CreateMaterializedView { name: String, query_sql: String, backing_table_id: TableId },
+    CreateMaterializedView {
+        name: String,
+        query_sql: String,
+        backing_table_id: TableId,
+    },
     /// DDL: drop materialized view.
     DropMaterializedView { name: String },
     /// DDL: alter table (typed operation, bincode-serialized).
@@ -443,10 +469,7 @@ pub enum WalRecord {
     /// DDL: drop role.
     DropRole { name: String },
     /// DDL: alter role (typed options, bincode-serialized).
-    AlterRole {
-        name: String,
-        opts: AlterRoleOpts,
-    },
+    AlterRole { name: String, opts: AlterRoleOpts },
     /// DCL: grant privilege.
     GrantPrivilege {
         grantee: String,
@@ -463,7 +486,9 @@ pub enum WalRecord {
         object_name: String,
     },
     /// DDL: create function.
-    CreateFunction { def: falcon_common::schema::FunctionDef },
+    CreateFunction {
+        def: falcon_common::schema::FunctionDef,
+    },
     /// DDL: drop function.
     DropFunction { name: String },
     /// DCL: grant role membership.
@@ -492,7 +517,6 @@ pub enum WalRecord {
 /// Callback invoked when a WAL segment is rotated (completed).
 /// Arguments: (completed_segment_id, segment_size_bytes)
 pub type SegmentRotateCallback = Arc<dyn Fn(u64, u64) + Send + Sync>;
-
 
 const WAL_SHARD_COUNT: usize = 8;
 
@@ -639,7 +663,9 @@ impl WalWriter {
 
     /// Spawn a dedicated flush thread that does back-to-back FUA writes.
     /// Returns the JoinHandle. Caller should store it and call shutdown_flush_thread() on drop.
-    pub fn start_flush_thread(self: &Arc<Self>) -> Result<std::thread::JoinHandle<()>, StorageError> {
+    pub fn start_flush_thread(
+        self: &Arc<Self>,
+    ) -> Result<std::thread::JoinHandle<()>, StorageError> {
         let wal = Arc::clone(self);
         std::thread::Builder::new()
             .name("wal-flush".into())
@@ -717,10 +743,7 @@ impl WalWriter {
 
     #[cfg(not(target_os = "windows"))]
     fn open_wal_file(path: &Path) -> Result<File, StorageError> {
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(file)
     }
 
@@ -745,14 +768,15 @@ impl WalWriter {
     /// within a thread — critical for recovery (inserts must precede commit).
     fn pick_shard(&self) -> usize {
         thread_local! {
-            static SHARD: std::cell::Cell<usize> = std::cell::Cell::new(usize::MAX);
+            static SHARD: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
         }
         SHARD.with(|cell| {
             let idx = cell.get();
             if idx < WAL_SHARD_COUNT {
                 idx
             } else {
-                let new_idx = (self.shard_rr.fetch_add(1, Ordering::Relaxed) as usize) % WAL_SHARD_COUNT;
+                let new_idx =
+                    (self.shard_rr.fetch_add(1, Ordering::Relaxed) as usize) % WAL_SHARD_COUNT;
                 cell.set(new_idx);
                 new_idx
             }
@@ -831,13 +855,14 @@ impl WalWriter {
             let shard_idx = self.pick_shard();
             let mut shard = self.shards[shard_idx].lock();
             let base_lsn = self.lsn.fetch_add(count, Ordering::Relaxed);
-            for i in 0..records.len() {
-                let (offset, len, crc) = index[i];
+            for (offset, len, crc) in index[..records.len()].iter().copied() {
                 let mut header = [0u8; 8];
                 header[..4].copy_from_slice(&(len as u32).to_le_bytes());
                 header[4..].copy_from_slice(&crc.to_le_bytes());
                 shard.buf.extend_from_slice(&header);
-                shard.buf.extend_from_slice(&serial_buf[offset..offset + len]);
+                shard
+                    .buf
+                    .extend_from_slice(&serial_buf[offset..offset + len]);
                 shard.pending_count += 1;
                 self.atomic_pending.fetch_add(1, Ordering::Relaxed);
             }
@@ -849,8 +874,8 @@ impl WalWriter {
 
     /// Pre-serialize a WAL record into header+payload bytes (for deferred append).
     pub fn serialize_record(record: &WalRecord) -> Result<Vec<u8>, StorageError> {
-        let data = bincode::serialize(record)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let data =
+            bincode::serialize(record).map_err(|e| StorageError::Serialization(e.to_string()))?;
         let checksum = crc32fast::hash(&data);
         let len = data.len() as u32;
         let mut out = Vec::with_capacity(8 + data.len());
@@ -863,7 +888,12 @@ impl WalWriter {
     /// Append pre-serialized bytes + one record under a single shard lock.
     /// `pre` contains already-framed (header+payload) WAL entries.
     /// `record` is serialized inline (typically CommitTxnLocal, ~20 bytes).
-    pub fn append_preserialized(&self, pre: &[u8], pre_count: usize, record: &WalRecord) -> Result<u64, StorageError> {
+    pub fn append_preserialized(
+        &self,
+        pre: &[u8],
+        pre_count: usize,
+        record: &WalRecord,
+    ) -> Result<u64, StorageError> {
         thread_local! {
             static SER_BUF: std::cell::RefCell<Vec<u8>> = std::cell::RefCell::new(Vec::with_capacity(64));
         }
@@ -892,7 +922,8 @@ impl WalWriter {
             shard.pending_count += total_records as usize;
             let last_lsn = base_lsn + total_records - 1;
             shard.max_lsn = last_lsn;
-            self.atomic_pending.fetch_add(total_records as usize, Ordering::Relaxed);
+            self.atomic_pending
+                .fetch_add(total_records as usize, Ordering::Relaxed);
             Ok(last_lsn)
         })
     }
@@ -901,7 +932,8 @@ impl WalWriter {
     pub fn flush(&self) -> Result<(), StorageError> {
         let mut collected = Vec::new();
         {
-            let mut shard_guards: [_; WAL_SHARD_COUNT] = std::array::from_fn(|i| self.shards[i].lock());
+            let mut shard_guards: [_; WAL_SHARD_COUNT] =
+                std::array::from_fn(|i| self.shards[i].lock());
             for sg in shard_guards.iter_mut() {
                 if !sg.buf.is_empty() {
                     collected.extend_from_slice(&sg.buf);
@@ -940,7 +972,8 @@ impl WalWriter {
 
         let mut inner = self.inner.lock();
         {
-            let mut shard_guards: [_; WAL_SHARD_COUNT] = std::array::from_fn(|i| self.shards[i].lock());
+            let mut shard_guards: [_; WAL_SHARD_COUNT] =
+                std::array::from_fn(|i| self.shards[i].lock());
             for sg in shard_guards.iter_mut() {
                 if !sg.buf.is_empty() {
                     flush_buf.extend_from_slice(&sg.buf);
@@ -968,7 +1001,10 @@ impl WalWriter {
         drop(inner);
 
         // FUA write outside all locks
-        let fd = self.flush_fd_cache.lock().take()
+        let fd = self
+            .flush_fd_cache
+            .lock()
+            .take()
             .map_or_else(|| self.inner.lock().file.try_clone(), Ok)?;
         (&fd).write_all(&flush_buf)?;
         #[cfg(not(target_os = "windows"))]
@@ -984,15 +1020,13 @@ impl WalWriter {
     /// Write data across segments, rotating as needed. Scans record boundaries
     /// ([len:4][crc:4][payload:len]) to split at the right place.
     /// Called with inner lock held.
-    fn do_rotate(
-        &self,
-        inner: &mut WalWriterInner,
-        data: &[u8],
-    ) -> Result<(), StorageError> {
+    fn do_rotate(&self, inner: &mut WalWriterInner, data: &[u8]) -> Result<(), StorageError> {
         let mut offset = 0usize;
         while offset < data.len() {
             let remaining = &data[offset..];
-            let space = self.max_segment_size.saturating_sub(inner.current_segment_size) as usize;
+            let space = self
+                .max_segment_size
+                .saturating_sub(inner.current_segment_size) as usize;
 
             let chunk_end = Self::find_records_boundary(remaining, space);
             if chunk_end > 0 {
@@ -1042,7 +1076,8 @@ impl WalWriter {
     fn find_records_boundary(data: &[u8], max_bytes: usize) -> usize {
         let mut pos = 0;
         while pos + 8 <= data.len() {
-            let len = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+            let len = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                as usize;
             let total = 8 + len;
             if pos + total > data.len() || pos + total > max_bytes {
                 break;
@@ -1054,10 +1089,16 @@ impl WalWriter {
 
     /// Length of the next complete record starting at data[0], or None.
     fn next_record_len(data: &[u8]) -> Option<usize> {
-        if data.len() < 8 { return None; }
+        if data.len() < 8 {
+            return None;
+        }
         let len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
         let total = 8 + len;
-        if total <= data.len() { Some(total) } else { None }
+        if total <= data.len() {
+            Some(total)
+        } else {
+            None
+        }
     }
 
     pub fn current_lsn(&self) -> u64 {
@@ -1072,7 +1113,6 @@ impl Drop for WalWriter {
 }
 
 impl WalWriter {
-
     pub fn sync_mode(&self) -> SyncMode {
         self.sync_mode
     }
@@ -1214,12 +1254,13 @@ impl WalReader {
         encryption: Option<&WalEncryption>,
     ) -> Result<(), StorageError> {
         // Skip segment header if present (magic + format version = 8 bytes)
-        let mut pos = if data.len() >= WAL_SEGMENT_HEADER_SIZE && &data[0..4] == WAL_MAGIC.as_slice() {
-            let _format_version = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-            WAL_SEGMENT_HEADER_SIZE
-        } else {
-            0
-        };
+        let mut pos =
+            if data.len() >= WAL_SEGMENT_HEADER_SIZE && &data[0..4] == WAL_MAGIC.as_slice() {
+                let _format_version = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+                WAL_SEGMENT_HEADER_SIZE
+            } else {
+                0
+            };
         while pos + 8 <= data.len() {
             let len = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
                 as usize;
@@ -1299,16 +1340,19 @@ impl CheckpointData {
             bincode::serialize(self).map_err(|e| StorageError::Serialization(e.to_string()))?;
         let tmp_path = dir.join("checkpoint.tmp");
         fs::write(&tmp_path, &data).map_err(|e| {
-            StorageError::Wal(format!("write checkpoint.tmp ({}): {e}", tmp_path.display()))
+            StorageError::Wal(format!(
+                "write checkpoint.tmp ({}): {e}",
+                tmp_path.display()
+            ))
         })?;
         // Sync the temp file to ensure data is durable before replacing.
         // On Windows, FlushFileBuffers requires write access — open with write(true).
-        let f = fs::OpenOptions::new().write(true).open(&tmp_path).map_err(|e| {
-            StorageError::Wal(format!("open checkpoint.tmp for sync: {e}"))
-        })?;
-        f.sync_all().map_err(|e| {
-            StorageError::Wal(format!("sync_all checkpoint.tmp: {e}"))
-        })?;
+        let f = fs::OpenOptions::new()
+            .write(true)
+            .open(&tmp_path)
+            .map_err(|e| StorageError::Wal(format!("open checkpoint.tmp for sync: {e}")))?;
+        f.sync_all()
+            .map_err(|e| StorageError::Wal(format!("sync_all checkpoint.tmp: {e}")))?;
         drop(f);
         // On Windows fs::rename fails if target exists; remove it first
         if path.exists() {

@@ -33,10 +33,7 @@ enum ManifestRecord {
 impl Manifest {
     pub fn open(dir: &Path) -> io::Result<Self> {
         let path = dir.join("MANIFEST");
-        let log = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let log = OpenOptions::new().create(true).append(true).open(&path)?;
         Ok(Self { path, log })
     }
 
@@ -151,8 +148,7 @@ impl Manifest {
                         file_size: meta.file_size,
                         seq: meta.seq,
                     };
-                    let line = serde_json::to_string(&rec)
-                        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                    let line = serde_json::to_string(&rec).map_err(io::Error::other)?;
                     writeln!(f, "{}", line)?;
                 }
             }
@@ -165,8 +161,7 @@ impl Manifest {
     }
 
     fn append(&mut self, rec: &ManifestRecord) -> io::Result<()> {
-        let line =
-            serde_json::to_string(rec).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let line = serde_json::to_string(rec).map_err(io::Error::other)?;
         writeln!(self.log, "{}", line)?;
         self.log.flush()
     }

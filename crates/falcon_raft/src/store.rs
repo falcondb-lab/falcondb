@@ -244,9 +244,7 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
                                     // Return storage error to openraft so it can handle it.
                                     return Err(StorageError::IO {
                                         source: openraft::StorageIOError::write_state_machine(
-                                            &std::io::Error::other(format!(
-                                                "apply callback: {e}"
-                                            )),
+                                            &std::io::Error::other(format!("apply callback: {e}")),
                                         ),
                                     });
                                 }

@@ -90,30 +90,54 @@ impl fmt::Display for ComponentState {
 /// Recovery action taken on restart.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecoveryAction {
-    WalReplay { records_replayed: u64, from_lsn: u64, to_lsn: u64 },
-    ColdSegmentRebuild { segments_rebuilt: u64 },
-    ReplicationResume { from_lsn: u64 },
-    CheckpointRestore { checkpoint_lsn: u64 },
-    InDoubtTxnResolution { committed: u64, aborted: u64 },
-    IndexRebuild { indexes_rebuilt: u64 },
+    WalReplay {
+        records_replayed: u64,
+        from_lsn: u64,
+        to_lsn: u64,
+    },
+    ColdSegmentRebuild {
+        segments_rebuilt: u64,
+    },
+    ReplicationResume {
+        from_lsn: u64,
+    },
+    CheckpointRestore {
+        checkpoint_lsn: u64,
+    },
+    InDoubtTxnResolution {
+        committed: u64,
+        aborted: u64,
+    },
+    IndexRebuild {
+        indexes_rebuilt: u64,
+    },
     None,
 }
 
 impl fmt::Display for RecoveryAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::WalReplay { records_replayed, from_lsn, to_lsn } =>
-                write!(f, "WAL_REPLAY(records={records_replayed}, lsn={from_lsn}..{to_lsn})"),
-            Self::ColdSegmentRebuild { segments_rebuilt } =>
-                write!(f, "COLD_REBUILD(segments={segments_rebuilt})"),
-            Self::ReplicationResume { from_lsn } =>
-                write!(f, "REPL_RESUME(from_lsn={from_lsn})"),
-            Self::CheckpointRestore { checkpoint_lsn } =>
-                write!(f, "CHECKPOINT(lsn={checkpoint_lsn})"),
-            Self::InDoubtTxnResolution { committed, aborted } =>
-                write!(f, "INDOUBT(committed={committed}, aborted={aborted})"),
-            Self::IndexRebuild { indexes_rebuilt } =>
-                write!(f, "INDEX_REBUILD(count={indexes_rebuilt})"),
+            Self::WalReplay {
+                records_replayed,
+                from_lsn,
+                to_lsn,
+            } => write!(
+                f,
+                "WAL_REPLAY(records={records_replayed}, lsn={from_lsn}..{to_lsn})"
+            ),
+            Self::ColdSegmentRebuild { segments_rebuilt } => {
+                write!(f, "COLD_REBUILD(segments={segments_rebuilt})")
+            }
+            Self::ReplicationResume { from_lsn } => write!(f, "REPL_RESUME(from_lsn={from_lsn})"),
+            Self::CheckpointRestore { checkpoint_lsn } => {
+                write!(f, "CHECKPOINT(lsn={checkpoint_lsn})")
+            }
+            Self::InDoubtTxnResolution { committed, aborted } => {
+                write!(f, "INDOUBT(committed={committed}, aborted={aborted})")
+            }
+            Self::IndexRebuild { indexes_rebuilt } => {
+                write!(f, "INDEX_REBUILD(count={indexes_rebuilt})")
+            }
             Self::None => write!(f, "NONE"),
         }
     }
@@ -216,20 +240,22 @@ impl CrashHardeningCoordinator {
 
     /// Detect how the previous instance terminated.
     pub fn detect_previous_shutdown(&self) -> ShutdownType {
-        self.shutdown_sentinel_path.as_ref().map_or(ShutdownType::Unknown, |path| {
-            if std::path::Path::new(path).exists() {
-                ShutdownType::Clean
-            } else {
-                ShutdownType::Crash
-            }
-        })
+        self.shutdown_sentinel_path
+            .as_ref()
+            .map_or(ShutdownType::Unknown, |path| {
+                if std::path::Path::new(path).exists() {
+                    ShutdownType::Clean
+                } else {
+                    ShutdownType::Crash
+                }
+            })
     }
 
     /// Write the shutdown sentinel (called during graceful shutdown).
     pub fn write_shutdown_sentinel(&self) -> bool {
-        self.shutdown_sentinel_path.as_ref().is_some_and(|path| {
-            std::fs::write(path, b"CLEAN_SHUTDOWN").is_ok()
-        })
+        self.shutdown_sentinel_path
+            .as_ref()
+            .is_some_and(|path| std::fs::write(path, b"CLEAN_SHUTDOWN").is_ok())
     }
 
     /// Remove the sentinel on startup (so crash on next run is detectable).
@@ -245,7 +271,9 @@ impl CrashHardeningCoordinator {
 
     /// Register a component in INIT state.
     pub fn register(&self, component: ComponentType) {
-        self.components.write().insert(component, ComponentState::Init);
+        self.components
+            .write()
+            .insert(component, ComponentState::Init);
     }
 
     /// Transition a component state.
@@ -283,15 +311,21 @@ impl CrashHardeningCoordinator {
                     self.metrics.cold_rebuilds.fetch_add(1, Ordering::Relaxed);
                 }
                 RecoveryAction::InDoubtTxnResolution { .. } => {
-                    self.metrics.indoubt_resolutions.fetch_add(1, Ordering::Relaxed);
+                    self.metrics
+                        .indoubt_resolutions
+                        .fetch_add(1, Ordering::Relaxed);
                 }
                 _ => {}
             }
         }
         if previous_shutdown == ShutdownType::Crash {
-            self.metrics.crash_recoveries.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .crash_recoveries
+                .fetch_add(1, Ordering::Relaxed);
         }
-        self.metrics.startup_total_ms.fetch_add(duration_ms, Ordering::Relaxed);
+        self.metrics
+            .startup_total_ms
+            .fetch_add(duration_ms, Ordering::Relaxed);
         self.transition(component, ComponentState::Running);
         self.startup_log.lock().push(record);
     }
@@ -314,7 +348,10 @@ impl CrashHardeningCoordinator {
 
     /// Check if any component is in Failed state.
     pub fn any_failed(&self) -> bool {
-        self.components.read().values().any(|s| *s == ComponentState::Failed)
+        self.components
+            .read()
+            .values()
+            .any(|s| *s == ComponentState::Failed)
     }
 
     /// Get component states.
@@ -490,7 +527,9 @@ impl ConfigRollbackManager {
                 restored.rollout_state = RolloutState::RolledBack;
                 drop(hist);
                 self.current.write().insert(key.to_owned(), restored);
-                self.metrics.rollbacks_executed.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .rollbacks_executed
+                    .fetch_add(1, Ordering::Relaxed);
                 return true;
             }
         }
@@ -520,7 +559,9 @@ impl ConfigRollbackManager {
         if let Some(entry) = self.current.read().get(key) {
             let expected = Self::compute_checksum(&entry.key, &entry.value);
             if expected != entry.checksum {
-                self.metrics.checksum_mismatches.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .checksum_mismatches
+                    .fetch_add(1, Ordering::Relaxed);
                 return false;
             }
         }
@@ -630,7 +671,9 @@ impl ResourceLeakDetector {
 
     /// Set alarm threshold for a resource type (growth per hour).
     pub fn set_threshold(&self, resource: LeakResourceType, growth_per_hour: f64) {
-        self.alarm_thresholds.write().insert(resource, growth_per_hour);
+        self.alarm_thresholds
+            .write()
+            .insert(resource, growth_per_hour);
     }
 
     /// Record a resource snapshot.
@@ -639,7 +682,10 @@ impl ResourceLeakDetector {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let snapshot = ResourceSnapshot { timestamp: ts, values };
+        let snapshot = ResourceSnapshot {
+            timestamp: ts,
+            values,
+        };
         let mut snaps = self.snapshots.lock();
         if snaps.len() >= self.max_snapshots {
             snaps.pop_front();
@@ -687,22 +733,41 @@ impl ResourceLeakDetector {
         let n = points.len() as f64;
         let (mut sx, mut sy, mut sxy, mut sxx) = (0.0, 0.0, 0.0, 0.0);
         for &(x, y) in &points {
-            sx += x; sy += y; sxy += x * y; sxx += x * x;
+            sx += x;
+            sy += y;
+            sxy += x * y;
+            sxx += x * x;
         }
         let denom = n.mul_add(sxx, -(sx * sx));
-        let slope = if denom.abs() < 1e-10 { 0.0 } else { n.mul_add(sxy, -(sx * sy)) / denom };
+        let slope = if denom.abs() < 1e-10 {
+            0.0
+        } else {
+            n.mul_add(sxy, -(sx * sy)) / denom
+        };
 
         // R² for confidence
         let y_mean = sy / n;
         let ss_tot: f64 = points.iter().map(|(_, y)| (y - y_mean).powi(2)).sum();
         let intercept = (sy - slope * sx) / n;
-        let ss_res: f64 = points.iter().map(|(x, y)| {
-            let predicted = intercept + slope * x;
-            (y - predicted).powi(2)
-        }).sum();
-        let r_squared = if ss_tot > 0.0 { 1.0 - ss_res / ss_tot } else { 0.0 };
+        let ss_res: f64 = points
+            .iter()
+            .map(|(x, y)| {
+                let predicted = intercept + slope * x;
+                (y - predicted).powi(2)
+            })
+            .sum();
+        let r_squared = if ss_tot > 0.0 {
+            1.0 - ss_res / ss_tot
+        } else {
+            0.0
+        };
 
-        let threshold = self.alarm_thresholds.read().get(&resource).copied().unwrap_or(1.0);
+        let threshold = self
+            .alarm_thresholds
+            .read()
+            .get(&resource)
+            .copied()
+            .unwrap_or(1.0);
         let is_leaking = slope > threshold && r_squared > 0.7;
 
         if is_leaking {
@@ -860,12 +925,16 @@ impl LatencyGuardrailEngine {
 
     /// Record a latency sample and check guardrails. Returns breach if any.
     pub fn record(&self, path: GuardedPath, latency_us: u64) -> Option<GuardrailBreach> {
-        self.metrics.samples_recorded.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .samples_recorded
+            .fetch_add(1, Ordering::Relaxed);
 
         // Store sample
         {
             let mut samples = self.samples.write();
-            let q = samples.entry(path).or_insert_with(|| VecDeque::with_capacity(self.max_samples));
+            let q = samples
+                .entry(path)
+                .or_insert_with(|| VecDeque::with_capacity(self.max_samples));
             if q.len() >= self.max_samples {
                 q.pop_front();
             }
@@ -877,8 +946,16 @@ impl LatencyGuardrailEngine {
         let guardrail = guardrails.get(&path)?;
 
         if latency_us > guardrail.absolute_max_us {
-            self.metrics.absolute_breaches.fetch_add(1, Ordering::Relaxed);
-            let breach = self.create_breach(path, BreachType::AbsoluteMaxExceeded, latency_us, guardrail.absolute_max_us, guardrail.trigger_backpressure);
+            self.metrics
+                .absolute_breaches
+                .fetch_add(1, Ordering::Relaxed);
+            let breach = self.create_breach(
+                path,
+                BreachType::AbsoluteMaxExceeded,
+                latency_us,
+                guardrail.absolute_max_us,
+                guardrail.trigger_backpressure,
+            );
             return Some(breach);
         }
 
@@ -890,19 +967,33 @@ impl LatencyGuardrailEngine {
                 if q.len() >= 10 {
                     let mut sorted: Vec<u64> = q.iter().copied().collect();
                     sorted.sort_unstable();
-                    let p99_idx = ((sorted.len() as f64 * 0.99).ceil() as usize).min(sorted.len()) - 1;
-                    let p999_idx = ((sorted.len() as f64 * 0.999).ceil() as usize).min(sorted.len()) - 1;
+                    let p99_idx =
+                        ((sorted.len() as f64 * 0.99).ceil() as usize).min(sorted.len()) - 1;
+                    let p999_idx =
+                        ((sorted.len() as f64 * 0.999).ceil() as usize).min(sorted.len()) - 1;
                     let p99 = sorted[p99_idx];
                     let p999 = sorted[p999_idx];
 
                     if p999 > guardrail.p999_threshold_us {
                         self.metrics.p999_breaches.fetch_add(1, Ordering::Relaxed);
-                        let breach = self.create_breach(path, BreachType::P999Exceeded, p999, guardrail.p999_threshold_us, guardrail.trigger_backpressure);
+                        let breach = self.create_breach(
+                            path,
+                            BreachType::P999Exceeded,
+                            p999,
+                            guardrail.p999_threshold_us,
+                            guardrail.trigger_backpressure,
+                        );
                         return Some(breach);
                     }
                     if p99 > guardrail.p99_threshold_us {
                         self.metrics.p99_breaches.fetch_add(1, Ordering::Relaxed);
-                        let breach = self.create_breach(path, BreachType::P99Exceeded, p99, guardrail.p99_threshold_us, guardrail.trigger_backpressure);
+                        let breach = self.create_breach(
+                            path,
+                            BreachType::P99Exceeded,
+                            p99,
+                            guardrail.p99_threshold_us,
+                            guardrail.trigger_backpressure,
+                        );
                         return Some(breach);
                     }
                 }
@@ -926,14 +1017,23 @@ impl LatencyGuardrailEngine {
             .as_secs();
         if trigger_bp {
             self.backpressure_active.store(true, Ordering::Relaxed);
-            self.metrics.backpressure_activations.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .backpressure_activations
+                .fetch_add(1, Ordering::Relaxed);
         }
         let breach = GuardrailBreach {
-            id, path, breach_type, observed_us: observed, threshold_us: threshold,
-            timestamp: ts, backpressure_triggered: trigger_bp,
+            id,
+            path,
+            breach_type,
+            observed_us: observed,
+            threshold_us: threshold,
+            timestamp: ts,
+            backpressure_triggered: trigger_bp,
         };
         let mut breaches = self.breaches.lock();
-        if breaches.len() >= self.max_breaches { breaches.pop_front(); }
+        if breaches.len() >= self.max_breaches {
+            breaches.pop_front();
+        }
         breaches.push_back(breach.clone());
         breach
     }
@@ -950,14 +1050,22 @@ impl LatencyGuardrailEngine {
 
     /// Get recent breaches.
     pub fn recent_breaches(&self, count: usize) -> Vec<GuardrailBreach> {
-        self.breaches.lock().iter().rev().take(count).cloned().collect()
+        self.breaches
+            .lock()
+            .iter()
+            .rev()
+            .take(count)
+            .cloned()
+            .collect()
     }
 
     /// Get percentiles for a path.
     pub fn percentiles(&self, path: GuardedPath) -> Option<(u64, u64, u64)> {
         let samples = self.samples.read();
         let q = samples.get(&path)?;
-        if q.len() < 2 { return None; }
+        if q.len() < 2 {
+            return None;
+        }
         let mut sorted: Vec<u64> = q.iter().copied().collect();
         sorted.sort_unstable();
         let p50 = sorted[sorted.len() / 2];
@@ -1083,7 +1191,8 @@ impl BgTaskIsolator {
 
     /// Update foreground load factor (0.0–1.0).
     pub fn set_foreground_load(&self, load: f64) {
-        self.foreground_load.store(load.to_bits(), Ordering::Relaxed);
+        self.foreground_load
+            .store(load.to_bits(), Ordering::Relaxed);
     }
 
     /// Get foreground load factor.
@@ -1099,8 +1208,12 @@ impl BgTaskIsolator {
     /// Request permission to perform an operation.
     pub fn request(&self, task_type: BgTaskType, io_bytes: u64) -> ThrottleDecision {
         let quotas = self.quotas.read();
-        let quota = if let Some(q) = quotas.get(&task_type) { q } else {
-            self.metrics.requests_allowed.fetch_add(1, Ordering::Relaxed);
+        let quota = if let Some(q) = quotas.get(&task_type) {
+            q
+        } else {
+            self.metrics
+                .requests_allowed
+                .fetch_add(1, Ordering::Relaxed);
             return ThrottleDecision::Allow;
         };
 
@@ -1109,13 +1222,17 @@ impl BgTaskIsolator {
 
         // Check concurrent ops
         if current.active_ops >= quota.max_concurrent {
-            self.metrics.requests_rejected.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .requests_rejected
+                .fetch_add(1, Ordering::Relaxed);
             return ThrottleDecision::Reject;
         }
 
         // Check memory
         if current.memory_bytes_used >= quota.memory_bytes {
-            self.metrics.requests_rejected.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .requests_rejected
+                .fetch_add(1, Ordering::Relaxed);
             return ThrottleDecision::Reject;
         }
 
@@ -1126,8 +1243,12 @@ impl BgTaskIsolator {
             if effective_io_limit > 0 && io_bytes > 0 {
                 let sleep_ms = (io_bytes as f64 / effective_io_limit as f64 * 1000.0) as u64;
                 if sleep_ms > 0 {
-                    self.metrics.requests_throttled.fetch_add(1, Ordering::Relaxed);
-                    self.metrics.dynamic_reductions.fetch_add(1, Ordering::Relaxed);
+                    self.metrics
+                        .requests_throttled
+                        .fetch_add(1, Ordering::Relaxed);
+                    self.metrics
+                        .dynamic_reductions
+                        .fetch_add(1, Ordering::Relaxed);
                     return ThrottleDecision::Throttle(sleep_ms.min(5000));
                 }
             }
@@ -1137,12 +1258,16 @@ impl BgTaskIsolator {
         if quota.io_bytes_per_sec > 0 && io_bytes > 0 {
             let sleep_ms = (io_bytes as f64 / quota.io_bytes_per_sec as f64 * 1000.0) as u64;
             if sleep_ms > 10 {
-                self.metrics.requests_throttled.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .requests_throttled
+                    .fetch_add(1, Ordering::Relaxed);
                 return ThrottleDecision::Throttle(sleep_ms.min(5000));
             }
         }
 
-        self.metrics.requests_allowed.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .requests_allowed
+            .fetch_add(1, Ordering::Relaxed);
         ThrottleDecision::Allow
     }
 
@@ -1171,7 +1296,10 @@ mod tests {
     fn test_lifecycle_order_default() {
         let order = LifecycleOrder::default();
         assert_eq!(order.startup_order[0], ComponentType::Controller);
-        assert_eq!(*order.shutdown_order.last().unwrap(), ComponentType::Controller);
+        assert_eq!(
+            *order.shutdown_order.last().unwrap(),
+            ComponentType::Controller
+        );
     }
 
     #[test]
@@ -1196,7 +1324,11 @@ mod tests {
         coord.record_startup(
             ComponentType::DataNode,
             vec![
-                RecoveryAction::WalReplay { records_replayed: 100, from_lsn: 0, to_lsn: 100 },
+                RecoveryAction::WalReplay {
+                    records_replayed: 100,
+                    from_lsn: 0,
+                    to_lsn: 100,
+                },
                 RecoveryAction::IndexRebuild { indexes_rebuilt: 3 },
             ],
             ShutdownType::Crash,
@@ -1245,7 +1377,10 @@ mod tests {
         let _v2 = mgr.set("pool_size", "20", "admin");
         assert_eq!(mgr.get("pool_size").unwrap().value, "20");
         assert!(mgr.rollback("pool_size"));
-        assert_eq!(mgr.get("pool_size").unwrap().rollout_state, RolloutState::RolledBack);
+        assert_eq!(
+            mgr.get("pool_size").unwrap().rollout_state,
+            RolloutState::RolledBack
+        );
         // Value is restored from v1
         let current = mgr.get("pool_size").unwrap();
         assert_eq!(current.value, "10");
@@ -1429,12 +1564,15 @@ mod tests {
             max_concurrent: 1,
             dynamic_throttle: false,
         });
-        isolator.report_usage(BgTaskType::Backup, BgTaskUsage {
-            cpu_fraction: 0.05,
-            io_bytes_used: 5_000_000,
-            memory_bytes_used: 50_000_000,
-            active_ops: 1, // already at max
-        });
+        isolator.report_usage(
+            BgTaskType::Backup,
+            BgTaskUsage {
+                cpu_fraction: 0.05,
+                io_bytes_used: 5_000_000,
+                memory_bytes_used: 50_000_000,
+                active_ops: 1, // already at max
+            },
+        );
         let decision = isolator.request(BgTaskType::Backup, 1_000_000);
         assert_eq!(decision, ThrottleDecision::Reject);
     }
@@ -1489,8 +1627,13 @@ mod tests {
                 }
             }));
         }
-        for h in handles { h.join().unwrap(); }
-        assert_eq!(engine.metrics.samples_recorded.load(Ordering::Relaxed), 1000);
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(
+            engine.metrics.samples_recorded.load(Ordering::Relaxed),
+            1000
+        );
     }
 
     #[test]
@@ -1506,7 +1649,9 @@ mod tests {
                 }
             }));
         }
-        for h in handles { h.join().unwrap(); }
+        for h in handles {
+            h.join().unwrap();
+        }
         assert_eq!(mgr.all_keys().len(), 4);
     }
 }

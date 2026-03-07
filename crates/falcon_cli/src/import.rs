@@ -54,7 +54,13 @@ pub fn parse_import(line: &str) -> Result<ImportCmd> {
     let mut on_error_stop = false;
     let mut use_copy = true;
 
-    parse_options(remainder, &mut opts, &mut batch_size, &mut on_error_stop, &mut use_copy)?;
+    parse_options(
+        remainder,
+        &mut opts,
+        &mut batch_size,
+        &mut on_error_stop,
+        &mut use_copy,
+    )?;
 
     let file = strip_outer_quotes(file_part);
 
@@ -117,17 +123,16 @@ async fn run_import_copy(client: &DbClient, cmd: &ImportCmd) -> Result<ImportSum
 
     loop {
         let mut tmp = vec![0u8; 256 * 1024];
-        let n = std::io::Read::read(&mut reader, &mut tmp)
-            .context("IMPORT: file read error")?;
-        if n == 0 { break; }
+        let n = std::io::Read::read(&mut reader, &mut tmp).context("IMPORT: file read error")?;
+        if n == 0 {
+            break;
+        }
         sink.send(Bytes::copy_from_slice(&tmp[..n]))
             .await
             .context("IMPORT: COPY send error")?;
     }
 
-    let rows = sink.finish()
-        .await
-        .context("IMPORT: COPY finalize error")?;
+    let rows = sink.finish().await.context("IMPORT: COPY finalize error")?;
     let _ = rows;
 
     Ok(ImportSummary {
@@ -143,7 +148,9 @@ fn count_data_lines(file: &str, has_header: bool) -> Result<u64> {
     let mut n: u64 = 0;
     for line in reader.lines() {
         let l = line?;
-        if !l.trim().is_empty() { n += 1; }
+        if !l.trim().is_empty() {
+            n += 1;
+        }
     }
     Ok(if has_header && n > 0 { n - 1 } else { n })
 }
@@ -167,10 +174,16 @@ async fn run_import_insert(client: &DbClient, cmd: &ImportCmd) -> Result<ImportS
     };
 
     if col_names.is_empty() {
-        bail!("IMPORT: could not determine column names for table '{}'.", cmd.table);
+        bail!(
+            "IMPORT: could not determine column names for table '{}'.",
+            cmd.table
+        );
     }
 
-    debug!("IMPORT INSERT: table={}, columns={:?}, batch={}", cmd.table, col_names, cmd.batch_size);
+    debug!(
+        "IMPORT INSERT: table={}, columns={:?}, batch={}",
+        cmd.table, col_names, cmd.batch_size
+    );
 
     let ncols = col_names.len();
     let mut summary = ImportSummary::default();
@@ -182,14 +195,21 @@ async fn run_import_insert(client: &DbClient, cmd: &ImportCmd) -> Result<ImportS
         let raw = raw_line.with_context(|| {
             format!("IMPORT: read error at line {} in '{}'", line_num, cmd.file)
         })?;
-        if raw.trim().is_empty() { continue; }
+        if raw.trim().is_empty() {
+            continue;
+        }
         summary.total += 1;
 
         let fields = match parse_csv_line(&raw, &cmd.opts) {
             Some(f) => f,
             None => {
-                let msg = format!("IMPORT: malformed CSV at line {} in '{}'", line_num, cmd.file);
-                if cmd.on_error_stop { bail!("{msg}"); }
+                let msg = format!(
+                    "IMPORT: malformed CSV at line {} in '{}'",
+                    line_num, cmd.file
+                );
+                if cmd.on_error_stop {
+                    bail!("{msg}");
+                }
                 eprintln!("ERROR: {msg}");
                 summary.failed += 1;
                 continue;
@@ -199,9 +219,13 @@ async fn run_import_insert(client: &DbClient, cmd: &ImportCmd) -> Result<ImportS
         if fields.len() != ncols {
             let msg = format!(
                 "IMPORT: column count mismatch at line {} (expected {}, got {})",
-                line_num, ncols, fields.len()
+                line_num,
+                ncols,
+                fields.len()
             );
-            if cmd.on_error_stop { bail!("{msg}"); }
+            if cmd.on_error_stop {
+                bail!("{msg}");
+            }
             eprintln!("ERROR: {msg}");
             summary.failed += 1;
             continue;
@@ -209,19 +233,38 @@ async fn run_import_insert(client: &DbClient, cmd: &ImportCmd) -> Result<ImportS
 
         batch.push(fields);
         if batch.len() >= cmd.batch_size {
-            let (ok, fail) = flush_batch(client, &cmd.table, &col_names, &batch, &cmd.opts, cmd.on_error_stop).await?;
+            let (ok, fail) = flush_batch(
+                client,
+                &cmd.table,
+                &col_names,
+                &batch,
+                &cmd.opts,
+                cmd.on_error_stop,
+            )
+            .await?;
             summary.inserted += ok;
             summary.failed += fail;
             batch.clear();
             let done = summary.inserted + summary.failed;
             if done % 10_000 == 0 {
-                eprintln!("Imported {} rows (failed: {})", summary.inserted, summary.failed);
+                eprintln!(
+                    "Imported {} rows (failed: {})",
+                    summary.inserted, summary.failed
+                );
             }
         }
     }
 
     if !batch.is_empty() {
-        let (ok, fail) = flush_batch(client, &cmd.table, &col_names, &batch, &cmd.opts, cmd.on_error_stop).await?;
+        let (ok, fail) = flush_batch(
+            client,
+            &cmd.table,
+            &col_names,
+            &batch,
+            &cmd.opts,
+            cmd.on_error_stop,
+        )
+        .await?;
         summary.inserted += ok;
         summary.failed += fail;
     }
@@ -241,7 +284,9 @@ async fn flush_batch(
     opts: &CsvOptions,
     on_error_stop: bool,
 ) -> Result<(u64, u64)> {
-    if batch.is_empty() { return Ok((0, 0)); }
+    if batch.is_empty() {
+        return Ok((0, 0));
+    }
 
     let col_list = col_names
         .iter()
@@ -252,13 +297,17 @@ async fn flush_batch(
     let rows_sql: Vec<String> = batch
         .iter()
         .map(|row| {
-            let vals = row.iter().map(|v| {
-                if !opts.null_as.is_empty() && v == &opts.null_as {
-                    "NULL".to_owned()
-                } else {
-                    format!("'{}'", v.replace('\'', "''"))
-                }
-            }).collect::<Vec<_>>().join(", ");
+            let vals = row
+                .iter()
+                .map(|v| {
+                    if !opts.null_as.is_empty() && v == &opts.null_as {
+                        "NULL".to_owned()
+                    } else {
+                        format!("'{}'", v.replace('\'', "''"))
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
             format!("({vals})")
         })
         .collect();
@@ -274,20 +323,26 @@ async fn flush_batch(
         Ok(_) => Ok((batch.len() as u64, 0)),
         Err(e) => {
             let msg = format!("IMPORT: INSERT batch failed: {e}");
-            if on_error_stop { bail!("{msg}"); }
+            if on_error_stop {
+                bail!("{msg}");
+            }
             eprintln!("ERROR: {msg}");
             // Fall back to row-by-row to count partial failures
             let mut inserted = 0u64;
             let mut failed = 0u64;
             let tbl = table.replace('"', "\"\"");
             for row in batch {
-                let vals = row.iter().map(|v| {
-                    if !opts.null_as.is_empty() && v == &opts.null_as {
-                        "NULL".to_owned()
-                    } else {
-                        format!("'{}'", v.replace('\'', "''"))
-                    }
-                }).collect::<Vec<_>>().join(", ");
+                let vals = row
+                    .iter()
+                    .map(|v| {
+                        if !opts.null_as.is_empty() && v == &opts.null_as {
+                            "NULL".to_owned()
+                        } else {
+                            format!("'{}'", v.replace('\'', "''"))
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 let row_sql = format!("INSERT INTO \"{tbl}\" ({col_list}) VALUES ({vals})");
                 if let Err(e2) = client.query_simple(&row_sql).await {
                     eprintln!("ERROR: IMPORT row failed: {e2}");

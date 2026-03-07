@@ -37,10 +37,14 @@ fn make_3node_gateway(local_node: u64) -> SmartGateway {
     }
 
     // Assign shards: 4 shards distributed across 3 nodes
-    gw.topology.update_leader(ShardId(0), NodeId(1), "node1:5443".into());
-    gw.topology.update_leader(ShardId(1), NodeId(2), "node2:5443".into());
-    gw.topology.update_leader(ShardId(2), NodeId(3), "node3:5443".into());
-    gw.topology.update_leader(ShardId(3), NodeId(1), "node1:5443".into());
+    gw.topology
+        .update_leader(ShardId(0), NodeId(1), "node1:5443".into());
+    gw.topology
+        .update_leader(ShardId(1), NodeId(2), "node2:5443".into());
+    gw.topology
+        .update_leader(ShardId(2), NodeId(3), "node3:5443".into());
+    gw.topology
+        .update_leader(ShardId(3), NodeId(1), "node1:5443".into());
 
     gw
 }
@@ -51,10 +55,8 @@ fn make_3node_gateway(local_node: u64) -> SmartGateway {
 
 #[test]
 fn test_jdbc_connect_to_any_seed() {
-    let url = JdbcConnectionUrl::parse(
-        "jdbc:falcondb://node1:5443,node2:5443,node3:5443/falcon",
-    )
-    .unwrap();
+    let url = JdbcConnectionUrl::parse("jdbc:falcondb://node1:5443,node2:5443,node3:5443/falcon")
+        .unwrap();
 
     let mut seeds = SeedGatewayList::from_url(&url);
     assert_eq!(seeds.seed_count(), 3);
@@ -69,10 +71,8 @@ fn test_jdbc_connect_to_any_seed() {
 
 #[test]
 fn test_jdbc_failover_on_gateway_unavailable() {
-    let url = JdbcConnectionUrl::parse(
-        "jdbc:falcondb://node1:5443,node2:5443,node3:5443/falcon",
-    )
-    .unwrap();
+    let url = JdbcConnectionUrl::parse("jdbc:falcondb://node1:5443,node2:5443,node3:5443/falcon")
+        .unwrap();
 
     let mut seeds = SeedGatewayList::from_url(&url);
 
@@ -86,10 +86,7 @@ fn test_jdbc_failover_on_gateway_unavailable() {
 
 #[test]
 fn test_jdbc_no_hang_all_gateways_down() {
-    let url = JdbcConnectionUrl::parse(
-        "jdbc:falcondb://node1:5443,node2:5443/falcon",
-    )
-    .unwrap();
+    let url = JdbcConnectionUrl::parse("jdbc:falcondb://node1:5443,node2:5443/falcon").unwrap();
 
     let mut seeds = SeedGatewayList::from_url(&url);
     let start = Instant::now();
@@ -118,10 +115,7 @@ fn test_jdbc_leader_change_no_client_reconnect() {
     assert_eq!(d1.classification, RequestClassification::LocalExec);
 
     // Leader for shard 0 changes to node 2
-    let err = gw.handle_not_leader(
-        ShardId(0),
-        Some((NodeId(2), "node2:5443".into())),
-    );
+    let err = gw.handle_not_leader(ShardId(0), Some((NodeId(2), "node2:5443".into())));
     assert_eq!(err.code, GatewayErrorCode::NotLeader);
     assert!(err.code.is_retryable());
     assert_eq!(err.retry_after_ms, Some(0)); // Immediate retry
@@ -217,8 +211,10 @@ fn test_gateway_overload_immediate_reject() {
         ..Default::default()
     };
     let gw = SmartGateway::new(config);
-    gw.topology.register_node(NodeId(1), "node1:5443".into(), GatewayRole::SmartGateway);
-    gw.topology.update_leader(ShardId(0), NodeId(1), "node1:5443".into());
+    gw.topology
+        .register_node(NodeId(1), "node1:5443".into(), GatewayRole::SmartGateway);
+    gw.topology
+        .update_leader(ShardId(0), NodeId(1), "node1:5443".into());
 
     // Fill inflight slots
     for _ in 0..5 {
@@ -229,9 +225,16 @@ fn test_gateway_overload_immediate_reject() {
     let decision = gw.classify_request(ShardId(0));
     let elapsed = start.elapsed();
 
-    assert_eq!(decision.classification, RequestClassification::RejectOverloaded);
+    assert_eq!(
+        decision.classification,
+        RequestClassification::RejectOverloaded
+    );
     // Must be fast — no queuing
-    assert!(elapsed < Duration::from_millis(10), "reject must be immediate, took {:?}", elapsed);
+    assert!(
+        elapsed < Duration::from_millis(10),
+        "reject must be immediate, took {:?}",
+        elapsed
+    );
 }
 
 #[test]
@@ -242,15 +245,23 @@ fn test_gateway_forward_limit_reject() {
         ..Default::default()
     };
     let gw = SmartGateway::new(config);
-    gw.topology.register_node(NodeId(1), "node1:5443".into(), GatewayRole::SmartGateway);
-    gw.topology.register_node(NodeId(2), "node2:5443".into(), GatewayRole::SmartGateway);
-    gw.topology.update_leader(ShardId(0), NodeId(2), "node2:5443".into());
+    gw.topology
+        .register_node(NodeId(1), "node1:5443".into(), GatewayRole::SmartGateway);
+    gw.topology
+        .register_node(NodeId(2), "node2:5443".into(), GatewayRole::SmartGateway);
+    gw.topology
+        .update_leader(ShardId(0), NodeId(2), "node2:5443".into());
 
     // Fill forwarded slots
-    gw.metrics.forwarded.store(2, std::sync::atomic::Ordering::Relaxed);
+    gw.metrics
+        .forwarded
+        .store(2, std::sync::atomic::Ordering::Relaxed);
 
     let decision = gw.classify_request(ShardId(0));
-    assert_eq!(decision.classification, RequestClassification::RejectOverloaded);
+    assert_eq!(
+        decision.classification,
+        RequestClassification::RejectOverloaded
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -308,7 +319,10 @@ fn test_node_recovery_restores_routing() {
 
     // Request to shard 1 (on node 2) → should forward again
     let decision = gw.classify_request(ShardId(1));
-    assert_eq!(decision.classification, RequestClassification::ForwardToLeader);
+    assert_eq!(
+        decision.classification,
+        RequestClassification::ForwardToLeader
+    );
     assert_eq!(decision.target_node, Some(NodeId(2)));
 }
 
@@ -369,11 +383,9 @@ fn test_leader_changes_during_concurrent_requests() {
         for i in 0..200 {
             let shard = ShardId((i % 4) as u64);
             let leader = NodeId(((i % 3) + 1) as u64);
-            gw_writer.topology.update_leader(
-                shard,
-                leader,
-                format!("node{}:5443", leader.0),
-            );
+            gw_writer
+                .topology
+                .update_leader(shard, leader, format!("node{}:5443", leader.0));
         }
     });
 

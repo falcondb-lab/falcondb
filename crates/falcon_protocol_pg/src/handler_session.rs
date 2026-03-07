@@ -44,7 +44,7 @@ impl QueryHandler {
                 let rest = &sql_lower[after_open..];
                 let rest = rest.trim_start_matches(['\'', '"']);
                 let param = rest
-                    .split(|c: char| c == '\'' || c == '"' || c == ')' || c == ',')
+                    .split(['\'', '"', ')', ','])
                     .next()
                     .unwrap_or("")
                     .trim();
@@ -120,14 +120,20 @@ impl QueryHandler {
             let snap = self.storage.memory_snapshot();
             let rows = vec![
                 vec![Some("mvcc_bytes".into()), Some(snap.mvcc_bytes.to_string())],
-                vec![Some("index_bytes".into()), Some(snap.index_bytes.to_string())],
-                vec![Some("write_buffer_bytes".into()), Some(snap.write_buffer_bytes.to_string())],
-                vec![Some("total_bytes".into()), Some(snap.total_bytes.to_string())],
+                vec![
+                    Some("index_bytes".into()),
+                    Some(snap.index_bytes.to_string()),
+                ],
+                vec![
+                    Some("write_buffer_bytes".into()),
+                    Some(snap.write_buffer_bytes.to_string()),
+                ],
+                vec![
+                    Some("total_bytes".into()),
+                    Some(snap.total_bytes.to_string()),
+                ],
             ];
-            return Some(self.single_row_result(
-                vec![("metric", 25, -1), ("value", 25, -1)],
-                rows,
-            ));
+            return Some(self.single_row_result(vec![("metric", 25, -1), ("value", 25, -1)], rows));
         }
 
         // SHOW falcon.replication
@@ -136,17 +142,29 @@ impl QueryHandler {
             let ws = self.storage.wal_stats_snapshot();
             let rows = vec![
                 vec![Some("node_role".into()), Some(role)],
-                vec![Some("wal_records_written".into()), Some(ws.records_written.to_string())],
+                vec![
+                    Some("wal_records_written".into()),
+                    Some(ws.records_written.to_string()),
+                ],
                 vec![Some("wal_flushes".into()), Some(ws.flushes.to_string())],
-                vec![Some("wal_fsync_total_us".into()), Some(ws.fsync_total_us.to_string())],
-                vec![Some("wal_fsync_max_us".into()), Some(ws.fsync_max_us.to_string())],
-                vec![Some("wal_fsync_avg_us".into()), Some(ws.fsync_avg_us.to_string())],
-                vec![Some("wal_backlog_bytes".into()), Some(ws.backlog_bytes.to_string())],
+                vec![
+                    Some("wal_fsync_total_us".into()),
+                    Some(ws.fsync_total_us.to_string()),
+                ],
+                vec![
+                    Some("wal_fsync_max_us".into()),
+                    Some(ws.fsync_max_us.to_string()),
+                ],
+                vec![
+                    Some("wal_fsync_avg_us".into()),
+                    Some(ws.fsync_avg_us.to_string()),
+                ],
+                vec![
+                    Some("wal_backlog_bytes".into()),
+                    Some(ws.backlog_bytes.to_string()),
+                ],
             ];
-            return Some(self.single_row_result(
-                vec![("metric", 25, -1), ("value", 25, -1)],
-                rows,
-            ));
+            return Some(self.single_row_result(vec![("metric", 25, -1), ("value", 25, -1)], rows));
         }
 
         // SHOW falcon.config
@@ -159,10 +177,9 @@ impl QueryHandler {
                 vec![Some("default_table_engine".into()), Some(engine)],
                 vec![Some("wal_enabled".into()), Some(wal_enabled.to_string())],
             ];
-            return Some(self.single_row_result(
-                vec![("parameter", 25, -1), ("value", 25, -1)],
-                rows,
-            ));
+            return Some(
+                self.single_row_result(vec![("parameter", 25, -1), ("value", 25, -1)], rows),
+            );
         }
 
         // REFRESH MATERIALIZED VIEW <name>
@@ -204,7 +221,8 @@ impl QueryHandler {
 
         // SET log_min_duration_statement = <ms>
         if let Some(threshold_ms) = parse_set_log_min_duration(sql_lower) {
-            self.observability.slow_query_log
+            self.observability
+                .slow_query_log
                 .set_threshold(std::time::Duration::from_millis(threshold_ms));
             return Some(vec![BackendMessage::CommandComplete { tag: "SET".into() }]);
         }
@@ -221,12 +239,16 @@ impl QueryHandler {
 
         // SELECT pg_create_restore_point('name')
         if sql_lower.starts_with("select pg_create_restore_point(") {
-            let name = extract_string_arg(&sql_lower, "select pg_create_restore_point(");
+            let name = extract_string_arg(sql_lower, "select pg_create_restore_point(");
             match self.storage.create_restore_point(&name) {
                 Ok(lsn) => {
                     return Some(self.single_row_result(
                         vec![("pg_create_restore_point", 25, -1)],
-                        vec![vec![Some(format!("{:X}/{:08X}", lsn >> 32, lsn & 0xFFFF_FFFF))]],
+                        vec![vec![Some(format!(
+                            "{:X}/{:08X}",
+                            lsn >> 32,
+                            lsn & 0xFFFF_FFFF
+                        ))]],
                     ));
                 }
                 Err(e) => {
@@ -241,7 +263,7 @@ impl QueryHandler {
 
         // SELECT pg_start_backup('label')
         if sql_lower.starts_with("select pg_start_backup(") {
-            let label = extract_string_arg(&sql_lower, "select pg_start_backup(");
+            let label = extract_string_arg(sql_lower, "select pg_start_backup(");
             match self.storage.start_base_backup(&label) {
                 Ok((_backup_id, lsn)) => {
                     return Some(self.single_row_result(
@@ -291,19 +313,22 @@ impl QueryHandler {
             let lsn = self.storage.current_wal_lsn();
             return Some(self.single_row_result(
                 vec![("pg_current_wal_lsn", 25, -1)],
-                vec![vec![Some(format!("{:X}/{:08X}", lsn >> 32, lsn & 0xFFFF_FFFF))]],
+                vec![vec![Some(format!(
+                    "{:X}/{:08X}",
+                    lsn >> 32,
+                    lsn & 0xFFFF_FFFF
+                ))]],
             ));
         }
 
         // SELECT pg_walfile_name(lsn) — returns the WAL segment filename for a given LSN
         if sql_lower.starts_with("select pg_walfile_name(") {
-            let lsn_str = extract_string_arg(&sql_lower, "select pg_walfile_name(");
+            let lsn_str = extract_string_arg(sql_lower, "select pg_walfile_name(");
             let seg_id = lsn_str.parse::<u64>().unwrap_or(0);
             let fname = falcon_storage::wal::segment_filename(seg_id);
-            return Some(self.single_row_result(
-                vec![("pg_walfile_name", 25, -1)],
-                vec![vec![Some(fname)]],
-            ));
+            return Some(
+                self.single_row_result(vec![("pg_walfile_name", 25, -1)], vec![vec![Some(fname)]]),
+            );
         }
 
         // CHECKPOINT — trigger a storage checkpoint (WAL compaction)
@@ -352,17 +377,17 @@ impl QueryHandler {
                 .map(|rp| {
                     vec![
                         Some(rp.name.clone()),
-                        Some(format!("{:X}/{:08X}", rp.lsn.0 >> 32, rp.lsn.0 & 0xFFFF_FFFF)),
+                        Some(format!(
+                            "{:X}/{:08X}",
+                            rp.lsn.0 >> 32,
+                            rp.lsn.0 & 0xFFFF_FFFF
+                        )),
                         Some(rp.created_at_ms.to_string()),
                     ]
                 })
                 .collect();
             return Some(self.single_row_result(
-                vec![
-                    ("name", 25, -1),
-                    ("lsn", 25, -1),
-                    ("created_at_ms", 20, 8),
-                ],
+                vec![("name", 25, -1), ("lsn", 25, -1), ("created_at_ms", 20, 8)],
                 rows,
             ));
         }
@@ -375,8 +400,16 @@ impl QueryHandler {
                 .map(|b| {
                     vec![
                         Some(b.label.clone()),
-                        Some(format!("{:X}/{:08X}", b.start_lsn.0 >> 32, b.start_lsn.0 & 0xFFFF_FFFF)),
-                        Some(format!("{:X}/{:08X}", b.end_lsn.0 >> 32, b.end_lsn.0 & 0xFFFF_FFFF)),
+                        Some(format!(
+                            "{:X}/{:08X}",
+                            b.start_lsn.0 >> 32,
+                            b.start_lsn.0 & 0xFFFF_FFFF
+                        )),
+                        Some(format!(
+                            "{:X}/{:08X}",
+                            b.end_lsn.0 >> 32,
+                            b.end_lsn.0 & 0xFFFF_FFFF
+                        )),
                         Some(b.size_bytes.to_string()),
                     ]
                 })
@@ -511,10 +544,9 @@ impl QueryHandler {
             } else {
                 "pg_table_size"
             };
-            return Some(self.single_row_result(
-                vec![(col_name, 20, 8)],
-                vec![vec![Some(size.to_string())]],
-            ));
+            return Some(
+                self.single_row_result(vec![(col_name, 20, 8)], vec![vec![Some(size.to_string())]]),
+            );
         }
 
         // SELECT pg_database_size(name|oid)
@@ -532,10 +564,9 @@ impl QueryHandler {
                 .map(|n| n as i64)
                 .unwrap_or(0);
             let pretty = format_size_pretty(bytes);
-            return Some(self.single_row_result(
-                vec![("pg_size_pretty", 25, -1)],
-                vec![vec![Some(pretty)]],
-            ));
+            return Some(
+                self.single_row_result(vec![("pg_size_pretty", 25, -1)], vec![vec![Some(pretty)]]),
+            );
         }
 
         // pg_advisory_lock / pg_advisory_unlock / pg_try_advisory_lock — stubs
@@ -545,13 +576,17 @@ impl QueryHandler {
                 vec![vec![Some(String::new())]],
             ));
         }
-        if sql_lower.contains("pg_try_advisory_lock(") || sql_lower.contains("pg_try_advisory_xact_lock(") {
+        if sql_lower.contains("pg_try_advisory_lock(")
+            || sql_lower.contains("pg_try_advisory_xact_lock(")
+        {
             return Some(self.single_row_result(
                 vec![("pg_try_advisory_lock", 16, 1)],
                 vec![vec![Some("t".into())]],
             ));
         }
-        if sql_lower.contains("pg_advisory_unlock(") || sql_lower.contains("pg_advisory_unlock_all()") {
+        if sql_lower.contains("pg_advisory_unlock(")
+            || sql_lower.contains("pg_advisory_unlock_all()")
+        {
             return Some(self.single_row_result(
                 vec![("pg_advisory_unlock", 16, 1)],
                 vec![vec![Some("t".into())]],
@@ -662,9 +697,7 @@ impl QueryHandler {
                 let real_name = db.name.clone();
                 drop(catalog);
                 session.database = real_name;
-                return Some(vec![BackendMessage::CommandComplete {
-                    tag: "USE".into(),
-                }]);
+                return Some(vec![BackendMessage::CommandComplete { tag: "USE".into() }]);
             } else {
                 drop(catalog);
                 return Some(vec![BackendMessage::ErrorResponse {
@@ -679,7 +712,10 @@ impl QueryHandler {
         if sql_lower.starts_with("drop database ") {
             let rest = sql_lower.trim_start_matches("drop database ").trim();
             let (if_exists, db_name) = if rest.starts_with("if exists ") {
-                (true, rest.trim_start_matches("if exists ").trim().to_owned())
+                (
+                    true,
+                    rest.trim_start_matches("if exists ").trim().to_owned(),
+                )
             } else {
                 (false, rest.to_owned())
             };
@@ -784,7 +820,10 @@ impl QueryHandler {
                     return Some(vec![BackendMessage::ErrorResponse {
                         severity: "ERROR".into(),
                         code: "42601".into(),
-                        message: format!("invalid encryption scope: '{}' (use wal, table_N, sst_N, or backup)", scope_str),
+                        message: format!(
+                            "invalid encryption scope: '{}' (use wal, table_N, sst_N, or backup)",
+                            scope_str
+                        ),
                     }]);
                 }
             }
@@ -795,18 +834,33 @@ impl QueryHandler {
             let deks = self.storage.tde_list_deks();
             if deks.is_empty() {
                 return Some(self.single_row_result(
-                    vec![("id", 20, -1), ("label", 25, -1), ("active", 16, -1), ("created_at_ms", 20, -1)],
+                    vec![
+                        ("id", 20, -1),
+                        ("label", 25, -1),
+                        ("active", 16, -1),
+                        ("created_at_ms", 20, -1),
+                    ],
                     vec![],
                 ));
             }
-            let rows: Vec<Vec<Option<String>>> = deks.iter().map(|d| vec![
-                Some(d.id.to_string()),
-                Some(d.label.clone()),
-                Some(d.active.to_string()),
-                Some(d.created_at_ms.to_string()),
-            ]).collect();
+            let rows: Vec<Vec<Option<String>>> = deks
+                .iter()
+                .map(|d| {
+                    vec![
+                        Some(d.id.to_string()),
+                        Some(d.label.clone()),
+                        Some(d.active.to_string()),
+                        Some(d.created_at_ms.to_string()),
+                    ]
+                })
+                .collect();
             return Some(self.single_row_result(
-                vec![("id", 20, -1), ("label", 25, -1), ("active", 16, -1), ("created_at_ms", 20, -1)],
+                vec![
+                    ("id", 20, -1),
+                    ("label", 25, -1),
+                    ("active", 16, -1),
+                    ("created_at_ms", 20, -1),
+                ],
                 rows,
             ));
         }
@@ -846,25 +900,34 @@ impl QueryHandler {
                 },
                 std::string::ToString::to_string,
             );
-            return Some(self.single_row_result(vec![(normalized, 25, -1)], vec![vec![Some(value)]]));
+            return Some(
+                self.single_row_result(vec![(normalized, 25, -1)], vec![vec![Some(value)]]),
+            );
         }
 
         // SELECT * FROM pg_stat_statements
         if sql_lower.contains("pg_stat_statements") && !sql_lower.contains("reset") {
             let snap = self.observability.stmt_stats.snapshot();
-            let mut rows: Vec<Vec<Option<String>>> = snap.iter().map(|(qid, query, calls, total, min, max, nrows)| {
-                let mean = if *calls > 0 { *total as f64 / *calls as f64 } else { 0.0 };
-                vec![
-                    Some(qid.to_string()),
-                    Some(query.clone()),
-                    Some(calls.to_string()),
-                    Some(format!("{:.3}", *total as f64 / 1000.0)),   // total_time ms
-                    Some(format!("{:.3}", *min as f64 / 1000.0)),     // min_time ms
-                    Some(format!("{:.3}", *max as f64 / 1000.0)),     // max_time ms
-                    Some(format!("{:.3}", mean / 1000.0)),            // mean_time ms
-                    Some(nrows.to_string()),
-                ]
-            }).collect();
+            let mut rows: Vec<Vec<Option<String>>> = snap
+                .iter()
+                .map(|(qid, query, calls, total, min, max, nrows)| {
+                    let mean = if *calls > 0 {
+                        *total as f64 / *calls as f64
+                    } else {
+                        0.0
+                    };
+                    vec![
+                        Some(qid.to_string()),
+                        Some(query.clone()),
+                        Some(calls.to_string()),
+                        Some(format!("{:.3}", *total as f64 / 1000.0)), // total_time ms
+                        Some(format!("{:.3}", *min as f64 / 1000.0)),   // min_time ms
+                        Some(format!("{:.3}", *max as f64 / 1000.0)),   // max_time ms
+                        Some(format!("{:.3}", mean / 1000.0)),          // mean_time ms
+                        Some(nrows.to_string()),
+                    ]
+                })
+                .collect();
             rows.sort_by(|a, b| {
                 let ta: f64 = a[3].as_deref().unwrap_or("0").parse().unwrap_or(0.0);
                 let tb: f64 = b[3].as_deref().unwrap_or("0").parse().unwrap_or(0.0);
@@ -872,10 +935,10 @@ impl QueryHandler {
             });
             return Some(self.single_row_result(
                 vec![
-                    ("queryid", 20, 8),       // int8
-                    ("query", 25, -1),        // text
-                    ("calls", 20, 8),         // int8
-                    ("total_time", 701, -1),  // float8 (ms)
+                    ("queryid", 20, 8),      // int8
+                    ("query", 25, -1),       // text
+                    ("calls", 20, 8),        // int8
+                    ("total_time", 701, -1), // float8 (ms)
                     ("min_time", 701, -1),
                     ("max_time", 701, -1),
                     ("mean_time", 701, -1),
@@ -901,8 +964,13 @@ impl QueryHandler {
 
         // PREPARE TRANSACTION 'gid'
         if sql_lower.starts_with("prepare transaction ") {
-            let gid = sql[19..].trim().trim_end_matches(';').trim()
-                .trim_matches('\'').trim_matches('"').to_owned();
+            let gid = sql[19..]
+                .trim()
+                .trim_end_matches(';')
+                .trim()
+                .trim_matches('\'')
+                .trim_matches('"')
+                .to_owned();
             if gid.is_empty() {
                 return Some(vec![BackendMessage::ErrorResponse {
                     severity: "ERROR".into(),
@@ -940,8 +1008,12 @@ impl QueryHandler {
 
         // COMMIT PREPARED 'gid'
         if sql_lower.starts_with("commit prepared ") {
-            let gid = sql[16..].trim().trim_end_matches(';').trim()
-                .trim_matches('\'').trim_matches('"');
+            let gid = sql[16..]
+                .trim()
+                .trim_end_matches(';')
+                .trim()
+                .trim_matches('\'')
+                .trim_matches('"');
             match self.txn_mgr.commit_prepared(gid) {
                 Ok(_ts) => {
                     return Some(vec![BackendMessage::CommandComplete {
@@ -960,8 +1032,12 @@ impl QueryHandler {
 
         // ROLLBACK PREPARED 'gid'
         if sql_lower.starts_with("rollback prepared ") {
-            let gid = sql[18..].trim().trim_end_matches(';').trim()
-                .trim_matches('\'').trim_matches('"');
+            let gid = sql[18..]
+                .trim()
+                .trim_end_matches(';')
+                .trim()
+                .trim_matches('\'')
+                .trim_matches('"');
             match self.txn_mgr.rollback_prepared(gid) {
                 Ok(()) => {
                     return Some(vec![BackendMessage::CommandComplete {
@@ -982,11 +1058,10 @@ impl QueryHandler {
         if sql_lower.starts_with("prepare ") {
             if let Some((name, query)) = parse_prepare_statement(sql) {
                 // Try plan-based path (same as extended query Parse)
-                let (plan, inferred_param_types, row_desc) =
-                    match self.prepare_statement(&query) {
-                        Ok((p, ipt, rd)) => (Some(std::sync::Arc::new(p)), ipt, rd),
-                        Err(_) => (None, vec![], vec![]),
-                    };
+                let (plan, inferred_param_types, row_desc) = match self.prepare_statement(&query) {
+                    Ok((p, ipt, rd)) => (Some(std::sync::Arc::new(p)), ipt, rd),
+                    Err(_) => (None, vec![], vec![]),
+                };
                 let param_types = inferred_param_types
                     .iter()
                     .map(|t| self.datatype_to_oid(t.as_ref()))
@@ -1033,8 +1108,7 @@ impl QueryHandler {
                 falcon_observability::record_prepared_stmt_sql_cmd("execute");
                 // Plan-based path: convert text params to typed Datum, execute plan
                 if let Some(ref plan) = ps.plan {
-                    let datum_params =
-                        text_params_to_datum(&params, &ps.inferred_param_types);
+                    let datum_params = text_params_to_datum(&params, &ps.inferred_param_types);
                     return Some(self.execute_plan(plan, &datum_params, session));
                 }
                 // Legacy fallback: text substitution
@@ -1095,7 +1169,8 @@ impl QueryHandler {
                 .trim_start_matches("listen ")
                 .trim()
                 .trim_end_matches(';')
-                .trim().to_owned();
+                .trim()
+                .to_owned();
             if !channel.is_empty() {
                 session
                     .notifications
@@ -1180,15 +1255,199 @@ impl QueryHandler {
             }]);
         }
 
+        // ── BACKUP DATABASE TO 'dest' [INCREMENTAL] [LABEL 'label'] ──
+        if sql_lower.starts_with("backup ") {
+            return Some(self.handle_backup_command(sql_lower, session));
+        }
+
+        // ── RESTORE DATABASE FROM 'src' ──
+        if sql_lower.starts_with("restore ") {
+            return Some(self.handle_restore_command(sql_lower, session));
+        }
+
+        // ── CREATE JOB name EVERY <n> SECONDS AS BACKUP TO 'dest' ──
+        if sql_lower.starts_with("create job ") {
+            return Some(self.handle_create_job(sql_lower, session));
+        }
+
+        // ── DROP JOB <id> ──
+        if sql_lower.starts_with("drop job ") {
+            return Some(self.handle_drop_job(sql_lower, session));
+        }
+
+        // ── CDC commands ──
+        if let Some(result) = self.handle_cdc_command(sql_lower) {
+            return Some(result);
+        }
+
         None
+    }
+
+    fn handle_backup_command(
+        &self,
+        sql_lower: &str,
+        _session: &mut PgSession,
+    ) -> Vec<BackendMessage> {
+        // BACKUP DATABASE TO 'dest' [INCREMENTAL] [LABEL 'label']
+        // BACKUP TO 'dest' [INCREMENTAL] [LABEL 'label']
+        let rest = sql_lower
+            .trim_start_matches("backup database to ")
+            .trim_start_matches("backup to ");
+        let incremental = rest.contains(" incremental");
+        let label = if let Some(pos) = rest.find("label '") {
+            let after = &rest[pos + 7..];
+            after.find('\'').map_or("", |end| &after[..end]).to_owned()
+        } else {
+            String::new()
+        };
+        let dest = rest
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_matches('\'')
+            .to_owned();
+        if dest.is_empty() {
+            return vec![BackendMessage::ErrorResponse {
+                severity: "ERROR".into(),
+                code: "42601".into(),
+                message: "BACKUP requires a destination directory".into(),
+            }];
+        }
+        let result = if incremental {
+            self.storage.backup_incremental(&dest, &label)
+        } else {
+            self.storage.backup_full(&dest, &label)
+        };
+        match result {
+            Ok(backup_id) => self.single_row_result(
+                vec![("backup_id", 20, 8), ("status", 25, -1)],
+                vec![vec![Some(backup_id.to_string()), Some("completed".into())]],
+            ),
+            Err(e) => vec![BackendMessage::ErrorResponse {
+                severity: "ERROR".into(),
+                code: "XX000".into(),
+                message: format!("BACKUP failed: {e}"),
+            }],
+        }
+    }
+
+    fn handle_restore_command(
+        &self,
+        sql_lower: &str,
+        _session: &mut PgSession,
+    ) -> Vec<BackendMessage> {
+        // RESTORE DATABASE FROM 'src'
+        // RESTORE FROM 'src'
+        let src = sql_lower
+            .trim_start_matches("restore database from ")
+            .trim_start_matches("restore from ")
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_matches('\'')
+            .to_owned();
+        if src.is_empty() {
+            return vec![BackendMessage::ErrorResponse {
+                severity: "ERROR".into(),
+                code: "42601".into(),
+                message: "RESTORE requires a source directory".into(),
+            }];
+        }
+        match self.storage.restore_from_backup(&src) {
+            Ok(rows) => self.single_row_result(
+                vec![("rows_restored", 20, 8)],
+                vec![vec![Some(rows.to_string())]],
+            ),
+            Err(e) => vec![BackendMessage::ErrorResponse {
+                severity: "ERROR".into(),
+                code: "XX000".into(),
+                message: format!("RESTORE failed: {e}"),
+            }],
+        }
+    }
+
+    fn handle_create_job(&self, sql_lower: &str, _session: &mut PgSession) -> Vec<BackendMessage> {
+        // CREATE JOB name EVERY <n> SECONDS AS BACKUP TO 'dest'
+        use falcon_storage::backup::BackupType;
+        use std::sync::Arc;
+        let rest = sql_lower.trim_start_matches("create job ").trim();
+        let parts: Vec<&str> = rest.splitn(2, " every ").collect();
+        if parts.len() < 2 {
+            return vec![BackendMessage::ErrorResponse {
+                severity: "ERROR".into(),
+                code: "42601".into(),
+                message: "CREATE JOB syntax: CREATE JOB name EVERY <n> SECONDS AS BACKUP TO 'dest'"
+                    .into(),
+            }];
+        }
+        let job_name = parts[0].trim().to_owned();
+        let after_every = parts[1].trim();
+        // parse <n> SECONDS AS BACKUP [INCREMENTAL] TO 'dest'
+        let (interval_secs, tail) = {
+            let mut sp = after_every.splitn(2, char::is_whitespace);
+            let n: u64 = sp.next().unwrap_or("0").parse().unwrap_or(0);
+            let tail = sp.next().unwrap_or("").trim();
+            (n, tail)
+        };
+        let tail = tail
+            .trim_start_matches("seconds as ")
+            .trim_start_matches("second as ");
+        let incremental = tail.contains("incremental");
+        let dest = tail
+            .trim_start_matches("backup incremental to ")
+            .trim_start_matches("backup to ")
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_matches('\'')
+            .to_owned();
+        if interval_secs == 0 || dest.is_empty() {
+            return vec![BackendMessage::ErrorResponse {
+                severity: "ERROR".into(),
+                code: "42601".into(),
+                message: "CREATE JOB requires a positive interval and a destination".into(),
+            }];
+        }
+        let btype = if incremental {
+            BackupType::Incremental
+        } else {
+            BackupType::Full
+        };
+        let arc_engine: Arc<falcon_storage::engine::StorageEngine> = Arc::clone(&self.storage);
+        let job_id = arc_engine.schedule_recurring_backup(
+            btype,
+            dest.clone(),
+            job_name.clone(),
+            interval_secs,
+        );
+        self.single_row_result(
+            vec![
+                ("job_id", 20, 8),
+                ("name", 25, -1),
+                ("interval_secs", 20, 8),
+            ],
+            vec![vec![
+                Some(job_id.to_string()),
+                Some(job_name),
+                Some(interval_secs.to_string()),
+            ]],
+        )
+    }
+
+    fn handle_drop_job(&self, sql_lower: &str, _session: &mut PgSession) -> Vec<BackendMessage> {
+        let rest = sql_lower.trim_start_matches("drop job ").trim();
+        let job_id: u64 = rest.trim_end_matches(';').trim().parse().unwrap_or(0);
+        let cancelled = self.storage.cancel_job(job_id);
+        self.single_row_result(
+            vec![("cancelled", 16, 1)],
+            vec![vec![Some(if cancelled { "t" } else { "f" }.into())]],
+        )
     }
 
     // ── Savepoint helpers ──
 
     fn handle_savepoint(&self, sql_lower: &str, session: &mut PgSession) -> Vec<BackendMessage> {
-        let name = sql_lower
-            .trim_start_matches("savepoint ")
-            .trim().to_owned();
+        let name = sql_lower.trim_start_matches("savepoint ").trim().to_owned();
         if !session.in_transaction() {
             return vec![BackendMessage::ErrorResponse {
                 severity: "ERROR".into(),
@@ -1314,18 +1573,27 @@ impl QueryHandler {
     fn handle_drop_tenant(&self, sql_lower: &str) -> Vec<BackendMessage> {
         let tenant_name = sql_lower
             .trim_start_matches("drop tenant ")
-            .trim().to_owned();
-        let found = self.enterprise.tenant_registry.tenant_ids().into_iter().find(|tid| {
-            self.enterprise.tenant_registry
-                .get_config(*tid)
-                .is_some_and(|c| c.name == tenant_name)
-        });
+            .trim()
+            .to_owned();
+        let found = self
+            .enterprise
+            .tenant_registry
+            .tenant_ids()
+            .into_iter()
+            .find(|tid| {
+                self.enterprise
+                    .tenant_registry
+                    .get_config(*tid)
+                    .is_some_and(|c| c.name == tenant_name)
+            });
         found.map_or_else(
-            || vec![BackendMessage::ErrorResponse {
-                severity: "ERROR".into(),
-                code: "42704".into(),
-                message: format!("tenant \"{tenant_name}\" does not exist"),
-            }],
+            || {
+                vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "42704".into(),
+                    message: format!("tenant \"{tenant_name}\" does not exist"),
+                }]
+            },
             |tid| {
                 self.enterprise.tenant_registry.remove_tenant(tid);
                 vec![BackendMessage::CommandComplete {
@@ -1333,6 +1601,193 @@ impl QueryHandler {
                 }]
             },
         )
+    }
+
+    // ── CDC command dispatch ──
+
+    fn handle_cdc_command(&self, sql_lower: &str) -> Option<Vec<BackendMessage>> {
+        if sql_lower.starts_with("create replication slot ") {
+            let name = sql_lower
+                .trim_start_matches("create replication slot ")
+                .trim()
+                .trim_end_matches(';')
+                .trim()
+                .trim_matches('\'')
+                .to_owned();
+            return Some(match self.storage.cdc_create_slot(&name) {
+                Ok(slot_id) => self.single_row_result(
+                    vec![
+                        ("slot_name", 25, -1),
+                        ("slot_id", 20, 8),
+                        ("restart_lsn", 25, -1),
+                    ],
+                    vec![vec![
+                        Some(name),
+                        Some(slot_id.to_string()),
+                        Some("0/0".into()),
+                    ]],
+                ),
+                Err(e) => vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "55000".into(),
+                    message: e,
+                }],
+            });
+        }
+
+        if sql_lower.starts_with("drop replication slot ") {
+            let name = sql_lower
+                .trim_start_matches("drop replication slot ")
+                .trim()
+                .trim_end_matches(';')
+                .trim()
+                .trim_matches('\'')
+                .to_owned();
+            return Some(match self.storage.cdc_drop_slot(&name) {
+                Ok(()) => vec![BackendMessage::CommandComplete {
+                    tag: "DROP REPLICATION SLOT".into(),
+                }],
+                Err(e) => vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "55000".into(),
+                    message: e,
+                }],
+            });
+        }
+
+        if sql_lower.starts_with("select falcon_cdc_status()") {
+            let s = self.storage.cdc_status();
+            return Some(self.single_row_result(
+                vec![
+                    ("enabled", 16, -1),
+                    ("slot_count", 23, 4),
+                    ("buffer_len", 23, 4),
+                    ("events_emitted", 20, 8),
+                    ("events_evicted", 20, 8),
+                    ("bridge_lsn", 20, 8),
+                    ("inflight_txns", 23, 4),
+                ],
+                vec![vec![
+                    Some(if s.enabled { "t" } else { "f" }.into()),
+                    Some(s.slot_count.to_string()),
+                    Some(s.buffer_len.to_string()),
+                    Some(s.events_emitted.to_string()),
+                    Some(s.events_evicted.to_string()),
+                    Some(s.bridge_lsn.to_string()),
+                    Some(s.inflight_txns.to_string()),
+                ]],
+            ));
+        }
+
+        if sql_lower.starts_with("select falcon_list_slots()") {
+            let slots = self.storage.cdc_list_slots();
+            let rows: Vec<Vec<Option<String>>> = slots
+                .iter()
+                .map(|s| {
+                    vec![
+                        Some(s.id.0.to_string()),
+                        Some(s.name.clone()),
+                        Some(if s.active { "t" } else { "f" }.into()),
+                        Some(s.confirmed_flush_lsn.0.to_string()),
+                        Some(s.restart_lsn.0.to_string()),
+                        Some(s.created_at_ms.to_string()),
+                    ]
+                })
+                .collect();
+            return Some(self.single_row_result(
+                vec![
+                    ("slot_id", 20, 8),
+                    ("slot_name", 25, -1),
+                    ("active", 16, -1),
+                    ("confirmed_flush_lsn", 20, 8),
+                    ("restart_lsn", 20, 8),
+                    ("created_at_ms", 20, 8),
+                ],
+                rows,
+            ));
+        }
+
+        if sql_lower.starts_with("select falcon_cdc_poll(") {
+            let inner = sql_lower
+                .trim_start_matches("select falcon_cdc_poll(")
+                .trim_end_matches(')')
+                .trim_end_matches(';')
+                .trim();
+            let parts: Vec<&str> = inner.splitn(2, ',').collect();
+            let slot_name = parts[0].trim().trim_matches('\'').to_owned();
+            let max_events: usize = parts
+                .get(1)
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(100);
+            return Some(match self.storage.cdc_poll(&slot_name, max_events) {
+                Ok(events) => {
+                    let rows: Vec<Vec<Option<String>>> = events
+                        .iter()
+                        .map(|e| {
+                            vec![
+                                Some(e.seq.to_string()),
+                                Some(e.lsn.0.to_string()),
+                                Some(e.txn_id.0.to_string()),
+                                Some(e.op.to_string()),
+                                Some(e.table_name.clone().unwrap_or_default()),
+                                Some(e.timestamp_ms.to_string()),
+                                e.pk_values.clone(),
+                                e.new_row.as_ref().map(|r| format!("{r:?}")),
+                                e.old_row.as_ref().map(|r| format!("{r:?}")),
+                                e.ddl_text.clone(),
+                            ]
+                        })
+                        .collect();
+                    self.single_row_result(
+                        vec![
+                            ("seq", 20, 8),
+                            ("lsn", 20, 8),
+                            ("txn_id", 20, 8),
+                            ("op", 25, -1),
+                            ("table_name", 25, -1),
+                            ("timestamp_ms", 20, 8),
+                            ("pk_values", 25, -1),
+                            ("new_row", 25, -1),
+                            ("old_row", 25, -1),
+                            ("ddl_text", 25, -1),
+                        ],
+                        rows,
+                    )
+                }
+                Err(e) => vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "55000".into(),
+                    message: e,
+                }],
+            });
+        }
+
+        if sql_lower.starts_with("select falcon_cdc_advance(") {
+            let inner = sql_lower
+                .trim_start_matches("select falcon_cdc_advance(")
+                .trim_end_matches(')')
+                .trim_end_matches(';')
+                .trim();
+            let parts: Vec<&str> = inner.splitn(2, ',').collect();
+            let slot_name = parts[0].trim().trim_matches('\'').to_owned();
+            let lsn: u64 = parts
+                .get(1)
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0);
+            return Some(match self.storage.cdc_advance_slot(&slot_name, lsn) {
+                Ok(()) => self.single_row_result(
+                    vec![("falcon_cdc_advance", 25, -1)],
+                    vec![vec![Some("OK".into())]],
+                ),
+                Err(e) => vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "55000".into(),
+                    message: e,
+                }],
+            });
+        }
+
+        None
     }
 
     // ── Cursor helpers ──
@@ -1395,9 +1850,8 @@ impl QueryHandler {
         let txn = session.txn.as_ref();
         match self.execute_sql_for_cursor(&query, txn) {
             Ok((columns, rows)) => {
-                let stream = falcon_executor::CursorStream::new_materialized(
-                    columns, rows, with_hold,
-                );
+                let stream =
+                    falcon_executor::CursorStream::new_materialized(columns, rows, with_hold);
                 session.cursors.insert(
                     cursor_name.clone(),
                     crate::session::CursorState {
@@ -1675,7 +2129,11 @@ impl QueryHandler {
         rows.sort_by(|a, b| a[0].cmp(&b[0]));
 
         self.single_row_result(
-            vec![("name", 25, -1i16), ("setting", 25, -1), ("description", 25, -1)],
+            vec![
+                ("name", 25, -1i16),
+                ("setting", 25, -1),
+                ("description", 25, -1),
+            ],
             rows,
         )
     }
@@ -1704,7 +2162,11 @@ fn extract_string_arg_from(sql: &str, func_prefix: &str) -> Option<String> {
     let rest = &sql[start..];
     let end = rest.find(')')?;
     let inner = rest[..end].trim().trim_matches('\'').trim_matches('"');
-    if inner.is_empty() { None } else { Some(inner.to_owned()) }
+    if inner.is_empty() {
+        None
+    } else {
+        Some(inner.to_owned())
+    }
 }
 
 /// Format bytes into a human-readable string like PG's pg_size_pretty.
@@ -1730,12 +2192,16 @@ fn parse_encryption_scope(s: &str) -> Option<falcon_storage::encryption::Encrypt
     match s {
         "wal" => Some(EncryptionScope::Wal),
         "backup" => Some(EncryptionScope::Backup),
-        _ if s.starts_with("table_") => {
-            s.strip_prefix("table_")?.parse::<u64>().ok().map(EncryptionScope::Table)
-        }
-        _ if s.starts_with("sst_") => {
-            s.strip_prefix("sst_")?.parse::<u64>().ok().map(EncryptionScope::Sst)
-        }
+        _ if s.starts_with("table_") => s
+            .strip_prefix("table_")?
+            .parse::<u64>()
+            .ok()
+            .map(EncryptionScope::Table),
+        _ if s.starts_with("sst_") => s
+            .strip_prefix("sst_")?
+            .parse::<u64>()
+            .ok()
+            .map(EncryptionScope::Sst),
         _ => None,
     }
 }

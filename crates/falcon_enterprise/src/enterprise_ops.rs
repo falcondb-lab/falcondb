@@ -174,7 +174,9 @@ impl AutoRebalancer {
         for (from_node, shards) in &mut overloaded {
             while shards.len() > ideal {
                 if let Some((to_node, remaining)) = underloaded.iter_mut().find(|(_, r)| *r > 0) {
-                    let shard_id = shards.pop().expect("BUG: pop failed while shards.len() > ideal");
+                    let shard_id = shards
+                        .pop()
+                        .expect("BUG: pop failed while shards.len() > ideal");
                     plan.push((shard_id, *from_node, *to_node));
                     *remaining -= 1;
                 } else {
@@ -206,7 +208,9 @@ impl AutoRebalancer {
             completed_at: None,
         };
         self.tasks.write().push(task);
-        self.metrics.migrations_started.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .migrations_started
+            .fetch_add(1, Ordering::Relaxed);
         Some(task_id)
     }
 
@@ -229,8 +233,12 @@ impl AutoRebalancer {
                 MigrationState::Completed => {
                     task.completed_at = Some(SystemTime::now());
                     self.active_count.fetch_sub(1, Ordering::Relaxed);
-                    self.metrics.migrations_completed.fetch_add(1, Ordering::Relaxed);
-                    self.metrics.bytes_migrated.fetch_add(task.bytes_migrated, Ordering::Relaxed);
+                    self.metrics
+                        .migrations_completed
+                        .fetch_add(1, Ordering::Relaxed);
+                    self.metrics
+                        .bytes_migrated
+                        .fetch_add(task.bytes_migrated, Ordering::Relaxed);
                 }
                 MigrationState::Failed | MigrationState::Cancelled => {
                     task.completed_at = Some(SystemTime::now());
@@ -238,7 +246,9 @@ impl AutoRebalancer {
                         self.active_count.fetch_sub(1, Ordering::Relaxed);
                     }
                     if new_state == MigrationState::Failed {
-                        self.metrics.migrations_failed.fetch_add(1, Ordering::Relaxed);
+                        self.metrics
+                            .migrations_failed
+                            .fetch_add(1, Ordering::Relaxed);
                     }
                 }
                 _ => {}
@@ -309,7 +319,9 @@ impl AutoRebalancer {
 
     /// Get pending tasks.
     pub fn pending_tasks(&self) -> Vec<MigrationTask> {
-        self.tasks.read().iter()
+        self.tasks
+            .read()
+            .iter()
             .filter(|t| t.state == MigrationState::Pending)
             .cloned()
             .collect()
@@ -433,41 +445,62 @@ impl CapacityPlanner {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let sample = ResourceSample { timestamp: ts, value };
+        let sample = ResourceSample {
+            timestamp: ts,
+            value,
+        };
         let mut series = self.series.write();
-        let q = series.entry(resource).or_insert_with(|| VecDeque::with_capacity(self.max_samples));
+        let q = series
+            .entry(resource)
+            .or_insert_with(|| VecDeque::with_capacity(self.max_samples));
         if q.len() >= self.max_samples {
             q.pop_front();
         }
         q.push_back(sample);
-        self.metrics.samples_recorded.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .samples_recorded
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record a sample with explicit timestamp.
     pub fn record_at(&self, resource: ResourceType, value: f64, timestamp: u64) {
         let sample = ResourceSample { timestamp, value };
         let mut series = self.series.write();
-        let q = series.entry(resource).or_insert_with(|| VecDeque::with_capacity(self.max_samples));
+        let q = series
+            .entry(resource)
+            .or_insert_with(|| VecDeque::with_capacity(self.max_samples));
         if q.len() >= self.max_samples {
             q.pop_front();
         }
         q.push_back(sample);
-        self.metrics.samples_recorded.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .samples_recorded
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Forecast a resource. Uses linear regression on the time series.
     pub fn forecast(&self, resource: ResourceType, horizon_hours: f64) -> Option<ForecastResult> {
-        self.metrics.forecasts_computed.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .forecasts_computed
+            .fetch_add(1, Ordering::Relaxed);
         let series = self.series.read();
         let samples = series.get(&resource)?;
         if samples.len() < 2 {
             return None;
         }
 
-        let capacity = self.capacities.read().get(&resource).copied().unwrap_or(f64::MAX);
+        let capacity = self
+            .capacities
+            .read()
+            .get(&resource)
+            .copied()
+            .unwrap_or(f64::MAX);
 
         // Linear regression: y = a + b*x (x = hours since first sample)
-        let first_ts = samples.front().expect("BUG: empty samples after len>=2 check").timestamp as f64;
+        let first_ts = samples
+            .front()
+            .expect("BUG: empty samples after len>=2 check")
+            .timestamp as f64;
         let n = samples.len() as f64;
         let mut sum_x = 0.0f64;
         let mut sum_y = 0.0f64;
@@ -492,12 +525,18 @@ impl CapacityPlanner {
             (a, b)
         };
 
-        let last = samples.back().expect("BUG: empty samples after len>=2 check");
+        let last = samples
+            .back()
+            .expect("BUG: empty samples after len>=2 check");
         let current_x = (last.timestamp as f64 - first_ts) / 3600.0;
         let predicted_value = b.mul_add(current_x + horizon_hours, a);
         let time_to_exhaustion = if b > 1e-10 {
             let remaining = capacity - last.value;
-            if remaining > 0.0 { Some(remaining / b) } else { Some(0.0) }
+            if remaining > 0.0 {
+                Some(remaining / b)
+            } else {
+                Some(0.0)
+            }
         } else {
             None
         };
@@ -509,7 +548,11 @@ impl CapacityPlanner {
             predicted_value,
             growth_rate_per_hour: b,
             time_to_exhaustion_hours: time_to_exhaustion,
-            utilization: if capacity > 0.0 { last.value / capacity } else { 0.0 },
+            utilization: if capacity > 0.0 {
+                last.value / capacity
+            } else {
+                0.0
+            },
         })
     }
 
@@ -553,9 +596,13 @@ impl CapacityPlanner {
                         forecast,
                         timestamp: now,
                     };
-                    self.metrics.alerts_generated.fetch_add(1, Ordering::Relaxed);
+                    self.metrics
+                        .alerts_generated
+                        .fetch_add(1, Ordering::Relaxed);
                     let mut hist = self.alerts.lock();
-                    if hist.len() >= 100 { hist.pop_front(); }
+                    if hist.len() >= 100 {
+                        hist.pop_front();
+                    }
                     hist.push_back(alert.clone());
                     alerts.push(alert);
                 }
@@ -566,7 +613,13 @@ impl CapacityPlanner {
 
     /// Get alert history.
     pub fn alert_history(&self, limit: usize) -> Vec<CapacityAlert> {
-        self.alerts.lock().iter().rev().take(limit).cloned().collect()
+        self.alerts
+            .lock()
+            .iter()
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect()
     }
 
     /// Spawn a background evaluator that periodically runs `evaluate_alerts()`.
@@ -711,7 +764,8 @@ impl SloEngine {
     /// Record a metric sample with explicit timestamp.
     pub fn record_sample_at(&self, metric: SloMetricType, value: f64, timestamp: u64) {
         let mut samples = self.samples.write();
-        let q = samples.entry(metric)
+        let q = samples
+            .entry(metric)
             .or_insert_with(|| VecDeque::with_capacity(self.max_samples));
         if q.len() >= self.max_samples {
             q.pop_front();
@@ -734,18 +788,28 @@ impl SloEngine {
             let actual = self.compute_metric(&samples, &slo.metric, slo.window_secs, now);
             let met = match slo.metric {
                 SloMetricType::Availability | SloMetricType::Durability => actual >= slo.target,
-                SloMetricType::LatencyP99 | SloMetricType::LatencyP999 | SloMetricType::ReplicationLag => {
-                    actual <= slo.target
-                }
+                SloMetricType::LatencyP99
+                | SloMetricType::LatencyP999
+                | SloMetricType::ReplicationLag => actual <= slo.target,
                 SloMetricType::ErrorRate => actual <= slo.target,
             };
             let error_budget = match slo.metric {
                 SloMetricType::Availability | SloMetricType::Durability => {
                     let budget = 1.0 - slo.target; // e.g., 0.001 for 99.9%
                     let used = 1.0 - actual;
-                    if budget > 0.0 { 1.0 - (used / budget) } else { 0.0 }
+                    if budget > 0.0 {
+                        1.0 - (used / budget)
+                    } else {
+                        0.0
+                    }
                 }
-                _ => if met { 1.0 } else { 0.0 },
+                _ => {
+                    if met {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
             };
 
             if met {
@@ -782,7 +846,8 @@ impl SloEngine {
             _ => return 0.0,
         };
         let cutoff = now.saturating_sub(window_secs);
-        let window_samples: Vec<f64> = q.iter()
+        let window_samples: Vec<f64> = q
+            .iter()
             .filter(|(ts, _)| *ts >= cutoff)
             .map(|(_, v)| *v)
             .collect();
@@ -799,7 +864,11 @@ impl SloEngine {
             SloMetricType::LatencyP99 | SloMetricType::LatencyP999 => {
                 let mut sorted = window_samples;
                 sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let pct = if *metric == SloMetricType::LatencyP99 { 0.99 } else { 0.999 };
+                let pct = if *metric == SloMetricType::LatencyP99 {
+                    0.99
+                } else {
+                    0.999
+                };
                 let idx = ((sorted.len() as f64 * pct).ceil() as usize)
                     .min(sorted.len())
                     .saturating_sub(1);
@@ -826,14 +895,28 @@ impl SloEngine {
         let evals = self.evaluations.read();
         let mut out = String::new();
         for e in evals.iter() {
-            let _ = writeln!(out, "falcon_slo_actual{{slo_id=\"{}\",metric=\"{}\"}} {:.6}",
-                e.slo_id, e.metric, e.actual);
-            let _ = writeln!(out, "falcon_slo_target{{slo_id=\"{}\",metric=\"{}\"}} {:.6}",
-                e.slo_id, e.metric, e.target);
-            let _ = writeln!(out, "falcon_slo_met{{slo_id=\"{}\",metric=\"{}\"}} {}",
-                e.slo_id, e.metric, i32::from(e.met));
-            let _ = writeln!(out, "falcon_slo_error_budget{{slo_id=\"{}\",metric=\"{}\"}} {:.6}",
-                e.slo_id, e.metric, e.error_budget_remaining);
+            let _ = writeln!(
+                out,
+                "falcon_slo_actual{{slo_id=\"{}\",metric=\"{}\"}} {:.6}",
+                e.slo_id, e.metric, e.actual
+            );
+            let _ = writeln!(
+                out,
+                "falcon_slo_target{{slo_id=\"{}\",metric=\"{}\"}} {:.6}",
+                e.slo_id, e.metric, e.target
+            );
+            let _ = writeln!(
+                out,
+                "falcon_slo_met{{slo_id=\"{}\",metric=\"{}\"}} {}",
+                e.slo_id,
+                e.metric,
+                i32::from(e.met)
+            );
+            let _ = writeln!(
+                out,
+                "falcon_slo_error_budget{{slo_id=\"{}\",metric=\"{}\"}} {:.6}",
+                e.slo_id, e.metric, e.error_budget_remaining
+            );
         }
         out
     }
@@ -872,12 +955,22 @@ impl fmt::Display for IncidentSeverity {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TimelineEventType {
     NodeFailure(NodeId),
-    LeaderChange { shard_id: u64, old: Option<NodeId>, new: NodeId },
+    LeaderChange {
+        shard_id: u64,
+        old: Option<NodeId>,
+        new: NodeId,
+    },
     OpsAction(String),
-    MetricAnomaly { metric: String, value: f64, threshold: f64 },
+    MetricAnomaly {
+        metric: String,
+        value: f64,
+        threshold: f64,
+    },
     SloBreached(String),
     BackupCompleted(u64),
-    ConfigChange { key: String },
+    ConfigChange {
+        key: String,
+    },
     RebalanceStarted,
     RebalanceCompleted,
 }
@@ -886,8 +979,9 @@ impl fmt::Display for TimelineEventType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NodeFailure(id) => write!(f, "NODE_FAILURE({id:?})"),
-            Self::LeaderChange { shard_id, new, .. } =>
-                write!(f, "LEADER_CHANGE(shard={shard_id}, new={new:?})"),
+            Self::LeaderChange { shard_id, new, .. } => {
+                write!(f, "LEADER_CHANGE(shard={shard_id}, new={new:?})")
+            }
             Self::OpsAction(a) => write!(f, "OPS({a})"),
             Self::MetricAnomaly { metric, .. } => write!(f, "ANOMALY({metric})"),
             Self::SloBreached(id) => write!(f, "SLO_BREACH({id})"),
@@ -1023,7 +1117,9 @@ impl IncidentTimeline {
             impact: None,
         };
         self.incidents.write().push(incident);
-        self.metrics.incidents_created.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .incidents_created
+            .fetch_add(1, Ordering::Relaxed);
         id
     }
 
@@ -1038,7 +1134,9 @@ impl IncidentTimeline {
             inc.resolved_at = Some(ts);
             inc.root_cause = Some(root_cause.to_owned());
             inc.impact = Some(impact.to_owned());
-            self.metrics.incidents_resolved.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .incidents_resolved
+                .fetch_add(1, Ordering::Relaxed);
             true
         } else {
             false
@@ -1063,7 +1161,8 @@ impl IncidentTimeline {
 
         let uncorrelated = {
             let mut events = self.events.lock();
-            let ids: Vec<u64> = events.iter()
+            let ids: Vec<u64> = events
+                .iter()
                 .filter(|e| {
                     e.timestamp >= cutoff
                         && e.incident_id.is_none()
@@ -1099,14 +1198,22 @@ impl IncidentTimeline {
             impact: None,
         };
         self.incidents.write().push(incident);
-        self.metrics.incidents_created.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .incidents_created
+            .fetch_add(1, Ordering::Relaxed);
 
         Some(incident_id)
     }
 
     /// Get recent events.
     pub fn recent_events(&self, count: usize) -> Vec<TimelineEvent> {
-        self.events.lock().iter().rev().take(count).cloned().collect()
+        self.events
+            .lock()
+            .iter()
+            .rev()
+            .take(count)
+            .cloned()
+            .collect()
     }
 
     /// Get all incidents.
@@ -1116,7 +1223,9 @@ impl IncidentTimeline {
 
     /// Get open (unresolved) incidents.
     pub fn open_incidents(&self) -> Vec<Incident> {
-        self.incidents.read().iter()
+        self.incidents
+            .read()
+            .iter()
             .filter(|i| i.resolved_at.is_none())
             .cloned()
             .collect()
@@ -1124,7 +1233,9 @@ impl IncidentTimeline {
 
     /// Get events for an incident.
     pub fn events_for_incident(&self, incident_id: u64) -> Vec<TimelineEvent> {
-        self.events.lock().iter()
+        self.events
+            .lock()
+            .iter()
             .filter(|e| e.incident_id == Some(incident_id))
             .cloned()
             .collect()
@@ -1275,8 +1386,8 @@ mod tests {
         let rb = AutoRebalancer::new(RebalanceConfig::default());
         let mut assignments = HashMap::new();
         assignments.insert(NodeId(1), vec![0, 1, 2, 3]); // 4 shards
-        assignments.insert(NodeId(2), vec![4]);            // 1 shard
-        assignments.insert(NodeId(3), vec![]);             // 0 shards
+        assignments.insert(NodeId(2), vec![4]); // 1 shard
+        assignments.insert(NodeId(3), vec![]); // 0 shards
         let nodes = vec![NodeId(1), NodeId(2), NodeId(3)];
         let plan = rb.compute_plan(&assignments, &nodes);
         // Ideal = ceil(5/3) = 2 per node
@@ -1303,7 +1414,10 @@ mod tests {
 
     #[test]
     fn test_migration_max_concurrent() {
-        let config = RebalanceConfig { max_concurrent: 1, ..Default::default() };
+        let config = RebalanceConfig {
+            max_concurrent: 1,
+            ..Default::default()
+        };
         let rb = AutoRebalancer::new(config);
         let t1 = rb.schedule_migration(0, NodeId(1), NodeId(2));
         assert!(t1.is_some());
@@ -1350,7 +1464,11 @@ mod tests {
 
         // At 90% usage with growth
         for hour in 0..5u64 {
-            planner.record_at(ResourceType::MemoryUsage, 80.0 + hour as f64 * 2.0, 1000 + hour * 3600);
+            planner.record_at(
+                ResourceType::MemoryUsage,
+                80.0 + hour as f64 * 2.0,
+                1000 + hour * 3600,
+            );
         }
 
         let alerts = planner.evaluate_alerts();
@@ -1407,7 +1525,11 @@ mod tests {
 
         // Most reads under 10ms, a few at 30ms
         for i in 0..100u64 {
-            let val = if i >= 95 { 30.0 } else { 5.0 + (i as f64) * 0.1 };
+            let val = if i >= 95 {
+                30.0
+            } else {
+                5.0 + (i as f64) * 0.1
+            };
             engine.record_sample_at(SloMetricType::LatencyP99, val, now - 1800 + i);
         }
 
@@ -1479,20 +1601,35 @@ mod tests {
             "Node 1 failed",
         );
         let e2 = timeline.record_event(
-            TimelineEventType::LeaderChange { shard_id: 0, old: Some(NodeId(1)), new: NodeId(2) },
+            TimelineEventType::LeaderChange {
+                shard_id: 0,
+                old: Some(NodeId(1)),
+                new: NodeId(2),
+            },
             IncidentSeverity::High,
             "Leader changed for shard 0",
         );
-        let inc_id = timeline.create_incident("Node 1 failure incident", IncidentSeverity::High, vec![e1, e2]);
+        let inc_id = timeline.create_incident(
+            "Node 1 failure incident",
+            IncidentSeverity::High,
+            vec![e1, e2],
+        );
         assert!(timeline.open_incidents().len() == 1);
 
-        timeline.resolve_incident(inc_id, "Node 1 hardware failure", "30s write unavailability on shard 0");
+        timeline.resolve_incident(
+            inc_id,
+            "Node 1 hardware failure",
+            "30s write unavailability on shard 0",
+        );
         assert!(timeline.open_incidents().is_empty());
 
         let incidents = timeline.all_incidents();
         assert_eq!(incidents.len(), 1);
         assert!(incidents[0].resolved_at.is_some());
-        assert_eq!(incidents[0].root_cause.as_deref(), Some("Node 1 hardware failure"));
+        assert_eq!(
+            incidents[0].root_cause.as_deref(),
+            Some("Node 1 hardware failure")
+        );
     }
 
     #[test]
@@ -1579,7 +1716,9 @@ mod tests {
                 }
             }));
         }
-        for h in handles { h.join().unwrap(); }
+        for h in handles {
+            h.join().unwrap();
+        }
         let evals = engine.evaluate_all();
         assert_eq!(evals.len(), 1);
         assert!(evals[0].actual > 0.95); // ~99% availability
@@ -1602,7 +1741,9 @@ mod tests {
                 }
             }));
         }
-        for h in handles { h.join().unwrap(); }
+        for h in handles {
+            h.join().unwrap();
+        }
         assert_eq!(tl.metrics.events_recorded.load(Ordering::Relaxed), 1000);
     }
 }

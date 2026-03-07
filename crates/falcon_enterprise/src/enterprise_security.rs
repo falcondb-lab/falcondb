@@ -73,7 +73,8 @@ fn verify_password(password: &str, stored_hash: &str) -> bool {
         None => return false,
     };
     let mut derived = vec![0u8; expected_dk.len()];
-    if pbkdf2::pbkdf2::<Hmac<Sha256>>(password.as_bytes(), &salt, iterations, &mut derived).is_err() {
+    if pbkdf2::pbkdf2::<Hmac<Sha256>>(password.as_bytes(), &salt, iterations, &mut derived).is_err()
+    {
         return false;
     }
     // Constant-time comparison to prevent timing attacks.
@@ -92,7 +93,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len())
@@ -100,7 +101,6 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
         .collect()
 }
-
 
 // ═══════════════════════════════════════════════════════════════════════════
 // §3 — AuthN: Credential Model
@@ -246,7 +246,9 @@ impl AuthnManager {
             locked_until: None,
         };
         self.users.write().insert(user_id, user);
-        self.username_index.write().insert(username.to_owned(), user_id);
+        self.username_index
+            .write()
+            .insert(username.to_owned(), user_id);
         user_id
     }
 
@@ -311,7 +313,9 @@ impl AuthnManager {
         // Look up user id
         let user_id = {
             let idx = self.username_index.read();
-            if let Some(id) = idx.get(&request.username) { *id } else {
+            if let Some(id) = idx.get(&request.username) {
+                *id
+            } else {
                 self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
                 return AuthnResult::Failed {
                     reason: "user not found".into(),
@@ -328,7 +332,9 @@ impl AuthnManager {
 
         let outcome = {
             let users = self.users.read();
-            let user = if let Some(u) = users.get(&user_id) { u } else {
+            let user = if let Some(u) = users.get(&user_id) {
+                u
+            } else {
                 self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
                 return AuthnResult::Failed {
                     reason: "user not found".into(),
@@ -430,7 +436,9 @@ impl AuthnManager {
                 }
             }
             AuthOutcome::CredentialExpired => {
-                self.metrics.credential_expirations.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .credential_expirations
+                    .fetch_add(1, Ordering::Relaxed);
                 AuthnResult::CredentialExpired
             }
             AuthOutcome::Failed => {
@@ -572,7 +580,11 @@ pub struct RbacGrant {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RbacCheckResult {
     Allowed,
-    Denied { scope: RbacScope, permission: String, resource: String },
+    Denied {
+        scope: RbacScope,
+        permission: String,
+        resource: String,
+    },
 }
 
 /// Index key for fast RBAC permission lookup: (role_id, scope, resource, permission).
@@ -739,7 +751,10 @@ impl EnterpriseRbac {
 
     /// List grants for a role.
     pub fn grants_for_role(&self, role_id: u64) -> Vec<RbacGrant> {
-        self.inner.read().grants.iter()
+        self.inner
+            .read()
+            .grants
+            .iter()
             .filter(|g| g.role_id == role_id)
             .cloned()
             .collect()
@@ -840,7 +855,9 @@ impl CertificateManager {
         not_before: u64,
         not_after: u64,
     ) -> bool {
-        self.metrics.rotations_attempted.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .rotations_attempted
+            .fetch_add(1, Ordering::Relaxed);
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
@@ -848,7 +865,8 @@ impl CertificateManager {
 
         let old_fingerprint = {
             let certs = self.certs.read();
-            certs.get(&link_type)
+            certs
+                .get(&link_type)
                 .map(|c| c.fingerprint.clone())
                 .unwrap_or_default()
         };
@@ -861,7 +879,9 @@ impl CertificateManager {
         } else if new_fingerprint.is_empty() {
             Some("fingerprint is empty".to_owned())
         } else if not_after <= now {
-            Some(format!("certificate already expired (not_after={not_after}, now={now})"))
+            Some(format!(
+                "certificate already expired (not_after={not_after}, now={now})"
+            ))
         } else if not_before > not_after {
             Some("not_before > not_after".to_owned())
         } else {
@@ -869,7 +889,9 @@ impl CertificateManager {
         };
 
         if let Some(err) = validation_error {
-            self.metrics.rotations_failed.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .rotations_failed
+                .fetch_add(1, Ordering::Relaxed);
             let event = CertRotationEvent {
                 link_type,
                 old_fingerprint,
@@ -899,7 +921,9 @@ impl CertificateManager {
         };
 
         self.certs.write().insert(link_type, new_record);
-        self.metrics.rotations_succeeded.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .rotations_succeeded
+            .fetch_add(1, Ordering::Relaxed);
 
         let event = CertRotationEvent {
             link_type,
@@ -925,7 +949,8 @@ impl CertificateManager {
             .as_secs();
         let threshold = now.saturating_add(within_secs);
         let certs = self.certs.read();
-        certs.iter()
+        certs
+            .iter()
             .filter(|(_, c)| c.not_after < threshold && c.is_active)
             .map(|(lt, c)| (*lt, c.not_after))
             .collect()
@@ -938,7 +963,13 @@ impl CertificateManager {
 
     /// Get rotation history.
     pub fn rotation_history(&self, limit: usize) -> Vec<CertRotationEvent> {
-        self.rotation_history.lock().iter().rev().take(limit).cloned().collect()
+        self.rotation_history
+            .lock()
+            .iter()
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect()
     }
 
     /// Check all links have valid certs.
@@ -950,7 +981,8 @@ impl CertificateManager {
             TlsLinkType::DataNodeToController,
         ];
         let certs = self.certs.read();
-        required.into_iter()
+        required
+            .into_iter()
             .filter(|lt| !certs.contains_key(lt))
             .collect()
     }
@@ -963,19 +995,35 @@ impl CertificateManager {
 /// Backup storage target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackupTarget {
-    Local { path: String },
-    S3 { bucket: String, prefix: String, region: String },
-    Oss { bucket: String, prefix: String, endpoint: String },
+    Local {
+        path: String,
+    },
+    S3 {
+        bucket: String,
+        prefix: String,
+        region: String,
+    },
+    Oss {
+        bucket: String,
+        prefix: String,
+        endpoint: String,
+    },
 }
 
 impl fmt::Display for BackupTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Local { path } => write!(f, "local:{path}"),
-            Self::S3 { bucket, prefix, region } =>
-                write!(f, "s3://{bucket}/{prefix} ({region})"),
-            Self::Oss { bucket, prefix, endpoint } =>
-                write!(f, "oss://{bucket}/{prefix} ({endpoint})"),
+            Self::S3 {
+                bucket,
+                prefix,
+                region,
+            } => write!(f, "s3://{bucket}/{prefix} ({region})"),
+            Self::Oss {
+                bucket,
+                prefix,
+                endpoint,
+            } => write!(f, "oss://{bucket}/{prefix} ({endpoint})"),
         }
     }
 }
@@ -1172,8 +1220,12 @@ impl BackupOrchestrator {
             job.tables_backed_up = tables;
             job.wal_end_lsn = wal_end_lsn;
             job.checksum = checksum;
-            self.metrics.backups_completed.fetch_add(1, Ordering::Relaxed);
-            self.metrics.total_bytes_backed_up.fetch_add(bytes_written, Ordering::Relaxed);
+            self.metrics
+                .backups_completed
+                .fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .total_bytes_backed_up
+                .fetch_add(bytes_written, Ordering::Relaxed);
             true
         } else {
             false
@@ -1216,7 +1268,9 @@ impl BackupOrchestrator {
             target_timestamp,
         };
         self.restore_jobs.write().push(job);
-        self.metrics.restores_started.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .restores_started
+            .fetch_add(1, Ordering::Relaxed);
         job_id
     }
 
@@ -1232,7 +1286,9 @@ impl BackupOrchestrator {
             job.completed_at = Some(now);
             job.bytes_read = bytes_read;
             job.tables_restored = tables;
-            self.metrics.restores_completed.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .restores_completed
+                .fetch_add(1, Ordering::Relaxed);
             true
         } else {
             false
@@ -1241,25 +1297,44 @@ impl BackupOrchestrator {
 
     /// Get backup history.
     pub fn backup_history(&self, limit: usize) -> Vec<BackupJob> {
-        self.backup_jobs.read().iter().rev().take(limit).cloned().collect()
+        self.backup_jobs
+            .read()
+            .iter()
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect()
     }
 
     /// Get latest completed full backup.
     pub fn latest_full_backup(&self) -> Option<BackupJob> {
-        self.backup_jobs.read().iter().rev()
-            .find(|j| j.backup_type == EnterpriseBackupType::Full
-                && j.status == BackupJobStatus::Completed)
+        self.backup_jobs
+            .read()
+            .iter()
+            .rev()
+            .find(|j| {
+                j.backup_type == EnterpriseBackupType::Full
+                    && j.status == BackupJobStatus::Completed
+            })
             .cloned()
     }
 
     /// Get a backup job by ID.
     pub fn get_backup_job(&self, job_id: u64) -> Option<BackupJob> {
-        self.backup_jobs.read().iter().find(|j| j.job_id == job_id).cloned()
+        self.backup_jobs
+            .read()
+            .iter()
+            .find(|j| j.job_id == job_id)
+            .cloned()
     }
 
     /// Get a restore job by ID.
     pub fn get_restore_job(&self, job_id: u64) -> Option<RestoreJob> {
-        self.restore_jobs.read().iter().find(|j| j.job_id == job_id).cloned()
+        self.restore_jobs
+            .read()
+            .iter()
+            .find(|j| j.job_id == job_id)
+            .cloned()
     }
 }
 
@@ -1395,9 +1470,8 @@ impl EnterpriseAuditLog {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let event_str = format!(
-            "{id}|{timestamp}|{category}|{actor}|{action}|{resource}|{outcome}|{details}"
-        );
+        let event_str =
+            format!("{id}|{timestamp}|{category}|{actor}|{action}|{resource}|{outcome}|{details}");
         // Hold both locks to guarantee hash-chain order matches event order.
         let mut events = self.events.lock();
         let hash = {
@@ -1430,18 +1504,28 @@ impl EnterpriseAuditLog {
 
     /// Verify integrity of the audit chain.
     pub fn verify_integrity(&self) -> bool {
-        self.metrics.integrity_checks.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .integrity_checks
+            .fetch_add(1, Ordering::Relaxed);
         let events = self.events.lock();
         let mut prev_hash = "genesis".to_owned();
         for event in events.iter() {
             let event_str = format!(
                 "{}|{}|{}|{}|{}|{}|{}|{}",
-                event.id, event.timestamp, event.category, event.actor,
-                event.action, event.resource, event.outcome, event.details
+                event.id,
+                event.timestamp,
+                event.category,
+                event.actor,
+                event.action,
+                event.resource,
+                event.outcome,
+                event.details
             );
             let expected = self.compute_hash(&event_str, &prev_hash);
             if event.integrity_hash != expected {
-                self.metrics.integrity_failures.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .integrity_failures
+                    .fetch_add(1, Ordering::Relaxed);
                 return false;
             }
             prev_hash = event.integrity_hash.clone();
@@ -1463,13 +1547,21 @@ impl EnterpriseAuditLog {
                 )
             })
             .collect();
-        self.metrics.events_exported.fetch_add(result.len() as u64, Ordering::Relaxed);
+        self.metrics
+            .events_exported
+            .fetch_add(result.len() as u64, Ordering::Relaxed);
         result
     }
 
     /// Get recent events.
     pub fn recent(&self, count: usize) -> Vec<EnterpriseAuditEvent> {
-        self.events.lock().iter().rev().take(count).cloned().collect()
+        self.events
+            .lock()
+            .iter()
+            .rev()
+            .take(count)
+            .cloned()
+            .collect()
     }
 
     /// Total events recorded.
@@ -1478,8 +1570,15 @@ impl EnterpriseAuditLog {
     }
 
     /// Query events by category.
-    pub fn query_by_category(&self, category: &AuditCategory, limit: usize) -> Vec<EnterpriseAuditEvent> {
-        self.events.lock().iter().rev()
+    pub fn query_by_category(
+        &self,
+        category: &AuditCategory,
+        limit: usize,
+    ) -> Vec<EnterpriseAuditEvent> {
+        self.events
+            .lock()
+            .iter()
+            .rev()
             .filter(|e| e.category == *category)
             .take(limit)
             .cloned()
@@ -1500,7 +1599,7 @@ mod tests {
     #[test]
     fn test_create_user_and_authenticate() {
         let mgr = AuthnManager::new(5, 300);
-        let uid = mgr.create_user("alice", "hash_abc");
+        let _uid = mgr.create_user("alice", "hash_abc");
         let result = mgr.authenticate(&AuthnRequest {
             username: "alice".into(),
             credential_type: CredentialType::Password,
@@ -1613,10 +1712,22 @@ mod tests {
     #[test]
     fn test_rbac_grant_and_check() {
         let rbac = EnterpriseRbac::new();
-        rbac.grant(1, RbacScope::Table, "orders", EnterprisePermission::Select, "admin");
+        rbac.grant(
+            1,
+            RbacScope::Table,
+            "orders",
+            EnterprisePermission::Select,
+            "admin",
+        );
         let mut roles = HashSet::new();
         roles.insert(1u64);
-        let result = rbac.check(1, &roles, RbacScope::Table, "orders", &EnterprisePermission::Select);
+        let result = rbac.check(
+            1,
+            &roles,
+            RbacScope::Table,
+            "orders",
+            &EnterprisePermission::Select,
+        );
         assert_eq!(result, RbacCheckResult::Allowed);
     }
 
@@ -1625,7 +1736,13 @@ mod tests {
         let rbac = EnterpriseRbac::new();
         let mut roles = HashSet::new();
         roles.insert(1u64);
-        let result = rbac.check(1, &roles, RbacScope::Table, "orders", &EnterprisePermission::Delete);
+        let result = rbac.check(
+            1,
+            &roles,
+            RbacScope::Table,
+            "orders",
+            &EnterprisePermission::Delete,
+        );
         assert!(matches!(result, RbacCheckResult::Denied { .. }));
     }
 
@@ -1634,28 +1751,58 @@ mod tests {
         let rbac = EnterpriseRbac::new();
         let mut roles = HashSet::new();
         roles.insert(0u64); // superuser
-        let result = rbac.check(0, &roles, RbacScope::Cluster, "any", &EnterprisePermission::ManageCluster);
+        let result = rbac.check(
+            0,
+            &roles,
+            RbacScope::Cluster,
+            "any",
+            &EnterprisePermission::ManageCluster,
+        );
         assert_eq!(result, RbacCheckResult::Allowed);
     }
 
     #[test]
     fn test_rbac_wildcard_resource() {
         let rbac = EnterpriseRbac::new();
-        rbac.grant(5, RbacScope::Database, "*", EnterprisePermission::Connect, "admin");
+        rbac.grant(
+            5,
+            RbacScope::Database,
+            "*",
+            EnterprisePermission::Connect,
+            "admin",
+        );
         let mut roles = HashSet::new();
         roles.insert(5u64);
-        let result = rbac.check(5, &roles, RbacScope::Database, "mydb", &EnterprisePermission::Connect);
+        let result = rbac.check(
+            5,
+            &roles,
+            RbacScope::Database,
+            "mydb",
+            &EnterprisePermission::Connect,
+        );
         assert_eq!(result, RbacCheckResult::Allowed);
     }
 
     #[test]
     fn test_rbac_revoke() {
         let rbac = EnterpriseRbac::new();
-        rbac.grant(1, RbacScope::Table, "t1", EnterprisePermission::Insert, "admin");
+        rbac.grant(
+            1,
+            RbacScope::Table,
+            "t1",
+            EnterprisePermission::Insert,
+            "admin",
+        );
         rbac.revoke(1, RbacScope::Table, "t1", &EnterprisePermission::Insert);
         let mut roles = HashSet::new();
         roles.insert(1u64);
-        let result = rbac.check(1, &roles, RbacScope::Table, "t1", &EnterprisePermission::Insert);
+        let result = rbac.check(
+            1,
+            &roles,
+            RbacScope::Table,
+            "t1",
+            &EnterprisePermission::Insert,
+        );
         assert!(matches!(result, RbacCheckResult::Denied { .. }));
     }
 
@@ -1736,7 +1883,9 @@ mod tests {
         let orch = BackupOrchestrator::new(30);
         let jid = orch.schedule_backup(
             EnterpriseBackupType::Full,
-            BackupTarget::Local { path: "/backup".into() },
+            BackupTarget::Local {
+                path: "/backup".into(),
+            },
             "admin",
         );
         assert!(orch.start_backup(jid, 1000));
@@ -1768,7 +1917,9 @@ mod tests {
     fn test_restore_pitr() {
         let orch = BackupOrchestrator::new(30);
         let rid = orch.schedule_restore(
-            BackupTarget::Local { path: "/backup".into() },
+            BackupTarget::Local {
+                path: "/backup".into(),
+            },
             1,
             RestoreType::ToTimestamp,
             None,
@@ -1785,7 +1936,9 @@ mod tests {
         let orch = BackupOrchestrator::new(30);
         let jid = orch.schedule_backup(
             EnterpriseBackupType::Full,
-            BackupTarget::Local { path: "/bad".into() },
+            BackupTarget::Local {
+                path: "/bad".into(),
+            },
             "admin",
         );
         orch.start_backup(jid, 0);
@@ -1802,14 +1955,22 @@ mod tests {
         log.record(
             AuditCategory::Authentication,
             AuditSeverity::Info,
-            "alice", "10.0.0.1",
-            "LOGIN", "system", "SUCCESS", "password auth",
+            "alice",
+            "10.0.0.1",
+            "LOGIN",
+            "system",
+            "SUCCESS",
+            "password auth",
         );
         log.record(
             AuditCategory::Authentication,
             AuditSeverity::Warning,
-            "eve", "10.0.0.2",
-            "LOGIN", "system", "FAILED", "wrong password",
+            "eve",
+            "10.0.0.2",
+            "LOGIN",
+            "system",
+            "FAILED",
+            "wrong password",
         );
         assert_eq!(log.total(), 2);
         let auth_events = log.query_by_category(&AuditCategory::Authentication, 10);
@@ -1823,8 +1984,12 @@ mod tests {
             log.record(
                 AuditCategory::DataAccess,
                 AuditSeverity::Info,
-                &format!("user{}", i), "10.0.0.1",
-                "SELECT", "table_a", "OK", "",
+                &format!("user{}", i),
+                "10.0.0.1",
+                "SELECT",
+                "table_a",
+                "OK",
+                "",
             );
         }
         assert!(log.verify_integrity());
@@ -1836,8 +2001,12 @@ mod tests {
         log.record(
             AuditCategory::SchemaChange,
             AuditSeverity::Info,
-            "admin", "10.0.0.1",
-            "CREATE TABLE", "users", "OK", "",
+            "admin",
+            "10.0.0.1",
+            "CREATE TABLE",
+            "users",
+            "OK",
+            "",
         );
         // Tamper with the event
         {
@@ -1855,8 +2024,12 @@ mod tests {
         log.record(
             AuditCategory::OpsOperation,
             AuditSeverity::Info,
-            "ops", "10.0.0.1",
-            "DRAIN", "node-3", "OK", "",
+            "ops",
+            "10.0.0.1",
+            "DRAIN",
+            "node-3",
+            "OK",
+            "",
         );
         let lines = log.export_jsonl(1);
         assert_eq!(lines.len(), 1);
@@ -1894,7 +2067,9 @@ mod tests {
                 }
             }));
         }
-        for h in handles { h.join().unwrap(); }
+        for h in handles {
+            h.join().unwrap();
+        }
         assert_eq!(mgr.metrics.auth_attempts.load(Ordering::Relaxed), 1000);
         assert_eq!(mgr.metrics.auth_successes.load(Ordering::Relaxed), 1000);
     }
@@ -1911,13 +2086,19 @@ mod tests {
                     log_c.record(
                         AuditCategory::DataAccess,
                         AuditSeverity::Info,
-                        &format!("t{}", t), "10.0.0.1",
-                        "SELECT", &format!("table_{}", i), "OK", "",
+                        &format!("t{}", t),
+                        "10.0.0.1",
+                        "SELECT",
+                        &format!("table_{}", i),
+                        "OK",
+                        "",
                     );
                 }
             }));
         }
-        for h in handles { h.join().unwrap(); }
+        for h in handles {
+            h.join().unwrap();
+        }
         assert_eq!(log.total(), 1000);
     }
 }

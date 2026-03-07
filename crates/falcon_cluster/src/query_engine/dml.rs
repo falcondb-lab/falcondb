@@ -11,7 +11,10 @@ use falcon_sql_frontend::types::BoundExpr;
 
 impl super::DistributedQueryEngine {
     /// Execute DDL on ALL shards in parallel. Returns the result from the first shard.
-    pub(crate) fn exec_ddl_all_shards(&self, plan: &PhysicalPlan) -> Result<ExecutionResult, FalconError> {
+    pub(crate) fn exec_ddl_all_shards(
+        &self,
+        plan: &PhysicalPlan,
+    ) -> Result<ExecutionResult, FalconError> {
         let results: Vec<Result<ExecutionResult, FalconError>> = std::thread::scope(|s| {
             #[allow(clippy::needless_collect)] // scoped JoinHandles must be stored before joining
             let handles: Vec<_> = self
@@ -83,7 +86,10 @@ impl super::DistributedQueryEngine {
     /// Split a multi-row INSERT by target shard: group rows by PK hash,
     /// build a per-shard INSERT plan, and execute each on its target shard.
     /// Falls back to shard 0 for rows whose PK cannot be extracted.
-    pub(crate) fn exec_insert_split(&self, plan: &PhysicalPlan) -> Result<ExecutionResult, FalconError> {
+    pub(crate) fn exec_insert_split(
+        &self,
+        plan: &PhysicalPlan,
+    ) -> Result<ExecutionResult, FalconError> {
         let (table_id, schema, columns, rows, source_select, returning, on_conflict) = match plan {
             PhysicalPlan::Insert {
                 table_id,
@@ -185,7 +191,11 @@ impl super::DistributedQueryEngine {
                             };
                             let local_exec =
                                 Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
-                            let txn = shard.txn_mgr.begin_at_snapshot_on_shard(snapshot_ts, IsolationLevel::ReadCommitted, sid);
+                            let txn = shard.txn_mgr.begin_at_snapshot_on_shard(
+                                snapshot_ts,
+                                IsolationLevel::ReadCommitted,
+                                sid,
+                            );
                             let txn_id = txn.txn_id;
                             let result = local_exec.execute(shard_plan, Some(&txn));
                             shard.storage.flush_local_cache();
@@ -257,10 +267,8 @@ impl super::DistributedQueryEngine {
             log.mark_applied(global_txn_id);
         }
 
-        let results: Vec<(ShardId, Result<ExecutionResult, FalconError>)> = phase1
-            .into_iter()
-            .map(|(sid, _, r)| (sid, r))
-            .collect();
+        let results: Vec<(ShardId, Result<ExecutionResult, FalconError>)> =
+            phase1.into_iter().map(|(sid, _, r)| (sid, r)).collect();
         Self::merge_dml_results(results, shard_count)
     }
 
@@ -413,55 +421,60 @@ impl super::DistributedQueryEngine {
         let snapshot_ts = self.engine.consistent_snapshot_ts();
 
         // Phase 1: execute on all shards, do not commit yet
-        let phase1: Vec<(u64, TxnId, Result<ExecutionResult, FalconError>)> = std::thread::scope(|s| {
-            let handles: Vec<_> = shards
-                .iter()
-                .map(|sid| {
-                    let shard = self.engine.shard(*sid);
-                    let plan_ref = plan;
-                    let shard_id = sid.0;
-                    s.spawn(move || {
-                        let shard = match shard {
-                            Some(s) => s,
-                            None => {
-                                return (
-                                    shard_id,
-                                    TxnId(0),
-                                    Err(FalconError::internal_bug(
-                                        "E-QE-004",
-                                        format!("DML dispatch: shard {shard_id} not found"),
-                                        "exec_dml_on_shards",
-                                    )),
-                                )
-                            }
-                        };
-                        let local_exec =
-                            Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
-                        let txn = shard.txn_mgr.begin_at_snapshot_on_shard(snapshot_ts, IsolationLevel::ReadCommitted, *sid);
-                        let txn_id = txn.txn_id;
-                        let result = local_exec.execute(plan_ref, Some(&txn));
-                        shard.storage.flush_local_cache();
-                        (shard_id, txn_id, result)
+        let phase1: Vec<(u64, TxnId, Result<ExecutionResult, FalconError>)> =
+            std::thread::scope(|s| {
+                let handles: Vec<_> = shards
+                    .iter()
+                    .map(|sid| {
+                        let shard = self.engine.shard(*sid);
+                        let plan_ref = plan;
+                        let shard_id = sid.0;
+                        s.spawn(move || {
+                            let shard = match shard {
+                                Some(s) => s,
+                                None => {
+                                    return (
+                                        shard_id,
+                                        TxnId(0),
+                                        Err(FalconError::internal_bug(
+                                            "E-QE-004",
+                                            format!("DML dispatch: shard {shard_id} not found"),
+                                            "exec_dml_on_shards",
+                                        )),
+                                    )
+                                }
+                            };
+                            let local_exec =
+                                Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
+                            let txn = shard.txn_mgr.begin_at_snapshot_on_shard(
+                                snapshot_ts,
+                                IsolationLevel::ReadCommitted,
+                                *sid,
+                            );
+                            let txn_id = txn.txn_id;
+                            let result = local_exec.execute(plan_ref, Some(&txn));
+                            shard.storage.flush_local_cache();
+                            (shard_id, txn_id, result)
+                        })
                     })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .map(|h| {
-                    h.join().unwrap_or_else(|_| {
-                        (
-                            0,
-                            TxnId(0),
-                            Err(FalconError::internal_bug(
-                                "E-QE-005",
-                                "DML dispatch: shard thread panicked",
-                                "exec_dml_on_shards phase1",
-                            )),
-                        )
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| {
+                        h.join().unwrap_or_else(|_| {
+                            (
+                                0,
+                                TxnId(0),
+                                Err(FalconError::internal_bug(
+                                    "E-QE-005",
+                                    "DML dispatch: shard thread panicked",
+                                    "exec_dml_on_shards phase1",
+                                )),
+                            )
+                        })
                     })
-                })
-                .collect()
-        });
+                    .collect()
+            });
 
         // Phase 2: fix59 — commit all on success, abort all on any failure
         let mut all_ok = phase1.iter().all(|(_, _, r)| r.is_ok());
@@ -509,10 +522,8 @@ impl super::DistributedQueryEngine {
             log.mark_applied(global_txn_id);
         }
 
-        let results: Vec<(u64, Result<ExecutionResult, FalconError>)> = phase1
-            .into_iter()
-            .map(|(sid, _, r)| (sid, r))
-            .collect();
+        let results: Vec<(u64, Result<ExecutionResult, FalconError>)> =
+            phase1.into_iter().map(|(sid, _, r)| (sid, r)).collect();
         Self::merge_dml_results(results, shard_count)
     }
 
@@ -587,49 +598,57 @@ impl super::DistributedQueryEngine {
     ///
     /// fix58: consistent snapshot timestamp across all shards.
     /// fix59: Two-phase execution — commit all on success, abort all on failure.
-    pub(crate) fn exec_dml_all_shards(&self, plan: &PhysicalPlan) -> Result<ExecutionResult, FalconError> {
+    pub(crate) fn exec_dml_all_shards(
+        &self,
+        plan: &PhysicalPlan,
+    ) -> Result<ExecutionResult, FalconError> {
         let shard_count = self.engine.all_shards().len();
         // fix58: consistent snapshot
         let snapshot_ts = self.engine.consistent_snapshot_ts();
 
         // Phase 1: execute DML on all shards without committing
-        let phase1: Vec<(usize, TxnId, Result<ExecutionResult, FalconError>)> = std::thread::scope(|s| {
-            #[allow(clippy::needless_collect)]
-            let handles: Vec<_> = self
-                .engine
-                .all_shards()
-                .iter()
-                .enumerate()
-                .map(|(idx, shard)| {
-                    let plan_ref = plan;
-                    s.spawn(move || {
-                        let local_exec =
-                            Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
-                        let txn = shard.txn_mgr.begin_at_snapshot_on_shard(snapshot_ts, IsolationLevel::ReadCommitted, shard.shard_id);
-                        let txn_id = txn.txn_id;
-                        let result = local_exec.execute(plan_ref, Some(&txn));
-                        shard.storage.flush_local_cache();
-                        (idx, txn_id, result)
+        let phase1: Vec<(usize, TxnId, Result<ExecutionResult, FalconError>)> =
+            std::thread::scope(|s| {
+                #[allow(clippy::needless_collect)]
+                let handles: Vec<_> = self
+                    .engine
+                    .all_shards()
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, shard)| {
+                        let plan_ref = plan;
+                        s.spawn(move || {
+                            let local_exec =
+                                Executor::new(shard.storage.clone(), shard.txn_mgr.clone());
+                            let txn = shard.txn_mgr.begin_at_snapshot_on_shard(
+                                snapshot_ts,
+                                IsolationLevel::ReadCommitted,
+                                shard.shard_id,
+                            );
+                            let txn_id = txn.txn_id;
+                            let result = local_exec.execute(plan_ref, Some(&txn));
+                            shard.storage.flush_local_cache();
+                            (idx, txn_id, result)
+                        })
                     })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .map(|h| {
-                    h.join().unwrap_or_else(|_| {
-                        (
-                            usize::MAX,
-                            TxnId(0),
-                            Err(FalconError::internal_bug(
-                                "E-QE-004",
-                                "shard thread panicked",
-                                "exec_dml_all_shards phase1",
-                            )),
-                        )
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| {
+                        h.join().unwrap_or_else(|_| {
+                            (
+                                usize::MAX,
+                                TxnId(0),
+                                Err(FalconError::internal_bug(
+                                    "E-QE-004",
+                                    "shard thread panicked",
+                                    "exec_dml_all_shards phase1",
+                                )),
+                            )
+                        })
                     })
-                })
-                .collect()
-        });
+                    .collect()
+            });
 
         // Phase 2: fix59 — commit all on success, abort all on any failure
         let mut all_ok = phase1.iter().all(|(_, _, r)| r.is_ok());
@@ -650,7 +669,12 @@ impl super::DistributedQueryEngine {
         }
 
         // Log coordinator decision durably BEFORE applying
-        let all_shard_ids: Vec<ShardId> = self.engine.all_shards().iter().map(|s| s.shard_id).collect();
+        let all_shard_ids: Vec<ShardId> = self
+            .engine
+            .all_shards()
+            .iter()
+            .map(|s| s.shard_id)
+            .collect();
         let global_txn_id = self.two_pc.alloc_global_txn_id();
         let decision = if all_ok {
             crate::deterministic_2pc::CoordinatorDecision::Commit
@@ -679,10 +703,8 @@ impl super::DistributedQueryEngine {
             log.mark_applied(global_txn_id);
         }
 
-        let results: Vec<(usize, Result<ExecutionResult, FalconError>)> = phase1
-            .into_iter()
-            .map(|(idx, _, r)| (idx, r))
-            .collect();
+        let results: Vec<(usize, Result<ExecutionResult, FalconError>)> =
+            phase1.into_iter().map(|(idx, _, r)| (idx, r)).collect();
         Self::merge_dml_results(results, shard_count)
     }
 }

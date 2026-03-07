@@ -191,7 +191,10 @@ impl PriorityScheduler {
             Duration::from_secs(3600) // effectively infinite
         };
 
-        let mut guard = self.slot_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = self
+            .slot_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         loop {
             // Check backpressure: if high-priority work is waiting, pause low-priority

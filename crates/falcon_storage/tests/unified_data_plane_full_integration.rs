@@ -6,11 +6,11 @@
 //! H3 — Performance guardrails: bootstrap throughput, cold compaction latency, replication no-degrade
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
-use falcon_storage::structured_lsn::StructuredLsn;
 use falcon_storage::csn::Csn;
+use falcon_storage::structured_lsn::StructuredLsn;
 use falcon_storage::unified_data_plane::*;
 use falcon_storage::unified_data_plane_full::*;
 
@@ -50,8 +50,12 @@ fn test_h1_empty_disk_full_bootstrap() {
     // 2 Cold segments from compactor
     let compactor = ColdCompactor::new();
     let rows: Vec<Vec<u8>> = (0..20).map(|i| vec![i as u8; 256]).collect();
-    let r1 = compactor.compact(&leader_store, 1, 0, &rows[..10], SegmentCodec::Lz4, &[]).unwrap();
-    let r2 = compactor.compact(&leader_store, 1, 0, &rows[10..], SegmentCodec::Lz4, &[]).unwrap();
+    let r1 = compactor
+        .compact(&leader_store, 1, 0, &rows[..10], SegmentCodec::Lz4, &[])
+        .unwrap();
+    let r2 = compactor
+        .compact(&leader_store, 1, 0, &rows[10..], SegmentCodec::Lz4, &[])
+        .unwrap();
     compactor.apply_to_manifest(&mut leader_manifest, &r1, 1, 0, SegmentCodec::Lz4);
     compactor.apply_to_manifest(&mut leader_manifest, &r2, 1, 0, SegmentCodec::Lz4);
 
@@ -66,7 +70,10 @@ fn test_h1_empty_disk_full_bootstrap() {
     // Phase 2: Compute missing
     boot.compute_missing(&follower_store);
     assert_eq!(boot.phase, BootstrapPhase::StreamSegments);
-    assert_eq!(boot.total_segments_needed as usize, leader_manifest.segments.len());
+    assert_eq!(
+        boot.total_segments_needed as usize,
+        leader_manifest.segments.len()
+    );
 
     // Phase 3: Stream all segments
     for &seg_id in &boot.missing_segments.clone() {
@@ -123,7 +130,9 @@ fn test_h1_cold_compaction_replication_consistency() {
     // Compact hot data to cold
     let compactor = ColdCompactor::new();
     let rows: Vec<Vec<u8>> = (0..10).map(|i| vec![i as u8; 100]).collect();
-    let result = compactor.compact(&leader_store, 1, 0, &rows, SegmentCodec::None, &[]).unwrap();
+    let result = compactor
+        .compact(&leader_store, 1, 0, &rows, SegmentCodec::None, &[])
+        .unwrap();
     compactor.apply_to_manifest(&mut leader.ssot.manifest, &result, 1, 0, SegmentCodec::None);
 
     // Follower handshake — has nothing
@@ -136,7 +145,10 @@ fn test_h1_cold_compaction_replication_consistency() {
     let resp = leader.handle_handshake(&handshake);
 
     // Follower should need all segments (WAL + Cold)
-    assert_eq!(resp.required_segments.len() as usize, leader.ssot.manifest.segments.len());
+    assert_eq!(
+        resp.required_segments.len() as usize,
+        leader.ssot.manifest.segments.len()
+    );
     assert!(resp.required_segments.contains(&result.new_segment_id));
 
     // Stream them all
@@ -155,7 +167,9 @@ fn test_h1_cold_compaction_replication_consistency() {
     assert_eq!(leader_ids, follower_ids);
 
     // Cold segment verifies
-    assert!(follower_store.verify_segment(result.new_segment_id).unwrap());
+    assert!(follower_store
+        .verify_segment(result.new_segment_id)
+        .unwrap());
 }
 
 /// H1.3: Snapshot restore produces consistent data.
@@ -202,7 +216,13 @@ fn test_h1_snapshot_restore_consistency() {
     assert_eq!(coord2.ssot.manifest.segments.len(), 5);
     assert!(coord2.ssot.manifest.snapshot_cutpoint.is_some());
     assert_eq!(
-        coord2.ssot.manifest.snapshot_cutpoint.as_ref().unwrap().snapshot_id,
+        coord2
+            .ssot
+            .manifest
+            .snapshot_cutpoint
+            .as_ref()
+            .unwrap()
+            .snapshot_id,
         1
     );
 }
@@ -216,25 +236,38 @@ fn test_h1_manifest_replay_idempotent() {
     // Apply the same sequence to both
     let ops = vec![
         ManifestEntry {
-            segment_id: 0, kind: SegmentKind::Wal, size_bytes: 1000,
+            segment_id: 0,
+            kind: SegmentKind::Wal,
+            size_bytes: 1000,
             codec: SegmentCodec::None,
             logical_range: LogicalRange::Wal {
-                start_lsn: StructuredLsn::new(0, 0), end_lsn: StructuredLsn::new(0, 1000),
+                start_lsn: StructuredLsn::new(0, 0),
+                end_lsn: StructuredLsn::new(0, 1000),
             },
             sealed: false,
         },
         ManifestEntry {
-            segment_id: 1, kind: SegmentKind::Cold, size_bytes: 5000,
+            segment_id: 1,
+            kind: SegmentKind::Cold,
+            size_bytes: 5000,
             codec: SegmentCodec::Lz4,
             logical_range: LogicalRange::Cold {
-                table_id: 1, shard_id: 0, min_key: vec![0], max_key: vec![255],
+                table_id: 1,
+                shard_id: 0,
+                min_key: vec![0],
+                max_key: vec![255],
             },
             sealed: true,
         },
         ManifestEntry {
-            segment_id: 2, kind: SegmentKind::Snapshot, size_bytes: 2000,
+            segment_id: 2,
+            kind: SegmentKind::Snapshot,
+            size_bytes: 2000,
             codec: SegmentCodec::None,
-            logical_range: LogicalRange::Snapshot { snapshot_id: 1, chunk_index: 0 },
+            logical_range: LogicalRange::Snapshot {
+                snapshot_id: 1,
+                chunk_index: 0,
+            },
             sealed: true,
         },
     ];
@@ -247,12 +280,16 @@ fn test_h1_manifest_replay_idempotent() {
     m2.seal_segment(0);
 
     m1.set_snapshot_cutpoint(SnapshotCutpoint {
-        snapshot_id: 1, cut_lsn: StructuredLsn::new(1, 0),
-        cut_csn: Csn::new(50), epoch: m1.epoch,
+        snapshot_id: 1,
+        cut_lsn: StructuredLsn::new(1, 0),
+        cut_csn: Csn::new(50),
+        epoch: m1.epoch,
     });
     m2.set_snapshot_cutpoint(SnapshotCutpoint {
-        snapshot_id: 1, cut_lsn: StructuredLsn::new(1, 0),
-        cut_csn: Csn::new(50), epoch: m2.epoch,
+        snapshot_id: 1,
+        cut_lsn: StructuredLsn::new(1, 0),
+        cut_csn: Csn::new(50),
+        epoch: m2.epoch,
     });
 
     // Both should be identical
@@ -330,10 +367,13 @@ fn test_h2_leader_switch_manifest_epoch() {
     let mut old_leader = UnifiedReplicationCoordinator::new(1, store.clone());
     for i in 0..5u64 {
         old_leader.ssot.manifest.add_segment(ManifestEntry {
-            segment_id: i, kind: SegmentKind::Wal, size_bytes: 100,
+            segment_id: i,
+            kind: SegmentKind::Wal,
+            size_bytes: 100,
             codec: SegmentCodec::None,
             logical_range: LogicalRange::Wal {
-                start_lsn: StructuredLsn::ZERO, end_lsn: StructuredLsn::ZERO,
+                start_lsn: StructuredLsn::ZERO,
+                end_lsn: StructuredLsn::ZERO,
             },
             sealed: true,
         });
@@ -344,10 +384,13 @@ fn test_h2_leader_switch_manifest_epoch() {
     new_leader.ssot.manifest = old_leader.ssot.manifest.clone();
     for i in 5..8u64 {
         new_leader.ssot.manifest.add_segment(ManifestEntry {
-            segment_id: i, kind: SegmentKind::Wal, size_bytes: 100,
+            segment_id: i,
+            kind: SegmentKind::Wal,
+            size_bytes: 100,
             codec: SegmentCodec::None,
             logical_range: LogicalRange::Wal {
-                start_lsn: StructuredLsn::ZERO, end_lsn: StructuredLsn::ZERO,
+                start_lsn: StructuredLsn::ZERO,
+                end_lsn: StructuredLsn::ZERO,
             },
             sealed: true,
         });
@@ -380,7 +423,9 @@ fn test_h2_gc_streaming_concurrent_safety() {
         store.write_chunk(i, &vec![0u8; 200]).unwrap();
         store.seal_segment(i).unwrap();
         ssot.manifest.add_segment(ManifestEntry {
-            segment_id: i, kind: SegmentKind::Wal, size_bytes: 200,
+            segment_id: i,
+            kind: SegmentKind::Wal,
+            size_bytes: 200,
             codec: SegmentCodec::None,
             logical_range: LogicalRange::Wal {
                 start_lsn: StructuredLsn::new(i, 0),
@@ -426,7 +471,9 @@ fn test_h2_compactor_crash_restart() {
 
     // First compaction succeeds
     let rows1: Vec<Vec<u8>> = vec![vec![1u8; 100]; 5];
-    let r1 = compactor.compact(&store, 1, 0, &rows1, SegmentCodec::None, &[]).unwrap();
+    let r1 = compactor
+        .compact(&store, 1, 0, &rows1, SegmentCodec::None, &[])
+        .unwrap();
     compactor.apply_to_manifest(&mut manifest, &r1, 1, 0, SegmentCodec::None);
 
     // Simulate partial compaction (create segment but don't seal — "crash")
@@ -438,7 +485,16 @@ fn test_h2_compactor_crash_restart() {
 
     // "Restart": new compaction should succeed with different segment ID
     let rows2: Vec<Vec<u8>> = vec![vec![2u8; 100]; 8];
-    let r2 = compactor.compact(&store, 1, 0, &rows2, SegmentCodec::None, &[r1.new_segment_id]).unwrap();
+    let r2 = compactor
+        .compact(
+            &store,
+            1,
+            0,
+            &rows2,
+            SegmentCodec::None,
+            &[r1.new_segment_id],
+        )
+        .unwrap();
     compactor.apply_to_manifest(&mut manifest, &r2, 1, 0, SegmentCodec::None);
 
     // New segment is sealed and in manifest
@@ -510,14 +566,18 @@ fn test_h3_cold_compaction_throughput() {
     let store = SegmentStore::new();
     let compactor = ColdCompactor::new();
 
-    let rows: Vec<Vec<u8>> = (0..10_000).map(|i| {
-        let mut row = vec![0u8; 64];
-        row[..8].copy_from_slice(&(i as u64).to_le_bytes());
-        row
-    }).collect();
+    let rows: Vec<Vec<u8>> = (0..10_000)
+        .map(|i| {
+            let mut row = vec![0u8; 64];
+            row[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            row
+        })
+        .collect();
 
     let start = std::time::Instant::now();
-    let result = compactor.compact(&store, 1, 0, &rows, SegmentCodec::None, &[]).unwrap();
+    let result = compactor
+        .compact(&store, 1, 0, &rows, SegmentCodec::None, &[])
+        .unwrap();
     let elapsed = start.elapsed();
 
     let rows_per_sec = result.row_count as f64 / elapsed.as_secs_f64();
@@ -627,19 +687,27 @@ fn test_h3_admin_status_derivable() {
     let mut ssot = ManifestSsot::new();
     for i in 0..3u64 {
         ssot.manifest.add_segment(ManifestEntry {
-            segment_id: i, kind: SegmentKind::Wal, size_bytes: 1000,
+            segment_id: i,
+            kind: SegmentKind::Wal,
+            size_bytes: 1000,
             codec: SegmentCodec::None,
             logical_range: LogicalRange::Wal {
-                start_lsn: StructuredLsn::new(i, 0), end_lsn: StructuredLsn::new(i, 1000),
+                start_lsn: StructuredLsn::new(i, 0),
+                end_lsn: StructuredLsn::new(i, 1000),
             },
             sealed: true,
         });
     }
     ssot.manifest.add_segment(ManifestEntry {
-        segment_id: 100, kind: SegmentKind::Cold, size_bytes: 5000,
+        segment_id: 100,
+        kind: SegmentKind::Cold,
+        size_bytes: 5000,
         codec: SegmentCodec::Lz4,
         logical_range: LogicalRange::Cold {
-            table_id: 1, shard_id: 0, min_key: vec![], max_key: vec![],
+            table_id: 1,
+            shard_id: 0,
+            min_key: vec![],
+            max_key: vec![],
         },
         sealed: true,
     });
@@ -664,25 +732,38 @@ fn test_h3_manifest_ssot_no_implicit_state() {
 
     // Add segments of all types
     ssot.manifest.add_segment(ManifestEntry {
-        segment_id: 0, kind: SegmentKind::Wal, size_bytes: 100,
+        segment_id: 0,
+        kind: SegmentKind::Wal,
+        size_bytes: 100,
         codec: SegmentCodec::None,
         logical_range: LogicalRange::Wal {
-            start_lsn: StructuredLsn::new(0, 0), end_lsn: StructuredLsn::new(0, 100),
+            start_lsn: StructuredLsn::new(0, 0),
+            end_lsn: StructuredLsn::new(0, 100),
         },
         sealed: true,
     });
     ssot.manifest.add_segment(ManifestEntry {
-        segment_id: 1, kind: SegmentKind::Cold, size_bytes: 500,
+        segment_id: 1,
+        kind: SegmentKind::Cold,
+        size_bytes: 500,
         codec: SegmentCodec::Lz4,
         logical_range: LogicalRange::Cold {
-            table_id: 1, shard_id: 0, min_key: vec![0], max_key: vec![255],
+            table_id: 1,
+            shard_id: 0,
+            min_key: vec![0],
+            max_key: vec![255],
         },
         sealed: true,
     });
     ssot.manifest.add_segment(ManifestEntry {
-        segment_id: 2, kind: SegmentKind::Snapshot, size_bytes: 200,
+        segment_id: 2,
+        kind: SegmentKind::Snapshot,
+        size_bytes: 200,
         codec: SegmentCodec::None,
-        logical_range: LogicalRange::Snapshot { snapshot_id: 1, chunk_index: 0 },
+        logical_range: LogicalRange::Snapshot {
+            snapshot_id: 1,
+            chunk_index: 0,
+        },
         sealed: true,
     });
 

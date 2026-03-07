@@ -12,22 +12,27 @@ pub fn install(config_path: &str) -> Result<(), String> {
     ensure_service_dirs()?;
 
     // Resolve absolute paths
-    let exe_path = std::env::current_exe()
-        .map_err(|e| format!("Cannot determine exe path: {e}"))?;
+    let exe_path =
+        std::env::current_exe().map_err(|e| format!("Cannot determine exe path: {e}"))?;
 
     let config_abs = if std::path::Path::new(config_path).is_absolute() {
         config_path.to_owned()
     } else {
         std::env::current_dir()
-            .map(|d| d.join(config_path)).map_or_else(|_| config_path.to_owned(), |p| p.to_string_lossy().to_string())
+            .map(|d| d.join(config_path))
+            .map_or_else(
+                |_| config_path.to_owned(),
+                |p| p.to_string_lossy().to_string(),
+            )
     };
 
     // Copy config to ProgramData if it's not already there
     let service_conf = service_config_path();
     if !service_conf.exists() {
         if std::path::Path::new(&config_abs).exists() {
-            std::fs::copy(&config_abs, &service_conf)
-                .map_err(|e| format!("Failed to copy config to {}: {}", service_conf.display(), e))?;
+            std::fs::copy(&config_abs, &service_conf).map_err(|e| {
+                format!("Failed to copy config to {}: {}", service_conf.display(), e)
+            })?;
             println!("  Config copied to: {}", service_conf.display());
         } else {
             return Err(format!(
@@ -133,9 +138,7 @@ pub fn uninstall() -> Result<(), String> {
     let stdout = String::from_utf8_lossy(&query.stdout);
     if stdout.contains("RUNNING") {
         println!("Stopping service '{SERVICE_NAME}'...");
-        let _ = Command::new("sc.exe")
-            .args(["stop", SERVICE_NAME])
-            .output();
+        let _ = Command::new("sc.exe").args(["stop", SERVICE_NAME]).output();
         // Wait for stop
         for _ in 0..30 {
             std::thread::sleep(std::time::Duration::from_secs(1));
@@ -164,7 +167,10 @@ pub fn uninstall() -> Result<(), String> {
 
     println!("Service '{SERVICE_NAME}' uninstalled.");
     println!();
-    println!("Note: Data and config in {} are NOT deleted.", program_data_root().display());
+    println!(
+        "Note: Data and config in {} are NOT deleted.",
+        program_data_root().display()
+    );
     println!("  Remove manually if desired.");
 
     Ok(())
@@ -265,7 +271,8 @@ pub fn status() -> Result<(), String> {
     let pid = stdout
         .lines()
         .find(|l| l.contains("PID"))
-        .and_then(|l| l.split(':').nth(1)).map_or_else(|| "N/A".to_owned(), |s| s.trim().to_owned());
+        .and_then(|l| l.split(':').nth(1))
+        .map_or_else(|| "N/A".to_owned(), |s| s.trim().to_owned());
 
     println!("FalconDB Service Status");
     println!("=======================");
@@ -288,13 +295,11 @@ pub fn status() -> Result<(), String> {
 
 /// Patch the service config to use ProgramData paths for data_dir.
 fn patch_service_config(config_path: &std::path::Path) -> Result<(), String> {
-    let content = std::fs::read_to_string(config_path)
-        .map_err(|e| format!("Failed to read config: {e}"))?;
+    let content =
+        std::fs::read_to_string(config_path).map_err(|e| format!("Failed to read config: {e}"))?;
 
     // Replace relative data_dir with absolute ProgramData path
-    let data_dir_abs = service_data_dir()
-        .to_string_lossy()
-        .replace('\\', "\\\\");
+    let data_dir_abs = service_data_dir().to_string_lossy().replace('\\', "\\\\");
 
     let patched = content
         .lines()

@@ -21,8 +21,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::{Mutex, RwLock};
 
-use crate::structured_lsn::StructuredLsn;
 use crate::csn::Csn;
+use crate::structured_lsn::StructuredLsn;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // §A1 — Segment Kind & Codec
@@ -99,9 +99,17 @@ impl fmt::Display for SegmentCodec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LogicalRange {
     /// WAL segment: [start_lsn, end_lsn)
-    Wal { start_lsn: StructuredLsn, end_lsn: StructuredLsn },
+    Wal {
+        start_lsn: StructuredLsn,
+        end_lsn: StructuredLsn,
+    },
     /// Cold segment: key range [min_key, max_key], table/shard scope.
-    Cold { table_id: u64, shard_id: u64, min_key: Vec<u8>, max_key: Vec<u8> },
+    Cold {
+        table_id: u64,
+        shard_id: u64,
+        min_key: Vec<u8>,
+        max_key: Vec<u8>,
+    },
     /// Snapshot segment: snapshot_id + chunk_index.
     Snapshot { snapshot_id: u64, chunk_index: u32 },
 }
@@ -109,12 +117,14 @@ pub enum LogicalRange {
 impl fmt::Display for LogicalRange {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Wal { start_lsn, end_lsn } =>
-                write!(f, "WAL[{start_lsn}..{end_lsn})"),
-            Self::Cold { table_id, shard_id, .. } =>
-                write!(f, "COLD[table={table_id},shard={shard_id}]"),
-            Self::Snapshot { snapshot_id, chunk_index } =>
-                write!(f, "SNAP[id={snapshot_id},chunk={chunk_index}]"),
+            Self::Wal { start_lsn, end_lsn } => write!(f, "WAL[{start_lsn}..{end_lsn})"),
+            Self::Cold {
+                table_id, shard_id, ..
+            } => write!(f, "COLD[table={table_id},shard={shard_id}]"),
+            Self::Snapshot {
+                snapshot_id,
+                chunk_index,
+            } => write!(f, "SNAP[id={snapshot_id},chunk={chunk_index}]"),
         }
     }
 }
@@ -239,12 +249,22 @@ impl UnifiedSegmentHeader {
     /// Compute CRC32 of header fields.
     pub fn compute_checksum(&self) -> u32 {
         let mut hash: u32 = 5381;
-        for b in self.magic.to_le_bytes() { hash = hash.wrapping_mul(33).wrapping_add(u32::from(b)); }
-        for b in self.version.to_le_bytes() { hash = hash.wrapping_mul(33).wrapping_add(u32::from(b)); }
+        for b in self.magic.to_le_bytes() {
+            hash = hash.wrapping_mul(33).wrapping_add(u32::from(b));
+        }
+        for b in self.version.to_le_bytes() {
+            hash = hash.wrapping_mul(33).wrapping_add(u32::from(b));
+        }
         hash = hash.wrapping_mul(33).wrapping_add(self.kind as u32);
-        for b in self.segment_id.to_le_bytes() { hash = hash.wrapping_mul(33).wrapping_add(u32::from(b)); }
-        for b in self.segment_size.to_le_bytes() { hash = hash.wrapping_mul(33).wrapping_add(u32::from(b)); }
-        for b in u32::from(self.codec as u8).to_le_bytes() { hash = hash.wrapping_mul(33).wrapping_add(u32::from(b)); }
+        for b in self.segment_id.to_le_bytes() {
+            hash = hash.wrapping_mul(33).wrapping_add(u32::from(b));
+        }
+        for b in self.segment_size.to_le_bytes() {
+            hash = hash.wrapping_mul(33).wrapping_add(u32::from(b));
+        }
+        for b in u32::from(self.codec as u8).to_le_bytes() {
+            hash = hash.wrapping_mul(33).wrapping_add(u32::from(b));
+        }
         hash
     }
 
@@ -276,7 +296,12 @@ impl UnifiedSegmentHeader {
                 buf.extend_from_slice(&start_lsn.raw().to_le_bytes());
                 buf.extend_from_slice(&end_lsn.raw().to_le_bytes());
             }
-            LogicalRange::Cold { table_id, shard_id, min_key, max_key } => {
+            LogicalRange::Cold {
+                table_id,
+                shard_id,
+                min_key,
+                max_key,
+            } => {
                 buf.push(1);
                 buf.extend_from_slice(&table_id.to_le_bytes());
                 buf.extend_from_slice(&shard_id.to_le_bytes());
@@ -285,7 +310,10 @@ impl UnifiedSegmentHeader {
                 buf.extend_from_slice(&(max_key.len() as u32).to_le_bytes());
                 buf.extend_from_slice(max_key);
             }
-            LogicalRange::Snapshot { snapshot_id, chunk_index } => {
+            LogicalRange::Snapshot {
+                snapshot_id,
+                chunk_index,
+            } => {
                 buf.push(2);
                 buf.extend_from_slice(&snapshot_id.to_le_bytes());
                 buf.extend_from_slice(&chunk_index.to_le_bytes());
@@ -298,7 +326,9 @@ impl UnifiedSegmentHeader {
 
     /// Deserialize from bytes.
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        if data.len() < 48 { return None; }
+        if data.len() < 48 {
+            return None;
+        }
         let magic = u32::from_le_bytes(data[0..4].try_into().ok()?);
         let version = u16::from_le_bytes(data[4..6].try_into().ok()?);
         let kind = SegmentKind::from_u8(data[6])?;
@@ -311,36 +341,66 @@ impl UnifiedSegmentHeader {
         let range_tag = data[44];
         let logical_range = match range_tag {
             0 => {
-                if data.len() < 61 { return None; }
+                if data.len() < 61 {
+                    return None;
+                }
                 let s = StructuredLsn::from_raw(u64::from_le_bytes(data[45..53].try_into().ok()?));
                 let e = StructuredLsn::from_raw(u64::from_le_bytes(data[53..61].try_into().ok()?));
-                LogicalRange::Wal { start_lsn: s, end_lsn: e }
+                LogicalRange::Wal {
+                    start_lsn: s,
+                    end_lsn: e,
+                }
             }
             1 => {
-                if data.len() < 69 { return None; }
+                if data.len() < 69 {
+                    return None;
+                }
                 let table_id = u64::from_le_bytes(data[45..53].try_into().ok()?);
                 let shard_id = u64::from_le_bytes(data[53..61].try_into().ok()?);
                 let mk_len = u32::from_le_bytes(data[61..65].try_into().ok()?) as usize;
-                if data.len() < 69 + mk_len { return None; }
-                let min_key = data[65..65+mk_len].to_vec();
+                if data.len() < 69 + mk_len {
+                    return None;
+                }
+                let min_key = data[65..65 + mk_len].to_vec();
                 let off = 65 + mk_len;
-                if data.len() < off + 4 { return None; }
-                let xk_len = u32::from_le_bytes(data[off..off+4].try_into().ok()?) as usize;
-                if data.len() < off + 4 + xk_len { return None; }
-                let max_key = data[off+4..off+4+xk_len].to_vec();
-                LogicalRange::Cold { table_id, shard_id, min_key, max_key }
+                if data.len() < off + 4 {
+                    return None;
+                }
+                let xk_len = u32::from_le_bytes(data[off..off + 4].try_into().ok()?) as usize;
+                if data.len() < off + 4 + xk_len {
+                    return None;
+                }
+                let max_key = data[off + 4..off + 4 + xk_len].to_vec();
+                LogicalRange::Cold {
+                    table_id,
+                    shard_id,
+                    min_key,
+                    max_key,
+                }
             }
             2 => {
-                if data.len() < 57 { return None; }
+                if data.len() < 57 {
+                    return None;
+                }
                 let snapshot_id = u64::from_le_bytes(data[45..53].try_into().ok()?);
                 let chunk_index = u32::from_le_bytes(data[53..57].try_into().ok()?);
-                LogicalRange::Snapshot { snapshot_id, chunk_index }
+                LogicalRange::Snapshot {
+                    snapshot_id,
+                    chunk_index,
+                }
             }
             _ => return None,
         };
         Some(Self {
-            magic, version, kind, segment_id, segment_size,
-            created_at_epoch, codec, checksum, last_valid_offset,
+            magic,
+            version,
+            kind,
+            segment_id,
+            segment_size,
+            created_at_epoch,
+            codec,
+            checksum,
+            last_valid_offset,
             logical_range,
         })
     }
@@ -487,7 +547,8 @@ impl Manifest {
 
     /// Get all sealed segment IDs.
     pub fn sealed_segment_ids(&self) -> BTreeSet<u64> {
-        self.segments.iter()
+        self.segments
+            .iter()
             .filter(|(_, e)| e.sealed)
             .map(|(id, _)| *id)
             .collect()
@@ -505,12 +566,16 @@ impl Manifest {
 
     /// Compute delta from an older epoch.
     pub fn delta_since(&self, from_epoch: u64) -> Vec<&ManifestDelta> {
-        self.history.iter().filter(|d| d.from_epoch >= from_epoch).collect()
+        self.history
+            .iter()
+            .filter(|d| d.from_epoch >= from_epoch)
+            .collect()
     }
 
     /// Compute which segments a peer is missing given their segment set.
     pub fn missing_segments(&self, have: &BTreeSet<u64>) -> Vec<u64> {
-        self.segments.keys()
+        self.segments
+            .keys()
             .filter(|id| !have.contains(id))
             .copied()
             .collect()
@@ -556,11 +621,23 @@ impl Default for Manifest {
 /// Errors from the segment store.
 #[derive(Debug, Clone)]
 pub enum SegmentStoreError {
-    NotFound { segment_id: u64 },
-    AlreadyExists { segment_id: u64 },
-    ReadOutOfBounds { segment_id: u64, offset: u64, len: u64 },
-    AlreadySealed { segment_id: u64 },
-    ChecksumMismatch { segment_id: u64 },
+    NotFound {
+        segment_id: u64,
+    },
+    AlreadyExists {
+        segment_id: u64,
+    },
+    ReadOutOfBounds {
+        segment_id: u64,
+        offset: u64,
+        len: u64,
+    },
+    AlreadySealed {
+        segment_id: u64,
+    },
+    ChecksumMismatch {
+        segment_id: u64,
+    },
     IoError(String),
 }
 
@@ -569,10 +646,18 @@ impl fmt::Display for SegmentStoreError {
         match self {
             Self::NotFound { segment_id } => write!(f, "segment {segment_id} not found"),
             Self::AlreadyExists { segment_id } => write!(f, "segment {segment_id} already exists"),
-            Self::ReadOutOfBounds { segment_id, offset, len } =>
-                write!(f, "read out of bounds: seg={segment_id} off={offset} len={len}"),
+            Self::ReadOutOfBounds {
+                segment_id,
+                offset,
+                len,
+            } => write!(
+                f,
+                "read out of bounds: seg={segment_id} off={offset} len={len}"
+            ),
             Self::AlreadySealed { segment_id } => write!(f, "segment {segment_id} already sealed"),
-            Self::ChecksumMismatch { segment_id } => write!(f, "checksum mismatch: segment {segment_id}"),
+            Self::ChecksumMismatch { segment_id } => {
+                write!(f, "checksum mismatch: segment {segment_id}")
+            }
             Self::IoError(msg) => write!(f, "IO error: {msg}"),
         }
     }
@@ -618,13 +703,20 @@ impl SegmentStore {
             return Err(SegmentStoreError::AlreadyExists { segment_id: id });
         }
         let body = header.to_bytes(); // starts with header bytes
-        segs.insert(id, SegmentData {
-            header,
-            body,
-            sealed: false,
-        });
-        self.metrics.segments_created.fetch_add(1, Ordering::Relaxed);
-        self.metrics.store_bytes_total.fetch_add(UNIFIED_HEADER_SIZE, Ordering::Relaxed);
+        segs.insert(
+            id,
+            SegmentData {
+                header,
+                body,
+                sealed: false,
+            },
+        );
+        self.metrics
+            .segments_created
+            .fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .store_bytes_total
+            .fetch_add(UNIFIED_HEADER_SIZE, Ordering::Relaxed);
         Ok(id)
     }
 
@@ -637,23 +729,36 @@ impl SegmentStore {
     }
 
     /// Read a chunk from a segment.
-    pub fn read_chunk(&self, segment_id: u64, offset: u64, len: u64) -> Result<Vec<u8>, SegmentStoreError> {
+    pub fn read_chunk(
+        &self,
+        segment_id: u64,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<u8>, SegmentStoreError> {
         let segs = self.segments.read();
-        let seg = segs.get(&segment_id)
+        let seg = segs
+            .get(&segment_id)
             .ok_or(SegmentStoreError::NotFound { segment_id })?;
         let start = offset as usize;
         let end = start + len as usize;
         if end > seg.body.len() {
-            return Err(SegmentStoreError::ReadOutOfBounds { segment_id, offset, len });
+            return Err(SegmentStoreError::ReadOutOfBounds {
+                segment_id,
+                offset,
+                len,
+            });
         }
-        self.metrics.read_bytes_total.fetch_add(len, Ordering::Relaxed);
+        self.metrics
+            .read_bytes_total
+            .fetch_add(len, Ordering::Relaxed);
         Ok(seg.body[start..end].to_vec())
     }
 
     /// Append a chunk to a segment (WAL segments only — append at end).
     pub fn write_chunk(&self, segment_id: u64, data: &[u8]) -> Result<u64, SegmentStoreError> {
         let mut segs = self.segments.write();
-        let seg = segs.get_mut(&segment_id)
+        let seg = segs
+            .get_mut(&segment_id)
             .ok_or(SegmentStoreError::NotFound { segment_id })?;
         if seg.sealed {
             return Err(SegmentStoreError::AlreadySealed { segment_id });
@@ -661,15 +766,25 @@ impl SegmentStore {
         let offset = seg.body.len() as u64;
         seg.body.extend_from_slice(data);
         seg.header.last_valid_offset = seg.body.len() as u64;
-        self.metrics.write_bytes_total.fetch_add(data.len() as u64, Ordering::Relaxed);
-        self.metrics.store_bytes_total.fetch_add(data.len() as u64, Ordering::Relaxed);
+        self.metrics
+            .write_bytes_total
+            .fetch_add(data.len() as u64, Ordering::Relaxed);
+        self.metrics
+            .store_bytes_total
+            .fetch_add(data.len() as u64, Ordering::Relaxed);
         Ok(offset)
     }
 
     /// Write a chunk at a specific offset (for receiving streamed data).
-    pub fn write_chunk_at(&self, segment_id: u64, offset: u64, data: &[u8]) -> Result<(), SegmentStoreError> {
+    pub fn write_chunk_at(
+        &self,
+        segment_id: u64,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<(), SegmentStoreError> {
         let mut segs = self.segments.write();
-        let seg = segs.get_mut(&segment_id)
+        let seg = segs
+            .get_mut(&segment_id)
             .ok_or(SegmentStoreError::NotFound { segment_id })?;
         if seg.sealed {
             return Err(SegmentStoreError::AlreadySealed { segment_id });
@@ -682,14 +797,17 @@ impl SegmentStore {
         if end as u64 > seg.header.last_valid_offset {
             seg.header.last_valid_offset = end as u64;
         }
-        self.metrics.write_bytes_total.fetch_add(data.len() as u64, Ordering::Relaxed);
+        self.metrics
+            .write_bytes_total
+            .fetch_add(data.len() as u64, Ordering::Relaxed);
         Ok(())
     }
 
     /// Seal a segment (mark immutable, set last_valid_offset).
     pub fn seal_segment(&self, segment_id: u64) -> Result<(), SegmentStoreError> {
         let mut segs = self.segments.write();
-        let seg = segs.get_mut(&segment_id)
+        let seg = segs
+            .get_mut(&segment_id)
             .ok_or(SegmentStoreError::NotFound { segment_id })?;
         if seg.sealed {
             return Err(SegmentStoreError::AlreadySealed { segment_id });
@@ -704,7 +822,8 @@ impl SegmentStore {
     /// Verify a segment's header checksum.
     pub fn verify_segment(&self, segment_id: u64) -> Result<bool, SegmentStoreError> {
         let segs = self.segments.read();
-        let seg = segs.get(&segment_id)
+        let seg = segs
+            .get(&segment_id)
             .ok_or(SegmentStoreError::NotFound { segment_id })?;
         Ok(seg.header.validate())
     }
@@ -712,7 +831,8 @@ impl SegmentStore {
     /// Check if a segment is sealed.
     pub fn is_sealed(&self, segment_id: u64) -> Result<bool, SegmentStoreError> {
         let segs = self.segments.read();
-        let seg = segs.get(&segment_id)
+        let seg = segs
+            .get(&segment_id)
             .ok_or(SegmentStoreError::NotFound { segment_id })?;
         Ok(seg.sealed)
     }
@@ -720,7 +840,8 @@ impl SegmentStore {
     /// Get the body size of a segment.
     pub fn segment_size(&self, segment_id: u64) -> Result<u64, SegmentStoreError> {
         let segs = self.segments.read();
-        let seg = segs.get(&segment_id)
+        let seg = segs
+            .get(&segment_id)
             .ok_or(SegmentStoreError::NotFound { segment_id })?;
         Ok(seg.body.len() as u64)
     }
@@ -728,11 +849,16 @@ impl SegmentStore {
     /// Delete a segment (GC).
     pub fn delete_segment(&self, segment_id: u64) -> Result<u64, SegmentStoreError> {
         let mut segs = self.segments.write();
-        let seg = segs.remove(&segment_id)
+        let seg = segs
+            .remove(&segment_id)
             .ok_or(SegmentStoreError::NotFound { segment_id })?;
         let freed = seg.body.len() as u64;
-        self.metrics.gc_bytes_total.fetch_add(freed, Ordering::Relaxed);
-        self.metrics.segments_deleted.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .gc_bytes_total
+            .fetch_add(freed, Ordering::Relaxed);
+        self.metrics
+            .segments_deleted
+            .fetch_add(1, Ordering::Relaxed);
         Ok(freed)
     }
 
@@ -749,7 +875,8 @@ impl SegmentStore {
     /// Get the full body of a segment (for streaming).
     pub fn get_segment_body(&self, segment_id: u64) -> Result<Vec<u8>, SegmentStoreError> {
         let segs = self.segments.read();
-        let seg = segs.get(&segment_id)
+        let seg = segs
+            .get(&segment_id)
             .ok_or(SegmentStoreError::NotFound { segment_id })?;
         Ok(seg.body.clone())
     }
@@ -796,7 +923,9 @@ pub struct StreamChunk {
 impl StreamChunk {
     pub fn compute_crc(data: &[u8]) -> u32 {
         let mut hash: u32 = 5381;
-        for &b in data { hash = hash.wrapping_mul(33).wrapping_add(u32::from(b)); }
+        for &b in data {
+            hash = hash.wrapping_mul(33).wrapping_add(u32::from(b));
+        }
         hash
     }
 
@@ -861,7 +990,9 @@ pub fn compute_replication_plan(
     let required = leader_manifest.missing_segments(&handshake.have_segments);
 
     // Determine if tail streaming is needed for the active WAL segment
-    let tail = leader_manifest.segments.values()
+    let tail = leader_manifest
+        .segments
+        .values()
         .find(|e| e.kind == SegmentKind::Wal && !e.sealed)
         .map(|e| TailStreamInfo {
             segment_id: e.segment_id,
@@ -897,22 +1028,33 @@ pub struct SnapshotDefinition {
 
 impl SnapshotDefinition {
     /// Create a snapshot from the current manifest state.
-    pub fn create(snapshot_id: u64, manifest: &Manifest, cut_lsn: StructuredLsn, cut_csn: Csn) -> Self {
+    pub fn create(
+        snapshot_id: u64,
+        manifest: &Manifest,
+        cut_lsn: StructuredLsn,
+        cut_csn: Csn,
+    ) -> Self {
         let cutpoint = SnapshotCutpoint {
             snapshot_id,
             cut_lsn,
             cut_csn,
             epoch: manifest.epoch,
         };
-        let wal_segments: Vec<u64> = manifest.segments.iter()
+        let wal_segments: Vec<u64> = manifest
+            .segments
+            .iter()
             .filter(|(_, e)| e.kind == SegmentKind::Wal && e.sealed)
             .map(|(id, _)| *id)
             .collect();
-        let cold_segments: Vec<u64> = manifest.segments.iter()
+        let cold_segments: Vec<u64> = manifest
+            .segments
+            .iter()
             .filter(|(_, e)| e.kind == SegmentKind::Cold)
             .map(|(id, _)| *id)
             .collect();
-        let snapshot_segments: Vec<u64> = manifest.segments.iter()
+        let snapshot_segments: Vec<u64> = manifest
+            .segments
+            .iter()
             .filter(|(_, e)| e.kind == SegmentKind::Snapshot)
             .map(|(id, _)| *id)
             .collect();
@@ -937,7 +1079,10 @@ impl SnapshotDefinition {
 
     /// Segments a follower needs from this snapshot.
     pub fn missing_for(&self, have: &BTreeSet<u64>) -> Vec<u64> {
-        self.all_segments().into_iter().filter(|id| !have.contains(id)).collect()
+        self.all_segments()
+            .into_iter()
+            .filter(|id| !have.contains(id))
+            .collect()
     }
 }
 
@@ -959,7 +1104,9 @@ pub struct ColdSegmentDescriptor {
 
 impl ColdSegmentDescriptor {
     pub fn compression_ratio(&self) -> f64 {
-        if self.compressed_bytes == 0 { return 1.0; }
+        if self.compressed_bytes == 0 {
+            return 1.0;
+        }
         self.original_bytes as f64 / self.compressed_bytes as f64
     }
 }
@@ -1040,8 +1187,12 @@ impl RecoveryCoordinator {
         for seg_id in self.manifest.all_segment_ids() {
             if store.exists(seg_id) {
                 match store.verify_segment(seg_id) {
-                    Ok(true) => { self.verified_segments.insert(seg_id); }
-                    _ => { self.missing_segments.push(seg_id); }
+                    Ok(true) => {
+                        self.verified_segments.insert(seg_id);
+                    }
+                    _ => {
+                        self.missing_segments.push(seg_id);
+                    }
                 }
             } else {
                 self.missing_segments.push(seg_id);
@@ -1138,11 +1289,15 @@ impl SegmentGc {
 
     /// Evaluate whether a segment can be GC'd.
     pub fn evaluate(&self, entry: &ManifestEntry, manifest: &Manifest) -> GcDecision {
-        self.metrics.segments_evaluated.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .segments_evaluated
+            .fetch_add(1, Ordering::Relaxed);
 
         // Check if currently streaming
         if self.streaming_segments.lock().contains(&entry.segment_id) {
-            self.metrics.deferred_streaming.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .deferred_streaming
+                .fetch_add(1, Ordering::Relaxed);
             return GcDecision::DeferStreaming;
         }
 
@@ -1155,9 +1310,8 @@ impl SegmentGc {
             SegmentKind::Wal => {
                 // WAL: can GC if all followers past this segment's LSN range
                 if let LogicalRange::Wal { end_lsn, .. } = &entry.logical_range {
-                    let min_durable = StructuredLsn::from_raw(
-                        self.min_durable_lsn.load(Ordering::Relaxed)
-                    );
+                    let min_durable =
+                        StructuredLsn::from_raw(self.min_durable_lsn.load(Ordering::Relaxed));
                     if *end_lsn <= min_durable {
                         return GcDecision::Eligible;
                     }
@@ -1200,11 +1354,7 @@ impl SegmentGc {
     }
 
     /// Execute GC: delete eligible segments from the store and manifest.
-    pub fn execute_gc(
-        &self,
-        manifest: &mut Manifest,
-        store: &SegmentStore,
-    ) -> (u64, u64) {
+    pub fn execute_gc(&self, manifest: &mut Manifest, store: &SegmentStore) -> (u64, u64) {
         let eligible = self.gc_pass(manifest);
         let mut freed_bytes = 0u64;
         let mut freed_count = 0u64;
@@ -1217,8 +1367,12 @@ impl SegmentGc {
         if !eligible.is_empty() {
             manifest.remove_segments(&eligible);
         }
-        self.metrics.segments_deleted.fetch_add(freed_count, Ordering::Relaxed);
-        self.metrics.bytes_freed.fetch_add(freed_bytes, Ordering::Relaxed);
+        self.metrics
+            .segments_deleted
+            .fetch_add(freed_count, Ordering::Relaxed);
+        self.metrics
+            .bytes_freed
+            .fetch_add(freed_bytes, Ordering::Relaxed);
         (freed_count, freed_bytes)
     }
 }
@@ -1315,7 +1469,11 @@ mod tests {
         let bytes = h.to_bytes();
         let recovered = UnifiedSegmentHeader::from_bytes(&bytes).unwrap();
         assert_eq!(recovered.kind, SegmentKind::Snapshot);
-        if let LogicalRange::Snapshot { snapshot_id, chunk_index } = recovered.logical_range {
+        if let LogicalRange::Snapshot {
+            snapshot_id,
+            chunk_index,
+        } = recovered.logical_range
+        {
             assert_eq!(snapshot_id, 1);
             assert_eq!(chunk_index, 0);
         } else {
@@ -1596,14 +1754,15 @@ mod tests {
             size_bytes: 5000,
             codec: SegmentCodec::Lz4,
             logical_range: LogicalRange::Cold {
-                table_id: 1, shard_id: 0, min_key: vec![], max_key: vec![],
+                table_id: 1,
+                shard_id: 0,
+                min_key: vec![],
+                max_key: vec![],
             },
             sealed: true,
         });
 
-        let snap = SnapshotDefinition::create(
-            1, &m, StructuredLsn::new(3, 0), Csn::new(50),
-        );
+        let snap = SnapshotDefinition::create(1, &m, StructuredLsn::new(3, 0), Csn::new(50));
         assert_eq!(snap.wal_segments, vec![0, 1, 2]);
         assert_eq!(snap.cold_segments, vec![100]);
         assert_eq!(snap.all_segments().len(), 4);
@@ -1840,7 +1999,10 @@ mod tests {
             size_bytes: 200,
             codec: SegmentCodec::Lz4,
             logical_range: LogicalRange::Cold {
-                table_id: 1, shard_id: 0, min_key: vec![], max_key: vec![],
+                table_id: 1,
+                shard_id: 0,
+                min_key: vec![],
+                max_key: vec![],
             },
             sealed: true,
         });

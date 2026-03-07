@@ -28,7 +28,10 @@ pub enum ExecutionResult {
     /// DDL success with a message.
     Ddl { message: String },
     /// DML success with affected row count.
-    Dml { rows_affected: u64, tag: &'static str },
+    Dml {
+        rows_affected: u64,
+        tag: &'static str,
+    },
     /// Query result with column metadata and rows.
     Query {
         columns: Vec<(String, DataType)>,
@@ -148,7 +151,8 @@ impl Executor {
 
     /// Set read-only mode (e.g. after failover role change).
     pub fn set_read_only(&self, val: bool) {
-        self.read_only.store(val, std::sync::atomic::Ordering::Relaxed);
+        self.read_only
+            .store(val, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Guard: reject the operation if this executor is read-only.
@@ -185,7 +189,9 @@ impl Executor {
             (Some(c), Some(m)) => (c, m),
             _ => return Ok(()), // RBAC not configured — allow all
         };
-        let catalog = catalog.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let catalog = catalog
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Superuser bypasses all privilege checks
         if let Some(role) = catalog.get_role(self.current_role) {
             if role.is_superuser {
@@ -214,7 +220,9 @@ impl Executor {
             object_id,
             object_name: object_name.to_owned(),
         };
-        let manager = manager.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let manager = manager
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match manager.check_privilege(&effective_roles, privilege, &object_ref) {
             PrivilegeCheckResult::Allowed => Ok(()),
             PrivilegeCheckResult::Denied {
@@ -222,8 +230,10 @@ impl Executor {
                 privilege,
                 object,
             } => {
-                let role_name = catalog
-                    .get_role(self.current_role).map_or_else(|| format!("role_id_{}", self.current_role.0), |r| r.name.clone());
+                let role_name = catalog.get_role(self.current_role).map_or_else(
+                    || format!("role_id_{}", self.current_role.0),
+                    |r| r.name.clone(),
+                );
                 tracing::warn!(
                     role_id = self.current_role.0,
                     role_name = %role_name,
@@ -276,13 +286,18 @@ impl Executor {
         }
         // Fast path for simple INSERT: substitute row exprs without cloning schema
         if let PhysicalPlan::Insert {
-            table_id, schema, columns, rows,
-            source_select, returning, on_conflict,
+            table_id,
+            schema,
+            columns,
+            rows,
+            source_select,
+            returning,
+            on_conflict,
         } = plan
         {
             if source_select.is_none() {
-                let subst_rows = crate::param_subst::subst_rows(rows, params)
-                    .map_err(FalconError::Execution)?;
+                let subst_rows =
+                    crate::param_subst::subst_rows(rows, params).map_err(FalconError::Execution)?;
                 let subst_returning = if returning.is_empty() {
                     Vec::new()
                 } else {
@@ -291,12 +306,19 @@ impl Executor {
                 };
                 let subst_on_conflict = crate::param_subst::subst_on_conflict(on_conflict, params)
                     .map_err(FalconError::Execution)?;
-                let txn = txn.ok_or_else(|| FalconError::Execution(
-                    falcon_common::error::ExecutionError::TypeError("INSERT requires a transaction".into()),
-                ))?;
+                let txn = txn.ok_or_else(|| {
+                    FalconError::Execution(falcon_common::error::ExecutionError::TypeError(
+                        "INSERT requires a transaction".into(),
+                    ))
+                })?;
                 return self.exec_insert(
-                    *table_id, schema, columns, &subst_rows,
-                    &subst_returning, &subst_on_conflict, txn,
+                    *table_id,
+                    schema,
+                    columns,
+                    &subst_rows,
+                    &subst_returning,
+                    &subst_on_conflict,
+                    txn,
                 );
             }
         }
@@ -312,7 +334,7 @@ impl Executor {
         plan: &PhysicalPlan,
         txn: Option<&TxnHandle>,
     ) -> Result<ExecutionResult, FalconError> {
-        crate::eval::scalar_time::set_statement_ts(chrono::Utc::now().timestamp_micros());
+        crate::eval::scalar_time::reset_statement_ts();
         match plan {
             PhysicalPlan::CreateDatabase {
                 name,
@@ -333,18 +355,13 @@ impl Executor {
                     Err(e) => Err(e.into()),
                 }
             }
-            PhysicalPlan::DropDatabase {
-                name,
-                if_exists,
-            } => {
+            PhysicalPlan::DropDatabase { name, if_exists } => {
                 self.reject_if_read_only("DROP DATABASE")?;
                 match self.storage.drop_database(name) {
                     Ok(()) => Ok(ExecutionResult::Ddl {
                         message: "DROP DATABASE".to_owned(),
                     }),
-                    Err(falcon_common::error::StorageError::DatabaseNotFound(_))
-                        if *if_exists =>
-                    {
+                    Err(falcon_common::error::StorageError::DatabaseNotFound(_)) if *if_exists => {
                         Ok(ExecutionResult::Ddl {
                             message: "DROP DATABASE".to_owned(),
                         })
@@ -371,18 +388,13 @@ impl Executor {
                     Err(e) => Err(e.into()),
                 }
             }
-            PhysicalPlan::DropSchema {
-                name,
-                if_exists,
-            } => {
+            PhysicalPlan::DropSchema { name, if_exists } => {
                 self.reject_if_read_only("DROP SCHEMA")?;
                 match self.storage.drop_schema(name) {
                     Ok(()) => Ok(ExecutionResult::Ddl {
                         message: "DROP SCHEMA".to_owned(),
                     }),
-                    Err(falcon_common::error::StorageError::SchemaNotFound(_))
-                        if *if_exists =>
-                    {
+                    Err(falcon_common::error::StorageError::SchemaNotFound(_)) if *if_exists => {
                         Ok(ExecutionResult::Ddl {
                             message: "DROP SCHEMA".to_owned(),
                         })
@@ -413,18 +425,13 @@ impl Executor {
                     Err(e) => Err(e.into()),
                 }
             }
-            PhysicalPlan::DropRole {
-                name,
-                if_exists,
-            } => {
+            PhysicalPlan::DropRole { name, if_exists } => {
                 self.reject_if_read_only("DROP ROLE")?;
                 match self.storage.drop_role(name) {
                     Ok(()) => Ok(ExecutionResult::Ddl {
                         message: "DROP ROLE".to_owned(),
                     }),
-                    Err(falcon_common::error::StorageError::RoleNotFound(_))
-                        if *if_exists =>
-                    {
+                    Err(falcon_common::error::StorageError::RoleNotFound(_)) if *if_exists => {
                         Ok(ExecutionResult::Ddl {
                             message: "DROP ROLE".to_owned(),
                         })
@@ -460,7 +467,13 @@ impl Executor {
                 grantee,
             } => {
                 self.reject_if_read_only("GRANT")?;
-                self.storage.grant_privilege(grantee, privilege, object_type, object_name, "falcon")?;
+                self.storage.grant_privilege(
+                    grantee,
+                    privilege,
+                    object_type,
+                    object_name,
+                    "falcon",
+                )?;
                 Ok(ExecutionResult::Ddl {
                     message: "GRANT".to_owned(),
                 })
@@ -472,7 +485,8 @@ impl Executor {
                 grantee,
             } => {
                 self.reject_if_read_only("REVOKE")?;
-                self.storage.revoke_privilege(grantee, privilege, object_type, object_name)?;
+                self.storage
+                    .revoke_privilege(grantee, privilege, object_type, object_name)?;
                 Ok(ExecutionResult::Ddl {
                     message: "REVOKE".to_owned(),
                 })
@@ -527,8 +541,10 @@ impl Executor {
                 ];
                 let mut rows = Vec::new();
                 for g in grants {
-                    let grantee_name = roles.iter()
-                        .find(|r| r.id == g.grantee_id).map_or_else(|| format!("id_{}", g.grantee_id), |r| r.name.clone());
+                    let grantee_name = roles
+                        .iter()
+                        .find(|r| r.id == g.grantee_id)
+                        .map_or_else(|| format!("id_{}", g.grantee_id), |r| r.name.clone());
                     if let Some(ref filter) = role_name {
                         if grantee_name.to_lowercase() != filter.to_lowercase() {
                             continue;
@@ -550,6 +566,18 @@ impl Executor {
                 self.reject_if_read_only("CREATE TABLE")?;
                 self.check_privilege(Privilege::Create, ObjectType::Schema, "public")?;
                 self.exec_create_table(schema, *if_not_exists)
+            }
+            PhysicalPlan::CreateTableAs {
+                table_name,
+                if_not_exists,
+                query,
+            } => {
+                self.reject_if_read_only("CREATE TABLE AS")?;
+                self.check_privilege(Privilege::Create, ObjectType::Schema, "public")?;
+                let txn = txn.ok_or_else(|| {
+                    FalconError::Internal("CREATE TABLE AS requires active transaction".into())
+                })?;
+                self.exec_create_table_as(table_name, *if_not_exists, query, txn)
             }
             PhysicalPlan::DropTable {
                 table_name,
@@ -575,9 +603,9 @@ impl Executor {
             } => {
                 self.reject_if_read_only("INSERT")?;
                 self.check_privilege(Privilege::Insert, ObjectType::Table, &schema.name)?;
-                let txn = txn.ok_or_else(|| FalconError::Internal(
-                    "INSERT requires active transaction".into(),
-                ))?;
+                let txn = txn.ok_or_else(|| {
+                    FalconError::Internal("INSERT requires active transaction".into())
+                })?;
                 Self::reject_if_txn_read_only(txn, "INSERT")?;
                 Self::check_txn_timeout(txn)?;
                 if let Some(sel) = source_select {
@@ -604,9 +632,9 @@ impl Executor {
             } => {
                 self.reject_if_read_only("UPDATE")?;
                 self.check_privilege(Privilege::Update, ObjectType::Table, &schema.name)?;
-                let txn = txn.ok_or_else(|| FalconError::Internal(
-                    "UPDATE requires active transaction".into(),
-                ))?;
+                let txn = txn.ok_or_else(|| {
+                    FalconError::Internal("UPDATE requires active transaction".into())
+                })?;
                 Self::reject_if_txn_read_only(txn, "UPDATE")?;
                 Self::check_txn_timeout(txn)?;
                 self.exec_update(
@@ -628,9 +656,9 @@ impl Executor {
             } => {
                 self.reject_if_read_only("DELETE")?;
                 self.check_privilege(Privilege::Delete, ObjectType::Table, &schema.name)?;
-                let txn = txn.ok_or_else(|| FalconError::Internal(
-                    "DELETE requires active transaction".into(),
-                ))?;
+                let txn = txn.ok_or_else(|| {
+                    FalconError::Internal("DELETE requires active transaction".into())
+                })?;
                 Self::reject_if_txn_read_only(txn, "DELETE")?;
                 Self::check_txn_timeout(txn)?;
                 self.exec_delete(
@@ -647,9 +675,9 @@ impl Executor {
                 self.check_privilege(Privilege::Insert, ObjectType::Table, &merge.target_name)?;
                 self.check_privilege(Privilege::Update, ObjectType::Table, &merge.target_name)?;
                 self.check_privilege(Privilege::Delete, ObjectType::Table, &merge.target_name)?;
-                let txn = txn.ok_or_else(|| FalconError::Internal(
-                    "MERGE requires active transaction".into(),
-                ))?;
+                let txn = txn.ok_or_else(|| {
+                    FalconError::Internal("MERGE requires active transaction".into())
+                })?;
                 Self::reject_if_txn_read_only(txn, "MERGE")?;
                 Self::check_txn_timeout(txn)?;
                 self.exec_merge(merge, txn)
@@ -673,9 +701,9 @@ impl Executor {
                 for_lock,
             } => {
                 self.check_privilege(Privilege::Select, ObjectType::Table, &schema.name)?;
-                let txn = txn.ok_or_else(|| FalconError::Internal(
-                    "SELECT requires active transaction".into(),
-                ))?;
+                let txn = txn.ok_or_else(|| {
+                    FalconError::Internal("SELECT requires active transaction".into())
+                })?;
                 self.register_row_locks(*table_id, for_lock, txn)?;
                 // Materialize CTEs
                 let cte_data = self.materialize_ctes(ctes, txn)?;
@@ -719,9 +747,9 @@ impl Executor {
                 for_lock,
             } => {
                 self.check_privilege(Privilege::Select, ObjectType::Table, &schema.name)?;
-                let txn = txn.ok_or_else(|| FalconError::Internal(
-                    "SELECT requires active transaction".into(),
-                ))?;
+                let txn = txn.ok_or_else(|| {
+                    FalconError::Internal("SELECT requires active transaction".into())
+                })?;
                 self.register_row_locks(*table_id, for_lock, txn)?;
 
                 // All columnar paths (pure AGG, GROUP BY AGG, plain scan) are
@@ -769,9 +797,9 @@ impl Executor {
                 virtual_rows,
                 for_lock,
             } => {
-                let txn = txn.ok_or_else(|| FalconError::Internal(
-                    "SELECT requires active transaction".into(),
-                ))?;
+                let txn = txn.ok_or_else(|| {
+                    FalconError::Internal("SELECT requires active transaction".into())
+                })?;
                 self.register_row_locks(*table_id, for_lock, txn)?;
                 let cte_data = self.materialize_ctes(ctes, txn)?;
                 let mut result = self.exec_index_scan(
@@ -819,9 +847,9 @@ impl Executor {
                 virtual_rows,
                 for_lock,
             } => {
-                let txn = txn.ok_or_else(|| FalconError::Internal(
-                    "SELECT requires active transaction".into(),
-                ))?;
+                let txn = txn.ok_or_else(|| {
+                    FalconError::Internal("SELECT requires active transaction".into())
+                })?;
                 self.register_row_locks(*table_id, for_lock, txn)?;
                 let cte_data = self.materialize_ctes(ctes, txn)?;
                 let mut result = self.exec_index_range_scan(
@@ -864,9 +892,9 @@ impl Executor {
                 ctes,
                 unions,
             } => {
-                let txn = txn.ok_or_else(|| FalconError::Internal(
-                    "SELECT requires active transaction".into(),
-                ))?;
+                let txn = txn.ok_or_else(|| {
+                    FalconError::Internal("SELECT requires active transaction".into())
+                })?;
                 let cte_data = self.materialize_ctes(ctes, txn)?;
                 let mut result = self.exec_nested_loop_join(
                     *left_table_id,
@@ -903,9 +931,9 @@ impl Executor {
                 ctes,
                 unions,
             } => {
-                let txn = txn.ok_or_else(|| FalconError::Internal(
-                    "SELECT requires active transaction".into(),
-                ))?;
+                let txn = txn.ok_or_else(|| {
+                    FalconError::Internal("SELECT requires active transaction".into())
+                })?;
                 let cte_data = self.materialize_ctes(ctes, txn)?;
                 let mut result = self.exec_hash_join(
                     *left_table_id,
@@ -942,9 +970,9 @@ impl Executor {
                 ctes,
                 unions,
             } => {
-                let txn = txn.ok_or_else(|| FalconError::Internal(
-                    "SELECT requires active transaction".into(),
-                ))?;
+                let txn = txn.ok_or_else(|| {
+                    FalconError::Internal("SELECT requires active transaction".into())
+                })?;
                 let cte_data = self.materialize_ctes(ctes, txn)?;
                 let mut result = self.exec_merge_sort_join(
                     *left_table_id,
@@ -1020,10 +1048,15 @@ impl Executor {
                 self.reject_if_read_only("CREATE INDEX")?;
                 if *concurrently {
                     let ddl_id = self.storage.create_index_concurrently(
-                        index_name, table_name, column_indices, *unique,
+                        index_name,
+                        table_name,
+                        column_indices,
+                        *unique,
                     )?;
                     Ok(ExecutionResult::Ddl {
-                        message: format!("CREATE INDEX CONCURRENTLY {index_name} (ddl_id={ddl_id})"),
+                        message: format!(
+                            "CREATE INDEX CONCURRENTLY {index_name} (ddl_id={ddl_id})"
+                        ),
                     })
                 } else {
                     for &col_idx in column_indices {
@@ -1055,9 +1088,11 @@ impl Executor {
             }
             PhysicalPlan::CreateMaterializedView { name, query_sql } => {
                 self.reject_if_read_only("CREATE MATERIALIZED VIEW")?;
-                let txn = txn.ok_or_else(|| FalconError::Internal(
-                    "CREATE MATERIALIZED VIEW requires active transaction".into(),
-                ))?;
+                let txn = txn.ok_or_else(|| {
+                    FalconError::Internal(
+                        "CREATE MATERIALIZED VIEW requires active transaction".into(),
+                    )
+                })?;
                 self.exec_create_materialized_view(name, query_sql, txn)?;
                 Ok(ExecutionResult::Ddl {
                     message: format!("CREATE MATERIALIZED VIEW {name}"),
@@ -1072,9 +1107,11 @@ impl Executor {
             }
             PhysicalPlan::RefreshMaterializedView { name } => {
                 self.reject_if_read_only("REFRESH MATERIALIZED VIEW")?;
-                let txn = txn.ok_or_else(|| FalconError::Internal(
-                    "REFRESH MATERIALIZED VIEW requires active transaction".into(),
-                ))?;
+                let txn = txn.ok_or_else(|| {
+                    FalconError::Internal(
+                        "REFRESH MATERIALIZED VIEW requires active transaction".into(),
+                    )
+                })?;
                 self.exec_refresh_materialized_view(name, txn)?;
                 Ok(ExecutionResult::Ddl {
                     message: format!("REFRESH MATERIALIZED VIEW {name}"),
@@ -1310,17 +1347,18 @@ impl Executor {
                     .collect();
                 Ok(ExecutionResult::Query { columns, rows })
             }
-            PhysicalPlan::ShowTenants
-            | PhysicalPlan::ShowTenantUsage => Ok(ExecutionResult::Query {
-                columns: vec![
-                    ("metric".into(), DataType::Text),
-                    ("value".into(), DataType::Text),
-                ],
-                rows: vec![OwnedRow::new(vec![
-                    Datum::Text("tenant_count".into()),
-                    Datum::Text("0".into()),
-                ])],
-            }),
+            PhysicalPlan::ShowTenants | PhysicalPlan::ShowTenantUsage => {
+                Ok(ExecutionResult::Query {
+                    columns: vec![
+                        ("metric".into(), DataType::Text),
+                        ("value".into(), DataType::Text),
+                    ],
+                    rows: vec![OwnedRow::new(vec![
+                        Datum::Text("tenant_count".into()),
+                        Datum::Text("0".into()),
+                    ])],
+                })
+            }
             PhysicalPlan::CreateTenant {
                 name,
                 max_qps: _,
@@ -1350,9 +1388,9 @@ impl Executor {
                 escape,
                 file_path: _,
             } => {
-                let txn = txn.ok_or_else(|| FalconError::Internal(
-                    "COPY TO requires active transaction".into(),
-                ))?;
+                let txn = txn.ok_or_else(|| {
+                    FalconError::Internal("COPY TO requires active transaction".into())
+                })?;
                 self.exec_copy_to(
                     *table_id,
                     schema,
@@ -1376,9 +1414,9 @@ impl Executor {
                 escape,
                 file_path: _,
             } => {
-                let txn = txn.ok_or_else(|| FalconError::Internal(
-                    "COPY TO requires active transaction".into(),
-                ))?;
+                let txn = txn.ok_or_else(|| {
+                    FalconError::Internal("COPY TO requires active transaction".into())
+                })?;
                 self.exec_copy_query_to(
                     query,
                     *csv,
@@ -1405,9 +1443,7 @@ impl Executor {
                     Ok(()) => Ok(ExecutionResult::Ddl {
                         message: "DROP FUNCTION".to_owned(),
                     }),
-                    Err(falcon_common::error::StorageError::FunctionNotFound(_))
-                        if *if_exists =>
-                    {
+                    Err(falcon_common::error::StorageError::FunctionNotFound(_)) if *if_exists => {
                         Ok(ExecutionResult::Ddl {
                             message: "DROP FUNCTION".to_owned(),
                         })
@@ -1416,10 +1452,194 @@ impl Executor {
                 }
             }
             PhysicalPlan::CallProcedure { name, args } => {
-                let txn = txn.ok_or_else(|| FalconError::Internal(
-                    "CALL requires active transaction".into(),
-                ))?;
+                let txn = txn.ok_or_else(|| {
+                    FalconError::Internal("CALL requires active transaction".into())
+                })?;
                 self.exec_call_procedure(name, args, txn)
+            }
+            PhysicalPlan::NoOp => Ok(ExecutionResult::Ddl {
+                message: "DO".to_owned(),
+            }),
+            PhysicalPlan::ShowPgVar { name, value } => {
+                use falcon_common::datum::{Datum, OwnedRow};
+                use falcon_common::types::DataType;
+                Ok(ExecutionResult::Query {
+                    columns: vec![(name.clone(), DataType::Text)],
+                    rows: vec![OwnedRow::new(vec![Datum::Text(value.clone())])],
+                })
+            }
+            PhysicalPlan::ShowDdlStatus => {
+                use falcon_common::datum::{Datum, OwnedRow};
+                use falcon_common::types::DataType;
+                let progress = self.storage.ddl_progress();
+                let columns = vec![
+                    ("ddl_id".to_owned(), DataType::Int64),
+                    ("description".to_owned(), DataType::Text),
+                    ("phase".to_owned(), DataType::Text),
+                    ("rows_processed".to_owned(), DataType::Int64),
+                    ("rows_total".to_owned(), DataType::Int64),
+                    ("pct".to_owned(), DataType::Float64),
+                    ("elapsed_ms".to_owned(), DataType::Int64),
+                    ("error".to_owned(), DataType::Text),
+                ];
+                let rows = progress
+                    .into_iter()
+                    .map(|p| {
+                        OwnedRow::new(vec![
+                            Datum::Int64(p.id as i64),
+                            Datum::Text(p.description),
+                            Datum::Text(p.phase.to_string()),
+                            Datum::Int64(p.rows_processed as i64),
+                            Datum::Int64(p.rows_total as i64),
+                            Datum::Float64(p.pct),
+                            Datum::Int64(p.elapsed_ms.unwrap_or(0) as i64),
+                            p.error.map_or(Datum::Null, Datum::Text),
+                        ])
+                    })
+                    .collect();
+                Ok(ExecutionResult::Query { columns, rows })
+            }
+            PhysicalPlan::Backup {
+                dest_dir,
+                incremental,
+                label,
+            } => {
+                use falcon_common::datum::{Datum, OwnedRow};
+                use falcon_common::types::DataType;
+                let result = if *incremental {
+                    self.storage.backup_incremental(dest_dir, label)
+                } else {
+                    self.storage.backup_full(dest_dir, label)
+                };
+                match result {
+                    Ok(backup_id) => Ok(ExecutionResult::Query {
+                        columns: vec![
+                            ("backup_id".to_owned(), DataType::Int64),
+                            ("status".to_owned(), DataType::Text),
+                        ],
+                        rows: vec![OwnedRow::new(vec![
+                            Datum::Int64(backup_id as i64),
+                            Datum::Text("completed".to_owned()),
+                        ])],
+                    }),
+                    Err(e) => Err(FalconError::Storage(e)),
+                }
+            }
+            PhysicalPlan::Restore { src_dir } => {
+                use falcon_common::datum::{Datum, OwnedRow};
+                use falcon_common::types::DataType;
+                match self.storage.restore_from_backup(src_dir) {
+                    Ok(rows) => Ok(ExecutionResult::Query {
+                        columns: vec![("rows_restored".to_owned(), DataType::Int64)],
+                        rows: vec![OwnedRow::new(vec![Datum::Int64(rows as i64)])],
+                    }),
+                    Err(e) => Err(FalconError::Storage(e)),
+                }
+            }
+            PhysicalPlan::CreateJob {
+                name,
+                backup_type,
+                dest_dir,
+                interval_secs,
+            } => {
+                use falcon_common::datum::{Datum, OwnedRow};
+                use falcon_common::types::DataType;
+                use falcon_storage::backup::BackupType;
+                let btype = if backup_type.eq_ignore_ascii_case("incremental") {
+                    BackupType::Incremental
+                } else {
+                    BackupType::Full
+                };
+                let arc_engine: std::sync::Arc<falcon_storage::engine::StorageEngine> =
+                    std::sync::Arc::clone(&self.storage);
+                let job_id = arc_engine.schedule_recurring_backup(
+                    btype,
+                    dest_dir.clone(),
+                    name.clone(),
+                    *interval_secs,
+                );
+                Ok(ExecutionResult::Query {
+                    columns: vec![
+                        ("job_id".to_owned(), DataType::Int64),
+                        ("name".to_owned(), DataType::Text),
+                        ("interval_secs".to_owned(), DataType::Int64),
+                    ],
+                    rows: vec![OwnedRow::new(vec![
+                        Datum::Int64(job_id as i64),
+                        Datum::Text(name.clone()),
+                        Datum::Int64(*interval_secs as i64),
+                    ])],
+                })
+            }
+            PhysicalPlan::DropJob { job_id } => {
+                use falcon_common::datum::{Datum, OwnedRow};
+                use falcon_common::types::DataType;
+                let cancelled = self.storage.cancel_job(*job_id);
+                Ok(ExecutionResult::Query {
+                    columns: vec![("cancelled".to_owned(), DataType::Boolean)],
+                    rows: vec![OwnedRow::new(vec![Datum::Boolean(cancelled)])],
+                })
+            }
+            PhysicalPlan::ShowJobs => {
+                use falcon_common::datum::{Datum, OwnedRow};
+                use falcon_common::types::DataType;
+                let jobs = self.storage.job_statuses();
+                let columns = vec![
+                    ("job_id".to_owned(), DataType::Int64),
+                    ("name".to_owned(), DataType::Text),
+                    ("interval_secs".to_owned(), DataType::Int64),
+                    ("state".to_owned(), DataType::Text),
+                    ("runs".to_owned(), DataType::Int64),
+                    ("last_run_ms".to_owned(), DataType::Int64),
+                    ("last_error".to_owned(), DataType::Text),
+                ];
+                let rows = jobs
+                    .into_iter()
+                    .map(|j| {
+                        OwnedRow::new(vec![
+                            Datum::Int64(j.id as i64),
+                            Datum::Text(j.name),
+                            j.interval_secs
+                                .map_or(Datum::Null, |s| Datum::Int64(s as i64)),
+                            Datum::Text(j.state.to_string()),
+                            Datum::Int64(j.runs as i64),
+                            Datum::Int64(j.last_run_ms as i64),
+                            j.last_error.map_or(Datum::Null, Datum::Text),
+                        ])
+                    })
+                    .collect();
+                Ok(ExecutionResult::Query { columns, rows })
+            }
+            PhysicalPlan::ShowBackupStatus => {
+                use falcon_common::datum::{Datum, OwnedRow};
+                use falcon_common::types::DataType;
+                let history = self.storage.backup_history(50);
+                let columns = vec![
+                    ("backup_id".to_owned(), DataType::Int64),
+                    ("backup_type".to_owned(), DataType::Text),
+                    ("status".to_owned(), DataType::Text),
+                    ("label".to_owned(), DataType::Text),
+                    ("start_lsn".to_owned(), DataType::Int64),
+                    ("end_lsn".to_owned(), DataType::Int64),
+                    ("size_bytes".to_owned(), DataType::Int64),
+                    ("table_count".to_owned(), DataType::Int64),
+                ];
+                let rows = history
+                    .into_iter()
+                    .map(|b| {
+                        OwnedRow::new(vec![
+                            Datum::Int64(b.backup_id as i64),
+                            Datum::Text(format!("{}", b.backup_type)),
+                            Datum::Text(format!("{:?}", b.status)),
+                            Datum::Text(b.label),
+                            Datum::Int64(b.start_lsn as i64),
+                            Datum::Int64(b.end_lsn as i64),
+                            Datum::Int64(b.total_bytes as i64),
+                            Datum::Int64(b.table_count as i64),
+                        ])
+                    })
+                    .collect();
+                Ok(ExecutionResult::Query { columns, rows })
             }
             PhysicalPlan::DistPlan { .. } => Err(FalconError::Internal(
                 "DistPlan must be executed via DistributedQueryEngine, not the local Executor"
@@ -1431,7 +1651,13 @@ impl Executor {
     fn datum_to_sql_literal(d: &Datum) -> String {
         match d {
             Datum::Null => "NULL".to_owned(),
-            Datum::Boolean(b) => if *b { "TRUE".to_owned() } else { "FALSE".to_owned() },
+            Datum::Boolean(b) => {
+                if *b {
+                    "TRUE".to_owned()
+                } else {
+                    "FALSE".to_owned()
+                }
+            }
             Datum::Int32(i) => i.to_string(),
             Datum::Int64(i) => i.to_string(),
             Datum::Float64(f) => format!("{}", f),
@@ -1449,18 +1675,24 @@ impl Executor {
         use falcon_common::schema::FunctionLanguage;
 
         let catalog = self.storage.get_catalog();
-        let func_def = catalog.find_function(name).ok_or_else(|| {
-            FalconError::Execution(ExecutionError::TypeError(format!(
-                "function \"{}\" does not exist", name
-            )))
-        })?.clone();
+        let func_def = catalog
+            .find_function(name)
+            .ok_or_else(|| {
+                FalconError::Execution(ExecutionError::TypeError(format!(
+                    "function \"{}\" does not exist",
+                    name
+                )))
+            })?
+            .clone();
 
         let arg_vals: Vec<Datum> = args
             .iter()
             .map(|a| self.eval_expr_with_sequences(a, row))
             .collect::<Result<_, _>>()?;
 
-        let eval_sql = |sql: &str, vars: &std::collections::HashMap<String, Datum>| -> Result<Datum, ExecutionError> {
+        let eval_sql = |sql: &str,
+                        vars: &std::collections::HashMap<String, Datum>|
+         -> Result<Datum, ExecutionError> {
             let mut resolved = sql.to_owned();
             for (k, v) in vars {
                 resolved = resolved.replace(k, &Self::datum_to_sql_literal(v));
@@ -1473,22 +1705,26 @@ impl Executor {
             let dialect = sqlparser::dialect::PostgreSqlDialect {};
             let stmts = sqlparser::parser::Parser::parse_sql(&dialect, &select_sql)
                 .map_err(|e| ExecutionError::TypeError(format!("SQL parse: {e}")))?;
-            let stmt = stmts.into_iter().next()
+            let stmt = stmts
+                .into_iter()
+                .next()
                 .ok_or_else(|| ExecutionError::TypeError("empty SQL".into()))?;
             let cat = self.storage.get_catalog();
             let mut binder = falcon_sql_frontend::binder::Binder::new(cat);
-            let bound = binder.bind(&stmt)
+            let bound = binder
+                .bind(&stmt)
                 .map_err(|e| ExecutionError::TypeError(format!("bind: {e}")))?;
             let plan = falcon_planner::Planner::plan(&bound)
                 .map_err(|e| ExecutionError::TypeError(format!("plan: {e}")))?;
-            let result = self.execute(&plan, None)
+            let result = self
+                .execute(&plan, None)
                 .map_err(|e| ExecutionError::TypeError(format!("exec: {e}")))?;
             match result {
-                ExecutionResult::Query { rows, .. } => {
-                    Ok(rows.into_iter().next()
-                        .and_then(|r| r.values.into_iter().next())
-                        .unwrap_or(Datum::Null))
-                }
+                ExecutionResult::Query { rows, .. } => Ok(rows
+                    .into_iter()
+                    .next()
+                    .and_then(|r| r.values.into_iter().next())
+                    .unwrap_or(Datum::Null)),
                 _ => Ok(Datum::Null),
             }
         };
@@ -1515,11 +1751,15 @@ impl Executor {
         use falcon_common::schema::FunctionLanguage;
 
         let catalog = self.storage.get_catalog();
-        let func_def = catalog.find_function(name).ok_or_else(|| {
-            FalconError::Execution(ExecutionError::TypeError(format!(
-                "function \"{}\" does not exist", name
-            )))
-        })?.clone();
+        let func_def = catalog
+            .find_function(name)
+            .ok_or_else(|| {
+                FalconError::Execution(ExecutionError::TypeError(format!(
+                    "function \"{}\" does not exist",
+                    name
+                )))
+            })?
+            .clone();
 
         let empty_row = OwnedRow::empty();
         let arg_vals: Vec<Datum> = args
@@ -1528,12 +1768,13 @@ impl Executor {
             .collect::<Result<_, _>>()
             .map_err(FalconError::Execution)?;
 
-        let eval_sql = |sql: &str, vars: &std::collections::HashMap<String, Datum>| -> Result<Datum, ExecutionError> {
+        let eval_sql = |sql: &str,
+                        vars: &std::collections::HashMap<String, Datum>|
+         -> Result<Datum, ExecutionError> {
             // Substitute PL/pgSQL variables ($1, $2, named) in the SQL string
             let mut resolved = sql.to_owned();
             for (k, v) in vars {
-                let placeholder = if k.starts_with('$') { k.clone() } else { k.clone() };
-                resolved = resolved.replace(&placeholder, &Self::datum_to_sql_literal(v));
+                resolved = resolved.replace(k.as_str(), &Self::datum_to_sql_literal(v));
             }
             // Try evaluating as a simple SELECT expression
             let select_sql = if resolved.to_uppercase().starts_with("SELECT ") {
@@ -1572,29 +1813,29 @@ impl Executor {
         })
     }
 
-    fn eval_sql_expr_in_txn(
-        &self,
-        sql: &str,
-        txn: &TxnHandle,
-    ) -> Result<Datum, FalconError> {
+    fn eval_sql_expr_in_txn(&self, sql: &str, txn: &TxnHandle) -> Result<Datum, FalconError> {
         let dialect = sqlparser::dialect::PostgreSqlDialect {};
-        let stmts = sqlparser::parser::Parser::parse_sql(&dialect, sql)
-            .map_err(|e| FalconError::Execution(ExecutionError::TypeError(format!("SQL parse: {e}"))))?;
-        let stmt = stmts.into_iter().next()
+        let stmts = sqlparser::parser::Parser::parse_sql(&dialect, sql).map_err(|e| {
+            FalconError::Execution(ExecutionError::TypeError(format!("SQL parse: {e}")))
+        })?;
+        let stmt = stmts
+            .into_iter()
+            .next()
             .ok_or_else(|| FalconError::Execution(ExecutionError::TypeError("empty SQL".into())))?;
         let catalog = self.storage.get_catalog();
         let mut binder = falcon_sql_frontend::binder::Binder::new(catalog);
-        let bound = binder.bind(&stmt)
+        let bound = binder
+            .bind(&stmt)
             .map_err(|e| FalconError::Execution(ExecutionError::TypeError(format!("bind: {e}"))))?;
         let plan = falcon_planner::Planner::plan(&bound)
             .map_err(|e| FalconError::Execution(ExecutionError::TypeError(format!("plan: {e}"))))?;
         let result = self.execute(&plan, Some(txn))?;
         match result {
-            ExecutionResult::Query { rows, .. } => {
-                Ok(rows.into_iter().next()
-                    .and_then(|r| r.values.into_iter().next())
-                    .unwrap_or(Datum::Null))
-            }
+            ExecutionResult::Query { rows, .. } => Ok(rows
+                .into_iter()
+                .next()
+                .and_then(|r| r.values.into_iter().next())
+                .unwrap_or(Datum::Null)),
             _ => Ok(Datum::Null),
         }
     }
@@ -1605,13 +1846,17 @@ impl Executor {
         txn: &TxnHandle,
     ) -> Result<ExecutionResult, FalconError> {
         let dialect = sqlparser::dialect::PostgreSqlDialect {};
-        let stmts = sqlparser::parser::Parser::parse_sql(&dialect, sql)
-            .map_err(|e| FalconError::Execution(ExecutionError::TypeError(format!("SQL parse: {e}"))))?;
-        let stmt = stmts.into_iter().next()
+        let stmts = sqlparser::parser::Parser::parse_sql(&dialect, sql).map_err(|e| {
+            FalconError::Execution(ExecutionError::TypeError(format!("SQL parse: {e}")))
+        })?;
+        let stmt = stmts
+            .into_iter()
+            .next()
             .ok_or_else(|| FalconError::Execution(ExecutionError::TypeError("empty SQL".into())))?;
         let catalog = self.storage.get_catalog();
         let mut binder = falcon_sql_frontend::binder::Binder::new(catalog);
-        let bound = binder.bind(&stmt)
+        let bound = binder
+            .bind(&stmt)
             .map_err(|e| FalconError::Execution(ExecutionError::TypeError(format!("bind: {e}"))))?;
         let plan = falcon_planner::Planner::plan(&bound)
             .map_err(|e| FalconError::Execution(ExecutionError::TypeError(format!("plan: {e}"))))?;
@@ -1638,6 +1883,81 @@ impl Executor {
             }
             Err(e) => Err(e.into()),
         }
+    }
+
+    fn exec_create_table_as(
+        &self,
+        table_name: &str,
+        if_not_exists: bool,
+        query: &BoundSelect,
+        txn: &TxnHandle,
+    ) -> Result<ExecutionResult, FalconError> {
+        use falcon_common::schema::{ColumnDef, TableSchema};
+        use falcon_common::types::{ColumnId, TableId};
+        use falcon_planner::Planner;
+
+        let bound_sel = falcon_sql_frontend::types::BoundStatement::Select(query.clone());
+        let select_plan = Planner::plan(&bound_sel)?;
+        let result = self.execute(&select_plan, Some(txn))?;
+        let (columns, rows) = match result {
+            ExecutionResult::Query { columns, rows } => (columns, rows),
+            _ => {
+                return Err(FalconError::Internal(
+                    "CTAS: inner SELECT did not produce rows".into(),
+                ))
+            }
+        };
+
+        let col_defs: Vec<ColumnDef> = columns
+            .iter()
+            .enumerate()
+            .map(|(i, (name, dt))| {
+                ColumnDef::new(
+                    ColumnId(i as u32),
+                    name.clone(),
+                    dt.clone(),
+                    true,
+                    false,
+                    None,
+                    false,
+                )
+            })
+            .collect();
+
+        let schema = TableSchema {
+            id: TableId(0),
+            name: table_name.to_owned(),
+            columns: col_defs,
+            ..Default::default()
+        };
+
+        match self.storage.create_table(schema.clone()) {
+            Ok(_) => {}
+            Err(_) if if_not_exists => {
+                return Ok(ExecutionResult::Ddl {
+                    message: format!("CREATE TABLE {table_name}"),
+                });
+            }
+            Err(e) => return Err(e.into()),
+        }
+
+        let new_schema = self
+            .storage
+            .get_catalog()
+            .find_table(table_name)
+            .ok_or_else(|| {
+                FalconError::Internal(format!("CTAS: table {table_name} not found after create"))
+            })?
+            .clone();
+
+        let table_id = new_schema.id;
+        for row in rows {
+            self.storage.insert(table_id, row, txn.txn_id)?;
+        }
+
+        Ok(ExecutionResult::Ddl {
+            message: format!("CREATE TABLE {table_name}"),
+        })
     }
 
     fn exec_drop_table(
@@ -1667,26 +1987,76 @@ impl Executor {
         let mut messages = Vec::new();
         let mut ddl_ids = Vec::new();
         for op in ops {
-            let (ddl_id, msg) = match op {
+            let pair = match op {
                 AlterTableOp::AddColumn(col) => {
                     let id = self
                         .storage
                         .alter_table_add_column(table_name, col.clone())?;
-                    (id, format!("ADD COLUMN {}", col.name))
+                    Some((id, format!("ADD COLUMN {}", col.name)))
+                }
+                AlterTableOp::AddColumnDynamic {
+                    col,
+                    dynamic_default,
+                } => {
+                    let id = self.storage.alter_table_add_column_dynamic(
+                        table_name,
+                        col.clone(),
+                        dynamic_default.clone(),
+                    )?;
+                    Some((id, format!("ADD COLUMN {} (dynamic default)", col.name)))
+                }
+                AlterTableOp::AddConstraint(bc) => {
+                    use falcon_common::schema::AddConstraintKind;
+                    use falcon_sql_frontend::types::ConstraintKind;
+                    let storage_kind = match &bc.kind {
+                        ConstraintKind::PrimaryKey(cols) => {
+                            AddConstraintKind::PrimaryKey(cols.clone())
+                        }
+                        ConstraintKind::Unique(cols) => AddConstraintKind::Unique(cols.clone()),
+                        ConstraintKind::ForeignKey {
+                            columns,
+                            ref_table,
+                            ref_columns,
+                        } => AddConstraintKind::ForeignKey {
+                            columns: columns.clone(),
+                            ref_table: ref_table.clone(),
+                            ref_columns: ref_columns.clone(),
+                        },
+                        ConstraintKind::Check(expr) => {
+                            let val = crate::eval::eval_expr(
+                                expr,
+                                &falcon_common::datum::OwnedRow::new(vec![]),
+                            )
+                            .map_err(FalconError::Execution)?;
+                            AddConstraintKind::Check(format!("{val}"))
+                        }
+                    };
+                    let id = self.storage.alter_table_add_constraint(
+                        table_name,
+                        bc.name.as_deref(),
+                        &storage_kind,
+                    )?;
+                    let kind_str = match &bc.kind {
+                        ConstraintKind::PrimaryKey(_) => "ADD PRIMARY KEY",
+                        ConstraintKind::Unique(_) => "ADD UNIQUE",
+                        ConstraintKind::ForeignKey { .. } => "ADD FOREIGN KEY",
+                        ConstraintKind::Check(_) => "ADD CHECK",
+                    };
+                    Some((id, kind_str.to_string()))
                 }
                 AlterTableOp::DropColumn(col_name) => {
                     let id = self.storage.alter_table_drop_column(table_name, col_name)?;
-                    (id, format!("DROP COLUMN {col_name}"))
+                    Some((id, format!("DROP COLUMN {col_name}")))
                 }
                 AlterTableOp::RenameColumn { old_name, new_name } => {
                     let id = self
                         .storage
                         .alter_table_rename_column(table_name, old_name, new_name)?;
-                    (id, format!("RENAME COLUMN {old_name} TO {new_name}"))
+                    Some((id, format!("RENAME COLUMN {old_name} TO {new_name}")))
                 }
                 AlterTableOp::RenameTable { new_name } => {
                     let id = self.storage.alter_table_rename(table_name, new_name)?;
-                    (id, format!("RENAME TO {new_name}"))
+                    Some((id, format!("RENAME TO {new_name}")))
                 }
                 AlterTableOp::AlterColumnType {
                     column_name,
@@ -1697,22 +2067,19 @@ impl Executor {
                         column_name,
                         new_type.clone(),
                     )?;
-                    (
-                        id,
-                        format!("ALTER COLUMN {column_name} TYPE {new_type}"),
-                    )
+                    Some((id, format!("ALTER COLUMN {column_name} TYPE {new_type}")))
                 }
                 AlterTableOp::AlterColumnSetNotNull { column_name } => {
                     let id = self
                         .storage
                         .alter_table_set_not_null(table_name, column_name)?;
-                    (id, format!("ALTER COLUMN {column_name} SET NOT NULL"))
+                    Some((id, format!("ALTER COLUMN {column_name} SET NOT NULL")))
                 }
                 AlterTableOp::AlterColumnDropNotNull { column_name } => {
                     let id = self
                         .storage
                         .alter_table_drop_not_null(table_name, column_name)?;
-                    (id, format!("ALTER COLUMN {column_name} DROP NOT NULL"))
+                    Some((id, format!("ALTER COLUMN {column_name} DROP NOT NULL")))
                 }
                 AlterTableOp::AlterColumnSetDefault {
                     column_name,
@@ -1728,14 +2095,31 @@ impl Executor {
                         column_name,
                         default_val,
                     )?;
-                    (id, format!("ALTER COLUMN {column_name} SET DEFAULT"))
+                    Some((id, format!("ALTER COLUMN {column_name} SET DEFAULT")))
                 }
                 AlterTableOp::AlterColumnDropDefault { column_name } => {
                     let id = self
                         .storage
                         .alter_table_drop_default(table_name, column_name)?;
-                    (id, format!("ALTER COLUMN {column_name} DROP DEFAULT"))
+                    Some((id, format!("ALTER COLUMN {column_name} DROP DEFAULT")))
                 }
+                AlterTableOp::DropConstraint { name, if_exists } => {
+                    let id = self
+                        .storage
+                        .alter_table_drop_constraint(table_name, name, *if_exists)?;
+                    Some((id, format!("DROP CONSTRAINT {name}")))
+                }
+                AlterTableOp::RenameConstraint { old_name, new_name } => {
+                    let id = self
+                        .storage
+                        .alter_table_rename_constraint(table_name, old_name, new_name)?;
+                    Some((id, format!("RENAME CONSTRAINT {old_name} TO {new_name}")))
+                }
+                AlterTableOp::NoOp => None,
+            };
+            let (ddl_id, msg) = match pair {
+                Some(p) => p,
+                None => continue,
             };
             ddl_ids.push(ddl_id);
             messages.push(msg);
@@ -1872,10 +2256,7 @@ impl Executor {
                 offset,
                 ..
             } => {
-                let mut lines = vec![format!(
-                    "{}Column Scan on {}",
-                    pad, schema.name,
-                )];
+                let mut lines = vec![format!("{}Column Scan on {}", pad, schema.name,)];
                 if let Some(f) = filter {
                     lines.push(format!("{pad}  Filter: {f:?}"));
                 }
@@ -1930,9 +2311,7 @@ impl Executor {
                     est_rows as u64,
                     schema.columns.len() * 8
                 )];
-                lines.push(format!(
-                    "{pad}  Index Cond: ({col_name} = {index_value:?})"
-                ));
+                lines.push(format!("{pad}  Index Cond: ({col_name} = {index_value:?})"));
                 let cols: Vec<String> = projections
                     .iter()
                     .map(|p| match p {
@@ -2000,8 +2379,13 @@ impl Executor {
                     .map_or("?", |c| c.name.as_str());
                 let mut lines = vec![format!(
                     "{}Index Range Scan using {} on {}  (cost={:.2}..{:.2} rows={} width={})",
-                    pad, col_name, schema.name, startup_cost, total_cost,
-                    est_rows as u64, schema.columns.len() * 8
+                    pad,
+                    col_name,
+                    schema.name,
+                    startup_cost,
+                    total_cost,
+                    est_rows as u64,
+                    schema.columns.len() * 8
                 )];
                 // Format the range condition
                 let lo_str = lower_bound.as_ref().map(|(expr, inc)| {
@@ -2047,7 +2431,8 @@ impl Executor {
                 if !unions.is_empty() {
                     lines.push(format!(
                         "{}  Set Ops: {} additional query(ies)",
-                        pad, unions.len()
+                        pad,
+                        unions.len()
                     ));
                 }
                 lines
@@ -2257,7 +2642,10 @@ impl Executor {
             PhysicalPlan::Merge(m) => {
                 vec![format!(
                     "{}Merge on {} using {} ({} clauses)",
-                    pad, m.target_name, m.source_name, m.clauses.len()
+                    pad,
+                    m.target_name,
+                    m.source_name,
+                    m.clauses.len()
                 )]
             }
             PhysicalPlan::CreateMaterializedView { name, .. } => {
@@ -2278,10 +2666,7 @@ impl Executor {
                     pad, name, if_not_exists
                 )]
             }
-            PhysicalPlan::DropDatabase {
-                name,
-                if_exists,
-            } => {
+            PhysicalPlan::DropDatabase { name, if_exists } => {
                 vec![format!(
                     "{}DropDatabase {} (if_exists={})",
                     pad, name, if_exists
@@ -2294,6 +2679,16 @@ impl Executor {
                 vec![format!(
                     "{}CreateTable {} (if_not_exists={})",
                     pad, schema.name, if_not_exists
+                )]
+            }
+            PhysicalPlan::CreateTableAs {
+                table_name,
+                if_not_exists,
+                ..
+            } => {
+                vec![format!(
+                    "{}CreateTableAs {} (if_not_exists={})",
+                    pad, table_name, if_not_exists
                 )]
             }
             PhysicalPlan::DropTable {

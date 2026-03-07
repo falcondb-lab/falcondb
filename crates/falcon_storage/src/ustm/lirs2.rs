@@ -109,7 +109,9 @@ impl Lirs2Cache {
     pub fn new(config: Lirs2Config) -> Self {
         Self {
             entries: HashMap::with_capacity(
-                config.lir_capacity + config.hir_resident_capacity + config.hir_nonresident_capacity,
+                config.lir_capacity
+                    + config.hir_resident_capacity
+                    + config.hir_nonresident_capacity,
             ),
             lir_queue: VecDeque::with_capacity(config.lir_capacity),
             hir_resident_queue: VecDeque::with_capacity(config.hir_resident_capacity),
@@ -501,7 +503,7 @@ mod tests {
         let h = make_handle(1);
         cache.access(PageId(1), h.clone()); // miss (insert)
         cache.access(PageId(1), h.clone()); // hit (promote)
-        cache.access(PageId(1), h);         // hit (LIR refresh)
+        cache.access(PageId(1), h); // hit (LIR refresh)
         assert_eq!(cache.stats.misses, 1);
         assert_eq!(cache.stats.hits, 2);
         assert_eq!(cache.stats.lir_promotions, 1);

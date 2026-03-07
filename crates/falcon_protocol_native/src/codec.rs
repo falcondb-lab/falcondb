@@ -158,10 +158,8 @@ fn encode_value(out: &mut BytesMut, v: &EncodedValue) {
         EncodedValue::Int32(i) => out.put_i32_le(*i),
         EncodedValue::Int64(i) => out.put_i64_le(*i),
         EncodedValue::Float64(f) => out.put_f64_le(*f),
-        EncodedValue::Text(s)
-        | EncodedValue::Jsonb(s) => write_string_u32(out, s),
-        EncodedValue::Timestamp(t)
-        | EncodedValue::Time(t) => out.put_i64_le(*t),
+        EncodedValue::Text(s) | EncodedValue::Jsonb(s) => write_string_u32(out, s),
+        EncodedValue::Timestamp(t) | EncodedValue::Time(t) => out.put_i64_le(*t),
         EncodedValue::Date(d) => out.put_i32_le(*d),
         EncodedValue::Decimal(mantissa, scale) => {
             out.put_u8(*scale);
@@ -675,9 +673,7 @@ pub fn datum_to_encoded(d: &Datum) -> EncodedValue {
             let elem_type = encoded.first().map_or(TYPE_NULL, value_type_id);
             EncodedValue::Array(elem_type, encoded)
         }
-        Datum::TsVector(_) | Datum::TsQuery(_) => {
-            EncodedValue::Text(format!("{d}"))
-        }
+        Datum::TsVector(_) | Datum::TsQuery(_) => EncodedValue::Text(format!("{d}")),
     }
 }
 
@@ -708,7 +704,7 @@ pub fn encoded_to_datum(v: &EncodedValue) -> Datum {
 pub const fn datatype_to_type_id(dt: &DataType) -> u8 {
     match dt {
         DataType::Boolean => TYPE_BOOLEAN,
-        DataType::Int16 => TYPE_INT32,   // widened to INT32 on the wire
+        DataType::Int16 => TYPE_INT32, // widened to INT32 on the wire
         DataType::Int32 => TYPE_INT32,
         DataType::Int64 => TYPE_INT64,
         DataType::Float32 => TYPE_FLOAT64, // widened to FLOAT64 on the wire

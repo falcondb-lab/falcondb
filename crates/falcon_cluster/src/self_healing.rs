@@ -121,22 +121,27 @@ impl ClusterFailureDetector {
     /// Register a node in the detector.
     pub fn register_node(&self, node_id: NodeId, version: String) {
         let mut nodes = self.nodes.write();
-        nodes.insert(node_id, NodeHealthRecord {
+        nodes.insert(
             node_id,
-            liveness: NodeLiveness::Alive,
-            last_heartbeat: Some(Instant::now()),
-            consecutive_misses: 0,
-            last_lsn: 0,
-            replication_lag: 0,
-            version,
-            uptime_secs: 0,
-            reason: "registered".into(),
-        });
+            NodeHealthRecord {
+                node_id,
+                liveness: NodeLiveness::Alive,
+                last_heartbeat: Some(Instant::now()),
+                consecutive_misses: 0,
+                last_lsn: 0,
+                replication_lag: 0,
+                version,
+                uptime_secs: 0,
+                reason: "registered".into(),
+            },
+        );
     }
 
     /// Record a heartbeat from a node.
     pub fn record_heartbeat(&self, node_id: NodeId, lsn: u64, uptime_secs: u64) {
-        self.metrics.heartbeats_received.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .heartbeats_received
+            .fetch_add(1, Ordering::Relaxed);
         let mut nodes = self.nodes.write();
         if let Some(record) = nodes.get_mut(&node_id) {
             let was_dead = record.liveness == NodeLiveness::Dead;
@@ -148,7 +153,9 @@ impl ClusterFailureDetector {
             if record.liveness == NodeLiveness::Dead || record.liveness == NodeLiveness::Suspect {
                 record.liveness = NodeLiveness::Alive;
                 record.reason = "heartbeat restored".into();
-                self.metrics.alive_transitions.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .alive_transitions
+                    .fetch_add(1, Ordering::Relaxed);
                 self.epoch.fetch_add(1, Ordering::SeqCst);
             }
             let _ = (was_dead, was_suspect); // suppress unused
@@ -164,8 +171,7 @@ impl ClusterFailureDetector {
 
         for record in nodes.values_mut() {
             // Skip nodes in managed states
-            if record.liveness == NodeLiveness::Draining
-                || record.liveness == NodeLiveness::Joining
+            if record.liveness == NodeLiveness::Draining || record.liveness == NodeLiveness::Joining
             {
                 continue;
             }
@@ -183,16 +189,17 @@ impl ClusterFailureDetector {
                             elapsed.as_secs_f64(),
                             record.consecutive_misses
                         );
-                        self.metrics.dead_transitions.fetch_add(1, Ordering::Relaxed);
+                        self.metrics
+                            .dead_transitions
+                            .fetch_add(1, Ordering::Relaxed);
                     }
                 } else if elapsed > self.config.suspect_threshold {
                     if record.liveness == NodeLiveness::Alive {
                         record.liveness = NodeLiveness::Suspect;
-                        record.reason = format!(
-                            "heartbeat late: {:.1}s",
-                            elapsed.as_secs_f64()
-                        );
-                        self.metrics.suspect_transitions.fetch_add(1, Ordering::Relaxed);
+                        record.reason = format!("heartbeat late: {:.1}s", elapsed.as_secs_f64());
+                        self.metrics
+                            .suspect_transitions
+                            .fetch_add(1, Ordering::Relaxed);
                     }
                     record.consecutive_misses += 1;
                 } else {
@@ -200,7 +207,9 @@ impl ClusterFailureDetector {
                     if record.liveness != NodeLiveness::Alive {
                         record.liveness = NodeLiveness::Alive;
                         record.reason = "heartbeat on time".into();
-                        self.metrics.alive_transitions.fetch_add(1, Ordering::Relaxed);
+                        self.metrics
+                            .alive_transitions
+                            .fetch_add(1, Ordering::Relaxed);
                     }
                     record.consecutive_misses = 0;
                 }
@@ -209,7 +218,9 @@ impl ClusterFailureDetector {
                 if record.liveness == NodeLiveness::Alive {
                     record.liveness = NodeLiveness::Suspect;
                     record.reason = "no heartbeat ever received".into();
-                    self.metrics.suspect_transitions.fetch_add(1, Ordering::Relaxed);
+                    self.metrics
+                        .suspect_transitions
+                        .fetch_add(1, Ordering::Relaxed);
                 }
             }
 
@@ -278,22 +289,25 @@ impl ClusterFailureDetector {
 
     /// Get alive node count.
     pub fn alive_count(&self) -> usize {
-        self.nodes.read().values().filter(|r| r.liveness == NodeLiveness::Alive).count()
+        self.nodes
+            .read()
+            .values()
+            .filter(|r| r.liveness == NodeLiveness::Alive)
+            .count()
     }
 
     /// Get dead node IDs.
     pub fn dead_nodes(&self) -> Vec<NodeId> {
-        self.nodes.read().values()
+        self.nodes
+            .read()
+            .values()
             .filter(|r| r.liveness == NodeLiveness::Dead)
             .map(|r| r.node_id)
             .collect()
     }
 
     /// Spawn a background evaluator that periodically calls `evaluate()`.
-    pub fn spawn_evaluator(
-        self: &Arc<Self>,
-        cancel: CancellationToken,
-    ) -> FailureDetectorHandle {
+    pub fn spawn_evaluator(self: &Arc<Self>, cancel: CancellationToken) -> FailureDetectorHandle {
         self.spawn_evaluator_with_failover(cancel, None)
     }
 
@@ -351,7 +365,8 @@ impl ClusterFailureDetector {
         let token = cancel.clone();
         let handle = tokio::spawn(async move {
             let mut tick = tokio::time::interval(interval);
-            let channels: dashmap::DashMap<u64, tonic::transport::Channel> = dashmap::DashMap::new();
+            let channels: dashmap::DashMap<u64, tonic::transport::Channel> =
+                dashmap::DashMap::new();
             loop {
                 tokio::select! {
                     _ = token.cancelled() => break,
@@ -519,24 +534,37 @@ impl LeaderElectionCoordinator {
     pub fn register_shard(&self, shard_id: u64, leader: Option<NodeId>, num_nodes: usize) {
         let quorum = num_nodes / 2 + 1;
         let mut shards = self.shards.write();
-        shards.insert(shard_id, ShardElection {
+        shards.insert(
             shard_id,
-            term: self.global_term.load(Ordering::SeqCst),
-            state: if leader.is_some() { ElectionState::Stable } else { ElectionState::NoLeader },
-            leader,
-            candidates: Vec::new(),
-            election_started: None,
-            last_stable: if leader.is_some() { Some(Instant::now()) } else { None },
-            vote_count: 0,
-            required_votes: quorum,
-        });
+            ShardElection {
+                shard_id,
+                term: self.global_term.load(Ordering::SeqCst),
+                state: if leader.is_some() {
+                    ElectionState::Stable
+                } else {
+                    ElectionState::NoLeader
+                },
+                leader,
+                candidates: Vec::new(),
+                election_started: None,
+                last_stable: if leader.is_some() {
+                    Some(Instant::now())
+                } else {
+                    None
+                },
+                vote_count: 0,
+                required_votes: quorum,
+            },
+        );
     }
 
     /// Trigger an election for a shard (e.g., when leader is detected DEAD).
     /// Returns the new term.
     pub fn start_election(&self, shard_id: u64) -> Option<Term> {
         let new_term = self.global_term.fetch_add(1, Ordering::SeqCst) + 1;
-        self.metrics.elections_started.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .elections_started
+            .fetch_add(1, Ordering::Relaxed);
         self.metrics.term_bumps.fetch_add(1, Ordering::Relaxed);
 
         let mut shards = self.shards.write();
@@ -574,7 +602,8 @@ impl LeaderElectionCoordinator {
     /// Requires quorum if configured. Returns the new leader.
     pub fn resolve_election(&self, shard_id: u64) -> Result<NodeId, ElectionError> {
         let mut shards = self.shards.write();
-        let election = shards.get_mut(&shard_id)
+        let election = shards
+            .get_mut(&shard_id)
             .ok_or(ElectionError::ShardNotFound(shard_id))?;
 
         if election.state != ElectionState::Electing {
@@ -585,7 +614,9 @@ impl LeaderElectionCoordinator {
         if let Some(started) = election.election_started {
             if started.elapsed() > self.config.election_max_duration {
                 election.state = ElectionState::NoLeader;
-                self.metrics.elections_timed_out.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .elections_timed_out
+                    .fetch_add(1, Ordering::Relaxed);
                 return Err(ElectionError::Timeout(shard_id));
             }
         }
@@ -600,7 +631,9 @@ impl LeaderElectionCoordinator {
         }
 
         // Pick highest LSN candidate
-        let winner = election.candidates.iter()
+        let winner = election
+            .candidates
+            .iter()
             .max_by_key(|(_, lsn)| *lsn)
             .map(|(node, _)| *node)
             .ok_or(ElectionError::NoCandidates(shard_id))?;
@@ -611,7 +644,9 @@ impl LeaderElectionCoordinator {
         election.state = ElectionState::Stable;
         election.leader = Some(winner);
         election.last_stable = Some(Instant::now());
-        self.metrics.elections_completed.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .elections_completed
+            .fetch_add(1, Ordering::Relaxed);
 
         Ok(winner)
     }
@@ -648,9 +683,17 @@ pub enum ElectionError {
     ShardNotFound(u64),
     NotElecting(u64),
     Timeout(u64),
-    NoQuorum { shard_id: u64, have: usize, need: usize },
+    NoQuorum {
+        shard_id: u64,
+        have: usize,
+        need: usize,
+    },
     NoCandidates(u64),
-    SplitBrain { shard_id: u64, existing_leader: NodeId, new_leader: NodeId },
+    SplitBrain {
+        shard_id: u64,
+        existing_leader: NodeId,
+        new_leader: NodeId,
+    },
 }
 
 impl fmt::Display for ElectionError {
@@ -812,11 +855,15 @@ impl ReplicaCatchUpCoordinator {
         let phase = match lag_class {
             ReplicaLagClass::CaughtUp => CatchUpPhase::Complete,
             ReplicaLagClass::WalReplay => {
-                self.metrics.wal_replays_started.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .wal_replays_started
+                    .fetch_add(1, Ordering::Relaxed);
                 CatchUpPhase::StreamingWal
             }
             ReplicaLagClass::SnapshotRequired => {
-                self.metrics.snapshots_started.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .snapshots_started
+                    .fetch_add(1, Ordering::Relaxed);
                 CatchUpPhase::StreamingSnapshot
             }
         };
@@ -851,14 +898,19 @@ impl ReplicaCatchUpCoordinator {
             state.replica_lsn = new_replica_lsn;
             state.lag = state.leader_lsn.saturating_sub(new_replica_lsn);
             state.bytes_transferred += bytes;
-            self.metrics.bytes_streamed.fetch_add(bytes, Ordering::Relaxed);
+            self.metrics
+                .bytes_streamed
+                .fetch_add(bytes, Ordering::Relaxed);
             if state.lag > 0 {
                 let total = state.leader_lsn.saturating_sub(
-                    state.leader_lsn.saturating_sub(state.lag + (new_replica_lsn - state.replica_lsn))
+                    state
+                        .leader_lsn
+                        .saturating_sub(state.lag + (new_replica_lsn - state.replica_lsn)),
                 );
                 if total > 0 {
-                    state.progress_pct = ((state.leader_lsn - state.lag) as f64
-                        / state.leader_lsn as f64 * 100.0).min(100.0);
+                    state.progress_pct =
+                        ((state.leader_lsn - state.lag) as f64 / state.leader_lsn as f64 * 100.0)
+                            .min(100.0);
                 }
             }
             if state.lag == 0 {
@@ -866,10 +918,14 @@ impl ReplicaCatchUpCoordinator {
                 state.progress_pct = 100.0;
                 match state.lag_class {
                     ReplicaLagClass::WalReplay => {
-                        self.metrics.wal_replays_completed.fetch_add(1, Ordering::Relaxed);
+                        self.metrics
+                            .wal_replays_completed
+                            .fetch_add(1, Ordering::Relaxed);
                     }
                     ReplicaLagClass::SnapshotRequired => {
-                        self.metrics.snapshots_completed.fetch_add(1, Ordering::Relaxed);
+                        self.metrics
+                            .snapshots_completed
+                            .fetch_add(1, Ordering::Relaxed);
                     }
                     _ => {}
                 }
@@ -882,7 +938,9 @@ impl ReplicaCatchUpCoordinator {
         let mut states = self.states.write();
         if let Some(state) = states.get_mut(&(node_id, shard_id)) {
             state.phase = CatchUpPhase::Failed;
-            self.metrics.catch_ups_failed.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .catch_ups_failed
+                .fetch_add(1, Ordering::Relaxed);
         }
         let _ = reason;
     }
@@ -894,7 +952,9 @@ impl ReplicaCatchUpCoordinator {
 
     /// Get all active catch-ups.
     pub fn active_catch_ups(&self) -> Vec<ReplicaCatchUpState> {
-        self.states.read().values()
+        self.states
+            .read()
+            .values()
             .filter(|s| s.phase != CatchUpPhase::Complete && s.phase != CatchUpPhase::Failed)
             .cloned()
             .collect()
@@ -1025,7 +1085,8 @@ impl RollingUpgradeCoordinator {
 
     /// Plan the upgrade: sort nodes by upgrade order.
     pub fn plan_upgrade(&self, nodes: Vec<(NodeId, UpgradeOrder, String)>) {
-        let mut records: Vec<UpgradeNodeRecord> = nodes.into_iter()
+        let mut records: Vec<UpgradeNodeRecord> = nodes
+            .into_iter()
             .map(|(id, order, from_ver)| UpgradeNodeRecord {
                 node_id: id,
                 order,
@@ -1041,7 +1102,9 @@ impl RollingUpgradeCoordinator {
 
     /// Get the next node to upgrade.
     pub fn next_node(&self) -> Option<NodeId> {
-        self.nodes.read().iter()
+        self.nodes
+            .read()
+            .iter()
             .find(|r| r.state == UpgradeNodeState::Pending)
             .map(|r| r.node_id)
     }
@@ -1084,10 +1147,9 @@ impl RollingUpgradeCoordinator {
             record.state = UpgradeNodeState::Complete;
             self.metrics.nodes_upgraded.fetch_add(1, Ordering::Relaxed);
             if let Some(started) = record.started {
-                self.metrics.total_rejoin_time_ms.fetch_add(
-                    started.elapsed().as_millis() as u64,
-                    Ordering::Relaxed,
-                );
+                self.metrics
+                    .total_rejoin_time_ms
+                    .fetch_add(started.elapsed().as_millis() as u64, Ordering::Relaxed);
             }
             return true;
         }
@@ -1107,7 +1169,10 @@ impl RollingUpgradeCoordinator {
 
     /// Check if upgrade is complete.
     pub fn is_complete(&self) -> bool {
-        self.nodes.read().iter().all(|r| r.state == UpgradeNodeState::Complete)
+        self.nodes
+            .read()
+            .iter()
+            .all(|r| r.state == UpgradeNodeState::Complete)
     }
 
     /// Get upgrade plan snapshot.
@@ -1119,7 +1184,10 @@ impl RollingUpgradeCoordinator {
     pub fn progress(&self) -> (usize, usize) {
         let nodes = self.nodes.read();
         let total = nodes.len();
-        let done = nodes.iter().filter(|r| r.state == UpgradeNodeState::Complete).count();
+        let done = nodes
+            .iter()
+            .filter(|r| r.state == UpgradeNodeState::Complete)
+            .count();
         (done, total)
     }
 }
@@ -1241,15 +1309,18 @@ impl NodeLifecycleCoordinator {
         if drains.contains_key(&node_id) {
             return false; // Already draining
         }
-        drains.insert(node_id, NodeDrainState {
+        drains.insert(
             node_id,
-            phase: DrainPhase::RejectingNew,
-            inflight_remaining: 0,
-            shards_to_transfer: owned_shards,
-            shards_transferred: Vec::new(),
-            started: Some(Instant::now()),
-            completed: None,
-        });
+            NodeDrainState {
+                node_id,
+                phase: DrainPhase::RejectingNew,
+                inflight_remaining: 0,
+                shards_to_transfer: owned_shards,
+                shards_transferred: Vec::new(),
+                started: Some(Instant::now()),
+                completed: None,
+            },
+        );
         self.metrics.drains_started.fetch_add(1, Ordering::Relaxed);
         true
     }
@@ -1266,7 +1337,9 @@ impl NodeLifecycleCoordinator {
                 if state.shards_to_transfer.is_empty() {
                     state.phase = DrainPhase::Drained;
                     state.completed = Some(Instant::now());
-                    self.metrics.drains_completed.fetch_add(1, Ordering::Relaxed);
+                    self.metrics
+                        .drains_completed
+                        .fetch_add(1, Ordering::Relaxed);
                 } else {
                     state.phase = DrainPhase::TransferringShards;
                 }
@@ -1280,18 +1353,24 @@ impl NodeLifecycleCoordinator {
         if let Some(state) = drains.get_mut(&node_id) {
             state.shards_to_transfer.retain(|s| *s != shard_id);
             state.shards_transferred.push(shard_id);
-            self.metrics.shards_transferred.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .shards_transferred
+                .fetch_add(1, Ordering::Relaxed);
             if state.shards_to_transfer.is_empty() && state.inflight_remaining == 0 {
                 state.phase = DrainPhase::Drained;
                 state.completed = Some(Instant::now());
-                self.metrics.drains_completed.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .drains_completed
+                    .fetch_add(1, Ordering::Relaxed);
             }
         }
     }
 
     /// Check if a node is fully drained.
     pub fn is_drained(&self, node_id: NodeId) -> bool {
-        self.drains.read().get(&node_id)
+        self.drains
+            .read()
+            .get(&node_id)
             .is_some_and(|s| s.phase == DrainPhase::Drained)
     }
 
@@ -1306,13 +1385,16 @@ impl NodeLifecycleCoordinator {
         if joins.contains_key(&node_id) {
             return false;
         }
-        joins.insert(node_id, NodeJoinState {
+        joins.insert(
             node_id,
-            phase: JoinPhase::Syncing,
-            shards_assigned: shards,
-            shards_synced: Vec::new(),
-            started: Some(Instant::now()),
-        });
+            NodeJoinState {
+                node_id,
+                phase: JoinPhase::Syncing,
+                shards_assigned: shards,
+                shards_synced: Vec::new(),
+                started: Some(Instant::now()),
+            },
+        );
         self.metrics.joins_started.fetch_add(1, Ordering::Relaxed);
         true
     }
@@ -1440,7 +1522,9 @@ impl SloTracker {
     }
 
     fn p99(sorted: &[u64]) -> u64 {
-        if sorted.is_empty() { return 0; }
+        if sorted.is_empty() {
+            return 0;
+        }
         let idx = ((sorted.len() as f64 * 0.99).ceil() as usize).saturating_sub(1);
         sorted[idx.min(sorted.len() - 1)]
     }
@@ -1572,8 +1656,12 @@ pub struct BackpressureConfig {
 impl Default for BackpressureConfig {
     fn default() -> Self {
         Self {
-            cpu_elevated: 0.7, cpu_high: 0.85, cpu_critical: 0.95,
-            memory_elevated: 0.7, memory_high: 0.85, memory_critical: 0.95,
+            cpu_elevated: 0.7,
+            cpu_high: 0.85,
+            cpu_critical: 0.95,
+            memory_elevated: 0.7,
+            memory_high: 0.85,
+            memory_critical: 0.95,
             wal_backlog_elevated: 10_000_000,
             wal_backlog_high: 50_000_000,
             wal_backlog_critical: 100_000_000,
@@ -1621,34 +1709,62 @@ impl BackpressureController {
         let mut max_level = PressureLevel::Normal;
 
         if let Some(&cpu) = signals.get(&PressureSignal::Cpu) {
-            let lvl = if cpu >= c.cpu_critical { PressureLevel::Critical }
-                else if cpu >= c.cpu_high { PressureLevel::High }
-                else if cpu >= c.cpu_elevated { PressureLevel::Elevated }
-                else { PressureLevel::Normal };
-            if lvl > max_level { max_level = lvl; }
+            let lvl = if cpu >= c.cpu_critical {
+                PressureLevel::Critical
+            } else if cpu >= c.cpu_high {
+                PressureLevel::High
+            } else if cpu >= c.cpu_elevated {
+                PressureLevel::Elevated
+            } else {
+                PressureLevel::Normal
+            };
+            if lvl > max_level {
+                max_level = lvl;
+            }
         }
         if let Some(&mem) = signals.get(&PressureSignal::Memory) {
-            let lvl = if mem >= c.memory_critical { PressureLevel::Critical }
-                else if mem >= c.memory_high { PressureLevel::High }
-                else if mem >= c.memory_elevated { PressureLevel::Elevated }
-                else { PressureLevel::Normal };
-            if lvl > max_level { max_level = lvl; }
+            let lvl = if mem >= c.memory_critical {
+                PressureLevel::Critical
+            } else if mem >= c.memory_high {
+                PressureLevel::High
+            } else if mem >= c.memory_elevated {
+                PressureLevel::Elevated
+            } else {
+                PressureLevel::Normal
+            };
+            if lvl > max_level {
+                max_level = lvl;
+            }
         }
         if let Some(&wal) = signals.get(&PressureSignal::WalBacklog) {
             let wal_bytes = wal as u64;
-            let lvl = if wal_bytes >= c.wal_backlog_critical { PressureLevel::Critical }
-                else if wal_bytes >= c.wal_backlog_high { PressureLevel::High }
-                else if wal_bytes >= c.wal_backlog_elevated { PressureLevel::Elevated }
-                else { PressureLevel::Normal };
-            if lvl > max_level { max_level = lvl; }
+            let lvl = if wal_bytes >= c.wal_backlog_critical {
+                PressureLevel::Critical
+            } else if wal_bytes >= c.wal_backlog_high {
+                PressureLevel::High
+            } else if wal_bytes >= c.wal_backlog_elevated {
+                PressureLevel::Elevated
+            } else {
+                PressureLevel::Normal
+            };
+            if lvl > max_level {
+                max_level = lvl;
+            }
         }
         if let Some(&lag) = signals.get(&PressureSignal::ReplicationLag) {
             let lag_lsn = lag as u64;
-            let lvl = if lag_lsn >= c.replication_lag_critical { PressureLevel::Critical }
-                else if lag_lsn >= c.replication_lag_high { PressureLevel::High }
-                else if lag_lsn >= c.replication_lag_elevated { PressureLevel::Elevated }
-                else { PressureLevel::Normal };
-            if lvl > max_level { max_level = lvl; }
+            let lvl = if lag_lsn >= c.replication_lag_critical {
+                PressureLevel::Critical
+            } else if lag_lsn >= c.replication_lag_high {
+                PressureLevel::High
+            } else if lag_lsn >= c.replication_lag_elevated {
+                PressureLevel::Elevated
+            } else {
+                PressureLevel::Normal
+            };
+            if lvl > max_level {
+                max_level = lvl;
+            }
         }
 
         // Update level and admission rate
@@ -1672,20 +1788,28 @@ impl BackpressureController {
     pub fn should_admit(&self, request_hash: u64) -> bool {
         let rate = *self.admission_rate.read();
         if rate >= 1.0 {
-            self.metrics.requests_admitted.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .requests_admitted
+                .fetch_add(1, Ordering::Relaxed);
             return true;
         }
         if rate <= 0.0 {
-            self.metrics.requests_throttled.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .requests_throttled
+                .fetch_add(1, Ordering::Relaxed);
             return false;
         }
         // Deterministic: hash mod 1000 < rate * 1000
         let threshold = (rate * 1000.0) as u64;
         let admitted = (request_hash % 1000) < threshold;
         if admitted {
-            self.metrics.requests_admitted.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .requests_admitted
+                .fetch_add(1, Ordering::Relaxed);
         } else {
-            self.metrics.requests_throttled.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .requests_throttled
+                .fetch_add(1, Ordering::Relaxed);
         }
         admitted
     }
@@ -1785,19 +1909,47 @@ pub enum OpsEventType {
     NodeUp(NodeId),
     NodeDown(NodeId),
     NodeSuspect(NodeId),
-    LeaderElected { shard_id: u64, leader: NodeId, term: Term },
-    LeaderLost { shard_id: u64, old_leader: NodeId },
+    LeaderElected {
+        shard_id: u64,
+        leader: NodeId,
+        term: Term,
+    },
+    LeaderLost {
+        shard_id: u64,
+        old_leader: NodeId,
+    },
     DrainStarted(NodeId),
     DrainCompleted(NodeId),
     JoinStarted(NodeId),
     JoinCompleted(NodeId),
-    UpgradeStarted { target_version: String },
-    UpgradeNodeComplete { node_id: NodeId, version: String },
-    UpgradeComplete { version: String },
-    ConfigChanged { key: String, old_value: String, new_value: String },
-    BackpressureChanged { old_level: PressureLevel, new_level: PressureLevel },
-    CatchUpStarted { node_id: NodeId, shard_id: u64, strategy: ReplicaLagClass },
-    CatchUpCompleted { node_id: NodeId, shard_id: u64 },
+    UpgradeStarted {
+        target_version: String,
+    },
+    UpgradeNodeComplete {
+        node_id: NodeId,
+        version: String,
+    },
+    UpgradeComplete {
+        version: String,
+    },
+    ConfigChanged {
+        key: String,
+        old_value: String,
+        new_value: String,
+    },
+    BackpressureChanged {
+        old_level: PressureLevel,
+        new_level: PressureLevel,
+    },
+    CatchUpStarted {
+        node_id: NodeId,
+        shard_id: u64,
+        strategy: ReplicaLagClass,
+    },
+    CatchUpCompleted {
+        node_id: NodeId,
+        shard_id: u64,
+    },
 }
 
 impl fmt::Display for OpsEventType {
@@ -1806,28 +1958,49 @@ impl fmt::Display for OpsEventType {
             Self::NodeUp(id) => write!(f, "NODE_UP {id:?}"),
             Self::NodeDown(id) => write!(f, "NODE_DOWN {id:?}"),
             Self::NodeSuspect(id) => write!(f, "NODE_SUSPECT {id:?}"),
-            Self::LeaderElected { shard_id, leader, term } =>
-                write!(f, "LEADER_ELECTED shard={shard_id} leader={leader:?} term={term}"),
-            Self::LeaderLost { shard_id, old_leader } =>
-                write!(f, "LEADER_LOST shard={shard_id} old_leader={old_leader:?}"),
+            Self::LeaderElected {
+                shard_id,
+                leader,
+                term,
+            } => write!(
+                f,
+                "LEADER_ELECTED shard={shard_id} leader={leader:?} term={term}"
+            ),
+            Self::LeaderLost {
+                shard_id,
+                old_leader,
+            } => write!(f, "LEADER_LOST shard={shard_id} old_leader={old_leader:?}"),
             Self::DrainStarted(id) => write!(f, "DRAIN_STARTED {id:?}"),
             Self::DrainCompleted(id) => write!(f, "DRAIN_COMPLETED {id:?}"),
             Self::JoinStarted(id) => write!(f, "JOIN_STARTED {id:?}"),
             Self::JoinCompleted(id) => write!(f, "JOIN_COMPLETED {id:?}"),
-            Self::UpgradeStarted { target_version } =>
-                write!(f, "UPGRADE_STARTED target={target_version}"),
-            Self::UpgradeNodeComplete { node_id, version } =>
-                write!(f, "UPGRADE_NODE_COMPLETE {node_id:?} v={version}"),
-            Self::UpgradeComplete { version } =>
-                write!(f, "UPGRADE_COMPLETE v={version}"),
-            Self::ConfigChanged { key, old_value, new_value } =>
-                write!(f, "CONFIG_CHANGED {key}={old_value}->{new_value}"),
-            Self::BackpressureChanged { old_level, new_level } =>
-                write!(f, "BACKPRESSURE_CHANGED {old_level}→{new_level}"),
-            Self::CatchUpStarted { node_id, shard_id, strategy } =>
-                write!(f, "CATCHUP_STARTED {node_id:?} shard={shard_id} strategy={strategy}"),
-            Self::CatchUpCompleted { node_id, shard_id } =>
-                write!(f, "CATCHUP_COMPLETED {node_id:?} shard={shard_id}"),
+            Self::UpgradeStarted { target_version } => {
+                write!(f, "UPGRADE_STARTED target={target_version}")
+            }
+            Self::UpgradeNodeComplete { node_id, version } => {
+                write!(f, "UPGRADE_NODE_COMPLETE {node_id:?} v={version}")
+            }
+            Self::UpgradeComplete { version } => write!(f, "UPGRADE_COMPLETE v={version}"),
+            Self::ConfigChanged {
+                key,
+                old_value,
+                new_value,
+            } => write!(f, "CONFIG_CHANGED {key}={old_value}->{new_value}"),
+            Self::BackpressureChanged {
+                old_level,
+                new_level,
+            } => write!(f, "BACKPRESSURE_CHANGED {old_level}→{new_level}"),
+            Self::CatchUpStarted {
+                node_id,
+                shard_id,
+                strategy,
+            } => write!(
+                f,
+                "CATCHUP_STARTED {node_id:?} shard={shard_id} strategy={strategy}"
+            ),
+            Self::CatchUpCompleted { node_id, shard_id } => {
+                write!(f, "CATCHUP_COMPLETED {node_id:?} shard={shard_id}")
+            }
         }
     }
 }
@@ -2072,7 +2245,10 @@ mod tests {
         let coord = ReplicaCatchUpCoordinator::new(CatchUpConfig::default());
         assert_eq!(coord.classify_lag(100, 100), ReplicaLagClass::CaughtUp);
         assert_eq!(coord.classify_lag(1000, 500), ReplicaLagClass::WalReplay);
-        assert_eq!(coord.classify_lag(200_000, 0), ReplicaLagClass::SnapshotRequired);
+        assert_eq!(
+            coord.classify_lag(200_000, 0),
+            ReplicaLagClass::SnapshotRequired
+        );
     }
 
     #[test]
@@ -2244,11 +2420,16 @@ mod tests {
         bp.evaluate(); // HIGH → rate 0.5
         let mut admitted = 0;
         for i in 0..1000u64 {
-            if bp.should_admit(i) { admitted += 1; }
+            if bp.should_admit(i) {
+                admitted += 1;
+            }
         }
         // ~50% should be admitted
-        assert!(admitted > 400 && admitted < 600,
-            "expected ~500 admitted, got {}", admitted);
+        assert!(
+            admitted > 400 && admitted < 600,
+            "expected ~500 admitted, got {}",
+            admitted
+        );
     }
 
     #[test]
@@ -2274,15 +2455,23 @@ mod tests {
         let log = OpsAuditLog::new(100);
         log.record(OpsEventType::NodeUp(NodeId(1)), "system");
         log.record(OpsEventType::NodeDown(NodeId(2)), "failure_detector");
-        log.record(OpsEventType::LeaderElected {
-            shard_id: 0, leader: NodeId(1), term: 5
-        }, "election_coordinator");
+        log.record(
+            OpsEventType::LeaderElected {
+                shard_id: 0,
+                leader: NodeId(1),
+                term: 5,
+            },
+            "election_coordinator",
+        );
 
         assert_eq!(log.total(), 3);
         let recent = log.recent(2);
         assert_eq!(recent.len(), 2);
         // Most recent first
-        assert!(matches!(recent[0].event_type, OpsEventType::LeaderElected { .. }));
+        assert!(matches!(
+            recent[0].event_type,
+            OpsEventType::LeaderElected { .. }
+        ));
     }
 
     #[test]
@@ -2351,10 +2540,7 @@ mod tests {
             let log_clone = Arc::clone(&log);
             handles.push(std::thread::spawn(move || {
                 for i in 0..250 {
-                    log_clone.record(
-                        OpsEventType::NodeUp(NodeId((t * 250 + i) as u64)),
-                        "test",
-                    );
+                    log_clone.record(OpsEventType::NodeUp(NodeId((t * 250 + i) as u64)), "test");
                 }
             }));
         }

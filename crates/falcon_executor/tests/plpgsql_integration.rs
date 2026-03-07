@@ -12,26 +12,32 @@ fn setup() -> (Executor, Arc<StorageEngine>, Arc<TxnManager>) {
     (executor, storage, txn_mgr)
 }
 
-fn run_sql(executor: &Executor, storage: &StorageEngine, sql: &str) -> Result<ExecutionResult, String> {
+fn run_sql(
+    executor: &Executor,
+    storage: &StorageEngine,
+    sql: &str,
+) -> Result<ExecutionResult, String> {
     let dialect = sqlparser::dialect::PostgreSqlDialect {};
-    let stmts = sqlparser::parser::Parser::parse_sql(&dialect, sql)
-        .map_err(|e| format!("parse: {e}"))?;
+    let stmts =
+        sqlparser::parser::Parser::parse_sql(&dialect, sql).map_err(|e| format!("parse: {e}"))?;
     let stmt = stmts.into_iter().next().ok_or("empty SQL")?;
     let catalog = storage.get_catalog();
     let mut binder = falcon_sql_frontend::binder::Binder::new(catalog);
     let bound = binder.bind(&stmt).map_err(|e| format!("bind: {e}"))?;
     let plan = falcon_planner::Planner::plan(&bound).map_err(|e| format!("plan: {e}"))?;
-    executor.execute(&plan, None).map_err(|e| format!("exec: {e}"))
+    executor
+        .execute(&plan, None)
+        .map_err(|e| format!("exec: {e}"))
 }
 
+#[allow(dead_code)]
 fn query_first_datum(executor: &Executor, storage: &StorageEngine, sql: &str) -> Datum {
     match run_sql(executor, storage, sql).unwrap() {
-        ExecutionResult::Query { rows, .. } => {
-            rows.into_iter()
-                .next()
-                .and_then(|r| r.values.into_iter().next())
-                .unwrap_or(Datum::Null)
-        }
+        ExecutionResult::Query { rows, .. } => rows
+            .into_iter()
+            .next()
+            .and_then(|r| r.values.into_iter().next())
+            .unwrap_or(Datum::Null),
         other => panic!("expected Query, got {:?}", other),
     }
 }
@@ -70,9 +76,12 @@ fn test_drop_function_if_exists() {
 fn test_create_or_replace_function() {
     let (executor, storage, _txn) = setup();
 
-    run_sql(&executor, &storage,
-        "CREATE FUNCTION myfunc(x INTEGER) RETURNS INTEGER LANGUAGE SQL AS 'SELECT $1'"
-    ).unwrap();
+    run_sql(
+        &executor,
+        &storage,
+        "CREATE FUNCTION myfunc(x INTEGER) RETURNS INTEGER LANGUAGE SQL AS 'SELECT $1'",
+    )
+    .unwrap();
 
     // OR REPLACE should succeed
     run_sql(&executor, &storage,
@@ -95,7 +104,10 @@ fn test_create_plpgsql_function() {
 
     let catalog = storage.get_catalog();
     let func = catalog.find_function("greet").unwrap();
-    assert_eq!(func.language, falcon_common::schema::FunctionLanguage::PlPgSql);
+    assert_eq!(
+        func.language,
+        falcon_common::schema::FunctionLanguage::PlPgSql
+    );
 }
 
 #[test]
@@ -108,7 +120,10 @@ fn test_create_function_volatility() {
 
     let catalog = storage.get_catalog();
     let func = catalog.find_function("pure_add").unwrap();
-    assert_eq!(func.volatility, falcon_common::schema::FunctionVolatility::Immutable);
+    assert_eq!(
+        func.volatility,
+        falcon_common::schema::FunctionVolatility::Immutable
+    );
 }
 
 #[test]

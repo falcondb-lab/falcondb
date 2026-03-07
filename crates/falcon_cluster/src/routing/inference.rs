@@ -89,7 +89,12 @@ impl ShardRouterClient {
             .connect_timeout(self.connect_timeout)
             .connect()
             .await
-            .map_err(|e| format!("gRPC connect to node {} ({}): {}", node_id, endpoint_addr, e))?;
+            .map_err(|e| {
+                format!(
+                    "gRPC connect to node {} ({}): {}",
+                    node_id, endpoint_addr, e
+                )
+            })?;
 
         self.channels.insert(node_id, channel.clone());
         Ok(channel)
@@ -122,8 +127,7 @@ impl ShardRouterClient {
         );
 
         let channel = self.get_channel(leader_id).await?;
-        let mut client =
-            crate::proto::wal_replication_client::WalReplicationClient::new(channel);
+        let mut client = crate::proto::wal_replication_client::WalReplicationClient::new(channel);
 
         let request = crate::proto::ForwardQueryRpc {
             shard_id,
@@ -181,8 +185,7 @@ impl ShardRouterClient {
         );
 
         let channel = self.get_channel(node_id).await?;
-        let mut client =
-            crate::proto::wal_replication_client::WalReplicationClient::new(channel);
+        let mut client = crate::proto::wal_replication_client::WalReplicationClient::new(channel);
 
         let request = crate::proto::ExecuteSubPlanRequest {
             shard_id,
@@ -240,13 +243,18 @@ impl ShardRouterClient {
         let channel = self.get_channel(node_id).await?;
         let mut client = crate::proto::wal_replication_client::WalReplicationClient::new(channel);
         let req = crate::proto::Prepare2pcRequest {
-            txn_id, shard_id, sql: sql.to_owned(),
+            txn_id,
+            shard_id,
+            sql: sql.to_owned(),
         };
         match client.prepare2pc(req).await {
             Ok(r) => {
                 let r = r.into_inner();
-                if r.success { Ok(r.rows_affected) }
-                else { Err(format!("Prepare2pc failed on node {node_id}: {}", r.error)) }
+                if r.success {
+                    Ok(r.rows_affected)
+                } else {
+                    Err(format!("Prepare2pc failed on node {node_id}: {}", r.error))
+                }
             }
             Err(s) => {
                 self.invalidate_channel(node_id);
@@ -256,15 +264,23 @@ impl ShardRouterClient {
     }
 
     /// Send Commit2pc RPC to a remote node.
-    pub async fn commit_2pc_remote(&self, node_id: u64, txn_id: u64, shard_id: u64) -> Result<(), String> {
+    pub async fn commit_2pc_remote(
+        &self,
+        node_id: u64,
+        txn_id: u64,
+        shard_id: u64,
+    ) -> Result<(), String> {
         let channel = self.get_channel(node_id).await?;
         let mut client = crate::proto::wal_replication_client::WalReplicationClient::new(channel);
         let req = crate::proto::Commit2pcRequest { txn_id, shard_id };
         match client.commit2pc(req).await {
             Ok(r) => {
                 let r = r.into_inner();
-                if r.success { Ok(()) }
-                else { Err(format!("Commit2pc failed on node {node_id}: {}", r.error)) }
+                if r.success {
+                    Ok(())
+                } else {
+                    Err(format!("Commit2pc failed on node {node_id}: {}", r.error))
+                }
             }
             Err(s) => {
                 self.invalidate_channel(node_id);
@@ -274,7 +290,12 @@ impl ShardRouterClient {
     }
 
     /// Send Abort2pc RPC to a remote node.
-    pub async fn abort_2pc_remote(&self, node_id: u64, txn_id: u64, shard_id: u64) -> Result<(), String> {
+    pub async fn abort_2pc_remote(
+        &self,
+        node_id: u64,
+        txn_id: u64,
+        shard_id: u64,
+    ) -> Result<(), String> {
         let channel = self.get_channel(node_id).await?;
         let mut client = crate::proto::wal_replication_client::WalReplicationClient::new(channel);
         let req = crate::proto::Abort2pcRequest { txn_id, shard_id };

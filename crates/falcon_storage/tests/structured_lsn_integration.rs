@@ -44,7 +44,9 @@ fn test_e2e_single_writer_flow() {
         assert!(
             all_lsns[i] > all_lsns[i - 1],
             "LSN not monotonically increasing at index {}: {} vs {}",
-            i, all_lsns[i - 1], all_lsns[i]
+            i,
+            all_lsns[i - 1],
+            all_lsns[i]
         );
     }
 }
@@ -79,7 +81,8 @@ fn test_multi_writer_no_lsn_overlap() {
             default_reservation_bytes: 4096,
             record_alignment: 8,
         },
-        0, 0,
+        0,
+        0,
     ));
 
     let num_writers = 8;
@@ -118,7 +121,8 @@ fn test_multi_writer_no_lsn_overlap() {
     all_lsns.sort();
     for i in 1..all_lsns.len() {
         assert_ne!(
-            all_lsns[i], all_lsns[i - 1],
+            all_lsns[i],
+            all_lsns[i - 1],
             "Duplicate LSN detected: {}",
             all_lsns[i]
         );
@@ -162,7 +166,8 @@ fn test_segment_boundary_fill_and_rollover() {
         assert!(
             r.base_lsn.raw() >= prev_lsn_raw,
             "LSN decreased after reservation: {} < {}",
-            r.base_lsn.raw(), prev_lsn_raw
+            r.base_lsn.raw(),
+            prev_lsn_raw
         );
         prev_lsn_raw = r.limit_lsn.raw();
     }
@@ -226,11 +231,7 @@ fn test_crash_recovery_rebuild_lsn_state() {
     h2.last_valid_offset = 50_000; // partially written at crash
     h2.checksum = h2.compute_checksum();
 
-    let headers = vec![
-        (0, h0.to_bytes()),
-        (1, h1.to_bytes()),
-        (2, h2.to_bytes()),
-    ];
+    let headers = vec![(0, h0.to_bytes()), (1, h1.to_bytes()), (2, h2.to_bytes())];
 
     let state = recover_from_headers(&headers);
     assert_eq!(state.segments.len(), 3);
@@ -243,9 +244,7 @@ fn test_crash_recovery_rebuild_lsn_state() {
     // Now create an allocator from recovered state
     let alloc = LsnAllocator::new(LsnAllocatorConfig::default(), 0, 0);
     for seg in &state.segments {
-        let mut hdr = SegmentHeader::new(
-            seg.segment_id, DEFAULT_MAX_SEGMENT_SIZE, seg.start_lsn,
-        );
+        let mut hdr = SegmentHeader::new(seg.segment_id, DEFAULT_MAX_SEGMENT_SIZE, seg.start_lsn);
         hdr.last_valid_offset = seg.last_valid_offset;
         alloc.recover_from_header(&hdr);
     }
@@ -268,13 +267,11 @@ fn test_crash_recovery_partial_header_corruption() {
     h0.last_valid_offset = 80_000;
     h0.checksum = h0.compute_checksum();
 
-    let mut h1_bytes = SegmentHeader::new(1, DEFAULT_MAX_SEGMENT_SIZE, StructuredLsn::new(1, 0)).to_bytes();
+    let mut h1_bytes =
+        SegmentHeader::new(1, DEFAULT_MAX_SEGMENT_SIZE, StructuredLsn::new(1, 0)).to_bytes();
     h1_bytes[30] ^= 0xFF; // corrupt
 
-    let headers = vec![
-        (0, h0.to_bytes()),
-        (1, h1_bytes),
-    ];
+    let headers = vec![(0, h0.to_bytes()), (1, h1_bytes)];
 
     let state = recover_from_headers(&headers);
     assert_eq!(state.segments.len(), 2);
@@ -291,11 +288,15 @@ fn test_crash_recovery_partial_header_corruption() {
 
 #[test]
 fn test_group_commit_reserve_exact_batch() {
-    let alloc = LsnAllocator::new(LsnAllocatorConfig {
-        segment_size: DEFAULT_MAX_SEGMENT_SIZE,
-        default_reservation_bytes: 256 * 1024,
-        record_alignment: 8,
-    }, 0, 0);
+    let alloc = LsnAllocator::new(
+        LsnAllocatorConfig {
+            segment_size: DEFAULT_MAX_SEGMENT_SIZE,
+            default_reservation_bytes: 256 * 1024,
+            record_alignment: 8,
+        },
+        0,
+        0,
+    );
 
     // Simulate group commit: 32 records × 256 bytes = 8 KB exact
     let batch_records = 32u64;
@@ -321,7 +322,13 @@ fn test_group_commit_reserve_exact_batch() {
     }
 
     // Only 1 atomic touch for the entire batch
-    assert_eq!(alloc.metrics.reservation_batches_total.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        alloc
+            .metrics
+            .reservation_batches_total
+            .load(Ordering::Relaxed),
+        1
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -377,17 +384,24 @@ fn test_perf_guardrail_atomic_reduction() {
             }
         }));
     }
-    for h in handles { h.join().unwrap(); }
+    for h in handles {
+        h.join().unwrap();
+    }
 
     let total_records = (num_threads * records_per_thread) as u64;
-    let atomic_touches = alloc.metrics.reservation_batches_total.load(Ordering::Relaxed);
+    let atomic_touches = alloc
+        .metrics
+        .reservation_batches_total
+        .load(Ordering::Relaxed);
     let reduction_pct = (1.0 - atomic_touches as f64 / total_records as f64) * 100.0;
 
     assert!(
         reduction_pct >= 90.0,
         "Expected ≥90% reduction in atomic ops vs per-record baseline. \
          Got {:.1}% (atomic_touches={}, total_records={})",
-        reduction_pct, atomic_touches, total_records
+        reduction_pct,
+        atomic_touches,
+        total_records
     );
 }
 
@@ -413,14 +427,26 @@ fn test_metrics_accuracy() {
     assert_eq!(m.reservation_batches_total.load(Ordering::Relaxed), 10);
 
     let total_reserved = m.reserved_bytes_total.load(Ordering::Relaxed);
-    assert!(total_reserved >= 10 * 2048, "expected ≥20480 reserved bytes, got {}", total_reserved);
+    assert!(
+        total_reserved >= 10 * 2048,
+        "expected ≥20480 reserved bytes, got {}",
+        total_reserved
+    );
 
     let rollovers = m.segment_rollover_total.load(Ordering::Relaxed);
     assert!(rollovers >= 2, "expected ≥2 rollovers, got {}", rollovers);
 
     let avg_util = m.avg_segment_utilization();
-    assert!(avg_util > 0.5, "expected >50% segment utilization, got {:.2}", avg_util);
+    assert!(
+        avg_util > 0.5,
+        "expected >50% segment utilization, got {:.2}",
+        avg_util
+    );
 
     let avg_res = m.avg_reservation_bytes();
-    assert!(avg_res >= 2048.0, "expected avg reservation ≥2048, got {:.0}", avg_res);
+    assert!(
+        avg_res >= 2048.0,
+        "expected avg reservation ≥2048, got {:.0}",
+        avg_res
+    );
 }

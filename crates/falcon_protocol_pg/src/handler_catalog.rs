@@ -170,7 +170,11 @@ impl QueryHandler {
             // pg_inherits — table inheritance (Hibernate schema tool)
             if sql_lower.contains("pg_inherits") {
                 return Some(self.single_row_result(
-                    vec![("inhrelid", 26, 4i16), ("inhparent", 26, 4), ("inhseqno", 23, 4)],
+                    vec![
+                        ("inhrelid", 26, 4i16),
+                        ("inhparent", 26, 4),
+                        ("inhseqno", 23, 4),
+                    ],
                     vec![],
                 ));
             }
@@ -181,7 +185,12 @@ impl QueryHandler {
             // pg_attrdef — column defaults (Hibernate, Django, SQLAlchemy)
             if sql_lower.contains("pg_attrdef") {
                 return Some(self.single_row_result(
-                    vec![("oid", 26, 4i16), ("adrelid", 26, 4), ("adnum", 21, 2), ("adbin", 25, -1)],
+                    vec![
+                        ("oid", 26, 4i16),
+                        ("adrelid", 26, 4),
+                        ("adnum", 21, 2),
+                        ("adbin", 25, -1),
+                    ],
                     vec![],
                 ));
             }
@@ -189,8 +198,12 @@ impl QueryHandler {
             if sql_lower.contains("pg_depend") {
                 return Some(self.single_row_result(
                     vec![
-                        ("classid", 26, 4i16), ("objid", 26, 4), ("objsubid", 23, 4),
-                        ("refclassid", 26, 4), ("refobjid", 26, 4), ("refobjsubid", 23, 4),
+                        ("classid", 26, 4i16),
+                        ("objid", 26, 4),
+                        ("objsubid", 23, 4),
+                        ("refclassid", 26, 4),
+                        ("refobjid", 26, 4),
+                        ("refobjsubid", 23, 4),
                         ("deptype", 18, 1),
                     ],
                     vec![],
@@ -200,13 +213,34 @@ impl QueryHandler {
             if sql_lower.contains("pg_collation") {
                 return Some(self.single_row_result(
                     vec![
-                        ("oid", 26, 4i16), ("collname", 25, -1), ("collnamespace", 26, 4),
-                        ("collowner", 26, 4), ("collencoding", 23, 4),
+                        ("oid", 26, 4i16),
+                        ("collname", 25, -1),
+                        ("collnamespace", 26, 4),
+                        ("collowner", 26, 4),
+                        ("collencoding", 23, 4),
                     ],
                     vec![
-                        vec![Some("100".into()), Some("default".into()), Some("11".into()), Some("10".into()), Some("-1".into())],
-                        vec![Some("950".into()), Some("C".into()), Some("11".into()), Some("10".into()), Some("-1".into())],
-                        vec![Some("951".into()), Some("POSIX".into()), Some("11".into()), Some("10".into()), Some("-1".into())],
+                        vec![
+                            Some("100".into()),
+                            Some("default".into()),
+                            Some("11".into()),
+                            Some("10".into()),
+                            Some("-1".into()),
+                        ],
+                        vec![
+                            Some("950".into()),
+                            Some("C".into()),
+                            Some("11".into()),
+                            Some("10".into()),
+                            Some("-1".into()),
+                        ],
+                        vec![
+                            Some("951".into()),
+                            Some("POSIX".into()),
+                            Some("11".into()),
+                            Some("10".into()),
+                            Some("-1".into()),
+                        ],
                     ],
                 ));
             }
@@ -214,20 +248,30 @@ impl QueryHandler {
             if sql_lower.contains("pg_extension") {
                 return Some(self.single_row_result(
                     vec![
-                        ("oid", 26, 4i16), ("extname", 25, -1), ("extowner", 26, 4),
-                        ("extnamespace", 26, 4), ("extversion", 25, -1),
+                        ("oid", 26, 4i16),
+                        ("extname", 25, -1),
+                        ("extowner", 26, 4),
+                        ("extnamespace", 26, 4),
+                        ("extversion", 25, -1),
                     ],
-                    vec![
-                        vec![Some("13823".into()), Some("plpgsql".into()), Some("10".into()), Some("11".into()), Some("1.0".into())],
-                    ],
+                    vec![vec![
+                        Some("13823".into()),
+                        Some("plpgsql".into()),
+                        Some("10".into()),
+                        Some("11".into()),
+                        Some("1.0".into()),
+                    ]],
                 ));
             }
             // pg_range — range type info
             if sql_lower.contains("pg_range") {
                 return Some(self.single_row_result(
                     vec![
-                        ("rngtypid", 26, 4i16), ("rngsubtype", 26, 4), ("rngmultitypid", 26, 4),
-                        ("rngcollation", 26, 4), ("rngsubopc", 26, 4),
+                        ("rngtypid", 26, 4i16),
+                        ("rngsubtype", 26, 4),
+                        ("rngmultitypid", 26, 4),
+                        ("rngcollation", 26, 4),
+                        ("rngsubopc", 26, 4),
                     ],
                     vec![],
                 ));
@@ -575,57 +619,57 @@ impl QueryHandler {
         // (typname, oid, typarray, typlen, typtype)
         // Column order matches pgjdbc TypeInfoCache expectation: col1=typname, col2=oid, col3=typarray
         let builtin_types: &[(&str, i32, i32, i16, &str)] = &[
-            ("bool",          16,   1000,   1, "b"),
-            ("bytea",         17,   1001,  -1, "b"),
-            ("char",          18,   1002,   1, "b"),
-            ("name",          19,   1003,  64, "b"),
-            ("int8",          20,   1016,   8, "b"),
-            ("int2",          21,   1005,   2, "b"),
-            ("int4",          23,   1007,   4, "b"),
-            ("text",          25,   1009,  -1, "b"),
-            ("oid",           26,   1028,   4, "b"),
-            ("json",         114,    199,  -1, "b"),
-            ("xml",          142,    143,  -1, "b"),
-            ("float4",       700,   1021,   4, "b"),
-            ("float8",       701,   1022,   8, "b"),
-            ("money",        790,    791,   8, "b"),
-            ("bpchar",      1042,   1014,  -1, "b"),
-            ("varchar",     1043,   1015,  -1, "b"),
-            ("date",        1082,   1182,   4, "b"),
-            ("time",        1083,   1183,   8, "b"),
-            ("timestamp",   1114,   1115,   8, "b"),
-            ("timestamptz", 1184,   1185,   8, "b"),
-            ("interval",    1186,   1187,  16, "b"),
-            ("timetz",      1266,   1270,  12, "b"),
-            ("bit",         1560,   1561,  -1, "b"),
-            ("varbit",      1562,   1563,  -1, "b"),
-            ("numeric",     1700,   1231,  -1, "b"),
-            ("void",        2278,      0,   4, "p"),
-            ("uuid",        2950,   2951,  16, "b"),
-            ("jsonb",       3802,   3807,  -1, "b"),
+            ("bool", 16, 1000, 1, "b"),
+            ("bytea", 17, 1001, -1, "b"),
+            ("char", 18, 1002, 1, "b"),
+            ("name", 19, 1003, 64, "b"),
+            ("int8", 20, 1016, 8, "b"),
+            ("int2", 21, 1005, 2, "b"),
+            ("int4", 23, 1007, 4, "b"),
+            ("text", 25, 1009, -1, "b"),
+            ("oid", 26, 1028, 4, "b"),
+            ("json", 114, 199, -1, "b"),
+            ("xml", 142, 143, -1, "b"),
+            ("float4", 700, 1021, 4, "b"),
+            ("float8", 701, 1022, 8, "b"),
+            ("money", 790, 791, 8, "b"),
+            ("bpchar", 1042, 1014, -1, "b"),
+            ("varchar", 1043, 1015, -1, "b"),
+            ("date", 1082, 1182, 4, "b"),
+            ("time", 1083, 1183, 8, "b"),
+            ("timestamp", 1114, 1115, 8, "b"),
+            ("timestamptz", 1184, 1185, 8, "b"),
+            ("interval", 1186, 1187, 16, "b"),
+            ("timetz", 1266, 1270, 12, "b"),
+            ("bit", 1560, 1561, -1, "b"),
+            ("varbit", 1562, 1563, -1, "b"),
+            ("numeric", 1700, 1231, -1, "b"),
+            ("void", 2278, 0, 4, "p"),
+            ("uuid", 2950, 2951, 16, "b"),
+            ("jsonb", 3802, 3807, -1, "b"),
             // array types
-            ("_bool",       1000,      0,  -1, "b"),
-            ("_bytea",      1001,      0,  -1, "b"),
-            ("_char",       1002,      0,  -1, "b"),
-            ("_name",       1003,      0,  -1, "b"),
-            ("_int2",       1005,      0,  -1, "b"),
-            ("_int4",       1007,      0,  -1, "b"),
-            ("_int8",       1016,      0,  -1, "b"),
-            ("_text",       1009,      0,  -1, "b"),
-            ("_oid",        1028,      0,  -1, "b"),
-            ("_float4",     1021,      0,  -1, "b"),
-            ("_float8",     1022,      0,  -1, "b"),
-            ("_bpchar",     1014,      0,  -1, "b"),
-            ("_varchar",    1015,      0,  -1, "b"),
-            ("_date",       1182,      0,  -1, "b"),
-            ("_time",       1183,      0,  -1, "b"),
-            ("_timestamp",  1115,      0,  -1, "b"),
-            ("_timestamptz",1185,      0,  -1, "b"),
-            ("_interval",   1187,      0,  -1, "b"),
-            ("_numeric",    1231,      0,  -1, "b"),
-            ("_uuid",       2951,      0,  -1, "b"),
-            ("_jsonb",      3807,      0,  -1, "b"),
-            ("anyarray",    2277,      0,  -1, "p"),
+            ("_bool", 1000, 0, -1, "b"),
+            ("_bytea", 1001, 0, -1, "b"),
+            ("_char", 1002, 0, -1, "b"),
+            ("_name", 1003, 0, -1, "b"),
+            ("_int2", 1005, 0, -1, "b"),
+            ("_int4", 1007, 0, -1, "b"),
+            ("_int8", 1016, 0, -1, "b"),
+            ("_text", 1009, 0, -1, "b"),
+            ("_oid", 1028, 0, -1, "b"),
+            ("_float4", 1021, 0, -1, "b"),
+            ("_float8", 1022, 0, -1, "b"),
+            ("_bpchar", 1014, 0, -1, "b"),
+            ("_varchar", 1015, 0, -1, "b"),
+            ("_date", 1182, 0, -1, "b"),
+            ("_time", 1183, 0, -1, "b"),
+            ("_timestamp", 1115, 0, -1, "b"),
+            ("_timestamptz", 1185, 0, -1, "b"),
+            ("_interval", 1187, 0, -1, "b"),
+            ("_numeric", 1231, 0, -1, "b"),
+            ("_uuid", 2951, 0, -1, "b"),
+            ("_jsonb", 3807, 0, -1, "b"),
+            ("anyarray", 2277, 0, -1, "p"),
         ];
 
         let filter_oid = extract_where_eq(sql_lower, "oid").and_then(|s| s.parse::<i32>().ok());
@@ -1157,13 +1201,13 @@ impl QueryHandler {
     /// pg_catalog.pg_stat_activity — live session info from the session registry.
     fn handle_pg_stat_activity(&self, session: &PgSession) -> Vec<BackendMessage> {
         let cols = vec![
-            ("datid", 26, 4i16),      // oid
+            ("datid", 26, 4i16), // oid
             ("datname", 25, -1),
             ("pid", 23, 4),
             ("usesysid", 26, 4),
             ("usename", 25, -1),
             ("application_name", 25, -1),
-            ("client_addr", 869, -1),  // inet
+            ("client_addr", 869, -1), // inet
             ("client_hostname", 25, -1),
             ("client_port", 23, 4),
             ("backend_start", 1184, 8),
@@ -1184,27 +1228,32 @@ impl QueryHandler {
         let mut rows: Vec<Vec<Option<String>>> = Vec::with_capacity(snapshots.len());
         for s in &snapshots {
             let (addr, port) = if let Some(pos) = s.client_addr.rfind(':') {
-                (s.client_addr[..pos].to_string(), s.client_addr[pos+1..].to_string())
+                (
+                    s.client_addr[..pos].to_string(),
+                    s.client_addr[pos + 1..].to_string(),
+                )
             } else {
                 (s.client_addr.clone(), "0".into())
             };
             rows.push(vec![
-                Some("16384".into()),          // datid
-                Some(db.clone()),              // datname
+                Some("16384".into()), // datid
+                Some(db.clone()),     // datname
                 Some(s.pid.to_string()),
-                Some("10".into()),             // usesysid
+                Some("10".into()), // usesysid
                 Some(s.user.clone()),
                 Some(s.application_name.clone()),
                 Some(addr),
-                None,                          // client_hostname
+                None, // client_hostname
                 Some(port),
-                None,                          // backend_start (no wall-clock yet)
+                None,                                     // backend_start (no wall-clock yet)
                 s.xact_start_secs.map(|_| String::new()), // placeholder
                 s.query_start_secs.map(|_| String::new()),
-                None,                          // state_change
-                None, None,                    // wait_event_type, wait_event
+                None, // state_change
+                None,
+                None, // wait_event_type, wait_event
                 Some(s.state.to_string()),
-                None, None,                    // backend_xid, backend_xmin
+                None,
+                None, // backend_xid, backend_xmin
                 Some(s.query.clone()),
                 Some("client backend".into()),
             ]);
@@ -1240,19 +1289,22 @@ impl QueryHandler {
         for s in &snapshots {
             // Each connected session with state != idle holds a virtualxid lock
             rows.push(vec![
-                Some("virtualxid".into()),   // locktype
-                None,                         // database
-                None,                         // relation
-                None, None,                   // page, tuple
+                Some("virtualxid".into()), // locktype
+                None,                      // database
+                None,                      // relation
+                None,
+                None,                         // page, tuple
                 Some(format!("{}/1", s.pid)), // virtualxid
                 None,                         // transactionid
-                None, None, None,             // classid, objid, objsubid
+                None,
+                None,
+                None,                         // classid, objid, objsubid
                 Some(format!("{}/1", s.pid)), // virtualtransaction
                 Some(s.pid.to_string()),
                 Some("ExclusiveLock".into()),
-                Some("t".into()),             // granted
-                Some("t".into()),             // fastpath
-                None,                         // waitstart
+                Some("t".into()), // granted
+                Some("t".into()), // fastpath
+                None,             // waitstart
             ]);
         }
 
@@ -1276,15 +1328,17 @@ impl QueryHandler {
         let rows: Vec<Vec<Option<String>>> = tables
             .iter()
             .filter(|t| filter.as_ref().is_none_or(|f| t.name.to_lowercase() == *f))
-            .map(|t| vec![
-                Some("public".into()),
-                Some(t.name.clone()),
-                Some("falcon".into()),
-                Some("t".into()),
-                Some("f".into()),
-                Some("f".into()),
-                Some("f".into()),
-            ])
+            .map(|t| {
+                vec![
+                    Some("public".into()),
+                    Some(t.name.clone()),
+                    Some("falcon".into()),
+                    Some("t".into()),
+                    Some("f".into()),
+                    Some("f".into()),
+                    Some("f".into()),
+                ]
+            })
             .collect();
         self.single_row_result(cols, rows)
     }
@@ -1402,8 +1456,14 @@ impl QueryHandler {
             Some(ds.temp_files.load(Relaxed).to_string()),
             Some(ds.temp_bytes.load(Relaxed).to_string()),
             Some(ds.deadlocks.load(Relaxed).to_string()),
-            Some(format!("{:.3}", ds.blk_read_time_us.load(Relaxed) as f64 / 1000.0)),
-            Some(format!("{:.3}", ds.blk_write_time_us.load(Relaxed) as f64 / 1000.0)),
+            Some(format!(
+                "{:.3}",
+                ds.blk_read_time_us.load(Relaxed) as f64 / 1000.0
+            )),
+            Some(format!(
+                "{:.3}",
+                ds.blk_write_time_us.load(Relaxed) as f64 / 1000.0
+            )),
             Some(format!("{:.3}", uptime_ms)),
             Some(format!("{:.3}", active_ms)),
             Some(ds.sessions.load(Relaxed).to_string()),

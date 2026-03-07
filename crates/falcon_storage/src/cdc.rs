@@ -307,11 +307,7 @@ impl CdcManager {
     }
 
     /// Set table filter on a slot.
-    pub fn set_table_filter(
-        &self,
-        slot_id: SlotId,
-        tables: Vec<TableId>,
-    ) -> Result<(), String> {
+    pub fn set_table_filter(&self, slot_id: SlotId, tables: Vec<TableId>) -> Result<(), String> {
         let mut slots = self.slots.write();
         let slot = slots
             .get_mut(&slot_id)
@@ -528,7 +524,8 @@ impl CdcManager {
             .filter(|e| {
                 // Apply table filter
                 slot.table_filter.as_ref().is_none_or(|filter| {
-                    e.table_id.map_or(slot.include_tx_markers, |tid| filter.contains(&tid))
+                    e.table_id
+                        .map_or(slot.include_tx_markers, |tid| filter.contains(&tid))
                 })
             })
             .filter(|e| {

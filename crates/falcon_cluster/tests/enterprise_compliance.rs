@@ -18,10 +18,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use falcon_common::types::NodeId;
 use falcon_cluster::control_plane::*;
-use falcon_cluster::enterprise_security::*;
 use falcon_cluster::enterprise_ops::*;
+use falcon_cluster::enterprise_security::*;
+use falcon_common::types::NodeId;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // §1 — Control Plane HA Failover
@@ -30,25 +30,42 @@ use falcon_cluster::enterprise_ops::*;
 #[test]
 fn test_controller_failover_metadata_survives() {
     // Setup: 3-node controller group, node 1 is leader
-    let ha = ControllerHAGroup::new(1, vec![
-        (1, "ctrl1:9000".into()),
-        (2, "ctrl2:9000".into()),
-        (3, "ctrl3:9000".into()),
-    ]);
+    let ha = ControllerHAGroup::new(
+        1,
+        vec![
+            (1, "ctrl1:9000".into()),
+            (2, "ctrl2:9000".into()),
+            (3, "ctrl3:9000".into()),
+        ],
+    );
     ha.elect_self();
     assert!(ha.is_leader());
 
     // Write metadata while node 1 is leader
     let store = ConsistentMetadataStore::new(true);
-    store.put(MetadataDomain::ClusterConfig, "cluster.name", "prod-enterprise", "admin");
-    store.put(MetadataDomain::ShardPlacement, "shard-0", "node-1", "system");
+    store.put(
+        MetadataDomain::ClusterConfig,
+        "cluster.name",
+        "prod-enterprise",
+        "admin",
+    );
+    store.put(
+        MetadataDomain::ShardPlacement,
+        "shard-0",
+        "node-1",
+        "system",
+    );
 
     // Simulate failover: node 1 goes down, node 2 becomes leader
     ha.set_leader(2, ha.term() + 1);
     assert!(!ha.is_leader());
 
     // Metadata still readable (data plane continues)
-    let name = store.get(&MetadataDomain::ClusterConfig, "cluster.name", ReadConsistency::Any);
+    let name = store.get(
+        &MetadataDomain::ClusterConfig,
+        "cluster.name",
+        ReadConsistency::Any,
+    );
     assert_eq!(name, Some("prod-enterprise".to_string()));
 }
 
@@ -68,14 +85,27 @@ fn test_concurrent_metadata_writes_no_drift() {
                 _ => MetadataDomain::SecurityPolicy,
             };
             for i in 0..100 {
-                s.put(domain.clone(), &format!("key-{}", i), &format!("val-{}-{}", t, i), "test");
+                s.put(
+                    domain.clone(),
+                    &format!("key-{}", i),
+                    &format!("val-{}-{}", t, i),
+                    "test",
+                );
             }
         }));
     }
-    for h in handles { h.join().unwrap(); }
+    for h in handles {
+        h.join().unwrap();
+    }
 
     // Verify all writes landed
-    assert_eq!(store.metrics.writes.load(std::sync::atomic::Ordering::Relaxed), 400);
+    assert_eq!(
+        store
+            .metrics
+            .writes
+            .load(std::sync::atomic::Ordering::Relaxed),
+        400
+    );
     // Each domain has 100 keys
     assert_eq!(store.list_keys(&MetadataDomain::ClusterConfig).len(), 100);
     assert_eq!(store.list_keys(&MetadataDomain::ShardPlacement).len(), 100);
@@ -87,12 +117,26 @@ fn test_metadata_cas_prevents_race() {
     store.put(MetadataDomain::ClusterConfig, "leader", "node-1", "system");
 
     // CAS with correct expected value succeeds
-    let r1 = store.cas(MetadataDomain::ClusterConfig, "leader", Some("node-1"), "node-2", "failover");
+    let r1 = store.cas(
+        MetadataDomain::ClusterConfig,
+        "leader",
+        Some("node-1"),
+        "node-2",
+        "failover",
+    );
     assert!(matches!(r1, MetadataWriteResult::Ok { .. }));
 
     // CAS with stale expected value fails
-    let r2 = store.cas(MetadataDomain::ClusterConfig, "leader", Some("node-1"), "node-3", "failover");
-    assert!(matches!(r2, MetadataWriteResult::CasFailed { current } if current == Some("node-2".into())));
+    let r2 = store.cas(
+        MetadataDomain::ClusterConfig,
+        "leader",
+        Some("node-1"),
+        "node-3",
+        "failover",
+    );
+    assert!(
+        matches!(r2, MetadataWriteResult::CasFailed { current } if current == Some("node-2".into()))
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -106,7 +150,11 @@ fn test_node_registry_lifecycle() {
 
     // Register 3 data nodes
     for i in 1..=3 {
-        reg.register(NodeId(i), format!("data{}:5000", i), NodeCapabilities::default());
+        reg.register(
+            NodeId(i),
+            format!("data{}:5000", i),
+            NodeCapabilities::default(),
+        );
     }
     assert_eq!(reg.node_count(), 3);
     assert_eq!(reg.online_nodes().len(), 3);
@@ -238,32 +286,62 @@ fn test_rbac_least_privilege() {
     let rbac = EnterpriseRbac::new();
 
     // Grant: role 10 can SELECT on 'users' table only
-    rbac.grant(10, RbacScope::Table, "users", EnterprisePermission::Select, "admin");
+    rbac.grant(
+        10,
+        RbacScope::Table,
+        "users",
+        EnterprisePermission::Select,
+        "admin",
+    );
 
     let mut roles = HashSet::new();
     roles.insert(10u64);
 
     // Allowed: SELECT on users
     assert_eq!(
-        rbac.check(10, &roles, RbacScope::Table, "users", &EnterprisePermission::Select),
+        rbac.check(
+            10,
+            &roles,
+            RbacScope::Table,
+            "users",
+            &EnterprisePermission::Select
+        ),
         RbacCheckResult::Allowed
     );
 
     // Denied: INSERT on users
     assert!(matches!(
-        rbac.check(10, &roles, RbacScope::Table, "users", &EnterprisePermission::Insert),
+        rbac.check(
+            10,
+            &roles,
+            RbacScope::Table,
+            "users",
+            &EnterprisePermission::Insert
+        ),
         RbacCheckResult::Denied { .. }
     ));
 
     // Denied: SELECT on different table
     assert!(matches!(
-        rbac.check(10, &roles, RbacScope::Table, "orders", &EnterprisePermission::Select),
+        rbac.check(
+            10,
+            &roles,
+            RbacScope::Table,
+            "orders",
+            &EnterprisePermission::Select
+        ),
         RbacCheckResult::Denied { .. }
     ));
 
     // Denied: Cluster-level operation
     assert!(matches!(
-        rbac.check(10, &roles, RbacScope::Cluster, "*", &EnterprisePermission::ManageCluster),
+        rbac.check(
+            10,
+            &roles,
+            RbacScope::Cluster,
+            "*",
+            &EnterprisePermission::ManageCluster
+        ),
         RbacCheckResult::Denied { .. }
     ));
 }
@@ -273,8 +351,20 @@ fn test_rbac_role_hierarchy() {
     let rbac = EnterpriseRbac::new();
 
     // Grant to parent role (id=100)
-    rbac.grant(100, RbacScope::Database, "analytics", EnterprisePermission::Connect, "admin");
-    rbac.grant(100, RbacScope::Table, "events", EnterprisePermission::Select, "admin");
+    rbac.grant(
+        100,
+        RbacScope::Database,
+        "analytics",
+        EnterprisePermission::Connect,
+        "admin",
+    );
+    rbac.grant(
+        100,
+        RbacScope::Table,
+        "events",
+        EnterprisePermission::Select,
+        "admin",
+    );
 
     // Child role (id=200) inherits from parent (id=100)
     let mut effective = HashSet::new();
@@ -283,11 +373,23 @@ fn test_rbac_role_hierarchy() {
 
     // Child can use parent's grants
     assert_eq!(
-        rbac.check(200, &effective, RbacScope::Database, "analytics", &EnterprisePermission::Connect),
+        rbac.check(
+            200,
+            &effective,
+            RbacScope::Database,
+            "analytics",
+            &EnterprisePermission::Connect
+        ),
         RbacCheckResult::Allowed
     );
     assert_eq!(
-        rbac.check(200, &effective, RbacScope::Table, "events", &EnterprisePermission::Select),
+        rbac.check(
+            200,
+            &effective,
+            RbacScope::Table,
+            "events",
+            &EnterprisePermission::Select
+        ),
         RbacCheckResult::Allowed
     );
 }
@@ -324,7 +426,14 @@ fn test_tls_rotation_all_links() {
 
     // Rotate all certs
     for link in &links {
-        let ok = cm.rotate_cert(*link, "/new.pem", "/new.key", &format!("new-fp-{:?}", link), 2000, 3000);
+        let ok = cm.rotate_cert(
+            *link,
+            "/new.pem",
+            "/new.key",
+            &format!("new-fp-{:?}", link),
+            2000,
+            3000,
+        );
         assert!(ok);
     }
 
@@ -333,7 +442,12 @@ fn test_tls_rotation_all_links() {
         let cert = cm.get_cert(*link).unwrap();
         assert!(cert.fingerprint.starts_with("new-fp-"));
     }
-    assert_eq!(cm.metrics.rotations_succeeded.load(std::sync::atomic::Ordering::Relaxed), 4);
+    assert_eq!(
+        cm.metrics
+            .rotations_succeeded
+            .load(std::sync::atomic::Ordering::Relaxed),
+        4
+    );
     assert_eq!(cm.rotation_history(10).len(), 4);
 }
 
@@ -367,18 +481,34 @@ fn test_full_backup_restore_cycle() {
     // Schedule and complete full backup
     let bid = orch.schedule_backup(
         EnterpriseBackupType::Full,
-        BackupTarget::S3 { bucket: "prod-backups".into(), prefix: "daily/".into(), region: "us-east-1".into() },
+        BackupTarget::S3 {
+            bucket: "prod-backups".into(),
+            prefix: "daily/".into(),
+            region: "us-east-1".into(),
+        },
         "cron",
     );
     orch.start_backup(bid, 10_000);
     orch.complete_backup(bid, 5_000_000_000, 50, 20_000, 0xDEADBEEF);
-    audit.record(AuditCategory::BackupRestore, AuditSeverity::Info, "cron", "system",
-        "FULL_BACKUP", &format!("backup_id={}", bid), "SUCCESS", "5GB, 50 tables");
+    audit.record(
+        AuditCategory::BackupRestore,
+        AuditSeverity::Info,
+        "cron",
+        "system",
+        "FULL_BACKUP",
+        &format!("backup_id={}", bid),
+        "SUCCESS",
+        "5GB, 50 tables",
+    );
 
     // Schedule incremental
     let iid = orch.schedule_backup(
         EnterpriseBackupType::Incremental,
-        BackupTarget::S3 { bucket: "prod-backups".into(), prefix: "hourly/".into(), region: "us-east-1".into() },
+        BackupTarget::S3 {
+            bucket: "prod-backups".into(),
+            prefix: "hourly/".into(),
+            region: "us-east-1".into(),
+        },
         "cron",
     );
     orch.start_backup(iid, 20_000);
@@ -386,15 +516,27 @@ fn test_full_backup_restore_cycle() {
 
     // Restore to point-in-time
     let rid = orch.schedule_restore(
-        BackupTarget::S3 { bucket: "prod-backups".into(), prefix: "daily/".into(), region: "us-east-1".into() },
+        BackupTarget::S3 {
+            bucket: "prod-backups".into(),
+            prefix: "daily/".into(),
+            region: "us-east-1".into(),
+        },
         bid,
         RestoreType::ToTimestamp,
         None,
         Some(1718000000),
     );
     orch.complete_restore(rid, 5_000_000_000, 50);
-    audit.record(AuditCategory::BackupRestore, AuditSeverity::Info, "ops", "system",
-        "PITR_RESTORE", &format!("restore_id={}", rid), "SUCCESS", "target_ts=1718000000");
+    audit.record(
+        AuditCategory::BackupRestore,
+        AuditSeverity::Info,
+        "ops",
+        "system",
+        "PITR_RESTORE",
+        &format!("restore_id={}", rid),
+        "SUCCESS",
+        "target_ts=1718000000",
+    );
 
     let restore = orch.get_restore_job(rid).unwrap();
     assert_eq!(restore.status, BackupJobStatus::Completed);
@@ -428,7 +570,9 @@ fn test_audit_chain_integrity_under_load() {
             }
         }));
     }
-    for h in handles { h.join().unwrap(); }
+    for h in handles {
+        h.join().unwrap();
+    }
 
     assert_eq!(log.total(), 400);
     // Note: chain integrity may not hold under concurrent writes because
@@ -440,16 +584,56 @@ fn test_audit_chain_integrity_under_load() {
 fn test_audit_siem_export_all_categories() {
     let log = EnterpriseAuditLog::new(1000, "siem-key");
 
-    log.record(AuditCategory::Authentication, AuditSeverity::Info,
-        "alice", "10.0.0.1", "LOGIN", "system", "SUCCESS", "");
-    log.record(AuditCategory::Authorization, AuditSeverity::Warning,
-        "bob", "10.0.0.2", "ACCESS_DENIED", "orders", "DENIED", "");
-    log.record(AuditCategory::SchemaChange, AuditSeverity::Info,
-        "admin", "10.0.0.3", "CREATE TABLE", "users", "OK", "");
-    log.record(AuditCategory::OpsOperation, AuditSeverity::Info,
-        "ops", "10.0.0.4", "DRAIN", "node-3", "OK", "");
-    log.record(AuditCategory::TopologyChange, AuditSeverity::Critical,
-        "system", "10.0.0.5", "LEADER_CHANGE", "shard-0", "OK", "");
+    log.record(
+        AuditCategory::Authentication,
+        AuditSeverity::Info,
+        "alice",
+        "10.0.0.1",
+        "LOGIN",
+        "system",
+        "SUCCESS",
+        "",
+    );
+    log.record(
+        AuditCategory::Authorization,
+        AuditSeverity::Warning,
+        "bob",
+        "10.0.0.2",
+        "ACCESS_DENIED",
+        "orders",
+        "DENIED",
+        "",
+    );
+    log.record(
+        AuditCategory::SchemaChange,
+        AuditSeverity::Info,
+        "admin",
+        "10.0.0.3",
+        "CREATE TABLE",
+        "users",
+        "OK",
+        "",
+    );
+    log.record(
+        AuditCategory::OpsOperation,
+        AuditSeverity::Info,
+        "ops",
+        "10.0.0.4",
+        "DRAIN",
+        "node-3",
+        "OK",
+        "",
+    );
+    log.record(
+        AuditCategory::TopologyChange,
+        AuditSeverity::Critical,
+        "system",
+        "10.0.0.5",
+        "LEADER_CHANGE",
+        "shard-0",
+        "OK",
+        "",
+    );
 
     let lines = log.export_jsonl(1);
     assert_eq!(lines.len(), 5);
@@ -500,12 +684,20 @@ fn test_rebalance_on_node_join() {
     }
 
     assert_eq!(rb.active_migrations(), 0);
-    assert!(rb.metrics.migrations_completed.load(std::sync::atomic::Ordering::Relaxed) >= 2);
+    assert!(
+        rb.metrics
+            .migrations_completed
+            .load(std::sync::atomic::Ordering::Relaxed)
+            >= 2
+    );
 }
 
 #[test]
 fn test_rebalance_sla_pause() {
-    let rb = AutoRebalancer::new(RebalanceConfig { max_concurrent: 3, ..Default::default() });
+    let rb = AutoRebalancer::new(RebalanceConfig {
+        max_concurrent: 3,
+        ..Default::default()
+    });
 
     let t1 = rb.schedule_migration(0, NodeId(1), NodeId(2)).unwrap();
     rb.advance(t1, MigrationState::Preparing);
@@ -556,15 +748,27 @@ fn test_slo_engine_multi_slo_evaluation() {
 
     // Good availability
     for i in 0..10000u64 {
-        engine.record_sample_at(SloMetricType::Availability, if i == 5000 { 0.0 } else { 1.0 }, now - 1800 + i);
+        engine.record_sample_at(
+            SloMetricType::Availability,
+            if i == 5000 { 0.0 } else { 1.0 },
+            now - 1800 + i,
+        );
     }
     // Good latency
     for i in 0..1000u64 {
-        engine.record_sample_at(SloMetricType::LatencyP99, 5.0 + (i as f64) * 0.01, now - 1800 + i);
+        engine.record_sample_at(
+            SloMetricType::LatencyP99,
+            5.0 + (i as f64) * 0.01,
+            now - 1800 + i,
+        );
     }
     // Good replication lag
     for i in 0..100u64 {
-        engine.record_sample_at(SloMetricType::ReplicationLag, 50.0 + i as f64, now - 1800 + i * 36);
+        engine.record_sample_at(
+            SloMetricType::ReplicationLag,
+            50.0 + i as f64,
+            now - 1800 + i * 36,
+        );
     }
 
     let evals = engine.evaluate_all();
@@ -624,7 +828,11 @@ fn test_incident_full_lifecycle() {
         "Node 2 crashed — disk failure",
     );
     let e2 = timeline.record_event(
-        TimelineEventType::LeaderChange { shard_id: 1, old: Some(NodeId(2)), new: NodeId(3) },
+        TimelineEventType::LeaderChange {
+            shard_id: 1,
+            old: Some(NodeId(2)),
+            new: NodeId(3),
+        },
         IncidentSeverity::High,
         "Leader election triggered for shard 1",
     );
@@ -676,13 +884,30 @@ fn test_full_enterprise_lifecycle() {
     // Step 1: Create admin user
     let admin_id = authn.create_user("admin", "admin_hash");
     rbac.set_superuser(admin_id);
-    audit.record(AuditCategory::Authentication, AuditSeverity::Info,
-        "system", "localhost", "CREATE_USER", "admin", "OK", "superuser");
+    audit.record(
+        AuditCategory::Authentication,
+        AuditSeverity::Info,
+        "system",
+        "localhost",
+        "CREATE_USER",
+        "admin",
+        "OK",
+        "superuser",
+    );
 
     // Step 2: Register data nodes
     for i in 1..=3 {
-        registry.register(NodeId(i), format!("data{}:5000", i), NodeCapabilities::default());
-        store.put(MetadataDomain::NodeRegistry, &format!("node-{}", i), "online", "system");
+        registry.register(
+            NodeId(i),
+            format!("data{}:5000", i),
+            NodeCapabilities::default(),
+        );
+        store.put(
+            MetadataDomain::NodeRegistry,
+            &format!("node-{}", i),
+            "online",
+            "system",
+        );
     }
 
     // Step 3: Setup shard placements
@@ -690,22 +915,32 @@ fn test_full_enterprise_lifecycle() {
         placement.set_placement(ShardPlacement {
             shard_id: sid,
             leader: Some(NodeId((sid % 3 + 1) as u64)),
-            replicas: vec![NodeId((sid % 3 + 2) as u64 % 3 + 1), NodeId((sid + 2) % 3 + 1)],
+            replicas: vec![
+                NodeId((sid % 3 + 2) as u64 % 3 + 1),
+                NodeId((sid + 2) % 3 + 1),
+            ],
             target_replica_count: 2,
             state: ShardPlacementState::Healthy,
         });
     }
 
     // Step 4: Load TLS certs
-    for link in &[TlsLinkType::ClientToGateway, TlsLinkType::GatewayToDataNode,
-                  TlsLinkType::DataNodeToReplica, TlsLinkType::DataNodeToController] {
+    for link in &[
+        TlsLinkType::ClientToGateway,
+        TlsLinkType::GatewayToDataNode,
+        TlsLinkType::DataNodeToReplica,
+        TlsLinkType::DataNodeToController,
+    ] {
         cert_mgr.load_cert(CertificateRecord {
             link_type: *link,
             cert_path: format!("/certs/{:?}.pem", link),
             key_path: format!("/certs/{:?}.key", link),
             ca_path: Some("/certs/ca.pem".into()),
             fingerprint: format!("fp-{:?}", link),
-            not_before: 0, not_after: u64::MAX, loaded_at: 0, is_active: true,
+            not_before: 0,
+            not_after: u64::MAX,
+            loaded_at: 0,
+            is_active: true,
         });
     }
     assert!(cert_mgr.all_links_covered().is_empty());
@@ -731,13 +966,23 @@ fn test_full_enterprise_lifecycle() {
     // Step 7: Take a backup
     let bid = backup.schedule_backup(
         EnterpriseBackupType::Full,
-        BackupTarget::Local { path: "/backup/enterprise".into() },
+        BackupTarget::Local {
+            path: "/backup/enterprise".into(),
+        },
         "admin",
     );
     backup.start_backup(bid, 10_000);
     backup.complete_backup(bid, 2_000_000_000, 20, 15_000, 0xBEEF);
-    audit.record(AuditCategory::BackupRestore, AuditSeverity::Info,
-        "admin", "localhost", "FULL_BACKUP", "all", "SUCCESS", "2GB");
+    audit.record(
+        AuditCategory::BackupRestore,
+        AuditSeverity::Info,
+        "admin",
+        "localhost",
+        "FULL_BACKUP",
+        "all",
+        "SUCCESS",
+        "2GB",
+    );
 
     // Step 8: Verify SLOs
     let evals = slo_engine.evaluate_all();

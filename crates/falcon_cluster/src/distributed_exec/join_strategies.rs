@@ -191,10 +191,8 @@ impl BroadcastJoinPlan {
     /// Cost = broadcast_rows × avg_row_size × num_shards (broadcast) +
     ///        result_rows × avg_row_size (gather results)
     pub fn estimated_network_cost(&self, avg_row_bytes: u64) -> u64 {
-        let broadcast_cost =
-            self.broadcast_rows * avg_row_bytes * self.target_shards.len() as u64;
         // Result gathering is hard to estimate without selectivity — use broadcast cost as proxy
-        broadcast_cost
+        self.broadcast_rows * avg_row_bytes * self.target_shards.len() as u64
     }
 }
 

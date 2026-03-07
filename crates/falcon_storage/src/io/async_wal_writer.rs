@@ -27,9 +27,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
-use super::async_file::{
-    AsyncFileConfig, FlushPolicy, FlushReason, IoError, IoMetrics,
-};
+use super::async_file::{AsyncFileConfig, FlushPolicy, FlushReason, IoError, IoMetrics};
 use super::AsyncFile;
 use crate::wal::{WAL_FORMAT_VERSION, WAL_MAGIC, WAL_SEGMENT_HEADER_SIZE};
 
@@ -301,10 +299,15 @@ impl AsyncWalWriter {
         }
 
         // Update sync state and atomic mirror
-        let new_pending = self.pending_bytes_atomic.fetch_add(record_size as u64, Ordering::Relaxed) + record_size as u64;
+        let new_pending = self
+            .pending_bytes_atomic
+            .fetch_add(record_size as u64, Ordering::Relaxed)
+            + record_size as u64;
         {
             let (lock, cvar) = &*self.sync_state;
-            let mut state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut state = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.pending_count += 1;
             state.pending_bytes = new_pending;
             cvar.notify_one();
@@ -336,7 +339,9 @@ impl AsyncWalWriter {
         // Snapshot pending state
         let (batch_count, batch_bytes) = {
             let (lock, _) = &*self.sync_state;
-            let state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let state = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             (state.pending_count, state.pending_bytes)
         };
 
@@ -352,7 +357,9 @@ impl AsyncWalWriter {
         // Update sync state — notify all waiters
         {
             let (lock, cvar) = &*self.sync_state;
-            let mut state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut state = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let current_lsn = self.lsn.load(Ordering::SeqCst);
             state.synced_lsn = current_lsn;
             state.pending_count = 0;
@@ -367,16 +374,17 @@ impl AsyncWalWriter {
         self.wal_metrics
             .sync_latency_us
             .fetch_add(latency_us, Ordering::Relaxed);
-        let _ = self
-            .wal_metrics
-            .max_sync_latency_us
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+        let _ = self.wal_metrics.max_sync_latency_us.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |cur| {
                 if latency_us > cur {
                     Some(latency_us)
                 } else {
                     None
                 }
-            });
+            },
+        );
 
         if batch_count > 0 {
             self.wal_metrics
@@ -445,12 +453,8 @@ impl AsyncWalWriter {
 
     fn syncer_loop(&self) {
         let flush_interval = match &self.config.flush_policy {
-            FlushPolicy::GroupCommit { max_wait_us, .. } => {
-                Duration::from_micros(*max_wait_us)
-            }
-            FlushPolicy::Periodic { interval_ms } => {
-                Duration::from_millis(*interval_ms)
-            }
+            FlushPolicy::GroupCommit { max_wait_us, .. } => Duration::from_micros(*max_wait_us),
+            FlushPolicy::Periodic { interval_ms } => Duration::from_millis(*interval_ms),
             FlushPolicy::Explicit => {
                 // No background syncing needed
                 return;
@@ -465,7 +469,9 @@ impl AsyncWalWriter {
 
             let should_flush = {
                 let (lock, cvar) = &*self.sync_state;
-                let state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let state = lock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
 
                 if state.pending_count == 0 {
                     // Wait for work
@@ -521,10 +527,7 @@ impl AsyncWalWriter {
         self.wal_metrics
             .segment_rotations
             .fetch_add(1, Ordering::Relaxed);
-        tracing::debug!(
-            "async WAL rotated to segment {}",
-            inner.current_segment
-        );
+        tracing::debug!("async WAL rotated to segment {}", inner.current_segment);
 
         Ok(())
     }
@@ -644,7 +647,7 @@ mod tests {
         let config = AsyncWalConfig {
             flush_policy: FlushPolicy::GroupCommit {
                 max_wait_us: 100_000, // long timer — batch-full should trigger first
-                max_batch_bytes: 200,  // small batch
+                max_batch_bytes: 200, // small batch
             },
             max_segment_size: 64 * 1024 * 1024,
             wal_dir: dir.to_path_buf(),
@@ -807,8 +810,7 @@ mod tests {
             let w = Arc::clone(&writer);
             threads.push(std::thread::spawn(move || {
                 for i in 0..25u32 {
-                    let data =
-                        bincode::serialize(&format!("thread-{}-record-{}", t, i)).unwrap();
+                    let data = bincode::serialize(&format!("thread-{}-record-{}", t, i)).unwrap();
                     w.append_buffered(&data).unwrap();
                 }
             }));

@@ -132,12 +132,7 @@ pub fn execute_broadcast_join(
         offset: None,
     };
 
-    executor.scatter_gather_serializable(
-        &join_plan,
-        &ctx.target_shards,
-        &join_gather,
-        backend,
-    )
+    executor.scatter_gather_serializable(&join_plan, &ctx.target_shards, &join_gather, backend)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -202,17 +197,11 @@ pub fn execute_hash_partition_join(
     let mut right_buckets: Vec<Vec<OwnedRow>> = vec![Vec::new(); num_partitions];
 
     for row in &left_rows {
-        let bucket = hash_partition_bucket(
-            row.values.get(ctx.left_key_col),
-            num_partitions,
-        );
+        let bucket = hash_partition_bucket(row.values.get(ctx.left_key_col), num_partitions);
         left_buckets[bucket].push(row.clone());
     }
     for row in &right_rows {
-        let bucket = hash_partition_bucket(
-            row.values.get(ctx.right_key_col),
-            num_partitions,
-        );
+        let bucket = hash_partition_bucket(row.values.get(ctx.right_key_col), num_partitions);
         right_buckets[bucket].push(row.clone());
     }
 
@@ -243,11 +232,7 @@ pub fn execute_hash_partition_join(
         offset: None,
     };
 
-    executor.scatter_gather_per_shard(
-        &per_shard_plans,
-        &join_gather,
-        backend,
-    )
+    executor.scatter_gather_per_shard(&per_shard_plans, &join_gather, backend)
 }
 
 /// Hash a datum value to a partition bucket index.

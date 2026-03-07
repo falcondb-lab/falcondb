@@ -19,7 +19,8 @@ fn make_table() -> LsmTable {
                 nullable: false,
                 is_primary_key: true,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             },
             ColumnDef {
                 id: ColumnId(1),
@@ -28,7 +29,8 @@ fn make_table() -> LsmTable {
                 nullable: true,
                 is_primary_key: false,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             },
         ],
         primary_key_columns: vec![0],
@@ -50,7 +52,10 @@ fn test_lsm_prepared_invisible_to_other_txn() {
 
     // Other txn can't see prepared row
     let scan = t.scan(TxnId(99), Timestamp(1000));
-    assert!(scan.is_empty(), "prepared row must be invisible to other txns");
+    assert!(
+        scan.is_empty(),
+        "prepared row must be invisible to other txns"
+    );
 }
 
 #[test]
@@ -81,7 +86,10 @@ fn test_lsm_committed_visible_after_commit_ts() {
 
     // read_ts < commit_ts → invisible
     let got3 = t.get(&pk, TxnId(99), Timestamp(99)).unwrap();
-    assert!(got3.is_none(), "committed row must be invisible before commit_ts");
+    assert!(
+        got3.is_none(),
+        "committed row must be invisible before commit_ts"
+    );
 }
 
 #[test]
@@ -156,7 +164,11 @@ fn test_lsm_scan_includes_sst_data() {
     }
 
     let scan = t.scan(TxnId(99), Timestamp(100));
-    assert_eq!(scan.len(), 60, "scan must include both SST and memtable rows");
+    assert_eq!(
+        scan.len(),
+        60,
+        "scan must include both SST and memtable rows"
+    );
 }
 
 #[test]
@@ -195,7 +207,10 @@ fn test_lsm_prepared_does_not_hide_committed() {
 
     // txn3 reads at ts=150: should see "v1" (committed), NOT nothing
     let got = t.get(&pk, TxnId(30), Timestamp(150)).unwrap();
-    assert!(got.is_some(), "prepared update must not hide committed version");
+    assert!(
+        got.is_some(),
+        "prepared update must not hide committed version"
+    );
     assert_eq!(got.unwrap().values[1], Datum::Text("v1".into()));
 
     // txn2 (writer) sees its own prepared "v2"

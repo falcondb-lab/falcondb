@@ -50,7 +50,8 @@ fn simple_schema() -> TableSchema {
             nullable: false,
             is_primary_key: true,
             default_value: None,
-            is_serial: false, max_length: None,
+            is_serial: false,
+            max_length: None,
         }],
         primary_key_columns: vec![0],
         ..Default::default()
@@ -207,7 +208,10 @@ fn test_async_allows_replica_to_lag_semisync_does_not() {
         SyncMode::SemiSync,
         Duration::from_millis(50),
     );
-    assert!(result.is_err(), "SemiSync with frozen replica must time out");
+    assert!(
+        result.is_err(),
+        "SemiSync with frozen replica must time out"
+    );
 }
 
 // ---------------------------------------------------------------------------

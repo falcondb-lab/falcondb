@@ -108,10 +108,7 @@ fn bench_datum_cmp(c: &mut Criterion) {
 
 fn bench_error_kind(c: &mut Criterion) {
     let errors: Vec<(&str, FalconError)> = vec![
-        (
-            "sql_parse",
-            FalconError::Sql(SqlError::Parse("bad".into())),
-        ),
+        ("sql_parse", FalconError::Sql(SqlError::Parse("bad".into()))),
         (
             "write_conflict",
             FalconError::Txn(TxnError::WriteConflict(TxnId(1))),
@@ -139,10 +136,7 @@ fn bench_error_kind(c: &mut Criterion) {
 
 fn bench_error_sqlstate(c: &mut Criterion) {
     let errors: Vec<(&str, FalconError)> = vec![
-        (
-            "sql_parse",
-            FalconError::Sql(SqlError::Parse("x".into())),
-        ),
+        ("sql_parse", FalconError::Sql(SqlError::Parse("x".into()))),
         (
             "unique_violation",
             FalconError::Storage(StorageError::DuplicateKey),

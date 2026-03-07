@@ -1,5 +1,5 @@
-use std::sync::OnceLock;
 use std::sync::atomic::AtomicU64;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 static DEFAULT_TABLE_ENGINE: OnceLock<String> = OnceLock::new();
@@ -59,7 +59,10 @@ pub fn set_default_table_engine(engine: String) {
 }
 
 pub fn default_table_engine() -> &'static str {
-    DEFAULT_TABLE_ENGINE.get().map(|s| s.as_str()).unwrap_or("rowstore")
+    DEFAULT_TABLE_ENGINE
+        .get()
+        .map(|s| s.as_str())
+        .unwrap_or("rowstore")
 }
 
 pub fn set_node_role(role: String) {

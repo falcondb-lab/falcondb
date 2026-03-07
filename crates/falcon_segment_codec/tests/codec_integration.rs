@@ -91,7 +91,13 @@ fn test_i1_all_codecs_block_roundtrip() {
         let recovered = read_blocks(codec.as_ref(), &body).unwrap();
         assert_eq!(recovered.len(), 20);
         for (i, row) in recovered.iter().enumerate() {
-            assert_eq!(row, &vec![i as u8; 128], "mismatch at row {} for {:?}", i, id);
+            assert_eq!(
+                row,
+                &vec![i as u8; 128],
+                "mismatch at row {} for {:?}",
+                i,
+                id
+            );
         }
     }
 }
@@ -99,8 +105,7 @@ fn test_i1_all_codecs_block_roundtrip() {
 /// I1.8: ZstdSegmentMeta serialization roundtrip.
 #[test]
 fn test_i1_segment_meta_roundtrip() {
-    let meta = ZstdSegmentMeta::new(7)
-        .with_dictionary(42, 0xCAFE);
+    let meta = ZstdSegmentMeta::new(7).with_dictionary(42, 0xCAFE);
     let bytes = meta.to_bytes();
     assert_eq!(bytes.len(), 37);
     let recovered = ZstdSegmentMeta::from_bytes(&bytes).unwrap();
@@ -128,20 +133,31 @@ fn test_i2_cached_read_latency() {
         let start = std::time::Instant::now();
         pool.decompress(1, 0, &block, &codec).unwrap();
         let us = start.elapsed().as_micros() as u64;
-        if us > max_us { max_us = us; }
+        if us > max_us {
+            max_us = us;
+        }
     }
-    assert!(max_us < 1000, "cached read p99 = {}µs, expected < 1000µs", max_us);
+    assert!(
+        max_us < 1000,
+        "cached read p99 = {}µs, expected < 1000µs",
+        max_us
+    );
 }
 
 /// I2.2: Zstd compression ratio ≥ 3x for repetitive data.
 #[test]
 fn test_i2_compression_ratio() {
-    let codec = ZstdBlockCodec::new(ZstdCodecConfig { level: 3, checksum: true });
-    let rows: Vec<Vec<u8>> = (0..100).map(|_| {
-        let mut v = b"SELECT * FROM users WHERE id = ".to_vec();
-        v.extend_from_slice(&[0u8; 200]);
-        v
-    }).collect();
+    let codec = ZstdBlockCodec::new(ZstdCodecConfig {
+        level: 3,
+        checksum: true,
+    });
+    let rows: Vec<Vec<u8>> = (0..100)
+        .map(|_| {
+            let mut v = b"SELECT * FROM users WHERE id = ".to_vec();
+            v.extend_from_slice(&[0u8; 200]);
+            v
+        })
+        .collect();
     let (body, meta) = write_blocks(&codec, &rows).unwrap();
     let ratio = meta.compression_ratio();
     assert!(ratio >= 3.0, "ratio {:.2}x below 3x guardrail", ratio);
@@ -163,8 +179,14 @@ fn test_i2_streaming_throughput() {
             let d = decompress_streaming_chunk(&c, codec, chunk.len()).unwrap();
             assert_eq!(d.len(), chunk.len());
         }
-        let mbps = (iters as f64 * chunk.len() as f64) / start.elapsed().as_secs_f64() / (1024.0 * 1024.0);
-        assert!(mbps >= 100.0, "{:?} streaming {:.1} MB/s < 100 MB/s", codec, mbps);
+        let mbps =
+            (iters as f64 * chunk.len() as f64) / start.elapsed().as_secs_f64() / (1024.0 * 1024.0);
+        assert!(
+            mbps >= 100.0,
+            "{:?} streaming {:.1} MB/s < 100 MB/s",
+            codec,
+            mbps
+        );
     }
 }
 
@@ -184,12 +206,17 @@ fn test_i2_pool_overload_rejection() {
 /// I2.5: Zstd block compression throughput ≥ 5K blocks/sec for 256-byte blocks.
 #[test]
 fn test_i2_block_compress_throughput() {
-    let codec = ZstdBlockCodec::new(ZstdCodecConfig { level: 1, checksum: false });
-    let rows: Vec<Vec<u8>> = (0..5_000).map(|i| {
-        let mut r = vec![0u8; 256];
-        r[..8].copy_from_slice(&(i as u64).to_le_bytes());
-        r
-    }).collect();
+    let codec = ZstdBlockCodec::new(ZstdCodecConfig {
+        level: 1,
+        checksum: false,
+    });
+    let rows: Vec<Vec<u8>> = (0..5_000)
+        .map(|i| {
+            let mut r = vec![0u8; 256];
+            r[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            r
+        })
+        .collect();
 
     let start = std::time::Instant::now();
     let (_body, meta) = write_blocks(&codec, &rows).unwrap();
@@ -208,12 +235,14 @@ fn test_i3_full_dictionary_lifecycle() {
     let reg = DictionaryRegistry::new();
 
     // Train via zstd-safe (real dict)
-    let samples: Vec<Vec<u8>> = (0..200).map(|i| {
-        let mut v = b"FalconDB table row payload ".to_vec();
-        v.extend_from_slice(&(i as u32).to_le_bytes());
-        v.extend_from_slice(&[0xABu8; 80]);
-        v
-    }).collect();
+    let samples: Vec<Vec<u8>> = (0..200)
+        .map(|i| {
+            let mut v = b"FalconDB table row payload ".to_vec();
+            v.extend_from_slice(&(i as u32).to_le_bytes());
+            v.extend_from_slice(&[0xABu8; 80]);
+            v
+        })
+        .collect();
     let sizes: Vec<usize> = samples.iter().map(|s| s.len()).collect();
     let concat: Vec<u8> = samples.iter().flat_map(|s| s.iter().copied()).collect();
     let mut dict_buf = vec![0u8; 16384];
@@ -225,15 +254,19 @@ fn test_i3_full_dictionary_lifecycle() {
     reg.load(handle);
 
     // Create codec with dict
-    let codec = reg.create_codec_with_dict(1, ZstdCodecConfig::default()).unwrap();
+    let codec = reg
+        .create_codec_with_dict(1, ZstdCodecConfig::default())
+        .unwrap();
 
     // Compress rows with dictionary
-    let rows: Vec<Vec<u8>> = (0..50).map(|i| {
-        let mut v = b"FalconDB table row payload ".to_vec();
-        v.extend_from_slice(&((i + 1000) as u32).to_le_bytes());
-        v.extend_from_slice(&[0xCDu8; 80]);
-        v
-    }).collect();
+    let rows: Vec<Vec<u8>> = (0..50)
+        .map(|i| {
+            let mut v = b"FalconDB table row payload ".to_vec();
+            v.extend_from_slice(&((i + 1000) as u32).to_le_bytes());
+            v.extend_from_slice(&[0xCDu8; 80]);
+            v
+        })
+        .collect();
     let (body, meta) = write_blocks(&codec, &rows).unwrap();
     assert_eq!(meta.block_count, 50);
 
@@ -264,7 +297,14 @@ fn test_i3_recompress_preserves_data() {
     let lz4_rows = read_blocks(lz4.as_ref(), &body_lz4).unwrap();
 
     // Recompress to Zstd
-    let zstd = create_codec(CodecId::Zstd, Some(ZstdCodecConfig { level: 5, checksum: true }), None);
+    let zstd = create_codec(
+        CodecId::Zstd,
+        Some(ZstdCodecConfig {
+            level: 5,
+            checksum: true,
+        }),
+        None,
+    );
     let request = RecompressRequest {
         source_data: lz4_rows,
         target_codec_id: CodecId::Zstd,
@@ -301,7 +341,10 @@ fn test_i3_streaming_negotiation_e2e() {
     assert_eq!(codec2, StreamingCodecId::Zstd);
 
     let c2 = compress_streaming_chunk(&payload, codec2, 1).unwrap();
-    assert!(c2.len() < compressed.len(), "zstd should compress better than lz4");
+    assert!(
+        c2.len() < compressed.len(),
+        "zstd should compress better than lz4"
+    );
     let d2 = decompress_streaming_chunk(&c2, codec2, payload.len()).unwrap();
     assert_eq!(d2, payload);
 }
@@ -312,9 +355,14 @@ fn test_i3_cache_effectiveness() {
     let pool = DecompressPool::new(4, 64 * 1024 * 1024);
     let codec = ZstdBlockCodec::new(ZstdCodecConfig::default());
 
-    let blocks: Vec<(u32, CompressedBlock)> = (0..10).map(|i| {
-        (i, CompressedBlock::compress(&codec, &vec![i as u8; 1024]).unwrap())
-    }).collect();
+    let blocks: Vec<(u32, CompressedBlock)> = (0..10)
+        .map(|i| {
+            (
+                i,
+                CompressedBlock::compress(&codec, &vec![i as u8; 1024]).unwrap(),
+            )
+        })
+        .collect();
 
     // First pass: all misses
     for (idx, block) in &blocks {

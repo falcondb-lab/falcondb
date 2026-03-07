@@ -56,7 +56,12 @@ impl ShardedEngine {
                 }
             })
             .collect();
-        Self { shards, num_shards, hlc, hlc_enabled: false }
+        Self {
+            shards,
+            num_shards,
+            hlc,
+            hlc_enabled: false,
+        }
     }
 
     /// Create N WAL-backed shards under `base_dir/shard_<i>/`.
@@ -96,16 +101,18 @@ impl ShardedEngine {
                     wal_mode,
                     no_buffering,
                 )
-                .map_err(|e| {
-                    FalconError::Internal(format!("shard {i} WAL init failed: {e}"))
-                })?
+                .map_err(|e| FalconError::Internal(format!("shard {i} WAL init failed: {e}")))?
             };
             let storage = Arc::new(storage);
             let txn_mgr = Arc::new(TxnManager::new_with_hlc(storage.clone(), hlc.clone()));
 
             // Advance counters past recovered state
-            let max_ts = storage.recovered_max_ts.load(std::sync::atomic::Ordering::Relaxed);
-            let max_txn = storage.recovered_max_txn_id.load(std::sync::atomic::Ordering::Relaxed);
+            let max_ts = storage
+                .recovered_max_ts
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let max_txn = storage
+                .recovered_max_txn_id
+                .load(std::sync::atomic::Ordering::Relaxed);
             if max_ts > 0 || max_txn > 0 {
                 txn_mgr.advance_counters_past(max_ts, max_txn);
             }
@@ -116,7 +123,12 @@ impl ShardedEngine {
                 txn_mgr,
             });
         }
-        Ok(Self { shards, num_shards, hlc, hlc_enabled: true })
+        Ok(Self {
+            shards,
+            num_shards,
+            hlc,
+            hlc_enabled: true,
+        })
     }
 
     /// Get a shard instance by ShardId.
@@ -212,7 +224,10 @@ impl ShardedEngine {
 
     /// Update the HLC on receiving a timestamp from a remote node.
     /// Call this on every cross-node RPC response to maintain causal order.
-    pub fn recv_remote_ts(&self, remote_ts: falcon_common::types::Timestamp) -> falcon_common::types::Timestamp {
+    pub fn recv_remote_ts(
+        &self,
+        remote_ts: falcon_common::types::Timestamp,
+    ) -> falcon_common::types::Timestamp {
         self.hlc.recv(remote_ts)
     }
 
@@ -222,7 +237,8 @@ impl ShardedEngine {
             if shard.storage.is_wal_enabled() {
                 shard.storage.flush_wal().map_err(|e| {
                     FalconError::Internal(format!(
-                        "shard {} WAL flush failed: {e}", shard.shard_id.0
+                        "shard {} WAL flush failed: {e}",
+                        shard.shard_id.0
                     ))
                 })?;
             }

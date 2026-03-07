@@ -35,7 +35,7 @@ impl Default for ZoneConfig {
     fn default() -> Self {
         Self {
             hot_capacity_bytes: 512 * 1024 * 1024,  // 512 MB
-            warm_capacity_bytes: 256 * 1024 * 1024,  // 256 MB
+            warm_capacity_bytes: 256 * 1024 * 1024, // 256 MB
             lirs2: Lirs2Config::default(),
         }
     }
@@ -239,8 +239,7 @@ impl ZoneManager {
                     self.eviction_count.fetch_add(1, Ordering::Relaxed);
 
                     // Track as cold.
-                    let cold_handle =
-                        Arc::new(PageHandle::new(page_id, handle.priority));
+                    let cold_handle = Arc::new(PageHandle::new(page_id, handle.priority));
                     cold_handle.set_tier(Tier::Cold);
                     self.cold_pages.insert(page_id, cold_handle);
                 }
@@ -261,9 +260,7 @@ impl ZoneManager {
 
     /// Register a cold page (metadata only, no data in memory).
     pub fn register_cold(&self, page_id: PageId, priority: AccessPriority) {
-        if !self.hot_pages.contains_key(&page_id)
-            && !self.warm_pages.contains_key(&page_id)
-        {
+        if !self.hot_pages.contains_key(&page_id) && !self.warm_pages.contains_key(&page_id) {
             let handle = Arc::new(PageHandle::new(page_id, priority));
             handle.set_tier(Tier::Cold);
             self.cold_pages.insert(page_id, handle);

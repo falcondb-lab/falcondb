@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::session_registry::SessionRegistry;
@@ -20,10 +20,13 @@ use falcon_common::datum::Datum;
 use falcon_common::error::{ExecutionError, FalconError, StorageError, TxnError};
 use falcon_common::types::ShardId;
 use falcon_executor::{ExecutionResult, Executor, PriorityScheduler, PrioritySchedulerConfig};
-use falcon_planner::{IndexedColumns, PhysicalPlan, PlannedTxnType, Planner, TableRowCounts};
+use falcon_planner::ai_optimizer::{FeedbackRecord, PlanKind};
+use falcon_planner::{
+    global_ai_optimizer, IndexedColumns, PhysicalPlan, PlannedTxnType, Planner, TableRowCounts,
+};
 use falcon_sql_frontend::binder::Binder;
-use falcon_sql_frontend::types::BoundStatement;
 use falcon_sql_frontend::parser::parse_sql;
+use falcon_sql_frontend::types::BoundStatement;
 use falcon_storage::engine::StorageEngine;
 use falcon_txn::{SlowPathMode, TxnClassification, TxnManager};
 use parking_lot::RwLock;
@@ -98,7 +101,8 @@ pub struct QueryHandler {
 
     pub(crate) flush_stats_counter: Arc<AtomicU64>,
     /// Last-1 schema cache: avoids catalog RwLock + deep clone on repeated INSERTs.
-    pub(crate) schema_cache: Arc<parking_lot::Mutex<Option<(String, falcon_common::schema::TableSchema)>>>,
+    pub(crate) schema_cache:
+        Arc<parking_lot::Mutex<Option<(String, falcon_common::schema::TableSchema)>>>,
     /// Shared session registry for pg_stat_activity.
     pub(crate) session_registry: SessionRegistry,
 }
@@ -255,7 +259,10 @@ impl QueryHandler {
         self.cluster.raft_coordinator = Some(coordinator);
     }
 
-    pub fn set_lifecycle_coordinator(&mut self, lc: Arc<falcon_cluster::ClusterLifecycleCoordinator>) {
+    pub fn set_lifecycle_coordinator(
+        &mut self,
+        lc: Arc<falcon_cluster::ClusterLifecycleCoordinator>,
+    ) {
         self.cluster.lifecycle_coordinator = Some(lc);
     }
 
@@ -269,7 +276,10 @@ impl QueryHandler {
 
     /// Set a shared SecurityManager instance (so SHOW falcon.security reflects
     /// the same state as the PgServer IP allowlist enforcement).
-    pub fn set_security_manager(&mut self, mgr: Arc<falcon_storage::security_manager::SecurityManager>) {
+    pub fn set_security_manager(
+        &mut self,
+        mgr: Arc<falcon_storage::security_manager::SecurityManager>,
+    ) {
         self.enterprise.security_manager = mgr;
     }
 
@@ -300,23 +310,36 @@ impl QueryHandler {
         let msgs = self.handle_query_dispatch(sql, first, session);
         let elapsed_us = t0.elapsed().as_micros() as u64;
         let qtype = match first {
-            b'I' | b'i' => "insert", b'U' | b'u' => "update",
-            b'D' | b'd' => "delete", b'S' | b's' => "select",
+            b'I' | b'i' => "insert",
+            b'U' | b'u' => "update",
+            b'D' | b'd' => "delete",
+            b'S' | b's' => "select",
             b'C' | b'c' | b'B' | b'b' | b'R' | b'r' | b'E' | b'e' => "txn_control",
             _ => "other",
         };
-        let ok = !msgs.iter().any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
+        let ok = !msgs
+            .iter()
+            .any(|m| matches!(m, BackendMessage::ErrorResponse { .. }));
         falcon_observability::record_query_metrics(elapsed_us, qtype, ok);
         // pg_stat_database counters
         {
             let ds = falcon_common::globals::db_stats();
             let rows = extract_row_count_from_msgs(&msgs);
-            ds.active_time_us.fetch_add(elapsed_us, std::sync::atomic::Ordering::Relaxed);
+            ds.active_time_us
+                .fetch_add(elapsed_us, std::sync::atomic::Ordering::Relaxed);
             match qtype {
-                "insert" => ds.tup_inserted.fetch_add(rows, std::sync::atomic::Ordering::Relaxed),
-                "update" => ds.tup_updated.fetch_add(rows, std::sync::atomic::Ordering::Relaxed),
-                "delete" => ds.tup_deleted.fetch_add(rows, std::sync::atomic::Ordering::Relaxed),
-                "select" => ds.tup_returned.fetch_add(rows, std::sync::atomic::Ordering::Relaxed),
+                "insert" => ds
+                    .tup_inserted
+                    .fetch_add(rows, std::sync::atomic::Ordering::Relaxed),
+                "update" => ds
+                    .tup_updated
+                    .fetch_add(rows, std::sync::atomic::Ordering::Relaxed),
+                "delete" => ds
+                    .tup_deleted
+                    .fetch_add(rows, std::sync::atomic::Ordering::Relaxed),
+                "select" => ds
+                    .tup_returned
+                    .fetch_add(rows, std::sync::atomic::Ordering::Relaxed),
                 _ => 0,
             };
             // pg_stat_statements: skip txn control
@@ -327,7 +350,12 @@ impl QueryHandler {
         msgs
     }
 
-    fn handle_query_dispatch(&self, sql: &str, first: u8, session: &mut PgSession) -> Vec<BackendMessage> {
+    fn handle_query_dispatch(
+        &self,
+        sql: &str,
+        first: u8,
+        session: &mut PgSession,
+    ) -> Vec<BackendMessage> {
         // Fast-path transaction control: bypass sqlparser+binder+planner entirely
         match first {
             b'B' | b'b' if sql.len() >= 5 && sql.as_bytes()[..5].eq_ignore_ascii_case(b"BEGIN") => {
@@ -340,12 +368,17 @@ impl QueryHandler {
                 }
                 // BEGIN ISOLATION LEVEL ... / READ ONLY / READ WRITE
                 let lower = rest.to_lowercase();
-                let opts = lower.strip_prefix("transaction").map(|s| s.trim()).unwrap_or(&lower);
+                let opts = lower
+                    .strip_prefix("transaction")
+                    .map(|s| s.trim())
+                    .unwrap_or(&lower);
                 if let Some(parsed) = parse_begin_options(opts) {
                     return self.fast_begin_with_options(session, parsed);
                 }
             }
-            b'C' | b'c' if sql.len() >= 6 && sql.as_bytes()[..6].eq_ignore_ascii_case(b"COMMIT") => {
+            b'C' | b'c'
+                if sql.len() >= 6 && sql.as_bytes()[..6].eq_ignore_ascii_case(b"COMMIT") =>
+            {
                 let rest = sql[6..].trim().trim_end_matches(';').trim();
                 if rest.is_empty()
                     || rest.eq_ignore_ascii_case("TRANSACTION")
@@ -363,7 +396,9 @@ impl QueryHandler {
                     return self.fast_commit(session);
                 }
             }
-            b'R' | b'r' if sql.len() >= 8 && sql.as_bytes()[..8].eq_ignore_ascii_case(b"ROLLBACK") => {
+            b'R' | b'r'
+                if sql.len() >= 8 && sql.as_bytes()[..8].eq_ignore_ascii_case(b"ROLLBACK") =>
+            {
                 let rest = sql[8..].trim().trim_end_matches(';').trim();
                 // Don't intercept ROLLBACK TO SAVEPOINT
                 if rest.is_empty() {
@@ -442,24 +477,8 @@ impl QueryHandler {
         sql: &str,
         session: &mut PgSession,
     ) -> Result<Vec<BackendMessage>, FalconError> {
-        // ── Fast-path: lightweight INSERT parser (bypasses sqlparser-rs) ──
-        if let Some(fast_ins) = self.try_fast_insert_parse(sql) {
-            // Ultra-fast: skip executor entirely for simple schemas
-            if let Some(result) = self.try_direct_insert(&fast_ins, session) {
-                return result;
-            }
-            let plan = match Planner::plan_insert_owned(fast_ins) {
-                Ok(p) => Planner::wrap_distributed(p, &self.cluster.shard_ids),
-                Err(e) => return Ok(vec![self.error_response(&FalconError::Sql(e))]),
-            };
-            return self.execute_single_plan(sql, plan, session);
-        }
-
-        // ── Fast-path: lightweight UPDATE parser (bypasses sqlparser-rs) ──
-        if let Some(plan) = self.try_fast_update_parse(sql) {
-            let plan = Planner::wrap_distributed(plan, &self.cluster.shard_ids);
-            return self.execute_single_plan(sql, plan, session);
-        }
+        // Fast-path INSERT/UPDATE already attempted in handle_query_dispatch;
+        // if we're here, they didn't match — go straight to sqlparser.
 
         // ── Standard path: sqlparser + binder + planner ──
         let stmts = match parse_sql(sql) {
@@ -489,7 +508,7 @@ impl QueryHandler {
 
                 // Fast path for INSERT: skip row_counts/indexed_cols (unused)
                 // and use owned planning to avoid cloning the rows vector.
-                
+
                 if let BoundStatement::Insert(ins) = bound {
                     match Planner::plan_insert_owned(ins) {
                         Ok(p) => Planner::wrap_distributed(p, &self.cluster.shard_ids),
@@ -499,8 +518,15 @@ impl QueryHandler {
                         }
                     }
                 } else {
-                    let is_dml = matches!(&bound, BoundStatement::Update(_) | BoundStatement::Delete(_));
-                    let indexed_cols = if is_dml { IndexedColumns::new() } else { self.build_indexed_columns() };
+                    let is_dml = matches!(
+                        &bound,
+                        BoundStatement::Update(_) | BoundStatement::Delete(_)
+                    );
+                    let indexed_cols = if is_dml {
+                        IndexedColumns::new()
+                    } else {
+                        self.build_indexed_columns()
+                    };
                     let p = if is_dml {
                         Planner::plan_with_indexes(&bound, &TableRowCounts::new(), &indexed_cols)
                     } else {
@@ -598,6 +624,9 @@ impl QueryHandler {
                                 self.storage.record_tenant_txn_commit(session.tenant_id);
                                 session.txn = None;
                                 session.autocommit = true;
+                                session.revert_local_gucs();
+                                session.savepoints.clear();
+                                session.cursors.clear();
                                 self.flush_txn_stats();
                                 messages.push(BackendMessage::CommandComplete {
                                     tag: "COMMIT".into(),
@@ -608,6 +637,9 @@ impl QueryHandler {
                                 self.storage.record_tenant_txn_abort(session.tenant_id);
                                 session.txn = None;
                                 session.autocommit = true;
+                                session.revert_local_gucs();
+                                session.savepoints.clear();
+                                session.cursors.clear();
                                 self.flush_txn_stats();
                                 messages.push(self.error_response(&FalconError::Txn(e)));
                             }
@@ -629,6 +661,9 @@ impl QueryHandler {
                         self.storage.record_tenant_txn_abort(session.tenant_id);
                         session.txn = None;
                         session.autocommit = true;
+                        session.revert_local_gucs();
+                        session.savepoints.clear();
+                        session.cursors.clear();
                         self.flush_txn_stats();
                     }
                     messages.push(BackendMessage::CommandComplete {
@@ -678,7 +713,8 @@ impl QueryHandler {
                     let auto_txn = if session.txn.is_none() {
                         let classification = classification_from_routing_hint(&routing_hint);
                         let txn = match self.txn_mgr.try_begin_with_classification(
-                            session.default_isolation, classification,
+                            session.default_isolation,
+                            classification,
                         ) {
                             Ok(t) => t,
                             Err(e) => {
@@ -704,8 +740,17 @@ impl QueryHandler {
                         }
                     };
                     let result = self.executor.exec_copy_from_data(
-                        *table_id, schema, columns, &data,
-                        *csv, *delimiter, *header, null_string, *quote, *escape, txn_ref,
+                        *table_id,
+                        schema,
+                        columns,
+                        &data,
+                        *csv,
+                        *delimiter,
+                        *header,
+                        null_string,
+                        *quote,
+                        *escape,
+                        txn_ref,
                     );
                     match result {
                         Ok(ExecutionResult::Dml { rows_affected, .. }) => {
@@ -793,7 +838,9 @@ impl QueryHandler {
                     false
                 };
 
-                let txn_ref = if let Some(t) = session.txn.as_ref() { t } else {
+                let txn_ref = if let Some(t) = session.txn.as_ref() {
+                    t
+                } else {
                     messages.push(BackendMessage::ErrorResponse {
                         severity: "ERROR".into(),
                         code: "25P01".into(),
@@ -829,7 +876,10 @@ impl QueryHandler {
                                 messages.push(BackendMessage::ErrorResponse {
                                     severity: "ERROR".into(),
                                     code: "58030".into(),
-                                    message: format!("could not write server file '{}': {}", path, e),
+                                    message: format!(
+                                        "could not write server file '{}': {}",
+                                        path, e
+                                    ),
                                 });
                             } else {
                                 messages.push(BackendMessage::CommandComplete {
@@ -845,7 +895,8 @@ impl QueryHandler {
                             let row_count = rows.len();
                             for row in &rows {
                                 if let Some(Datum::Text(ref line)) = row.values.first().cloned() {
-                                    messages.push(BackendMessage::CopyData(line.as_bytes().to_vec()));
+                                    messages
+                                        .push(BackendMessage::CopyData(line.as_bytes().to_vec()));
                                 }
                             }
                             messages.push(BackendMessage::CopyDone);
@@ -901,7 +952,9 @@ impl QueryHandler {
                     false
                 };
 
-                let txn_ref = if let Some(t) = session.txn.as_ref() { t } else {
+                let txn_ref = if let Some(t) = session.txn.as_ref() {
+                    t
+                } else {
                     messages.push(BackendMessage::ErrorResponse {
                         severity: "ERROR".into(),
                         code: "25P01".into(),
@@ -934,7 +987,10 @@ impl QueryHandler {
                                 messages.push(BackendMessage::ErrorResponse {
                                     severity: "ERROR".into(),
                                     code: "58030".into(),
-                                    message: format!("could not write server file '{}': {}", path, e),
+                                    message: format!(
+                                        "could not write server file '{}': {}",
+                                        path, e
+                                    ),
                                 });
                             } else {
                                 messages.push(BackendMessage::CommandComplete {
@@ -950,7 +1006,8 @@ impl QueryHandler {
                             let row_count = rows.len();
                             for row in &rows {
                                 if let Some(Datum::Text(ref line)) = row.values.first().cloned() {
-                                    messages.push(BackendMessage::CopyData(line.as_bytes().to_vec()));
+                                    messages
+                                        .push(BackendMessage::CopyData(line.as_bytes().to_vec()));
                                 }
                             }
                             messages.push(BackendMessage::CopyDone);
@@ -1029,6 +1086,11 @@ impl QueryHandler {
                 false
             };
 
+            // Autocommit txns never validate read-sets — skip DashMap+clone overhead
+            if auto_txn {
+                falcon_storage::engine::set_skip_read_tracking(true);
+            }
+
             // Route execution: DistPlan and multi-shard DML/DDL go through
             // DistributedQueryEngine when available; local plans use Executor.
             let query_start = Instant::now();
@@ -1037,15 +1099,50 @@ impl QueryHandler {
             } else {
                 self.executor.execute(&plan, session.txn.as_ref())
             };
+
+            if auto_txn {
+                falcon_storage::engine::set_skip_read_tracking(false);
+            }
             let query_duration = query_start.elapsed();
 
-            let plan_is_dml = matches!(&plan,
-                PhysicalPlan::Insert { .. } | PhysicalPlan::Update { .. } | PhysicalPlan::Delete { .. });
+            // AI optimizer feedback: record actual execution time for SELECT queries.
+            if matches!(
+                &plan,
+                PhysicalPlan::SeqScan { .. }
+                    | PhysicalPlan::IndexScan { .. }
+                    | PhysicalPlan::IndexRangeScan { .. }
+                    | PhysicalPlan::HashJoin { .. }
+                    | PhysicalPlan::NestedLoopJoin { .. }
+                    | PhysicalPlan::MergeSortJoin { .. }
+            ) {
+                let actual_us = query_duration.as_micros() as u64;
+                let kind = PlanKind::from_physical(&plan);
+                // Extract features from empty vec as placeholder (features were extracted at plan time)
+                let features = [0.0f64; falcon_planner::FEATURE_DIM];
+                global_ai_optimizer().record_feedback(FeedbackRecord {
+                    features,
+                    plan_kind: kind,
+                    actual_us,
+                    predicted_log2_cost: 0.0,
+                });
+            }
+
+            let plan_is_dml = matches!(
+                &plan,
+                PhysicalPlan::Insert { .. }
+                    | PhysicalPlan::Update { .. }
+                    | PhysicalPlan::Delete { .. }
+            );
 
             match result {
                 Ok(exec_result) => {
-                    let is_readonly = !plan_is_dml && matches!(&exec_result, ExecutionResult::Query { .. }
-                        | ExecutionResult::Ddl { .. } | ExecutionResult::TxnControl { .. });
+                    let is_readonly = !plan_is_dml
+                        && matches!(
+                            &exec_result,
+                            ExecutionResult::Query { .. }
+                                | ExecutionResult::Ddl { .. }
+                                | ExecutionResult::TxnControl { .. }
+                        );
                     match exec_result {
                         ExecutionResult::Query { columns, rows } => {
                             let fields: Vec<FieldDescription> = columns
@@ -1064,20 +1161,29 @@ impl QueryHandler {
 
                             let row_count = rows.len();
                             for row in rows {
-                                let values: Vec<Option<String>> =
-                                    row.values.iter().map(falcon_common::datum::Datum::to_pg_text).collect();
+                                let values: Vec<Option<String>> = row
+                                    .values
+                                    .iter()
+                                    .map(falcon_common::datum::Datum::to_pg_text)
+                                    .collect();
                                 messages.push(BackendMessage::DataRow { values });
                             }
 
-                            messages.push(BackendMessage::CommandComplete {
-                                tag: format!("SELECT {row_count}"),
-                            });
+                            let tag = match row_count {
+                                0 => "SELECT 0".to_owned(),
+                                1 => "SELECT 1".to_owned(),
+                                _ => format!("SELECT {row_count}"),
+                            };
+                            messages.push(BackendMessage::CommandComplete { tag });
                         }
                         ExecutionResult::Dml { rows_affected, tag } => {
-                            let cmd_tag = match tag {
-                                "INSERT" => format!("INSERT 0 {rows_affected}"),
-                                "UPDATE" => format!("UPDATE {rows_affected}"),
-                                "DELETE" => format!("DELETE {rows_affected}"),
+                            let cmd_tag = match (tag, rows_affected) {
+                                ("INSERT", 1) => "INSERT 0 1".to_owned(),
+                                ("UPDATE", 1) => "UPDATE 1".to_owned(),
+                                ("DELETE", 1) => "DELETE 1".to_owned(),
+                                ("INSERT", _) => format!("INSERT 0 {rows_affected}"),
+                                ("UPDATE", _) => format!("UPDATE {rows_affected}"),
+                                ("DELETE", _) => format!("DELETE {rows_affected}"),
                                 _ => format!("{tag} {rows_affected}"),
                             };
                             messages.push(BackendMessage::CommandComplete { tag: cmd_tag });
@@ -1103,7 +1209,12 @@ impl QueryHandler {
                     }
 
                     // Record to slow query log and emit tracing warn if threshold exceeded
-                    if self.observability.slow_query_log.record(sql, query_duration, session.id, &session.peer_addr) {
+                    if self.observability.slow_query_log.record(
+                        sql,
+                        query_duration,
+                        session.id,
+                        &session.peer_addr,
+                    ) {
                         tracing::warn!(
                             target: "slow_query",
                             session_id = session.id,
@@ -1116,7 +1227,12 @@ impl QueryHandler {
                 }
                 Err(e) => {
                     // Record to slow query log (even failed queries)
-                    if self.observability.slow_query_log.record(sql, query_duration, session.id, &session.peer_addr) {
+                    if self.observability.slow_query_log.record(
+                        sql,
+                        query_duration,
+                        session.id,
+                        &session.peer_addr,
+                    ) {
                         tracing::warn!(
                             target: "slow_query",
                             session_id = session.id,
@@ -1197,13 +1313,14 @@ impl QueryHandler {
         for row in rows {
             messages.push(BackendMessage::DataRow { values: row });
         }
-        messages.push(BackendMessage::CommandComplete {
-            tag: format!("SELECT {row_count}"),
-        });
+        let tag = match row_count {
+            0 => "SELECT 0".to_owned(),
+            1 => "SELECT 1".to_owned(),
+            _ => format!("SELECT {row_count}"),
+        };
+        messages.push(BackendMessage::CommandComplete { tag });
         messages
     }
-
-
 }
 
 /// Extract row count from CommandComplete tags in response messages.
@@ -1228,13 +1345,16 @@ impl QueryHandler {
         let code: String = err.pg_sqlstate().into();
 
         let extra = match err {
-            FalconError::Storage(StorageError::UniqueViolation { column_idx, index_key_hex }) => {
-                Some(crate::codec::ErrorFields {
-                    detail: Some(format!("Key collision on column index {column_idx} (key {index_key_hex})")),
-                    constraint_name: Some(format!("unique_{column_idx}")),
-                    ..Default::default()
-                })
-            }
+            FalconError::Storage(StorageError::UniqueViolation {
+                column_idx,
+                index_key_hex,
+            }) => Some(crate::codec::ErrorFields {
+                detail: Some(format!(
+                    "Key collision on column index {column_idx} (key {index_key_hex})"
+                )),
+                constraint_name: Some(format!("unique_{column_idx}")),
+                ..Default::default()
+            }),
             FalconError::Txn(TxnError::ConstraintViolation(_, desc)) => {
                 Some(crate::codec::ErrorFields {
                     detail: Some(desc.clone()),
@@ -1247,26 +1367,39 @@ impl QueryHandler {
                     ..Default::default()
                 })
             }
-            FalconError::Retryable { leader_hint: Some(hint), retry_after_ms, .. } => {
-                Some(crate::codec::ErrorFields {
-                    hint: Some(format!("leader={hint}, retry_after={retry_after_ms}ms")),
-                    ..Default::default()
-                })
-            }
+            FalconError::Retryable {
+                leader_hint: Some(hint),
+                retry_after_ms,
+                ..
+            } => Some(crate::codec::ErrorFields {
+                hint: Some(format!("leader={hint}, retry_after={retry_after_ms}ms")),
+                ..Default::default()
+            }),
             _ => None,
         };
 
         if let Some(fields) = extra {
-            BackendMessage::ErrorResponseExt { severity, code, message, fields }
+            BackendMessage::ErrorResponseExt {
+                severity,
+                code,
+                message,
+                fields,
+            }
         } else {
-            BackendMessage::ErrorResponse { severity, code, message }
+            BackendMessage::ErrorResponse {
+                severity,
+                code,
+                message,
+            }
         }
     }
 
     /// Push current txn stats to Prometheus gauges (sampled 1-in-64).
     pub(crate) fn flush_txn_stats(&self) {
-        let n = self.flush_stats_counter.fetch_add(1, AtomicOrdering::Relaxed);
-        if n % 64 != 0 {
+        let n = self
+            .flush_stats_counter
+            .fetch_add(1, AtomicOrdering::Relaxed);
+        if !n.is_multiple_of(64) {
             return;
         }
         let s = self.txn_mgr.stats_snapshot();
@@ -1282,7 +1415,6 @@ impl QueryHandler {
     }
 }
 
-
 /// Parsed options from BEGIN TRANSACTION ... clauses.
 pub(crate) struct BeginOptions {
     pub isolation: Option<falcon_common::types::IsolationLevel>,
@@ -1293,7 +1425,10 @@ pub(crate) struct BeginOptions {
 /// Returns None if the string is not a valid set of BEGIN options.
 pub(crate) fn parse_begin_options(s: &str) -> Option<BeginOptions> {
     use falcon_common::types::IsolationLevel;
-    let mut opts = BeginOptions { isolation: None, read_only: None };
+    let mut opts = BeginOptions {
+        isolation: None,
+        read_only: None,
+    };
     let mut rest = s.trim();
     if rest.is_empty() {
         return None;
@@ -3909,13 +4044,15 @@ mod tests {
             "PREPARE my_insert AS INSERT INTO sql_ps2 VALUES ($1, $2)",
             &mut session,
         );
-        assert!(msgs.iter().any(
-            |m| matches!(m, BackendMessage::CommandComplete { tag } if tag == "PREPARE")
-        ));
+        assert!(msgs
+            .iter()
+            .any(|m| matches!(m, BackendMessage::CommandComplete { tag } if tag == "PREPARE")));
 
         // Execute the prepared insert
         let msgs = handler.handle_query("EXECUTE my_insert(1, 'hello')", &mut session);
-        let has_complete = msgs.iter().any(|m| matches!(m, BackendMessage::CommandComplete { .. }));
+        let has_complete = msgs
+            .iter()
+            .any(|m| matches!(m, BackendMessage::CommandComplete { .. }));
         assert!(has_complete, "EXECUTE INSERT should return CommandComplete");
 
         // Verify data was inserted
@@ -3935,10 +4072,7 @@ mod tests {
         );
         handler.handle_query("INSERT INTO sql_ps3 VALUES (1, 'x')", &mut session);
 
-        handler.handle_query(
-            "PREPARE all_rows AS SELECT * FROM sql_ps3",
-            &mut session,
-        );
+        handler.handle_query("PREPARE all_rows AS SELECT * FROM sql_ps3", &mut session);
         let msgs = handler.handle_query("EXECUTE all_rows", &mut session);
         let rows = extract_data_rows(&msgs);
         assert_eq!(rows.len(), 1);
@@ -3948,10 +4082,13 @@ mod tests {
     fn test_sql_execute_nonexistent() {
         let (handler, mut session) = setup_handler();
         let msgs = handler.handle_query("EXECUTE ghost_stmt(1)", &mut session);
-        let has_error = msgs.iter().any(|m| {
-            matches!(m, BackendMessage::ErrorResponse { code, .. } if code == "26000")
-        });
-        assert!(has_error, "EXECUTE on nonexistent stmt should return SQLSTATE 26000");
+        let has_error = msgs
+            .iter()
+            .any(|m| matches!(m, BackendMessage::ErrorResponse { code, .. } if code == "26000"));
+        assert!(
+            has_error,
+            "EXECUTE on nonexistent stmt should return SQLSTATE 26000"
+        );
     }
 
     #[test]
@@ -3961,14 +4098,8 @@ mod tests {
             "CREATE TABLE sql_dealloc (id INT PRIMARY KEY)",
             &mut session,
         );
-        handler.handle_query(
-            "PREPARE stmt_a AS SELECT * FROM sql_dealloc",
-            &mut session,
-        );
-        handler.handle_query(
-            "PREPARE stmt_b AS SELECT * FROM sql_dealloc",
-            &mut session,
-        );
+        handler.handle_query("PREPARE stmt_a AS SELECT * FROM sql_dealloc", &mut session);
+        handler.handle_query("PREPARE stmt_b AS SELECT * FROM sql_dealloc", &mut session);
         assert_eq!(session.prepared_statements.len(), 2);
 
         handler.handle_query("DEALLOCATE stmt_a", &mut session);
@@ -3984,14 +4115,8 @@ mod tests {
             "CREATE TABLE sql_dealloc2 (id INT PRIMARY KEY)",
             &mut session,
         );
-        handler.handle_query(
-            "PREPARE s1 AS SELECT * FROM sql_dealloc2",
-            &mut session,
-        );
-        handler.handle_query(
-            "PREPARE s2 AS SELECT * FROM sql_dealloc2",
-            &mut session,
-        );
+        handler.handle_query("PREPARE s1 AS SELECT * FROM sql_dealloc2", &mut session);
+        handler.handle_query("PREPARE s2 AS SELECT * FROM sql_dealloc2", &mut session);
         assert_eq!(session.prepared_statements.len(), 2);
 
         handler.handle_query("DEALLOCATE ALL", &mut session);
@@ -4028,9 +4153,9 @@ mod tests {
             "PREPARE typed_q(int, text) AS SELECT * FROM sql_typed WHERE id = $1",
             &mut session,
         );
-        assert!(msgs.iter().any(
-            |m| matches!(m, BackendMessage::CommandComplete { tag } if tag == "PREPARE")
-        ));
+        assert!(msgs
+            .iter()
+            .any(|m| matches!(m, BackendMessage::CommandComplete { tag } if tag == "PREPARE")));
         assert!(session.prepared_statements.contains_key("typed_q"));
     }
 
@@ -4057,7 +4182,8 @@ mod tests {
 
     #[test]
     fn test_parse_prepare_statement_with_types() {
-        let result = parse_prepare_statement("PREPARE bar(int, text) AS INSERT INTO t VALUES ($1, $2)");
+        let result =
+            parse_prepare_statement("PREPARE bar(int, text) AS INSERT INTO t VALUES ($1, $2)");
         assert!(result.is_some());
         let (name, query) = result.unwrap();
         assert_eq!(name, "bar");
@@ -4095,19 +4221,19 @@ mod tests {
 
     #[test]
     fn test_bind_params_substitution() {
-        let result = bind_params("SELECT * FROM t WHERE id = $1 AND name = $2", &[
-            Some(b"42".to_vec()),
-            Some(b"alice".to_vec()),
-        ]);
+        let result = bind_params(
+            "SELECT * FROM t WHERE id = $1 AND name = $2",
+            &[Some(b"42".to_vec()), Some(b"alice".to_vec())],
+        );
         assert_eq!(result, "SELECT * FROM t WHERE id = '42' AND name = 'alice'");
     }
 
     #[test]
     fn test_bind_params_null() {
-        let result = bind_params("INSERT INTO t VALUES ($1, $2)", &[
-            Some(b"1".to_vec()),
-            None,
-        ]);
+        let result = bind_params(
+            "INSERT INTO t VALUES ($1, $2)",
+            &[Some(b"1".to_vec()), None],
+        );
         assert_eq!(result, "INSERT INTO t VALUES ('1', NULL)");
     }
 
@@ -4120,11 +4246,7 @@ mod tests {
     #[test]
     fn test_text_params_to_datum_typed() {
         use falcon_common::types::DataType;
-        let params = vec![
-            Some(b"42".to_vec()),
-            Some(b"hello".to_vec()),
-            None,
-        ];
+        let params = vec![Some(b"42".to_vec()), Some(b"hello".to_vec()), None];
         let hints = vec![
             Some(DataType::Int32),
             Some(DataType::Text),
@@ -4134,7 +4256,10 @@ mod tests {
         assert_eq!(datums.len(), 3);
         assert_eq!(datums[0], Datum::Int32(42));
         assert_eq!(datums[1], Datum::Text("hello".into()));
-        assert!(matches!(datums[2], Datum::Null), "None param should produce Datum::Null");
+        assert!(
+            matches!(datums[2], Datum::Null),
+            "None param should produce Datum::Null"
+        );
     }
 
     #[test]
@@ -4237,7 +4362,10 @@ mod tests {
             "CREATE TABLE mixed_int (a SMALLINT, b INT, c BIGINT)",
             &mut session,
         );
-        handler.handle_query("INSERT INTO mixed_int VALUES (1, 100000, 9999999999)", &mut session);
+        handler.handle_query(
+            "INSERT INTO mixed_int VALUES (1, 100000, 9999999999)",
+            &mut session,
+        );
 
         let msgs = handler.handle_query("SELECT * FROM mixed_int", &mut session);
         let rows = extract_data_rows(&msgs);
@@ -4250,10 +4378,7 @@ mod tests {
     #[test]
     fn test_mixed_float_types_table() {
         let (handler, mut session) = setup_handler();
-        handler.handle_query(
-            "CREATE TABLE mixed_float (a REAL, b FLOAT8)",
-            &mut session,
-        );
+        handler.handle_query("CREATE TABLE mixed_float (a REAL, b FLOAT8)", &mut session);
         handler.handle_query("INSERT INTO mixed_float VALUES (1.5, 2.5)", &mut session);
 
         let msgs = handler.handle_query("SELECT * FROM mixed_float", &mut session);
@@ -4277,7 +4402,10 @@ mod tests {
             &mut session,
         );
 
-        let msgs = handler.handle_query("SELECT price, qty FROM t_numeric WHERE id = 1", &mut session);
+        let msgs = handler.handle_query(
+            "SELECT price, qty FROM t_numeric WHERE id = 1",
+            &mut session,
+        );
         let rows = extract_data_rows(&msgs);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0][0], Some("123.45".into()));
@@ -4418,10 +4546,7 @@ mod tests {
             "CREATE TABLE t_time (id INT PRIMARY KEY, t TIME)",
             &mut session,
         );
-        handler.handle_query(
-            "INSERT INTO t_time VALUES (1, '14:30:00')",
-            &mut session,
-        );
+        handler.handle_query("INSERT INTO t_time VALUES (1, '14:30:00')", &mut session);
 
         let msgs = handler.handle_query("SELECT t FROM t_time WHERE id = 1", &mut session);
         let rows = extract_data_rows(&msgs);

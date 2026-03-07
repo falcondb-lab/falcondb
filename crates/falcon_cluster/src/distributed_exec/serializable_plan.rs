@@ -242,14 +242,12 @@ impl FilterExpr {
                     None => false, // missing column → false
                 }
             }
-            Self::IsNull { column_idx } => matches!(
-                row.values.get(*column_idx),
-                Some(Datum::Null) | None
-            ),
-            Self::IsNotNull { column_idx } => !matches!(
-                row.values.get(*column_idx),
-                Some(Datum::Null) | None
-            ),
+            Self::IsNull { column_idx } => {
+                matches!(row.values.get(*column_idx), Some(Datum::Null) | None)
+            }
+            Self::IsNotNull { column_idx } => {
+                !matches!(row.values.get(*column_idx), Some(Datum::Null) | None)
+            }
             Self::And(exprs) => exprs.iter().all(|e| e.evaluate(row)),
             Self::Or(exprs) => exprs.iter().any(|e| e.evaluate(row)),
             Self::Not(expr) => !expr.evaluate(row),
@@ -538,12 +536,7 @@ fn project_rows(rows: &[OwnedRow], projection: &[usize]) -> Vec<OwnedRow> {
         .map(|row| {
             let values: Vec<Datum> = projection
                 .iter()
-                .map(|&idx| {
-                    row.values
-                        .get(idx)
-                        .cloned()
-                        .unwrap_or(Datum::Null)
-                })
+                .map(|&idx| row.values.get(idx).cloned().unwrap_or(Datum::Null))
                 .collect();
             OwnedRow::new(values)
         })
@@ -575,7 +568,9 @@ fn compute_aggregates(rows: &[OwnedRow], aggregates: &[AggFunc]) -> OwnedRow {
                     .iter()
                     .filter_map(|r| r.values.get(*col))
                     .filter(|d| !matches!(d, Datum::Null))
-                    .min_by(|a, b| crate::distributed_exec::gather::compare_datums(Some(a), Some(b)))
+                    .min_by(|a, b| {
+                        crate::distributed_exec::gather::compare_datums(Some(a), Some(b))
+                    })
                     .cloned()
                     .unwrap_or(Datum::Null);
                 values.push(min);
@@ -585,7 +580,9 @@ fn compute_aggregates(rows: &[OwnedRow], aggregates: &[AggFunc]) -> OwnedRow {
                     .iter()
                     .filter_map(|r| r.values.get(*col))
                     .filter(|d| !matches!(d, Datum::Null))
-                    .max_by(|a, b| crate::distributed_exec::gather::compare_datums(Some(a), Some(b)))
+                    .max_by(|a, b| {
+                        crate::distributed_exec::gather::compare_datums(Some(a), Some(b))
+                    })
                     .cloned()
                     .unwrap_or(Datum::Null);
                 values.push(max);
@@ -750,7 +747,10 @@ mod tests {
 
     #[test]
     fn test_project_rows_empty_projection() {
-        let rows = vec![OwnedRow::new(vec![Datum::Int64(1), Datum::Text("a".into())])];
+        let rows = vec![OwnedRow::new(vec![
+            Datum::Int64(1),
+            Datum::Text("a".into()),
+        ])];
         let projected = project_rows(&rows, &[]);
         assert_eq!(projected.len(), 1);
         assert_eq!(projected[0].values.len(), 2);
@@ -858,12 +858,10 @@ mod tests {
                 op: CompareOp::Eq,
                 value: Datum::Int64(42),
             },
-            assignments: vec![
-                ColumnAssignment {
-                    column_idx: 1,
-                    value: Datum::Text("updated".into()),
-                },
-            ],
+            assignments: vec![ColumnAssignment {
+                column_idx: 1,
+                value: Datum::Text("updated".into()),
+            }],
             columns: vec![("rows_affected".into(), DataType::Int64)],
         };
         let bytes = plan.to_bytes().unwrap();
@@ -895,12 +893,10 @@ mod tests {
         let plan = SerializableSubPlan::Update {
             table_id: 1,
             predicate: FilterExpr::True,
-            assignments: vec![
-                ColumnAssignment {
-                    column_idx: 1,
-                    value: Datum::Text("blanked".into()),
-                },
-            ],
+            assignments: vec![ColumnAssignment {
+                column_idx: 1,
+                value: Datum::Text("blanked".into()),
+            }],
             columns: vec![("rows_affected".into(), DataType::Int64)],
         };
         let bytes = plan.to_bytes().unwrap();

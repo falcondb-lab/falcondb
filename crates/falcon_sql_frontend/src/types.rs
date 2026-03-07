@@ -7,6 +7,11 @@ use falcon_common::types::TableId;
 #[allow(clippy::large_enum_variant)]
 pub enum BoundStatement {
     CreateTable(BoundCreateTable),
+    CreateTableAs {
+        table_name: String,
+        if_not_exists: bool,
+        query: Box<BoundSelect>,
+    },
     DropTable(BoundDropTable),
     AlterTable(BoundAlterTable),
     Insert(BoundInsert),
@@ -203,6 +208,40 @@ pub enum BoundStatement {
         name: String,
         args: Vec<BoundExpr>,
     },
+    /// Accepted but ignored — e.g. CREATE EXTENSION, CREATE TYPE, ALTER INDEX, CREATE TRIGGER.
+    NoOp,
+    /// SHOW <pg_var> — returns a single-row result with the variable value.
+    ShowPgVar {
+        name: String,
+        value: String,
+    },
+    /// SHOW DDL STATUS — returns progress of all active online DDL operations.
+    ShowDdlStatus,
+    /// BACKUP DATABASE TO <path>
+    Backup {
+        dest_dir: String,
+        incremental: bool,
+        label: String,
+    },
+    /// RESTORE DATABASE FROM <path>
+    Restore {
+        src_dir: String,
+    },
+    /// CREATE JOB name EVERY <interval_secs> SECONDS AS BACKUP TO <dest>
+    CreateJob {
+        name: String,
+        backup_type: String,
+        dest_dir: String,
+        interval_secs: u64,
+    },
+    /// DROP JOB <id>
+    DropJob {
+        job_id: u64,
+    },
+    /// SHOW JOBS
+    ShowJobs,
+    /// SHOW BACKUP STATUS
+    ShowBackupStatus,
 }
 
 #[derive(Debug, Clone)]
@@ -220,6 +259,13 @@ pub struct BoundDropTable {
 #[derive(Debug, Clone)]
 pub enum AlterTableOp {
     AddColumn(falcon_common::schema::ColumnDef),
+    /// ADD COLUMN with a dynamic default (NOW(), CURRENT_DATE, NEXTVAL, etc.)
+    AddColumnDynamic {
+        col: falcon_common::schema::ColumnDef,
+        dynamic_default: falcon_common::schema::DefaultFn,
+    },
+    /// ADD CONSTRAINT — adds PK, UNIQUE, CHECK, or FK constraint to existing table
+    AddConstraint(BoundAddConstraint),
     DropColumn(String),
     RenameColumn {
         old_name: String,
@@ -245,6 +291,33 @@ pub enum AlterTableOp {
     AlterColumnDropDefault {
         column_name: String,
     },
+    DropConstraint {
+        name: String,
+        if_exists: bool,
+    },
+    RenameConstraint {
+        old_name: String,
+        new_name: String,
+    },
+    NoOp,
+}
+
+#[derive(Debug, Clone)]
+pub enum ConstraintKind {
+    PrimaryKey(Vec<String>),
+    Unique(Vec<String>),
+    Check(BoundExpr),
+    ForeignKey {
+        columns: Vec<String>,
+        ref_table: String,
+        ref_columns: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct BoundAddConstraint {
+    pub name: Option<String>,
+    pub kind: ConstraintKind,
 }
 
 #[derive(Debug, Clone)]
@@ -846,10 +919,7 @@ pub enum BoundExpr {
     /// IS NOT NULL check.
     IsNotNull(Box<Self>),
     /// IS NOT DISTINCT FROM (NULL-safe equality).
-    IsNotDistinctFrom {
-        left: Box<Self>,
-        right: Box<Self>,
-    },
+    IsNotDistinctFrom { left: Box<Self>, right: Box<Self> },
     /// LIKE / ILIKE pattern match.
     Like {
         expr: Box<Self>,
@@ -885,10 +955,7 @@ pub enum BoundExpr {
     /// COALESCE(a, b, ...)
     Coalesce(Vec<Self>),
     /// Scalar function call: UPPER, LOWER, LENGTH, SUBSTRING, CONCAT
-    Function {
-        func: ScalarFunc,
-        args: Vec<Self>,
-    },
+    Function { func: ScalarFunc, args: Vec<Self> },
     /// Scalar subquery — returns a single value: `(SELECT MAX(id) FROM t)`.
     ScalarSubquery(Box<BoundSelect>),
     /// IN subquery: `expr IN (SELECT col FROM t)`.
@@ -911,10 +978,7 @@ pub enum BoundExpr {
     /// ARRAY literal: ARRAY[1, 2, 3]
     ArrayLiteral(Vec<Self>),
     /// Array subscript: arr[index] (1-indexed)
-    ArrayIndex {
-        array: Box<Self>,
-        index: Box<Self>,
-    },
+    ArrayIndex { array: Box<Self>, index: Box<Self> },
     /// Reference to a column in the outer query (correlated subquery).
     /// The usize is the column index in the outer query's schema.
     OuterColumnRef(usize),
@@ -950,10 +1014,7 @@ pub enum BoundExpr {
     /// Each usize is a column index in the source table.
     Grouping(Vec<usize>),
     /// User-defined function call (SQL or PL/pgSQL).
-    UserFunction {
-        name: String,
-        args: Vec<Self>,
-    },
+    UserFunction { name: String, args: Vec<Self> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -981,4 +1042,16 @@ pub enum BinOp {
     JsonContainedBy,   // <@ (left contained by right)
     JsonExists,        // ? (key exists in jsonb)
     TsMatch,           // @@ (tsvector matches tsquery)
+    // Bitwise operators
+    BitwiseOr,         // |
+    BitwiseAnd,        // &
+    BitwiseXor,        // ^ (PG uses # for XOR)
+    BitwiseShiftLeft,  // <<
+    BitwiseShiftRight, // >>
+    Exponent,          // ^ (PG power operator)
+    // Regex match operators
+    RegexMatch,     // ~
+    RegexIMatch,    // ~*
+    RegexNotMatch,  // !~
+    RegexNotIMatch, // !~*
 }

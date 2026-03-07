@@ -36,9 +36,7 @@ mod failover_txn_matrix {
     use crate::ha::{HAConfig, HAReplicaGroup};
     use crate::indoubt_resolver::{InDoubtResolver, TxnOutcome, TxnOutcomeCache};
     use falcon_storage::wal::WalRecord;
-    use falcon_txn::manager::{
-        SlowPathMode, TxnClassification, TxnManager, TxnState,
-    };
+    use falcon_txn::manager::{SlowPathMode, TxnClassification, TxnManager, TxnState};
 
     // ═══════════════════════════════════════════════════════════════════
     // Test Infrastructure: schemas, cluster setup, invariant checkers
@@ -57,7 +55,8 @@ mod failover_txn_matrix {
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(1),
@@ -66,7 +65,8 @@ mod failover_txn_matrix {
                     nullable: false,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
             ],
             primary_key_columns: vec![0],
@@ -87,7 +87,8 @@ mod failover_txn_matrix {
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(1),
@@ -96,7 +97,8 @@ mod failover_txn_matrix {
                     nullable: false,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(2),
@@ -105,7 +107,8 @@ mod failover_txn_matrix {
                     nullable: false,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(3),
@@ -114,7 +117,8 @@ mod failover_txn_matrix {
                     nullable: false,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
             ],
             primary_key_columns: vec![0],
@@ -321,12 +325,9 @@ mod failover_txn_matrix {
         // I4: client sees a deterministic outcome (abort success or NotFound)
         assert!(abort_result.is_ok() || matches!(abort_result, Err(TxnError::NotFound(_))));
 
-        cluster.fo_coord.record_affected_txn(
-            txn_id,
-            false,
-            FailoverTxnResolution::Aborted,
-            100,
-        );
+        cluster
+            .fo_coord
+            .record_affected_txn(txn_id, false, FailoverTxnResolution::Aborted, 100);
 
         // Promote replica
         cluster.shard0.bump_epoch();
@@ -343,7 +344,10 @@ mod failover_txn_matrix {
         assert_eq!(cluster.resolver.indoubt_count(), 0);
 
         // I2: balance sum preserved (no partial effect)
-        assert!(check_balance_sum(&cluster.shard0.inner.primary.storage, 2000));
+        assert!(check_balance_sum(
+            &cluster.shard0.inner.primary.storage,
+            2000
+        ));
     }
 
     /// SS-02: Kill shard leader before commit.
@@ -360,19 +364,15 @@ mod failover_txn_matrix {
 
         // Simulate: txn did some work, then leader killed before commit
         // Initiate failover drain
-        cluster.fo_coord.begin_failover_drain(
-            cluster.shard0.current_epoch() + 1,
-            vec![txn_id],
-        );
+        cluster
+            .fo_coord
+            .begin_failover_drain(cluster.shard0.current_epoch() + 1, vec![txn_id]);
 
         // Force-abort the txn (leader died before commit could execute)
         let _ = cluster.mgr0.abort(txn_id);
-        cluster.fo_coord.record_affected_txn(
-            txn_id,
-            false,
-            FailoverTxnResolution::Aborted,
-            50,
-        );
+        cluster
+            .fo_coord
+            .record_affected_txn(txn_id, false, FailoverTxnResolution::Aborted, 50);
 
         // Promote replica
         cluster.shard0.bump_epoch();
@@ -380,7 +380,10 @@ mod failover_txn_matrix {
 
         // I1: atomicity — txn was aborted, no effects visible
         // I2: balance unchanged
-        assert!(check_balance_sum(&cluster.shard0.inner.primary.storage, 2000));
+        assert!(check_balance_sum(
+            &cluster.shard0.inner.primary.storage,
+            2000
+        ));
 
         // I4: attempting commit after abort yields deterministic error
         let commit_result = cluster.mgr0.commit(txn_id);
@@ -416,7 +419,10 @@ mod failover_txn_matrix {
         // The txn was committed exactly once (at commit_ts)
 
         // I2: balance sum preserved
-        assert!(check_balance_sum(&cluster.shard0.inner.primary.storage, 2000));
+        assert!(check_balance_sum(
+            &cluster.shard0.inner.primary.storage,
+            2000
+        ));
     }
 
     /// SS-04: Replica lag + leader switch.
@@ -471,10 +477,9 @@ mod failover_txn_matrix {
 
         // I4: after failover, convergence should eventually complete
         std::thread::sleep(Duration::from_millis(60));
-        cluster.fo_coord.begin_failover_drain(
-            cluster.shard0.current_epoch(),
-            vec![],
-        );
+        cluster
+            .fo_coord
+            .begin_failover_drain(cluster.shard0.current_epoch(), vec![]);
         cluster.fo_coord.complete_failover_drain();
         std::thread::sleep(Duration::from_millis(60));
         assert!(cluster.fo_coord.check_convergence());
@@ -539,10 +544,9 @@ mod failover_txn_matrix {
 
         // Coordinator "crashes" mid-prepare → txn is in-doubt
         // Register as in-doubt in the resolver
-        cluster.resolver.register_indoubt(
-            txn_id,
-            vec![(ShardId(0), txn_id), (ShardId(1), txn_id)],
-        );
+        cluster
+            .resolver
+            .register_indoubt(txn_id, vec![(ShardId(0), txn_id), (ShardId(1), txn_id)]);
         cluster.ttl_enforcer.register(txn_id);
 
         // I5: in-doubt txn is visible
@@ -587,17 +591,16 @@ mod failover_txn_matrix {
         assert_eq!(handle.state, TxnState::Prepared);
 
         // Coordinator crashes → register in-doubt
-        cluster.resolver.register_indoubt(
-            txn_id,
-            vec![(ShardId(0), txn_id), (ShardId(1), txn_id)],
-        );
+        cluster
+            .resolver
+            .register_indoubt(txn_id, vec![(ShardId(0), txn_id), (ShardId(1), txn_id)]);
         cluster.ttl_enforcer.register(txn_id);
 
         // Simulate: coordinator WAL replay finds commit decision
+        cluster.outcome_cache.record(txn_id, TxnOutcome::Committed);
         cluster
-            .outcome_cache
-            .record(txn_id, TxnOutcome::Committed);
-        cluster.resolver.record_decision(txn_id, TxnOutcome::Committed);
+            .resolver
+            .record_decision(txn_id, TxnOutcome::Committed);
 
         // I5: sweep resolves to committed
         let resolved = cluster.resolver.sweep();
@@ -628,16 +631,13 @@ mod failover_txn_matrix {
 
         // Prepare + decision recorded
         cluster.mgr0.prepare(txn_id).unwrap();
-        cluster
-            .outcome_cache
-            .record(txn_id, TxnOutcome::Committed);
+        cluster.outcome_cache.record(txn_id, TxnOutcome::Committed);
 
         // Coordinator "crashes" after sending commit to shard 0 but not shard 1
         // Register as in-doubt
-        cluster.resolver.register_indoubt(
-            txn_id,
-            vec![(ShardId(0), txn_id), (ShardId(1), txn_id)],
-        );
+        cluster
+            .resolver
+            .register_indoubt(txn_id, vec![(ShardId(0), txn_id), (ShardId(1), txn_id)]);
 
         // I5: resolver reads cached commit decision → resolves as committed
         let resolved = cluster.resolver.sweep();
@@ -668,19 +668,15 @@ mod failover_txn_matrix {
         let txn_id = txn.txn_id;
 
         // Shard 0 leader dies during prepare → failover
-        cluster.fo_coord.begin_failover_drain(
-            cluster.shard0.current_epoch() + 1,
-            vec![txn_id],
-        );
+        cluster
+            .fo_coord
+            .begin_failover_drain(cluster.shard0.current_epoch() + 1, vec![txn_id]);
 
         // Txn cannot complete prepare → abort
         let _ = cluster.mgr0.abort(txn_id);
-        cluster.fo_coord.record_affected_txn(
-            txn_id,
-            false,
-            FailoverTxnResolution::Aborted,
-            100,
-        );
+        cluster
+            .fo_coord
+            .record_affected_txn(txn_id, false, FailoverTxnResolution::Aborted, 100);
 
         // Promote new leader
         cluster.shard0.catch_up_all_replicas().unwrap();
@@ -714,10 +710,9 @@ mod failover_txn_matrix {
         cluster.mgr0.prepare(txn_id).unwrap();
 
         // Shard 0 leader dies AFTER prepare persisted
-        cluster.fo_coord.begin_failover_drain(
-            cluster.shard0.current_epoch() + 1,
-            vec![txn_id],
-        );
+        cluster
+            .fo_coord
+            .begin_failover_drain(cluster.shard0.current_epoch() + 1, vec![txn_id]);
 
         // Txn was prepared → move to in-doubt
         cluster.fo_coord.record_affected_txn(
@@ -726,10 +721,9 @@ mod failover_txn_matrix {
             FailoverTxnResolution::MovedToInDoubt,
             200,
         );
-        cluster.resolver.register_indoubt(
-            txn_id,
-            vec![(ShardId(0), txn_id), (ShardId(1), txn_id)],
-        );
+        cluster
+            .resolver
+            .register_indoubt(txn_id, vec![(ShardId(0), txn_id), (ShardId(1), txn_id)]);
         cluster.ttl_enforcer.register(txn_id);
 
         // Promote new leader
@@ -738,9 +732,7 @@ mod failover_txn_matrix {
         cluster.fo_coord.complete_failover_drain();
 
         // Coordinator decides to commit (via WAL replay)
-        cluster
-            .outcome_cache
-            .record(txn_id, TxnOutcome::Committed);
+        cluster.outcome_cache.record(txn_id, TxnOutcome::Committed);
 
         // I5: resolver applies decision
         let resolved = cluster.resolver.sweep();
@@ -784,10 +776,9 @@ mod failover_txn_matrix {
         cluster.blocked_guard.release(txn_id);
 
         // Register in-doubt and resolve
-        cluster.resolver.register_indoubt(
-            txn_id,
-            vec![(ShardId(0), txn_id), (ShardId(1), txn_id)],
-        );
+        cluster
+            .resolver
+            .register_indoubt(txn_id, vec![(ShardId(0), txn_id), (ShardId(1), txn_id)]);
 
         // I5: no permanent prepared state — resolver cleans up
         cluster.resolver.sweep();
@@ -813,9 +804,7 @@ mod failover_txn_matrix {
         cluster.mgr0.prepare(txn_id).unwrap();
 
         // Coordinator decides abort (shard 1 not prepared)
-        cluster
-            .outcome_cache
-            .record(txn_id, TxnOutcome::Aborted);
+        cluster.outcome_cache.record(txn_id, TxnOutcome::Aborted);
 
         // Register in-doubt for shard 0
         cluster
@@ -854,10 +843,7 @@ mod failover_txn_matrix {
         for round in 0..failover_rounds {
             // Check damper
             let epoch = cluster.shard0.current_epoch() + 1;
-            let damper_ok = cluster
-                .damper
-                .check_failover_allowed(epoch, 0)
-                .is_ok();
+            let damper_ok = cluster.damper.check_failover_allowed(epoch, 0).is_ok();
 
             if damper_ok {
                 // Start some SS transactions
@@ -904,7 +890,10 @@ mod failover_txn_matrix {
 
         // Assertions:
         // - Some txns committed after failover
-        assert!(committed_count > 0, "at least one post-failover commit should succeed");
+        assert!(
+            committed_count > 0,
+            "at least one post-failover commit should succeed"
+        );
 
         // - No resource leak: no active txns remain
         assert_eq!(cluster.mgr0.active_count(), 0);
@@ -917,7 +906,10 @@ mod failover_txn_matrix {
         assert!(dm.total_allowed > 0);
 
         // - I2: balance sum preserved
-        assert!(check_balance_sum(&cluster.shard0.inner.primary.storage, 2000));
+        assert!(check_balance_sum(
+            &cluster.shard0.inner.primary.storage,
+            2000
+        ));
     }
 
     /// CH-02: Repeated coordinator restart + XS workload.
@@ -943,10 +935,9 @@ mod failover_txn_matrix {
             cluster.mgr0.prepare(txn_id).unwrap();
 
             // Coordinator "restarts" → txn goes in-doubt
-            cluster.resolver.register_indoubt(
-                txn_id,
-                vec![(ShardId(0), txn_id), (ShardId(1), txn_id)],
-            );
+            cluster
+                .resolver
+                .register_indoubt(txn_id, vec![(ShardId(0), txn_id), (ShardId(1), txn_id)]);
             cluster.ttl_enforcer.register(txn_id);
             indoubt_total += 1;
 
@@ -964,7 +955,10 @@ mod failover_txn_matrix {
         assert_eq!(metrics.total_resolved, indoubt_total as u64);
 
         // I2: balance preserved (all txns aborted, no partial effects)
-        assert!(check_balance_sum(&cluster.shard0.inner.primary.storage, 2000));
+        assert!(check_balance_sum(
+            &cluster.shard0.inner.primary.storage,
+            2000
+        ));
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -1045,12 +1039,8 @@ mod failover_txn_matrix {
 
         // ── In-doubt cache replay ──
         // Recording the same outcome twice is safe
-        cluster
-            .outcome_cache
-            .record(txn_id, TxnOutcome::Committed);
-        cluster
-            .outcome_cache
-            .record(txn_id, TxnOutcome::Committed);
+        cluster.outcome_cache.record(txn_id, TxnOutcome::Committed);
+        cluster.outcome_cache.record(txn_id, TxnOutcome::Committed);
         assert_eq!(
             cluster.outcome_cache.lookup(txn_id),
             Some(TxnOutcome::Committed)
@@ -1114,14 +1104,12 @@ mod failover_txn_matrix {
         let cluster = TestCluster::new();
 
         // Register in-doubt txns
-        cluster.resolver.register_indoubt(
-            TxnId(3000),
-            vec![(ShardId(0), TxnId(30000))],
-        );
-        cluster.resolver.register_indoubt(
-            TxnId(3001),
-            vec![(ShardId(1), TxnId(30010))],
-        );
+        cluster
+            .resolver
+            .register_indoubt(TxnId(3000), vec![(ShardId(0), TxnId(30000))]);
+        cluster
+            .resolver
+            .register_indoubt(TxnId(3001), vec![(ShardId(1), TxnId(30010))]);
 
         // I5: in-doubt transactions queryable
         let status = cluster.resolver.convergence_status();

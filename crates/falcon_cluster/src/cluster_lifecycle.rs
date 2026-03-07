@@ -44,13 +44,11 @@ use tokio_util::sync::CancellationToken;
 
 use falcon_common::types::NodeId;
 use falcon_enterprise::control_plane::{
-    ConfigStore, ConsistentMetadataStore, DataNodeState, MetadataDomain,
-    NodeCapabilities, NodeRegistry, ShardPlacementManager,
+    ConfigStore, ConsistentMetadataStore, DataNodeState, MetadataDomain, NodeCapabilities,
+    NodeRegistry, ShardPlacementManager,
 };
-use falcon_enterprise::enterprise_ops::{SloEngine, SloDefinition, SloMetricType};
-use falcon_enterprise::enterprise_security::{
-    AuditCategory, AuditSeverity, EnterpriseAuditLog,
-};
+use falcon_enterprise::enterprise_ops::{SloDefinition, SloEngine, SloMetricType};
+use falcon_enterprise::enterprise_security::{AuditCategory, AuditSeverity, EnterpriseAuditLog};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // §1 — Configuration
@@ -134,7 +132,10 @@ impl ClusterLifecycleCoordinator {
         Self::new_with_config_store(config, Arc::new(ConfigStore::new()))
     }
 
-    pub fn new_with_config_store(config: ClusterLifecycleConfig, config_store: Arc<ConfigStore>) -> Self {
+    pub fn new_with_config_store(
+        config: ClusterLifecycleConfig,
+        config_store: Arc<ConfigStore>,
+    ) -> Self {
         let node_registry = Arc::new(NodeRegistry::new(
             config.suspect_threshold,
             config.offline_threshold,
@@ -193,7 +194,10 @@ impl ClusterLifecycleCoordinator {
             "NODE_START",
             &format!("node/{}", self.config.node_id.0),
             "success",
-            &format!("Node {} started at {}", self.config.node_id.0, self.config.advertise_addr),
+            &format!(
+                "Node {} started at {}",
+                self.config.node_id.0, self.config.advertise_addr
+            ),
         );
     }
 
@@ -269,8 +273,7 @@ impl ClusterLifecycleCoordinator {
                             for node_id in &stale_nodes {
                                 let nid = node_id.0;
                                 if let Some(addr) = node_addrs.get(&nid).map(|e| e.value().clone()) {
-                                    match tonic::transport::Endpoint::from_shared(addr.clone())
-                                        .and_then(|e| Ok(e.connect_timeout(std::time::Duration::from_secs(3))))
+                                    match tonic::transport::Endpoint::from_shared(addr.clone()).map(|e| e.connect_timeout(std::time::Duration::from_secs(3)))
                                     {
                                         Ok(endpoint) => {
                                             match endpoint.connect().await {
@@ -411,7 +414,11 @@ impl ClusterLifecycleCoordinator {
                 .state_transitions
                 .load(Ordering::Relaxed),
             config_syncs: self.config_sync_count.load(Ordering::Relaxed),
-            slo_evals: self.slo_engine.metrics.evaluations_run.load(Ordering::Relaxed),
+            slo_evals: self
+                .slo_engine
+                .metrics
+                .evaluations_run
+                .load(Ordering::Relaxed),
             nodes_online: *counts.get(&DataNodeState::Online).unwrap_or(&0),
             nodes_suspect: *counts.get(&DataNodeState::Suspect).unwrap_or(&0),
             nodes_offline: *counts.get(&DataNodeState::Offline).unwrap_or(&0),
@@ -517,12 +524,9 @@ mod tests {
     #[test]
     fn test_metadata_store_wired() {
         let coord = ClusterLifecycleCoordinator::new(ClusterLifecycleConfig::default());
-        coord.metadata_store.put(
-            MetadataDomain::ClusterConfig,
-            "shard_count",
-            "4",
-            "test",
-        );
+        coord
+            .metadata_store
+            .put(MetadataDomain::ClusterConfig, "shard_count", "4", "test");
         use falcon_enterprise::control_plane::ReadConsistency;
         let entry = coord.metadata_store.get(
             &MetadataDomain::ClusterConfig,

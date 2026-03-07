@@ -24,7 +24,8 @@ mod txn_manager_tests {
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(1),
@@ -33,7 +34,8 @@ mod txn_manager_tests {
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
             ],
             primary_key_columns: vec![0],
@@ -755,7 +757,7 @@ mod txn_manager_tests {
 
     #[test]
     fn test_try_begin_rejects_under_pressure() {
-        use falcon_common::types::{TxnType, ShardId};
+        use falcon_common::types::{ShardId, TxnType};
         let (storage, mgr) = setup_with_budget(1000, 2000);
         // Push into PRESSURE state (>= soft_limit but < hard_limit)
         storage.memory_tracker().alloc_mvcc(1500);
@@ -766,7 +768,10 @@ mod txn_manager_tests {
 
         // Local transactions are allowed under Pressure (may be read-only).
         let result = mgr.try_begin(IsolationLevel::ReadCommitted);
-        assert!(result.is_ok(), "local try_begin should be allowed under Pressure");
+        assert!(
+            result.is_ok(),
+            "local try_begin should be allowed under Pressure"
+        );
 
         // Global (write-path) transactions are rejected under Pressure.
         let global_class = TxnClassification {
@@ -775,7 +780,10 @@ mod txn_manager_tests {
             slow_path_mode: SlowPathMode::Xa2Pc,
         };
         let result = mgr.try_begin_with_classification(IsolationLevel::ReadCommitted, global_class);
-        assert!(result.is_err(), "global try_begin should reject under Pressure");
+        assert!(
+            result.is_err(),
+            "global try_begin should reject under Pressure"
+        );
         match result.unwrap_err() {
             falcon_common::error::TxnError::MemoryPressure(_) => {}
             other => panic!("Expected MemoryPressure, got {:?}", other),
@@ -802,7 +810,7 @@ mod txn_manager_tests {
 
     #[test]
     fn test_admission_recovers_after_dealloc() {
-        use falcon_common::types::{TxnType, ShardId};
+        use falcon_common::types::{ShardId, TxnType};
         let (storage, mgr) = setup_with_budget(1000, 2000);
 
         // Push into PRESSURE
@@ -813,7 +821,9 @@ mod txn_manager_tests {
             involved_shards: vec![ShardId(0), ShardId(1)],
             slow_path_mode: SlowPathMode::Xa2Pc,
         };
-        assert!(mgr.try_begin_with_classification(IsolationLevel::ReadCommitted, global_class).is_err());
+        assert!(mgr
+            .try_begin_with_classification(IsolationLevel::ReadCommitted, global_class)
+            .is_err());
 
         // Deallocate to return to NORMAL
         storage.memory_tracker().dealloc_mvcc(1000);
@@ -1307,7 +1317,7 @@ mod long_txn_detection_tests {
             info.stalled,
             "GC safepoint should be stalled by long-running txn"
         );
-        assert!(info.longest_txn_age_us >= 0);
+        let _ = info.longest_txn_age_us;
     }
 }
 
@@ -1322,9 +1332,7 @@ mod txn_state_machine_tests {
     use falcon_common::types::{IsolationLevel, ShardId, TxnId};
     use falcon_storage::engine::StorageEngine;
 
-    use crate::manager::{
-        SlowPathMode, TransitionResult, TxnClassification, TxnManager, TxnState, TxnType,
-    };
+    use crate::manager::{SlowPathMode, TransitionResult, TxnClassification, TxnManager, TxnState};
 
     fn setup() -> (Arc<StorageEngine>, TxnManager) {
         let storage = Arc::new(StorageEngine::new_in_memory());

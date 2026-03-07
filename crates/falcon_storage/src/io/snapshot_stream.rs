@@ -166,10 +166,7 @@ pub struct SnapshotWriter {
 
 impl SnapshotWriter {
     /// Create a new snapshot file for writing.
-    pub fn create(
-        path: PathBuf,
-        config: SnapshotStreamConfig,
-    ) -> Result<Self, IoError> {
+    pub fn create(path: PathBuf, config: SnapshotStreamConfig) -> Result<Self, IoError> {
         // Remove existing file if any
         let _ = std::fs::remove_file(&path);
 
@@ -312,7 +309,8 @@ mod tests {
             ..Default::default()
         };
 
-        let mut reader = SnapshotReader::open(path.clone(), "snap-1".into(), config.clone()).unwrap();
+        let mut reader =
+            SnapshotReader::open(path.clone(), "snap-1".into(), config.clone()).unwrap();
         assert_eq!(reader.total_size(), 18);
 
         let chunk = reader.read_next_chunk().unwrap().expect("should have data");
@@ -354,7 +352,8 @@ mod tests {
             ..Default::default()
         };
 
-        let mut reader = SnapshotReader::open(path.clone(), "snap-2".into(), config.clone()).unwrap();
+        let mut reader =
+            SnapshotReader::open(path.clone(), "snap-2".into(), config.clone()).unwrap();
         let mut chunks = Vec::new();
         while let Some(chunk) = reader.read_next_chunk().unwrap() {
             chunks.push(chunk);

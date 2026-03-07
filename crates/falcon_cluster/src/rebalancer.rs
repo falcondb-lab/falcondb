@@ -401,12 +401,16 @@ impl ShardMigrator {
         status.phase = MigrationPhase::CopyingRows;
         status.started_at = Some(Instant::now());
 
-        let source = if let Some(s) = engine.shard(task.source_shard) { s } else {
+        let source = if let Some(s) = engine.shard(task.source_shard) {
+            s
+        } else {
             status.phase = MigrationPhase::Failed;
             status.error = Some(format!("Source shard {:?} not found", task.source_shard));
             return status;
         };
-        let target = if let Some(s) = engine.shard(task.target_shard) { s } else {
+        let target = if let Some(s) = engine.shard(task.target_shard) {
+            s
+        } else {
             status.phase = MigrationPhase::Failed;
             status.error = Some(format!("Target shard {:?} not found", task.target_shard));
             return status;
@@ -414,14 +418,18 @@ impl ShardMigrator {
 
         // Find the table on source shard
         let catalog = source.storage.catalog_snapshot();
-        let table_schema = if let Some(s) = catalog.find_table(&task.table_name) { s.clone() } else {
+        let table_schema = if let Some(s) = catalog.find_table(&task.table_name) {
+            s.clone()
+        } else {
             status.phase = MigrationPhase::Failed;
             status.error = Some(format!("Table '{}' not found on source", task.table_name));
             return status;
         };
 
         let table_id = table_schema.id;
-        let source_table = if let Some(t) = source.storage.get_table(table_id) { t } else {
+        let source_table = if let Some(t) = source.storage.get_table(table_id) {
+            t
+        } else {
             status.phase = MigrationPhase::Failed;
             status.error = Some("Table data not found on source shard".to_owned());
             return status;
@@ -688,7 +696,10 @@ impl ShardRebalancer {
 
         // Cooldown check
         {
-            let status = self.status.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let status = self
+                .status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(last_run) = status.last_run {
                 if last_run.elapsed().as_millis() < u128::from(self.config.cooldown_ms) {
                     self.running.store(false, Ordering::SeqCst);
@@ -755,7 +766,10 @@ impl ShardRebalancer {
         plan: Option<MigrationPlan>,
         statuses: Vec<MigrationStatus>,
     ) {
-        let mut status = self.status.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut status = self
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         status.last_run = Some(Instant::now());
         if let Some(s) = snapshot {
             status.last_snapshot = Some(s);
@@ -815,13 +829,19 @@ impl ShardRebalancer {
 
     /// Export current rebalancer metrics as a snapshot for Prometheus integration.
     pub fn metrics_snapshot(&self) -> RebalancerMetrics {
-        let status = self.status.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let status = self
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         RebalancerMetrics {
             runs_completed: self.runs_completed.load(Ordering::Relaxed),
             total_rows_migrated: self.total_rows_migrated.load(Ordering::Relaxed),
             is_running: self.running.load(Ordering::Relaxed),
             is_paused: self.paused.load(Ordering::Relaxed),
-            last_imbalance_ratio: status.last_snapshot.as_ref().map_or(0.0, |s| s.imbalance_ratio()),
+            last_imbalance_ratio: status
+                .last_snapshot
+                .as_ref()
+                .map_or(0.0, |s| s.imbalance_ratio()),
             last_completed_tasks: status.completed_tasks(),
             last_failed_tasks: status.failed_tasks(),
             last_duration_ms: status.last_rebalance_duration_ms(),
@@ -1021,7 +1041,8 @@ mod tests {
                     nullable: false,
                     default_value: None,
                     is_primary_key: true,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(1),
@@ -1030,7 +1051,8 @@ mod tests {
                     nullable: true,
                     default_value: None,
                     is_primary_key: false,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
             ],
             primary_key_columns: vec![0],
@@ -1554,7 +1576,10 @@ mod tests {
         // runs_completed must equal atomic counter
         assert_eq!(metrics.runs_completed, rebalancer.runs_completed());
         // total_rows_migrated must equal atomic counter
-        assert_eq!(metrics.total_rows_migrated, rebalancer.total_rows_migrated());
+        assert_eq!(
+            metrics.total_rows_migrated,
+            rebalancer.total_rows_migrated()
+        );
         // total must be sum of individual runs
         assert_eq!(metrics.total_rows_migrated, migrated1 + migrated2);
         // Not running after synchronous call

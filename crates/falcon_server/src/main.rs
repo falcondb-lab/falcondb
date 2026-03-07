@@ -11,21 +11,21 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use falcon_cluster::{
-    ClusterFailureDetector, ClusterLifecycleConfig, ClusterLifecycleCoordinator,
-    DistributedQueryEngine, FailureDetectorConfig, RaftShardCoordinator, ShardedEngine,
-    SmartGateway, SmartGatewayConfig, SmartRebalanceConfig, SmartRebalanceRunner,
-    ParticipantIdempotencyRegistry, TwoPcRecoveryCoordinator,
     deterministic_2pc::{CoordinatorDecisionLog, DecisionLogConfig},
     indoubt_resolver::InDoubtResolver,
+    ClusterFailureDetector, ClusterLifecycleConfig, ClusterLifecycleCoordinator,
+    DistributedQueryEngine, FailureDetectorConfig, ParticipantIdempotencyRegistry,
+    RaftShardCoordinator, ShardedEngine, SmartGateway, SmartGatewayConfig, SmartRebalanceConfig,
+    SmartRebalanceRunner, TwoPcRecoveryCoordinator,
 };
 use falcon_common::config::{FalconConfig, NodeRole};
 use falcon_common::types::ShardId;
 use falcon_executor::Executor;
 use falcon_protocol_pg::server::PgServer;
-use falcon_raft::server::{LocalRaftHandle, start_raft_transport_server};
 use falcon_raft::network::GrpcNetworkFactory;
-use falcon_server::shutdown::{self, ShutdownCoordinator, ShutdownReason};
+use falcon_raft::server::{start_raft_transport_server, LocalRaftHandle};
 use falcon_server::service;
+use falcon_server::shutdown::{self, ShutdownCoordinator, ShutdownReason};
 use falcon_storage::engine::StorageEngine;
 use falcon_storage::gc::{GcConfig, GcRunner};
 use falcon_storage::memory::MemoryBudget;
@@ -149,28 +149,22 @@ async fn main() -> Result<()> {
         Some(Command::Service { action }) => {
             match action {
                 ServiceAction::Install => {
-                    service::commands::install(&cli.config)
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    service::commands::install(&cli.config).map_err(|e| anyhow::anyhow!("{e}"))?;
                 }
                 ServiceAction::Uninstall => {
-                    service::commands::uninstall()
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    service::commands::uninstall().map_err(|e| anyhow::anyhow!("{e}"))?;
                 }
                 ServiceAction::Start => {
-                    service::commands::start()
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    service::commands::start().map_err(|e| anyhow::anyhow!("{e}"))?;
                 }
                 ServiceAction::Stop => {
-                    service::commands::stop()
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    service::commands::stop().map_err(|e| anyhow::anyhow!("{e}"))?;
                 }
                 ServiceAction::Restart => {
-                    service::commands::restart()
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    service::commands::restart().map_err(|e| anyhow::anyhow!("{e}"))?;
                 }
                 ServiceAction::Status => {
-                    service::commands::status()
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    service::commands::status().map_err(|e| anyhow::anyhow!("{e}"))?;
                 }
                 ServiceAction::Dispatch => {
                     // Service mode: initialize file logger, then dispatch to SCM
@@ -213,8 +207,7 @@ async fn main() -> Result<()> {
 
         // ── Status ──
         Some(Command::Status) => {
-            service::commands::status()
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            service::commands::status().map_err(|e| anyhow::anyhow!("{e}"))?;
             Ok(())
         }
 
@@ -225,17 +218,25 @@ async fn main() -> Result<()> {
                     falcon_server::config_migrate::run_config_migrate(&cli.config);
                 }
                 ConfigAction::Check => {
-                    let text = std::fs::read_to_string(&cli.config)
-                        .unwrap_or_default();
+                    let text = std::fs::read_to_string(&cli.config).unwrap_or_default();
                     match falcon_server::config_migrate::check_config_version(&text) {
                         falcon_server::config_migrate::ConfigVersionStatus::Current => {
-                            println!("Config version: {} (current)", falcon_common::config::CURRENT_CONFIG_VERSION);
+                            println!(
+                                "Config version: {} (current)",
+                                falcon_common::config::CURRENT_CONFIG_VERSION
+                            );
                         }
-                        falcon_server::config_migrate::ConfigVersionStatus::NeedsMigration { from, to } => {
+                        falcon_server::config_migrate::ConfigVersionStatus::NeedsMigration {
+                            from,
+                            to,
+                        } => {
                             println!("Config version: {from} (needs migration to {to})");
                             println!("Run: falcon config migrate --config {}", cli.config);
                         }
-                        falcon_server::config_migrate::ConfigVersionStatus::TooNew { found, max_supported } => {
+                        falcon_server::config_migrate::ConfigVersionStatus::TooNew {
+                            found,
+                            max_supported,
+                        } => {
                             eprintln!("Config version {found} is newer than supported (max: {max_supported})");
                         }
                     }
@@ -251,9 +252,7 @@ async fn main() -> Result<()> {
         }
 
         // ── Default: console mode (backward-compatible) ──
-        None => {
-            run_console(cli).await
-        }
+        None => run_console(cli).await,
     }
 }
 
@@ -292,7 +291,10 @@ async fn run_console(cli: Cli) -> Result<()> {
 ///
 /// When `external_coordinator` is `Some`, the server uses it (service mode).
 /// When `None`, the server creates its own coordinator and waits for OS signals.
-pub async fn run_server(config_path: String, external_coordinator: Option<ShutdownCoordinator>) -> Result<()> {
+pub async fn run_server(
+    config_path: String,
+    external_coordinator: Option<ShutdownCoordinator>,
+) -> Result<()> {
     let cli = Cli {
         command: None,
         config: config_path.clone(),
@@ -338,16 +340,17 @@ async fn run_server_inner(
     }
 
     // Default table engine for CREATE TABLE without ENGINE=...
-    falcon_common::globals::set_default_table_engine(
-        config.storage.default_engine.to_lowercase(),
-    );
+    falcon_common::globals::set_default_table_engine(config.storage.default_engine.to_lowercase());
 
     tracing::info!("Config: {:?}", config);
 
     // ── Production Safety Mode ──
     let safety_violations = falcon_common::config::validate_production_safety(&config);
     if !safety_violations.is_empty() {
-        let critical_count = safety_violations.iter().filter(|v| v.severity == "CRITICAL").count();
+        let critical_count = safety_violations
+            .iter()
+            .filter(|v| v.severity == "CRITICAL")
+            .count();
         for v in &safety_violations {
             if v.severity == "CRITICAL" {
                 tracing::error!(id = v.id, "[Production Safety] {}: {}", v.id, v.message);
@@ -401,9 +404,7 @@ async fn run_server_inner(
         }
     }
 
-    falcon_common::globals::set_node_role(
-        format!("{:?}", config.replication.role).to_lowercase(),
-    );
+    falcon_common::globals::set_node_role(format!("{:?}", config.replication.role).to_lowercase());
     falcon_common::globals::init_server_start_time();
 
     // Initialize metrics
@@ -480,6 +481,7 @@ async fn run_server_inner(
 
         let storage = Arc::new(engine);
         storage.register_arc();
+        storage.start_job_scheduler();
         storage
     } else {
         tracing::info!("Running in pure in-memory mode (no WAL)");
@@ -487,6 +489,7 @@ async fn run_server_inner(
         apply_engine_config(&mut engine, &config, &replication_log);
         let storage = Arc::new(engine);
         storage.register_arc();
+        storage.start_job_scheduler();
         storage
     };
 
@@ -498,11 +501,23 @@ async fn run_server_inner(
         let max_txn = storage.recovered_max_txn_id.load(Ordering::Relaxed);
         if max_ts > 0 || max_txn > 0 {
             txn_mgr.advance_counters_past(max_ts, max_txn);
-            tracing::info!("TxnManager counters advanced past recovery: ts={}, txn_id={}", max_ts, max_txn);
+            tracing::info!(
+                "TxnManager counters advanced past recovery: ts={}, txn_id={}",
+                max_ts,
+                max_txn
+            );
+        }
+        let gids = std::mem::take(&mut *storage.recovered_prepared_gids.write());
+        if !gids.is_empty() {
+            tracing::info!("Restoring {} prepared GID(s) from WAL recovery", gids.len());
+            txn_mgr.seed_prepared_gids(gids);
         }
     }
     txn_mgr.set_slow_txn_threshold_us(config.server.slow_txn_threshold_us);
-    tracing::info!("Slow txn threshold: {}us (0=disabled)", config.server.slow_txn_threshold_us);
+    tracing::info!(
+        "Slow txn threshold: {}us (0=disabled)",
+        config.server.slow_txn_threshold_us
+    );
 
     // Initialize executor (read-only on replicas/analytics to reject writes at SQL level)
     let mut executor = if matches!(
@@ -593,7 +608,10 @@ async fn run_server_inner(
         let threshold = std::time::Duration::from_millis(config.logging.slow_query_ms);
         let log = Arc::new(SlowQueryLog::new(threshold, 1000));
         pg_server.set_slow_query_log(log);
-        tracing::info!("Slow query logging enabled (threshold: {}ms)", config.logging.slow_query_ms);
+        tracing::info!(
+            "Slow query logging enabled (threshold: {}ms)",
+            config.logging.slow_query_ms
+        );
     }
 
     // Start background GC runner (if enabled in config)
@@ -787,9 +805,10 @@ async fn run_server_inner(
 
             // Build the shard routing map for the coordinator.
             let local_node_id = falcon_common::types::NodeId(config.raft.node_id);
-            let shard_map = Arc::new(parking_lot::RwLock::new(
-                falcon_cluster::ShardMap::uniform(num_shards, local_node_id),
-            ));
+            let shard_map = Arc::new(parking_lot::RwLock::new(falcon_cluster::ShardMap::uniform(
+                num_shards,
+                local_node_id,
+            )));
 
             // Create one RaftWalGroup per shard.
             let coordinator = RaftShardCoordinator::new(shard_map.clone());
@@ -901,7 +920,10 @@ async fn run_server_inner(
             is_controller: config.replication.role == NodeRole::Primary
                 || config.replication.role == NodeRole::RaftMember,
         };
-        let lc = Arc::new(ClusterLifecycleCoordinator::new_with_config_store(lc_config, shared_config_store.clone()));
+        let lc = Arc::new(ClusterLifecycleCoordinator::new_with_config_store(
+            lc_config,
+            shared_config_store.clone(),
+        ));
         lc.register_default_slos();
         lc.start();
         tracing::info!("Cluster lifecycle coordinator started");
@@ -923,10 +945,7 @@ async fn run_server_inner(
                 auto_declare_dead: true,
             };
             let fd = Arc::new(ClusterFailureDetector::new(fd_config));
-            fd.register_node(
-                local_node_id,
-                env!("CARGO_PKG_VERSION").to_owned(),
-            );
+            fd.register_node(local_node_id, env!("CARGO_PKG_VERSION").to_owned());
             // Evaluator is spawned after SmartGateway so the failover callback can capture it
 
             // Active probing — register peers and start gRPC prober
@@ -987,10 +1006,8 @@ async fn run_server_inner(
         // Parse peers from config and build shard map for cross-node routing
         // Format: "node_id:grpc_addr" e.g. "2:http://10.0.0.2:6543"
         if !config.cluster.peers.is_empty() {
-            let mut shard_map = falcon_cluster::routing::ShardMap::uniform(
-                num_shards as u64,
-                local_node_id,
-            );
+            let mut shard_map =
+                falcon_cluster::routing::ShardMap::uniform(num_shards, local_node_id);
             for peer_str in &config.cluster.peers {
                 let parts: Vec<&str> = peer_str.splitn(2, ':').collect();
                 if parts.len() == 2 {
@@ -1003,12 +1020,12 @@ async fn run_server_inner(
                         let peer_node_id = falcon_common::types::NodeId(nid);
                         gw.add_node_endpoint(nid, addr.clone());
                         gw.topology.update_leader(
-                            falcon_common::types::ShardId(nid % num_shards as u64),
+                            falcon_common::types::ShardId(nid % num_shards),
                             peer_node_id,
                             addr.clone(),
                         );
                         shard_map.update_leader(
-                            falcon_common::types::ShardId(nid % num_shards as u64),
+                            falcon_common::types::ShardId(nid % num_shards),
                             peer_node_id,
                         );
                         // F3: register peer gRPC addr for config sync pushes
@@ -1077,7 +1094,9 @@ async fn run_server_inner(
                 ..Default::default()
             };
             let runner = SmartRebalanceRunner::new(rb_config);
-            let rb_engine = sharded_engine.clone().unwrap_or_else(|| Arc::new(ShardedEngine::new(num_shards)));
+            let rb_engine = sharded_engine
+                .clone()
+                .unwrap_or_else(|| Arc::new(ShardedEngine::new(num_shards)));
             match runner.start(rb_engine) {
                 Ok(handle) => {
                     tracing::info!(
@@ -1095,12 +1114,15 @@ async fn run_server_inner(
     }
 
     // ── 2PC Decision Log + InDoubt Resolver (distributed mode) ──
-    let mut _indoubt_resolver_handle: Option<falcon_cluster::indoubt_resolver::InDoubtResolverHandle> = None;
+    let mut _indoubt_resolver_handle: Option<
+        falcon_cluster::indoubt_resolver::InDoubtResolverHandle,
+    > = None;
     let mut _recovery_coord: Option<TwoPcRecoveryCoordinator> = None;
     if let Some(ref engine) = sharded_engine {
         let data_dir = Path::new(&config.storage.data_dir);
         let journal_path = data_dir.join("2pc_decision.journal");
-        let decision_log = CoordinatorDecisionLog::open(DecisionLogConfig::default(), &journal_path);
+        let decision_log =
+            CoordinatorDecisionLog::open(DecisionLogConfig::default(), &journal_path);
         tracing::info!(path = ?journal_path, "2PC decision journal opened");
 
         // Wire decision log to the distributed query engine's 2PC coordinator
@@ -1137,9 +1159,12 @@ async fn run_server_inner(
         }
 
         // Wire TwoPcRecoveryCoordinator — hoisted to outer scope so it lives until shutdown
-        let idempotency = Arc::new(ParticipantIdempotencyRegistry::new(10_000, std::time::Duration::from_secs(3600)));
-        _recovery_coord = Some(TwoPcRecoveryCoordinator::new(idempotency)
-            .with_engine(engine.clone()));
+        let idempotency = Arc::new(ParticipantIdempotencyRegistry::new(
+            10_000,
+            std::time::Duration::from_secs(3600),
+        ));
+        _recovery_coord =
+            Some(TwoPcRecoveryCoordinator::new(idempotency).with_engine(engine.clone()));
         tracing::info!("TwoPc recovery coordinator wired");
     }
 
@@ -1172,7 +1197,11 @@ async fn run_server_inner(
         let txn = txn_mgr.clone();
         let conns = pg_server.active_connections_handle();
         let metrics_token = coordinator.child_token();
-        let node_count = if config.replication.role == NodeRole::Standalone { 1u64 } else { 2 };
+        let node_count = if config.replication.role == NodeRole::Standalone {
+            1u64
+        } else {
+            2
+        };
         let lc_ref = lifecycle_coordinator.clone();
         let fd_ref = failure_detector.clone();
         let gw_ref = smart_gateway.clone();
@@ -1190,20 +1219,25 @@ async fn run_server_inner(
                 let ws = stor.wal_stats_snapshot();
                 let backlog = stor.wal_backlog_bytes();
                 falcon_observability::record_wal_stability_metrics(
-                    ws.fsync_total_us, ws.fsync_max_us, ws.fsync_avg_us,
-                    ws.group_commit_avg_size, backlog,
+                    ws.fsync_total_us,
+                    ws.fsync_max_us,
+                    ws.fsync_avg_us,
+                    ws.group_commit_avg_size,
+                    backlog,
                 );
                 let hot = stor.memory_hot_bytes();
                 let cold = stor.memory_cold_bytes();
-                falcon_observability::record_memory_metrics(
-                    0, 0, 0, hot + cold, 0, 0, "normal", 0,
-                );
+                falcon_observability::record_memory_metrics(0, 0, 0, hot + cold, 0, 0, "normal", 0);
 
                 // Cluster health from real subsystems
                 if let Some(ref lc) = lc_ref {
                     let m = lc.metrics();
                     let total = m.nodes_online + m.nodes_suspect + m.nodes_offline;
-                    let health = if m.nodes_offline > 0 { "degraded" } else { "healthy" };
+                    let health = if m.nodes_offline > 0 {
+                        "degraded"
+                    } else {
+                        "healthy"
+                    };
                     falcon_observability::record_cluster_health_metrics(
                         health,
                         total as u64,
@@ -1223,8 +1257,12 @@ async fn run_server_inner(
                     let alive = fd.alive_count() as u64;
                     let dead = fd.dead_nodes().len() as u64;
                     falcon_observability::record_replication_metrics(
-                        fd.epoch(), alive, dead,
-                        fd.metrics.heartbeats_received.load(std::sync::atomic::Ordering::Relaxed),
+                        fd.epoch(),
+                        alive,
+                        dead,
+                        fd.metrics
+                            .heartbeats_received
+                            .load(std::sync::atomic::Ordering::Relaxed),
                     );
                 } else {
                     falcon_observability::record_replication_metrics(0, 0, 0, 0);
@@ -1234,12 +1272,20 @@ async fn run_server_inner(
                 if let Some(ref gw) = gw_ref {
                     let snap = gw.metrics.snapshot();
                     falcon_observability::record_rebalancer_metrics(
-                        snap.local_exec_total, snap.forward_total,
-                        false, false, 0.0, snap.reject_no_route_total,
-                        snap.reject_overloaded_total, snap.reject_timeout_total, 0.0,
+                        snap.local_exec_total,
+                        snap.forward_total,
+                        false,
+                        false,
+                        0.0,
+                        snap.reject_no_route_total,
+                        snap.reject_overloaded_total,
+                        snap.reject_timeout_total,
+                        0.0,
                     );
                 } else {
-                    falcon_observability::record_rebalancer_metrics(0, 0, false, false, 0.0, 0, 0, 0, 0.0);
+                    falcon_observability::record_rebalancer_metrics(
+                        0, 0, false, false, 0.0, 0, 0, 0, 0.0,
+                    );
                 }
 
                 falcon_observability::record_segment_streaming_metrics(0, 0, 0, 0, 0, 0, 0);
@@ -1362,7 +1408,10 @@ async fn run_server_inner(
     // 5b. Flush per-shard WALs (distributed mode)
     if let Some(ref se) = sharded_engine {
         match se.flush_wal_all() {
-            Ok(()) => tracing::info!("Shard WAL final flush complete ({} shards)", se.num_shards()),
+            Ok(()) => tracing::info!(
+                "Shard WAL final flush complete ({} shards)",
+                se.num_shards()
+            ),
             Err(e) => tracing::error!(error = %e, "Shard WAL flush FAILED"),
         }
         se.shutdown_wal_all();
@@ -1392,10 +1441,16 @@ fn print_version() {
     println!("FalconDB v{}", env!("CARGO_PKG_VERSION"));
     println!("  Git commit:    {}", env!("FALCONDB_GIT_HASH"));
     println!("  Build time:    {}", env!("FALCONDB_BUILD_TIME"));
-    println!("  Config schema: v{}", falcon_common::config::CURRENT_CONFIG_VERSION);
+    println!(
+        "  Config schema: v{}",
+        falcon_common::config::CURRENT_CONFIG_VERSION
+    );
     println!("  Build target:  {}", std::env::consts::ARCH);
     println!("  OS:            {}", std::env::consts::OS);
-    println!("  Exe:           {}", std::env::current_exe().map_or_else(|_| "unknown".into(), |p| p.display().to_string()));
+    println!(
+        "  Exe:           {}",
+        std::env::current_exe().map_or_else(|_| "unknown".into(), |p| p.display().to_string())
+    );
 }
 
 /// Returns the version string for use by other modules (e.g., startup banner).
@@ -1488,6 +1543,7 @@ fn apply_engine_config(
     tracing::info!("LSM sync_writes: {}", config.storage.lsm_sync_writes);
 
     engine.configure_cdc(config.cdc.enabled, config.cdc.buffer_size);
+    engine.configure_cdc_bridge(config.cdc.enabled, config.cdc.persist_every);
 
     engine.configure_pitr(
         config.pitr.enabled,
@@ -1529,16 +1585,18 @@ fn apply_engine_config(
 }
 
 fn load_config(path: &str) -> FalconConfig {
-    if let Ok(content) = std::fs::read_to_string(path) { match toml::from_str(&content) {
-        Ok(config) => {
-            tracing::info!("Loaded config from {}", path);
-            config
+    if let Ok(content) = std::fs::read_to_string(path) {
+        match toml::from_str(&content) {
+            Ok(config) => {
+                tracing::info!("Loaded config from {}", path);
+                config
+            }
+            Err(e) => {
+                tracing::warn!("Failed to parse config {}: {}, using defaults", path, e);
+                FalconConfig::default()
+            }
         }
-        Err(e) => {
-            tracing::warn!("Failed to parse config {}: {}, using defaults", path, e);
-            FalconConfig::default()
-        }
-    } } else {
+    } else {
         tracing::info!("Config file {} not found, using defaults", path);
         FalconConfig::default()
     }

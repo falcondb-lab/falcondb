@@ -72,9 +72,7 @@ pub fn cmp_datum_for_range(a: &Datum, b: &Datum) -> std::cmp::Ordering {
         (Datum::Int64(x), Datum::Int64(y)) => x.cmp(y),
         (Datum::Int32(x), Datum::Int64(y)) => i64::from(*x).cmp(y),
         (Datum::Int64(x), Datum::Int32(y)) => x.cmp(&i64::from(*y)),
-        (Datum::Float64(x), Datum::Float64(y)) => {
-            x.partial_cmp(y).unwrap_or(Ordering::Equal)
-        }
+        (Datum::Float64(x), Datum::Float64(y)) => x.partial_cmp(y).unwrap_or(Ordering::Equal),
         (Datum::Float64(x), Datum::Int64(y)) => {
             x.partial_cmp(&(*y as f64)).unwrap_or(Ordering::Equal)
         }
@@ -190,7 +188,7 @@ pub fn target_shard_from_datums(
     match schema.sharding_policy {
         ShardingPolicy::Reference => None,
         ShardingPolicy::Range => {
-            let value = datums.first().map(|d| *d).unwrap_or(&Datum::Null);
+            let value = datums.first().copied().unwrap_or(&Datum::Null);
             let idx = range_shard_index(value, &schema.range_bounds);
             Some(ShardId(idx.min(num_shards - 1)))
         }
@@ -352,7 +350,8 @@ mod tests {
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(1),
@@ -361,7 +360,8 @@ mod tests {
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
             ],
             primary_key_columns: vec![0],
@@ -434,7 +434,8 @@ mod tests {
                 nullable: false,
                 is_primary_key: true,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             }],
             primary_key_columns: vec![0],
             shard_key: vec![0],
@@ -520,7 +521,8 @@ mod tests {
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(1),
@@ -529,7 +531,8 @@ mod tests {
                     nullable: false,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(2),
@@ -538,7 +541,8 @@ mod tests {
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
             ],
             primary_key_columns: vec![0],
@@ -559,7 +563,8 @@ mod tests {
                 nullable: false,
                 is_primary_key: true,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             }],
             primary_key_columns: vec![0],
             sharding_policy: ShardingPolicy::Reference,

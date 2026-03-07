@@ -89,7 +89,9 @@ impl GrpcTransport {
         let total_bytes = snapshot_data.len() as u64;
 
         // Check total size limit
-        if self.config.max_snapshot_total_bytes > 0 && total_bytes > self.config.max_snapshot_total_bytes {
+        if self.config.max_snapshot_total_bytes > 0
+            && total_bytes > self.config.max_snapshot_total_bytes
+        {
             return Err(TransportError::PayloadTooLarge {
                 size: total_bytes as usize,
                 max: self.config.max_snapshot_total_bytes as usize,
@@ -244,12 +246,10 @@ impl GrpcTransport {
             return Ok(conn.client.clone());
         }
 
-        let addr = self
-            .peers
-            .read()
-            .get(&peer_id)
-            .cloned()
-            .ok_or_else(|| TransportError::Unreachable(format!("peer {peer_id} not registered")))?;
+        let addr =
+            self.peers.read().get(&peer_id).cloned().ok_or_else(|| {
+                TransportError::Unreachable(format!("peer {peer_id} not registered"))
+            })?;
 
         let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
             .map_err(|e| TransportError::Internal(format!("invalid addr {addr}: {e}")))?
@@ -324,10 +324,7 @@ fn grpc_status_to_transport_error(status: tonic::Status) -> TransportError {
             TransportError::Unreachable(status.message().to_owned())
         }
         tonic::Code::DeadlineExceeded => TransportError::Timeout(status.message().to_owned()),
-        tonic::Code::ResourceExhausted => TransportError::PayloadTooLarge {
-            size: 0,
-            max: 0,
-        },
+        tonic::Code::ResourceExhausted => TransportError::PayloadTooLarge { size: 0, max: 0 },
         tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => {
             TransportError::RemoteRejected(status.message().to_owned())
         }
@@ -381,8 +378,7 @@ mod tests {
         let e = grpc_status_to_transport_error(tonic::Status::unimplemented("nope"));
         assert!(matches!(e, TransportError::Unsupported(_)));
 
-        let e =
-            grpc_status_to_transport_error(tonic::Status::permission_denied("auth"));
+        let e = grpc_status_to_transport_error(tonic::Status::permission_denied("auth"));
         assert!(matches!(e, TransportError::RemoteRejected(_)));
     }
 

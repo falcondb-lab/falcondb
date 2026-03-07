@@ -98,7 +98,11 @@ pub fn parse_csv_line(line: &str, opts: &CsvOptions) -> Option<Vec<String>> {
                         break;
                     }
                     Some(_) => {
-                        field.push(chars.next().expect("BUG: next() None after peek() returned Some"));
+                        field.push(
+                            chars
+                                .next()
+                                .expect("BUG: next() None after peek() returned Some"),
+                        );
                     }
                     None => {
                         fields.push(field);

@@ -158,9 +158,8 @@ impl DistributedQueryEngine {
         if params.is_empty() {
             return self.execute(plan, txn);
         }
-        let substituted =
-            falcon_executor::param_subst::substitute_params_plan(plan, params)
-                .map_err(FalconError::Execution)?;
+        let substituted = falcon_executor::param_subst::substitute_params_plan(plan, params)
+            .map_err(FalconError::Execution)?;
         self.execute(&substituted, txn)
     }
 

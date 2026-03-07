@@ -3,15 +3,15 @@ use std::sync::Arc;
 
 use bytes::BytesMut;
 use dashmap::DashMap;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
 use falcon_cluster::{DistributedQueryEngine, RaftShardCoordinator, ReplicaRunnerMetrics};
 use falcon_common::config::{AuthConfig, AuthMethod};
 use falcon_common::types::ShardId;
 use falcon_executor::Executor;
 use falcon_storage::engine::StorageEngine;
-use falcon_storage::security_manager::{SecurityManager, IpCheckResult};
+use falcon_storage::security_manager::{IpCheckResult, SecurityManager};
 use falcon_txn::TxnManager;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 
 use crate::codec::{self, BackendMessage, FrontendMessage};
 use crate::connection_pool::{ConnectionPool, PoolConfig};
@@ -216,7 +216,10 @@ impl PgServer {
     ///
     /// **TLS-2**: If TLS is enabled but cert/key are invalid, this returns an error.
     /// The caller MUST treat this as a fatal boot error.
-    pub fn set_tls_config(&mut self, config: TlsConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub fn set_tls_config(
+        &mut self,
+        config: TlsConfig,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if config.enabled {
             let acceptor = tls::build_tls_acceptor(&config)?;
             self.tls_acceptor = Some(Arc::new(acceptor));
@@ -298,7 +301,10 @@ impl PgServer {
         self.raft_coordinator = Some(coordinator);
     }
 
-    pub fn set_lifecycle_coordinator(&mut self, lc: Arc<falcon_cluster::ClusterLifecycleCoordinator>) {
+    pub fn set_lifecycle_coordinator(
+        &mut self,
+        lc: Arc<falcon_cluster::ClusterLifecycleCoordinator>,
+    ) {
         self.lifecycle_coordinator = Some(lc);
     }
 
@@ -367,11 +373,13 @@ impl PgServer {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let listener = TcpListener::bind(&self.listen_addr).await?;
         let local_addr = listener
-            .local_addr().map_or_else(|_| self.listen_addr.clone(), |a| a.to_string());
+            .local_addr()
+            .map_or_else(|_| self.listen_addr.clone(), |a| a.to_string());
         let port = local_addr
             .rsplit(':')
             .next()
-            .unwrap_or("unknown").to_owned();
+            .unwrap_or("unknown")
+            .to_owned();
         tracing::info!("FalconDB PG server listening on {}", local_addr);
 
         tokio::pin!(shutdown);
@@ -477,7 +485,11 @@ impl PgServer {
 
         // Early rejection: if IP is blocked due to repeated auth failures.
         if auth_failures.is_blocked(&peer_ip) {
-            tracing::warn!("Connection rejected: IP {} blocked due to auth failures, session {}", peer_ip, session_id);
+            tracing::warn!(
+                "Connection rejected: IP {} blocked due to auth failures, session {}",
+                peer_ip,
+                session_id
+            );
             let msg = BackendMessage::ErrorResponse {
                 severity: "FATAL".into(),
                 code: "28000".into(),
@@ -500,14 +512,17 @@ impl PgServer {
         if max_connections > 0 && prev >= max_connections {
             tracing::warn!(
                 "Connection rejected pre-handshake: {} active (max {}), session {}",
-                prev + 1, max_connections, session_id
+                prev + 1,
+                max_connections,
+                session_id
             );
             let msg = BackendMessage::ErrorResponse {
                 severity: "FATAL".into(),
                 code: "53300".into(),
                 message: format!(
                     "sorry, too many clients already ({} of {} connections used)",
-                    prev + 1, max_connections
+                    prev + 1,
+                    max_connections
                 ),
             };
             let buf = codec::encode_message(&msg);
@@ -695,17 +710,22 @@ async fn handle_connection_with_timeout(
     // Startup handshake deadline: 30s to complete SSL + auth.
     // Prevents half-open connections from exhausting max_connections.
     const STARTUP_TIMEOUT_SECS: u64 = 30;
-    let startup_deadline = tokio::time::Instant::now()
-        + std::time::Duration::from_secs(STARTUP_TIMEOUT_SECS);
+    let startup_deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(STARTUP_TIMEOUT_SECS);
 
     // Phase 0: SSL/TLS negotiation (on raw TcpStream).
     // PG protocol: if the client wants TLS, SslRequest is the first message.
     // We handle it here, then wrap the stream as PgStream for all subsequent I/O.
     let mut stream: crate::tls::PgStream = loop {
-        let n = match tokio::time::timeout_at(startup_deadline, raw_stream.read_buf(&mut buf)).await {
+        let n = match tokio::time::timeout_at(startup_deadline, raw_stream.read_buf(&mut buf)).await
+        {
             Ok(r) => r?,
             Err(_) => {
-                tracing::warn!("Startup timeout ({}s) for session {}", STARTUP_TIMEOUT_SECS, session_id);
+                tracing::warn!(
+                    "Startup timeout ({}s) for session {}",
+                    STARTUP_TIMEOUT_SECS,
+                    session_id
+                );
                 return Ok(());
             }
         };
@@ -731,9 +751,7 @@ async fn handle_connection_with_timeout(
                             break crate::tls::PgStream::Tls(Box::new(tls_stream));
                         }
                         Err(e) => {
-                            tracing::error!(
-                                "TLS handshake failed (session {}): {}", session_id, e
-                            );
+                            tracing::error!("TLS handshake failed (session {}): {}", session_id, e);
                             return Ok(());
                         }
                     }
@@ -763,9 +781,7 @@ async fn handle_connection_with_timeout(
                     if let Some(entry) = cancel_registry.get(&process_id) {
                         if entry.secret_key == sk {
                             entry.cancelled.store(true, Ordering::SeqCst);
-                            tracing::info!(
-                                "Cancel request accepted for session {}", process_id
-                            );
+                            tracing::info!("Cancel request accepted for session {}", process_id);
                         }
                     }
                 }
@@ -774,8 +790,7 @@ async fn handle_connection_with_timeout(
                 // Normal Startup message — no SSL requested
                 if tls_required {
                     // TLS-1: plaintext connection when require_ssl=true → FATAL
-                    if let Some(FrontendMessage::Startup { .. }) =
-                        codec::decode_startup(&mut buf)?
+                    if let Some(FrontendMessage::Startup { .. }) = codec::decode_startup(&mut buf)?
                     {
                         let msg = BackendMessage::ErrorResponse {
                             severity: "FATAL".into(),
@@ -799,10 +814,15 @@ async fn handle_connection_with_timeout(
     loop {
         // If buf already has data from Phase 0, try to decode before reading more
         if buf.is_empty() {
-            let n = match tokio::time::timeout_at(startup_deadline, stream.read_buf(&mut buf)).await {
+            let n = match tokio::time::timeout_at(startup_deadline, stream.read_buf(&mut buf)).await
+            {
                 Ok(r) => r?,
                 Err(_) => {
-                    tracing::warn!("Startup timeout ({}s) for session {}", STARTUP_TIMEOUT_SECS, session_id);
+                    tracing::warn!(
+                        "Startup timeout ({}s) for session {}",
+                        STARTUP_TIMEOUT_SECS,
+                        session_id
+                    );
                     return Ok(());
                 }
             };
@@ -868,8 +888,8 @@ async fn handle_connection_with_timeout(
                 // Look up the role in the catalog.
                 let catalog = handler.storage.get_catalog();
                 let catalog_role = catalog.find_role_by_name(&session.user);
-                let catalog_password: Option<String> = catalog_role
-                    .and_then(|r| r.password_hash.clone());
+                let catalog_password: Option<String> =
+                    catalog_role.and_then(|r| r.password_hash.clone());
                 let catalog_can_login = catalog_role.is_none_or(|r| r.can_login);
                 let catalog_is_superuser = catalog_role.is_some_and(|r| r.is_superuser);
 
@@ -878,10 +898,7 @@ async fn handle_connection_with_timeout(
                     let msg = BackendMessage::ErrorResponse {
                         severity: "FATAL".into(),
                         code: "28000".into(),
-                        message: format!(
-                            "role \"{}\" is not permitted to log in",
-                            session.user
-                        ),
+                        message: format!("role \"{}\" is not permitted to log in", session.user),
                     };
                     send_message(&mut stream, &msg).await?;
                     return Ok(());
@@ -904,8 +921,8 @@ async fn handle_connection_with_timeout(
 
                 // Determine the effective password for authentication.
                 // Catalog password takes priority if set; otherwise fall back to auth_config.
-                let effective_password = catalog_password
-                    .unwrap_or_else(|| auth_config.password.clone());
+                let effective_password =
+                    catalog_password.unwrap_or_else(|| auth_config.password.clone());
 
                 // Set is_superuser parameter based on catalog lookup
                 drop(catalog);
@@ -915,7 +932,10 @@ async fn handle_connection_with_timeout(
                 let mut startup_buf = BytesMut::with_capacity(512);
                 match auth_config.method {
                     AuthMethod::Trust => {
-                        codec::encode_message_into(&mut startup_buf, &BackendMessage::AuthenticationOk);
+                        codec::encode_message_into(
+                            &mut startup_buf,
+                            &BackendMessage::AuthenticationOk,
+                        );
                     }
                     AuthMethod::Password => {
                         // Request cleartext password
@@ -928,7 +948,12 @@ async fn handle_connection_with_timeout(
 
                         // Read password response
                         let password = loop {
-                            let pn = match tokio::time::timeout_at(startup_deadline, stream.read_buf(&mut buf)).await {
+                            let pn = match tokio::time::timeout_at(
+                                startup_deadline,
+                                stream.read_buf(&mut buf),
+                            )
+                            .await
+                            {
                                 Ok(r) => r?,
                                 Err(_) => return Ok(()),
                             };
@@ -955,7 +980,10 @@ async fn handle_connection_with_timeout(
                             send_message(&mut stream, &msg).await?;
                             return Ok(());
                         }
-                        codec::encode_message_into(&mut startup_buf, &BackendMessage::AuthenticationOk);
+                        codec::encode_message_into(
+                            &mut startup_buf,
+                            &BackendMessage::AuthenticationOk,
+                        );
                     }
                     AuthMethod::Md5 => {
                         // Generate random 4-byte salt (CSPRNG)
@@ -974,7 +1002,12 @@ async fn handle_connection_with_timeout(
 
                         // Read password response
                         let client_hash = loop {
-                            let pn = match tokio::time::timeout_at(startup_deadline, stream.read_buf(&mut buf)).await {
+                            let pn = match tokio::time::timeout_at(
+                                startup_deadline,
+                                stream.read_buf(&mut buf),
+                            )
+                            .await
+                            {
                                 Ok(r) => r?,
                                 Err(_) => return Ok(()),
                             };
@@ -1016,11 +1049,16 @@ async fn handle_connection_with_timeout(
                             send_message(&mut stream, &msg).await?;
                             return Ok(());
                         }
-                        codec::encode_message_into(&mut startup_buf, &BackendMessage::AuthenticationOk);
+                        codec::encode_message_into(
+                            &mut startup_buf,
+                            &BackendMessage::AuthenticationOk,
+                        );
                     }
                     AuthMethod::ScramSha256 => {
                         // ── SCRAM-SHA-256 SASL authentication ──
-                        use crate::auth::scram::{ScramVerifier, ScramServerSession, SCRAM_SHA_256};
+                        use crate::auth::scram::{
+                            ScramServerSession, ScramVerifier, SCRAM_SHA_256,
+                        };
 
                         // Look up SCRAM verifier for this user:
                         // 1. Check auth_config.users list for a matching entry
@@ -1057,17 +1095,20 @@ async fn handle_connection_with_timeout(
 
                         // Step 2: Receive SASLInitialResponse (client-first-message)
                         let (mechanism, client_first_data) = loop {
-                            let pn = match tokio::time::timeout_at(startup_deadline, stream.read_buf(&mut buf)).await {
+                            let pn = match tokio::time::timeout_at(
+                                startup_deadline,
+                                stream.read_buf(&mut buf),
+                            )
+                            .await
+                            {
                                 Ok(r) => r?,
                                 Err(_) => return Ok(()),
                             };
                             if pn == 0 {
                                 return Ok(());
                             }
-                            if let Some(FrontendMessage::SASLInitialResponse {
-                                mechanism,
-                                data,
-                            }) = codec::decode_sasl_initial_response(&mut buf)?
+                            if let Some(FrontendMessage::SASLInitialResponse { mechanism, data }) =
+                                codec::decode_sasl_initial_response(&mut buf)?
                             {
                                 break (mechanism, data);
                             }
@@ -1081,7 +1122,10 @@ async fn handle_connection_with_timeout(
                         {
                             Ok(data) => data,
                             Err(e) => {
-                                tracing::warn!("SCRAM client-first failed for user \"{}\": {e}", session.user);
+                                tracing::warn!(
+                                    "SCRAM client-first failed for user \"{}\": {e}",
+                                    session.user
+                                );
                                 let msg = BackendMessage::ErrorResponse {
                                     severity: "FATAL".into(),
                                     code: "28000".into(),
@@ -1105,7 +1149,12 @@ async fn handle_connection_with_timeout(
 
                         // Step 4: Receive SASLResponse (client-final-message)
                         let client_final_data = loop {
-                            let pn = match tokio::time::timeout_at(startup_deadline, stream.read_buf(&mut buf)).await {
+                            let pn = match tokio::time::timeout_at(
+                                startup_deadline,
+                                stream.read_buf(&mut buf),
+                            )
+                            .await
+                            {
                                 Ok(r) => r?,
                                 Err(_) => return Ok(()),
                             };
@@ -1145,25 +1194,31 @@ async fn handle_connection_with_timeout(
                             };
 
                         // Step 6: AuthenticationSASLFinal + AuthenticationOk (batched)
-                        codec::encode_message_into(&mut startup_buf, &BackendMessage::AuthenticationSASLFinal {
-                            data: server_final_data,
-                        });
-                        codec::encode_message_into(&mut startup_buf, &BackendMessage::AuthenticationOk);
+                        codec::encode_message_into(
+                            &mut startup_buf,
+                            &BackendMessage::AuthenticationSASLFinal {
+                                data: server_final_data,
+                            },
+                        );
+                        codec::encode_message_into(
+                            &mut startup_buf,
+                            &BackendMessage::AuthenticationOk,
+                        );
                     }
                 }
 
                 // Send initial parameter statuses (must match session GUC values).
                 // pgjdbc parses server_version to determine feature support.
                 // Use session GUC values so client-supplied startup params are reflected.
-                let app_name = session
-                    .get_guc("application_name")
-                    .unwrap_or("").to_owned();
+                let app_name = session.get_guc("application_name").unwrap_or("").to_owned();
                 let client_enc = session
                     .get_guc("client_encoding")
-                    .unwrap_or("UTF8").to_owned();
+                    .unwrap_or("UTF8")
+                    .to_owned();
                 let datestyle = session
                     .get_guc("datestyle")
-                    .unwrap_or("ISO, MDY").to_owned();
+                    .unwrap_or("ISO, MDY")
+                    .to_owned();
                 let timezone = session.get_guc("timezone").unwrap_or("UTC").to_owned();
                 let startup_params: Vec<(&str, String)> = vec![
                     ("server_version", PG_COMPAT_VERSION.into()),
@@ -1174,24 +1229,36 @@ async fn handle_connection_with_timeout(
                     ("integer_datetimes", "on".into()),
                     ("standard_conforming_strings", "on".into()),
                     ("TimeZone", timezone),
-                    ("is_superuser", if catalog_is_superuser { "on" } else { "off" }.into()),
+                    (
+                        "is_superuser",
+                        if catalog_is_superuser { "on" } else { "off" }.into(),
+                    ),
                     ("session_authorization", session.user.clone()),
                     ("IntervalStyle", "postgres".into()),
                     ("application_name", app_name),
                 ];
                 for (name, value) in &startup_params {
-                    codec::encode_message_into(&mut startup_buf, &BackendMessage::ParameterStatus {
-                        name: name.to_string(),
-                        value: value.clone(),
-                    });
+                    codec::encode_message_into(
+                        &mut startup_buf,
+                        &BackendMessage::ParameterStatus {
+                            name: name.to_string(),
+                            value: value.clone(),
+                        },
+                    );
                 }
-                codec::encode_message_into(&mut startup_buf, &BackendMessage::BackendKeyData {
-                    process_id: session_id,
-                    secret_key,
-                });
-                codec::encode_message_into(&mut startup_buf, &BackendMessage::ReadyForQuery {
-                    txn_status: session.txn_status_byte(),
-                });
+                codec::encode_message_into(
+                    &mut startup_buf,
+                    &BackendMessage::BackendKeyData {
+                        process_id: session_id,
+                        secret_key,
+                    },
+                );
+                codec::encode_message_into(
+                    &mut startup_buf,
+                    &BackendMessage::ReadyForQuery {
+                        txn_status: session.txn_status_byte(),
+                    },
+                );
                 stream.write_all(&startup_buf).await?;
                 stream.flush().await?;
 
@@ -1204,9 +1271,15 @@ async fn handle_connection_with_timeout(
                     &session.peer_addr,
                     session.get_guc("application_name").unwrap_or(""),
                 );
-                falcon_common::globals::db_stats().sessions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                falcon_common::globals::db_stats()
+                    .sessions
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 struct RegGuard(SessionRegistry, i32);
-                impl Drop for RegGuard { fn drop(&mut self) { self.0.deregister(self.1); } }
+                impl Drop for RegGuard {
+                    fn drop(&mut self) {
+                        self.0.deregister(self.1);
+                    }
+                }
                 let _sess_guard = RegGuard(sess_registry.clone(), session_id);
 
                 break;
@@ -1260,7 +1333,9 @@ async fn handle_connection_with_timeout(
     loop {
         let n = if idle_timeout_ms > 0 {
             let idle_dur = std::time::Duration::from_millis(idle_timeout_ms);
-            if let Ok(result) = tokio::time::timeout(idle_dur, stream.read_buf(&mut buf)).await { result? } else {
+            if let Ok(result) = tokio::time::timeout(idle_dur, stream.read_buf(&mut buf)).await {
+                result?
+            } else {
                 tracing::info!(
                     "Idle timeout ({}ms) for session {}",
                     idle_timeout_ms,
@@ -1362,16 +1437,36 @@ async fn handle_connection_with_timeout(
                     // Check for SET lock_timeout
                     if let Some(ms) = parse_set_lock_timeout(&sql) {
                         session.lock_timeout_ms = ms;
-                        send_message(&mut stream, &BackendMessage::CommandComplete { tag: "SET".into() }).await?;
-                        send_message(&mut stream, &BackendMessage::ReadyForQuery { txn_status: session.txn_status_byte() }).await?;
+                        send_message(
+                            &mut stream,
+                            &BackendMessage::CommandComplete { tag: "SET".into() },
+                        )
+                        .await?;
+                        send_message(
+                            &mut stream,
+                            &BackendMessage::ReadyForQuery {
+                                txn_status: session.txn_status_byte(),
+                            },
+                        )
+                        .await?;
                         continue;
                     }
 
                     // Check for SET idle_in_transaction_session_timeout
                     if let Some(ms) = parse_set_idle_in_transaction_session_timeout(&sql) {
                         handler.txn_mgr.set_idle_in_txn_timeout_ms(ms);
-                        send_message(&mut stream, &BackendMessage::CommandComplete { tag: "SET".into() }).await?;
-                        send_message(&mut stream, &BackendMessage::ReadyForQuery { txn_status: session.txn_status_byte() }).await?;
+                        send_message(
+                            &mut stream,
+                            &BackendMessage::CommandComplete { tag: "SET".into() },
+                        )
+                        .await?;
+                        send_message(
+                            &mut stream,
+                            &BackendMessage::ReadyForQuery {
+                                txn_status: session.txn_status_byte(),
+                            },
+                        )
+                        .await?;
                         continue;
                     }
 
@@ -1566,36 +1661,41 @@ async fn handle_connection_with_timeout(
                         query,
                         param_types.len()
                     );
-                    let (plan, inferred_param_types, row_desc) =
-                        if is_system_query(&query) {
-                            // System queries (SET/SHOW/DISCARD/pg_catalog introspection)
-                            // are handled by handle_system_query at Execute time.
-                            falcon_observability::record_prepared_stmt_op("parse", "system");
-                            (None, vec![], vec![])
-                        } else if let Some(cached) = handler.observability.plan_cache.get_prepared(&query) {
-                            falcon_observability::record_prepared_stmt_op("parse", "cached");
-                            (Some(cached.plan), cached.inferred_param_types, cached.row_desc)
-                        } else {
-                            match handler.prepare_statement(&query) {
-                                Ok((p, ipt, rd)) => {
-                                    falcon_observability::record_prepared_stmt_op("parse", "plan");
-                                    let arc_plan = std::sync::Arc::new(p);
-                                    handler.observability.plan_cache.put_prepared(
-                                        &query,
-                                        crate::plan_cache::CachedPrepared {
-                                            plan: arc_plan.clone(),
-                                            inferred_param_types: ipt.clone(),
-                                            row_desc: rd.clone(),
-                                        },
-                                    );
-                                    (Some(arc_plan), ipt, rd)
-                                }
-                                Err(_e) => {
-                                    falcon_observability::record_prepared_stmt_op("parse", "legacy");
-                                    (None, vec![], vec![])
-                                }
+                    let (plan, inferred_param_types, row_desc) = if is_system_query(&query) {
+                        // System queries (SET/SHOW/DISCARD/pg_catalog introspection)
+                        // are handled by handle_system_query at Execute time.
+                        falcon_observability::record_prepared_stmt_op("parse", "system");
+                        (None, vec![], vec![])
+                    } else if let Some(cached) =
+                        handler.observability.plan_cache.get_prepared(&query)
+                    {
+                        falcon_observability::record_prepared_stmt_op("parse", "cached");
+                        (
+                            Some(cached.plan),
+                            cached.inferred_param_types,
+                            cached.row_desc,
+                        )
+                    } else {
+                        match handler.prepare_statement(&query) {
+                            Ok((p, ipt, rd)) => {
+                                falcon_observability::record_prepared_stmt_op("parse", "plan");
+                                let arc_plan = std::sync::Arc::new(p);
+                                handler.observability.plan_cache.put_prepared(
+                                    &query,
+                                    crate::plan_cache::CachedPrepared {
+                                        plan: arc_plan.clone(),
+                                        inferred_param_types: ipt.clone(),
+                                        row_desc: rd.clone(),
+                                    },
+                                );
+                                (Some(arc_plan), ipt, rd)
                             }
-                        };
+                            Err(_e) => {
+                                falcon_observability::record_prepared_stmt_op("parse", "legacy");
+                                (None, vec![], vec![])
+                            }
+                        }
+                    };
                     let effective_param_oids = if !param_types.is_empty() {
                         param_types // move, not clone
                     } else {
@@ -1729,7 +1829,8 @@ async fn handle_connection_with_timeout(
                                         .await?;
                                     }
                                     _ => {
-                                        send_message_no_flush(&mut stream, &BackendMessage::NoData).await?;
+                                        send_message_no_flush(&mut stream, &BackendMessage::NoData)
+                                            .await?;
                                     }
                                 }
                             }
@@ -1759,7 +1860,8 @@ async fn handle_connection_with_timeout(
                                         .await?;
                                     }
                                     _ => {
-                                        send_message_no_flush(&mut stream, &BackendMessage::NoData).await?;
+                                        send_message_no_flush(&mut stream, &BackendMessage::NoData)
+                                            .await?;
                                     }
                                 }
                             } else {
@@ -1891,9 +1993,12 @@ async fn handle_connection_with_timeout(
                 }
                 FrontendMessage::Sync => {
                     let mut out = BytesMut::with_capacity(16);
-                    codec::encode_message_into(&mut out, &BackendMessage::ReadyForQuery {
-                        txn_status: session.txn_status_byte(),
-                    });
+                    codec::encode_message_into(
+                        &mut out,
+                        &BackendMessage::ReadyForQuery {
+                            txn_status: session.txn_status_byte(),
+                        },
+                    );
                     stream.write_all(&out).await?;
                     stream.flush().await?;
                 }
@@ -1948,7 +2053,9 @@ async fn handle_replication_session<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     loop {
         let n = if idle_timeout_ms > 0 {
             let idle_dur = std::time::Duration::from_millis(idle_timeout_ms);
-            if let Ok(result) = tokio::time::timeout(idle_dur, stream.read_buf(buf)).await { result? } else {
+            if let Ok(result) = tokio::time::timeout(idle_dur, stream.read_buf(buf)).await {
+                result?
+            } else {
                 let msg = BackendMessage::ErrorResponse {
                     severity: "FATAL".into(),
                     code: "57P01".into(),
@@ -2081,7 +2188,10 @@ async fn handle_replication_streaming<S: AsyncReadExt + AsyncWriteExt + Unpin>(
         let pending_messages: Vec<(u64, Vec<u8>)> = {
             if let Some(slot) = storage.ext.cdc_manager.get_slot_by_name(slot_name) {
                 let slot_id = slot.id;
-                storage.ext.cdc_manager.poll_changes(slot_id, 100)
+                storage
+                    .ext
+                    .cdc_manager
+                    .poll_changes(slot_id, 100)
                     .iter()
                     .map(|event| {
                         let text = logical_replication::encode_change_event_text(event);
@@ -2106,7 +2216,10 @@ async fn handle_replication_streaming<S: AsyncReadExt + AsyncWriteExt + Unpin>(
         // Advance the slot's confirmed flush position
         if current_lsn > 0 && !pending_messages.is_empty() {
             if let Some(slot) = storage.ext.cdc_manager.get_slot_by_name(slot_name) {
-                let _ = storage.ext.cdc_manager.advance_slot(slot.id, falcon_storage::cdc::CdcLsn(current_lsn));
+                let _ = storage
+                    .ext
+                    .cdc_manager
+                    .advance_slot(slot.id, falcon_storage::cdc::CdcLsn(current_lsn));
             }
         }
 
@@ -2137,7 +2250,8 @@ async fn handle_replication_streaming<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                                 "Replication streaming ended by client (session {})",
                                 session_id
                             );
-                            if let Some(slot) = storage.ext.cdc_manager.get_slot_by_name(slot_name) {
+                            if let Some(slot) = storage.ext.cdc_manager.get_slot_by_name(slot_name)
+                            {
                                 storage.ext.cdc_manager.deactivate_slot(slot.id);
                             }
                             return Ok(());
@@ -2148,7 +2262,9 @@ async fn handle_replication_streaming<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                             if let Some(status) =
                                 logical_replication::StandbyStatusUpdate::parse(&data)
                             {
-                                if let Some(slot) = storage.ext.cdc_manager.get_slot_by_name(slot_name) {
+                                if let Some(slot) =
+                                    storage.ext.cdc_manager.get_slot_by_name(slot_name)
+                                {
                                     let _ = storage.ext.cdc_manager.advance_slot(
                                         slot.id,
                                         falcon_storage::cdc::CdcLsn(status.flush_lsn),
@@ -2165,7 +2281,8 @@ async fn handle_replication_streaming<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                             }
                         }
                         FrontendMessage::Terminate => {
-                            if let Some(slot) = storage.ext.cdc_manager.get_slot_by_name(slot_name) {
+                            if let Some(slot) = storage.ext.cdc_manager.get_slot_by_name(slot_name)
+                            {
                                 storage.ext.cdc_manager.deactivate_slot(slot.id);
                             }
                             return Ok(());
@@ -2283,15 +2400,20 @@ fn decode_param_value(
 
     match type_hint {
         Some(DataType::Int16) => s
-            .parse::<i16>().map_or_else(|_| Datum::Text(s.to_owned()), |v| Datum::Int32(v as i32)),
+            .parse::<i16>()
+            .map_or_else(|_| Datum::Text(s.to_owned()), |v| Datum::Int32(v as i32)),
         Some(DataType::Int32) => s
-            .parse::<i32>().map_or_else(|_| Datum::Text(s.to_owned()), Datum::Int32),
+            .parse::<i32>()
+            .map_or_else(|_| Datum::Text(s.to_owned()), Datum::Int32),
         Some(DataType::Int64) => s
-            .parse::<i64>().map_or_else(|_| Datum::Text(s.to_owned()), Datum::Int64),
+            .parse::<i64>()
+            .map_or_else(|_| Datum::Text(s.to_owned()), Datum::Int64),
         Some(DataType::Float32) => s
-            .parse::<f32>().map_or_else(|_| Datum::Text(s.to_owned()), |v| Datum::Float64(v as f64)),
+            .parse::<f32>()
+            .map_or_else(|_| Datum::Text(s.to_owned()), |v| Datum::Float64(v as f64)),
         Some(DataType::Float64) => s
-            .parse::<f64>().map_or_else(|_| Datum::Text(s.to_owned()), Datum::Float64),
+            .parse::<f64>()
+            .map_or_else(|_| Datum::Text(s.to_owned()), Datum::Float64),
         Some(DataType::Boolean) => match s.to_lowercase().as_str() {
             "t" | "true" | "1" | "yes" | "on" => Datum::Boolean(true),
             "f" | "false" | "0" | "no" | "off" => Datum::Boolean(false),
@@ -2316,10 +2438,16 @@ fn decode_param_value(
                     let sp: Vec<&str> = parts[2].split('.').collect();
                     let sv: i64 = sp[0].parse().unwrap_or(0);
                     let fv: i64 = if sp.len() > 1 {
-                        format!("{:0<6}", &sp[1][..sp[1].len().min(6)]).parse().unwrap_or(0)
-                    } else { 0 };
+                        format!("{:0<6}", &sp[1][..sp[1].len().min(6)])
+                            .parse()
+                            .unwrap_or(0)
+                    } else {
+                        0
+                    };
                     (sv, fv)
-                } else { (0, 0) };
+                } else {
+                    (0, 0)
+                };
                 Datum::Time(
                     h.checked_mul(3_600_000_000)
                         .and_then(|v| v.checked_add(m.checked_mul(60_000_000)?))
@@ -2356,9 +2484,7 @@ fn decode_param_value(
                 .collect();
             Datum::Bytea(bytes)
         }
-        Some(DataType::TsVector) | Some(DataType::TsQuery) => {
-            Datum::Text(s.to_owned())
-        }
+        Some(DataType::TsVector) | Some(DataType::TsQuery) => Datum::Text(s.to_owned()),
         None => {
             // No type hint: try integer, then float, then text
             if let Ok(i) = s.parse::<i64>() {
@@ -2416,7 +2542,8 @@ fn decode_param_value_binary(
                 Datum::Int32(v as i32)
             } else {
                 let s = String::from_utf8_lossy(bytes);
-                s.parse::<i16>().map_or_else(|_| Datum::Text(s.into_owned()), |v| Datum::Int32(v as i32))
+                s.parse::<i16>()
+                    .map_or_else(|_| Datum::Text(s.into_owned()), |v| Datum::Int32(v as i32))
             }
         }
         Some(DataType::Int32) => {
@@ -2426,7 +2553,8 @@ fn decode_param_value_binary(
             } else {
                 // Fallback: try text parse
                 let s = String::from_utf8_lossy(bytes);
-                s.parse::<i32>().map_or_else(|_| Datum::Text(s.into_owned()), Datum::Int32)
+                s.parse::<i32>()
+                    .map_or_else(|_| Datum::Text(s.into_owned()), Datum::Int32)
             }
         }
         Some(DataType::Int64) => {
@@ -2441,7 +2569,8 @@ fn decode_param_value_binary(
                 Datum::Int64(i64::from(v))
             } else {
                 let s = String::from_utf8_lossy(bytes);
-                s.parse::<i64>().map_or_else(|_| Datum::Text(s.into_owned()), Datum::Int64)
+                s.parse::<i64>()
+                    .map_or_else(|_| Datum::Text(s.into_owned()), Datum::Int64)
             }
         }
         Some(DataType::Float32) => {
@@ -2450,7 +2579,10 @@ fn decode_param_value_binary(
                 Datum::Float64(f64::from(v))
             } else {
                 let s = String::from_utf8_lossy(bytes);
-                s.parse::<f32>().map_or_else(|_| Datum::Text(s.into_owned()), |v| Datum::Float64(v as f64))
+                s.parse::<f32>().map_or_else(
+                    |_| Datum::Text(s.into_owned()),
+                    |v| Datum::Float64(v as f64),
+                )
             }
         }
         Some(DataType::Float64) => {
@@ -2465,7 +2597,8 @@ fn decode_param_value_binary(
                 Datum::Float64(f64::from(v))
             } else {
                 let s = String::from_utf8_lossy(bytes);
-                s.parse::<f64>().map_or_else(|_| Datum::Text(s.into_owned()), Datum::Float64)
+                s.parse::<f64>()
+                    .map_or_else(|_| Datum::Text(s.into_owned()), Datum::Float64)
             }
         }
         Some(DataType::Boolean) => {
@@ -2541,12 +2674,15 @@ fn decode_param_value_binary(
 /// in sqlparser anyway (SET, SHOW, DISCARD, pg_catalog introspection, etc.).
 fn is_system_query(sql: &str) -> bool {
     let b = sql.as_bytes();
-    if b.is_empty() { return false; }
+    if b.is_empty() {
+        return false;
+    }
     match b[0] | 0x20 {
         b's' => {
             let lower = &sql[..sql.len().min(30)];
             let l = lower.to_ascii_lowercase();
-            l.starts_with("set ") || l.starts_with("show ") 
+            l.starts_with("set ")
+                || l.starts_with("show ")
                 || l.starts_with("select version(")
                 || l.starts_with("select current_setting(")
                 || l.starts_with("select current_database(")
@@ -2615,7 +2751,11 @@ fn parse_set_guc_ms(sql: &str, guc_name: &str) -> Option<u64> {
     } else {
         return None;
     };
-    let value = rest.trim_end_matches(';').trim().trim_matches('\'').trim_matches('"');
+    let value = rest
+        .trim_end_matches(';')
+        .trim()
+        .trim_matches('\'')
+        .trim_matches('"');
     if value == "default" || value == "0" {
         return Some(0);
     }
@@ -2696,8 +2836,16 @@ fn base64_encode(data: &[u8]) -> String {
     let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = u32::from(chunk[0]);
-        let b1 = if chunk.len() > 1 { u32::from(chunk[1]) } else { 0 };
-        let b2 = if chunk.len() > 2 { u32::from(chunk[2]) } else { 0 };
+        let b1 = if chunk.len() > 1 {
+            u32::from(chunk[1])
+        } else {
+            0
+        };
+        let b2 = if chunk.len() > 2 {
+            u32::from(chunk[2])
+        } else {
+            0
+        };
         let triple = (b0 << 16) | (b1 << 8) | b2;
         result.push(ALPHABET[((triple >> 18) & 0x3F) as usize] as char);
         result.push(ALPHABET[((triple >> 12) & 0x3F) as usize] as char);
@@ -3110,7 +3258,10 @@ mod tests {
         match decode_param_value_binary(&raw, Some(&DataType::Uuid)) {
             Datum::Uuid(v) => {
                 // Verify it formats back to the expected UUID string
-                assert_eq!(format!("{}", Datum::Uuid(v)), "550e8400-e29b-41d4-a716-446655440000");
+                assert_eq!(
+                    format!("{}", Datum::Uuid(v)),
+                    "550e8400-e29b-41d4-a716-446655440000"
+                );
             }
             other => panic!("expected Datum::Uuid, got {:?}", other),
         }
@@ -3123,7 +3274,10 @@ mod tests {
         let raw = Some(b"550e8400-e29b-41d4-a716-446655440000".to_vec());
         match decode_param_value_binary(&raw, Some(&DataType::Uuid)) {
             Datum::Uuid(v) => {
-                assert_eq!(format!("{}", Datum::Uuid(v)), "550e8400-e29b-41d4-a716-446655440000");
+                assert_eq!(
+                    format!("{}", Datum::Uuid(v)),
+                    "550e8400-e29b-41d4-a716-446655440000"
+                );
             }
             other => panic!("expected Datum::Uuid, got {:?}", other),
         }
@@ -3531,7 +3685,9 @@ mod tests {
         let mut buf = BytesMut::new();
         buf.put_u8(b'p');
         buf.put_i32(100); // claims 100 bytes but we don't provide them
-        assert!(codec::decode_sasl_initial_response(&mut buf).unwrap().is_none());
+        assert!(codec::decode_sasl_initial_response(&mut buf)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -3587,8 +3743,10 @@ mod tests {
 
     #[test]
     fn test_scram_wire_handshake_with_verifier() {
-        use crate::auth::scram::{ScramVerifier, ScramServerSession, SCRAM_SHA_256, b64_encode, b64_decode};
-        use sha2::{Sha256, Digest};
+        use crate::auth::scram::{
+            b64_decode, b64_encode, ScramServerSession, ScramVerifier, SCRAM_SHA_256,
+        };
+        use sha2::{Digest, Sha256};
 
         let password = "s3cret";
         let salt = b"test_salt_16byte";
@@ -3621,11 +3779,21 @@ mod tests {
 
         // Parse server-first-message
         let combined_nonce = server_first_msg
-            .split(',').find(|p| p.starts_with("r=")).unwrap()[2..].to_owned();
+            .split(',')
+            .find(|p| p.starts_with("r="))
+            .unwrap()[2..]
+            .to_owned();
         let server_salt_b64 = server_first_msg
-            .split(',').find(|p| p.starts_with("s=")).unwrap()[2..].to_owned();
+            .split(',')
+            .find(|p| p.starts_with("s="))
+            .unwrap()[2..]
+            .to_owned();
         let server_iterations: u32 = server_first_msg
-            .split(',').find(|p| p.starts_with("i=")).unwrap()[2..].parse().unwrap();
+            .split(',')
+            .find(|p| p.starts_with("i="))
+            .unwrap()[2..]
+            .parse()
+            .unwrap();
 
         assert!(combined_nonce.starts_with(client_nonce));
         assert_eq!(server_iterations, iterations);
@@ -3670,9 +3838,8 @@ mod tests {
 
         // Build auth message
         let client_final_without_proof = format!("c=biws,r={combined_nonce}");
-        let auth_message = format!(
-            "{client_first_bare},{server_first_msg},{client_final_without_proof}"
-        );
+        let auth_message =
+            format!("{client_first_bare},{server_first_msg},{client_final_without_proof}");
 
         let client_signature = hmac_fn(&stored_key, auth_message.as_bytes());
         let client_proof: Vec<u8> = client_key

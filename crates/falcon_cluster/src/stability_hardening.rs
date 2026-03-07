@@ -124,12 +124,7 @@ impl TxnStateGuard {
 
     /// Validate a state transition. Returns Ok if valid or idempotent.
     /// Returns Err with structured error if the transition is a regression.
-    pub fn validate_transition(
-        &self,
-        txn_id: TxnId,
-        from: &str,
-        to: &str,
-    ) -> Result<(), TxnError> {
+    pub fn validate_transition(&self, txn_id: TxnId, from: &str, to: &str) -> Result<(), TxnError> {
         let from_ord = StateOrdinal::from_state_name(from);
         let to_ord = StateOrdinal::from_state_name(to);
 
@@ -137,7 +132,9 @@ impl TxnStateGuard {
         m.total_transitions += 1;
 
         // Unknown state names → reject
-        let (from_o, to_o) = if let (Some(f), Some(t)) = (from_ord, to_ord) { (f, t) } else {
+        let (from_o, to_o) = if let (Some(f), Some(t)) = (from_ord, to_ord) {
+            (f, t)
+        } else {
             m.rejected_transitions += 1;
             return Err(TxnError::InvalidTransition(
                 txn_id,
@@ -730,7 +727,13 @@ impl InDoubtEscalator {
     }
 
     pub fn recent_escalations(&self, limit: usize) -> Vec<EscalationRecord> {
-        self.history.lock().iter().rev().take(limit).cloned().collect()
+        self.history
+            .lock()
+            .iter()
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect()
     }
 }
 
@@ -802,11 +805,7 @@ impl FailoverOutcomeGuard {
     }
 
     /// Check if a commit is safe (not a duplicate, not from stale epoch).
-    pub fn check_commit_safe(
-        &self,
-        txn_id: TxnId,
-        epoch: u64,
-    ) -> Result<(), TxnError> {
+    pub fn check_commit_safe(&self, txn_id: TxnId, epoch: u64) -> Result<(), TxnError> {
         let current = self.current_epoch.load(Ordering::SeqCst);
 
         // Reject stale epoch
@@ -881,11 +880,7 @@ impl ErrorClassStabilizer {
 
     /// Record an error classification and check for instability.
     /// Returns Err if the same error description previously mapped to a different kind.
-    pub fn validate_classification(
-        &self,
-        error_desc: &str,
-        kind: ErrorKind,
-    ) -> Result<(), String> {
+    pub fn validate_classification(&self, error_desc: &str, kind: ErrorKind) -> Result<(), String> {
         let mut cache = self.class_cache.write();
         if let Some(&cached_kind) = cache.get(error_desc) {
             if cached_kind != kind {
@@ -998,16 +993,15 @@ impl DefensiveValidator {
 
         // Commit and Abort are only valid after Begin or Prepare
         if (incoming == ProtocolPhase::Commit || incoming == ProtocolPhase::Abort)
-            && current < ProtocolPhase::Begin {
-                m.rejections += 1;
-                m.invalid_phase_ordering += 1;
-                return Err(TxnError::InvariantViolation(
-                    txn_id,
-                    format!(
-                        "invalid message ordering: {incoming} before {current}"
-                    ),
-                ));
-            }
+            && current < ProtocolPhase::Begin
+        {
+            m.rejections += 1;
+            m.invalid_phase_ordering += 1;
+            return Err(TxnError::InvariantViolation(
+                txn_id,
+                format!("invalid message ordering: {incoming} before {current}"),
+            ));
+        }
 
         // Prepare only valid after Begin/Execute
         if incoming == ProtocolPhase::Prepare && current < ProtocolPhase::Begin {
@@ -1136,7 +1130,13 @@ impl TxnOutcomeJournal {
 
     /// Query recent outcomes (most recent first).
     pub fn recent(&self, limit: usize) -> Vec<TxnOutcomeEntry> {
-        self.entries.lock().iter().rev().take(limit).cloned().collect()
+        self.entries
+            .lock()
+            .iter()
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect()
     }
 
     /// Query outcome for a specific txn_id.
@@ -1191,16 +1191,22 @@ mod tests {
         let guard = TxnStateGuard::new();
         let tid = TxnId(1);
         assert!(guard.validate_transition(tid, "Active", "Prepared").is_ok());
-        assert!(guard.validate_transition(tid, "Prepared", "Committed").is_ok());
+        assert!(guard
+            .validate_transition(tid, "Prepared", "Committed")
+            .is_ok());
     }
 
     #[test]
     fn test_state_guard_idempotent_terminal() {
         let guard = TxnStateGuard::new();
         let tid = TxnId(2);
-        assert!(guard.validate_transition(tid, "Active", "Committed").is_ok());
+        assert!(guard
+            .validate_transition(tid, "Active", "Committed")
+            .is_ok());
         // Idempotent re-entry
-        assert!(guard.validate_transition(tid, "Committed", "Committed").is_ok());
+        assert!(guard
+            .validate_transition(tid, "Committed", "Committed")
+            .is_ok());
     }
 
     #[test]
@@ -1210,7 +1216,9 @@ mod tests {
         // Advance to Prepared
         assert!(guard.validate_transition(tid, "Active", "Prepared").is_ok());
         // Try to go back to Active → regression
-        assert!(guard.validate_transition(tid, "Prepared", "Active").is_err());
+        assert!(guard
+            .validate_transition(tid, "Prepared", "Active")
+            .is_err());
 
         let m = guard.metrics();
         assert_eq!(m.state_regressions_detected, 1);
@@ -1219,14 +1227,20 @@ mod tests {
     #[test]
     fn test_state_guard_rejects_unknown_state() {
         let guard = TxnStateGuard::new();
-        assert!(guard.validate_transition(TxnId(4), "Active", "Unknown").is_err());
+        assert!(guard
+            .validate_transition(TxnId(4), "Active", "Unknown")
+            .is_err());
     }
 
     #[test]
     fn test_state_guard_audit_trail() {
         let guard = TxnStateGuard::new();
-        guard.validate_transition(TxnId(5), "Active", "Prepared").unwrap();
-        guard.validate_transition(TxnId(5), "Prepared", "Committed").unwrap();
+        guard
+            .validate_transition(TxnId(5), "Active", "Prepared")
+            .unwrap();
+        guard
+            .validate_transition(TxnId(5), "Prepared", "Committed")
+            .unwrap();
         let audit = guard.recent_audit(10);
         assert_eq!(audit.len(), 2);
         assert!(audit[0].valid);
@@ -1243,7 +1257,9 @@ mod tests {
         assert_eq!(tracker.current_phase(tid), Some(CommitPhase::Active));
         tracker.advance(tid, CommitPhase::WalLogged, None).unwrap();
         tracker.advance(tid, CommitPhase::WalDurable, None).unwrap();
-        tracker.advance(tid, CommitPhase::Visible, Some(100)).unwrap();
+        tracker
+            .advance(tid, CommitPhase::Visible, Some(100))
+            .unwrap();
 
         assert!(tracker.is_irreversible(tid));
         tracker.complete(tid);
@@ -1265,7 +1281,9 @@ mod tests {
         let tracker = CommitPhaseTracker::new();
         let tid = TxnId(12);
         tracker.begin_commit(tid);
-        tracker.advance(tid, CommitPhase::Visible, Some(200)).unwrap();
+        tracker
+            .advance(tid, CommitPhase::Visible, Some(200))
+            .unwrap();
         assert!(tracker.is_irreversible(tid));
     }
 
@@ -1273,7 +1291,9 @@ mod tests {
     fn test_commit_phase_metrics() {
         let tracker = CommitPhaseTracker::new();
         tracker.begin_commit(TxnId(13));
-        tracker.advance(TxnId(13), CommitPhase::WalDurable, None).unwrap();
+        tracker
+            .advance(TxnId(13), CommitPhase::WalDurable, None)
+            .unwrap();
         tracker.complete(TxnId(13));
 
         let m = tracker.metrics();
@@ -1287,20 +1307,28 @@ mod tests {
     #[test]
     fn test_retry_guard_first_attempt_ok() {
         let guard = RetryGuard::new();
-        assert!(guard.check_retry(TxnId(20), ProtocolPhase::Begin, 12345).is_ok());
+        assert!(guard
+            .check_retry(TxnId(20), ProtocolPhase::Begin, 12345)
+            .is_ok());
     }
 
     #[test]
     fn test_retry_guard_same_fingerprint_ok() {
         let guard = RetryGuard::new();
-        guard.check_retry(TxnId(21), ProtocolPhase::Begin, 100).unwrap();
-        guard.check_retry(TxnId(21), ProtocolPhase::Execute, 100).unwrap();
+        guard
+            .check_retry(TxnId(21), ProtocolPhase::Begin, 100)
+            .unwrap();
+        guard
+            .check_retry(TxnId(21), ProtocolPhase::Execute, 100)
+            .unwrap();
     }
 
     #[test]
     fn test_retry_guard_conflicting_payload_rejected() {
         let guard = RetryGuard::new();
-        guard.check_retry(TxnId(22), ProtocolPhase::Begin, 100).unwrap();
+        guard
+            .check_retry(TxnId(22), ProtocolPhase::Begin, 100)
+            .unwrap();
         let result = guard.check_retry(TxnId(22), ProtocolPhase::Begin, 999);
         assert!(result.is_err());
     }
@@ -1308,7 +1336,9 @@ mod tests {
     #[test]
     fn test_retry_guard_reordered_phase_rejected() {
         let guard = RetryGuard::new();
-        guard.check_retry(TxnId(23), ProtocolPhase::Commit, 0).unwrap();
+        guard
+            .check_retry(TxnId(23), ProtocolPhase::Commit, 0)
+            .unwrap();
         let result = guard.check_retry(TxnId(23), ProtocolPhase::Begin, 0);
         assert!(result.is_err());
     }
@@ -1413,14 +1443,19 @@ mod tests {
     #[test]
     fn test_error_class_stable() {
         let stab = ErrorClassStabilizer::new();
-        assert!(stab.validate_classification("timeout error", ErrorKind::Transient).is_ok());
-        assert!(stab.validate_classification("timeout error", ErrorKind::Transient).is_ok());
+        assert!(stab
+            .validate_classification("timeout error", ErrorKind::Transient)
+            .is_ok());
+        assert!(stab
+            .validate_classification("timeout error", ErrorKind::Transient)
+            .is_ok());
     }
 
     #[test]
     fn test_error_class_instability_detected() {
         let stab = ErrorClassStabilizer::new();
-        stab.validate_classification("some error", ErrorKind::Retryable).unwrap();
+        stab.validate_classification("some error", ErrorKind::Retryable)
+            .unwrap();
         let result = stab.validate_classification("some error", ErrorKind::Transient);
         assert!(result.is_err());
         assert_eq!(stab.instability_count(), 1);
@@ -1470,14 +1505,11 @@ mod tests {
     fn test_defensive_message_ordering() {
         let v = DefensiveValidator::new();
         // Commit before Begin → rejected
-        let result = v.validate_message_order(
-            TxnId(50),
-            ProtocolPhase::Begin,
-            ProtocolPhase::Commit,
-        );
+        let result =
+            v.validate_message_order(TxnId(50), ProtocolPhase::Begin, ProtocolPhase::Commit);
         assert!(result.is_ok()); // Begin is >= Begin
 
-        // Prepare before Begin when current is "before Begin" isn't testable since 
+        // Prepare before Begin when current is "before Begin" isn't testable since
         // ProtocolPhase::Begin is the lowest, so this is always ok
     }
 

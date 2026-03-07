@@ -93,10 +93,7 @@ impl std::fmt::Display for DdlOpKind {
                 column_name,
                 new_type,
             } => {
-                write!(
-                    f,
-                    "ALTER COLUMN {table_name}.{column_name} TYPE {new_type}"
-                )
+                write!(f, "ALTER COLUMN {table_name}.{column_name} TYPE {new_type}")
             }
             Self::MetadataOnly { description } => {
                 write!(f, "{description}")
@@ -214,7 +211,10 @@ impl OnlineDdlManager {
     pub fn register(&self, table_id: TableId, kind: DdlOpKind) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let op = DdlOperation::new(id, table_id, kind);
-        let mut ops = self.operations.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut ops = self
+            .operations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         ops.insert(id, op);
         self.gc_completed(&mut ops);
         id
@@ -387,6 +387,19 @@ impl DdlProgress {
 }
 
 impl OnlineDdlManager {
+    /// Get progress snapshots for all tracked operations (active + completed/failed).
+    pub fn all_progress(&self) -> Vec<DdlProgress> {
+        let mut ops: Vec<DdlProgress> = self
+            .operations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .map(DdlProgress::from_op)
+            .collect();
+        ops.sort_by_key(|p| p.id);
+        ops
+    }
+
     /// Get progress snapshots for all active operations.
     pub fn active_progress(&self) -> Vec<DdlProgress> {
         self.operations
@@ -428,7 +441,10 @@ impl OnlineDdlManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get_mut(&id)
         {
-            if matches!(op.phase, DdlPhase::Running | DdlPhase::Backfilling | DdlPhase::Pending) {
+            if matches!(
+                op.phase,
+                DdlPhase::Running | DdlPhase::Backfilling | DdlPhase::Pending
+            ) {
                 op.fail("Cancelled by user".into());
                 tracing::info!("Online DDL #{} cancelled: {}", id, op.kind);
                 return true;
@@ -439,7 +455,10 @@ impl OnlineDdlManager {
 
     /// Summary metrics for all tracked operations.
     pub fn metrics_summary(&self) -> DdlMetricsSummary {
-        let ops = self.operations.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ops = self
+            .operations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut summary = DdlMetricsSummary::default();
         for op in ops.values() {
             match op.phase {
@@ -543,7 +562,8 @@ impl DdlBackgroundExecutor {
                 .spawn(move || {
                     loop {
                         let task = {
-                            let guard = rx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let guard =
+                                rx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                             match guard.recv() {
                                 Ok(task) => task,
                                 Err(_) => break, // channel closed → shutdown
@@ -560,7 +580,8 @@ impl DdlBackgroundExecutor {
                         match (task.work)(ddl_id, task.cancelled.clone()) {
                             Ok(()) => {
                                 if task.cancelled.load(Ordering::Relaxed) {
-                                    task.manager.fail(ddl_id, "Cancelled during backfill".into());
+                                    task.manager
+                                        .fail(ddl_id, "Cancelled during backfill".into());
                                 } else {
                                     task.manager.complete(ddl_id);
                                 }
@@ -610,9 +631,13 @@ impl DdlBackgroundExecutor {
             manager,
         };
 
-        let guard = self.tx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let guard = self
+            .tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tx = guard.as_ref().ok_or("Executor has been shut down")?;
-        tx.send(task).map_err(|_| "Executor channel closed".to_string())?;
+        tx.send(task)
+            .map_err(|_| "Executor channel closed".to_string())?;
         self.inflight.fetch_add(1, Ordering::Relaxed);
 
         Ok(handle)
@@ -626,10 +651,16 @@ impl DdlBackgroundExecutor {
     /// Shut down the executor: drop the sender so workers exit, then join all threads.
     pub fn shutdown(&self) {
         {
-            let mut guard = self.tx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut guard = self
+                .tx
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             *guard = None; // drop sender → workers will see channel closed
         }
-        let mut workers = self.workers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut workers = self
+            .workers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for handle in workers.drain(..) {
             let _ = handle.join();
         }

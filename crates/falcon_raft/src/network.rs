@@ -177,13 +177,11 @@ impl RaftNetwork<TypeConfig> for RouterConnection {
         // Read the full snapshot into memory (in-process, so no streaming needed)
         let mut data = Vec::new();
         let mut cursor = snapshot.snapshot;
-        cursor
-            .read_to_end(&mut data)
-            .map_err(|e| {
-                StreamingError::Unreachable(Unreachable::new(&io::Error::other(
-                    format!("read snapshot: {e}"),
-                )))
-            })?;
+        cursor.read_to_end(&mut data).map_err(|e| {
+            StreamingError::Unreachable(Unreachable::new(&io::Error::other(format!(
+                "read snapshot: {e}"
+            ))))
+        })?;
 
         let install_req = InstallSnapshotRequest {
             vote,
@@ -193,14 +191,11 @@ impl RaftNetwork<TypeConfig> for RouterConnection {
             done: true,
         };
 
-        let resp = raft
-            .install_snapshot(install_req)
-            .await
-            .map_err(|e| {
-                StreamingError::Unreachable(Unreachable::new(&io::Error::other(
-                    format!("install_snapshot: {e}"),
-                )))
-            })?;
+        let resp = raft.install_snapshot(install_req).await.map_err(|e| {
+            StreamingError::Unreachable(Unreachable::new(&io::Error::other(format!(
+                "install_snapshot: {e}"
+            ))))
+        })?;
 
         Ok(SnapshotResponse { vote: resp.vote })
     }
@@ -260,9 +255,7 @@ impl GrpcConnection {
         &self,
         err: TransportError,
     ) -> RPCError<u64, BasicNode, RaftError<u64, E>> {
-        RPCError::Unreachable(Unreachable::new(&io::Error::other(
-            format!("{err}"),
-        )))
+        RPCError::Unreachable(Unreachable::new(&io::Error::other(format!("{err}"))))
     }
 }
 
@@ -273,9 +266,9 @@ impl RaftNetwork<TypeConfig> for GrpcConnection {
         _option: RPCOption,
     ) -> Result<AppendEntriesResponse<u64>, RPCError<u64, BasicNode, RaftError<u64>>> {
         let req_bytes = bincode::serialize(&rpc).map_err(|e| {
-            RPCError::Unreachable(Unreachable::new(&io::Error::other(
-                format!("serialize: {e}"),
-            )))
+            RPCError::Unreachable(Unreachable::new(&io::Error::other(format!(
+                "serialize: {e}"
+            ))))
         })?;
 
         let resp_bytes = self
@@ -285,9 +278,9 @@ impl RaftNetwork<TypeConfig> for GrpcConnection {
             .map_err(|e| self.transport_err_to_rpc_err(e))?;
 
         bincode::deserialize(&resp_bytes).map_err(|e| {
-            RPCError::Unreachable(Unreachable::new(&io::Error::other(
-                format!("deserialize: {e}"),
-            )))
+            RPCError::Unreachable(Unreachable::new(&io::Error::other(format!(
+                "deserialize: {e}"
+            ))))
         })
     }
 
@@ -297,9 +290,9 @@ impl RaftNetwork<TypeConfig> for GrpcConnection {
         _option: RPCOption,
     ) -> Result<VoteResponse<u64>, RPCError<u64, BasicNode, RaftError<u64>>> {
         let req_bytes = bincode::serialize(&rpc).map_err(|e| {
-            RPCError::Unreachable(Unreachable::new(&io::Error::other(
-                format!("serialize: {e}"),
-            )))
+            RPCError::Unreachable(Unreachable::new(&io::Error::other(format!(
+                "serialize: {e}"
+            ))))
         })?;
 
         let resp_bytes = self
@@ -309,9 +302,9 @@ impl RaftNetwork<TypeConfig> for GrpcConnection {
             .map_err(|e| self.transport_err_to_rpc_err(e))?;
 
         bincode::deserialize(&resp_bytes).map_err(|e| {
-            RPCError::Unreachable(Unreachable::new(&io::Error::other(
-                format!("deserialize: {e}"),
-            )))
+            RPCError::Unreachable(Unreachable::new(&io::Error::other(format!(
+                "deserialize: {e}"
+            ))))
         })
     }
 
@@ -324,9 +317,9 @@ impl RaftNetwork<TypeConfig> for GrpcConnection {
         RPCError<u64, BasicNode, RaftError<u64, openraft::error::InstallSnapshotError>>,
     > {
         let req_bytes = bincode::serialize(&rpc).map_err(|e| {
-            RPCError::Unreachable(Unreachable::new(&io::Error::other(
-                format!("serialize: {e}"),
-            )))
+            RPCError::Unreachable(Unreachable::new(&io::Error::other(format!(
+                "serialize: {e}"
+            ))))
         })?;
 
         let resp_bytes = self
@@ -336,9 +329,9 @@ impl RaftNetwork<TypeConfig> for GrpcConnection {
             .map_err(|e| self.transport_err_to_rpc_err(e))?;
 
         bincode::deserialize(&resp_bytes).map_err(|e| {
-            RPCError::Unreachable(Unreachable::new(&io::Error::other(
-                format!("deserialize: {e}"),
-            )))
+            RPCError::Unreachable(Unreachable::new(&io::Error::other(format!(
+                "deserialize: {e}"
+            ))))
         })
     }
 
@@ -354,9 +347,9 @@ impl RaftNetwork<TypeConfig> for GrpcConnection {
         let mut data = Vec::new();
         let mut cursor = snapshot.snapshot;
         cursor.read_to_end(&mut data).map_err(|e| {
-            StreamingError::Unreachable(Unreachable::new(&io::Error::other(
-                format!("read snapshot: {e}"),
-            )))
+            StreamingError::Unreachable(Unreachable::new(&io::Error::other(format!(
+                "read snapshot: {e}"
+            ))))
         })?;
 
         // Stream snapshot via gRPC chunked transfer
@@ -364,8 +357,7 @@ impl RaftNetwork<TypeConfig> for GrpcConnection {
             snapshot_id: snapshot.meta.snapshot_id.clone(),
             last_included_index: snapshot.meta.last_log_id.map_or(0, |id| id.index),
             last_included_term: snapshot.meta.last_log_id.map_or(0, |id| id.leader_id.term),
-            membership_data: bincode::serialize(&snapshot.meta.last_membership)
-                .unwrap_or_default(),
+            membership_data: bincode::serialize(&snapshot.meta.last_membership).unwrap_or_default(),
             total_bytes: data.len() as u64,
             checksum: 0,
         };
@@ -374,9 +366,9 @@ impl RaftNetwork<TypeConfig> for GrpcConnection {
             .stream_snapshot(self.target, data, meta)
             .await
             .map_err(|e| {
-                StreamingError::Unreachable(Unreachable::new(&io::Error::other(
-                    format!("stream_snapshot: {e}"),
-                )))
+                StreamingError::Unreachable(Unreachable::new(&io::Error::other(format!(
+                    "stream_snapshot: {e}"
+                ))))
             })?;
 
         // Return a placeholder vote — the actual vote is determined by the receiver.

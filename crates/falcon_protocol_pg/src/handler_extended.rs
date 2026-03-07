@@ -43,33 +43,40 @@ impl QueryHandler {
         let all_stats = self.storage.get_all_table_stats();
         let mut map = TableStatsMap::new();
         for ts in all_stats {
-            let columns = ts.column_stats.iter().map(|cs| {
-                let null_fraction = if ts.row_count > 0 {
-                    cs.null_count as f64 / ts.row_count as f64
-                } else {
-                    0.0
-                };
-                let mcv = cs.mcv.as_ref().map_or_else(Vec::new, |m| m.entries.clone());
-                let (histogram_bounds, histogram_rows) = cs.histogram.as_ref().map_or_else(
-                    || (vec![], 0),
-                    |h| (h.bounds.clone(), h.total_rows),
-                );
-                ColumnStatsInfo {
-                    column_idx: cs.column_idx,
-                    distinct_count: cs.distinct_count,
-                    null_fraction,
-                    min_value: cs.min_value.clone(),
-                    max_value: cs.max_value.clone(),
-                    mcv,
-                    histogram_bounds,
-                    histogram_rows,
-                }
-            }).collect();
-            map.insert(ts.table_id, TableStatsInfo {
-                table_id: ts.table_id,
-                row_count: ts.row_count,
-                columns,
-            });
+            let columns = ts
+                .column_stats
+                .iter()
+                .map(|cs| {
+                    let null_fraction = if ts.row_count > 0 {
+                        cs.null_count as f64 / ts.row_count as f64
+                    } else {
+                        0.0
+                    };
+                    let mcv = cs.mcv.as_ref().map_or_else(Vec::new, |m| m.entries.clone());
+                    let (histogram_bounds, histogram_rows) = cs
+                        .histogram
+                        .as_ref()
+                        .map_or_else(|| (vec![], 0), |h| (h.bounds.clone(), h.total_rows));
+                    ColumnStatsInfo {
+                        column_idx: cs.column_idx,
+                        distinct_count: cs.distinct_count,
+                        null_fraction,
+                        min_value: cs.min_value.clone(),
+                        max_value: cs.max_value.clone(),
+                        mcv,
+                        histogram_bounds,
+                        histogram_rows,
+                    }
+                })
+                .collect();
+            map.insert(
+                ts.table_id,
+                TableStatsInfo {
+                    table_id: ts.table_id,
+                    row_count: ts.row_count,
+                    columns,
+                },
+            );
         }
         map
     }
@@ -188,7 +195,8 @@ impl QueryHandler {
     ) -> Vec<BackendMessage> {
         let t0 = std::time::Instant::now();
         // Skip crash domain for DML — matches simple query fast path behavior
-        let msgs = if matches!(plan,
+        let msgs = if matches!(
+            plan,
             PhysicalPlan::Insert { .. } | PhysicalPlan::Update { .. } | PhysicalPlan::Delete { .. }
         ) {
             self.execute_plan_inner(plan, params, session)
@@ -204,7 +212,10 @@ impl QueryHandler {
             }
         };
         // pg_stat_statements for extended query path
-        if !matches!(plan, PhysicalPlan::Begin | PhysicalPlan::Commit | PhysicalPlan::Rollback) {
+        if !matches!(
+            plan,
+            PhysicalPlan::Begin | PhysicalPlan::Commit | PhysicalPlan::Rollback
+        ) {
             let elapsed_us = t0.elapsed().as_micros() as u64;
             let rows = super::handler::extract_row_count_from_msgs(&msgs);
             let label = match plan {
@@ -212,10 +223,14 @@ impl QueryHandler {
                 PhysicalPlan::Update { schema, .. } => format!("UPDATE {}", schema.name),
                 PhysicalPlan::Delete { schema, .. } => format!("DELETE FROM {}", schema.name),
                 PhysicalPlan::SeqScan { schema, .. } => format!("SELECT FROM {}", schema.name),
-                PhysicalPlan::IndexScan { schema, .. } => format!("SELECT FROM {} (idx)", schema.name),
+                PhysicalPlan::IndexScan { schema, .. } => {
+                    format!("SELECT FROM {} (idx)", schema.name)
+                }
                 _ => "STMT".into(),
             };
-            self.observability.stmt_stats.record(&label, elapsed_us, rows);
+            self.observability
+                .stmt_stats
+                .record(&label, elapsed_us, rows);
         }
         msgs
     }
@@ -295,8 +310,10 @@ impl QueryHandler {
             return messages;
         }
 
-        let plan_is_dml = matches!(plan,
-            PhysicalPlan::Insert { .. } | PhysicalPlan::Update { .. } | PhysicalPlan::Delete { .. });
+        let plan_is_dml = matches!(
+            plan,
+            PhysicalPlan::Insert { .. } | PhysicalPlan::Update { .. } | PhysicalPlan::Delete { .. }
+        );
 
         // For DML/query, ensure a transaction exists (autocommit = implicit txn)
         let auto_txn = if session.txn.is_none() {
@@ -307,12 +324,20 @@ impl QueryHandler {
             false
         };
 
+        if auto_txn {
+            falcon_storage::engine::set_skip_read_tracking(true);
+        }
+
         let result = if let Some(dist) = &self.cluster.dist_engine {
             dist.execute_with_params(plan, session.txn.as_ref(), params)
         } else {
             self.executor
                 .execute_with_params(plan, session.txn.as_ref(), params)
         };
+
+        if auto_txn {
+            falcon_storage::engine::set_skip_read_tracking(false);
+        }
 
         match result {
             Ok(exec_result) => {
@@ -333,13 +358,19 @@ impl QueryHandler {
                         messages.push(BackendMessage::RowDescription { fields });
                         let row_count = rows.len();
                         for row in rows {
-                            let values: Vec<Option<String>> =
-                                row.values.iter().map(falcon_common::datum::Datum::to_pg_text).collect();
+                            let values: Vec<Option<String>> = row
+                                .values
+                                .iter()
+                                .map(falcon_common::datum::Datum::to_pg_text)
+                                .collect();
                             messages.push(BackendMessage::DataRow { values });
                         }
-                        messages.push(BackendMessage::CommandComplete {
-                            tag: format!("SELECT {row_count}"),
-                        });
+                        let tag = match row_count {
+                            0 => "SELECT 0".to_owned(),
+                            1 => "SELECT 1".to_owned(),
+                            _ => format!("SELECT {row_count}"),
+                        };
+                        messages.push(BackendMessage::CommandComplete { tag });
                     }
                     ExecutionResult::Dml { rows_affected, tag } => {
                         let cmd_tag = if rows_affected == 1 {
@@ -432,36 +463,44 @@ impl QueryHandler {
                 BoundExpr::ColumnRef(idx) => cols
                     .get(*idx)
                     .map_or(DataType::Text, |c| c.data_type.clone()),
-                BoundExpr::BinaryOp { left, op, right } => {
-                    match op {
-                        BinOp::Eq
-                        | BinOp::NotEq
-                        | BinOp::Lt
-                        | BinOp::LtEq
-                        | BinOp::Gt
-                        | BinOp::GtEq
-                        | BinOp::And
-                        | BinOp::Or => DataType::Boolean,
-                        BinOp::Plus
-                        | BinOp::Minus
-                        | BinOp::Multiply
-                        | BinOp::Divide
-                        | BinOp::Modulo => {
-                            let lt = infer_expr_type(left, cols);
-                            let rt = infer_expr_type(right, cols);
-                            promote_numeric(lt, rt)
-                        }
-                        BinOp::StringConcat
-                        | BinOp::JsonArrowText
-                        | BinOp::JsonHashArrowText => DataType::Text,
-                        BinOp::TsMatch => DataType::Boolean,
-                        BinOp::JsonArrow
-                        | BinOp::JsonHashArrow
-                        | BinOp::JsonContains
-                        | BinOp::JsonContainedBy
-                        | BinOp::JsonExists => DataType::Jsonb,
+                BoundExpr::BinaryOp { left, op, right } => match op {
+                    BinOp::Eq
+                    | BinOp::NotEq
+                    | BinOp::Lt
+                    | BinOp::LtEq
+                    | BinOp::Gt
+                    | BinOp::GtEq
+                    | BinOp::And
+                    | BinOp::Or => DataType::Boolean,
+                    BinOp::Plus
+                    | BinOp::Minus
+                    | BinOp::Multiply
+                    | BinOp::Divide
+                    | BinOp::Modulo => {
+                        let lt = infer_expr_type(left, cols);
+                        let rt = infer_expr_type(right, cols);
+                        promote_numeric(lt, rt)
                     }
-                }
+                    BinOp::StringConcat | BinOp::JsonArrowText | BinOp::JsonHashArrowText => {
+                        DataType::Text
+                    }
+                    BinOp::TsMatch
+                    | BinOp::RegexMatch
+                    | BinOp::RegexIMatch
+                    | BinOp::RegexNotMatch
+                    | BinOp::RegexNotIMatch => DataType::Boolean,
+                    BinOp::BitwiseOr
+                    | BinOp::BitwiseAnd
+                    | BinOp::BitwiseXor
+                    | BinOp::BitwiseShiftLeft
+                    | BinOp::BitwiseShiftRight => DataType::Int64,
+                    BinOp::Exponent => DataType::Float64,
+                    BinOp::JsonArrow
+                    | BinOp::JsonHashArrow
+                    | BinOp::JsonContains
+                    | BinOp::JsonContainedBy
+                    | BinOp::JsonExists => DataType::Jsonb,
+                },
                 BoundExpr::Not(_)
                 | BoundExpr::IsNull(_)
                 | BoundExpr::IsNotNull(_)
@@ -494,12 +533,10 @@ impl QueryHandler {
                     infer_agg_return_type(func, input_ty)
                 }
                 BoundExpr::ArrayLiteral(_) => DataType::Array(Box::new(DataType::Text)),
-                BoundExpr::ArrayIndex { array, .. } => {
-                    match infer_expr_type(array, cols) {
-                        DataType::Array(inner) => *inner,
-                        _ => DataType::Text,
-                    }
-                }
+                BoundExpr::ArrayIndex { array, .. } => match infer_expr_type(array, cols) {
+                    DataType::Array(inner) => *inner,
+                    _ => DataType::Text,
+                },
                 BoundExpr::OuterColumnRef(idx) => cols
                     .get(*idx)
                     .map_or(DataType::Text, |c| c.data_type.clone()),
@@ -613,9 +650,7 @@ impl QueryHandler {
                 ScalarFunc::Now => DataType::Timestamp,
                 ScalarFunc::CurrentDate | ScalarFunc::ToDate => DataType::Date,
                 ScalarFunc::ToTimestamp => DataType::Timestamp,
-                ScalarFunc::Extract | ScalarFunc::EpochFromTimestamp => {
-                    DataType::Float64
-                }
+                ScalarFunc::Extract | ScalarFunc::EpochFromTimestamp => DataType::Float64,
                 ScalarFunc::DateTrunc | ScalarFunc::Age => DataType::Timestamp,
                 ScalarFunc::ToNumber => DataType::Float64,
                 ScalarFunc::Greatest | ScalarFunc::Least => args
@@ -627,8 +662,10 @@ impl QueryHandler {
                 ScalarFunc::ArrayAppend
                 | ScalarFunc::ArrayPrepend
                 | ScalarFunc::ArrayRemove
-                | ScalarFunc::ArrayCat => args
-                    .first().map_or_else(|| DataType::Array(Box::new(DataType::Text)), |a| infer_expr_type(a, cols)),
+                | ScalarFunc::ArrayCat => args.first().map_or_else(
+                    || DataType::Array(Box::new(DataType::Text)),
+                    |a| infer_expr_type(a, cols),
+                ),
                 _ => DataType::Text,
             }
         }

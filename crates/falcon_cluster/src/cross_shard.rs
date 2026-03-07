@@ -94,10 +94,7 @@ impl CrossShardLatencyBreakdown {
             ("replication_ack", self.replication_ack_us),
             ("retry_backoff", self.retry_backoff_us),
         ];
-        phases
-            .iter()
-            .max_by_key(|p| p.1)
-            .map_or("unknown", |p| p.0)
+        phases.iter().max_by_key(|p| p.1).map_or("unknown", |p| p.0)
     }
 
     /// Compact waterfall string for tracing.
@@ -880,12 +877,13 @@ impl DeadlockDetector {
     /// Scan for stalled transactions that exceed the deadlock timeout.
     /// Returns the list of stalled transactions that should be aborted.
     pub fn detect_stalled(&self) -> Vec<StalledTxn> {
-        let active = self.active.lock();
+        let mut active = self.active.lock();
         let mut stalled = Vec::new();
+        let mut stalled_ids = Vec::new();
         for entry in active.values() {
             let elapsed = entry.started_waiting.elapsed();
             if elapsed >= self.deadlock_timeout {
-                self.total_deadlocks.fetch_add(1, Ordering::Relaxed);
+                stalled_ids.push(entry.txn_id);
                 stalled.push(StalledTxn {
                     txn_id: entry.txn_id,
                     involved_shards: entry.involved_shards.clone(),
@@ -893,6 +891,14 @@ impl DeadlockDetector {
                     wait_duration_us: elapsed.as_micros() as u64,
                 });
             }
+        }
+        // Remove detected stalled txns so they aren't re-counted on the next scan
+        for id in &stalled_ids {
+            active.remove(id);
+        }
+        if !stalled.is_empty() {
+            self.total_deadlocks
+                .fetch_add(stalled.len() as u64, Ordering::Relaxed);
         }
         stalled
     }
@@ -909,22 +915,17 @@ impl DeadlockDetector {
 
 /// Strategy for choosing which transaction to abort when a deadlock cycle
 /// is detected in the wait-for graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum VictimSelectionPolicy {
     /// Abort the youngest transaction (highest txn_id) in the cycle.
     /// Default — minimises wasted work since the youngest has done the least.
+    #[default]
     Youngest,
     /// Abort the transaction that is waiting on the most shards.
     MostShards,
     /// Abort the transaction that has been waiting the *shortest* time
     /// (least invested).
     ShortestWait,
-}
-
-impl Default for VictimSelectionPolicy {
-    fn default() -> Self {
-        Self::Youngest
-    }
 }
 
 /// A single edge in the wait-for graph: `waiter` → `holder`.
@@ -2177,7 +2178,10 @@ mod tests {
 
     #[test]
     fn test_wfg_default_policy_is_youngest() {
-        assert_eq!(VictimSelectionPolicy::default(), VictimSelectionPolicy::Youngest);
+        assert_eq!(
+            VictimSelectionPolicy::default(),
+            VictimSelectionPolicy::Youngest
+        );
     }
 
     // ── Queue Policy ──

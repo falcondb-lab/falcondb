@@ -39,7 +39,8 @@ async fn audit_recent(client: &DbClient, mode: OutputMode) -> Result<String> {
 
     if rows.is_empty() {
         return Ok(
-            "No audit records found. (falcon.audit_log view not present or no events recorded)\n".to_owned(),
+            "No audit records found. (falcon.audit_log view not present or no events recorded)\n"
+                .to_owned(),
         );
     }
 

@@ -19,8 +19,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::{Mutex, RwLock};
 
-use falcon_common::types::{ShardId, TxnId};
 use crate::sharded_engine::ShardedEngine;
+use falcon_common::types::{ShardId, TxnId};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // §1 — Replication Invariant Gates (P0-2)
@@ -221,11 +221,7 @@ impl ReplicationInvariantGate {
     ///
     /// `acked_replicas` is the number of replicas that have acknowledged
     /// durability for this LSN.
-    pub fn check_visibility(
-        &self,
-        shard_id: ShardId,
-        acked_replicas: usize,
-    ) -> InvariantResult {
+    pub fn check_visibility(&self, shard_id: ShardId, acked_replicas: usize) -> InvariantResult {
         let mut m = self.metrics.lock();
         m.visibility_checks += 1;
 
@@ -437,10 +433,13 @@ impl FailoverRunbook {
 
     /// Record entering a failover stage.
     pub fn enter_stage(&self, stage: FailoverStage) {
-        self.stage_start_times
-            .lock()
-            .insert(stage, Instant::now());
-        self.emit_event(stage, format!("entering stage: {}", stage), true, HashMap::new());
+        self.stage_start_times.lock().insert(stage, Instant::now());
+        self.emit_event(
+            stage,
+            format!("entering stage: {}", stage),
+            true,
+            HashMap::new(),
+        );
     }
 
     /// Record completing a failover stage.
@@ -454,7 +453,12 @@ impl FailoverRunbook {
         self.stage_durations.lock().insert(stage, duration);
         let mut data = HashMap::new();
         data.insert("duration_us".into(), duration.as_micros().to_string());
-        self.emit_event(stage, format!("completed stage: {} ({}µs)", stage, duration.as_micros()), true, data);
+        self.emit_event(
+            stage,
+            format!("completed stage: {} ({}µs)", stage, duration.as_micros()),
+            true,
+            data,
+        );
     }
 
     /// Record a stage failure.
@@ -468,13 +472,23 @@ impl FailoverRunbook {
         self.stage_durations.lock().insert(stage, duration);
         let mut data = HashMap::new();
         data.insert("error".into(), reason.to_string());
-        self.emit_event(stage, format!("FAILED stage: {}: {}", stage, reason), false, data);
+        self.emit_event(
+            stage,
+            format!("FAILED stage: {}: {}", stage, reason),
+            false,
+            data,
+        );
     }
 
     /// Mark failover as complete (success).
     pub fn mark_complete(&self) {
         self.successful_failovers.fetch_add(1, Ordering::Relaxed);
-        self.emit_event(FailoverStage::Complete, "failover complete".into(), true, HashMap::new());
+        self.emit_event(
+            FailoverStage::Complete,
+            "failover complete".into(),
+            true,
+            HashMap::new(),
+        );
     }
 
     /// Emit an audit event.
@@ -823,7 +837,9 @@ impl TwoPcRecoveryCoordinator {
 
         let mut all_ok = true;
         for &shard_id in participant_shards {
-            let is_duplicate = self.idempotency.check_and_record(global_txn_id, shard_id, decision);
+            let is_duplicate = self
+                .idempotency
+                .check_and_record(global_txn_id, shard_id, decision);
             if is_duplicate {
                 tracing::info!(txn_id = global_txn_id.0, shard = ?shard_id, "recovery: already applied");
                 continue;
@@ -833,11 +849,13 @@ impl TwoPcRecoveryCoordinator {
             if let Some(ref engine) = self.engine {
                 if let Some(shard) = engine.shard(shard_id) {
                     let res = match decision {
-                        ParticipantDecision::Commit => shard.txn_mgr
+                        ParticipantDecision::Commit => shard
+                            .txn_mgr
                             .commit(global_txn_id)
                             .map(|_| ())
                             .map_err(|e| e.to_string()),
-                        ParticipantDecision::Abort => shard.txn_mgr
+                        ParticipantDecision::Abort => shard
+                            .txn_mgr
                             .abort(global_txn_id)
                             .map_err(|e| e.to_string()),
                     };
@@ -971,26 +989,46 @@ impl MembershipLifecycle {
     pub fn join_node(&self, node_id: u64) -> Result<(), String> {
         let mut states = self.states.write();
         if states.contains_key(&node_id) {
-            return Err(format!("node {} already exists in state {:?}", node_id, states[&node_id]));
+            return Err(format!(
+                "node {} already exists in state {:?}",
+                node_id, states[&node_id]
+            ));
         }
         states.insert(node_id, MemberState::Joining);
-        self.record_transition(node_id, MemberState::Removed, MemberState::Joining, "node join initiated");
+        self.record_transition(
+            node_id,
+            MemberState::Removed,
+            MemberState::Joining,
+            "node join initiated",
+        );
         Ok(())
     }
 
     /// Mark a node as Active (bootstrap complete).
     pub fn activate_node(&self, node_id: u64) -> Result<(), String> {
-        self.transition(node_id, MemberState::Joining, MemberState::Active, "bootstrap complete")
+        self.transition(
+            node_id,
+            MemberState::Joining,
+            MemberState::Active,
+            "bootstrap complete",
+        )
     }
 
     /// Begin draining a node.
     pub fn drain_node(&self, node_id: u64) -> Result<(), String> {
-        self.transition(node_id, MemberState::Active, MemberState::Draining, "drain initiated")
+        self.transition(
+            node_id,
+            MemberState::Active,
+            MemberState::Draining,
+            "drain initiated",
+        )
     }
 
     /// Mark a node as Removed.
     pub fn remove_node(&self, node_id: u64) -> Result<(), String> {
-        let current = self.get_state(node_id).ok_or_else(|| format!("node {} not found", node_id))?;
+        let current = self
+            .get_state(node_id)
+            .ok_or_else(|| format!("node {} not found", node_id))?;
         match current {
             MemberState::Draining | MemberState::Active | MemberState::Joining => {
                 self.transition_unchecked(node_id, current, MemberState::Removed, "node removed")
@@ -1001,8 +1039,17 @@ impl MembershipLifecycle {
 
     /// Check if a drain is complete (no inflight txns, all shards migrated).
     pub fn is_drain_complete(&self, node_id: u64) -> bool {
-        let inflight = self.inflight_txns.read().get(&node_id).copied().unwrap_or(0);
-        let shards = self.shard_assignments.read().get(&node_id).map_or(0, |s| s.len());
+        let inflight = self
+            .inflight_txns
+            .read()
+            .get(&node_id)
+            .copied()
+            .unwrap_or(0);
+        let shards = self
+            .shard_assignments
+            .read()
+            .get(&node_id)
+            .map_or(0, |s| s.len());
         inflight == 0 && shards == 0
     }
 
@@ -1052,7 +1099,9 @@ impl MembershipLifecycle {
         to: MemberState,
         reason: &str,
     ) -> Result<(), String> {
-        let current = self.get_state(node_id).ok_or_else(|| format!("node {} not found", node_id))?;
+        let current = self
+            .get_state(node_id)
+            .ok_or_else(|| format!("node {} not found", node_id))?;
         if current != expected_from {
             return Err(format!(
                 "invalid transition for node {}: expected {} but found {}",
@@ -1244,7 +1293,11 @@ impl ShardMigrationCoordinator {
     }
 
     /// Advance a migration to the next phase.
-    pub fn advance_phase(&self, shard_id: ShardId, new_phase: ShardMigrationPhase) -> Result<(), String> {
+    pub fn advance_phase(
+        &self,
+        shard_id: ShardId,
+        new_phase: ShardMigrationPhase,
+    ) -> Result<(), String> {
         let mut active = self.active.write();
         let task = active
             .get_mut(&shard_id)
@@ -1263,7 +1316,10 @@ impl ShardMigrationCoordinator {
                     self.max_freeze_duration.as_millis()
                 ));
                 self.metrics.lock().failed_migrations += 1;
-                return Err(task.error.clone().expect("BUG: error is None immediately after assignment"));
+                return Err(task
+                    .error
+                    .clone()
+                    .expect("BUG: error is None immediately after assignment"));
             }
         }
 
@@ -1330,12 +1386,7 @@ impl ShardMigrationCoordinator {
     }
 
     /// Update transfer progress.
-    pub fn record_progress(
-        &self,
-        shard_id: ShardId,
-        bytes: u64,
-        wal_entries: u64,
-    ) {
+    pub fn record_progress(&self, shard_id: ShardId, bytes: u64, wal_entries: u64) {
         if let Some(task) = self.active.write().get_mut(&shard_id) {
             task.bytes_transferred += bytes;
             task.wal_entries_applied += wal_entries;
@@ -1678,12 +1729,7 @@ mod tests {
             },
         ];
 
-        let report = runbook.generate_report(
-            ShardId(1),
-            5, 6,
-            1, 2,
-            invariants,
-        );
+        let report = runbook.generate_report(ShardId(1), 5, 6, 1, 2, invariants);
 
         assert!(report.passed);
         assert_eq!(report.old_epoch, 5);
@@ -1752,7 +1798,10 @@ mod tests {
 
     #[test]
     fn test_2pc_recovery_coordinator() {
-        let registry = Arc::new(ParticipantIdempotencyRegistry::new(1000, Duration::from_secs(300)));
+        let registry = Arc::new(ParticipantIdempotencyRegistry::new(
+            1000,
+            Duration::from_secs(300),
+        ));
         let recovery = TwoPcRecoveryCoordinator::new(registry);
 
         let txn = TxnId(100);
@@ -1851,12 +1900,22 @@ mod tests {
         let coord = ShardMigrationCoordinator::new(3, Duration::from_secs(5));
 
         coord.start_migration(ShardId(1), 1, 2).unwrap();
-        coord.advance_phase(ShardId(1), ShardMigrationPhase::Freeze).unwrap();
-        coord.advance_phase(ShardId(1), ShardMigrationPhase::Snapshot).unwrap();
-        coord.advance_phase(ShardId(1), ShardMigrationPhase::CatchUp).unwrap();
+        coord
+            .advance_phase(ShardId(1), ShardMigrationPhase::Freeze)
+            .unwrap();
+        coord
+            .advance_phase(ShardId(1), ShardMigrationPhase::Snapshot)
+            .unwrap();
+        coord
+            .advance_phase(ShardId(1), ShardMigrationPhase::CatchUp)
+            .unwrap();
         coord.record_progress(ShardId(1), 1024 * 1024, 500);
-        coord.advance_phase(ShardId(1), ShardMigrationPhase::SwitchRouting).unwrap();
-        coord.advance_phase(ShardId(1), ShardMigrationPhase::Verify).unwrap();
+        coord
+            .advance_phase(ShardId(1), ShardMigrationPhase::SwitchRouting)
+            .unwrap();
+        coord
+            .advance_phase(ShardId(1), ShardMigrationPhase::Verify)
+            .unwrap();
         coord.complete_migration(ShardId(1)).unwrap();
 
         let m = coord.metrics();
@@ -1870,8 +1929,12 @@ mod tests {
         let coord = ShardMigrationCoordinator::new(3, Duration::from_secs(5));
 
         coord.start_migration(ShardId(1), 1, 2).unwrap();
-        coord.advance_phase(ShardId(1), ShardMigrationPhase::Snapshot).unwrap();
-        coord.rollback_migration(ShardId(1), "target node unreachable").unwrap();
+        coord
+            .advance_phase(ShardId(1), ShardMigrationPhase::Snapshot)
+            .unwrap();
+        coord
+            .rollback_migration(ShardId(1), "target node unreachable")
+            .unwrap();
 
         let m = coord.metrics();
         assert_eq!(m.failed_migrations, 1);
@@ -1907,18 +1970,14 @@ mod tests {
 
     #[test]
     fn test_cluster_status_degraded() {
-        let status = ClusterStatusBuilder::new()
-            .indoubt_count(2)
-            .build();
+        let status = ClusterStatusBuilder::new().indoubt_count(2).build();
 
         assert_eq!(status.health, ClusterHealthStatus::Degraded);
     }
 
     #[test]
     fn test_cluster_status_critical() {
-        let status = ClusterStatusBuilder::new()
-            .split_brain_events(1)
-            .build();
+        let status = ClusterStatusBuilder::new().split_brain_events(1).build();
 
         assert_eq!(status.health, ClusterHealthStatus::Critical);
     }

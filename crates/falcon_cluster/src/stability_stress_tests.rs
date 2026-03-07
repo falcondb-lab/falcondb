@@ -99,17 +99,25 @@ mod stress {
         let tid = TxnId(999);
 
         // First submission
-        retry_guard.check_retry(tid, ProtocolPhase::Begin, 42).unwrap();
-        retry_guard.check_retry(tid, ProtocolPhase::Execute, 42).unwrap();
-        retry_guard.check_retry(tid, ProtocolPhase::Commit, 42).unwrap();
+        retry_guard
+            .check_retry(tid, ProtocolPhase::Begin, 42)
+            .unwrap();
+        retry_guard
+            .check_retry(tid, ProtocolPhase::Execute, 42)
+            .unwrap();
+        retry_guard
+            .check_retry(tid, ProtocolPhase::Commit, 42)
+            .unwrap();
 
         // Commit
         outcome_guard.check_commit_safe(tid, 1).unwrap();
         outcome_guard.record_commit(tid, 100, 1);
 
-        // Duplicate submission with SAME fingerprint — retry guard allows 
+        // Duplicate submission with SAME fingerprint — retry guard allows
         // (idempotent retry), but outcome guard blocks the duplicate commit
-        retry_guard.check_retry(tid, ProtocolPhase::Commit, 42).unwrap();
+        retry_guard
+            .check_retry(tid, ProtocolPhase::Commit, 42)
+            .unwrap();
         assert!(outcome_guard.check_commit_safe(tid, 1).is_err());
 
         // Duplicate submission with DIFFERENT fingerprint — rejected by retry guard
@@ -144,7 +152,9 @@ mod stress {
                 let tid = TxnId(epoch * 100 + j);
 
                 // Validate state transitions
-                state_guard.validate_transition(tid, "Active", "Committed").unwrap();
+                state_guard
+                    .validate_transition(tid, "Active", "Committed")
+                    .unwrap();
 
                 // Try commit at current epoch
                 if outcome_guard.check_commit_safe(tid, epoch).is_ok() {
@@ -165,7 +175,10 @@ mod stress {
                 // Try commit at stale epoch — should be rejected
                 if epoch > 1 {
                     let stale_tid = TxnId(epoch * 100 + j + 50);
-                    if outcome_guard.check_commit_safe(stale_tid, epoch - 1).is_err() {
+                    if outcome_guard
+                        .check_commit_safe(stale_tid, epoch - 1)
+                        .is_err()
+                    {
                         stale_rejected += 1;
                     }
                 }
@@ -258,13 +271,13 @@ mod stress {
             outcome_guard.advance_epoch(epoch);
 
             // Start 3 txns per cycle
-            let tids: Vec<TxnId> = (0..3)
-                .map(|j| TxnId(cycle * 100 + j))
-                .collect();
+            let tids: Vec<TxnId> = (0..3).map(|j| TxnId(cycle * 100 + j)).collect();
 
             for &tid in &tids {
                 phase_tracker.begin_commit(tid);
-                phase_tracker.advance(tid, CommitPhase::WalLogged, None).unwrap();
+                phase_tracker
+                    .advance(tid, CommitPhase::WalLogged, None)
+                    .unwrap();
             }
 
             // "Crash" before CP-D on some txns — only first txn makes it to durable
@@ -279,7 +292,9 @@ mod stress {
             assert!(phase_tracker.is_irreversible(surviving_tid));
 
             // Commit the surviving txn
-            outcome_guard.check_commit_safe(surviving_tid, epoch).unwrap();
+            outcome_guard
+                .check_commit_safe(surviving_tid, epoch)
+                .unwrap();
             outcome_guard.record_commit(surviving_tid, epoch * 1000, epoch);
             phase_tracker.complete(surviving_tid);
 
@@ -397,8 +412,12 @@ mod stress {
         }
 
         // State guard with unknown states — must reject
-        assert!(state_guard.validate_transition(TxnId(1), "Active", "Zombie").is_err());
-        assert!(state_guard.validate_transition(TxnId(2), "Pending", "Committed").is_err());
+        assert!(state_guard
+            .validate_transition(TxnId(1), "Active", "Zombie")
+            .is_err());
+        assert!(state_guard
+            .validate_transition(TxnId(2), "Pending", "Committed")
+            .is_err());
 
         // Malformed inputs never corrupt state
         assert_eq!(state_guard.metrics().rejected_transitions, 2);
@@ -427,17 +446,31 @@ mod stress {
         // ── Normal commit path ──
         let tid1 = TxnId(5001);
         validator.validate_txn_id(tid1).unwrap();
-        retry_guard.check_retry(tid1, ProtocolPhase::Begin, 111).unwrap();
+        retry_guard
+            .check_retry(tid1, ProtocolPhase::Begin, 111)
+            .unwrap();
         // Active→Active is a same-rank no-op (not a regression)
-        state_guard.validate_transition(tid1, "Active", "Active").unwrap();
+        state_guard
+            .validate_transition(tid1, "Active", "Active")
+            .unwrap();
         // Forward: Active→Prepared→Committed
-        state_guard.validate_transition(tid1, "Active", "Prepared").unwrap();
+        state_guard
+            .validate_transition(tid1, "Active", "Prepared")
+            .unwrap();
         phase_tracker.begin_commit(tid1);
-        phase_tracker.advance(tid1, CommitPhase::WalLogged, None).unwrap();
-        phase_tracker.advance(tid1, CommitPhase::WalDurable, None).unwrap();
-        phase_tracker.advance(tid1, CommitPhase::Visible, Some(100)).unwrap();
+        phase_tracker
+            .advance(tid1, CommitPhase::WalLogged, None)
+            .unwrap();
+        phase_tracker
+            .advance(tid1, CommitPhase::WalDurable, None)
+            .unwrap();
+        phase_tracker
+            .advance(tid1, CommitPhase::Visible, Some(100))
+            .unwrap();
         assert!(phase_tracker.is_irreversible(tid1));
-        state_guard.validate_transition(tid1, "Prepared", "Committed").unwrap();
+        state_guard
+            .validate_transition(tid1, "Prepared", "Committed")
+            .unwrap();
         outcome_guard.check_commit_safe(tid1, 1).unwrap();
         outcome_guard.record_commit(tid1, 100, 1);
         phase_tracker.complete(tid1);
@@ -457,14 +490,20 @@ mod stress {
         // ── Abort path with in-doubt escalation ──
         let tid2 = TxnId(5002);
         validator.validate_txn_id(tid2).unwrap();
-        retry_guard.check_retry(tid2, ProtocolPhase::Begin, 222).unwrap();
-        state_guard.validate_transition(tid2, "Active", "Prepared").unwrap();
+        retry_guard
+            .check_retry(tid2, ProtocolPhase::Begin, 222)
+            .unwrap();
+        state_guard
+            .validate_transition(tid2, "Active", "Prepared")
+            .unwrap();
         // Coordinator crashes → in-doubt
         escalator.register(tid2);
         std::thread::sleep(Duration::from_millis(35));
         let escalated = escalator.sweep();
         assert_eq!(escalated.len(), 1);
-        state_guard.validate_transition(tid2, "Prepared", "Aborted").unwrap();
+        state_guard
+            .validate_transition(tid2, "Prepared", "Aborted")
+            .unwrap();
         retry_guard.remove(tid2);
         state_guard.remove(tid2);
         journal.record(TxnOutcomeEntry {

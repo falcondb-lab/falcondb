@@ -43,7 +43,7 @@ impl Default for CompactionConfig {
             l1_target_bytes: 64 * 1024 * 1024, // 64 MB
             level_multiplier: 10,
             max_levels: 7,
-            target_file_size: 64 * 1024 * 1024, // 64 MB
+            target_file_size: 64 * 1024 * 1024,      // 64 MB
             max_compaction_bytes: 512 * 1024 * 1024, // 512 MB
         }
     }
@@ -180,7 +180,11 @@ impl Compactor {
 
         let mut deduped: Vec<SstEntry> = Vec::new();
         for (key, value, _) in tagged {
-            if deduped.last().map(|e: &SstEntry| e.key == key).unwrap_or(false) {
+            if deduped
+                .last()
+                .map(|e: &SstEntry| e.key == key)
+                .unwrap_or(false)
+            {
                 continue;
             }
             deduped.push(SstEntry { key, value });
@@ -200,31 +204,9 @@ impl Compactor {
             }
         }
 
-        // Write output SST(s) at L1
-        let mut produced = Vec::new();
-        let mut bytes_written = 0u64;
-
-        if !deduped.is_empty() {
-            let seq = self.next_sst_seq.fetch_add(1, Ordering::Relaxed);
-            let out_path = self.data_dir.join(format!("sst_L1_{:06}.sst", seq));
-            let mut writer = SstWriter::new_with_crypto(&out_path, deduped.len(), crypto.cloned())?;
-
-            for entry in &deduped {
-                writer.add(&entry.key, &entry.value)?;
-            }
-
-            let mut meta = writer.finish(1, seq)?;
-            meta.level = 1;
-            bytes_written += meta.file_size;
-            // Throttle writes
-            if let Some(rl) = throttle {
-                let d = rl.request(bytes_written);
-                if !d.is_zero() {
-                    std::thread::sleep(d);
-                }
-            }
-            produced.push(meta);
-        }
+        // Write output SST(s) at L1, splitting at target_file_size
+        let produced = self.write_output_ssts(&deduped, 1, throttle, crypto)?;
+        let bytes_written: u64 = produced.iter().map(|m| m.file_size).sum();
 
         // Build consumed list
         let mut consumed: Vec<SstMeta> = l0_files.to_vec();
@@ -304,12 +286,7 @@ impl Compactor {
 
     /// Pick the best file in `source` to compact into `target` level.
     /// Heuristic: pick the file with smallest overlap to minimize write amp.
-    fn pick_file_for_level(
-        &self,
-        _level: usize,
-        source: &[SstMeta],
-        target: &[SstMeta],
-    ) -> usize {
+    fn pick_file_for_level(&self, _level: usize, source: &[SstMeta], target: &[SstMeta]) -> usize {
         if source.is_empty() {
             return 0;
         }
@@ -333,9 +310,10 @@ impl Compactor {
 
     /// Compact one source file from `src_level` into `dst_level`.
     /// Merges with overlapping files in dst_level, deduplicates, optionally GCs.
+    #[allow(clippy::too_many_arguments)]
     pub fn compact_level(
         &self,
-        src_level: usize,
+        _src_level: usize,
         src_file: &SstMeta,
         dst_level_files: &[SstMeta],
         dst_level: usize,
@@ -380,7 +358,11 @@ impl Compactor {
             // Group by key, apply multi-version aware GC (tracks bytes_reclaimed, Prepared kept)
             let mut grouped: Vec<(Vec<u8>, Vec<SstEntry>)> = Vec::new();
             for entry in all_entries {
-                if grouped.last().map(|(k, _)| k == &entry.key).unwrap_or(false) {
+                if grouped
+                    .last()
+                    .map(|(k, _)| k == &entry.key)
+                    .unwrap_or(false)
+                {
                     grouped.last_mut().unwrap().1.push(entry);
                 } else {
                     grouped.push((entry.key.clone(), vec![entry]));
@@ -400,10 +382,14 @@ impl Compactor {
         consumed.extend(consumed_dst);
 
         self.stats_runs.fetch_add(1, Ordering::Relaxed);
-        self.stats_bytes_read.fetch_add(bytes_read, Ordering::Relaxed);
-        self.stats_bytes_written.fetch_add(bytes_written, Ordering::Relaxed);
-        self.stats_files_consumed.fetch_add(consumed.len() as u64, Ordering::Relaxed);
-        self.stats_files_produced.fetch_add(produced.len() as u64, Ordering::Relaxed);
+        self.stats_bytes_read
+            .fetch_add(bytes_read, Ordering::Relaxed);
+        self.stats_bytes_written
+            .fetch_add(bytes_written, Ordering::Relaxed);
+        self.stats_files_consumed
+            .fetch_add(consumed.len() as u64, Ordering::Relaxed);
+        self.stats_files_produced
+            .fetch_add(produced.len() as u64, Ordering::Relaxed);
 
         Ok(CompactionResult {
             consumed,
@@ -477,9 +463,9 @@ impl Compactor {
     /// Compute pending compaction bytes across all levels.
     pub fn pending_compaction_bytes(&self, levels: &[Vec<SstMeta>]) -> u64 {
         let mut pending = 0u64;
-        for lvl in 1..levels.len() {
+        for (lvl, level_files) in levels.iter().enumerate().skip(1) {
             let target = self.level_target_bytes(lvl);
-            let actual: u64 = levels[lvl].iter().map(|m| m.file_size).sum();
+            let actual: u64 = level_files.iter().map(|m| m.file_size).sum();
             if actual > target {
                 pending += actual - target;
             }
@@ -487,8 +473,8 @@ impl Compactor {
         // L0 excess
         if !levels.is_empty() && levels[0].len() > self.config.l0_compaction_trigger {
             let excess = levels[0].len() - self.config.l0_compaction_trigger;
-            let avg_size: u64 = levels[0].iter().map(|m| m.file_size).sum::<u64>()
-                / levels[0].len().max(1) as u64;
+            let avg_size: u64 =
+                levels[0].iter().map(|m| m.file_size).sum::<u64>() / levels[0].len().max(1) as u64;
             pending += excess as u64 * avg_size;
         }
         pending
@@ -570,7 +556,9 @@ mod tests {
             2,
         );
 
-        let result = compactor.compact_l0_to_l1(&[l0_1, l0_2], &[], None, 7, None, None).unwrap();
+        let result = compactor
+            .compact_l0_to_l1(&[l0_1, l0_2], &[], None, 7, None, None)
+            .unwrap();
 
         assert_eq!(result.consumed.len(), 2);
         assert_eq!(result.produced.len(), 1);
@@ -612,7 +600,9 @@ mod tests {
             3,
         );
 
-        let result = compactor.compact_l0_to_l1(&[l0], &[l1], None, 7, None, None).unwrap();
+        let result = compactor
+            .compact_l0_to_l1(&[l0], &[l1], None, 7, None, None)
+            .unwrap();
 
         assert_eq!(result.consumed.len(), 2); // l0 + overlapping l1
         assert_eq!(result.produced.len(), 1);
@@ -631,7 +621,9 @@ mod tests {
 
         let l0 = write_sst(dir.path(), "l0.sst", &[(b"key", b"val")], 0, 1);
 
-        compactor.compact_l0_to_l1(&[l0], &[], None, 7, None, None).unwrap();
+        compactor
+            .compact_l0_to_l1(&[l0], &[], None, 7, None, None)
+            .unwrap();
 
         let stats = compactor.stats();
         assert_eq!(stats.runs_completed, 1);

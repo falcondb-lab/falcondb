@@ -200,7 +200,9 @@ impl TokenBucket {
             {
                 let pair = std::sync::Mutex::new(false);
                 let cvar = std::sync::Condvar::new();
-                let guard = pair.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let guard = pair
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let _ = cvar.wait_timeout(guard, Duration::from_millis(wait_ms));
             }
         }

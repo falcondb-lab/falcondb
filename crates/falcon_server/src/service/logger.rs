@@ -19,15 +19,10 @@ pub type LogGuard = tracing_appender::non_blocking::WorkerGuard;
 /// Returns a guard that **must** be kept alive until shutdown completes.
 /// Dropping the guard flushes buffered log output.
 pub fn init_file_logger(log_dir: &Path, filename_prefix: &str) -> LogGuard {
-    let file_appender = RollingFileAppender::new(
-        Rotation::DAILY,
-        log_dir,
-        filename_prefix,
-    );
+    let file_appender = RollingFileAppender::new(Rotation::DAILY, log_dir, filename_prefix);
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let fmt_layer = fmt::layer()
         .with_target(true)

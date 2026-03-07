@@ -102,7 +102,9 @@ impl PlanOutput {
                 .unwrap_or(0)
                 .max(12);
             for f in &self.fields {
-                let _ = writeln!(out, "  {:<width$} : {}",
+                let _ = writeln!(
+                    out,
+                    "  {:<width$} : {}",
                     f.label,
                     f.value,
                     width = label_width

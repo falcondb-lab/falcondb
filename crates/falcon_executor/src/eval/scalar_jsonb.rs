@@ -230,7 +230,9 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
         }
         ScalarFunc::RowToJson => {
             // Simple: convert the first argument to JSON
-            Ok(args.first().map_or(Datum::Null, |d| Datum::Jsonb(datum_to_json_value(d))))
+            Ok(args
+                .first()
+                .map_or(Datum::Null, |d| Datum::Jsonb(datum_to_json_value(d))))
         }
         _ => Err(ExecutionError::TypeError(format!(
             "Unknown JSONB function: {func:?}"
@@ -258,24 +260,27 @@ fn datum_to_json_value(d: &Datum) -> JsonValue {
         Datum::Boolean(b) => JsonValue::Bool(*b),
         Datum::Int32(n) => JsonValue::Number((*n).into()),
         Datum::Int64(n) => JsonValue::Number((*n).into()),
-        Datum::Float64(f) => serde_json::Number::from_f64(*f)
-            .map_or(JsonValue::Null, JsonValue::Number),
+        Datum::Float64(f) => {
+            serde_json::Number::from_f64(*f).map_or(JsonValue::Null, JsonValue::Number)
+        }
         Datum::Text(s) => JsonValue::String(s.clone()),
         Datum::Timestamp(us) => JsonValue::Number((*us).into()),
         Datum::Date(days) => {
-            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
-                .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or(chrono::NaiveDate::MIN));
-            epoch.checked_add_signed(chrono::Duration::days(i64::from(*days))).map_or_else(
-                || JsonValue::Number((*days).into()),
-                |d| JsonValue::String(d.format("%Y-%m-%d").to_string()),
-            )
+            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap_or_else(|| {
+                chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or(chrono::NaiveDate::MIN)
+            });
+            epoch
+                .checked_add_signed(chrono::Duration::days(i64::from(*days)))
+                .map_or_else(
+                    || JsonValue::Number((*days).into()),
+                    |d| JsonValue::String(d.format("%Y-%m-%d").to_string()),
+                )
         }
         Datum::Array(arr) => JsonValue::Array(arr.iter().map(datum_to_json_value).collect()),
         Datum::Jsonb(v) => v.clone(),
         Datum::Decimal(m, s) => {
             let f = *m as f64 / 10f64.powi(i32::from(*s));
-            serde_json::Number::from_f64(f)
-                .map_or(JsonValue::Null, JsonValue::Number)
+            serde_json::Number::from_f64(f).map_or(JsonValue::Null, JsonValue::Number)
         }
         Datum::Time(_) | Datum::Interval(_, _, _) | Datum::Uuid(_) => {
             JsonValue::String(format!("{d}"))

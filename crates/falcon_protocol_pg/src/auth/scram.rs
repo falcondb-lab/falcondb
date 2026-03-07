@@ -56,9 +56,9 @@ impl ScramVerifier {
     /// Parse a PostgreSQL SCRAM verifier string.
     /// Format: `SCRAM-SHA-256$<iterations>:<salt_b64>$<stored_key_b64>:<server_key_b64>`
     pub fn parse(s: &str) -> Result<Self, ScramError> {
-        let s = s.strip_prefix("SCRAM-SHA-256$").ok_or_else(|| {
-            ScramError::InvalidVerifier("missing SCRAM-SHA-256$ prefix".into())
-        })?;
+        let s = s
+            .strip_prefix("SCRAM-SHA-256$")
+            .ok_or_else(|| ScramError::InvalidVerifier("missing SCRAM-SHA-256$ prefix".into()))?;
 
         let (iter_salt, keys) = s
             .split_once('$')
@@ -261,8 +261,7 @@ impl ScramServerSession {
         );
 
         // Verify: ClientSignature = HMAC(StoredKey, AuthMessage)
-        let client_signature =
-            hmac_sha256(&self.verifier.stored_key, auth_message.as_bytes());
+        let client_signature = hmac_sha256(&self.verifier.stored_key, auth_message.as_bytes());
 
         // Recover ClientKey = ClientProof XOR ClientSignature
         let mut recovered_client_key = [0u8; 32];
@@ -279,8 +278,7 @@ impl ScramServerSession {
         }
 
         // Compute server signature for server-final-message
-        let server_signature =
-            hmac_sha256(&self.verifier.server_key, auth_message.as_bytes());
+        let server_signature = hmac_sha256(&self.verifier.server_key, auth_message.as_bytes());
 
         self.state = ScramState::Done;
 
@@ -319,8 +317,7 @@ fn pbkdf2_hmac_sha256(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 32]
 /// HMAC-SHA-256 using the `hmac` crate.
 fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
     type HmacSha256 = Hmac<Sha256>;
-    let mut mac =
-        HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(message);
     mac.finalize().into_bytes().into()
 }
@@ -475,7 +472,9 @@ mod tests {
 
         let client_nonce = "abc123";
         let client_first = format!("n,,n=user,r={client_nonce}");
-        let server_first_bytes = server.handle_client_first(SCRAM_SHA_256, &client_first).unwrap();
+        let server_first_bytes = server
+            .handle_client_first(SCRAM_SHA_256, &client_first)
+            .unwrap();
         let server_first_msg = String::from_utf8(server_first_bytes).unwrap();
 
         // Derive with WRONG password
@@ -487,7 +486,11 @@ mod tests {
         let cfwp = format!("c=biws,r={combined_nonce}");
         let auth_msg = format!("{client_first_bare},{server_first_msg},{cfwp}");
         let sig = hmac_sha256(&stored_key, auth_msg.as_bytes());
-        let proof: Vec<u8> = client_key.iter().zip(sig.iter()).map(|(a, b)| a ^ b).collect();
+        let proof: Vec<u8> = client_key
+            .iter()
+            .zip(sig.iter())
+            .map(|(a, b)| a ^ b)
+            .collect();
         let client_final = format!("{cfwp},p={}", b64_encode(&proof));
 
         match server.handle_client_final(&client_final) {

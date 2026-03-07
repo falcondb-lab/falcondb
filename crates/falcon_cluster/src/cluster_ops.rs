@@ -561,9 +561,7 @@ impl ClusterAdmin {
             u64::MAX,
             "idle",
             "planned",
-            format!(
-                "Rebalance plan generated: {num_tasks} tasks, {total_rows} rows to move"
-            ),
+            format!("Rebalance plan generated: {num_tasks} tasks, {total_rows} rows to move"),
         );
     }
 

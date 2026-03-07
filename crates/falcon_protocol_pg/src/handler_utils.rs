@@ -3,7 +3,9 @@ use falcon_common::types::ShardId;
 use falcon_planner::PlannedTxnType;
 use falcon_txn::{SlowPathMode, TxnClassification};
 
-pub(crate) fn classification_from_routing_hint(hint: &falcon_planner::TxnRoutingHint) -> TxnClassification {
+pub(crate) fn classification_from_routing_hint(
+    hint: &falcon_planner::TxnRoutingHint,
+) -> TxnClassification {
     match hint.planned_txn_type() {
         PlannedTxnType::Local => {
             let shard = hint.involved_shards.first().copied().unwrap_or(ShardId(0));
@@ -101,7 +103,9 @@ pub(crate) fn parse_prepare_statement(sql: &str) -> Option<(String, String)> {
         .trim_end_matches(';')
         .trim();
     // before_as is "name" or "name(type, ...)"
-    let name = before_as.find('(').map_or_else(|| before_as.trim(), |paren| before_as[..paren].trim());
+    let name = before_as
+        .find('(')
+        .map_or_else(|| before_as.trim(), |paren| before_as[..paren].trim());
     if name.is_empty() || query.is_empty() {
         return None;
     }
@@ -253,9 +257,10 @@ pub(crate) fn text_params_to_datum(
                 Some(DataType::Int64) => s
                     .parse::<i64>()
                     .map_or_else(|_| Datum::Text(s.into_owned()), Datum::Int64),
-                Some(DataType::Float32) => s
-                    .parse::<f32>()
-                    .map_or_else(|_| Datum::Text(s.into_owned()), |v| Datum::Float64(v as f64)),
+                Some(DataType::Float32) => s.parse::<f32>().map_or_else(
+                    |_| Datum::Text(s.into_owned()),
+                    |v| Datum::Float64(v as f64),
+                ),
                 Some(DataType::Float64) => s
                     .parse::<f64>()
                     .map_or_else(|_| Datum::Text(s.into_owned()), Datum::Float64),
@@ -280,13 +285,19 @@ pub(crate) fn text_params_to_datum(
                     let raw = s.strip_prefix("\\x").unwrap_or(&s);
                     let bytes: Vec<u8> = (0..raw.len())
                         .step_by(2)
-                        .filter_map(|i| raw.get(i..i + 2).and_then(|h| u8::from_str_radix(h, 16).ok()))
+                        .filter_map(|i| {
+                            raw.get(i..i + 2)
+                                .and_then(|h| u8::from_str_radix(h, 16).ok())
+                        })
                         .collect();
                     Datum::Bytea(bytes)
                 }
-                Some(DataType::Time) | Some(DataType::Interval)
-                | Some(DataType::Timestamp) | Some(DataType::Date)
-                | Some(DataType::Text) | Some(DataType::Array(_))
+                Some(DataType::Time)
+                | Some(DataType::Interval)
+                | Some(DataType::Timestamp)
+                | Some(DataType::Date)
+                | Some(DataType::Text)
+                | Some(DataType::Array(_))
                 | Some(DataType::Jsonb) => Datum::Text(s.into_owned()),
                 _ => {
                     // No hint or text-like types: try integer, float, text

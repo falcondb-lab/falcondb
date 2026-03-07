@@ -138,13 +138,19 @@ impl CostTracker {
         let total_wal: u64 = table_costs.iter().map(|t| t.wal_io_bytes).sum();
         let total_repl: u64 = shard_costs.iter().map(|s| s.replication_bytes).sum();
         let total_rows: u64 = table_costs.iter().map(|t| t.row_count).sum();
-        let total_savings: u64 = table_costs.iter().map(|t| t.compression_savings_bytes).sum();
+        let total_savings: u64 = table_costs
+            .iter()
+            .map(|t| t.compression_savings_bytes)
+            .sum();
 
-        let ratios: Vec<f64> = table_costs.iter()
+        let ratios: Vec<f64> = table_costs
+            .iter()
             .filter(|t| t.compression_ratio > 0.0)
             .map(|t| t.compression_ratio)
             .collect();
-        let avg_ratio = if ratios.is_empty() { 1.0 } else {
+        let avg_ratio = if ratios.is_empty() {
+            1.0
+        } else {
             ratios.iter().sum::<f64>() / ratios.len() as f64
         };
 
@@ -162,7 +168,9 @@ impl CostTracker {
         };
 
         let mut hist = self.history.lock();
-        if hist.len() >= self.max_history { hist.pop_front(); }
+        if hist.len() >= self.max_history {
+            hist.pop_front();
+        }
         hist.push_back(summary.clone());
         self.metrics.snapshots_taken.fetch_add(1, Ordering::Relaxed);
 
@@ -171,7 +179,13 @@ impl CostTracker {
 
     /// Get cost history.
     pub fn cost_history(&self, limit: usize) -> Vec<ClusterCostSummary> {
-        self.history.lock().iter().rev().take(limit).cloned().collect()
+        self.history
+            .lock()
+            .iter()
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect()
     }
 
     /// Get top N tables by a cost metric.
@@ -222,29 +236,48 @@ impl fmt::Display for PressureType {
 /// Recommendation type from the capacity guard.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Recommendation {
-    ScaleOut { add_nodes: u32, reason: String },
-    IncreaseCompression { current_profile: String, suggested_profile: String },
-    WalGc { suggested_gc_threshold_mb: u64 },
-    ColdCompaction { estimated_savings_mb: u64 },
-    ShardRebalance { overloaded_nodes: Vec<NodeId> },
-    ConnectionPoolResize { current: u32, suggested: u32 },
+    ScaleOut {
+        add_nodes: u32,
+        reason: String,
+    },
+    IncreaseCompression {
+        current_profile: String,
+        suggested_profile: String,
+    },
+    WalGc {
+        suggested_gc_threshold_mb: u64,
+    },
+    ColdCompaction {
+        estimated_savings_mb: u64,
+    },
+    ShardRebalance {
+        overloaded_nodes: Vec<NodeId>,
+    },
+    ConnectionPoolResize {
+        current: u32,
+        suggested: u32,
+    },
 }
 
 impl fmt::Display for Recommendation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ScaleOut { add_nodes, reason } =>
-                write!(f, "SCALE_OUT(+{add_nodes} nodes: {reason})"),
-            Self::IncreaseCompression { suggested_profile, .. } =>
-                write!(f, "COMPRESS(→{suggested_profile})"),
-            Self::WalGc { suggested_gc_threshold_mb } =>
-                write!(f, "WAL_GC(threshold={suggested_gc_threshold_mb}MB)"),
-            Self::ColdCompaction { estimated_savings_mb } =>
-                write!(f, "COLD_COMPACT(save ~{estimated_savings_mb}MB)"),
-            Self::ShardRebalance { overloaded_nodes } =>
-                write!(f, "REBALANCE(overloaded={overloaded_nodes:?})"),
-            Self::ConnectionPoolResize { suggested, .. } =>
-                write!(f, "RESIZE_POOL(→{suggested})"),
+            Self::ScaleOut { add_nodes, reason } => {
+                write!(f, "SCALE_OUT(+{add_nodes} nodes: {reason})")
+            }
+            Self::IncreaseCompression {
+                suggested_profile, ..
+            } => write!(f, "COMPRESS(→{suggested_profile})"),
+            Self::WalGc {
+                suggested_gc_threshold_mb,
+            } => write!(f, "WAL_GC(threshold={suggested_gc_threshold_mb}MB)"),
+            Self::ColdCompaction {
+                estimated_savings_mb,
+            } => write!(f, "COLD_COMPACT(save ~{estimated_savings_mb}MB)"),
+            Self::ShardRebalance { overloaded_nodes } => {
+                write!(f, "REBALANCE(overloaded={overloaded_nodes:?})")
+            }
+            Self::ConnectionPoolResize { suggested, .. } => write!(f, "RESIZE_POOL(→{suggested})"),
         }
     }
 }
@@ -313,16 +346,23 @@ impl CapacityGuardV2 {
 
     /// Set threshold for a pressure type.
     pub fn set_threshold(&self, pressure: PressureType, warning_pct: f64, urgent_pct: f64) {
-        self.thresholds.write().insert(pressure, (warning_pct, urgent_pct));
+        self.thresholds
+            .write()
+            .insert(pressure, (warning_pct, urgent_pct));
     }
 
     /// Evaluate memory pressure.
     pub fn evaluate_memory(&self, used_bytes: u64, total_bytes: u64) -> Option<CapacityGuardAlert> {
         self.metrics.evaluations.fetch_add(1, Ordering::Relaxed);
-        if total_bytes == 0 { return None; }
+        if total_bytes == 0 {
+            return None;
+        }
         let ratio = used_bytes as f64 / total_bytes as f64;
         let thresholds = self.thresholds.read();
-        let (warn, urgent) = thresholds.get(&PressureType::MemoryApproaching).copied().unwrap_or((0.75, 0.90));
+        let (warn, urgent) = thresholds
+            .get(&PressureType::MemoryApproaching)
+            .copied()
+            .unwrap_or((0.75, 0.90));
 
         if ratio >= urgent {
             Some(self.create_alert(
@@ -350,9 +390,15 @@ impl CapacityGuardV2 {
     }
 
     /// Evaluate WAL growth rate.
-    pub fn evaluate_wal_growth(&self, growth_bytes_per_hour: u64, max_wal_bytes: u64) -> Option<CapacityGuardAlert> {
+    pub fn evaluate_wal_growth(
+        &self,
+        growth_bytes_per_hour: u64,
+        max_wal_bytes: u64,
+    ) -> Option<CapacityGuardAlert> {
         self.metrics.evaluations.fetch_add(1, Ordering::Relaxed);
-        if max_wal_bytes == 0 { return None; }
+        if max_wal_bytes == 0 {
+            return None;
+        }
         let hours_to_fill = if growth_bytes_per_hour > 0 {
             max_wal_bytes as f64 / growth_bytes_per_hour as f64
         } else {
@@ -363,14 +409,18 @@ impl CapacityGuardV2 {
             Some(self.create_alert(
                 PressureType::WalGrowthTooFast,
                 CapacityGuardSeverity::Urgent,
-                Recommendation::WalGc { suggested_gc_threshold_mb: max_wal_bytes / 2 / (1024 * 1024) },
+                Recommendation::WalGc {
+                    suggested_gc_threshold_mb: max_wal_bytes / 2 / (1024 * 1024),
+                },
                 format!("WAL fills in {hours_to_fill:.1}h at current rate"),
             ))
         } else if hours_to_fill < 24.0 {
             Some(self.create_alert(
                 PressureType::WalGrowthTooFast,
                 CapacityGuardSeverity::Warning,
-                Recommendation::WalGc { suggested_gc_threshold_mb: max_wal_bytes / 3 / (1024 * 1024) },
+                Recommendation::WalGc {
+                    suggested_gc_threshold_mb: max_wal_bytes / 3 / (1024 * 1024),
+                },
                 format!("WAL fills in {hours_to_fill:.1}h at current rate"),
             ))
         } else {
@@ -379,9 +429,15 @@ impl CapacityGuardV2 {
     }
 
     /// Evaluate cold segment bloat.
-    pub fn evaluate_cold_bloat(&self, cold_bytes: u64, uncompressed_bytes: u64) -> Option<CapacityGuardAlert> {
+    pub fn evaluate_cold_bloat(
+        &self,
+        cold_bytes: u64,
+        uncompressed_bytes: u64,
+    ) -> Option<CapacityGuardAlert> {
         self.metrics.evaluations.fetch_add(1, Ordering::Relaxed);
-        if uncompressed_bytes == 0 { return None; }
+        if uncompressed_bytes == 0 {
+            return None;
+        }
         let ratio = cold_bytes as f64 / uncompressed_bytes as f64;
         // If compression ratio is poor (> 0.8 = less than 20% savings)
         if ratio > 0.8 {
@@ -389,7 +445,9 @@ impl CapacityGuardV2 {
             Some(self.create_alert(
                 PressureType::ColdSegmentBloat,
                 CapacityGuardSeverity::Advisory,
-                Recommendation::ColdCompaction { estimated_savings_mb: (uncompressed_bytes / 5) / (1024 * 1024) },
+                Recommendation::ColdCompaction {
+                    estimated_savings_mb: (uncompressed_bytes / 5) / (1024 * 1024),
+                },
                 format!("Cold compression ratio {ratio:.2} — consider recompaction"),
             ))
         } else {
@@ -409,18 +467,37 @@ impl CapacityGuardV2 {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        self.metrics.alerts_generated.fetch_add(1, Ordering::Relaxed);
-        self.metrics.recommendations_generated.fetch_add(1, Ordering::Relaxed);
-        let alert = CapacityGuardAlert { id, pressure, severity, recommendation, message, timestamp: ts };
+        self.metrics
+            .alerts_generated
+            .fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .recommendations_generated
+            .fetch_add(1, Ordering::Relaxed);
+        let alert = CapacityGuardAlert {
+            id,
+            pressure,
+            severity,
+            recommendation,
+            message,
+            timestamp: ts,
+        };
         let mut alerts = self.alerts.lock();
-        if alerts.len() >= self.max_alerts { alerts.pop_front(); }
+        if alerts.len() >= self.max_alerts {
+            alerts.pop_front();
+        }
         alerts.push_back(alert.clone());
         alert
     }
 
     /// Get recent alerts.
     pub fn recent_alerts(&self, count: usize) -> Vec<CapacityGuardAlert> {
-        self.alerts.lock().iter().rev().take(count).cloned().collect()
+        self.alerts
+            .lock()
+            .iter()
+            .rev()
+            .take(count)
+            .cloned()
+            .collect()
     }
 }
 
@@ -486,7 +563,9 @@ impl HardenedAuditLog {
                 .unwrap_or_default()
                 .as_secs();
         }
-        if events.len() >= self.capacity { events.pop_front(); }
+        if events.len() >= self.capacity {
+            events.pop_front();
+        }
         events.push_back(ev);
         self.metrics.events_recorded.fetch_add(1, Ordering::Relaxed);
         id
@@ -494,8 +573,12 @@ impl HardenedAuditLog {
 
     /// Query events by trace ID.
     pub fn query_by_trace(&self, trace_id: &str) -> Vec<UnifiedAuditEvent> {
-        self.metrics.trace_correlations.fetch_add(1, Ordering::Relaxed);
-        self.events.lock().iter()
+        self.metrics
+            .trace_correlations
+            .fetch_add(1, Ordering::Relaxed);
+        self.events
+            .lock()
+            .iter()
             .filter(|e| e.trace_id == trace_id)
             .cloned()
             .collect()
@@ -621,18 +704,24 @@ impl PostmortemGenerator {
             .unwrap_or_default()
             .as_secs();
         let dp = DecisionPoint {
-            id, timestamp: ts,
+            id,
+            timestamp: ts,
             decision: decision.to_owned(),
             reason: reason.to_owned(),
             trigger_metric: trigger_metric.to_owned(),
-            trigger_value, threshold,
+            trigger_value,
+            threshold,
             action_taken: action_taken.to_owned(),
             outcome: String::new(),
         };
         let mut dps = self.decision_points.lock();
-        if dps.len() >= self.max_decisions { dps.pop_front(); }
+        if dps.len() >= self.max_decisions {
+            dps.pop_front();
+        }
         dps.push_back(dp);
-        self.metrics.decisions_recorded.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .decisions_recorded
+            .fetch_add(1, Ordering::Relaxed);
         id
     }
 
@@ -650,18 +739,24 @@ impl PostmortemGenerator {
     ) -> u64 {
         let id = self.next_decision_id.fetch_add(1, Ordering::Relaxed);
         let dp = DecisionPoint {
-            id, timestamp,
+            id,
+            timestamp,
             decision: decision.to_owned(),
             reason: reason.to_owned(),
             trigger_metric: trigger_metric.to_owned(),
-            trigger_value, threshold,
+            trigger_value,
+            threshold,
             action_taken: action_taken.to_owned(),
             outcome: String::new(),
         };
         let mut dps = self.decision_points.lock();
-        if dps.len() >= self.max_decisions { dps.pop_front(); }
+        if dps.len() >= self.max_decisions {
+            dps.pop_front();
+        }
         dps.push_back(dp);
-        self.metrics.decisions_recorded.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .decisions_recorded
+            .fetch_add(1, Ordering::Relaxed);
         id
     }
 
@@ -685,9 +780,12 @@ impl PostmortemGenerator {
     /// Record a metric sample with explicit timestamp.
     pub fn record_metric_at(&self, name: &str, value: f64, timestamp: u64) {
         let mut snaps = self.metric_snapshots.write();
-        let q = snaps.entry(name.to_owned())
+        let q = snaps
+            .entry(name.to_owned())
             .or_insert_with(|| VecDeque::with_capacity(self.max_metric_samples));
-        if q.len() >= self.max_metric_samples { q.pop_front(); }
+        if q.len() >= self.max_metric_samples {
+            q.pop_front();
+        }
         q.push_back((timestamp, value));
         self.metrics.metric_samples.fetch_add(1, Ordering::Relaxed);
     }
@@ -701,14 +799,19 @@ impl PostmortemGenerator {
         window_end: u64,
         timeline_entries: Vec<PostmortemTimelineEntry>,
     ) -> PostmortemReport {
-        self.metrics.reports_generated.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .reports_generated
+            .fetch_add(1, Ordering::Relaxed);
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
         // Collect decision points in window
-        let decisions: Vec<DecisionPoint> = self.decision_points.lock().iter()
+        let decisions: Vec<DecisionPoint> = self
+            .decision_points
+            .lock()
+            .iter()
             .filter(|d| d.timestamp >= window_start && d.timestamp <= window_end)
             .cloned()
             .collect();
@@ -717,21 +820,29 @@ impl PostmortemGenerator {
         let snaps = self.metric_snapshots.read();
         let mut metric_changes = Vec::new();
         for (name, samples) in snaps.iter() {
-            let before_samples: Vec<f64> = samples.iter()
+            let before_samples: Vec<f64> = samples
+                .iter()
                 .filter(|(ts, _)| *ts < window_start)
                 .map(|(_, v)| *v)
                 .collect();
-            let after_samples: Vec<f64> = samples.iter()
+            let after_samples: Vec<f64> = samples
+                .iter()
                 .filter(|(ts, _)| *ts >= window_start && *ts <= window_end)
                 .map(|(_, v)| *v)
                 .collect();
             if !before_samples.is_empty() && !after_samples.is_empty() {
                 let before = before_samples.iter().sum::<f64>() / before_samples.len() as f64;
                 let after = after_samples.iter().sum::<f64>() / after_samples.len() as f64;
-                let delta = if before.abs() > 1e-10 { (after - before) / before * 100.0 } else { 0.0 };
+                let delta = if before.abs() > 1e-10 {
+                    (after - before) / before * 100.0
+                } else {
+                    0.0
+                };
                 metric_changes.push(MetricChange {
                     metric_name: name.clone(),
-                    before, after, delta_pct: delta,
+                    before,
+                    after,
+                    delta_pct: delta,
                     timestamp: window_start,
                 });
             }
@@ -757,27 +868,44 @@ impl PostmortemGenerator {
         let mut out = String::new();
         let _ = writeln!(out, "=== POSTMORTEM: {} ===", report.title);
         let _ = writeln!(out, "Incident ID: {}", report.incident_id);
-        let _ = writeln!(out, "Window: {} — {}", report.window_start, report.window_end);
+        let _ = writeln!(
+            out,
+            "Window: {} — {}",
+            report.window_start, report.window_end
+        );
         let _ = writeln!(out, "Generated: {}\n", report.generated_at);
 
         out.push_str("--- TIMELINE ---\n");
         for entry in &report.timeline {
-            let _ = writeln!(out, "[{}] [{}] {} — {}",
-                entry.timestamp, entry.severity, entry.event_type, entry.description);
+            let _ = writeln!(
+                out,
+                "[{}] [{}] {} — {}",
+                entry.timestamp, entry.severity, entry.event_type, entry.description
+            );
         }
 
         out.push_str("\n--- METRIC CHANGES ---\n");
         for mc in &report.metric_changes {
-            let _ = writeln!(out, "{}: {:.2} → {:.2} ({:+.1}%)",
-                mc.metric_name, mc.before, mc.after, mc.delta_pct);
+            let _ = writeln!(
+                out,
+                "{}: {:.2} → {:.2} ({:+.1}%)",
+                mc.metric_name, mc.before, mc.after, mc.delta_pct
+            );
         }
 
         out.push_str("\n--- DECISION POINTS ---\n");
         for dp in &report.decision_points {
-            let _ = writeln!(out, "[{}] {}: {} (trigger: {}={:.2} > {:.2}) → {}",
-                dp.timestamp, dp.decision, dp.reason,
-                dp.trigger_metric, dp.trigger_value, dp.threshold,
-                dp.action_taken);
+            let _ = writeln!(
+                out,
+                "[{}] {}: {} (trigger: {}={:.2} > {:.2}) → {}",
+                dp.timestamp,
+                dp.decision,
+                dp.reason,
+                dp.trigger_metric,
+                dp.trigger_value,
+                dp.threshold,
+                dp.action_taken
+            );
             if !dp.outcome.is_empty() {
                 let _ = writeln!(out, "  Outcome: {}", dp.outcome);
             }
@@ -896,20 +1024,15 @@ pub enum ProposedChange {
 impl fmt::Display for ProposedChange {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::IncreaseCompression { from, to } =>
-                write!(f, "compression: {from} → {to}"),
-            Self::AddNode { node_count } =>
-                write!(f, "add {node_count} node(s)"),
-            Self::RemoveNode { node_id } =>
-                write!(f, "remove node {node_id:?}"),
-            Self::ChangeReplicationFactor { from, to } =>
-                write!(f, "replication: {from} → {to}"),
-            Self::ResizeConnectionPool { from, to } =>
-                write!(f, "pool: {from} → {to}"),
-            Self::AdjustWalGc { new_threshold_mb } =>
-                write!(f, "WAL GC threshold → {new_threshold_mb}MB"),
-            Self::EnableColdCompaction =>
-                write!(f, "enable cold compaction"),
+            Self::IncreaseCompression { from, to } => write!(f, "compression: {from} → {to}"),
+            Self::AddNode { node_count } => write!(f, "add {node_count} node(s)"),
+            Self::RemoveNode { node_id } => write!(f, "remove node {node_id:?}"),
+            Self::ChangeReplicationFactor { from, to } => write!(f, "replication: {from} → {to}"),
+            Self::ResizeConnectionPool { from, to } => write!(f, "pool: {from} → {to}"),
+            Self::AdjustWalGc { new_threshold_mb } => {
+                write!(f, "WAL GC threshold → {new_threshold_mb}MB")
+            }
+            Self::EnableColdCompaction => write!(f, "enable cold compaction"),
         }
     }
 }
@@ -969,12 +1092,16 @@ impl Default for ChangeImpactPreview {
 
 impl ChangeImpactPreview {
     pub fn new() -> Self {
-        Self { metrics: ChangeImpactMetrics::default() }
+        Self {
+            metrics: ChangeImpactMetrics::default(),
+        }
     }
 
     /// Estimate the impact of a proposed change.
     pub fn preview(&self, change: &ProposedChange) -> ImpactEstimate {
-        self.metrics.previews_computed.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .previews_computed
+            .fetch_add(1, Ordering::Relaxed);
         match change {
             ProposedChange::IncreaseCompression { from, to } => {
                 ImpactEstimate {
@@ -1029,51 +1156,59 @@ impl ChangeImpactPreview {
                     guardrail_ok: *to <= 5,
                     summary: format!(
                         "Replication {} → {}: {}% CPU, {}MB memory, p99 {}us",
-                        from, to,
+                        from,
+                        to,
                         repl_delta * 3,
                         repl_delta * 50,
                         if repl_delta > 0 { "+300" } else { "-200" }
                     ),
-                    risk: if repl_delta.abs() > 1 { ImpactRisk::High } else { ImpactRisk::Medium },
+                    risk: if repl_delta.abs() > 1 {
+                        ImpactRisk::High
+                    } else {
+                        ImpactRisk::Medium
+                    },
                 }
             }
-            ProposedChange::ResizeConnectionPool { from, to } => {
-                ImpactEstimate {
-                    change: change.to_string(),
-                    cpu_delta_pct: 0.0,
-                    memory_delta_bytes: (i64::from(*to) - i64::from(*from)) * 2 * 1024 * 1024,
-                    storage_delta_bytes: 0,
-                    latency_p99_delta_us: 0,
-                    guardrail_ok: true,
-                    summary: format!("Pool {} → {}: {}MB memory delta", from, to,
-                        (i64::from(*to) - i64::from(*from)) * 2),
-                    risk: ImpactRisk::Low,
-                }
-            }
-            ProposedChange::AdjustWalGc { new_threshold_mb } => {
-                ImpactEstimate {
-                    change: change.to_string(),
-                    cpu_delta_pct: 1.0,
-                    memory_delta_bytes: 0,
-                    storage_delta_bytes: -(*new_threshold_mb as i64 * 1024 * 1024 / 2),
-                    latency_p99_delta_us: 0,
-                    guardrail_ok: true,
-                    summary: format!("WAL GC at {}MB: +1% CPU (GC), recovers ~{}MB", new_threshold_mb, new_threshold_mb / 2),
-                    risk: ImpactRisk::Low,
-                }
-            }
-            ProposedChange::EnableColdCompaction => {
-                ImpactEstimate {
-                    change: change.to_string(),
-                    cpu_delta_pct: 3.0,
-                    memory_delta_bytes: -(50 * 1024 * 1024),
-                    storage_delta_bytes: -(200 * 1024 * 1024),
-                    latency_p99_delta_us: 100,
-                    guardrail_ok: true,
-                    summary: "Cold compaction: +3% CPU, -50MB memory, -200MB storage, p99 +0.1ms".into(),
-                    risk: ImpactRisk::Low,
-                }
-            }
+            ProposedChange::ResizeConnectionPool { from, to } => ImpactEstimate {
+                change: change.to_string(),
+                cpu_delta_pct: 0.0,
+                memory_delta_bytes: (i64::from(*to) - i64::from(*from)) * 2 * 1024 * 1024,
+                storage_delta_bytes: 0,
+                latency_p99_delta_us: 0,
+                guardrail_ok: true,
+                summary: format!(
+                    "Pool {} → {}: {}MB memory delta",
+                    from,
+                    to,
+                    (i64::from(*to) - i64::from(*from)) * 2
+                ),
+                risk: ImpactRisk::Low,
+            },
+            ProposedChange::AdjustWalGc { new_threshold_mb } => ImpactEstimate {
+                change: change.to_string(),
+                cpu_delta_pct: 1.0,
+                memory_delta_bytes: 0,
+                storage_delta_bytes: -(*new_threshold_mb as i64 * 1024 * 1024 / 2),
+                latency_p99_delta_us: 0,
+                guardrail_ok: true,
+                summary: format!(
+                    "WAL GC at {}MB: +1% CPU (GC), recovers ~{}MB",
+                    new_threshold_mb,
+                    new_threshold_mb / 2
+                ),
+                risk: ImpactRisk::Low,
+            },
+            ProposedChange::EnableColdCompaction => ImpactEstimate {
+                change: change.to_string(),
+                cpu_delta_pct: 3.0,
+                memory_delta_bytes: -(50 * 1024 * 1024),
+                storage_delta_bytes: -(200 * 1024 * 1024),
+                latency_p99_delta_us: 100,
+                guardrail_ok: true,
+                summary: "Cold compaction: +3% CPU, -50MB memory, -200MB storage, p99 +0.1ms"
+                    .into(),
+                risk: ImpactRisk::Low,
+            },
         }
     }
 
@@ -1086,7 +1221,15 @@ impl ChangeImpactPreview {
         let _ = writeln!(out, "  Memory:  {:+}B", estimate.memory_delta_bytes);
         let _ = writeln!(out, "  Storage: {:+}B", estimate.storage_delta_bytes);
         let _ = writeln!(out, "  p99:     {:+}us", estimate.latency_p99_delta_us);
-        let _ = writeln!(out, "  Guardrail: {}", if estimate.guardrail_ok { "OK" } else { "AT RISK" });
+        let _ = writeln!(
+            out,
+            "  Guardrail: {}",
+            if estimate.guardrail_ok {
+                "OK"
+            } else {
+                "AT RISK"
+            }
+        );
         let _ = writeln!(out, "  Risk:    {}", estimate.risk);
         let _ = writeln!(out, "  Summary: {}", estimate.summary);
         out
@@ -1143,8 +1286,12 @@ mod tests {
                 table_id: TableId(i),
                 table_name: format!("table_{}", i),
                 hot_memory_bytes: (i + 1) * 1_000_000,
-                cold_memory_bytes: 0, wal_io_bytes: 0, replication_bytes: 0,
-                row_count: 0, compression_ratio: 1.0, compression_savings_bytes: 0,
+                cold_memory_bytes: 0,
+                wal_io_bytes: 0,
+                replication_bytes: 0,
+                row_count: 0,
+                compression_ratio: 1.0,
+                compression_savings_bytes: 0,
             });
         }
         let top = tracker.top_tables_by_hot_memory(3);
@@ -1194,18 +1341,40 @@ mod tests {
     fn test_hardened_audit_trace_correlation() {
         let log = HardenedAuditLog::new(1000);
         log.record(UnifiedAuditEvent {
-            id: 0, timestamp: 1000, trace_id: "trace-abc".into(), span_id: "span-1".into(),
-            category: "AUTH".into(), severity: "INFO".into(), actor: "alice".into(),
-            source_ip: "10.0.0.1".into(), action: "LOGIN".into(), resource: "system".into(),
-            outcome: "OK".into(), details: "".into(), component: "gateway".into(),
-            node_id: None, shard_id: None, duration_us: Some(500),
+            id: 0,
+            timestamp: 1000,
+            trace_id: "trace-abc".into(),
+            span_id: "span-1".into(),
+            category: "AUTH".into(),
+            severity: "INFO".into(),
+            actor: "alice".into(),
+            source_ip: "10.0.0.1".into(),
+            action: "LOGIN".into(),
+            resource: "system".into(),
+            outcome: "OK".into(),
+            details: "".into(),
+            component: "gateway".into(),
+            node_id: None,
+            shard_id: None,
+            duration_us: Some(500),
         });
         log.record(UnifiedAuditEvent {
-            id: 0, timestamp: 1001, trace_id: "trace-abc".into(), span_id: "span-2".into(),
-            category: "DATA".into(), severity: "INFO".into(), actor: "alice".into(),
-            source_ip: "10.0.0.1".into(), action: "SELECT".into(), resource: "users".into(),
-            outcome: "OK".into(), details: "".into(), component: "executor".into(),
-            node_id: None, shard_id: Some(0), duration_us: Some(1200),
+            id: 0,
+            timestamp: 1001,
+            trace_id: "trace-abc".into(),
+            span_id: "span-2".into(),
+            category: "DATA".into(),
+            severity: "INFO".into(),
+            actor: "alice".into(),
+            source_ip: "10.0.0.1".into(),
+            action: "SELECT".into(),
+            resource: "users".into(),
+            outcome: "OK".into(),
+            details: "".into(),
+            component: "executor".into(),
+            node_id: None,
+            shard_id: Some(0),
+            duration_us: Some(1200),
         });
         let correlated = log.query_by_trace("trace-abc");
         assert_eq!(correlated.len(), 2);
@@ -1215,11 +1384,22 @@ mod tests {
     fn test_hardened_audit_export() {
         let log = HardenedAuditLog::new(1000);
         log.record(UnifiedAuditEvent {
-            id: 0, timestamp: 1000, trace_id: "t1".into(), span_id: "s1".into(),
-            category: "OPS".into(), severity: "WARN".into(), actor: "admin".into(),
-            source_ip: "10.0.0.1".into(), action: "DRAIN".into(), resource: "node-3".into(),
-            outcome: "OK".into(), details: "".into(), component: "controller".into(),
-            node_id: Some(NodeId(3)), shard_id: None, duration_us: None,
+            id: 0,
+            timestamp: 1000,
+            trace_id: "t1".into(),
+            span_id: "s1".into(),
+            category: "OPS".into(),
+            severity: "WARN".into(),
+            actor: "admin".into(),
+            source_ip: "10.0.0.1".into(),
+            action: "DRAIN".into(),
+            resource: "node-3".into(),
+            outcome: "OK".into(),
+            details: "".into(),
+            component: "controller".into(),
+            node_id: Some(NodeId(3)),
+            shard_id: None,
+            duration_us: None,
         });
         let lines = log.export_jsonl(1);
         assert_eq!(lines.len(), 1);
@@ -1260,19 +1440,24 @@ mod tests {
             "BACKPRESSURE",
             "p99 exceeded guardrail",
             "latency_p99_ms",
-            55.0, 20.0,
+            55.0,
+            20.0,
             "activated backpressure",
             1005,
         );
 
         let timeline = vec![
             PostmortemTimelineEntry {
-                timestamp: 1000, event_type: "NODE_FAILURE".into(),
-                description: "Node 2 crashed".into(), severity: "CRITICAL".into(),
+                timestamp: 1000,
+                event_type: "NODE_FAILURE".into(),
+                description: "Node 2 crashed".into(),
+                severity: "CRITICAL".into(),
             },
             PostmortemTimelineEntry {
-                timestamp: 1002, event_type: "LEADER_CHANGE".into(),
-                description: "Shard 0 leader → node 3".into(), severity: "HIGH".into(),
+                timestamp: 1002,
+                event_type: "LEADER_CHANGE".into(),
+                description: "Shard 0 leader → node 3".into(),
+                severity: "HIGH".into(),
             },
         ];
 
@@ -1303,7 +1488,8 @@ mod tests {
     fn test_change_impact_compression() {
         let preview = ChangeImpactPreview::new();
         let est = preview.preview(&ProposedChange::IncreaseCompression {
-            from: "balanced".into(), to: "aggressive".into(),
+            from: "balanced".into(),
+            to: "aggressive".into(),
         });
         assert!(est.cpu_delta_pct > 0.0);
         assert!(est.memory_delta_bytes < 0);
@@ -1344,13 +1530,19 @@ mod tests {
                         table_id: TableId(t * 100 + i),
                         table_name: format!("t_{}_{}", t, i),
                         hot_memory_bytes: 1000,
-                        cold_memory_bytes: 0, wal_io_bytes: 0, replication_bytes: 0,
-                        row_count: 0, compression_ratio: 1.0, compression_savings_bytes: 0,
+                        cold_memory_bytes: 0,
+                        wal_io_bytes: 0,
+                        replication_bytes: 0,
+                        row_count: 0,
+                        compression_ratio: 1.0,
+                        compression_savings_bytes: 0,
                     });
                 }
             }));
         }
-        for h in handles { h.join().unwrap(); }
+        for h in handles {
+            h.join().unwrap();
+        }
         assert_eq!(tracker.table_count(), 200);
     }
 
@@ -1367,7 +1559,9 @@ mod tests {
                 }
             }));
         }
-        for h in handles { h.join().unwrap(); }
+        for h in handles {
+            h.join().unwrap();
+        }
         assert_eq!(gen.metrics.metric_samples.load(Ordering::Relaxed), 1000);
     }
 }

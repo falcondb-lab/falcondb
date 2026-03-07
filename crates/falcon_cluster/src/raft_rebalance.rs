@@ -280,7 +280,9 @@ impl SmartRebalanceRunner {
 
                     if rows_migrated > 0 {
                         metrics.rebalances_succeeded.fetch_add(1, Ordering::Relaxed);
-                        metrics.total_rows_migrated.fetch_add(rows_migrated, Ordering::Relaxed);
+                        metrics
+                            .total_rows_migrated
+                            .fetch_add(rows_migrated, Ordering::Relaxed);
                         metrics.consecutive_failures.store(0, Ordering::Relaxed);
                         backoff = config.initial_backoff;
                         tracing::info!(rows_migrated, "SmartRebalanceRunner: succeeded");
@@ -303,9 +305,7 @@ impl SmartRebalanceRunner {
                 tracing::info!("SmartRebalanceRunner stopped");
             })
             .map_err(|e| {
-                FalconError::Internal(format!(
-                    "failed to spawn smart-rebalancer thread: {e}"
-                ))
+                FalconError::Internal(format!("failed to spawn smart-rebalancer thread: {e}"))
             })?;
 
         Ok(SmartRebalanceRunnerHandle {
@@ -321,13 +321,21 @@ impl SmartRebalanceRunner {
         if !self.config.policy.should_trigger(&snapshot) {
             return 0;
         }
-        self.metrics.rebalances_triggered.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .rebalances_triggered
+            .fetch_add(1, Ordering::Relaxed);
         let rows = self.rebalancer.check_and_rebalance(engine);
         if rows > 0 {
-            self.metrics.rebalances_succeeded.fetch_add(1, Ordering::Relaxed);
-            self.metrics.total_rows_migrated.fetch_add(rows, Ordering::Relaxed);
+            self.metrics
+                .rebalances_succeeded
+                .fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .total_rows_migrated
+                .fetch_add(rows, Ordering::Relaxed);
         } else {
-            self.metrics.rebalances_failed.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .rebalances_failed
+                .fetch_add(1, Ordering::Relaxed);
         }
         rows
     }
@@ -395,7 +403,8 @@ mod tests {
                 nullable: false,
                 is_primary_key: true,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             }],
             primary_key_columns: vec![0],
             ..Default::default()
@@ -407,7 +416,10 @@ mod tests {
 
     #[test]
     fn test_policy_rejects_single_shard() {
-        let policy = RebalanceTriggerPolicy { min_shards: 2, ..Default::default() };
+        let policy = RebalanceTriggerPolicy {
+            min_shards: 2,
+            ..Default::default()
+        };
         let engine = Arc::new(ShardedEngine::new(1));
         let schema = TableSchema {
             id: TableId(1),
@@ -419,7 +431,8 @@ mod tests {
                 nullable: false,
                 is_primary_key: true,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             }],
             primary_key_columns: vec![0],
             ..Default::default()
@@ -483,7 +496,10 @@ mod tests {
 
     #[test]
     fn test_start_paused() {
-        let config = SmartRebalanceConfig { start_paused: true, ..Default::default() };
+        let config = SmartRebalanceConfig {
+            start_paused: true,
+            ..Default::default()
+        };
         let runner = SmartRebalanceRunner::new(config);
         assert!(runner.paused.load(Ordering::Relaxed));
         let snap = runner.metrics_snapshot();
@@ -533,7 +549,10 @@ mod tests {
         }
 
         let snap = ShardLoadSnapshot::collect(&engine);
-        assert!(snap.imbalance_ratio() > 1.25, "setup: cluster should be skewed");
+        assert!(
+            snap.imbalance_ratio() > 1.25,
+            "setup: cluster should be skewed"
+        );
 
         let config = SmartRebalanceConfig {
             policy: RebalanceTriggerPolicy {
@@ -553,6 +572,9 @@ mod tests {
         // check_once should trigger a rebalance
         let _ = runner.check_once(&engine);
         let m = runner.metrics_snapshot();
-        assert_eq!(m.rebalances_triggered, 1, "should have triggered one rebalance");
+        assert_eq!(
+            m.rebalances_triggered, 1,
+            "should have triggered one rebalance"
+        );
     }
 }

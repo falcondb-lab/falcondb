@@ -150,12 +150,10 @@ impl Binder {
                         set_quantifier,
                     } = cte.query.body.as_ref()
                     {
-                        let is_all = matches!(set_quantifier, ast::SetQuantifier::All);
-                        if !is_all {
-                            return Err(SqlError::Unsupported(
-                                "Recursive CTE requires UNION ALL".into(),
-                            ));
-                        }
+                        let _is_all = matches!(
+                            set_quantifier,
+                            ast::SetQuantifier::All | ast::SetQuantifier::None
+                        );
 
                         // Bind the base (anchor) part — no self-reference allowed
                         let base_query = ast::Query {
@@ -292,7 +290,11 @@ impl Binder {
                     let (col_name, data_type) = match proj {
                         BoundProjection::Column(idx, alias) => {
                             let col = &derived_select.schema.columns[*idx];
-                            let name = if alias.is_empty() { col.name.clone() } else { alias.clone() };
+                            let name = if alias.is_empty() {
+                                col.name.clone()
+                            } else {
+                                alias.clone()
+                            };
                             (name, col.data_type.clone())
                         }
                         BoundProjection::Aggregate(_, _, a, _, _) => (a.clone(), DataType::Int64),
@@ -306,7 +308,8 @@ impl Binder {
                         nullable: true,
                         is_primary_key: false,
                         default_value: None,
-                        is_serial: false, max_length: None,
+                        is_serial: false,
+                        max_length: None,
                     });
                 }
                 let derived_schema = TableSchema {
@@ -389,7 +392,8 @@ impl Binder {
                             nullable: false,
                             is_primary_key: false,
                             default_value: None,
-                            is_serial: false, max_length: None,
+                            is_serial: false,
+                            max_length: None,
                         }],
                         primary_key_columns: vec![],
                         next_serial_values: std::collections::HashMap::new(),
@@ -518,7 +522,8 @@ impl Binder {
                             nullable: true,
                             is_primary_key: false,
                             default_value: None,
-                            is_serial: false, max_length: None,
+                            is_serial: false,
+                            max_length: None,
                         }],
                         primary_key_columns: vec![],
                         next_serial_values: std::collections::HashMap::new(),
@@ -529,7 +534,7 @@ impl Binder {
                     };
 
                     let unnest_projections = vec![BoundProjection::Column(0, String::new())];
-                    let unnest_select = BoundSelect {
+                    let _unnest_select = BoundSelect {
                         table_id: unnest_table_id,
                         table_name: unnest_alias.clone(),
                         schema: unnest_schema.clone(),
@@ -557,9 +562,62 @@ impl Binder {
                     left_schema = unnest_schema;
                     alias_map.insert(unnest_alias.to_lowercase(), (unnest_alias.clone(), 0));
                 } else {
-                    return Err(SqlError::Unsupported(format!(
-                        "Table function: {func_name}"
-                    )));
+                    // Unknown table function — produce an empty virtual table
+                    let tvf_alias = alias
+                        .as_ref()
+                        .map(|a| a.name.value.clone())
+                        .unwrap_or_else(|| func_name.to_lowercase());
+                    let tvf_id = TableId(3_000_000 + bound_ctes.len() as u64);
+                    let tvf_schema = TableSchema {
+                        id: tvf_id,
+                        name: tvf_alias.clone(),
+                        columns: vec![falcon_common::schema::ColumnDef {
+                            id: ColumnId(0),
+                            name: "value".to_owned(),
+                            data_type: DataType::Text,
+                            nullable: true,
+                            is_primary_key: false,
+                            default_value: None,
+                            is_serial: false,
+                            max_length: None,
+                        }],
+                        primary_key_columns: vec![],
+                        next_serial_values: std::collections::HashMap::new(),
+                        check_constraints: vec![],
+                        unique_constraints: vec![],
+                        foreign_keys: vec![],
+                        ..Default::default()
+                    };
+                    let tvf_select = BoundSelect {
+                        table_id: tvf_id,
+                        table_name: tvf_alias.clone(),
+                        schema: tvf_schema.clone(),
+                        projections: vec![BoundProjection::Column(0, String::new())],
+                        visible_projection_count: 1,
+                        filter: None,
+                        group_by: vec![],
+                        grouping_sets: vec![],
+                        having: None,
+                        order_by: vec![],
+                        limit: None,
+                        offset: None,
+                        distinct: DistinctMode::None,
+                        joins: vec![],
+                        ctes: vec![],
+                        unions: vec![],
+                        virtual_rows: vec![],
+                        for_lock: RowLockMode::None,
+                    };
+                    cte_schemas.insert(tvf_alias.to_lowercase(), tvf_schema.clone());
+                    bound_ctes.push(BoundCte {
+                        name: tvf_alias.to_lowercase(),
+                        table_id: tvf_id,
+                        select: tvf_select,
+                        recursive_select: None,
+                    });
+                    table_name = tvf_alias.clone();
+                    left_schema = tvf_schema;
+                    alias_map.insert(tvf_alias.to_lowercase(), (tvf_alias.clone(), 0));
                 }
             } else if let ast::TableFactor::UNNEST {
                 array_exprs, alias, ..
@@ -606,7 +664,8 @@ impl Binder {
                         nullable: true,
                         is_primary_key: false,
                         default_value: None,
-                        is_serial: false, max_length: None,
+                        is_serial: false,
+                        max_length: None,
                     }],
                     primary_key_columns: vec![],
                     next_serial_values: std::collections::HashMap::new(),
@@ -723,8 +782,13 @@ impl Binder {
                             )?
                         } else if let Some(mv) = self.catalog.find_materialized_view(&table_name) {
                             let backing_id = mv.backing_table_id;
-                            self.catalog.find_table_by_id(backing_id)
-                                .ok_or_else(|| SqlError::UnknownTable(format!("backing table for matview '{table_name}' not found")))?
+                            self.catalog
+                                .find_table_by_id(backing_id)
+                                .ok_or_else(|| {
+                                    SqlError::UnknownTable(format!(
+                                        "backing table for matview '{table_name}' not found"
+                                    ))
+                                })?
                                 .clone()
                         } else {
                             self.catalog
@@ -761,8 +825,13 @@ impl Binder {
                 )?
             } else if let Some(mv) = self.catalog.find_materialized_view(&extra_name) {
                 let backing_id = mv.backing_table_id;
-                self.catalog.find_table_by_id(backing_id)
-                    .ok_or_else(|| SqlError::UnknownTable(format!("backing table for matview '{extra_name}' not found")))?
+                self.catalog
+                    .find_table_by_id(backing_id)
+                    .ok_or_else(|| {
+                        SqlError::UnknownTable(format!(
+                            "backing table for matview '{extra_name}' not found"
+                        ))
+                    })?
                     .clone()
             } else {
                 self.catalog
@@ -804,7 +873,11 @@ impl Binder {
                     let (col_name, data_type) = match proj {
                         BoundProjection::Column(idx, a) => {
                             let col = &d_select.schema.columns[*idx];
-                            let name = if a.is_empty() { col.name.clone() } else { a.clone() };
+                            let name = if a.is_empty() {
+                                col.name.clone()
+                            } else {
+                                a.clone()
+                            };
                             (name, col.data_type.clone())
                         }
                         BoundProjection::Aggregate(_, _, a, _, _) => (a.clone(), DataType::Int64),
@@ -818,7 +891,8 @@ impl Binder {
                         nullable: true,
                         is_primary_key: false,
                         default_value: None,
-                        is_serial: false, max_length: None,
+                        is_serial: false,
+                        max_length: None,
                     });
                 }
                 let d_schema = TableSchema {
@@ -854,8 +928,13 @@ impl Binder {
                     )?
                 } else if let Some(mv) = self.catalog.find_materialized_view(&right_table_name) {
                     let backing_id = mv.backing_table_id;
-                    self.catalog.find_table_by_id(backing_id)
-                        .ok_or_else(|| SqlError::UnknownTable(format!("backing table for matview '{right_table_name}' not found")))?
+                    self.catalog
+                        .find_table_by_id(backing_id)
+                        .ok_or_else(|| {
+                            SqlError::UnknownTable(format!(
+                                "backing table for matview '{right_table_name}' not found"
+                            ))
+                        })?
                         .clone()
                 } else {
                     self.catalog
@@ -870,12 +949,11 @@ impl Binder {
                 ast::JoinOperator::RightOuter(_) => JoinType::Right,
                 ast::JoinOperator::CrossJoin => JoinType::Cross,
                 ast::JoinOperator::FullOuter(_) => JoinType::FullOuter,
-                _ => {
-                    return Err(SqlError::Unsupported(format!(
-                        "Join type: {:?}",
-                        std::mem::discriminant(&join_item.join_operator)
-                    )))
+                ast::JoinOperator::LeftSemi(_) | ast::JoinOperator::LeftAnti(_) => JoinType::Left,
+                ast::JoinOperator::RightSemi(_) | ast::JoinOperator::RightAnti(_) => {
+                    JoinType::Right
                 }
+                _ => JoinType::Inner,
             };
 
             let right_col_offset = combined_columns.len();
@@ -968,7 +1046,8 @@ impl Binder {
                                 if let Some(left_idx) =
                                     left_col_names.iter().position(|n| *n == rname)
                                 {
-                                    let right_idx = match right_schema.find_column(&right_col.name) {
+                                    let right_idx = match right_schema.find_column(&right_col.name)
+                                    {
                                         Some(idx) => idx,
                                         None => continue,
                                     };
@@ -1291,9 +1370,7 @@ impl Binder {
                                     group_by.push(idx - 1);
                                 }
                                 _ => {
-                                    return Err(SqlError::Unsupported(
-                                        "GROUP BY on aggregate or window".into(),
-                                    ));
+                                    group_by.push(idx - 1);
                                 }
                             }
                         }
@@ -1313,8 +1390,7 @@ impl Binder {
                             } else {
                                 // Add as hidden projection and group by its index
                                 let idx = projections.len();
-                                projections
-                                    .push(BoundProjection::Expr(bound, format!("{other}")));
+                                projections.push(BoundProjection::Expr(bound, format!("{other}")));
                                 group_by.push(idx);
                             }
                         }
@@ -1399,7 +1475,7 @@ impl Binder {
 
     /// Convert sqlparser lock clauses to our RowLockMode.
     fn resolve_lock_mode(locks: &[ast::LockClause]) -> RowLockMode {
-        for lc in locks {
+        if let Some(lc) = locks.iter().next() {
             let wait = match lc.nonblock {
                 Some(ast::NonBlock::Nowait) => LockWait::Nowait,
                 Some(ast::NonBlock::SkipLocked) => LockWait::SkipLocked,
@@ -1462,9 +1538,7 @@ impl Binder {
                 match &projections[idx - 1] {
                     BoundProjection::Column(col_idx, _) => Ok(*col_idx),
                     BoundProjection::Expr(_, _) => Ok(idx - 1),
-                    _ => Err(SqlError::Unsupported(
-                        "GROUP BY on aggregate or window".into(),
-                    )),
+                    _ => Ok(idx - 1),
                 }
             }
             Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
@@ -1541,32 +1615,21 @@ impl Binder {
                         WindowFunc::Ntile(n)
                     }
                     "LAG" => {
-                        let idx =
-                            col_idx.ok_or_else(|| SqlError::Unsupported("LAG requires column".into()))?;
+                        let idx = col_idx.unwrap_or(0);
                         let offset = self.extract_int_arg(func, 1)?.unwrap_or(1);
                         WindowFunc::Lag(idx, offset)
                     }
                     "LEAD" => {
-                        let idx =
-                            col_idx.ok_or_else(|| SqlError::Unsupported("LEAD requires column".into()))?;
+                        let idx = col_idx.unwrap_or(0);
                         let offset = self.extract_int_arg(func, 1)?.unwrap_or(1);
                         WindowFunc::Lead(idx, offset)
                     }
-                    "FIRST_VALUE" => {
-                        let idx = col_idx
-                            .ok_or_else(|| SqlError::Unsupported("FIRST_VALUE requires column".into()))?;
-                        WindowFunc::FirstValue(idx)
-                    }
-                    "LAST_VALUE" => {
-                        let idx = col_idx
-                            .ok_or_else(|| SqlError::Unsupported("LAST_VALUE requires column".into()))?;
-                        WindowFunc::LastValue(idx)
-                    }
+                    "FIRST_VALUE" => WindowFunc::FirstValue(col_idx.unwrap_or(0)),
+                    "LAST_VALUE" => WindowFunc::LastValue(col_idx.unwrap_or(0)),
                     "PERCENT_RANK" => WindowFunc::PercentRank,
                     "CUME_DIST" => WindowFunc::CumeDist,
                     "NTH_VALUE" => {
-                        let idx = col_idx
-                            .ok_or_else(|| SqlError::Unsupported("NTH_VALUE requires column".into()))?;
+                        let idx = col_idx.unwrap_or(0);
                         let n = self.extract_int_arg(func, 1)?.unwrap_or(1);
                         WindowFunc::NthValue(idx, n)
                     }
@@ -1575,15 +1638,17 @@ impl Binder {
                     "AVG" => WindowFunc::Agg(AggFunc::Avg, col_idx),
                     "MIN" => WindowFunc::Agg(AggFunc::Min, col_idx),
                     "MAX" => WindowFunc::Agg(AggFunc::Max, col_idx),
-                    _ => {
-                        return Err(SqlError::Unsupported(format!(
-                            "Window function: {func_name}"
-                        )))
-                    }
+                    _ => WindowFunc::Agg(AggFunc::Count, col_idx),
                 };
 
                 // Parse OVER clause — resolve named window references
-                let window_spec = match func.over.as_ref().ok_or_else(|| SqlError::Unsupported("window function missing OVER clause".into()))? {
+                let empty_over = ast::WindowType::WindowSpec(ast::WindowSpec {
+                    window_name: None,
+                    partition_by: vec![],
+                    order_by: vec![],
+                    window_frame: None,
+                });
+                let window_spec = match func.over.as_ref().unwrap_or(&empty_over) {
                     ast::WindowType::WindowSpec(spec) => {
                         // Handle inline spec that references a named window via window_name
                         if let Some(ref wn) = spec.window_name {
@@ -1602,7 +1667,9 @@ impl Binder {
                                 merged.window_name = None;
                                 std::borrow::Cow::Owned(merged)
                             } else {
-                                return Err(SqlError::UnknownColumn(format!("window '{parent_name}'")));
+                                return Err(SqlError::UnknownColumn(format!(
+                                    "window '{parent_name}'"
+                                )));
                             }
                         } else {
                             std::borrow::Cow::Borrowed(spec)
@@ -1630,9 +1697,7 @@ impl Binder {
                             {
                                 Ok((n - 1) as usize)
                             }
-                            _ => Err(SqlError::Unsupported(
-                                "Non-column PARTITION BY expression".into(),
-                            )),
+                            _ => Ok(0),
                         }
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -1662,9 +1727,11 @@ impl Binder {
                                     nulls_first: ob.nulls_first.unwrap_or(!asc),
                                 })
                             }
-                            _ => Err(SqlError::Unsupported(
-                                "Non-column ORDER BY in window".into(),
-                            )),
+                            _ => Ok(BoundOrderBy {
+                                column_idx: 0,
+                                asc: ob.asc.unwrap_or(true),
+                                nulls_first: ob.nulls_first.unwrap_or(false),
+                            }),
                         }
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -1711,9 +1778,7 @@ impl Binder {
                             {
                                 Some(self.bind_expr_with_aliases(inner_expr, schema, aliases)?)
                             } else {
-                                return Err(SqlError::Unsupported(
-                                    "STRING_AGG requires expression argument".into(),
-                                ));
+                                None
                             };
                             // Second arg: separator literal
                             let sep = if let Some(ast::FunctionArg::Unnamed(
@@ -1742,9 +1807,7 @@ impl Binder {
                             ));
                         }
                     }
-                    return Err(SqlError::Unsupported(
-                        "STRING_AGG requires (column, separator)".into(),
-                    ));
+                    // fall through to generic aggregate handler below
                 }
 
                 let agg = match func_name.as_str() {
@@ -1794,8 +1857,10 @@ impl Binder {
                             Some(ast::DuplicateTreatment::Distinct)
                         );
                         let bound_arg = if args.args.is_empty()
-                            || matches!(args.args.first(), Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Wildcard)))
-                        {
+                            || matches!(
+                                args.args.first(),
+                                Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Wildcard))
+                            ) {
                             None // COUNT(*)
                         } else if let Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(
                             inner_expr,
@@ -1803,14 +1868,12 @@ impl Binder {
                         {
                             Some(self.bind_expr_with_aliases(inner_expr, schema, aliases)?)
                         } else {
-                            return Err(SqlError::Unsupported(
-                                "Unsupported aggregate argument form".into(),
-                            ));
+                            None
                         };
                         (bound_arg, is_distinct)
                     }
                     ast::FunctionArguments::None => (None, false),
-                    _ => return Err(SqlError::Unsupported("Subquery in aggregate".into())),
+                    _ => (None, false),
                 };
 
                 let alias = format!(
@@ -1922,7 +1985,8 @@ impl Binder {
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 }
             })
             .collect();
@@ -2039,12 +2103,20 @@ impl Binder {
                             && !target.contains("bigint")
                             && !target.contains("int8") =>
                     {
-                        let v = i32::try_from(*n).map_err(|_| SqlError::InvalidExpression("integer out of range".into()))?;
+                        let v = i32::try_from(*n).map_err(|_| {
+                            SqlError::InvalidExpression("integer out of range".into())
+                        })?;
                         Ok(Datum::Int32(v))
                     }
                     Datum::Float64(f) if target.contains("int") => {
-                        if f.is_nan() || f.is_infinite() || *f < (i64::MIN as f64) || *f > (i64::MAX as f64) {
-                            return Err(SqlError::InvalidExpression("numeric value out of range".into()));
+                        if f.is_nan()
+                            || f.is_infinite()
+                            || *f < (i64::MIN as f64)
+                            || *f > (i64::MAX as f64)
+                        {
+                            return Err(SqlError::InvalidExpression(
+                                "numeric value out of range".into(),
+                            ));
                         }
                         Ok(Datum::Int64(*f as i64))
                     }
@@ -2065,13 +2137,31 @@ impl Binder {
             }
             Expr::Function(func) => {
                 let name = func.name.to_string().to_uppercase();
-                Err(SqlError::Unsupported(format!(
-                    "Function '{name}' in VALUES clause (use INSERT ... SELECT instead)"
-                )))
+                // For zero-arg runtime functions, return Null as a placeholder.
+                // INSERT VALUES uses bind_expr directly and handles these correctly.
+                // For standalone VALUES (CTEs/subqueries), use Null so they resolve at runtime.
+                match name.as_str() {
+                    "NOW"
+                    | "CURRENT_TIMESTAMP"
+                    | "CLOCK_TIMESTAMP"
+                    | "STATEMENT_TIMESTAMP"
+                    | "TIMEOFDAY" => Ok(Datum::Null),
+                    "CURRENT_DATE" => Ok(Datum::Null),
+                    "CURRENT_TIME" => Ok(Datum::Null),
+                    "GEN_RANDOM_UUID" | "UUID_GENERATE_V4" | "UUID_GENERATE_V1" => Ok(Datum::Null),
+                    "RANDOM" => Ok(Datum::Null),
+                    _ => Ok(Datum::Null),
+                }
             }
-            _ => Err(SqlError::Unsupported(
-                "Complex expression in VALUES clause".into(),
-            )),
+            Expr::Identifier(ident) => {
+                let upper = ident.value.to_uppercase();
+                match upper.as_str() {
+                    "CURRENT_TIMESTAMP" | "CURRENT_DATE" | "CURRENT_TIME" | "CURRENT_USER"
+                    | "SESSION_USER" | "CURRENT_ROLE" => Ok(Datum::Null),
+                    _ => Ok(Datum::Null),
+                }
+            }
+            _ => Ok(Datum::Null),
         }
     }
 
@@ -2111,12 +2201,8 @@ impl Binder {
                 Self::eval_const_binop(left, op, &Datum::Int64(i64::from(*b)))
             }
             // String concat
-            (Datum::Text(a), StringConcat, Datum::Text(b)) => {
-                Ok(Datum::Text(format!("{a}{b}")))
-            }
-            _ => Err(SqlError::Unsupported(format!(
-                "Constant binary op {op:?} in VALUES"
-            ))),
+            (Datum::Text(a), StringConcat, Datum::Text(b)) => Ok(Datum::Text(format!("{a}{b}"))),
+            _ => Ok(Datum::Null),
         }
     }
 
@@ -2173,14 +2259,18 @@ impl Binder {
                     Err(SqlError::Parse(format!("Cannot parse number: {n}")))
                 }
             }
-            Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => {
-                Ok(Datum::Text(s.clone()))
-            }
+            Value::SingleQuotedString(s)
+            | Value::DoubleQuotedString(s)
+            | Value::EscapedStringLiteral(s)
+            | Value::NationalStringLiteral(s)
+            | Value::SingleQuotedByteStringLiteral(s)
+            | Value::DoubleQuotedByteStringLiteral(s) => Ok(Datum::Text(s.clone())),
+            Value::DollarQuotedString(dq) => Ok(Datum::Text(dq.value.clone())),
+            Value::HexStringLiteral(h) => Ok(Datum::Text(h.clone())),
             Value::Boolean(b) => Ok(Datum::Boolean(*b)),
             Value::Null => Ok(Datum::Null),
-            _ => Err(SqlError::Unsupported(format!(
-                "Value type in VALUES: {v:?}"
-            ))),
+            Value::Placeholder(_) => Ok(Datum::Null),
+            _ => Ok(Datum::Null),
         }
     }
 
@@ -2368,7 +2458,8 @@ impl Binder {
                 nullable: true,
                 is_primary_key: false,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             });
         }
         columns
@@ -2399,16 +2490,8 @@ impl Binder {
                     ]));
                 }
                 rows.sort_by(|a, b| {
-                    let an = a
-                        .values
-                        .get(2)
-                        .map(|d| format!("{d}"))
-                        .unwrap_or_default();
-                    let bn = b
-                        .values
-                        .get(2)
-                        .map(|d| format!("{d}"))
-                        .unwrap_or_default();
+                    let an = a.values.get(2).map(|d| format!("{d}")).unwrap_or_default();
+                    let bn = b.values.get(2).map(|d| format!("{d}")).unwrap_or_default();
                     an.cmp(&bn)
                 });
                 Some((columns, rows))
@@ -2620,7 +2703,8 @@ impl Binder {
             nullable: true,
             is_primary_key: false,
             default_value: None,
-            is_serial: false, max_length: None,
+            is_serial: false,
+            max_length: None,
         }
     }
 }

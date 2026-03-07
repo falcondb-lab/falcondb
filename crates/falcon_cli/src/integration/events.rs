@@ -64,7 +64,8 @@ async fn events_list(client: &DbClient, mode: OutputMode) -> Result<String> {
 
         if fb_rows.is_empty() {
             return Ok(
-                "No events found. (falcon.events view not present or no events recorded)\n".to_owned(),
+                "No events found. (falcon.events view not present or no events recorded)\n"
+                    .to_owned(),
             );
         }
         return Ok(format_rows_as_string(&fb_rows, mode, "Events"));

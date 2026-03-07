@@ -67,7 +67,10 @@ impl Executor {
         }
 
         // Encode composite PK in column order
-        let datum_refs: Vec<&Datum> = pk_datums.into_iter().map(|d| d.expect("BUG: None pk_datum after is_none guard")).collect();
+        let datum_refs: Vec<&Datum> = pk_datums
+            .into_iter()
+            .map(|d| d.expect("BUG: None pk_datum after is_none guard"))
+            .collect();
         let pk = encode_pk_from_datums(&datum_refs);
 
         // Build residual filter from unmatched conjuncts
@@ -85,7 +88,11 @@ impl Executor {
     /// Flatten a tree of AND expressions into a flat list of conjuncts.
     fn flatten_and<'a>(expr: &'a BoundExpr, out: &mut Vec<&'a BoundExpr>) {
         match expr {
-            BoundExpr::BinaryOp { left, op: BinOp::And, right } => {
+            BoundExpr::BinaryOp {
+                left,
+                op: BinOp::And,
+                right,
+            } => {
                 Self::flatten_and(left, out);
                 Self::flatten_and(right, out);
             }
@@ -95,7 +102,12 @@ impl Executor {
 
     /// Try to extract `col_idx = literal` from a simple equality expression.
     fn try_extract_eq_literal(expr: &BoundExpr) -> Option<(usize, &Datum)> {
-        if let BoundExpr::BinaryOp { left, op: BinOp::Eq, right } = expr {
+        if let BoundExpr::BinaryOp {
+            left,
+            op: BinOp::Eq,
+            right,
+        } = expr
+        {
             match (left.as_ref(), right.as_ref()) {
                 (BoundExpr::ColumnRef(idx), BoundExpr::Literal(d))
                 | (BoundExpr::Literal(d), BoundExpr::ColumnRef(idx)) => Some((*idx, d)),
@@ -220,6 +232,7 @@ impl Executor {
     ///
     /// Returns `(column_idx, lower_bound, upper_bound, remaining_filter)`.
     /// Each bound is `Option<(encoded_key, inclusive)>`.
+    #[allow(clippy::type_complexity)]
     pub(crate) fn try_index_range_scan_predicate(
         &self,
         filter: Option<&BoundExpr>,
@@ -228,7 +241,7 @@ impl Executor {
         usize,
         Option<(Vec<u8>, bool)>,
         Option<(Vec<u8>, bool)>,
-        Option<BoundExpr>,
+        Option<BoundExpr>, // suppress type_complexity: complex range predicate result
     )> {
         let f = filter?;
         let indexed_cols = self.storage.get_indexed_columns(table_id);
@@ -357,8 +370,8 @@ impl Executor {
         // Build aggregate specs. For AVG, decompose into SUM + COUNT.
         // Track: (SimpleAggOp, Option<col_idx>) and how to map back to projections.
         struct AggMapping {
-            sum_idx: Option<usize>,   // index in specs for SUM (used by AVG)
-            count_idx: Option<usize>, // index in specs for COUNT (used by AVG)
+            sum_idx: Option<usize>,    // index in specs for SUM (used by AVG)
+            count_idx: Option<usize>,  // index in specs for COUNT (used by AVG)
             direct_idx: Option<usize>, // index in specs for direct agg
             is_avg: bool,
         }
@@ -381,18 +394,28 @@ impl Executor {
                         AggFunc::Count => {
                             let idx = specs.len();
                             specs.push((
-                                if col_idx.is_none() { SimpleAggOp::CountStar } else { SimpleAggOp::Count },
+                                if col_idx.is_none() {
+                                    SimpleAggOp::CountStar
+                                } else {
+                                    SimpleAggOp::Count
+                                },
                                 col_idx,
                             ));
                             mappings.push(AggMapping {
-                                sum_idx: None, count_idx: None, direct_idx: Some(idx), is_avg: false,
+                                sum_idx: None,
+                                count_idx: None,
+                                direct_idx: Some(idx),
+                                is_avg: false,
                             });
                         }
                         AggFunc::Sum => {
                             let idx = specs.len();
                             specs.push((SimpleAggOp::Sum, col_idx));
                             mappings.push(AggMapping {
-                                sum_idx: None, count_idx: None, direct_idx: Some(idx), is_avg: false,
+                                sum_idx: None,
+                                count_idx: None,
+                                direct_idx: Some(idx),
+                                is_avg: false,
                             });
                         }
                         AggFunc::Avg => {
@@ -401,21 +424,30 @@ impl Executor {
                             let ci = specs.len();
                             specs.push((SimpleAggOp::Count, col_idx));
                             mappings.push(AggMapping {
-                                sum_idx: Some(si), count_idx: Some(ci), direct_idx: None, is_avg: true,
+                                sum_idx: Some(si),
+                                count_idx: Some(ci),
+                                direct_idx: None,
+                                is_avg: true,
                             });
                         }
                         AggFunc::Min => {
                             let idx = specs.len();
                             specs.push((SimpleAggOp::Min, col_idx));
                             mappings.push(AggMapping {
-                                sum_idx: None, count_idx: None, direct_idx: Some(idx), is_avg: false,
+                                sum_idx: None,
+                                count_idx: None,
+                                direct_idx: Some(idx),
+                                is_avg: false,
                             });
                         }
                         AggFunc::Max => {
                             let idx = specs.len();
                             specs.push((SimpleAggOp::Max, col_idx));
                             mappings.push(AggMapping {
-                                sum_idx: None, count_idx: None, direct_idx: Some(idx), is_avg: false,
+                                sum_idx: None,
+                                count_idx: None,
+                                direct_idx: Some(idx),
+                                is_avg: false,
                             });
                         }
                         _ => return None, // unsupported aggregate
@@ -445,9 +477,7 @@ impl Executor {
                     _ => values.push(Datum::Null),
                 }
             } else {
-                let Some(di) = m.direct_idx else {
-                    return None;
-                };
+                let di = m.direct_idx?;
                 values.push(raw_results[di].clone());
             }
         }
@@ -583,7 +613,11 @@ impl Executor {
         });
 
         // Early-limit capacity hint: if no ORDER BY/DISTINCT/window, we know the max output size.
-        let capacity_hint = match (order_by.is_empty() && matches!(distinct, DistinctMode::None) && !has_window, limit, offset) {
+        let capacity_hint = match (
+            order_by.is_empty() && matches!(distinct, DistinctMode::None) && !has_window,
+            limit,
+            offset,
+        ) {
             (true, Some(lim), Some(off)) => lim.saturating_add(off),
             (true, Some(lim), None) => lim,
             _ => raw_rows.len(),
@@ -595,11 +629,12 @@ impl Executor {
         let mut result_rows: Vec<OwnedRow> = Vec::with_capacity(capacity_hint.min(raw_rows.len()));
 
         // Effective row limit for early cutoff (only when no sort/distinct/window).
-        let early_limit = if order_by.is_empty() && matches!(distinct, DistinctMode::None) && !has_window {
-            limit.map(|l| l.saturating_add(offset.unwrap_or(0)))
-        } else {
-            None
-        };
+        let early_limit =
+            if order_by.is_empty() && matches!(distinct, DistinctMode::None) && !has_window {
+                limit.map(|l| l.saturating_add(offset.unwrap_or(0)))
+            } else {
+                None
+            };
 
         for (_pk, row) in &raw_rows {
             // Early cutoff: stop scanning once we have enough rows.
@@ -712,23 +747,36 @@ impl Executor {
         let read_ts = txn.read_ts(self.txn_mgr.current_ts());
         let lo_ref = lo.as_ref().map(|(k, inc)| (k.as_slice(), *inc));
         let hi_ref = hi.as_ref().map(|(k, inc)| (k.as_slice(), *inc));
-        let raw_rows = self.storage.index_range_scan(
-            table_id, index_col, lo_ref, hi_ref, txn.txn_id, read_ts,
-        )?;
+        let raw_rows = self
+            .storage
+            .index_range_scan(table_id, index_col, lo_ref, hi_ref, txn.txn_id, read_ts)?;
 
         // Same pipeline as exec_index_scan
         let mat_filter = self.materialize_filter(filter, txn)?;
         let mat_having = self.materialize_filter(having, txn)?;
         let filter_has_correlated_sub = mat_filter.as_ref().is_some_and(Self::expr_has_outer_ref);
 
-        let has_window = projections.iter().any(|p| matches!(p, BoundProjection::Window(..)));
-        let has_agg = projections.iter().any(|p| matches!(p, BoundProjection::Aggregate(..)));
+        let has_window = projections
+            .iter()
+            .any(|p| matches!(p, BoundProjection::Window(..)));
+        let has_agg = projections
+            .iter()
+            .any(|p| matches!(p, BoundProjection::Aggregate(..)));
 
         if (has_agg || !group_by.is_empty() || !grouping_sets.is_empty()) && !has_window {
             return self.exec_aggregate(
-                &raw_rows, schema, projections, mat_filter.as_ref(),
-                group_by, grouping_sets, mat_having.as_ref(),
-                order_by, limit, offset, distinct, txn,
+                &raw_rows,
+                schema,
+                projections,
+                mat_filter.as_ref(),
+                group_by,
+                grouping_sets,
+                mat_having.as_ref(),
+                order_by,
+                limit,
+                offset,
+                distinct,
+                txn,
             );
         }
 
@@ -739,7 +787,8 @@ impl Executor {
 
         let capacity_hint = match (
             order_by.is_empty() && matches!(distinct, DistinctMode::None) && !has_window,
-            limit, offset,
+            limit,
+            offset,
         ) {
             (true, Some(lim), Some(off)) => lim.saturating_add(off),
             (true, Some(lim), None) => lim,
@@ -750,25 +799,36 @@ impl Executor {
         let mut filtered: Vec<&OwnedRow> = Vec::new();
         let mut result_rows: Vec<OwnedRow> = Vec::with_capacity(capacity_hint.min(raw_rows.len()));
 
-        let early_limit = if order_by.is_empty() && matches!(distinct, DistinctMode::None) && !has_window {
-            limit.map(|l| l.saturating_add(offset.unwrap_or(0)))
-        } else {
-            None
-        };
+        let early_limit =
+            if order_by.is_empty() && matches!(distinct, DistinctMode::None) && !has_window {
+                limit.map(|l| l.saturating_add(offset.unwrap_or(0)))
+            } else {
+                None
+            };
 
         for (_pk, row) in &raw_rows {
             if let Some(max) = early_limit {
-                if result_rows.len() >= max { break; }
+                if result_rows.len() >= max {
+                    break;
+                }
             }
             if let Some(ref f) = mat_filter {
                 if filter_has_correlated_sub {
                     let row_filter = self.materialize_correlated(f, row, txn)?;
                     if !crate::expr_engine::ExprEngine::eval_filter(&row_filter, row)
-                        .map_err(FalconError::Execution)? { continue; }
+                        .map_err(FalconError::Execution)?
+                    {
+                        continue;
+                    }
                 } else if !crate::expr_engine::ExprEngine::eval_filter(f, row)
-                    .map_err(FalconError::Execution)? { continue; }
+                    .map_err(FalconError::Execution)?
+                {
+                    continue;
+                }
             }
-            if has_window { filtered.push(row); }
+            if has_window {
+                filtered.push(row);
+            }
             if projs_have_correlated {
                 result_rows.push(self.project_row_correlated(row, projections, txn)?);
             } else {
@@ -783,16 +843,27 @@ impl Executor {
         self.apply_distinct(distinct, &mut result_rows);
 
         if let Some(off) = offset {
-            if off < result_rows.len() { result_rows.drain(..off); } else { result_rows.clear(); }
+            if off < result_rows.len() {
+                result_rows.drain(..off);
+            } else {
+                result_rows.clear();
+            }
         }
-        if let Some(lim) = limit { result_rows.truncate(lim); }
+        if let Some(lim) = limit {
+            result_rows.truncate(lim);
+        }
 
         if visible_projection_count < projections.len() {
-            for row in &mut result_rows { row.values.truncate(visible_projection_count); }
+            for row in &mut result_rows {
+                row.values.truncate(visible_projection_count);
+            }
             columns.truncate(visible_projection_count);
         }
 
-        Ok(ExecutionResult::Query { columns, rows: result_rows })
+        Ok(ExecutionResult::Query {
+            columns,
+            rows: result_rows,
+        })
     }
 
     pub(crate) fn exec_seq_scan(
@@ -860,9 +931,7 @@ impl Executor {
             // ── Streaming aggregate fast path ──
             // For mixed simple aggregates (COUNT/SUM/AVG/MIN/MAX) on column refs,
             // compute in a single pass without materializing any rows.
-            if let Some(result) = self.try_streaming_aggs(
-                projections, schema, table_id, txn,
-            ) {
+            if let Some(result) = self.try_streaming_aggs(projections, schema, table_id, txn) {
                 return Ok(result);
             }
         }
@@ -882,8 +951,16 @@ impl Executor {
             && Self::is_fused_eligible(projections, grouping_sets, having)
         {
             return self.exec_fused_aggregate(
-                table_id, schema, projections, filter, group_by,
-                order_by, limit, offset, distinct, txn,
+                table_id,
+                schema,
+                projections,
+                filter,
+                group_by,
+                order_by,
+                limit,
+                offset,
+                distinct,
+                txn,
             );
         }
 
@@ -892,12 +969,18 @@ impl Executor {
             if !virtual_rows.is_empty() {
                 // VALUES clause or GENERATE_SERIES — use inline data directly
                 (
-                    virtual_rows.iter().map(|r| (Vec::new(), r.clone())).collect(),
+                    virtual_rows
+                        .iter()
+                        .map(|r| (Vec::new(), r.clone()))
+                        .collect(),
                     filter.cloned(),
                 )
             } else if table_id == TableId(0) {
                 // Virtual dual table — single empty row for SELECT without FROM
-                (vec![(Vec::new(), OwnedRow::new(Vec::new()))], filter.cloned())
+                (
+                    vec![(Vec::new(), OwnedRow::new(Vec::new()))],
+                    filter.cloned(),
+                )
             } else if let Some(cte_rows) = cte_data.get(&table_id) {
                 (
                     cte_rows.iter().map(|r| (Vec::new(), r.clone())).collect(),
@@ -926,19 +1009,29 @@ impl Executor {
                 let read_ts = txn.read_ts(self.txn_mgr.current_ts());
                 let lo_ref = lo.as_ref().map(|(k, inc)| (k.as_slice(), *inc));
                 let hi_ref = hi.as_ref().map(|(k, inc)| (k.as_slice(), *inc));
-                let rows = self.storage.index_range_scan(
-                    table_id, col_idx, lo_ref, hi_ref, txn.txn_id, read_ts,
-                )?;
+                let rows = self
+                    .storage
+                    .index_range_scan(table_id, col_idx, lo_ref, hi_ref, txn.txn_id, read_ts)?;
                 (rows, remaining)
             } else if let Some((k, ascending)) = self.try_pk_ordered_limit(
-                schema, filter, order_by, limit, offset, group_by, distinct,
-                &has_agg, &has_window, virtual_rows, table_id, cte_data,
+                schema,
+                filter,
+                order_by,
+                limit,
+                offset,
+                group_by,
+                distinct,
+                &has_agg,
+                &has_window,
+                virtual_rows,
+                table_id,
+                cte_data,
             ) {
                 // ORDER BY <pk> LIMIT K: only materialize K rows
                 let read_ts = txn.read_ts(self.txn_mgr.current_ts());
-                let rows = self.storage.scan_top_k_by_pk(
-                    table_id, txn.txn_id, read_ts, k, ascending,
-                )?;
+                let rows = self
+                    .storage
+                    .scan_top_k_by_pk(table_id, txn.txn_id, read_ts, k, ascending)?;
                 // Rows are already sorted and limited — clear order_by/limit
                 // to skip redundant sort+limit later. We do this via a wrapper
                 // that returns the rows and signals "already sorted".
@@ -981,16 +1074,21 @@ impl Executor {
                 // When ALL projections are COUNT(*) and there's no filter, skip full scan
                 // and just count visible rows via MVCC visibility checks (no row cloning).
                 let is_pure_count_star = mat_filter.is_none()
-                    && projections.iter().all(|p| matches!(
-                        p,
-                        BoundProjection::Aggregate(AggFunc::Count, None, _, false, None)
-                    ));
+                    && projections.iter().all(|p| {
+                        matches!(
+                            p,
+                            BoundProjection::Aggregate(AggFunc::Count, None, _, false, None)
+                        )
+                    });
                 if is_pure_count_star {
                     let read_ts = txn.read_ts(self.txn_mgr.current_ts());
                     if let Ok(count) = self.storage.count_visible(table_id, txn.txn_id, read_ts) {
                         let columns = self.resolve_output_columns(projections, schema);
                         let row = OwnedRow::new(
-                            projections.iter().map(|_| Datum::Int64(count as i64)).collect(),
+                            projections
+                                .iter()
+                                .map(|_| Datum::Int64(count as i64))
+                                .collect(),
                         );
                         return Ok(ExecutionResult::Query {
                             columns,
@@ -1024,11 +1122,13 @@ impl Executor {
                 && virtual_rows.is_empty()
                 && table_id != TableId(0)
                 && cte_data.get(&table_id).is_none()
-                && projections.iter().all(|p| matches!(
-                    p,
-                    BoundProjection::Aggregate(_, _, _, false, None)
-                    | BoundProjection::Column(..)
-                ));
+                && projections.iter().all(|p| {
+                    matches!(
+                        p,
+                        BoundProjection::Aggregate(_, _, _, false, None)
+                            | BoundProjection::Column(..)
+                    )
+                });
 
             if is_columnar_group_agg {
                 let read_ts = txn.read_ts(self.txn_mgr.current_ts());
@@ -1083,11 +1183,12 @@ impl Executor {
         };
 
         // Effective row limit for early cutoff (only when no sort/distinct/window).
-        let early_limit = if order_by.is_empty() && matches!(distinct, DistinctMode::None) && !has_window {
-            limit.map(|l| l.saturating_add(offset.unwrap_or(0)))
-        } else {
-            None
-        };
+        let early_limit =
+            if order_by.is_empty() && matches!(distinct, DistinctMode::None) && !has_window {
+                limit.map(|l| l.saturating_add(offset.unwrap_or(0)))
+            } else {
+                None
+            };
 
         // ── Single-pass filter + project ──
         // For the common non-window path we avoid materialising a separate `filtered` Vec:
@@ -1138,11 +1239,15 @@ impl Executor {
                 // Correlated subquery: must re-materialise per row (no parallel/vectorized)
                 for (_pk, row) in &raw_rows {
                     if let Some(max) = early_limit {
-                        if result_rows.len() >= max { break; }
+                        if result_rows.len() >= max {
+                            break;
+                        }
                     }
                     let row_filter = self.materialize_correlated(f, row, txn)?;
                     if ExprEngine::eval_filter(&row_filter, row).map_err(FalconError::Execution)? {
-                        if has_window { filtered.push(row); }
+                        if has_window {
+                            filtered.push(row);
+                        }
                         result_rows.push(do_project!(row));
                     }
                 }
@@ -1153,10 +1258,14 @@ impl Executor {
                 let matched = parallel_filter(&raw_rows, f, &self.parallel_config);
                 for idx in matched {
                     if let Some(max) = early_limit {
-                        if result_rows.len() >= max { break; }
+                        if result_rows.len() >= max {
+                            break;
+                        }
                     }
                     let row = &raw_rows[idx].1;
-                    if has_window { filtered.push(row); }
+                    if has_window {
+                        filtered.push(row);
+                    }
                     result_rows.push(do_project!(row));
                 }
             } else if raw_rows.len() >= 256 && is_vectorizable(projections, mat_filter.as_ref()) {
@@ -1166,20 +1275,28 @@ impl Executor {
                 vectorized_filter(&mut batch, f);
                 for &idx in &*batch.active_indices() {
                     if let Some(max) = early_limit {
-                        if result_rows.len() >= max { break; }
+                        if result_rows.len() >= max {
+                            break;
+                        }
                     }
                     let row = &raw_rows[idx].1;
-                    if has_window { filtered.push(row); }
+                    if has_window {
+                        filtered.push(row);
+                    }
                     result_rows.push(do_project!(row));
                 }
             } else {
                 // ── Row-at-a-time filter+project (small data, fused single pass) ──
                 for (_pk, row) in &raw_rows {
                     if let Some(max) = early_limit {
-                        if result_rows.len() >= max { break; }
+                        if result_rows.len() >= max {
+                            break;
+                        }
                     }
                     if ExprEngine::eval_filter(f, row).map_err(FalconError::Execution)? {
-                        if has_window { filtered.push(row); }
+                        if has_window {
+                            filtered.push(row);
+                        }
                         result_rows.push(do_project!(row));
                     }
                 }
@@ -1188,9 +1305,13 @@ impl Executor {
             // No filter — project all rows
             for (_pk, row) in &raw_rows {
                 if let Some(max) = early_limit {
-                    if result_rows.len() >= max { break; }
+                    if result_rows.len() >= max {
+                        break;
+                    }
                 }
-                if has_window { filtered.push(row); }
+                if has_window {
+                    filtered.push(row);
+                }
                 result_rows.push(do_project!(row));
             }
         }
@@ -1324,8 +1445,7 @@ impl Executor {
                         values.push(val);
                     }
                 }
-                BoundProjection::Aggregate(..)
-                | BoundProjection::Window(..) => {
+                BoundProjection::Aggregate(..) | BoundProjection::Window(..) => {
                     values.push(Datum::Null);
                 }
             }
@@ -1418,9 +1538,7 @@ impl Executor {
                     .map_err(FalconError::Storage)?;
                 Ok(Datum::Int64(val))
             }
-            BoundExpr::UserFunction { name, args } => {
-                self.eval_user_function(name, args, row)
-            }
+            BoundExpr::UserFunction { name, args } => self.eval_user_function(name, args, row),
             _ => ExprEngine::eval_row(expr, row).map_err(FalconError::Execution),
         }
     }

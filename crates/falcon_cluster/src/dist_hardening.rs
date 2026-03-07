@@ -265,8 +265,9 @@ pub struct SplitBrainDetector {
     /// Authoritative epoch for this shard.
     current_epoch: AtomicU64,
     metrics: Mutex<SplitBrainMetrics>,
-    /// History of detected split-brain events (bounded).
+    /// History of detected split-brain events (bounded ring buffer).
     history: Mutex<Vec<SplitBrainEvent>>,
+    history_cursor: AtomicU64,
     max_history: usize,
 }
 
@@ -285,6 +286,7 @@ impl SplitBrainDetector {
             current_epoch: AtomicU64::new(initial_epoch),
             metrics: Mutex::new(SplitBrainMetrics::default()),
             history: Mutex::new(Vec::new()),
+            history_cursor: AtomicU64::new(0),
             max_history: 100,
         }
     }
@@ -310,6 +312,10 @@ impl SplitBrainDetector {
             let mut hist = self.history.lock();
             if hist.len() < self.max_history {
                 hist.push(event);
+            } else {
+                let idx =
+                    self.history_cursor.fetch_add(1, Ordering::Relaxed) as usize % self.max_history;
+                hist[idx] = event;
             }
 
             tracing::error!(
@@ -711,15 +717,14 @@ impl HealthCheckHysteresis {
         self.metrics.lock().total_evaluations += 1;
 
         let old_status = node.status;
-        let new_status =
-            if node.consecutive_successes >= self.config.recovery_threshold {
-                DebouncedHealth::Healthy
-            } else if old_status == DebouncedHealth::Failed {
-                // Still failed until recovery threshold is met
-                DebouncedHealth::Suspect
-            } else {
-                old_status
-            };
+        let new_status = if node.consecutive_successes >= self.config.recovery_threshold {
+            DebouncedHealth::Healthy
+        } else if old_status == DebouncedHealth::Failed {
+            // Still failed until recovery threshold is met
+            DebouncedHealth::Suspect
+        } else {
+            old_status
+        };
 
         if new_status != old_status {
             node.status = new_status;
@@ -842,10 +847,7 @@ impl PromotionSafetyGuard {
         *self.current_step.lock() = PromotionStep::Idle;
         self.target_lsn.store(primary_lsn, Ordering::SeqCst);
         self.metrics.lock().promotions_attempted += 1;
-        tracing::info!(
-            target_lsn = primary_lsn,
-            "promotion safety guard: BEGIN"
-        );
+        tracing::info!(target_lsn = primary_lsn, "promotion safety guard: BEGIN");
     }
 
     /// Record that the old primary has been fenced.
@@ -1254,7 +1256,11 @@ mod tests {
         hyst.register_node(1);
 
         let status = hyst.record_miss(1);
-        assert_eq!(status, DebouncedHealth::Healthy, "single miss → still healthy");
+        assert_eq!(
+            status,
+            DebouncedHealth::Healthy,
+            "single miss → still healthy"
+        );
     }
 
     #[test]
@@ -1351,7 +1357,10 @@ mod tests {
         hyst.record_success(1);
 
         let m = hyst.metrics();
-        assert!(m.false_alarms_prevented > 0, "should count prevented false alarms");
+        assert!(
+            m.false_alarms_prevented > 0,
+            "should count prevented false alarms"
+        );
     }
 
     // ── §5: PromotionSafetyGuard ──

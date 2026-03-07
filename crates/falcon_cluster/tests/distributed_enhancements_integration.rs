@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use falcon_cluster::distributed_enhancements::*;
 use falcon_cluster::dist_hardening::{SplitBrainDetector, WriteEpochCheck};
+use falcon_cluster::distributed_enhancements::*;
 use falcon_common::types::{ShardId, TxnId};
 use falcon_storage::io::epoch_fence::{EpochFenceResult, StorageEpochFence};
 
@@ -110,7 +110,10 @@ fn test_p01_epoch_fence_plus_split_brain_detector() {
         detector.check_write(&check5),
         falcon_cluster::dist_hardening::SplitBrainVerdict::Rejected { .. }
     ));
-    assert!(matches!(fence.check_write(5), EpochFenceResult::Rejected { .. }));
+    assert!(matches!(
+        fence.check_write(5),
+        EpochFenceResult::Rejected { .. }
+    ));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -193,7 +196,11 @@ fn test_p02_promotion_commit_set_subset() {
 /// verify invariants hold.
 #[test]
 fn test_p02_crashpoint_matrix() {
-    let crash_points = ["after_primary_commit", "during_replication", "after_replica_ack"];
+    let crash_points = [
+        "after_primary_commit",
+        "during_replication",
+        "after_replica_ack",
+    ];
 
     for crash_point in &crash_points {
         let gate = ReplicationInvariantGate::new(CommitPolicy::Quorum);
@@ -343,11 +350,7 @@ fn test_p03_gameday_failover_drill() {
     assert!(report.failure_reason.is_none());
 
     // Verify audit trail completeness
-    let stages_seen: Vec<FailoverStage> = report
-        .audit_trail
-        .iter()
-        .map(|e| e.stage)
-        .collect();
+    let stages_seen: Vec<FailoverStage> = report.audit_trail.iter().map(|e| e.stage).collect();
     assert!(stages_seen.contains(&FailoverStage::DetectFailure));
     assert!(stages_seen.contains(&FailoverStage::FreezeWrites));
     assert!(stages_seen.contains(&FailoverStage::SealEpoch));
@@ -704,15 +707,11 @@ fn test_p13_cluster_status_escalation() {
     assert_eq!(degraded.health, ClusterHealthStatus::Degraded);
 
     // Degraded: in-doubt txns
-    let degraded2 = ClusterStatusBuilder::new()
-        .indoubt_count(5)
-        .build();
+    let degraded2 = ClusterStatusBuilder::new().indoubt_count(5).build();
     assert_eq!(degraded2.health, ClusterHealthStatus::Degraded);
 
     // Critical: split-brain events
-    let critical = ClusterStatusBuilder::new()
-        .split_brain_events(1)
-        .build();
+    let critical = ClusterStatusBuilder::new().split_brain_events(1).build();
     assert_eq!(critical.health, ClusterHealthStatus::Critical);
 
     // Critical: epoch fence rejections
@@ -777,7 +776,10 @@ fn test_e2e_full_distributed_lifecycle() {
     runbook.complete_stage(FailoverStage::SealEpoch);
 
     // Old leader (epoch 1) writes must be rejected
-    assert!(matches!(fence.check_write(1), EpochFenceResult::Rejected { .. }));
+    assert!(matches!(
+        fence.check_write(1),
+        EpochFenceResult::Rejected { .. }
+    ));
 
     runbook.enter_stage(FailoverStage::CatchUp);
     gate.update_replica_lsn(ShardId(1), 1, 50); // best replica catches up
@@ -819,7 +821,10 @@ fn test_e2e_full_distributed_lifecycle() {
     runbook.mark_complete();
 
     let report = runbook.generate_report(ShardId(1), 1, 2, 1, 2, invariants);
-    assert!(report.passed, "E2E lifecycle failover must pass all invariants");
+    assert!(
+        report.passed,
+        "E2E lifecycle failover must pass all invariants"
+    );
     assert_eq!(report.old_epoch, 1);
     assert_eq!(report.new_epoch, 2);
 

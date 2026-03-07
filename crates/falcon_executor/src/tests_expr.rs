@@ -184,7 +184,10 @@ mod case_when_tests {
             else_result: Some(Box::new(lit(Datum::Text("fallback".into())))),
         };
         let r = row(vec![]);
-        assert_eq!(eval_expr(&expr, &r).unwrap(), Datum::Text("fallback".into()));
+        assert_eq!(
+            eval_expr(&expr, &r).unwrap(),
+            Datum::Text("fallback".into())
+        );
     }
 
     // Result expression may itself be complex
@@ -235,21 +238,14 @@ mod coalesce_nullif_tests {
 
     #[test]
     fn coalesce_first_value_non_null() {
-        let expr = BoundExpr::Coalesce(vec![
-            lit(Datum::Int32(10)),
-            lit(Datum::Int32(99)),
-        ]);
+        let expr = BoundExpr::Coalesce(vec![lit(Datum::Int32(10)), lit(Datum::Int32(99))]);
         let r = row(vec![]);
         assert_eq!(eval_expr(&expr, &r).unwrap(), Datum::Int32(10));
     }
 
     #[test]
     fn coalesce_all_null_returns_null() {
-        let expr = BoundExpr::Coalesce(vec![
-            lit(Datum::Null),
-            lit(Datum::Null),
-            lit(Datum::Null),
-        ]);
+        let expr = BoundExpr::Coalesce(vec![lit(Datum::Null), lit(Datum::Null), lit(Datum::Null)]);
         let r = row(vec![]);
         assert!(matches!(eval_expr(&expr, &r).unwrap(), Datum::Null));
     }
@@ -425,10 +421,7 @@ mod scalar_func_tests {
     #[test]
     fn trim_leading_trailing() {
         let expr = func(ScalarFunc::Trim, vec![lit(Datum::Text("  hi  ".into()))]);
-        assert_eq!(
-            eval_expr(&expr, &row0()).unwrap(),
-            Datum::Text("hi".into())
-        );
+        assert_eq!(eval_expr(&expr, &row0()).unwrap(), Datum::Text("hi".into()));
     }
 
     #[test]
@@ -724,19 +717,35 @@ mod nested_expr_tests {
     }
 
     fn add(l: BoundExpr, r: BoundExpr) -> BoundExpr {
-        BoundExpr::BinaryOp { left: Box::new(l), op: BinOp::Plus, right: Box::new(r) }
+        BoundExpr::BinaryOp {
+            left: Box::new(l),
+            op: BinOp::Plus,
+            right: Box::new(r),
+        }
     }
 
     fn mul(l: BoundExpr, r: BoundExpr) -> BoundExpr {
-        BoundExpr::BinaryOp { left: Box::new(l), op: BinOp::Multiply, right: Box::new(r) }
+        BoundExpr::BinaryOp {
+            left: Box::new(l),
+            op: BinOp::Multiply,
+            right: Box::new(r),
+        }
     }
 
     fn gt(l: BoundExpr, r: BoundExpr) -> BoundExpr {
-        BoundExpr::BinaryOp { left: Box::new(l), op: BinOp::Gt, right: Box::new(r) }
+        BoundExpr::BinaryOp {
+            left: Box::new(l),
+            op: BinOp::Gt,
+            right: Box::new(r),
+        }
     }
 
     fn and(l: BoundExpr, r: BoundExpr) -> BoundExpr {
-        BoundExpr::BinaryOp { left: Box::new(l), op: BinOp::And, right: Box::new(r) }
+        BoundExpr::BinaryOp {
+            left: Box::new(l),
+            op: BinOp::And,
+            right: Box::new(r),
+        }
     }
 
     // (col0 + col1) * (col2 - 1) > 20
@@ -850,48 +859,75 @@ mod numeric_edge_tests {
 
     #[test]
     fn gte_equal() {
-        assert_eq!(binop(Datum::Int32(5), BinOp::GtEq, Datum::Int32(5)), Datum::Boolean(true));
+        assert_eq!(
+            binop(Datum::Int32(5), BinOp::GtEq, Datum::Int32(5)),
+            Datum::Boolean(true)
+        );
     }
 
     #[test]
     fn gte_greater() {
-        assert_eq!(binop(Datum::Int32(6), BinOp::GtEq, Datum::Int32(5)), Datum::Boolean(true));
+        assert_eq!(
+            binop(Datum::Int32(6), BinOp::GtEq, Datum::Int32(5)),
+            Datum::Boolean(true)
+        );
     }
 
     #[test]
     fn gte_less() {
-        assert_eq!(binop(Datum::Int32(4), BinOp::GtEq, Datum::Int32(5)), Datum::Boolean(false));
+        assert_eq!(
+            binop(Datum::Int32(4), BinOp::GtEq, Datum::Int32(5)),
+            Datum::Boolean(false)
+        );
     }
 
     #[test]
     fn negative_addition() {
-        assert_eq!(binop(Datum::Int32(-3), BinOp::Plus, Datum::Int32(-7)), Datum::Int64(-10));
+        assert_eq!(
+            binop(Datum::Int32(-3), BinOp::Plus, Datum::Int32(-7)),
+            Datum::Int64(-10)
+        );
     }
 
     #[test]
     fn negative_subtraction() {
-        assert_eq!(binop(Datum::Int32(-5), BinOp::Minus, Datum::Int32(3)), Datum::Int64(-8));
+        assert_eq!(
+            binop(Datum::Int32(-5), BinOp::Minus, Datum::Int32(3)),
+            Datum::Int64(-8)
+        );
     }
 
     #[test]
     fn negative_multiplication() {
-        assert_eq!(binop(Datum::Int32(-4), BinOp::Multiply, Datum::Int32(3)), Datum::Int64(-12));
+        assert_eq!(
+            binop(Datum::Int32(-4), BinOp::Multiply, Datum::Int32(3)),
+            Datum::Int64(-12)
+        );
     }
 
     #[test]
     fn negative_divide() {
-        assert_eq!(binop(Datum::Int32(-9), BinOp::Divide, Datum::Int32(3)), Datum::Int64(-3));
+        assert_eq!(
+            binop(Datum::Int32(-9), BinOp::Divide, Datum::Int32(3)),
+            Datum::Int64(-3)
+        );
     }
 
     #[test]
     fn int64_arithmetic() {
-        let r = row(vec![Datum::Int64(1_000_000_000_i64), Datum::Int64(2_000_000_000_i64)]);
+        let r = row(vec![
+            Datum::Int64(1_000_000_000_i64),
+            Datum::Int64(2_000_000_000_i64),
+        ]);
         let expr = BoundExpr::BinaryOp {
             left: Box::new(BoundExpr::ColumnRef(0)),
             op: BinOp::Plus,
             right: Box::new(BoundExpr::ColumnRef(1)),
         };
-        assert_eq!(eval_expr(&expr, &r).unwrap(), Datum::Int64(3_000_000_000_i64));
+        assert_eq!(
+            eval_expr(&expr, &r).unwrap(),
+            Datum::Int64(3_000_000_000_i64)
+        );
     }
 
     #[test]
@@ -927,9 +963,18 @@ mod numeric_edge_tests {
 
     #[test]
     fn zero_comparison_operators() {
-        assert_eq!(binop(Datum::Int32(0), BinOp::Eq, Datum::Int32(0)), Datum::Boolean(true));
-        assert_eq!(binop(Datum::Int32(0), BinOp::Lt, Datum::Int32(1)), Datum::Boolean(true));
-        assert_eq!(binop(Datum::Int32(0), BinOp::GtEq, Datum::Int32(0)), Datum::Boolean(true));
+        assert_eq!(
+            binop(Datum::Int32(0), BinOp::Eq, Datum::Int32(0)),
+            Datum::Boolean(true)
+        );
+        assert_eq!(
+            binop(Datum::Int32(0), BinOp::Lt, Datum::Int32(1)),
+            Datum::Boolean(true)
+        );
+        assert_eq!(
+            binop(Datum::Int32(0), BinOp::GtEq, Datum::Int32(0)),
+            Datum::Boolean(true)
+        );
     }
 
     #[test]

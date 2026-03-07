@@ -46,26 +46,38 @@ impl QueryHandler {
 
         // Extract table name (identifier chars)
         let tbl_end = rest.find(|c: char| !c.is_alphanumeric() && c != '_' && c != '"')?;
-        if tbl_end == 0 { return None; }
+        if tbl_end == 0 {
+            return None;
+        }
         let table_name = rest[..tbl_end].trim_matches('"');
         let rest = rest[tbl_end..].trim_start();
 
         // Extract column list: (col1, col2, ...)
-        if !rest.starts_with('(') { return None; }
+        if !rest.starts_with('(') {
+            return None;
+        }
         let col_end = rest.find(')')?;
-        let col_names: Vec<&str> = rest[1..col_end].split(',').map(|s| s.trim().trim_matches('"')).collect();
-        if col_names.is_empty() { return None; }
+        let col_names: Vec<&str> = rest[1..col_end]
+            .split(',')
+            .map(|s| s.trim().trim_matches('"'))
+            .collect();
+        if col_names.is_empty() {
+            return None;
+        }
         let rest = rest[col_end + 1..].trim_start();
 
         // Expect VALUES keyword
-        if rest.len() < 6 || !rest[..6].eq_ignore_ascii_case("VALUES") { return None; }
+        if rest.len() < 6 || !rest[..6].eq_ignore_ascii_case("VALUES") {
+            return None;
+        }
         // Reject RETURNING / ON CONFLICT DO UPDATE (fall back to standard path)
         // Allow ON CONFLICT DO NOTHING
         let mut on_conflict_do_nothing = false;
         {
             fn contains_ci(hay: &str, needle: &str) -> bool {
-                hay.as_bytes().windows(needle.len()).any(|w|
-                    w.eq_ignore_ascii_case(needle.as_bytes()))
+                hay.as_bytes()
+                    .windows(needle.len())
+                    .any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
             }
             if contains_ci(rest, "RETURNING") {
                 return None;
@@ -83,8 +95,9 @@ impl QueryHandler {
         let values_str = if on_conflict_do_nothing {
             let bytes = values_str.as_bytes();
             let needle = b"ON CONFLICT";
-            let idx = bytes.windows(needle.len()).position(|w|
-                w.eq_ignore_ascii_case(needle));
+            let idx = bytes
+                .windows(needle.len())
+                .position(|w| w.eq_ignore_ascii_case(needle));
             if let Some(i) = idx {
                 values_str[..i].trim_end()
             } else {
@@ -98,20 +111,36 @@ impl QueryHandler {
         let schema = {
             let cached = self.schema_cache.lock();
             if let Some((ref name, ref s)) = *cached {
-                if name == table_name { Some(s.clone()) } else { None }
-            } else { None }
-        }.or_else(|| {
+                if name == table_name {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        .or_else(|| {
             let s = self.storage.get_table_schema(table_name)?;
             *self.schema_cache.lock() = Some((table_name.to_owned(), s.clone()));
             Some(s)
         })?;
-        let col_indices: Vec<usize> = col_names.iter().map(|name| {
-            schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(name))
-        }).collect::<Option<Vec<_>>>()?;
+        let col_indices: Vec<usize> = col_names
+            .iter()
+            .map(|name| {
+                schema
+                    .columns
+                    .iter()
+                    .position(|c| c.name.eq_ignore_ascii_case(name))
+            })
+            .collect::<Option<Vec<_>>>()?;
 
         // Collect column DataTypes for value parsing
         use falcon_common::types::DataType;
-        let col_types: Vec<&DataType> = col_indices.iter().map(|&i| &schema.columns[i].data_type).collect();
+        let col_types: Vec<&DataType> = col_indices
+            .iter()
+            .map(|&i| &schema.columns[i].data_type)
+            .collect();
         let ncols = col_indices.len();
 
         // Parse VALUES tuples using byte-level scanner
@@ -125,18 +154,28 @@ impl QueryHandler {
             while pos < len && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r' | b',') {
                 pos += 1;
             }
-            if pos >= len || bytes[pos] == b';' { break; }
-            if bytes[pos] != b'(' { return None; }
+            if pos >= len || bytes[pos] == b';' {
+                break;
+            }
+            if bytes[pos] != b'(' {
+                return None;
+            }
             pos += 1;
 
             let mut vals = Vec::with_capacity(ncols);
             #[allow(clippy::needless_range_loop)]
             for vi in 0..ncols {
                 // Skip whitespace
-                while pos < len && bytes[pos] == b' ' { pos += 1; }
+                while pos < len && bytes[pos] == b' ' {
+                    pos += 1;
+                }
                 if vi > 0 {
-                    if pos < len && bytes[pos] == b',' { pos += 1; }
-                    while pos < len && bytes[pos] == b' ' { pos += 1; }
+                    if pos < len && bytes[pos] == b',' {
+                        pos += 1;
+                    }
+                    while pos < len && bytes[pos] == b' ' {
+                        pos += 1;
+                    }
                 }
 
                 // Parse one value
@@ -146,7 +185,9 @@ impl QueryHandler {
                     let mut s = String::new();
                     let mut start = pos;
                     loop {
-                        if pos >= len { return None; }
+                        if pos >= len {
+                            return None;
+                        }
                         if bytes[pos] == b'\'' {
                             s.push_str(std::str::from_utf8(&bytes[start..pos]).ok()?);
                             pos += 1;
@@ -165,7 +206,7 @@ impl QueryHandler {
                     Datum::Text(s)
                 } else if bytes[pos] == b'N' || bytes[pos] == b'n' {
                     // NULL
-                    if pos + 4 <= len && values_str[pos..pos+4].eq_ignore_ascii_case("null") {
+                    if pos + 4 <= len && values_str[pos..pos + 4].eq_ignore_ascii_case("null") {
                         pos += 4;
                         Datum::Null
                     } else {
@@ -173,7 +214,7 @@ impl QueryHandler {
                     }
                 } else if bytes[pos] == b't' || bytes[pos] == b'T' {
                     // true
-                    if pos + 4 <= len && values_str[pos..pos+4].eq_ignore_ascii_case("true") {
+                    if pos + 4 <= len && values_str[pos..pos + 4].eq_ignore_ascii_case("true") {
                         pos += 4;
                         Datum::Boolean(true)
                     } else {
@@ -181,7 +222,7 @@ impl QueryHandler {
                     }
                 } else if bytes[pos] == b'f' || bytes[pos] == b'F' {
                     // false
-                    if pos + 5 <= len && values_str[pos..pos+5].eq_ignore_ascii_case("false") {
+                    if pos + 5 <= len && values_str[pos..pos + 5].eq_ignore_ascii_case("false") {
                         pos += 5;
                         Datum::Boolean(false)
                     } else {
@@ -189,34 +230,52 @@ impl QueryHandler {
                     }
                 } else if bytes[pos] == b'c' || bytes[pos] == b'C' {
                     // CURRENT_TIMESTAMP / CURRENT_DATE
-                    if pos + 17 <= len && values_str[pos..pos+17].eq_ignore_ascii_case("CURRENT_TIMESTAMP") {
+                    if pos + 17 <= len
+                        && values_str[pos..pos + 17].eq_ignore_ascii_case("CURRENT_TIMESTAMP")
+                    {
                         pos += 17;
                         let now = chrono::Utc::now();
-                        Datum::Timestamp(now.timestamp() * 1_000_000 + now.timestamp_subsec_micros() as i64)
-                    } else if pos + 12 <= len && values_str[pos..pos+12].eq_ignore_ascii_case("CURRENT_DATE") {
+                        Datum::Timestamp(
+                            now.timestamp() * 1_000_000 + now.timestamp_subsec_micros() as i64,
+                        )
+                    } else if pos + 12 <= len
+                        && values_str[pos..pos + 12].eq_ignore_ascii_case("CURRENT_DATE")
+                    {
                         pos += 12;
                         let now = chrono::Utc::now();
-                        Datum::Timestamp(now.timestamp() * 1_000_000 + now.timestamp_subsec_micros() as i64)
+                        Datum::Timestamp(
+                            now.timestamp() * 1_000_000 + now.timestamp_subsec_micros() as i64,
+                        )
                     } else {
                         return None;
                     }
                 } else if bytes[pos] == b'-' || bytes[pos].is_ascii_digit() {
                     // Number
                     let num_start = pos;
-                    if bytes[pos] == b'-' { pos += 1; }
+                    if bytes[pos] == b'-' {
+                        pos += 1;
+                    }
                     let mut is_float = false;
-                    while pos < len && bytes[pos].is_ascii_digit() { pos += 1; }
+                    while pos < len && bytes[pos].is_ascii_digit() {
+                        pos += 1;
+                    }
                     if pos < len && bytes[pos] == b'.' {
                         is_float = true;
                         pos += 1;
-                        while pos < len && bytes[pos].is_ascii_digit() { pos += 1; }
+                        while pos < len && bytes[pos].is_ascii_digit() {
+                            pos += 1;
+                        }
                     }
                     // Scientific notation
                     if pos < len && (bytes[pos] == b'e' || bytes[pos] == b'E') {
                         is_float = true;
                         pos += 1;
-                        if pos < len && (bytes[pos] == b'+' || bytes[pos] == b'-') { pos += 1; }
-                        while pos < len && bytes[pos].is_ascii_digit() { pos += 1; }
+                        if pos < len && (bytes[pos] == b'+' || bytes[pos] == b'-') {
+                            pos += 1;
+                        }
+                        while pos < len && bytes[pos].is_ascii_digit() {
+                            pos += 1;
+                        }
                     }
                     let num_str = std::str::from_utf8(&bytes[num_start..pos]).ok()?;
                     if is_float {
@@ -235,13 +294,19 @@ impl QueryHandler {
             }
 
             // Skip whitespace and expect ')'
-            while pos < len && bytes[pos] == b' ' { pos += 1; }
-            if pos >= len || bytes[pos] != b')' { return None; }
+            while pos < len && bytes[pos] == b' ' {
+                pos += 1;
+            }
+            if pos >= len || bytes[pos] != b')' {
+                return None;
+            }
             pos += 1;
             rows.push(vals);
         }
 
-        if rows.is_empty() { return None; }
+        if rows.is_empty() {
+            return None;
+        }
 
         Some(BoundInsert {
             table_id: schema.id,
@@ -292,7 +357,9 @@ impl QueryHandler {
         let mut rows: Vec<OwnedRow> = Vec::with_capacity(ins.rows.len());
         for row_exprs in &ins.rows {
             // Start with static defaults for all columns
-            let mut values: Vec<Datum> = schema.columns.iter()
+            let mut values: Vec<Datum> = schema
+                .columns
+                .iter()
                 .map(|c| c.default_value.clone().unwrap_or(Datum::Null))
                 .collect();
             // Overlay provided columns with literal values
@@ -348,7 +415,11 @@ impl QueryHandler {
             return Some(Ok(vec![self.error_response(&FalconError::Txn(e))]));
         }
         session.txn = None;
-        let tag = if count == 1 { "INSERT 0 1".to_owned() } else { format!("INSERT 0 {count}") };
+        let tag = if count == 1 {
+            "INSERT 0 1".to_owned()
+        } else {
+            format!("INSERT 0 {count}")
+        };
         Some(Ok(vec![BackendMessage::CommandComplete { tag }]))
     }
 
@@ -364,17 +435,23 @@ impl QueryHandler {
 
         // Table name
         let tbl_end = rest.find(|c: char| !c.is_alphanumeric() && c != '_' && c != '"')?;
-        if tbl_end == 0 { return None; }
+        if tbl_end == 0 {
+            return None;
+        }
         let table_name = rest[..tbl_end].trim_matches('"');
         let rest = rest[tbl_end..].trim_start();
 
         // SET keyword
-        if rest.len() < 4 || !rest[..3].eq_ignore_ascii_case("SET") { return None; }
+        if rest.len() < 4 || !rest[..3].eq_ignore_ascii_case("SET") {
+            return None;
+        }
         let rest = rest[3..].trim_start();
 
         // Reject RETURNING / FROM (complex) — zero-alloc
         fn contains_ci_u(hay: &str, needle: &str) -> bool {
-            hay.as_bytes().windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
+            hay.as_bytes()
+                .windows(needle.len())
+                .any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
         }
         if contains_ci_u(rest, "RETURNING") || contains_ci_u(rest, " FROM ") {
             return None;
@@ -385,7 +462,10 @@ impl QueryHandler {
             let bytes = rest.as_bytes();
             let mut found = None;
             for i in 0..bytes.len().saturating_sub(6) {
-                if bytes[i] == b' ' && bytes[i+1..i+6].eq_ignore_ascii_case(b"WHERE") && (i + 6 >= bytes.len() || bytes[i+6] == b' ') {
+                if bytes[i] == b' '
+                    && bytes[i + 1..i + 6].eq_ignore_ascii_case(b"WHERE")
+                    && (i + 6 >= bytes.len() || bytes[i + 6] == b' ')
+                {
                     found = Some(i);
                     break;
                 }
@@ -399,9 +479,16 @@ impl QueryHandler {
         let schema = {
             let cached = self.schema_cache.lock();
             if let Some((ref name, ref s)) = *cached {
-                if name == table_name { Some(s.clone()) } else { None }
-            } else { None }
-        }.or_else(|| {
+                if name == table_name {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        .or_else(|| {
             let s = self.storage.get_table_schema(table_name)?;
             *self.schema_cache.lock() = Some((table_name.to_owned(), s.clone()));
             Some(s)
@@ -415,7 +502,10 @@ impl QueryHandler {
             let col_name = assign_str[..eq_pos].trim().trim_matches('"');
             let expr_str = assign_str[eq_pos + 1..].trim();
 
-            let col_idx = schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(col_name))?;
+            let col_idx = schema
+                .columns
+                .iter()
+                .position(|c| c.name.eq_ignore_ascii_case(col_name))?;
 
             // Parse expr: literal | col +/- literal
             let expr = self.parse_fast_expr(expr_str, &schema)?;
@@ -431,7 +521,10 @@ impl QueryHandler {
             let mut start = 0;
             let mut i = 0;
             while i + 5 <= bytes.len() {
-                if bytes[i] == b' ' && bytes[i+1..i+4].eq_ignore_ascii_case(b"AND") && bytes[i+4] == b' ' {
+                if bytes[i] == b' '
+                    && bytes[i + 1..i + 4].eq_ignore_ascii_case(b"AND")
+                    && bytes[i + 4] == b' '
+                {
                     parts.push(where_part[start..i].trim());
                     start = i + 5;
                     i = start;
@@ -453,7 +546,10 @@ impl QueryHandler {
             }
             let col_name = cond[..eq_pos].trim().trim_matches('"');
             let val_str = cond[eq_pos + 1..].trim();
-            let col_idx = schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(col_name))?;
+            let col_idx = schema
+                .columns
+                .iter()
+                .position(|c| c.name.eq_ignore_ascii_case(col_name))?;
             let val = self.parse_fast_literal(val_str, &schema.columns[col_idx].data_type)?;
             filters.push(BoundExpr::BinaryOp {
                 left: Box::new(BoundExpr::ColumnRef(col_idx)),
@@ -488,13 +584,21 @@ impl QueryHandler {
         })
     }
 
-    pub(crate) fn parse_fast_expr(&self, s: &str, schema: &falcon_common::schema::TableSchema) -> Option<BoundExpr> {
+    pub(crate) fn parse_fast_expr(
+        &self,
+        s: &str,
+        schema: &falcon_common::schema::TableSchema,
+    ) -> Option<BoundExpr> {
         let s = s.trim();
         // Try: col + literal or col - literal
         if let Some(plus_pos) = s.find('+') {
             let lhs = s[..plus_pos].trim();
             let rhs = s[plus_pos + 1..].trim();
-            if let Some(col_idx) = schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(lhs)) {
+            if let Some(col_idx) = schema
+                .columns
+                .iter()
+                .position(|c| c.name.eq_ignore_ascii_case(lhs))
+            {
                 let val = self.parse_fast_literal(rhs, &schema.columns[col_idx].data_type)?;
                 return Some(BoundExpr::BinaryOp {
                     left: Box::new(BoundExpr::ColumnRef(col_idx)),
@@ -507,7 +611,11 @@ impl QueryHandler {
             if minus_pos > 0 {
                 let lhs = s[..minus_pos].trim();
                 let rhs = s[minus_pos + 1..].trim();
-                if let Some(col_idx) = schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(lhs)) {
+                if let Some(col_idx) = schema
+                    .columns
+                    .iter()
+                    .position(|c| c.name.eq_ignore_ascii_case(lhs))
+                {
                     let val = self.parse_fast_literal(rhs, &schema.columns[col_idx].data_type)?;
                     return Some(BoundExpr::BinaryOp {
                         left: Box::new(BoundExpr::ColumnRef(col_idx)),
@@ -523,10 +631,16 @@ impl QueryHandler {
         Some(BoundExpr::Literal(val))
     }
 
-    pub(crate) fn parse_fast_literal(&self, s: &str, dt: &falcon_common::types::DataType) -> Option<Datum> {
+    pub(crate) fn parse_fast_literal(
+        &self,
+        s: &str,
+        dt: &falcon_common::types::DataType,
+    ) -> Option<Datum> {
         use falcon_common::types::DataType;
         let s = s.trim();
-        if s.eq_ignore_ascii_case("NULL") { return Some(Datum::Null); }
+        if s.eq_ignore_ascii_case("NULL") {
+            return Some(Datum::Null);
+        }
         if s.starts_with('\'') {
             return Some(Datum::Text(s.trim_matches('\'').to_owned()));
         }
@@ -554,12 +668,20 @@ impl QueryHandler {
             false
         };
 
+        if auto_txn {
+            falcon_storage::engine::set_skip_read_tracking(true);
+        }
+
         // Execute
         let result = if let Some(dist) = &self.cluster.dist_engine {
             dist.execute(&plan, session.txn.as_ref())
         } else {
             self.executor.execute(&plan, session.txn.as_ref())
         };
+
+        if auto_txn {
+            falcon_storage::engine::set_skip_read_tracking(false);
+        }
 
         match result {
             Ok(ExecutionResult::Dml { rows_affected, tag }) => {
@@ -595,7 +717,9 @@ impl QueryHandler {
         if auto_txn {
             if let Some(ref txn) = session.txn {
                 let _ = self.txn_mgr.commit_autocommit(txn.txn_id);
-                falcon_common::globals::db_stats().xact_commit.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                falcon_common::globals::db_stats()
+                    .xact_commit
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             session.txn = None;
         }
@@ -609,7 +733,9 @@ impl QueryHandler {
                 BackendMessage::NoticeResponse {
                     message: "there is already a transaction in progress".into(),
                 },
-                BackendMessage::CommandComplete { tag: "BEGIN".into() },
+                BackendMessage::CommandComplete {
+                    tag: "BEGIN".into(),
+                },
             ];
         }
         if let Err(reason) = self.storage.check_tenant_quota(session.tenant_id) {
@@ -633,16 +759,24 @@ impl QueryHandler {
         self.storage.record_tenant_txn_begin(session.tenant_id);
         session.txn = Some(txn);
         session.autocommit = false;
-        vec![BackendMessage::CommandComplete { tag: "BEGIN".into() }]
+        vec![BackendMessage::CommandComplete {
+            tag: "BEGIN".into(),
+        }]
     }
 
-    pub(crate) fn fast_begin_with_options(&self, session: &mut PgSession, opts: BeginOptions) -> Vec<BackendMessage> {
+    pub(crate) fn fast_begin_with_options(
+        &self,
+        session: &mut PgSession,
+        opts: BeginOptions,
+    ) -> Vec<BackendMessage> {
         if session.in_transaction() {
             return vec![
                 BackendMessage::NoticeResponse {
                     message: "there is already a transaction in progress".into(),
                 },
-                BackendMessage::CommandComplete { tag: "BEGIN".into() },
+                BackendMessage::CommandComplete {
+                    tag: "BEGIN".into(),
+                },
             ];
         }
         if let Err(reason) = self.storage.check_tenant_quota(session.tenant_id) {
@@ -653,10 +787,10 @@ impl QueryHandler {
             }];
         }
         let isolation = opts.isolation.unwrap_or(session.default_isolation);
-        let txn = match self.txn_mgr.try_begin_with_classification(
-            isolation,
-            TxnClassification::local(ShardId(0)),
-        ) {
+        let txn = match self
+            .txn_mgr
+            .try_begin_with_classification(isolation, TxnClassification::local(ShardId(0)))
+        {
             Ok(t) => t,
             Err(e) => {
                 let ce: FalconError = e.into();
@@ -668,7 +802,9 @@ impl QueryHandler {
         session.txn = Some(txn);
         session.autocommit = false;
         // read_only is accepted but not enforced (no write barrier yet)
-        vec![BackendMessage::CommandComplete { tag: "BEGIN".into() }]
+        vec![BackendMessage::CommandComplete {
+            tag: "BEGIN".into(),
+        }]
     }
 
     pub(crate) fn fast_commit(&self, session: &mut PgSession) -> Vec<BackendMessage> {
@@ -686,20 +822,30 @@ impl QueryHandler {
                     }
                     self.storage.record_tenant_txn_commit(session.tenant_id);
                     falcon_observability::record_txn_metrics("committed");
-                    falcon_common::globals::db_stats().xact_commit.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    falcon_common::globals::db_stats()
+                        .xact_commit
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     session.txn = None;
                     session.autocommit = true;
                     session.revert_local_gucs();
+                    session.savepoints.clear();
+                    session.cursors.clear();
                     self.flush_txn_stats();
-                    vec![BackendMessage::CommandComplete { tag: "COMMIT".into() }]
+                    vec![BackendMessage::CommandComplete {
+                        tag: "COMMIT".into(),
+                    }]
                 }
                 Err(e) => {
                     self.storage.record_tenant_txn_abort(session.tenant_id);
                     falcon_observability::record_txn_metrics("aborted");
-                    falcon_common::globals::db_stats().xact_rollback.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    falcon_common::globals::db_stats()
+                        .xact_rollback
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     session.txn = None;
                     session.autocommit = true;
                     session.revert_local_gucs();
+                    session.savepoints.clear();
+                    session.cursors.clear();
                     self.flush_txn_stats();
                     vec![self.error_response(&FalconError::Txn(e))]
                 }
@@ -709,7 +855,9 @@ impl QueryHandler {
                 BackendMessage::NoticeResponse {
                     message: "there is no transaction in progress".into(),
                 },
-                BackendMessage::CommandComplete { tag: "COMMIT".into() },
+                BackendMessage::CommandComplete {
+                    tag: "COMMIT".into(),
+                },
             ]
         }
     }
@@ -719,18 +867,28 @@ impl QueryHandler {
             let _ = self.txn_mgr.abort(txn.txn_id);
             self.storage.record_tenant_txn_abort(session.tenant_id);
             falcon_observability::record_txn_metrics("aborted");
-            falcon_common::globals::db_stats().xact_rollback.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            falcon_common::globals::db_stats()
+                .xact_rollback
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             session.txn = None;
             session.autocommit = true;
             session.revert_local_gucs();
+            session.savepoints.clear();
+            session.cursors.clear();
             self.flush_txn_stats();
         }
-        vec![BackendMessage::CommandComplete { tag: "ROLLBACK".into() }]
+        vec![BackendMessage::CommandComplete {
+            tag: "ROLLBACK".into(),
+        }]
     }
 
     /// Fast-path SELECT for simple point lookups: SELECT col [, col2] FROM table WHERE pk = val
     /// Bypasses sqlparser, binder, planner, and build_indexed_columns entirely.
-    pub(crate) fn try_fast_select(&self, sql: &str, session: &mut PgSession) -> Option<Vec<BackendMessage>> {
+    pub(crate) fn try_fast_select(
+        &self,
+        sql: &str,
+        session: &mut PgSession,
+    ) -> Option<Vec<BackendMessage>> {
         let trimmed = sql.trim().trim_end_matches(';').trim_end();
         if trimmed.len() < 20 || !trimmed[..6].eq_ignore_ascii_case("SELECT") {
             return None;
@@ -743,7 +901,10 @@ impl QueryHandler {
             let mut i = 0;
             let mut found = None;
             while i + 5 <= bytes.len() {
-                if bytes[i] == b' ' && bytes[i+1..i+5].eq_ignore_ascii_case(b"FROM") && (i + 5 >= bytes.len() || bytes[i+5] == b' ') {
+                if bytes[i] == b' '
+                    && bytes[i + 1..i + 5].eq_ignore_ascii_case(b"FROM")
+                    && (i + 5 >= bytes.len() || bytes[i + 5] == b' ')
+                {
                     found = Some(i);
                     break;
                 }
@@ -756,7 +917,9 @@ impl QueryHandler {
 
         // Table name
         let tbl_end = after_from.find(|c: char| !c.is_alphanumeric() && c != '_' && c != '"')?;
-        if tbl_end == 0 { return None; }
+        if tbl_end == 0 {
+            return None;
+        }
         let table_name = after_from[..tbl_end].trim_matches('"');
         let after_table = after_from[tbl_end..].trim_start();
 
@@ -768,9 +931,14 @@ impl QueryHandler {
 
         // Reject complex WHERE (AND, OR, subqueries, etc. beyond simple equality)
         fn contains_ci(hay: &str, needle: &str) -> bool {
-            hay.as_bytes().windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
+            hay.as_bytes()
+                .windows(needle.len())
+                .any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
         }
-        if contains_ci(where_part, " AND ") || contains_ci(where_part, " OR ") || where_part.contains('(') {
+        if contains_ci(where_part, " AND ")
+            || contains_ci(where_part, " OR ")
+            || where_part.contains('(')
+        {
             return None;
         }
 
@@ -786,29 +954,53 @@ impl QueryHandler {
         let schema = {
             let cached = self.schema_cache.lock();
             if let Some((ref name, ref s)) = *cached {
-                if name == table_name { Some(s.clone()) } else { None }
-            } else { None }
-        }.or_else(|| {
+                if name == table_name {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        .or_else(|| {
             let s = self.storage.get_table_schema(table_name)?;
             *self.schema_cache.lock() = Some((table_name.to_owned(), s.clone()));
             Some(s)
         })?;
 
         // WHERE column must be the (single) PK
-        if schema.primary_key_columns.len() != 1 { return None; }
+        if schema.primary_key_columns.len() != 1 {
+            return None;
+        }
         let pk_col_idx = schema.primary_key_columns[0];
-        let where_col_idx = schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(where_col))?;
-        if where_col_idx != pk_col_idx { return None; }
+        let where_col_idx = schema
+            .columns
+            .iter()
+            .position(|c| c.name.eq_ignore_ascii_case(where_col))?;
+        if where_col_idx != pk_col_idx {
+            return None;
+        }
 
         // Parse PK value
-        let pk_val = self.parse_fast_literal(where_val_str, &schema.columns[pk_col_idx].data_type)?;
+        let pk_val =
+            self.parse_fast_literal(where_val_str, &schema.columns[pk_col_idx].data_type)?;
         let pk = falcon_storage::memtable::encode_pk_from_datums(&[&pk_val]);
 
         // Parse select columns
-        let sel_col_names: Vec<&str> = cols_str.split(',').map(|s| s.trim().trim_matches('"')).collect();
-        let sel_col_indices: Vec<usize> = sel_col_names.iter().map(|name| {
-            schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(name))
-        }).collect::<Option<Vec<_>>>()?;
+        let sel_col_names: Vec<&str> = cols_str
+            .split(',')
+            .map(|s| s.trim().trim_matches('"'))
+            .collect();
+        let sel_col_indices: Vec<usize> = sel_col_names
+            .iter()
+            .map(|name| {
+                schema
+                    .columns
+                    .iter()
+                    .position(|c| c.name.eq_ignore_ascii_case(name))
+            })
+            .collect::<Option<Vec<_>>>()?;
 
         // Ensure txn exists
         let auto_txn = if session.txn.is_none() {
@@ -819,37 +1011,53 @@ impl QueryHandler {
             false
         };
 
+        if auto_txn {
+            falcon_storage::engine::set_skip_read_tracking(true);
+        }
+
         let txn = session.txn.as_ref().unwrap();
         let read_ts = txn.read_ts(self.txn_mgr.current_ts());
         let result = self.storage.get(schema.id, &pk, txn.txn_id, read_ts);
 
+        if auto_txn {
+            falcon_storage::engine::set_skip_read_tracking(false);
+        }
+
         let mut messages = Vec::new();
 
         // Build RowDescription
-        let fields: Vec<FieldDescription> = sel_col_indices.iter().map(|&ci| {
-            let col = &schema.columns[ci];
-            FieldDescription {
-                name: col.name.clone(),
-                table_oid: 0,
-                column_attr: 0,
-                type_oid: col.data_type.pg_oid(),
-                type_len: col.data_type.type_len(),
-                type_modifier: -1,
-                format_code: 0,
-            }
-        }).collect();
+        let fields: Vec<FieldDescription> = sel_col_indices
+            .iter()
+            .map(|&ci| {
+                let col = &schema.columns[ci];
+                FieldDescription {
+                    name: col.name.clone(),
+                    table_oid: 0,
+                    column_attr: 0,
+                    type_oid: col.data_type.pg_oid(),
+                    type_len: col.data_type.type_len(),
+                    type_modifier: -1,
+                    format_code: 0,
+                }
+            })
+            .collect();
         messages.push(BackendMessage::RowDescription { fields });
 
         match result {
             Ok(Some(row)) => {
-                let values: Vec<Option<String>> = sel_col_indices.iter()
+                let values: Vec<Option<String>> = sel_col_indices
+                    .iter()
                     .map(|&ci| row.values.get(ci).map(|d| d.to_pg_text()).unwrap_or(None))
                     .collect();
                 messages.push(BackendMessage::DataRow { values });
-                messages.push(BackendMessage::CommandComplete { tag: "SELECT 1".into() });
+                messages.push(BackendMessage::CommandComplete {
+                    tag: "SELECT 1".into(),
+                });
             }
             Ok(None) => {
-                messages.push(BackendMessage::CommandComplete { tag: "SELECT 0".into() });
+                messages.push(BackendMessage::CommandComplete {
+                    tag: "SELECT 0".into(),
+                });
             }
             Err(e) => {
                 if auto_txn {
@@ -872,7 +1080,11 @@ impl QueryHandler {
 
     /// Direct UPDATE bypass for simple point updates on constraint-free tables.
     /// Parses SQL, reads row, applies SET, writes back — skips executor entirely.
-    pub(crate) fn try_fast_direct_update(&self, sql: &str, session: &mut PgSession) -> Option<Vec<BackendMessage>> {
+    pub(crate) fn try_fast_direct_update(
+        &self,
+        sql: &str,
+        session: &mut PgSession,
+    ) -> Option<Vec<BackendMessage>> {
         let trimmed = sql.trim().trim_end_matches(';').trim_end();
         if trimmed.len() < 20 || !trimmed[..6].eq_ignore_ascii_case("UPDATE") {
             return None;
@@ -881,26 +1093,37 @@ impl QueryHandler {
 
         // Table name
         let tbl_end = rest.find(|c: char| !c.is_alphanumeric() && c != '_' && c != '"')?;
-        if tbl_end == 0 { return None; }
+        if tbl_end == 0 {
+            return None;
+        }
         let table_name = rest[..tbl_end].trim_matches('"');
         let rest = rest[tbl_end..].trim_start();
 
         // SET keyword
-        if rest.len() < 4 || !rest[..3].eq_ignore_ascii_case("SET") { return None; }
+        if rest.len() < 4 || !rest[..3].eq_ignore_ascii_case("SET") {
+            return None;
+        }
         let rest = rest[3..].trim_start();
 
         // Reject RETURNING / FROM
         fn has_ci(hay: &str, needle: &str) -> bool {
-            hay.as_bytes().windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
+            hay.as_bytes()
+                .windows(needle.len())
+                .any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
         }
-        if has_ci(rest, "RETURNING") || has_ci(rest, " FROM ") { return None; }
+        if has_ci(rest, "RETURNING") || has_ci(rest, " FROM ") {
+            return None;
+        }
 
         // Find WHERE
         let where_pos = {
             let bytes = rest.as_bytes();
             let mut found = None;
             for i in 0..bytes.len().saturating_sub(6) {
-                if bytes[i] == b' ' && bytes[i+1..i+6].eq_ignore_ascii_case(b"WHERE") && (i + 6 >= bytes.len() || bytes[i+6] == b' ') {
+                if bytes[i] == b' '
+                    && bytes[i + 1..i + 6].eq_ignore_ascii_case(b"WHERE")
+                    && (i + 6 >= bytes.len() || bytes[i + 6] == b' ')
+                {
                     found = Some(i);
                     break;
                 }
@@ -914,9 +1137,16 @@ impl QueryHandler {
         let schema = {
             let cached = self.schema_cache.lock();
             if let Some((ref name, ref s)) = *cached {
-                if name == table_name { Some(s.clone()) } else { None }
-            } else { None }
-        }.or_else(|| {
+                if name == table_name {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        .or_else(|| {
             let s = self.storage.get_table_schema(table_name)?;
             *self.schema_cache.lock() = Some((table_name.to_owned(), s.clone()));
             Some(s)
@@ -933,43 +1163,76 @@ impl QueryHandler {
         let pk_col_idx = schema.primary_key_columns[0];
 
         // Parse WHERE: only pk = literal (no AND)
-        if has_ci(where_part, " AND ") || has_ci(where_part, " OR ") { return None; }
+        if has_ci(where_part, " AND ") || has_ci(where_part, " OR ") {
+            return None;
+        }
         let eq_pos = where_part.find('=')?;
-        if eq_pos > 0 && matches!(where_part.as_bytes()[eq_pos - 1], b'!' | b'>' | b'<') { return None; }
+        if eq_pos > 0 && matches!(where_part.as_bytes()[eq_pos - 1], b'!' | b'>' | b'<') {
+            return None;
+        }
         let w_col = where_part[..eq_pos].trim().trim_matches('"');
         let w_val_str = where_part[eq_pos + 1..].trim();
-        let w_col_idx = schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(w_col))?;
-        if w_col_idx != pk_col_idx { return None; }
+        let w_col_idx = schema
+            .columns
+            .iter()
+            .position(|c| c.name.eq_ignore_ascii_case(w_col))?;
+        if w_col_idx != pk_col_idx {
+            return None;
+        }
         let pk_val = self.parse_fast_literal(w_val_str, &schema.columns[pk_col_idx].data_type)?;
         let pk = falcon_storage::memtable::encode_pk_from_datums(&[&pk_val]);
 
         // Parse SET assignments: col = expr [, col = expr]
         // For direct execution, we store (col_idx, SetOp) instead of BoundExpr
-        enum SetOp { Literal(Datum), Plus(usize, Datum), Minus(usize, Datum) }
+        enum SetOp {
+            Literal(Datum),
+            Plus(usize, Datum),
+            Minus(usize, Datum),
+        }
         let mut ops: Vec<(usize, SetOp)> = Vec::new();
         for assign_str in set_part.split(',') {
             let assign_str = assign_str.trim();
             let aeq = assign_str.find('=')?;
             let col_name = assign_str[..aeq].trim().trim_matches('"');
             let expr_str = assign_str[aeq + 1..].trim();
-            let col_idx = schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(col_name))?;
+            let col_idx = schema
+                .columns
+                .iter()
+                .position(|c| c.name.eq_ignore_ascii_case(col_name))?;
 
             if let Some(plus_pos) = expr_str.find('+') {
                 let lhs = expr_str[..plus_pos].trim();
                 let rhs = expr_str[plus_pos + 1..].trim();
-                if schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(lhs))? == col_idx {
+                if schema
+                    .columns
+                    .iter()
+                    .position(|c| c.name.eq_ignore_ascii_case(lhs))?
+                    == col_idx
+                {
                     let val = self.parse_fast_literal(rhs, &schema.columns[col_idx].data_type)?;
                     ops.push((col_idx, SetOp::Plus(col_idx, val)));
-                } else { return None; }
+                } else {
+                    return None;
+                }
             } else if let Some(minus_pos) = expr_str.rfind('-') {
                 if minus_pos > 0 {
                     let lhs = expr_str[..minus_pos].trim();
                     let rhs = expr_str[minus_pos + 1..].trim();
-                    if schema.columns.iter().position(|c| c.name.eq_ignore_ascii_case(lhs))? == col_idx {
-                        let val = self.parse_fast_literal(rhs, &schema.columns[col_idx].data_type)?;
+                    if schema
+                        .columns
+                        .iter()
+                        .position(|c| c.name.eq_ignore_ascii_case(lhs))?
+                        == col_idx
+                    {
+                        let val =
+                            self.parse_fast_literal(rhs, &schema.columns[col_idx].data_type)?;
                         ops.push((col_idx, SetOp::Minus(col_idx, val)));
-                    } else { return None; }
-                } else { return None; }
+                    } else {
+                        return None;
+                    }
+                } else {
+                    return None;
+                }
             } else {
                 let val = self.parse_fast_literal(expr_str, &schema.columns[col_idx].data_type)?;
                 ops.push((col_idx, SetOp::Literal(val)));
@@ -1035,6 +1298,8 @@ impl QueryHandler {
             session.txn = None;
         }
 
-        Some(vec![BackendMessage::CommandComplete { tag: "UPDATE 1".to_owned() }])
+        Some(vec![BackendMessage::CommandComplete {
+            tag: "UPDATE 1".to_owned(),
+        }])
     }
 }

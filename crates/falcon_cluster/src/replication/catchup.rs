@@ -25,6 +25,7 @@ pub fn apply_wal_record_to_engine(
     match record {
         WalRecord::BeginTxn { .. }
         | WalRecord::PrepareTxn { .. }
+        | WalRecord::PrepareTxnNamed { .. }
         | WalRecord::PrepareTxn2pc { .. }
         | WalRecord::Checkpoint { .. }
         | WalRecord::CoordinatorPrepare { .. }
@@ -121,16 +122,17 @@ pub fn apply_wal_record_to_engine(
         WalRecord::DropView { name } => {
             let _ = engine.drop_view(name, true);
         }
-        WalRecord::CreateMaterializedView { name, query_sql, backing_table_id } => {
+        WalRecord::CreateMaterializedView {
+            name,
+            query_sql,
+            backing_table_id,
+        } => {
             let _ = engine.create_materialized_view(name, query_sql, *backing_table_id);
         }
         WalRecord::DropMaterializedView { name } => {
             let _ = engine.drop_materialized_view(name, true);
         }
-        WalRecord::AlterTable {
-            table_name,
-            op,
-        } => {
+        WalRecord::AlterTable { table_name, op } => {
             use falcon_storage::wal::AlterTableOp;
             match op {
                 AlterTableOp::AddColumn { column } => {
@@ -145,14 +147,34 @@ pub fn apply_wal_record_to_engine(
                 AlterTableOp::RenameTable { new_name } => {
                     let _ = engine.alter_table_rename(table_name, new_name);
                 }
-                AlterTableOp::ChangeColumnType { column_name, new_type } => {
-                    let _ = engine.alter_table_change_column_type(table_name, column_name, new_type.clone());
+                AlterTableOp::ChangeColumnType {
+                    column_name,
+                    new_type,
+                } => {
+                    let _ = engine.alter_table_change_column_type(
+                        table_name,
+                        column_name,
+                        new_type.clone(),
+                    );
                 }
                 AlterTableOp::SetNotNull { column_name } => {
                     let _ = engine.alter_table_set_not_null(table_name, column_name);
                 }
                 AlterTableOp::DropNotNull { column_name } => {
                     let _ = engine.alter_table_drop_not_null(table_name, column_name);
+                }
+                AlterTableOp::SetDefault {
+                    column_name,
+                    default_value,
+                } => {
+                    let _ = engine.alter_table_set_default(
+                        table_name,
+                        column_name,
+                        default_value.clone(),
+                    );
+                }
+                AlterTableOp::DropDefault { column_name } => {
+                    let _ = engine.alter_table_drop_default(table_name, column_name);
                 }
             }
         }
@@ -195,13 +217,27 @@ pub fn apply_wal_record_to_engine(
             can_create_role,
             password_hash,
         } => {
-            let _ = engine.create_role(name, *can_login, *is_superuser, *can_create_db, *can_create_role, password_hash.clone());
+            let _ = engine.create_role(
+                name,
+                *can_login,
+                *is_superuser,
+                *can_create_db,
+                *can_create_role,
+                password_hash.clone(),
+            );
         }
         WalRecord::DropRole { name } => {
             let _ = engine.drop_role(name);
         }
         WalRecord::AlterRole { name, opts } => {
-            let _ = engine.alter_role(name, opts.password.clone(), opts.can_login, opts.is_superuser, opts.can_create_db, opts.can_create_role);
+            let _ = engine.alter_role(
+                name,
+                opts.password.clone(),
+                opts.can_login,
+                opts.is_superuser,
+                opts.can_create_db,
+                opts.can_create_role,
+            );
         }
         WalRecord::GrantPrivilege {
             grantee,
@@ -225,6 +261,13 @@ pub fn apply_wal_record_to_engine(
         }
         WalRecord::RevokeRole { member, group } => {
             let _ = engine.revoke_role_membership(member, group);
+        }
+        WalRecord::DdlBackfillUpdate {
+            table_id,
+            pk,
+            new_row,
+        } => {
+            engine.ddl_backfill_replace(table_id, pk, new_row.clone());
         }
         WalRecord::CreateFunction { def } => {
             let _ = engine.create_function(def.clone());

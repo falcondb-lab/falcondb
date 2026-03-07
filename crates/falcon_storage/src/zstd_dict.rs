@@ -48,7 +48,9 @@ impl DictionaryMetrics {
     pub fn hit_rate(&self) -> f64 {
         let hit = self.dict_hit.load(Ordering::Relaxed) as f64;
         let miss = self.dict_miss.load(Ordering::Relaxed) as f64;
-        if hit + miss == 0.0 { return 0.0; }
+        if hit + miss == 0.0 {
+            return 0.0;
+        }
         hit / (hit + miss)
     }
 }
@@ -79,7 +81,8 @@ impl DictionaryStore {
         let checksum = djb2_crc(&dict_data);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .unwrap_or_default().as_secs();
+            .unwrap_or_default()
+            .as_secs();
         let entry = DictionaryEntry {
             dictionary_id: dict_id,
             segment_id: 0,
@@ -90,8 +93,12 @@ impl DictionaryStore {
             created_at_epoch: now,
             sample_count: samples.len() as u64,
         };
-        self.metrics.dictionaries_created.fetch_add(1, Ordering::Relaxed);
-        self.metrics.dictionary_bytes_total.fetch_add(entry.data.len() as u64, Ordering::Relaxed);
+        self.metrics
+            .dictionaries_created
+            .fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .dictionary_bytes_total
+            .fetch_add(entry.data.len() as u64, Ordering::Relaxed);
         self.metrics.training_runs.fetch_add(1, Ordering::Relaxed);
         Ok(entry)
     }
@@ -128,7 +135,12 @@ impl DictionaryStore {
         store: &SegmentStore,
     ) -> Result<u64, SegmentStoreError> {
         let seg_id = store.next_segment_id();
-        let hdr = UnifiedSegmentHeader::new_snapshot(seg_id, entry.data.len() as u64, entry.dictionary_id, 0);
+        let hdr = UnifiedSegmentHeader::new_snapshot(
+            seg_id,
+            entry.data.len() as u64,
+            entry.dictionary_id,
+            0,
+        );
         store.create_segment(hdr)?;
         store.write_chunk(seg_id, &entry.data)?;
         store.seal_segment(seg_id)?;
@@ -144,7 +156,8 @@ impl DictionaryStore {
         table_id: u64,
         schema_version: u64,
     ) -> Result<DictionaryEntry, String> {
-        let body = store.get_segment_body(segment_id)
+        let body = store
+            .get_segment_body(segment_id)
             .map_err(|e| format!("load dict segment: {e}"))?;
         let data = if body.len() > UNIFIED_HEADER_SIZE as usize {
             body[UNIFIED_HEADER_SIZE as usize..].to_vec()
@@ -153,16 +166,26 @@ impl DictionaryStore {
         };
         let checksum = djb2_crc(&data);
         Ok(DictionaryEntry {
-            dictionary_id, segment_id, table_id, schema_version,
-            data, checksum, created_at_epoch: 0, sample_count: 0,
+            dictionary_id,
+            segment_id,
+            table_id,
+            schema_version,
+            data,
+            checksum,
+            created_at_epoch: 0,
+            sample_count: 0,
         })
     }
 }
 
 impl Default for DictionaryStore {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 pub(crate) fn djb2_crc(data: &[u8]) -> u32 {
-    data.iter().fold(5381u32, |acc, &b| acc.wrapping_mul(33).wrapping_add(u32::from(b)))
+    data.iter().fold(5381u32, |acc, &b| {
+        acc.wrapping_mul(33).wrapping_add(u32::from(b))
+    })
 }

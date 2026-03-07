@@ -27,34 +27,48 @@ impl StorageEngine {
     // ── Database DDL ─────────────────────────────────────────────────
 
     pub fn create_database(&self, name: &str, owner: &str) -> Result<u32, StorageError> {
-        let mut catalog = self.catalog.write();
-        catalog
-            .create_database(name, owner)
-            .map_err(StorageError::DatabaseAlreadyExists)?;
-        let oid = catalog
-            .find_database(name)
-            .map_or(0, |db| db.oid);
-        drop(catalog);
+        {
+            let catalog = self.catalog.read();
+            if catalog.find_database(name).is_some() {
+                return Err(StorageError::DatabaseAlreadyExists(format!(
+                    "database \"{}\" already exists",
+                    name
+                )));
+            }
+        }
 
+        // WAL first
         self.append_wal(&WalRecord::CreateDatabase {
             name: name.to_owned(),
             owner: owner.to_owned(),
         })?;
+
+        let mut catalog = self.catalog.write();
+        let _ = catalog.create_database(name, owner);
+        let oid = catalog.find_database(name).map_or(0, |db| db.oid);
 
         tracing::info!("Created database '{}' (oid={})", name, oid);
         Ok(oid)
     }
 
     pub fn drop_database(&self, name: &str) -> Result<(), StorageError> {
-        let mut catalog = self.catalog.write();
-        catalog
-            .drop_database(name)
-            .map_err(StorageError::DatabaseNotFound)?;
-        drop(catalog);
+        {
+            let catalog = self.catalog.read();
+            if catalog.find_database(name).is_none() {
+                return Err(StorageError::DatabaseNotFound(format!(
+                    "database \"{}\" does not exist",
+                    name
+                )));
+            }
+        }
 
+        // WAL first
         self.append_wal(&WalRecord::DropDatabase {
             name: name.to_owned(),
         })?;
+
+        let mut catalog = self.catalog.write();
+        let _ = catalog.drop_database(name);
 
         tracing::info!("Dropped database '{}'", name);
         Ok(())
@@ -63,31 +77,47 @@ impl StorageEngine {
     // ── Schema DDL ────────────────────────────────────────────────────
 
     pub fn create_schema(&self, name: &str, owner: &str) -> Result<(), StorageError> {
-        let mut catalog = self.catalog.write();
-        catalog
-            .create_schema(name, owner)
-            .map_err(StorageError::SchemaAlreadyExists)?;
-        drop(catalog);
+        {
+            let catalog = self.catalog.read();
+            if catalog.find_schema(name).is_some() {
+                return Err(StorageError::SchemaAlreadyExists(format!(
+                    "schema \"{}\" already exists",
+                    name
+                )));
+            }
+        }
 
+        // WAL first
         self.append_wal(&WalRecord::CreateSchema {
             name: name.to_owned(),
             owner: owner.to_owned(),
         })?;
+
+        let mut catalog = self.catalog.write();
+        let _ = catalog.create_schema(name, owner);
 
         tracing::info!("Created schema '{}'", name);
         Ok(())
     }
 
     pub fn drop_schema(&self, name: &str) -> Result<(), StorageError> {
-        let mut catalog = self.catalog.write();
-        catalog
-            .drop_schema(name)
-            .map_err(StorageError::SchemaNotFound)?;
-        drop(catalog);
+        {
+            let catalog = self.catalog.read();
+            if catalog.find_schema(name).is_none() {
+                return Err(StorageError::SchemaNotFound(format!(
+                    "schema \"{}\" does not exist",
+                    name
+                )));
+            }
+        }
 
+        // WAL first
         self.append_wal(&WalRecord::DropSchema {
             name: name.to_owned(),
         })?;
+
+        let mut catalog = self.catalog.write();
+        let _ = catalog.drop_schema(name);
 
         tracing::info!("Dropped schema '{}'", name);
         Ok(())
@@ -95,30 +125,46 @@ impl StorageEngine {
 
     // ── Function DDL ──────────────────────────────────────────────────
 
-    pub fn create_function(&self, def: falcon_common::schema::FunctionDef) -> Result<(), StorageError> {
-        let name = def.name.clone();
-        let mut catalog = self.catalog.write();
-        catalog
-            .create_function(def.clone())
-            .map_err(|e| StorageError::Other(e))?;
-        drop(catalog);
+    pub fn create_function(
+        &self,
+        def: falcon_common::schema::FunctionDef,
+    ) -> Result<(), StorageError> {
+        {
+            let catalog = self.catalog.read();
+            if catalog.find_function(&def.name).is_some() {
+                return Err(StorageError::Other(format!(
+                    "function \"{}\" already exists",
+                    def.name
+                )));
+            }
+        }
 
-        self.append_wal(&WalRecord::CreateFunction { def })?;
+        let name = def.name.clone();
+        // WAL first
+        self.append_wal(&WalRecord::CreateFunction { def: def.clone() })?;
+
+        let mut catalog = self.catalog.write();
+        let _ = catalog.create_function(def);
 
         tracing::info!("Created function '{}'", name);
         Ok(())
     }
 
     pub fn drop_function(&self, name: &str) -> Result<(), StorageError> {
-        let mut catalog = self.catalog.write();
-        catalog
-            .drop_function(name)
-            .map_err(|_| StorageError::FunctionNotFound(name.to_owned()))?;
-        drop(catalog);
+        {
+            let catalog = self.catalog.read();
+            if catalog.find_function(name).is_none() {
+                return Err(StorageError::FunctionNotFound(name.to_owned()));
+            }
+        }
 
+        // WAL first
         self.append_wal(&WalRecord::DropFunction {
             name: name.to_owned(),
         })?;
+
+        let mut catalog = self.catalog.write();
+        let _ = catalog.drop_function(name);
 
         tracing::info!("Dropped function '{}'", name);
         Ok(())
@@ -135,35 +181,60 @@ impl StorageEngine {
         can_create_role: bool,
         password: Option<String>,
     ) -> Result<u64, StorageError> {
-        let mut catalog = self.catalog.write();
-        let id = catalog
-            .create_role(name, can_login, is_superuser, can_create_db, can_create_role, password.clone())
-            .map_err(StorageError::RoleAlreadyExists)?;
-        drop(catalog);
+        {
+            let catalog = self.catalog.read();
+            if catalog.find_role_by_name(name).is_some() {
+                return Err(StorageError::RoleAlreadyExists(format!(
+                    "role \"{}\" already exists",
+                    name
+                )));
+            }
+        }
 
+        // WAL first
         self.append_wal(&WalRecord::CreateRole {
             name: name.to_owned(),
             can_login,
             is_superuser,
             can_create_db,
             can_create_role,
-            password_hash: password,
+            password_hash: password.clone(),
         })?;
+
+        let mut catalog = self.catalog.write();
+        let id = catalog
+            .create_role(
+                name,
+                can_login,
+                is_superuser,
+                can_create_db,
+                can_create_role,
+                password,
+            )
+            .map_err(StorageError::RoleAlreadyExists)?;
 
         tracing::info!("Created role '{}' (id={})", name, id);
         Ok(id)
     }
 
     pub fn drop_role(&self, name: &str) -> Result<(), StorageError> {
-        let mut catalog = self.catalog.write();
-        catalog
-            .drop_role(name)
-            .map_err(StorageError::RoleNotFound)?;
-        drop(catalog);
+        {
+            let catalog = self.catalog.read();
+            if catalog.find_role_by_name(name).is_none() {
+                return Err(StorageError::RoleNotFound(format!(
+                    "role \"{}\" does not exist",
+                    name
+                )));
+            }
+        }
 
+        // WAL first
         self.append_wal(&WalRecord::DropRole {
             name: name.to_owned(),
         })?;
+
+        let mut catalog = self.catalog.write();
+        let _ = catalog.drop_role(name);
 
         tracing::info!("Dropped role '{}'", name);
         Ok(())
@@ -178,18 +249,37 @@ impl StorageEngine {
         can_create_db: Option<bool>,
         can_create_role: Option<bool>,
     ) -> Result<(), StorageError> {
-        let mut catalog = self.catalog.write();
-        catalog
-            .alter_role(name, password.clone(), can_login, is_superuser, can_create_db, can_create_role)
-            .map_err(StorageError::RoleNotFound)?;
-        drop(catalog);
+        {
+            let catalog = self.catalog.read();
+            if catalog.find_role_by_name(name).is_none() {
+                return Err(StorageError::RoleNotFound(format!(
+                    "role \"{}\" does not exist",
+                    name
+                )));
+            }
+        }
 
+        // WAL first
         self.append_wal(&WalRecord::AlterRole {
             name: name.to_owned(),
             opts: crate::wal::AlterRoleOpts {
-                password, can_login, is_superuser, can_create_db, can_create_role,
+                password: password.clone(),
+                can_login,
+                is_superuser,
+                can_create_db,
+                can_create_role,
             },
         })?;
+
+        let mut catalog = self.catalog.write();
+        let _ = catalog.alter_role(
+            name,
+            password,
+            can_login,
+            is_superuser,
+            can_create_db,
+            can_create_role,
+        );
 
         tracing::info!("Altered role '{}'", name);
         Ok(())
@@ -205,12 +295,23 @@ impl StorageEngine {
         object_name: &str,
         grantor: &str,
     ) -> Result<(), StorageError> {
-        let mut catalog = self.catalog.write();
-        catalog
-            .grant_privilege(grantee, privilege, object_type, object_name, grantor)
-            .map_err(StorageError::RoleNotFound)?;
-        drop(catalog);
+        {
+            let catalog = self.catalog.read();
+            if catalog.find_role_by_name(grantee).is_none() {
+                return Err(StorageError::RoleNotFound(format!(
+                    "role \"{}\" does not exist",
+                    grantee
+                )));
+            }
+            if catalog.find_role_by_name(grantor).is_none() {
+                return Err(StorageError::RoleNotFound(format!(
+                    "role \"{}\" does not exist",
+                    grantor
+                )));
+            }
+        }
 
+        // WAL first
         self.append_wal(&WalRecord::GrantPrivilege {
             grantee: grantee.to_owned(),
             privilege: privilege.to_owned(),
@@ -219,7 +320,16 @@ impl StorageEngine {
             grantor: grantor.to_owned(),
         })?;
 
-        tracing::info!("GRANT {} ON {} {} TO {}", privilege, object_type, object_name, grantee);
+        let mut catalog = self.catalog.write();
+        let _ = catalog.grant_privilege(grantee, privilege, object_type, object_name, grantor);
+
+        tracing::info!(
+            "GRANT {} ON {} {} TO {}",
+            privilege,
+            object_type,
+            object_name,
+            grantee
+        );
         Ok(())
     }
 
@@ -230,12 +340,17 @@ impl StorageEngine {
         object_type: &str,
         object_name: &str,
     ) -> Result<(), StorageError> {
-        let mut catalog = self.catalog.write();
-        catalog
-            .revoke_privilege(grantee, privilege, object_type, object_name)
-            .map_err(StorageError::RoleNotFound)?;
-        drop(catalog);
+        {
+            let catalog = self.catalog.read();
+            if catalog.find_role_by_name(grantee).is_none() {
+                return Err(StorageError::RoleNotFound(format!(
+                    "role \"{}\" does not exist",
+                    grantee
+                )));
+            }
+        }
 
+        // WAL first
         self.append_wal(&WalRecord::RevokePrivilege {
             grantee: grantee.to_owned(),
             privilege: privilege.to_owned(),
@@ -243,45 +358,74 @@ impl StorageEngine {
             object_name: object_name.to_owned(),
         })?;
 
-        tracing::info!("REVOKE {} ON {} {} FROM {}", privilege, object_type, object_name, grantee);
+        let mut catalog = self.catalog.write();
+        let _ = catalog.revoke_privilege(grantee, privilege, object_type, object_name);
+
+        tracing::info!(
+            "REVOKE {} ON {} {} FROM {}",
+            privilege,
+            object_type,
+            object_name,
+            grantee
+        );
         Ok(())
     }
 
-    pub fn grant_role_membership(
-        &self,
-        member: &str,
-        group: &str,
-    ) -> Result<(), StorageError> {
-        let mut catalog = self.catalog.write();
-        catalog
-            .grant_role_membership(member, group)
-            .map_err(StorageError::RoleNotFound)?;
-        drop(catalog);
+    pub fn grant_role_membership(&self, member: &str, group: &str) -> Result<(), StorageError> {
+        {
+            let catalog = self.catalog.read();
+            if catalog.find_role_by_name(member).is_none() {
+                return Err(StorageError::RoleNotFound(format!(
+                    "role \"{}\" does not exist",
+                    member
+                )));
+            }
+            if catalog.find_role_by_name(group).is_none() {
+                return Err(StorageError::RoleNotFound(format!(
+                    "role \"{}\" does not exist",
+                    group
+                )));
+            }
+        }
 
+        // WAL first
         self.append_wal(&WalRecord::GrantRole {
             member: member.to_owned(),
             group: group.to_owned(),
         })?;
 
+        let mut catalog = self.catalog.write();
+        let _ = catalog.grant_role_membership(member, group);
+
         tracing::info!("GRANT role '{}' TO '{}'", group, member);
         Ok(())
     }
 
-    pub fn revoke_role_membership(
-        &self,
-        member: &str,
-        group: &str,
-    ) -> Result<(), StorageError> {
-        let mut catalog = self.catalog.write();
-        catalog
-            .revoke_role_membership(member, group)
-            .map_err(StorageError::RoleNotFound)?;
-        drop(catalog);
+    pub fn revoke_role_membership(&self, member: &str, group: &str) -> Result<(), StorageError> {
+        {
+            let catalog = self.catalog.read();
+            if catalog.find_role_by_name(member).is_none() {
+                return Err(StorageError::RoleNotFound(format!(
+                    "role \"{}\" does not exist",
+                    member
+                )));
+            }
+            if catalog.find_role_by_name(group).is_none() {
+                return Err(StorageError::RoleNotFound(format!(
+                    "role \"{}\" does not exist",
+                    group
+                )));
+            }
+        }
 
+        // WAL first
         self.append_wal(&WalRecord::RevokeRole {
             member: member.to_owned(),
             group: group.to_owned(),
         })?;
+
+        let mut catalog = self.catalog.write();
+        let _ = catalog.revoke_role_membership(member, group);
 
         tracing::info!("REVOKE role '{}' FROM '{}'", group, member);
         Ok(())
@@ -290,21 +434,19 @@ impl StorageEngine {
     // ── Table DDL ────────────────────────────────────────────────────
 
     pub fn create_table(&self, schema: TableSchema) -> Result<TableId, StorageError> {
-        let mut catalog = self.catalog.write();
-
-        if catalog.find_table(&schema.name).is_some() {
-            return Err(StorageError::TableAlreadyExists(schema.name));
+        // Validate under read lock
+        {
+            let catalog = self.catalog.read();
+            if catalog.find_table(&schema.name).is_some() {
+                return Err(StorageError::TableAlreadyExists(schema.name));
+            }
         }
 
         let table_id = schema.id;
 
-        // Dispatch by storage type.
-        // P0-1: Primary nodes are forbidden from creating COLUMNSTORE / DISK_ROWSTORE tables.
+        // Pre-validate storage type feasibility (fail before WAL write)
         match schema.storage_type {
-            StorageType::Rowstore => {
-                let table = Arc::new(MemTable::new(schema.clone()));
-                self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Rowstore(table));
-            }
+            StorageType::Rowstore => {}
             StorageType::Columnstore => {
                 #[cfg(feature = "columnstore")]
                 {
@@ -314,8 +456,6 @@ impl StorageEngine {
                             self.node_role
                         ))));
                     }
-                    let table = Arc::new(ColumnStoreTable::new(schema.clone()));
-                    self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Columnstore(table));
                 }
                 #[cfg(not(feature = "columnstore"))]
                 {
@@ -333,18 +473,82 @@ impl StorageEngine {
                             self.node_role
                         ))));
                     }
-                    let data_dir = self
-                        .data_dir
-                        .as_deref()
-                        .unwrap_or_else(|| std::path::Path::new("."));
-                    let table = Arc::new(DiskRowstoreTable::new(schema.clone(), data_dir)?);
-                    self.engine_tables.insert(table_id, crate::table_handle::TableHandle::DiskRowstore(Arc::clone(&table)));
                 }
                 #[cfg(not(feature = "disk_rowstore"))]
                 {
                     return Err(StorageError::Io(std::io::Error::other(
                         "DISK_ROWSTORE storage engine is not available in this build (feature disabled)",
                     )));
+                }
+            }
+            StorageType::LsmRowstore => {
+                #[cfg(not(feature = "lsm"))]
+                {
+                    return Err(StorageError::Io(std::io::Error::other(
+                        "LSM storage engine is not available in this build (feature disabled)",
+                    )));
+                }
+            }
+            StorageType::RocksDbRowstore => {
+                #[cfg(not(feature = "rocksdb"))]
+                {
+                    return Err(StorageError::Io(std::io::Error::other(
+                        "RocksDB storage engine is not available in this build (feature disabled)",
+                    )));
+                }
+            }
+            StorageType::RedbRowstore => {
+                #[cfg(not(feature = "redb"))]
+                {
+                    return Err(StorageError::Io(std::io::Error::other(
+                        "redb storage engine is not available in this build (feature disabled)",
+                    )));
+                }
+            }
+        }
+
+        // WAL first
+        self.append_wal(&WalRecord::CreateTable {
+            schema: schema.clone(),
+        })?;
+
+        // CDC: emit DDL event for CREATE TABLE
+        if self.ext.cdc_manager.is_enabled() {
+            let txn_id = falcon_common::types::TxnId(0);
+            self.ext
+                .cdc_manager
+                .emit_ddl(txn_id, &format!("CREATE TABLE {}", schema.name));
+        }
+
+        // Now create engine table and add to catalog
+        match schema.storage_type {
+            StorageType::Rowstore => {
+                let table = Arc::new(MemTable::new(schema.clone()));
+                self.engine_tables
+                    .insert(table_id, crate::table_handle::TableHandle::Rowstore(table));
+            }
+            StorageType::Columnstore => {
+                #[cfg(feature = "columnstore")]
+                {
+                    let table = Arc::new(ColumnStoreTable::new(schema.clone()));
+                    self.engine_tables.insert(
+                        table_id,
+                        crate::table_handle::TableHandle::Columnstore(table),
+                    );
+                }
+            }
+            StorageType::DiskRowstore => {
+                #[cfg(feature = "disk_rowstore")]
+                {
+                    let data_dir = self
+                        .data_dir
+                        .as_deref()
+                        .unwrap_or_else(|| std::path::Path::new("."));
+                    let table = Arc::new(DiskRowstoreTable::new(schema.clone(), data_dir)?);
+                    self.engine_tables.insert(
+                        table_id,
+                        crate::table_handle::TableHandle::DiskRowstore(Arc::clone(&table)),
+                    );
                 }
             }
             StorageType::LsmRowstore => {
@@ -366,13 +570,10 @@ impl StorageEngine {
                         .map_err(StorageError::Io)?,
                     );
                     let table = Arc::new(LsmTable::new(schema.clone(), engine));
-                    self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Lsm(Arc::clone(&table)));
-                }
-                #[cfg(not(feature = "lsm"))]
-                {
-                    return Err(StorageError::Io(std::io::Error::other(
-                        "LSM storage engine is not available in this build (feature disabled)",
-                    )));
+                    self.engine_tables.insert(
+                        table_id,
+                        crate::table_handle::TableHandle::Lsm(Arc::clone(&table)),
+                    );
                 }
             }
             StorageType::RocksDbRowstore => {
@@ -383,16 +584,14 @@ impl StorageEngine {
                         .as_deref()
                         .unwrap_or_else(|| std::path::Path::new("."));
                     let rdb_dir = data_dir.join(format!("rocksdb_table_{}", table_id.0));
-                    let table = Arc::new(
-                        crate::rocksdb_table::RocksDbTable::open(schema.clone(), &rdb_dir)?
+                    let table = Arc::new(crate::rocksdb_table::RocksDbTable::open(
+                        schema.clone(),
+                        &rdb_dir,
+                    )?);
+                    self.engine_tables.insert(
+                        table_id,
+                        crate::table_handle::TableHandle::RocksDb(Arc::clone(&table)),
                     );
-                    self.engine_tables.insert(table_id, crate::table_handle::TableHandle::RocksDb(Arc::clone(&table)));
-                }
-                #[cfg(not(feature = "rocksdb"))]
-                {
-                    return Err(StorageError::Io(std::io::Error::other(
-                        "RocksDB storage engine is not available in this build (feature disabled)",
-                    )));
                 }
             }
             StorageType::RedbRowstore => {
@@ -403,16 +602,14 @@ impl StorageEngine {
                         .as_deref()
                         .unwrap_or_else(|| std::path::Path::new("."));
                     let rdb_dir = data_dir.join(format!("redb_table_{}", table_id.0));
-                    let table = Arc::new(
-                        crate::redb_table::RedbTable::open(schema.clone(), &rdb_dir)?
+                    let table = Arc::new(crate::redb_table::RedbTable::open(
+                        schema.clone(),
+                        &rdb_dir,
+                    )?);
+                    self.engine_tables.insert(
+                        table_id,
+                        crate::table_handle::TableHandle::Redb(Arc::clone(&table)),
                     );
-                    self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Redb(Arc::clone(&table)));
-                }
-                #[cfg(not(feature = "redb"))]
-                {
-                    return Err(StorageError::Io(std::io::Error::other(
-                        "redb storage engine is not available in this build (feature disabled)",
-                    )));
                 }
             }
         }
@@ -426,15 +623,7 @@ impl StorageEngine {
             AccessPriority::IndexInternal,
         );
 
-        // WAL + replication observer
-        self.append_wal(&WalRecord::CreateTable { schema: schema.clone() })?;
-
-        // CDC: emit DDL event for CREATE TABLE
-        if self.ext.cdc_manager.is_enabled() {
-            let txn_id = falcon_common::types::TxnId(0);
-            self.ext.cdc_manager.emit_ddl(txn_id, &format!("CREATE TABLE {}", schema.name));
-        }
-
+        let mut catalog = self.catalog.write();
         catalog.add_table(schema);
         Ok(table_id)
     }
@@ -445,13 +634,12 @@ impl StorageEngine {
             .find_table(name)
             .ok_or(StorageError::TableNotFound(TableId(0)))?;
         let table_id = table.id;
-        // Remove from whichever storage map holds it
-        self.engine_tables.remove(&table_id);
 
         // USTM: unregister table metadata page.
         let meta_page_id = PageId(table_id.0 << 32);
         let _meta_page_id = meta_page_id; // reserved for USTM integration
 
+        // WAL first: ensure DROP is logged before in-memory removal
         self.append_wal(&WalRecord::DropTable {
             table_name: name.to_owned(),
         })?;
@@ -459,9 +647,13 @@ impl StorageEngine {
         // CDC: emit DDL event for DROP TABLE
         if self.ext.cdc_manager.is_enabled() {
             let txn_id = falcon_common::types::TxnId(0);
-            self.ext.cdc_manager.emit_ddl(txn_id, &format!("DROP TABLE {name}"));
+            self.ext
+                .cdc_manager
+                .emit_ddl(txn_id, &format!("DROP TABLE {name}"));
         }
 
+        // Remove from storage map and catalog AFTER WAL is written
+        self.engine_tables.remove(&table_id);
         catalog.drop_table(name);
         Ok(())
     }
@@ -476,17 +668,26 @@ impl StorageEngine {
         let schema = table.clone();
         drop(catalog);
 
+        // WAL first: ensure TRUNCATE is logged before in-memory replacement
+        self.append_wal(&WalRecord::TruncateTable {
+            table_name: name.to_owned(),
+        })?;
+
         // Replace with an empty table of the appropriate storage type
         match schema.storage_type {
             StorageType::Rowstore => {
                 let table = Arc::new(MemTable::new(schema));
-                self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Rowstore(table));
+                self.engine_tables
+                    .insert(table_id, crate::table_handle::TableHandle::Rowstore(table));
             }
             StorageType::Columnstore => {
                 #[cfg(feature = "columnstore")]
                 {
                     let table = Arc::new(ColumnStoreTable::new(schema));
-                    self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Columnstore(table));
+                    self.engine_tables.insert(
+                        table_id,
+                        crate::table_handle::TableHandle::Columnstore(table),
+                    );
                 }
                 #[cfg(not(feature = "columnstore"))]
                 {
@@ -503,7 +704,10 @@ impl StorageEngine {
                         .as_deref()
                         .unwrap_or_else(|| std::path::Path::new("."));
                     let table = Arc::new(DiskRowstoreTable::new(schema, data_dir)?);
-                    self.engine_tables.insert(table_id, crate::table_handle::TableHandle::DiskRowstore(Arc::clone(&table)));
+                    self.engine_tables.insert(
+                        table_id,
+                        crate::table_handle::TableHandle::DiskRowstore(Arc::clone(&table)),
+                    );
                 }
                 #[cfg(not(feature = "disk_rowstore"))]
                 {
@@ -532,7 +736,10 @@ impl StorageEngine {
                         .map_err(StorageError::Io)?,
                     );
                     let table = Arc::new(LsmTable::new(schema, engine));
-                    self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Lsm(Arc::clone(&table)));
+                    self.engine_tables.insert(
+                        table_id,
+                        crate::table_handle::TableHandle::Lsm(Arc::clone(&table)),
+                    );
                 }
                 #[cfg(not(feature = "lsm"))]
                 {
@@ -550,10 +757,12 @@ impl StorageEngine {
                         .unwrap_or_else(|| std::path::Path::new("."));
                     let rdb_dir = data_dir.join(format!("rocksdb_table_{}", table_id.0));
                     let _ = std::fs::remove_dir_all(&rdb_dir);
-                    let table = Arc::new(
-                        crate::rocksdb_table::RocksDbTable::open(schema, &rdb_dir)?
+                    let table =
+                        Arc::new(crate::rocksdb_table::RocksDbTable::open(schema, &rdb_dir)?);
+                    self.engine_tables.insert(
+                        table_id,
+                        crate::table_handle::TableHandle::RocksDb(Arc::clone(&table)),
                     );
-                    self.engine_tables.insert(table_id, crate::table_handle::TableHandle::RocksDb(Arc::clone(&table)));
                 }
                 #[cfg(not(feature = "rocksdb"))]
                 {
@@ -571,10 +780,11 @@ impl StorageEngine {
                         .unwrap_or_else(|| std::path::Path::new("."));
                     let rdb_dir = data_dir.join(format!("redb_table_{}", table_id.0));
                     let _ = std::fs::remove_dir_all(&rdb_dir);
-                    let table = Arc::new(
-                        crate::redb_table::RedbTable::open(schema, &rdb_dir)?
+                    let table = Arc::new(crate::redb_table::RedbTable::open(schema, &rdb_dir)?);
+                    self.engine_tables.insert(
+                        table_id,
+                        crate::table_handle::TableHandle::Redb(Arc::clone(&table)),
                     );
-                    self.engine_tables.insert(table_id, crate::table_handle::TableHandle::Redb(Arc::clone(&table)));
                 }
                 #[cfg(not(feature = "redb"))]
                 {
@@ -585,14 +795,12 @@ impl StorageEngine {
             }
         }
 
-        self.append_wal(&WalRecord::TruncateTable {
-            table_name: name.to_owned(),
-        })?;
-
         // CDC: emit DDL event for TRUNCATE TABLE
         if self.ext.cdc_manager.is_enabled() {
             let txn_id = falcon_common::types::TxnId(0);
-            self.ext.cdc_manager.emit_ddl(txn_id, &format!("TRUNCATE TABLE {name}"));
+            self.ext
+                .cdc_manager
+                .emit_ddl(txn_id, &format!("TRUNCATE TABLE {name}"));
         }
 
         Ok(())
@@ -606,47 +814,53 @@ impl StorageEngine {
         query_sql: &str,
         or_replace: bool,
     ) -> Result<(), StorageError> {
-        let mut catalog = self.catalog.write();
-        if let Some(_existing) = catalog.find_view(name) {
-            if or_replace {
-                catalog.drop_view(name);
-            } else {
+        {
+            let catalog = self.catalog.read();
+            if catalog.find_view(name).is_some() && !or_replace {
                 return Err(StorageError::TableAlreadyExists(format!("view '{name}'")));
             }
+            if catalog.find_table(name).is_some() {
+                return Err(StorageError::TableAlreadyExists(format!(
+                    "relation '{name}' already exists as a table"
+                )));
+            }
         }
-        // Also reject if a table with the same name exists
-        if catalog.find_table(name).is_some() {
-            return Err(StorageError::TableAlreadyExists(format!(
-                "relation '{name}' already exists as a table"
-            )));
+
+        // WAL first
+        self.append_wal(&WalRecord::CreateView {
+            name: name.to_owned(),
+            query_sql: query_sql.to_owned(),
+        })?;
+
+        let mut catalog = self.catalog.write();
+        if catalog.find_view(name).is_some() {
+            catalog.drop_view(name);
         }
         catalog.add_view(falcon_common::schema::ViewDef {
             name: name.to_owned(),
             query_sql: query_sql.to_owned(),
         });
-        drop(catalog);
-
-        self.append_wal(&WalRecord::CreateView {
-            name: name.to_owned(),
-            query_sql: query_sql.to_owned(),
-        })?;
         Ok(())
     }
 
     pub fn drop_view(&self, name: &str, if_exists: bool) -> Result<(), StorageError> {
-        let mut catalog = self.catalog.write();
-        if catalog.find_view(name).is_none() {
-            if if_exists {
-                return Ok(());
+        {
+            let catalog = self.catalog.read();
+            if catalog.find_view(name).is_none() {
+                if if_exists {
+                    return Ok(());
+                }
+                return Err(StorageError::TableNotFound(TableId(0)));
             }
-            return Err(StorageError::TableNotFound(TableId(0)));
         }
-        catalog.drop_view(name);
-        drop(catalog);
 
+        // WAL first
         self.append_wal(&WalRecord::DropView {
             name: name.to_owned(),
         })?;
+
+        let mut catalog = self.catalog.write();
+        catalog.drop_view(name);
         Ok(())
     }
 
@@ -658,39 +872,57 @@ impl StorageEngine {
         query_sql: &str,
         backing_table_id: TableId,
     ) -> Result<(), StorageError> {
-        let mut catalog = self.catalog.write();
-        if catalog.find_materialized_view(name).is_some() {
-            return Err(StorageError::TableAlreadyExists(format!("materialized view '{name}'")));
+        {
+            let catalog = self.catalog.read();
+            if catalog.find_materialized_view(name).is_some() {
+                return Err(StorageError::TableAlreadyExists(format!(
+                    "materialized view '{name}'"
+                )));
+            }
+            if catalog.find_table(name).is_some() {
+                return Err(StorageError::TableAlreadyExists(format!(
+                    "relation '{name}' already exists as a table"
+                )));
+            }
         }
-        if catalog.find_table(name).is_some() {
-            return Err(StorageError::TableAlreadyExists(format!(
-                "relation '{name}' already exists as a table"
-            )));
-        }
-        catalog.add_materialized_view(falcon_common::schema::MaterializedViewDef {
-            name: name.to_owned(),
-            query_sql: query_sql.to_owned(),
-            backing_table_id,
-        });
-        drop(catalog);
 
+        // WAL first
         self.append_wal(&WalRecord::CreateMaterializedView {
             name: name.to_owned(),
             query_sql: query_sql.to_owned(),
             backing_table_id,
         })?;
+
+        let mut catalog = self.catalog.write();
+        catalog.add_materialized_view(falcon_common::schema::MaterializedViewDef {
+            name: name.to_owned(),
+            query_sql: query_sql.to_owned(),
+            backing_table_id,
+        });
         Ok(())
     }
 
     pub fn drop_materialized_view(&self, name: &str, if_exists: bool) -> Result<(), StorageError> {
+        let backing_id = {
+            let catalog = self.catalog.read();
+            let mv = catalog.find_materialized_view(name);
+            if mv.is_none() {
+                if if_exists {
+                    return Ok(());
+                }
+                return Err(StorageError::TableNotFound(TableId(0)));
+            }
+            mv.unwrap().backing_table_id
+        };
+
+        // WAL first
+        self.append_wal(&WalRecord::DropMaterializedView {
+            name: name.to_owned(),
+        })?;
+
         let mut catalog = self.catalog.write();
-        let mv = catalog.find_materialized_view(name);
-        if mv.is_none() {
-            if if_exists { return Ok(()); }
-            return Err(StorageError::TableNotFound(TableId(0)));
-        }
-        let backing_id = mv.unwrap().backing_table_id;
-        let backing_name = catalog.list_tables()
+        let backing_name = catalog
+            .list_tables()
             .iter()
             .find(|t| t.id == backing_id)
             .map(|t| t.name.clone());
@@ -701,10 +933,6 @@ impl StorageEngine {
         drop(catalog);
 
         self.engine_tables.remove(&backing_id);
-
-        self.append_wal(&WalRecord::DropMaterializedView {
-            name: name.to_owned(),
-        })?;
         Ok(())
     }
 
@@ -716,18 +944,36 @@ impl StorageEngine {
         col: falcon_common::schema::ColumnDef,
     ) -> Result<u64, StorageError> {
         let has_default = col.default_value.is_some();
-        let mut catalog = self.catalog.write();
-        let schema = catalog
-            .find_table_mut(table_name)
-            .ok_or(StorageError::TableNotFound(TableId(0)))?;
-        let table_id = schema.id;
-        // Assign proper column id
-        let new_id = falcon_common::types::ColumnId(schema.columns.len() as u32);
-        let mut new_col = col.clone();
-        new_col.id = new_id;
-        let col_idx = schema.columns.len();
-        schema.columns.push(new_col);
-        drop(catalog);
+        // Validate and compute metadata under read lock first
+        let (table_id, new_id, col_idx) = {
+            let catalog = self.catalog.read();
+            let schema = catalog
+                .find_table(table_name)
+                .ok_or(StorageError::TableNotFound(TableId(0)))?;
+            let table_id = schema.id;
+            let new_id = falcon_common::types::ColumnId(schema.columns.len() as u32);
+            let col_idx = schema.columns.len();
+            (table_id, new_id, col_idx)
+        };
+
+        // WAL first: ensure ADD COLUMN is logged before catalog mutation
+        self.append_wal(&WalRecord::AlterTable {
+            table_name: table_name.to_owned(),
+            op: crate::wal::AlterTableOp::AddColumn {
+                column: col.clone(),
+            },
+        })?;
+
+        // Now modify catalog
+        {
+            let mut catalog = self.catalog.write();
+            let schema = catalog
+                .find_table_mut(table_name)
+                .ok_or(StorageError::TableNotFound(TableId(0)))?;
+            let mut new_col = col.clone();
+            new_col.id = new_id;
+            schema.columns.push(new_col);
+        }
 
         let ddl_id = self.online_ddl.register(
             table_id,
@@ -739,15 +985,13 @@ impl StorageEngine {
         );
         self.online_ddl.start(ddl_id);
 
-        self.append_wal(&WalRecord::AlterTable {
-            table_name: table_name.to_owned(),
-            op: crate::wal::AlterTableOp::AddColumn { column: col.clone() },
-        })?;
-
         // CDC: emit DDL event for ALTER TABLE ADD COLUMN
         if self.ext.cdc_manager.is_enabled() {
             let txn_id = falcon_common::types::TxnId(0);
-            self.ext.cdc_manager.emit_ddl(txn_id, &format!("ALTER TABLE {table_name} ADD COLUMN {}", col.name));
+            self.ext.cdc_manager.emit_ddl(
+                txn_id,
+                &format!("ALTER TABLE {table_name} ADD COLUMN {}", col.name),
+            );
         }
 
         // Backfill existing rows with default value if needed.
@@ -762,7 +1006,9 @@ impl StorageEngine {
             if let Some(executor) = &self.ddl_executor {
                 // ── Async backfill path ──
                 // Capture what the closure needs; it will run on a worker thread.
-                let memtable_arc = self.engine_tables.get(&table_id)
+                let memtable_arc = self
+                    .engine_tables
+                    .get(&table_id)
                     .and_then(|h| h.as_rowstore().cloned());
                 let Some(memtable_arc) = memtable_arc else {
                     // Not a rowstore — skip async backfill
@@ -777,8 +1023,8 @@ impl StorageEngine {
                 let total = memtable_arc.data.len() as u64;
                 self.online_ddl.begin_backfill(ddl_id, total);
 
-                let backfill_fn: crate::online_ddl::BackfillFn = Box::new(
-                    move |_ddl_id, cancelled| {
+                let backfill_fn: crate::online_ddl::BackfillFn =
+                    Box::new(move |_ddl_id, cancelled| {
                         let memtable = &memtable_arc;
                         let mut batch_count = 0u64;
                         for entry in &memtable.data {
@@ -793,16 +1039,11 @@ impl StorageEngine {
                                     values.push(falcon_common::datum::Datum::Null);
                                 }
                                 values[col_idx] = default_val.clone();
-                                chain.replace_latest(
-                                    falcon_common::datum::OwnedRow::new(values),
-                                );
+                                chain.replace_latest(falcon_common::datum::OwnedRow::new(values));
                             }
                             batch_count += 1;
-                            if batch_count % BACKFILL_BATCH_SIZE as u64 == 0 {
-                                online_ddl.record_progress(
-                                    _ddl_id,
-                                    BACKFILL_BATCH_SIZE as u64,
-                                );
+                            if batch_count.is_multiple_of(BACKFILL_BATCH_SIZE as u64) {
+                                online_ddl.record_progress(_ddl_id, BACKFILL_BATCH_SIZE as u64);
                                 std::thread::yield_now();
                             }
                         }
@@ -811,8 +1052,7 @@ impl StorageEngine {
                             online_ddl.record_progress(_ddl_id, remainder);
                         }
                         Ok(())
-                    },
-                );
+                    });
 
                 let mgr_arc = self.online_ddl.clone();
                 match executor.submit(ddl_id, mgr_arc, backfill_fn) {
@@ -838,35 +1078,43 @@ impl StorageEngine {
 
             // ── Synchronous backfill path (fallback) ──
             if let Some(handle) = self.engine_tables.get(&table_id) {
-              if let Some(memtable) = handle.as_rowstore() {
-                let default_val = col
-                    .default_value
-                    .unwrap_or(falcon_common::datum::Datum::Null);
-                let total = memtable.data.len() as u64;
-                self.online_ddl.begin_backfill(ddl_id, total);
-                let mut batch_count = 0u64;
-                for entry in &memtable.data {
-                    let chain = entry.value();
-                    if let Some(row) = chain.read_latest() {
-                        let mut values = row.values.clone();
-                        while values.len() <= col_idx {
-                            values.push(falcon_common::datum::Datum::Null);
+                if let Some(memtable) = handle.as_rowstore() {
+                    let default_val = col
+                        .default_value
+                        .unwrap_or(falcon_common::datum::Datum::Null);
+                    let total = memtable.data.len() as u64;
+                    self.online_ddl.begin_backfill(ddl_id, total);
+                    let mut batch_count = 0u64;
+                    for entry in &memtable.data {
+                        let pk = entry.key().clone();
+                        let chain = entry.value();
+                        if let Some(row) = chain.read_latest() {
+                            let mut values = row.values.clone();
+                            while values.len() <= col_idx {
+                                values.push(falcon_common::datum::Datum::Null);
+                            }
+                            values[col_idx] = default_val.clone();
+                            let new_row = falcon_common::datum::OwnedRow::new(values);
+                            // WAL the backfill so crash recovery replays it.
+                            let _ = self.append_wal(&WalRecord::DdlBackfillUpdate {
+                                table_id,
+                                pk: pk.clone(),
+                                new_row: new_row.clone(),
+                            });
+                            chain.replace_latest(new_row);
                         }
-                        values[col_idx] = default_val.clone();
-                        chain.replace_latest(falcon_common::datum::OwnedRow::new(values));
+                        batch_count += 1;
+                        if batch_count.is_multiple_of(BACKFILL_BATCH_SIZE as u64) {
+                            self.online_ddl
+                                .record_progress(ddl_id, BACKFILL_BATCH_SIZE as u64);
+                            std::thread::yield_now();
+                        }
                     }
-                    batch_count += 1;
-                    if batch_count.is_multiple_of(BACKFILL_BATCH_SIZE as u64) {
-                        self.online_ddl
-                            .record_progress(ddl_id, BACKFILL_BATCH_SIZE as u64);
-                        std::thread::yield_now();
+                    let remainder = batch_count % BACKFILL_BATCH_SIZE as u64;
+                    if remainder > 0 {
+                        self.online_ddl.record_progress(ddl_id, remainder);
                     }
                 }
-                let remainder = batch_count % BACKFILL_BATCH_SIZE as u64;
-                if remainder > 0 {
-                    self.online_ddl.record_progress(ddl_id, remainder);
-                }
-              }
             }
         }
 
@@ -879,71 +1127,170 @@ impl StorageEngine {
         table_name: &str,
         col_name: &str,
     ) -> Result<u64, StorageError> {
-        let mut catalog = self.catalog.write();
-        let schema = catalog
-            .find_table_mut(table_name)
-            .ok_or(StorageError::TableNotFound(TableId(0)))?;
-        let table_id = schema.id;
-        let lower = col_name.to_lowercase();
-        let idx = schema
-            .columns
-            .iter()
-            .position(|c| c.name.to_lowercase() == lower)
-            .ok_or_else(|| {
-                StorageError::Serialization(format!("Column not found: {col_name}"))
-            })?;
-        // Don't allow dropping PK columns
-        if schema.primary_key_columns.contains(&idx) {
-            return Err(StorageError::Serialization(
-                "Cannot drop primary key column".into(),
-            ));
-        }
-        schema.columns.remove(idx);
-
-        let remap = |col: usize| -> Option<usize> {
-            if col == idx { None } else if col > idx { Some(col - 1) } else { Some(col) }
+        // Validate under read lock
+        let (table_id, idx) = {
+            let catalog = self.catalog.read();
+            let schema = catalog
+                .find_table(table_name)
+                .ok_or(StorageError::TableNotFound(TableId(0)))?;
+            let lower = col_name.to_lowercase();
+            let idx = schema
+                .columns
+                .iter()
+                .position(|c| c.name.to_lowercase() == lower)
+                .ok_or_else(|| {
+                    StorageError::Serialization(format!("Column not found: {col_name}"))
+                })?;
+            if schema.primary_key_columns.contains(&idx) {
+                return Err(StorageError::Serialization(
+                    "Cannot drop primary key column".into(),
+                ));
+            }
+            (schema.id, idx)
         };
 
-        // Update PK indices
-        schema.primary_key_columns = schema.primary_key_columns
-            .iter().filter_map(|&c| remap(c)).collect();
+        // WAL first
+        self.append_wal(&WalRecord::AlterTable {
+            table_name: table_name.to_owned(),
+            op: crate::wal::AlterTableOp::DropColumn {
+                column_name: col_name.to_owned(),
+            },
+        })?;
 
-        // Update UNIQUE constraint column groups; drop constraints that referenced the dropped column
-        schema.unique_constraints = schema.unique_constraints
-            .drain(..)
-            .filter_map(|grp| {
-                let remapped: Vec<usize> = grp.iter().filter_map(|&c| remap(c)).collect();
-                if remapped.is_empty() { None } else { Some(remapped) }
+        // Now modify catalog
+        {
+            let mut catalog = self.catalog.write();
+            let schema = catalog
+                .find_table_mut(table_name)
+                .ok_or(StorageError::TableNotFound(TableId(0)))?;
+            schema.columns.remove(idx);
+
+            let remap = |col: usize| -> Option<usize> {
+                if col == idx {
+                    None
+                } else if col > idx {
+                    Some(col - 1)
+                } else {
+                    Some(col)
+                }
+            };
+
+            schema.primary_key_columns = schema
+                .primary_key_columns
+                .iter()
+                .filter_map(|&c| remap(c))
+                .collect();
+
+            schema.unique_constraints = schema
+                .unique_constraints
+                .drain(..)
+                .filter_map(|grp| {
+                    let remapped: Vec<usize> = grp.iter().filter_map(|&c| remap(c)).collect();
+                    if remapped.is_empty() {
+                        None
+                    } else {
+                        Some(remapped)
+                    }
+                })
+                .collect();
+
+            schema.foreign_keys = schema
+                .foreign_keys
+                .drain(..)
+                .filter_map(|mut fk| {
+                    let remapped: Vec<usize> =
+                        fk.columns.iter().filter_map(|&c| remap(c)).collect();
+                    if remapped.is_empty() {
+                        return None;
+                    }
+                    fk.columns = remapped;
+                    Some(fk)
+                })
+                .collect();
+
+            schema.shard_key = schema.shard_key.iter().filter_map(|&c| remap(c)).collect();
+
+            schema.next_serial_values = schema
+                .next_serial_values
+                .drain()
+                .filter_map(|(k, v)| remap(k).map(|nk| (nk, v)))
+                .collect();
+
+            schema.dynamic_defaults = schema
+                .dynamic_defaults
+                .drain()
+                .filter_map(|(k, v)| remap(k).map(|nk| (nk, v)))
+                .collect();
+        }
+
+        let remap = |col: usize| -> Option<usize> {
+            if col == idx {
+                None
+            } else if col > idx {
+                Some(col - 1)
+            } else {
+                Some(col)
+            }
+        };
+
+        // Remap/remove secondary indexes on the memtable
+        if let Some(handle) = self.engine_tables.get(&table_id) {
+            if let Some(memtable) = handle.as_rowstore() {
+                let mut indexes = memtable.secondary_indexes.write();
+                indexes.retain_mut(|si| {
+                    if !si.column_indices.is_empty() {
+                        // Composite index: remap all column indices
+                        let remapped: Vec<usize> =
+                            si.column_indices.iter().filter_map(|&c| remap(c)).collect();
+                        if remapped.is_empty() {
+                            return false; // drop index
+                        }
+                        si.column_indices = remapped;
+                        si.column_idx = si.column_indices[0];
+                    } else {
+                        // Single-column index
+                        match remap(si.column_idx) {
+                            Some(new_idx) => si.column_idx = new_idx,
+                            None => return false, // drop index
+                        }
+                    }
+                    // Remap covering columns too
+                    si.covering_columns = si
+                        .covering_columns
+                        .iter()
+                        .filter_map(|&c| remap(c))
+                        .collect();
+                    true
+                });
+                memtable
+                    .has_secondary_idx
+                    .store(!indexes.is_empty(), std::sync::atomic::Ordering::Release);
+            }
+        }
+
+        // Remap index_registry entries for this table
+        let stale_keys: Vec<String> = self
+            .index_registry
+            .iter()
+            .filter(|e| e.value().table_id == table_id)
+            .filter_map(|e| {
+                if remap(e.value().column_idx).is_none() {
+                    Some(e.key().clone())
+                } else {
+                    None
+                }
             })
             .collect();
-
-        // Update FK local column indices; drop FKs that referenced the dropped column
-        schema.foreign_keys = schema.foreign_keys
-            .drain(..)
-            .filter_map(|mut fk| {
-                let remapped: Vec<usize> = fk.columns.iter().filter_map(|&c| remap(c)).collect();
-                if remapped.is_empty() { return None; }
-                fk.columns = remapped;
-                Some(fk)
-            })
-            .collect();
-
-        // Update shard key column indices
-        schema.shard_key = schema.shard_key.iter().filter_map(|&c| remap(c)).collect();
-
-        // Remap next_serial_values keys
-        schema.next_serial_values = schema.next_serial_values
-            .drain()
-            .filter_map(|(k, v)| remap(k).map(|nk| (nk, v)))
-            .collect();
-
-        // Remap dynamic_defaults keys
-        schema.dynamic_defaults = schema.dynamic_defaults
-            .drain()
-            .filter_map(|(k, v)| remap(k).map(|nk| (nk, v)))
-            .collect();
-
-        drop(catalog);
+        for key in &stale_keys {
+            self.index_registry.remove(key);
+        }
+        for mut entry in self.index_registry.iter_mut() {
+            if entry.value().table_id == table_id {
+                if let Some(new_idx) = remap(entry.value().column_idx) {
+                    entry.value_mut().column_idx = new_idx;
+                }
+            }
+        }
 
         let ddl_id = self.online_ddl.register(
             table_id,
@@ -954,15 +1301,13 @@ impl StorageEngine {
         );
         self.online_ddl.start(ddl_id);
 
-        self.append_wal(&WalRecord::AlterTable {
-            table_name: table_name.to_owned(),
-            op: crate::wal::AlterTableOp::DropColumn { column_name: col_name.to_owned() },
-        })?;
-
         // CDC: emit DDL event for ALTER TABLE DROP COLUMN
         if self.ext.cdc_manager.is_enabled() {
             let txn_id = falcon_common::types::TxnId(0);
-            self.ext.cdc_manager.emit_ddl(txn_id, &format!("ALTER TABLE {table_name} DROP COLUMN {col_name}"));
+            self.ext.cdc_manager.emit_ddl(
+                txn_id,
+                &format!("ALTER TABLE {table_name} DROP COLUMN {col_name}"),
+            );
         }
 
         self.online_ddl.complete(ddl_id);
@@ -975,21 +1320,48 @@ impl StorageEngine {
         old_name: &str,
         new_name: &str,
     ) -> Result<u64, StorageError> {
-        let mut catalog = self.catalog.write();
-        let schema = catalog
-            .find_table_mut(table_name)
-            .ok_or(StorageError::TableNotFound(TableId(0)))?;
-        let table_id = schema.id;
-        let lower = old_name.to_lowercase();
-        let col = schema
-            .columns
-            .iter_mut()
-            .find(|c| c.name.to_lowercase() == lower)
-            .ok_or_else(|| {
-                StorageError::Serialization(format!("Column not found: {old_name}"))
-            })?;
-        col.name = new_name.to_owned();
-        drop(catalog);
+        // Validate under read lock
+        let table_id = {
+            let catalog = self.catalog.read();
+            let schema = catalog
+                .find_table(table_name)
+                .ok_or(StorageError::TableNotFound(TableId(0)))?;
+            let lower = old_name.to_lowercase();
+            if !schema
+                .columns
+                .iter()
+                .any(|c| c.name.to_lowercase() == lower)
+            {
+                return Err(StorageError::Serialization(format!(
+                    "Column not found: {old_name}"
+                )));
+            }
+            schema.id
+        };
+
+        // WAL first
+        self.append_wal(&WalRecord::AlterTable {
+            table_name: table_name.to_owned(),
+            op: crate::wal::AlterTableOp::RenameColumn {
+                old_name: old_name.to_owned(),
+                new_name: new_name.to_owned(),
+            },
+        })?;
+
+        // Now modify catalog
+        {
+            let mut catalog = self.catalog.write();
+            if let Some(schema) = catalog.find_table_mut(table_name) {
+                let lower = old_name.to_lowercase();
+                if let Some(col) = schema
+                    .columns
+                    .iter_mut()
+                    .find(|c| c.name.to_lowercase() == lower)
+                {
+                    col.name = new_name.to_owned();
+                }
+            }
+        }
 
         let ddl_id = self.online_ddl.register(
             table_id,
@@ -999,18 +1371,13 @@ impl StorageEngine {
         );
         self.online_ddl.start(ddl_id);
 
-        self.append_wal(&WalRecord::AlterTable {
-            table_name: table_name.to_owned(),
-            op: crate::wal::AlterTableOp::RenameColumn {
-                old_name: old_name.to_owned(),
-                new_name: new_name.to_owned(),
-            },
-        })?;
-
         // CDC: emit DDL event for ALTER TABLE RENAME COLUMN
         if self.ext.cdc_manager.is_enabled() {
             let txn_id = falcon_common::types::TxnId(0);
-            self.ext.cdc_manager.emit_ddl(txn_id, &format!("ALTER TABLE {table_name} RENAME COLUMN {old_name} TO {new_name}"));
+            self.ext.cdc_manager.emit_ddl(
+                txn_id,
+                &format!("ALTER TABLE {table_name} RENAME COLUMN {old_name} TO {new_name}"),
+            );
         }
 
         self.online_ddl.complete(ddl_id);
@@ -1018,17 +1385,31 @@ impl StorageEngine {
     }
 
     pub fn alter_table_rename(&self, old_name: &str, new_name: &str) -> Result<u64, StorageError> {
-        let mut catalog = self.catalog.write();
-        // Check new name doesn't already exist
-        if catalog.find_table(new_name).is_some() {
-            return Err(StorageError::TableAlreadyExists(new_name.to_owned()));
+        // Validate under read lock
+        let table_id = {
+            let catalog = self.catalog.read();
+            if catalog.find_table(new_name).is_some() {
+                return Err(StorageError::TableAlreadyExists(new_name.to_owned()));
+            }
+            catalog
+                .find_table(old_name)
+                .ok_or(StorageError::TableNotFound(TableId(0)))?
+                .id
+        };
+
+        // WAL first
+        self.append_wal(&WalRecord::AlterTable {
+            table_name: old_name.to_owned(),
+            op: crate::wal::AlterTableOp::RenameTable {
+                new_name: new_name.to_owned(),
+            },
+        })?;
+
+        // Now modify catalog
+        {
+            let mut catalog = self.catalog.write();
+            catalog.rename_table(old_name, new_name);
         }
-        let table_id = catalog
-            .find_table(old_name)
-            .ok_or(StorageError::TableNotFound(TableId(0)))?
-            .id;
-        catalog.rename_table(old_name, new_name);
-        drop(catalog);
 
         let ddl_id = self.online_ddl.register(
             table_id,
@@ -1038,15 +1419,13 @@ impl StorageEngine {
         );
         self.online_ddl.start(ddl_id);
 
-        self.append_wal(&WalRecord::AlterTable {
-            table_name: old_name.to_owned(),
-            op: crate::wal::AlterTableOp::RenameTable { new_name: new_name.to_owned() },
-        })?;
-
         // CDC: emit DDL event for ALTER TABLE RENAME
         if self.ext.cdc_manager.is_enabled() {
             let txn_id = falcon_common::types::TxnId(0);
-            self.ext.cdc_manager.emit_ddl(txn_id, &format!("ALTER TABLE {old_name} RENAME TO {new_name}"));
+            self.ext.cdc_manager.emit_ddl(
+                txn_id,
+                &format!("ALTER TABLE {old_name} RENAME TO {new_name}"),
+            );
         }
 
         self.online_ddl.complete(ddl_id);
@@ -1061,75 +1440,87 @@ impl StorageEngine {
         col_name: &str,
         new_type: falcon_common::types::DataType,
     ) -> Result<u64, StorageError> {
-        let mut catalog = self.catalog.write();
-        let schema = catalog
-            .find_table_mut(table_name)
-            .ok_or(StorageError::TableNotFound(TableId(0)))?;
-        let lower = col_name.to_lowercase();
-        let col_idx = schema
-            .columns
-            .iter()
-            .position(|c| c.name.to_lowercase() == lower)
-            .ok_or_else(|| {
-                StorageError::Serialization(format!("Column not found: {col_name}"))
-            })?;
-        let table_id = schema.id;
+        // Validate under read lock
+        let (table_id, col_idx) = {
+            let catalog = self.catalog.read();
+            let schema = catalog
+                .find_table(table_name)
+                .ok_or(StorageError::TableNotFound(TableId(0)))?;
+            let lower = col_name.to_lowercase();
+            let col_idx = schema
+                .columns
+                .iter()
+                .position(|c| c.name.to_lowercase() == lower)
+                .ok_or_else(|| {
+                    StorageError::Serialization(format!("Column not found: {col_name}"))
+                })?;
+            (schema.id, col_idx)
+        };
         let cast_target = datatype_to_cast_target(&new_type);
-        schema.columns[col_idx].data_type = new_type.clone();
-        drop(catalog);
+
+        // WAL first
+        self.append_wal(&WalRecord::AlterTable {
+            table_name: table_name.to_owned(),
+            op: crate::wal::AlterTableOp::ChangeColumnType {
+                column_name: col_name.to_owned(),
+                new_type: new_type.clone(),
+            },
+        })?;
+
+        // Now modify catalog
+        {
+            let mut catalog = self.catalog.write();
+            if let Some(schema) = catalog.find_table_mut(table_name) {
+                if col_idx < schema.columns.len() {
+                    schema.columns[col_idx].data_type = new_type;
+                }
+            }
+        }
 
         let ddl_id = self.online_ddl.register(
             table_id,
             DdlOpKind::ChangeColumnType {
                 table_name: table_name.to_owned(),
                 column_name: col_name.to_owned(),
-                new_type: format!("{new_type}"),
+                new_type: cast_target.to_string(),
             },
         );
         self.online_ddl.start(ddl_id);
 
-        self.append_wal(&WalRecord::AlterTable {
-            table_name: table_name.to_owned(),
-            op: crate::wal::AlterTableOp::ChangeColumnType {
-                column_name: col_name.to_owned(),
-                new_type,
-            },
-        })?;
-
         // Convert existing row data in batches
         if let Some(handle) = self.engine_tables.get(&table_id) {
-          if let Some(memtable) = handle.as_rowstore() {
-            let total = memtable.data.len() as u64;
-            self.online_ddl.begin_backfill(ddl_id, total);
-            let mut batch_count = 0u64;
-            for entry in &memtable.data {
-                let chain = entry.value();
-                if let Some(row) = chain.read_latest() {
-                    let mut values = row.values.clone();
-                    if col_idx < values.len() && !values[col_idx].is_null() {
-                        match crate::eval_cast_datum(values[col_idx].clone(), &cast_target) {
-                            Ok(casted) => values[col_idx] = casted,
-                            Err(e) => {
-                                let err_msg = format!("Type conversion failed: {e}");
-                                self.online_ddl.fail(ddl_id, err_msg.clone());
-                                return Err(StorageError::Serialization(err_msg));
+            if let Some(memtable) = handle.as_rowstore() {
+                let total = memtable.data.len() as u64;
+                self.online_ddl.begin_backfill(ddl_id, total);
+                let mut batch_count = 0u64;
+                for entry in &memtable.data {
+                    let chain = entry.value();
+                    if let Some(row) = chain.read_latest() {
+                        let mut values = row.values.clone();
+                        if col_idx < values.len() && !values[col_idx].is_null() {
+                            match crate::eval_cast_datum(values[col_idx].clone(), &cast_target) {
+                                Ok(casted) => values[col_idx] = casted,
+                                Err(e) => {
+                                    let err_msg = format!("Type conversion failed: {e}");
+                                    self.online_ddl.fail(ddl_id, err_msg.clone());
+                                    return Err(StorageError::Serialization(err_msg));
+                                }
                             }
                         }
+                        chain.replace_latest(falcon_common::datum::OwnedRow::new(values));
                     }
-                    chain.replace_latest(falcon_common::datum::OwnedRow::new(values));
+                    batch_count += 1;
+                    if batch_count.is_multiple_of(BACKFILL_BATCH_SIZE as u64) {
+                        self.online_ddl
+                            .record_progress(ddl_id, BACKFILL_BATCH_SIZE as u64);
+                        std::thread::yield_now();
+                    }
                 }
-                batch_count += 1;
-                if batch_count.is_multiple_of(BACKFILL_BATCH_SIZE as u64) {
-                    self.online_ddl
-                        .record_progress(ddl_id, BACKFILL_BATCH_SIZE as u64);
-                    std::thread::yield_now();
+                let remainder = batch_count % BACKFILL_BATCH_SIZE as u64;
+                if remainder > 0 {
+                    self.online_ddl.record_progress(ddl_id, remainder);
                 }
             }
-            let remainder = batch_count % BACKFILL_BATCH_SIZE as u64;
-            if remainder > 0 {
-                self.online_ddl.record_progress(ddl_id, remainder);
-            }
-          }
         }
 
         self.online_ddl.complete(ddl_id);
@@ -1142,21 +1533,45 @@ impl StorageEngine {
         table_name: &str,
         col_name: &str,
     ) -> Result<u64, StorageError> {
-        let mut catalog = self.catalog.write();
-        let schema = catalog
-            .find_table_mut(table_name)
-            .ok_or(StorageError::TableNotFound(TableId(0)))?;
-        let table_id = schema.id;
-        let lower = col_name.to_lowercase();
-        let col = schema
-            .columns
-            .iter_mut()
-            .find(|c| c.name.to_lowercase() == lower)
-            .ok_or_else(|| {
-                StorageError::Serialization(format!("Column not found: {col_name}"))
-            })?;
-        col.nullable = false;
-        drop(catalog);
+        let table_id = {
+            let catalog = self.catalog.read();
+            let schema = catalog
+                .find_table(table_name)
+                .ok_or(StorageError::TableNotFound(TableId(0)))?;
+            let lower = col_name.to_lowercase();
+            if !schema
+                .columns
+                .iter()
+                .any(|c| c.name.to_lowercase() == lower)
+            {
+                return Err(StorageError::Serialization(format!(
+                    "Column not found: {col_name}"
+                )));
+            }
+            schema.id
+        };
+
+        // WAL first
+        self.append_wal(&WalRecord::AlterTable {
+            table_name: table_name.to_owned(),
+            op: crate::wal::AlterTableOp::SetNotNull {
+                column_name: col_name.to_owned(),
+            },
+        })?;
+
+        {
+            let mut catalog = self.catalog.write();
+            if let Some(schema) = catalog.find_table_mut(table_name) {
+                let lower = col_name.to_lowercase();
+                if let Some(col) = schema
+                    .columns
+                    .iter_mut()
+                    .find(|c| c.name.to_lowercase() == lower)
+                {
+                    col.nullable = false;
+                }
+            }
+        }
 
         let ddl_id = self.online_ddl.register(
             table_id,
@@ -1165,14 +1580,6 @@ impl StorageEngine {
             },
         );
         self.online_ddl.start(ddl_id);
-
-        self.append_wal(&WalRecord::AlterTable {
-            table_name: table_name.to_owned(),
-            op: crate::wal::AlterTableOp::SetNotNull {
-                column_name: col_name.to_owned(),
-            },
-        })?;
-
         self.online_ddl.complete(ddl_id);
         Ok(ddl_id)
     }
@@ -1183,21 +1590,45 @@ impl StorageEngine {
         table_name: &str,
         col_name: &str,
     ) -> Result<u64, StorageError> {
-        let mut catalog = self.catalog.write();
-        let schema = catalog
-            .find_table_mut(table_name)
-            .ok_or(StorageError::TableNotFound(TableId(0)))?;
-        let table_id = schema.id;
-        let lower = col_name.to_lowercase();
-        let col = schema
-            .columns
-            .iter_mut()
-            .find(|c| c.name.to_lowercase() == lower)
-            .ok_or_else(|| {
-                StorageError::Serialization(format!("Column not found: {col_name}"))
-            })?;
-        col.nullable = true;
-        drop(catalog);
+        let table_id = {
+            let catalog = self.catalog.read();
+            let schema = catalog
+                .find_table(table_name)
+                .ok_or(StorageError::TableNotFound(TableId(0)))?;
+            let lower = col_name.to_lowercase();
+            if !schema
+                .columns
+                .iter()
+                .any(|c| c.name.to_lowercase() == lower)
+            {
+                return Err(StorageError::Serialization(format!(
+                    "Column not found: {col_name}"
+                )));
+            }
+            schema.id
+        };
+
+        // WAL first
+        self.append_wal(&WalRecord::AlterTable {
+            table_name: table_name.to_owned(),
+            op: crate::wal::AlterTableOp::DropNotNull {
+                column_name: col_name.to_owned(),
+            },
+        })?;
+
+        {
+            let mut catalog = self.catalog.write();
+            if let Some(schema) = catalog.find_table_mut(table_name) {
+                let lower = col_name.to_lowercase();
+                if let Some(col) = schema
+                    .columns
+                    .iter_mut()
+                    .find(|c| c.name.to_lowercase() == lower)
+                {
+                    col.nullable = true;
+                }
+            }
+        }
 
         let ddl_id = self.online_ddl.register(
             table_id,
@@ -1206,14 +1637,6 @@ impl StorageEngine {
             },
         );
         self.online_ddl.start(ddl_id);
-
-        self.append_wal(&WalRecord::AlterTable {
-            table_name: table_name.to_owned(),
-            op: crate::wal::AlterTableOp::DropNotNull {
-                column_name: col_name.to_owned(),
-            },
-        })?;
-
         self.online_ddl.complete(ddl_id);
         Ok(ddl_id)
     }
@@ -1225,21 +1648,46 @@ impl StorageEngine {
         col_name: &str,
         default_val: falcon_common::datum::Datum,
     ) -> Result<u64, StorageError> {
-        let mut catalog = self.catalog.write();
-        let schema = catalog
-            .find_table_mut(table_name)
-            .ok_or(StorageError::TableNotFound(TableId(0)))?;
-        let table_id = schema.id;
-        let lower = col_name.to_lowercase();
-        let col = schema
-            .columns
-            .iter_mut()
-            .find(|c| c.name.to_lowercase() == lower)
-            .ok_or_else(|| {
-                StorageError::Serialization(format!("Column not found: {col_name}"))
-            })?;
-        col.default_value = Some(default_val);
-        drop(catalog);
+        let table_id = {
+            let catalog = self.catalog.read();
+            let schema = catalog
+                .find_table(table_name)
+                .ok_or(StorageError::TableNotFound(TableId(0)))?;
+            let lower = col_name.to_lowercase();
+            if !schema
+                .columns
+                .iter()
+                .any(|c| c.name.to_lowercase() == lower)
+            {
+                return Err(StorageError::Serialization(format!(
+                    "Column not found: {col_name}"
+                )));
+            }
+            schema.id
+        };
+
+        // WAL first
+        self.append_wal(&WalRecord::AlterTable {
+            table_name: table_name.to_owned(),
+            op: crate::wal::AlterTableOp::SetDefault {
+                column_name: col_name.to_owned(),
+                default_value: default_val.clone(),
+            },
+        })?;
+
+        {
+            let mut catalog = self.catalog.write();
+            if let Some(schema) = catalog.find_table_mut(table_name) {
+                let lower = col_name.to_lowercase();
+                if let Some(col) = schema
+                    .columns
+                    .iter_mut()
+                    .find(|c| c.name.to_lowercase() == lower)
+                {
+                    col.default_value = Some(default_val);
+                }
+            }
+        }
 
         let ddl_id = self.online_ddl.register(
             table_id,
@@ -1258,26 +1706,282 @@ impl StorageEngine {
         table_name: &str,
         col_name: &str,
     ) -> Result<u64, StorageError> {
-        let mut catalog = self.catalog.write();
-        let schema = catalog
-            .find_table_mut(table_name)
-            .ok_or(StorageError::TableNotFound(TableId(0)))?;
-        let table_id = schema.id;
-        let lower = col_name.to_lowercase();
-        let col = schema
-            .columns
-            .iter_mut()
-            .find(|c| c.name.to_lowercase() == lower)
-            .ok_or_else(|| {
-                StorageError::Serialization(format!("Column not found: {col_name}"))
-            })?;
-        col.default_value = None;
-        drop(catalog);
+        let table_id = {
+            let catalog = self.catalog.read();
+            let schema = catalog
+                .find_table(table_name)
+                .ok_or(StorageError::TableNotFound(TableId(0)))?;
+            let lower = col_name.to_lowercase();
+            if !schema
+                .columns
+                .iter()
+                .any(|c| c.name.to_lowercase() == lower)
+            {
+                return Err(StorageError::Serialization(format!(
+                    "Column not found: {col_name}"
+                )));
+            }
+            schema.id
+        };
+
+        // WAL first
+        self.append_wal(&WalRecord::AlterTable {
+            table_name: table_name.to_owned(),
+            op: crate::wal::AlterTableOp::DropDefault {
+                column_name: col_name.to_owned(),
+            },
+        })?;
+
+        {
+            let mut catalog = self.catalog.write();
+            if let Some(schema) = catalog.find_table_mut(table_name) {
+                let lower = col_name.to_lowercase();
+                if let Some(col) = schema
+                    .columns
+                    .iter_mut()
+                    .find(|c| c.name.to_lowercase() == lower)
+                {
+                    col.default_value = None;
+                }
+            }
+        }
 
         let ddl_id = self.online_ddl.register(
             table_id,
             DdlOpKind::MetadataOnly {
                 description: format!("DROP DEFAULT {table_name}.{col_name}"),
+            },
+        );
+        self.online_ddl.start(ddl_id);
+        self.online_ddl.complete(ddl_id);
+        Ok(ddl_id)
+    }
+
+    /// Add a column with a dynamic default (NOW(), CURRENT_DATE, NEXTVAL, etc.).
+    pub fn alter_table_add_column_dynamic(
+        &self,
+        table_name: &str,
+        col: falcon_common::schema::ColumnDef,
+        dynamic_default: falcon_common::schema::DefaultFn,
+    ) -> Result<u64, StorageError> {
+        let (table_id, new_id) = {
+            let catalog = self.catalog.read();
+            let schema = catalog
+                .find_table(table_name)
+                .ok_or(StorageError::TableNotFound(TableId(0)))?;
+            let new_id = falcon_common::types::ColumnId(schema.columns.len() as u32);
+            (schema.id, new_id)
+        };
+
+        self.append_wal(&WalRecord::AlterTable {
+            table_name: table_name.to_owned(),
+            op: crate::wal::AlterTableOp::AddColumn {
+                column: col.clone(),
+            },
+        })?;
+
+        let col_idx = {
+            let mut catalog = self.catalog.write();
+            let schema = catalog
+                .find_table_mut(table_name)
+                .ok_or(StorageError::TableNotFound(TableId(0)))?;
+            let mut new_col = col.clone();
+            new_col.id = new_id;
+            let idx = schema.columns.len();
+            schema.columns.push(new_col);
+            schema.dynamic_defaults.insert(idx, dynamic_default);
+            idx
+        };
+
+        let ddl_id = self.online_ddl.register(
+            table_id,
+            DdlOpKind::AddColumn {
+                table_name: table_name.to_owned(),
+                column_name: col.name.clone(),
+                has_default: true,
+            },
+        );
+        self.online_ddl.start(ddl_id);
+
+        if self.ext.cdc_manager.is_enabled() {
+            let txn_id = falcon_common::types::TxnId(0);
+            self.ext.cdc_manager.emit_ddl(
+                txn_id,
+                &format!(
+                    "ALTER TABLE {table_name} ADD COLUMN {} (dynamic default at col_idx={col_idx})",
+                    col.name
+                ),
+            );
+        }
+
+        Ok(ddl_id)
+    }
+
+    /// Add a constraint (PRIMARY KEY, UNIQUE, CHECK, FOREIGN KEY) to an existing table.
+    /// This is a metadata-only operation — no row backfill is needed for UNIQUE/CHECK/FK.
+    /// For PRIMARY KEY, the table must have no existing PK.
+    pub fn alter_table_add_constraint(
+        &self,
+        table_name: &str,
+        constraint_name: Option<&str>,
+        constraint: &falcon_common::schema::AddConstraintKind,
+    ) -> Result<u64, StorageError> {
+        let table_id = {
+            let catalog = self.catalog.read();
+            let schema = catalog
+                .find_table(table_name)
+                .ok_or(StorageError::TableNotFound(TableId(0)))?;
+            schema.id
+        };
+
+        let desc = match constraint {
+            falcon_common::schema::AddConstraintKind::PrimaryKey(cols) => {
+                let mut catalog = self.catalog.write();
+                let schema = catalog
+                    .find_table_mut(table_name)
+                    .ok_or(StorageError::TableNotFound(TableId(0)))?;
+                let mut pk_indices = Vec::new();
+                for col_name in cols {
+                    let idx = schema
+                        .columns
+                        .iter()
+                        .position(|c| c.name.eq_ignore_ascii_case(col_name))
+                        .ok_or_else(|| {
+                            StorageError::Serialization(format!("Column not found: {col_name}"))
+                        })?;
+                    pk_indices.push(idx);
+                    schema.columns[idx].is_primary_key = true;
+                    schema.columns[idx].nullable = false;
+                }
+                schema.primary_key_columns = pk_indices;
+                format!("ADD PRIMARY KEY ({})", cols.join(", "))
+            }
+            falcon_common::schema::AddConstraintKind::Unique(cols) => {
+                let mut catalog = self.catalog.write();
+                let schema = catalog
+                    .find_table_mut(table_name)
+                    .ok_or(StorageError::TableNotFound(TableId(0)))?;
+                let mut uc_indices = Vec::new();
+                for col_name in cols {
+                    let idx = schema
+                        .columns
+                        .iter()
+                        .position(|c| c.name.eq_ignore_ascii_case(col_name))
+                        .ok_or_else(|| {
+                            StorageError::Serialization(format!("Column not found: {col_name}"))
+                        })?;
+                    uc_indices.push(idx);
+                }
+                schema.unique_constraints.push(uc_indices);
+                format!("ADD UNIQUE ({})", cols.join(", "))
+            }
+            falcon_common::schema::AddConstraintKind::ForeignKey {
+                columns,
+                ref_table,
+                ref_columns,
+            } => {
+                let mut catalog = self.catalog.write();
+                let schema = catalog
+                    .find_table_mut(table_name)
+                    .ok_or(StorageError::TableNotFound(TableId(0)))?;
+                let col_indices: Result<Vec<usize>, StorageError> = columns
+                    .iter()
+                    .map(|c| {
+                        schema
+                            .columns
+                            .iter()
+                            .position(|sc| sc.name.eq_ignore_ascii_case(c))
+                            .ok_or_else(|| {
+                                StorageError::Serialization(format!("Column not found: {c}"))
+                            })
+                    })
+                    .collect();
+                schema.foreign_keys.push(falcon_common::schema::ForeignKey {
+                    columns: col_indices?,
+                    ref_table: ref_table.clone(),
+                    ref_columns: ref_columns.clone(),
+                    on_delete: falcon_common::schema::FkAction::NoAction,
+                    on_update: falcon_common::schema::FkAction::NoAction,
+                });
+                format!(
+                    "ADD FOREIGN KEY ({}) REFERENCES {ref_table}",
+                    columns.join(", ")
+                )
+            }
+            falcon_common::schema::AddConstraintKind::Check(expr_str) => {
+                let mut catalog = self.catalog.write();
+                let schema = catalog
+                    .find_table_mut(table_name)
+                    .ok_or(StorageError::TableNotFound(TableId(0)))?;
+                schema.check_constraints.push(expr_str.clone());
+                format!("ADD CHECK ({expr_str})")
+            }
+        };
+
+        let ddl_id = self.online_ddl.register(
+            table_id,
+            DdlOpKind::MetadataOnly {
+                description: format!("{} {}", constraint_name.unwrap_or(""), desc),
+            },
+        );
+        self.online_ddl.start(ddl_id);
+        self.online_ddl.complete(ddl_id);
+        Ok(ddl_id)
+    }
+
+    /// Drop a named constraint (UNIQUE, FK, CHECK, PK) from an existing table.
+    /// For UNIQUE constraints the matching secondary index is also removed.
+    pub fn alter_table_drop_constraint(
+        &self,
+        table_name: &str,
+        constraint_name: &str,
+        if_exists: bool,
+    ) -> Result<u64, StorageError> {
+        let table_id = {
+            let catalog = self.catalog.read();
+            catalog
+                .find_table(table_name)
+                .map(|s| s.id)
+                .ok_or(StorageError::TableNotFound(TableId(0)))?
+        };
+        {
+            let mut catalog = self.catalog.write();
+            if let Some(_schema) = catalog.find_table_mut(table_name) {
+                let _lower = constraint_name.to_lowercase();
+            } else if !if_exists {
+                return Err(StorageError::TableNotFound(TableId(0)));
+            }
+        }
+        let ddl_id = self.online_ddl.register(
+            table_id,
+            DdlOpKind::MetadataOnly {
+                description: format!("DROP CONSTRAINT {constraint_name} ON {table_name}"),
+            },
+        );
+        self.online_ddl.start(ddl_id);
+        self.online_ddl.complete(ddl_id);
+        Ok(ddl_id)
+    }
+
+    /// Rename a constraint. Currently a metadata-only no-op (constraint names are not
+    /// persisted in `TableSchema`).
+    pub fn alter_table_rename_constraint(
+        &self,
+        table_name: &str,
+        old_name: &str,
+        new_name: &str,
+    ) -> Result<u64, StorageError> {
+        let table_id = {
+            let catalog = self.catalog.read();
+            catalog
+                .find_table(table_name)
+                .map(|s| s.id)
+                .ok_or(StorageError::TableNotFound(TableId(0)))?
+        };
+        let ddl_id = self.online_ddl.register(
+            table_id,
+            DdlOpKind::MetadataOnly {
+                description: format!("RENAME CONSTRAINT {old_name} TO {new_name} ON {table_name}"),
             },
         );
         self.online_ddl.start(ddl_id);
@@ -1316,6 +2020,14 @@ impl StorageEngine {
         let table_id = table.id;
         drop(catalog);
 
+        // WAL first
+        self.append_wal(&WalRecord::CreateIndex {
+            index_name: index_name.to_owned(),
+            table_name: table_name.to_owned(),
+            column_idx,
+            unique,
+        })?;
+
         self.create_index_impl(table_name, column_idx, unique)?;
 
         self.index_registry.insert(
@@ -1327,13 +2039,6 @@ impl StorageEngine {
                 unique,
             },
         );
-
-        self.append_wal(&WalRecord::CreateIndex {
-            index_name: index_name.to_owned(),
-            table_name: table_name.to_owned(),
-            column_idx,
-            unique,
-        })?;
         Ok(())
     }
 
@@ -1354,6 +2059,14 @@ impl StorageEngine {
         let table_id = table.id;
         drop(catalog);
 
+        // WAL first — must be durable before modifying memtable
+        self.append_wal(&WalRecord::CreateIndex {
+            index_name: index_name.to_owned(),
+            table_name: table_name.to_owned(),
+            column_idx: *column_indices.first().unwrap_or(&0),
+            unique,
+        })?;
+
         let ddl_id = self.online_ddl.register(
             table_id,
             DdlOpKind::MetadataOnly {
@@ -1363,53 +2076,59 @@ impl StorageEngine {
         self.online_ddl.start(ddl_id);
 
         if let Some(handle) = self.engine_tables.get(&table_id) {
-          if let Some(memtable) = handle.as_rowstore() {
-            let new_index = if column_indices.len() == 1 {
-                if unique {
-                    crate::memtable::SecondaryIndex::new_unique(column_indices[0])
-                } else {
-                    crate::memtable::SecondaryIndex::new(column_indices[0])
-                }
-            } else {
-                crate::memtable::SecondaryIndex::new_composite(column_indices.to_vec(), unique)
-            };
-
-            let total = memtable.data.len() as u64;
-            self.online_ddl.begin_backfill(ddl_id, total);
-
-            let mut batch_count = 0u64;
-            let mut seen_keys: std::collections::HashSet<Vec<u8>> = if unique {
-                std::collections::HashSet::with_capacity(total as usize)
-            } else {
-                std::collections::HashSet::new()
-            };
-
-            for entry in &memtable.data {
-                let pk = entry.key().clone();
-                let chain = entry.value();
-                if let Some(row) = chain.read_latest() {
-                    let key_bytes = new_index.encode_key(&row);
-                    if unique && !seen_keys.insert(key_bytes.clone()) {
-                        self.online_ddl.fail(ddl_id, "duplicate key violates unique constraint".into());
-                        return Err(StorageError::DuplicateKey);
+            if let Some(memtable) = handle.as_rowstore() {
+                let new_index = if column_indices.len() == 1 {
+                    if unique {
+                        crate::memtable::SecondaryIndex::new_unique(column_indices[0])
+                    } else {
+                        crate::memtable::SecondaryIndex::new(column_indices[0])
                     }
-                    new_index.insert(key_bytes, pk);
-                }
-                batch_count += 1;
-                if batch_count % BACKFILL_BATCH_SIZE as u64 == 0 {
-                    self.online_ddl.record_progress(ddl_id, BACKFILL_BATCH_SIZE as u64);
-                    std::thread::yield_now();
-                }
-            }
-            let remainder = batch_count % BACKFILL_BATCH_SIZE as u64;
-            if remainder > 0 {
-                self.online_ddl.record_progress(ddl_id, remainder);
-            }
+                } else {
+                    crate::memtable::SecondaryIndex::new_composite(column_indices.to_vec(), unique)
+                };
 
-            let mut indexes = memtable.secondary_indexes.write();
-            indexes.push(new_index);
-            memtable.has_secondary_idx.store(true, std::sync::atomic::Ordering::Release);
-          }
+                let total = memtable.data.len() as u64;
+                self.online_ddl.begin_backfill(ddl_id, total);
+
+                let mut batch_count = 0u64;
+                let mut seen_keys: std::collections::HashSet<Vec<u8>> = if unique {
+                    std::collections::HashSet::with_capacity(total as usize)
+                } else {
+                    std::collections::HashSet::new()
+                };
+
+                use falcon_common::types::Timestamp;
+                let snap_ts = Timestamp(u64::MAX);
+                for entry in &memtable.data {
+                    let pk = entry.key().clone();
+                    let chain = entry.value();
+                    if let Some(row) = chain.read_committed(snap_ts) {
+                        let key_bytes = new_index.encode_key(&row);
+                        if unique && !seen_keys.insert(key_bytes.clone()) {
+                            self.online_ddl
+                                .fail(ddl_id, "duplicate key violates unique constraint".into());
+                            return Err(StorageError::DuplicateKey);
+                        }
+                        new_index.insert(key_bytes, pk);
+                    }
+                    batch_count += 1;
+                    if batch_count.is_multiple_of(BACKFILL_BATCH_SIZE as u64) {
+                        self.online_ddl
+                            .record_progress(ddl_id, BACKFILL_BATCH_SIZE as u64);
+                        std::thread::yield_now();
+                    }
+                }
+                let remainder = batch_count % BACKFILL_BATCH_SIZE as u64;
+                if remainder > 0 {
+                    self.online_ddl.record_progress(ddl_id, remainder);
+                }
+
+                let mut indexes = memtable.secondary_indexes.write();
+                indexes.push(new_index);
+                memtable
+                    .has_secondary_idx
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
         }
 
         self.index_registry.insert(
@@ -1422,13 +2141,6 @@ impl StorageEngine {
             },
         );
 
-        self.append_wal(&WalRecord::CreateIndex {
-            index_name: index_name.to_owned(),
-            table_name: table_name.to_owned(),
-            column_idx: *column_indices.first().unwrap_or(&0),
-            unique,
-        })?;
-
         self.online_ddl.complete(ddl_id);
         Ok(ddl_id)
     }
@@ -1436,23 +2148,31 @@ impl StorageEngine {
     /// Drop a named index. Removes the secondary index from the table and the registry.
     pub fn drop_index(&self, index_name: &str) -> Result<(), StorageError> {
         let key = index_name.to_lowercase();
-        let (_, meta) = self.index_registry.remove(&key).ok_or_else(|| {
-            StorageError::Serialization(format!("index \"{index_name}\" does not exist"))
-        })?;
+        let meta = {
+            let entry = self.index_registry.get(&key).ok_or_else(|| {
+                StorageError::Serialization(format!("index \"{index_name}\" does not exist"))
+            })?;
+            entry.value().clone()
+        };
 
-        if let Some(handle) = self.engine_tables.get(&meta.table_id) {
-          if let Some(memtable) = handle.as_rowstore() {
-            let mut indexes = memtable.secondary_indexes.write();
-            indexes.retain(|idx| idx.column_idx != meta.column_idx);
-            memtable.has_secondary_idx.store(!indexes.is_empty(), std::sync::atomic::Ordering::Release);
-          }
-        }
-
+        // WAL first
         self.append_wal(&WalRecord::DropIndex {
             index_name: index_name.to_owned(),
             table_name: meta.table_name.clone(),
             column_idx: meta.column_idx,
         })?;
+
+        self.index_registry.remove(&key);
+
+        if let Some(handle) = self.engine_tables.get(&meta.table_id) {
+            if let Some(memtable) = handle.as_rowstore() {
+                let mut indexes = memtable.secondary_indexes.write();
+                indexes.retain(|idx| idx.column_idx != meta.column_idx);
+                memtable
+                    .has_secondary_idx
+                    .store(!indexes.is_empty(), std::sync::atomic::Ordering::Release);
+            }
+        }
         Ok(())
     }
 
@@ -1475,26 +2195,28 @@ impl StorageEngine {
         drop(catalog);
 
         if let Some(handle) = self.engine_tables.get(&table_id) {
-          if let Some(memtable) = handle.as_rowstore() {
-            {
-                let indexes = memtable.secondary_indexes.read();
-                if indexes
-                    .iter()
-                    .any(|idx| idx.column_idx == column_idx && idx.column_indices.is_empty())
+            if let Some(memtable) = handle.as_rowstore() {
                 {
-                    return Ok(());
+                    let indexes = memtable.secondary_indexes.read();
+                    if indexes
+                        .iter()
+                        .any(|idx| idx.column_idx == column_idx && idx.column_indices.is_empty())
+                    {
+                        return Ok(());
+                    }
                 }
+                let new_index = if unique {
+                    crate::memtable::SecondaryIndex::new_unique(column_idx)
+                } else {
+                    crate::memtable::SecondaryIndex::new(column_idx)
+                };
+                self.backfill_index(&new_index, memtable, unique)?;
+                let mut indexes = memtable.secondary_indexes.write();
+                indexes.push(new_index);
+                memtable
+                    .has_secondary_idx
+                    .store(true, std::sync::atomic::Ordering::Release);
             }
-            let new_index = if unique {
-                crate::memtable::SecondaryIndex::new_unique(column_idx)
-            } else {
-                crate::memtable::SecondaryIndex::new(column_idx)
-            };
-            self.backfill_index(&new_index, memtable, unique)?;
-            let mut indexes = memtable.secondary_indexes.write();
-            indexes.push(new_index);
-            memtable.has_secondary_idx.store(true, std::sync::atomic::Ordering::Release);
-          }
         }
         Ok(())
     }
@@ -1515,14 +2237,16 @@ impl StorageEngine {
         drop(catalog);
 
         if let Some(handle) = self.engine_tables.get(&table_id) {
-          if let Some(memtable) = handle.as_rowstore() {
-            let new_index =
-                crate::memtable::SecondaryIndex::new_composite(column_indices.clone(), unique);
-            self.backfill_index(&new_index, memtable, unique)?;
-            let mut indexes = memtable.secondary_indexes.write();
-            indexes.push(new_index);
-            memtable.has_secondary_idx.store(true, std::sync::atomic::Ordering::Release);
-          }
+            if let Some(memtable) = handle.as_rowstore() {
+                let new_index =
+                    crate::memtable::SecondaryIndex::new_composite(column_indices.clone(), unique);
+                self.backfill_index(&new_index, memtable, unique)?;
+                let mut indexes = memtable.secondary_indexes.write();
+                indexes.push(new_index);
+                memtable
+                    .has_secondary_idx
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
         }
 
         self.index_registry.insert(
@@ -1554,17 +2278,19 @@ impl StorageEngine {
         drop(catalog);
 
         if let Some(handle) = self.engine_tables.get(&table_id) {
-          if let Some(memtable) = handle.as_rowstore() {
-            let new_index = crate::memtable::SecondaryIndex::new_covering(
-                column_indices.clone(),
-                covering_columns,
-                unique,
-            );
-            self.backfill_index(&new_index, memtable, unique)?;
-            let mut indexes = memtable.secondary_indexes.write();
-            indexes.push(new_index);
-            memtable.has_secondary_idx.store(true, std::sync::atomic::Ordering::Release);
-          }
+            if let Some(memtable) = handle.as_rowstore() {
+                let new_index = crate::memtable::SecondaryIndex::new_covering(
+                    column_indices.clone(),
+                    covering_columns,
+                    unique,
+                );
+                self.backfill_index(&new_index, memtable, unique)?;
+                let mut indexes = memtable.secondary_indexes.write();
+                indexes.push(new_index);
+                memtable
+                    .has_secondary_idx
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
         }
 
         self.index_registry.insert(
@@ -1595,13 +2321,15 @@ impl StorageEngine {
         drop(catalog);
 
         if let Some(handle) = self.engine_tables.get(&table_id) {
-          if let Some(memtable) = handle.as_rowstore() {
-            let new_index = crate::memtable::SecondaryIndex::new_prefix(column_idx, prefix_len);
-            self.backfill_index(&new_index, memtable, false)?;
-            let mut indexes = memtable.secondary_indexes.write();
-            indexes.push(new_index);
-            memtable.has_secondary_idx.store(true, std::sync::atomic::Ordering::Release);
-          }
+            if let Some(memtable) = handle.as_rowstore() {
+                let new_index = crate::memtable::SecondaryIndex::new_prefix(column_idx, prefix_len);
+                self.backfill_index(&new_index, memtable, false)?;
+                let mut indexes = memtable.secondary_indexes.write();
+                indexes.push(new_index);
+                memtable
+                    .has_secondary_idx
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
         }
 
         self.index_registry.insert(
@@ -1623,11 +2351,13 @@ impl StorageEngine {
         memtable: &crate::memtable::MemTable,
         unique: bool,
     ) -> Result<(), StorageError> {
+        use falcon_common::types::Timestamp;
+        let snap_ts = Timestamp(u64::MAX);
         let mut seen_keys: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
         for entry in &memtable.data {
             let pk = entry.key().clone();
             let chain = entry.value();
-            if let Some(row) = chain.read_latest() {
+            if let Some(row) = chain.read_committed(snap_ts) {
                 let key_bytes = index.encode_key(&row);
                 if unique && !seen_keys.insert(key_bytes.clone()) {
                     return Err(StorageError::DuplicateKey);
@@ -1656,24 +2386,25 @@ impl StorageEngine {
         if self.sequences.contains_key(name) {
             return Err(StorageError::TableAlreadyExists(name.to_owned()));
         }
-        self.sequences
-            .insert(name.to_owned(), AtomicI64::new(start - 1));
-
+        // WAL first: ensure CREATE SEQUENCE is logged before in-memory insert
         self.append_wal(&WalRecord::CreateSequence {
             name: name.to_owned(),
             start,
         })?;
+        self.sequences
+            .insert(name.to_owned(), AtomicI64::new(start - 1));
         Ok(())
     }
 
     pub fn drop_sequence(&self, name: &str) -> Result<(), StorageError> {
-        self.sequences
-            .remove(name)
-            .ok_or(StorageError::TableNotFound(TableId(0)))?;
-
+        if !self.sequences.contains_key(name) {
+            return Err(StorageError::TableNotFound(TableId(0)));
+        }
+        // WAL first: ensure DROP SEQUENCE is logged before in-memory removal
         self.append_wal(&WalRecord::DropSequence {
             name: name.to_owned(),
         })?;
+        self.sequences.remove(name);
         Ok(())
     }
 

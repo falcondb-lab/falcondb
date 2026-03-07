@@ -122,6 +122,12 @@ impl VarRegistry {
             "falcon_tenant_usage",
             Box::new(|_| BoundStatement::ShowTenantUsage),
         );
+        reg.register("ddl_status", Box::new(|_| BoundStatement::ShowDdlStatus));
+        reg.register("falcon_jobs", Box::new(|_| BoundStatement::ShowJobs));
+        reg.register(
+            "falcon_backup_status",
+            Box::new(|_| BoundStatement::ShowBackupStatus),
+        );
 
         // Prefix handler: falcon_table_stats_<table_name>
         reg.register_prefix(
@@ -133,6 +139,47 @@ impl VarRegistry {
                 }
             }),
         );
+
+        // PostgreSQL compatibility: SHOW variables used by ORMs, JDBC drivers, psql
+        macro_rules! pg_var {
+            ($name:expr, $val:expr) => {
+                reg.register(
+                    $name,
+                    Box::new(|_| BoundStatement::ShowPgVar {
+                        name: $name.to_owned(),
+                        value: $val.to_owned(),
+                    }),
+                );
+            };
+        }
+        pg_var!("search_path", "\"$user\", public");
+        pg_var!("transaction_isolation", "read committed");
+        pg_var!("default_transaction_isolation", "read committed");
+        pg_var!("standard_conforming_strings", "on");
+        pg_var!("client_encoding", "UTF8");
+        pg_var!("server_encoding", "UTF8");
+        pg_var!("server_version", "18.0.0");
+        pg_var!("server_version_num", "180000");
+        pg_var!("integer_datetimes", "on");
+        pg_var!("datestyle", "ISO, MDY");
+        pg_var!("intervalstyle", "postgres");
+        pg_var!("timezone", "UTC");
+        pg_var!("lc_collate", "C");
+        pg_var!("lc_ctype", "C");
+        pg_var!("lc_messages", "C");
+        pg_var!("max_connections", "100");
+        pg_var!("max_identifier_length", "63");
+        pg_var!("session_replication_role", "origin");
+        pg_var!("statement_timeout", "0");
+        pg_var!("lock_timeout", "0");
+        pg_var!("idle_in_transaction_session_timeout", "0");
+        pg_var!("extra_float_digits", "1");
+        pg_var!("application_name", "falcondb");
+        pg_var!("synchronous_commit", "on");
+        pg_var!("wal_level", "replica");
+        pg_var!("is_superuser", "on");
+        pg_var!("in_hot_standby", "off");
+        pg_var!("allow_system_table_mods", "off");
 
         reg
     }
@@ -207,7 +254,7 @@ mod tests {
     #[test]
     fn test_counts() {
         let reg = VarRegistry::with_defaults();
-        assert_eq!(reg.exact_count(), 9);
+        assert_eq!(reg.exact_count(), 10 + 28 + 2);
         assert_eq!(reg.prefix_count(), 1);
     }
 }

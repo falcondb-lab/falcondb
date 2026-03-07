@@ -221,7 +221,9 @@ impl BlockCrypto for AesGcmBlockCrypto {
         let mut nonce_bytes = [0u8; 12];
         OsRng.fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
-        let ct = self.cipher.encrypt(nonce, plaintext)
+        let ct = self
+            .cipher
+            .encrypt(nonce, plaintext)
             .map_err(|_| io::Error::new(io::ErrorKind::Other, "AES-GCM encrypt failed"))?;
         let mut out = Vec::with_capacity(12 + ct.len());
         out.extend_from_slice(&nonce_bytes);
@@ -233,12 +235,19 @@ impl BlockCrypto for AesGcmBlockCrypto {
         use aes_gcm::aead::Aead;
         use aes_gcm::Nonce;
         if ciphertext.len() < 12 + 16 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "SST block too short for TDE"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "SST block too short for TDE",
+            ));
         }
         let (nonce_bytes, ct) = ciphertext.split_at(12);
         let nonce = Nonce::from_slice(nonce_bytes);
-        self.cipher.decrypt(nonce, ct)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "AES-GCM decrypt failed (tampered?)"))
+        self.cipher.decrypt(nonce, ct).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "AES-GCM decrypt failed (tampered?)",
+            )
+        })
     }
 }
 
@@ -460,7 +469,9 @@ pub struct SstReader {
 
 impl std::fmt::Debug for SstReader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SstReader").field("path", &self.path).finish_non_exhaustive()
+        f.debug_struct("SstReader")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
     }
 }
 
@@ -708,9 +719,12 @@ impl SstReader {
             if let Some(first) = reader.index.first().cloned() {
                 let block_data = reader.read_block(first.block_offset, first.block_len)?;
                 if block_data.len() >= 12 {
-                    let key_len = u32::from_le_bytes(
-                        [block_data[4], block_data[5], block_data[6], block_data[7]]
-                    ) as usize;
+                    let key_len = u32::from_le_bytes([
+                        block_data[4],
+                        block_data[5],
+                        block_data[6],
+                        block_data[7],
+                    ]) as usize;
                     if 8 + key_len <= block_data.len() {
                         reader.meta.min_key = block_data[8..8 + key_len].to_vec();
                     }
@@ -1206,11 +1220,9 @@ mod tests {
     fn test_sst_tde_roundtrip() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("encrypted.sst");
-        let crypto: std::sync::Arc<dyn BlockCrypto> =
-            std::sync::Arc::new(XorBlockCrypto(0xAB));
+        let crypto: std::sync::Arc<dyn BlockCrypto> = std::sync::Arc::new(XorBlockCrypto(0xAB));
 
-        let mut writer =
-            SstWriter::new_with_crypto(&path, 3, Some(crypto.clone())).unwrap();
+        let mut writer = SstWriter::new_with_crypto(&path, 3, Some(crypto.clone())).unwrap();
         writer.add(b"alpha", b"v1").unwrap();
         writer.add(b"beta", b"v2").unwrap();
         writer.add(b"gamma", b"v3").unwrap();

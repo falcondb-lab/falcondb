@@ -114,15 +114,25 @@ pub struct TopologyChangeEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TopologyChangeType {
     /// A shard's leader changed (failover or rebalance).
-    LeaderChange { shard_id: ShardId, new_leader: NodeId },
+    LeaderChange {
+        shard_id: ShardId,
+        new_leader: NodeId,
+    },
     /// A node joined the cluster.
     NodeJoined { node_id: NodeId },
     /// A node left the cluster.
     NodeLeft { node_id: NodeId },
     /// A shard was split.
-    ShardSplit { original: ShardId, new_shard: ShardId },
+    ShardSplit {
+        original: ShardId,
+        new_shard: ShardId,
+    },
     /// A shard was merged.
-    ShardMerge { shard_a: ShardId, shard_b: ShardId, result: ShardId },
+    ShardMerge {
+        shard_a: ShardId,
+        shard_b: ShardId,
+        result: ShardId,
+    },
     /// Full topology refresh (e.g., after prolonged partition).
     FullRefresh,
 }
@@ -205,8 +215,12 @@ impl TopologySubscriptionManager {
         };
         let mut subs = self.subscribers.write().unwrap_or_else(|e| e.into_inner());
         subs.insert(id, sub);
-        self.metrics.active_subscriptions.fetch_add(1, Ordering::Relaxed);
-        self.metrics.total_subscriptions.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .active_subscriptions
+            .fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .total_subscriptions
+            .fetch_add(1, Ordering::Relaxed);
         id
     }
 
@@ -216,7 +230,9 @@ impl TopologySubscriptionManager {
         if let Some(sub) = subs.get_mut(&id) {
             if sub.active {
                 sub.active = false;
-                self.metrics.active_subscriptions.fetch_sub(1, Ordering::Relaxed);
+                self.metrics
+                    .active_subscriptions
+                    .fetch_sub(1, Ordering::Relaxed);
                 return true;
             }
         }
@@ -238,9 +254,13 @@ impl TopologySubscriptionManager {
             }
             sub.pending_events.push(event.clone());
         }
-        self.metrics.events_published.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .events_published
+            .fetch_add(1, Ordering::Relaxed);
         if dropped > 0 {
-            self.metrics.events_dropped.fetch_add(dropped, Ordering::Relaxed);
+            self.metrics
+                .events_dropped
+                .fetch_add(dropped, Ordering::Relaxed);
         }
     }
 
@@ -252,7 +272,9 @@ impl TopologySubscriptionManager {
             let events: Vec<TopologyChangeEvent> = sub.pending_events.drain(..).collect();
             let count = events.len() as u64;
             if count > 0 {
-                self.metrics.events_delivered.fetch_add(count, Ordering::Relaxed);
+                self.metrics
+                    .events_delivered
+                    .fetch_add(count, Ordering::Relaxed);
             }
             events
         } else {
@@ -287,7 +309,9 @@ impl TopologySubscriptionManager {
                 .fetch_sub(deactivated as u64, Ordering::Relaxed);
         }
         if evicted > 0 {
-            self.metrics.evictions.fetch_add(evicted as u64, Ordering::Relaxed);
+            self.metrics
+                .evictions
+                .fetch_add(evicted as u64, Ordering::Relaxed);
         }
         evicted
     }
@@ -306,10 +330,7 @@ impl TopologySubscriptionManager {
     ///
     /// Runs every `idle_timeout / 2` to catch stale subscriptions promptly.
     /// Returns a handle that stops the evictor when dropped.
-    pub fn spawn_evictor(
-        self: &Arc<Self>,
-        cancel: CancellationToken,
-    ) -> SubscriptionEvictorHandle {
+    pub fn spawn_evictor(self: &Arc<Self>, cancel: CancellationToken) -> SubscriptionEvictorHandle {
         let mgr = Arc::clone(self);
         let interval = mgr.idle_timeout / 2;
         let token = cancel.clone();
@@ -422,7 +443,10 @@ impl ClientRoutingTable {
     pub fn get_leader(&self, shard_id: ShardId) -> Option<String> {
         let routes = self.routes.read().unwrap_or_else(|e| e.into_inner());
         if let Some(route) = routes.get(&shard_id.0) {
-            debug_assert_eq!(route.shard_id, shard_id, "routing table key/value shard_id mismatch");
+            debug_assert_eq!(
+                route.shard_id, shard_id,
+                "routing table key/value shard_id mismatch"
+            );
             self.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
             Some(route.leader_addr.clone())
         } else {
@@ -440,7 +464,13 @@ impl ClientRoutingTable {
 
     /// Update a single shard's leader (from NOT_LEADER hint).
     /// Ignores updates with a stale epoch to prevent ABA routing.
-    pub fn update_leader(&self, shard_id: ShardId, new_leader: NodeId, new_addr: String, new_epoch: u64) {
+    pub fn update_leader(
+        &self,
+        shard_id: ShardId,
+        new_leader: NodeId,
+        new_addr: String,
+        new_epoch: u64,
+    ) {
         let mut routes = self.routes.write().unwrap_or_else(|e| e.into_inner());
         if let Some(existing) = routes.get(&shard_id.0) {
             if new_epoch < existing.leader_epoch {
@@ -463,7 +493,12 @@ impl ClientRoutingTable {
     pub fn get_route_detail(&self, shard_id: ShardId) -> Option<(NodeId, String, u64, Duration)> {
         let routes = self.routes.read().unwrap_or_else(|e| e.into_inner());
         routes.get(&shard_id.0).map(|r| {
-            (r.leader_node, r.leader_addr.clone(), r.leader_epoch, r.cached_at.elapsed())
+            (
+                r.leader_node,
+                r.leader_addr.clone(),
+                r.leader_epoch,
+                r.cached_at.elapsed(),
+            )
         })
     }
 
@@ -571,10 +606,14 @@ impl NotLeaderRedirector {
         leader_hint: Option<(NodeId, String)>,
         attempt: u32,
     ) -> RedirectOutcome {
-        self.metrics.redirect_attempts.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .redirect_attempts
+            .fetch_add(1, Ordering::Relaxed);
 
         if attempt >= self.config.max_attempts {
-            self.metrics.budget_exhaustions.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .budget_exhaustions
+                .fetch_add(1, Ordering::Relaxed);
             return RedirectOutcome::BudgetExhausted { attempts: attempt };
         }
 
@@ -584,8 +623,12 @@ impl NotLeaderRedirector {
             let new_epoch = self.routing_table.epoch() + 1;
             self.routing_table
                 .update_leader(shard_id, node_id, addr.clone(), new_epoch);
-            self.metrics.leader_hints_applied.fetch_add(1, Ordering::Relaxed);
-            self.metrics.redirect_successes.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .leader_hints_applied
+                .fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .redirect_successes
+                .fetch_add(1, Ordering::Relaxed);
             return RedirectOutcome::Redirected {
                 new_addr: addr,
                 attempt: attempt + 1,
@@ -597,7 +640,9 @@ impl NotLeaderRedirector {
 
         // After invalidation, the caller must refresh the routing table (poll snapshot).
         // For now, indicate budget is not yet exhausted, but we don't have a new address.
-        RedirectOutcome::BudgetExhausted { attempts: attempt + 1 }
+        RedirectOutcome::BudgetExhausted {
+            attempts: attempt + 1,
+        }
     }
 
     /// Calculate backoff delay for a given attempt number.
@@ -606,7 +651,11 @@ impl NotLeaderRedirector {
         let exp = base_ms * 2.0_f64.powi(attempt as i32);
         let capped = exp.min(self.config.max_delay.as_millis() as f64);
         // Simple deterministic "jitter" — proportional reduction based on attempt
-        let jittered = capped * self.config.jitter_factor.mul_add(-((attempt % 3) as f64 / 3.0), 1.0);
+        let jittered = capped
+            * self
+                .config
+                .jitter_factor
+                .mul_add(-((attempt % 3) as f64 / 3.0), 1.0);
         Duration::from_millis(jittered.max(1.0) as u64)
     }
 }
@@ -910,7 +959,10 @@ impl TopologyProvider {
             gateway_endpoints,
         };
 
-        let mut cached = self.latest_snapshot.write().unwrap_or_else(|e| e.into_inner());
+        let mut cached = self
+            .latest_snapshot
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         *cached = Some(snapshot.clone());
         self.metrics.snapshot_builds.fetch_add(1, Ordering::Relaxed);
 
@@ -920,10 +972,15 @@ impl TopologyProvider {
     /// Get the latest cached snapshot, if client's epoch is stale.
     /// Returns None if the client is already up-to-date.
     pub fn get_snapshot_if_newer(&self, client_epoch: u64) -> Option<TopologySnapshot> {
-        let cached = self.latest_snapshot.read().unwrap_or_else(|e| e.into_inner());
+        let cached = self
+            .latest_snapshot
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(ref snapshot) = *cached {
             if snapshot.is_newer_than(client_epoch) {
-                self.metrics.snapshots_served.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .snapshots_served
+                    .fetch_add(1, Ordering::Relaxed);
                 return Some(snapshot.clone());
             }
         }
@@ -932,9 +989,14 @@ impl TopologyProvider {
 
     /// Get the latest snapshot unconditionally.
     pub fn get_latest_snapshot(&self) -> Option<TopologySnapshot> {
-        let cached = self.latest_snapshot.read().unwrap_or_else(|e| e.into_inner());
+        let cached = self
+            .latest_snapshot
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         if cached.is_some() {
-            self.metrics.snapshots_served.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .snapshots_served
+                .fetch_add(1, Ordering::Relaxed);
         }
         cached.clone()
     }
@@ -1132,11 +1194,8 @@ mod tests {
         let table = Arc::new(ClientRoutingTable::new());
         let redirector = NotLeaderRedirector::new(RedirectorConfig::default(), table.clone());
 
-        let outcome = redirector.handle_not_leader(
-            ShardId(0),
-            Some((NodeId(5), "node5:5443".into())),
-            0,
-        );
+        let outcome =
+            redirector.handle_not_leader(ShardId(0), Some((NodeId(5), "node5:5443".into())), 0);
 
         assert_eq!(
             outcome,
@@ -1201,7 +1260,7 @@ mod tests {
 
         // Report failures until failover
         assert!(!mgr.report_failure()); // 1st failure — no failover yet
-        assert!(mgr.report_failure());  // 2nd failure — failover!
+        assert!(mgr.report_failure()); // 2nd failure — failover!
 
         let addr = mgr.active_address().unwrap();
         assert_eq!(addr, "gw2:5443");
@@ -1351,8 +1410,18 @@ mod tests {
                 },
             ],
             vec![
-                NodeDirectoryEntry { node_id: NodeId(1), address: "node1:5443".into(), role: "smart_gateway".into(), is_alive: true },
-                NodeDirectoryEntry { node_id: NodeId(2), address: "node2:5443".into(), role: "smart_gateway".into(), is_alive: true },
+                NodeDirectoryEntry {
+                    node_id: NodeId(1),
+                    address: "node1:5443".into(),
+                    role: "smart_gateway".into(),
+                    is_alive: true,
+                },
+                NodeDirectoryEntry {
+                    node_id: NodeId(2),
+                    address: "node2:5443".into(),
+                    role: "smart_gateway".into(),
+                    is_alive: true,
+                },
             ],
             vec!["node1:5443".into(), "node2:5443".into()],
         );
@@ -1383,11 +1452,8 @@ mod tests {
 
         // 6. Client handles NOT_LEADER using the redirector
         let redirector = NotLeaderRedirector::new(RedirectorConfig::default(), table.clone());
-        let outcome = redirector.handle_not_leader(
-            ShardId(0),
-            Some((NodeId(2), "node2:5443".into())),
-            0,
-        );
+        let outcome =
+            redirector.handle_not_leader(ShardId(0), Some((NodeId(2), "node2:5443".into())), 0);
         assert_eq!(
             outcome,
             RedirectOutcome::Redirected {

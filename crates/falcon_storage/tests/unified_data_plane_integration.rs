@@ -56,7 +56,10 @@ fn test_empty_node_bootstrap() {
             size_bytes: 3000,
             codec: SegmentCodec::Lz4,
             logical_range: LogicalRange::Cold {
-                table_id: 1, shard_id: 0, min_key: vec![], max_key: vec![],
+                table_id: 1,
+                shard_id: 0,
+                min_key: vec![],
+                max_key: vec![],
             },
             sealed: true,
         });
@@ -196,7 +199,10 @@ fn test_compactor_cold_segments_replication() {
         size_bytes: 2000,
         codec: SegmentCodec::Lz4,
         logical_range: LogicalRange::Cold {
-            table_id: 1, shard_id: 0, min_key: vec![], max_key: vec![],
+            table_id: 1,
+            shard_id: 0,
+            min_key: vec![],
+            max_key: vec![],
         },
         sealed: true,
     });
@@ -214,7 +220,10 @@ fn test_compactor_cold_segments_replication() {
         size_bytes: 1500,
         codec: SegmentCodec::Lz4,
         logical_range: LogicalRange::Cold {
-            table_id: 1, shard_id: 0, min_key: vec![], max_key: vec![],
+            table_id: 1,
+            shard_id: 0,
+            min_key: vec![],
+            max_key: vec![],
         },
         sealed: true,
     });
@@ -459,7 +468,10 @@ fn test_mixed_segment_types() {
             size_bytes: 500,
             codec: SegmentCodec::Lz4,
             logical_range: LogicalRange::Cold {
-                table_id: 1, shard_id: 0, min_key: vec![], max_key: vec![],
+                table_id: 1,
+                shard_id: 0,
+                min_key: vec![],
+                max_key: vec![],
             },
             sealed: true,
         });
@@ -474,7 +486,10 @@ fn test_mixed_segment_types() {
         kind: SegmentKind::Snapshot,
         size_bytes: 1000,
         codec: SegmentCodec::None,
-        logical_range: LogicalRange::Snapshot { snapshot_id: 1, chunk_index: 0 },
+        logical_range: LogicalRange::Snapshot {
+            snapshot_id: 1,
+            chunk_index: 0,
+        },
         sealed: true,
     });
 
@@ -484,9 +499,7 @@ fn test_mixed_segment_types() {
     assert_eq!(manifest.segments_by_kind(SegmentKind::Snapshot).len(), 1);
 
     // Snapshot definition includes all types
-    let snap_def = SnapshotDefinition::create(
-        1, &manifest, StructuredLsn::new(3, 0), Csn::new(50),
-    );
+    let snap_def = SnapshotDefinition::create(1, &manifest, StructuredLsn::new(3, 0), Csn::new(50));
     assert_eq!(snap_def.wal_segments.len(), 3);
     assert_eq!(snap_def.cold_segments.len(), 3);
     assert_eq!(snap_def.snapshot_segments.len(), 1);
@@ -530,7 +543,10 @@ fn test_snapshot_restore_unified_recovery() {
         size_bytes: 1000,
         codec: SegmentCodec::Lz4,
         logical_range: LogicalRange::Cold {
-            table_id: 1, shard_id: 0, min_key: vec![], max_key: vec![],
+            table_id: 1,
+            shard_id: 0,
+            min_key: vec![],
+            max_key: vec![],
         },
         sealed: true,
     });
@@ -542,9 +558,8 @@ fn test_snapshot_restore_unified_recovery() {
         cut_csn: Csn::new(100),
         epoch: leader_manifest.epoch,
     });
-    let snap_def = SnapshotDefinition::create(
-        1, &leader_manifest, StructuredLsn::new(3, 0), Csn::new(100),
-    );
+    let snap_def =
+        SnapshotDefinition::create(1, &leader_manifest, StructuredLsn::new(3, 0), Csn::new(100));
 
     // Restore on new node
     let new_store = SegmentStore::new();
@@ -592,6 +607,8 @@ fn test_segment_store_throughput() {
     assert!(
         throughput > 100.0,
         "throughput too low: {:.1} MB/s ({} iterations in {:.2}s)",
-        throughput, iterations, elapsed.as_secs_f64()
+        throughput,
+        iterations,
+        elapsed.as_secs_f64()
     );
 }

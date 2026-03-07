@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use falcon_common::types::NodeId;
 use falcon_cluster::self_healing::*;
+use falcon_common::types::NodeId;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
@@ -67,10 +67,13 @@ fn test_leader_kill_triggers_reelection() {
 
     // Start election for shard 0
     let term = ec.start_election(0).unwrap();
-    audit.record(OpsEventType::LeaderLost {
-        shard_id: 0,
-        old_leader: NodeId(1),
-    }, "election_coordinator");
+    audit.record(
+        OpsEventType::LeaderLost {
+            shard_id: 0,
+            old_leader: NodeId(1),
+        },
+        "election_coordinator",
+    );
 
     // Surviving nodes submit candidacy
     ec.submit_candidate(0, NodeId(2), 500, term);
@@ -79,17 +82,29 @@ fn test_leader_kill_triggers_reelection() {
     // Resolve — Node 3 has highest LSN
     let winner = ec.resolve_election(0).unwrap();
     assert_eq!(winner, NodeId(3));
-    audit.record(OpsEventType::LeaderElected {
-        shard_id: 0,
-        leader: NodeId(3),
-        term,
-    }, "election_coordinator");
+    audit.record(
+        OpsEventType::LeaderElected {
+            shard_id: 0,
+            leader: NodeId(3),
+            term,
+        },
+        "election_coordinator",
+    );
 
     // Verify audit trail
     let events = audit.all();
     assert_eq!(events.len(), 3);
-    assert!(matches!(events[0].event_type, OpsEventType::NodeDown(NodeId(1))));
-    assert!(matches!(events[2].event_type, OpsEventType::LeaderElected { leader: NodeId(3), .. }));
+    assert!(matches!(
+        events[0].event_type,
+        OpsEventType::NodeDown(NodeId(1))
+    ));
+    assert!(matches!(
+        events[2].event_type,
+        OpsEventType::LeaderElected {
+            leader: NodeId(3),
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -151,11 +166,14 @@ fn test_follower_kill_and_wal_catchup() {
 
     let strategy = catchup.start_catch_up(NodeId(3), 0, 5000, 3000);
     assert_eq!(strategy, ReplicaLagClass::WalReplay);
-    audit.record(OpsEventType::CatchUpStarted {
-        node_id: NodeId(3),
-        shard_id: 0,
-        strategy,
-    }, "catchup_coordinator");
+    audit.record(
+        OpsEventType::CatchUpStarted {
+            node_id: NodeId(3),
+            shard_id: 0,
+            strategy,
+        },
+        "catchup_coordinator",
+    );
 
     // Simulate progress
     catchup.update_progress(NodeId(3), 0, 4000, 1000);
@@ -165,10 +183,13 @@ fn test_follower_kill_and_wal_catchup() {
     catchup.update_progress(NodeId(3), 0, 5000, 1000);
     let state = catchup.get_state(NodeId(3), 0).unwrap();
     assert_eq!(state.phase, CatchUpPhase::Complete);
-    audit.record(OpsEventType::CatchUpCompleted {
-        node_id: NodeId(3),
-        shard_id: 0,
-    }, "catchup_coordinator");
+    audit.record(
+        OpsEventType::CatchUpCompleted {
+            node_id: NodeId(3),
+            shard_id: 0,
+        },
+        "catchup_coordinator",
+    );
 
     assert_eq!(audit.total(), 3);
 }
@@ -219,8 +240,18 @@ fn test_network_jitter_suspect_flapping() {
     assert_eq!(fd.get_liveness(NodeId(1)), Some(NodeLiveness::Alive));
 
     // Should not have reached DEAD at any point
-    assert!(fd.metrics.dead_transitions.load(std::sync::atomic::Ordering::Relaxed) == 0);
-    assert!(fd.metrics.suspect_transitions.load(std::sync::atomic::Ordering::Relaxed) >= 2);
+    assert!(
+        fd.metrics
+            .dead_transitions
+            .load(std::sync::atomic::Ordering::Relaxed)
+            == 0
+    );
+    assert!(
+        fd.metrics
+            .suspect_transitions
+            .load(std::sync::atomic::Ordering::Relaxed)
+            >= 2
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -321,9 +352,12 @@ fn test_rolling_upgrade_full_lifecycle() {
     );
 
     assert!(coord.check_compatibility());
-    audit.record(OpsEventType::UpgradeStarted {
-        target_version: "1.0.10".into(),
-    }, "ops");
+    audit.record(
+        OpsEventType::UpgradeStarted {
+            target_version: "1.0.10".into(),
+        },
+        "ops",
+    );
 
     // Plan: follower → gateway → leader
     coord.plan_upgrade(vec![
@@ -344,17 +378,23 @@ fn test_rolling_upgrade_full_lifecycle() {
         coord.mark_upgrading(node);
         coord.mark_rejoining(node);
         coord.mark_complete(node);
-        audit.record(OpsEventType::UpgradeNodeComplete {
-            node_id: node,
-            version: "1.0.10".into(),
-        }, "ops");
+        audit.record(
+            OpsEventType::UpgradeNodeComplete {
+                node_id: node,
+                version: "1.0.10".into(),
+            },
+            "ops",
+        );
     }
 
     assert!(coord.is_complete());
     assert_eq!(coord.progress(), (3, 3));
-    audit.record(OpsEventType::UpgradeComplete {
-        version: "1.0.10".into(),
-    }, "ops");
+    audit.record(
+        OpsEventType::UpgradeComplete {
+            version: "1.0.10".into(),
+        },
+        "ops",
+    );
 
     // Verify audit trail
     assert_eq!(audit.total(), 5); // 1 start + 3 node + 1 complete
@@ -414,7 +454,7 @@ fn test_drain_with_inflight_completion() {
     assert!(!lc.is_drained(NodeId(1)));
 
     lc.update_drain(NodeId(1), 0); // all drained
-    // Still have shards to transfer
+                                   // Still have shards to transfer
     lc.record_shard_transferred(NodeId(1), 0);
     lc.record_shard_transferred(NodeId(1), 1);
 
@@ -490,19 +530,28 @@ fn test_slo_accuracy_under_mixed_workload() {
     let snap = slo.snapshot();
 
     // Write availability: 900/1000 = 90%
-    assert!((snap.write_availability - 0.9).abs() < 0.01,
-        "write_availability={}", snap.write_availability);
+    assert!(
+        (snap.write_availability - 0.9).abs() < 0.01,
+        "write_availability={}",
+        snap.write_availability
+    );
 
     // Read availability: 990/1000 = 99%
-    assert!((snap.read_availability - 0.99).abs() < 0.01,
-        "read_availability={}", snap.read_availability);
+    assert!(
+        (snap.read_availability - 0.99).abs() < 0.01,
+        "read_availability={}",
+        snap.read_availability
+    );
 
     // Replication lag
     assert_eq!(snap.replication_lag_max_lsn, 500);
 
     // Gateway reject rate: 50/1000 = 5%
-    assert!((snap.gateway_reject_rate - 0.05).abs() < 0.01,
-        "gateway_reject_rate={}", snap.gateway_reject_rate);
+    assert!(
+        (snap.gateway_reject_rate - 0.05).abs() < 0.01,
+        "gateway_reject_rate={}",
+        snap.gateway_reject_rate
+    );
 
     // p99 should be in upper range
     assert!(snap.write_p99_us > 0);
@@ -560,7 +609,8 @@ fn test_concurrent_failure_detection_and_election() {
     let term = ec.start_election(0).unwrap();
     for node in 2..=5u64 {
         let snap = fd.snapshot();
-        let lsn = snap.iter()
+        let lsn = snap
+            .iter()
             .find(|r| r.node_id == NodeId(node))
             .map(|r| r.last_lsn)
             .unwrap_or(0);
@@ -648,19 +698,25 @@ fn test_full_self_healing_cycle() {
 
     // Step 4: Election
     let term = ec.start_election(0).unwrap();
-    audit.record(OpsEventType::LeaderLost {
-        shard_id: 0,
-        old_leader: NodeId(1),
-    }, "election_coordinator");
+    audit.record(
+        OpsEventType::LeaderLost {
+            shard_id: 0,
+            old_leader: NodeId(1),
+        },
+        "election_coordinator",
+    );
     ec.submit_candidate(0, NodeId(2), 2000, term);
     ec.submit_candidate(0, NodeId(3), 1800, term);
     let winner = ec.resolve_election(0).unwrap();
     assert_eq!(winner, NodeId(2)); // highest LSN
-    audit.record(OpsEventType::LeaderElected {
-        shard_id: 0,
-        leader: winner,
-        term,
-    }, "election_coordinator");
+    audit.record(
+        OpsEventType::LeaderElected {
+            shard_id: 0,
+            leader: winner,
+            term,
+        },
+        "election_coordinator",
+    );
 
     // Step 5: Catch up Node 3 (behind by 200 LSN)
     let strategy = catchup.start_catch_up(NodeId(3), 0, 2000, 1800);
@@ -739,43 +795,74 @@ fn test_ops_audit_covers_all_event_types() {
     audit.record(OpsEventType::NodeUp(NodeId(1)), "system");
     audit.record(OpsEventType::NodeDown(NodeId(1)), "fd");
     audit.record(OpsEventType::NodeSuspect(NodeId(1)), "fd");
-    audit.record(OpsEventType::LeaderElected {
-        shard_id: 0, leader: NodeId(1), term: 1,
-    }, "ec");
-    audit.record(OpsEventType::LeaderLost {
-        shard_id: 0, old_leader: NodeId(1),
-    }, "ec");
+    audit.record(
+        OpsEventType::LeaderElected {
+            shard_id: 0,
+            leader: NodeId(1),
+            term: 1,
+        },
+        "ec",
+    );
+    audit.record(
+        OpsEventType::LeaderLost {
+            shard_id: 0,
+            old_leader: NodeId(1),
+        },
+        "ec",
+    );
     audit.record(OpsEventType::DrainStarted(NodeId(1)), "ops");
     audit.record(OpsEventType::DrainCompleted(NodeId(1)), "ops");
     audit.record(OpsEventType::JoinStarted(NodeId(2)), "ops");
     audit.record(OpsEventType::JoinCompleted(NodeId(2)), "ops");
-    audit.record(OpsEventType::UpgradeStarted {
-        target_version: "1.0.10".into(),
-    }, "ops");
-    audit.record(OpsEventType::UpgradeNodeComplete {
-        node_id: NodeId(1), version: "1.0.10".into(),
-    }, "ops");
-    audit.record(OpsEventType::UpgradeComplete {
-        version: "1.0.10".into(),
-    }, "ops");
-    audit.record(OpsEventType::ConfigChanged {
-        key: "heartbeat_interval".into(),
-        old_value: "1s".into(),
-        new_value: "2s".into(),
-    }, "admin");
-    audit.record(OpsEventType::BackpressureChanged {
-        old_level: PressureLevel::Normal,
-        new_level: PressureLevel::High,
-    }, "bp");
-    audit.record(OpsEventType::CatchUpStarted {
-        node_id: NodeId(3),
-        shard_id: 0,
-        strategy: ReplicaLagClass::WalReplay,
-    }, "catchup");
-    audit.record(OpsEventType::CatchUpCompleted {
-        node_id: NodeId(3),
-        shard_id: 0,
-    }, "catchup");
+    audit.record(
+        OpsEventType::UpgradeStarted {
+            target_version: "1.0.10".into(),
+        },
+        "ops",
+    );
+    audit.record(
+        OpsEventType::UpgradeNodeComplete {
+            node_id: NodeId(1),
+            version: "1.0.10".into(),
+        },
+        "ops",
+    );
+    audit.record(
+        OpsEventType::UpgradeComplete {
+            version: "1.0.10".into(),
+        },
+        "ops",
+    );
+    audit.record(
+        OpsEventType::ConfigChanged {
+            key: "heartbeat_interval".into(),
+            old_value: "1s".into(),
+            new_value: "2s".into(),
+        },
+        "admin",
+    );
+    audit.record(
+        OpsEventType::BackpressureChanged {
+            old_level: PressureLevel::Normal,
+            new_level: PressureLevel::High,
+        },
+        "bp",
+    );
+    audit.record(
+        OpsEventType::CatchUpStarted {
+            node_id: NodeId(3),
+            shard_id: 0,
+            strategy: ReplicaLagClass::WalReplay,
+        },
+        "catchup",
+    );
+    audit.record(
+        OpsEventType::CatchUpCompleted {
+            node_id: NodeId(3),
+            shard_id: 0,
+        },
+        "catchup",
+    );
 
     assert_eq!(audit.total(), 16);
     let all = audit.all();

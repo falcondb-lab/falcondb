@@ -132,9 +132,13 @@ impl DataType {
             Self::Int32 | Self::Float32 | Self::Date => 4,
             Self::Int64 | Self::Float64 | Self::Timestamp | Self::Time => 8,
             Self::Interval | Self::Uuid => 16,
-            Self::Text | Self::Array(_) | Self::Jsonb
-            | Self::Decimal(_, _) | Self::Bytea
-            | Self::TsVector | Self::TsQuery => -1, // variable length
+            Self::Text
+            | Self::Array(_)
+            | Self::Jsonb
+            | Self::Decimal(_, _)
+            | Self::Bytea
+            | Self::TsVector
+            | Self::TsQuery => -1, // variable length
         }
     }
 

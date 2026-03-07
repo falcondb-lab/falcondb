@@ -31,7 +31,8 @@ fn test_h1_checksum_failure_rejected() {
             corrupted[corrupt_offset] ^= 0xFF;
             // Write corrupted body back
             store.delete_segment(seg_id).unwrap();
-            let hdr = UnifiedSegmentHeader::new_cold(seg_id, 256 * 1024 * 1024, SegmentCodec::Zstd, 1, 0);
+            let hdr =
+                UnifiedSegmentHeader::new_cold(seg_id, 256 * 1024 * 1024, SegmentCodec::Zstd, 1, 0);
             store.create_segment(hdr).unwrap();
             store.write_chunk_at(seg_id, 0, &corrupted).unwrap();
             store.seal_segment(seg_id).unwrap();
@@ -50,26 +51,29 @@ fn test_h1_dictionary_required_for_read() {
     let dict_store = DictionaryStore::new();
 
     // Train a dictionary
-    let samples: Vec<Vec<u8>> = (0..100).map(|i| {
-        let mut v = b"FalconDB common prefix row data ".to_vec();
-        v.extend_from_slice(&(i as u32).to_le_bytes());
-        v.extend_from_slice(&vec![0xABu8; 64]);
-        v
-    }).collect();
+    let samples: Vec<Vec<u8>> = (0..100)
+        .map(|i| {
+            let mut v = b"FalconDB common prefix row data ".to_vec();
+            v.extend_from_slice(&(i as u32).to_le_bytes());
+            v.extend_from_slice(&vec![0xABu8; 64]);
+            v
+        })
+        .collect();
     let entry = dict_store.train_dictionary(1, 1, &samples, 8192).unwrap();
     let dict_data = entry.data.clone();
     dict_store.register(entry);
 
     // Write segment with dictionary
-    let rows: Vec<Vec<u8>> = (0..10).map(|i| {
-        let mut v = b"FalconDB common prefix row data ".to_vec();
-        v.extend_from_slice(&(i as u32).to_le_bytes());
-        v.extend_from_slice(&vec![0xCDu8; 64]);
-        v
-    }).collect();
-    let (seg_id, meta) = write_zstd_cold_segment(
-        &store, 1, 0, &rows, 3, Some(&dict_data), 1,
-    ).unwrap();
+    let rows: Vec<Vec<u8>> = (0..10)
+        .map(|i| {
+            let mut v = b"FalconDB common prefix row data ".to_vec();
+            v.extend_from_slice(&(i as u32).to_le_bytes());
+            v.extend_from_slice(&vec![0xCDu8; 64]);
+            v
+        })
+        .collect();
+    let (seg_id, meta) =
+        write_zstd_cold_segment(&store, 1, 0, &rows, 3, Some(&dict_data), 1).unwrap();
     assert!(meta.dictionary_id > 0);
 
     // Read WITH dictionary succeeds
@@ -78,7 +82,10 @@ fn test_h1_dictionary_required_for_read() {
 
     // Read WITHOUT dictionary fails (zstd decompression error)
     let no_dict_result = read_zstd_cold_segment(&store, seg_id, None);
-    assert!(no_dict_result.is_err(), "reading dict-compressed segment without dict should fail");
+    assert!(
+        no_dict_result.is_err(),
+        "reading dict-compressed segment without dict should fail"
+    );
 }
 
 /// H1.3: Dictionary stored as segment and loaded back correctly.
@@ -87,11 +94,13 @@ fn test_h1_dictionary_segment_roundtrip() {
     let seg_store = SegmentStore::new();
     let dict_store = DictionaryStore::new();
 
-    let samples: Vec<Vec<u8>> = (0..50).map(|i| {
-        let mut v = b"dict roundtrip test ".to_vec();
-        v.extend_from_slice(&vec![i as u8; 80]);
-        v
-    }).collect();
+    let samples: Vec<Vec<u8>> = (0..50)
+        .map(|i| {
+            let mut v = b"dict roundtrip test ".to_vec();
+            v.extend_from_slice(&vec![i as u8; 80]);
+            v
+        })
+        .collect();
 
     let mut entry = dict_store.train_dictionary(1, 1, &samples, 4096).unwrap();
     let original_data = entry.data.clone();
@@ -102,7 +111,9 @@ fn test_h1_dictionary_segment_roundtrip() {
     assert!(seg_store.is_sealed(seg_id).unwrap());
 
     // Load back from segment
-    let loaded = dict_store.load_from_segment(&seg_store, seg_id, dict_id, 1, 1).unwrap();
+    let loaded = dict_store
+        .load_from_segment(&seg_store, seg_id, dict_id, 1, 1)
+        .unwrap();
     assert_eq!(loaded.data, original_data);
     assert_eq!(loaded.dictionary_id, dict_id);
 }
@@ -124,16 +135,17 @@ fn test_h1_crash_during_compaction_consistency() {
         size_bytes: 500,
         codec: SegmentCodec::Zstd,
         logical_range: LogicalRange::Cold {
-            table_id: 1, shard_id: 0, min_key: vec![], max_key: vec![],
+            table_id: 1,
+            shard_id: 0,
+            min_key: vec![],
+            max_key: vec![],
         },
         sealed: true,
     });
 
     // Simulate "crash" — create a segment but don't finish it
     let partial_id = store.next_segment_id();
-    let partial_hdr = UnifiedSegmentHeader::new_cold(
-        partial_id, 1024, SegmentCodec::Zstd, 1, 0,
-    );
+    let partial_hdr = UnifiedSegmentHeader::new_cold(partial_id, 1024, SegmentCodec::Zstd, 1, 0);
     store.create_segment(partial_hdr).unwrap();
     store.write_chunk(partial_id, &vec![0u8; 50]).unwrap();
     // NOT sealed — "crash" happened
@@ -198,7 +210,9 @@ fn test_h2_cold_read_cached_latency() {
         let result = pool.decompress(1, 0, &block, None).unwrap();
         let elapsed_us = start.elapsed().as_micros() as u64;
         assert_eq!(result, data);
-        if elapsed_us > max_us { max_us = elapsed_us; }
+        if elapsed_us > max_us {
+            max_us = elapsed_us;
+        }
     }
 
     assert!(
@@ -213,11 +227,13 @@ fn test_h2_cold_read_cached_latency() {
 fn test_h2_compression_ratio_repetitive() {
     let store = SegmentStore::new();
     // Highly repetitive data
-    let rows: Vec<Vec<u8>> = (0..100).map(|_| {
-        let mut v = b"SELECT * FROM users WHERE id = ".to_vec();
-        v.extend_from_slice(&vec![0u8; 200]);
-        v
-    }).collect();
+    let rows: Vec<Vec<u8>> = (0..100)
+        .map(|_| {
+            let mut v = b"SELECT * FROM users WHERE id = ".to_vec();
+            v.extend_from_slice(&vec![0u8; 200]);
+            v
+        })
+        .collect();
 
     let (seg_id, meta) = write_zstd_cold_segment(&store, 1, 0, &rows, 5, None, 0).unwrap();
     let ratio = meta.compression_ratio();
@@ -248,12 +264,14 @@ fn test_h2_streaming_throughput() {
             assert_eq!(decompressed.len(), chunk_size);
         }
         let elapsed = start.elapsed();
-        let throughput_mbps = (iterations as f64 * chunk_size as f64) / elapsed.as_secs_f64() / (1024.0 * 1024.0);
+        let throughput_mbps =
+            (iterations as f64 * chunk_size as f64) / elapsed.as_secs_f64() / (1024.0 * 1024.0);
 
         assert!(
             throughput_mbps >= 100.0,
             "{:?} streaming throughput {:.1} MB/s below 100 MB/s",
-            codec, throughput_mbps
+            codec,
+            throughput_mbps
         );
     }
 }
@@ -275,11 +293,13 @@ fn test_h2_decompress_pool_overload_protection() {
 #[test]
 fn test_h2_zstd_compaction_throughput() {
     let store = SegmentStore::new();
-    let rows: Vec<Vec<u8>> = (0..5_000).map(|i| {
-        let mut row = vec![0u8; 256];
-        row[..8].copy_from_slice(&(i as u64).to_le_bytes());
-        row
-    }).collect();
+    let rows: Vec<Vec<u8>> = (0..5_000)
+        .map(|i| {
+            let mut row = vec![0u8; 256];
+            row[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            row
+        })
+        .collect();
 
     let start = std::time::Instant::now();
     let (seg_id, meta) = write_zstd_cold_segment(&store, 1, 0, &rows, 1, None, 0).unwrap();
@@ -306,12 +326,14 @@ fn test_h3_full_dictionary_lifecycle() {
     let dict_store = DictionaryStore::new();
 
     // Step 1: Train dictionary from samples
-    let samples: Vec<Vec<u8>> = (0..200).map(|i| {
-        let mut v = b"FalconDB table1 row payload data ".to_vec();
-        v.extend_from_slice(&(i as u32).to_le_bytes());
-        v.extend_from_slice(&vec![0xABu8; 100]);
-        v
-    }).collect();
+    let samples: Vec<Vec<u8>> = (0..200)
+        .map(|i| {
+            let mut v = b"FalconDB table1 row payload data ".to_vec();
+            v.extend_from_slice(&(i as u32).to_le_bytes());
+            v.extend_from_slice(&vec![0xABu8; 100]);
+            v
+        })
+        .collect();
     let mut entry = dict_store.train_dictionary(1, 1, &samples, 16384).unwrap();
     let dict_data = entry.data.clone();
 
@@ -320,15 +342,16 @@ fn test_h3_full_dictionary_lifecycle() {
     dict_store.register(entry);
 
     // Step 3: Compress data with dictionary
-    let rows: Vec<Vec<u8>> = (0..50).map(|i| {
-        let mut v = b"FalconDB table1 row payload data ".to_vec();
-        v.extend_from_slice(&((i + 1000) as u32).to_le_bytes());
-        v.extend_from_slice(&vec![0xCDu8; 100]);
-        v
-    }).collect();
-    let (data_seg_id, meta) = write_zstd_cold_segment(
-        &seg_store, 1, 0, &rows, 3, Some(&dict_data), 1,
-    ).unwrap();
+    let rows: Vec<Vec<u8>> = (0..50)
+        .map(|i| {
+            let mut v = b"FalconDB table1 row payload data ".to_vec();
+            v.extend_from_slice(&((i + 1000) as u32).to_le_bytes());
+            v.extend_from_slice(&vec![0xCDu8; 100]);
+            v
+        })
+        .collect();
+    let (data_seg_id, meta) =
+        write_zstd_cold_segment(&seg_store, 1, 0, &rows, 3, Some(&dict_data), 1).unwrap();
 
     // Step 4: Verify dictionary is retrievable
     let fetched_dict = dict_store.get_for_table(1).unwrap();
@@ -416,7 +439,10 @@ fn test_h3_streaming_negotiation_e2e() {
     assert_eq!(codec2, SegmentCodec::Zstd);
 
     let compressed2 = compress_streaming_chunk(&data, codec2, 1).unwrap();
-    assert!(compressed2.len() < compressed.len(), "zstd should compress better than lz4");
+    assert!(
+        compressed2.len() < compressed.len(),
+        "zstd should compress better than lz4"
+    );
     let decompressed2 = decompress_streaming_chunk(&compressed2, codec2, data.len()).unwrap();
     assert_eq!(decompressed2, data);
 }
@@ -427,10 +453,12 @@ fn test_h3_decompress_cache_effectiveness() {
     let pool = DecompressPool::new(4, 64 * 1024 * 1024);
 
     // Compress 10 blocks
-    let blocks: Vec<(u32, ZstdBlock)> = (0..10).map(|i| {
-        let data = vec![i as u8; 1024];
-        (i, zstd_compress_block(&data, 1, None).unwrap())
-    }).collect();
+    let blocks: Vec<(u32, ZstdBlock)> = (0..10)
+        .map(|i| {
+            let data = vec![i as u8; 1024];
+            (i, zstd_compress_block(&data, 1, None).unwrap())
+        })
+        .collect();
 
     // First pass: all misses
     for (idx, block) in &blocks {

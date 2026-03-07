@@ -209,7 +209,10 @@ impl PartialAggState {
             let combined_mean = combined_sum / combined_count as f64;
             let combined_m2 = self.m2
                 + other.m2
-                + (delta * delta).mul_add(self.count as f64 * other.count as f64 / combined_count as f64, 0.0);
+                + (delta * delta).mul_add(
+                    self.count as f64 * other.count as f64 / combined_count as f64,
+                    0.0,
+                );
             self.m2 = combined_m2;
             self.mean = combined_mean;
         }
@@ -312,7 +315,10 @@ pub fn parallel_grouped_aggregate(
                     let mut key_buf = Vec::with_capacity(64);
                     for (_, row) in rows[start..end].iter().map(|(pk, r)| (pk, r)) {
                         crate::executor_aggregate::encode_group_key(&mut key_buf, row, group_by);
-                        let val = row.values.get(agg_col_idx).and_then(falcon_common::datum::Datum::as_f64);
+                        let val = row
+                            .values
+                            .get(agg_col_idx)
+                            .and_then(falcon_common::datum::Datum::as_f64);
                         let state = local_map.entry(key_buf.clone()).or_default();
                         state.update(val, row);
                     }
@@ -345,12 +351,14 @@ fn single_thread_aggregate(
     agg_col_idx: usize,
     _agg_func: &AggFunc,
 ) -> HashMap<GroupKey, PartialAggState> {
-    let mut map: HashMap<GroupKey, PartialAggState> =
-        HashMap::with_capacity(rows.len() / 4 + 1);
+    let mut map: HashMap<GroupKey, PartialAggState> = HashMap::with_capacity(rows.len() / 4 + 1);
     let mut key_buf = Vec::with_capacity(64);
     for (_pk, row) in rows {
         crate::executor_aggregate::encode_group_key(&mut key_buf, row, group_by);
-        let val = row.values.get(agg_col_idx).and_then(falcon_common::datum::Datum::as_f64);
+        let val = row
+            .values
+            .get(agg_col_idx)
+            .and_then(falcon_common::datum::Datum::as_f64);
         map.entry(key_buf.clone()).or_default().update(val, row);
     }
     map

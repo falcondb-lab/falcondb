@@ -7,21 +7,18 @@
 //! - p50/p99/p999 latency measurement
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
+use falcon_common::types::TxnId;
 use falcon_storage::group_commit::{GroupCommitConfig, GroupCommitSyncer};
 use falcon_storage::wal::{SyncMode, WalRecord, WalWriter};
-use falcon_common::types::TxnId;
 
 fn test_wal(dir: &std::path::Path, sync: SyncMode) -> Arc<WalWriter> {
     Arc::new(WalWriter::open_with_options(dir, sync, 64 * 1024 * 1024, 1024).unwrap())
 }
 
 /// Measure latencies for a batch of append_and_wait calls.
-fn measure_latencies(
-    syncer: &GroupCommitSyncer,
-    count: usize,
-) -> Vec<u64> {
+fn measure_latencies(syncer: &GroupCommitSyncer, count: usize) -> Vec<u64> {
     let mut latencies = Vec::with_capacity(count);
     for i in 0..count {
         let start = Instant::now();
@@ -142,7 +139,10 @@ fn test_gc_window_500us_aggressive_batching() {
     let p99 = percentile(&latencies, 99.0);
     let p999 = percentile(&latencies, 99.9);
 
-    println!("gc_window=500µs: p50={}µs p99={}µs p999={}µs", p50, p99, p999);
+    println!(
+        "gc_window=500µs: p50={}µs p99={}µs p999={}µs",
+        p50, p99, p999
+    );
 
     let stats = syncer.stats().snapshot();
     assert!(stats.records_synced >= 200);
@@ -304,9 +304,7 @@ fn test_flushed_lsn_and_backlog() {
     // Write some records
     for i in 0..10 {
         syncer
-            .append_and_wait(&WalRecord::BeginTxn {
-                txn_id: TxnId(i),
-            })
+            .append_and_wait(&WalRecord::BeginTxn { txn_id: TxnId(i) })
             .unwrap();
     }
 
@@ -338,9 +336,7 @@ fn test_group_commit_stats_enhanced() {
 
     for i in 0..20 {
         syncer
-            .append_and_wait(&WalRecord::BeginTxn {
-                txn_id: TxnId(i),
-            })
+            .append_and_wait(&WalRecord::BeginTxn { txn_id: TxnId(i) })
             .unwrap();
     }
 
@@ -349,7 +345,10 @@ fn test_group_commit_stats_enhanced() {
     assert!(stats.records_synced >= 20);
     assert!(stats.batches > 0);
     // ring_buffer_used should be 0 after all records are flushed
-    assert_eq!(stats.ring_buffer_used, 0, "ring buffer should be empty after flush");
+    assert_eq!(
+        stats.ring_buffer_used, 0,
+        "ring buffer should be empty after flush"
+    );
 
     syncer.shutdown();
     handle.join().unwrap();

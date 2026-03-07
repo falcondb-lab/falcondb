@@ -373,7 +373,8 @@ pub async fn run_health_server(
     };
 
     let port = listener
-        .local_addr().map_or_else(|_| "unknown".to_owned(), |a| a.port().to_string());
+        .local_addr()
+        .map_or_else(|_| "unknown".to_owned(), |a| a.port().to_string());
 
     tokio::pin!(shutdown);
 
@@ -500,7 +501,13 @@ async fn handle_health_request(
                 state.dist_engine.as_ref().map_or((0, 0, 0, 0, 0), |de| {
                     let snap = de.gateway_metrics_snapshot();
                     let (inflight, forwarded) = de.admission_snapshot();
-                    (inflight, forwarded, snap.reject_total, snap.local_exec_total, snap.forward_total)
+                    (
+                        inflight,
+                        forwarded,
+                        snap.reject_total,
+                        snap.local_exec_total,
+                        snap.forward_total,
+                    )
                 });
 
             // v1.0.7: cold store / memory tiering metrics

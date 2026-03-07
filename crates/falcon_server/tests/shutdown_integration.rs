@@ -91,7 +91,10 @@ async fn test_tcp_listener_explicit_drop_releases_port() {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
             .await
             .unwrap();
-        assert!(!port_is_free(port), "port should be busy while listener exists");
+        assert!(
+            !port_is_free(port),
+            "port should be busy while listener exists"
+        );
 
         // Explicit drop — the key contract
         drop(listener);
@@ -100,7 +103,10 @@ async fn test_tcp_listener_explicit_drop_releases_port() {
     // Port should be free immediately after drop
     // (On some OS, a tiny delay may be needed)
     tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(port_is_free(port), "port should be free after explicit drop");
+    assert!(
+        port_is_free(port),
+        "port should be free after explicit drop"
+    );
 }
 
 #[tokio::test]
@@ -402,9 +408,9 @@ fn test_wal_flush_noop_when_disabled() {
 
 #[test]
 fn test_wal_lsn_advances_after_transaction() {
+    use falcon_common::datum::Datum;
     use falcon_common::schema::{ColumnDef, TableSchema};
     use falcon_common::types::*;
-    use falcon_common::datum::Datum;
 
     let dir = std::env::temp_dir().join("falcon_shutdown_wal_lsn_txn_test");
     let _ = std::fs::remove_dir_all(&dir);
@@ -432,7 +438,8 @@ fn test_wal_lsn_advances_after_transaction() {
             nullable: false,
             is_primary_key: true,
             default_value: None,
-            is_serial: false, max_length: None,
+            is_serial: false,
+            max_length: None,
         }],
         primary_key_columns: vec![0],
         ..Default::default()
@@ -441,10 +448,10 @@ fn test_wal_lsn_advances_after_transaction() {
 
     // Insert a row via transaction
     let txn = txn_mgr.begin(IsolationLevel::ReadCommitted);
-    let row = falcon_common::datum::OwnedRow { values: vec![Datum::Int32(1)] };
-    engine
-        .insert(TableId(1), row, txn.txn_id)
-        .unwrap();
+    let row = falcon_common::datum::OwnedRow {
+        values: vec![Datum::Int32(1)],
+    };
+    engine.insert(TableId(1), row, txn.txn_id).unwrap();
     txn_mgr.commit(txn.txn_id).unwrap();
 
     let lsn_after = engine.current_wal_lsn();
@@ -458,7 +465,10 @@ fn test_wal_lsn_advances_after_transaction() {
     // Flush should succeed and LSN remains stable
     engine.flush_wal().unwrap();
     let lsn_post_flush = engine.current_wal_lsn();
-    assert_eq!(lsn_after, lsn_post_flush, "LSN should not change after flush");
+    assert_eq!(
+        lsn_after, lsn_post_flush,
+        "LSN should not change after flush"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

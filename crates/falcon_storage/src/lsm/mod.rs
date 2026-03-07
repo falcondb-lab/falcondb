@@ -44,6 +44,7 @@ pub mod gc;
 pub mod idempotency;
 pub mod manifest;
 pub mod memtable;
+pub mod merge_iter;
 pub mod mvcc_encoding;
 pub mod sst;
 pub mod throttle;

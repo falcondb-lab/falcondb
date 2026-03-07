@@ -13,9 +13,7 @@ use std::time::Duration;
 
 use falcon_common::types::ShardId;
 use falcon_raft::store::ApplyFn;
-use falcon_raft::{
-    Consensus, ConsensusError, LogEntry, RaftConsensus, RaftGroup,
-};
+use falcon_raft::{Consensus, ConsensusError, LogEntry, RaftConsensus, RaftGroup};
 
 // ─── Membership Changes ─────────────────────────────────────────────────────
 
@@ -24,7 +22,12 @@ async fn test_remove_voter_shrinks_cluster() {
     let group = RaftGroup::new_cluster(vec![1, 2, 3]).await.unwrap();
     let leader = group.wait_for_leader(Duration::from_secs(5)).await.unwrap();
 
-    let victim = group.node_ids().iter().find(|&&id| id != leader).copied().unwrap();
+    let victim = group
+        .node_ids()
+        .iter()
+        .find(|&&id| id != leader)
+        .copied()
+        .unwrap();
     group.remove_voter(victim).await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -108,9 +111,15 @@ async fn test_multi_shard_consensus() {
     let consensus = RaftConsensus::new();
 
     let group_a = RaftGroup::new_cluster(vec![1, 2, 3]).await.unwrap();
-    group_a.wait_for_leader(Duration::from_secs(5)).await.unwrap();
+    group_a
+        .wait_for_leader(Duration::from_secs(5))
+        .await
+        .unwrap();
     let group_b = RaftGroup::new_cluster(vec![10, 20, 30]).await.unwrap();
-    group_b.wait_for_leader(Duration::from_secs(5)).await.unwrap();
+    group_b
+        .wait_for_leader(Duration::from_secs(5))
+        .await
+        .unwrap();
 
     consensus.register_shard(ShardId(0), group_a);
     consensus.register_shard(ShardId(1), group_b);
@@ -119,11 +128,21 @@ async fn test_multi_shard_consensus() {
     assert!(consensus.is_leader(ShardId(1)).await);
 
     consensus
-        .propose(ShardId(0), LogEntry { data: b"shard-0".to_vec() })
+        .propose(
+            ShardId(0),
+            LogEntry {
+                data: b"shard-0".to_vec(),
+            },
+        )
         .await
         .unwrap();
     consensus
-        .propose(ShardId(1), LogEntry { data: b"shard-1".to_vec() })
+        .propose(
+            ShardId(1),
+            LogEntry {
+                data: b"shard-1".to_vec(),
+            },
+        )
         .await
         .unwrap();
 }
@@ -132,7 +151,12 @@ async fn test_multi_shard_consensus() {
 async fn test_consensus_unknown_shard_returns_error() {
     let consensus = RaftConsensus::new();
     let result = consensus
-        .propose(ShardId(999), LogEntry { data: b"nope".to_vec() })
+        .propose(
+            ShardId(999),
+            LogEntry {
+                data: b"nope".to_vec(),
+            },
+        )
         .await;
     assert!(result.is_err());
     match result.unwrap_err() {
@@ -175,8 +199,16 @@ async fn test_large_payload_proposal() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     for &id in group.node_ids() {
         if let Some(raft) = group.get_node(id) {
-            let applied = raft.metrics().borrow().last_applied.map(|l| l.index).unwrap_or(0);
-            assert!(applied >= 1, "node {id} should have applied the large entry");
+            let applied = raft
+                .metrics()
+                .borrow()
+                .last_applied
+                .map(|l| l.index)
+                .unwrap_or(0);
+            assert!(
+                applied >= 1,
+                "node {id} should have applied the large entry"
+            );
         }
     }
     group.shutdown().await.unwrap();

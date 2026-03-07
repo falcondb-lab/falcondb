@@ -241,7 +241,7 @@ pub enum FlushPolicy {
 impl Default for FlushPolicy {
     fn default() -> Self {
         Self::GroupCommit {
-            max_wait_us: 1000,              // 1ms
+            max_wait_us: 1000,                // 1ms
             max_batch_bytes: 4 * 1024 * 1024, // 4MB
         }
     }
@@ -327,19 +327,18 @@ impl IoMetrics {
         self.flush_ops.fetch_add(1, Ordering::Relaxed);
         self.flush_latency_us
             .fetch_add(latency_us, Ordering::Relaxed);
-        let _ = self
-            .max_flush_latency_us
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-                if latency_us > cur {
-                    Some(latency_us)
-                } else {
-                    None
-                }
-            });
+        let _ =
+            self.max_flush_latency_us
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                    if latency_us > cur {
+                        Some(latency_us)
+                    } else {
+                        None
+                    }
+                });
         match reason {
             FlushReason::BatchFull => {
-                self.flush_reason_batch_full
-                    .fetch_add(1, Ordering::Relaxed);
+                self.flush_reason_batch_full.fetch_add(1, Ordering::Relaxed);
             }
             FlushReason::Timer => {
                 self.flush_reason_timer.fetch_add(1, Ordering::Relaxed);

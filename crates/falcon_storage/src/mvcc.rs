@@ -281,6 +281,8 @@ impl VersionChain {
                     self.fast_commit_ts.store(commit_ts.0, Ordering::Release);
                     return 1;
                 }
+                // UPDATE/DELETE/re-INSERT: chain now has >1 version, invalidate fast path
+                self.fast_commit_ts.store(0, Ordering::Release);
                 let has_prev_committed = ver.has_prev() && {
                     ver.get_prev().is_some_and(|p| {
                         let cts = p.get_commit_ts();
@@ -288,8 +290,8 @@ impl VersionChain {
                     })
                 };
                 return match (is_live, has_prev_committed) {
-                    (true, false) => 1,   // INSERT (re-insert after delete)
-                    (false, true) => -1,  // DELETE
+                    (true, false) => 1,  // INSERT (re-insert after delete)
+                    (false, true) => -1, // DELETE
                     _ => 0,              // UPDATE or no previous committed row
                 };
             }
@@ -339,6 +341,8 @@ impl VersionChain {
         }
         if new_data.is_some() && old_data.is_none() {
             self.fast_commit_ts.store(commit_ts.0, Ordering::Release);
+        } else {
+            self.fast_commit_ts.store(0, Ordering::Release);
         }
         (new_data, old_data)
     }
@@ -353,16 +357,20 @@ impl VersionChain {
     /// - `restored`: the row data from the version that is now the new head (if any).
     ///
     /// Used by MemTable to undo/redo secondary index entries on abort.
-    pub fn abort_and_report(&self, txn_id: TxnId) -> (Option<Arc<OwnedRow>>, Option<Arc<OwnedRow>>) {
-        self.fast_commit_ts.store(0, Ordering::Release);
+    pub fn abort_and_report(
+        &self,
+        txn_id: TxnId,
+    ) -> (Option<Arc<OwnedRow>>, Option<Arc<OwnedRow>>) {
         let mut head = self.head.write();
         let aborted = match *head {
             Some(ref ver) if ver.created_by == txn_id => ver.data.read().clone_hot(),
             _ => None,
         };
+        let mut modified = false;
         while let Some(ref ver) = *head {
             if ver.created_by == txn_id {
                 *head = ver.get_prev();
+                modified = true;
             } else {
                 break;
             }
@@ -371,9 +379,15 @@ impl VersionChain {
         while let Some(ver) = current {
             if ver.created_by == txn_id && ver.get_commit_ts().0 == 0 {
                 ver.set_commit_ts(Timestamp::MAX);
+                modified = true;
             }
             current = ver.get_prev();
         }
+        if !modified {
+            return (None, None);
+        }
+        // Chain was modified — invalidate then try to restore fast path
+        self.fast_commit_ts.store(0, Ordering::Release);
         let restored = match *head {
             Some(ref ver) if ver.is_live() => {
                 let cts = ver.get_commit_ts();
@@ -445,7 +459,9 @@ impl VersionChain {
     ) -> ColdMigrateResult {
         let mut result = ColdMigrateResult::default();
         let head = self.head.read();
-        let Some(ref head_ver) = *head else { return result };
+        let Some(ref head_ver) = *head else {
+            return result;
+        };
         // Start from prev — never migrate the head version (it's the live row).
         let mut current = head_ver.get_prev();
         while let Some(ver) = current {
@@ -464,7 +480,9 @@ impl VersionChain {
                                 result.cold_bytes_written += handle.len as u64;
                                 *ver.data.write() = VersionData::Cold(handle);
                             }
-                            Err(_) => { result.errors += 1; }
+                            Err(_) => {
+                                result.errors += 1;
+                            }
                         }
                     }
                 }
@@ -478,9 +496,7 @@ impl VersionChain {
     pub fn estimate_version_bytes(ver: &Version) -> u64 {
         let header = mem::size_of::<Version>() as u64;
         let data_bytes = match &*ver.data.read() {
-            VersionData::Hot(row) => {
-                row.values.iter().map(estimate_datum_bytes).sum::<u64>() + 24
-            }
+            VersionData::Hot(row) => row.values.iter().map(estimate_datum_bytes).sum::<u64>() + 24,
             VersionData::Cold(_) => ColdHandle::SIZE as u64,
             VersionData::Tombstone => 0,
         };
@@ -706,8 +722,7 @@ fn estimate_datum_bytes(d: &falcon_common::datum::Datum) -> u64 {
         Datum::Null => 0,
         Datum::Boolean(_) => 1,
         Datum::Int32(_) => 4,
-        Datum::Int64(_) | Datum::Float64(_)
-        | Datum::Date(_) | Datum::Time(_) => 8,
+        Datum::Int64(_) | Datum::Float64(_) | Datum::Date(_) | Datum::Time(_) => 8,
         Datum::Timestamp(_) | Datum::Uuid(_) => 16,
         Datum::Interval(_, _, _) | Datum::Decimal(_, _) => 24,
         Datum::Text(s) => s.len() as u64 + 24, // String heap + ptr/len/cap

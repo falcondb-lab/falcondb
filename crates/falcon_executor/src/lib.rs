@@ -11,12 +11,12 @@ mod executor_setops;
 mod executor_subquery;
 mod executor_window;
 pub mod expr_engine;
-pub mod plpgsql;
-pub mod fts;
 pub mod external_sort;
+pub mod fts;
 pub mod governor;
 pub mod parallel;
 pub mod param_subst;
+pub mod plpgsql;
 pub mod priority_scheduler;
 pub mod row_stream;
 #[cfg(test)]
@@ -26,7 +26,6 @@ mod tests_expr;
 pub mod vectorized;
 
 pub use executor::{ExecutionResult, Executor};
-pub use row_stream::{ChunkedRows, CursorStream};
 pub use governor::{
     GovernorAbortReason, GovernorSnapshot, QueryGovernor, QueryGovernorConfig, QueryLimits,
 };
@@ -34,3 +33,4 @@ pub use priority_scheduler::{
     PriorityScheduler, PrioritySchedulerConfig, PrioritySchedulerSnapshot, QueryPriority,
     SchedulerGuard,
 };
+pub use row_stream::{ChunkedRows, CursorStream};

@@ -416,8 +416,7 @@ impl Executor {
         }
         for proj in &sel.projections {
             match proj {
-                BoundProjection::Expr(e, _)
-                | BoundProjection::Aggregate(_, Some(e), _, _, _) => {
+                BoundProjection::Expr(e, _) | BoundProjection::Aggregate(_, Some(e), _, _, _) => {
                     if Self::expr_has_outer_ref(e) {
                         return true;
                     }

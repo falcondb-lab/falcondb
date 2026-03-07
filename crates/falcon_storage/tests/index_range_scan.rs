@@ -81,7 +81,11 @@ fn test_range_scan_unbounded_both() {
     let idx = make_index_with_ints(&[10, 20, 30]);
     // No bounds → should return all 3
     let result = idx.range_scan(None, None);
-    assert_eq!(result.len(), 3, "expected all 3 results for unbounded range");
+    assert_eq!(
+        result.len(),
+        3,
+        "expected all 3 results for unbounded range"
+    );
 }
 
 #[test]
@@ -114,7 +118,11 @@ fn test_range_scan_int64() {
     let lo = encode_column_value(&Datum::Int64(200));
     let hi = encode_column_value(&Datum::Int64(400));
     let result = idx.range_scan(Some((&lo, true)), Some((&hi, true)));
-    assert_eq!(result.len(), 3, "expected 3 results for Int64 BETWEEN 200 AND 400");
+    assert_eq!(
+        result.len(),
+        3,
+        "expected 3 results for Int64 BETWEEN 200 AND 400"
+    );
 }
 
 #[test]
@@ -129,7 +137,11 @@ fn test_range_scan_float64() {
     let hi = encode_column_value(&Datum::Float64(6.0));
     let result = idx.range_scan(Some((&lo, true)), Some((&hi, true)));
     // 2.0 <= key <= 6.0 → 2.5, 3.7, 5.0
-    assert_eq!(result.len(), 3, "expected 3 results for Float64 BETWEEN 2.0 AND 6.0");
+    assert_eq!(
+        result.len(),
+        3,
+        "expected 3 results for Float64 BETWEEN 2.0 AND 6.0"
+    );
 }
 
 #[test]
@@ -179,7 +191,15 @@ fn test_range_scan_single_element_exclusive() {
     let lo = encode_column_value(&Datum::Int32(42));
     // lo exclusive, hi exclusive with same key → logically empty range
     let result = idx.range_scan(Some((&lo, false)), Some((&lo, true)));
-    assert_eq!(result.len(), 0, "exclusive lower bound on exact match should return 0");
+    assert_eq!(
+        result.len(),
+        0,
+        "exclusive lower bound on exact match should return 0"
+    );
     let result2 = idx.range_scan(Some((&lo, true)), Some((&lo, false)));
-    assert_eq!(result2.len(), 0, "exclusive upper bound on exact match should return 0");
+    assert_eq!(
+        result2.len(),
+        0,
+        "exclusive upper bound on exact match should return 0"
+    );
 }

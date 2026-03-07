@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::unified_data_plane::{Manifest, SegmentCodec, SegmentKind, SegmentStore};
 use crate::zstd_dict::DictionaryStore;
-use crate::zstd_segment::{write_zstd_cold_segment, read_zstd_cold_segment};
+use crate::zstd_segment::{read_zstd_cold_segment, write_zstd_cold_segment};
 use crate::zstd_streaming::DecompressPool;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -60,13 +60,21 @@ pub fn recompress_segment(
     shard_id: u64,
 ) -> Result<RecompressResult, String> {
     let rows = read_zstd_cold_segment(store, request.source_segment_id, old_dict)?;
-    let old_size = store.segment_size(request.source_segment_id)
+    let old_size = store
+        .segment_size(request.source_segment_id)
         .map_err(|e| format!("segment size: {e}"))?;
     let (new_seg_id, _meta) = write_zstd_cold_segment(
-        store, table_id, shard_id, &rows,
-        request.target_level, new_dict, request.new_dictionary_id,
-    ).map_err(|e| format!("write recompressed: {e}"))?;
-    let new_size = store.segment_size(new_seg_id)
+        store,
+        table_id,
+        shard_id,
+        &rows,
+        request.target_level,
+        new_dict,
+        request.new_dictionary_id,
+    )
+    .map_err(|e| format!("write recompressed: {e}"))?;
+    let new_size = store
+        .segment_size(new_seg_id)
         .map_err(|e| format!("new segment size: {e}"))?;
     Ok(RecompressResult {
         old_segment_id: request.source_segment_id,
@@ -115,14 +123,20 @@ pub struct ZstdCompressMetrics {
 impl ZstdCompressMetrics {
     pub fn record(&self, bytes_in: u64, bytes_out: u64) {
         self.compress_total.fetch_add(1, Ordering::Relaxed);
-        self.compress_bytes_in.fetch_add(bytes_in, Ordering::Relaxed);
-        self.compress_bytes_out.fetch_add(bytes_out, Ordering::Relaxed);
+        self.compress_bytes_in
+            .fetch_add(bytes_in, Ordering::Relaxed);
+        self.compress_bytes_out
+            .fetch_add(bytes_out, Ordering::Relaxed);
     }
 
     pub fn ratio(&self) -> f64 {
         let i = self.compress_bytes_in.load(Ordering::Relaxed) as f64;
         let o = self.compress_bytes_out.load(Ordering::Relaxed) as f64;
-        if o > 0.0 { i / o } else { 1.0 }
+        if o > 0.0 {
+            i / o
+        } else {
+            1.0
+        }
     }
 }
 
@@ -135,7 +149,9 @@ pub fn build_zstd_metrics(
     let decompress_ns = pool.metrics.decompress_ns_total.load(Ordering::Relaxed);
     let avg_us = if decompress_total > 0 {
         (decompress_ns as f64 / decompress_total as f64) / 1000.0
-    } else { 0.0 };
+    } else {
+        0.0
+    };
     ZstdMetricsSnapshot {
         compress_total: compress.compress_total.load(Ordering::Relaxed),
         compress_bytes_in: compress.compress_bytes_in.load(Ordering::Relaxed),
@@ -151,7 +167,10 @@ pub fn build_zstd_metrics(
         cache_used_bytes: pool.cache.used_bytes(),
         cache_evictions: pool.cache.metrics.evictions.load(Ordering::Relaxed),
         dict_count: dict_store.list().len() as u64,
-        dict_bytes_total: dict_store.metrics.dictionary_bytes_total.load(Ordering::Relaxed),
+        dict_bytes_total: dict_store
+            .metrics
+            .dictionary_bytes_total
+            .load(Ordering::Relaxed),
         dict_hit_rate: dict_store.metrics.hit_rate(),
         dict_training_runs: dict_store.metrics.training_runs.load(Ordering::Relaxed),
         stream_bytes_saved_ratio: compress.ratio(),
@@ -168,8 +187,13 @@ pub struct SegmentCodecInfo {
     pub sealed: bool,
 }
 
-pub fn list_segments_by_codec(manifest: &Manifest, codec: Option<SegmentCodec>) -> Vec<SegmentCodecInfo> {
-    manifest.segments.values()
+pub fn list_segments_by_codec(
+    manifest: &Manifest,
+    codec: Option<SegmentCodec>,
+) -> Vec<SegmentCodecInfo> {
+    manifest
+        .segments
+        .values()
         .filter(|e| codec.is_none_or(|c| e.codec == c))
         .map(|e| SegmentCodecInfo {
             segment_id: e.segment_id,

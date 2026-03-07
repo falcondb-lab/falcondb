@@ -146,7 +146,9 @@ pub trait SegmentCodecImpl: Send + Sync {
 pub struct NoneCodec;
 
 impl SegmentCodecImpl for NoneCodec {
-    fn codec_id(&self) -> CodecId { CodecId::None }
+    fn codec_id(&self) -> CodecId {
+        CodecId::None
+    }
 
     fn compress_block(&self, input: &[u8]) -> Result<Vec<u8>, CodecError> {
         Ok(input.to_vec())
@@ -165,7 +167,9 @@ impl SegmentCodecImpl for NoneCodec {
 pub struct Lz4BlockCodec;
 
 impl SegmentCodecImpl for Lz4BlockCodec {
-    fn codec_id(&self) -> CodecId { CodecId::Lz4 }
+    fn codec_id(&self) -> CodecId {
+        CodecId::Lz4
+    }
 
     fn compress_block(&self, input: &[u8]) -> Result<Vec<u8>, CodecError> {
         Ok(lz4_flex::compress_prepend_size(input))
@@ -192,7 +196,10 @@ pub struct ZstdCodecConfig {
 
 impl Default for ZstdCodecConfig {
     fn default() -> Self {
-        Self { level: 3, checksum: true }
+        Self {
+            level: 3,
+            checksum: true,
+        }
     }
 }
 
@@ -220,12 +227,18 @@ impl fmt::Debug for ZstdBlockCodec {
 impl ZstdBlockCodec {
     /// Create a new codec without dictionary.
     pub const fn new(config: ZstdCodecConfig) -> Self {
-        Self { config, dict_data: None }
+        Self {
+            config,
+            dict_data: None,
+        }
     }
 
     /// Create a new codec with a pre-loaded dictionary.
     pub const fn with_dictionary(config: ZstdCodecConfig, dict_data: Vec<u8>) -> Self {
-        Self { config, dict_data: Some(dict_data) }
+        Self {
+            config,
+            dict_data: Some(dict_data),
+        }
     }
 
     /// Compress using zstd-safe low-level API.
@@ -242,7 +255,8 @@ impl ZstdBlockCodec {
             cctx.load_dictionary(dict)
                 .map_err(|c| CodecError(format!("zstd load dict for compress: code {c}")))?;
         }
-        let written = cctx.compress2(&mut output[..], input)
+        let written = cctx
+            .compress2(&mut output[..], input)
             .map_err(|c| CodecError(format!("zstd compress2: code {c}")))?;
 
         output.truncate(written);
@@ -252,7 +266,11 @@ impl ZstdBlockCodec {
     /// Decompress using zstd-safe low-level API.
     fn zstd_decompress(&self, input: &[u8], original_len: usize) -> Result<Vec<u8>, CodecError> {
         // Allocate extra headroom in case original_len is inexact
-        let alloc = if original_len == 0 { input.len() * 10 + 64 } else { original_len + 64 };
+        let alloc = if original_len == 0 {
+            input.len() * 10 + 64
+        } else {
+            original_len + 64
+        };
         let mut output = vec![0u8; alloc];
 
         let mut dctx = zstd_safe::DCtx::create();
@@ -260,7 +278,8 @@ impl ZstdBlockCodec {
             dctx.load_dictionary(dict)
                 .map_err(|c| CodecError(format!("zstd load dict for decompress: code {c}")))?;
         }
-        let written = dctx.decompress(&mut output[..], input)
+        let written = dctx
+            .decompress(&mut output[..], input)
             .map_err(|c| CodecError(format!("zstd decompress: code {c}")))?;
 
         output.truncate(written);
@@ -269,7 +288,9 @@ impl ZstdBlockCodec {
 }
 
 impl SegmentCodecImpl for ZstdBlockCodec {
-    fn codec_id(&self) -> CodecId { CodecId::Zstd }
+    fn codec_id(&self) -> CodecId {
+        CodecId::Zstd
+    }
 
     fn compress_block(&self, input: &[u8]) -> Result<Vec<u8>, CodecError> {
         self.zstd_compress(input)
@@ -331,9 +352,22 @@ fn djb2_crc(data: &[u8]) -> u32 {
 
 impl DictionaryHandle {
     /// Compute checksum and create a handle.
-    pub fn new(dictionary_id: u64, segment_id: u64, table_id: u64, schema_version: u64, data: Vec<u8>) -> Self {
+    pub fn new(
+        dictionary_id: u64,
+        segment_id: u64,
+        table_id: u64,
+        schema_version: u64,
+        data: Vec<u8>,
+    ) -> Self {
         let checksum = djb2_crc(&data);
-        Self { dictionary_id, segment_id, table_id, schema_version, data, checksum }
+        Self {
+            dictionary_id,
+            segment_id,
+            table_id,
+            schema_version,
+            data,
+            checksum,
+        }
     }
 
     /// Verify the dictionary checksum.
@@ -367,7 +401,11 @@ impl DictionaryMetrics {
     pub fn hit_rate(&self) -> f64 {
         let h = self.hits.load(Ordering::Relaxed) as f64;
         let m = self.misses.load(Ordering::Relaxed) as f64;
-        if h + m == 0.0 { 0.0 } else { h / (h + m) }
+        if h + m == 0.0 {
+            0.0
+        } else {
+            h / (h + m)
+        }
     }
 }
 
@@ -384,7 +422,9 @@ impl DictionaryRegistry {
     pub fn load(&self, handle: DictionaryHandle) {
         let dict_id = handle.dictionary_id;
         let table_id = handle.table_id;
-        self.metrics.bytes_total.fetch_add(handle.data.len() as u64, Ordering::Relaxed);
+        self.metrics
+            .bytes_total
+            .fetch_add(handle.data.len() as u64, Ordering::Relaxed);
         self.metrics.loaded.fetch_add(1, Ordering::Relaxed);
         self.entries.write().insert(dict_id, handle);
         self.table_latest.write().insert(table_id, dict_id);
@@ -419,17 +459,22 @@ impl DictionaryRegistry {
         dictionary_id: u64,
         config: ZstdCodecConfig,
     ) -> Result<ZstdBlockCodec, CodecError> {
-        let handle = self.get(dictionary_id)
+        let handle = self
+            .get(dictionary_id)
             .ok_or_else(|| CodecError(format!("dictionary {dictionary_id} not found")))?;
         if !handle.verify() {
-            return Err(CodecError(format!("dictionary {dictionary_id} checksum mismatch")));
+            return Err(CodecError(format!(
+                "dictionary {dictionary_id} checksum mismatch"
+            )));
         }
         Ok(ZstdBlockCodec::with_dictionary(config, handle.data))
     }
 }
 
 impl Default for DictionaryRegistry {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -462,7 +507,9 @@ impl BlockHeader {
 
     /// Deserialize from bytes.
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        if data.len() < BLOCK_HEADER_SIZE { return None; }
+        if data.len() < BLOCK_HEADER_SIZE {
+            return None;
+        }
         Some(Self {
             uncompressed_len: u32::from_le_bytes(data[0..4].try_into().ok()?),
             compressed_len: u32::from_le_bytes(data[4..8].try_into().ok()?),
@@ -523,9 +570,17 @@ impl CompressedBlock {
     pub fn from_bytes(data: &[u8]) -> Option<(Self, usize)> {
         let header = BlockHeader::from_bytes(data)?;
         let total = BLOCK_HEADER_SIZE + header.compressed_len as usize;
-        if data.len() < total { return None; }
+        if data.len() < total {
+            return None;
+        }
         let block_data = data[BLOCK_HEADER_SIZE..total].to_vec();
-        Some((Self { header, data: block_data }, total))
+        Some((
+            Self {
+                header,
+                data: block_data,
+            },
+            total,
+        ))
     }
 }
 
@@ -561,7 +616,9 @@ impl ZstdSegmentMeta {
     }
 
     pub fn compression_ratio(&self) -> f64 {
-        if self.compressed_bytes == 0 { return 1.0; }
+        if self.compressed_bytes == 0 {
+            return 1.0;
+        }
         self.uncompressed_bytes as f64 / self.compressed_bytes as f64
     }
 
@@ -580,7 +637,9 @@ impl ZstdSegmentMeta {
 
     /// Deserialize from bytes.
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        if data.len() < 37 { return None; }
+        if data.len() < 37 {
+            return None;
+        }
         Some(Self {
             codec_id: CodecId::from_u8(data[0])?,
             codec_level: i32::from_le_bytes(data[1..5].try_into().ok()?),
@@ -617,14 +676,15 @@ pub fn write_blocks(
 }
 
 /// Read blocks from a buffer: `[block_count:u32] [CompressedBlock]*N`
-pub fn read_blocks(
-    codec: &dyn SegmentCodecImpl,
-    data: &[u8],
-) -> Result<Vec<Vec<u8>>, CodecError> {
+pub fn read_blocks(codec: &dyn SegmentCodecImpl, data: &[u8]) -> Result<Vec<Vec<u8>>, CodecError> {
     if data.len() < 4 {
         return Err(CodecError("data too small for block count".to_owned()));
     }
-    let block_count = u32::from_le_bytes(data[0..4].try_into().expect("infallible: 4-byte slice to [u8;4]")) as usize;
+    let block_count = u32::from_le_bytes(
+        data[0..4]
+            .try_into()
+            .expect("infallible: 4-byte slice to [u8;4]"),
+    ) as usize;
     let mut offset = 4;
     let mut rows = Vec::with_capacity(block_count);
 
@@ -662,7 +722,11 @@ pub struct StreamingCodecCaps {
 impl StreamingCodecCaps {
     pub fn high_bandwidth() -> Self {
         Self {
-            supported: vec![StreamingCodecId::None, StreamingCodecId::Lz4, StreamingCodecId::Zstd],
+            supported: vec![
+                StreamingCodecId::None,
+                StreamingCodecId::Lz4,
+                StreamingCodecId::Zstd,
+            ],
             preferred: StreamingCodecId::Lz4,
             estimated_bandwidth_bps: 10_000_000_000,
         }
@@ -681,16 +745,23 @@ pub fn negotiate_streaming_codec(
     sender: &StreamingCodecCaps,
     receiver: &StreamingCodecCaps,
 ) -> StreamingCodecId {
-    let common: Vec<StreamingCodecId> = sender.supported.iter()
+    let common: Vec<StreamingCodecId> = sender
+        .supported
+        .iter()
         .filter(|c| receiver.supported.contains(c))
         .copied()
         .collect();
-    if common.is_empty() { return StreamingCodecId::None; }
+    if common.is_empty() {
+        return StreamingCodecId::None;
+    }
     if (sender.preferred == StreamingCodecId::Zstd || receiver.preferred == StreamingCodecId::Zstd)
-        && common.contains(&StreamingCodecId::Zstd) {
+        && common.contains(&StreamingCodecId::Zstd)
+    {
         return StreamingCodecId::Zstd;
     }
-    if common.contains(&sender.preferred) { return sender.preferred; }
+    if common.contains(&sender.preferred) {
+        return sender.preferred;
+    }
     common[0]
 }
 
@@ -704,7 +775,10 @@ pub fn compress_streaming_chunk(
         StreamingCodecId::None => Ok(data.to_vec()),
         StreamingCodecId::Lz4 => Ok(lz4_flex::compress_prepend_size(data)),
         StreamingCodecId::Zstd => {
-            let c = ZstdBlockCodec::new(ZstdCodecConfig { level: zstd_level, checksum: false });
+            let c = ZstdBlockCodec::new(ZstdCodecConfig {
+                level: zstd_level,
+                checksum: false,
+            });
             c.compress_block(data)
         }
     }
@@ -718,10 +792,8 @@ pub fn decompress_streaming_chunk(
 ) -> Result<Vec<u8>, CodecError> {
     match codec {
         StreamingCodecId::None => Ok(data.to_vec()),
-        StreamingCodecId::Lz4 => {
-            lz4_flex::decompress_size_prepended(data)
-                .map_err(|e| CodecError(format!("lz4 stream decompress: {e}")))
-        }
+        StreamingCodecId::Lz4 => lz4_flex::decompress_size_prepended(data)
+            .map_err(|e| CodecError(format!("lz4 stream decompress: {e}"))),
         StreamingCodecId::Zstd => {
             let c = ZstdBlockCodec::new(ZstdCodecConfig::default());
             c.decompress_block(data, max_decompressed)
@@ -760,7 +832,11 @@ impl DecompressCacheMetrics {
     pub fn hit_rate(&self) -> f64 {
         let h = self.hits.load(Ordering::Relaxed) as f64;
         let m = self.misses.load(Ordering::Relaxed) as f64;
-        if h + m == 0.0 { 0.0 } else { h / (h + m) }
+        if h + m == 0.0 {
+            0.0
+        } else {
+            h / (h + m)
+        }
     }
 }
 
@@ -792,7 +868,8 @@ impl DecompressCache {
             let evict_key = self.order.lock().pop_front();
             if let Some(ek) = evict_key {
                 if let Some(evicted) = self.entries.lock().remove(&ek) {
-                    self.used_bytes.fetch_sub(evicted.len() as u64, Ordering::Relaxed);
+                    self.used_bytes
+                        .fetch_sub(evicted.len() as u64, Ordering::Relaxed);
                     self.metrics.evictions.fetch_add(1, Ordering::Relaxed);
                 }
             } else {
@@ -807,9 +884,15 @@ impl DecompressCache {
         }
     }
 
-    pub fn used_bytes(&self) -> u64 { self.used_bytes.load(Ordering::Relaxed) }
-    pub fn len(&self) -> usize { self.entries.lock().len() }
-    pub fn is_empty(&self) -> bool { self.len() == 0 }
+    pub fn used_bytes(&self) -> u64 {
+        self.used_bytes.load(Ordering::Relaxed)
+    }
+    pub fn len(&self) -> usize {
+        self.entries.lock().len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// Decompression pool — enforces concurrency limit and caches results.
@@ -850,7 +933,10 @@ impl DecompressPool {
         block: &CompressedBlock,
         codec: &dyn SegmentCodecImpl,
     ) -> Result<Vec<u8>, CodecError> {
-        let cache_key = DecompressCacheKey { segment_id, block_index };
+        let cache_key = DecompressCacheKey {
+            segment_id,
+            block_index,
+        };
 
         if let Some(cached) = self.cache.get(&cache_key) {
             return Ok(cached);
@@ -873,7 +959,9 @@ impl DecompressPool {
 
         match result {
             Ok(data) => {
-                self.metrics.bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
+                self.metrics
+                    .bytes
+                    .fetch_add(data.len() as u64, Ordering::Relaxed);
                 self.cache.insert(cache_key, data.clone());
                 Ok(data)
             }
@@ -884,7 +972,9 @@ impl DecompressPool {
         }
     }
 
-    pub fn inflight(&self) -> u64 { self.inflight.load(Ordering::Relaxed) }
+    pub fn inflight(&self) -> u64 {
+        self.inflight.load(Ordering::Relaxed)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -969,15 +1059,21 @@ pub struct CompressMetrics {
 impl CompressMetrics {
     pub fn record(&self, bytes_in: u64, bytes_out: u64, cpu_ns: u64) {
         self.compress_calls.fetch_add(1, Ordering::Relaxed);
-        self.compress_bytes_in.fetch_add(bytes_in, Ordering::Relaxed);
-        self.compress_bytes_out.fetch_add(bytes_out, Ordering::Relaxed);
+        self.compress_bytes_in
+            .fetch_add(bytes_in, Ordering::Relaxed);
+        self.compress_bytes_out
+            .fetch_add(bytes_out, Ordering::Relaxed);
         self.compress_cpu_ns.fetch_add(cpu_ns, Ordering::Relaxed);
     }
 
     pub fn ratio(&self) -> f64 {
         let i = self.compress_bytes_in.load(Ordering::Relaxed) as f64;
         let o = self.compress_bytes_out.load(Ordering::Relaxed) as f64;
-        if o > 0.0 { i / o } else { 1.0 }
+        if o > 0.0 {
+            i / o
+        } else {
+            1.0
+        }
     }
 }
 
@@ -1116,7 +1212,10 @@ mod tests {
     #[test]
     fn test_zstd_codec_levels() {
         for level in [1, 3, 5, 9] {
-            let c = ZstdBlockCodec::new(ZstdCodecConfig { level, checksum: true });
+            let c = ZstdBlockCodec::new(ZstdCodecConfig {
+                level,
+                checksum: true,
+            });
             let data = vec![42u8; 2048];
             let compressed = c.compress_block(&data).unwrap();
             let decompressed = c.decompress_block(&compressed, data.len()).unwrap();
@@ -1160,12 +1259,14 @@ mod tests {
     #[test]
     fn test_zstd_with_dictionary() {
         // Build a simple dictionary from repeated patterns using zstd-safe API
-        let samples: Vec<Vec<u8>> = (0..100).map(|i| {
-            let mut v = b"FalconDB common prefix data ".to_vec();
-            v.extend_from_slice(&(i as u32).to_le_bytes());
-            v.extend_from_slice(&[0u8; 50]);
-            v
-        }).collect();
+        let samples: Vec<Vec<u8>> = (0..100)
+            .map(|i| {
+                let mut v = b"FalconDB common prefix data ".to_vec();
+                v.extend_from_slice(&(i as u32).to_le_bytes());
+                v.extend_from_slice(&[0u8; 50]);
+                v
+            })
+            .collect();
         // zstd_safe::train_from_buffer wants: &mut [u8] (dict buf), &[u8] (concat samples), &[usize] (sizes)
         let sizes: Vec<usize> = samples.iter().map(|s| s.len()).collect();
         let concat: Vec<u8> = samples.iter().flat_map(|s| s.iter().copied()).collect();
@@ -1174,10 +1275,7 @@ mod tests {
             .expect("dict training failed");
         dict_buf.truncate(dict_written);
 
-        let c = ZstdBlockCodec::with_dictionary(
-            ZstdCodecConfig::default(),
-            dict_buf,
-        );
+        let c = ZstdBlockCodec::with_dictionary(ZstdCodecConfig::default(), dict_buf);
         let test_data = b"FalconDB common prefix data \x05\x00\x00\x00test payload here";
         let compressed = c.compress_block(test_data).unwrap();
         let decompressed = c.decompress_block(&compressed, test_data.len()).unwrap();
@@ -1187,12 +1285,14 @@ mod tests {
     #[test]
     fn test_zstd_dict_mismatch_fails() {
         // Train dict A from pattern A
-        let samples_a: Vec<Vec<u8>> = (0..100).map(|i| {
-            let mut v = b"AAAA pattern alpha ".to_vec();
-            v.extend_from_slice(&(i as u32).to_le_bytes());
-            v.extend_from_slice(&[0xAAu8; 60]);
-            v
-        }).collect();
+        let samples_a: Vec<Vec<u8>> = (0..100)
+            .map(|i| {
+                let mut v = b"AAAA pattern alpha ".to_vec();
+                v.extend_from_slice(&(i as u32).to_le_bytes());
+                v.extend_from_slice(&[0xAAu8; 60]);
+                v
+            })
+            .collect();
         let sizes_a: Vec<usize> = samples_a.iter().map(|s| s.len()).collect();
         let concat_a: Vec<u8> = samples_a.iter().flat_map(|s| s.iter().copied()).collect();
         let mut buf_a = vec![0u8; 8192];
@@ -1200,12 +1300,14 @@ mod tests {
         buf_a.truncate(n_a);
 
         // Train dict B from pattern B
-        let samples_b: Vec<Vec<u8>> = (0..100).map(|i| {
-            let mut v = b"BBBB pattern beta ".to_vec();
-            v.extend_from_slice(&((i + 500) as u32).to_le_bytes());
-            v.extend_from_slice(&[0xBBu8; 60]);
-            v
-        }).collect();
+        let samples_b: Vec<Vec<u8>> = (0..100)
+            .map(|i| {
+                let mut v = b"BBBB pattern beta ".to_vec();
+                v.extend_from_slice(&((i + 500) as u32).to_le_bytes());
+                v.extend_from_slice(&[0xBBu8; 60]);
+                v
+            })
+            .collect();
         let sizes_b: Vec<usize> = samples_b.iter().map(|s| s.len()).collect();
         let concat_b: Vec<u8> = samples_b.iter().flat_map(|s| s.iter().copied()).collect();
         let mut buf_b = vec![0u8; 8192];
@@ -1220,8 +1322,10 @@ mod tests {
         // Decompress with dict B — should fail or produce wrong output
         let c_b = ZstdBlockCodec::with_dictionary(ZstdCodecConfig::default(), buf_b);
         let result = c_b.decompress_block(&compressed, data.len());
-        assert!(result.is_err() || result.as_ref().unwrap() != data,
-            "dict mismatch should cause error or wrong data");
+        assert!(
+            result.is_err() || result.as_ref().unwrap() != data,
+            "dict mismatch should cause error or wrong data"
+        );
     }
 
     // -- §B: create_codec factory --
@@ -1274,18 +1378,26 @@ mod tests {
         let handle = DictionaryHandle::new(1, 100, 42, 1, vec![0u8; 256]);
         reg.load(handle);
 
-        let codec = reg.create_codec_with_dict(1, ZstdCodecConfig::default()).unwrap();
+        let codec = reg
+            .create_codec_with_dict(1, ZstdCodecConfig::default())
+            .unwrap();
         assert_eq!(codec.codec_id(), CodecId::Zstd);
 
         // Missing dict → error
-        assert!(reg.create_codec_with_dict(999, ZstdCodecConfig::default()).is_err());
+        assert!(reg
+            .create_codec_with_dict(999, ZstdCodecConfig::default())
+            .is_err());
     }
 
     // -- §D: Block wire format --
 
     #[test]
     fn test_block_header_roundtrip() {
-        let hdr = BlockHeader { uncompressed_len: 1234, compressed_len: 567, block_crc: 0xDEAD };
+        let hdr = BlockHeader {
+            uncompressed_len: 1234,
+            compressed_len: 567,
+            block_crc: 0xDEAD,
+        };
         let bytes = hdr.to_bytes();
         let recovered = BlockHeader::from_bytes(&bytes).unwrap();
         assert_eq!(recovered, hdr);
@@ -1335,8 +1447,7 @@ mod tests {
 
     #[test]
     fn test_zstd_segment_meta_roundtrip() {
-        let meta = ZstdSegmentMeta::new(5)
-            .with_dictionary(42, 0xBEEF);
+        let meta = ZstdSegmentMeta::new(5).with_dictionary(42, 0xBEEF);
         let bytes = meta.to_bytes();
         let recovered = ZstdSegmentMeta::from_bytes(&bytes).unwrap();
         assert_eq!(recovered, meta);
@@ -1368,10 +1479,18 @@ mod tests {
     #[test]
     fn test_streaming_chunk_roundtrip() {
         let data = vec![42u8; 8192];
-        for codec in [StreamingCodecId::None, StreamingCodecId::Lz4, StreamingCodecId::Zstd] {
+        for codec in [
+            StreamingCodecId::None,
+            StreamingCodecId::Lz4,
+            StreamingCodecId::Zstd,
+        ] {
             let compressed = compress_streaming_chunk(&data, codec, 1).unwrap();
             let decompressed = decompress_streaming_chunk(&compressed, codec, data.len()).unwrap();
-            assert_eq!(decompressed, data, "streaming roundtrip failed for {:?}", codec);
+            assert_eq!(
+                decompressed, data,
+                "streaming roundtrip failed for {:?}",
+                codec
+            );
         }
     }
 
@@ -1380,7 +1499,10 @@ mod tests {
     #[test]
     fn test_decompress_cache_basic() {
         let cache = DecompressCache::new(1024 * 1024);
-        let key = DecompressCacheKey { segment_id: 1, block_index: 0 };
+        let key = DecompressCacheKey {
+            segment_id: 1,
+            block_index: 0,
+        };
         assert!(cache.get(&key).is_none());
         cache.insert(key, vec![1, 2, 3]);
         assert_eq!(cache.get(&key).unwrap(), vec![1, 2, 3]);
@@ -1391,7 +1513,10 @@ mod tests {
         let cache = DecompressCache::new(100);
         for i in 0..20u32 {
             cache.insert(
-                DecompressCacheKey { segment_id: 1, block_index: i },
+                DecompressCacheKey {
+                    segment_id: 1,
+                    block_index: i,
+                },
                 vec![0u8; 50],
             );
         }
@@ -1428,7 +1553,10 @@ mod tests {
     #[test]
     fn test_recompress() {
         let rows: Vec<Vec<u8>> = (0..5).map(|i| vec![i as u8; 300]).collect();
-        let new_codec = ZstdBlockCodec::new(ZstdCodecConfig { level: 5, checksum: true });
+        let new_codec = ZstdBlockCodec::new(ZstdCodecConfig {
+            level: 5,
+            checksum: true,
+        });
         let request = RecompressRequest {
             source_data: rows.clone(),
             target_codec_id: CodecId::Zstd,
@@ -1479,6 +1607,9 @@ mod tests {
     #[test]
     fn test_display() {
         assert_eq!(format!("{}", CodecId::Zstd), "zstd");
-        assert_eq!(format!("{}", RecompressReason::DictionaryUpgrade), "dict_upgrade");
+        assert_eq!(
+            format!("{}", RecompressReason::DictionaryUpgrade),
+            "dict_upgrade"
+        );
     }
 }

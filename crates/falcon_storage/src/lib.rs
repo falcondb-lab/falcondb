@@ -1,20 +1,22 @@
 // ── PRODUCTION modules (always compiled) ──
-pub mod storage_trait;
-pub mod table_handle;
 pub mod audit;
 pub mod backup;
 pub mod cold_store;
+#[allow(dead_code)]
+pub mod csn;
+pub mod delta_lsn;
 pub mod engine;
-pub mod logical_backup;
 mod engine_ddl;
 mod engine_dml;
 pub mod gc;
 pub mod gc_budget;
 pub mod group_commit;
-pub mod io;
 pub mod health;
 pub mod hotspot;
 pub mod index;
+pub mod io;
+pub mod job_scheduler;
+pub mod logical_backup;
 pub mod memory;
 pub mod memtable;
 pub mod metering;
@@ -23,22 +25,21 @@ pub mod partition;
 pub mod role_catalog;
 pub mod security_manager;
 pub mod stats;
+pub mod storage_trait;
+#[allow(dead_code)]
+pub mod structured_lsn;
+pub mod table_handle;
+pub mod unified_data_plane;
+pub mod unified_data_plane_full;
 pub mod upgrade;
 pub mod ustm;
 pub mod verification;
-#[allow(dead_code)]
-pub mod csn;
-pub mod delta_lsn;
-#[allow(dead_code)]
-pub mod structured_lsn;
-pub mod unified_data_plane;
-pub mod unified_data_plane_full;
-pub mod zstd_segment;
-pub mod zstd_dict;
-pub mod zstd_streaming;
-pub mod zstd_recompress;
 pub mod wal;
 pub mod wal_win_async;
+pub mod zstd_dict;
+pub mod zstd_recompress;
+pub mod zstd_segment;
+pub mod zstd_streaming;
 
 // ── Enterprise stubs (always compiled for handler compat, disabled at runtime) ──
 pub mod cdc;
@@ -66,10 +67,10 @@ pub mod disk_rowstore;
 pub mod lsm;
 #[cfg(feature = "lsm")]
 pub mod lsm_table;
-#[cfg(feature = "rocksdb")]
-pub mod rocksdb_table;
 #[cfg(feature = "redb")]
 pub mod redb_table;
+#[cfg(feature = "rocksdb")]
+pub mod rocksdb_table;
 
 // ── Stub for columnstore so engine.rs compiles without the feature ──
 #[cfg(not(feature = "columnstore"))]
@@ -127,7 +128,8 @@ pub(crate) fn eval_cast_datum(
                 .map(Datum::Int32)
                 .map_err(|_| "Numeric value out of range for int".to_string()),
             Datum::Float64(v) => {
-                if v.is_nan() || v.is_infinite() || *v < (i32::MIN as f64) || *v > (i32::MAX as f64) {
+                if v.is_nan() || v.is_infinite() || *v < (i32::MIN as f64) || *v > (i32::MAX as f64)
+                {
                     Err("Numeric value out of range for int".to_string())
                 } else {
                     Ok(Datum::Int32(*v as i32))
@@ -144,7 +146,8 @@ pub(crate) fn eval_cast_datum(
             Datum::Int64(_) => Ok(val),
             Datum::Int32(v) => Ok(Datum::Int64(i64::from(*v))),
             Datum::Float64(v) => {
-                if v.is_nan() || v.is_infinite() || *v < (i64::MIN as f64) || *v > (i64::MAX as f64) {
+                if v.is_nan() || v.is_infinite() || *v < (i64::MIN as f64) || *v > (i64::MAX as f64)
+                {
                     Err("Numeric value out of range for bigint".to_string())
                 } else {
                     Ok(Datum::Int64(*v as i64))

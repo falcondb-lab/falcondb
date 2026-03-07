@@ -57,6 +57,19 @@ pub enum StorageType {
     RedbRowstore,
 }
 
+/// Constraint kind for ALTER TABLE ADD CONSTRAINT.
+#[derive(Debug, Clone)]
+pub enum AddConstraintKind {
+    PrimaryKey(Vec<String>),
+    Unique(Vec<String>),
+    Check(String), // raw SQL expression string
+    ForeignKey {
+        columns: Vec<String>,
+        ref_table: String,
+        ref_columns: Vec<String>,
+    },
+}
+
 /// Dynamic default expression evaluated at INSERT time.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DefaultFn {
@@ -83,8 +96,25 @@ pub struct ColumnDef {
 
 impl ColumnDef {
     /// Shorthand constructor — sets max_length to None.
-    pub fn new(id: ColumnId, name: String, data_type: DataType, nullable: bool, is_primary_key: bool, default_value: Option<Datum>, is_serial: bool) -> Self {
-        Self { id, name, data_type, nullable, is_primary_key, default_value, is_serial, max_length: None }
+    pub fn new(
+        id: ColumnId,
+        name: String,
+        data_type: DataType,
+        nullable: bool,
+        is_primary_key: bool,
+        default_value: Option<Datum>,
+        is_serial: bool,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            data_type,
+            nullable,
+            is_primary_key,
+            default_value,
+            is_serial,
+            max_length: None,
+        }
     }
 }
 
@@ -291,15 +321,12 @@ pub enum FunctionLanguage {
 }
 
 /// Volatility category (matches PostgreSQL semantics).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FunctionVolatility {
     Immutable,
     Stable,
+    #[default]
     Volatile,
-}
-
-impl Default for FunctionVolatility {
-    fn default() -> Self { Self::Volatile }
 }
 
 /// Stored definition of a user-defined function or procedure.
@@ -367,9 +394,18 @@ impl Catalog {
 
     fn default_schemas() -> Vec<SchemaEntry> {
         vec![
-            SchemaEntry { name: "public".to_owned(), owner: "falcon".to_owned() },
-            SchemaEntry { name: "pg_catalog".to_owned(), owner: "falcon".to_owned() },
-            SchemaEntry { name: "information_schema".to_owned(), owner: "falcon".to_owned() },
+            SchemaEntry {
+                name: "public".to_owned(),
+                owner: "falcon".to_owned(),
+            },
+            SchemaEntry {
+                name: "pg_catalog".to_owned(),
+                owner: "falcon".to_owned(),
+            },
+            SchemaEntry {
+                name: "information_schema".to_owned(),
+                owner: "falcon".to_owned(),
+            },
         ]
     }
 
@@ -416,17 +452,17 @@ impl Catalog {
         // RoleCatalog::new() already adds superuser. Remove it first to avoid duplicates.
         rc.remove_role(SUPERUSER_ROLE_ID);
         for entry in &self.role_entries {
-            let mut role = Role::new_user(
-                RoleId(entry.id),
-                entry.name.clone(),
-                SYSTEM_TENANT_ID,
-            );
+            let mut role = Role::new_user(RoleId(entry.id), entry.name.clone(), SYSTEM_TENANT_ID);
             role.can_login = entry.can_login;
             role.is_superuser = entry.is_superuser;
             role.can_create_db = entry.can_create_db;
             role.can_create_role = entry.can_create_role;
             role.password_hash = entry.password_hash.clone();
-            role.member_of = entry.member_of.iter().map(|&id| RoleId(id)).collect::<HashSet<_>>();
+            role.member_of = entry
+                .member_of
+                .iter()
+                .map(|&id| RoleId(id))
+                .collect::<HashSet<_>>();
             rc.add_role(role);
         }
         self.role_catalog = Some(rc);
@@ -442,13 +478,17 @@ impl Catalog {
     /// Get a reference to the in-memory role catalog.
     pub fn role_catalog(&mut self) -> &RoleCatalog {
         self.ensure_role_catalog();
-        self.role_catalog.as_ref().expect("BUG: ensure_role_catalog did not initialize role_catalog")
+        self.role_catalog
+            .as_ref()
+            .expect("BUG: ensure_role_catalog did not initialize role_catalog")
     }
 
     /// Get a mutable reference to the in-memory role catalog.
     pub fn role_catalog_mut(&mut self) -> &mut RoleCatalog {
         self.ensure_role_catalog();
-        self.role_catalog.as_mut().expect("BUG: ensure_role_catalog did not initialize role_catalog")
+        self.role_catalog
+            .as_mut()
+            .expect("BUG: ensure_role_catalog did not initialize role_catalog")
     }
 
     pub const fn next_table_id(&mut self) -> TableId {
@@ -537,13 +577,16 @@ impl Catalog {
 
     pub fn find_materialized_view(&self, name: &str) -> Option<&MaterializedViewDef> {
         let lower = name.to_lowercase();
-        self.materialized_views.iter().find(|v| v.name.to_lowercase() == lower)
+        self.materialized_views
+            .iter()
+            .find(|v| v.name.to_lowercase() == lower)
     }
 
     pub fn drop_materialized_view(&mut self, name: &str) -> bool {
         let lower = name.to_lowercase();
         let before = self.materialized_views.len();
-        self.materialized_views.retain(|v| v.name.to_lowercase() != lower);
+        self.materialized_views
+            .retain(|v| v.name.to_lowercase() != lower);
         self.materialized_views.len() < before
     }
 
@@ -551,7 +594,11 @@ impl Catalog {
 
     pub fn create_database(&mut self, name: &str, owner: &str) -> Result<u32, String> {
         let lower = name.to_lowercase();
-        if self.databases.iter().any(|db| db.name.to_lowercase() == lower) {
+        if self
+            .databases
+            .iter()
+            .any(|db| db.name.to_lowercase() == lower)
+        {
             return Err(format!("database \"{name}\" already exists"));
         }
         let oid = self.next_database_oid;
@@ -581,7 +628,9 @@ impl Catalog {
 
     pub fn find_database(&self, name: &str) -> Option<&DatabaseEntry> {
         let lower = name.to_lowercase();
-        self.databases.iter().find(|db| db.name.to_lowercase() == lower)
+        self.databases
+            .iter()
+            .find(|db| db.name.to_lowercase() == lower)
     }
 
     pub fn list_databases(&self) -> &[DatabaseEntry] {
@@ -628,7 +677,10 @@ impl Catalog {
     /// Resolve a potentially schema-qualified table name.
     /// If name contains '.', treat left part as schema prefix and strip it.
     pub fn resolve_table_name(&self, name: &str) -> String {
-        name.find('.').map_or_else(|| name.to_owned(), |dot_pos| name[dot_pos + 1..].to_string())
+        name.find('.').map_or_else(
+            || name.to_owned(),
+            |dot_pos| name[dot_pos + 1..].to_string(),
+        )
     }
 
     // ── Role management ──
@@ -643,7 +695,11 @@ impl Catalog {
         password: Option<String>,
     ) -> Result<u64, String> {
         let lower = name.to_lowercase();
-        if self.role_entries.iter().any(|r| r.name.to_lowercase() == lower) {
+        if self
+            .role_entries
+            .iter()
+            .any(|r| r.name.to_lowercase() == lower)
+        {
             return Err(format!("role \"{name}\" already exists"));
         }
         let id = self.next_role_id;
@@ -668,9 +724,14 @@ impl Catalog {
             return Err("cannot drop the superuser role \"falcon\"".to_owned());
         }
         let len_before = self.role_entries.len();
-        if let Some(entry) = self.role_entries.iter().find(|r| r.name.to_lowercase() == lower) {
+        if let Some(entry) = self
+            .role_entries
+            .iter()
+            .find(|r| r.name.to_lowercase() == lower)
+        {
             let role_id = entry.id;
-            self.grant_entries.retain(|g| g.grantee_id != role_id && g.grantor_id != role_id);
+            self.grant_entries
+                .retain(|g| g.grantee_id != role_id && g.grantor_id != role_id);
             for r in &mut self.role_entries {
                 r.member_of.retain(|&id| id != role_id);
             }
@@ -694,7 +755,9 @@ impl Catalog {
         can_create_role: Option<bool>,
     ) -> Result<(), String> {
         let lower = name.to_lowercase();
-        let entry = self.role_entries.iter_mut()
+        let entry = self
+            .role_entries
+            .iter_mut()
             .find(|r| r.name.to_lowercase() == lower)
             .ok_or_else(|| format!("role \"{name}\" does not exist"))?;
         if let Some(pw) = password {
@@ -718,7 +781,9 @@ impl Catalog {
 
     pub fn find_role_by_name(&self, name: &str) -> Option<&RoleEntry> {
         let lower = name.to_lowercase();
-        self.role_entries.iter().find(|r| r.name.to_lowercase() == lower)
+        self.role_entries
+            .iter()
+            .find(|r| r.name.to_lowercase() == lower)
     }
 
     pub fn list_role_entries(&self) -> &[RoleEntry] {
@@ -735,10 +800,12 @@ impl Catalog {
         object_name: &str,
         grantor_name: &str,
     ) -> Result<(), String> {
-        let grantee = self.find_role_by_name(grantee_name)
+        let grantee = self
+            .find_role_by_name(grantee_name)
             .ok_or_else(|| format!("role \"{grantee_name}\" does not exist"))?;
         let grantee_id = grantee.id;
-        let grantor = self.find_role_by_name(grantor_name)
+        let grantor = self
+            .find_role_by_name(grantor_name)
             .ok_or_else(|| format!("role \"{grantor_name}\" does not exist"))?;
         let grantor_id = grantor.id;
 
@@ -767,7 +834,8 @@ impl Catalog {
         object_type: &str,
         object_name: &str,
     ) -> Result<(), String> {
-        let grantee = self.find_role_by_name(grantee_name)
+        let grantee = self
+            .find_role_by_name(grantee_name)
             .ok_or_else(|| format!("role \"{grantee_name}\" does not exist"))?;
         let grantee_id = grantee.id;
         self.grant_entries.retain(|g| {
@@ -780,15 +848,23 @@ impl Catalog {
     }
 
     /// Grant role membership: make `member_name` a member of `group_name`.
-    pub fn grant_role_membership(&mut self, member_name: &str, group_name: &str) -> Result<(), String> {
+    pub fn grant_role_membership(
+        &mut self,
+        member_name: &str,
+        group_name: &str,
+    ) -> Result<(), String> {
         let member_lower = member_name.to_lowercase();
         let group_lower = group_name.to_lowercase();
-        let group_entry = self.role_entries.iter()
+        let group_entry = self
+            .role_entries
+            .iter()
             .find(|r| r.name.to_lowercase() == group_lower)
             .ok_or_else(|| format!("role \"{group_name}\" does not exist"))?;
         let group_id = group_entry.id;
 
-        let member_entry = self.role_entries.iter_mut()
+        let member_entry = self
+            .role_entries
+            .iter_mut()
             .find(|r| r.name.to_lowercase() == member_lower)
             .ok_or_else(|| format!("role \"{member_name}\" does not exist"))?;
         if !member_entry.member_of.contains(&group_id) {
@@ -799,15 +875,23 @@ impl Catalog {
     }
 
     /// Revoke role membership.
-    pub fn revoke_role_membership(&mut self, member_name: &str, group_name: &str) -> Result<(), String> {
+    pub fn revoke_role_membership(
+        &mut self,
+        member_name: &str,
+        group_name: &str,
+    ) -> Result<(), String> {
         let member_lower = member_name.to_lowercase();
         let group_lower = group_name.to_lowercase();
-        let group_entry = self.role_entries.iter()
+        let group_entry = self
+            .role_entries
+            .iter()
             .find(|r| r.name.to_lowercase() == group_lower)
             .ok_or_else(|| format!("role \"{group_name}\" does not exist"))?;
         let group_id = group_entry.id;
 
-        let member_entry = self.role_entries.iter_mut()
+        let member_entry = self
+            .role_entries
+            .iter_mut()
             .find(|r| r.name.to_lowercase() == member_lower)
             .ok_or_else(|| format!("role \"{member_name}\" does not exist"))?;
         member_entry.member_of.retain(|&id| id != group_id);
@@ -857,7 +941,11 @@ impl Catalog {
         object_name: &str,
     ) -> bool {
         let lower = role_name.to_lowercase();
-        let entry = match self.role_entries.iter().find(|r| r.name.to_lowercase() == lower) {
+        let entry = match self
+            .role_entries
+            .iter()
+            .find(|r| r.name.to_lowercase() == lower)
+        {
             Some(e) => e,
             None => return false,
         };
@@ -867,7 +955,10 @@ impl Catalog {
         let role_id = entry.id;
 
         self.ensure_role_catalog();
-        let rc = self.role_catalog.as_ref().expect("BUG: ensure_role_catalog did not initialize role_catalog");
+        let rc = self
+            .role_catalog
+            .as_ref()
+            .expect("BUG: ensure_role_catalog did not initialize role_catalog");
         let effective = rc.effective_roles(RoleId(role_id));
         let effective_ids: Vec<u64> = effective.iter().map(|r| r.0).collect();
 

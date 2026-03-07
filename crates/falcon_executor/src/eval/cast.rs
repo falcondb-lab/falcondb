@@ -88,13 +88,11 @@ pub fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionError> {
             Datum::Float64(v) => {
                 // Convert float to decimal with reasonable scale
                 let s = format!("{v}");
-                Datum::parse_decimal(&s).ok_or_else(|| {
-                    ExecutionError::TypeError(format!("Cannot cast {v} to numeric"))
-                })
+                Datum::parse_decimal(&s)
+                    .ok_or_else(|| ExecutionError::TypeError(format!("Cannot cast {v} to numeric")))
             }
-            Datum::Text(s) => Datum::parse_decimal(s).ok_or_else(|| {
-                ExecutionError::TypeError(format!("Cannot cast '{s}' to numeric"))
-            }),
+            Datum::Text(s) => Datum::parse_decimal(s)
+                .ok_or_else(|| ExecutionError::TypeError(format!("Cannot cast '{s}' to numeric"))),
             _ => Err(ExecutionError::TypeError(format!(
                 "Cannot cast {val:?} to numeric"
             ))),
@@ -135,7 +133,11 @@ pub fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionError> {
                 } else if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
                     let dt = match d.and_hms_opt(0, 0, 0) {
                         Some(dt) => dt,
-                        None => return Err(ExecutionError::TypeError(format!("Cannot cast '{s}' to timestamp"))),
+                        None => {
+                            return Err(ExecutionError::TypeError(format!(
+                                "Cannot cast '{s}' to timestamp"
+                            )))
+                        }
                     };
                     Ok(Datum::Timestamp(dt.and_utc().timestamp_micros()))
                 } else {
@@ -164,8 +166,9 @@ pub fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionError> {
                     .map_err(|e| {
                         ExecutionError::TypeError(format!("Cannot cast '{s}' to date: {e}"))
                     })?;
-                let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)
-                    .unwrap_or_else(|| NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or(NaiveDate::MIN));
+                let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap_or_else(|| {
+                    NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or(NaiveDate::MIN)
+                });
                 let days = i32::try_from((date - epoch).num_days())
                     .map_err(|_| ExecutionError::NumericOverflow)?;
                 Ok(Datum::Date(days))
@@ -180,9 +183,9 @@ pub fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionError> {
         },
         "jsonb" | "json" => match &val {
             Datum::Jsonb(_) => Ok(val),
-            Datum::Text(s) => serde_json::from_str(s).map(Datum::Jsonb).map_err(|e| {
-                ExecutionError::TypeError(format!("Cannot cast '{s}' to jsonb: {e}"))
-            }),
+            Datum::Text(s) => serde_json::from_str(s)
+                .map(Datum::Jsonb)
+                .map_err(|e| ExecutionError::TypeError(format!("Cannot cast '{s}' to jsonb: {e}"))),
             _ => Err(ExecutionError::TypeError(format!(
                 "Cannot cast {val:?} to jsonb"
             ))),
@@ -196,9 +199,8 @@ pub fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionError> {
                         "Cannot cast '{s}' to uuid"
                     )));
                 }
-                let v = u128::from_str_radix(&hex, 16).map_err(|_| {
-                    ExecutionError::TypeError(format!("Cannot cast '{s}' to uuid"))
-                })?;
+                let v = u128::from_str_radix(&hex, 16)
+                    .map_err(|_| ExecutionError::TypeError(format!("Cannot cast '{s}' to uuid")))?;
                 Ok(Datum::Uuid(v))
             }
             _ => Err(ExecutionError::TypeError(format!(
@@ -231,7 +233,10 @@ pub fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionError> {
                 // Simplified interval parsing: "N days", "HH:MM:SS", or "N hours"
                 // Full PG interval parsing is complex; handle common patterns
                 let s_lower = s.trim().to_lowercase();
-                if let Some(rest) = s_lower.strip_suffix("days").or_else(|| s_lower.strip_suffix("day")) {
+                if let Some(rest) = s_lower
+                    .strip_suffix("days")
+                    .or_else(|| s_lower.strip_suffix("day"))
+                {
                     let d: i32 = rest.trim().parse().map_err(|_| {
                         ExecutionError::TypeError(format!("Cannot cast '{s}' to interval"))
                     })?;
@@ -239,16 +244,24 @@ pub fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionError> {
                 } else if s_lower.contains(':') {
                     // HH:MM:SS
                     let parts: Vec<&str> = s_lower.split(':').collect();
-                    let cast_err = || ExecutionError::TypeError(format!("Cannot cast '{s}' to interval"));
+                    let cast_err =
+                        || ExecutionError::TypeError(format!("Cannot cast '{s}' to interval"));
                     if parts.len() >= 2 {
                         let h: i64 = parts[0].trim().parse().map_err(|_| cast_err())?;
                         let m: i64 = parts[1].trim().parse().map_err(|_| cast_err())?;
                         let sec: i64 = if parts.len() >= 3 {
-                            parts[2].trim().split('.').next().unwrap_or("0").parse().map_err(|_| cast_err())?
+                            parts[2]
+                                .trim()
+                                .split('.')
+                                .next()
+                                .unwrap_or("0")
+                                .parse()
+                                .map_err(|_| cast_err())?
                         } else {
                             0
                         };
-                        let us = h.checked_mul(3_600_000_000)
+                        let us = h
+                            .checked_mul(3_600_000_000)
                             .and_then(|v| v.checked_add(m.checked_mul(60_000_000)?))
                             .and_then(|v| v.checked_add(sec.checked_mul(1_000_000)?))
                             .ok_or(ExecutionError::NumericOverflow)?;
@@ -277,12 +290,12 @@ pub fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionError> {
                         "Cannot cast '{s}' to time"
                     )));
                 }
-                let h: i64 = parts[0].parse().map_err(|_| {
-                    ExecutionError::TypeError(format!("Cannot cast '{s}' to time"))
-                })?;
-                let m: i64 = parts[1].parse().map_err(|_| {
-                    ExecutionError::TypeError(format!("Cannot cast '{s}' to time"))
-                })?;
+                let h: i64 = parts[0]
+                    .parse()
+                    .map_err(|_| ExecutionError::TypeError(format!("Cannot cast '{s}' to time")))?;
+                let m: i64 = parts[1]
+                    .parse()
+                    .map_err(|_| ExecutionError::TypeError(format!("Cannot cast '{s}' to time")))?;
                 let cast_err = || ExecutionError::TypeError(format!("Cannot cast '{s}' to time"));
                 let (sec, frac) = if parts.len() >= 3 {
                     let sec_parts: Vec<&str> = parts[2].split('.').collect();
@@ -298,7 +311,8 @@ pub fn eval_cast(val: Datum, target: &str) -> Result<Datum, ExecutionError> {
                 } else {
                     (0, 0)
                 };
-                let time_us = h.checked_mul(3_600_000_000)
+                let time_us = h
+                    .checked_mul(3_600_000_000)
                     .and_then(|v| v.checked_add(m.checked_mul(60_000_000)?))
                     .and_then(|v| v.checked_add(sec.checked_mul(1_000_000)?))
                     .and_then(|v| v.checked_add(frac))

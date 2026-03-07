@@ -207,9 +207,10 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 }
             };
             if count > MAX_ARRAY_LEN {
-                return Err(ExecutionError::TypeError(
-                    format!("ARRAY_REPEAT count {} exceeds maximum {}", count, MAX_ARRAY_LEN),
-                ));
+                return Err(ExecutionError::TypeError(format!(
+                    "ARRAY_REPEAT count {} exceeds maximum {}",
+                    count, MAX_ARRAY_LEN
+                )));
             }
             Ok(Datum::Array(vec![elem; count]))
         }
@@ -349,9 +350,10 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             if step > 0 {
                 while i <= stop {
                     if result.len() >= MAX_GENERATE_LEN {
-                        return Err(ExecutionError::TypeError(
-                            format!("ARRAY_GENERATE result exceeds maximum {} elements", MAX_GENERATE_LEN),
-                        ));
+                        return Err(ExecutionError::TypeError(format!(
+                            "ARRAY_GENERATE result exceeds maximum {} elements",
+                            MAX_GENERATE_LEN
+                        )));
                     }
                     result.push(Datum::Int64(i));
                     i = match i.checked_add(step) {
@@ -362,9 +364,10 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             } else {
                 while i >= stop {
                     if result.len() >= MAX_GENERATE_LEN {
-                        return Err(ExecutionError::TypeError(
-                            format!("ARRAY_GENERATE result exceeds maximum {} elements", MAX_GENERATE_LEN),
-                        ));
+                        return Err(ExecutionError::TypeError(format!(
+                            "ARRAY_GENERATE result exceeds maximum {} elements",
+                            MAX_GENERATE_LEN
+                        )));
                     }
                     result.push(Datum::Int64(i));
                     i = match i.checked_add(step) {
@@ -406,8 +409,11 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                         format!("[{}]", elems.join(","))
                     }
                     Datum::Date(days) => {
-                        let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
-                            .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or(chrono::NaiveDate::MIN));
+                        let epoch =
+                            chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap_or_else(|| {
+                                chrono::NaiveDate::from_ymd_opt(2000, 1, 1)
+                                    .unwrap_or(chrono::NaiveDate::MIN)
+                            });
                         if let Some(d) =
                             epoch.checked_add_signed(chrono::Duration::days(i64::from(*days)))
                         {
@@ -639,9 +645,10 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 }
             };
             if count > MAX_ARRAY_LEN {
-                return Err(ExecutionError::TypeError(
-                    format!("ARRAY_FILL count {} exceeds maximum {}", count, MAX_ARRAY_LEN),
-                ));
+                return Err(ExecutionError::TypeError(format!(
+                    "ARRAY_FILL count {} exceeds maximum {}",
+                    count, MAX_ARRAY_LEN
+                )));
             }
             Ok(Datum::Array(vec![value; count]))
         }

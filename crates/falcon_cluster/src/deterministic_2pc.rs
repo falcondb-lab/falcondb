@@ -147,7 +147,9 @@ impl CoordinatorDecisionLog {
                     };
                     match Self::parse_journal_line(&line) {
                         Some(JournalEntry::Decision(rec)) => {
-                            if rec.seq > max_seq { max_seq = rec.seq; }
+                            if rec.seq > max_seq {
+                                max_seq = rec.seq;
+                            }
                             records.push_back(rec);
                         }
                         Some(JournalEntry::Applied(txn_id)) => {
@@ -164,7 +166,10 @@ impl CoordinatorDecisionLog {
             }
             let unapplied = records.iter().filter(|r| !r.applied).count();
             if unapplied > 0 {
-                tracing::warn!(unapplied, "2PC decision journal: recovered unapplied decisions");
+                tracing::warn!(
+                    unapplied,
+                    "2PC decision journal: recovered unapplied decisions"
+                );
             }
         }
 
@@ -172,7 +177,9 @@ impl CoordinatorDecisionLog {
         let total_applied = records.iter().filter(|r| r.applied).count() as u64;
 
         let journal_file = std::fs::OpenOptions::new()
-            .create(true).append(true).open(path)
+            .create(true)
+            .append(true)
+            .open(path)
             .ok();
 
         Arc::new(Self {
@@ -188,7 +195,9 @@ impl CoordinatorDecisionLog {
 
     fn parse_journal_line(line: &str) -> Option<JournalEntry> {
         let parts: Vec<&str> = line.splitn(7, ' ').collect();
-        if parts.is_empty() { return None; }
+        if parts.is_empty() {
+            return None;
+        }
         match parts[0] {
             "D" if parts.len() >= 7 => {
                 let seq = parts[1].parse().ok()?;
@@ -207,9 +216,13 @@ impl CoordinatorDecisionLog {
                 let timestamp_ms = parts[5].parse().ok()?;
                 let prepare_latency_us = parts[6].parse().ok()?;
                 Some(JournalEntry::Decision(DecisionRecord {
-                    seq, txn_id, decision,
+                    seq,
+                    txn_id,
+                    decision,
                     participant_shards: shards,
-                    timestamp_ms, applied: false, prepare_latency_us,
+                    timestamp_ms,
+                    applied: false,
+                    prepare_latency_us,
                 }))
             }
             "A" if parts.len() >= 2 => {
@@ -242,9 +255,13 @@ impl CoordinatorDecisionLog {
             .unwrap_or_default()
             .as_millis() as u64;
         let record = DecisionRecord {
-            seq, txn_id, decision,
+            seq,
+            txn_id,
+            decision,
             participant_shards: participant_shards.to_vec(),
-            timestamp_ms, applied: false, prepare_latency_us,
+            timestamp_ms,
+            applied: false,
+            prepare_latency_us,
         };
 
         // Persist to journal BEFORE adding to in-memory state
@@ -252,8 +269,11 @@ impl CoordinatorDecisionLog {
             CoordinatorDecision::Commit => "C",
             CoordinatorDecision::Abort => "A",
         };
-        let shards_csv: String = participant_shards.iter()
-            .map(|s| s.0.to_string()).collect::<Vec<_>>().join(",");
+        let shards_csv: String = participant_shards
+            .iter()
+            .map(|s| s.0.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         self.append_journal_line(&format!(
             "D {} {} {} {} {} {}",
             seq, txn_id.0, decision_char, shards_csv, timestamp_ms, prepare_latency_us
@@ -292,7 +312,7 @@ impl CoordinatorDecisionLog {
                 let applied = self.total_applied.fetch_add(1, Ordering::Relaxed) + 1;
                 drop(records);
                 // Compact journal when enough applied entries accumulate
-                if applied % self.config.compact_threshold as u64 == 0 {
+                if applied.is_multiple_of(self.config.compact_threshold as u64) {
                     self.compact_journal();
                 }
                 return true;
@@ -321,11 +341,17 @@ impl CoordinatorDecisionLog {
                     CoordinatorDecision::Commit => 'C',
                     CoordinatorDecision::Abort => 'A',
                 };
-                let shards = rec.participant_shards.iter()
-                    .map(|s| s.0.to_string()).collect::<Vec<_>>().join(",");
-                writeln!(tmp, "D {} {} {} {} {} {}",
-                    rec.seq, rec.txn_id.0, dc, shards,
-                    rec.timestamp_ms, rec.prepare_latency_us)?;
+                let shards = rec
+                    .participant_shards
+                    .iter()
+                    .map(|s| s.0.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                writeln!(
+                    tmp,
+                    "D {} {} {} {} {} {}",
+                    rec.seq, rec.txn_id.0, dc, shards, rec.timestamp_ms, rec.prepare_latency_us
+                )?;
             }
             tmp.sync_all()?;
             drop(tmp);
@@ -335,7 +361,8 @@ impl CoordinatorDecisionLog {
             std::fs::rename(&tmp_path, journal_path)?;
             // Reopen in append mode
             let new_file = std::fs::OpenOptions::new()
-                .append(true).open(journal_path)?;
+                .append(true)
+                .open(journal_path)?;
             *guard = Some(new_file);
             Ok(())
         })();

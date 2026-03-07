@@ -425,7 +425,9 @@ fn string_decode(delimiter: char, args: &[Datum]) -> Result<Datum, ExecutionErro
     }
     fields.push(current);
 
-    Ok(fields.get(idx).map_or(Datum::Null, |s| Datum::Text(s.clone())))
+    Ok(fields
+        .get(idx)
+        .map_or(Datum::Null, |s| Datum::Text(s.clone())))
 }
 
 fn dispatch_string_encoding(

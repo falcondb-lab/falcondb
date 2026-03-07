@@ -53,8 +53,10 @@ impl GcPolicy {
                     match mv.status {
                         MvccStatus::Aborted => {
                             self.versions_dropped.fetch_add(1, Ordering::Relaxed);
-                            self.bytes_reclaimed
-                                .fetch_add(entry.key.len() as u64 + entry.value.len() as u64, Ordering::Relaxed);
+                            self.bytes_reclaimed.fetch_add(
+                                entry.key.len() as u64 + entry.value.len() as u64,
+                                Ordering::Relaxed,
+                            );
                             continue;
                         }
                         MvccStatus::Prepared => {
@@ -64,8 +66,10 @@ impl GcPolicy {
                         MvccStatus::Committed => {
                             if mv.is_tombstone && mv.commit_ts.0 < gc_ts && is_bottom_level {
                                 self.tombstones_dropped.fetch_add(1, Ordering::Relaxed);
-                                self.bytes_reclaimed
-                                    .fetch_add(entry.key.len() as u64 + entry.value.len() as u64, Ordering::Relaxed);
+                                self.bytes_reclaimed.fetch_add(
+                                    entry.key.len() as u64 + entry.value.len() as u64,
+                                    Ordering::Relaxed,
+                                );
                                 continue;
                             }
                             result.push(entry);
@@ -115,7 +119,9 @@ impl GcPolicy {
                     if mv.status == MvccStatus::Aborted {
                         self.versions_dropped.fetch_add(1, Ordering::Relaxed);
                         self.bytes_reclaimed.fetch_add(
-                            v.key.len() as u64 + v.value.len() as u64, Ordering::Relaxed);
+                            v.key.len() as u64 + v.value.len() as u64,
+                            Ordering::Relaxed,
+                        );
                         continue;
                     }
                     if mv.status == MvccStatus::Prepared {
@@ -128,7 +134,9 @@ impl GcPolicy {
                         if mv.is_tombstone && mv.commit_ts.0 < gc_ts && is_bottom_level {
                             self.tombstones_dropped.fetch_add(1, Ordering::Relaxed);
                             self.bytes_reclaimed.fetch_add(
-                                v.key.len() as u64 + v.value.len() as u64, Ordering::Relaxed);
+                                v.key.len() as u64 + v.value.len() as u64,
+                                Ordering::Relaxed,
+                            );
                         } else {
                             result.push(v);
                             kept_latest = true;
@@ -136,15 +144,15 @@ impl GcPolicy {
                     } else if mv.commit_ts.0 < gc_ts {
                         self.versions_dropped.fetch_add(1, Ordering::Relaxed);
                         self.bytes_reclaimed.fetch_add(
-                            v.key.len() as u64 + v.value.len() as u64, Ordering::Relaxed);
+                            v.key.len() as u64 + v.value.len() as u64,
+                            Ordering::Relaxed,
+                        );
                     } else {
                         result.push(v);
                     }
-                } else {
-                    if !kept_latest {
-                        result.push(v);
-                        kept_latest = true;
-                    }
+                } else if !kept_latest {
+                    result.push(v);
+                    kept_latest = true;
                 }
             }
         }
@@ -173,7 +181,13 @@ mod tests {
     use super::*;
     use falcon_common::types::{Timestamp, TxnId};
 
-    fn mvcc_entry(key: &[u8], txn_id: u64, status: MvccStatus, commit_ts: u64, data: &[u8]) -> SstEntry {
+    fn mvcc_entry(
+        key: &[u8],
+        txn_id: u64,
+        status: MvccStatus,
+        commit_ts: u64,
+        data: &[u8],
+    ) -> SstEntry {
         let mv = MvccValue {
             txn_id: TxnId(txn_id),
             status,
@@ -181,17 +195,26 @@ mod tests {
             is_tombstone: false,
             data: data.to_vec(),
         };
-        SstEntry { key: key.to_vec(), value: mv.encode() }
+        SstEntry {
+            key: key.to_vec(),
+            value: mv.encode(),
+        }
     }
 
     fn tombstone_entry(key: &[u8], txn_id: u64, commit_ts: u64) -> SstEntry {
         let mv = MvccValue::committed_tombstone(TxnId(txn_id), Timestamp(commit_ts));
-        SstEntry { key: key.to_vec(), value: mv.encode() }
+        SstEntry {
+            key: key.to_vec(),
+            value: mv.encode(),
+        }
     }
 
     fn aborted_entry(key: &[u8], txn_id: u64) -> SstEntry {
         let mv = MvccValue::aborted(TxnId(txn_id));
-        SstEntry { key: key.to_vec(), value: mv.encode() }
+        SstEntry {
+            key: key.to_vec(),
+            value: mv.encode(),
+        }
     }
 
     #[test]
@@ -237,9 +260,10 @@ mod tests {
     #[test]
     fn test_gc_raw_kv_passthrough() {
         let gc = GcPolicy::new(100);
-        let entries = vec![
-            SstEntry { key: b"k1".to_vec(), value: b"raw_value".to_vec() },
-        ];
+        let entries = vec![SstEntry {
+            key: b"k1".to_vec(),
+            value: b"raw_value".to_vec(),
+        }];
         let filtered = gc.filter(entries, false);
         assert_eq!(filtered.len(), 1);
     }
@@ -248,7 +272,10 @@ mod tests {
     fn test_gc_raw_tombstone_at_bottom() {
         let gc = GcPolicy::new(100);
         let entries = vec![
-            SstEntry { key: b"k1".to_vec(), value: vec![] }, // empty = tombstone
+            SstEntry {
+                key: b"k1".to_vec(),
+                value: vec![],
+            }, // empty = tombstone
         ];
         let filtered = gc.filter(entries, true);
         assert_eq!(filtered.len(), 0);

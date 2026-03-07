@@ -1,9 +1,9 @@
 //! PL/pgSQL parser and interpreter for user-defined functions.
 
-use std::collections::HashMap;
 use falcon_common::datum::Datum;
 use falcon_common::error::ExecutionError;
 use falcon_common::schema::FunctionDef;
+use std::collections::HashMap;
 
 // ── AST ──────────────────────────────────────────────────────────────
 
@@ -23,9 +23,17 @@ pub enum PlStmt {
         else_body: Vec<PlStmt>,
     },
     /// WHILE cond LOOP stmts END LOOP;
-    WhileLoop { condition: String, body: Vec<PlStmt> },
+    WhileLoop {
+        condition: String,
+        body: Vec<PlStmt>,
+    },
     /// FOR var IN start..end LOOP stmts END LOOP;
-    ForLoop { var: String, start_sql: String, end_sql: String, body: Vec<PlStmt> },
+    ForLoop {
+        var: String,
+        start_sql: String,
+        end_sql: String,
+        body: Vec<PlStmt>,
+    },
     /// RAISE NOTICE 'fmt', args...;
     Raise { level: String, message: String },
     /// PERFORM sql; (execute SQL, discard result)
@@ -56,7 +64,9 @@ pub fn parse_plpgsql(body: &str) -> Result<PlBlock, ExecutionError> {
             let decl_section = rest[..begin_pos].trim();
             for line in decl_section.split(';') {
                 let line = line.trim();
-                if line.is_empty() { continue; }
+                if line.is_empty() {
+                    continue;
+                }
                 let parts: Vec<&str> = line.splitn(2, char::is_whitespace).collect();
                 if parts.len() == 2 {
                     declarations.push((parts[0].to_lowercase(), parts[1].trim().to_owned()));
@@ -76,7 +86,10 @@ pub fn parse_plpgsql(body: &str) -> Result<PlBlock, ExecutionError> {
     }
 
     let body_stmts = parse_statements(rest.trim())?;
-    Ok(PlBlock { declarations, body: body_stmts })
+    Ok(PlBlock {
+        declarations,
+        body: body_stmts,
+    })
 }
 
 fn parse_statements(input: &str) -> Result<Vec<PlStmt>, ExecutionError> {
@@ -85,14 +98,18 @@ fn parse_statements(input: &str) -> Result<Vec<PlStmt>, ExecutionError> {
 
     while !rest.is_empty() {
         rest = rest.trim();
-        if rest.is_empty() { break; }
+        if rest.is_empty() {
+            break;
+        }
 
         let upper = rest.to_uppercase();
 
         if upper.starts_with("RETURN QUERY ") {
             let after = &rest[13..];
             let end = find_stmt_end(after);
-            stmts.push(PlStmt::ReturnQuery { sql: after[..end].trim().to_owned() });
+            stmts.push(PlStmt::ReturnQuery {
+                sql: after[..end].trim().to_owned(),
+            });
             rest = skip_past_semicolon(&after[end..]);
         } else if upper.starts_with("RETURN ") || upper.starts_with("RETURN;") {
             let after = &rest[6..].trim_start();
@@ -116,8 +133,7 @@ fn parse_statements(input: &str) -> Result<Vec<PlStmt>, ExecutionError> {
             let after = &rest[6..];
             let end = find_stmt_end(after);
             let content = after[..end].trim().to_owned();
-            let (level, msg) = content.split_once(' ')
-                .unwrap_or(("NOTICE", &content));
+            let (level, msg) = content.split_once(' ').unwrap_or(("NOTICE", &content));
             stmts.push(PlStmt::Raise {
                 level: level.to_uppercase(),
                 message: msg.trim().trim_matches('\'').to_owned(),
@@ -126,7 +142,9 @@ fn parse_statements(input: &str) -> Result<Vec<PlStmt>, ExecutionError> {
         } else if upper.starts_with("PERFORM ") {
             let after = &rest[8..];
             let end = find_stmt_end(after);
-            stmts.push(PlStmt::Perform { sql: after[..end].trim().to_owned() });
+            stmts.push(PlStmt::Perform {
+                sql: after[..end].trim().to_owned(),
+            });
             rest = skip_past_semicolon(&after[end..]);
         } else {
             // Check for assignment (var := expr;) or plain SQL
@@ -135,7 +153,10 @@ fn parse_statements(input: &str) -> Result<Vec<PlStmt>, ExecutionError> {
                 if assign_pos < semi {
                     let var = rest[..assign_pos].trim().to_lowercase();
                     let expr = rest[assign_pos + 2..semi].trim().to_owned();
-                    stmts.push(PlStmt::Assign { var, expr_sql: expr });
+                    stmts.push(PlStmt::Assign {
+                        var,
+                        expr_sql: expr,
+                    });
                     rest = skip_past_semicolon(&rest[semi..]);
                     continue;
                 }
@@ -176,12 +197,20 @@ fn parse_if_stmt(input: &str) -> Result<(PlStmt, &str), ExecutionError> {
     };
 
     Ok((
-        PlStmt::If { condition, then_body, elsif_branches: elsif, else_body },
+        PlStmt::If {
+            condition,
+            then_body,
+            elsif_branches: elsif,
+            else_body,
+        },
         remaining,
     ))
 }
 
-fn parse_if_body(input: &str) -> Result<(String, Vec<(String, String)>, String, &str), ExecutionError> {
+#[allow(clippy::type_complexity)]
+fn parse_if_body(
+    input: &str,
+) -> Result<(String, Vec<(String, String)>, String, &str), ExecutionError> {
     let mut depth = 1i32;
     let upper = input.to_uppercase();
     let bytes = upper.as_bytes();
@@ -193,7 +222,7 @@ fn parse_if_body(input: &str) -> Result<(String, Vec<(String, String)>, String, 
     let mut current_cond: Option<String> = None;
 
     while i < bytes.len() {
-        if i + 6 <= bytes.len() && &upper[i..i+6] == "END IF" && is_word_boundary(bytes, i, 6) {
+        if i + 6 <= bytes.len() && &upper[i..i + 6] == "END IF" && is_word_boundary(bytes, i, 6) {
             depth -= 1;
             if depth == 0 {
                 let body_part = &input[current_start..i];
@@ -206,17 +235,25 @@ fn parse_if_body(input: &str) -> Result<(String, Vec<(String, String)>, String, 
                     return Ok((then_body, elsif_branches, body_part.to_owned(), remaining));
                 } else {
                     let remaining = skip_past_semicolon(&input[i + 6..]);
-                    return Ok((body_part.to_owned(), elsif_branches, String::new(), remaining));
+                    return Ok((
+                        body_part.to_owned(),
+                        elsif_branches,
+                        String::new(),
+                        remaining,
+                    ));
                 }
             }
         }
-        if i + 2 <= bytes.len() && &upper[i..i+2] == "IF" && is_word_boundary(bytes, i, 2)
+        if i + 2 <= bytes.len()
+            && &upper[i..i + 2] == "IF"
+            && is_word_boundary(bytes, i, 2)
             && (i == 0 || !upper[..i].trim_end().ends_with("END"))
         {
             depth += 1;
         }
         if depth == 1 {
-            if i + 5 <= bytes.len() && &upper[i..i+5] == "ELSIF" && is_word_boundary(bytes, i, 5) {
+            if i + 5 <= bytes.len() && &upper[i..i + 5] == "ELSIF" && is_word_boundary(bytes, i, 5)
+            {
                 let body_part = &input[current_start..i];
                 if let Some(cond) = current_cond.take() {
                     elsif_branches.push((cond, body_part.to_owned()));
@@ -224,14 +261,15 @@ fn parse_if_body(input: &str) -> Result<(String, Vec<(String, String)>, String, 
                     then_body_end = Some(i);
                 }
                 let after_elsif = &input[i + 5..];
-                let then_pos = find_keyword_ci(after_elsif, "THEN")
-                    .ok_or_else(|| ExecutionError::TypeError("PL/pgSQL: ELSIF without THEN".into()))?;
+                let then_pos = find_keyword_ci(after_elsif, "THEN").ok_or_else(|| {
+                    ExecutionError::TypeError("PL/pgSQL: ELSIF without THEN".into())
+                })?;
                 current_cond = Some(after_elsif[..then_pos].trim().to_owned());
                 i = i + 5 + then_pos + 4;
                 current_start = i;
                 continue;
             }
-            if i + 4 <= bytes.len() && &upper[i..i+4] == "ELSE" && is_word_boundary(bytes, i, 4) {
+            if i + 4 <= bytes.len() && &upper[i..i + 4] == "ELSE" && is_word_boundary(bytes, i, 4) {
                 let body_part = &input[current_start..i];
                 if let Some(cond) = current_cond.take() {
                     elsif_branches.push((cond, body_part.to_owned()));
@@ -247,7 +285,9 @@ fn parse_if_body(input: &str) -> Result<(String, Vec<(String, String)>, String, 
         }
         i += 1;
     }
-    Err(ExecutionError::TypeError("PL/pgSQL: IF without matching END IF".into()))
+    Err(ExecutionError::TypeError(
+        "PL/pgSQL: IF without matching END IF".into(),
+    ))
 }
 
 fn parse_while_stmt(input: &str) -> Result<(PlStmt, &str), ExecutionError> {
@@ -273,7 +313,10 @@ fn parse_for_stmt(input: &str) -> Result<(PlStmt, &str), ExecutionError> {
         .ok_or_else(|| ExecutionError::TypeError("PL/pgSQL: FOR without LOOP".into()))?;
     let range_expr = after_in[..loop_pos].trim();
     let (start_sql, end_sql) = if let Some(dot_pos) = range_expr.find("..") {
-        (range_expr[..dot_pos].trim().to_owned(), range_expr[dot_pos + 2..].trim().to_owned())
+        (
+            range_expr[..dot_pos].trim().to_owned(),
+            range_expr[dot_pos + 2..].trim().to_owned(),
+        )
     } else {
         (range_expr.to_owned(), range_expr.to_owned())
     };
@@ -282,7 +325,15 @@ fn parse_for_stmt(input: &str) -> Result<(PlStmt, &str), ExecutionError> {
         .ok_or_else(|| ExecutionError::TypeError("PL/pgSQL: FOR LOOP without END LOOP".into()))?;
     let body = parse_statements(after_loop[..end_loop].trim())?;
     let remaining = skip_past_semicolon(&after_loop[end_loop + 8..]);
-    Ok((PlStmt::ForLoop { var, start_sql, end_sql, body }, remaining))
+    Ok((
+        PlStmt::ForLoop {
+            var,
+            start_sql,
+            end_sql,
+            body,
+        },
+        remaining,
+    ))
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -293,8 +344,8 @@ fn strip_dollar_quoting(s: &str) -> &str {
         return &s[2..s.len() - 2];
     }
     // $tag$...$tag$
-    if s.starts_with('$') {
-        if let Some(end) = s[1..].find('$') {
+    if let Some(rest) = s.strip_prefix('$') {
+        if let Some(end) = rest.find('$') {
             let tag = &s[..end + 2];
             if s.ends_with(tag) && s.len() > tag.len() * 2 {
                 return &s[tag.len()..s.len() - tag.len()];
@@ -373,8 +424,8 @@ fn find_stmt_end(input: &str) -> usize {
 
 fn skip_past_semicolon(input: &str) -> &str {
     let s = input.trim_start();
-    if s.starts_with(';') {
-        s[1..].trim_start()
+    if let Some(rest) = s.strip_prefix(';') {
+        rest.trim_start()
     } else {
         s
     }
@@ -479,7 +530,12 @@ where
                 let val = eval_sql(sql, vars)?;
                 return Ok(PlResult::Value(val));
             }
-            PlStmt::If { condition, then_body, elsif_branches, else_body } => {
+            PlStmt::If {
+                condition,
+                then_body,
+                elsif_branches,
+                else_body,
+            } => {
                 let cond_val = eval_sql(condition, vars)?;
                 if datum_is_truthy(&cond_val) {
                     let result = execute_block(then_body, vars, eval_sql)?;
@@ -511,7 +567,9 @@ where
                 let mut iterations = 0u64;
                 loop {
                     let cond_val = eval_sql(condition, vars)?;
-                    if !datum_is_truthy(&cond_val) { break; }
+                    if !datum_is_truthy(&cond_val) {
+                        break;
+                    }
                     let result = execute_block(body, vars, eval_sql)?;
                     if let PlResult::Value(_) = &result {
                         return Ok(result);
@@ -524,7 +582,12 @@ where
                     }
                 }
             }
-            PlStmt::ForLoop { var, start_sql, end_sql, body } => {
+            PlStmt::ForLoop {
+                var,
+                start_sql,
+                end_sql,
+                body,
+            } => {
                 let start_val = eval_sql(start_sql, vars)?;
                 let end_val = eval_sql(end_sql, vars)?;
                 let start = datum_to_i64(&start_val)?;
@@ -571,11 +634,12 @@ fn datum_to_i64(d: &Datum) -> Result<i64, ExecutionError> {
         Datum::Int32(i) => Ok(*i as i64),
         Datum::Int64(i) => Ok(*i),
         Datum::Float64(f) => Ok(*f as i64),
-        Datum::Text(s) => s.parse::<i64>().map_err(|_| {
-            ExecutionError::TypeError(format!("cannot convert '{}' to integer", s))
-        }),
+        Datum::Text(s) => s
+            .parse::<i64>()
+            .map_err(|_| ExecutionError::TypeError(format!("cannot convert '{}' to integer", s))),
         other => Err(ExecutionError::TypeError(format!(
-            "cannot convert {:?} to integer", other
+            "cannot convert {:?} to integer",
+            other
         ))),
     }
 }
@@ -622,7 +686,12 @@ mod tests {
         let block = parse_plpgsql(body).unwrap();
         assert_eq!(block.body.len(), 1);
         match &block.body[0] {
-            PlStmt::If { condition, then_body, else_body, .. } => {
+            PlStmt::If {
+                condition,
+                then_body,
+                else_body,
+                ..
+            } => {
                 assert_eq!(condition, "true");
                 assert_eq!(then_body.len(), 1);
                 assert_eq!(else_body.len(), 1);
@@ -660,10 +729,8 @@ mod tests {
             or_replace: false,
         };
 
-        let result = execute_sql_function(
-            &func,
-            &[Datum::Int32(3), Datum::Int32(4)],
-            |sql, vars| {
+        let result =
+            execute_sql_function(&func, &[Datum::Int32(3), Datum::Int32(4)], |_sql, vars| {
                 // Simple mock: evaluate "$1 + $2" by looking up vars
                 let a = vars.get("$1").cloned().unwrap_or(Datum::Null);
                 let b = vars.get("$2").cloned().unwrap_or(Datum::Null);
@@ -671,8 +738,8 @@ mod tests {
                     (Datum::Int32(x), Datum::Int32(y)) => Ok(Datum::Int32(x + y)),
                     _ => Ok(Datum::Null),
                 }
-            },
-        ).unwrap();
+            })
+            .unwrap();
         assert_eq!(result, Datum::Int32(7));
     }
 
@@ -686,32 +753,30 @@ mod tests {
             }],
             return_type: Some(falcon_common::types::DataType::Text),
             language: falcon_common::schema::FunctionLanguage::PlPgSql,
-            body: "BEGIN IF x > 0 THEN RETURN 'positive'; ELSE RETURN 'non-positive'; END IF; END".into(),
+            body: "BEGIN IF x > 0 THEN RETURN 'positive'; ELSE RETURN 'non-positive'; END IF; END"
+                .into(),
             volatility: falcon_common::schema::FunctionVolatility::Immutable,
             is_strict: false,
             or_replace: false,
         };
 
-        let result = execute_plpgsql(
-            &func,
-            &[Datum::Int32(5)],
-            |sql, vars| {
-                let sql_lower = sql.to_lowercase();
-                if sql_lower.contains("> 0") {
-                    let x = vars.get("x").cloned().unwrap_or(Datum::Null);
-                    match x {
-                        Datum::Int32(v) => Ok(Datum::Boolean(v > 0)),
-                        _ => Ok(Datum::Boolean(false)),
-                    }
-                } else if sql == "'positive'" || sql == "positive" {
-                    Ok(Datum::Text("positive".into()))
-                } else if sql == "'non-positive'" || sql == "non-positive" {
-                    Ok(Datum::Text("non-positive".into()))
-                } else {
-                    Ok(Datum::Null)
+        let result = execute_plpgsql(&func, &[Datum::Int32(5)], |sql, vars| {
+            let sql_lower = sql.to_lowercase();
+            if sql_lower.contains("> 0") {
+                let x = vars.get("x").cloned().unwrap_or(Datum::Null);
+                match x {
+                    Datum::Int32(v) => Ok(Datum::Boolean(v > 0)),
+                    _ => Ok(Datum::Boolean(false)),
                 }
-            },
-        ).unwrap();
+            } else if sql == "'positive'" || sql == "positive" {
+                Ok(Datum::Text("positive".into()))
+            } else if sql == "'non-positive'" || sql == "non-positive" {
+                Ok(Datum::Text("non-positive".into()))
+            } else {
+                Ok(Datum::Null)
+            }
+        })
+        .unwrap();
         assert_eq!(result, Datum::Text("positive".into()));
     }
 }

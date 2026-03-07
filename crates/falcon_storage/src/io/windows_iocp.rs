@@ -142,7 +142,10 @@ impl IocpFile {
             if ops >= u64::from(self.config.max_inflight_ops) {
                 return Err(IoError::new(
                     IoErrorKind::Timeout,
-                    format!("inflight ops limit: {} >= {}", ops, self.config.max_inflight_ops),
+                    format!(
+                        "inflight ops limit: {} >= {}",
+                        ops, self.config.max_inflight_ops
+                    ),
                 ));
             }
         }

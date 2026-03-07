@@ -91,7 +91,8 @@ pub fn migrate_config(toml_text: &str) -> Result<MigrationResult, String> {
 
     if current < 3 {
         content = migrate_v2_to_v3(&content);
-        steps.push("v2→v3: Added shutdown_drain_timeout_secs, idle_timeout_ms, ustm section".into());
+        steps
+            .push("v2→v3: Added shutdown_drain_timeout_secs, idle_timeout_ms, ustm section".into());
         current = 3;
     }
 
@@ -125,8 +126,13 @@ pub fn migrate_config_file(path: &std::path::Path) -> Result<MigrationResult, St
 
     // Create backup
     let backup_path = path.with_extension("toml.bak");
-    std::fs::copy(path, &backup_path)
-        .map_err(|e| format!("Failed to create backup at {}: {}", backup_path.display(), e))?;
+    std::fs::copy(path, &backup_path).map_err(|e| {
+        format!(
+            "Failed to create backup at {}: {}",
+            backup_path.display(),
+            e
+        )
+    })?;
 
     // Write migrated config
     std::fs::write(path, &result.content)
@@ -147,9 +153,7 @@ pub fn run_config_migrate(config_path: &str) {
     println!("=========================");
     println!("  File: {config_path}");
 
-    match check_config_version(
-        &std::fs::read_to_string(path).unwrap_or_default(),
-    ) {
+    match check_config_version(&std::fs::read_to_string(path).unwrap_or_default()) {
         ConfigVersionStatus::Current => {
             println!("  Status: Already at version {CURRENT_CONFIG_VERSION} (current)");
             println!("  No migration needed.");
@@ -173,7 +177,10 @@ pub fn run_config_migrate(config_path: &str) {
                 }
             }
         }
-        ConfigVersionStatus::TooNew { found, max_supported } => {
+        ConfigVersionStatus::TooNew {
+            found,
+            max_supported,
+        } => {
             eprintln!(
                 "  ERROR: Config version {found} is newer than this build supports (max: {max_supported})."
             );
@@ -271,7 +278,10 @@ mod tests {
 
     #[test]
     fn test_extract_version_missing() {
-        assert_eq!(extract_version("[server]\npg_listen_addr = \"0.0.0.0:5443\"\n"), 0);
+        assert_eq!(
+            extract_version("[server]\npg_listen_addr = \"0.0.0.0:5443\"\n"),
+            0
+        );
     }
 
     #[test]
@@ -306,7 +316,10 @@ mod tests {
 
     #[test]
     fn test_migrate_already_current() {
-        let toml = format!("config_version = {}\n[server]\npg = \"0.0.0.0:5443\"\n", CURRENT_CONFIG_VERSION);
+        let toml = format!(
+            "config_version = {}\n[server]\npg = \"0.0.0.0:5443\"\n",
+            CURRENT_CONFIG_VERSION
+        );
         let result = migrate_config(&toml).unwrap();
         assert_eq!(result.from_version, CURRENT_CONFIG_VERSION);
         assert_eq!(result.to_version, CURRENT_CONFIG_VERSION);
@@ -318,7 +331,9 @@ mod tests {
         let result = migrate_config(toml).unwrap();
         assert_eq!(result.from_version, 0);
         assert_eq!(result.to_version, CURRENT_CONFIG_VERSION);
-        assert!(result.content.contains(&format!("config_version = {}", CURRENT_CONFIG_VERSION)));
+        assert!(result
+            .content
+            .contains(&format!("config_version = {}", CURRENT_CONFIG_VERSION)));
     }
 
     #[test]

@@ -23,8 +23,8 @@ use falcon_txn::manager::TxnManager;
 use crate::cross_shard::{
     CircuitBreaker, ConcurrencyLimiter, CrossShardLatencyBreakdown, CrossShardTxnResult,
     DeadlockDetector, FailureClass, LayeredTimeouts, RetryConfig, RetryOutcome,
-    ShardConflictTracker, TimeoutPhase, TimeoutPolicy, VictimSelectionPolicy,
-    WaitForGraphDetector, WaitReason,
+    ShardConflictTracker, TimeoutPhase, TimeoutPolicy, VictimSelectionPolicy, WaitForGraphDetector,
+    WaitReason,
 };
 use crate::deterministic_2pc::{CoordinatorDecision, CoordinatorDecisionLog};
 use crate::sharded_engine::ShardedEngine;
@@ -154,7 +154,11 @@ impl TwoPhaseCoordinator {
         // ── Phase 2: Commit or Abort ──
         let commit_start = Instant::now();
         let global_txn_id = TxnId(self.global_txn_seq.fetch_add(1, Ordering::Relaxed));
-        let decision = if all_prepared { CoordinatorDecision::Commit } else { CoordinatorDecision::Abort };
+        let decision = if all_prepared {
+            CoordinatorDecision::Commit
+        } else {
+            CoordinatorDecision::Abort
+        };
         let shard_ids: Vec<ShardId> = participants.iter().map(|p| p.shard_id).collect();
 
         // Log decision BEFORE applying — durable commit point
@@ -164,7 +168,9 @@ impl TwoPhaseCoordinator {
 
         if all_prepared {
             for p in &participants {
-                let shard = if let Some(s) = self.engine.shard(p.shard_id) { s } else {
+                let shard = if let Some(s) = self.engine.shard(p.shard_id) {
+                    s
+                } else {
                     tracing::error!(
                         "2PC commit: shard {:?} not found — skipping commit for txn {}",
                         p.shard_id,
@@ -282,9 +288,7 @@ impl HardenedTwoPhaseCoordinator {
             circuit_breaker: CircuitBreaker::new(cb_thresh, cb_recovery),
             conflict_tracker: ShardConflictTracker::new(config.conflict_window),
             deadlock_detector: DeadlockDetector::new(config.deadlock_timeout),
-            wfg_detector: WaitForGraphDetector::new(
-                config.victim_selection.unwrap_or_default(),
-            ),
+            wfg_detector: WaitForGraphDetector::new(config.victim_selection.unwrap_or_default()),
             decision_log: None,
             global_txn_seq: AtomicU64::new(1),
             config,
@@ -451,7 +455,9 @@ impl HardenedTwoPhaseCoordinator {
                 // so the thread yields properly and doesn't block shutdown.
                 let pair = std::sync::Mutex::new(false);
                 let cvar = std::sync::Condvar::new();
-                let guard = pair.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let guard = pair
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let _ = cvar.wait_timeout(guard, backoff);
             }
         }
@@ -572,7 +578,11 @@ impl HardenedTwoPhaseCoordinator {
         let commit_start = Instant::now();
 
         let global_txn_id = TxnId(self.global_txn_seq.fetch_add(1, Ordering::Relaxed));
-        let decision = if all_prepared { CoordinatorDecision::Commit } else { CoordinatorDecision::Abort };
+        let decision = if all_prepared {
+            CoordinatorDecision::Commit
+        } else {
+            CoordinatorDecision::Abort
+        };
 
         // Log decision BEFORE applying — this is the durable commit point
         if let Some(ref log) = self.decision_log {
@@ -586,7 +596,9 @@ impl HardenedTwoPhaseCoordinator {
 
         if all_prepared {
             for p in &participants {
-                let shard = if let Some(s) = self.engine.shard(p.shard_id) { s } else {
+                let shard = if let Some(s) = self.engine.shard(p.shard_id) {
+                    s
+                } else {
                     tracing::error!(
                         "2PC hardened commit: shard {:?} not found — skipping",
                         p.shard_id

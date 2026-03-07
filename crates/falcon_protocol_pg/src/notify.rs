@@ -159,7 +159,10 @@ impl SessionNotifications {
 
     /// List of channels we're listening on.
     pub fn listening_channels(&self) -> Vec<&str> {
-        self.channels.iter().map(std::string::String::as_str).collect()
+        self.channels
+            .iter()
+            .map(std::string::String::as_str)
+            .collect()
     }
 }
 

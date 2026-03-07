@@ -168,7 +168,8 @@ fn bench_schema() -> TableSchema {
                 nullable: false,
                 is_primary_key: true,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             },
             ColumnDef {
                 id: ColumnId(1),
@@ -177,7 +178,8 @@ fn bench_schema() -> TableSchema {
                 nullable: true,
                 is_primary_key: false,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             },
         ],
         primary_key_columns: vec![0],
@@ -469,9 +471,7 @@ fn run_scaleout(args: &Args) {
     let isolation = isolation_from_str(&args.isolation);
 
     println!("Running scatter/gather scale-out benchmark...");
-    println!(
-        "  ops/round: {ops_per_round}  records: {record_count}\n"
-    );
+    println!("  ops/round: {ops_per_round}  records: {record_count}\n");
 
     if args.export == "csv" {
         println!("shards,ops,elapsed_ms,tps,scatter_gather_total_us,max_subplan_us,gather_merge_us,rows_total");
@@ -806,9 +806,7 @@ fn run_failover_bench(args: &Args) {
             println!(
                 "before,{ops_half},{elapsed_before_ms},{tps_before:.1},{bp50},{bp95},{bp99},0,true"
             );
-            println!(
-                "failover,0,{failover_ms},0,0,0,0,{failover_ms},{data_intact}"
-            );
+            println!("failover,0,{failover_ms},0,0,0,0,{failover_ms},{data_intact}");
             println!(
                 "after,{ops_half},{elapsed_after_ms},{tps_after:.1},{ap50},{ap95},{ap99},0,{data_intact}"
             );
@@ -863,7 +861,8 @@ fn tpcb_schema() -> Vec<TableSchema> {
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(1),
@@ -872,7 +871,8 @@ fn tpcb_schema() -> Vec<TableSchema> {
                     nullable: false,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(2),
@@ -881,7 +881,8 @@ fn tpcb_schema() -> Vec<TableSchema> {
                     nullable: false,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
             ],
             primary_key_columns: vec![0],
@@ -898,7 +899,8 @@ fn tpcb_schema() -> Vec<TableSchema> {
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(1),
@@ -907,7 +909,8 @@ fn tpcb_schema() -> Vec<TableSchema> {
                     nullable: false,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(2),
@@ -916,7 +919,8 @@ fn tpcb_schema() -> Vec<TableSchema> {
                     nullable: false,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
             ],
             primary_key_columns: vec![0],
@@ -933,7 +937,8 @@ fn tpcb_schema() -> Vec<TableSchema> {
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(1),
@@ -942,7 +947,8 @@ fn tpcb_schema() -> Vec<TableSchema> {
                     nullable: false,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
             ],
             primary_key_columns: vec![0],
@@ -1406,7 +1412,8 @@ fn check_baseline(r: &BenchResult, args: &Args) -> bool {
     }
 
     // P99 regression check
-    let p99_ceiling = baseline.all_p99_us as f64 * (1.0 + f64::from(args.p99_threshold_pct) / 100.0);
+    let p99_ceiling =
+        baseline.all_p99_us as f64 * (1.0 + f64::from(args.p99_threshold_pct) / 100.0);
     let current_p99 = r.stats.latency.all.p99_us;
     if current_p99 as f64 > p99_ceiling {
         eprintln!(
@@ -1425,14 +1432,10 @@ fn check_baseline(r: &BenchResult, args: &Args) -> bool {
     let fp99 = r.stats.latency.fast_path.p99_us;
     let sp99 = r.stats.latency.slow_path.p99_us;
     if fp99 > 0 && sp99 > 0 && fp99 > sp99 {
-        eprintln!(
-            "INVARIANT VIOLATION: fast-path P99 ({fp99}µs) > slow-path P99 ({sp99}µs)"
-        );
+        eprintln!("INVARIANT VIOLATION: fast-path P99 ({fp99}µs) > slow-path P99 ({sp99}µs)");
         passed = false;
     } else if fp99 > 0 && sp99 > 0 {
-        println!(
-            "INVARIANT OK: fast-path P99 ({fp99}µs) <= slow-path P99 ({sp99}µs)"
-        );
+        println!("INVARIANT OK: fast-path P99 ({fp99}µs) <= slow-path P99 ({sp99}µs)");
     }
 
     if passed {

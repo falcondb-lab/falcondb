@@ -12,8 +12,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use falcon_cluster::{DistributedQueryEngine, GatewayMetrics, GatewayMetricsSnapshot};
 use falcon_cluster::sharded_engine::ShardedEngine;
+use falcon_cluster::{DistributedQueryEngine, GatewayMetrics, GatewayMetricsSnapshot};
 use falcon_common::schema::{ColumnDef, TableSchema};
 use falcon_common::types::*;
 
@@ -29,7 +29,8 @@ fn test_schema() -> TableSchema {
                 nullable: false,
                 is_primary_key: true,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             },
             ColumnDef {
                 id: ColumnId(1),
@@ -38,7 +39,8 @@ fn test_schema() -> TableSchema {
                 nullable: true,
                 is_primary_key: false,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             },
         ],
         primary_key_columns: vec![0],
@@ -136,7 +138,10 @@ fn test_shard_health_check_all_healthy() {
     for (_sid, healthy, latency_us) in &health {
         assert!(healthy);
         // Latency should be positive (at least some microseconds)
-        assert!(*latency_us < 1_000_000, "health check latency suspiciously high");
+        assert!(
+            *latency_us < 1_000_000,
+            "health check latency suspiciously high"
+        );
     }
 }
 

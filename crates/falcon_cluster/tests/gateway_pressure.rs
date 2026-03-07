@@ -11,11 +11,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use falcon_cluster::{
-    DistributedQueryEngine, GatewayAdmissionConfig, GatewayAdmissionControl,
-    GatewayDisposition, GatewayMetrics, GatewayMetricsSnapshot,
-};
 use falcon_cluster::sharded_engine::ShardedEngine;
+use falcon_cluster::{
+    DistributedQueryEngine, GatewayAdmissionConfig, GatewayAdmissionControl, GatewayDisposition,
+    GatewayMetrics, GatewayMetricsSnapshot,
+};
 fn make_engine(shards: u64) -> Arc<ShardedEngine> {
     Arc::new(ShardedEngine::new(shards))
 }
@@ -55,10 +55,7 @@ fn test_disposition_as_str() {
         GatewayDisposition::RejectOverloaded.as_str(),
         "REJECT_OVERLOADED"
     );
-    assert_eq!(
-        GatewayDisposition::RejectTimeout.as_str(),
-        "REJECT_TIMEOUT"
-    );
+    assert_eq!(GatewayDisposition::RejectTimeout.as_str(), "REJECT_TIMEOUT");
 }
 
 #[test]
@@ -98,10 +95,7 @@ fn test_admission_inflight_limit() {
     assert_eq!(ac.inflight(), 5);
 
     // 6th should be rejected
-    assert!(
-        !ac.try_acquire_inflight(),
-        "should reject when at limit"
-    );
+    assert!(!ac.try_acquire_inflight(), "should reject when at limit");
     assert_eq!(ac.inflight(), 5); // counter unchanged
 
     // Release one, then acquire should succeed

@@ -81,12 +81,15 @@ pub fn install_panic_hook() {
             "<non-string panic payload>".to_owned()
         };
 
-        let location = info
-            .location().map_or_else(|| "<unknown location>".to_owned(), |l| format!("{}:{}:{}", l.file(), l.line(), l.column()));
+        let location = info.location().map_or_else(
+            || "<unknown location>".to_owned(),
+            |l| format!("{}:{}:{}", l.file(), l.line(), l.column()),
+        );
 
         let thread_name = std::thread::current()
             .name()
-            .unwrap_or("<unnamed>").to_owned();
+            .unwrap_or("<unnamed>")
+            .to_owned();
 
         let count = PANIC_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
 
@@ -110,7 +113,9 @@ pub fn install_panic_hook() {
                 .as_millis() as u64,
         };
         {
-            let mut buf = recent_panics().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut buf = recent_panics()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if buf.len() >= MAX_RECENT_PANICS {
                 buf.remove(0);
             }
@@ -255,7 +260,10 @@ impl PanicThrottle {
 
     /// Record a panic. Returns `true` if the restart storm threshold is exceeded.
     pub fn record_panic(&self) -> bool {
-        let mut start = self.window_start.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut start = self
+            .window_start
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if start.elapsed() > self.window {
             // Reset window
             *start = Instant::now();

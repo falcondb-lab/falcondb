@@ -35,16 +35,17 @@ async fn start_grpc_node(
     node_id: u64,
     port: u16,
     peer_addrs: Vec<(u64, String)>,
-) -> (Raft<TypeConfig>, Arc<LocalRaftHandle>, tokio::task::JoinHandle<()>) {
+) -> (
+    Raft<TypeConfig>,
+    Arc<LocalRaftHandle>,
+    tokio::task::JoinHandle<()>,
+) {
     let local = LocalRaftHandle::new();
 
     // Start the gRPC server
-    let server_handle = start_raft_transport_server(
-        format!("127.0.0.1:{}", port),
-        local.clone(),
-    )
-    .await
-    .expect("start server");
+    let server_handle = start_raft_transport_server(format!("127.0.0.1:{}", port), local.clone())
+        .await
+        .expect("start server");
 
     // Give server a moment to bind
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -246,10 +247,7 @@ async fn test_fault_injection_partition_prevents_commit() {
     let old_leader = group.wait_for_leader(Duration::from_secs(5)).await.unwrap();
 
     // Propose some entries first
-    group
-        .propose(b"before-partition".to_vec())
-        .await
-        .unwrap();
+    group.propose(b"before-partition".to_vec()).await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Partition the leader
@@ -282,10 +280,7 @@ async fn test_fault_injection_partition_prevents_commit() {
     assert_ne!(new_leader.unwrap(), old_leader);
 
     // New leader can still commit
-    group
-        .propose(b"after-partition".to_vec())
-        .await
-        .unwrap();
+    group.propose(b"after-partition".to_vec()).await.unwrap();
 
     group.shutdown().await.unwrap();
 }
@@ -302,7 +297,11 @@ async fn test_fault_injection_drop_rate_recovery() {
             dropped += 1;
         }
     }
-    assert!(dropped > 50, "expected > 50% drops with 90% rate, got {}", dropped);
+    assert!(
+        dropped > 50,
+        "expected > 50% drops with 90% rate, got {}",
+        dropped
+    );
 
     // Disable faults — all messages should pass
     fi.disable();
@@ -469,10 +468,7 @@ async fn test_leader_crash_new_leader_continues() {
     assert_ne!(new_leader_id, old_leader);
 
     // New leader can still accept proposals
-    group
-        .propose(b"post-crash-entry".to_vec())
-        .await
-        .unwrap();
+    group.propose(b"post-crash-entry".to_vec()).await.unwrap();
 
     // Verify surviving nodes have committed the new entry
     tokio::time::sleep(Duration::from_millis(300)).await;

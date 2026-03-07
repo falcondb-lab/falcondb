@@ -266,8 +266,7 @@ impl PasswordPolicy {
         if char_count < self.config.min_length {
             reasons.push(format!(
                 "Password must be at least {} characters (got {})",
-                self.config.min_length,
-                char_count
+                self.config.min_length, char_count
             ));
         }
 
@@ -513,7 +512,9 @@ impl SqlFirewall {
                     }
                 }
                 result.push('\''); // closing quote (content stripped)
-                if i < len { i += 1; } // skip past closing quote
+                if i < len {
+                    i += 1;
+                } // skip past closing quote
             } else if ch == '"' {
                 result.push('"');
                 i += 1;
@@ -529,7 +530,9 @@ impl SqlFirewall {
                     }
                 }
                 result.push('"');
-                if i < len { i += 1; }
+                if i < len {
+                    i += 1;
+                }
             } else {
                 result.push(ch);
                 i += 1;
@@ -544,9 +547,7 @@ impl SqlFirewall {
         let tautology_patterns = ["OR 1=1", "OR '1'='1'", "OR ''=''", "OR TRUE", "OR 1 = 1"];
         for pat in &tautology_patterns {
             if sql_upper.contains(pat) {
-                return Some(format!(
-                    "SQL injection pattern detected: tautology ({pat})"
-                ));
+                return Some(format!("SQL injection pattern detected: tautology ({pat})"));
             }
         }
 
@@ -608,7 +609,7 @@ impl SqlFirewall {
     /// Uses SQL-standard quoting rules:
     /// - Single quotes are escaped by doubling: `''`
     /// - Double quotes (identifiers) are escaped by doubling: `""`
-    /// Backslash escaping (`\'`) is NOT standard SQL and is not recognised here.
+    ///   Backslash escaping (`\'`) is NOT standard SQL and is not recognised here.
     fn has_real_semicolons(sql: &str) -> bool {
         let mut in_single_quote = false;
         let mut in_double_quote = false;

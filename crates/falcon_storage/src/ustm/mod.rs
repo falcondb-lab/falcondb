@@ -44,18 +44,23 @@
 //! // guard dropped → page unpinned, eligible for eviction
 //! ```
 
-pub mod page;
-pub mod lirs2;
+pub mod engine;
 pub mod io_scheduler;
+pub mod lirs2;
+pub mod page;
 pub mod prefetcher;
 pub mod zones;
-pub mod engine;
 
 // ── Re-exports for convenience ───────────────────────────────────────────────
 
+pub use engine::{FetchResult, PageLocation, UstmConfig, UstmEngine, UstmError, UstmStats};
+pub use io_scheduler::{
+    IoError, IoPriority, IoRequest, IoResponse, IoScheduler, IoSchedulerConfig, IoSchedulerStats,
+    TokenBucket,
+};
+pub use lirs2::{AccessResult, Lirs2Cache, Lirs2Config, Lirs2Stats};
 pub use page::{AccessPriority, PageData, PageHandle, PageId, PinGuard, Tier};
-pub use lirs2::{Lirs2Cache, Lirs2Config, Lirs2Stats, AccessResult};
-pub use io_scheduler::{IoScheduler, IoSchedulerConfig, IoSchedulerStats, IoPriority, IoRequest, IoResponse, IoError, TokenBucket};
-pub use prefetcher::{Prefetcher, PrefetcherConfig, PrefetcherStats, PrefetchSource, PrefetchRequest};
-pub use zones::{ZoneManager, ZoneConfig, ZoneStats, ZoneError};
-pub use engine::{UstmEngine, UstmConfig, UstmStats, UstmError, FetchResult, PageLocation};
+pub use prefetcher::{
+    PrefetchRequest, PrefetchSource, Prefetcher, PrefetcherConfig, PrefetcherStats,
+};
+pub use zones::{ZoneConfig, ZoneError, ZoneManager, ZoneStats};

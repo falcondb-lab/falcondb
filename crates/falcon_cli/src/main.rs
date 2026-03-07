@@ -253,7 +253,8 @@ async fn run_statements(
                                             .await
                                             .map(|r| r.render()),
                                         None => Ok(
-                                            "Specify resolution: \\txn resolve <id> commit|abort\n".to_owned(),
+                                            "Specify resolution: \\txn resolve <id> commit|abort\n"
+                                                .to_owned(),
                                         ),
                                     }
                                 } else {
@@ -464,13 +465,11 @@ async fn run_statements(
                 }
                 MetaCommand::ListTables
                 | MetaCommand::DescribeTable(_)
-                | MetaCommand::ListDatabases => {
-                    match meta::execute_meta(&cmd, client).await {
-                        Ok(meta::MetaResult::Output(s)) => print!("{s}"),
-                        Ok(_) => {}
-                        Err(e) => eprintln!("ERROR: {e:#}"),
-                    }
-                }
+                | MetaCommand::ListDatabases => match meta::execute_meta(&cmd, client).await {
+                    Ok(meta::MetaResult::Output(s)) => print!("{s}"),
+                    Ok(_) => {}
+                    Err(e) => eprintln!("ERROR: {e:#}"),
+                },
                 // Other meta-commands are silently skipped in script mode
                 // (\q, \x, \timing etc. don't make sense in -c/-f)
                 _ => {}

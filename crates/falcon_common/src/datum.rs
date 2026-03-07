@@ -16,10 +16,10 @@ pub enum Datum {
     Int64(i64),
     Float64(f64),
     Text(String),
-    Timestamp(i64),    // microseconds since Unix epoch
-    Date(i32),         // days since Unix epoch (1970-01-01)
+    Timestamp(i64),   // microseconds since Unix epoch
+    Date(i32),        // days since Unix epoch (1970-01-01)
     Array(Vec<Self>), // PostgreSQL-style array
-    Jsonb(JsonValue),  // JSONB stored as serde_json::Value
+    Jsonb(JsonValue), // JSONB stored as serde_json::Value
     /// Fixed-point decimal for financial precision: mantissa × 10^(-scale).
     /// e.g. Decimal(12345, 2) = 123.45
     /// Supports up to 38 significant digits (i128 range).
@@ -120,17 +120,42 @@ impl Datum {
                 let nsecs = ((us % 1_000_000).abs() * 1000) as u32;
                 Some(chrono::DateTime::from_timestamp(secs, nsecs).map_or_else(
                     || us.to_string(),
-                    |dt| dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+                    |dt| {
+                        use chrono::{Datelike, Timelike};
+                        use std::fmt::Write;
+                        let mut buf = String::with_capacity(19);
+                        let _ = write!(
+                            buf,
+                            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                            dt.year(),
+                            dt.month(),
+                            dt.day(),
+                            dt.hour(),
+                            dt.minute(),
+                            dt.second()
+                        );
+                        buf
+                    },
                 ))
             }
             Self::Date(days) => {
-                // SAFETY: 1970-01-01 is always a valid date — unwrap_or fallback is unreachable.
                 let epoch =
                     chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap_or(chrono::NaiveDate::MIN);
-                Some(epoch.checked_add_signed(chrono::Duration::days(i64::from(*days))).map_or_else(
-                    || days.to_string(),
-                    |d| d.format("%Y-%m-%d").to_string(),
-                ))
+                Some(
+                    epoch
+                        .checked_add_signed(chrono::Duration::days(i64::from(*days)))
+                        .map_or_else(
+                            || days.to_string(),
+                            |d| {
+                                use chrono::Datelike;
+                                use std::fmt::Write;
+                                let mut buf = String::with_capacity(10);
+                                let _ =
+                                    write!(buf, "{:04}-{:02}-{:02}", d.year(), d.month(), d.day());
+                                buf
+                            },
+                        ),
+                )
             }
             Self::Array(elems) => {
                 let inner: Vec<String> = elems
@@ -152,14 +177,18 @@ impl Datum {
                 Some(format!("\\x{hex}"))
             }
             Self::TsVector(entries) => {
-                let parts: Vec<String> = entries.iter().map(|(word, positions)| {
-                    if positions.is_empty() {
-                        format!("'{word}'")
-                    } else {
-                        let pos_str: Vec<String> = positions.iter().map(|p| p.to_string()).collect();
-                        format!("'{word}':{}", pos_str.join(","))
-                    }
-                }).collect();
+                let parts: Vec<String> = entries
+                    .iter()
+                    .map(|(word, positions)| {
+                        if positions.is_empty() {
+                            format!("'{word}'")
+                        } else {
+                            let pos_str: Vec<String> =
+                                positions.iter().map(|p| p.to_string()).collect();
+                            format!("'{word}':{}", pos_str.join(","))
+                        }
+                    })
+                    .collect();
                 Some(parts.join(" "))
             }
             Self::TsQuery(q) => Some(q.clone()),
@@ -189,12 +218,8 @@ impl Datum {
             (Self::Float64(a), Self::Int64(b)) => Some(Self::Float64(a + *b as f64)),
             (Self::Float64(a), Self::Int32(b)) => Some(Self::Float64(a + f64::from(*b))),
             (Self::Decimal(a, sa), Self::Decimal(b, sb)) => Some(decimal_add(*a, *sa, *b, *sb)),
-            (Self::Decimal(a, sa), Self::Int64(b)) => {
-                Some(decimal_add(*a, *sa, i128::from(*b), 0))
-            }
-            (Self::Int64(a), Self::Decimal(b, sb)) => {
-                Some(decimal_add(i128::from(*a), 0, *b, *sb))
-            }
+            (Self::Decimal(a, sa), Self::Int64(b)) => Some(decimal_add(*a, *sa, i128::from(*b), 0)),
+            (Self::Int64(a), Self::Decimal(b, sb)) => Some(decimal_add(i128::from(*a), 0, *b, *sb)),
             _ => None,
         }
     }
@@ -205,9 +230,9 @@ impl Datum {
         if s.is_empty() {
             return None;
         }
-        let (int_part, frac_part) = s.find('.').map_or((s, ""), |dot_pos| {
-            (&s[..dot_pos], &s[dot_pos + 1..])
-        });
+        let (int_part, frac_part) = s
+            .find('.')
+            .map_or((s, ""), |dot_pos| (&s[..dot_pos], &s[dot_pos + 1..]));
         if frac_part.len() > u8::MAX as usize {
             return None; // scale exceeds u8 range
         }
@@ -239,7 +264,8 @@ impl fmt::Display for Datum {
             Self::Date(days) => {
                 let epoch =
                     chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap_or(chrono::NaiveDate::MIN);
-                if let Some(d) = epoch.checked_add_signed(chrono::Duration::days(i64::from(*days))) {
+                if let Some(d) = epoch.checked_add_signed(chrono::Duration::days(i64::from(*days)))
+                {
                     write!(f, "{}", d.format("%Y-%m-%d"))
                 } else {
                     write!(f, "{days}")
@@ -319,11 +345,14 @@ impl fmt::Display for Datum {
             }
             Self::TsVector(entries) => {
                 for (i, (word, positions)) in entries.iter().enumerate() {
-                    if i > 0 { write!(f, " ")?; }
+                    if i > 0 {
+                        write!(f, " ")?;
+                    }
                     if positions.is_empty() {
                         write!(f, "'{word}'")?;
                     } else {
-                        let pos_str: Vec<String> = positions.iter().map(|p| p.to_string()).collect();
+                        let pos_str: Vec<String> =
+                            positions.iter().map(|p| p.to_string()).collect();
                         write!(f, "'{word}':{}", pos_str.join(","))?;
                     }
                 }
@@ -472,7 +501,9 @@ impl Hash for Datum {
             Self::TsVector(entries) => {
                 14u8.hash(state);
                 entries.len().hash(state);
-                for (w, _) in entries { w.hash(state); }
+                for (w, _) in entries {
+                    w.hash(state);
+                }
             }
             Self::TsQuery(q) => {
                 15u8.hash(state);

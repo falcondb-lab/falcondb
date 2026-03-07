@@ -107,7 +107,9 @@ impl DistributedExecutor {
                                 {
                                     let pair = std::sync::Mutex::new(false);
                                     let cvar = std::sync::Condvar::new();
-                                    let guard = pair.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                                    let guard = pair
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                                     let _ = cvar.wait_timeout(guard, Duration::from_millis(5));
                                 }
                             }
@@ -431,10 +433,8 @@ impl DistributedExecutor {
         strategy: &GatherStrategy,
         backend: &dyn ShardExecBackend,
     ) -> Result<(SubPlanResult, ScatterGatherMetrics), FalconError> {
-        let plans: Vec<(ShardId, &SerializableSubPlan)> = target_shards
-            .iter()
-            .map(|&sid| (sid, plan))
-            .collect();
+        let plans: Vec<(ShardId, &SerializableSubPlan)> =
+            target_shards.iter().map(|&sid| (sid, plan)).collect();
         self.scatter_gather_per_shard_inner(&plans, strategy, backend)
     }
 
@@ -448,10 +448,8 @@ impl DistributedExecutor {
         strategy: &GatherStrategy,
         backend: &dyn ShardExecBackend,
     ) -> Result<(SubPlanResult, ScatterGatherMetrics), FalconError> {
-        let refs: Vec<(ShardId, &SerializableSubPlan)> = plans
-            .iter()
-            .map(|(sid, p)| (*sid, p))
-            .collect();
+        let refs: Vec<(ShardId, &SerializableSubPlan)> =
+            plans.iter().map(|(sid, p)| (*sid, p)).collect();
         self.scatter_gather_per_shard_inner(&refs, strategy, backend)
     }
 
@@ -479,7 +477,9 @@ impl DistributedExecutor {
                             if attempt > 0 {
                                 let pair = std::sync::Mutex::new(false);
                                 let cvar = std::sync::Condvar::new();
-                                let guard = pair.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                                let guard = pair
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                                 let _ = cvar.wait_timeout(guard, Duration::from_millis(5));
                             }
 
@@ -547,7 +547,10 @@ impl DistributedExecutor {
                     collected.push(sr);
                 }
                 Err(e) => {
-                    let sid = target_shard_ids.get(i).copied().unwrap_or(ShardId(i as u64));
+                    let sid = target_shard_ids
+                        .get(i)
+                        .copied()
+                        .unwrap_or(ShardId(i as u64));
                     tracing::warn!("Shard {:?} failed during scatter: {}", sid, e);
                     failed_shards.push((sid, format!("{e}")));
                 }
@@ -576,11 +579,7 @@ impl DistributedExecutor {
                 .map(|(sid, msg)| format!("shard_{}: {}", sid.0, msg))
                 .collect();
             return Err(FalconError::Transient {
-                reason: format!(
-                    "All {} shards failed: {}",
-                    plans.len(),
-                    msgs.join("; "),
-                ),
+                reason: format!("All {} shards failed: {}", plans.len(), msgs.join("; "),),
                 retry_after_ms: 200,
             });
         }
@@ -695,10 +694,8 @@ fn gather_merge(
             });
 
             if is_pre_sorted {
-                let merger = StreamingMergeSort::from_shard_results(
-                    shard_results,
-                    sort_columns.clone(),
-                );
+                let merger =
+                    StreamingMergeSort::from_shard_results(shard_results, sort_columns.clone());
                 merger.collect_with_offset_limit(*offset, *limit)
             } else {
                 let mut all_rows = Vec::with_capacity(total_rows_gathered);
@@ -736,9 +733,7 @@ fn gather_merge(
                     let count_val = row.values.get(count_idx).cloned().unwrap_or(Datum::Null);
                     let avg = match (&sum_val, &count_val) {
                         (_, Datum::Int64(0)) | (_, Datum::Null) => Datum::Null,
-                        (Datum::Int64(s), Datum::Int64(c)) => {
-                            Datum::Float64(*s as f64 / *c as f64)
-                        }
+                        (Datum::Int64(s), Datum::Int64(c)) => Datum::Float64(*s as f64 / *c as f64),
                         (Datum::Int32(s), Datum::Int64(c)) => {
                             Datum::Float64(f64::from(*s) / *c as f64)
                         }

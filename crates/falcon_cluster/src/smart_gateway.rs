@@ -22,8 +22,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use falcon_common::types::{NodeId, ShardId};
 use crate::routing::{ShardMap, ShardRouterClient};
+use falcon_common::types::{NodeId, ShardId};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Cluster Access Model
@@ -123,22 +123,22 @@ impl GatewayErrorCode {
     /// 0 = retry immediately, None = do not retry.
     pub const fn retry_delay_ms(&self) -> Option<u64> {
         match self {
-            Self::NotLeader => Some(0),       // Immediate retry with new leader
-            Self::NoRoute => Some(100),       // Short delay, topology may be updating
-            Self::Overloaded => Some(500),    // Backoff, gateway is under pressure
-            Self::Timeout => Some(200),       // Moderate delay
-            Self::Fatal => None,              // Do not retry
+            Self::NotLeader => Some(0),    // Immediate retry with new leader
+            Self::NoRoute => Some(100),    // Short delay, topology may be updating
+            Self::Overloaded => Some(500), // Backoff, gateway is under pressure
+            Self::Timeout => Some(200),    // Moderate delay
+            Self::Fatal => None,           // Do not retry
         }
     }
 
     /// SQLSTATE-compatible error code string.
     pub const fn sqlstate(&self) -> &'static str {
         match self {
-            Self::NotLeader => "FD001",    // FalconDB-specific: leader changed
-            Self::NoRoute => "FD002",      // FalconDB-specific: no route
-            Self::Overloaded => "FD003",   // FalconDB-specific: overloaded
-            Self::Timeout => "FD004",      // FalconDB-specific: timeout
-            Self::Fatal => "FD000",        // FalconDB-specific: fatal
+            Self::NotLeader => "FD001",  // FalconDB-specific: leader changed
+            Self::NoRoute => "FD002",    // FalconDB-specific: no route
+            Self::Overloaded => "FD003", // FalconDB-specific: overloaded
+            Self::Timeout => "FD004",    // FalconDB-specific: timeout
+            Self::Fatal => "FD000",      // FalconDB-specific: fatal
         }
     }
 
@@ -330,7 +330,11 @@ impl JdbcConnectionUrl {
 
     /// Format back to JDBC URL string.
     pub fn to_url(&self) -> String {
-        let hosts: Vec<String> = self.seeds.iter().map(std::string::ToString::to_string).collect();
+        let hosts: Vec<String> = self
+            .seeds
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         let mut url = format!("jdbc:falcondb://{}/{}", hosts.join(","), self.database);
         if !self.params.is_empty() {
             let params: Vec<String> = self
@@ -446,7 +450,10 @@ impl TopologyCache {
 
     /// Register or update a node in the directory.
     pub fn register_node(&self, node_id: NodeId, address: String, role: GatewayRole) {
-        let mut dir = self.node_directory.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut dir = self
+            .node_directory
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         dir.insert(
             node_id.0,
             NodeInfo {
@@ -461,7 +468,10 @@ impl TopologyCache {
 
     /// Mark a node as dead.
     pub fn mark_node_dead(&self, node_id: NodeId) {
-        let mut dir = self.node_directory.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut dir = self
+            .node_directory
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(info) = dir.get_mut(&node_id.0) {
             info.is_alive = false;
         }
@@ -469,7 +479,10 @@ impl TopologyCache {
 
     /// Mark a node as alive (heartbeat received).
     pub fn mark_node_alive(&self, node_id: NodeId) {
-        let mut dir = self.node_directory.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut dir = self
+            .node_directory
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(info) = dir.get_mut(&node_id.0) {
             info.is_alive = true;
             info.last_heartbeat = Instant::now();
@@ -483,7 +496,10 @@ impl TopologyCache {
         leader_node: NodeId,
         leader_addr: String,
     ) -> u64 {
-        let mut entries = self.entries.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut entries = self
+            .entries
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let current_epoch = self.epoch.load(Ordering::Acquire);
 
         let changed = entries
@@ -516,7 +532,10 @@ impl TopologyCache {
 
     /// Look up the leader for a shard.
     pub fn get_leader(&self, shard_id: ShardId) -> Option<TopologyEntry> {
-        let entries = self.entries.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entries = self
+            .entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(entry) = entries.get(&shard_id.0) {
             self.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
             Some(entry.clone())
@@ -528,14 +547,20 @@ impl TopologyCache {
 
     /// Invalidate a shard's leader entry (e.g., after a NOT_LEADER error).
     pub fn invalidate(&self, shard_id: ShardId) {
-        let mut entries = self.entries.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut entries = self
+            .entries
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         entries.remove(&shard_id.0);
         self.metrics.invalidations.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Invalidate all entries for a given node (node crash).
     pub fn invalidate_node(&self, node_id: NodeId) {
-        let mut entries = self.entries.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut entries = self
+            .entries
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let before = entries.len();
         entries.retain(|_, v| v.leader_node != node_id);
         let removed = before - entries.len();
@@ -549,26 +574,41 @@ impl TopologyCache {
 
     /// Get a snapshot of the node directory.
     pub fn node_directory_snapshot(&self) -> Vec<NodeInfo> {
-        let dir = self.node_directory.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = self
+            .node_directory
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         dir.values().cloned().collect()
     }
 
     /// Get node address by ID.
     pub fn node_address(&self, node_id: NodeId) -> Option<String> {
-        let dir = self.node_directory.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = self
+            .node_directory
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         dir.get(&node_id.0).map(|n| n.address.clone())
     }
 
     /// Check if a node is alive.
     pub fn is_node_alive(&self, node_id: NodeId) -> bool {
-        let dir = self.node_directory.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = self
+            .node_directory
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         dir.get(&node_id.0).is_some_and(|n| n.is_alive)
     }
 
     /// Metrics snapshot.
     pub fn metrics_snapshot(&self) -> TopologyCacheMetricsSnapshot {
-        let entries = self.entries.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let dir = self.node_directory.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entries = self
+            .entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = self
+            .node_directory
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let hits = self.metrics.cache_hits.load(Ordering::Relaxed);
         let misses = self.metrics.cache_misses.load(Ordering::Relaxed);
         let total = hits + misses;
@@ -581,7 +621,11 @@ impl TopologyCache {
             epoch_bumps: self.metrics.epoch_bumps.load(Ordering::Relaxed),
             invalidations: self.metrics.invalidations.load(Ordering::Relaxed),
             leader_changes: self.metrics.leader_changes.load(Ordering::Relaxed),
-            hit_rate: if total > 0 { hits as f64 / total as f64 } else { 0.0 },
+            hit_rate: if total > 0 {
+                hits as f64 / total as f64
+            } else {
+                0.0
+            },
         }
     }
 }
@@ -750,7 +794,11 @@ impl SmartGatewayMetrics {
             reject_timeout_total: rej_to,
             inflight: self.inflight.load(Ordering::Relaxed),
             forwarded: self.forwarded.load(Ordering::Relaxed),
-            forward_latency_avg_us: if forward > 0 { cum_latency / forward } else { 0 },
+            forward_latency_avg_us: if forward > 0 {
+                cum_latency / forward
+            } else {
+                0
+            },
             forward_latency_peak_us: self.forward_latency_peak_us.load(Ordering::Relaxed),
             forward_failed: self.forward_failed.load(Ordering::Relaxed),
             client_connect_total: self.client_connect_total.load(Ordering::Relaxed),
@@ -777,11 +825,13 @@ impl SmartGatewayMetrics {
     }
 
     fn record_forward_latency(&self, latency_us: u64) {
-        self.forward_latency_us.fetch_add(latency_us, Ordering::Relaxed);
+        self.forward_latency_us
+            .fetch_add(latency_us, Ordering::Relaxed);
         // Best-effort peak tracking (no CAS needed for approximate peak)
         let current_peak = self.forward_latency_peak_us.load(Ordering::Relaxed);
         if latency_us > current_peak {
-            self.forward_latency_peak_us.store(latency_us, Ordering::Relaxed);
+            self.forward_latency_peak_us
+                .store(latency_us, Ordering::Relaxed);
         }
     }
 }
@@ -843,7 +893,8 @@ impl SmartGateway {
         if shard.leader == self.config.node_id {
             return Ok(None); // local
         }
-        let resp = self.router_client
+        let resp = self
+            .router_client
             .forward_query(map, pk_bytes, sql, txn_id)
             .await?;
         self.metrics.forward_total.fetch_add(1, Ordering::Relaxed);
@@ -856,7 +907,8 @@ impl SmartGateway {
         // 1. Check admission — overload protection (no infinite queuing)
         let current_inflight = self.metrics.inflight.load(Ordering::Relaxed);
         if self.config.max_inflight > 0 && current_inflight >= self.config.max_inflight {
-            self.metrics.record_classification(RequestClassification::RejectOverloaded);
+            self.metrics
+                .record_classification(RequestClassification::RejectOverloaded);
             return RouteDecision {
                 classification: RequestClassification::RejectOverloaded,
                 target_node: None,
@@ -871,7 +923,8 @@ impl SmartGateway {
         match entry {
             None => {
                 // No route: topology unknown for this shard
-                self.metrics.record_classification(RequestClassification::RejectNoRoute);
+                self.metrics
+                    .record_classification(RequestClassification::RejectNoRoute);
                 RouteDecision {
                     classification: RequestClassification::RejectNoRoute,
                     target_node: None,
@@ -883,7 +936,8 @@ impl SmartGateway {
             Some(topo) => {
                 if topo.leader_node == self.config.node_id {
                     // Local execution
-                    self.metrics.record_classification(RequestClassification::LocalExec);
+                    self.metrics
+                        .record_classification(RequestClassification::LocalExec);
                     RouteDecision {
                         classification: RequestClassification::LocalExec,
                         target_node: Some(topo.leader_node),
@@ -895,7 +949,8 @@ impl SmartGateway {
                     // Forward to leader — check forwarded slot limit
                     let current_fwd = self.metrics.forwarded.load(Ordering::Relaxed);
                     if self.config.max_forwarded > 0 && current_fwd >= self.config.max_forwarded {
-                        self.metrics.record_classification(RequestClassification::RejectOverloaded);
+                        self.metrics
+                            .record_classification(RequestClassification::RejectOverloaded);
                         return RouteDecision {
                             classification: RequestClassification::RejectOverloaded,
                             target_node: None,
@@ -908,7 +963,8 @@ impl SmartGateway {
                     // Verify target node is alive — no blind forward to dead nodes
                     if !self.topology.is_node_alive(topo.leader_node) {
                         self.topology.invalidate(shard_id);
-                        self.metrics.record_classification(RequestClassification::RejectNoRoute);
+                        self.metrics
+                            .record_classification(RequestClassification::RejectNoRoute);
                         return RouteDecision {
                             classification: RequestClassification::RejectNoRoute,
                             target_node: None,
@@ -918,7 +974,8 @@ impl SmartGateway {
                         };
                     }
 
-                    self.metrics.record_classification(RequestClassification::ForwardToLeader);
+                    self.metrics
+                        .record_classification(RequestClassification::ForwardToLeader);
                     RouteDecision {
                         classification: RequestClassification::ForwardToLeader,
                         target_node: Some(topo.leader_node),
@@ -985,12 +1042,16 @@ impl SmartGateway {
 
     /// Record a client connection event.
     pub fn record_client_connect(&self) {
-        self.metrics.client_connect_total.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .client_connect_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record a client failover event (switched from one gateway to this one).
     pub fn record_client_failover(&self) {
-        self.metrics.client_failover_total.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .client_failover_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Get metrics snapshot.
@@ -1017,7 +1078,8 @@ impl SmartGateway {
         let mut total_rows = 0u64;
 
         for (node_id, shard_id, sql) in participants {
-            match self.router_client
+            match self
+                .router_client
                 .prepare_2pc_remote(*node_id, coord_txn_id, *shard_id, sql)
                 .await
             {
@@ -1029,7 +1091,10 @@ impl SmartGateway {
                     tracing::error!(coord_txn_id, node_id, shard_id, error = %e, "2PC prepare failed, aborting all");
                     // Abort all already-prepared
                     for (n, s) in &prepared {
-                        let _ = self.router_client.abort_2pc_remote(*n, coord_txn_id, *s).await;
+                        let _ = self
+                            .router_client
+                            .abort_2pc_remote(*n, coord_txn_id, *s)
+                            .await;
                     }
                     return Err(e);
                 }
@@ -1044,7 +1109,8 @@ impl SmartGateway {
             let mut last_err = String::new();
             let mut committed = false;
             for attempt in 0..=MAX_COMMIT_RETRIES {
-                match self.router_client
+                match self
+                    .router_client
                     .commit_2pc_remote(*node_id, coord_txn_id, *shard_id)
                     .await
                 {
@@ -1076,7 +1142,12 @@ impl SmartGateway {
             }
         }
 
-        tracing::debug!(coord_txn_id, participants = prepared.len(), total_rows, "2PC completed");
+        tracing::debug!(
+            coord_txn_id,
+            participants = prepared.len(),
+            total_rows,
+            "2PC completed"
+        );
         Ok(total_rows)
     }
 }
@@ -1187,8 +1258,8 @@ impl CompressionProfile {
     /// Cold migration min_version_age (timestamp units).
     pub const fn min_version_age(&self) -> u64 {
         match self {
-            Self::Off => u64::MAX, // Never migrate
-            Self::Balanced => 300, // ~5 minutes
+            Self::Off => u64::MAX,  // Never migrate
+            Self::Balanced => 300,  // ~5 minutes
             Self::Aggressive => 60, // ~1 minute
         }
     }
@@ -1210,8 +1281,8 @@ impl CompressionProfile {
     pub const fn block_cache_capacity(&self) -> u64 {
         match self {
             Self::Off => 0,
-            Self::Balanced => 16 * 1024 * 1024,      // 16 MB
-            Self::Aggressive => 64 * 1024 * 1024,     // 64 MB
+            Self::Balanced => 16 * 1024 * 1024,   // 16 MB
+            Self::Aggressive => 64 * 1024 * 1024, // 64 MB
         }
     }
 
@@ -1336,10 +1407,9 @@ mod tests {
 
     #[test]
     fn test_jdbc_url_multi_host() {
-        let url = JdbcConnectionUrl::parse(
-            "jdbc:falcondb://node1:5443,node2:5443,node3:5443/falcon",
-        )
-        .unwrap();
+        let url =
+            JdbcConnectionUrl::parse("jdbc:falcondb://node1:5443,node2:5443,node3:5443/falcon")
+                .unwrap();
         assert_eq!(url.seeds.len(), 3);
         assert_eq!(url.seeds[0].host, "node1");
         assert_eq!(url.seeds[1].host, "node2");
@@ -1349,10 +1419,9 @@ mod tests {
 
     #[test]
     fn test_jdbc_url_with_params() {
-        let url = JdbcConnectionUrl::parse(
-            "jdbc:falcondb://host1:5443/db?user=admin&password=secret",
-        )
-        .unwrap();
+        let url =
+            JdbcConnectionUrl::parse("jdbc:falcondb://host1:5443/db?user=admin&password=secret")
+                .unwrap();
         assert_eq!(url.seeds.len(), 1);
         assert_eq!(url.database, "db");
         assert_eq!(url.params.get("user"), Some(&"admin".to_string()));
@@ -1541,8 +1610,10 @@ mod tests {
             ..Default::default()
         };
         let gw = SmartGateway::new(config);
-        gw.topology.register_node(NodeId(1), "node1:5443".into(), GatewayRole::SmartGateway);
-        gw.topology.update_leader(ShardId(0), NodeId(1), "node1:5443".into());
+        gw.topology
+            .register_node(NodeId(1), "node1:5443".into(), GatewayRole::SmartGateway);
+        gw.topology
+            .update_leader(ShardId(0), NodeId(1), "node1:5443".into());
 
         let decision = gw.classify_request(ShardId(0));
         assert_eq!(decision.classification, RequestClassification::LocalExec);
@@ -1556,12 +1627,18 @@ mod tests {
             ..Default::default()
         };
         let gw = SmartGateway::new(config);
-        gw.topology.register_node(NodeId(1), "node1:5443".into(), GatewayRole::SmartGateway);
-        gw.topology.register_node(NodeId(2), "node2:5443".into(), GatewayRole::SmartGateway);
-        gw.topology.update_leader(ShardId(0), NodeId(2), "node2:5443".into());
+        gw.topology
+            .register_node(NodeId(1), "node1:5443".into(), GatewayRole::SmartGateway);
+        gw.topology
+            .register_node(NodeId(2), "node2:5443".into(), GatewayRole::SmartGateway);
+        gw.topology
+            .update_leader(ShardId(0), NodeId(2), "node2:5443".into());
 
         let decision = gw.classify_request(ShardId(0));
-        assert_eq!(decision.classification, RequestClassification::ForwardToLeader);
+        assert_eq!(
+            decision.classification,
+            RequestClassification::ForwardToLeader
+        );
         assert_eq!(decision.target_node, Some(NodeId(2)));
         assert_eq!(decision.target_addr, Some("node2:5443".to_string()));
     }
@@ -1575,7 +1652,10 @@ mod tests {
         let gw = SmartGateway::new(config);
 
         let decision = gw.classify_request(ShardId(99));
-        assert_eq!(decision.classification, RequestClassification::RejectNoRoute);
+        assert_eq!(
+            decision.classification,
+            RequestClassification::RejectNoRoute
+        );
     }
 
     #[test]
@@ -1586,14 +1666,19 @@ mod tests {
             ..Default::default()
         };
         let gw = SmartGateway::new(config);
-        gw.topology.register_node(NodeId(1), "node1:5443".into(), GatewayRole::SmartGateway);
-        gw.topology.update_leader(ShardId(0), NodeId(1), "node1:5443".into());
+        gw.topology
+            .register_node(NodeId(1), "node1:5443".into(), GatewayRole::SmartGateway);
+        gw.topology
+            .update_leader(ShardId(0), NodeId(1), "node1:5443".into());
 
         // Fill up inflight slots
         gw.metrics.inflight.store(2, Ordering::Relaxed);
 
         let decision = gw.classify_request(ShardId(0));
-        assert_eq!(decision.classification, RequestClassification::RejectOverloaded);
+        assert_eq!(
+            decision.classification,
+            RequestClassification::RejectOverloaded
+        );
     }
 
     #[test]
@@ -1603,9 +1688,12 @@ mod tests {
             ..Default::default()
         };
         let gw = SmartGateway::new(config);
-        gw.topology.register_node(NodeId(1), "node1:5443".into(), GatewayRole::SmartGateway);
-        gw.topology.register_node(NodeId(2), "node2:5443".into(), GatewayRole::SmartGateway);
-        gw.topology.update_leader(ShardId(0), NodeId(2), "node2:5443".into());
+        gw.topology
+            .register_node(NodeId(1), "node1:5443".into(), GatewayRole::SmartGateway);
+        gw.topology
+            .register_node(NodeId(2), "node2:5443".into(), GatewayRole::SmartGateway);
+        gw.topology
+            .update_leader(ShardId(0), NodeId(2), "node2:5443".into());
 
         // Mark node 2 as dead
         gw.topology.mark_node_dead(NodeId(2));
@@ -1625,15 +1713,15 @@ mod tests {
             ..Default::default()
         };
         let gw = SmartGateway::new(config);
-        gw.topology.register_node(NodeId(1), "node1:5443".into(), GatewayRole::SmartGateway);
-        gw.topology.register_node(NodeId(2), "node2:5443".into(), GatewayRole::SmartGateway);
-        gw.topology.update_leader(ShardId(0), NodeId(1), "node1:5443".into());
+        gw.topology
+            .register_node(NodeId(1), "node1:5443".into(), GatewayRole::SmartGateway);
+        gw.topology
+            .register_node(NodeId(2), "node2:5443".into(), GatewayRole::SmartGateway);
+        gw.topology
+            .update_leader(ShardId(0), NodeId(1), "node1:5443".into());
 
         // Simulate NOT_LEADER response — leader is now node 2
-        let err = gw.handle_not_leader(
-            ShardId(0),
-            Some((NodeId(2), "node2:5443".into())),
-        );
+        let err = gw.handle_not_leader(ShardId(0), Some((NodeId(2), "node2:5443".into())));
 
         assert_eq!(err.code, GatewayErrorCode::NotLeader);
         assert_eq!(err.leader_hint, Some("node2:5443".to_string()));
@@ -1650,10 +1738,14 @@ mod tests {
             ..Default::default()
         };
         let gw = SmartGateway::new(config);
-        gw.topology.register_node(NodeId(1), "node1:5443".into(), GatewayRole::SmartGateway);
-        gw.topology.register_node(NodeId(2), "node2:5443".into(), GatewayRole::SmartGateway);
-        gw.topology.update_leader(ShardId(0), NodeId(1), "node1:5443".into());
-        gw.topology.update_leader(ShardId(1), NodeId(2), "node2:5443".into());
+        gw.topology
+            .register_node(NodeId(1), "node1:5443".into(), GatewayRole::SmartGateway);
+        gw.topology
+            .register_node(NodeId(2), "node2:5443".into(), GatewayRole::SmartGateway);
+        gw.topology
+            .update_leader(ShardId(0), NodeId(1), "node1:5443".into());
+        gw.topology
+            .update_leader(ShardId(1), NodeId(2), "node2:5443".into());
 
         gw.classify_request(ShardId(0)); // LocalExec
         gw.classify_request(ShardId(1)); // ForwardToLeader
@@ -1671,9 +1763,18 @@ mod tests {
     #[test]
     fn test_seed_list_failover() {
         let seeds = vec![
-            HostPort { host: "node1".into(), port: 5443 },
-            HostPort { host: "node2".into(), port: 5443 },
-            HostPort { host: "node3".into(), port: 5443 },
+            HostPort {
+                host: "node1".into(),
+                port: 5443,
+            },
+            HostPort {
+                host: "node2".into(),
+                port: 5443,
+            },
+            HostPort {
+                host: "node3".into(),
+                port: 5443,
+            },
         ];
         let mut list = SeedGatewayList::new(seeds);
 
@@ -1693,25 +1794,41 @@ mod tests {
     #[test]
     fn test_seed_list_wrap_around() {
         let seeds = vec![
-            HostPort { host: "node1".into(), port: 5443 },
-            HostPort { host: "node2".into(), port: 5443 },
+            HostPort {
+                host: "node1".into(),
+                port: 5443,
+            },
+            HostPort {
+                host: "node2".into(),
+                port: 5443,
+            },
         ];
         let mut list = SeedGatewayList::new(seeds);
 
         // Fail node1 → node2
-        for _ in 0..3 { list.report_failure(); }
+        for _ in 0..3 {
+            list.report_failure();
+        }
         assert_eq!(list.active().host, "node2");
 
         // Fail node2 → wraps back to node1
-        for _ in 0..3 { list.report_failure(); }
+        for _ in 0..3 {
+            list.report_failure();
+        }
         assert_eq!(list.active().host, "node1");
     }
 
     #[test]
     fn test_seed_list_all_exhausted() {
         let seeds = vec![
-            HostPort { host: "a".into(), port: 1 },
-            HostPort { host: "b".into(), port: 2 },
+            HostPort {
+                host: "a".into(),
+                port: 1,
+            },
+            HostPort {
+                host: "b".into(),
+                port: 2,
+            },
         ];
         let list = SeedGatewayList::new(seeds);
         assert!(!list.all_seeds_exhausted(5));
@@ -1765,11 +1882,26 @@ mod tests {
 
     #[test]
     fn test_compression_profile_from_str() {
-        assert_eq!(CompressionProfile::from_str_loose("off"), CompressionProfile::Off);
-        assert_eq!(CompressionProfile::from_str_loose("none"), CompressionProfile::Off);
-        assert_eq!(CompressionProfile::from_str_loose("balanced"), CompressionProfile::Balanced);
-        assert_eq!(CompressionProfile::from_str_loose("aggressive"), CompressionProfile::Aggressive);
-        assert_eq!(CompressionProfile::from_str_loose("unknown"), CompressionProfile::Balanced);
+        assert_eq!(
+            CompressionProfile::from_str_loose("off"),
+            CompressionProfile::Off
+        );
+        assert_eq!(
+            CompressionProfile::from_str_loose("none"),
+            CompressionProfile::Off
+        );
+        assert_eq!(
+            CompressionProfile::from_str_loose("balanced"),
+            CompressionProfile::Balanced
+        );
+        assert_eq!(
+            CompressionProfile::from_str_loose("aggressive"),
+            CompressionProfile::Aggressive
+        );
+        assert_eq!(
+            CompressionProfile::from_str_loose("unknown"),
+            CompressionProfile::Balanced
+        );
     }
 
     // ── WAL Backend Policy ──────────────────────────────────────────
@@ -1787,7 +1919,10 @@ mod tests {
         assert_eq!(WalMode::from_str_loose("posix"), WalMode::Posix);
         assert_eq!(WalMode::from_str_loose("file"), WalMode::Posix);
         assert_eq!(WalMode::from_str_loose("win_async"), WalMode::WinAsync);
-        assert_eq!(WalMode::from_str_loose("raw_experimental"), WalMode::RawExperimental);
+        assert_eq!(
+            WalMode::from_str_loose("raw_experimental"),
+            WalMode::RawExperimental
+        );
     }
 
     #[test]
@@ -1855,11 +1990,8 @@ mod tests {
             );
         }
         for s in 0..8u64 {
-            gw.topology.update_leader(
-                ShardId(s),
-                NodeId(s % 4),
-                format!("node{}:5443", s % 4),
-            );
+            gw.topology
+                .update_leader(ShardId(s), NodeId(s % 4), format!("node{}:5443", s % 4));
         }
 
         let mut handles = Vec::new();

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use falcon_common::types::DataType;
 use falcon_planner::PhysicalPlan;
@@ -170,7 +170,9 @@ impl PlanCache {
     pub fn get_prepared(&self, sql: &str) -> Option<CachedPrepared> {
         let key = normalize_sql(sql);
         let inner = self.prepared.read().ok()?;
-        let gen_valid = inner.entry_generations.get(key.as_str())
+        let gen_valid = inner
+            .entry_generations
+            .get(key.as_str())
             .map(|g| *g == inner.schema_generation);
         match gen_valid {
             Some(true) => {
@@ -197,9 +199,13 @@ impl PlanCache {
     /// Cache a prepared statement result.
     pub fn put_prepared(&self, sql: &str, entry: CachedPrepared) {
         let key = normalize_sql(sql);
-        let Ok(mut inner) = self.prepared.write() else { return };
+        let Ok(mut inner) = self.prepared.write() else {
+            return;
+        };
         if inner.entries.len() >= inner.capacity && !inner.entries.contains_key(key.as_str()) {
-            if let Some(evict_key) = inner.entries.iter()
+            if let Some(evict_key) = inner
+                .entries
+                .iter()
                 .min_by_key(|(_, (_, count))| *count)
                 .map(|(k, _)| k.clone())
             {
@@ -214,7 +220,10 @@ impl PlanCache {
 
     /// Get cache statistics.
     pub fn stats(&self) -> PlanCacheStats {
-        let inner = self.inner.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let inner = self
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let hits = self.hits.load(Ordering::Relaxed);
         let misses = self.misses.load(Ordering::Relaxed);
         let total = hits + misses;
@@ -323,7 +332,8 @@ mod tests {
                 nullable: false,
                 is_primary_key: true,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             }],
             primary_key_columns: vec![0],
             next_serial_values: std::collections::HashMap::new(),

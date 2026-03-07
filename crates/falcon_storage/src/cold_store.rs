@@ -118,7 +118,11 @@ impl ColdHandle {
 const BLOCK_HEADER_SIZE: usize = 1 + 4 + 4; // codec + original_len + compressed_len
 
 fn encode_block(data: &[u8], codec: CompressionCodec, compression_enabled: bool) -> Vec<u8> {
-    let actual_codec = if compression_enabled { codec } else { CompressionCodec::None };
+    let actual_codec = if compression_enabled {
+        codec
+    } else {
+        CompressionCodec::None
+    };
     let original_len = data.len() as u32;
 
     let compressed = match actual_codec {
@@ -164,7 +168,8 @@ fn decode_block(block: &[u8]) -> Result<Vec<u8>, StorageError> {
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn serialize_row(row: &OwnedRow) -> Result<Vec<u8>, StorageError> {
-    bincode::serialize(row).map_err(|e| StorageError::ColdStore(format!("row serialize error: {e}")))
+    bincode::serialize(row)
+        .map_err(|e| StorageError::ColdStore(format!("row serialize error: {e}")))
 }
 
 fn deserialize_row(data: &[u8]) -> Result<OwnedRow, StorageError> {
@@ -207,7 +212,10 @@ impl Segment {
         if end > self.data.len() {
             return Err(StorageError::ColdStore(format!(
                 "read out of bounds: segment={}, offset={}, len={}, segment_size={}",
-                self.id, offset, len, self.data.len()
+                self.id,
+                offset,
+                len,
+                self.data.len()
             )));
         }
         Ok(&self.data[start..end])
@@ -341,14 +349,22 @@ impl ColdStoreMetrics {
     pub fn compression_ratio(&self) -> f64 {
         let orig = self.cold_original_bytes.load(Ordering::Relaxed) as f64;
         let comp = self.cold_bytes.load(Ordering::Relaxed) as f64;
-        if comp > 0.0 { orig / comp } else { 1.0 }
+        if comp > 0.0 {
+            orig / comp
+        } else {
+            1.0
+        }
     }
 
     /// Average decompress latency in microseconds.
     pub fn avg_decompress_us(&self) -> f64 {
         let total = self.cold_decompress_latency_us.load(Ordering::Relaxed) as f64;
         let count = self.cold_decompress_total.load(Ordering::Relaxed) as f64;
-        if count > 0.0 { total / count } else { 0.0 }
+        if count > 0.0 {
+            total / count
+        } else {
+            0.0
+        }
     }
 
     pub fn snapshot(&self) -> ColdStoreMetricsSnapshot {
@@ -431,13 +447,18 @@ impl ColdStore {
     pub fn store_row(&self, row: &OwnedRow) -> Result<ColdHandle, StorageError> {
         let raw_bytes = serialize_row(row)?;
         let original_len = raw_bytes.len() as u64;
-        let block = encode_block(&raw_bytes, self.config.codec, self.config.compression_enabled);
+        let block = encode_block(
+            &raw_bytes,
+            self.config.codec,
+            self.config.compression_enabled,
+        );
         let block_len = block.len() as u64;
 
         let handle = {
-            let mut segments = self.segments.write().map_err(|_| {
-                StorageError::ColdStore("segment lock poisoned".into())
-            })?;
+            let mut segments = self
+                .segments
+                .write()
+                .map_err(|_| StorageError::ColdStore("segment lock poisoned".into()))?;
 
             // Check if active segment has space
             let active_idx = segments.len() - 1;
@@ -445,10 +466,9 @@ impl ColdStore {
                 // Rotate: create new segment
                 let new_id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
                 segments.push(Segment::new(new_id, self.config.max_segment_size));
-                self.metrics.cold_segments_total.store(
-                    segments.len() as u64,
-                    Ordering::Relaxed,
-                );
+                self.metrics
+                    .cold_segments_total
+                    .store(segments.len() as u64, Ordering::Relaxed);
             }
 
             let active_idx = segments.len() - 1;
@@ -461,9 +481,15 @@ impl ColdStore {
         };
 
         // Update metrics
-        self.metrics.cold_bytes.fetch_add(block_len, Ordering::Relaxed);
-        self.metrics.cold_original_bytes.fetch_add(original_len, Ordering::Relaxed);
-        self.metrics.cold_migrate_total.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .cold_bytes
+            .fetch_add(block_len, Ordering::Relaxed);
+        self.metrics
+            .cold_original_bytes
+            .fetch_add(original_len, Ordering::Relaxed);
+        self.metrics
+            .cold_migrate_total
+            .fetch_add(1, Ordering::Relaxed);
 
         Ok(handle)
     }
@@ -482,17 +508,15 @@ impl ColdStore {
         let start = Instant::now();
 
         let raw_block = {
-            let segments = self.segments.read().map_err(|_| {
-                StorageError::ColdStore("segment lock poisoned".into())
-            })?;
+            let segments = self
+                .segments
+                .read()
+                .map_err(|_| StorageError::ColdStore("segment lock poisoned".into()))?;
             let segment = segments
                 .iter()
                 .find(|s| s.id == handle.segment_id)
                 .ok_or_else(|| {
-                    StorageError::ColdStore(format!(
-                        "segment {} not found",
-                        handle.segment_id
-                    ))
+                    StorageError::ColdStore(format!("segment {} not found", handle.segment_id))
                 })?;
             segment.read(handle.offset, handle.len)?.to_vec()
         };
@@ -500,12 +524,22 @@ impl ColdStore {
         let decompressed = decode_block(&raw_block)?;
 
         let elapsed_us = start.elapsed().as_micros() as u64;
-        self.metrics.cold_decompress_total.fetch_add(1, Ordering::Relaxed);
-        self.metrics.cold_decompress_latency_us.fetch_add(elapsed_us, Ordering::Relaxed);
+        self.metrics
+            .cold_decompress_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .cold_decompress_latency_us
+            .fetch_add(elapsed_us, Ordering::Relaxed);
         let _ = self.metrics.cold_decompress_peak_us.fetch_update(
             Ordering::Relaxed,
             Ordering::Relaxed,
-            |cur| if elapsed_us > cur { Some(elapsed_us) } else { None },
+            |cur| {
+                if elapsed_us > cur {
+                    Some(elapsed_us)
+                } else {
+                    None
+                }
+            },
         );
 
         // Populate cache
@@ -524,7 +558,11 @@ impl ColdStore {
         let hits = self.cache.hits() as f64;
         let misses = self.cache.misses() as f64;
         let total = hits + misses;
-        if total > 0.0 { hits / total } else { 0.0 }
+        if total > 0.0 {
+            hits / total
+        } else {
+            0.0
+        }
     }
 
     /// Get current cache usage in bytes.
@@ -534,10 +572,7 @@ impl ColdStore {
 
     /// Total number of segments.
     pub fn segment_count(&self) -> u64 {
-        self.segments
-            .read()
-            .map(|s| s.len() as u64)
-            .unwrap_or(0)
+        self.segments.read().map(|s| s.len() as u64).unwrap_or(0)
     }
 }
 
@@ -648,7 +683,11 @@ impl StringInternPool {
         let hits = self.hits.load(Ordering::Relaxed) as f64;
         let misses = self.misses.load(Ordering::Relaxed) as f64;
         let total = hits + misses;
-        if total > 0.0 { hits / total } else { 0.0 }
+        if total > 0.0 {
+            hits / total
+        } else {
+            0.0
+        }
     }
 
     /// Number of unique strings in the pool.
@@ -755,7 +794,11 @@ mod tests {
 
         let ratio = store.metrics.compression_ratio();
         println!("compression_ratio = {:.2}", ratio);
-        assert!(ratio > 1.0, "LZ4 should compress repetitive data: ratio={}", ratio);
+        assert!(
+            ratio > 1.0,
+            "LZ4 should compress repetitive data: ratio={}",
+            ratio
+        );
     }
 
     #[test]
@@ -774,7 +817,11 @@ mod tests {
         let ratio = store.metrics.compression_ratio();
         // Without compression, ratio = original / (original + block_header).
         // For small rows the 9-byte header overhead makes ratio < 1.0.
-        assert!(ratio > 0.5 && ratio < 1.1, "no-compression ratio should be < 1.1: {}", ratio);
+        assert!(
+            ratio > 0.5 && ratio < 1.1,
+            "no-compression ratio should be < 1.1: {}",
+            ratio
+        );
     }
 
     #[test]
@@ -789,7 +836,11 @@ mod tests {
         }
 
         let seg_count = store.segment_count();
-        assert!(seg_count > 1, "should have multiple segments: got {}", seg_count);
+        assert!(
+            seg_count > 1,
+            "should have multiple segments: got {}",
+            seg_count
+        );
     }
 
     #[test]
@@ -924,7 +975,11 @@ mod tests {
 
     #[test]
     fn test_cold_handle_size() {
-        assert!(ColdHandle::SIZE <= 24, "ColdHandle should be compact: {} bytes", ColdHandle::SIZE);
+        assert!(
+            ColdHandle::SIZE <= 24,
+            "ColdHandle should be compact: {} bytes",
+            ColdHandle::SIZE
+        );
     }
 
     // ── CompressionCodec ──

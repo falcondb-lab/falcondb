@@ -212,7 +212,9 @@ impl RaftGroup {
             members.insert(id, BasicNode::new(format!("node-{id}").as_str()));
         }
         for &node_id in &node_ids {
-            let sm = apply_fn.as_ref().map_or_else(StateMachine::new, |cb| StateMachine::with_apply_fn(cb.clone()));
+            let sm = apply_fn.as_ref().map_or_else(StateMachine::new, |cb| {
+                StateMachine::with_apply_fn(cb.clone())
+            });
             let raft = Raft::new(
                 node_id,
                 config.clone(),
@@ -308,7 +310,9 @@ impl RaftGroup {
         if self.router.get_node(node_id).is_some() {
             return Ok(());
         }
-        let sm = self.apply_fn.as_ref().map_or_else(StateMachine::new, |cb| StateMachine::with_apply_fn(cb.clone()));
+        let sm = self.apply_fn.as_ref().map_or_else(StateMachine::new, |cb| {
+            StateMachine::with_apply_fn(cb.clone())
+        });
         let raft = Raft::new(
             node_id,
             self.config.clone(),
@@ -380,9 +384,9 @@ impl RaftGroup {
     pub async fn shutdown(self) -> Result<(), ConsensusError> {
         for id in self.node_ids.clone() {
             if let Some(raft) = self.router.get_node(id) {
-                raft.shutdown().await.map_err(|e| {
-                    ConsensusError::ProposalFailed(format!("shutdown {id}: {e}"))
-                })?;
+                raft.shutdown()
+                    .await
+                    .map_err(|e| ConsensusError::ProposalFailed(format!("shutdown {id}: {e}")))?;
             }
         }
         Ok(())

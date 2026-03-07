@@ -214,10 +214,15 @@ impl ConnectionPool {
         let permit = if self.config.acquire_timeout_ms > 0 {
             let timeout = Duration::from_millis(self.config.acquire_timeout_ms);
             let available = self.semaphore.clone().try_acquire_owned().ok();
-            if let Some(permit) = available { permit } else {
+            if let Some(permit) = available {
+                permit
+            } else {
                 self.stats.total_waits.fetch_add(1, Ordering::Relaxed);
-                if let Ok(Ok(permit)) = tokio::time::timeout(timeout, self.semaphore.clone().acquire_owned())
-                    .await { permit } else {
+                if let Ok(Ok(permit)) =
+                    tokio::time::timeout(timeout, self.semaphore.clone().acquire_owned()).await
+                {
+                    permit
+                } else {
                     self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
                     return None;
                 }

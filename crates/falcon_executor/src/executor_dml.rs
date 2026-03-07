@@ -12,42 +12,53 @@ use crate::expr_engine::ExprEngine;
 
 impl Executor {
     /// Fill dynamic defaults (CURRENT_TIMESTAMP, etc.) for NULL columns.
-    fn eval_dynamic_defaults(schema: &TableSchema, values: &mut [Datum]) {
+    pub(crate) fn eval_dynamic_defaults(schema: &TableSchema, values: &mut [Datum]) {
         use chrono::Timelike;
         use falcon_common::schema::DefaultFn;
         for (&col_idx, dfn) in &schema.dynamic_defaults {
             if col_idx < values.len() && values[col_idx].is_null() {
                 values[col_idx] = match dfn {
                     DefaultFn::CurrentTimestamp => {
-                        Datum::Timestamp(chrono::Utc::now().timestamp_micros())
+                        Datum::Timestamp(crate::eval::scalar_time::statement_ts())
                     }
                     DefaultFn::CurrentDate => {
-                        let today = chrono::Utc::now().date_naive();
+                        let us = crate::eval::scalar_time::statement_ts();
+                        let secs = us / 1_000_000;
+                        let dt = chrono::DateTime::from_timestamp(secs, 0)
+                            .unwrap_or_default()
+                            .date_naive();
                         let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-                        Datum::Date((today - epoch).num_days() as i32)
+                        Datum::Date((dt - epoch).num_days() as i32)
                     }
                     DefaultFn::CurrentTime => {
-                        let t = chrono::Utc::now().time();
+                        let us = crate::eval::scalar_time::statement_ts();
+                        let secs = us / 1_000_000;
+                        let nanos = ((us % 1_000_000) * 1_000) as u32;
+                        let dt = chrono::DateTime::from_timestamp(secs, nanos).unwrap_or_default();
+                        let t = dt.time();
                         Datum::Time(
-                            t.num_seconds_from_midnight() as i64 * 1_000_000
-                                + t.nanosecond() as i64 / 1_000,
+                            t.num_seconds_from_midnight() as i64 * 1_000_000 + us % 1_000_000,
                         )
                     }
-                    DefaultFn::Nextval(_) => continue, // handled in build_insert_row
+                    DefaultFn::Nextval(_) => continue,
                 };
             }
         }
     }
 
     /// Enforce VARCHAR(n)/CHAR(n) max_length on text columns.
-    fn enforce_max_length(schema: &TableSchema, values: &[Datum]) -> Result<(), FalconError> {
+    pub(crate) fn enforce_max_length(
+        schema: &TableSchema,
+        values: &[Datum],
+    ) -> Result<(), FalconError> {
         for (i, col) in schema.columns.iter().enumerate() {
             if let Some(max_len) = col.max_length {
                 if let Datum::Text(ref s) = values[i] {
                     let char_count = s.chars().count() as u32;
                     if char_count > max_len {
                         return Err(FalconError::Execution(ExecutionError::TypeError(format!(
-                            "value too long for type character varying({})", max_len
+                            "value too long for type character varying({})",
+                            max_len
                         ))));
                     }
                 }
@@ -114,7 +125,9 @@ impl Executor {
                     Datum::Int64(next_val)
                 } else {
                     Datum::Int32(i32::try_from(next_val).map_err(|_| {
-                        FalconError::Execution(falcon_common::error::ExecutionError::NumericOverflow)
+                        FalconError::Execution(
+                            falcon_common::error::ExecutionError::NumericOverflow,
+                        )
                     })?)
                 };
             }
@@ -182,10 +195,71 @@ impl Executor {
         rows: &[Vec<BoundExpr>],
         txn: &TxnHandle,
     ) -> Result<ExecutionResult, FalconError> {
+        let has_checks = !schema.check_constraints.is_empty();
+        // Pre-build FK lookup sets (scan each referenced table once)
+        let fk_lookup: Vec<(Vec<usize>, std::collections::HashSet<Vec<Datum>>)> =
+            if !schema.foreign_keys.is_empty() {
+                let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+                schema
+                    .foreign_keys
+                    .iter()
+                    .map(|fk| {
+                        let ref_schema =
+                            self.storage
+                                .get_table_schema(&fk.ref_table)
+                                .ok_or_else(|| {
+                                    FalconError::Execution(ExecutionError::TypeError(format!(
+                                        "Referenced table '{}' not found",
+                                        fk.ref_table
+                                    )))
+                                })?;
+                        let ref_col_indices: Vec<usize> = fk
+                            .ref_columns
+                            .iter()
+                            .map(|name| {
+                                ref_schema.find_column(name).ok_or_else(|| {
+                                    FalconError::Execution(ExecutionError::TypeError(format!(
+                                        "Referenced column '{}' not found in '{}'",
+                                        name, fk.ref_table
+                                    )))
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let ref_rows = self.storage.scan(ref_schema.id, txn.txn_id, read_ts)?;
+                        let fk_set: std::collections::HashSet<Vec<Datum>> = ref_rows
+                            .iter()
+                            .map(|(_, r)| {
+                                ref_col_indices
+                                    .iter()
+                                    .map(|&i| r.values[i].clone())
+                                    .collect()
+                            })
+                            .collect();
+                        Ok((fk.columns.clone(), fk_set))
+                    })
+                    .collect::<Result<Vec<_>, FalconError>>()?
+            } else {
+                vec![]
+            };
         let mut count = 0u64;
         for row_exprs in rows {
             let values = self.build_insert_row(schema, columns, row_exprs)?;
             let row = OwnedRow::new(values);
+            if has_checks {
+                self.eval_check_constraints(schema, &row)?;
+            }
+            for (fk_cols, fk_set) in &fk_lookup {
+                let fk_vals: Vec<Datum> =
+                    fk_cols.iter().map(|&idx| row.values[idx].clone()).collect();
+                if fk_vals.iter().any(Datum::is_null) {
+                    continue;
+                }
+                if !fk_set.contains(&fk_vals) {
+                    return Err(FalconError::Execution(ExecutionError::TypeError(
+                        "FOREIGN KEY constraint violated".into(),
+                    )));
+                }
+            }
             match self.storage.insert(table_id, row, txn.txn_id) {
                 Ok(_) => count += 1,
                 Err(falcon_common::error::StorageError::DuplicateKey) => {}
@@ -211,15 +285,11 @@ impl Executor {
         let mut built_rows: Vec<OwnedRow> = Vec::with_capacity(rows.len());
         for row_exprs in rows {
             let values = self.build_insert_row(schema, columns, row_exprs)?;
-
-            // Enforce CHECK constraints (only if any exist)
+            let row = OwnedRow::new(values);
             if has_checks {
-                let check_row = OwnedRow::new(values.clone());
-                self.eval_check_constraints(schema, &check_row)?;
-                built_rows.push(check_row);
-            } else {
-                built_rows.push(OwnedRow::new(values));
+                self.eval_check_constraints(schema, &row)?;
             }
+            built_rows.push(row);
         }
 
         // Phase 2: Batch UNIQUE constraint check — scan existing rows ONCE
@@ -257,12 +327,10 @@ impl Executor {
                             .iter()
                             .map(|&idx| schema.columns[idx].name.as_str())
                             .collect();
-                        return Err(FalconError::Execution(ExecutionError::TypeError(
-                            format!(
-                                "UNIQUE constraint violated on column(s): {}",
-                                col_names.join(", ")
-                            ),
-                        )));
+                        return Err(FalconError::Execution(ExecutionError::TypeError(format!(
+                            "UNIQUE constraint violated on column(s): {}",
+                            col_names.join(", ")
+                        ))));
                     }
                 }
             }
@@ -309,18 +377,19 @@ impl Executor {
 
                 // Check each new row
                 for new_row in &built_rows {
-                    let fk_vals: Vec<Datum> =
-                        fk.columns.iter().map(|&idx| new_row.values[idx].clone()).collect();
+                    let fk_vals: Vec<Datum> = fk
+                        .columns
+                        .iter()
+                        .map(|&idx| new_row.values[idx].clone())
+                        .collect();
                     if fk_vals.iter().any(falcon_common::datum::Datum::is_null) {
                         continue;
                     }
                     if !fk_set.contains(&fk_vals) {
-                        return Err(FalconError::Execution(ExecutionError::TypeError(
-                            format!(
-                                "FOREIGN KEY constraint violated: no matching row in '{}'",
-                                fk.ref_table
-                            ),
-                        )));
+                        return Err(FalconError::Execution(ExecutionError::TypeError(format!(
+                            "FOREIGN KEY constraint violated: no matching row in '{}'",
+                            fk.ref_table
+                        ))));
                     }
                 }
             }
@@ -367,15 +436,15 @@ impl Executor {
                     .foreign_keys
                     .iter()
                     .map(|fk| {
-                        let ref_schema = self
-                            .storage
-                            .get_table_schema(&fk.ref_table)
-                            .ok_or_else(|| {
-                                FalconError::Execution(ExecutionError::TypeError(format!(
-                                    "Referenced table '{}' not found",
-                                    fk.ref_table
-                                )))
-                            })?;
+                        let ref_schema =
+                            self.storage
+                                .get_table_schema(&fk.ref_table)
+                                .ok_or_else(|| {
+                                    FalconError::Execution(ExecutionError::TypeError(format!(
+                                        "Referenced table '{}' not found",
+                                        fk.ref_table
+                                    )))
+                                })?;
                         let ref_table_id = ref_schema.id;
                         let ref_col_indices: Vec<usize> = fk
                             .ref_columns
@@ -389,8 +458,7 @@ impl Executor {
                                 })
                             })
                             .collect::<Result<Vec<_>, _>>()?;
-                        let ref_rows =
-                            self.storage.scan(ref_table_id, txn.txn_id, read_ts)?;
+                        let ref_rows = self.storage.scan(ref_table_id, txn.txn_id, read_ts)?;
                         let fk_set: std::collections::HashSet<Vec<Datum>> = ref_rows
                             .iter()
                             .map(|(_, ref_row)| {
@@ -417,8 +485,10 @@ impl Executor {
                         existing
                             .iter()
                             .filter_map(|(_, row)| {
-                                let key: Vec<Datum> =
-                                    uniq_cols.iter().map(|&idx| row.values[idx].clone()).collect();
+                                let key: Vec<Datum> = uniq_cols
+                                    .iter()
+                                    .map(|&idx| row.values[idx].clone())
+                                    .collect();
                                 if key.iter().any(falcon_common::datum::Datum::is_null) {
                                     None
                                 } else {
@@ -435,11 +505,12 @@ impl Executor {
         for row_exprs in rows {
             let values = self.build_insert_row(schema, columns, row_exprs)?;
 
-            // Enforce CHECK constraints
+            // Build row once for CHECK constraints (avoids clone)
+            let row = OwnedRow::new(values);
             if !schema.check_constraints.is_empty() {
-                let check_row = OwnedRow::new(values.clone());
-                self.eval_check_constraints(schema, &check_row)?;
+                self.eval_check_constraints(schema, &row)?;
             }
+            let values = row.values;
 
             // Enforce UNIQUE constraints (using pre-built HashSets)
             for (set_idx, uniq_cols) in schema.unique_constraints.iter().enumerate() {
@@ -516,7 +587,8 @@ impl Executor {
                                     // Evaluate WHERE clause — skip update if false
                                     if let Some(ref wc) = where_clause {
                                         if !ExprEngine::eval_filter(wc, &combined_row)
-                                            .map_err(FalconError::Execution)? {
+                                            .map_err(FalconError::Execution)?
+                                        {
                                             break;
                                         }
                                     }
@@ -527,6 +599,67 @@ impl Executor {
                                             .map_err(FalconError::Execution)?;
                                         new_values[*col_idx] = val;
                                     }
+                                    // Enforce constraints on the updated row
+                                    Self::enforce_max_length(schema, &new_values)?;
+                                    for (i, val) in new_values.iter().enumerate() {
+                                        if i < schema.columns.len()
+                                            && val.is_null()
+                                            && !schema.columns[i].nullable
+                                        {
+                                            return Err(FalconError::Execution(
+                                                ExecutionError::TypeError(format!(
+                                                    "NULL value in column '{}' violates NOT NULL constraint",
+                                                    schema.columns[i].name
+                                                )),
+                                            ));
+                                        }
+                                    }
+                                    let check_row = OwnedRow::new(new_values);
+                                    self.eval_check_constraints(schema, &check_row)?;
+                                    let new_values = check_row.values;
+
+                                    // UNIQUE constraint check on updated values
+                                    if let Some(ref existing) = unique_existing {
+                                        for uniq_cols in &schema.unique_constraints {
+                                            let new_vals: Vec<&Datum> = uniq_cols
+                                                .iter()
+                                                .map(|&idx| &new_values[idx])
+                                                .collect();
+                                            if new_vals.iter().any(|v| v.is_null()) {
+                                                continue;
+                                            }
+                                            for (other_pk, other_row) in existing {
+                                                if other_pk == pk {
+                                                    continue;
+                                                }
+                                                let other_vals: Vec<&Datum> = uniq_cols
+                                                    .iter()
+                                                    .map(|&idx| &other_row.values[idx])
+                                                    .collect();
+                                                if new_vals == other_vals {
+                                                    let col_names: Vec<&str> = uniq_cols
+                                                        .iter()
+                                                        .map(|&idx| {
+                                                            schema.columns[idx].name.as_str()
+                                                        })
+                                                        .collect();
+                                                    return Err(FalconError::Execution(
+                                                        ExecutionError::TypeError(format!(
+                                                            "UNIQUE constraint violated on column(s): {}",
+                                                            col_names.join(", ")
+                                                        )),
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    self.apply_fk_on_update(
+                                        schema,
+                                        existing_row,
+                                        &new_values,
+                                        txn,
+                                    )?;
                                     let new_row = OwnedRow::new(new_values.clone());
                                     self.storage.update(table_id, pk, new_row, txn.txn_id)?;
                                     if !returning.is_empty() {
@@ -641,12 +774,26 @@ impl Executor {
         let mut unique_sets: Vec<std::collections::HashSet<Vec<Datum>>> =
             if !schema.unique_constraints.is_empty() {
                 let existing = self.storage.scan(table_id, txn.txn_id, read_ts)?;
-                schema.unique_constraints.iter().map(|uniq_cols| {
-                    existing.iter().filter_map(|(_, row)| {
-                        let key: Vec<Datum> = uniq_cols.iter().map(|&idx| row.values[idx].clone()).collect();
-                        if key.iter().any(falcon_common::datum::Datum::is_null) { None } else { Some(key) }
-                    }).collect()
-                }).collect()
+                schema
+                    .unique_constraints
+                    .iter()
+                    .map(|uniq_cols| {
+                        existing
+                            .iter()
+                            .filter_map(|(_, row)| {
+                                let key: Vec<Datum> = uniq_cols
+                                    .iter()
+                                    .map(|&idx| row.values[idx].clone())
+                                    .collect();
+                                if key.iter().any(falcon_common::datum::Datum::is_null) {
+                                    None
+                                } else {
+                                    Some(key)
+                                }
+                            })
+                            .collect()
+                    })
+                    .collect()
             } else {
                 vec![]
             };
@@ -654,25 +801,44 @@ impl Executor {
         // Pre-build FK lookup sets once
         let fk_lookup: Vec<(Vec<usize>, std::collections::HashSet<Vec<Datum>>)> =
             if !schema.foreign_keys.is_empty() {
-                schema.foreign_keys.iter().map(|fk| {
-                    let ref_schema = self.storage.get_table_schema(&fk.ref_table).ok_or_else(|| {
-                        FalconError::Execution(ExecutionError::TypeError(format!(
-                            "Referenced table '{}' not found", fk.ref_table
-                        )))
-                    })?;
-                    let ref_col_indices: Vec<usize> = fk.ref_columns.iter().map(|name| {
-                        ref_schema.find_column(name).ok_or_else(|| {
-                            FalconError::Execution(ExecutionError::TypeError(format!(
-                                "Referenced column '{}' not found in table '{}'", name, fk.ref_table
-                            )))
-                        })
-                    }).collect::<Result<Vec<_>, _>>()?;
-                    let ref_rows = self.storage.scan(ref_schema.id, txn.txn_id, read_ts)?;
-                    let fk_set: std::collections::HashSet<Vec<Datum>> = ref_rows.iter().map(|(_, r)| {
-                        ref_col_indices.iter().map(|&idx| r.values[idx].clone()).collect()
-                    }).collect();
-                    Ok((fk.columns.clone(), fk_set))
-                }).collect::<Result<Vec<_>, FalconError>>()?
+                schema
+                    .foreign_keys
+                    .iter()
+                    .map(|fk| {
+                        let ref_schema =
+                            self.storage
+                                .get_table_schema(&fk.ref_table)
+                                .ok_or_else(|| {
+                                    FalconError::Execution(ExecutionError::TypeError(format!(
+                                        "Referenced table '{}' not found",
+                                        fk.ref_table
+                                    )))
+                                })?;
+                        let ref_col_indices: Vec<usize> = fk
+                            .ref_columns
+                            .iter()
+                            .map(|name| {
+                                ref_schema.find_column(name).ok_or_else(|| {
+                                    FalconError::Execution(ExecutionError::TypeError(format!(
+                                        "Referenced column '{}' not found in table '{}'",
+                                        name, fk.ref_table
+                                    )))
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let ref_rows = self.storage.scan(ref_schema.id, txn.txn_id, read_ts)?;
+                        let fk_set: std::collections::HashSet<Vec<Datum>> = ref_rows
+                            .iter()
+                            .map(|(_, r)| {
+                                ref_col_indices
+                                    .iter()
+                                    .map(|&idx| r.values[idx].clone())
+                                    .collect()
+                            })
+                            .collect();
+                        Ok((fk.columns.clone(), fk_set))
+                    })
+                    .collect::<Result<Vec<_>, FalconError>>()?
             } else {
                 vec![]
             };
@@ -704,7 +870,9 @@ impl Executor {
                         Datum::Int64(next_val)
                     } else {
                         Datum::Int32(i32::try_from(next_val).map_err(|_| {
-                            FalconError::Execution(falcon_common::error::ExecutionError::NumericOverflow)
+                            FalconError::Execution(
+                                falcon_common::error::ExecutionError::NumericOverflow,
+                            )
                         })?)
                     };
                 }
@@ -723,26 +891,38 @@ impl Executor {
                 }
             }
 
-            // Enforce CHECK constraints
-            let check_row = OwnedRow::new(values.clone());
-            self.eval_check_constraints(schema, &check_row)?;
+            // Build row once — check constraints on it directly (avoids clone)
+            let row = OwnedRow::new(values);
+            self.eval_check_constraints(schema, &row)?;
 
             // Enforce UNIQUE constraints
             for (set_idx, uniq_cols) in schema.unique_constraints.iter().enumerate() {
-                let key: Vec<Datum> = uniq_cols.iter().map(|&idx| values[idx].clone()).collect();
-                if key.iter().any(falcon_common::datum::Datum::is_null) { continue; }
+                let key: Vec<Datum> = uniq_cols
+                    .iter()
+                    .map(|&idx| row.values[idx].clone())
+                    .collect();
+                if key.iter().any(falcon_common::datum::Datum::is_null) {
+                    continue;
+                }
                 if !unique_sets[set_idx].insert(key) {
-                    let col_names: Vec<&str> = uniq_cols.iter().map(|&idx| schema.columns[idx].name.as_str()).collect();
+                    let col_names: Vec<&str> = uniq_cols
+                        .iter()
+                        .map(|&idx| schema.columns[idx].name.as_str())
+                        .collect();
                     return Err(FalconError::Execution(ExecutionError::TypeError(format!(
-                        "UNIQUE constraint violated on column(s): {}", col_names.join(", ")
+                        "UNIQUE constraint violated on column(s): {}",
+                        col_names.join(", ")
                     ))));
                 }
             }
 
             // Enforce FK constraints
             for (fk_cols, fk_set) in &fk_lookup {
-                let fk_vals: Vec<Datum> = fk_cols.iter().map(|&idx| values[idx].clone()).collect();
-                if fk_vals.iter().any(falcon_common::datum::Datum::is_null) { continue; }
+                let fk_vals: Vec<Datum> =
+                    fk_cols.iter().map(|&idx| row.values[idx].clone()).collect();
+                if fk_vals.iter().any(falcon_common::datum::Datum::is_null) {
+                    continue;
+                }
                 if !fk_set.contains(&fk_vals) {
                     return Err(FalconError::Execution(ExecutionError::TypeError(
                         "FOREIGN KEY constraint violated".into(),
@@ -750,7 +930,6 @@ impl Executor {
                 }
             }
 
-            let row = OwnedRow::new(values);
             self.storage.insert(table_id, row, txn.txn_id)?;
             count += 1;
         }
@@ -812,7 +991,10 @@ impl Executor {
         // Pre-scan all rows once for UNIQUE constraint checks (avoid per-row O(n) rescan)
         // Use current_ts to catch concurrent committed conflicts beyond txn start snapshot
         let all_rows_for_uniq = if !schema.unique_constraints.is_empty() {
-            Some(self.storage.scan(table_id, txn.txn_id, self.txn_mgr.current_ts())?)
+            Some(
+                self.storage
+                    .scan(table_id, txn.txn_id, self.txn_mgr.current_ts())?,
+            )
         } else {
             None
         };
@@ -845,9 +1027,10 @@ impl Executor {
                 }
             }
 
-            // Enforce CHECK constraints
-            let check_row = OwnedRow::new(new_values.clone());
+            // Check constraints directly on OwnedRow (avoids clone)
+            let check_row = OwnedRow::new(new_values);
             self.eval_check_constraints(schema, &check_row)?;
+            let new_values = check_row.values;
 
             // Enforce UNIQUE constraints on updated row
             if let Some(ref all_rows) = all_rows_for_uniq {
@@ -888,7 +1071,9 @@ impl Executor {
                 let ret_row = OwnedRow::new(new_values.clone());
                 let ret_vals: Vec<Datum> = returning
                     .iter()
-                    .map(|(expr, _)| ExprEngine::eval_row(expr, &ret_row).map_err(FalconError::Execution))
+                    .map(|(expr, _)| {
+                        ExprEngine::eval_row(expr, &ret_row).map_err(FalconError::Execution)
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 returning_rows.push(ret_vals);
             }
@@ -972,7 +1157,9 @@ impl Executor {
             if !returning.is_empty() {
                 let ret_vals: Vec<Datum> = returning
                     .iter()
-                    .map(|(expr, _)| ExprEngine::eval_row(expr, row).map_err(FalconError::Execution))
+                    .map(|(expr, _)| {
+                        ExprEngine::eval_row(expr, row).map_err(FalconError::Execution)
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 returning_rows.push(ret_vals);
             }
@@ -1091,6 +1278,18 @@ impl Executor {
                             self.storage.delete(child_table.id, child_pk, txn.txn_id)?;
                         }
                         FkAction::SetNull => {
+                            for &col_idx in &fk.columns {
+                                if col_idx < child_table.columns.len()
+                                    && !child_table.columns[col_idx].nullable
+                                {
+                                    return Err(FalconError::Execution(ExecutionError::TypeError(
+                                        format!(
+                                            "Cannot set column '{}' to NULL (NOT NULL constraint) via ON DELETE SET NULL in '{}'",
+                                            child_table.columns[col_idx].name, child_table.name
+                                        ),
+                                    )));
+                                }
+                            }
                             let mut new_values = child_row.values.clone();
                             for &col_idx in &fk.columns {
                                 new_values[col_idx] = Datum::Null;
@@ -1102,10 +1301,22 @@ impl Executor {
                         FkAction::SetDefault => {
                             let mut new_values = child_row.values.clone();
                             for &col_idx in &fk.columns {
-                                new_values[col_idx] = child_table.columns[col_idx]
+                                let def = child_table.columns[col_idx]
                                     .default_value
                                     .clone()
                                     .unwrap_or(Datum::Null);
+                                if def.is_null()
+                                    && col_idx < child_table.columns.len()
+                                    && !child_table.columns[col_idx].nullable
+                                {
+                                    return Err(FalconError::Execution(ExecutionError::TypeError(
+                                        format!(
+                                            "Cannot set column '{}' to NULL default (NOT NULL constraint) via ON DELETE SET DEFAULT in '{}'",
+                                            child_table.columns[col_idx].name, child_table.name
+                                        ),
+                                    )));
+                                }
+                                new_values[col_idx] = def;
                             }
                             let new_row = OwnedRow::new(new_values);
                             self.storage
@@ -1140,6 +1351,7 @@ impl Executor {
         self.apply_fk_on_update_inner(parent_schema, old_row, new_values, txn, &mut visited)
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn apply_fk_on_update_inner(
         &self,
         parent_schema: &TableSchema,
@@ -1218,6 +1430,18 @@ impl Executor {
                                 .update(child_table.id, child_pk, new_row, txn.txn_id)?;
                         }
                         FkAction::SetNull => {
+                            for &fk_col in &fk.columns {
+                                if fk_col < child_table.columns.len()
+                                    && !child_table.columns[fk_col].nullable
+                                {
+                                    return Err(FalconError::Execution(ExecutionError::TypeError(
+                                        format!(
+                                            "Cannot set column '{}' to NULL (NOT NULL constraint) via ON UPDATE SET NULL in '{}'",
+                                            child_table.columns[fk_col].name, child_table.name
+                                        ),
+                                    )));
+                                }
+                            }
                             let mut updated_child = child_row.values.clone();
                             for &fk_col in &fk.columns {
                                 updated_child[fk_col] = Datum::Null;
@@ -1229,10 +1453,22 @@ impl Executor {
                         FkAction::SetDefault => {
                             let mut updated_child = child_row.values.clone();
                             for &fk_col in &fk.columns {
-                                updated_child[fk_col] = child_table.columns[fk_col]
+                                let def = child_table.columns[fk_col]
                                     .default_value
                                     .clone()
                                     .unwrap_or(Datum::Null);
+                                if def.is_null()
+                                    && fk_col < child_table.columns.len()
+                                    && !child_table.columns[fk_col].nullable
+                                {
+                                    return Err(FalconError::Execution(ExecutionError::TypeError(
+                                        format!(
+                                            "Cannot set column '{}' to NULL default (NOT NULL constraint) via ON UPDATE SET DEFAULT in '{}'",
+                                            child_table.columns[fk_col].name, child_table.name
+                                        ),
+                                    )));
+                                }
+                                updated_child[fk_col] = def;
                             }
                             let new_row = OwnedRow::new(updated_child);
                             self.storage
@@ -1270,6 +1506,15 @@ impl Executor {
         let target_rows = self.storage.scan(table_id, txn.txn_id, read_ts)?;
         let from_rows = self.storage.scan(ft.table_id, txn.txn_id, read_ts)?;
         let mat_filter = self.materialize_filter(filter, txn)?;
+
+        let all_rows_for_uniq = if !schema.unique_constraints.is_empty() {
+            Some(
+                self.storage
+                    .scan(table_id, txn.txn_id, self.txn_mgr.current_ts())?,
+            )
+        } else {
+            None
+        };
 
         let mut count = 0u64;
         let mut returning_rows = Vec::new();
@@ -1318,6 +1563,38 @@ impl Executor {
                 // Enforce CHECK constraints
                 let check_row = OwnedRow::new(new_values.clone());
                 self.eval_check_constraints(schema, &check_row)?;
+
+                // Enforce UNIQUE constraints
+                if let Some(ref all_rows) = all_rows_for_uniq {
+                    for uniq_cols in &schema.unique_constraints {
+                        let new_vals: Vec<&Datum> =
+                            uniq_cols.iter().map(|&idx| &new_values[idx]).collect();
+                        if new_vals.iter().any(|v| v.is_null()) {
+                            continue;
+                        }
+                        for (other_pk, other_row) in all_rows {
+                            if other_pk == pk {
+                                continue;
+                            }
+                            let other_vals: Vec<&Datum> = uniq_cols
+                                .iter()
+                                .map(|&idx| &other_row.values[idx])
+                                .collect();
+                            if new_vals == other_vals {
+                                let col_names: Vec<&str> = uniq_cols
+                                    .iter()
+                                    .map(|&idx| schema.columns[idx].name.as_str())
+                                    .collect();
+                                return Err(FalconError::Execution(ExecutionError::TypeError(
+                                    format!(
+                                        "UNIQUE constraint violated on column(s): {}",
+                                        col_names.join(", ")
+                                    ),
+                                )));
+                            }
+                        }
+                    }
+                }
 
                 // FK cascading on update
                 self.apply_fk_on_update(schema, target_row, &new_values, txn)?;
@@ -1463,6 +1740,15 @@ impl Executor {
         let source_rows = self.storage.scan(source_id, txn.txn_id, read_ts)?;
         let target_rows = self.storage.scan(target_id, txn.txn_id, read_ts)?;
 
+        let all_rows_for_uniq = if !target_schema.unique_constraints.is_empty() {
+            Some(
+                self.storage
+                    .scan(target_id, txn.txn_id, self.txn_mgr.current_ts())?,
+            )
+        } else {
+            None
+        };
+
         let mut count: u64 = 0;
 
         for (_src_pk, src_row) in &source_rows {
@@ -1492,7 +1778,8 @@ impl Executor {
 
                     if let Some(ref pred) = clause.predicate {
                         if !ExprEngine::eval_filter(pred, &combined_row)
-                            .map_err(FalconError::Execution)? {
+                            .map_err(FalconError::Execution)?
+                        {
                             continue;
                         }
                     }
@@ -1505,11 +1792,65 @@ impl Executor {
                                 new_values[*col_idx] = val;
                             }
                             Self::enforce_max_length(target_schema, &new_values)?;
+                            for (i, val) in new_values.iter().enumerate() {
+                                if i < target_schema.columns.len()
+                                    && val.is_null()
+                                    && !target_schema.columns[i].nullable
+                                {
+                                    return Err(FalconError::Execution(
+                                        ExecutionError::TypeError(format!(
+                                            "NULL value in column '{}' violates NOT NULL constraint",
+                                            target_schema.columns[i].name
+                                        )),
+                                    ));
+                                }
+                            }
+                            let check_row = OwnedRow::new(new_values);
+                            self.eval_check_constraints(target_schema, &check_row)?;
+                            let new_values = check_row.values;
+
+                            // Enforce UNIQUE constraints
+                            if let Some(ref all_rows) = all_rows_for_uniq {
+                                for uniq_cols in &target_schema.unique_constraints {
+                                    let new_vals: Vec<&Datum> =
+                                        uniq_cols.iter().map(|&idx| &new_values[idx]).collect();
+                                    if new_vals.iter().any(|v| v.is_null()) {
+                                        continue;
+                                    }
+                                    for (other_pk, other_row) in all_rows {
+                                        if other_pk == tgt_pk {
+                                            continue;
+                                        }
+                                        let other_vals: Vec<&Datum> = uniq_cols
+                                            .iter()
+                                            .map(|&idx| &other_row.values[idx])
+                                            .collect();
+                                        if new_vals == other_vals {
+                                            let col_names: Vec<&str> = uniq_cols
+                                                .iter()
+                                                .map(|&idx| {
+                                                    target_schema.columns[idx].name.as_str()
+                                                })
+                                                .collect();
+                                            return Err(FalconError::Execution(
+                                                ExecutionError::TypeError(format!(
+                                                    "UNIQUE constraint violated on column(s): {}",
+                                                    col_names.join(", ")
+                                                )),
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+
+                            self.apply_fk_on_update(target_schema, tgt_row, &new_values, txn)?;
                             let new_row = OwnedRow::new(new_values);
-                            self.storage.update(target_id, tgt_pk, new_row, txn.txn_id)?;
+                            self.storage
+                                .update(target_id, tgt_pk, new_row, txn.txn_id)?;
                             count += 1;
                         }
                         BoundMergeAction::Delete => {
+                            self.apply_fk_on_delete(target_schema, tgt_row, txn)?;
                             self.storage.delete(target_id, tgt_pk, txn.txn_id)?;
                             count += 1;
                         }
@@ -1527,22 +1868,24 @@ impl Executor {
                     if clause.kind != MergeClauseKind::NotMatched {
                         continue;
                     }
-                    let nulls: Vec<Datum> = target_schema.columns.iter()
-                        .map(|_| Datum::Null)
-                        .collect();
+                    let nulls: Vec<Datum> =
+                        target_schema.columns.iter().map(|_| Datum::Null).collect();
                     let mut combined = nulls;
                     combined.extend(src_row.values.iter().cloned());
                     let combined_row = OwnedRow::new(combined);
 
                     if let Some(ref pred) = clause.predicate {
                         if !ExprEngine::eval_filter(pred, &combined_row)
-                            .map_err(FalconError::Execution)? {
+                            .map_err(FalconError::Execution)?
+                        {
                             continue;
                         }
                     }
                     match &clause.action {
                         BoundMergeAction::Insert(cols, value_exprs) => {
-                            let mut values: Vec<Datum> = target_schema.columns.iter()
+                            let mut values: Vec<Datum> = target_schema
+                                .columns
+                                .iter()
                                 .map(|c| c.default_value.clone().unwrap_or(Datum::Null))
                                 .collect();
                             for (i, col_idx) in cols.iter().enumerate() {
@@ -1551,19 +1894,132 @@ impl Executor {
                                 values[*col_idx] = val;
                             }
                             for (i, col) in target_schema.columns.iter().enumerate() {
-                                if values[i].is_null() { continue; }
+                                if values[i].is_null() {
+                                    continue;
+                                }
                                 if let Some(vt) = values[i].data_type() {
                                     if vt != col.data_type {
                                         let target = datatype_to_cast_target(&col.data_type);
-                                        if let Ok(cv) = crate::eval::cast::eval_cast(values[i].clone(), &target) {
+                                        if let Ok(cv) =
+                                            crate::eval::cast::eval_cast(values[i].clone(), &target)
+                                        {
                                             values[i] = cv;
                                         }
                                     }
                                 }
                             }
+                            // Fill SERIAL columns still NULL
+                            for (col_idx, col) in target_schema.columns.iter().enumerate() {
+                                if col.is_serial && values[col_idx].is_null() {
+                                    let next_val = self
+                                        .storage
+                                        .next_serial_value(&target_schema.name, col_idx)?;
+                                    values[col_idx] = if col.data_type == DataType::Int64 {
+                                        Datum::Int64(next_val)
+                                    } else {
+                                        Datum::Int32(i32::try_from(next_val).map_err(|_| {
+                                            FalconError::Execution(ExecutionError::NumericOverflow)
+                                        })?)
+                                    };
+                                }
+                            }
                             Self::enforce_max_length(target_schema, &values)?;
                             Self::eval_dynamic_defaults(target_schema, &mut values);
+                            // NOT NULL check
+                            for (i, val) in values.iter().enumerate() {
+                                if val.is_null() && !target_schema.columns[i].nullable {
+                                    return Err(FalconError::Execution(ExecutionError::TypeError(
+                                        format!(
+                                            "NULL value in column '{}' violates NOT NULL constraint",
+                                            target_schema.columns[i].name
+                                        ),
+                                    )));
+                                }
+                            }
                             let row = OwnedRow::new(values);
+                            self.eval_check_constraints(target_schema, &row)?;
+                            // UNIQUE constraints
+                            if let Some(ref all_rows) = all_rows_for_uniq {
+                                for uniq_cols in &target_schema.unique_constraints {
+                                    let new_vals: Vec<&Datum> =
+                                        uniq_cols.iter().map(|&idx| &row.values[idx]).collect();
+                                    if new_vals.iter().any(|v| v.is_null()) {
+                                        continue;
+                                    }
+                                    for (_other_pk, other_row) in all_rows {
+                                        let other_vals: Vec<&Datum> = uniq_cols
+                                            .iter()
+                                            .map(|&idx| &other_row.values[idx])
+                                            .collect();
+                                        if new_vals == other_vals {
+                                            let col_names: Vec<&str> = uniq_cols
+                                                .iter()
+                                                .map(|&idx| {
+                                                    target_schema.columns[idx].name.as_str()
+                                                })
+                                                .collect();
+                                            return Err(FalconError::Execution(
+                                                ExecutionError::TypeError(format!(
+                                                    "MERGE: UNIQUE constraint violated on column(s): {}",
+                                                    col_names.join(", ")
+                                                )),
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                            // FK validation
+                            if !target_schema.foreign_keys.is_empty() {
+                                let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+                                for fk in &target_schema.foreign_keys {
+                                    let fk_vals: Vec<Datum> = fk
+                                        .columns
+                                        .iter()
+                                        .map(|&idx| row.values[idx].clone())
+                                        .collect();
+                                    if fk_vals.iter().any(Datum::is_null) {
+                                        continue;
+                                    }
+                                    let ref_schema = self
+                                        .storage
+                                        .get_table_schema(&fk.ref_table)
+                                        .ok_or_else(|| {
+                                        FalconError::Execution(ExecutionError::TypeError(format!(
+                                            "Referenced table '{}' not found",
+                                            fk.ref_table
+                                        )))
+                                    })?;
+                                    let ref_col_indices: Vec<usize> = fk
+                                        .ref_columns
+                                        .iter()
+                                        .map(|name| {
+                                            ref_schema.find_column(name).ok_or_else(|| {
+                                                FalconError::Execution(ExecutionError::TypeError(
+                                                    format!(
+                                                        "Referenced column '{}' not found in '{}'",
+                                                        name, fk.ref_table
+                                                    ),
+                                                ))
+                                            })
+                                        })
+                                        .collect::<Result<Vec<_>, _>>()?;
+                                    let ref_rows =
+                                        self.storage.scan(ref_schema.id, txn.txn_id, read_ts)?;
+                                    let found = ref_rows.iter().any(|(_, r)| {
+                                        let rv: Vec<&Datum> =
+                                            ref_col_indices.iter().map(|&i| &r.values[i]).collect();
+                                        let fv: Vec<&Datum> = fk_vals.iter().collect();
+                                        rv == fv
+                                    });
+                                    if !found {
+                                        return Err(FalconError::Execution(
+                                            ExecutionError::TypeError(
+                                                "MERGE: FOREIGN KEY constraint violated".into(),
+                                            ),
+                                        ));
+                                    }
+                                }
+                            }
                             self.storage.insert(target_id, row, txn.txn_id)?;
                             count += 1;
                         }
@@ -1640,7 +2096,8 @@ impl Executor {
         }
 
         // Register the materialized view definition
-        self.storage.create_materialized_view(name, query_sql, table_id)?;
+        self.storage
+            .create_materialized_view(name, query_sql, table_id)?;
         Ok(())
     }
 
@@ -1652,10 +2109,11 @@ impl Executor {
     ) -> Result<(), FalconError> {
         let (backing_id, query_sql) = {
             let catalog = self.storage.get_catalog();
-            let mv = catalog.find_materialized_view(name)
-                .ok_or_else(|| FalconError::Execution(ExecutionError::TypeError(
-                    format!("materialized view '{name}' does not exist"),
-                )))?;
+            let mv = catalog.find_materialized_view(name).ok_or_else(|| {
+                FalconError::Execution(ExecutionError::TypeError(format!(
+                    "materialized view '{name}' does not exist"
+                )))
+            })?;
             (mv.backing_table_id, mv.query_sql.clone())
         };
 
@@ -1680,31 +2138,38 @@ impl Executor {
     }
 
     /// Execute a SQL query internally and return (columns, rows).
+    #[allow(clippy::type_complexity)]
     fn run_internal_query(
         &self,
         sql: &str,
         txn: &TxnHandle,
     ) -> Result<(Vec<(String, DataType)>, Vec<OwnedRow>), FalconError> {
-        use falcon_sql_frontend::binder::Binder;
         use falcon_planner::planner::Planner;
+        use falcon_sql_frontend::binder::Binder;
         use sqlparser::dialect::PostgreSqlDialect;
         use sqlparser::parser::Parser;
 
         let dialect = PostgreSqlDialect {};
-        let stmts = Parser::parse_sql(&dialect, sql).map_err(|e| FalconError::Execution(
-            ExecutionError::TypeError(format!("matview query parse error: {e}"))
-        ))?;
-        let stmt = stmts.into_iter().next().ok_or_else(|| FalconError::Execution(
-            ExecutionError::TypeError("empty query".into())
-        ))?;
+        let stmts = Parser::parse_sql(&dialect, sql).map_err(|e| {
+            FalconError::Execution(ExecutionError::TypeError(format!(
+                "matview query parse error: {e}"
+            )))
+        })?;
+        let stmt = stmts.into_iter().next().ok_or_else(|| {
+            FalconError::Execution(ExecutionError::TypeError("empty query".into()))
+        })?;
         let catalog = self.storage.get_catalog();
         let mut binder = Binder::new(catalog);
-        let bound = binder.bind(&stmt).map_err(|e| FalconError::Execution(
-            ExecutionError::TypeError(format!("matview query bind error: {e}"))
-        ))?;
-        let plan = Planner::plan(&bound).map_err(|e| FalconError::Execution(
-            ExecutionError::TypeError(format!("matview query plan error: {e}"))
-        ))?;
+        let bound = binder.bind(&stmt).map_err(|e| {
+            FalconError::Execution(ExecutionError::TypeError(format!(
+                "matview query bind error: {e}"
+            )))
+        })?;
+        let plan = Planner::plan(&bound).map_err(|e| {
+            FalconError::Execution(ExecutionError::TypeError(format!(
+                "matview query plan error: {e}"
+            )))
+        })?;
         match self.execute(&plan, Some(txn))? {
             ExecutionResult::Query { columns, rows } => Ok((columns, rows)),
             _ => Err(FalconError::Execution(ExecutionError::TypeError(

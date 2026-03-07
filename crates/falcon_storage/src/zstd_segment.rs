@@ -1,4 +1,4 @@
-﻿//! # Zstd Integration in Unified Data Plane
+//! # Zstd Integration in Unified Data Plane
 //!
 //! **"Zstd is not a row compressor. It is a segment-level infrastructure primitive."**
 //!
@@ -18,25 +18,22 @@
 use std::fmt;
 
 use crate::unified_data_plane::{
-    SegmentCodec, SegmentKind, SegmentStore, SegmentStoreError,
-    UnifiedSegmentHeader, UNIFIED_HEADER_SIZE,
+    SegmentCodec, SegmentKind, SegmentStore, SegmentStoreError, UnifiedSegmentHeader,
+    UNIFIED_HEADER_SIZE,
 };
 use crate::unified_data_plane_full::ColdBlockEncoding;
 
-pub use crate::zstd_dict::{
-    DictionaryEntry, DictionaryMetrics, DictionaryStore,
+pub use crate::zstd_dict::{DictionaryEntry, DictionaryMetrics, DictionaryStore};
+pub use crate::zstd_recompress::{
+    build_zstd_metrics, list_segments_by_codec, recompress_segment, RecompressReason,
+    RecompressRequest, RecompressResult, SegmentCodecInfo, ZstdCompressMetrics,
+    ZstdMetricsSnapshot,
 };
 pub use crate::zstd_streaming::{
-    StreamingCodecCaps, DecompressCacheKey, DecompressCache,
-    DecompressCacheMetrics, DecompressPool, DecompressPoolMetrics,
     compress_streaming_chunk, decompress_streaming_chunk, negotiate_streaming_codec,
+    DecompressCache, DecompressCacheKey, DecompressCacheMetrics, DecompressPool,
+    DecompressPoolMetrics, StreamingCodecCaps,
 };
-pub use crate::zstd_recompress::{
-    RecompressRequest, RecompressReason, RecompressResult, recompress_segment,
-    ZstdMetricsSnapshot, ZstdCompressMetrics, build_zstd_metrics,
-    SegmentCodecInfo, list_segments_by_codec,
-};
-
 
 // Compression Scope & Codec Policy
 /// Codec policy configuration — which codec is allowed/required where.
@@ -175,7 +172,9 @@ impl ZstdSegmentMeta {
     }
 
     pub fn compression_ratio(&self) -> f64 {
-        if self.compressed_bytes == 0 { return 1.0; }
+        if self.compressed_bytes == 0 {
+            return 1.0;
+        }
         self.uncompressed_bytes as f64 / self.compressed_bytes as f64
     }
 
@@ -194,7 +193,9 @@ impl ZstdSegmentMeta {
 
     /// Deserialize from bytes.
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        if data.len() < 37 { return None; }
+        if data.len() < 37 {
+            return None;
+        }
         let codec = SegmentCodec::from_u8(data[0])?;
         let codec_level = i32::from_le_bytes(data[1..5].try_into().ok()?);
         let dictionary_id = u64::from_le_bytes(data[5..13].try_into().ok()?);
@@ -203,8 +204,13 @@ impl ZstdSegmentMeta {
         let uncompressed_bytes = u64::from_le_bytes(data[21..29].try_into().ok()?);
         let compressed_bytes = u64::from_le_bytes(data[29..37].try_into().ok()?);
         Some(Self {
-            codec, codec_level, dictionary_id, dictionary_checksum,
-            block_count, uncompressed_bytes, compressed_bytes,
+            codec,
+            codec_level,
+            dictionary_id,
+            dictionary_checksum,
+            block_count,
+            uncompressed_bytes,
+            compressed_bytes,
         })
     }
 }
@@ -228,7 +234,9 @@ pub struct ZstdBlock {
 
 fn djb2_crc(data: &[u8]) -> u32 {
     let mut hash: u32 = 5381;
-    for &b in data { hash = hash.wrapping_mul(33).wrapping_add(u32::from(b)); }
+    for &b in data {
+        hash = hash.wrapping_mul(33).wrapping_add(u32::from(b));
+    }
     hash
 }
 
@@ -251,18 +259,28 @@ impl ZstdBlock {
 
     /// Deserialize from bytes. Returns (block, bytes_consumed).
     pub fn from_bytes(data: &[u8]) -> Option<(Self, usize)> {
-        if data.len() < 13 { return None; } // min: 4+4+1+0+4
+        if data.len() < 13 {
+            return None;
+        } // min: 4+4+1+0+4
         let uncompressed_len = u32::from_le_bytes(data[0..4].try_into().ok()?);
         let compressed_len = u32::from_le_bytes(data[4..8].try_into().ok()?) as usize;
         let encoding = ColdBlockEncoding::from_u8(data[8])?;
         let total = 9 + compressed_len + 4;
-        if data.len() < total { return None; }
+        if data.len() < total {
+            return None;
+        }
         let compressed_data = data[9..9 + compressed_len].to_vec();
         let crc = u32::from_le_bytes(data[9 + compressed_len..total].try_into().ok()?);
-        Some((Self {
-            uncompressed_len, compressed_len: compressed_len as u32,
-            encoding, compressed_data, crc,
-        }, total))
+        Some((
+            Self {
+                uncompressed_len,
+                compressed_len: compressed_len as u32,
+                encoding,
+                compressed_data,
+                crc,
+            },
+            total,
+        ))
     }
 
     /// Verify CRC.
@@ -272,15 +290,19 @@ impl ZstdBlock {
 }
 
 /// Compress a raw block using Zstd.
-pub fn zstd_compress_block(data: &[u8], level: i32, dict: Option<&[u8]>) -> Result<ZstdBlock, String> {
+pub fn zstd_compress_block(
+    data: &[u8],
+    level: i32,
+    dict: Option<&[u8]>,
+) -> Result<ZstdBlock, String> {
     let compressed = if let Some(dict_data) = dict {
         let mut compressor = zstd::bulk::Compressor::with_dictionary(level, dict_data)
             .map_err(|e| format!("zstd init compressor with dict: {e}"))?;
-        compressor.compress(data)
+        compressor
+            .compress(data)
             .map_err(|e| format!("zstd dict compress: {e}"))?
     } else {
-        zstd::bulk::compress(data, level)
-            .map_err(|e| format!("zstd compress: {e}"))?
+        zstd::bulk::compress(data, level).map_err(|e| format!("zstd compress: {e}"))?
     };
 
     let crc = djb2_crc(&compressed);
@@ -303,7 +325,8 @@ pub fn zstd_decompress_block(block: &ZstdBlock, dict: Option<&[u8]>) -> Result<V
     let decompressed = if let Some(dict_data) = dict {
         let mut decompressor = zstd::bulk::Decompressor::with_dictionary(dict_data)
             .map_err(|e| format!("zstd init decompressor with dict: {e}"))?;
-        decompressor.decompress(&block.compressed_data, capacity)
+        decompressor
+            .decompress(&block.compressed_data, capacity)
             .map_err(|e| format!("zstd dict decompress: {e}"))?
     } else {
         zstd::bulk::decompress(&block.compressed_data, capacity)
@@ -336,7 +359,12 @@ pub fn lz4_decompress_block(block: &ZstdBlock) -> Result<Vec<u8>, String> {
 }
 
 /// Compress a block with the appropriate codec.
-pub fn compress_block(data: &[u8], codec: SegmentCodec, level: i32, dict: Option<&[u8]>) -> Result<ZstdBlock, String> {
+pub fn compress_block(
+    data: &[u8],
+    codec: SegmentCodec,
+    level: i32,
+    dict: Option<&[u8]>,
+) -> Result<ZstdBlock, String> {
     match codec {
         SegmentCodec::None => {
             let crc = djb2_crc(data);
@@ -385,7 +413,13 @@ pub fn write_zstd_cold_segment(
     dict_id: u64,
 ) -> Result<(u64, ZstdSegmentMeta), SegmentStoreError> {
     let seg_id = store.next_segment_id();
-    let hdr = UnifiedSegmentHeader::new_cold(seg_id, 256 * 1024 * 1024, SegmentCodec::Zstd, table_id, shard_id);
+    let hdr = UnifiedSegmentHeader::new_cold(
+        seg_id,
+        256 * 1024 * 1024,
+        SegmentCodec::Zstd,
+        table_id,
+        shard_id,
+    );
     store.create_segment(hdr)?;
 
     let mut meta = ZstdSegmentMeta::new(level);
@@ -399,8 +433,7 @@ pub fn write_zstd_cold_segment(
     store.write_chunk(seg_id, &block_count.to_le_bytes())?;
 
     for row in rows {
-        let block = zstd_compress_block(row, level, dict)
-            .map_err(SegmentStoreError::IoError)?;
+        let block = zstd_compress_block(row, level, dict).map_err(SegmentStoreError::IoError)?;
         meta.uncompressed_bytes += row.len() as u64;
         meta.compressed_bytes += block.compressed_data.len() as u64;
         meta.block_count += 1;
@@ -418,7 +451,8 @@ pub fn read_zstd_cold_segment(
     segment_id: u64,
     dict: Option<&[u8]>,
 ) -> Result<Vec<Vec<u8>>, String> {
-    let body = store.get_segment_body(segment_id)
+    let body = store
+        .get_segment_body(segment_id)
         .map_err(|e| format!("read segment: {e}"))?;
 
     if body.len() < UNIFIED_HEADER_SIZE as usize {
@@ -429,7 +463,11 @@ pub fn read_zstd_cold_segment(
     if data.len() < 4 {
         return Err("segment body too small for block count".to_owned());
     }
-    let block_count = u32::from_le_bytes(data[0..4].try_into().expect("infallible: 4-byte slice to [u8;4]")) as usize;
+    let block_count = u32::from_le_bytes(
+        data[0..4]
+            .try_into()
+            .expect("infallible: 4-byte slice to [u8;4]"),
+    ) as usize;
     let mut offset = 4;
     let mut rows = Vec::with_capacity(block_count);
 
@@ -447,8 +485,8 @@ pub fn read_zstd_cold_segment(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::unified_data_plane::{ManifestEntry, LogicalRange};
     use crate::structured_lsn::StructuredLsn;
+    use crate::unified_data_plane::{LogicalRange, ManifestEntry};
 
     #[test]
     fn test_codec_policy_defaults() {
@@ -568,18 +606,26 @@ mod tests {
         use crate::zstd_recompress::list_segments_by_codec;
         let mut m = crate::unified_data_plane::Manifest::new();
         m.add_segment(ManifestEntry {
-            segment_id: 0, kind: SegmentKind::Wal, size_bytes: 100,
+            segment_id: 0,
+            kind: SegmentKind::Wal,
+            size_bytes: 100,
             codec: SegmentCodec::None,
             logical_range: LogicalRange::Wal {
-                start_lsn: StructuredLsn::ZERO, end_lsn: StructuredLsn::ZERO,
+                start_lsn: StructuredLsn::ZERO,
+                end_lsn: StructuredLsn::ZERO,
             },
             sealed: true,
         });
         m.add_segment(ManifestEntry {
-            segment_id: 1, kind: SegmentKind::Cold, size_bytes: 200,
+            segment_id: 1,
+            kind: SegmentKind::Cold,
+            size_bytes: 200,
             codec: SegmentCodec::Zstd,
             logical_range: LogicalRange::Cold {
-                table_id: 1, shard_id: 0, min_key: vec![], max_key: vec![],
+                table_id: 1,
+                shard_id: 0,
+                min_key: vec![],
+                max_key: vec![],
             },
             sealed: true,
         });
@@ -590,4 +636,3 @@ mod tests {
         assert_eq!(zstd_only[0].segment_id, 1);
     }
 }
-

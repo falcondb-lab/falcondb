@@ -168,32 +168,49 @@ fn expr_has_params(expr: &BoundExpr) -> bool {
         | BoundExpr::SequenceSetval(_, _)
         | BoundExpr::Grouping(_) => false,
         BoundExpr::BinaryOp { left, right, .. } => expr_has_params(left) || expr_has_params(right),
-        BoundExpr::Not(inner)
-        | BoundExpr::IsNull(inner)
-        | BoundExpr::IsNotNull(inner) => expr_has_params(inner),
-        BoundExpr::IsNotDistinctFrom { left, right } => expr_has_params(left) || expr_has_params(right),
-        BoundExpr::Like { expr: e, pattern, .. } => expr_has_params(e) || expr_has_params(pattern),
-        BoundExpr::Between { expr: e, low, high, .. } => {
-            expr_has_params(e) || expr_has_params(low) || expr_has_params(high)
+        BoundExpr::Not(inner) | BoundExpr::IsNull(inner) | BoundExpr::IsNotNull(inner) => {
+            expr_has_params(inner)
         }
+        BoundExpr::IsNotDistinctFrom { left, right } => {
+            expr_has_params(left) || expr_has_params(right)
+        }
+        BoundExpr::Like {
+            expr: e, pattern, ..
+        } => expr_has_params(e) || expr_has_params(pattern),
+        BoundExpr::Between {
+            expr: e, low, high, ..
+        } => expr_has_params(e) || expr_has_params(low) || expr_has_params(high),
         BoundExpr::InList { expr: e, list, .. } => {
             expr_has_params(e) || list.iter().any(expr_has_params)
         }
         BoundExpr::Cast { expr: e, .. } => expr_has_params(e),
-        BoundExpr::Case { operand, conditions, results, else_result } => {
+        BoundExpr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
             operand.as_ref().is_some_and(|e| expr_has_params(e))
                 || conditions.iter().any(expr_has_params)
                 || results.iter().any(expr_has_params)
                 || else_result.as_ref().is_some_and(|e| expr_has_params(e))
         }
-        BoundExpr::Coalesce(args) | BoundExpr::ArrayLiteral(args) => args.iter().any(expr_has_params),
-        BoundExpr::Function { args, .. } | BoundExpr::UserFunction { args, .. } => args.iter().any(expr_has_params),
+        BoundExpr::Coalesce(args) | BoundExpr::ArrayLiteral(args) => {
+            args.iter().any(expr_has_params)
+        }
+        BoundExpr::Function { args, .. } | BoundExpr::UserFunction { args, .. } => {
+            args.iter().any(expr_has_params)
+        }
         BoundExpr::AggregateExpr { arg, .. } => arg.as_ref().is_some_and(|e| expr_has_params(e)),
         BoundExpr::ArrayIndex { array, index } => expr_has_params(array) || expr_has_params(index),
         BoundExpr::AnyOp { left, right, .. } | BoundExpr::AllOp { left, right, .. } => {
             expr_has_params(left) || expr_has_params(right)
         }
-        BoundExpr::ArraySlice { array, lower, upper } => {
+        BoundExpr::ArraySlice {
+            array,
+            lower,
+            upper,
+        } => {
             expr_has_params(array)
                 || lower.as_ref().is_some_and(|e| expr_has_params(e))
                 || upper.as_ref().is_some_and(|e| expr_has_params(e))
@@ -502,7 +519,9 @@ pub fn eval_expr_with_params(
                     BoundExpr::Literal(d) if !d.is_null() => *d == val,
                     _ => false,
                 });
-                let n = list.iter().any(|e| matches!(e, BoundExpr::Literal(d) if d.is_null()));
+                let n = list
+                    .iter()
+                    .any(|e| matches!(e, BoundExpr::Literal(d) if d.is_null()));
                 (f, n)
             } else {
                 let mut found = false;
@@ -556,7 +575,9 @@ pub fn eval_expr_with_params(
                     }
                 }
             }
-            else_result.as_ref().map_or(Ok(Datum::Null), |e| eval_expr_with_params(e, row, params))
+            else_result
+                .as_ref()
+                .map_or(Ok(Datum::Null), |e| eval_expr_with_params(e, row, params))
         }
         BoundExpr::Coalesce(args) => {
             for arg in args {
@@ -584,11 +605,10 @@ pub fn eval_expr_with_params(
                 eval_scalar_func(func, &vals)
             }
         }
-        BoundExpr::UserFunction { name, .. } => {
-            Err(ExecutionError::TypeError(format!(
-                "user-defined function '{}' cannot be evaluated in this context", name
-            )))
-        }
+        BoundExpr::UserFunction { name, .. } => Err(ExecutionError::TypeError(format!(
+            "user-defined function '{}' cannot be evaluated in this context",
+            name
+        ))),
         BoundExpr::ArrayLiteral(elems) => {
             let vals: Vec<Datum> = elems
                 .iter()
@@ -807,19 +827,64 @@ fn eval_scalar_func(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, Executio
 pub fn encode_datum_key(buf: &mut Vec<u8>, datum: &Datum) {
     match datum {
         Datum::Null => buf.push(0),
-        Datum::Boolean(b) => { buf.push(1); buf.push(u8::from(*b)); }
-        Datum::Int32(v) => { buf.push(2); buf.extend_from_slice(&v.to_le_bytes()); }
-        Datum::Int64(v) => { buf.push(3); buf.extend_from_slice(&v.to_le_bytes()); }
-        Datum::Float64(v) => { buf.push(4); buf.extend_from_slice(&v.to_le_bytes()); }
-        Datum::Text(s) => { buf.push(5); buf.extend_from_slice(s.as_bytes()); buf.push(0); }
-        Datum::Timestamp(v) => { buf.push(6); buf.extend_from_slice(&v.to_le_bytes()); }
-        Datum::Date(v) => { buf.push(7); buf.extend_from_slice(&v.to_le_bytes()); }
-        Datum::Time(v) => { buf.push(8); buf.extend_from_slice(&v.to_le_bytes()); }
-        Datum::Decimal(m, s) => { buf.push(9); buf.extend_from_slice(&m.to_le_bytes()); buf.push(*s); }
-        Datum::Uuid(v) => { buf.push(10); buf.extend_from_slice(&v.to_le_bytes()); }
-        Datum::Bytea(b) => { buf.push(11); buf.extend_from_slice(&(b.len() as u32).to_le_bytes()); buf.extend_from_slice(b); }
-        Datum::Interval(mo, d, us) => { buf.push(12); buf.extend_from_slice(&mo.to_le_bytes()); buf.extend_from_slice(&d.to_le_bytes()); buf.extend_from_slice(&us.to_le_bytes()); }
-        other => { buf.push(255); buf.extend_from_slice(format!("{other}").as_bytes()); buf.push(0); }
+        Datum::Boolean(b) => {
+            buf.push(1);
+            buf.push(u8::from(*b));
+        }
+        Datum::Int32(v) => {
+            buf.push(2);
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        Datum::Int64(v) => {
+            buf.push(3);
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        Datum::Float64(v) => {
+            buf.push(4);
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        Datum::Text(s) => {
+            buf.push(5);
+            buf.extend_from_slice(s.as_bytes());
+            buf.push(0);
+        }
+        Datum::Timestamp(v) => {
+            buf.push(6);
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        Datum::Date(v) => {
+            buf.push(7);
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        Datum::Time(v) => {
+            buf.push(8);
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        Datum::Decimal(m, s) => {
+            buf.push(9);
+            buf.extend_from_slice(&m.to_le_bytes());
+            buf.push(*s);
+        }
+        Datum::Uuid(v) => {
+            buf.push(10);
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        Datum::Bytea(b) => {
+            buf.push(11);
+            buf.extend_from_slice(&(b.len() as u32).to_le_bytes());
+            buf.extend_from_slice(b);
+        }
+        Datum::Interval(mo, d, us) => {
+            buf.push(12);
+            buf.extend_from_slice(&mo.to_le_bytes());
+            buf.extend_from_slice(&d.to_le_bytes());
+            buf.extend_from_slice(&us.to_le_bytes());
+        }
+        other => {
+            buf.push(255);
+            buf.extend_from_slice(format!("{other}").as_bytes());
+            buf.push(0);
+        }
     }
 }
 
@@ -910,16 +975,23 @@ fn like_match_chars(s: &[char], p: &[char]) -> bool {
 pub fn eval_filter(expr: &BoundExpr, row: &OwnedRow) -> Result<bool, ExecutionError> {
     match expr {
         // AND: short-circuit without allocating Datum
-        BoundExpr::BinaryOp { left, op: BinOp::And, right } => {
-            Ok(eval_filter(left, row)? && eval_filter(right, row)?)
-        }
+        BoundExpr::BinaryOp {
+            left,
+            op: BinOp::And,
+            right,
+        } => Ok(eval_filter(left, row)? && eval_filter(right, row)?),
         // OR: short-circuit without allocating Datum
-        BoundExpr::BinaryOp { left, op: BinOp::Or, right } => {
-            Ok(eval_filter(left, row)? || eval_filter(right, row)?)
-        }
+        BoundExpr::BinaryOp {
+            left,
+            op: BinOp::Or,
+            right,
+        } => Ok(eval_filter(left, row)? || eval_filter(right, row)?),
         // col <cmp> literal / literal <cmp> col — borrow both sides, zero clone
         BoundExpr::BinaryOp { left, op, right }
-            if matches!(op, BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq) =>
+            if matches!(
+                op,
+                BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq
+            ) =>
         {
             let (lref, rref) = match (left.as_ref(), right.as_ref()) {
                 (BoundExpr::ColumnRef(li), BoundExpr::Literal(rd)) => {
@@ -984,9 +1056,12 @@ pub fn eval_filter(expr: &BoundExpr, row: &OwnedRow) -> Result<bool, ExecutionEr
             }
         }
         // IN list: col IN (lit, lit, ...) — borrow column value, compare against literal refs
-        BoundExpr::InList { expr, list, negated }
-            if matches!(expr.as_ref(), BoundExpr::ColumnRef(_))
-                && list.iter().all(|e| matches!(e, BoundExpr::Literal(_))) =>
+        BoundExpr::InList {
+            expr,
+            list,
+            negated,
+        } if matches!(expr.as_ref(), BoundExpr::ColumnRef(_))
+            && list.iter().all(|e| matches!(e, BoundExpr::Literal(_))) =>
         {
             let col_idx = match expr.as_ref() {
                 BoundExpr::ColumnRef(i) => *i,
@@ -1000,16 +1075,25 @@ pub fn eval_filter(expr: &BoundExpr, row: &OwnedRow) -> Result<bool, ExecutionEr
                 BoundExpr::Literal(d) if !d.is_null() => d == val,
                 _ => false,
             });
-            if *negated && !found && list.iter().any(|e| matches!(e, BoundExpr::Literal(d) if d.is_null())) {
+            if *negated
+                && !found
+                && list
+                    .iter()
+                    .any(|e| matches!(e, BoundExpr::Literal(d) if d.is_null()))
+            {
                 return Ok(false); // x NOT IN (..., NULL) = NULL → false in filter
             }
             Ok(if *negated { !found } else { found })
         }
         // BETWEEN: col BETWEEN lit AND lit — borrow column value, compare directly
-        BoundExpr::Between { expr: inner, low, high, negated }
-            if matches!(inner.as_ref(), BoundExpr::ColumnRef(_))
-                && matches!(low.as_ref(), BoundExpr::Literal(_))
-                && matches!(high.as_ref(), BoundExpr::Literal(_)) =>
+        BoundExpr::Between {
+            expr: inner,
+            low,
+            high,
+            negated,
+        } if matches!(inner.as_ref(), BoundExpr::ColumnRef(_))
+            && matches!(low.as_ref(), BoundExpr::Literal(_))
+            && matches!(high.as_ref(), BoundExpr::Literal(_)) =>
         {
             let col_idx = match inner.as_ref() {
                 BoundExpr::ColumnRef(i) => *i,
@@ -1031,9 +1115,13 @@ pub fn eval_filter(expr: &BoundExpr, row: &OwnedRow) -> Result<bool, ExecutionEr
             Ok(if *negated { !in_range } else { in_range })
         }
         // LIKE / ILIKE: col LIKE 'pattern' — borrow column value, pre-lower literal pattern
-        BoundExpr::Like { expr: inner, pattern, negated, case_insensitive }
-            if matches!(inner.as_ref(), BoundExpr::ColumnRef(_))
-                && matches!(pattern.as_ref(), BoundExpr::Literal(Datum::Text(_))) =>
+        BoundExpr::Like {
+            expr: inner,
+            pattern,
+            negated,
+            case_insensitive,
+        } if matches!(inner.as_ref(), BoundExpr::ColumnRef(_))
+            && matches!(pattern.as_ref(), BoundExpr::Literal(Datum::Text(_))) =>
         {
             let col_idx = match inner.as_ref() {
                 BoundExpr::ColumnRef(i) => *i,
@@ -1106,8 +1194,7 @@ pub fn eval_having_expr(
                 Ok(vals)
             };
             let distinct_vals = |e: &BoundExpr| -> Result<Vec<Datum>, ExecutionError> {
-                let mut seen: std::collections::HashSet<Vec<u8>> =
-                    std::collections::HashSet::new();
+                let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
                 let mut vals = Vec::new();
                 let mut key_buf = Vec::with_capacity(32);
                 for row in group_rows {
@@ -1219,9 +1306,9 @@ pub fn eval_having_expr(
                     }
                 }
                 AggFunc::StringAgg(sep) => {
-                    let e = arg
-                        .as_ref()
-                        .ok_or_else(|| ExecutionError::TypeError("STRING_AGG requires arg".into()))?;
+                    let e = arg.as_ref().ok_or_else(|| {
+                        ExecutionError::TypeError("STRING_AGG requires arg".into())
+                    })?;
                     let vals = eval_all(e)?;
                     if vals.is_empty() {
                         Ok(Datum::Null)
@@ -1235,9 +1322,9 @@ pub fn eval_having_expr(
                     }
                 }
                 AggFunc::ArrayAgg => {
-                    let e = arg
-                        .as_ref()
-                        .ok_or_else(|| ExecutionError::TypeError("ARRAY_AGG requires arg".into()))?;
+                    let e = arg.as_ref().ok_or_else(|| {
+                        ExecutionError::TypeError("ARRAY_AGG requires arg".into())
+                    })?;
                     let vals = if *distinct {
                         distinct_vals(e)?
                     } else {
@@ -1251,15 +1338,18 @@ pub fn eval_having_expr(
                 }
                 // Statistical aggregates in HAVING — compute inline
                 AggFunc::VarPop | AggFunc::VarSamp | AggFunc::StddevPop | AggFunc::StddevSamp => {
-                    let e = arg.as_ref().ok_or_else(|| ExecutionError::TypeError(
-                        "Statistical aggregate requires arg".into(),
-                    ))?;
+                    let e = arg.as_ref().ok_or_else(|| {
+                        ExecutionError::TypeError("Statistical aggregate requires arg".into())
+                    })?;
                     let vals = if *distinct {
                         distinct_vals(e)?
                     } else {
                         eval_all(e)?
                     };
-                    let floats: Vec<f64> = vals.iter().filter_map(falcon_common::datum::Datum::as_f64).collect();
+                    let floats: Vec<f64> = vals
+                        .iter()
+                        .filter_map(falcon_common::datum::Datum::as_f64)
+                        .collect();
                     let n = floats.len();
                     if n == 0 {
                         return Ok(Datum::Null);
@@ -1300,10 +1390,7 @@ pub fn eval_having_expr(
                         }
                     }
                     freq.sort_by(|a, b| b.1.cmp(&a.1));
-                    Ok(freq
-                        .into_iter()
-                        .next()
-                        .map_or(Datum::Null, |(_, _, v)| v))
+                    Ok(freq.into_iter().next().map_or(Datum::Null, |(_, _, v)| v))
                 }
                 AggFunc::BitAndAgg => {
                     let e = arg
@@ -1367,9 +1454,9 @@ pub fn eval_having_expr(
             Ok(val.as_bool().map_or(Datum::Null, |b| Datum::Boolean(!b)))
         }
         // For non-aggregate expressions, evaluate against first row
-        _ => {
-            group_rows.first().map_or(Ok(Datum::Null), |row| eval_expr(expr, row))
-        }
+        _ => group_rows
+            .first()
+            .map_or(Ok(Datum::Null), |row| eval_expr(expr, row)),
     }
 }
 

@@ -1,13 +1,13 @@
-use std::collections::BTreeMap;
 use falcon_common::datum::Datum;
 use falcon_common::error::ExecutionError;
+use std::collections::BTreeMap;
 
 // ── Stop words (English) ──
 
 const STOP_WORDS: &[&str] = &[
-    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "if", "in",
-    "into", "is", "it", "no", "not", "of", "on", "or", "such", "that", "the",
-    "their", "then", "there", "these", "they", "this", "to", "was", "will", "with",
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "if", "in", "into", "is", "it",
+    "no", "not", "of", "on", "or", "such", "that", "the", "their", "then", "there", "these",
+    "they", "this", "to", "was", "will", "with",
 ];
 
 fn is_stop_word(w: &str) -> bool {
@@ -57,7 +57,10 @@ pub fn parse_tsquery(input: &str) -> Result<TsQueryNode, ExecutionError> {
     }
     let (node, rest) = parse_or(&tokens)?;
     if !rest.is_empty() {
-        return Err(ExecutionError::TypeError(format!("unexpected token in tsquery: {:?}", rest[0])));
+        return Err(ExecutionError::TypeError(format!(
+            "unexpected token in tsquery: {:?}",
+            rest[0]
+        )));
     }
     Ok(node)
 }
@@ -99,17 +102,37 @@ fn lex_tsquery(input: &str) -> Result<Vec<QToken>, ExecutionError> {
     let mut chars = input.chars().peekable();
     while let Some(&c) = chars.peek() {
         match c {
-            ' ' | '\t' | '\n' | '\r' => { chars.next(); }
-            '&' => { chars.next(); tokens.push(QToken::And); }
-            '|' => { chars.next(); tokens.push(QToken::Or); }
-            '!' => { chars.next(); tokens.push(QToken::Not); }
-            '(' => { chars.next(); tokens.push(QToken::LParen); }
-            ')' => { chars.next(); tokens.push(QToken::RParen); }
+            ' ' | '\t' | '\n' | '\r' => {
+                chars.next();
+            }
+            '&' => {
+                chars.next();
+                tokens.push(QToken::And);
+            }
+            '|' => {
+                chars.next();
+                tokens.push(QToken::Or);
+            }
+            '!' => {
+                chars.next();
+                tokens.push(QToken::Not);
+            }
+            '(' => {
+                chars.next();
+                tokens.push(QToken::LParen);
+            }
+            ')' => {
+                chars.next();
+                tokens.push(QToken::RParen);
+            }
             '\'' => {
                 chars.next();
                 let mut word = String::new();
                 while let Some(&ch) = chars.peek() {
-                    if ch == '\'' { chars.next(); break; }
+                    if ch == '\'' {
+                        chars.next();
+                        break;
+                    }
                     word.push(ch);
                     chars.next();
                 }
@@ -121,7 +144,9 @@ fn lex_tsquery(input: &str) -> Result<Vec<QToken>, ExecutionError> {
                         tokens.push(QToken::PrefixWord(w));
                     } else {
                         // skip weight labels like :A, :B etc
-                        while chars.peek().is_some_and(|c| c.is_alphanumeric()) { chars.next(); }
+                        while chars.peek().is_some_and(|c| c.is_alphanumeric()) {
+                            chars.next();
+                        }
                         tokens.push(QToken::Word(w));
                     }
                 } else {
@@ -130,7 +155,10 @@ fn lex_tsquery(input: &str) -> Result<Vec<QToken>, ExecutionError> {
             }
             _ if c.is_alphanumeric() || c == '_' => {
                 let mut word = String::new();
-                while chars.peek().is_some_and(|c| c.is_alphanumeric() || *c == '_') {
+                while chars
+                    .peek()
+                    .is_some_and(|c| c.is_alphanumeric() || *c == '_')
+                {
                     word.push(chars.next().unwrap());
                 }
                 let w = word.to_lowercase();
@@ -140,14 +168,18 @@ fn lex_tsquery(input: &str) -> Result<Vec<QToken>, ExecutionError> {
                         chars.next();
                         tokens.push(QToken::PrefixWord(w));
                     } else {
-                        while chars.peek().is_some_and(|c| c.is_alphanumeric()) { chars.next(); }
+                        while chars.peek().is_some_and(|c| c.is_alphanumeric()) {
+                            chars.next();
+                        }
                         tokens.push(QToken::Word(w));
                     }
                 } else {
                     tokens.push(QToken::Word(w));
                 }
             }
-            _ => { chars.next(); }
+            _ => {
+                chars.next();
+            }
         }
     }
     Ok(tokens)
@@ -155,7 +187,7 @@ fn lex_tsquery(input: &str) -> Result<Vec<QToken>, ExecutionError> {
 
 // ── Recursive descent parser: or > and > not > atom ──
 
-fn parse_or<'a>(tokens: &'a [QToken]) -> Result<(TsQueryNode, &'a [QToken]), ExecutionError> {
+fn parse_or(tokens: &[QToken]) -> Result<(TsQueryNode, &[QToken]), ExecutionError> {
     let (mut left, mut rest) = parse_and(tokens)?;
     while matches!(rest.first(), Some(QToken::Or)) {
         let (right, r) = parse_and(&rest[1..])?;
@@ -165,7 +197,7 @@ fn parse_or<'a>(tokens: &'a [QToken]) -> Result<(TsQueryNode, &'a [QToken]), Exe
     Ok((left, rest))
 }
 
-fn parse_and<'a>(tokens: &'a [QToken]) -> Result<(TsQueryNode, &'a [QToken]), ExecutionError> {
+fn parse_and(tokens: &[QToken]) -> Result<(TsQueryNode, &[QToken]), ExecutionError> {
     let (mut left, mut rest) = parse_not(tokens)?;
     while matches!(rest.first(), Some(QToken::And)) {
         let (right, r) = parse_not(&rest[1..])?;
@@ -175,7 +207,7 @@ fn parse_and<'a>(tokens: &'a [QToken]) -> Result<(TsQueryNode, &'a [QToken]), Ex
     Ok((left, rest))
 }
 
-fn parse_not<'a>(tokens: &'a [QToken]) -> Result<(TsQueryNode, &'a [QToken]), ExecutionError> {
+fn parse_not(tokens: &[QToken]) -> Result<(TsQueryNode, &[QToken]), ExecutionError> {
     if matches!(tokens.first(), Some(QToken::Not)) {
         let (inner, rest) = parse_atom(&tokens[1..])?;
         Ok((TsQueryNode::Not(Box::new(inner)), rest))
@@ -184,7 +216,7 @@ fn parse_not<'a>(tokens: &'a [QToken]) -> Result<(TsQueryNode, &'a [QToken]), Ex
     }
 }
 
-fn parse_atom<'a>(tokens: &'a [QToken]) -> Result<(TsQueryNode, &'a [QToken]), ExecutionError> {
+fn parse_atom(tokens: &[QToken]) -> Result<(TsQueryNode, &[QToken]), ExecutionError> {
     match tokens.first() {
         Some(QToken::Word(w)) => Ok((TsQueryNode::Term(w.clone()), &tokens[1..])),
         Some(QToken::PrefixWord(w)) => Ok((TsQueryNode::Prefix(w.clone()), &tokens[1..])),
@@ -195,7 +227,9 @@ fn parse_atom<'a>(tokens: &'a [QToken]) -> Result<(TsQueryNode, &'a [QToken]), E
                 _ => Err(ExecutionError::TypeError("expected ')' in tsquery".into())),
             }
         }
-        _ => Err(ExecutionError::TypeError("unexpected end of tsquery".into())),
+        _ => Err(ExecutionError::TypeError(
+            "unexpected end of tsquery".into(),
+        )),
     }
 }
 
@@ -238,7 +272,10 @@ pub fn ts_rank(vector: &[(String, Vec<u16>)], query: &TsQueryNode) -> f64 {
 fn count_matching_terms(vector: &[(String, Vec<u16>)], query: &TsQueryNode) -> usize {
     match query {
         TsQueryNode::Term(w) => vector.iter().filter(|(lex, _)| lex == w).count(),
-        TsQueryNode::Prefix(p) => vector.iter().filter(|(lex, _)| lex.starts_with(p.as_str())).count(),
+        TsQueryNode::Prefix(p) => vector
+            .iter()
+            .filter(|(lex, _)| lex.starts_with(p.as_str()))
+            .count(),
         TsQueryNode::Not(_) => 0,
         TsQueryNode::And(a, b) => count_matching_terms(vector, a) + count_matching_terms(vector, b),
         TsQueryNode::Or(a, b) => count_matching_terms(vector, a) + count_matching_terms(vector, b),
@@ -250,7 +287,9 @@ fn count_matching_terms(vector: &[(String, Vec<u16>)], query: &TsQueryNode) -> u
 pub fn ts_rank_cd(vector: &[(String, Vec<u16>)], query: &TsQueryNode) -> f64 {
     let matching = count_matching_terms(vector, query) as f64;
     let total_positions: usize = vector.iter().map(|(_, p)| p.len()).sum();
-    if total_positions == 0 { return 0.0; }
+    if total_positions == 0 {
+        return 0.0;
+    }
     matching / (total_positions as f64)
 }
 
@@ -263,7 +302,10 @@ pub fn ts_headline(text: &str, query: &TsQueryNode) -> String {
     for w in &words {
         let lower = w.to_lowercase();
         let base: String = lower.chars().filter(|c| c.is_alphanumeric()).collect();
-        if query_terms.iter().any(|t| base == *t || base.starts_with(t.as_str())) {
+        if query_terms
+            .iter()
+            .any(|t| base == *t || base.starts_with(t.as_str()))
+        {
             result.push(format!("<b>{w}</b>"));
         } else {
             result.push(w.to_string());
@@ -332,12 +374,20 @@ pub fn tsvector_concat(
     a: &[(String, Vec<u16>)],
     b: &[(String, Vec<u16>)],
 ) -> Vec<(String, Vec<u16>)> {
-    let offset = a.iter().flat_map(|(_, p)| p.iter().copied()).max().unwrap_or(0);
+    let offset = a
+        .iter()
+        .flat_map(|(_, p)| p.iter().copied())
+        .max()
+        .unwrap_or(0);
     let mut map: BTreeMap<String, Vec<u16>> = BTreeMap::new();
-    for (w, pos) in a { map.entry(w.clone()).or_default().extend(pos); }
+    for (w, pos) in a {
+        map.entry(w.clone()).or_default().extend(pos);
+    }
     for (w, pos) in b {
         let entry = map.entry(w.clone()).or_default();
-        for p in pos { entry.push(p + offset); }
+        for p in pos {
+            entry.push(p + offset);
+        }
     }
     map.into_iter().collect()
 }
@@ -350,12 +400,16 @@ pub fn array_to_tsvector(words: &[Datum]) -> Result<Vec<(String, Vec<u16>)>, Exe
         match d {
             Datum::Text(s) => {
                 let w = s.to_lowercase();
-                map.entry(w).or_default().push((i + 1).min(u16::MAX as usize) as u16);
+                map.entry(w)
+                    .or_default()
+                    .push((i + 1).min(u16::MAX as usize) as u16);
             }
             Datum::Null => {}
-            _ => return Err(ExecutionError::TypeError(
-                "array_to_tsvector requires text array".into(),
-            )),
+            _ => {
+                return Err(ExecutionError::TypeError(
+                    "array_to_tsvector requires text array".into(),
+                ))
+            }
         }
     }
     Ok(map.into_iter().collect())

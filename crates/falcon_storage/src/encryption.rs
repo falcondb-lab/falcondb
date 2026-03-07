@@ -159,9 +159,14 @@ impl fmt::Display for TdeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DekNotFound(id) => write!(f, "DEK {id} not found"),
-            Self::DecryptionFailed => write!(f, "AES-256-GCM decryption failed (auth tag mismatch)"),
+            Self::DecryptionFailed => {
+                write!(f, "AES-256-GCM decryption failed (auth tag mismatch)")
+            }
             Self::EncryptionFailed => write!(f, "AES-256-GCM encryption failed"),
-            Self::NonceReused { dek_id } => write!(f, "nonce reuse detected for DEK {dek_id} — refusing to encrypt"),
+            Self::NonceReused { dek_id } => write!(
+                f,
+                "nonce reuse detected for DEK {dek_id} — refusing to encrypt"
+            ),
         }
     }
 }
@@ -473,10 +478,7 @@ impl KeyManager {
     /// After rotation, new writes to `scope` use `new_dek_id`. Old data encrypted
     /// with `old_dek_id` remains readable (the old DEK stays in the keystore) until
     /// all segments are re-encrypted and the old DEK is explicitly pruned.
-    pub fn rotate_dek(
-        &mut self,
-        scope: EncryptionScope,
-    ) -> Result<DekRotationResult, TdeError> {
+    pub fn rotate_dek(&mut self, scope: EncryptionScope) -> Result<DekRotationResult, TdeError> {
         let old_dek_id = self.active_deks.get(&scope).copied();
         let new_dek_id = self.generate_dek(scope)?;
         Ok(DekRotationResult {
@@ -623,7 +625,10 @@ mod tests {
         }
 
         let result = km.decrypt_block(dek_id, &encrypted);
-        assert!(result.is_err(), "Tampered ciphertext must fail authentication");
+        assert!(
+            result.is_err(),
+            "Tampered ciphertext must fail authentication"
+        );
     }
 
     #[test]
@@ -856,7 +861,9 @@ mod tests {
         let encrypted_v1 = km.encrypt_block(dek1, original).unwrap();
 
         let rot = km.rotate_dek(scope).unwrap();
-        let encrypted_v2 = km.re_encrypt_block(dek1, rot.new_dek_id, &encrypted_v1).unwrap();
+        let encrypted_v2 = km
+            .re_encrypt_block(dek1, rot.new_dek_id, &encrypted_v1)
+            .unwrap();
 
         // v2 decrypts with new DEK to same plaintext
         let decrypted = km.decrypt_block(rot.new_dek_id, &encrypted_v2).unwrap();

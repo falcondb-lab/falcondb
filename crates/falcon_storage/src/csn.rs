@@ -138,7 +138,11 @@ impl CsnGenerator {
     #[inline]
     pub fn last_committed(&self) -> Csn {
         let cur = self.next_csn.load(Ordering::SeqCst);
-        if cur <= 1 { Csn::ZERO } else { Csn(cur - 1) }
+        if cur <= 1 {
+            Csn::ZERO
+        } else {
+            Csn(cur - 1)
+        }
     }
 
     /// Shard ID.
@@ -174,7 +178,11 @@ pub struct CommitRecord {
 
 impl CommitRecord {
     pub const fn new(txn_id: TxnId, commit_csn: Csn, commit_lsn: StructuredLsn) -> Self {
-        Self { txn_id, commit_csn, commit_lsn }
+        Self {
+            txn_id,
+            commit_csn,
+            commit_lsn,
+        }
     }
 
     /// Serialize to bytes (for WAL embedding).
@@ -189,11 +197,17 @@ impl CommitRecord {
 
     /// Deserialize from bytes.
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        if data.len() < 24 { return None; }
+        if data.len() < 24 {
+            return None;
+        }
         let txn_id = TxnId(u64::from_le_bytes(data[0..8].try_into().ok()?));
         let csn = Csn(u64::from_le_bytes(data[8..16].try_into().ok()?));
         let lsn = StructuredLsn::from_raw(u64::from_le_bytes(data[16..24].try_into().ok()?));
-        Some(Self { txn_id, commit_csn: csn, commit_lsn: lsn })
+        Some(Self {
+            txn_id,
+            commit_csn: csn,
+            commit_lsn: lsn,
+        })
     }
 }
 
@@ -302,9 +316,15 @@ impl CommitTable {
 
     /// Get all entries (for snapshot/debug).
     pub fn entries(&self) -> Vec<CommitRecord> {
-        self.table.read().iter().map(|(txn_id, (csn, lsn))| {
-            CommitRecord { txn_id: *txn_id, commit_csn: *csn, commit_lsn: *lsn }
-        }).collect()
+        self.table
+            .read()
+            .iter()
+            .map(|(txn_id, (csn, lsn))| CommitRecord {
+                txn_id: *txn_id,
+                commit_csn: *csn,
+                commit_lsn: *lsn,
+            })
+            .collect()
     }
 }
 
@@ -368,7 +388,9 @@ impl CsnSnapshot {
         if !row_csn.is_committed() {
             return false;
         }
-        self.csn_map.get(&shard_id).is_some_and(|snap_csn| row_csn <= *snap_csn)
+        self.csn_map
+            .get(&shard_id)
+            .is_some_and(|snap_csn| row_csn <= *snap_csn)
     }
 
     /// Number of shards in this snapshot.
@@ -403,18 +425,25 @@ impl CsnSnapshot {
 
     /// Deserialize from bytes.
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        if data.len() < 12 { return None; }
+        if data.len() < 12 {
+            return None;
+        }
         let count = u32::from_le_bytes(data[0..4].try_into().ok()?) as usize;
         let taken_at_ns = u64::from_le_bytes(data[4..12].try_into().ok()?);
-        if data.len() < 12 + count * 16 { return None; }
+        if data.len() < 12 + count * 16 {
+            return None;
+        }
         let mut map = HashMap::with_capacity(count);
         for i in 0..count {
             let off = 12 + i * 16;
-            let shard = ShardId(u64::from_le_bytes(data[off..off+8].try_into().ok()?));
-            let csn = Csn(u64::from_le_bytes(data[off+8..off+16].try_into().ok()?));
+            let shard = ShardId(u64::from_le_bytes(data[off..off + 8].try_into().ok()?));
+            let csn = Csn(u64::from_le_bytes(data[off + 8..off + 16].try_into().ok()?));
             map.insert(shard, csn);
         }
-        Some(Self { csn_map: map, taken_at_ns })
+        Some(Self {
+            csn_map: map,
+            taken_at_ns,
+        })
     }
 }
 
@@ -423,7 +452,9 @@ impl fmt::Display for CsnSnapshot {
         write!(f, "CsnSnapshot{{")?;
         let mut first = true;
         for (shard, csn) in &self.csn_map {
-            if !first { write!(f, ", ")?; }
+            if !first {
+                write!(f, ", ")?;
+            }
             write!(f, "shard{}={}", shard.0, csn.0)?;
             first = false;
         }
@@ -452,10 +483,7 @@ pub struct CsnRecoveryState {
 /// sequence of commit records found in WAL commit entries.
 ///
 /// **Invariant:** After recovery, `CsnGenerator` resumes from `max_csn + 1`.
-pub fn recover_csn_state(
-    shard_id: ShardId,
-    commit_records: &[CommitRecord],
-) -> CsnRecoveryState {
+pub fn recover_csn_state(shard_id: ShardId, commit_records: &[CommitRecord]) -> CsnRecoveryState {
     let mut last_csn_per_shard: HashMap<ShardId, Csn> = HashMap::new();
 
     for rec in commit_records {
@@ -518,7 +546,8 @@ impl CommitCoordinator {
 
     /// Create from recovered state.
     pub fn from_recovered(shard_id: ShardId, recovery: &CsnRecoveryState) -> Self {
-        let last_csn = recovery.last_committed_csn
+        let last_csn = recovery
+            .last_committed_csn
             .get(&shard_id)
             .copied()
             .unwrap_or(Csn::ZERO);
@@ -544,7 +573,9 @@ impl CommitCoordinator {
         let record = CommitRecord::new(txn_id, csn, commit_lsn);
         self.commit_table.insert(record);
         self.metrics.commits_total.fetch_add(1, Ordering::Relaxed);
-        self.metrics.csn_assigned_total.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .csn_assigned_total
+            .fetch_add(1, Ordering::Relaxed);
         csn
     }
 
@@ -578,7 +609,9 @@ impl CommitCoordinator {
     /// GC commit table entries below watermark.
     pub fn gc_before(&self, watermark: Csn) -> u64 {
         let removed = self.commit_table.gc_before(watermark);
-        self.metrics.gc_entries_total.fetch_add(removed, Ordering::Relaxed);
+        self.metrics
+            .gc_entries_total
+            .fetch_add(removed, Ordering::Relaxed);
         removed
     }
 }
@@ -710,11 +743,7 @@ mod tests {
 
     #[test]
     fn test_commit_record_roundtrip() {
-        let rec = CommitRecord::new(
-            TxnId(42),
-            Csn::new(100),
-            StructuredLsn::new(5, 2048),
-        );
+        let rec = CommitRecord::new(TxnId(42), Csn::new(100), StructuredLsn::new(5, 2048));
         let bytes = rec.to_bytes();
         let recovered = CommitRecord::from_bytes(&bytes).unwrap();
         assert_eq!(recovered, rec);
@@ -740,7 +769,9 @@ mod tests {
         let table = CommitTable::new();
         for i in 1..=10u64 {
             table.insert(CommitRecord::new(
-                TxnId(i), Csn::new(i), StructuredLsn::ZERO,
+                TxnId(i),
+                Csn::new(i),
+                StructuredLsn::ZERO,
             ));
         }
         assert_eq!(table.len(), 10);
@@ -842,7 +873,10 @@ mod tests {
             CommitRecord::new(TxnId(3), Csn::new(3), StructuredLsn::new(0, 300)),
         ];
         let recovery = recover_csn_state(ShardId(0), &records);
-        assert_eq!(recovery.last_committed_csn.get(&ShardId(0)), Some(&Csn::new(3)));
+        assert_eq!(
+            recovery.last_committed_csn.get(&ShardId(0)),
+            Some(&Csn::new(3))
+        );
 
         let coord = CommitCoordinator::from_recovered(ShardId(0), &recovery);
         assert_eq!(coord.last_committed_csn(), Csn::new(3));

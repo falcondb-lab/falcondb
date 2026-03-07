@@ -12,7 +12,11 @@ fn main() {
         .args(["rev-parse", "--short=8", "HEAD"])
         .output()
         .ok()
-        .filter(|o| o.status.success()).map_or_else(|| "unknown".to_owned(), |o| String::from_utf8_lossy(&o.stdout).trim().to_owned());
+        .filter(|o| o.status.success())
+        .map_or_else(
+            || "unknown".to_owned(),
+            |o| String::from_utf8_lossy(&o.stdout).trim().to_owned(),
+        );
 
     // Build timestamp (UTC, second precision)
     let build_time = chrono_free_utc_now();
@@ -40,9 +44,7 @@ fn chrono_free_utc_now() -> String {
 
     // Compute year/month/day from days since epoch (1970-01-01)
     let (year, month, day) = days_to_ymd(days_since_epoch);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z"
-    )
+    format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
 }
 
 fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {

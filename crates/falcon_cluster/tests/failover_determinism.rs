@@ -86,7 +86,8 @@ fn test_schema() -> TableSchema {
                 nullable: false,
                 is_primary_key: true,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             },
             ColumnDef {
                 id: ColumnId(1),
@@ -95,7 +96,8 @@ fn test_schema() -> TableSchema {
                 nullable: false,
                 is_primary_key: false,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             },
             ColumnDef {
                 id: ColumnId(2),
@@ -104,7 +106,8 @@ fn test_schema() -> TableSchema {
                 nullable: true,
                 is_primary_key: false,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             },
         ],
         primary_key_columns: vec![0],
@@ -170,7 +173,11 @@ fn run_failover_experiment(fault: FaultType, load: LoadType) -> FailoverResult {
             Datum::Text(format!("user_{}", i)),
         ]);
 
-        match group.primary.storage.insert(TableId(1), row.clone(), txn_id) {
+        match group
+            .primary
+            .storage
+            .insert(TableId(1), row.clone(), txn_id)
+        {
             Ok(_) => {
                 match group.primary.storage.commit_txn(txn_id, ts, TxnType::Local) {
                     Ok(_) => {
@@ -239,7 +246,11 @@ fn run_failover_experiment(fault: FaultType, load: LoadType) -> FailoverResult {
             Datum::Text(format!("inflight_{}", i)),
         ]);
 
-        match group.primary.storage.insert(TableId(1), row.clone(), txn_id) {
+        match group
+            .primary
+            .storage
+            .insert(TableId(1), row.clone(), txn_id)
+        {
             Ok(_) => {
                 match group.primary.storage.commit_txn(txn_id, ts, TxnType::Local) {
                     Ok(_) => {
@@ -320,16 +331,14 @@ fn run_failover_experiment(fault: FaultType, load: LoadType) -> FailoverResult {
         ]);
 
         match group.primary.storage.insert(TableId(1), row, txn_id) {
-            Ok(_) => {
-                match group.primary.storage.commit_txn(txn_id, ts, TxnType::Local) {
-                    Ok(_) => {
-                        *outcomes.entry(TxnOutcome::Committed).or_insert(0) += 1;
-                    }
-                    Err(_) => {
-                        *outcomes.entry(TxnOutcome::Aborted).or_insert(0) += 1;
-                    }
+            Ok(_) => match group.primary.storage.commit_txn(txn_id, ts, TxnType::Local) {
+                Ok(_) => {
+                    *outcomes.entry(TxnOutcome::Committed).or_insert(0) += 1;
                 }
-            }
+                Err(_) => {
+                    *outcomes.entry(TxnOutcome::Aborted).or_insert(0) += 1;
+                }
+            },
             Err(_) => {
                 *outcomes.entry(TxnOutcome::Aborted).or_insert(0) += 1;
             }
@@ -340,15 +349,22 @@ fn run_failover_experiment(fault: FaultType, load: LoadType) -> FailoverResult {
     let tps_after = post_count as f64 / post_elapsed.as_secs_f64().max(0.001);
 
     // ── Phase 5: Consistency verification ──
-    let final_scan = group.primary.storage
+    let final_scan = group
+        .primary
+        .storage
         .scan(TableId(1), TxnId(u64::MAX - 1), Timestamp(u64::MAX - 1))
         .expect("final scan failed");
 
     // Check: no phantom commits (rows visible that were never committed)
     // All committed rows from pre-fault should be visible
-    let visible_ids: Vec<i32> = final_scan.iter()
+    let visible_ids: Vec<i32> = final_scan
+        .iter()
         .filter_map(|(_, row)| {
-            if let Datum::Int32(id) = &row.values[0] { Some(*id) } else { None }
+            if let Datum::Int32(id) = &row.values[0] {
+                Some(*id)
+            } else {
+                None
+            }
         })
         .collect();
 
@@ -388,7 +404,12 @@ fn print_result(r: &FailoverResult) {
     println!("  │ Fault: {:?} × Load: {:?}", r.fault, r.load);
     println!("  ├─────────────────────────────────────────────────────┤");
     println!("  │ Txn Outcomes:");
-    for outcome in &[TxnOutcome::Committed, TxnOutcome::Aborted, TxnOutcome::Retried, TxnOutcome::InDoubt] {
+    for outcome in &[
+        TxnOutcome::Committed,
+        TxnOutcome::Aborted,
+        TxnOutcome::Retried,
+        TxnOutcome::InDoubt,
+    ] {
         let count = r.txn_counts.get(outcome).copied().unwrap_or(0);
         if count > 0 {
             println!("  │   {:?}: {}", outcome, count);
@@ -396,11 +417,20 @@ fn print_result(r: &FailoverResult) {
     }
     println!("  │ Total: {}", r.total_txns());
     println!("  ├─────────────────────────────────────────────────────┤");
-    println!("  │ TPS: before={:.0}  during={:.0}  after={:.0}", r.tps_before, r.tps_during, r.tps_after);
-    println!("  │ Latency (µs): p50={}  p99={}  p99.9={}  p99.99={}", r.p50_us, r.p99_us, r.p999_us, r.p9999_us);
+    println!(
+        "  │ TPS: before={:.0}  during={:.0}  after={:.0}",
+        r.tps_before, r.tps_during, r.tps_after
+    );
+    println!(
+        "  │ Latency (µs): p50={}  p99={}  p99.9={}  p99.99={}",
+        r.p50_us, r.p99_us, r.p999_us, r.p9999_us
+    );
     println!("  │ Failover time: {} ms", r.failover_ms);
     println!("  ├─────────────────────────────────────────────────────┤");
-    println!("  │ Data consistent: {}  Phantom commits: {}", r.data_consistent, r.phantom_commits);
+    println!(
+        "  │ Data consistent: {}  Phantom commits: {}",
+        r.data_consistent, r.phantom_commits
+    );
     println!("  └─────────────────────────────────────────────────────┘");
 }
 
@@ -438,7 +468,10 @@ fn failover_matrix_network_partition_read_heavy() {
     let r = run_failover_experiment(FaultType::NetworkPartition, LoadType::ReadHeavy);
     print_result(&r);
     assert!(r.data_consistent, "Data inconsistency detected");
-    assert_eq!(r.phantom_commits, 0, "Phantom commits detected — in-doubt txns must NOT be visible");
+    assert_eq!(
+        r.phantom_commits, 0,
+        "Phantom commits detected — in-doubt txns must NOT be visible"
+    );
 }
 
 #[test]
@@ -449,7 +482,10 @@ fn failover_matrix_network_partition_write_heavy() {
     assert_eq!(r.phantom_commits, 0, "Phantom commits detected");
     // In-doubt txns are explicitly tracked
     let indoubt = r.txn_counts.get(&TxnOutcome::InDoubt).copied().unwrap_or(0);
-    println!("  In-doubt txns: {} (explicitly tracked, not visible on new primary)", indoubt);
+    println!(
+        "  In-doubt txns: {} (explicitly tracked, not visible on new primary)",
+        indoubt
+    );
 }
 
 #[test]
@@ -494,7 +530,11 @@ fn failover_full_matrix_summary() {
     println!("║  FalconDB P0-2: Failover Determinism Evidence Matrix         ║");
     println!("╚══════════════════════════════════════════════════════════════╝\n");
 
-    let faults = [FaultType::LeaderCrash, FaultType::NetworkPartition, FaultType::WalStall];
+    let faults = [
+        FaultType::LeaderCrash,
+        FaultType::NetworkPartition,
+        FaultType::WalStall,
+    ];
     let loads = [LoadType::ReadHeavy, LoadType::WriteHeavy, LoadType::Mixed];
 
     let mut results: Vec<FailoverResult> = Vec::new();
@@ -515,27 +555,52 @@ fn failover_full_matrix_summary() {
     println!("\n══════════════════════════════════════════════════════════════");
     println!("  SUMMARY: {} experiments", results.len());
     println!("══════════════════════════════════════════════════════════════");
-    println!("  {:20} {:12} {:>8} {:>8} {:>8} {:>6} {:>6} {:>10}",
-        "Experiment", "Consistent", "Commit", "Abort", "InDoubt", "FO ms", "p99µs", "TPS(after)");
+    println!(
+        "  {:20} {:12} {:>8} {:>8} {:>8} {:>6} {:>6} {:>10}",
+        "Experiment", "Consistent", "Commit", "Abort", "InDoubt", "FO ms", "p99µs", "TPS(after)"
+    );
     println!("  {}", "-".repeat(80));
 
     for r in &results {
         let label = format!("{:?}×{:?}", r.fault, r.load);
-        let committed = r.txn_counts.get(&TxnOutcome::Committed).copied().unwrap_or(0);
+        let committed = r
+            .txn_counts
+            .get(&TxnOutcome::Committed)
+            .copied()
+            .unwrap_or(0);
         let aborted = r.txn_counts.get(&TxnOutcome::Aborted).copied().unwrap_or(0);
         let indoubt = r.txn_counts.get(&TxnOutcome::InDoubt).copied().unwrap_or(0);
-        println!("  {:20} {:12} {:>8} {:>8} {:>8} {:>6} {:>6} {:>10.0}",
+        println!(
+            "  {:20} {:12} {:>8} {:>8} {:>8} {:>6} {:>6} {:>10.0}",
             label,
-            if r.data_consistent { "✅ YES" } else { "❌ NO" },
-            committed, aborted, indoubt,
-            r.failover_ms, r.p99_us, r.tps_after);
+            if r.data_consistent {
+                "✅ YES"
+            } else {
+                "❌ NO"
+            },
+            committed,
+            aborted,
+            indoubt,
+            r.failover_ms,
+            r.p99_us,
+            r.tps_after
+        );
     }
 
     println!("  {}", "=".repeat(80));
-    println!("  All consistent: {}", if all_consistent { "✅ YES" } else { "❌ NO" });
-    println!("  Phantom commits: {}", results.iter().map(|r| r.phantom_commits).sum::<u64>());
+    println!(
+        "  All consistent: {}",
+        if all_consistent { "✅ YES" } else { "❌ NO" }
+    );
+    println!(
+        "  Phantom commits: {}",
+        results.iter().map(|r| r.phantom_commits).sum::<u64>()
+    );
 
-    assert!(all_consistent, "At least one experiment showed data inconsistency");
+    assert!(
+        all_consistent,
+        "At least one experiment showed data inconsistency"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -553,12 +618,10 @@ fn failover_full_matrix_summary() {
 #[test]
 fn fde1_commit_phase_determines_recovery_outcome() {
     use falcon_cluster::determinism_hardening::{
-        CommitPhase, FailoverCrashRecord, FailoverExpectedOutcome,
-        validate_failover_invariants,
+        validate_failover_invariants, CommitPhase, FailoverCrashRecord, FailoverExpectedOutcome,
     };
 
-    let mut group = ShardReplicaGroup::new(ShardId(0), &[test_schema()])
-        .expect("create group");
+    let mut group = ShardReplicaGroup::new(ShardId(0), &[test_schema()]).expect("create group");
 
     // ── Txn A: committed + shipped + caught-up (WalDurable) ──
     let txn_a = next_txn();
@@ -568,8 +631,16 @@ fn fde1_commit_phase_determines_recovery_outcome() {
         Datum::Int64(1000),
         Datum::Text("durable".into()),
     ]);
-    group.primary.storage.insert(TableId(1), row_a.clone(), txn_a).unwrap();
-    group.primary.storage.commit_txn(txn_a, ts_a, TxnType::Local).unwrap();
+    group
+        .primary
+        .storage
+        .insert(TableId(1), row_a.clone(), txn_a)
+        .unwrap();
+    group
+        .primary
+        .storage
+        .commit_txn(txn_a, ts_a, TxnType::Local)
+        .unwrap();
     group.ship_wal_record(WalRecord::Insert {
         txn_id: txn_a,
         table_id: TableId(1),
@@ -589,8 +660,16 @@ fn fde1_commit_phase_determines_recovery_outcome() {
         Datum::Int64(2000),
         Datum::Text("inflight".into()),
     ]);
-    group.primary.storage.insert(TableId(1), row_b, txn_b).unwrap();
-    group.primary.storage.commit_txn(txn_b, ts_b, TxnType::Local).unwrap();
+    group
+        .primary
+        .storage
+        .insert(TableId(1), row_b, txn_b)
+        .unwrap();
+    group
+        .primary
+        .storage
+        .commit_txn(txn_b, ts_b, TxnType::Local)
+        .unwrap();
     // NOT shipped to replica — simulates crash before WAL shipping
 
     // ── Txn C: inserted but NOT committed (Active) ──
@@ -600,17 +679,24 @@ fn fde1_commit_phase_determines_recovery_outcome() {
         Datum::Int64(3000),
         Datum::Text("uncommitted".into()),
     ]);
-    group.primary.storage.insert(TableId(1), row_c, txn_c).unwrap();
+    group
+        .primary
+        .storage
+        .insert(TableId(1), row_c, txn_c)
+        .unwrap();
     // NOT committed, NOT shipped
 
     // ── Crash: promote replica ──
     group.promote(0).expect("promote");
 
     // ── Verify recovery outcomes on new primary ──
-    let recovered = group.primary.storage
+    let recovered = group
+        .primary
+        .storage
         .scan(TableId(1), TxnId(u64::MAX - 1), Timestamp(u64::MAX - 1))
         .unwrap_or_default();
-    let recovered_ids: Vec<TxnId> = recovered.iter()
+    let recovered_ids: Vec<TxnId> = recovered
+        .iter()
         .filter_map(|(_, row)| {
             if let Datum::Int32(id) = &row.values[0] {
                 // Map row id back to txn id for validation
@@ -647,7 +733,11 @@ fn fde1_commit_phase_determines_recovery_outcome() {
 
     // ── FC-1/FC-2/FC-3 validation ──
     let result = validate_failover_invariants(&crash_records, &recovered_ids, true);
-    assert!(result.is_ok(), "Failover invariant violations: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Failover invariant violations: {:?}",
+        result.err()
+    );
 
     // Explicit assertions for documentation
     assert!(
@@ -678,8 +768,7 @@ fn fde1_commit_phase_determines_recovery_outcome() {
 ///   - No phantom partial state after recovery
 #[test]
 fn fde2_occ_write_conflict_during_failover() {
-    let mut group = ShardReplicaGroup::new(ShardId(0), &[test_schema()])
-        .expect("create group");
+    let mut group = ShardReplicaGroup::new(ShardId(0), &[test_schema()]).expect("create group");
 
     // Seed: account_id=1, balance=1000
     let seed_txn = next_txn();
@@ -689,8 +778,16 @@ fn fde2_occ_write_conflict_during_failover() {
         Datum::Int64(1000),
         Datum::Text("seed".into()),
     ]);
-    group.primary.storage.insert(TableId(1), seed_row.clone(), seed_txn).unwrap();
-    group.primary.storage.commit_txn(seed_txn, seed_ts, TxnType::Local).unwrap();
+    group
+        .primary
+        .storage
+        .insert(TableId(1), seed_row.clone(), seed_txn)
+        .unwrap();
+    group
+        .primary
+        .storage
+        .commit_txn(seed_txn, seed_ts, TxnType::Local)
+        .unwrap();
     group.ship_wal_record(WalRecord::Insert {
         txn_id: seed_txn,
         table_id: TableId(1),
@@ -710,7 +807,10 @@ fn fde2_occ_write_conflict_during_failover() {
         Datum::Int64(2000),
         Datum::Text("writer_a".into()),
     ]);
-    let insert_a = group.primary.storage.insert(TableId(1), row_a.clone(), txn_a);
+    let insert_a = group
+        .primary
+        .storage
+        .insert(TableId(1), row_a.clone(), txn_a);
 
     // ── Writer B: update balance to 3000 (same key, OCC conflict) ──
     let txn_b = next_txn();
@@ -726,7 +826,12 @@ fn fde2_occ_write_conflict_during_failover() {
     let mut b_committed = false;
 
     if insert_a.is_ok() {
-        if group.primary.storage.commit_txn(txn_a, ts_a, TxnType::Local).is_ok() {
+        if group
+            .primary
+            .storage
+            .commit_txn(txn_a, ts_a, TxnType::Local)
+            .is_ok()
+        {
             a_committed = true;
             group.ship_wal_record(WalRecord::Insert {
                 txn_id: txn_a,
@@ -743,7 +848,12 @@ fn fde2_occ_write_conflict_during_failover() {
     // Try commit B (should fail with conflict or succeed if A didn't)
     if insert_b.is_ok() {
         let ts_b = next_ts();
-        if group.primary.storage.commit_txn(txn_b, ts_b, TxnType::Local).is_ok() {
+        if group
+            .primary
+            .storage
+            .commit_txn(txn_b, ts_b, TxnType::Local)
+            .is_ok()
+        {
             b_committed = true;
         }
     }
@@ -753,11 +863,14 @@ fn fde2_occ_write_conflict_during_failover() {
     group.promote(0).expect("promote");
 
     // ── Verify on new primary ──
-    let final_scan = group.primary.storage
+    let final_scan = group
+        .primary
+        .storage
         .scan(TableId(1), TxnId(u64::MAX - 1), Timestamp(u64::MAX - 1))
         .unwrap_or_default();
 
-    let final_balances: Vec<i64> = final_scan.iter()
+    let final_balances: Vec<i64> = final_scan
+        .iter()
         .filter_map(|(_, row)| {
             if let (Datum::Int32(1), Datum::Int64(bal)) = (&row.values[0], &row.values[1]) {
                 Some(*bal)
@@ -798,7 +911,10 @@ fn fde2_occ_write_conflict_during_failover() {
     }
 
     println!("  FDE-2: OCC conflict during failover VERIFIED");
-    println!("    writer_a committed: {}  writer_b committed: {}", a_committed, b_committed);
+    println!(
+        "    writer_a committed: {}  writer_b committed: {}",
+        a_committed, b_committed
+    );
     println!("    final balance on new primary: {:?}", final_balances);
     println!("    no phantom state ✅, no duplication ✅");
 }
@@ -810,8 +926,7 @@ fn fde2_occ_write_conflict_during_failover() {
 /// "no split-brain" guarantee for WAL-shipping replication.
 #[test]
 fn fde3_partition_writes_invisible_after_promote() {
-    let mut group = ShardReplicaGroup::new(ShardId(0), &[test_schema()])
-        .expect("create group");
+    let mut group = ShardReplicaGroup::new(ShardId(0), &[test_schema()]).expect("create group");
 
     // Pre-partition: seed data replicated
     let n_pre = 5;
@@ -823,8 +938,16 @@ fn fde3_partition_writes_invisible_after_promote() {
             Datum::Int64(1000),
             Datum::Text(format!("pre_{}", i)),
         ]);
-        group.primary.storage.insert(TableId(1), row.clone(), txn_id).unwrap();
-        group.primary.storage.commit_txn(txn_id, ts, TxnType::Local).unwrap();
+        group
+            .primary
+            .storage
+            .insert(TableId(1), row.clone(), txn_id)
+            .unwrap();
+        group
+            .primary
+            .storage
+            .commit_txn(txn_id, ts, TxnType::Local)
+            .unwrap();
         group.ship_wal_record(WalRecord::Insert {
             txn_id,
             table_id: TableId(1),
@@ -849,8 +972,16 @@ fn fde3_partition_writes_invisible_after_promote() {
             Datum::Int64(9999),
             Datum::Text(format!("partition_{}", i)),
         ]);
-        group.primary.storage.insert(TableId(1), row, txn_id).unwrap();
-        group.primary.storage.commit_txn(txn_id, ts, TxnType::Local).unwrap();
+        group
+            .primary
+            .storage
+            .insert(TableId(1), row, txn_id)
+            .unwrap();
+        group
+            .primary
+            .storage
+            .commit_txn(txn_id, ts, TxnType::Local)
+            .unwrap();
         // NOT shipped — partition in effect
         partition_ids.push(row_id);
     }
@@ -860,13 +991,20 @@ fn fde3_partition_writes_invisible_after_promote() {
     group.promote(0).expect("promote");
 
     // ── Verify: partition writes invisible on new primary ──
-    let scan = group.primary.storage
+    let scan = group
+        .primary
+        .storage
         .scan(TableId(1), TxnId(u64::MAX - 1), Timestamp(u64::MAX - 1))
         .unwrap_or_default();
 
-    let visible_ids: Vec<i32> = scan.iter()
+    let visible_ids: Vec<i32> = scan
+        .iter()
         .filter_map(|(_, row)| {
-            if let Datum::Int32(id) = &row.values[0] { Some(*id) } else { None }
+            if let Datum::Int32(id) = &row.values[0] {
+                Some(*id)
+            } else {
+                None
+            }
         })
         .collect();
 
@@ -907,19 +1045,13 @@ fn fde3_partition_writes_invisible_after_promote() {
 ///   - No in-doubt accumulation over multiple failover cycles
 #[test]
 fn fde4_indoubt_ttl_bounded_resolution() {
-    use falcon_cluster::{
-        InDoubtTtlEnforcer, InDoubtTtlConfig,
-    };
     use falcon_cluster::indoubt_resolver::{InDoubtResolver, TxnOutcomeCache};
+    use falcon_cluster::{InDoubtTtlConfig, InDoubtTtlEnforcer};
     use std::time::Duration;
 
     let outcome_cache = TxnOutcomeCache::new(Duration::from_secs(60), 10_000);
-    let resolver = InDoubtResolver::with_config(
-        outcome_cache.clone(),
-        Duration::from_millis(10),
-        3,
-        100,
-    );
+    let resolver =
+        InDoubtResolver::with_config(outcome_cache.clone(), Duration::from_millis(10), 3, 100);
     let ttl_enforcer = InDoubtTtlEnforcer::with_config(InDoubtTtlConfig {
         max_lifetime: Duration::from_millis(200),
         sweep_interval: Duration::from_millis(10),
@@ -936,10 +1068,7 @@ fn fde4_indoubt_ttl_bounded_resolution() {
         // Register batch of in-doubt txns
         for i in 0..txns_per_cycle {
             let txn_id = TxnId(cycle * 1000 + i + 10000);
-            resolver.register_indoubt(
-                txn_id,
-                vec![(ShardId(0), txn_id)],
-            );
+            resolver.register_indoubt(txn_id, vec![(ShardId(0), txn_id)]);
             ttl_enforcer.register(txn_id);
             total_registered += 1;
 
@@ -966,7 +1095,8 @@ fn fde4_indoubt_ttl_bounded_resolution() {
     // Assertions:
     // 1. All registered txns resolved
     assert_eq!(
-        resolver.indoubt_count(), 0,
+        resolver.indoubt_count(),
+        0,
         "All in-doubt txns must be resolved, {} remain",
         resolver.indoubt_count()
     );
@@ -980,7 +1110,8 @@ fn fde4_indoubt_ttl_bounded_resolution() {
 
     // 3. TTL enforcer has no tracked txns
     assert_eq!(
-        ttl_enforcer.tracked_count(), 0,
+        ttl_enforcer.tracked_count(),
+        0,
         "TTL enforcer must have 0 tracked txns after cleanup"
     );
 
@@ -997,7 +1128,10 @@ fn fde4_indoubt_ttl_bounded_resolution() {
 
     println!("  FDE-4: In-doubt TTL bounded resolution VERIFIED");
     println!("    cycles: {}  txns/cycle: {}", n_cycles, txns_per_cycle);
-    println!("    total registered: {}  total resolved: {}", total_registered, total_resolved);
+    println!(
+        "    total registered: {}  total resolved: {}",
+        total_registered, total_resolved
+    );
     println!("    remaining in-doubt: 0 ✅");
     println!("    total elapsed: {:?} (< 5s bound) ✅", elapsed);
 }
@@ -1008,8 +1142,7 @@ fn fde4_indoubt_ttl_bounded_resolution() {
 /// This is critical for crash recovery correctness.
 #[test]
 fn fde5_idempotent_wal_replay_after_failover() {
-    let mut group = ShardReplicaGroup::new(ShardId(0), &[test_schema()])
-        .expect("create group");
+    let mut group = ShardReplicaGroup::new(ShardId(0), &[test_schema()]).expect("create group");
 
     let n_txns = 20;
 
@@ -1022,8 +1155,16 @@ fn fde5_idempotent_wal_replay_after_failover() {
             Datum::Int64(100 * (i as i64 + 1)),
             Datum::Text(format!("row_{}", i)),
         ]);
-        group.primary.storage.insert(TableId(1), row.clone(), txn_id).unwrap();
-        group.primary.storage.commit_txn(txn_id, ts, TxnType::Local).unwrap();
+        group
+            .primary
+            .storage
+            .insert(TableId(1), row.clone(), txn_id)
+            .unwrap();
+        group
+            .primary
+            .storage
+            .commit_txn(txn_id, ts, TxnType::Local)
+            .unwrap();
 
         group.ship_wal_record(WalRecord::Insert {
             txn_id,
@@ -1052,13 +1193,20 @@ fn fde5_idempotent_wal_replay_after_failover() {
     // ── Promote: replica becomes primary (WAL applied during catch-up) ──
     group.promote(0).expect("promote");
 
-    let scan = group.primary.storage
+    let scan = group
+        .primary
+        .storage
         .scan(TableId(1), TxnId(u64::MAX - 1), Timestamp(u64::MAX - 1))
         .unwrap_or_default();
     let count = scan.len();
-    let sum: i64 = scan.iter()
+    let sum: i64 = scan
+        .iter()
         .filter_map(|(_, row)| {
-            if let Datum::Int64(b) = &row.values[1] { Some(*b) } else { None }
+            if let Datum::Int64(b) = &row.values[1] {
+                Some(*b)
+            } else {
+                None
+            }
         })
         .sum();
 

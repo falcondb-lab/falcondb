@@ -116,9 +116,7 @@ pub fn parse_cluster_mode_arg(arg: &str) -> Result<ClusterMode> {
     let parts: Vec<&str> = arg.trim().splitn(2, char::is_whitespace).collect();
     let target = parts.get(1).copied().unwrap_or("").trim();
     ClusterMode::parse(target).ok_or_else(|| {
-        anyhow::anyhow!(
-            "Unknown cluster mode '{target}'. Use 'readonly' or 'readwrite'."
-        )
+        anyhow::anyhow!("Unknown cluster mode '{target}'. Use 'readonly' or 'readwrite'.")
     })
 }
 

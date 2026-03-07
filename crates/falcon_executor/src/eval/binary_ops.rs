@@ -3,11 +3,7 @@ use falcon_common::error::ExecutionError;
 use falcon_sql_frontend::types::BinOp;
 use serde_json::Value as JsonValue;
 
-pub fn eval_binary_op(
-    left: &Datum,
-    op: BinOp,
-    right: &Datum,
-) -> Result<Datum, ExecutionError> {
+pub fn eval_binary_op(left: &Datum, op: BinOp, right: &Datum) -> Result<Datum, ExecutionError> {
     if left.is_null() || right.is_null() {
         return match op {
             BinOp::And => eval_and_null(left, right),
@@ -116,16 +112,30 @@ pub fn eval_binary_op(
             }
         },
         BinOp::TsMatch => crate::fts::ts_match_datums(left, right),
+        BinOp::BitwiseOr => eval_bitwise(left, right, |a, b| a | b),
+        BinOp::BitwiseAnd => eval_bitwise(left, right, |a, b| a & b),
+        BinOp::BitwiseXor => eval_bitwise(left, right, |a, b| a ^ b),
+        BinOp::BitwiseShiftLeft => eval_bitwise(left, right, |a, b| a << (b & 63)),
+        BinOp::BitwiseShiftRight => eval_bitwise(left, right, |a, b| a >> (b & 63)),
+        BinOp::Exponent => {
+            let a = left
+                .as_f64()
+                .ok_or_else(|| ExecutionError::TypeError("^ requires numeric".into()))?;
+            let b = right
+                .as_f64()
+                .ok_or_else(|| ExecutionError::TypeError("^ requires numeric".into()))?;
+            Ok(Datum::Float64(a.powf(b)))
+        }
+        BinOp::RegexMatch => eval_regex_match(left, right, false, false),
+        BinOp::RegexIMatch => eval_regex_match(left, right, false, true),
+        BinOp::RegexNotMatch => eval_regex_match(left, right, true, false),
+        BinOp::RegexNotIMatch => eval_regex_match(left, right, true, true),
     }
 }
 
 /// Inner binary op evaluation — called after coercion. Does NOT re-enter
 /// coercion, preventing infinite recursion when types remain mismatched.
-fn eval_binary_op_same(
-    left: &Datum,
-    op: BinOp,
-    right: &Datum,
-) -> Result<Datum, ExecutionError> {
+fn eval_binary_op_same(left: &Datum, op: BinOp, right: &Datum) -> Result<Datum, ExecutionError> {
     if left.is_null() || right.is_null() {
         return match op {
             BinOp::And => eval_and_null(left, right),
@@ -193,6 +203,24 @@ fn eval_binary_op_same(
         BinOp::JsonContainedBy => eval_json_contains(right, left),
         BinOp::JsonExists => eval_json_exists(left, right),
         BinOp::TsMatch => crate::fts::ts_match_datums(left, right),
+        BinOp::BitwiseOr => eval_bitwise(left, right, |a, b| a | b),
+        BinOp::BitwiseAnd => eval_bitwise(left, right, |a, b| a & b),
+        BinOp::BitwiseXor => eval_bitwise(left, right, |a, b| a ^ b),
+        BinOp::BitwiseShiftLeft => eval_bitwise(left, right, |a, b| a << (b & 63)),
+        BinOp::BitwiseShiftRight => eval_bitwise(left, right, |a, b| a >> (b & 63)),
+        BinOp::Exponent => {
+            let a = left
+                .as_f64()
+                .ok_or_else(|| ExecutionError::TypeError("^ requires numeric".into()))?;
+            let b = right
+                .as_f64()
+                .ok_or_else(|| ExecutionError::TypeError("^ requires numeric".into()))?;
+            Ok(Datum::Float64(a.powf(b)))
+        }
+        BinOp::RegexMatch => eval_regex_match(left, right, false, false),
+        BinOp::RegexIMatch => eval_regex_match(left, right, false, true),
+        BinOp::RegexNotMatch => eval_regex_match(left, right, true, false),
+        BinOp::RegexNotIMatch => eval_regex_match(left, right, true, true),
         BinOp::StringConcat => match (left, right) {
             (Datum::Array(a), Datum::Array(b)) => {
                 let mut result = a.clone();
@@ -229,7 +257,7 @@ fn eval_binary_op_same(
 /// exceeds f64's exact integer range (±2^53).
 fn safe_i64_to_f64(v: i64) -> Result<f64, ExecutionError> {
     const MAX_SAFE: i64 = 1_i64 << 53;
-    if v > MAX_SAFE || v < -MAX_SAFE {
+    if !(-MAX_SAFE..=MAX_SAFE).contains(&v) {
         Err(ExecutionError::NumericOverflow)
     } else {
         Ok(v as f64)
@@ -330,7 +358,11 @@ fn eval_json_arrow(left: &Datum, right: &Datum, as_text: bool) -> Result<Datum, 
             if i < 0 {
                 let len = json.as_array().map_or(0, |a| a.len() as i64);
                 let resolved = len + i;
-                if resolved >= 0 { json.get(resolved as usize).cloned() } else { None }
+                if resolved >= 0 {
+                    json.get(resolved as usize).cloned()
+                } else {
+                    None
+                }
             } else {
                 json.get(i as usize).cloned()
             }
@@ -340,7 +372,11 @@ fn eval_json_arrow(left: &Datum, right: &Datum, as_text: bool) -> Result<Datum, 
             if i < 0 {
                 let len = json.as_array().map_or(0, |a| a.len() as i64);
                 let resolved = len + i;
-                if resolved >= 0 { json.get(resolved as usize).cloned() } else { None }
+                if resolved >= 0 {
+                    json.get(resolved as usize).cloned()
+                } else {
+                    None
+                }
             } else {
                 json.get(i as usize).cloned()
             }
@@ -352,7 +388,11 @@ fn eval_json_arrow(left: &Datum, right: &Datum, as_text: bool) -> Result<Datum, 
         }
     };
     Ok(result.map_or(Datum::Null, |v| {
-        if as_text { json_to_text_datum(&v) } else { json_to_datum(&v) }
+        if as_text {
+            json_to_text_datum(&v)
+        } else {
+            json_to_datum(&v)
+        }
     }))
 }
 
@@ -475,6 +515,57 @@ fn coerce_for_comparison(left: &Datum, right: &Datum) -> (Datum, Datum) {
         _ => {}
     }
     (left.clone(), right.clone())
+}
+
+fn eval_bitwise(
+    left: &Datum,
+    right: &Datum,
+    op: impl Fn(i64, i64) -> i64,
+) -> Result<Datum, ExecutionError> {
+    let a = match left {
+        Datum::Int64(v) => *v,
+        Datum::Int32(v) => i64::from(*v),
+        _ => {
+            return Err(ExecutionError::TypeError(
+                "bitwise op requires integer".into(),
+            ))
+        }
+    };
+    let b = match right {
+        Datum::Int64(v) => *v,
+        Datum::Int32(v) => i64::from(*v),
+        _ => {
+            return Err(ExecutionError::TypeError(
+                "bitwise op requires integer".into(),
+            ))
+        }
+    };
+    Ok(Datum::Int64(op(a, b)))
+}
+
+fn eval_regex_match(
+    left: &Datum,
+    right: &Datum,
+    negate: bool,
+    case_insensitive: bool,
+) -> Result<Datum, ExecutionError> {
+    let text = match left {
+        Datum::Text(s) => s.as_str(),
+        _ => return Ok(Datum::Null),
+    };
+    let pattern = match right {
+        Datum::Text(s) => s.as_str(),
+        _ => return Ok(Datum::Null),
+    };
+    let re_pattern = if case_insensitive {
+        format!("(?i){pattern}")
+    } else {
+        pattern.to_owned()
+    };
+    let matched = regex::Regex::new(&re_pattern)
+        .map(|re| re.is_match(text))
+        .unwrap_or(false);
+    Ok(Datum::Boolean(if negate { !matched } else { matched }))
 }
 
 /// `?`: key/element exists in JSONB object or array.

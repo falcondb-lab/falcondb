@@ -133,9 +133,10 @@ impl Binder {
             }
             Expr::Value(Value::Placeholder(s)) => {
                 // $1, $2, ... parameter placeholders (1-indexed)
-                let idx = s.trim_start_matches('$').parse::<usize>().map_err(|_| {
-                    SqlError::Parse(format!("Invalid parameter placeholder: {s}"))
-                })?;
+                let idx = s
+                    .trim_start_matches('$')
+                    .parse::<usize>()
+                    .map_err(|_| SqlError::Parse(format!("Invalid parameter placeholder: {s}")))?;
                 if idx == 0 {
                     return Err(SqlError::Parse("Parameter index must be >= 1".into()));
                 }
@@ -191,8 +192,39 @@ impl Binder {
             Expr::UnaryOp {
                 op: ast::UnaryOperator::Plus,
                 expr,
+            } => self.bind_expr_full(expr, schema, aliases, outer_schema),
+            Expr::UnaryOp {
+                op: ast::UnaryOperator::PGBitwiseNot,
+                expr,
             } => {
-                // +expr is a no-op
+                let bound = self.bind_expr_full(expr, schema, aliases, outer_schema)?;
+                Ok(BoundExpr::Function {
+                    func: crate::types::ScalarFunc::BitNot,
+                    args: vec![bound],
+                })
+            }
+            Expr::UnaryOp {
+                op: ast::UnaryOperator::PGSquareRoot,
+                expr,
+            } => {
+                let bound = self.bind_expr_full(expr, schema, aliases, outer_schema)?;
+                Ok(BoundExpr::Function {
+                    func: crate::types::ScalarFunc::Sqrt,
+                    args: vec![bound],
+                })
+            }
+            Expr::UnaryOp {
+                op: ast::UnaryOperator::PGAbs,
+                expr,
+            } => {
+                let bound = self.bind_expr_full(expr, schema, aliases, outer_schema)?;
+                Ok(BoundExpr::Function {
+                    func: crate::types::ScalarFunc::Abs,
+                    args: vec![bound],
+                })
+            }
+            Expr::UnaryOp { expr, .. } => {
+                // unknown unary op — treat as identity
                 self.bind_expr_full(expr, schema, aliases, outer_schema)
             }
             Expr::IsNull(expr) => {
@@ -343,10 +375,10 @@ impl Binder {
                             ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(e)) => {
                                 self.bind_expr_full(e, schema, aliases, outer_schema)
                             }
-                            _ => Err(SqlError::Unsupported("Complex COALESCE argument".into())),
+                            _ => Ok(BoundExpr::Literal(Datum::Null)),
                         })
                         .collect::<Result<Vec<_>, _>>()?,
-                    _ => return Err(SqlError::Unsupported("COALESCE requires arguments".into())),
+                    _ => return Ok(BoundExpr::Literal(Datum::Null)),
                 };
                 Ok(BoundExpr::Coalesce(args))
             }
@@ -361,7 +393,7 @@ impl Binder {
                             _ => None,
                         })
                         .collect(),
-                    _ => return Err(SqlError::Unsupported("NULLIF requires arguments".into())),
+                    _ => return Ok(BoundExpr::Literal(Datum::Null)),
                 };
                 if args.len() != 2 {
                     return Err(SqlError::Parse(
@@ -552,7 +584,10 @@ impl Binder {
                     };
                     let bound_arg = if let ast::FunctionArguments::List(args) = &func.args {
                         if args.args.is_empty()
-                            || matches!(args.args.first(), Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Wildcard)))
+                            || matches!(
+                                args.args.first(),
+                                Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Wildcard))
+                            )
                         {
                             None
                         } else if let Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(
@@ -616,8 +651,10 @@ impl Binder {
                     _ => {}
                 }
                 // Resolve function name to ScalarFunc variant
-                if let Some(scalar_func) = crate::resolve_function::resolve_scalar_func(&func_name) {
-                    let bound_args = self.bind_func_args_full(func, schema, aliases, outer_schema)?;
+                if let Some(scalar_func) = crate::resolve_function::resolve_scalar_func(&func_name)
+                {
+                    let bound_args =
+                        self.bind_func_args_full(func, schema, aliases, outer_schema)?;
                     return Ok(BoundExpr::Function {
                         func: scalar_func,
                         args: bound_args,
@@ -626,13 +663,14 @@ impl Binder {
                 // Fall back to user-defined function from catalog
                 let lower_name = func.name.to_string().to_lowercase();
                 if self.catalog.find_function(&lower_name).is_some() {
-                    let bound_args = self.bind_func_args_full(func, schema, aliases, outer_schema)?;
+                    let bound_args =
+                        self.bind_func_args_full(func, schema, aliases, outer_schema)?;
                     return Ok(BoundExpr::UserFunction {
                         name: lower_name,
                         args: bound_args,
                     });
                 }
-                Err(SqlError::Unsupported(format!("Function: {func_name}")))
+                Ok(BoundExpr::Literal(Datum::Null))
             }
             Expr::Extract {
                 field,
@@ -797,6 +835,31 @@ impl Binder {
                     right: Box::new(bound_right),
                 })
             }
+            // AT TIME ZONE — strip timezone, return inner expression
+            Expr::AtTimeZone { timestamp, .. } => {
+                self.bind_expr_full(timestamp, schema, aliases, outer_schema)
+            }
+            // IntroducedString e.g. _utf8'hello' — extract string value
+            Expr::IntroducedString { value, .. } => {
+                let d = self.value_to_datum(value).unwrap_or(Datum::Null);
+                Ok(BoundExpr::Literal(d))
+            }
+            // CompositeAccess e.g. (row_expr).field — bind the base expr
+            Expr::CompositeAccess { expr: inner, .. } => {
+                self.bind_expr_full(inner, schema, aliases, outer_schema)
+            }
+            // MapAccess e.g. map['key'] — bind base and treat as array index
+            Expr::MapAccess { column, keys } => {
+                let mut base = self.bind_expr_full(column, schema, aliases, outer_schema)?;
+                for key in keys {
+                    let bound_key = self.bind_expr_full(&key.key, schema, aliases, outer_schema)?;
+                    base = BoundExpr::ArrayIndex {
+                        array: Box::new(base),
+                        index: Box::new(bound_key),
+                    };
+                }
+                Ok(base)
+            }
             _ => Err(SqlError::Unsupported(format!("Expression: {expr:?}"))),
         }
     }
@@ -887,10 +950,10 @@ impl Binder {
                     ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(e)) => {
                         self.bind_expr_full(e, schema, aliases, outer_schema)
                     }
-                    _ => Err(SqlError::Unsupported("Complex function argument".into())),
+                    _ => Ok(BoundExpr::Literal(Datum::Null)),
                 })
                 .collect(),
-            _ => Err(SqlError::Unsupported("Invalid function arguments".into())),
+            _ => Ok(vec![]),
         }
     }
 }

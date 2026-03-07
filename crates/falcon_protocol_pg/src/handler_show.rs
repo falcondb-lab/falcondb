@@ -70,6 +70,8 @@ impl QueryHandler {
             "falcon.tde_keys" => Some(self.show_falcon_tde_keys()),
             "falcon.raft_stats" => Some(self.show_falcon_raft_stats()),
             "falcon.membership" => Some(self.show_falcon_membership()),
+            "falcon.cdc_status" => Some(self.show_falcon_cdc_status()),
+            "falcon.cdc_slots" => Some(self.show_falcon_cdc_slots()),
             _ => None,
         }
     }
@@ -84,8 +86,14 @@ impl QueryHandler {
         let metrics = coord.metrics_snapshot();
         let mut rows: Vec<Vec<Option<String>>> = vec![
             vec![Some("raft_enabled".into()), Some("true".into())],
-            vec![Some("shard_count".into()), Some(metrics.shard_count.to_string())],
-            vec![Some("total_proposed".into()), Some(metrics.total_proposed.to_string())],
+            vec![
+                Some("shard_count".into()),
+                Some(metrics.shard_count.to_string()),
+            ],
+            vec![
+                Some("total_proposed".into()),
+                Some(metrics.total_proposed.to_string()),
+            ],
         ];
         for shard in &metrics.shards {
             rows.push(vec![
@@ -104,20 +112,28 @@ impl QueryHandler {
         let (enabled, segment_count, bytes_archived) = self.storage.pitr_stats();
         let rows = vec![
             vec![Some("enabled".into()), Some(enabled.to_string())],
-            vec![Some("segments_archived".into()), Some(segment_count.to_string())],
-            vec![Some("bytes_archived".into()), Some(bytes_archived.to_string())],
+            vec![
+                Some("segments_archived".into()),
+                Some(segment_count.to_string()),
+            ],
+            vec![
+                Some("bytes_archived".into()),
+                Some(bytes_archived.to_string()),
+            ],
         ];
-        self.single_row_result(
-            vec![("metric", 25, -1), ("value", 25, -1)],
-            rows,
-        )
+        self.single_row_result(vec![("metric", 25, -1), ("value", 25, -1)], rows)
     }
 
     fn show_falcon_pitr_segments(&self) -> Vec<BackendMessage> {
         let segments = self.storage.list_archived_segments();
         if segments.is_empty() {
             return self.single_row_result(
-                vec![("filename", 25, -1), ("start_lsn", 25, -1), ("end_lsn", 25, -1), ("size_bytes", 25, -1)],
+                vec![
+                    ("filename", 25, -1),
+                    ("start_lsn", 25, -1),
+                    ("end_lsn", 25, -1),
+                    ("size_bytes", 25, -1),
+                ],
                 vec![],
             );
         }
@@ -133,7 +149,12 @@ impl QueryHandler {
             })
             .collect();
         self.single_row_result(
-            vec![("filename", 25, -1), ("start_lsn", 25, -1), ("end_lsn", 25, -1), ("size_bytes", 25, -1)],
+            vec![
+                ("filename", 25, -1),
+                ("start_lsn", 25, -1),
+                ("end_lsn", 25, -1),
+                ("size_bytes", 25, -1),
+            ],
             rows,
         )
     }
@@ -142,7 +163,12 @@ impl QueryHandler {
         let backups = self.storage.list_base_backups();
         if backups.is_empty() {
             return self.single_row_result(
-                vec![("label", 25, -1), ("start_lsn", 25, -1), ("end_lsn", 25, -1), ("consistent", 25, -1)],
+                vec![
+                    ("label", 25, -1),
+                    ("start_lsn", 25, -1),
+                    ("end_lsn", 25, -1),
+                    ("consistent", 25, -1),
+                ],
                 vec![],
             );
         }
@@ -158,7 +184,12 @@ impl QueryHandler {
             })
             .collect();
         self.single_row_result(
-            vec![("label", 25, -1), ("start_lsn", 25, -1), ("end_lsn", 25, -1), ("consistent", 25, -1)],
+            vec![
+                ("label", 25, -1),
+                ("start_lsn", 25, -1),
+                ("end_lsn", 25, -1),
+                ("consistent", 25, -1),
+            ],
             rows,
         )
     }
@@ -1053,7 +1084,8 @@ impl QueryHandler {
     fn show_falcon_cluster(&self) -> Vec<BackendMessage> {
         let shard_count = self.cluster.shard_ids.len();
         let shard_list = self
-            .cluster.shard_ids
+            .cluster
+            .shard_ids
             .iter()
             .map(|s| s.0.to_string())
             .collect::<Vec<_>>()
@@ -1091,21 +1123,45 @@ impl QueryHandler {
 
         if let Some(ref lc) = self.cluster.lifecycle_coordinator {
             let m = lc.metrics();
-            rows.push(vec![Some("lifecycle_started".into()), Some(lc.is_started().to_string())]);
-            rows.push(vec![Some("nodes_online".into()), Some(m.nodes_online.to_string())]);
-            rows.push(vec![Some("nodes_suspect".into()), Some(m.nodes_suspect.to_string())]);
-            rows.push(vec![Some("nodes_offline".into()), Some(m.nodes_offline.to_string())]);
-            rows.push(vec![Some("heartbeat_evals".into()), Some(m.heartbeat_evals.to_string())]);
-            rows.push(vec![Some("slo_evals".into()), Some(m.slo_evals.to_string())]);
+            rows.push(vec![
+                Some("lifecycle_started".into()),
+                Some(lc.is_started().to_string()),
+            ]);
+            rows.push(vec![
+                Some("nodes_online".into()),
+                Some(m.nodes_online.to_string()),
+            ]);
+            rows.push(vec![
+                Some("nodes_suspect".into()),
+                Some(m.nodes_suspect.to_string()),
+            ]);
+            rows.push(vec![
+                Some("nodes_offline".into()),
+                Some(m.nodes_offline.to_string()),
+            ]);
+            rows.push(vec![
+                Some("heartbeat_evals".into()),
+                Some(m.heartbeat_evals.to_string()),
+            ]);
+            rows.push(vec![
+                Some("slo_evals".into()),
+                Some(m.slo_evals.to_string()),
+            ]);
         }
 
         if let Some(ref fd) = self.cluster.failure_detector {
-            rows.push(vec![Some("fd_alive_nodes".into()), Some(fd.alive_count().to_string())]);
+            rows.push(vec![
+                Some("fd_alive_nodes".into()),
+                Some(fd.alive_count().to_string()),
+            ]);
             let dead = fd.dead_nodes();
             let dead_str = if dead.is_empty() {
                 "none".to_string()
             } else {
-                dead.iter().map(|n| n.0.to_string()).collect::<Vec<_>>().join(", ")
+                dead.iter()
+                    .map(|n| n.0.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             };
             rows.push(vec![Some("fd_dead_nodes".into()), Some(dead_str)]);
         }
@@ -1128,8 +1184,10 @@ impl QueryHandler {
                 columns,
                 vec![vec![
                     Some("(no lifecycle coordinator)".into()),
-                    Some(String::new()), Some(String::new()),
-                    Some(String::new()), Some(String::new()),
+                    Some(String::new()),
+                    Some(String::new()),
+                    Some(String::new()),
+                    Some(String::new()),
                     Some(String::new()),
                 ]],
             );
@@ -1141,31 +1199,41 @@ impl QueryHandler {
                 columns,
                 vec![vec![
                     Some("(no nodes)".into()),
-                    Some(String::new()), Some(String::new()),
-                    Some(String::new()), Some(String::new()),
+                    Some(String::new()),
+                    Some(String::new()),
+                    Some(String::new()),
+                    Some(String::new()),
                     Some(String::new()),
                 ]],
             );
         }
 
-        let rows: Vec<Vec<Option<String>>> = nodes.iter().map(|n| {
-            let hb_age = n.last_heartbeat
-                .map(|t| format!("{:.1}s", t.elapsed().as_secs_f64()))
-                .unwrap_or_else(|| "never".into());
-            let shards_str = if n.assigned_shards.is_empty() {
-                "none".into()
-            } else {
-                n.assigned_shards.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(",")
-            };
-            vec![
-                Some(n.node_id.0.to_string()),
-                Some(n.address.clone()),
-                Some(format!("{:?}", n.state)),
-                Some(n.config_version.to_string()),
-                Some(shards_str),
-                Some(hb_age),
-            ]
-        }).collect();
+        let rows: Vec<Vec<Option<String>>> = nodes
+            .iter()
+            .map(|n| {
+                let hb_age = n
+                    .last_heartbeat
+                    .map(|t| format!("{:.1}s", t.elapsed().as_secs_f64()))
+                    .unwrap_or_else(|| "never".into());
+                let shards_str = if n.assigned_shards.is_empty() {
+                    "none".into()
+                } else {
+                    n.assigned_shards
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                };
+                vec![
+                    Some(n.node_id.0.to_string()),
+                    Some(n.address.clone()),
+                    Some(format!("{:?}", n.state)),
+                    Some(n.config_version.to_string()),
+                    Some(shards_str),
+                    Some(hb_age),
+                ]
+            })
+            .collect();
 
         self.single_row_result(columns, rows)
     }
@@ -1765,15 +1833,30 @@ impl QueryHandler {
         let mut rows = vec![
             vec![
                 Some("tracked_shards".into()),
-                Some(self.observability.hotspot_detector.tracked_shards().to_string()),
+                Some(
+                    self.observability
+                        .hotspot_detector
+                        .tracked_shards()
+                        .to_string(),
+                ),
             ],
             vec![
                 Some("tracked_tables".into()),
-                Some(self.observability.hotspot_detector.tracked_tables().to_string()),
+                Some(
+                    self.observability
+                        .hotspot_detector
+                        .tracked_tables()
+                        .to_string(),
+                ),
             ],
             vec![
                 Some("total_alerts".into()),
-                Some(self.observability.hotspot_detector.total_alerts().to_string()),
+                Some(
+                    self.observability
+                        .hotspot_detector
+                        .total_alerts()
+                        .to_string(),
+                ),
             ],
         ];
         for alert in &alerts {
@@ -2120,9 +2203,7 @@ impl QueryHandler {
                 {
                     Ok(()) => Some(self.single_row_result(
                         vec![("result", 25, -1)],
-                        vec![vec![Some(format!(
-                            "Scale-in initiated for node {node_id}"
-                        ))]],
+                        vec![vec![Some(format!("Scale-in initiated for node {node_id}"))]],
                     )),
                     Err(e) => Some(self.single_row_result(
                         vec![("result", 25, -1)],
@@ -2167,10 +2248,12 @@ impl QueryHandler {
                 );
                 let plan = match self.cluster.dist_engine.as_ref() {
                     Some(de) => de.rebalance_plan(&planner),
-                    None => return Some(self.single_row_result(
-                        vec![("result", 25, -1)],
-                        vec![vec![Some("ERROR: distributed engine unavailable".into())]],
-                    )),
+                    None => {
+                        return Some(self.single_row_result(
+                            vec![("result", 25, -1)],
+                            vec![vec![Some("ERROR: distributed engine unavailable".into())]],
+                        ))
+                    }
                 };
                 let num_tasks = plan.tasks.len();
                 let total_rows = plan.total_rows_to_move();
@@ -2189,14 +2272,15 @@ impl QueryHandler {
                 self.cluster.admin.log_rebalance_start(num_tasks);
 
                 let start = std::time::Instant::now();
-                let (completed, failed, rows_migrated) =
-                    match self.cluster.dist_engine.as_ref() {
-                        Some(de) => de.rebalance_execute(&plan),
-                        None => return Some(self.single_row_result(
+                let (completed, failed, rows_migrated) = match self.cluster.dist_engine.as_ref() {
+                    Some(de) => de.rebalance_execute(&plan),
+                    None => {
+                        return Some(self.single_row_result(
                             vec![("result", 25, -1)],
                             vec![vec![Some("ERROR: distributed engine unavailable".into())]],
-                        )),
-                    };
+                        ))
+                    }
+                };
 
                 self.cluster.admin.log_rebalance_complete(
                     completed,
@@ -2809,7 +2893,10 @@ impl QueryHandler {
             vec![Some("enabled".into()), Some(status.enabled.to_string())],
             vec![Some("algorithm".into()), Some(status.algorithm)],
             vec![Some("dek_count".into()), Some(status.dek_count.to_string())],
-            vec![Some("wal_encrypted".into()), Some(status.wal_encrypted.to_string())],
+            vec![
+                Some("wal_encrypted".into()),
+                Some(status.wal_encrypted.to_string()),
+            ],
         ];
         self.single_row_result(vec![("metric", 25, -1), ("value", 25, -1)], rows)
     }
@@ -2818,18 +2905,99 @@ impl QueryHandler {
         let deks = self.storage.tde_list_deks();
         if deks.is_empty() {
             return self.single_row_result(
-                vec![("id", 20, -1), ("label", 25, -1), ("active", 16, -1), ("created_at_ms", 20, -1)],
-                vec![vec![Some("(no DEKs)".into()), Some("".into()), Some("".into()), Some("".into())]],
+                vec![
+                    ("id", 20, -1),
+                    ("label", 25, -1),
+                    ("active", 16, -1),
+                    ("created_at_ms", 20, -1),
+                ],
+                vec![vec![
+                    Some("(no DEKs)".into()),
+                    Some("".into()),
+                    Some("".into()),
+                    Some("".into()),
+                ]],
             );
         }
-        let rows: Vec<Vec<Option<String>>> = deks.iter().map(|d| vec![
-            Some(d.id.to_string()),
-            Some(d.label.clone()),
-            Some(d.active.to_string()),
-            Some(d.created_at_ms.to_string()),
-        ]).collect();
+        let rows: Vec<Vec<Option<String>>> = deks
+            .iter()
+            .map(|d| {
+                vec![
+                    Some(d.id.to_string()),
+                    Some(d.label.clone()),
+                    Some(d.active.to_string()),
+                    Some(d.created_at_ms.to_string()),
+                ]
+            })
+            .collect();
         self.single_row_result(
-            vec![("id", 20, -1), ("label", 25, -1), ("active", 16, -1), ("created_at_ms", 20, -1)],
+            vec![
+                ("id", 20, -1),
+                ("label", 25, -1),
+                ("active", 16, -1),
+                ("created_at_ms", 20, -1),
+            ],
+            rows,
+        )
+    }
+
+    fn show_falcon_cdc_status(&self) -> Vec<BackendMessage> {
+        let s = self.storage.cdc_status();
+        let rows = vec![
+            vec![Some("enabled".into()), Some(s.enabled.to_string())],
+            vec![Some("slot_count".into()), Some(s.slot_count.to_string())],
+            vec![Some("buffer_len".into()), Some(s.buffer_len.to_string())],
+            vec![
+                Some("events_emitted".into()),
+                Some(s.events_emitted.to_string()),
+            ],
+            vec![
+                Some("events_evicted".into()),
+                Some(s.events_evicted.to_string()),
+            ],
+            vec![Some("bridge_lsn".into()), Some(s.bridge_lsn.to_string())],
+            vec![
+                Some("inflight_txns".into()),
+                Some(s.inflight_txns.to_string()),
+            ],
+        ];
+        self.single_row_result(vec![("metric", 25, -1), ("value", 25, -1)], rows)
+    }
+
+    fn show_falcon_cdc_slots(&self) -> Vec<BackendMessage> {
+        let slots = self.storage.cdc_list_slots();
+        if slots.is_empty() {
+            return self.single_row_result(
+                vec![
+                    ("slot_id", 20, -1),
+                    ("slot_name", 25, -1),
+                    ("active", 16, -1),
+                    ("confirmed_flush_lsn", 20, -1),
+                    ("restart_lsn", 20, -1),
+                ],
+                vec![vec![Some("(no slots)".into()), None, None, None, None]],
+            );
+        }
+        let rows: Vec<Vec<Option<String>>> = slots
+            .iter()
+            .map(|s| {
+                vec![
+                    Some(s.id.0.to_string()),
+                    Some(s.name.clone()),
+                    Some(if s.active { "t" } else { "f" }.into()),
+                    Some(s.confirmed_flush_lsn.0.to_string()),
+                    Some(s.restart_lsn.0.to_string()),
+                ]
+            })
+            .collect();
+        self.single_row_result(
+            vec![
+                ("slot_id", 20, -1),
+                ("slot_name", 25, -1),
+                ("active", 16, -1),
+                ("confirmed_flush_lsn", 20, -1),
+                ("restart_lsn", 20, -1),
+            ],
             rows,
         )
     }

@@ -17,8 +17,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 
-use crate::structured_lsn::StructuredLsn;
 use crate::csn::Csn;
+use crate::structured_lsn::StructuredLsn;
 use crate::unified_data_plane::*;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -107,14 +107,26 @@ impl ColdBlock {
 
     /// Deserialize from bytes.
     pub fn from_bytes(data: &[u8]) -> Option<(Self, usize)> {
-        if data.len() < 9 { return None; } // min: 4+1+0+4
+        if data.len() < 9 {
+            return None;
+        } // min: 4+1+0+4
         let payload_len = u32::from_le_bytes(data[0..4].try_into().ok()?) as usize;
         let encoding = ColdBlockEncoding::from_u8(data[4])?;
         let total = 4 + 1 + payload_len + 4;
-        if data.len() < total { return None; }
+        if data.len() < total {
+            return None;
+        }
         let payload = data[5..5 + payload_len].to_vec();
         let crc = u32::from_le_bytes(data[5 + payload_len..total].try_into().ok()?);
-        Some((Self { payload_len: payload_len as u32, encoding, payload, crc }, total))
+        Some((
+            Self {
+                payload_len: payload_len as u32,
+                encoding,
+                payload,
+                crc,
+            },
+            total,
+        ))
     }
 
     /// Create a new block with raw encoding.
@@ -185,13 +197,19 @@ impl CompactorMetrics {
     pub fn compression_ratio(&self) -> f64 {
         let orig = self.bytes_original.load(Ordering::Relaxed) as f64;
         let comp = self.bytes_compressed.load(Ordering::Relaxed) as f64;
-        if comp > 0.0 { orig / comp } else { 1.0 }
+        if comp > 0.0 {
+            orig / comp
+        } else {
+            1.0
+        }
     }
 }
 
 impl ColdCompactor {
     pub fn new() -> Self {
-        Self { metrics: CompactorMetrics::default() }
+        Self {
+            metrics: CompactorMetrics::default(),
+        }
     }
 
     /// Compact rows into a new cold segment.
@@ -211,7 +229,8 @@ impl ColdCompactor {
         replaced_segments: &[u64],
     ) -> Result<CompactionResult, SegmentStoreError> {
         let seg_id = store.next_segment_id();
-        let hdr = UnifiedSegmentHeader::new_cold(seg_id, 256 * 1024 * 1024, codec, table_id, shard_id);
+        let hdr =
+            UnifiedSegmentHeader::new_cold(seg_id, 256 * 1024 * 1024, codec, table_id, shard_id);
         store.create_segment(hdr)?;
 
         let mut original_bytes = 0u64;
@@ -238,13 +257,27 @@ impl ColdCompactor {
             block_count,
         };
 
-        self.metrics.compactions_total.fetch_add(1, Ordering::Relaxed);
-        self.metrics.segments_created.fetch_add(1, Ordering::Relaxed);
-        self.metrics.segments_replaced.fetch_add(replaced_segments.len() as u64, Ordering::Relaxed);
-        self.metrics.bytes_original.fetch_add(original_bytes, Ordering::Relaxed);
-        self.metrics.bytes_compressed.fetch_add(compressed_bytes, Ordering::Relaxed);
-        self.metrics.rows_compacted.fetch_add(rows.len() as u64, Ordering::Relaxed);
-        self.metrics.blocks_written.fetch_add(u64::from(block_count), Ordering::Relaxed);
+        self.metrics
+            .compactions_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .segments_created
+            .fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .segments_replaced
+            .fetch_add(replaced_segments.len() as u64, Ordering::Relaxed);
+        self.metrics
+            .bytes_original
+            .fetch_add(original_bytes, Ordering::Relaxed);
+        self.metrics
+            .bytes_compressed
+            .fetch_add(compressed_bytes, Ordering::Relaxed);
+        self.metrics
+            .rows_compacted
+            .fetch_add(rows.len() as u64, Ordering::Relaxed);
+        self.metrics
+            .blocks_written
+            .fetch_add(u64::from(block_count), Ordering::Relaxed);
 
         Ok(result)
     }
@@ -278,7 +311,9 @@ impl ColdCompactor {
 }
 
 impl Default for ColdCompactor {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -354,7 +389,8 @@ impl ManifestSsot {
 
     /// Compute min durable LSN across all followers.
     pub fn min_follower_lsn(&self) -> StructuredLsn {
-        self.follower_durable_lsn.values()
+        self.follower_durable_lsn
+            .values()
             .copied()
             .min()
             .unwrap_or(StructuredLsn::ZERO)
@@ -394,7 +430,11 @@ impl ManifestSsot {
             snapshot_segments: snap_count,
             sealed_segments: sealed,
             total_bytes,
-            snapshot_id: self.manifest.snapshot_cutpoint.as_ref().map(|c| c.snapshot_id),
+            snapshot_id: self
+                .manifest
+                .snapshot_cutpoint
+                .as_ref()
+                .map(|c| c.snapshot_id),
             snapshot_pinned_count: self.snapshot_pinned.len() as u64,
             catchup_anchor_count: self.catchup_anchors.len() as u64,
             gc_safe_epoch: self.gc_safe_epoch,
@@ -403,7 +443,9 @@ impl ManifestSsot {
 }
 
 impl Default for ManifestSsot {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Status derived entirely from the manifest.
@@ -525,7 +567,9 @@ impl BootstrapCoordinator {
     pub fn receive_manifest(&mut self, manifest: Manifest) {
         self.manifest = Some(manifest);
         self.phase = BootstrapPhase::ComputeMissing;
-        self.metrics.bootstrap_started.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .bootstrap_started
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Phase 2: Compute which segments are missing locally.
@@ -550,8 +594,12 @@ impl BootstrapCoordinator {
         self.missing_segments.retain(|&id| id != segment_id);
         self.segments_fetched += 1;
         self.bytes_fetched += bytes;
-        self.metrics.segments_streamed.fetch_add(1, Ordering::Relaxed);
-        self.metrics.bytes_streamed.fetch_add(bytes, Ordering::Relaxed);
+        self.metrics
+            .segments_streamed
+            .fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .bytes_streamed
+            .fetch_add(bytes, Ordering::Relaxed);
         if self.missing_segments.is_empty() {
             self.phase = BootstrapPhase::VerifySegments;
         }
@@ -567,7 +615,9 @@ impl BootstrapCoordinator {
         if let Some(ref manifest) = self.manifest {
             let mut all_ok = true;
             for seg_id in manifest.all_segment_ids() {
-                if matches!(store.verify_segment(seg_id), Ok(true)) { self.segments_verified += 1; } else {
+                if matches!(store.verify_segment(seg_id), Ok(true)) {
+                    self.segments_verified += 1;
+                } else {
                     all_ok = false;
                     self.failed_segments.push(seg_id);
                 }
@@ -576,7 +626,10 @@ impl BootstrapCoordinator {
                 self.phase = BootstrapPhase::ReplayTail;
             } else {
                 self.phase = BootstrapPhase::Failed;
-                self.error = Some(format!("{} segments failed verification", self.failed_segments.len()));
+                self.error = Some(format!(
+                    "{} segments failed verification",
+                    self.failed_segments.len()
+                ));
             }
             all_ok
         } else {
@@ -587,19 +640,25 @@ impl BootstrapCoordinator {
     /// Phase 5: After WAL tail replay, mark ready.
     pub fn mark_ready(&mut self) {
         self.phase = BootstrapPhase::Ready;
-        self.metrics.bootstrap_completed.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .bootstrap_completed
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Mark as failed with reason.
     pub fn mark_failed(&mut self, reason: &str) {
         self.phase = BootstrapPhase::Failed;
         self.error = Some(reason.to_owned());
-        self.metrics.bootstrap_failed.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .bootstrap_failed
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Progress as a fraction [0.0, 1.0].
     pub fn progress(&self) -> f64 {
-        if self.total_segments_needed == 0 { return 1.0; }
+        if self.total_segments_needed == 0 {
+            return 1.0;
+        }
         self.segments_fetched as f64 / self.total_segments_needed as f64
     }
 
@@ -645,7 +704,9 @@ impl UnifiedReplicationCoordinator {
 
     /// Leader: handle a follower handshake. Returns what the follower needs.
     pub fn handle_handshake(&self, handshake: &ReplicationHandshake) -> ReplicationResponse {
-        self.metrics.handshakes_total.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .handshakes_total
+            .fetch_add(1, Ordering::Relaxed);
         compute_replication_plan(&self.ssot.manifest, handshake)
     }
 
@@ -653,7 +714,9 @@ impl UnifiedReplicationCoordinator {
     pub fn stream_segment(&self, segment_id: u64) -> Result<Vec<u8>, SegmentStoreError> {
         let body = self.store.get_segment_body(segment_id)?;
         self.metrics.segments_sent.fetch_add(1, Ordering::Relaxed);
-        self.metrics.bytes_sent.fetch_add(body.len() as u64, Ordering::Relaxed);
+        self.metrics
+            .bytes_sent
+            .fetch_add(body.len() as u64, Ordering::Relaxed);
         Ok(body)
     }
 
@@ -667,16 +730,27 @@ impl UnifiedReplicationCoordinator {
         self.store.create_segment(header)?;
         self.store.write_chunk_at(seg_id, 0, body)?;
         self.store.seal_segment(seg_id)?;
-        self.metrics.segments_received.fetch_add(1, Ordering::Relaxed);
-        self.metrics.bytes_received.fetch_add(body.len() as u64, Ordering::Relaxed);
+        self.metrics
+            .segments_received
+            .fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .bytes_received
+            .fetch_add(body.len() as u64, Ordering::Relaxed);
         Ok(seg_id)
     }
 
     /// Create a snapshot from current manifest state.
     /// Snapshot IS a manifest — just a frozen one.
-    pub fn create_snapshot(&mut self, snapshot_id: u64, cut_lsn: StructuredLsn, cut_csn: Csn) -> SnapshotDefinition {
+    pub fn create_snapshot(
+        &mut self,
+        snapshot_id: u64,
+        cut_lsn: StructuredLsn,
+        cut_csn: Csn,
+    ) -> SnapshotDefinition {
         let snap = SnapshotDefinition::create(snapshot_id, &self.ssot.manifest, cut_lsn, cut_csn);
-        self.ssot.manifest.set_snapshot_cutpoint(snap.cutpoint.clone());
+        self.ssot
+            .manifest
+            .set_snapshot_cutpoint(snap.cutpoint.clone());
         self.ssot.pin_snapshot(snapshot_id, &snap.all_segments());
         snap
     }
@@ -827,7 +901,10 @@ impl TwoPhaseGc {
             }
 
             // Check catch-up anchor
-            let is_anchor = ssot.catchup_anchors.values().any(|s| s.contains(&entry.segment_id));
+            let is_anchor = ssot
+                .catchup_anchors
+                .values()
+                .any(|s| s.contains(&entry.segment_id));
             if is_anchor {
                 deferred.push(GcPlanEntry {
                     segment_id: entry.segment_id,
@@ -849,7 +926,9 @@ impl TwoPhaseGc {
                 SegmentKind::Wal => {
                     if let LogicalRange::Wal { end_lsn, .. } = &entry.logical_range {
                         *end_lsn <= min_durable
-                    } else { false }
+                    } else {
+                        false
+                    }
                 }
                 SegmentKind::Cold => {
                     // Cold segments eligible if they've been replaced
@@ -949,12 +1028,16 @@ impl TwoPhaseGc {
     /// Rollback: cancel a pending GC plan (no-op since sweep hasn't run).
     /// This is `falconctl gc rollback`.
     pub fn rollback(&self) {
-        self.metrics.plans_rolled_back.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .plans_rolled_back
+            .fetch_add(1, Ordering::Relaxed);
     }
 }
 
 impl Default for TwoPhaseGc {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1066,9 +1149,9 @@ mod tests {
 
     #[test]
     fn test_cold_block_multiple() {
-        let blocks: Vec<ColdBlock> = (0..10).map(|i| {
-            ColdBlock::new_raw(&vec![i as u8; 100])
-        }).collect();
+        let blocks: Vec<ColdBlock> = (0..10)
+            .map(|i| ColdBlock::new_raw(&vec![i as u8; 100]))
+            .collect();
 
         let mut buf = Vec::new();
         for b in &blocks {
@@ -1094,7 +1177,9 @@ mod tests {
         let compactor = ColdCompactor::new();
 
         let rows: Vec<Vec<u8>> = (0..5).map(|i| vec![i as u8; 200]).collect();
-        let result = compactor.compact(&store, 1, 0, &rows, SegmentCodec::None, &[]).unwrap();
+        let result = compactor
+            .compact(&store, 1, 0, &rows, SegmentCodec::None, &[])
+            .unwrap();
 
         assert!(store.exists(result.new_segment_id));
         assert!(store.is_sealed(result.new_segment_id).unwrap());
@@ -1110,11 +1195,22 @@ mod tests {
 
         // First compaction
         let rows1: Vec<Vec<u8>> = vec![vec![1u8; 100]; 3];
-        let r1 = compactor.compact(&store, 1, 0, &rows1, SegmentCodec::None, &[]).unwrap();
+        let r1 = compactor
+            .compact(&store, 1, 0, &rows1, SegmentCodec::None, &[])
+            .unwrap();
 
         // Second compaction replacing the first
         let rows2: Vec<Vec<u8>> = vec![vec![2u8; 100]; 5];
-        let r2 = compactor.compact(&store, 1, 0, &rows2, SegmentCodec::None, &[r1.new_segment_id]).unwrap();
+        let r2 = compactor
+            .compact(
+                &store,
+                1,
+                0,
+                &rows2,
+                SegmentCodec::None,
+                &[r1.new_segment_id],
+            )
+            .unwrap();
 
         assert_eq!(r2.replaced_segment_ids, vec![r1.new_segment_id]);
         assert_ne!(r1.new_segment_id, r2.new_segment_id);
@@ -1131,11 +1227,16 @@ mod tests {
         let mut manifest = Manifest::new();
 
         let rows: Vec<Vec<u8>> = vec![vec![1u8; 50]; 10];
-        let result = compactor.compact(&store, 1, 0, &rows, SegmentCodec::Lz4, &[]).unwrap();
+        let result = compactor
+            .compact(&store, 1, 0, &rows, SegmentCodec::Lz4, &[])
+            .unwrap();
         compactor.apply_to_manifest(&mut manifest, &result, 1, 0, SegmentCodec::Lz4);
 
         assert!(manifest.segments.contains_key(&result.new_segment_id));
-        assert_eq!(manifest.segments[&result.new_segment_id].kind, SegmentKind::Cold);
+        assert_eq!(
+            manifest.segments[&result.new_segment_id].kind,
+            SegmentKind::Cold
+        );
         assert!(manifest.segments[&result.new_segment_id].sealed);
     }
 
@@ -1145,9 +1246,14 @@ mod tests {
         let compactor = ColdCompactor::new();
 
         let rows: Vec<Vec<u8>> = vec![vec![0u8; 100]; 3];
-        compactor.compact(&store, 1, 0, &rows, SegmentCodec::None, &[]).unwrap();
+        compactor
+            .compact(&store, 1, 0, &rows, SegmentCodec::None, &[])
+            .unwrap();
 
-        assert_eq!(compactor.metrics.compactions_total.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            compactor.metrics.compactions_total.load(Ordering::Relaxed),
+            1
+        );
         assert_eq!(compactor.metrics.rows_compacted.load(Ordering::Relaxed), 3);
         assert_eq!(compactor.metrics.blocks_written.load(Ordering::Relaxed), 3);
     }
@@ -1158,15 +1264,27 @@ mod tests {
     fn test_manifest_ssot_derivability() {
         let mut ssot = ManifestSsot::new();
         ssot.manifest.add_segment(ManifestEntry {
-            segment_id: 0, kind: SegmentKind::Wal, size_bytes: 1000,
+            segment_id: 0,
+            kind: SegmentKind::Wal,
+            size_bytes: 1000,
             codec: SegmentCodec::None,
-            logical_range: LogicalRange::Wal { start_lsn: StructuredLsn::ZERO, end_lsn: StructuredLsn::ZERO },
+            logical_range: LogicalRange::Wal {
+                start_lsn: StructuredLsn::ZERO,
+                end_lsn: StructuredLsn::ZERO,
+            },
             sealed: true,
         });
         ssot.manifest.add_segment(ManifestEntry {
-            segment_id: 100, kind: SegmentKind::Cold, size_bytes: 2000,
+            segment_id: 100,
+            kind: SegmentKind::Cold,
+            size_bytes: 2000,
             codec: SegmentCodec::Lz4,
-            logical_range: LogicalRange::Cold { table_id: 1, shard_id: 0, min_key: vec![], max_key: vec![] },
+            logical_range: LogicalRange::Cold {
+                table_id: 1,
+                shard_id: 0,
+                min_key: vec![],
+                max_key: vec![],
+            },
             sealed: true,
         });
 
@@ -1181,9 +1299,14 @@ mod tests {
     fn test_manifest_ssot_reachability() {
         let mut ssot = ManifestSsot::new();
         ssot.manifest.add_segment(ManifestEntry {
-            segment_id: 0, kind: SegmentKind::Wal, size_bytes: 100,
+            segment_id: 0,
+            kind: SegmentKind::Wal,
+            size_bytes: 100,
             codec: SegmentCodec::None,
-            logical_range: LogicalRange::Wal { start_lsn: StructuredLsn::ZERO, end_lsn: StructuredLsn::ZERO },
+            logical_range: LogicalRange::Wal {
+                start_lsn: StructuredLsn::ZERO,
+                end_lsn: StructuredLsn::ZERO,
+            },
             sealed: true,
         });
 
@@ -1233,10 +1356,13 @@ mod tests {
             leader_store.write_chunk(i, &vec![0xAB; 200]).unwrap();
             leader_store.seal_segment(i).unwrap();
             leader_manifest.add_segment(ManifestEntry {
-                segment_id: i, kind: SegmentKind::Wal, size_bytes: 200,
+                segment_id: i,
+                kind: SegmentKind::Wal,
+                size_bytes: 200,
                 codec: SegmentCodec::None,
                 logical_range: LogicalRange::Wal {
-                    start_lsn: StructuredLsn::new(i, 0), end_lsn: StructuredLsn::new(i, 200),
+                    start_lsn: StructuredLsn::new(i, 0),
+                    end_lsn: StructuredLsn::new(i, 200),
                 },
                 sealed: true,
             });
@@ -1291,10 +1417,13 @@ mod tests {
         let mut manifest = Manifest::new();
         for i in 0..3u64 {
             manifest.add_segment(ManifestEntry {
-                segment_id: i, kind: SegmentKind::Wal, size_bytes: 100,
+                segment_id: i,
+                kind: SegmentKind::Wal,
+                size_bytes: 100,
                 codec: SegmentCodec::None,
                 logical_range: LogicalRange::Wal {
-                    start_lsn: StructuredLsn::ZERO, end_lsn: StructuredLsn::ZERO,
+                    start_lsn: StructuredLsn::ZERO,
+                    end_lsn: StructuredLsn::ZERO,
                 },
                 sealed: true,
             });
@@ -1327,17 +1456,21 @@ mod tests {
             store.write_chunk(i, &vec![0u8; 100]).unwrap();
             store.seal_segment(i).unwrap();
             coord.ssot.manifest.add_segment(ManifestEntry {
-                segment_id: i, kind: SegmentKind::Wal, size_bytes: 100,
+                segment_id: i,
+                kind: SegmentKind::Wal,
+                size_bytes: 100,
                 codec: SegmentCodec::None,
                 logical_range: LogicalRange::Wal {
-                    start_lsn: StructuredLsn::new(i, 0), end_lsn: StructuredLsn::new(i, 100),
+                    start_lsn: StructuredLsn::new(i, 0),
+                    end_lsn: StructuredLsn::new(i, 100),
                 },
                 sealed: true,
             });
         }
 
         let handshake = ReplicationHandshake {
-            node_id: 2, last_manifest_epoch: 0,
+            node_id: 2,
+            last_manifest_epoch: 0,
             have_segments: [0, 1].iter().copied().collect(),
             protocol_version: 1,
         };
@@ -1369,10 +1502,13 @@ mod tests {
 
         for i in 0..3u64 {
             coord.ssot.manifest.add_segment(ManifestEntry {
-                segment_id: i, kind: SegmentKind::Wal, size_bytes: 100,
+                segment_id: i,
+                kind: SegmentKind::Wal,
+                size_bytes: 100,
                 codec: SegmentCodec::None,
                 logical_range: LogicalRange::Wal {
-                    start_lsn: StructuredLsn::new(i, 0), end_lsn: StructuredLsn::new(i, 100),
+                    start_lsn: StructuredLsn::new(i, 0),
+                    end_lsn: StructuredLsn::new(i, 100),
                 },
                 sealed: true,
             });
@@ -1400,7 +1536,9 @@ mod tests {
         // Add WAL segments 0-4
         for i in 0..5u64 {
             ssot.manifest.add_segment(ManifestEntry {
-                segment_id: i, kind: SegmentKind::Wal, size_bytes: 100,
+                segment_id: i,
+                kind: SegmentKind::Wal,
+                size_bytes: 100,
                 codec: SegmentCodec::None,
                 logical_range: LogicalRange::Wal {
                     start_lsn: StructuredLsn::new(i, 0),
@@ -1424,7 +1562,9 @@ mod tests {
 
         for i in 0..3u64 {
             ssot.manifest.add_segment(ManifestEntry {
-                segment_id: i, kind: SegmentKind::Wal, size_bytes: 100,
+                segment_id: i,
+                kind: SegmentKind::Wal,
+                size_bytes: 100,
                 codec: SegmentCodec::None,
                 logical_range: LogicalRange::Wal {
                     start_lsn: StructuredLsn::new(i, 0),
@@ -1437,7 +1577,9 @@ mod tests {
         gc.mark_streaming(1);
         let plan = gc.mark(&ssot);
 
-        let streaming_ids: Vec<u64> = plan.deferred.iter()
+        let streaming_ids: Vec<u64> = plan
+            .deferred
+            .iter()
             .filter(|e| e.reason == GcEligibilityReason::DeferredStreaming)
             .map(|e| e.segment_id)
             .collect();
@@ -1454,19 +1596,25 @@ mod tests {
         gc.update_min_durable_lsn(StructuredLsn::new(10, 0));
 
         ssot.manifest.add_segment(ManifestEntry {
-            segment_id: 0, kind: SegmentKind::Wal, size_bytes: 100,
+            segment_id: 0,
+            kind: SegmentKind::Wal,
+            size_bytes: 100,
             codec: SegmentCodec::None,
             logical_range: LogicalRange::Wal {
-                start_lsn: StructuredLsn::new(0, 0), end_lsn: StructuredLsn::new(1, 0),
+                start_lsn: StructuredLsn::new(0, 0),
+                end_lsn: StructuredLsn::new(1, 0),
             },
             sealed: true,
         });
 
         ssot.pin_snapshot(1, &[0]);
         let plan = gc.mark(&ssot);
-        let pinned: Vec<u64> = plan.deferred.iter()
+        let pinned: Vec<u64> = plan
+            .deferred
+            .iter()
             .filter(|e| e.reason == GcEligibilityReason::DeferredSnapshotPin)
-            .map(|e| e.segment_id).collect();
+            .map(|e| e.segment_id)
+            .collect();
         assert!(pinned.contains(&0));
     }
 
@@ -1483,7 +1631,9 @@ mod tests {
             store.write_chunk(i, &vec![0u8; 200]).unwrap();
             store.seal_segment(i).unwrap();
             ssot.manifest.add_segment(ManifestEntry {
-                segment_id: i, kind: SegmentKind::Wal, size_bytes: 200,
+                segment_id: i,
+                kind: SegmentKind::Wal,
+                size_bytes: 200,
                 codec: SegmentCodec::None,
                 logical_range: LogicalRange::Wal {
                     start_lsn: StructuredLsn::new(i, 0),
@@ -1514,10 +1664,13 @@ mod tests {
         gc.update_min_durable_lsn(StructuredLsn::new(5, 0));
 
         ssot.manifest.add_segment(ManifestEntry {
-            segment_id: 0, kind: SegmentKind::Wal, size_bytes: 100,
+            segment_id: 0,
+            kind: SegmentKind::Wal,
+            size_bytes: 100,
             codec: SegmentCodec::None,
             logical_range: LogicalRange::Wal {
-                start_lsn: StructuredLsn::new(0, 0), end_lsn: StructuredLsn::new(1, 0),
+                start_lsn: StructuredLsn::new(0, 0),
+                end_lsn: StructuredLsn::new(1, 0),
             },
             sealed: true,
         });
@@ -1526,10 +1679,13 @@ mod tests {
 
         // Advance manifest epoch (simulating concurrent activity)
         ssot.manifest.add_segment(ManifestEntry {
-            segment_id: 99, kind: SegmentKind::Wal, size_bytes: 50,
+            segment_id: 99,
+            kind: SegmentKind::Wal,
+            size_bytes: 50,
             codec: SegmentCodec::None,
             logical_range: LogicalRange::Wal {
-                start_lsn: StructuredLsn::ZERO, end_lsn: StructuredLsn::ZERO,
+                start_lsn: StructuredLsn::ZERO,
+                end_lsn: StructuredLsn::ZERO,
             },
             sealed: true,
         });
@@ -1553,17 +1709,27 @@ mod tests {
     fn test_admin_status() {
         let mut ssot = ManifestSsot::new();
         ssot.manifest.add_segment(ManifestEntry {
-            segment_id: 0, kind: SegmentKind::Wal, size_bytes: 1000,
+            segment_id: 0,
+            kind: SegmentKind::Wal,
+            size_bytes: 1000,
             codec: SegmentCodec::None,
             logical_range: LogicalRange::Wal {
-                start_lsn: StructuredLsn::ZERO, end_lsn: StructuredLsn::ZERO,
+                start_lsn: StructuredLsn::ZERO,
+                end_lsn: StructuredLsn::ZERO,
             },
             sealed: true,
         });
         ssot.manifest.add_segment(ManifestEntry {
-            segment_id: 100, kind: SegmentKind::Cold, size_bytes: 5000,
+            segment_id: 100,
+            kind: SegmentKind::Cold,
+            size_bytes: 5000,
             codec: SegmentCodec::Lz4,
-            logical_range: LogicalRange::Cold { table_id: 1, shard_id: 0, min_key: vec![], max_key: vec![] },
+            logical_range: LogicalRange::Cold {
+                table_id: 1,
+                shard_id: 0,
+                min_key: vec![],
+                max_key: vec![],
+            },
             sealed: true,
         });
 
@@ -1592,7 +1758,10 @@ mod tests {
     #[test]
     fn test_display_bootstrap_phase() {
         assert_eq!(format!("{}", BootstrapPhase::Init), "INIT");
-        assert_eq!(format!("{}", BootstrapPhase::StreamSegments), "STREAM_SEGMENTS");
+        assert_eq!(
+            format!("{}", BootstrapPhase::StreamSegments),
+            "STREAM_SEGMENTS"
+        );
         assert_eq!(format!("{}", BootstrapPhase::Ready), "READY");
     }
 }

@@ -61,7 +61,8 @@ async fn automation_status(client: &DbClient, mode: OutputMode) -> Result<String
 
         if fb_rows.is_empty() {
             return Ok("Automation engine status unavailable. \
-                 (falcon.automation_status view not present)\n".to_owned());
+                 (falcon.automation_status view not present)\n"
+                .to_owned());
         }
         return Ok(format_rows_as_string(&fb_rows, mode, "Automation Status"));
     }
@@ -82,7 +83,8 @@ async fn automation_events(client: &DbClient, mode: OutputMode) -> Result<String
 
     if rows.is_empty() {
         return Ok("No automation events recorded. \
-             (falcon.automation_events view not present or no events yet)\n".to_owned());
+             (falcon.automation_events view not present or no events yet)\n"
+            .to_owned());
     }
 
     Ok(format_rows_as_string(&rows, mode, "Automation Events"))
@@ -93,11 +95,13 @@ async fn automation_pause(client: &DbClient, _mode: OutputMode) -> Result<String
     match client.query_simple(sql).await {
         Ok(_) => Ok(
             "Automation engine paused. No policies will fire until resumed.\n\
-             Use \\automation resume to re-enable.\n".to_owned(),
+             Use \\automation resume to re-enable.\n"
+                .to_owned(),
         ),
         Err(_) => Ok("Automation engine pause requested. \
              (falcon.admin_pause_automation() not available — \
-             update may be required on the server)\n".to_owned()),
+             update may be required on the server)\n"
+            .to_owned()),
     }
 }
 
@@ -107,7 +111,8 @@ async fn automation_resume(client: &DbClient, _mode: OutputMode) -> Result<Strin
         Ok(_) => Ok("Automation engine resumed. Enabled policies will be evaluated.\n".to_owned()),
         Err(_) => Ok("Automation engine resume requested. \
              (falcon.admin_resume_automation() not available — \
-             update may be required on the server)\n".to_owned()),
+             update may be required on the server)\n"
+            .to_owned()),
     }
 }
 

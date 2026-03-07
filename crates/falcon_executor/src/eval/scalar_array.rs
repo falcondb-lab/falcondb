@@ -178,7 +178,13 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
                 .map(|part| {
                     null_str.as_ref().map_or_else(
                         || Datum::Text(part.to_owned()),
-                        |ns| if part == ns { Datum::Null } else { Datum::Text(part.to_owned()) },
+                        |ns| {
+                            if part == ns {
+                                Datum::Null
+                            } else {
+                                Datum::Text(part.to_owned())
+                            }
+                        },
                     )
                 })
                 .collect();

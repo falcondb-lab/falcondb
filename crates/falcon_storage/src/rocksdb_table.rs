@@ -17,7 +17,7 @@ use falcon_common::datum::OwnedRow;
 use falcon_common::error::StorageError;
 use falcon_common::schema::TableSchema;
 use falcon_common::types::{TableId, Timestamp, TxnId};
-use rocksdb::{BlockBasedOptions, DB, Options, WriteBatch, WriteOptions};
+use rocksdb::{BlockBasedOptions, Options, WriteBatch, WriteOptions, DB};
 
 use crate::lsm::mvcc_encoding::{MvccStatus, MvccValue};
 use crate::memtable::{encode_pk, PrimaryKey};
@@ -26,7 +26,10 @@ const PK_LOCK_SHARDS: usize = 256;
 
 fn pk_shard(pk: &[u8]) -> usize {
     let mut h: u64 = 0xcbf29ce484222325;
-    for &b in pk { h ^= b as u64; h = h.wrapping_mul(0x100000001b3); }
+    for &b in pk {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
     h as usize & (PK_LOCK_SHARDS - 1)
 }
 
@@ -55,17 +58,23 @@ fn encode_chain(versions: &[MvccValue]) -> Vec<u8> {
 fn decode_chain(raw: &[u8]) -> Vec<MvccValue> {
     if raw.len() < 2 {
         // Backwards compat: old u8 format
-        if raw.len() == 1 { return vec![]; }
+        if raw.len() == 1 {
+            return vec![];
+        }
         return vec![];
     }
     let count = u16::from_le_bytes([raw[0], raw[1]]) as usize;
     let mut pos = 2;
     let mut out = Vec::with_capacity(count);
     for _ in 0..count {
-        if pos + 4 > raw.len() { break; }
-        let len = u32::from_le_bytes([raw[pos], raw[pos+1], raw[pos+2], raw[pos+3]]) as usize;
+        if pos + 4 > raw.len() {
+            break;
+        }
+        let len = u32::from_le_bytes([raw[pos], raw[pos + 1], raw[pos + 2], raw[pos + 3]]) as usize;
         pos += 4;
-        if pos + len > raw.len() { break; }
+        if pos + len > raw.len() {
+            break;
+        }
         if let Some(mv) = MvccValue::decode(&raw[pos..pos + len]) {
             out.push(mv);
         }
@@ -82,7 +91,9 @@ fn first_visible(chain: &[MvccValue], txn_id: TxnId, read_ts: Timestamp) -> Opti
             MvccStatus::Aborted => false,
         };
         if vis {
-            if mv.is_tombstone { return None; }
+            if mv.is_tombstone {
+                return None;
+            }
             return bincode::deserialize(&mv.data).ok();
         }
     }
@@ -90,7 +101,10 @@ fn first_visible(chain: &[MvccValue], txn_id: TxnId, read_ts: Timestamp) -> Opti
 }
 
 fn rdb_err(e: rocksdb::Error) -> StorageError {
-    StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+    StorageError::Io(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        e.to_string(),
+    ))
 }
 
 impl RocksDbTable {
@@ -116,10 +130,18 @@ impl RocksDbTable {
         write_opts.disable_wal(true);
 
         let db = DB::open(&opts, path).map_err(|e| {
-            StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+            StorageError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))
         })?;
         let pk_locks: Vec<Mutex<()>> = (0..PK_LOCK_SHARDS).map(|_| Mutex::new(())).collect();
-        Ok(Self { schema, db: Arc::new(db), write_opts, pk_locks: pk_locks.into_boxed_slice() })
+        Ok(Self {
+            schema,
+            db: Arc::new(db),
+            write_opts,
+            pk_locks: pk_locks.into_boxed_slice(),
+        })
     }
 
     pub fn table_id(&self) -> TableId {
@@ -172,7 +194,12 @@ impl RocksDbTable {
         Ok(pk)
     }
 
-    pub fn update(&self, pk: &PrimaryKey, new_row: &OwnedRow, txn_id: TxnId) -> Result<(), StorageError> {
+    pub fn update(
+        &self,
+        pk: &PrimaryKey,
+        new_row: &OwnedRow,
+        txn_id: TxnId,
+    ) -> Result<(), StorageError> {
         let mv = MvccValue::prepared(txn_id, Self::ser(new_row)?);
         let _guard = self.pk_locks[pk_shard(pk)].lock().unwrap();
         let mut chain = self.read_chain(pk)?;
@@ -215,7 +242,12 @@ impl RocksDbTable {
 
     /// Commit all PKs belonging to this table in a single atomic WriteBatch.
     /// Caller supplies only the PKs that belong to this table.
-    pub fn commit_batch(&self, pks: &[PrimaryKey], txn_id: TxnId, commit_ts: Timestamp) -> Result<(), StorageError> {
+    pub fn commit_batch(
+        &self,
+        pks: &[PrimaryKey],
+        txn_id: TxnId,
+        commit_ts: Timestamp,
+    ) -> Result<(), StorageError> {
         let mut batch = WriteBatch::default();
         for pk in pks {
             let _guard = self.pk_locks[pk_shard(pk)].lock().unwrap();
@@ -229,10 +261,13 @@ impl RocksDbTable {
                     break;
                 }
             }
-            if !changed { continue; }
+            if !changed {
+                continue;
+            }
 
             // GC only aborted versions; keep all committed versions for MVCC visibility.
-            let keep: Vec<MvccValue> = chain.into_iter()
+            let keep: Vec<MvccValue> = chain
+                .into_iter()
                 .filter(|mv| mv.status != MvccStatus::Aborted)
                 .collect();
             if keep.is_empty() {
@@ -252,7 +287,9 @@ impl RocksDbTable {
             let mut chain = self.read_chain(pk)?;
             let before = chain.len();
             chain.retain(|mv| !(mv.txn_id == txn_id && mv.status == MvccStatus::Prepared));
-            if chain.len() == before { continue; }
+            if chain.len() == before {
+                continue;
+            }
             if chain.is_empty() {
                 batch.delete(pk);
             } else {
@@ -263,7 +300,12 @@ impl RocksDbTable {
     }
 
     /// Single-key commit (used by TableHandle::commit_key).
-    pub fn commit(&self, pk: &PrimaryKey, txn_id: TxnId, commit_ts: Timestamp) -> Result<(), StorageError> {
+    pub fn commit(
+        &self,
+        pk: &PrimaryKey,
+        txn_id: TxnId,
+        commit_ts: Timestamp,
+    ) -> Result<(), StorageError> {
         self.commit_batch(std::slice::from_ref(pk), txn_id, commit_ts)
     }
 
@@ -274,7 +316,12 @@ impl RocksDbTable {
 
     // ── read path ──
 
-    pub fn get(&self, pk: &PrimaryKey, txn_id: TxnId, read_ts: Timestamp) -> Result<Option<OwnedRow>, StorageError> {
+    pub fn get(
+        &self,
+        pk: &PrimaryKey,
+        txn_id: TxnId,
+        read_ts: Timestamp,
+    ) -> Result<Option<OwnedRow>, StorageError> {
         let chain = self.read_chain(pk)?;
         Ok(first_visible(&chain, txn_id, read_ts))
     }
@@ -304,7 +351,10 @@ impl RocksDbTable {
     {
         let iter = self.db.iterator(rocksdb::IteratorMode::Start);
         for item in iter {
-            let (key, value) = match item { Ok(kv) => kv, Err(_) => continue };
+            let (key, value) = match item {
+                Ok(kv) => kv,
+                Err(_) => continue,
+            };
             let chain = decode_chain(&value);
             if let Some(row) = first_visible(&chain, txn_id, read_ts) {
                 f(key.to_vec(), row);
@@ -326,13 +376,20 @@ impl Drop for RocksDbTable {
 }
 
 impl crate::storage_trait::StorageTable for RocksDbTable {
-    fn schema(&self) -> &falcon_common::schema::TableSchema { &self.schema }
+    fn schema(&self) -> &falcon_common::schema::TableSchema {
+        &self.schema
+    }
 
     fn insert(&self, row: &OwnedRow, txn_id: TxnId) -> Result<PrimaryKey, StorageError> {
         self.insert(row, txn_id)
     }
 
-    fn update(&self, pk: &PrimaryKey, new_row: &OwnedRow, txn_id: TxnId) -> Result<(), StorageError> {
+    fn update(
+        &self,
+        pk: &PrimaryKey,
+        new_row: &OwnedRow,
+        txn_id: TxnId,
+    ) -> Result<(), StorageError> {
         self.update(pk, new_row, txn_id)
     }
 
@@ -340,7 +397,12 @@ impl crate::storage_trait::StorageTable for RocksDbTable {
         self.delete(pk, txn_id)
     }
 
-    fn get(&self, pk: &PrimaryKey, txn_id: TxnId, read_ts: Timestamp) -> Result<Option<OwnedRow>, StorageError> {
+    fn get(
+        &self,
+        pk: &PrimaryKey,
+        txn_id: TxnId,
+        read_ts: Timestamp,
+    ) -> Result<Option<OwnedRow>, StorageError> {
         self.get(pk, txn_id, read_ts)
     }
 
@@ -348,7 +410,12 @@ impl crate::storage_trait::StorageTable for RocksDbTable {
         self.scan(txn_id, read_ts)
     }
 
-    fn commit_key(&self, pk: &PrimaryKey, txn_id: TxnId, commit_ts: Timestamp) -> Result<(), StorageError> {
+    fn commit_key(
+        &self,
+        pk: &PrimaryKey,
+        txn_id: TxnId,
+        commit_ts: Timestamp,
+    ) -> Result<(), StorageError> {
         self.commit(pk, txn_id, commit_ts)
     }
 
@@ -356,7 +423,12 @@ impl crate::storage_trait::StorageTable for RocksDbTable {
         let _ = self.abort(pk, txn_id);
     }
 
-    fn commit_batch(&self, pks: &[PrimaryKey], txn_id: TxnId, commit_ts: Timestamp) -> Result<(), StorageError> {
+    fn commit_batch(
+        &self,
+        pks: &[PrimaryKey],
+        txn_id: TxnId,
+        commit_ts: Timestamp,
+    ) -> Result<(), StorageError> {
         RocksDbTable::commit_batch(self, pks, txn_id, commit_ts)
     }
     fn abort_batch(&self, pks: &[PrimaryKey], txn_id: TxnId) {

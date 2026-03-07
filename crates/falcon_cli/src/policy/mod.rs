@@ -273,7 +273,8 @@ async fn policy_audit(client: &DbClient, policy_id: &str, mode: OutputMode) -> R
          FROM falcon.audit_log \
          WHERE command_issued LIKE '%policy%' \
          ORDER BY event_time DESC \
-         LIMIT 50".to_owned()
+         LIMIT 50"
+            .to_owned()
     } else {
         format!(
             "SELECT event_time, policy_id, trigger_type, condition_snapshot, \

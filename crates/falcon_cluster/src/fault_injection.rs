@@ -603,9 +603,7 @@ impl ChaosRunner {
                         .partition_nodes(group_a.clone(), group_b.clone());
                     std::thread::sleep(Duration::from_millis(*duration_ms));
                     self.injector.heal_partition();
-                    format!(
-                        "NetworkPartition(a={group_a:?}, b={group_b:?}, {duration_ms}ms)"
-                    )
+                    format!("NetworkPartition(a={group_a:?}, b={group_b:?}, {duration_ms}ms)")
                 }
                 ChaosScenario::CpuIoJitter {
                     config,

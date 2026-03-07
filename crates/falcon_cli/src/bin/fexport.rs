@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
-use bytes::Bytes;
 use clap::Parser;
-use falcon_cli::{client::DbClient, csv::CsvOptions, export::{ExportCmd, run_export}};
-use futures::TryStreamExt;
-use std::io::{BufWriter, Write};
+use falcon_cli::{
+    client::DbClient,
+    csv::CsvOptions,
+    export::{run_export, ExportCmd},
+};
 
 /// FalconDB high-performance export tool.
 ///
@@ -15,7 +16,11 @@ use std::io::{BufWriter, Write};
 ///
 ///   fexport ... --query orders --file orders.csv --delimiter '|'
 #[derive(Parser, Debug)]
-#[command(name = "fexport", version, about = "Export FalconDB table/query to CSV")]
+#[command(
+    name = "fexport",
+    version,
+    about = "Export FalconDB table/query to CSV"
+)]
 struct Cli {
     #[arg(short = 'H', long, default_value = "127.0.0.1", env = "FALCON_HOST")]
     host: String,
@@ -117,7 +122,9 @@ fn parse_single_char(s: &str, name: &str) -> Result<char> {
         other => other,
     };
     let mut chars = s.chars();
-    let c = chars.next().ok_or_else(|| anyhow::anyhow!("{name} must not be empty"))?;
+    let c = chars
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("{name} must not be empty"))?;
     if chars.next().is_some() {
         anyhow::bail!("{name} must be a single character, got {:?}", s);
     }

@@ -217,11 +217,7 @@ impl FailoverTxnCoordinator {
     /// 3. Sets the phase to `Draining`.
     ///
     /// The caller is responsible for draining/aborting the returned txn IDs.
-    pub fn begin_failover_drain(
-        &self,
-        new_epoch: u64,
-        active_txn_ids: Vec<TxnId>,
-    ) -> Vec<TxnId> {
+    pub fn begin_failover_drain(&self, new_epoch: u64, active_txn_ids: Vec<TxnId>) -> Vec<TxnId> {
         // Block new writes immediately
         self.writes_blocked.store(true, Ordering::SeqCst);
         self.failover_epoch.store(new_epoch, Ordering::SeqCst);
@@ -650,11 +646,7 @@ impl FailoverDamper {
     ///
     /// Returns `Ok(())` if the failover is allowed.
     /// Returns `Err` with a reason if the failover is suppressed.
-    pub fn check_failover_allowed(
-        &self,
-        epoch: u64,
-        shard_id: u64,
-    ) -> Result<(), String> {
+    pub fn check_failover_allowed(&self, epoch: u64, shard_id: u64) -> Result<(), String> {
         self.total_attempts.fetch_add(1, Ordering::Relaxed);
         let now = Instant::now();
 
@@ -1027,12 +1019,7 @@ mod tests {
         coord.begin_failover_drain(2, vec![TxnId(1)]);
         assert!(coord.are_writes_blocked());
 
-        coord.record_affected_txn(
-            TxnId(1),
-            false,
-            FailoverTxnResolution::Aborted,
-            100,
-        );
+        coord.record_affected_txn(TxnId(1), false, FailoverTxnResolution::Aborted, 100);
         coord.complete_failover_drain();
 
         assert!(!coord.are_writes_blocked());
@@ -1395,7 +1382,12 @@ mod tests {
         assert!(coord.are_writes_blocked());
 
         // Simulate: TxnId(10) completes before drain
-        coord.record_affected_txn(TxnId(10), false, FailoverTxnResolution::CompletedBeforeDrain, 50);
+        coord.record_affected_txn(
+            TxnId(10),
+            false,
+            FailoverTxnResolution::CompletedBeforeDrain,
+            50,
+        );
 
         // Simulate: TxnId(11) is aborted
         coord.record_affected_txn(TxnId(11), false, FailoverTxnResolution::Aborted, 100);

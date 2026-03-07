@@ -198,11 +198,7 @@ mod inner {
         if let Ok(entries) = std::fs::read_dir(node_base) {
             let mut node_dirs: Vec<_> = entries
                 .flatten()
-                .filter(|e| {
-                    e.file_name()
-                        .to_string_lossy()
-                        .starts_with("node")
-                })
+                .filter(|e| e.file_name().to_string_lossy().starts_with("node"))
                 .collect();
             node_dirs.sort_by_key(|e| e.file_name());
 
@@ -375,7 +371,8 @@ mod inner {
                     "Kernel {} is older than recommended (5.10+). io_uring may not be available.",
                     kernel.release
                 ),
-                recommendation: "Upgrade to Ubuntu 24.04 LTS (kernel 6.x) for best performance.".into(),
+                recommendation: "Upgrade to Ubuntu 24.04 LTS (kernel 6.x) for best performance."
+                    .into(),
             });
         }
 
@@ -387,7 +384,8 @@ mod inner {
                     severity: AdvisorySeverity::Info,
                     message: "ext4 detected — good choice for WAL workloads.".into(),
                     recommendation: "Ensure data=ordered (default) journaling mode. \
-                        Use fdatasync for WAL sync (avoids metadata overhead of full fsync).".into(),
+                        Use fdatasync for WAL sync (avoids metadata overhead of full fsync)."
+                        .into(),
                 });
             }
             FilesystemType::Xfs => {
@@ -396,7 +394,8 @@ mod inner {
                     severity: AdvisorySeverity::Info,
                     message: "XFS detected — good choice for WAL workloads.".into(),
                     recommendation: "XFS uses extent-based allocation with O(1) append. \
-                        fdatasync is recommended (XFS metadata journaling is separate).".into(),
+                        fdatasync is recommended (XFS metadata journaling is separate)."
+                        .into(),
                 });
             }
             FilesystemType::Btrfs => {
@@ -404,10 +403,12 @@ mod inner {
                     id: "LPD-2c".into(),
                     severity: AdvisorySeverity::Warn,
                     message: "Btrfs detected — CoW semantics may cause write amplification \
-                        on WAL-heavy workloads.".into(),
+                        on WAL-heavy workloads."
+                        .into(),
                     recommendation: "Disable CoW for WAL directory: \
                         chattr +C /path/to/falcon_data. \
-                        Or use ext4/xfs for the WAL partition.".into(),
+                        Or use ext4/xfs for the WAL partition."
+                        .into(),
                 });
             }
             FilesystemType::Tmpfs => {
@@ -415,7 +416,8 @@ mod inner {
                     id: "LPD-2d".into(),
                     severity: AdvisorySeverity::Critical,
                     message: "tmpfs detected — data is stored in RAM only. \
-                        fsync is a no-op. The DCG is void.".into(),
+                        fsync is a no-op. The DCG is void."
+                        .into(),
                     recommendation: "Use a real filesystem (ext4/xfs) on NVMe/SSD for WAL.".into(),
                 });
             }
@@ -427,9 +429,11 @@ mod inner {
             advisories.push(Advisory {
                 id: "LPD-3".into(),
                 severity: AdvisorySeverity::Warn,
-                message: "HDD detected — fsync latency will be 5-15ms (vs 0.1-0.5ms for NVMe).".into(),
+                message: "HDD detected — fsync latency will be 5-15ms (vs 0.1-0.5ms for NVMe)."
+                    .into(),
                 recommendation: "Use NVMe or SSD for the WAL directory. \
-                    HDD is acceptable for snapshot/backup storage only.".into(),
+                    HDD is acceptable for snapshot/backup storage only."
+                    .into(),
             });
         }
 
@@ -444,7 +448,8 @@ mod inner {
                 ),
                 recommendation: "Pin FalconDB to a single NUMA node: \
                     numactl --cpunodebind=0 --membind=0 ./falcon. \
-                    Or configure shard-to-node affinity in falcon.toml.".into(),
+                    Or configure shard-to-node affinity in falcon.toml."
+                    .into(),
             });
         }
 
@@ -454,11 +459,13 @@ mod inner {
                 id: "LPD-5".into(),
                 severity: AdvisorySeverity::Warn,
                 message: "Transparent Huge Pages (THP) is set to 'always'. \
-                    This can cause latency spikes due to compaction.".into(),
+                    This can cause latency spikes due to compaction."
+                    .into(),
                 recommendation: "Set THP to 'madvise': \
                     echo madvise > /sys/kernel/mm/transparent_hugepage/enabled. \
                     FalconDB does not currently use madvise(MADV_HUGEPAGE), \
-                    so 'madvise' effectively disables THP for FalconDB.".into(),
+                    so 'madvise' effectively disables THP for FalconDB."
+                    .into(),
             });
         }
 
@@ -469,7 +476,8 @@ mod inner {
                 severity: AdvisorySeverity::Warn,
                 message: "CFQ I/O scheduler detected — suboptimal for NVMe/SSD.".into(),
                 recommendation: "Use 'none' (noop) or 'mq-deadline' for NVMe: \
-                    echo none > /sys/block/nvme0n1/queue/scheduler".into(),
+                    echo none > /sys/block/nvme0n1/queue/scheduler"
+                    .into(),
             });
         }
 

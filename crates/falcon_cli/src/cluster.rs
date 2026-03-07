@@ -88,7 +88,8 @@ async fn cluster_leaders(client: &DbClient, mode: OutputMode) -> Result<String> 
 
     if rows.is_empty() {
         return Ok("No shard leader information available. \
-                   (falcon.shard_leaders view not present)\n".to_owned());
+                   (falcon.shard_leaders view not present)\n"
+            .to_owned());
     }
 
     Ok(format_rows_as_string(&rows, mode, "Shard Leaders"))
@@ -105,7 +106,8 @@ async fn cluster_shards(client: &DbClient, mode: OutputMode) -> Result<String> {
 
     if rows.is_empty() {
         return Ok("No shard information available. \
-                   (falcon.shards view not present)\n".to_owned());
+                   (falcon.shards view not present)\n"
+            .to_owned());
     }
 
     Ok(format_rows_as_string(&rows, mode, "Cluster Shards"))

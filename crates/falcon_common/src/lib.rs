@@ -1,7 +1,5 @@
 pub mod bg_supervisor;
-pub mod globals;
 pub mod cloud;
-pub mod hlc;
 pub mod compat;
 pub mod config;
 pub mod consistency;
@@ -10,6 +8,8 @@ pub mod datum;
 pub mod diag_bundle;
 pub mod edition;
 pub mod error;
+pub mod globals;
+pub mod hlc;
 pub mod kernel;
 pub mod lock_metrics;
 pub mod request_context;

@@ -116,7 +116,11 @@ impl SlotPersistence {
         std::fs::rename(&tmp_path, &self.path)
             .map_err(|e| format!("Failed to rename slot state file: {e}"))?;
 
-        tracing::debug!("CDC slot state persisted ({} slots, LSN={})", slots.len(), current_lsn);
+        tracing::debug!(
+            "CDC slot state persisted ({} slots, LSN={})",
+            slots.len(),
+            current_lsn
+        );
         Ok(())
     }
 
@@ -127,8 +131,8 @@ impl SlotPersistence {
         }
         let data = std::fs::read_to_string(&self.path)
             .map_err(|e| format!("Failed to read slot state: {e}"))?;
-        let state: PersistedSlotState = serde_json::from_str(&data)
-            .map_err(|e| format!("Failed to parse slot state: {e}"))?;
+        let state: PersistedSlotState =
+            serde_json::from_str(&data).map_err(|e| format!("Failed to parse slot state: {e}"))?;
         tracing::info!(
             "CDC slot state loaded ({} slots, snapshot_lsn={})",
             state.slots.len(),
@@ -151,7 +155,8 @@ impl SlotPersistence {
                     // Advance the slot to its persisted position
                     let _ = cdc.advance_slot(slot_id, CdcLsn(ps.confirmed_flush_lsn));
                     if let Some(ref filter) = ps.table_filter {
-                        let table_ids: Vec<TableId> = filter.iter().map(|&id| TableId(id)).collect();
+                        let table_ids: Vec<TableId> =
+                            filter.iter().map(|&id| TableId(id)).collect();
                         let _ = cdc.set_table_filter(slot_id, table_ids);
                     }
                     recovered += 1;
@@ -220,7 +225,10 @@ impl CachedTableResolver {
         for schema in catalog.list_tables() {
             self.names.insert(schema.id, schema.name.clone());
         }
-        tracing::debug!("CachedTableResolver: loaded {} table names", self.names.len());
+        tracing::debug!(
+            "CachedTableResolver: loaded {} table names",
+            self.names.len()
+        );
     }
 
     /// Register or update a table name mapping.
@@ -276,10 +284,7 @@ pub struct WalCdcBridge {
 
 impl WalCdcBridge {
     /// Create a new WAL-CDC bridge.
-    pub fn new(
-        cdc: Arc<CdcManager>,
-        resolver: Arc<dyn TableNameResolver>,
-    ) -> Self {
+    pub fn new(cdc: Arc<CdcManager>, resolver: Arc<dyn TableNameResolver>) -> Self {
         Self {
             cdc,
             resolver,
@@ -324,15 +329,28 @@ impl WalCdcBridge {
         match record {
             WalRecord::BeginTxn { txn_id } => {
                 let mut inflight = self.inflight.lock();
-                inflight.entry(*txn_id).or_insert_with(Vec::new);
+                inflight.entry(*txn_id).or_default();
                 // Buffer a BEGIN marker
-                let event = self.make_event(wal_lsn, *txn_id, ChangeOp::Begin, None, None, None, None, None);
+                let event = self.make_event(
+                    wal_lsn,
+                    *txn_id,
+                    ChangeOp::Begin,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                );
                 if let Some(buf) = inflight.get_mut(txn_id) {
                     buf.push(event);
                 }
             }
 
-            WalRecord::Insert { txn_id, table_id, row } => {
+            WalRecord::Insert {
+                txn_id,
+                table_id,
+                row,
+            } => {
                 let table_name = self.resolver.resolve(*table_id);
                 let event = self.make_event(
                     wal_lsn,
@@ -347,7 +365,11 @@ impl WalCdcBridge {
                 self.buffer_event(*txn_id, event);
             }
 
-            WalRecord::BatchInsert { txn_id, table_id, rows } => {
+            WalRecord::BatchInsert {
+                txn_id,
+                table_id,
+                rows,
+            } => {
                 let table_name = self.resolver.resolve(*table_id);
                 for row in rows {
                     let event = self.make_event(
@@ -364,7 +386,12 @@ impl WalCdcBridge {
                 }
             }
 
-            WalRecord::Update { txn_id, table_id, new_row, .. } => {
+            WalRecord::Update {
+                txn_id,
+                table_id,
+                new_row,
+                ..
+            } => {
                 let table_name = self.resolver.resolve(*table_id);
                 let event = self.make_event(
                     wal_lsn,
@@ -379,7 +406,9 @@ impl WalCdcBridge {
                 self.buffer_event(*txn_id, event);
             }
 
-            WalRecord::Delete { txn_id, table_id, .. } => {
+            WalRecord::Delete {
+                txn_id, table_id, ..
+            } => {
                 let table_name = self.resolver.resolve(*table_id);
                 let event = self.make_event(
                     wal_lsn,
@@ -427,11 +456,19 @@ impl WalCdcBridge {
                 let ddl_text = format!("ALTER TABLE {table_name} {op:?}");
                 self.emit_ddl_immediate(wal_lsn, &ddl_text);
             }
-            WalRecord::CreateIndex { index_name, table_name, .. } => {
+            WalRecord::CreateIndex {
+                index_name,
+                table_name,
+                ..
+            } => {
                 let ddl_text = format!("CREATE INDEX {index_name} ON {table_name}");
                 self.emit_ddl_immediate(wal_lsn, &ddl_text);
             }
-            WalRecord::DropIndex { index_name, table_name, .. } => {
+            WalRecord::DropIndex {
+                index_name,
+                table_name,
+                ..
+            } => {
                 let ddl_text = format!("DROP INDEX {index_name} ON {table_name}");
                 self.emit_ddl_immediate(wal_lsn, &ddl_text);
             }
@@ -506,7 +543,7 @@ impl WalCdcBridge {
     /// Buffer an event for a transaction (will be emitted on commit).
     fn buffer_event(&self, txn_id: TxnId, event: ChangeEvent) {
         let mut inflight = self.inflight.lock();
-        inflight.entry(txn_id).or_insert_with(Vec::new).push(event);
+        inflight.entry(txn_id).or_default().push(event);
     }
 
     /// Construct a ChangeEvent with the real WAL LSN.
@@ -543,7 +580,7 @@ impl WalCdcBridge {
             return;
         }
         let count = self.persist_counter.fetch_add(1, Ordering::Relaxed);
-        if count % self.persist_interval == 0 {
+        if count.is_multiple_of(self.persist_interval) {
             if let Some(ref p) = self.persistence {
                 let lsn = self.latest_lsn.load(Ordering::Relaxed);
                 if let Err(e) = p.save(&self.cdc, lsn) {
@@ -606,15 +643,21 @@ mod tests {
 
         // Simulate: BEGIN → INSERT → COMMIT
         bridge.on_wal_record(1, &WalRecord::BeginTxn { txn_id: TxnId(1) });
-        bridge.on_wal_record(2, &WalRecord::Insert {
-            txn_id: TxnId(1),
-            table_id: TableId(1),
-            row: OwnedRow::new(vec![Datum::Int64(42), Datum::Text("alice".into())]),
-        });
-        bridge.on_wal_record(3, &WalRecord::CommitTxn {
-            txn_id: TxnId(1),
-            commit_ts: Timestamp(100),
-        });
+        bridge.on_wal_record(
+            2,
+            &WalRecord::Insert {
+                txn_id: TxnId(1),
+                table_id: TableId(1),
+                row: OwnedRow::new(vec![Datum::Int64(42), Datum::Text("alice".into())]),
+            },
+        );
+        bridge.on_wal_record(
+            3,
+            &WalRecord::CommitTxn {
+                txn_id: TxnId(1),
+                commit_ts: Timestamp(100),
+            },
+        );
 
         let changes = cdc.poll_changes(slot_id, 100);
         // Should see: BEGIN, INSERT, COMMIT
@@ -632,11 +675,14 @@ mod tests {
         let slot_id = cdc.create_slot("test").unwrap();
 
         bridge.on_wal_record(1, &WalRecord::BeginTxn { txn_id: TxnId(1) });
-        bridge.on_wal_record(2, &WalRecord::Insert {
-            txn_id: TxnId(1),
-            table_id: TableId(1),
-            row: OwnedRow::new(vec![Datum::Int64(1)]),
-        });
+        bridge.on_wal_record(
+            2,
+            &WalRecord::Insert {
+                txn_id: TxnId(1),
+                table_id: TableId(1),
+                row: OwnedRow::new(vec![Datum::Int64(1)]),
+            },
+        );
         bridge.on_wal_record(3, &WalRecord::AbortTxn { txn_id: TxnId(1) });
 
         let changes = cdc.poll_changes(slot_id, 100);
@@ -648,9 +694,12 @@ mod tests {
         let (cdc, bridge) = make_bridge();
         let slot_id = cdc.create_slot("test").unwrap();
 
-        bridge.on_wal_record(1, &WalRecord::DropTable {
-            table_name: "old_table".into(),
-        });
+        bridge.on_wal_record(
+            1,
+            &WalRecord::DropTable {
+                table_name: "old_table".into(),
+            },
+        );
 
         let changes = cdc.poll_changes(slot_id, 100);
         assert_eq!(changes.len(), 1);
@@ -664,24 +713,33 @@ mod tests {
         let slot_id = cdc.create_slot("test").unwrap();
 
         bridge.on_wal_record(1, &WalRecord::BeginTxn { txn_id: TxnId(1) });
-        bridge.on_wal_record(2, &WalRecord::BatchInsert {
-            txn_id: TxnId(1),
-            table_id: TableId(1),
-            rows: vec![
-                OwnedRow::new(vec![Datum::Int64(1)]),
-                OwnedRow::new(vec![Datum::Int64(2)]),
-                OwnedRow::new(vec![Datum::Int64(3)]),
-            ],
-        });
-        bridge.on_wal_record(3, &WalRecord::CommitTxn {
-            txn_id: TxnId(1),
-            commit_ts: Timestamp(100),
-        });
+        bridge.on_wal_record(
+            2,
+            &WalRecord::BatchInsert {
+                txn_id: TxnId(1),
+                table_id: TableId(1),
+                rows: vec![
+                    OwnedRow::new(vec![Datum::Int64(1)]),
+                    OwnedRow::new(vec![Datum::Int64(2)]),
+                    OwnedRow::new(vec![Datum::Int64(3)]),
+                ],
+            },
+        );
+        bridge.on_wal_record(
+            3,
+            &WalRecord::CommitTxn {
+                txn_id: TxnId(1),
+                commit_ts: Timestamp(100),
+            },
+        );
 
         let changes = cdc.poll_changes(slot_id, 100);
         // BEGIN + 3 INSERTs + COMMIT = 5
         assert_eq!(changes.len(), 5);
-        assert_eq!(changes.iter().filter(|c| c.op == ChangeOp::Insert).count(), 3);
+        assert_eq!(
+            changes.iter().filter(|c| c.op == ChangeOp::Insert).count(),
+            3
+        );
     }
 
     #[test]
@@ -692,21 +750,30 @@ mod tests {
         // Interleave two transactions
         bridge.on_wal_record(1, &WalRecord::BeginTxn { txn_id: TxnId(1) });
         bridge.on_wal_record(2, &WalRecord::BeginTxn { txn_id: TxnId(2) });
-        bridge.on_wal_record(3, &WalRecord::Insert {
-            txn_id: TxnId(1),
-            table_id: TableId(1),
-            row: OwnedRow::new(vec![Datum::Int64(1)]),
-        });
-        bridge.on_wal_record(4, &WalRecord::Insert {
-            txn_id: TxnId(2),
-            table_id: TableId(2),
-            row: OwnedRow::new(vec![Datum::Int64(2)]),
-        });
+        bridge.on_wal_record(
+            3,
+            &WalRecord::Insert {
+                txn_id: TxnId(1),
+                table_id: TableId(1),
+                row: OwnedRow::new(vec![Datum::Int64(1)]),
+            },
+        );
+        bridge.on_wal_record(
+            4,
+            &WalRecord::Insert {
+                txn_id: TxnId(2),
+                table_id: TableId(2),
+                row: OwnedRow::new(vec![Datum::Int64(2)]),
+            },
+        );
         // Commit txn 2 first
-        bridge.on_wal_record(5, &WalRecord::CommitTxn {
-            txn_id: TxnId(2),
-            commit_ts: Timestamp(200),
-        });
+        bridge.on_wal_record(
+            5,
+            &WalRecord::CommitTxn {
+                txn_id: TxnId(2),
+                commit_ts: Timestamp(200),
+            },
+        );
         // Abort txn 1
         bridge.on_wal_record(6, &WalRecord::AbortTxn { txn_id: TxnId(1) });
 
@@ -728,10 +795,13 @@ mod tests {
         bridge.on_wal_record(2, &WalRecord::BeginTxn { txn_id: TxnId(2) });
         assert_eq!(bridge.inflight_txn_count(), 2);
 
-        bridge.on_wal_record(3, &WalRecord::CommitTxn {
-            txn_id: TxnId(1),
-            commit_ts: Timestamp(100),
-        });
+        bridge.on_wal_record(
+            3,
+            &WalRecord::CommitTxn {
+                txn_id: TxnId(1),
+                commit_ts: Timestamp(100),
+            },
+        );
         assert_eq!(bridge.inflight_txn_count(), 1);
     }
 
@@ -742,10 +812,13 @@ mod tests {
         assert_eq!(bridge.latest_lsn(), 0);
         bridge.on_wal_record(42, &WalRecord::BeginTxn { txn_id: TxnId(1) });
         assert_eq!(bridge.latest_lsn(), 42);
-        bridge.on_wal_record(99, &WalRecord::CommitTxn {
-            txn_id: TxnId(1),
-            commit_ts: Timestamp(100),
-        });
+        bridge.on_wal_record(
+            99,
+            &WalRecord::CommitTxn {
+                txn_id: TxnId(1),
+                commit_ts: Timestamp(100),
+            },
+        );
         assert_eq!(bridge.latest_lsn(), 99);
     }
 
@@ -781,15 +854,21 @@ mod tests {
         let bridge = WalCdcBridge::new(cdc, resolver);
 
         bridge.on_wal_record(1, &WalRecord::BeginTxn { txn_id: TxnId(1) });
-        bridge.on_wal_record(2, &WalRecord::Insert {
-            txn_id: TxnId(1),
-            table_id: TableId(1),
-            row: OwnedRow::new(vec![Datum::Int64(1)]),
-        });
-        bridge.on_wal_record(3, &WalRecord::CommitTxn {
-            txn_id: TxnId(1),
-            commit_ts: Timestamp(100),
-        });
+        bridge.on_wal_record(
+            2,
+            &WalRecord::Insert {
+                txn_id: TxnId(1),
+                table_id: TableId(1),
+                row: OwnedRow::new(vec![Datum::Int64(1)]),
+            },
+        );
+        bridge.on_wal_record(
+            3,
+            &WalRecord::CommitTxn {
+                txn_id: TxnId(1),
+                commit_ts: Timestamp(100),
+            },
+        );
 
         // Records are counted but no events are generated
         assert_eq!(bridge.records_processed.load(Ordering::Relaxed), 0);
@@ -801,21 +880,30 @@ mod tests {
         let slot_id = cdc.create_slot("test").unwrap();
 
         bridge.on_wal_record(1, &WalRecord::BeginTxn { txn_id: TxnId(1) });
-        bridge.on_wal_record(2, &WalRecord::Update {
-            txn_id: TxnId(1),
-            table_id: TableId(1),
-            pk: vec![0, 0, 0, 1],
-            new_row: OwnedRow::new(vec![Datum::Int64(1), Datum::Text("updated".into())]),
-        });
-        bridge.on_wal_record(3, &WalRecord::Delete {
-            txn_id: TxnId(1),
-            table_id: TableId(2),
-            pk: vec![0, 0, 0, 2],
-        });
-        bridge.on_wal_record(4, &WalRecord::CommitTxn {
-            txn_id: TxnId(1),
-            commit_ts: Timestamp(100),
-        });
+        bridge.on_wal_record(
+            2,
+            &WalRecord::Update {
+                txn_id: TxnId(1),
+                table_id: TableId(1),
+                pk: vec![0, 0, 0, 1],
+                new_row: OwnedRow::new(vec![Datum::Int64(1), Datum::Text("updated".into())]),
+            },
+        );
+        bridge.on_wal_record(
+            3,
+            &WalRecord::Delete {
+                txn_id: TxnId(1),
+                table_id: TableId(2),
+                pk: vec![0, 0, 0, 2],
+            },
+        );
+        bridge.on_wal_record(
+            4,
+            &WalRecord::CommitTxn {
+                txn_id: TxnId(1),
+                commit_ts: Timestamp(100),
+            },
+        );
 
         let changes = cdc.poll_changes(slot_id, 100);
         // BEGIN + UPDATE + DELETE + COMMIT = 4

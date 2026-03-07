@@ -117,7 +117,10 @@ impl IpNet {
             IpAddr::V4(_) => 32,
             IpAddr::V6(_) => 128,
         };
-        assert!(prefix_len <= max, "prefix_len {prefix_len} exceeds max {max}");
+        assert!(
+            prefix_len <= max,
+            "prefix_len {prefix_len} exceeds max {max}"
+        );
         Self { addr, prefix_len }
     }
 
@@ -125,20 +128,29 @@ impl IpNet {
     /// A bare IP ("10.0.0.1") is treated as a /32 (IPv4) or /128 (IPv6).
     pub fn parse(s: &str) -> Result<Self, String> {
         if let Some((addr_str, prefix_str)) = s.split_once('/') {
-            let addr: IpAddr = addr_str.trim().parse()
+            let addr: IpAddr = addr_str
+                .trim()
+                .parse()
                 .map_err(|e| format!("invalid IP in CIDR '{}': {}", s, e))?;
-            let prefix_len: u8 = prefix_str.trim().parse()
+            let prefix_len: u8 = prefix_str
+                .trim()
+                .parse()
                 .map_err(|e| format!("invalid prefix length in '{}': {}", s, e))?;
             let max = match addr {
                 IpAddr::V4(_) => 32,
                 IpAddr::V6(_) => 128,
             };
             if prefix_len > max {
-                return Err(format!("prefix length {} exceeds max {} for {}", prefix_len, max, s));
+                return Err(format!(
+                    "prefix length {} exceeds max {} for {}",
+                    prefix_len, max, s
+                ));
             }
             Ok(Self { addr, prefix_len })
         } else {
-            let addr: IpAddr = s.trim().parse()
+            let addr: IpAddr = s
+                .trim()
+                .parse()
                 .map_err(|e| format!("invalid IP '{}': {}", s, e))?;
             let prefix_len = match addr {
                 IpAddr::V4(_) => 32,
@@ -155,14 +167,18 @@ impl IpNet {
                 if self.prefix_len == 0 {
                     return true;
                 }
-                let mask = u32::MAX.checked_shl(32 - self.prefix_len as u32).unwrap_or(0);
+                let mask = u32::MAX
+                    .checked_shl(32 - self.prefix_len as u32)
+                    .unwrap_or(0);
                 u32::from(net) & mask == u32::from(candidate) & mask
             }
             (IpAddr::V6(net), IpAddr::V6(candidate)) => {
                 if self.prefix_len == 0 {
                     return true;
                 }
-                let mask = u128::MAX.checked_shl(128 - self.prefix_len as u32).unwrap_or(0);
+                let mask = u128::MAX
+                    .checked_shl(128 - self.prefix_len as u32)
+                    .unwrap_or(0);
                 u128::from(net) & mask == u128::from(candidate) & mask
             }
             _ => false, // v4 vs v6 mismatch
@@ -324,7 +340,12 @@ impl SecurityManager {
         }
 
         // Slow path: CIDR range match
-        if self.ip_cidr_rules.read().iter().any(|cidr| cidr.contains(ip)) {
+        if self
+            .ip_cidr_rules
+            .read()
+            .iter()
+            .any(|cidr| cidr.contains(ip))
+        {
             return IpCheckResult::Allowed;
         }
 

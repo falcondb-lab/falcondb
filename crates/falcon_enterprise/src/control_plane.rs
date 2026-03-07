@@ -153,7 +153,9 @@ impl ControllerHAGroup {
     }
 
     pub fn record_heartbeat(&self, from_id: u64) {
-        self.metrics.heartbeats_received.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .heartbeats_received
+            .fetch_add(1, Ordering::Relaxed);
         let mut nodes = self.nodes.write();
         if let Some(n) = nodes.iter_mut().find(|n| n.id == from_id) {
             n.last_heartbeat = Some(Instant::now());
@@ -267,16 +269,19 @@ impl NodeRegistry {
             .as_secs();
         let mut nodes = self.nodes.write();
         let is_new = !nodes.contains_key(&node_id);
-        nodes.insert(node_id, DataNodeRecord {
+        nodes.insert(
             node_id,
-            address,
-            state: DataNodeState::Online,
-            capabilities,
-            registered_at: now_ts,
-            last_heartbeat: Some(Instant::now()),
-            assigned_shards: Vec::new(),
-            config_version: 0,
-        });
+            DataNodeRecord {
+                node_id,
+                address,
+                state: DataNodeState::Online,
+                capabilities,
+                registered_at: now_ts,
+                last_heartbeat: Some(Instant::now()),
+                assigned_shards: Vec::new(),
+                config_version: 0,
+            },
+        );
         if is_new {
             self.metrics.registrations.fetch_add(1, Ordering::Relaxed);
         }
@@ -301,7 +306,9 @@ impl NodeRegistry {
             record.config_version = config_version;
             if record.state == DataNodeState::Suspect {
                 record.state = DataNodeState::Online;
-                self.metrics.state_transitions.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .state_transitions
+                    .fetch_add(1, Ordering::Relaxed);
             }
             true
         } else {
@@ -335,7 +342,9 @@ impl NodeRegistry {
                 record.state = DataNodeState::Suspect;
             }
             if record.state != old {
-                self.metrics.state_transitions.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .state_transitions
+                    .fetch_add(1, Ordering::Relaxed);
                 transitions.push((record.node_id, old, record.state));
             }
         }
@@ -347,7 +356,9 @@ impl NodeRegistry {
         let mut nodes = self.nodes.write();
         if let Some(record) = nodes.get_mut(&node_id) {
             record.state = state;
-            self.metrics.state_transitions.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .state_transitions
+                .fetch_add(1, Ordering::Relaxed);
             true
         } else {
             false
@@ -387,7 +398,9 @@ impl NodeRegistry {
 
     /// Get online node IDs.
     pub fn online_nodes(&self) -> Vec<NodeId> {
-        self.nodes.read().values()
+        self.nodes
+            .read()
+            .values()
             .filter(|r| r.state == DataNodeState::Online)
             .map(|r| r.node_id)
             .collect()
@@ -400,7 +413,9 @@ impl NodeRegistry {
 
     /// Nodes needing config update (config_version < target).
     pub fn nodes_needing_config(&self, target_version: u64) -> Vec<NodeId> {
-        self.nodes.read().values()
+        self.nodes
+            .read()
+            .values()
             .filter(|r| r.config_version < target_version && r.state == DataNodeState::Online)
             .map(|r| r.node_id)
             .collect()
@@ -488,7 +503,9 @@ impl ConfigStore {
 
     /// Get entries changed since a given version.
     pub fn changes_since(&self, since_version: u64) -> Vec<ConfigEntry> {
-        self.entries.read().values()
+        self.entries
+            .read()
+            .values()
             .filter(|e| e.version > since_version)
             .cloned()
             .collect()
@@ -496,7 +513,13 @@ impl ConfigStore {
 
     /// Get config history (most recent first).
     pub fn history(&self, limit: usize) -> Vec<ConfigEntry> {
-        self.history.lock().iter().rev().take(limit).cloned().collect()
+        self.history
+            .lock()
+            .iter()
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect()
     }
 }
 
@@ -549,9 +572,18 @@ pub struct MetadataCommand {
 
 #[derive(Debug, Clone)]
 pub enum MetadataOperation {
-    Put { key: String, value: String },
-    Delete { key: String },
-    CAS { key: String, expected: Option<String>, new_value: String },
+    Put {
+        key: String,
+        value: String,
+    },
+    Delete {
+        key: String,
+    },
+    CAS {
+        key: String,
+        expected: Option<String>,
+        new_value: String,
+    },
 }
 
 impl fmt::Display for MetadataOperation {
@@ -629,7 +661,9 @@ impl ConsistentMetadataStore {
         issued_by: &str,
     ) -> MetadataWriteResult {
         if !self.is_leader.load(Ordering::SeqCst) {
-            self.metrics.not_leader_rejections.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .not_leader_rejections
+                .fetch_add(1, Ordering::Relaxed);
             return MetadataWriteResult::NotLeader { leader_hint: None };
         }
         self.metrics.writes.fetch_add(1, Ordering::Relaxed);
@@ -675,7 +709,9 @@ impl ConsistentMetadataStore {
         _issued_by: &str,
     ) -> MetadataWriteResult {
         if !self.is_leader.load(Ordering::SeqCst) {
-            self.metrics.not_leader_rejections.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .not_leader_rejections
+                .fetch_add(1, Ordering::Relaxed);
             return MetadataWriteResult::NotLeader { leader_hint: None };
         }
         self.metrics.cas_attempts.fetch_add(1, Ordering::Relaxed);
@@ -701,7 +737,9 @@ impl ConsistentMetadataStore {
         _issued_by: &str,
     ) -> MetadataWriteResult {
         if !self.is_leader.load(Ordering::SeqCst) {
-            self.metrics.not_leader_rejections.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .not_leader_rejections
+                .fetch_add(1, Ordering::Relaxed);
             return MetadataWriteResult::NotLeader { leader_hint: None };
         }
         self.metrics.writes.fetch_add(1, Ordering::Relaxed);
@@ -727,14 +765,17 @@ impl ConsistentMetadataStore {
         }
         self.metrics.reads.fetch_add(1, Ordering::Relaxed);
         let domains = self.domains.read();
-        domains.get(domain).and_then(|store| store.get(key).cloned())
+        domains
+            .get(domain)
+            .and_then(|store| store.get(key).cloned())
     }
 
     /// List all keys in a domain.
     pub fn list_keys(&self, domain: &MetadataDomain) -> Vec<String> {
         self.metrics.reads.fetch_add(1, Ordering::Relaxed);
         let domains = self.domains.read();
-        domains.get(domain)
+        domains
+            .get(domain)
             .map(|store| store.keys().cloned().collect())
             .unwrap_or_default()
     }
@@ -743,7 +784,8 @@ impl ConsistentMetadataStore {
     pub fn list_all(&self, domain: &MetadataDomain) -> Vec<(String, String)> {
         self.metrics.reads.fetch_add(1, Ordering::Relaxed);
         let domains = self.domains.read();
-        domains.get(domain)
+        domains
+            .get(domain)
             .map(|store| store.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
             .unwrap_or_default()
     }
@@ -760,7 +802,13 @@ impl ConsistentMetadataStore {
 
     /// Get recent committed log entries.
     pub fn recent_log(&self, count: usize) -> Vec<MetadataCommand> {
-        self.committed_log.lock().iter().rev().take(count).cloned().collect()
+        self.committed_log
+            .lock()
+            .iter()
+            .rev()
+            .take(count)
+            .cloned()
+            .collect()
     }
 }
 
@@ -827,8 +875,12 @@ impl ShardPlacementManager {
 
     /// Create or update a shard placement.
     pub fn set_placement(&self, placement: ShardPlacement) {
-        self.metrics.placements_updated.fetch_add(1, Ordering::Relaxed);
-        self.placements.write().insert(placement.shard_id, placement);
+        self.metrics
+            .placements_updated
+            .fetch_add(1, Ordering::Relaxed);
+        self.placements
+            .write()
+            .insert(placement.shard_id, placement);
     }
 
     /// Get placement for a shard.
@@ -869,7 +921,9 @@ impl ShardPlacementManager {
             let before = p.replicas.len();
             p.replicas.retain(|r| *r != replica);
             if p.replicas.len() < before {
-                self.metrics.replicas_removed.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .replicas_removed
+                    .fetch_add(1, Ordering::Relaxed);
             }
             true
         } else {
@@ -895,7 +949,9 @@ impl ShardPlacementManager {
 
     /// Get shards on a specific node (as leader or replica).
     pub fn shards_on_node(&self, node_id: NodeId) -> Vec<u64> {
-        self.placements.read().values()
+        self.placements
+            .read()
+            .values()
             .filter(|p| p.leader == Some(node_id) || p.replicas.contains(&node_id))
             .map(|p| p.shard_id)
             .collect()
@@ -903,7 +959,9 @@ impl ShardPlacementManager {
 
     /// Find under-replicated shards.
     pub fn under_replicated(&self) -> Vec<ShardPlacement> {
-        self.placements.read().values()
+        self.placements
+            .read()
+            .values()
             .filter(|p| p.replicas.len() < p.target_replica_count || p.leader.is_none())
             .cloned()
             .collect()
@@ -932,27 +990,42 @@ impl ShardPlacementManager {
 #[derive(Debug, Clone)]
 pub enum ControlPlaneCommand {
     DrainNode(NodeId),
-    JoinNode { node_id: NodeId, address: String },
-    UpgradeNode { node_id: NodeId, target_version: String },
-    RebalanceShard { shard_id: u64, from: NodeId, to: NodeId },
-    SetConfig { key: String, value: String },
-    ForceLeaderElection { shard_id: u64 },
+    JoinNode {
+        node_id: NodeId,
+        address: String,
+    },
+    UpgradeNode {
+        node_id: NodeId,
+        target_version: String,
+    },
+    RebalanceShard {
+        shard_id: u64,
+        from: NodeId,
+        to: NodeId,
+    },
+    SetConfig {
+        key: String,
+        value: String,
+    },
+    ForceLeaderElection {
+        shard_id: u64,
+    },
 }
 
 impl fmt::Display for ControlPlaneCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DrainNode(id) => write!(f, "DRAIN {id:?}"),
-            Self::JoinNode { node_id, address } =>
-                write!(f, "JOIN {node_id:?} at {address}"),
-            Self::UpgradeNode { node_id, target_version } =>
-                write!(f, "UPGRADE {node_id:?} to {target_version}"),
-            Self::RebalanceShard { shard_id, from, to } =>
-                write!(f, "REBALANCE shard {shard_id} {from:?}→{to:?}"),
-            Self::SetConfig { key, value } =>
-                write!(f, "CONFIG {key}={value}"),
-            Self::ForceLeaderElection { shard_id } =>
-                write!(f, "FORCE_ELECTION shard {shard_id}"),
+            Self::JoinNode { node_id, address } => write!(f, "JOIN {node_id:?} at {address}"),
+            Self::UpgradeNode {
+                node_id,
+                target_version,
+            } => write!(f, "UPGRADE {node_id:?} to {target_version}"),
+            Self::RebalanceShard { shard_id, from, to } => {
+                write!(f, "REBALANCE shard {shard_id} {from:?}→{to:?}")
+            }
+            Self::SetConfig { key, value } => write!(f, "CONFIG {key}={value}"),
+            Self::ForceLeaderElection { shard_id } => write!(f, "FORCE_ELECTION shard {shard_id}"),
         }
     }
 }
@@ -1000,7 +1073,9 @@ impl CommandDispatcher {
     pub fn submit(&self, cmd: ControlPlaneCommand) -> CommandResult {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.queue.lock().push_back((id, cmd));
-        self.metrics.commands_accepted.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .commands_accepted
+            .fetch_add(1, Ordering::Relaxed);
         CommandResult::Accepted { command_id: id }
     }
 
@@ -1012,7 +1087,9 @@ impl CommandDispatcher {
     /// Mark a command as completed.
     pub fn complete(&self, command_id: u64, success: bool, message: String) {
         self.completed.lock().push((command_id, success, message));
-        self.metrics.commands_completed.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .commands_completed
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Get pending command count.
@@ -1038,7 +1115,10 @@ mod tests {
 
     #[test]
     fn test_controller_ha_elect_self() {
-        let ha = ControllerHAGroup::new(1, vec![(1, "127.0.0.1:9000".into()), (2, "127.0.0.1:9001".into())]);
+        let ha = ControllerHAGroup::new(
+            1,
+            vec![(1, "127.0.0.1:9000".into()), (2, "127.0.0.1:9001".into())],
+        );
         let term = ha.elect_self();
         assert!(term >= 2);
         assert!(ha.is_leader());
@@ -1083,7 +1163,7 @@ mod tests {
         // Wait for suspect
         std::thread::sleep(Duration::from_millis(40));
         reg.heartbeat(NodeId(1), 1); // refresh node 1
-        let transitions = reg.evaluate();
+        let _transitions = reg.evaluate();
         // Node 2 should be suspect
         let n2 = reg.get(NodeId(2)).unwrap();
         assert_eq!(n2.state, DataNodeState::Suspect);
@@ -1112,7 +1192,7 @@ mod tests {
         reg.register(NodeId(1), "h1".into(), NodeCapabilities::default());
         reg.register(NodeId(2), "h2".into(), NodeCapabilities::default());
         reg.heartbeat(NodeId(1), 5); // config v5
-        // Node 2 still at config v0
+                                     // Node 2 still at config v0
         let needing = reg.nodes_needing_config(5);
         assert_eq!(needing.len(), 1);
         assert_eq!(needing[0], NodeId(2));
@@ -1281,8 +1361,14 @@ mod tests {
             state: ShardPlacementState::Healthy,
         });
         mgr.evaluate_health();
-        assert_eq!(mgr.get_placement(0).unwrap().state, ShardPlacementState::UnderReplicated);
-        assert_eq!(mgr.get_placement(1).unwrap().state, ShardPlacementState::Orphaned);
+        assert_eq!(
+            mgr.get_placement(0).unwrap().state,
+            ShardPlacementState::UnderReplicated
+        );
+        assert_eq!(
+            mgr.get_placement(1).unwrap().state,
+            ShardPlacementState::Orphaned
+        );
     }
 
     #[test]
@@ -1310,7 +1396,7 @@ mod tests {
             _ => panic!("expected accepted"),
         };
         assert_eq!(disp.pending_count(), 1);
-        let (id, cmd) = disp.next_command().unwrap();
+        let (id, _cmd) = disp.next_command().unwrap();
         assert_eq!(id, cmd_id);
         disp.complete(id, true, "done".into());
         assert_eq!(disp.pending_count(), 0);
@@ -1322,7 +1408,10 @@ mod tests {
     #[test]
     fn test_registry_concurrent() {
         use std::sync::Arc;
-        let reg = Arc::new(NodeRegistry::new(Duration::from_secs(3), Duration::from_secs(10)));
+        let reg = Arc::new(NodeRegistry::new(
+            Duration::from_secs(3),
+            Duration::from_secs(10),
+        ));
         for i in 1..=10u64 {
             reg.register(NodeId(i), format!("h{}", i), NodeCapabilities::default());
         }
@@ -1339,7 +1428,9 @@ mod tests {
                 }
             }));
         }
-        for h in handles { h.join().unwrap(); }
+        for h in handles {
+            h.join().unwrap();
+        }
         assert_eq!(reg.metrics.heartbeats.load(Ordering::Relaxed), 2000);
     }
 
@@ -1357,7 +1448,9 @@ mod tests {
                 }
             }));
         }
-        for h in handles { h.join().unwrap(); }
+        for h in handles {
+            h.join().unwrap();
+        }
         assert_eq!(store.metrics.writes.load(Ordering::Relaxed), 1000);
     }
 }

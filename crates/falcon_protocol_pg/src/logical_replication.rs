@@ -97,7 +97,8 @@ pub fn handle_replication_command(sql: &str, storage: &Arc<StorageEngine>) -> Re
     // SHOW and SELECT are also allowed on replication connections
     if upper.starts_with("SHOW") || upper.starts_with("SELECT") {
         return ReplicationResult::Error(
-            "regular queries on replication connections are forwarded to the normal handler".to_owned(),
+            "regular queries on replication connections are forwarded to the normal handler"
+                .to_owned(),
         );
     }
 
@@ -148,10 +149,10 @@ fn handle_identify_system(storage: &Arc<StorageEngine>) -> ReplicationResult {
     ];
 
     let row = vec![
-        Some("falcondb".to_owned()),  // systemid
-        Some("1".to_owned()),         // timeline
+        Some("falcondb".to_owned()),   // systemid
+        Some("1".to_owned()),          // timeline
         Some(format_lsn(current_lsn)), // xlogpos
-        Some("falcon".to_owned()),    // dbname
+        Some("falcon".to_owned()),     // dbname
     ];
 
     ReplicationResult::Messages(vec![
@@ -182,7 +183,12 @@ fn handle_create_replication_slot(sql: &str, storage: &Arc<StorageEngine>) -> Re
 
     match storage.ext.cdc_manager.create_slot(slot_name) {
         Ok(slot_id) => {
-            let slot = storage.ext.cdc_manager.list_slots().into_iter().find(|s| s.id == slot_id);
+            let slot = storage
+                .ext
+                .cdc_manager
+                .list_slots()
+                .into_iter()
+                .find(|s| s.id == slot_id);
             let consistent_point = slot.map_or(0, |s| s.confirmed_flush_lsn.0);
 
             let fields = vec![
@@ -252,11 +258,9 @@ fn handle_drop_replication_slot(sql: &str, storage: &Arc<StorageEngine>) -> Repl
 
     let slot_name = tokens[1];
     match storage.ext.cdc_manager.drop_slot(slot_name) {
-        Ok(_) => {
-            ReplicationResult::Messages(vec![BackendMessage::CommandComplete {
-                tag: "DROP_REPLICATION_SLOT".into(),
-            }])
-        }
+        Ok(_) => ReplicationResult::Messages(vec![BackendMessage::CommandComplete {
+            tag: "DROP_REPLICATION_SLOT".into(),
+        }]),
         Err(e) => ReplicationResult::Error(e),
     }
 }
@@ -453,9 +457,9 @@ impl StandbyStatusUpdate {
 
 /// Check if a startup parameter set indicates a replication connection.
 pub fn is_replication_connection(params: &std::collections::HashMap<String, String>) -> bool {
-    params
-        .get("replication")
-        .is_some_and(|v| v.eq_ignore_ascii_case("database") || v.eq_ignore_ascii_case("true") || v == "1")
+    params.get("replication").is_some_and(|v| {
+        v.eq_ignore_ascii_case("database") || v.eq_ignore_ascii_case("true") || v == "1"
+    })
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

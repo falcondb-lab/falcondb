@@ -101,7 +101,9 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             // DATE_DIFF(timestamp1, timestamp2)  → difference in days
             let ts1 = match args.first() {
                 Some(Datum::Timestamp(t)) => *t,
-                Some(Datum::Date(d)) => i64::from(*d).checked_mul(86_400_000_000).ok_or(ExecutionError::NumericOverflow)?,
+                Some(Datum::Date(d)) => i64::from(*d)
+                    .checked_mul(86_400_000_000)
+                    .ok_or(ExecutionError::NumericOverflow)?,
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -111,7 +113,9 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             };
             let ts2 = match args.get(1) {
                 Some(Datum::Timestamp(t)) => *t,
-                Some(Datum::Date(d)) => i64::from(*d).checked_mul(86_400_000_000).ok_or(ExecutionError::NumericOverflow)?,
+                Some(Datum::Date(d)) => i64::from(*d)
+                    .checked_mul(86_400_000_000)
+                    .ok_or(ExecutionError::NumericOverflow)?,
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -171,8 +175,12 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             };
             match args.first() {
                 Some(Datum::Timestamp(t)) => {
-                    let delta = days_to_add.checked_mul(86_400_000_000).ok_or(ExecutionError::NumericOverflow)?;
-                    let result = t.checked_add(delta).ok_or(ExecutionError::NumericOverflow)?;
+                    let delta = days_to_add
+                        .checked_mul(86_400_000_000)
+                        .ok_or(ExecutionError::NumericOverflow)?;
+                    let result = t
+                        .checked_add(delta)
+                        .ok_or(ExecutionError::NumericOverflow)?;
                     Ok(Datum::Timestamp(result))
                 }
                 Some(Datum::Date(d)) => {
@@ -203,8 +211,12 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             };
             match args.first() {
                 Some(Datum::Timestamp(t)) => {
-                    let delta = days_to_sub.checked_mul(86_400_000_000).ok_or(ExecutionError::NumericOverflow)?;
-                    let result = t.checked_sub(delta).ok_or(ExecutionError::NumericOverflow)?;
+                    let delta = days_to_sub
+                        .checked_mul(86_400_000_000)
+                        .ok_or(ExecutionError::NumericOverflow)?;
+                    let result = t
+                        .checked_sub(delta)
+                        .ok_or(ExecutionError::NumericOverflow)?;
                     Ok(Datum::Timestamp(result))
                 }
                 Some(Datum::Date(d)) => {
@@ -243,19 +255,29 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             // MAKE_DATE(year, month, day)  → date (days since epoch)
             let year = match args.first() {
                 Some(Datum::Int32(n)) => *n,
-                Some(Datum::Int64(n)) => i32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?,
+                Some(Datum::Int64(n)) => {
+                    i32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?
+                }
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("MAKE_DATE requires year".into())),
             };
             let month = match args.get(1) {
-                Some(Datum::Int32(n)) => u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?,
-                Some(Datum::Int64(n)) => u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?,
+                Some(Datum::Int32(n)) => {
+                    u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?
+                }
+                Some(Datum::Int64(n)) => {
+                    u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?
+                }
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("MAKE_DATE requires month".into())),
             };
             let day = match args.get(2) {
-                Some(Datum::Int32(n)) => u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?,
-                Some(Datum::Int64(n)) => u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?,
+                Some(Datum::Int32(n)) => {
+                    u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?
+                }
+                Some(Datum::Int64(n)) => {
+                    u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?
+                }
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("MAKE_DATE requires day".into())),
             };
@@ -272,7 +294,9 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             // MAKE_TIMESTAMP(year, month, day, hour, min, sec)  → timestamp
             let year = match args.first() {
                 Some(Datum::Int32(n)) => *n,
-                Some(Datum::Int64(n)) => i32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?,
+                Some(Datum::Int64(n)) => {
+                    i32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?
+                }
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -281,8 +305,12 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 }
             };
             let month = match args.get(1) {
-                Some(Datum::Int32(n)) => u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?,
-                Some(Datum::Int64(n)) => u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?,
+                Some(Datum::Int32(n)) => {
+                    u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?
+                }
+                Some(Datum::Int64(n)) => {
+                    u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?
+                }
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -291,8 +319,12 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 }
             };
             let day = match args.get(2) {
-                Some(Datum::Int32(n)) => u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?,
-                Some(Datum::Int64(n)) => u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?,
+                Some(Datum::Int32(n)) => {
+                    u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?
+                }
+                Some(Datum::Int64(n)) => {
+                    u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?
+                }
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -301,8 +333,12 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 }
             };
             let hour = match args.get(3) {
-                Some(Datum::Int32(n)) => u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?,
-                Some(Datum::Int64(n)) => u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?,
+                Some(Datum::Int32(n)) => {
+                    u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?
+                }
+                Some(Datum::Int64(n)) => {
+                    u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?
+                }
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -311,8 +347,12 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 }
             };
             let min = match args.get(4) {
-                Some(Datum::Int32(n)) => u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?,
-                Some(Datum::Int64(n)) => u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?,
+                Some(Datum::Int32(n)) => {
+                    u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?
+                }
+                Some(Datum::Int64(n)) => {
+                    u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?
+                }
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -321,8 +361,12 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 }
             };
             let sec = match args.get(5) {
-                Some(Datum::Int32(n)) => u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?,
-                Some(Datum::Int64(n)) => u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?,
+                Some(Datum::Int32(n)) => {
+                    u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?
+                }
+                Some(Datum::Int64(n)) => {
+                    u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?
+                }
                 Some(Datum::Float64(n)) => {
                     if n.is_nan() || n.is_infinite() || *n < 0.0 || *n > (u32::MAX as f64) {
                         return Err(ExecutionError::NumericOverflow);
@@ -365,7 +409,9 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             // AGE(timestamp1, timestamp2)  → interval ts1 - ts2 (like PG: first - second)
             let ts1_us = match args.first() {
                 Some(Datum::Timestamp(t)) => *t,
-                Some(Datum::Date(d)) => i64::from(*d).checked_mul(86_400_000_000).ok_or(ExecutionError::NumericOverflow)?,
+                Some(Datum::Date(d)) => i64::from(*d)
+                    .checked_mul(86_400_000_000)
+                    .ok_or(ExecutionError::NumericOverflow)?,
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(
@@ -376,7 +422,9 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let ts2_us: i64 = if args.len() > 1 {
                 match args.get(1) {
                     Some(Datum::Timestamp(t)) => *t,
-                    Some(Datum::Date(d)) => i64::from(*d).checked_mul(86_400_000_000).ok_or(ExecutionError::NumericOverflow)?,
+                    Some(Datum::Date(d)) => i64::from(*d)
+                        .checked_mul(86_400_000_000)
+                        .ok_or(ExecutionError::NumericOverflow)?,
                     Some(Datum::Null) => return Ok(Datum::Null),
                     _ => {
                         return Err(ExecutionError::TypeError(

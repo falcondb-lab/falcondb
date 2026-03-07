@@ -60,8 +60,7 @@ fn test_single_gateway_handles_full_load() {
         let shard = ShardId(i % 8);
         let decision = gw.classify_request(shard);
         match decision.classification {
-            RequestClassification::LocalExec
-            | RequestClassification::ForwardToLeader => {}
+            RequestClassification::LocalExec | RequestClassification::ForwardToLeader => {}
             other => panic!("Unexpected classification: {:?} for shard {}", other, i % 8),
         }
     }
@@ -72,7 +71,11 @@ fn test_single_gateway_handles_full_load() {
     assert!(snap.local_exec_total > 0);
     assert!(snap.forward_total > 0);
     // Must complete within reasonable time
-    assert!(elapsed < Duration::from_secs(2), "10K classifications took {:?}", elapsed);
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "10K classifications took {:?}",
+        elapsed
+    );
 }
 
 #[test]
@@ -155,7 +158,10 @@ fn test_multi_gateway_concurrent_operations() {
         h.join().expect("gateway thread must not panic");
     }
 
-    let total: u64 = gateways.iter().map(|g| g.metrics_snapshot().requests_total).sum();
+    let total: u64 = gateways
+        .iter()
+        .map(|g| g.metrics_snapshot().requests_total)
+        .sum();
     assert_eq!(total, 4000);
 }
 
@@ -201,9 +207,18 @@ fn test_gateway_restart_client_recovery() {
 
     // Client failover: create JDBC seed list and simulate failover
     let mut seeds = SeedGatewayList::new(vec![
-        HostPort { host: "node1".into(), port: 5443 },
-        HostPort { host: "node2".into(), port: 5443 },
-        HostPort { host: "node3".into(), port: 5443 },
+        HostPort {
+            host: "node1".into(),
+            port: 5443,
+        },
+        HostPort {
+            host: "node2".into(),
+            port: 5443,
+        },
+        HostPort {
+            host: "node3".into(),
+            port: 5443,
+        },
     ]);
 
     // node1 failures → switch to node2
@@ -295,7 +310,11 @@ fn test_topology_invalidation_then_update() {
 fn test_topology_concurrent_updates_and_reads() {
     let topo = Arc::new(TopologyCache::new());
     for i in 1..=4u64 {
-        topo.register_node(NodeId(i), format!("node{}:5443", i), GatewayRole::SmartGateway);
+        topo.register_node(
+            NodeId(i),
+            format!("node{}:5443", i),
+            GatewayRole::SmartGateway,
+        );
     }
 
     let mut handles = Vec::new();
@@ -369,8 +388,10 @@ fn test_reject_latency_under_1us() {
         ..Default::default()
     };
     let gw = SmartGateway::new(config);
-    gw.topology.register_node(NodeId(1), "node1:5443".into(), GatewayRole::SmartGateway);
-    gw.topology.update_leader(ShardId(0), NodeId(1), "node1:5443".into());
+    gw.topology
+        .register_node(NodeId(1), "node1:5443".into(), GatewayRole::SmartGateway);
+    gw.topology
+        .update_leader(ShardId(0), NodeId(1), "node1:5443".into());
 
     // Saturate
     gw.metrics.inflight.store(1, Ordering::Relaxed);
@@ -384,21 +405,24 @@ fn test_reject_latency_under_1us() {
     let elapsed = start.elapsed();
     let avg_ns = elapsed.as_nanos() / iterations as u128;
 
-    assert!(
-        avg_ns < 1000,
-        "avg reject latency {}ns exceeds 1µs",
-        avg_ns
-    );
+    assert!(avg_ns < 1000, "avg reject latency {}ns exceeds 1µs", avg_ns);
 }
 
 #[test]
 fn test_no_hang_under_concurrent_topology_churn() {
     let topo = Arc::new(TopologyCache::new());
     for i in 1..=4u64 {
-        topo.register_node(NodeId(i), format!("node{}:5443", i), GatewayRole::SmartGateway);
+        topo.register_node(
+            NodeId(i),
+            format!("node{}:5443", i),
+            GatewayRole::SmartGateway,
+        );
     }
     let gw = Arc::new(SmartGateway::with_topology(
-        SmartGatewayConfig { node_id: NodeId(1), ..Default::default() },
+        SmartGatewayConfig {
+            node_id: NodeId(1),
+            ..Default::default()
+        },
         Arc::clone(&topo),
     ));
 
@@ -418,7 +442,11 @@ fn test_no_hang_under_concurrent_topology_churn() {
                 tc.invalidate_node(NodeId((i / 100 % 4) + 1));
                 // Re-register
                 let n = (i / 100 % 4) + 1;
-                tc.register_node(NodeId(n), format!("node{}:5443", n), GatewayRole::SmartGateway);
+                tc.register_node(
+                    NodeId(n),
+                    format!("node{}:5443", n),
+                    GatewayRole::SmartGateway,
+                );
             }
         }
     }));
@@ -437,5 +465,9 @@ fn test_no_hang_under_concurrent_topology_churn() {
         h.join().expect("thread must not panic");
     }
 
-    assert!(start.elapsed() < timeout, "test must complete within {:?}", timeout);
+    assert!(
+        start.elapsed() < timeout,
+        "test must complete within {:?}",
+        timeout
+    );
 }

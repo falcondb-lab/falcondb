@@ -183,8 +183,10 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("ASIN requires numeric".into())),
             };
-            if n < -1.0 || n > 1.0 {
-                return Err(ExecutionError::TypeError("input is out of range for ASIN".into()));
+            if !(-1.0..=1.0).contains(&n) {
+                return Err(ExecutionError::TypeError(
+                    "input is out of range for ASIN".into(),
+                ));
             }
             Ok(Datum::Float64(n.asin()))
         }
@@ -196,8 +198,10 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("ACOS requires numeric".into())),
             };
-            if n < -1.0 || n > 1.0 {
-                return Err(ExecutionError::TypeError("input is out of range for ACOS".into()));
+            if !(-1.0..=1.0).contains(&n) {
+                return Err(ExecutionError::TypeError(
+                    "input is out of range for ACOS".into(),
+                ));
             }
             Ok(Datum::Float64(n.acos()))
         }
@@ -480,7 +484,8 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => 0,
             };
-            let places_i32 = i32::try_from(places).unwrap_or(if places > 0 { i32::MAX } else { i32::MIN });
+            let places_i32 =
+                i32::try_from(places).unwrap_or(if places > 0 { i32::MAX } else { i32::MIN });
             let factor = 10f64.powi(places_i32);
             Ok(Datum::Float64((n * factor).trunc() / factor))
         }
@@ -503,7 +508,8 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => 0,
             };
-            let places_i32 = i32::try_from(places).unwrap_or(if places > 0 { i32::MAX } else { i32::MIN });
+            let places_i32 =
+                i32::try_from(places).unwrap_or(if places > 0 { i32::MAX } else { i32::MIN });
             let factor = 10f64.powi(places_i32);
             Ok(Datum::Float64((n * factor).round() / factor))
         }
@@ -604,7 +610,11 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 Some(Datum::Int64(n)) => *n,
                 Some(Datum::Int32(n)) => i64::from(*n),
                 Some(Datum::Float64(n)) => {
-                    if n.is_nan() || n.is_infinite() || *n < (i64::MIN as f64) || *n > (i64::MAX as f64) {
+                    if n.is_nan()
+                        || n.is_infinite()
+                        || *n < (i64::MIN as f64)
+                        || *n > (i64::MAX as f64)
+                    {
                         return Err(ExecutionError::NumericOverflow);
                     }
                     *n as i64
@@ -616,7 +626,11 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 Some(Datum::Int64(n)) => *n,
                 Some(Datum::Int32(n)) => i64::from(*n),
                 Some(Datum::Float64(n)) => {
-                    if n.is_nan() || n.is_infinite() || *n < (i64::MIN as f64) || *n > (i64::MAX as f64) {
+                    if n.is_nan()
+                        || n.is_infinite()
+                        || *n < (i64::MIN as f64)
+                        || *n > (i64::MAX as f64)
+                    {
                         return Err(ExecutionError::NumericOverflow);
                     }
                     *n as i64
@@ -677,9 +691,9 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             };
             let re = regex::Regex::new(&pattern)
                 .map_err(|e| ExecutionError::TypeError(format!("Invalid regex: {e}")))?;
-            let pos = re.find(&source).map_or(0, |m| {
-                source[..m.start()].chars().count() + 1
-            });
+            let pos = re
+                .find(&source)
+                .map_or(0, |m| source[..m.start()].chars().count() + 1);
             Ok(Datum::Int64(pos as i64))
         }
         ScalarFunc::WidthBucket => {
@@ -746,7 +760,9 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 _ => return Err(ExecutionError::TypeError("LOG10 requires numeric".into())),
             };
             if n <= 0.0 {
-                return Err(ExecutionError::TypeError("cannot take logarithm of zero or negative number".into()));
+                return Err(ExecutionError::TypeError(
+                    "cannot take logarithm of zero or negative number".into(),
+                ));
             }
             Ok(Datum::Float64(n.log10()))
         }
@@ -759,7 +775,9 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 _ => return Err(ExecutionError::TypeError("LOG2 requires numeric".into())),
             };
             if n <= 0.0 {
-                return Err(ExecutionError::TypeError("cannot take logarithm of zero or negative number".into()));
+                return Err(ExecutionError::TypeError(
+                    "cannot take logarithm of zero or negative number".into(),
+                ));
             }
             Ok(Datum::Float64(n.log2()))
         }
@@ -839,10 +857,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                     ))
                 }
             };
-            let parts: Vec<Datum> = s
-                .split(&delim)
-                .map(|p| Datum::Text(p.to_owned()))
-                .collect();
+            let parts: Vec<Datum> = s.split(&delim).map(|p| Datum::Text(p.to_owned())).collect();
             Ok(Datum::Array(parts))
         }
         ScalarFunc::Format => {
@@ -866,10 +881,7 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
                 let val_str = format!("{arg}");
                 result = result.replace(&placeholder, &val_str);
             }
-            result = result.replace(
-                "%s",
-                &args.get(1).map_or(String::new(), |a| format!("{a}")),
-            );
+            result = result.replace("%s", &args.get(1).map_or(String::new(), |a| format!("{a}")));
             Ok(Datum::Text(result))
         }
         ScalarFunc::SubstrCount => {
@@ -954,9 +966,10 @@ fn dispatch_inner(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionE
             let (m, n) = (a.len(), b.len());
             const MAX_LEVENSHTEIN_LEN: usize = 5_000;
             if m > MAX_LEVENSHTEIN_LEN || n > MAX_LEVENSHTEIN_LEN {
-                return Err(ExecutionError::TypeError(
-                    format!("LEVENSHTEIN input length exceeds maximum {} characters", MAX_LEVENSHTEIN_LEN),
-                ));
+                return Err(ExecutionError::TypeError(format!(
+                    "LEVENSHTEIN input length exceeds maximum {} characters",
+                    MAX_LEVENSHTEIN_LEN
+                )));
             }
             let mut dp = vec![vec![0usize; n + 1]; m + 1];
             for (i, row) in dp.iter_mut().enumerate().take(m + 1) {

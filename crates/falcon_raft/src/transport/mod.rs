@@ -72,9 +72,9 @@ impl TransportError {
     /// Suggested retry policy for this error.
     pub const fn retry_policy(&self) -> RetryPolicy {
         match self {
-            Self::Timeout(_)
-            | Self::ConnectionReset(_)
-            | Self::Unreachable(_) => RetryPolicy::ExponentialBackoff,
+            Self::Timeout(_) | Self::ConnectionReset(_) | Self::Unreachable(_) => {
+                RetryPolicy::ExponentialBackoff
+            }
             Self::RemoteRejected(_)
             | Self::PayloadTooLarge { .. }
             | Self::Unsupported(_)
@@ -136,8 +136,8 @@ impl Default for RaftTransportConfig {
             connect_timeout_ms: 2_000,
             request_timeout_ms: 5_000,
             snapshot_chunk_timeout_ms: 10_000,
-            max_snapshot_chunk_bytes: 1024 * 1024, // 1 MB
-            max_snapshot_total_bytes: 0,            // unlimited
+            max_snapshot_chunk_bytes: 1024 * 1024,   // 1 MB
+            max_snapshot_total_bytes: 0,             // unlimited
             max_rpc_payload_bytes: 64 * 1024 * 1024, // 64 MB
             backoff: BackoffConfig::default(),
             circuit_breaker: CircuitBreakerConfig::default(),
@@ -287,11 +287,12 @@ impl PeerCircuitBreaker {
         self.consecutive_successes = 0;
         self.consecutive_failures += 1;
         if self.consecutive_failures >= self.config.failure_threshold
-            && self.state != CircuitState::Open {
-                self.state = CircuitState::Open;
-                self.opened_at = Some(std::time::Instant::now());
-                self.total_trips += 1;
-            }
+            && self.state != CircuitState::Open
+        {
+            self.state = CircuitState::Open;
+            self.opened_at = Some(std::time::Instant::now());
+            self.total_trips += 1;
+        }
     }
 
     pub const fn state(&self) -> CircuitState {

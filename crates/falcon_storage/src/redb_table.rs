@@ -77,7 +77,10 @@ fn first_visible(chain: &[MvccValue], txn_id: TxnId, read_ts: Timestamp) -> Opti
 }
 
 fn map_redb_err<E: std::fmt::Display>(e: E) -> StorageError {
-    StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+    StorageError::Io(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        e.to_string(),
+    ))
 }
 
 impl RedbTable {
@@ -256,13 +259,20 @@ impl RedbTable {
 }
 
 impl crate::storage_trait::StorageTable for RedbTable {
-    fn schema(&self) -> &falcon_common::schema::TableSchema { &self.schema }
+    fn schema(&self) -> &falcon_common::schema::TableSchema {
+        &self.schema
+    }
 
     fn insert(&self, row: &OwnedRow, txn_id: TxnId) -> Result<PrimaryKey, StorageError> {
         self.insert(row, txn_id)
     }
 
-    fn update(&self, pk: &PrimaryKey, new_row: &OwnedRow, txn_id: TxnId) -> Result<(), StorageError> {
+    fn update(
+        &self,
+        pk: &PrimaryKey,
+        new_row: &OwnedRow,
+        txn_id: TxnId,
+    ) -> Result<(), StorageError> {
         self.update(pk, new_row, txn_id)
     }
 
@@ -270,7 +280,12 @@ impl crate::storage_trait::StorageTable for RedbTable {
         self.delete(pk, txn_id)
     }
 
-    fn get(&self, pk: &PrimaryKey, txn_id: TxnId, read_ts: Timestamp) -> Result<Option<OwnedRow>, StorageError> {
+    fn get(
+        &self,
+        pk: &PrimaryKey,
+        txn_id: TxnId,
+        read_ts: Timestamp,
+    ) -> Result<Option<OwnedRow>, StorageError> {
         self.get(pk, txn_id, read_ts)
     }
 
@@ -278,7 +293,12 @@ impl crate::storage_trait::StorageTable for RedbTable {
         self.scan(txn_id, read_ts)
     }
 
-    fn commit_key(&self, pk: &PrimaryKey, txn_id: TxnId, commit_ts: Timestamp) -> Result<(), StorageError> {
+    fn commit_key(
+        &self,
+        pk: &PrimaryKey,
+        txn_id: TxnId,
+        commit_ts: Timestamp,
+    ) -> Result<(), StorageError> {
         self.commit(pk, txn_id, commit_ts)
     }
 

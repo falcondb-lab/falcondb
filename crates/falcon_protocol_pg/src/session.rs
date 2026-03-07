@@ -291,7 +291,9 @@ impl PgSession {
 
     /// Get a GUC variable value.
     pub fn get_guc(&self, name: &str) -> Option<&str> {
-        self.guc_vars.get(&name.to_lowercase()).map(std::string::String::as_str)
+        self.guc_vars
+            .get(&name.to_lowercase())
+            .map(std::string::String::as_str)
     }
 
     /// Set a GUC variable value.
@@ -328,8 +330,12 @@ impl PgSession {
     pub fn revert_local_gucs(&mut self) {
         for (key, prev) in self.local_gucs.drain(..).rev() {
             match prev {
-                Some(v) => { self.guc_vars.insert(key, v); }
-                None => { self.guc_vars.remove(&key); }
+                Some(v) => {
+                    self.guc_vars.insert(key, v);
+                }
+                None => {
+                    self.guc_vars.remove(&key);
+                }
             }
         }
     }

@@ -259,13 +259,15 @@ impl MemoryTracker {
 
     /// Record allocation of WAL / group-commit buffer bytes.
     pub fn alloc_wal_buffer(&self, bytes: u64) {
-        self.wal_buffer_bytes.fetch_add(bytes as i64, Ordering::Relaxed);
+        self.wal_buffer_bytes
+            .fetch_add(bytes as i64, Ordering::Relaxed);
         self.check_pressure_transition();
     }
 
     /// Record deallocation of WAL / group-commit buffer bytes.
     pub fn dealloc_wal_buffer(&self, bytes: u64) {
-        self.wal_buffer_bytes.fetch_sub(bytes as i64, Ordering::Relaxed);
+        self.wal_buffer_bytes
+            .fetch_sub(bytes as i64, Ordering::Relaxed);
         self.check_pressure_transition();
     }
 
@@ -273,13 +275,15 @@ impl MemoryTracker {
 
     /// Record allocation of replication / streaming buffer bytes.
     pub fn alloc_replication_buffer(&self, bytes: u64) {
-        self.replication_buffer_bytes.fetch_add(bytes as i64, Ordering::Relaxed);
+        self.replication_buffer_bytes
+            .fetch_add(bytes as i64, Ordering::Relaxed);
         self.check_pressure_transition();
     }
 
     /// Record deallocation of replication / streaming buffer bytes.
     pub fn dealloc_replication_buffer(&self, bytes: u64) {
-        self.replication_buffer_bytes.fetch_sub(bytes as i64, Ordering::Relaxed);
+        self.replication_buffer_bytes
+            .fetch_sub(bytes as i64, Ordering::Relaxed);
         self.check_pressure_transition();
     }
 
@@ -287,13 +291,15 @@ impl MemoryTracker {
 
     /// Record allocation of snapshot / streaming transfer buffer bytes.
     pub fn alloc_snapshot_buffer(&self, bytes: u64) {
-        self.snapshot_buffer_bytes.fetch_add(bytes as i64, Ordering::Relaxed);
+        self.snapshot_buffer_bytes
+            .fetch_add(bytes as i64, Ordering::Relaxed);
         self.check_pressure_transition();
     }
 
     /// Record deallocation of snapshot / streaming transfer buffer bytes.
     pub fn dealloc_snapshot_buffer(&self, bytes: u64) {
-        self.snapshot_buffer_bytes.fetch_sub(bytes as i64, Ordering::Relaxed);
+        self.snapshot_buffer_bytes
+            .fetch_sub(bytes as i64, Ordering::Relaxed);
         self.check_pressure_transition();
     }
 
@@ -301,13 +307,15 @@ impl MemoryTracker {
 
     /// Record allocation of SQL execution intermediate result bytes.
     pub fn alloc_exec_buffer(&self, bytes: u64) {
-        self.exec_buffer_bytes.fetch_add(bytes as i64, Ordering::Relaxed);
+        self.exec_buffer_bytes
+            .fetch_add(bytes as i64, Ordering::Relaxed);
         self.check_pressure_transition();
     }
 
     /// Record deallocation of SQL execution intermediate result bytes.
     pub fn dealloc_exec_buffer(&self, bytes: u64) {
-        self.exec_buffer_bytes.fetch_sub(bytes as i64, Ordering::Relaxed);
+        self.exec_buffer_bytes
+            .fetch_sub(bytes as i64, Ordering::Relaxed);
         self.check_pressure_transition();
     }
 

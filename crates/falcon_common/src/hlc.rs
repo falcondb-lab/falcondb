@@ -18,9 +18,15 @@ use crate::types::Timestamp;
 const LOGICAL_BITS: u32 = 16;
 const LOGICAL_MASK: u64 = (1u64 << LOGICAL_BITS) - 1;
 
-fn physical(ts: u64) -> u64 { ts >> LOGICAL_BITS }
-fn logical(ts: u64) -> u64 { ts & LOGICAL_MASK }
-fn pack(phys: u64, log: u64) -> u64 { (phys << LOGICAL_BITS) | (log & LOGICAL_MASK) }
+fn physical(ts: u64) -> u64 {
+    ts >> LOGICAL_BITS
+}
+fn logical(ts: u64) -> u64 {
+    ts & LOGICAL_MASK
+}
+fn pack(phys: u64, log: u64) -> u64 {
+    (phys << LOGICAL_BITS) | (log & LOGICAL_MASK)
+}
 
 fn wall_ms() -> u64 {
     SystemTime::now()
@@ -36,7 +42,9 @@ pub struct HybridClock {
 
 impl HybridClock {
     pub fn new() -> Self {
-        Self { state: AtomicU64::new(pack(wall_ms(), 0)) }
+        Self {
+            state: AtomicU64::new(pack(wall_ms(), 0)),
+        }
     }
 
     /// Allocate a new timestamp, advancing the clock.
@@ -54,7 +62,11 @@ impl HybridClock {
                 pack(old_phys, old_log + 1)
             };
 
-            if self.state.compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+            if self
+                .state
+                .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
                 return Timestamp(new);
             }
         }
@@ -81,7 +93,11 @@ impl HybridClock {
                 pack(rem_phys, rem_log + 1)
             };
 
-            if self.state.compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+            if self
+                .state
+                .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
                 return Timestamp(new);
             }
         }
@@ -99,21 +115,31 @@ impl HybridClock {
             if old >= ts.0 {
                 return;
             }
-            if self.state.compare_exchange_weak(old, ts.0 + 1, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+            if self
+                .state
+                .compare_exchange_weak(old, ts.0 + 1, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
                 return;
             }
         }
     }
 
     /// Extract physical component (milliseconds since epoch).
-    pub fn physical_ms(ts: Timestamp) -> u64 { physical(ts.0) }
+    pub fn physical_ms(ts: Timestamp) -> u64 {
+        physical(ts.0)
+    }
 
     /// Extract logical component.
-    pub fn logical_part(ts: Timestamp) -> u64 { logical(ts.0) }
+    pub fn logical_part(ts: Timestamp) -> u64 {
+        logical(ts.0)
+    }
 }
 
 impl Default for HybridClock {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]

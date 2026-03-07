@@ -283,7 +283,9 @@ pub trait SafepointProvider: Send + Sync {
     fn replica_safe_ts(&self) -> Timestamp;
 
     /// Auto-abort transactions exceeding the idle timeout. Returns count reaped.
-    fn reap_long_transactions(&self) -> usize { 0 }
+    fn reap_long_transactions(&self) -> usize {
+        0
+    }
 }
 
 /// Background GC runner.

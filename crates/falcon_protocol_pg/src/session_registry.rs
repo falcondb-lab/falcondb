@@ -44,6 +44,12 @@ pub struct SessionRegistry {
     start_time: Instant,
 }
 
+impl Default for SessionRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SessionRegistry {
     pub fn new() -> Self {
         Self {
@@ -52,21 +58,31 @@ impl SessionRegistry {
         }
     }
 
-    pub fn register(&self, pid: i32, user: &str, database: &str, client_addr: &str, app_name: &str) {
+    pub fn register(
+        &self,
+        pid: i32,
+        user: &str,
+        database: &str,
+        client_addr: &str,
+        app_name: &str,
+    ) {
         let now = Instant::now();
-        self.inner.insert(pid, SessionInfo {
+        self.inner.insert(
             pid,
-            user: user.to_owned(),
-            database: database.to_owned(),
-            client_addr: client_addr.to_owned(),
-            application_name: app_name.to_owned(),
-            backend_start: now,
-            state: SessionState::Idle,
-            query: String::new(),
-            query_start: None,
-            xact_start: None,
-            state_change: now,
-        });
+            SessionInfo {
+                pid,
+                user: user.to_owned(),
+                database: database.to_owned(),
+                client_addr: client_addr.to_owned(),
+                application_name: app_name.to_owned(),
+                backend_start: now,
+                state: SessionState::Idle,
+                query: String::new(),
+                query_start: None,
+                xact_start: None,
+                state_change: now,
+            },
+        );
     }
 
     pub fn deregister(&self, pid: i32) {
@@ -86,7 +102,11 @@ impl SessionRegistry {
     pub fn set_idle(&self, pid: i32, in_txn: bool) {
         if let Some(mut entry) = self.inner.get_mut(&pid) {
             let now = Instant::now();
-            entry.state = if in_txn { SessionState::IdleInTransaction } else { SessionState::Idle };
+            entry.state = if in_txn {
+                SessionState::IdleInTransaction
+            } else {
+                SessionState::Idle
+            };
             entry.state_change = now;
             if !in_txn {
                 entry.xact_start = None;
@@ -105,21 +125,24 @@ impl SessionRegistry {
     /// Snapshot all sessions for pg_stat_activity.
     pub fn snapshot(&self) -> Vec<SessionSnapshot> {
         let base = self.start_time;
-        self.inner.iter().map(|e| {
-            let s = e.value();
-            SessionSnapshot {
-                pid: s.pid,
-                user: s.user.clone(),
-                database: s.database.clone(),
-                client_addr: s.client_addr.clone(),
-                application_name: s.application_name.clone(),
-                backend_start_secs: s.backend_start.duration_since(base).as_secs_f64(),
-                state: s.state.as_str(),
-                query: s.query.clone(),
-                query_start_secs: s.query_start.map(|t| t.duration_since(base).as_secs_f64()),
-                xact_start_secs: s.xact_start.map(|t| t.duration_since(base).as_secs_f64()),
-            }
-        }).collect()
+        self.inner
+            .iter()
+            .map(|e| {
+                let s = e.value();
+                SessionSnapshot {
+                    pid: s.pid,
+                    user: s.user.clone(),
+                    database: s.database.clone(),
+                    client_addr: s.client_addr.clone(),
+                    application_name: s.application_name.clone(),
+                    backend_start_secs: s.backend_start.duration_since(base).as_secs_f64(),
+                    state: s.state.as_str(),
+                    query: s.query.clone(),
+                    query_start_secs: s.query_start.map(|t| t.duration_since(base).as_secs_f64()),
+                    xact_start_secs: s.xact_start.map(|t| t.duration_since(base).as_secs_f64()),
+                }
+            })
+            .collect()
     }
 }
 

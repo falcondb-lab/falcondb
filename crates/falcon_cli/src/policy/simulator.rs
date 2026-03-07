@@ -32,14 +32,18 @@ impl SimulationResult {
     fn render_table(&self) -> String {
         let mut out = String::new();
         let _ = writeln!(out, "╔══ SIMULATION: policy '{}' ══", self.policy_id);
-        let _ = writeln!(out, "  Condition     : {} [{}]",
+        let _ = writeln!(
+            out,
+            "  Condition     : {} [{}]",
             self.condition_description,
             if self.condition_met { "MET" } else { "NOT MET" }
         );
         let _ = writeln!(out, "  Action        : {}", self.action_description);
         let _ = writeln!(out, "  Risk          : {}", self.risk_assessment);
         out.push_str(&self.guardrail_report);
-        let _ = writeln!(out, "  Would Fire    : {}",
+        let _ = writeln!(
+            out,
+            "  Would Fire    : {}",
             if self.would_fire { "YES" } else { "NO" }
         );
         out.push_str("╚══ DRY-RUN ONLY — no cluster state was modified ══\n");
@@ -164,10 +168,7 @@ async fn evaluate_condition_live(client: &DbClient, condition_expr: &str) -> (bo
             .and_then(|r| r.get(0).map(std::string::ToString::to_string))
             .unwrap_or_else(|| "readwrite".to_owned());
         let met = mode == "readonly";
-        return (
-            met,
-            format!("cluster_mode = '{mode}' (readonly: {met})"),
-        );
+        return (met, format!("cluster_mode = '{mode}' (readonly: {met})"));
     }
 
     if lower.contains("in_doubt") {
@@ -186,9 +187,7 @@ async fn evaluate_condition_live(client: &DbClient, condition_expr: &str) -> (bo
     // Generic: return not-evaluable
     (
         false,
-        format!(
-            "'{condition_expr}' (live evaluation not available for this condition type)"
-        ),
+        format!("'{condition_expr}' (live evaluation not available for this condition type)"),
     )
 }
 

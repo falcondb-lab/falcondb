@@ -60,7 +60,9 @@ impl StructuredLsn {
     /// Construct from segment ID and offset.
     #[inline]
     pub const fn new(segment_id: u64, offset: u64) -> Self {
-        Self((segment_id << DEFAULT_SEGMENT_OFFSET_BITS) | (offset & (DEFAULT_MAX_SEGMENT_SIZE - 1)))
+        Self(
+            (segment_id << DEFAULT_SEGMENT_OFFSET_BITS) | (offset & (DEFAULT_MAX_SEGMENT_SIZE - 1)),
+        )
     }
 
     /// Extract the segment ID.
@@ -202,9 +204,7 @@ impl SegmentHeader {
 
     /// Validate the header: magic, version, and checksum.
     pub fn validate(&self) -> bool {
-        self.magic == SEGMENT_MAGIC
-            && self.version >= 2
-            && self.checksum == self.compute_checksum()
+        self.magic == SEGMENT_MAGIC && self.version >= 2 && self.checksum == self.compute_checksum()
     }
 
     /// Serialize to bytes (for writing to disk).
@@ -229,20 +229,16 @@ impl SegmentHeader {
         magic.copy_from_slice(&data[0..8]);
         let version = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
         let segment_id = u64::from_le_bytes([
-            data[16], data[17], data[18], data[19],
-            data[20], data[21], data[22], data[23],
+            data[16], data[17], data[18], data[19], data[20], data[21], data[22], data[23],
         ]);
         let segment_size = u64::from_le_bytes([
-            data[24], data[25], data[26], data[27],
-            data[28], data[29], data[30], data[31],
+            data[24], data[25], data[26], data[27], data[28], data[29], data[30], data[31],
         ]);
         let start_lsn = u64::from_le_bytes([
-            data[32], data[33], data[34], data[35],
-            data[36], data[37], data[38], data[39],
+            data[32], data[33], data[34], data[35], data[36], data[37], data[38], data[39],
         ]);
         let last_valid_offset = u64::from_le_bytes([
-            data[40], data[41], data[42], data[43],
-            data[44], data[45], data[46], data[47],
+            data[40], data[41], data[42], data[43], data[44], data[45], data[46], data[47],
         ]);
         let checksum = u32::from_le_bytes([data[48], data[49], data[50], data[51]]);
         Some(Self {
@@ -350,7 +346,7 @@ impl Default for LsnAllocatorConfig {
         Self {
             segment_size: DEFAULT_MAX_SEGMENT_SIZE, // 256 MB
             default_reservation_bytes: 256 * 1024,  // 256 KB
-            record_alignment: 8,                     // 8-byte aligned
+            record_alignment: 8,                    // 8-byte aligned
         }
     }
 }
@@ -358,16 +354,34 @@ impl Default for LsnAllocatorConfig {
 impl LsnAllocatorConfig {
     /// Validate configuration. Panics on invalid values.
     pub fn validate(&self) {
-        assert!(self.segment_size.is_power_of_two(), "segment_size must be power of 2");
-        assert!(self.segment_size <= DEFAULT_MAX_SEGMENT_SIZE,
-            "segment_size must be <= {DEFAULT_MAX_SEGMENT_SIZE} bytes");
-        assert!(self.record_alignment.is_power_of_two(), "record_alignment must be power of 2");
-        assert!(self.record_alignment <= 4096, "record_alignment must be <= 4096");
-        assert!(self.default_reservation_bytes > 0, "default_reservation_bytes must be > 0");
-        assert!(self.default_reservation_bytes <= self.segment_size,
-            "default_reservation_bytes must be <= segment_size");
-        assert!(self.segment_size.is_multiple_of(self.record_alignment),
-            "segment_size must be a multiple of record_alignment");
+        assert!(
+            self.segment_size.is_power_of_two(),
+            "segment_size must be power of 2"
+        );
+        assert!(
+            self.segment_size <= DEFAULT_MAX_SEGMENT_SIZE,
+            "segment_size must be <= {DEFAULT_MAX_SEGMENT_SIZE} bytes"
+        );
+        assert!(
+            self.record_alignment.is_power_of_two(),
+            "record_alignment must be power of 2"
+        );
+        assert!(
+            self.record_alignment <= 4096,
+            "record_alignment must be <= 4096"
+        );
+        assert!(
+            self.default_reservation_bytes > 0,
+            "default_reservation_bytes must be > 0"
+        );
+        assert!(
+            self.default_reservation_bytes <= self.segment_size,
+            "default_reservation_bytes must be <= segment_size"
+        );
+        assert!(
+            self.segment_size.is_multiple_of(self.record_alignment),
+            "segment_size must be a multiple of record_alignment"
+        );
     }
 }
 
@@ -414,16 +428,22 @@ impl LsnAllocatorMetrics {
     /// Average reservation size in bytes.
     pub fn avg_reservation_bytes(&self) -> f64 {
         let batches = self.reservation_batches_total.load(Ordering::Relaxed);
-        if batches == 0 { return 0.0; }
+        if batches == 0 {
+            return 0.0;
+        }
         self.reserved_bytes_total.load(Ordering::Relaxed) as f64 / batches as f64
     }
 
     /// Average segment utilization at rollover (0.0–1.0).
     pub fn avg_segment_utilization(&self) -> f64 {
         let rollovers = self.segment_rollover_total.load(Ordering::Relaxed);
-        if rollovers == 0 { return 1.0; }
-        self.segment_utilization_sum_permille.load(Ordering::Relaxed) as f64
-            / rollovers as f64 / 1000.0
+        if rollovers == 0 {
+            return 1.0;
+        }
+        self.segment_utilization_sum_permille
+            .load(Ordering::Relaxed) as f64
+            / rollovers as f64
+            / 1000.0
     }
 }
 
@@ -493,18 +513,29 @@ impl LsnAllocator {
 
         let mut inner = self.inner.lock();
 
-        let remaining = self.config.segment_size.saturating_sub(inner.current_offset);
+        let remaining = self
+            .config
+            .segment_size
+            .saturating_sub(inner.current_offset);
 
         if aligned <= remaining {
             // Fits in current segment — fast path
             let base = StructuredLsn::new(inner.current_segment_id, inner.current_offset);
-            let limit = StructuredLsn::new(inner.current_segment_id, inner.current_offset + aligned);
+            let limit =
+                StructuredLsn::new(inner.current_segment_id, inner.current_offset + aligned);
             inner.current_offset += aligned;
 
-            self.metrics.reservation_batches_total.fetch_add(1, Ordering::Relaxed);
-            self.metrics.reserved_bytes_total.fetch_add(aligned, Ordering::Relaxed);
+            self.metrics
+                .reservation_batches_total
+                .fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .reserved_bytes_total
+                .fetch_add(aligned, Ordering::Relaxed);
 
-            ReserveResult::Ok(Reservation { base_lsn: base, limit_lsn: limit })
+            ReserveResult::Ok(Reservation {
+                base_lsn: base,
+                limit_lsn: limit,
+            })
         } else {
             // Need segment rollover
             let sealed_segment_id = inner.current_segment_id;
@@ -516,9 +547,15 @@ impl LsnAllocator {
             } else {
                 0
             };
-            self.metrics.segment_utilization_sum_permille.fetch_add(util_permille, Ordering::Relaxed);
-            self.metrics.segment_rollover_total.fetch_add(1, Ordering::Relaxed);
-            self.metrics.reservation_triggered_rollover.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .segment_utilization_sum_permille
+                .fetch_add(util_permille, Ordering::Relaxed);
+            self.metrics
+                .segment_rollover_total
+                .fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .reservation_triggered_rollover
+                .fetch_add(1, Ordering::Relaxed);
 
             // Advance to next segment
             inner.current_segment_id += 1;
@@ -533,13 +570,20 @@ impl LsnAllocator {
             let limit = StructuredLsn::new(new_seg_id, actual_reserve);
             inner.current_offset = actual_reserve;
 
-            self.metrics.reservation_batches_total.fetch_add(1, Ordering::Relaxed);
-            self.metrics.reserved_bytes_total.fetch_add(actual_reserve, Ordering::Relaxed);
+            self.metrics
+                .reservation_batches_total
+                .fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .reserved_bytes_total
+                .fetch_add(actual_reserve, Ordering::Relaxed);
 
             let header = SegmentHeader::new(new_seg_id, self.config.segment_size, start_lsn);
 
             ReserveResult::OkWithRollover {
-                reservation: Reservation { base_lsn: base, limit_lsn: limit },
+                reservation: Reservation {
+                    base_lsn: base,
+                    limit_lsn: limit,
+                },
                 sealed_segment_id,
                 sealed_last_valid_offset: sealed_offset,
                 new_header: header,
@@ -553,26 +597,45 @@ impl LsnAllocator {
         let aligned = self.align_up(bytes);
         let mut inner = self.inner.lock();
 
-        let remaining = self.config.segment_size.saturating_sub(inner.current_offset);
+        let remaining = self
+            .config
+            .segment_size
+            .saturating_sub(inner.current_offset);
 
         if aligned <= remaining {
             let base = StructuredLsn::new(inner.current_segment_id, inner.current_offset);
-            let limit = StructuredLsn::new(inner.current_segment_id, inner.current_offset + aligned);
+            let limit =
+                StructuredLsn::new(inner.current_segment_id, inner.current_offset + aligned);
             inner.current_offset += aligned;
 
-            self.metrics.reservation_batches_total.fetch_add(1, Ordering::Relaxed);
-            self.metrics.reserved_bytes_total.fetch_add(aligned, Ordering::Relaxed);
+            self.metrics
+                .reservation_batches_total
+                .fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .reserved_bytes_total
+                .fetch_add(aligned, Ordering::Relaxed);
 
-            ReserveResult::Ok(Reservation { base_lsn: base, limit_lsn: limit })
+            ReserveResult::Ok(Reservation {
+                base_lsn: base,
+                limit_lsn: limit,
+            })
         } else {
             let sealed_segment_id = inner.current_segment_id;
             let sealed_offset = inner.current_offset;
             let util_permille = if self.config.segment_size > 0 {
                 (sealed_offset * 1000) / self.config.segment_size
-            } else { 0 };
-            self.metrics.segment_utilization_sum_permille.fetch_add(util_permille, Ordering::Relaxed);
-            self.metrics.segment_rollover_total.fetch_add(1, Ordering::Relaxed);
-            self.metrics.reservation_triggered_rollover.fetch_add(1, Ordering::Relaxed);
+            } else {
+                0
+            };
+            self.metrics
+                .segment_utilization_sum_permille
+                .fetch_add(util_permille, Ordering::Relaxed);
+            self.metrics
+                .segment_rollover_total
+                .fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .reservation_triggered_rollover
+                .fetch_add(1, Ordering::Relaxed);
 
             inner.current_segment_id += 1;
             inner.current_offset = 0;
@@ -584,12 +647,19 @@ impl LsnAllocator {
             let limit = StructuredLsn::new(new_seg_id, actual);
             inner.current_offset = actual;
 
-            self.metrics.reservation_batches_total.fetch_add(1, Ordering::Relaxed);
-            self.metrics.reserved_bytes_total.fetch_add(actual, Ordering::Relaxed);
+            self.metrics
+                .reservation_batches_total
+                .fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .reserved_bytes_total
+                .fetch_add(actual, Ordering::Relaxed);
 
             let header = SegmentHeader::new(new_seg_id, self.config.segment_size, start_lsn);
             ReserveResult::OkWithRollover {
-                reservation: Reservation { base_lsn: base, limit_lsn: limit },
+                reservation: Reservation {
+                    base_lsn: base,
+                    limit_lsn: limit,
+                },
                 sealed_segment_id,
                 sealed_last_valid_offset: sealed_offset,
                 new_header: header,
@@ -670,7 +740,10 @@ impl WriterCursor {
     /// Remaining bytes in the current reservation.
     #[inline]
     pub const fn remaining(&self) -> u64 {
-        self.reservation.limit_lsn.raw().saturating_sub(self.current.raw())
+        self.reservation
+            .limit_lsn
+            .raw()
+            .saturating_sub(self.current.raw())
     }
 
     /// Whether the reservation is fully consumed.
@@ -734,7 +807,9 @@ pub fn encode_record_header(record_len: u32, flags: u16, crc: u32) -> [u8; 12] {
 /// Decode a record frame header.
 #[inline]
 pub fn decode_record_header(data: &[u8]) -> Option<(u32, u16, u32)> {
-    if data.len() < 12 { return None; }
+    if data.len() < 12 {
+        return None;
+    }
     let len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
     let flags = u16::from_le_bytes([data[4], data[5]]);
     let crc = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
@@ -781,7 +856,11 @@ pub fn recover_from_headers(headers: &[(u64, Vec<u8>)]) -> RecoveryState {
             segments.push(RecoveredSegment {
                 segment_id: hdr.segment_id,
                 start_lsn: StructuredLsn::from_raw(hdr.start_lsn),
-                last_valid_offset: if valid { hdr.last_valid_offset } else { SEGMENT_HEADER_SIZE },
+                last_valid_offset: if valid {
+                    hdr.last_valid_offset
+                } else {
+                    SEGMENT_HEADER_SIZE
+                },
                 header_valid: valid,
             });
         }
@@ -794,7 +873,10 @@ pub fn recover_from_headers(headers: &[(u64, Vec<u8>)]) -> RecoveryState {
         StructuredLsn::new(last.segment_id, last.last_valid_offset)
     });
 
-    RecoveryState { segments, resume_lsn }
+    RecoveryState {
+        segments,
+        resume_lsn,
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -969,16 +1051,23 @@ mod tests {
         assert_eq!(res3.base_lsn.segment_id(), 1);
         assert_eq!(res3.base_lsn.offset(), 0);
 
-        assert_eq!(alloc.metrics.segment_rollover_total.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            alloc.metrics.segment_rollover_total.load(Ordering::Relaxed),
+            1
+        );
     }
 
     #[test]
     fn test_allocator_exact_reserve() {
-        let alloc = LsnAllocator::new(LsnAllocatorConfig {
-            segment_size: 4096,
-            default_reservation_bytes: 256,
-            record_alignment: 8,
-        }, 0, 0);
+        let alloc = LsnAllocator::new(
+            LsnAllocatorConfig {
+                segment_size: 4096,
+                default_reservation_bytes: 256,
+                record_alignment: 8,
+            },
+            0,
+            0,
+        );
 
         let r = alloc.reserve_exact(128);
         assert!(!r.had_rollover());
@@ -1016,8 +1105,17 @@ mod tests {
         let r5 = alloc.reserve(512);
         assert!(r5.had_rollover());
 
-        assert!(alloc.metrics.reservation_batches_total.load(Ordering::Relaxed) >= 5);
-        assert_eq!(alloc.metrics.segment_rollover_total.load(Ordering::Relaxed), 1);
+        assert!(
+            alloc
+                .metrics
+                .reservation_batches_total
+                .load(Ordering::Relaxed)
+                >= 5
+        );
+        assert_eq!(
+            alloc.metrics.segment_rollover_total.load(Ordering::Relaxed),
+            1
+        );
         assert!(alloc.metrics.avg_segment_utilization() > 0.5);
     }
 
@@ -1087,8 +1185,8 @@ mod tests {
     #[test]
     fn test_aligned_record_size() {
         assert_eq!(aligned_record_size(100, 8), 112); // 12 + 100 = 112 (already aligned)
-        assert_eq!(aligned_record_size(1, 8), 16);    // 12 + 1 = 13 → 16
-        assert_eq!(aligned_record_size(0, 8), 16);    // 12 + 0 = 12 → 16 (header is 12, needs align to 16)
+        assert_eq!(aligned_record_size(1, 8), 16); // 12 + 1 = 13 → 16
+        assert_eq!(aligned_record_size(0, 8), 16); // 12 + 0 = 12 → 16 (header is 12, needs align to 16)
         assert_eq!(aligned_record_size(100, 4096), 4096); // 112 → 4096
     }
 
@@ -1106,10 +1204,7 @@ mod tests {
         h1_mod.last_valid_offset = 12000;
         h1_mod.checksum = h1_mod.compute_checksum();
 
-        let headers = vec![
-            (0, h0_mod.to_bytes()),
-            (1, h1_mod.to_bytes()),
-        ];
+        let headers = vec![(0, h0_mod.to_bytes()), (1, h1_mod.to_bytes())];
 
         let state = recover_from_headers(&headers);
         assert_eq!(state.segments.len(), 2);
@@ -1170,12 +1265,16 @@ mod tests {
             assert!(
                 all_ranges[i].0 >= all_ranges[i - 1].1,
                 "Reservation overlap detected: {:?} and {:?}",
-                all_ranges[i - 1], all_ranges[i]
+                all_ranges[i - 1],
+                all_ranges[i]
             );
         }
 
         assert_eq!(
-            alloc.metrics.reservation_batches_total.load(Ordering::Relaxed),
+            alloc
+                .metrics
+                .reservation_batches_total
+                .load(Ordering::Relaxed),
             800
         );
     }
@@ -1200,7 +1299,9 @@ mod tests {
             }));
         }
 
-        for h in handles { h.join().unwrap(); }
+        for h in handles {
+            h.join().unwrap();
+        }
 
         // 200 reserves × 512 bytes = 100 KB, segment=8KB → ~12 rollovers
         let rollovers = alloc.metrics.segment_rollover_total.load(Ordering::Relaxed);
@@ -1268,7 +1369,9 @@ mod tests {
         assert!(
             reduction_pct >= 90.0,
             "Expected ≥90% reduction in atomic ops, got {:.1}% (reservations={}, baseline={})",
-            reduction_pct, atomic_touches, baseline_touches
+            reduction_pct,
+            atomic_touches,
+            baseline_touches
         );
     }
 }

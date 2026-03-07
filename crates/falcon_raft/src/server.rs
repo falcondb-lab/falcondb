@@ -101,7 +101,9 @@ impl RaftTransport for RaftTransportService {
         let resp_bytes = bincode::serialize(&resp)
             .map_err(|e| Status::internal(format!("serialize response: {e}")))?;
 
-        Ok(Response::new(pb::AppendEntriesResponse { data: resp_bytes }))
+        Ok(Response::new(pb::AppendEntriesResponse {
+            data: resp_bytes,
+        }))
     }
 
     async fn request_vote(
@@ -153,19 +155,16 @@ impl RaftTransport for RaftTransportService {
                     .append_entries(openraft_req)
                     .await
                     .map_err(|e| Status::internal(format!("append: {e}")))?;
-                bincode::serialize(&resp)
-                    .map_err(|e| Status::internal(format!("ser: {e}")))?
+                bincode::serialize(&resp).map_err(|e| Status::internal(format!("ser: {e}")))?
             }
             RpcType::RequestVote => {
-                let openraft_req: openraft::raft::VoteRequest<u64> =
-                    bincode::deserialize(payload)
-                        .map_err(|e| Status::internal(format!("deser vote: {e}")))?;
+                let openraft_req: openraft::raft::VoteRequest<u64> = bincode::deserialize(payload)
+                    .map_err(|e| Status::internal(format!("deser vote: {e}")))?;
                 let resp = raft
                     .vote(openraft_req)
                     .await
                     .map_err(|e| Status::internal(format!("vote: {e}")))?;
-                bincode::serialize(&resp)
-                    .map_err(|e| Status::internal(format!("ser: {e}")))?
+                bincode::serialize(&resp).map_err(|e| Status::internal(format!("ser: {e}")))?
             }
             RpcType::InstallSnapshot => {
                 let openraft_req: openraft::raft::InstallSnapshotRequest<TypeConfig> =
@@ -175,8 +174,7 @@ impl RaftTransport for RaftTransportService {
                     .install_snapshot(openraft_req)
                     .await
                     .map_err(|e| Status::internal(format!("snap: {e}")))?;
-                bincode::serialize(&resp)
-                    .map_err(|e| Status::internal(format!("ser: {e}")))?
+                bincode::serialize(&resp).map_err(|e| Status::internal(format!("ser: {e}")))?
             }
         };
 

@@ -87,7 +87,10 @@ fn sp2_disk_spill_records_all_metrics() {
     let snap = sorter.metrics.snapshot();
     assert_eq!(snap.spill_count, 1, "should record 1 spill");
     assert_eq!(snap.in_memory_count, 0, "should NOT record in-memory");
-    assert!(snap.runs_created >= 10, "should create ≥10 runs for 100 rows / 10 threshold");
+    assert!(
+        snap.runs_created >= 10,
+        "should create ≥10 runs for 100 rows / 10 threshold"
+    );
     assert!(snap.bytes_spilled > 0, "should record bytes spilled");
     assert!(snap.bytes_read_back > 0, "should record bytes read back");
     assert!(snap.spill_duration_us > 0, "should record spill duration");
@@ -169,11 +172,23 @@ fn sp5_disabled_spill_returns_none() {
 #[test]
 fn sp6_default_spill_config_is_production_ready() {
     let config = SpillConfig::default();
-    assert_eq!(config.memory_rows_threshold, 500_000, "default threshold should be 500K");
+    assert_eq!(
+        config.memory_rows_threshold, 500_000,
+        "default threshold should be 500K"
+    );
     assert_eq!(config.merge_fan_in, 16, "default fan-in should be 16");
-    assert_eq!(config.hash_agg_group_limit, 1_000_000, "default group limit should be 1M");
-    assert_eq!(config.pressure_spill_trigger, "soft", "default trigger should be soft");
-    assert!(config.temp_dir.is_empty(), "default temp_dir should be empty (use system)");
+    assert_eq!(
+        config.hash_agg_group_limit, 1_000_000,
+        "default group limit should be 1M"
+    );
+    assert_eq!(
+        config.pressure_spill_trigger, "soft",
+        "default trigger should be soft"
+    );
+    assert!(
+        config.temp_dir.is_empty(),
+        "default temp_dir should be empty (use system)"
+    );
 }
 
 #[test]
@@ -181,7 +196,10 @@ fn sp7_default_config_creates_sorter() {
     // With default config (threshold=500K), ExternalSorter should be created.
     let config = SpillConfig::default();
     let sorter = ExternalSorter::from_config(&config);
-    assert!(sorter.is_some(), "default config should enable spill (threshold > 0)");
+    assert!(
+        sorter.is_some(),
+        "default config should enable spill (threshold > 0)"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -206,7 +224,10 @@ fn sp8_hash_agg_group_limit_in_executor() {
     executor.set_spill_config(&config);
     // Verify via spill_metrics that config was applied
     let snap = executor.spill_metrics().unwrap();
-    assert_eq!(snap.spill_count, 0, "freshly configured executor should have 0 spills");
+    assert_eq!(
+        snap.spill_count, 0,
+        "freshly configured executor should have 0 spills"
+    );
 }
 
 #[test]
@@ -214,7 +235,11 @@ fn sp9_resource_exhausted_error_has_correct_sqlstate() {
     let err = FalconError::Execution(ExecutionError::ResourceExhausted(
         "hash aggregation group limit exceeded".to_string(),
     ));
-    assert_eq!(err.pg_sqlstate(), "53000", "ResourceExhausted should map to SQLSTATE 53000");
+    assert_eq!(
+        err.pg_sqlstate(),
+        "53000",
+        "ResourceExhausted should map to SQLSTATE 53000"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

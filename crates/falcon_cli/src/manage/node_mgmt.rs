@@ -83,9 +83,7 @@ pub async fn apply_node_drain(
     match client.query_simple(&sql).await {
         Ok(_) => Ok(ApplyResult::success(
             format!("node drain {node_id}"),
-            format!(
-                "Node '{node_id}' is now draining. No new transactions will be routed to it."
-            ),
+            format!("Node '{node_id}' is now draining. No new transactions will be routed to it."),
         )),
         Err(e) => Ok(ApplyResult::rejected(
             format!("node drain {node_id}"),
@@ -158,9 +156,7 @@ pub async fn apply_node_resume(
     match client.query_simple(&sql).await {
         Ok(_) => Ok(ApplyResult::success(
             format!("node resume {node_id}"),
-            format!(
-                "Node '{node_id}' has been resumed. Transaction routing is re-enabled."
-            ),
+            format!("Node '{node_id}' has been resumed. Transaction routing is re-enabled."),
         )),
         Err(e) => Ok(ApplyResult::rejected(
             format!("node resume {node_id}"),

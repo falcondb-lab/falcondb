@@ -99,8 +99,7 @@ impl std::fmt::Display for NodeState {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Capacity/role hint for a node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum NodeRole {
     /// Can be elected coordinator; accepts reads and writes.
     #[default]
@@ -110,7 +109,6 @@ pub enum NodeRole {
     /// Witness node for quorum (no data).
     Witness,
 }
-
 
 /// Full information about a cluster member.
 #[derive(Debug, Clone)]
@@ -425,11 +423,7 @@ impl MembershipManager {
 
     /// Record a heartbeat from a node. Updates last_seen and metrics.
     /// Does NOT bump epoch (minor update — bumps version only).
-    pub fn heartbeat(
-        &self,
-        node_id: NodeId,
-        metrics: NodeMetrics,
-    ) -> Result<u64, MembershipError> {
+    pub fn heartbeat(&self, node_id: NodeId, metrics: NodeMetrics) -> Result<u64, MembershipError> {
         let mut members = self.members.write();
         let member = members
             .get_mut(&node_id)
@@ -543,9 +537,7 @@ impl MembershipManager {
         let members = self.members.read();
         let candidates: Vec<NodeId> = members
             .values()
-            .filter(|m| {
-                m.state.counts_for_quorum() && m.last_heartbeat.elapsed() > timeout
-            })
+            .filter(|m| m.state.counts_for_quorum() && m.last_heartbeat.elapsed() > timeout)
             .map(|m| m.node_id)
             .collect();
         drop(members);
@@ -663,7 +655,9 @@ mod tests {
     #[test]
     fn test_join_creates_joining_node() {
         let m = mgr();
-        let epoch = m.join(NodeId(1), "127.0.0.1".into(), 5432, 9100, NodeRole::Primary).unwrap();
+        let epoch = m
+            .join(NodeId(1), "127.0.0.1".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
         assert!(epoch > 0);
         assert_eq!(m.get_state(NodeId(1)), Some(NodeState::Joining));
         assert_eq!(m.member_count(), 1);
@@ -672,7 +666,8 @@ mod tests {
     #[test]
     fn test_join_duplicate_rejected() {
         let m = mgr();
-        m.join(NodeId(1), "127.0.0.1".into(), 5432, 9100, NodeRole::Primary).unwrap();
+        m.join(NodeId(1), "127.0.0.1".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
         let err = m.join(NodeId(1), "127.0.0.1".into(), 5432, 9100, NodeRole::Primary);
         assert!(matches!(err, Err(MembershipError::NodeAlreadyExists(_))));
     }
@@ -680,7 +675,8 @@ mod tests {
     #[test]
     fn test_activate_from_joining() {
         let m = mgr();
-        m.join(NodeId(1), "127.0.0.1".into(), 5432, 9100, NodeRole::Primary).unwrap();
+        m.join(NodeId(1), "127.0.0.1".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
         m.activate(NodeId(1)).unwrap();
         assert_eq!(m.get_state(NodeId(1)), Some(NodeState::Active));
     }
@@ -688,7 +684,9 @@ mod tests {
     #[test]
     fn test_join_and_activate() {
         let m = mgr();
-        let epoch = m.join_and_activate(NodeId(1), "host1".into(), 5432, 9100, NodeRole::Primary).unwrap();
+        let epoch = m
+            .join_and_activate(NodeId(1), "host1".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
         assert_eq!(m.get_state(NodeId(1)), Some(NodeState::Active));
         assert!(epoch > 1); // join bumps, activate bumps again
     }
@@ -698,7 +696,8 @@ mod tests {
     #[test]
     fn test_drain_from_active() {
         let m = mgr();
-        m.join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary).unwrap();
+        m.join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
         m.drain(NodeId(1)).unwrap();
         assert_eq!(m.get_state(NodeId(1)), Some(NodeState::Draining));
         assert!(!NodeState::Draining.accepts_writes());
@@ -708,7 +707,8 @@ mod tests {
     #[test]
     fn test_leave_from_draining() {
         let m = mgr();
-        m.join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary).unwrap();
+        m.join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
         m.drain(NodeId(1)).unwrap();
         m.leave(NodeId(1)).unwrap();
         assert_eq!(m.get_state(NodeId(1)), Some(NodeState::Leaving));
@@ -717,7 +717,8 @@ mod tests {
     #[test]
     fn test_leave_from_active() {
         let m = mgr();
-        m.join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary).unwrap();
+        m.join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
         m.leave(NodeId(1)).unwrap();
         assert_eq!(m.get_state(NodeId(1)), Some(NodeState::Leaving));
     }
@@ -727,7 +728,8 @@ mod tests {
     #[test]
     fn test_invalid_transition_dead_to_active() {
         let m = mgr();
-        m.join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary).unwrap();
+        m.join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
         m.mark_dead(NodeId(1)).unwrap();
         let err = m.activate(NodeId(1));
         assert!(matches!(err, Err(MembershipError::InvalidTransition(..))));
@@ -736,7 +738,8 @@ mod tests {
     #[test]
     fn test_invalid_transition_joining_to_draining() {
         let m = mgr();
-        m.join(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary).unwrap();
+        m.join(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
         let err = m.drain(NodeId(1));
         assert!(matches!(err, Err(MembershipError::InvalidTransition(..))));
     }
@@ -746,15 +749,20 @@ mod tests {
     #[test]
     fn test_epoch_monotonic() {
         let m = mgr();
-        let e1 = m.join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary).unwrap();
-        let e2 = m.join_and_activate(NodeId(2), "h2".into(), 5432, 9100, NodeRole::Primary).unwrap();
+        let e1 = m
+            .join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
+        let e2 = m
+            .join_and_activate(NodeId(2), "h2".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
         assert!(e2 > e1);
     }
 
     #[test]
     fn test_epoch_validation() {
         let m = mgr();
-        m.join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary).unwrap();
+        m.join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
         let current = m.epoch();
         assert!(m.validate_epoch(current).is_ok());
         assert!(m.validate_epoch(current + 1).is_err());
@@ -766,7 +774,8 @@ mod tests {
     #[test]
     fn test_heartbeat_updates_metrics() {
         let m = mgr();
-        m.join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary).unwrap();
+        m.join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
         let metrics = NodeMetrics {
             cpu_usage_pct: 42.0,
             active_connections: 100,
@@ -789,9 +798,12 @@ mod tests {
     #[test]
     fn test_get_view() {
         let m = mgr();
-        m.join_and_activate(NodeId(1), "h1".into(), 5432, 9100, NodeRole::Primary).unwrap();
-        m.join_and_activate(NodeId(2), "h2".into(), 5432, 9100, NodeRole::Primary).unwrap();
-        m.join_and_activate(NodeId(3), "h3".into(), 5432, 9100, NodeRole::Primary).unwrap();
+        m.join_and_activate(NodeId(1), "h1".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
+        m.join_and_activate(NodeId(2), "h2".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
+        m.join_and_activate(NodeId(3), "h3".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
         let view = m.get_view();
         assert_eq!(view.members.len(), 3);
         assert!(view.quorum_met);
@@ -803,9 +815,12 @@ mod tests {
     #[test]
     fn test_quorum_with_3_nodes() {
         let m = mgr();
-        m.join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary).unwrap();
-        m.join_and_activate(NodeId(2), "h".into(), 5432, 9100, NodeRole::Primary).unwrap();
-        m.join_and_activate(NodeId(3), "h".into(), 5432, 9100, NodeRole::Primary).unwrap();
+        m.join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
+        m.join_and_activate(NodeId(2), "h".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
+        m.join_and_activate(NodeId(3), "h".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
         assert!(m.check_write_quorum().is_ok());
 
         // Kill 2 of 3 → quorum lost
@@ -818,7 +833,8 @@ mod tests {
     #[test]
     fn test_single_node_quorum() {
         let m = mgr();
-        m.join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary).unwrap();
+        m.join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
         assert!(m.check_write_quorum().is_ok());
     }
 
@@ -827,8 +843,10 @@ mod tests {
     #[test]
     fn test_write_eligible_excludes_draining() {
         let m = mgr();
-        m.join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary).unwrap();
-        m.join_and_activate(NodeId(2), "h".into(), 5432, 9100, NodeRole::Primary).unwrap();
+        m.join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
+        m.join_and_activate(NodeId(2), "h".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
         m.drain(NodeId(2)).unwrap();
         let writers = m.write_eligible_nodes();
         assert_eq!(writers.len(), 1);
@@ -838,8 +856,10 @@ mod tests {
     #[test]
     fn test_read_eligible_includes_draining() {
         let m = mgr();
-        m.join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary).unwrap();
-        m.join_and_activate(NodeId(2), "h".into(), 5432, 9100, NodeRole::Primary).unwrap();
+        m.join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
+        m.join_and_activate(NodeId(2), "h".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
         m.drain(NodeId(2)).unwrap();
         let readers = m.read_eligible_nodes();
         assert_eq!(readers.len(), 2);
@@ -854,7 +874,8 @@ mod tests {
             ..Default::default()
         };
         let m = MembershipManager::new(config);
-        m.join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary).unwrap();
+        m.join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
         // Sleep just enough for the timeout
         std::thread::sleep(Duration::from_millis(5));
         let dead = m.detect_dead_nodes();
@@ -868,7 +889,8 @@ mod tests {
     #[test]
     fn test_events_recorded() {
         let m = mgr();
-        m.join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary).unwrap();
+        m.join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
         let events = m.recent_events(10);
         assert!(events.len() >= 2); // join + activate
     }
@@ -878,8 +900,10 @@ mod tests {
     #[test]
     fn test_metrics_snapshot() {
         let m = mgr();
-        m.join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary).unwrap();
-        m.join_and_activate(NodeId(2), "h".into(), 5432, 9100, NodeRole::Primary).unwrap();
+        m.join_and_activate(NodeId(1), "h".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
+        m.join_and_activate(NodeId(2), "h".into(), 5432, 9100, NodeRole::Primary)
+            .unwrap();
         m.drain(NodeId(2)).unwrap();
         let snap = m.metrics_snapshot();
         assert_eq!(snap.active, 1);
@@ -905,7 +929,10 @@ mod tests {
     fn test_membership_error_display() {
         let e = MembershipError::QuorumNotMet { have: 1, need: 2 };
         assert!(e.to_string().contains("quorum"));
-        let e = MembershipError::EpochMismatch { expected: 5, got: 3 };
+        let e = MembershipError::EpochMismatch {
+            expected: 5,
+            got: 3,
+        };
         assert!(e.to_string().contains("epoch"));
     }
 }

@@ -17,9 +17,9 @@
 //! - Bypassing WAL append on commit → violates crash-safety
 //! - Non-transactional reads that skip visibility checks → violates isolation
 
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::sync::atomic::AtomicBool;
-use std::cmp::Reverse;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
@@ -217,7 +217,7 @@ pub struct MemTable {
     pub(crate) analyze_threshold: AtomicU64,
     /// Ordered PK index: maintained at commit time.
     /// Enables O(K) scan_top_k_by_pk instead of O(N) full DashMap scan.
-    pk_order: RwLock<BTreeSet<PrimaryKey>>,
+    pub(crate) pk_order: RwLock<BTreeSet<PrimaryKey>>,
 }
 
 /// A secondary index on one or more columns using a BTreeMap.
@@ -437,7 +437,11 @@ impl MemTable {
     pub fn new(schema: TableSchema) -> Self {
         Self {
             schema,
-            data: DashMap::with_capacity_and_hasher_and_shard_amount(1 << 20, Default::default(), 256),
+            data: DashMap::with_capacity_and_hasher_and_shard_amount(
+                1 << 20,
+                Default::default(),
+                256,
+            ),
             secondary_indexes: RwLock::new(Vec::new()),
             has_secondary_idx: AtomicBool::new(false),
             gc_candidates: AtomicU64::new(0),
@@ -573,7 +577,12 @@ impl MemTable {
     }
 
     /// Point read returning Arc (zero-copy).
-    pub fn get_arc(&self, pk: &PrimaryKey, txn_id: TxnId, read_ts: Timestamp) -> Option<Arc<OwnedRow>> {
+    pub fn get_arc(
+        &self,
+        pk: &PrimaryKey,
+        txn_id: TxnId,
+        read_ts: Timestamp,
+    ) -> Option<Arc<OwnedRow>> {
         self.data
             .get(pk)
             .and_then(|chain| chain.read_for_txn(txn_id, read_ts))
@@ -591,6 +600,38 @@ impl MemTable {
                 f(row);
             });
         }
+    }
+
+    /// Stream through visible rows with early termination support.
+    /// The closure returns `true` to continue, `false` to stop.
+    /// Returns the number of rows visited.
+    pub fn for_each_visible_limit<F>(
+        &self,
+        txn_id: TxnId,
+        read_ts: Timestamp,
+        limit: usize,
+        mut f: F,
+    ) -> usize
+    where
+        F: FnMut(&OwnedRow) -> bool,
+    {
+        let mut visited = 0usize;
+        for entry in &self.data {
+            if visited >= limit {
+                break;
+            }
+            let cont = entry
+                .value()
+                .with_visible_data(txn_id, read_ts, |row| {
+                    visited += 1;
+                    f(row)
+                })
+                .unwrap_or(true);
+            if !cont {
+                break;
+            }
+        }
+        visited
     }
 
     /// Parallel map-reduce over all visible rows.
@@ -627,8 +668,7 @@ impl MemTable {
         }
 
         // Phase 1: collect chain refs (Arc pointer copies, no row data clone)
-        let chains: Vec<Arc<VersionChain>> =
-            self.data.iter().map(|e| e.value().clone()).collect();
+        let chains: Vec<Arc<VersionChain>> = self.data.iter().map(|e| e.value().clone()).collect();
 
         // Phase 2: parallel map-reduce
         let num_threads = std::thread::available_parallelism()
@@ -691,7 +731,13 @@ impl MemTable {
     }
 
     /// Secondary index point scan: look up PKs via index, then fetch visible rows.
-    pub fn index_scan(&self, column_idx: usize, key: &[u8], txn_id: TxnId, read_ts: Timestamp) -> Vec<(PrimaryKey, OwnedRow)> {
+    pub fn index_scan(
+        &self,
+        column_idx: usize,
+        key: &[u8],
+        txn_id: TxnId,
+        read_ts: Timestamp,
+    ) -> Vec<(PrimaryKey, OwnedRow)> {
         let pks = {
             let indexes = self.secondary_indexes.read();
             let mut found = Vec::new();
@@ -744,7 +790,12 @@ impl MemTable {
         vec![]
     }
 
-    fn fetch_visible(&self, pks: Vec<PrimaryKey>, txn_id: TxnId, read_ts: Timestamp) -> Vec<(PrimaryKey, OwnedRow)> {
+    fn fetch_visible(
+        &self,
+        pks: Vec<PrimaryKey>,
+        txn_id: TxnId,
+        read_ts: Timestamp,
+    ) -> Vec<(PrimaryKey, OwnedRow)> {
         let mut results = Vec::new();
         for pk in pks {
             if let Some(chain) = self.data.get(&pk) {
@@ -758,10 +809,29 @@ impl MemTable {
 
     /// Commit all writes by a transaction (legacy full-scan path).
     /// Also maintains secondary indexes at commit time (方案A).
+    /// Validates unique constraints before committing (same as commit_keys).
     pub fn commit_txn(&self, txn_id: TxnId, commit_ts: Timestamp) {
-        // Collect pk_order changes locally to avoid acquiring the global RwLock
-        // once per key. A single bulk write at the end reduces contention from
-        // O(N) write-lock acquisitions to O(1), matching commit_keys behaviour.
+        // Collect keys with uncommitted writes by this txn for unique validation
+        let affected_keys: Vec<PrimaryKey> = self
+            .data
+            .iter()
+            .filter(|e| {
+                let head = e.value().head.read();
+                head.as_ref()
+                    .is_some_and(|v| v.created_by == txn_id && v.get_commit_ts().0 == 0)
+            })
+            .map(|e| e.key().clone())
+            .collect();
+
+        // Validate unique constraints before committing any version
+        if !affected_keys.is_empty() {
+            if let Err(_e) = self.validate_unique_constraints_for_commit(txn_id, &affected_keys) {
+                // Abort instead of silently committing with violated constraints
+                self.abort_keys(txn_id, &affected_keys);
+                return;
+            }
+        }
+
         let mut pk_inserts: Vec<PrimaryKey> = Vec::new();
         let mut pk_deletes: Vec<PrimaryKey> = Vec::new();
         let mut row_delta: i64 = 0;
@@ -770,17 +840,35 @@ impl MemTable {
             let pk = entry.key().clone();
             let (new_data, old_data) = entry.value().commit_and_report(txn_id, commit_ts);
             match (new_data.is_some(), old_data.is_some()) {
-                (true, false) => { row_delta += 1; pk_inserts.push(pk.clone()); }
-                (false, true) => { row_delta -= 1; pk_deletes.push(pk.clone()); }
+                (true, false) => {
+                    row_delta += 1;
+                    pk_inserts.push(pk.clone());
+                }
+                (false, true) => {
+                    row_delta -= 1;
+                    pk_deletes.push(pk.clone());
+                }
                 _ => {}
             }
             self.index_update_on_commit(&pk, new_data.as_deref(), old_data.as_deref());
         }
 
         if row_delta > 0 {
-            self.committed_row_count.fetch_add(row_delta, AtomicOrdering::Relaxed);
+            self.committed_row_count
+                .fetch_add(row_delta, AtomicOrdering::Relaxed);
         } else if row_delta < 0 {
-            self.committed_row_count.fetch_sub(-row_delta, AtomicOrdering::Relaxed);
+            self.committed_row_count
+                .fetch_sub(-row_delta, AtomicOrdering::Relaxed);
+        }
+
+        if !pk_inserts.is_empty() || !pk_deletes.is_empty() {
+            let mut pk_set = self.pk_order.write();
+            for pk in pk_inserts {
+                pk_set.insert(pk);
+            }
+            for pk in pk_deletes {
+                pk_set.remove(&pk);
+            }
         }
     }
 
@@ -804,13 +892,21 @@ impl MemTable {
 
         // Phase 2: All checks passed — apply MVCC commits + index updates.
         let mut row_delta: i64 = 0;
+        let mut pk_inserts: Vec<PrimaryKey> = Vec::new();
+        let mut pk_deletes: Vec<PrimaryKey> = Vec::new();
 
         for pk in keys {
             if let Some(chain) = self.data.get(pk) {
                 let (new_data, old_data) = chain.commit_and_report(txn_id, commit_ts);
                 match (new_data.is_some(), old_data.is_some()) {
-                    (true, false) => row_delta += 1,
-                    (false, true) => row_delta -= 1,
+                    (true, false) => {
+                        row_delta += 1;
+                        pk_inserts.push(pk.clone());
+                    }
+                    (false, true) => {
+                        row_delta -= 1;
+                        pk_deletes.push(pk.clone());
+                    }
                     _ => {}
                 }
                 self.index_update_on_commit(pk, new_data.as_deref(), old_data.as_deref());
@@ -818,9 +914,21 @@ impl MemTable {
         }
 
         if row_delta > 0 {
-            self.committed_row_count.fetch_add(row_delta, AtomicOrdering::Relaxed);
+            self.committed_row_count
+                .fetch_add(row_delta, AtomicOrdering::Relaxed);
         } else if row_delta < 0 {
-            self.committed_row_count.fetch_sub(-row_delta, AtomicOrdering::Relaxed);
+            self.committed_row_count
+                .fetch_sub(-row_delta, AtomicOrdering::Relaxed);
+        }
+
+        if !pk_inserts.is_empty() || !pk_deletes.is_empty() {
+            let mut pk_set = self.pk_order.write();
+            for pk in pk_inserts {
+                pk_set.insert(pk);
+            }
+            for pk in pk_deletes {
+                pk_set.remove(&pk);
+            }
         }
 
         Ok(())
@@ -852,7 +960,9 @@ impl MemTable {
         exclude_txn: TxnId,
         after_ts: Timestamp,
     ) -> bool {
-        self.data.get(pk).is_some_and(|chain| chain.has_committed_write_after(exclude_txn, after_ts))
+        self.data
+            .get(pk)
+            .is_some_and(|chain| chain.has_committed_write_after(exclude_txn, after_ts))
     }
 
     /// Count visible rows without cloning row data.
@@ -941,8 +1051,11 @@ impl MemTable {
                                 let d = &row.values[*ci];
                                 if !matches!(d, Datum::Null)
                                     && (mins[i].is_none()
-                                        || d.partial_cmp(mins[i].as_ref().expect("BUG: None after is_none short-circuit"))
-                                            == Some(std::cmp::Ordering::Less))
+                                        || d.partial_cmp(
+                                            mins[i]
+                                                .as_ref()
+                                                .expect("BUG: None after is_none short-circuit"),
+                                        ) == Some(std::cmp::Ordering::Less))
                                 {
                                     mins[i] = Some(d.clone());
                                 }
@@ -953,8 +1066,11 @@ impl MemTable {
                                 let d = &row.values[*ci];
                                 if !matches!(d, Datum::Null)
                                     && (maxs[i].is_none()
-                                        || d.partial_cmp(maxs[i].as_ref().expect("BUG: None after is_none short-circuit"))
-                                            == Some(std::cmp::Ordering::Greater))
+                                        || d.partial_cmp(
+                                            maxs[i]
+                                                .as_ref()
+                                                .expect("BUG: None after is_none short-circuit"),
+                                        ) == Some(std::cmp::Ordering::Greater))
                                 {
                                     maxs[i] = Some(d.clone());
                                 }
@@ -1045,8 +1161,7 @@ impl MemTable {
             }
             heap.into_sorted_vec()
         } else {
-            let mut heap: BinaryHeap<Reverse<PrimaryKey>> =
-                BinaryHeap::with_capacity(k + 1);
+            let mut heap: BinaryHeap<Reverse<PrimaryKey>> = BinaryHeap::with_capacity(k + 1);
             for entry in &self.data {
                 if entry.value().is_visible(txn_id, read_ts) {
                     let pk = entry.key();
@@ -1070,6 +1185,53 @@ impl MemTable {
         for pk in top_pks {
             if let Some(row) = self.get(&pk, txn_id, read_ts) {
                 results.push((pk, row));
+            }
+        }
+        results
+    }
+
+    /// PK range scan using the ordered PK index.
+    /// `start`/`end` are optional inclusive/exclusive bounds on the encoded PK bytes.
+    /// Fast path: O(K) via BTreeSet range when pk_order is populated.
+    /// Fallback: O(N) full DashMap scan + filter when pk_order is empty.
+    pub fn scan_range_by_pk(
+        &self,
+        txn_id: TxnId,
+        read_ts: Timestamp,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+    ) -> Vec<(PrimaryKey, OwnedRow)> {
+        let in_range =
+            |pk: &[u8]| -> bool { start.is_none_or(|s| pk >= s) && end.is_none_or(|e| pk < e) };
+
+        let pk_set = self.pk_order.read();
+        if !pk_set.is_empty() {
+            use std::ops::Bound;
+            let lo = match start {
+                Some(s) => Bound::Included(s.to_vec()),
+                None => Bound::Unbounded,
+            };
+            let hi = match end {
+                Some(e) => Bound::Excluded(e.to_vec()),
+                None => Bound::Unbounded,
+            };
+            let mut results = Vec::new();
+            for pk in pk_set.range((lo, hi)) {
+                if let Some(row) = self.get(pk, txn_id, read_ts) {
+                    results.push((pk.clone(), row));
+                }
+            }
+            return results;
+        }
+        drop(pk_set);
+
+        // Fallback: full DashMap scan with filter
+        let mut results = Vec::new();
+        for entry in &self.data {
+            if in_range(entry.key()) {
+                if let Some(row) = entry.value().read_for_txn(txn_id, read_ts) {
+                    results.push((entry.key().clone(), unwrap_arc_row(row)));
+                }
             }
         }
         results
@@ -1116,7 +1278,10 @@ impl MemTable {
 
         for pk in keys {
             // Read the uncommitted row this txn is about to commit
-            let uncommitted = self.data.get(pk).and_then(|chain| chain.read_uncommitted_for_txn(txn_id));
+            let uncommitted = self
+                .data
+                .get(pk)
+                .and_then(|chain| chain.read_uncommitted_for_txn(txn_id));
 
             // Only check inserts/updates (Some(Some(row))), skip deletes (Some(None))
             let new_row = match uncommitted {
@@ -1150,7 +1315,10 @@ impl MemTable {
         pk: &PrimaryKey,
         row: &OwnedRow,
     ) -> Result<(), falcon_common::error::StorageError> {
-        if !self.has_secondary_idx.load(std::sync::atomic::Ordering::Acquire) {
+        if !self
+            .has_secondary_idx
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
             return Ok(());
         }
         let indexes = self.secondary_indexes.read();
@@ -1255,21 +1423,41 @@ impl MemTable {
 }
 
 impl crate::storage_trait::StorageTable for MemTable {
-    fn schema(&self) -> &falcon_common::schema::TableSchema { &self.schema }
+    fn schema(&self) -> &falcon_common::schema::TableSchema {
+        &self.schema
+    }
 
-    fn insert(&self, row: &OwnedRow, txn_id: TxnId) -> Result<PrimaryKey, falcon_common::error::StorageError> {
+    fn insert(
+        &self,
+        row: &OwnedRow,
+        txn_id: TxnId,
+    ) -> Result<PrimaryKey, falcon_common::error::StorageError> {
         self.insert(row.clone(), txn_id)
     }
 
-    fn update(&self, pk: &PrimaryKey, new_row: &OwnedRow, txn_id: TxnId) -> Result<(), falcon_common::error::StorageError> {
+    fn update(
+        &self,
+        pk: &PrimaryKey,
+        new_row: &OwnedRow,
+        txn_id: TxnId,
+    ) -> Result<(), falcon_common::error::StorageError> {
         self.update(pk, new_row.clone(), txn_id)
     }
 
-    fn delete(&self, pk: &PrimaryKey, txn_id: TxnId) -> Result<(), falcon_common::error::StorageError> {
+    fn delete(
+        &self,
+        pk: &PrimaryKey,
+        txn_id: TxnId,
+    ) -> Result<(), falcon_common::error::StorageError> {
         self.delete(pk, txn_id)
     }
 
-    fn get(&self, pk: &PrimaryKey, txn_id: TxnId, read_ts: Timestamp) -> Result<Option<OwnedRow>, falcon_common::error::StorageError> {
+    fn get(
+        &self,
+        pk: &PrimaryKey,
+        txn_id: TxnId,
+        read_ts: Timestamp,
+    ) -> Result<Option<OwnedRow>, falcon_common::error::StorageError> {
         Ok(self.get(pk, txn_id, read_ts))
     }
 
@@ -1277,7 +1465,12 @@ impl crate::storage_trait::StorageTable for MemTable {
         self.scan(txn_id, read_ts)
     }
 
-    fn commit_key(&self, pk: &PrimaryKey, txn_id: TxnId, commit_ts: Timestamp) -> Result<(), falcon_common::error::StorageError> {
+    fn commit_key(
+        &self,
+        pk: &PrimaryKey,
+        txn_id: TxnId,
+        commit_ts: Timestamp,
+    ) -> Result<(), falcon_common::error::StorageError> {
         self.commit_keys(txn_id, commit_ts, std::slice::from_ref(pk))
     }
 
@@ -1285,7 +1478,12 @@ impl crate::storage_trait::StorageTable for MemTable {
         self.abort_keys(txn_id, std::slice::from_ref(pk));
     }
 
-    fn commit_batch(&self, pks: &[PrimaryKey], txn_id: TxnId, commit_ts: Timestamp) -> Result<(), falcon_common::error::StorageError> {
+    fn commit_batch(
+        &self,
+        pks: &[PrimaryKey],
+        txn_id: TxnId,
+        commit_ts: Timestamp,
+    ) -> Result<(), falcon_common::error::StorageError> {
         self.commit_keys(txn_id, commit_ts, pks)
     }
     fn abort_batch(&self, pks: &[PrimaryKey], txn_id: TxnId) {
@@ -1308,7 +1506,8 @@ mod index_tests {
             nullable: !pk,
             is_primary_key: pk,
             default_value: None,
-            is_serial: false, max_length: None,
+            is_serial: false,
+            max_length: None,
         }
     }
 

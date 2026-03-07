@@ -111,13 +111,11 @@ pub fn run_doctor(config_path: &str) {
         // Check for WAL segment files
         let has_wal = std::fs::read_dir(&wal_dir)
             .map(|entries| {
-                entries
-                    .flatten()
-                    .any(|e| {
-                        let name = e.file_name();
-                        let name = name.to_string_lossy();
-                        name.ends_with(".wal")
-                    })
+                entries.flatten().any(|e| {
+                    let name = e.file_name();
+                    let name = name.to_string_lossy();
+                    name.ends_with(".wal")
+                })
             })
             .unwrap_or(false);
         if has_wal {
@@ -178,10 +176,7 @@ pub fn run_doctor(config_path: &str) {
 
     // 7. ProgramData directory
     let pd_root = crate::service::paths::program_data_root();
-    print!(
-        "  [check] ProgramData dir: {} ... ",
-        pd_root.display()
-    );
+    print!("  [check] ProgramData dir: {} ... ", pd_root.display());
     if pd_root.exists() {
         println!("EXISTS");
         pass += 1;
@@ -210,7 +205,10 @@ pub fn run_doctor(config_path: &str) {
             std::env::temp_dir()
         };
 
-        print!("  [check] FILE_FLAG_NO_BUFFERING on {} ... ", check_dir.display());
+        print!(
+            "  [check] FILE_FLAG_NO_BUFFERING on {} ... ",
+            check_dir.display()
+        );
         let (no_buf_ok, sector_size) =
             falcon_storage::wal_win_async::check_no_buffering_support(&check_dir);
         if no_buf_ok {

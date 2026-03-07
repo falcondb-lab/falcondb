@@ -38,7 +38,10 @@ fn subst_assignments(
         .collect()
 }
 
-pub fn subst_rows(rows: &[Vec<BoundExpr>], p: &[Datum]) -> Result<Vec<Vec<BoundExpr>>, ExecutionError> {
+pub fn subst_rows(
+    rows: &[Vec<BoundExpr>],
+    p: &[Datum],
+) -> Result<Vec<Vec<BoundExpr>>, ExecutionError> {
     rows.iter()
         .map(|row| row.iter().map(|e| substitute_params_expr(e, p)).collect())
         .collect()

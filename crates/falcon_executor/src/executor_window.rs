@@ -205,7 +205,10 @@ impl Executor {
                                 let end = Self::resolve_frame_end(&wf.frame, pos, part_len);
                                 let frame_idx = start + n_zero;
                                 let val = if frame_idx <= end && frame_idx < part_len {
-                                    source_rows[indices[frame_idx]].get(*col_idx).cloned().unwrap_or(Datum::Null)
+                                    source_rows[indices[frame_idx]]
+                                        .get(*col_idx)
+                                        .cloned()
+                                        .unwrap_or(Datum::Null)
                                 } else {
                                     Datum::Null
                                 };
@@ -217,7 +220,10 @@ impl Executor {
                             for (pos, &row_idx) in indices.iter().enumerate() {
                                 let start = Self::resolve_frame_start(&wf.frame, pos, part_len);
                                 let val = if start < part_len {
-                                    source_rows[indices[start]].get(*col_idx).cloned().unwrap_or(Datum::Null)
+                                    source_rows[indices[start]]
+                                        .get(*col_idx)
+                                        .cloned()
+                                        .unwrap_or(Datum::Null)
                                 } else {
                                     Datum::Null
                                 };
@@ -229,7 +235,10 @@ impl Executor {
                             for (pos, &row_idx) in indices.iter().enumerate() {
                                 let end = Self::resolve_frame_end(&wf.frame, pos, part_len);
                                 let val = if end < part_len {
-                                    source_rows[indices[end]].get(*col_idx).cloned().unwrap_or(Datum::Null)
+                                    source_rows[indices[end]]
+                                        .get(*col_idx)
+                                        .cloned()
+                                        .unwrap_or(Datum::Null)
                                 } else {
                                     Datum::Null
                                 };
@@ -343,13 +352,18 @@ impl Executor {
         }
 
         // Determine column type from first non-null value.
-        let is_integer_col = indices.iter().find_map(|&i| source_rows[i].get(col_idx))
+        let is_integer_col = indices
+            .iter()
+            .find_map(|&i| source_rows[i].get(col_idx))
             .map(|d| matches!(d, Datum::Int32(_) | Datum::Int64(_)))
             .unwrap_or(false);
 
         // For integer columns keep a lossless i64 sum; fall back to f64 on overflow.
         // For float columns use f64 directly.
-        enum SumAcc { Int(i64), Float(f64) }
+        enum SumAcc {
+            Int(i64),
+            Float(f64),
+        }
 
         let extract_i64 = |i: usize| -> Option<i64> {
             source_rows[i].get(col_idx).and_then(|d| match d {
@@ -358,9 +372,8 @@ impl Executor {
                 _ => None,
             })
         };
-        let extract_f64 = |i: usize| -> Option<f64> {
-            source_rows[i].get(col_idx).and_then(|d| d.as_f64())
-        };
+        let extract_f64 =
+            |i: usize| -> Option<f64> { source_rows[i].get(col_idx).and_then(|d| d.as_f64()) };
 
         // Two separate sliding-window loops to keep the hot path branch-free.
         if is_integer_col {
@@ -370,23 +383,23 @@ impl Executor {
             let mut prev_start = 0usize;
             let mut prev_end_plus1 = 0usize;
 
-            let add = |acc: &mut SumAcc, v: i64| {
-                match acc {
-                    SumAcc::Int(s) => match s.checked_add(v) {
-                        Some(r) => *s = r,
-                        None => { *acc = SumAcc::Float(*s as f64 + v as f64); }
-                    },
-                    SumAcc::Float(s) => *s += v as f64,
-                }
+            let add = |acc: &mut SumAcc, v: i64| match acc {
+                SumAcc::Int(s) => match s.checked_add(v) {
+                    Some(r) => *s = r,
+                    None => {
+                        *acc = SumAcc::Float(*s as f64 + v as f64);
+                    }
+                },
+                SumAcc::Float(s) => *s += v as f64,
             };
-            let sub = |acc: &mut SumAcc, v: i64| {
-                match acc {
-                    SumAcc::Int(s) => match s.checked_sub(v) {
-                        Some(r) => *s = r,
-                        None => { *acc = SumAcc::Float(*s as f64 - v as f64); }
-                    },
-                    SumAcc::Float(s) => *s -= v as f64,
-                }
+            let sub = |acc: &mut SumAcc, v: i64| match acc {
+                SumAcc::Int(s) => match s.checked_sub(v) {
+                    Some(r) => *s = r,
+                    None => {
+                        *acc = SumAcc::Float(*s as f64 - v as f64);
+                    }
+                },
+                SumAcc::Float(s) => *s -= v as f64,
             };
 
             for (pos, &row_idx) in indices.iter().enumerate().take(n) {
@@ -422,7 +435,10 @@ impl Executor {
                         },
                         AggFunc::Count => Datum::Int64(count),
                         AggFunc::Avg => {
-                            let s = match acc { SumAcc::Int(s) => s as f64, SumAcc::Float(s) => s };
+                            let s = match acc {
+                                SumAcc::Int(s) => s as f64,
+                                SumAcc::Float(s) => s,
+                            };
                             Datum::Float64(s / count as f64)
                         }
                         _ => Datum::Null,
@@ -442,10 +458,19 @@ impl Executor {
                 let end_plus1 = end + 1;
 
                 if pos == 0 {
-                    for v in vals[start..end_plus1].iter().flatten() { sum += v; count += 1; }
+                    for v in vals[start..end_plus1].iter().flatten() {
+                        sum += v;
+                        count += 1;
+                    }
                 } else {
-                    for v in vals[prev_start..start.min(prev_end_plus1)].iter().flatten() { sum -= v; count -= 1; }
-                    for v in vals[prev_end_plus1.max(start)..end_plus1].iter().flatten() { sum += v; count += 1; }
+                    for v in vals[prev_start..start.min(prev_end_plus1)].iter().flatten() {
+                        sum -= v;
+                        count -= 1;
+                    }
+                    for v in vals[prev_end_plus1.max(start)..end_plus1].iter().flatten() {
+                        sum += v;
+                        count += 1;
+                    }
                 }
                 prev_start = start;
                 prev_end_plus1 = end_plus1;
@@ -480,9 +505,9 @@ impl Executor {
         match &frame.end {
             WindowFrameBound::UnboundedFollowing => partition_len.saturating_sub(1),
             WindowFrameBound::CurrentRow => pos,
-            WindowFrameBound::Following(n) => {
-                pos.saturating_add(*n as usize).min(partition_len.saturating_sub(1))
-            }
+            WindowFrameBound::Following(n) => pos
+                .saturating_add(*n as usize)
+                .min(partition_len.saturating_sub(1)),
             WindowFrameBound::Preceding(n) => pos.saturating_sub(*n as usize),
             WindowFrameBound::UnboundedPreceding => 0,
         }

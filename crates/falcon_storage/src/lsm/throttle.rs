@@ -137,7 +137,8 @@ impl BackpressureController {
     }
 
     pub fn update_compaction_backlog(&self, bytes: u64) {
-        self.compaction_backlog_bytes.store(bytes, Ordering::Relaxed);
+        self.compaction_backlog_bytes
+            .store(bytes, Ordering::Relaxed);
     }
 
     /// Evaluate current backpressure level.
@@ -231,7 +232,7 @@ impl std::error::Error for BackpressureError {}
 
 impl From<BackpressureError> for std::io::Error {
     fn from(e: BackpressureError) -> Self {
-        std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+        std::io::Error::other(e.to_string())
     }
 }
 

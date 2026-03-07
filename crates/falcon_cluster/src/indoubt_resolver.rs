@@ -235,7 +235,10 @@ impl InDoubtResolver {
     }
 
     /// Create with ShardedEngine for applying decisions to participant shards.
-    pub fn with_engine(outcome_cache: Arc<TxnOutcomeCache>, engine: Arc<ShardedEngine>) -> Arc<Self> {
+    pub fn with_engine(
+        outcome_cache: Arc<TxnOutcomeCache>,
+        engine: Arc<ShardedEngine>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             indoubt: RwLock::new(HashMap::new()),
             outcome_cache,
@@ -519,10 +522,14 @@ impl InDoubtResolver {
             let local_txn_id = txn.global_txn_id;
             for shard in engine.all_shards() {
                 let result = match outcome {
-                    TxnOutcome::Committed => shard.txn_mgr.commit(local_txn_id)
+                    TxnOutcome::Committed => shard
+                        .txn_mgr
+                        .commit(local_txn_id)
                         .map(|_| ())
                         .map_err(|e| FalconError::Internal(e.to_string())),
-                    TxnOutcome::Aborted => shard.txn_mgr.abort(local_txn_id)
+                    TxnOutcome::Aborted => shard
+                        .txn_mgr
+                        .abort(local_txn_id)
                         .map_err(|e| FalconError::Internal(e.to_string())),
                 };
                 // Ignore "txn not found" — it may only exist on one shard
@@ -541,23 +548,30 @@ impl InDoubtResolver {
                 Some(s) => s,
                 None => {
                     let e = FalconError::Internal(format!(
-                        "shard {:?} not found for txn {}", shard_id, txn.global_txn_id.0
+                        "shard {:?} not found for txn {}",
+                        shard_id, txn.global_txn_id.0
                     ));
                     tracing::warn!(
                         txn_id = txn.global_txn_id.0,
                         shard = ?shard_id,
                         "apply_decision: shard not found"
                     );
-                    if first_err.is_none() { first_err = Some(e); }
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
                     continue;
                 }
             };
 
             let result: Result<(), FalconError> = match outcome {
-                TxnOutcome::Committed => shard.txn_mgr.commit(*participant_txn_id)
+                TxnOutcome::Committed => shard
+                    .txn_mgr
+                    .commit(*participant_txn_id)
                     .map(|_| ())
                     .map_err(|e| FalconError::Internal(e.to_string())),
-                TxnOutcome::Aborted => shard.txn_mgr.abort(*participant_txn_id)
+                TxnOutcome::Aborted => shard
+                    .txn_mgr
+                    .abort(*participant_txn_id)
                     .map_err(|e| FalconError::Internal(e.to_string())),
             };
 
@@ -579,7 +593,9 @@ impl InDoubtResolver {
                         error = %e,
                         "participant decision apply failed"
                     );
-                    if first_err.is_none() { first_err = Some(e); }
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
                 }
             }
         }

@@ -33,7 +33,9 @@ use crate::structured_lsn::StructuredLsn;
 pub fn encode_varint(mut value: u64, buf: &mut [u8]) -> usize {
     let mut i = 0;
     loop {
-        if i >= buf.len() { break; }
+        if i >= buf.len() {
+            break;
+        }
         let byte = (value & 0x7F) as u8;
         value >>= 7;
         if value == 0 {
@@ -61,7 +63,9 @@ pub fn decode_varint(buf: &[u8]) -> Option<(u64, usize)> {
     let mut value: u64 = 0;
     let mut shift: u32 = 0;
     for (i, &byte) in buf.iter().enumerate() {
-        if shift >= 64 { return None; } // overflow
+        if shift >= 64 {
+            return None;
+        } // overflow
         value |= u64::from(byte & 0x7F) << shift;
         if byte & 0x80 == 0 {
             return Some((value, i + 1));
@@ -158,11 +162,7 @@ pub struct ReplicateSegmentHeader {
 pub const STREAM_HEADER_SIZE: usize = 25;
 
 impl ReplicateSegmentHeader {
-    pub const fn new(
-        version: ProtocolVersion,
-        segment_id: u64,
-        base_offset: u64,
-    ) -> Self {
+    pub const fn new(version: ProtocolVersion, segment_id: u64, base_offset: u64) -> Self {
         Self {
             version,
             segment_id,
@@ -183,12 +183,19 @@ impl ReplicateSegmentHeader {
 
     /// Deserialize from bytes.
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        if data.len() < STREAM_HEADER_SIZE { return None; }
+        if data.len() < STREAM_HEADER_SIZE {
+            return None;
+        }
         let version = ProtocolVersion::from_u8(data[0])?;
         let segment_id = u64::from_le_bytes(data[1..9].try_into().ok()?);
         let base_offset = u64::from_le_bytes(data[9..17].try_into().ok()?);
         let base_lsn = StructuredLsn::from_raw(u64::from_le_bytes(data[17..25].try_into().ok()?));
-        Some(Self { version, segment_id, base_offset, base_lsn })
+        Some(Self {
+            version,
+            segment_id,
+            base_offset,
+            base_lsn,
+        })
     }
 }
 
@@ -219,7 +226,11 @@ impl RecordFrame {
     /// Create a frame from payload and delta.
     pub fn new(delta_offset: u64, payload: Vec<u8>) -> Self {
         let crc32 = Self::compute_crc(&payload);
-        Self { delta_offset, payload, crc32 }
+        Self {
+            delta_offset,
+            payload,
+            crc32,
+        }
     }
 
     /// Verify frame integrity.
@@ -264,14 +275,23 @@ impl RecordFrame {
         pos += n;
         let payload_len = payload_len as usize;
         // payload
-        if data.len() < pos + payload_len + 4 { return None; }
+        if data.len() < pos + payload_len + 4 {
+            return None;
+        }
         let payload = data[pos..pos + payload_len].to_vec();
         pos += payload_len;
         // crc32
         let crc32 = u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?);
         pos += 4;
 
-        Some((Self { delta_offset: delta, payload, crc32 }, pos))
+        Some((
+            Self {
+                delta_offset: delta,
+                payload,
+                crc32,
+            },
+            pos,
+        ))
     }
 
     /// Encode in legacy v0 format (full 8-byte offset instead of varint delta).
@@ -287,13 +307,25 @@ impl RecordFrame {
 
     /// Decode from legacy v0 format.
     pub fn decode_v0(data: &[u8]) -> Option<(Self, u64, usize)> {
-        if data.len() < 16 { return None; }
+        if data.len() < 16 {
+            return None;
+        }
         let offset = u64::from_le_bytes(data[0..8].try_into().ok()?);
         let payload_len = u32::from_le_bytes(data[8..12].try_into().ok()?) as usize;
-        if data.len() < 16 + payload_len { return None; }
+        if data.len() < 16 + payload_len {
+            return None;
+        }
         let payload = data[12..12 + payload_len].to_vec();
         let crc32 = u32::from_le_bytes(data[12 + payload_len..16 + payload_len].try_into().ok()?);
-        Some((Self { delta_offset: 0, payload, crc32 }, offset, 16 + payload_len))
+        Some((
+            Self {
+                delta_offset: 0,
+                payload,
+                crc32,
+            },
+            offset,
+            16 + payload_len,
+        ))
     }
 }
 
@@ -342,9 +374,13 @@ impl DeltaStreamEncoder {
     }
 
     /// Total frames encoded.
-    pub const fn frames_encoded(&self) -> u64 { self.frames_encoded }
+    pub const fn frames_encoded(&self) -> u64 {
+        self.frames_encoded
+    }
     /// Total bytes in the encoded stream (excluding header).
-    pub const fn bytes_encoded(&self) -> u64 { self.bytes_encoded }
+    pub const fn bytes_encoded(&self) -> u64 {
+        self.bytes_encoded
+    }
 }
 
 /// Decodes a delta-encoded byte stream back to absolute offsets + payloads.
@@ -387,30 +423,38 @@ impl DeltaStreamDecoder {
                 self.current_offset = abs_offset + frame.payload.len() as u64;
                 let lsn = StructuredLsn::new(self.header.segment_id, abs_offset);
                 self.frames_decoded += 1;
-                Some((DecodedRecord {
-                    absolute_offset: abs_offset,
-                    lsn,
-                    payload: frame.payload.clone(),
-                    crc_valid: frame.verify(),
-                }, consumed))
+                Some((
+                    DecodedRecord {
+                        absolute_offset: abs_offset,
+                        lsn,
+                        payload: frame.payload.clone(),
+                        crc_valid: frame.verify(),
+                    },
+                    consumed,
+                ))
             }
             ProtocolVersion::V0FullLsn => {
                 let (frame, offset, consumed) = RecordFrame::decode_v0(data)?;
                 let lsn = StructuredLsn::new(self.header.segment_id, offset);
                 self.current_offset = offset + frame.payload.len() as u64;
                 self.frames_decoded += 1;
-                Some((DecodedRecord {
-                    absolute_offset: offset,
-                    lsn,
-                    payload: frame.payload.clone(),
-                    crc_valid: frame.verify(),
-                }, consumed))
+                Some((
+                    DecodedRecord {
+                        absolute_offset: offset,
+                        lsn,
+                        payload: frame.payload.clone(),
+                        crc_valid: frame.verify(),
+                    },
+                    consumed,
+                ))
             }
         }
     }
 
     /// Total frames decoded.
-    pub const fn frames_decoded(&self) -> u64 { self.frames_decoded }
+    pub const fn frames_decoded(&self) -> u64 {
+        self.frames_decoded
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -421,13 +465,20 @@ impl DeltaStreamDecoder {
 #[derive(Debug, Clone)]
 pub enum DeltaStreamError {
     /// CRC32 mismatch on a frame.
-    CrcMismatch { frame_index: u64, expected: u32, actual: u32 },
+    CrcMismatch {
+        frame_index: u64,
+        expected: u32,
+        actual: u32,
+    },
     /// Truncated frame (incomplete data).
     TruncatedFrame { frame_index: u64 },
     /// Invalid varint encoding.
     InvalidVarint { frame_index: u64 },
     /// Protocol version mismatch.
-    VersionMismatch { expected: ProtocolVersion, actual: ProtocolVersion },
+    VersionMismatch {
+        expected: ProtocolVersion,
+        actual: ProtocolVersion,
+    },
     /// Segment rollover boundary error.
     SegmentBoundary { segment_id: u64, offset: u64 },
 }
@@ -435,16 +486,28 @@ pub enum DeltaStreamError {
 impl fmt::Display for DeltaStreamError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::CrcMismatch { frame_index, expected, actual } =>
-                write!(f, "CRC mismatch at frame {frame_index}: expected {expected:#x}, got {actual:#x}"),
-            Self::TruncatedFrame { frame_index } =>
-                write!(f, "truncated frame at index {frame_index}"),
-            Self::InvalidVarint { frame_index } =>
-                write!(f, "invalid varint at frame {frame_index}"),
-            Self::VersionMismatch { expected, actual } =>
-                write!(f, "protocol version mismatch: expected {expected}, got {actual}"),
-            Self::SegmentBoundary { segment_id, offset } =>
-                write!(f, "segment boundary error: seg={segment_id}, offset={offset}"),
+            Self::CrcMismatch {
+                frame_index,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "CRC mismatch at frame {frame_index}: expected {expected:#x}, got {actual:#x}"
+            ),
+            Self::TruncatedFrame { frame_index } => {
+                write!(f, "truncated frame at index {frame_index}")
+            }
+            Self::InvalidVarint { frame_index } => {
+                write!(f, "invalid varint at frame {frame_index}")
+            }
+            Self::VersionMismatch { expected, actual } => write!(
+                f,
+                "protocol version mismatch: expected {expected}, got {actual}"
+            ),
+            Self::SegmentBoundary { segment_id, offset } => write!(
+                f,
+                "segment boundary error: seg={segment_id}, offset={offset}"
+            ),
         }
     }
 }
@@ -462,10 +525,12 @@ pub enum DeltaRecoveryAction {
 
 pub const fn decide_delta_recovery(error: &DeltaStreamError) -> DeltaRecoveryAction {
     match error {
-        DeltaStreamError::CrcMismatch { .. }
-        | DeltaStreamError::TruncatedFrame { .. } => DeltaRecoveryAction::RetryFromLastGood,
-        DeltaStreamError::InvalidVarint { .. }
-        | DeltaStreamError::SegmentBoundary { .. } => DeltaRecoveryAction::DiscardAndRollback,
+        DeltaStreamError::CrcMismatch { .. } | DeltaStreamError::TruncatedFrame { .. } => {
+            DeltaRecoveryAction::RetryFromLastGood
+        }
+        DeltaStreamError::InvalidVarint { .. } | DeltaStreamError::SegmentBoundary { .. } => {
+            DeltaRecoveryAction::DiscardAndRollback
+        }
         DeltaStreamError::VersionMismatch { .. } => DeltaRecoveryAction::Abort,
     }
 }
@@ -497,14 +562,18 @@ impl DeltaLsnMetrics {
     pub fn bytes_saved_ratio(&self) -> f64 {
         let actual = self.bytes_sent_total.load(Ordering::Relaxed) as f64;
         let baseline = self.bytes_baseline_total.load(Ordering::Relaxed) as f64;
-        if baseline == 0.0 { return 0.0; }
+        if baseline == 0.0 {
+            return 0.0;
+        }
         1.0 - (actual / baseline)
     }
 
     /// Record an encoded frame's sizes for metric tracking.
     pub fn record_encode(&self, encoded_bytes: u64, baseline_bytes: u64) {
-        self.bytes_sent_total.fetch_add(encoded_bytes, Ordering::Relaxed);
-        self.bytes_baseline_total.fetch_add(baseline_bytes, Ordering::Relaxed);
+        self.bytes_sent_total
+            .fetch_add(encoded_bytes, Ordering::Relaxed);
+        self.bytes_baseline_total
+            .fetch_add(baseline_bytes, Ordering::Relaxed);
         self.frames_encoded_total.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -589,14 +658,20 @@ mod tests {
     fn test_version_negotiation() {
         let leader = [ProtocolVersion::V0FullLsn, ProtocolVersion::V1DeltaLsn];
         let follower = [ProtocolVersion::V0FullLsn, ProtocolVersion::V1DeltaLsn];
-        assert_eq!(negotiate_version(&leader, &follower), Some(ProtocolVersion::V1DeltaLsn));
+        assert_eq!(
+            negotiate_version(&leader, &follower),
+            Some(ProtocolVersion::V1DeltaLsn)
+        );
     }
 
     #[test]
     fn test_version_negotiation_fallback() {
         let leader = [ProtocolVersion::V0FullLsn, ProtocolVersion::V1DeltaLsn];
         let follower = [ProtocolVersion::V0FullLsn]; // only v0
-        assert_eq!(negotiate_version(&leader, &follower), Some(ProtocolVersion::V0FullLsn));
+        assert_eq!(
+            negotiate_version(&leader, &follower),
+            Some(ProtocolVersion::V0FullLsn)
+        );
     }
 
     #[test]
@@ -747,7 +822,9 @@ mod tests {
         assert!(
             saving_pct >= 5.0, // At minimum 5% savings on metadata bytes
             "Expected meaningful bandwidth savings, got {:.1}% (v1={}B, v0={}B)",
-            saving_pct, v1_total, v0_total
+            saving_pct,
+            v1_total,
+            v0_total
         );
 
         // Check metadata-only savings (strip payload)
@@ -757,7 +834,9 @@ mod tests {
         assert!(
             meta_saving_pct >= 30.0,
             "Expected ≥30% metadata bandwidth reduction, got {:.1}% (v1_meta={}B, v0_meta={}B)",
-            meta_saving_pct, meta_v1, meta_v0
+            meta_saving_pct,
+            meta_v1,
+            meta_v0
         );
     }
 
@@ -792,7 +871,11 @@ mod tests {
     #[test]
     fn test_error_recovery_decisions() {
         assert_eq!(
-            decide_delta_recovery(&DeltaStreamError::CrcMismatch { frame_index: 0, expected: 0, actual: 1 }),
+            decide_delta_recovery(&DeltaStreamError::CrcMismatch {
+                frame_index: 0,
+                expected: 0,
+                actual: 1
+            }),
             DeltaRecoveryAction::RetryFromLastGood
         );
         assert_eq!(
@@ -818,7 +901,11 @@ mod tests {
         m.record_encode(75, 100);
         // Total: 210 / 300 → saved 30%
         let ratio = m.bytes_saved_ratio();
-        assert!(ratio > 0.29 && ratio < 0.31, "expected ~30% savings, got {:.2}", ratio);
+        assert!(
+            ratio > 0.29 && ratio < 0.31,
+            "expected ~30% savings, got {:.2}",
+            ratio
+        );
 
         m.record_crc_fail();
         let snap = m.snapshot();

@@ -45,13 +45,30 @@ impl Executor {
         // Pre-scan existing rows once for UNIQUE checks
         let mut unique_sets: Vec<std::collections::HashSet<Vec<Datum>>> =
             if !schema.unique_constraints.is_empty() {
-                let existing = self.storage.scan(table_id, txn.txn_id, read_ts).map_err(FalconError::Storage)?;
-                schema.unique_constraints.iter().map(|uniq_cols| {
-                    existing.iter().filter_map(|(_, row)| {
-                        let key: Vec<Datum> = uniq_cols.iter().map(|&idx| row.values[idx].clone()).collect();
-                        if key.iter().any(Datum::is_null) { None } else { Some(key) }
-                    }).collect()
-                }).collect()
+                let existing = self
+                    .storage
+                    .scan(table_id, txn.txn_id, read_ts)
+                    .map_err(FalconError::Storage)?;
+                schema
+                    .unique_constraints
+                    .iter()
+                    .map(|uniq_cols| {
+                        existing
+                            .iter()
+                            .filter_map(|(_, row)| {
+                                let key: Vec<Datum> = uniq_cols
+                                    .iter()
+                                    .map(|&idx| row.values[idx].clone())
+                                    .collect();
+                                if key.iter().any(Datum::is_null) {
+                                    None
+                                } else {
+                                    Some(key)
+                                }
+                            })
+                            .collect()
+                    })
+                    .collect()
             } else {
                 vec![]
             };
@@ -59,25 +76,47 @@ impl Executor {
         // Pre-build FK lookup sets once
         let fk_lookup: Vec<(Vec<usize>, std::collections::HashSet<Vec<Datum>>)> =
             if !schema.foreign_keys.is_empty() {
-                schema.foreign_keys.iter().map(|fk| {
-                    let ref_schema = self.storage.get_table_schema(&fk.ref_table).ok_or_else(|| {
-                        FalconError::Execution(ExecutionError::TypeError(format!(
-                            "Referenced table '{}' not found", fk.ref_table
-                        )))
-                    })?;
-                    let ref_col_indices: Vec<usize> = fk.ref_columns.iter().map(|name| {
-                        ref_schema.find_column(name).ok_or_else(|| {
-                            FalconError::Execution(ExecutionError::TypeError(format!(
-                                "Referenced column '{}' not found in '{}'", name, fk.ref_table
-                            )))
-                        })
-                    }).collect::<Result<Vec<_>, _>>()?;
-                    let ref_rows = self.storage.scan(ref_schema.id, txn.txn_id, read_ts).map_err(FalconError::Storage)?;
-                    let fk_set: std::collections::HashSet<Vec<Datum>> = ref_rows.iter().map(|(_, r)| {
-                        ref_col_indices.iter().map(|&idx| r.values[idx].clone()).collect()
-                    }).collect();
-                    Ok((fk.columns.clone(), fk_set))
-                }).collect::<Result<Vec<_>, FalconError>>()?
+                schema
+                    .foreign_keys
+                    .iter()
+                    .map(|fk| {
+                        let ref_schema =
+                            self.storage
+                                .get_table_schema(&fk.ref_table)
+                                .ok_or_else(|| {
+                                    FalconError::Execution(ExecutionError::TypeError(format!(
+                                        "Referenced table '{}' not found",
+                                        fk.ref_table
+                                    )))
+                                })?;
+                        let ref_col_indices: Vec<usize> = fk
+                            .ref_columns
+                            .iter()
+                            .map(|name| {
+                                ref_schema.find_column(name).ok_or_else(|| {
+                                    FalconError::Execution(ExecutionError::TypeError(format!(
+                                        "Referenced column '{}' not found in '{}'",
+                                        name, fk.ref_table
+                                    )))
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let ref_rows = self
+                            .storage
+                            .scan(ref_schema.id, txn.txn_id, read_ts)
+                            .map_err(FalconError::Storage)?;
+                        let fk_set: std::collections::HashSet<Vec<Datum>> = ref_rows
+                            .iter()
+                            .map(|(_, r)| {
+                                ref_col_indices
+                                    .iter()
+                                    .map(|&idx| r.values[idx].clone())
+                                    .collect()
+                            })
+                            .collect();
+                        Ok((fk.columns.clone(), fk_set))
+                    })
+                    .collect::<Result<Vec<_>, FalconError>>()?
             } else {
                 vec![]
             };
@@ -125,6 +164,41 @@ impl Executor {
                 }
             }
 
+            // Auto-fill SERIAL columns still NULL
+            for (col_idx, col) in schema.columns.iter().enumerate() {
+                if col.is_serial && values[col_idx].is_null() {
+                    let next_val = self
+                        .storage
+                        .next_serial_value(&schema.name, col_idx)
+                        .map_err(FalconError::Storage)?;
+                    values[col_idx] =
+                        if col.data_type == DataType::Int64 {
+                            Datum::Int64(next_val)
+                        } else {
+                            Datum::Int32(i32::try_from(next_val).map_err(|_| {
+                                FalconError::Execution(ExecutionError::NumericOverflow)
+                            })?)
+                        };
+                }
+            }
+
+            // Dynamic defaults (CURRENT_TIMESTAMP, nextval, etc.)
+            Self::eval_dynamic_defaults(schema, &mut values);
+            for (&col_idx, dfn) in &schema.dynamic_defaults {
+                if let falcon_common::schema::DefaultFn::Nextval(ref seq_name) = dfn {
+                    if col_idx < values.len() && values[col_idx].is_null() {
+                        let next_val = self
+                            .storage
+                            .sequence_nextval(seq_name)
+                            .map_err(FalconError::Storage)?;
+                        values[col_idx] = Datum::Int64(next_val);
+                    }
+                }
+            }
+
+            // Enforce VARCHAR(n)/CHAR(n) max length
+            Self::enforce_max_length(schema, &values)?;
+
             // NOT NULL
             for (col_idx, col) in schema.columns.iter().enumerate() {
                 if !col.nullable && values[col_idx].is_null() {
@@ -135,34 +209,44 @@ impl Executor {
                 }
             }
 
-            // CHECK
-            let check_row = OwnedRow::new(values.clone());
-            self.eval_check_constraints(schema, &check_row)?;
+            // Build row once — check constraints directly (avoids clone)
+            let row = OwnedRow::new(values);
+            self.eval_check_constraints(schema, &row)?;
 
             // UNIQUE
             for (set_idx, uniq_cols) in schema.unique_constraints.iter().enumerate() {
-                let key: Vec<Datum> = uniq_cols.iter().map(|&idx| values[idx].clone()).collect();
-                if key.iter().any(Datum::is_null) { continue; }
+                let key: Vec<Datum> = uniq_cols
+                    .iter()
+                    .map(|&idx| row.values[idx].clone())
+                    .collect();
+                if key.iter().any(Datum::is_null) {
+                    continue;
+                }
                 if !unique_sets[set_idx].insert(key) {
-                    let col_names: Vec<&str> = uniq_cols.iter().map(|&idx| schema.columns[idx].name.as_str()).collect();
+                    let col_names: Vec<&str> = uniq_cols
+                        .iter()
+                        .map(|&idx| schema.columns[idx].name.as_str())
+                        .collect();
                     return Err(FalconError::Execution(ExecutionError::TypeError(format!(
-                        "COPY: UNIQUE constraint violated on column(s): {}", col_names.join(", ")
+                        "COPY: UNIQUE constraint violated on column(s): {}",
+                        col_names.join(", ")
                     ))));
                 }
             }
 
             // FK
             for (fk_cols, fk_set) in &fk_lookup {
-                let fk_vals: Vec<Datum> = fk_cols.iter().map(|&idx| values[idx].clone()).collect();
-                if fk_vals.iter().any(Datum::is_null) { continue; }
+                let fk_vals: Vec<Datum> =
+                    fk_cols.iter().map(|&idx| row.values[idx].clone()).collect();
+                if fk_vals.iter().any(Datum::is_null) {
+                    continue;
+                }
                 if !fk_set.contains(&fk_vals) {
                     return Err(FalconError::Execution(ExecutionError::TypeError(
                         "COPY: FOREIGN KEY constraint violated".into(),
                     )));
                 }
             }
-
-            let row = OwnedRow::new(values);
             self.storage
                 .insert(table_id, row, txn.txn_id)
                 .map_err(FalconError::Storage)?;
@@ -231,7 +315,9 @@ impl Executor {
                 line_buf.push_str(&format_csv_line(&fields_buf, delimiter, quote, escape));
             } else {
                 for (i, f) in fields_buf.iter().enumerate() {
-                    if i > 0 { line_buf.push_str(&delim_str); }
+                    if i > 0 {
+                        line_buf.push_str(&delim_str);
+                    }
                     line_buf.push_str(f);
                 }
             }
@@ -303,7 +389,9 @@ impl Executor {
                 line_buf.push_str(&format_csv_line(&fields_buf, delimiter, quote, escape));
             } else {
                 for (j, f) in fields_buf.iter().enumerate() {
-                    if j > 0 { line_buf.push_str(&delim_str); }
+                    if j > 0 {
+                        line_buf.push_str(&delim_str);
+                    }
                     line_buf.push_str(f);
                 }
             }
@@ -323,7 +411,9 @@ impl Executor {
 
 /// Parse a text-format line (tab-delimited by default).
 fn parse_text_line(line: &str, delimiter: char) -> Vec<String> {
-    line.split(delimiter).map(std::string::ToString::to_string).collect()
+    line.split(delimiter)
+        .map(std::string::ToString::to_string)
+        .collect()
 }
 
 /// Parse a CSV-format line with quoting support.
@@ -418,7 +508,7 @@ fn parse_datum(field: &str, data_type: &DataType) -> Result<Datum, String> {
             let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)
                 .unwrap_or_else(|| NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or(NaiveDate::MIN));
             let days = i32::try_from((date - epoch).num_days())
-                .map_err(|_| format!("Date value out of range"))?;
+                .map_err(|_| "Date value out of range".to_string())?;
             Ok(Datum::Date(days))
         }
         DataType::Jsonb => {
@@ -443,8 +533,9 @@ fn parse_datum(field: &str, data_type: &DataType) -> Result<Datum, String> {
                 Err(format!("Cannot parse '{field}' as ARRAY"))
             }
         }
-        DataType::Decimal(_, _) => Datum::parse_decimal(field)
-            .ok_or_else(|| format!("Cannot parse '{field}' as DECIMAL")),
+        DataType::Decimal(_, _) => {
+            Datum::parse_decimal(field).ok_or_else(|| format!("Cannot parse '{field}' as DECIMAL"))
+        }
         DataType::Time => {
             // Parse HH:MM:SS or HH:MM:SS.ffffff
             let parts: Vec<&str> = field.split(':').collect();
@@ -464,11 +555,14 @@ fn parse_datum(field: &str, data_type: &DataType) -> Result<Datum, String> {
             let frac: i64 = if sec_parts.len() > 1 {
                 let f = sec_parts[1];
                 let padded = format!("{:0<6}", &f[..f.len().min(6)]);
-                padded.parse().map_err(|_| format!("Cannot parse '{field}' as TIME"))?
+                padded
+                    .parse()
+                    .map_err(|_| format!("Cannot parse '{field}' as TIME"))?
             } else {
                 0
             };
-            let us = h.checked_mul(3_600_000_000)
+            let us = h
+                .checked_mul(3_600_000_000)
                 .and_then(|v| v.checked_add(m.checked_mul(60_000_000)?))
                 .and_then(|v| v.checked_add(s.checked_mul(1_000_000)?))
                 .and_then(|v| v.checked_add(frac))
@@ -520,12 +614,15 @@ fn datum_to_text(datum: &Datum) -> String {
             )
         }
         Datum::Date(days) => {
-            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
-                .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or(chrono::NaiveDate::MIN));
-            epoch.checked_add_signed(chrono::Duration::days(i64::from(*days))).map_or_else(
-                || days.to_string(),
-                |date| date.format("%Y-%m-%d").to_string(),
-            )
+            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap_or_else(|| {
+                chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or(chrono::NaiveDate::MIN)
+            });
+            epoch
+                .checked_add_signed(chrono::Duration::days(i64::from(*days)))
+                .map_or_else(
+                    || days.to_string(),
+                    |date| date.format("%Y-%m-%d").to_string(),
+                )
         }
         Datum::Jsonb(v) => v.to_string(),
         Datum::Array(elements) => {

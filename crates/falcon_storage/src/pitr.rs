@@ -388,8 +388,7 @@ impl RecoveryExecutor {
             RecoveryTarget::Lsn(target) => record_lsn >= *target,
             RecoveryTarget::Time(target_ms) => record_time_ms >= *target_ms,
             RecoveryTarget::Xid(target_xid) => record_xid >= *target_xid,
-            RecoveryTarget::Latest
-            | RecoveryTarget::RestorePoint(_) => false, // never stop early; restore points handled separately
+            RecoveryTarget::Latest | RecoveryTarget::RestorePoint(_) => false, // never stop early; restore points handled separately
         }
     }
 
@@ -524,7 +523,9 @@ mod tests {
             std::fs::write(&src, vec![0u8; 4096]).unwrap();
             let start = Lsn(i * 1000);
             let end = Lsn((i + 1) * 1000 - 1);
-            archiver.archive_segment(&src, &fname, start, end, 4096).unwrap();
+            archiver
+                .archive_segment(&src, &fname, start, end, 4096)
+                .unwrap();
         }
         let backup = BaseBackup {
             label: "base".into(),

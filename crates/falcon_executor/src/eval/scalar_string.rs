@@ -46,14 +46,24 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
                 _ => 0,
             };
             // Avoid Vec<char>: find byte offset of char at `start` via char_indices.
-            let byte_start = s.char_indices().nth(start).map(|(i, _)| i).unwrap_or(s.len());
+            let byte_start = s
+                .char_indices()
+                .nth(start)
+                .map(|(i, _)| i)
+                .unwrap_or(s.len());
             if byte_start >= s.len() {
                 return Ok(Datum::Text(String::new()));
             }
             let tail = &s[byte_start..];
             let result: String = match args.get(2) {
-                Some(Datum::Int32(n)) => tail.chars().take(usize::try_from(*n).unwrap_or(0)).collect(),
-                Some(Datum::Int64(n)) => tail.chars().take(usize::try_from(*n).unwrap_or(0)).collect(),
+                Some(Datum::Int32(n)) => tail
+                    .chars()
+                    .take(usize::try_from(*n).unwrap_or(0))
+                    .collect(),
+                Some(Datum::Int64(n)) => tail
+                    .chars()
+                    .take(usize::try_from(*n).unwrap_or(0))
+                    .collect(),
                 _ => tail.to_owned(),
             };
             Ok(Datum::Text(result))
@@ -63,12 +73,22 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
             for arg in args {
                 match arg {
                     Datum::Text(s) => result.push_str(s),
-                    Datum::Int32(n) => { let _ = write!(result, "{n}"); }
-                    Datum::Int64(n) => { let _ = write!(result, "{n}"); }
-                    Datum::Float64(f) => { let _ = write!(result, "{f}"); }
-                    Datum::Boolean(b) => { let _ = write!(result, "{b}"); }
+                    Datum::Int32(n) => {
+                        let _ = write!(result, "{n}");
+                    }
+                    Datum::Int64(n) => {
+                        let _ = write!(result, "{n}");
+                    }
+                    Datum::Float64(f) => {
+                        let _ = write!(result, "{f}");
+                    }
+                    Datum::Boolean(b) => {
+                        let _ = write!(result, "{b}");
+                    }
                     Datum::Null => {} // NULL is skipped in CONCAT
-                    _ => { let _ = write!(result, "{arg}"); }
+                    _ => {
+                        let _ = write!(result, "{arg}");
+                    }
                 }
             }
             Ok(Datum::Text(result))
@@ -88,12 +108,18 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
             let mut result = String::new();
             let mut first = true;
             for arg in &args[1..] {
-                if arg.is_null() { continue; }
-                if !first { result.push_str(sep); }
+                if arg.is_null() {
+                    continue;
+                }
+                if !first {
+                    result.push_str(sep);
+                }
                 first = false;
                 match arg {
                     Datum::Text(s) => result.push_str(s),
-                    _ => { let _ = write!(result, "{arg}"); }
+                    _ => {
+                        let _ = write!(result, "{arg}");
+                    }
                 }
             }
             Ok(Datum::Text(result))
@@ -130,7 +156,8 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
             let result = match args.get(1) {
                 Some(Datum::Text(c)) => {
                     let chars: Vec<char> = c.chars().collect();
-                    s.trim_start_matches(|ch: char| chars.contains(&ch)).to_owned()
+                    s.trim_start_matches(|ch: char| chars.contains(&ch))
+                        .to_owned()
                 }
                 _ => s.trim_start().to_owned(),
             };
@@ -145,7 +172,8 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
             let result = match args.get(1) {
                 Some(Datum::Text(c)) => {
                     let chars: Vec<char> = c.chars().collect();
-                    s.trim_end_matches(|ch: char| chars.contains(&ch)).to_owned()
+                    s.trim_end_matches(|ch: char| chars.contains(&ch))
+                        .to_owned()
                 }
                 _ => s.trim_end().to_owned(),
             };
@@ -228,9 +256,10 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
                 }
             };
             if len > MAX_PAD_LEN {
-                return Err(ExecutionError::TypeError(
-                    format!("LPAD length {} exceeds maximum {}", len, MAX_PAD_LEN),
-                ));
+                return Err(ExecutionError::TypeError(format!(
+                    "LPAD length {} exceeds maximum {}",
+                    len, MAX_PAD_LEN
+                )));
             }
             let fill = match args.get(2) {
                 Some(Datum::Text(f)) => f.clone(),
@@ -274,9 +303,10 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
                 }
             };
             if len > MAX_PAD_LEN {
-                return Err(ExecutionError::TypeError(
-                    format!("RPAD length {} exceeds maximum {}", len, MAX_PAD_LEN),
-                ));
+                return Err(ExecutionError::TypeError(format!(
+                    "RPAD length {} exceeds maximum {}",
+                    len, MAX_PAD_LEN
+                )));
             }
             let fill = match args.get(2) {
                 Some(Datum::Text(f)) => f.clone(),
@@ -340,9 +370,10 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
                 _ => return Err(ExecutionError::TypeError("REPEAT requires integer".into())),
             };
             if s.len().saturating_mul(n) > MAX_REPEAT_LEN {
-                return Err(ExecutionError::TypeError(
-                    format!("REPEAT result length exceeds maximum {}", MAX_REPEAT_LEN),
-                ));
+                return Err(ExecutionError::TypeError(format!(
+                    "REPEAT result length exceeds maximum {}",
+                    MAX_REPEAT_LEN
+                )));
             }
             Ok(Datum::Text(s.repeat(n)))
         }
@@ -406,10 +437,16 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
             let result: String = s
                 .chars()
                 .filter_map(|c| {
-                    from_chars.iter().position(|&fc| fc == c).map_or(
-                        Some(c),
-                        |pos| if pos < to_chars.len() { Some(to_chars[pos]) } else { None },
-                    )
+                    from_chars
+                        .iter()
+                        .position(|&fc| fc == c)
+                        .map_or(Some(c), |pos| {
+                            if pos < to_chars.len() {
+                                Some(to_chars[pos])
+                            } else {
+                                None
+                            }
+                        })
                 })
                 .collect();
             Ok(Datum::Text(result))
@@ -532,8 +569,12 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
         }
         ScalarFunc::Chr => {
             let code = match args.first() {
-                Some(Datum::Int32(n)) => u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?,
-                Some(Datum::Int64(n)) => u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?,
+                Some(Datum::Int32(n)) => {
+                    u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?
+                }
+                Some(Datum::Int64(n)) => {
+                    u32::try_from(*n).map_err(|_| ExecutionError::NumericOverflow)?
+                }
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => return Err(ExecutionError::TypeError("CHR requires integer".into())),
             };
@@ -545,9 +586,7 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
             }
         }
         ScalarFunc::Ascii => match args.first() {
-            Some(Datum::Text(s)) => Ok(Datum::Int32(
-                s.chars().next().map_or(0, |c| c as i32),
-            )),
+            Some(Datum::Text(s)) => Ok(Datum::Int32(s.chars().next().map_or(0, |c| c as i32))),
             Some(Datum::Null) => Ok(Datum::Null),
             _ => Err(ExecutionError::TypeError("ASCII requires text".into())),
         },

@@ -1,7 +1,7 @@
+use crate::fts;
 use falcon_common::datum::Datum;
 use falcon_common::error::ExecutionError;
 use falcon_sql_frontend::types::ScalarFunc;
-use crate::fts;
 
 pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionError> {
     match func {
@@ -37,7 +37,9 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
         }
         ScalarFunc::TsHeadline => {
             if args.len() < 2 {
-                return Err(ExecutionError::TypeError("ts_headline requires at least 2 arguments".into()));
+                return Err(ExecutionError::TypeError(
+                    "ts_headline requires at least 2 arguments".into(),
+                ));
             }
             let text = datum_to_text(&args[0])?;
             let query_str = match &args[1] {
@@ -65,7 +67,9 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
         }
         ScalarFunc::Setweight => {
             if args.len() < 2 {
-                return Err(ExecutionError::TypeError("setweight requires 2 arguments".into()));
+                return Err(ExecutionError::TypeError(
+                    "setweight requires 2 arguments".into(),
+                ));
             }
             let vec = extract_tsvector(&args[0])?;
             let weight = match &args[1] {
@@ -82,28 +86,34 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
             let vec = extract_tsvector(&args[0])?;
             Ok(Datum::Int32(fts::tsvector_length(&vec)))
         }
-        ScalarFunc::ArrayToTsvector => {
-            match &args[0] {
-                Datum::Array(arr) => Ok(Datum::TsVector(fts::array_to_tsvector(arr)?)),
-                _ => Err(ExecutionError::TypeError("array_to_tsvector requires array argument".into())),
-            }
-        }
+        ScalarFunc::ArrayToTsvector => match &args[0] {
+            Datum::Array(arr) => Ok(Datum::TsVector(fts::array_to_tsvector(arr)?)),
+            _ => Err(ExecutionError::TypeError(
+                "array_to_tsvector requires array argument".into(),
+            )),
+        },
         ScalarFunc::TsvectorConcat => {
             if args.len() < 2 {
-                return Err(ExecutionError::TypeError("tsvector_concat requires 2 arguments".into()));
+                return Err(ExecutionError::TypeError(
+                    "tsvector_concat requires 2 arguments".into(),
+                ));
             }
             let a = extract_tsvector(&args[0])?;
             let b = extract_tsvector(&args[1])?;
             Ok(Datum::TsVector(fts::tsvector_concat(&a, &b)))
         }
-        _ => Err(ExecutionError::TypeError(format!("unknown FTS function: {func:?}"))),
+        _ => Err(ExecutionError::TypeError(format!(
+            "unknown FTS function: {func:?}"
+        ))),
     }
 }
 
 fn datum_to_text(d: &Datum) -> Result<String, ExecutionError> {
     match d {
         Datum::Text(s) => Ok(s.clone()),
-        Datum::Null => Err(ExecutionError::TypeError("NULL argument to FTS function".into())),
+        Datum::Null => Err(ExecutionError::TypeError(
+            "NULL argument to FTS function".into(),
+        )),
         other => Ok(format!("{other}")),
     }
 }
@@ -116,9 +126,12 @@ fn extract_tsvector(d: &Datum) -> Result<Vec<(String, Vec<u16>)>, ExecutionError
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn extract_vec_query(args: &[Datum]) -> Result<(Vec<(String, Vec<u16>)>, String), ExecutionError> {
     if args.len() < 2 {
-        return Err(ExecutionError::TypeError("ts_rank requires tsvector and tsquery".into()));
+        return Err(ExecutionError::TypeError(
+            "ts_rank requires tsvector and tsquery".into(),
+        ));
     }
     let vec = extract_tsvector(&args[0])?;
     let query = match &args[1] {

@@ -33,12 +33,10 @@ impl DbClient {
         password: Option<&str>,
     ) -> Result<Self> {
         let conn_str = match password {
-            Some(pwd) if !pwd.is_empty() => format!(
-                "host={host} port={port} user={user} dbname={dbname} password={pwd}"
-            ),
-            _ => format!(
-                "host={host} port={port} user={user} dbname={dbname}"
-            ),
+            Some(pwd) if !pwd.is_empty() => {
+                format!("host={host} port={port} user={user} dbname={dbname} password={pwd}")
+            }
+            _ => format!("host={host} port={port} user={user} dbname={dbname}"),
         };
         debug!(
             "Connecting: host={} port={} user={} dbname={}",

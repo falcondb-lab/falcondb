@@ -8,7 +8,10 @@ use falcon_planner::plan::{DistGather, PhysicalPlan};
 
 impl super::DistributedQueryEngine {
     /// EXPLAIN ANALYZE for a DistPlan: execute the plan and show per-shard stats.
-    pub(crate) fn exec_explain_dist(&self, inner: &PhysicalPlan) -> Result<ExecutionResult, FalconError> {
+    pub(crate) fn exec_explain_dist(
+        &self,
+        inner: &PhysicalPlan,
+    ) -> Result<ExecutionResult, FalconError> {
         // Execute the inner DistPlan to populate scatter stats.
         let result = self.execute(inner, None);
         let stats = self.last_scatter_stats();
@@ -79,7 +82,10 @@ impl super::DistributedQueryEngine {
                     limit,
                     offset,
                 } => {
-                    let merges: Vec<String> = agg_merges.iter().map(std::string::ToString::to_string).collect();
+                    let merges: Vec<String> = agg_merges
+                        .iter()
+                        .map(std::string::ToString::to_string)
+                        .collect();
                     lines.push(OwnedRow::new(vec![Datum::Text(format!(
                         "  Gather: TwoPhaseAgg (group_by={group_by_indices:?})"
                     ))]));

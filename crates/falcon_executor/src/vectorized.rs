@@ -32,13 +32,16 @@ pub struct NullBitmap {
 impl NullBitmap {
     /// Create an empty bitmap.
     pub fn new() -> Self {
-        Self { words: Vec::new(), len: 0 }
+        Self {
+            words: Vec::new(),
+            len: 0,
+        }
     }
 
     /// Create a bitmap with pre-allocated capacity for `cap` bits.
     pub fn with_capacity(cap: usize) -> Self {
         Self {
-            words: Vec::with_capacity((cap + 63) / 64),
+            words: Vec::with_capacity(cap.div_ceil(64)),
             len: 0,
         }
     }
@@ -46,7 +49,7 @@ impl NullBitmap {
     /// Create a bitmap of `len` bits, all cleared (not-null).
     pub fn all_false(len: usize) -> Self {
         Self {
-            words: vec![0u64; (len + 63) / 64],
+            words: vec![0u64; len.div_ceil(64)],
             len,
         }
     }
@@ -80,7 +83,11 @@ impl NullBitmap {
     /// Get the bit at `idx`. Returns `true` if null.
     #[inline]
     pub fn get(&self, idx: usize) -> bool {
-        debug_assert!(idx < self.len, "NullBitmap index {idx} out of bounds (len={})", self.len);
+        debug_assert!(
+            idx < self.len,
+            "NullBitmap index {idx} out of bounds (len={})",
+            self.len
+        );
         let word_idx = idx / 64;
         let bit_idx = idx % 64;
         (self.words[word_idx] >> bit_idx) & 1 == 1
@@ -114,7 +121,11 @@ impl std::ops::Index<usize> for NullBitmap {
     fn index(&self, idx: usize) -> &bool {
         // We cannot return a reference to a computed value, so we use a
         // static pair.  This is a well-known pattern for bitset Index impls.
-        if self.get(idx) { &true } else { &false }
+        if self.get(idx) {
+            &true
+        } else {
+            &false
+        }
     }
 }
 
@@ -127,7 +138,10 @@ impl std::ops::Index<usize> for NullBitmap {
 #[derive(Debug, Clone)]
 pub enum ColumnVector {
     /// Boolean column with packed null bitmap.
-    Booleans { values: Vec<bool>, nulls: NullBitmap },
+    Booleans {
+        values: Vec<bool>,
+        nulls: NullBitmap,
+    },
     /// 32-bit integer column.
     Int32s { values: Vec<i32>, nulls: NullBitmap },
     /// 64-bit integer column.
@@ -144,7 +158,10 @@ pub enum ColumnVector {
     /// Date column (days since epoch).
     Dates { values: Vec<i32>, nulls: NullBitmap },
     /// Bytea column.
-    Byteas { values: Vec<Vec<u8>>, nulls: NullBitmap },
+    Byteas {
+        values: Vec<Vec<u8>>,
+        nulls: NullBitmap,
+    },
     /// Fallback: heterogeneous Datum column (for mixed / unsupported types).
     Mixed(Vec<Datum>),
 }
@@ -209,13 +226,25 @@ impl ColumnVector {
                 }
             }
             Self::Timestamps { values, nulls } => {
-                if nulls[idx] { Datum::Null } else { Datum::Timestamp(values[idx]) }
+                if nulls[idx] {
+                    Datum::Null
+                } else {
+                    Datum::Timestamp(values[idx])
+                }
             }
             Self::Dates { values, nulls } => {
-                if nulls[idx] { Datum::Null } else { Datum::Date(values[idx]) }
+                if nulls[idx] {
+                    Datum::Null
+                } else {
+                    Datum::Date(values[idx])
+                }
             }
             Self::Byteas { values, nulls } => {
-                if nulls[idx] { Datum::Null } else { Datum::Bytea(values[idx].clone()) }
+                if nulls[idx] {
+                    Datum::Null
+                } else {
+                    Datum::Bytea(values[idx].clone())
+                }
             }
             Self::Mixed(v) => v[idx].clone(),
         }
@@ -349,8 +378,14 @@ impl ColumnVector {
                 let mut nulls = NullBitmap::with_capacity(datums.len());
                 for d in datums {
                     match d {
-                        Datum::Timestamp(v) => { values.push(*v); nulls.push(false); }
-                        Datum::Null => { values.push(0); nulls.push(true); }
+                        Datum::Timestamp(v) => {
+                            values.push(*v);
+                            nulls.push(false);
+                        }
+                        Datum::Null => {
+                            values.push(0);
+                            nulls.push(true);
+                        }
                         _ => return Self::Mixed(datums.to_vec()),
                     }
                 }
@@ -361,8 +396,14 @@ impl ColumnVector {
                 let mut nulls = NullBitmap::with_capacity(datums.len());
                 for d in datums {
                     match d {
-                        Datum::Date(v) => { values.push(*v); nulls.push(false); }
-                        Datum::Null => { values.push(0); nulls.push(true); }
+                        Datum::Date(v) => {
+                            values.push(*v);
+                            nulls.push(false);
+                        }
+                        Datum::Null => {
+                            values.push(0);
+                            nulls.push(true);
+                        }
                         _ => return Self::Mixed(datums.to_vec()),
                     }
                 }
@@ -373,8 +414,14 @@ impl ColumnVector {
                 let mut nulls = NullBitmap::with_capacity(datums.len());
                 for d in datums {
                     match d {
-                        Datum::Bytea(v) => { values.push(v.clone()); nulls.push(false); }
-                        Datum::Null => { values.push(Vec::new()); nulls.push(true); }
+                        Datum::Bytea(v) => {
+                            values.push(v.clone());
+                            nulls.push(false);
+                        }
+                        Datum::Null => {
+                            values.push(Vec::new());
+                            nulls.push(true);
+                        }
                         _ => return Self::Mixed(datums.to_vec()),
                     }
                 }
@@ -399,7 +446,10 @@ impl ColumnVector {
                     v.push(values[i]);
                     nl.push(nulls[i]);
                 }
-                Self::Int32s { values: v, nulls: nl }
+                Self::Int32s {
+                    values: v,
+                    nulls: nl,
+                }
             }
             Self::Int64s { values, nulls } => {
                 let mut v = Vec::with_capacity(n);
@@ -408,7 +458,10 @@ impl ColumnVector {
                     v.push(values[i]);
                     nl.push(nulls[i]);
                 }
-                Self::Int64s { values: v, nulls: nl }
+                Self::Int64s {
+                    values: v,
+                    nulls: nl,
+                }
             }
             Self::Float64s { values, nulls } => {
                 let mut v = Vec::with_capacity(n);
@@ -417,7 +470,10 @@ impl ColumnVector {
                     v.push(values[i]);
                     nl.push(nulls[i]);
                 }
-                Self::Float64s { values: v, nulls: nl }
+                Self::Float64s {
+                    values: v,
+                    nulls: nl,
+                }
             }
             Self::Booleans { values, nulls } => {
                 let mut v = Vec::with_capacity(n);
@@ -426,7 +482,10 @@ impl ColumnVector {
                     v.push(values[i]);
                     nl.push(nulls[i]);
                 }
-                Self::Booleans { values: v, nulls: nl }
+                Self::Booleans {
+                    values: v,
+                    nulls: nl,
+                }
             }
             Self::Texts { values, nulls } => {
                 let mut v = Vec::with_capacity(n);
@@ -435,25 +494,46 @@ impl ColumnVector {
                     v.push(values[i].clone());
                     nl.push(nulls[i]);
                 }
-                Self::Texts { values: v, nulls: nl }
+                Self::Texts {
+                    values: v,
+                    nulls: nl,
+                }
             }
             Self::Timestamps { values, nulls } => {
                 let mut v = Vec::with_capacity(n);
                 let mut nl = NullBitmap::with_capacity(n);
-                for &i in indices { v.push(values[i]); nl.push(nulls[i]); }
-                Self::Timestamps { values: v, nulls: nl }
+                for &i in indices {
+                    v.push(values[i]);
+                    nl.push(nulls[i]);
+                }
+                Self::Timestamps {
+                    values: v,
+                    nulls: nl,
+                }
             }
             Self::Dates { values, nulls } => {
                 let mut v = Vec::with_capacity(n);
                 let mut nl = NullBitmap::with_capacity(n);
-                for &i in indices { v.push(values[i]); nl.push(nulls[i]); }
-                Self::Dates { values: v, nulls: nl }
+                for &i in indices {
+                    v.push(values[i]);
+                    nl.push(nulls[i]);
+                }
+                Self::Dates {
+                    values: v,
+                    nulls: nl,
+                }
             }
             Self::Byteas { values, nulls } => {
                 let mut v = Vec::with_capacity(n);
                 let mut nl = NullBitmap::with_capacity(n);
-                for &i in indices { v.push(values[i].clone()); nl.push(nulls[i]); }
-                Self::Byteas { values: v, nulls: nl }
+                for &i in indices {
+                    v.push(values[i].clone());
+                    nl.push(nulls[i]);
+                }
+                Self::Byteas {
+                    values: v,
+                    nulls: nl,
+                }
             }
             Self::Mixed(data) => {
                 let mut v = Vec::with_capacity(n);
@@ -1214,8 +1294,7 @@ pub fn vectorized_project(
                         row_buf.push(col.get_datum(idx));
                     }
                     let row = OwnedRow::new(std::mem::take(&mut row_buf));
-                    let val =
-                        crate::expr_engine::ExprEngine::eval_row(expr, &row)?;
+                    let val = crate::expr_engine::ExprEngine::eval_row(expr, &row)?;
                     // Reclaim buffer for reuse
                     row_buf = row.values;
                     datums.push(val);
@@ -1316,20 +1395,38 @@ fn extract_column(col: &ColumnVector, indices: &[usize]) -> ColumnVector {
         ColumnVector::Timestamps { values, nulls } => {
             let mut v = Vec::with_capacity(indices.len());
             let mut n = NullBitmap::with_capacity(indices.len());
-            for &i in indices { v.push(values[i]); n.push(nulls[i]); }
-            ColumnVector::Timestamps { values: v, nulls: n }
+            for &i in indices {
+                v.push(values[i]);
+                n.push(nulls[i]);
+            }
+            ColumnVector::Timestamps {
+                values: v,
+                nulls: n,
+            }
         }
         ColumnVector::Dates { values, nulls } => {
             let mut v = Vec::with_capacity(indices.len());
             let mut n = NullBitmap::with_capacity(indices.len());
-            for &i in indices { v.push(values[i]); n.push(nulls[i]); }
-            ColumnVector::Dates { values: v, nulls: n }
+            for &i in indices {
+                v.push(values[i]);
+                n.push(nulls[i]);
+            }
+            ColumnVector::Dates {
+                values: v,
+                nulls: n,
+            }
         }
         ColumnVector::Byteas { values, nulls } => {
             let mut v = Vec::with_capacity(indices.len());
             let mut n = NullBitmap::with_capacity(indices.len());
-            for &i in indices { v.push(values[i].clone()); n.push(nulls[i]); }
-            ColumnVector::Byteas { values: v, nulls: n }
+            for &i in indices {
+                v.push(values[i].clone());
+                n.push(nulls[i]);
+            }
+            ColumnVector::Byteas {
+                values: v,
+                nulls: n,
+            }
         }
         ColumnVector::Mixed(vals) => {
             ColumnVector::Mixed(indices.iter().map(|&i| vals[i].clone()).collect())
@@ -1361,15 +1458,17 @@ pub fn vectorized_hash_join(
 
     // Build phase: hash table keyed by right key columns → list of right row indices.
     // Reuse a single key buffer to avoid per-row Vec allocation.
-    let mut hash_table: HashMap<Vec<u64>, Vec<usize>> =
-        HashMap::with_capacity(right_indices.len());
+    let mut hash_table: HashMap<Vec<u64>, Vec<usize>> = HashMap::with_capacity(right_indices.len());
     let mut key_buf: Vec<u64> = Vec::with_capacity(right_key_cols.len());
     for &ri in &*right_indices {
         key_buf.clear();
         let mut has_null = false;
         for &c in right_key_cols {
             let d = right.columns[c].get_datum_ref(ri);
-            if matches!(*d, Datum::Null) { has_null = true; break; }
+            if matches!(*d, Datum::Null) {
+                has_null = true;
+                break;
+            }
             key_buf.push(hash_datum(&d));
         }
         if !has_null {
@@ -1387,10 +1486,15 @@ pub fn vectorized_hash_join(
         let mut has_null = false;
         for &c in left_key_cols {
             let d = left.columns[c].get_datum_ref(li);
-            if matches!(*d, Datum::Null) { has_null = true; break; }
+            if matches!(*d, Datum::Null) {
+                has_null = true;
+                break;
+            }
             key_buf.push(hash_datum(&d));
         }
-        if has_null { continue; }
+        if has_null {
+            continue;
+        }
         if let Some(matches) = hash_table.get(&key_buf) {
             for &ri in matches {
                 // Verify actual equality (hash collision check)
@@ -1608,10 +1712,12 @@ fn cmp_datum_values(a: &Datum, b: &Datum) -> std::cmp::Ordering {
         (Datum::Bytea(x), Datum::Bytea(y)) => x.cmp(y),
         (Datum::Interval(m1, d1, u1), Datum::Interval(m2, d2, u2)) => {
             // Compare by total microseconds approximation (saturating to avoid overflow)
-            let total_a = (*m1 as i64).saturating_mul(30 * 86_400_000_000)
+            let total_a = (*m1 as i64)
+                .saturating_mul(30 * 86_400_000_000)
                 .saturating_add((*d1 as i64).saturating_mul(86_400_000_000))
                 .saturating_add(*u1);
-            let total_b = (*m2 as i64).saturating_mul(30 * 86_400_000_000)
+            let total_b = (*m2 as i64)
+                .saturating_mul(30 * 86_400_000_000)
                 .saturating_add((*d2 as i64).saturating_mul(86_400_000_000))
                 .saturating_add(*u2);
             total_a.cmp(&total_b)
@@ -1636,7 +1742,7 @@ fn cmp_datum_values(a: &Datum, b: &Datum) -> std::cmp::Ordering {
 #[derive(Debug, Clone)]
 enum GroupAccum {
     Count(i64),
-    SumI64(i64, bool),       // (sum, has_value)
+    SumI64(i64, bool), // (sum, has_value)
     SumF64(f64, bool),
     MinI64(Option<i64>),
     MinF64(Option<f64>),
@@ -1737,13 +1843,25 @@ impl GroupAccum {
         match self {
             GroupAccum::Count(c) => Datum::Int64(*c),
             GroupAccum::SumI64(s, has) => {
-                if *has { Datum::Int64(*s) } else { Datum::Null }
+                if *has {
+                    Datum::Int64(*s)
+                } else {
+                    Datum::Null
+                }
             }
             GroupAccum::SumF64(s, has) => {
-                if *has { Datum::Float64(*s) } else { Datum::Null }
+                if *has {
+                    Datum::Float64(*s)
+                } else {
+                    Datum::Null
+                }
             }
             GroupAccum::AvgF64(s, c) => {
-                if *c > 0 { Datum::Float64(*s / *c as f64) } else { Datum::Null }
+                if *c > 0 {
+                    Datum::Float64(*s / *c as f64)
+                } else {
+                    Datum::Null
+                }
             }
             GroupAccum::MinI64(v) => v.map_or(Datum::Null, Datum::Int64),
             GroupAccum::MinF64(v) => v.map_or(Datum::Null, Datum::Float64),
@@ -1863,8 +1981,8 @@ pub fn vectorized_hash_agg(
     for (gid, key) in group_keys.into_iter().enumerate() {
         let mut values = Vec::with_capacity(num_keys + num_aggs);
         values.extend(key);
-        for ai in 0..num_aggs {
-            values.push(group_accums[gid][ai].finalize());
+        for accum in group_accums[gid].iter().take(num_aggs) {
+            values.push(accum.finalize());
         }
         rows.push(OwnedRow::new(values));
     }
@@ -2244,26 +2362,43 @@ mod tests {
         ];
         let batch = RecordBatch::from_rows(&rows, 2);
         let aggs = vec![
-            AggDescriptor { func: AggFunc::Count, col_idx: Some(1) },
-            AggDescriptor { func: AggFunc::Sum, col_idx: Some(1) },
-            AggDescriptor { func: AggFunc::Avg, col_idx: Some(1) },
+            AggDescriptor {
+                func: AggFunc::Count,
+                col_idx: Some(1),
+            },
+            AggDescriptor {
+                func: AggFunc::Sum,
+                col_idx: Some(1),
+            },
+            AggDescriptor {
+                func: AggFunc::Avg,
+                col_idx: Some(1),
+            },
         ];
         let result = vectorized_hash_agg(&batch, &[0], &aggs);
         assert_eq!(result.rows.len(), 2); // 2 groups
 
         // Find dept=1 group
-        let g1 = result.rows.iter().find(|r| r.values[0] == Datum::Int64(1)).unwrap();
-        assert_eq!(g1.values[1], Datum::Int64(2));   // COUNT = 2
-        assert_eq!(g1.values[2], Datum::Int64(400));  // SUM = 400
+        let g1 = result
+            .rows
+            .iter()
+            .find(|r| r.values[0] == Datum::Int64(1))
+            .unwrap();
+        assert_eq!(g1.values[1], Datum::Int64(2)); // COUNT = 2
+        assert_eq!(g1.values[2], Datum::Int64(400)); // SUM = 400
         match g1.values[3] {
             Datum::Float64(v) => assert!((v - 200.0).abs() < 0.01), // AVG = 200
             _ => panic!("expected Float64 for AVG"),
         }
 
         // Find dept=2 group
-        let g2 = result.rows.iter().find(|r| r.values[0] == Datum::Int64(2)).unwrap();
-        assert_eq!(g2.values[1], Datum::Int64(1));   // COUNT = 1
-        assert_eq!(g2.values[2], Datum::Int64(200));  // SUM = 200
+        let g2 = result
+            .rows
+            .iter()
+            .find(|r| r.values[0] == Datum::Int64(2))
+            .unwrap();
+        assert_eq!(g2.values[1], Datum::Int64(1)); // COUNT = 1
+        assert_eq!(g2.values[2], Datum::Int64(200)); // SUM = 200
     }
 
     #[test]
@@ -2275,15 +2410,27 @@ mod tests {
         ];
         let batch = RecordBatch::from_rows(&rows, 2);
         let aggs = vec![
-            AggDescriptor { func: AggFunc::Count, col_idx: Some(1) },
-            AggDescriptor { func: AggFunc::Sum, col_idx: Some(1) },
-            AggDescriptor { func: AggFunc::Min, col_idx: Some(1) },
-            AggDescriptor { func: AggFunc::Max, col_idx: Some(1) },
+            AggDescriptor {
+                func: AggFunc::Count,
+                col_idx: Some(1),
+            },
+            AggDescriptor {
+                func: AggFunc::Sum,
+                col_idx: Some(1),
+            },
+            AggDescriptor {
+                func: AggFunc::Min,
+                col_idx: Some(1),
+            },
+            AggDescriptor {
+                func: AggFunc::Max,
+                col_idx: Some(1),
+            },
         ];
         let result = vectorized_hash_agg(&batch, &[0], &aggs);
         assert_eq!(result.rows.len(), 1);
         let g = &result.rows[0];
-        assert_eq!(g.values[1], Datum::Int64(2));  // COUNT skips NULL
+        assert_eq!(g.values[1], Datum::Int64(2)); // COUNT skips NULL
         assert_eq!(g.values[2], Datum::Int64(40)); // SUM skips NULL
         assert_eq!(g.values[3], Datum::Int64(10)); // MIN
         assert_eq!(g.values[4], Datum::Int64(30)); // MAX

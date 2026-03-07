@@ -9,14 +9,25 @@ thread_local! {
     static STMT_TS_US: Cell<i64> = const { Cell::new(0) };
 }
 
+#[allow(dead_code)]
 pub fn set_statement_ts(us: i64) {
     STMT_TS_US.with(|c| c.set(us));
 }
 
-fn statement_ts() -> i64 {
+pub fn reset_statement_ts() {
+    STMT_TS_US.with(|c| c.set(0));
+}
+
+pub fn statement_ts() -> i64 {
     STMT_TS_US.with(|c| {
         let v = c.get();
-        if v != 0 { v } else { chrono::Utc::now().timestamp_micros() }
+        if v != 0 {
+            v
+        } else {
+            let now = chrono::Utc::now().timestamp_micros();
+            c.set(now);
+            now
+        }
     })
 }
 
@@ -27,10 +38,11 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
         ScalarFunc::CurrentDate => {
             let us = statement_ts();
             let secs = us / 1_000_000;
-            let dt = chrono::DateTime::from_timestamp(secs, 0)
-                .ok_or(ExecutionError::NumericOverflow)?;
-            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
-                .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or(chrono::NaiveDate::MIN));
+            let dt =
+                chrono::DateTime::from_timestamp(secs, 0).ok_or(ExecutionError::NumericOverflow)?;
+            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap_or_else(|| {
+                chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or(chrono::NaiveDate::MIN)
+            });
             let days = i32::try_from((dt.date_naive() - epoch).num_days())
                 .map_err(|_| ExecutionError::NumericOverflow)?;
             Ok(Datum::Date(days))
@@ -38,8 +50,8 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
         ScalarFunc::CurrentTime => {
             let us = statement_ts();
             let secs = us / 1_000_000;
-            let dt = chrono::DateTime::from_timestamp(secs, 0)
-                .ok_or(ExecutionError::NumericOverflow)?;
+            let dt =
+                chrono::DateTime::from_timestamp(secs, 0).ok_or(ExecutionError::NumericOverflow)?;
             Ok(Datum::Text(dt.format("%H:%M:%S").to_string()))
         }
         ScalarFunc::Extract => {
@@ -53,9 +65,10 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
                 }
             };
             let ts_us = match args.get(1) {
-                Some(Datum::Timestamp(us))
-                | Some(Datum::Int64(us)) => *us,
-                Some(Datum::Date(days)) => i64::from(*days).checked_mul(86_400_000_000).ok_or(ExecutionError::NumericOverflow)?,
+                Some(Datum::Timestamp(us)) | Some(Datum::Int64(us)) => *us,
+                Some(Datum::Date(days)) => i64::from(*days)
+                    .checked_mul(86_400_000_000)
+                    .ok_or(ExecutionError::NumericOverflow)?,
                 Some(Datum::Int32(us)) => i64::from(*us),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
@@ -69,14 +82,14 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
             let dt = chrono::DateTime::from_timestamp(secs, nsecs)
                 .ok_or_else(|| ExecutionError::TypeError("Invalid timestamp".into()))?;
             let val = match field.as_str() {
-                "YEAR" => dt.format("%Y").to_string().parse::<i64>().unwrap_or(0),
-                "MONTH" => dt.format("%m").to_string().parse::<i64>().unwrap_or(0),
-                "DAY" => dt.format("%d").to_string().parse::<i64>().unwrap_or(0),
-                "HOUR" => dt.format("%H").to_string().parse::<i64>().unwrap_or(0),
-                "MINUTE" => dt.format("%M").to_string().parse::<i64>().unwrap_or(0),
-                "SECOND" => dt.format("%S").to_string().parse::<i64>().unwrap_or(0),
-                "DOW" | "DAYOFWEEK" => dt.format("%w").to_string().parse::<i64>().unwrap_or(0),
-                "DOY" | "DAYOFYEAR" => dt.format("%j").to_string().parse::<i64>().unwrap_or(0),
+                "YEAR" => i64::from(dt.year()),
+                "MONTH" => i64::from(dt.month()),
+                "DAY" => i64::from(dt.day()),
+                "HOUR" => i64::from(dt.hour()),
+                "MINUTE" => i64::from(dt.minute()),
+                "SECOND" => i64::from(dt.second()),
+                "DOW" | "DAYOFWEEK" => i64::from(dt.weekday().num_days_from_sunday()),
+                "DOY" | "DAYOFYEAR" => i64::from(dt.ordinal()),
                 "EPOCH" => ts_us / 1_000_000,
                 _ => {
                     return Err(ExecutionError::TypeError(format!(
@@ -97,9 +110,10 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
                 }
             };
             let ts_us = match args.get(1) {
-                Some(Datum::Timestamp(us))
-                | Some(Datum::Int64(us)) => *us,
-                Some(Datum::Date(days)) => i64::from(*days).checked_mul(86_400_000_000).ok_or(ExecutionError::NumericOverflow)?,
+                Some(Datum::Timestamp(us)) | Some(Datum::Int64(us)) => *us,
+                Some(Datum::Date(days)) => i64::from(*days)
+                    .checked_mul(86_400_000_000)
+                    .ok_or(ExecutionError::NumericOverflow)?,
                 Some(Datum::Int32(us)) => i64::from(*us),
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
@@ -151,9 +165,10 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
         ScalarFunc::ToChar => {
             // TO_CHAR(timestamp, format) — format timestamp as string
             let ts_us = match args.first() {
-                Some(Datum::Timestamp(us))
-                | Some(Datum::Int64(us)) => *us,
-                Some(Datum::Date(days)) => i64::from(*days).checked_mul(86_400_000_000).ok_or(ExecutionError::NumericOverflow)?,
+                Some(Datum::Timestamp(us)) | Some(Datum::Int64(us)) => *us,
+                Some(Datum::Date(days)) => i64::from(*days)
+                    .checked_mul(86_400_000_000)
+                    .ok_or(ExecutionError::NumericOverflow)?,
                 Some(Datum::Null) => return Ok(Datum::Null),
                 _ => {
                     return Err(ExecutionError::TypeError(

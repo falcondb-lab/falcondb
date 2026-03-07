@@ -258,9 +258,8 @@ impl ReplicaRunner {
                         // Map to range [0.75, 1.25]
                         0.75 + (raw % 1000) as f64 / 2000.0
                     };
-                    let jittered = Duration::from_millis(
-                        (backoff.as_millis() as f64 * jitter_pct) as u64
-                    );
+                    let jittered =
+                        Duration::from_millis((backoff.as_millis() as f64 * jitter_pct) as u64);
                     let sleep_end = tokio::time::Instant::now() + jittered;
                     while tokio::time::Instant::now() < sleep_end {
                         if stop.load(Ordering::SeqCst) {

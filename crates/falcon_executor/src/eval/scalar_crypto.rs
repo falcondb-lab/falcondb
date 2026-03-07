@@ -44,11 +44,7 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
             };
             match fmt.as_str() {
                 "hex" => {
-                    let hex: String = data
-                        .as_bytes()
-                        .iter()
-                        .map(|b| format!("{b:02x}"))
-                        .collect();
+                    let hex: String = data.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
                     Ok(Datum::Text(hex))
                 }
                 "base64" => {

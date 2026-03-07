@@ -46,7 +46,8 @@ pub fn init_tracing_from_config(cfg: &falcon_common::config::LoggingConfig) -> V
     let file_writer: Option<tracing_appender::non_blocking::NonBlocking> = if !cfg.file.is_empty() {
         let path = std::path::Path::new(&cfg.file);
         let log_dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-        let filename = path.file_name()
+        let filename = path
+            .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "falcondb.log".to_owned());
 
@@ -73,26 +74,58 @@ pub fn init_tracing_from_config(cfg: &falcon_common::config::LoggingConfig) -> V
     // Compose layers using Option<Layer> — tracing_subscriber implements Layer for Option<L>.
     // stderr layer (text or json, mutually exclusive)
     let stderr_text = if cfg.stderr && !use_json {
-        Some(fmt::layer().with_timer(LocalTimer).with_target(true).with_thread_ids(true)
-            .with_file(true).with_line_number(true).with_ansi(false).with_writer(std::io::stderr))
-    } else { None };
+        Some(
+            fmt::layer()
+                .with_timer(LocalTimer)
+                .with_target(true)
+                .with_thread_ids(true)
+                .with_file(true)
+                .with_line_number(true)
+                .with_ansi(false)
+                .with_writer(std::io::stderr),
+        )
+    } else {
+        None
+    };
 
     let stderr_json = if cfg.stderr && use_json {
-        Some(fmt::layer().json().with_timer(LocalTimer).with_target(true).with_thread_ids(true)
-            .with_file(true).with_line_number(true).with_writer(std::io::stderr))
-    } else { None };
+        Some(
+            fmt::layer()
+                .json()
+                .with_timer(LocalTimer)
+                .with_target(true)
+                .with_thread_ids(true)
+                .with_file(true)
+                .with_line_number(true)
+                .with_writer(std::io::stderr),
+        )
+    } else {
+        None
+    };
 
     // file layer — build inside if/else so file_writer is consumed by exactly one branch
     if use_json {
         let file_json = file_writer.map(|w| {
-            fmt::layer().json().with_timer(LocalTimer).with_target(true).with_thread_ids(true)
-                .with_file(true).with_line_number(true).with_writer(w)
+            fmt::layer()
+                .json()
+                .with_timer(LocalTimer)
+                .with_target(true)
+                .with_thread_ids(true)
+                .with_file(true)
+                .with_line_number(true)
+                .with_writer(w)
         });
         registry.with(stderr_json).with(file_json).init();
     } else {
         let file_text = file_writer.map(|w| {
-            fmt::layer().with_timer(LocalTimer).with_target(true).with_thread_ids(true)
-                .with_file(true).with_line_number(true).with_ansi(false).with_writer(w)
+            fmt::layer()
+                .with_timer(LocalTimer)
+                .with_target(true)
+                .with_thread_ids(true)
+                .with_file(true)
+                .with_line_number(true)
+                .with_ansi(false)
+                .with_writer(w)
         });
         registry.with(stderr_text).with(file_text).init();
     }
@@ -102,8 +135,7 @@ pub fn init_tracing_from_config(cfg: &falcon_common::config::LoggingConfig) -> V
 
 /// Initialize tracing with defaults (stderr, info level). Used before config is loaded.
 pub fn init_tracing() {
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let fmt_layer = fmt::layer()
         .with_timer(LocalTimer)
@@ -122,7 +154,9 @@ pub fn init_tracing() {
 /// Remove old rotated log files, keeping only the most recent `keep` files.
 fn prune_old_log_files(dir: &std::path::Path, prefix: &str, keep: usize) {
     let base = prefix.split('.').next().unwrap_or(prefix);
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
 
     let mut files: Vec<_> = entries
         .filter_map(|e| e.ok())
@@ -158,7 +192,8 @@ pub fn init_metrics(listen_addr: &str) -> Result<(), Box<dyn std::error::Error>>
 
 /// Record common database metrics.
 pub fn record_query_metrics(duration_us: u64, query_type: &str, success: bool) {
-    metrics::counter!("falcon_queries_total", "type" => query_type.to_owned(), "success" => success.to_string()).increment(1);
+    let success_str = if success { "true" } else { "false" };
+    metrics::counter!("falcon_queries_total", "type" => query_type.to_owned(), "success" => success_str.to_owned()).increment(1);
     metrics::histogram!("falcon_query_duration_us", "type" => query_type.to_owned())
         .record(duration_us as f64);
 }
@@ -179,7 +214,6 @@ pub fn init_txn_counters() {
     metrics::counter!("falcon_txn_committed_total").absolute(0);
     metrics::counter!("falcon_txn_aborted_total").absolute(0);
 }
-
 
 pub fn record_active_connections(count: usize) {
     metrics::gauge!("falcon_active_connections").set(count as f64);
@@ -621,7 +655,8 @@ pub fn record_security_hardening_metrics(
 /// Record version and compatibility metrics for Prometheus.
 pub fn record_compat_metrics(wal_format_version: u32, snapshot_format_version: u32) {
     metrics::gauge!("falcon_compat_wal_format_version").set(f64::from(wal_format_version));
-    metrics::gauge!("falcon_compat_snapshot_format_version").set(f64::from(snapshot_format_version));
+    metrics::gauge!("falcon_compat_snapshot_format_version")
+        .set(f64::from(snapshot_format_version));
 }
 
 /// Record transaction fast-path / slow-path statistics from a TxnStatsSnapshot.
@@ -730,17 +765,12 @@ pub fn record_queue_depth_metrics(
     metrics::gauge!("falcon_queue_depth", "queue" => n.clone()).set(depth as f64);
     metrics::gauge!("falcon_queue_capacity", "queue" => n.clone()).set(capacity as f64);
     metrics::gauge!("falcon_queue_peak", "queue" => n.clone()).set(peak as f64);
-    metrics::gauge!("falcon_queue_enqueued_total", "queue" => n.clone())
-        .set(total_enqueued as f64);
+    metrics::gauge!("falcon_queue_enqueued_total", "queue" => n.clone()).set(total_enqueued as f64);
     metrics::gauge!("falcon_queue_rejected_total", "queue" => n).set(total_rejected as f64);
 }
 
 /// Record idempotent replay metrics (v1.0.4 §6).
-pub fn record_replay_metrics(
-    replayed_count: u64,
-    duplicate_count: u64,
-    violation_count: u64,
-) {
+pub fn record_replay_metrics(replayed_count: u64, duplicate_count: u64, violation_count: u64) {
     metrics::gauge!("falcon_replay_replayed_total").set(replayed_count as f64);
     metrics::gauge!("falcon_replay_duplicate_total").set(duplicate_count as f64);
     metrics::gauge!("falcon_replay_violation_total").set(violation_count as f64);
@@ -1049,7 +1079,9 @@ mod tests {
         let timer = LocalTimer;
         let mut buf = String::new();
         let mut writer = tracing_subscriber::fmt::format::Writer::new(&mut buf);
-        timer.format_time(&mut writer).expect("format_time should not fail");
+        timer
+            .format_time(&mut writer)
+            .expect("format_time should not fail");
         // Output should be an ISO-8601-ish timestamp: YYYY-MM-DDTHH:MM:SS.mmm+HH:MM
         assert!(buf.len() >= 23, "timestamp too short: {buf}");
         assert!(buf.contains('T'), "missing 'T' separator in: {buf}");

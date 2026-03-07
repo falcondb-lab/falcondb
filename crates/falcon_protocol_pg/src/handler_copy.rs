@@ -107,6 +107,13 @@ impl QueryHandler {
                 vec![self.error_response(&e)]
             }
             _ => {
+                if auto_txn {
+                    if let Some(ref txn) = session.txn {
+                        let _ = self.txn_mgr.abort(txn.txn_id);
+                    }
+                    session.txn = None;
+                    self.flush_txn_stats();
+                }
                 vec![BackendMessage::ErrorResponse {
                     severity: "ERROR".into(),
                     code: "XX000".into(),

@@ -17,8 +17,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use falcon_cluster::rebalancer::{
-    MigrationPhase, MigrationTask, RebalancePlanner, RebalancerConfig,
-    ShardLoadSnapshot, ShardMigrator, ShardRebalancer,
+    MigrationPhase, MigrationTask, RebalancePlanner, RebalancerConfig, ShardLoadSnapshot,
+    ShardMigrator, ShardRebalancer,
 };
 use falcon_cluster::routing::shard_map::ShardMap;
 use falcon_cluster::sharded_engine::ShardedEngine;
@@ -39,7 +39,8 @@ fn make_schema() -> TableSchema {
                 nullable: false,
                 default_value: None,
                 is_primary_key: true,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             },
             ColumnDef {
                 id: ColumnId(1),
@@ -48,7 +49,8 @@ fn make_schema() -> TableSchema {
                 nullable: true,
                 default_value: None,
                 is_primary_key: false,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             },
         ],
         primary_key_columns: vec![0],
@@ -147,7 +149,8 @@ fn chaos_leader_change_during_migration() {
     assert!(
         entries_after >= entries_before,
         "Entries should not decrease (MVCC tombstones): before={}, after={}",
-        entries_before, entries_after
+        entries_before,
+        entries_after
     );
 
     // Verify rebalancer completed successfully
@@ -248,16 +251,16 @@ fn chaos_shard_split_during_migration() {
         let pk_val = i as i64;
         let target_shard = engine_3shard.shard_for_key(pk_val);
         let target = engine_3shard.shard(target_shard).unwrap();
-        let row = OwnedRow::new(vec![
-            Datum::Int64(pk_val),
-            Datum::Text(format!("row_{i}")),
-        ]);
+        let row = OwnedRow::new(vec![Datum::Int64(pk_val), Datum::Text(format!("row_{i}"))]);
         let pk = encode_pk_from_datums(&[&Datum::Int64(pk_val)]);
         target.storage.insert_row(TableId(1), pk, row).unwrap();
     }
 
     let entries_3shard = dashmap_entries(&engine_3shard);
-    assert_eq!(entries_3shard, 200, "Fresh 3-shard engine should have 200 entries");
+    assert_eq!(
+        entries_3shard, 200,
+        "Fresh 3-shard engine should have 200 entries"
+    );
 
     // Verify data is distributed across shards
     let shard_counts: Vec<u64> = engine_3shard
@@ -281,7 +284,11 @@ fn chaos_shard_split_during_migration() {
     // Run rebalancer on the new 3-shard topology — should succeed
     let rebalancer = ShardRebalancer::new(config);
     let _migrated = rebalancer.check_and_rebalance(&engine_3shard);
-    assert_eq!(rebalancer.runs_completed(), 1, "Rebalancer should run on new topology");
+    assert_eq!(
+        rebalancer.runs_completed(),
+        1,
+        "Rebalancer should run on new topology"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -433,7 +440,10 @@ fn chaos_migration_missing_target_shard() {
 
     // Original data untouched (no migration happened, so count is exact)
     let entries = dashmap_entries(&engine);
-    assert_eq!(entries, 100, "Entries should be untouched after failed migration");
+    assert_eq!(
+        entries, 100,
+        "Entries should be untouched after failed migration"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

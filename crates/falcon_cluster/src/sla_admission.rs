@@ -282,7 +282,12 @@ impl std::fmt::Display for RejectionExplanation {
         write!(
             f,
             "[{}] {}: current={:.2}, threshold={:.2}, class={}, remedy={}",
-            self.sqlstate, self.signal, self.current_value, self.threshold, self.txn_class, self.remedy,
+            self.sqlstate,
+            self.signal,
+            self.current_value,
+            self.threshold,
+            self.txn_class,
+            self.remedy,
         )
     }
 }
@@ -433,10 +438,15 @@ impl SlaAdmissionController {
         // ── Check inflight limits ──
         let total_inflight = self.inflight_total.load(Ordering::Relaxed) as usize;
         if total_inflight >= cfg.max_inflight_txn {
-            return self.do_reject(class, RejectionSignal::InflightLimitReached,
-                total_inflight as f64, cfg.max_inflight_txn as f64,
-                "53300", "Reduce concurrent connections or increase max_inflight_txn",
-                50);
+            return self.do_reject(
+                class,
+                RejectionSignal::InflightLimitReached,
+                total_inflight as f64,
+                cfg.max_inflight_txn as f64,
+                "53300",
+                "Reduce concurrent connections or increase max_inflight_txn",
+                50,
+            );
         }
 
         // ── Class-specific quota checks ──
@@ -445,26 +455,41 @@ impl SlaAdmissionController {
                 let slow = self.inflight_slow.load(Ordering::Relaxed) as usize;
                 let quota = (cfg.max_inflight_txn as f64 * cfg.slow_path_quota_ratio) as usize;
                 if slow >= quota.max(1) {
-                    return self.do_reject(class, RejectionSignal::SlowPathQuotaExhausted,
-                        slow as f64, quota as f64,
-                        "53300", "Cross-shard quota exhausted; retry as single-shard or wait",
-                        100);
+                    return self.do_reject(
+                        class,
+                        RejectionSignal::SlowPathQuotaExhausted,
+                        slow as f64,
+                        quota as f64,
+                        "53300",
+                        "Cross-shard quota exhausted; retry as single-shard or wait",
+                        100,
+                    );
                 }
                 let cross = self.inflight_slow.load(Ordering::Relaxed) as usize;
                 if cross >= cfg.max_cross_shard_inflight {
-                    return self.do_reject(class, RejectionSignal::SlowPathQuotaExhausted,
-                        cross as f64, cfg.max_cross_shard_inflight as f64,
-                        "53300", "Max cross-shard inflight reached",
-                        100);
+                    return self.do_reject(
+                        class,
+                        RejectionSignal::SlowPathQuotaExhausted,
+                        cross as f64,
+                        cfg.max_cross_shard_inflight as f64,
+                        "53300",
+                        "Max cross-shard inflight reached",
+                        100,
+                    );
                 }
             }
             TxnClass::Ddl => {
                 let ddl = self.inflight_ddl.load(Ordering::Relaxed) as usize;
                 if ddl >= cfg.ddl_quota {
-                    return self.do_reject(class, RejectionSignal::DdlQuotaExhausted,
-                        ddl as f64, cfg.ddl_quota as f64,
-                        "53300", "DDL concurrency limit reached; wait for in-progress DDL",
-                        200);
+                    return self.do_reject(
+                        class,
+                        RejectionSignal::DdlQuotaExhausted,
+                        ddl as f64,
+                        cfg.ddl_quota as f64,
+                        "53300",
+                        "DDL concurrency limit reached; wait for in-progress DDL",
+                        200,
+                    );
                 }
             }
             _ => {}
@@ -475,18 +500,28 @@ impl SlaAdmissionController {
         if pct.sample_count >= cfg.min_samples_for_enforcement {
             // SLA-2: p999 breach → reject ALL non-system txns
             if pct.p999_ms() > cfg.target_p999_ms {
-                return self.do_reject(class, RejectionSignal::P999Exceeded,
-                    pct.p999_ms(), cfg.target_p999_ms,
-                    "53300", "p999 latency SLA breach; system is overloaded",
-                    200);
+                return self.do_reject(
+                    class,
+                    RejectionSignal::P999Exceeded,
+                    pct.p999_ms(),
+                    cfg.target_p999_ms,
+                    "53300",
+                    "p999 latency SLA breach; system is overloaded",
+                    200,
+                );
             }
 
             // SLA-1: p99 breach → reject slow-path only (fast-path still admitted)
             if pct.p99_ms() > cfg.target_p99_ms && class != TxnClass::FastPath {
-                return self.do_reject(class, RejectionSignal::P99Exceeded,
-                    pct.p99_ms(), cfg.target_p99_ms,
-                    "53300", "p99 latency SLA breach; slow-path txns rejected",
-                    100);
+                return self.do_reject(
+                    class,
+                    RejectionSignal::P99Exceeded,
+                    pct.p99_ms(),
+                    cfg.target_p99_ms,
+                    "53300",
+                    "p99 latency SLA breach; slow-path txns rejected",
+                    100,
+                );
             }
         }
 
@@ -535,11 +570,20 @@ impl SlaAdmissionController {
 
     // ── Internal helpers ──
 
-    fn do_accept(self: &Arc<Self>, class: TxnClass) -> Result<SlaPermit, (AdmissionDecision, RejectionExplanation)> {
+    fn do_accept(
+        self: &Arc<Self>,
+        class: TxnClass,
+    ) -> Result<SlaPermit, (AdmissionDecision, RejectionExplanation)> {
         match class {
-            TxnClass::FastPath => { self.inflight_fast.fetch_add(1, Ordering::Relaxed); }
-            TxnClass::SlowPath => { self.inflight_slow.fetch_add(1, Ordering::Relaxed); }
-            TxnClass::Ddl => { self.inflight_ddl.fetch_add(1, Ordering::Relaxed); }
+            TxnClass::FastPath => {
+                self.inflight_fast.fetch_add(1, Ordering::Relaxed);
+            }
+            TxnClass::SlowPath => {
+                self.inflight_slow.fetch_add(1, Ordering::Relaxed);
+            }
+            TxnClass::Ddl => {
+                self.inflight_ddl.fetch_add(1, Ordering::Relaxed);
+            }
             TxnClass::System => {}
         }
         self.inflight_total.fetch_add(1, Ordering::Relaxed);
@@ -565,14 +609,30 @@ impl SlaAdmissionController {
     ) -> Result<SlaPermit, (AdmissionDecision, RejectionExplanation)> {
         // Increment per-signal counter
         match signal {
-            RejectionSignal::P99Exceeded => { self.rejected_p99.fetch_add(1, Ordering::Relaxed); }
-            RejectionSignal::P999Exceeded => { self.rejected_p999.fetch_add(1, Ordering::Relaxed); }
-            RejectionSignal::InflightLimitReached => { self.rejected_inflight.fetch_add(1, Ordering::Relaxed); }
-            RejectionSignal::SlowPathQuotaExhausted => { self.rejected_slow_quota.fetch_add(1, Ordering::Relaxed); }
-            RejectionSignal::DdlQuotaExhausted => { self.rejected_ddl_quota.fetch_add(1, Ordering::Relaxed); }
-            RejectionSignal::MemoryPressure => { self.rejected_memory.fetch_add(1, Ordering::Relaxed); }
-            RejectionSignal::WalBacklog => { self.rejected_wal.fetch_add(1, Ordering::Relaxed); }
-            RejectionSignal::RejectRateCapped => { self.rejected_rate_cap.fetch_add(1, Ordering::Relaxed); }
+            RejectionSignal::P99Exceeded => {
+                self.rejected_p99.fetch_add(1, Ordering::Relaxed);
+            }
+            RejectionSignal::P999Exceeded => {
+                self.rejected_p999.fetch_add(1, Ordering::Relaxed);
+            }
+            RejectionSignal::InflightLimitReached => {
+                self.rejected_inflight.fetch_add(1, Ordering::Relaxed);
+            }
+            RejectionSignal::SlowPathQuotaExhausted => {
+                self.rejected_slow_quota.fetch_add(1, Ordering::Relaxed);
+            }
+            RejectionSignal::DdlQuotaExhausted => {
+                self.rejected_ddl_quota.fetch_add(1, Ordering::Relaxed);
+            }
+            RejectionSignal::MemoryPressure => {
+                self.rejected_memory.fetch_add(1, Ordering::Relaxed);
+            }
+            RejectionSignal::WalBacklog => {
+                self.rejected_wal.fetch_add(1, Ordering::Relaxed);
+            }
+            RejectionSignal::RejectRateCapped => {
+                self.rejected_rate_cap.fetch_add(1, Ordering::Relaxed);
+            }
         }
         self.total_rejected.fetch_add(1, Ordering::Relaxed);
         self.rejected_this_sec.fetch_add(1, Ordering::Relaxed);
@@ -594,7 +654,12 @@ impl SlaAdmissionController {
             sqlstate,
         };
 
-        Err((AdmissionDecision::RejectRetryable { retry_after_ms: retry_ms }, explanation))
+        Err((
+            AdmissionDecision::RejectRetryable {
+                retry_after_ms: retry_ms,
+            },
+            explanation,
+        ))
     }
 
     fn maybe_reset_rate_cap(&self) {
@@ -604,10 +669,14 @@ impl SlaAdmissionController {
             .as_secs();
         let prev = self.rate_cap_epoch.load(Ordering::Relaxed);
         if now_sec > prev
-            && self.rate_cap_epoch.compare_exchange(prev, now_sec, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
-                self.accepted_this_sec.store(0, Ordering::Relaxed);
-                self.rejected_this_sec.store(0, Ordering::Relaxed);
-            }
+            && self
+                .rate_cap_epoch
+                .compare_exchange(prev, now_sec, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            self.accepted_this_sec.store(0, Ordering::Relaxed);
+            self.rejected_this_sec.store(0, Ordering::Relaxed);
+        }
     }
 }
 
@@ -647,12 +716,24 @@ impl Drop for SlaPermit {
     fn drop(&mut self) {
         let latency_us = self.start.elapsed().as_micros() as u64;
         match self.class {
-            TxnClass::FastPath => { self.controller.inflight_fast.fetch_sub(1, Ordering::Relaxed); }
-            TxnClass::SlowPath => { self.controller.inflight_slow.fetch_sub(1, Ordering::Relaxed); }
-            TxnClass::Ddl => { self.controller.inflight_ddl.fetch_sub(1, Ordering::Relaxed); }
+            TxnClass::FastPath => {
+                self.controller
+                    .inflight_fast
+                    .fetch_sub(1, Ordering::Relaxed);
+            }
+            TxnClass::SlowPath => {
+                self.controller
+                    .inflight_slow
+                    .fetch_sub(1, Ordering::Relaxed);
+            }
+            TxnClass::Ddl => {
+                self.controller.inflight_ddl.fetch_sub(1, Ordering::Relaxed);
+            }
             TxnClass::System => {}
         }
-        self.controller.inflight_total.fetch_sub(1, Ordering::Relaxed);
+        self.controller
+            .inflight_total
+            .fetch_sub(1, Ordering::Relaxed);
         self.controller.latency.record(latency_us);
     }
 }
@@ -691,7 +772,11 @@ impl SlaAdmissionMetrics {
     /// Accept rate (0.0 - 1.0).
     pub fn accept_rate(&self) -> f64 {
         let total = self.total_accepted + self.total_rejected;
-        if total == 0 { 1.0 } else { self.total_accepted as f64 / total as f64 }
+        if total == 0 {
+            1.0
+        } else {
+            self.total_accepted as f64 / total as f64
+        }
     }
 }
 
@@ -732,7 +817,11 @@ mod tests {
         assert_eq!(pct.sample_count, 1000);
         // p50 ≈ 500, p99 ≈ 990, p999 ≈ 999
         assert!(pct.p50_us >= 490 && pct.p50_us <= 510, "p50={}", pct.p50_us);
-        assert!(pct.p99_us >= 985 && pct.p99_us <= 1000, "p99={}", pct.p99_us);
+        assert!(
+            pct.p99_us >= 985 && pct.p99_us <= 1000,
+            "p99={}",
+            pct.p99_us
+        );
         assert_eq!(pct.max_us, 1000);
     }
 
@@ -752,24 +841,48 @@ mod tests {
 
     #[test]
     fn test_txn_classification() {
-        assert_eq!(classify_txn(&TxnClassificationHints::default()), TxnClass::FastPath);
-        assert_eq!(classify_txn(&TxnClassificationHints {
-            shard_count: 3, ..Default::default()
-        }), TxnClass::SlowPath);
-        assert_eq!(classify_txn(&TxnClassificationHints {
-            is_ddl: true, ..Default::default()
-        }), TxnClass::Ddl);
-        assert_eq!(classify_txn(&TxnClassificationHints {
-            is_system: true, ..Default::default()
-        }), TxnClass::System);
+        assert_eq!(
+            classify_txn(&TxnClassificationHints::default()),
+            TxnClass::FastPath
+        );
+        assert_eq!(
+            classify_txn(&TxnClassificationHints {
+                shard_count: 3,
+                ..Default::default()
+            }),
+            TxnClass::SlowPath
+        );
+        assert_eq!(
+            classify_txn(&TxnClassificationHints {
+                is_ddl: true,
+                ..Default::default()
+            }),
+            TxnClass::Ddl
+        );
+        assert_eq!(
+            classify_txn(&TxnClassificationHints {
+                is_system: true,
+                ..Default::default()
+            }),
+            TxnClass::System
+        );
         // Large row estimate without LIMIT → slow path
-        assert_eq!(classify_txn(&TxnClassificationHints {
-            estimated_rows: 50_000, ..Default::default()
-        }), TxnClass::SlowPath);
+        assert_eq!(
+            classify_txn(&TxnClassificationHints {
+                estimated_rows: 50_000,
+                ..Default::default()
+            }),
+            TxnClass::SlowPath
+        );
         // Large row estimate WITH LIMIT → fast path
-        assert_eq!(classify_txn(&TxnClassificationHints {
-            estimated_rows: 50_000, has_limit: true, ..Default::default()
-        }), TxnClass::FastPath);
+        assert_eq!(
+            classify_txn(&TxnClassificationHints {
+                estimated_rows: 50_000,
+                has_limit: true,
+                ..Default::default()
+            }),
+            TxnClass::FastPath
+        );
     }
 
     #[test]
@@ -807,7 +920,10 @@ mod tests {
         let result = ctrl.try_admit(TxnClass::FastPath);
         assert!(result.is_err());
         let (decision, explanation) = result.unwrap_err();
-        assert!(matches!(decision, AdmissionDecision::RejectRetryable { .. }));
+        assert!(matches!(
+            decision,
+            AdmissionDecision::RejectRetryable { .. }
+        ));
         assert_eq!(explanation.signal, RejectionSignal::InflightLimitReached);
         drop(p1);
         drop(p2);

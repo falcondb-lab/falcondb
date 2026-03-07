@@ -27,7 +27,8 @@ fn test_schema(name: &str, table_id: TableId) -> TableSchema {
                 nullable: false,
                 is_primary_key: true,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             },
             ColumnDef {
                 id: ColumnId(1),
@@ -36,7 +37,8 @@ fn test_schema(name: &str, table_id: TableId) -> TableSchema {
                 nullable: true,
                 is_primary_key: false,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             },
         ],
         primary_key_columns: vec![0],
@@ -524,7 +526,7 @@ fn test_checkpoint_plus_wal_recovery() {
         }
 
         // Checkpoint
-        let (seg, count) = engine.checkpoint().unwrap();
+        let (_seg, count) = engine.checkpoint().unwrap();
         assert_eq!(count, 5);
 
         // More data after checkpoint

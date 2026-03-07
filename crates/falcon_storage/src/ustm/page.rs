@@ -358,7 +358,10 @@ pub(crate) fn page_id_for_pk(table_id: falcon_common::types::TableId, pk: &[u8])
 
 /// Derive a USTM PageId for a table-level page (DDL / scan).
 #[inline]
-pub(crate) const fn page_id_for_table(table_id: falcon_common::types::TableId, page_seq: u32) -> PageId {
+pub(crate) const fn page_id_for_table(
+    table_id: falcon_common::types::TableId,
+    page_seq: u32,
+) -> PageId {
     PageId(table_id.0 << 32 | page_seq as u64)
 }
 

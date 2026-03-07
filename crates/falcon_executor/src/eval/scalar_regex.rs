@@ -70,19 +70,20 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
             let re = regex::Regex::new(&pattern)
                 .map_err(|e| ExecutionError::TypeError(format!("Invalid regex: {e}")))?;
             re.captures(&source).map_or(Ok(Datum::Null), |caps| {
-                    let matches: Vec<Datum> = caps
-                        .iter()
-                        .skip(1)
-                        .map(|m| m.map_or(Datum::Null, |mat| Datum::Text(mat.as_str().to_owned())))
-                        .collect();
-                    if matches.is_empty() {
-                        // No capture groups; return full match
-                        Ok(Datum::Array(vec![Datum::Text(
-                            caps.get(0).map_or_else(String::new, |m| m.as_str().to_owned()),
-                        )]))
-                    } else {
-                        Ok(Datum::Array(matches))
-                    }
+                let matches: Vec<Datum> = caps
+                    .iter()
+                    .skip(1)
+                    .map(|m| m.map_or(Datum::Null, |mat| Datum::Text(mat.as_str().to_owned())))
+                    .collect();
+                if matches.is_empty() {
+                    // No capture groups; return full match
+                    Ok(Datum::Array(vec![Datum::Text(
+                        caps.get(0)
+                            .map_or_else(String::new, |m| m.as_str().to_owned()),
+                    )]))
+                } else {
+                    Ok(Datum::Array(matches))
+                }
             })
         }
         ScalarFunc::RegexpCount => {
@@ -131,7 +132,9 @@ pub fn dispatch(func: &ScalarFunc, args: &[Datum]) -> Result<Datum, ExecutionErr
             };
             let re = regex::Regex::new(&pattern)
                 .map_err(|e| ExecutionError::TypeError(format!("Invalid regex: {e}")))?;
-            Ok(re.find(&source).map_or(Datum::Null, |m| Datum::Text(m.as_str().to_owned())))
+            Ok(re
+                .find(&source)
+                .map_or(Datum::Null, |m| Datum::Text(m.as_str().to_owned())))
         }
         ScalarFunc::RegexpSplitToArray => {
             // REGEXP_SPLIT_TO_ARRAY(string, pattern) → split string by regex into array

@@ -106,7 +106,10 @@ fn test_cold_read_p99_latency() {
     let p99 = percentile(&latencies, 99.0);
     let p999 = percentile(&latencies, 99.9);
 
-    println!("cold read (cached): p50={}µs p99={}µs p999={}µs", p50, p99, p999);
+    println!(
+        "cold read (cached): p50={}µs p99={}µs p999={}µs",
+        p50, p99, p999
+    );
 
     // Cache hits should be sub-millisecond
     assert!(
@@ -163,7 +166,10 @@ fn test_store_throughput() {
     let elapsed = start.elapsed();
 
     let tps = count as f64 / elapsed.as_secs_f64();
-    println!("store throughput: {} rows in {:?} ({:.0} rows/sec)", count, elapsed, tps);
+    println!(
+        "store throughput: {} rows in {:?} ({:.0} rows/sec)",
+        count, elapsed, tps
+    );
 
     // Should be able to store at least 10K rows/sec
     assert!(
@@ -292,5 +298,9 @@ fn test_intern_pool_memory_savings() {
     assert_eq!(pool.misses(), 10);
 
     let hit_rate = pool.hit_rate();
-    assert!(hit_rate > 0.99, "hit rate should be > 99%: got {:.3}", hit_rate);
+    assert!(
+        hit_rate > 0.99,
+        "hit rate should be > 99%: got {:.3}",
+        hit_rate
+    );
 }

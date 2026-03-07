@@ -28,7 +28,9 @@ use falcon_storage::wal::WalRecord;
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn make_wal_record(txn_id: u64) -> WalRecord {
-    WalRecord::BeginTxn { txn_id: TxnId(txn_id) }
+    WalRecord::BeginTxn {
+        txn_id: TxnId(txn_id),
+    }
 }
 
 fn make_lsn_record(lsn: u64) -> LsnWalRecord {
@@ -64,8 +66,13 @@ fn scenario_a_wal_replication_service_register_and_pull() {
 
     // Pull from a higher LSN — should get fewer records
     let current_lsn = chunk.end_lsn;
-    let chunk2 = svc.handle_pull(shard, current_lsn - 1, 100).expect("pull from near end");
-    assert!(chunk2.records.len() <= 2, "should get at most last 2 records");
+    let chunk2 = svc
+        .handle_pull(shard, current_lsn - 1, 100)
+        .expect("pull from near end");
+    assert!(
+        chunk2.records.len() <= 2,
+        "should get at most last 2 records"
+    );
 
     // Pull with max_records = 2
     let chunk3 = svc.handle_pull(shard, 0, 2).expect("pull max 2");
@@ -99,7 +106,10 @@ fn scenario_a_wal_replication_service_ack_and_lag() {
     assert!(r0_lag > 0, "replica 0 should have lag");
     // replica 1 acked at 1 — should have more lag
     let r1_lag = lag.iter().find(|(id, _)| *id == 1).unwrap().1;
-    assert!(r1_lag > r0_lag, "replica 1 should have more lag than replica 0");
+    assert!(
+        r1_lag > r0_lag,
+        "replica 1 should have more lag than replica 0"
+    );
 }
 
 #[test]
@@ -126,7 +136,10 @@ fn scenario_a_wal_replication_service_with_storage_ack() {
     // Verify the storage replica_ack_tracker was updated.
     // min_replica_safe_ts() returns Timestamp(3) since we acked at 3.
     let safe_ts = storage.replica_ack_tracker().min_replica_safe_ts();
-    assert!(safe_ts.0 >= 3, "replica ack should advance storage safepoint");
+    assert!(
+        safe_ts.0 >= 3,
+        "replica ack should advance storage safepoint"
+    );
 }
 
 #[test]
@@ -544,7 +557,10 @@ async fn scenario_e_grpc_wal_subscribe_partial() {
     let mut stream = response.into_inner();
 
     let msg = stream.next().await.unwrap().expect("chunk 1");
-    assert!(msg.records.len() <= 2, "should respect max_records_per_chunk");
+    assert!(
+        msg.records.len() <= 2,
+        "should respect max_records_per_chunk"
+    );
 
     server_handle.abort();
 }
@@ -621,7 +637,7 @@ fn scenario_f_fault_injector_partition_and_metrics() {
 
 #[test]
 fn scenario_f_fault_injector_deterministic() {
-    use falcon_raft::transport::fault::{FaultInjector, FaultConfig};
+    use falcon_raft::transport::fault::{FaultConfig, FaultInjector};
 
     // Two injectors with same config produce same decisions
     let fi1 = FaultInjector::new(FaultConfig::with_drop_rate(0.5));
@@ -660,8 +676,8 @@ fn scenario_g_crc32_deterministic() {
 async fn scenario_h_full_wal_streaming_replication_e2e() {
     use falcon_cluster::grpc_transport::WalReplicationService;
     use falcon_cluster::proto::wal_replication_server::WalReplicationServer;
-    use falcon_cluster::replication::ReplicationLog;
     use falcon_cluster::replication::catchup::apply_wal_record_to_engine;
+    use falcon_cluster::replication::ReplicationLog;
     use falcon_common::datum::{Datum, OwnedRow};
     use falcon_common::schema::{ColumnDef, TableSchema};
     use falcon_common::types::*;
@@ -684,7 +700,8 @@ async fn scenario_h_full_wal_streaming_replication_e2e() {
                 nullable: false,
                 is_primary_key: true,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             },
             ColumnDef {
                 id: ColumnId(1),
@@ -693,7 +710,8 @@ async fn scenario_h_full_wal_streaming_replication_e2e() {
                 nullable: false,
                 is_primary_key: false,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             },
             ColumnDef {
                 id: ColumnId(2),
@@ -702,7 +720,8 @@ async fn scenario_h_full_wal_streaming_replication_e2e() {
                 nullable: true,
                 is_primary_key: false,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             },
         ],
         primary_key_columns: vec![0],
@@ -715,9 +734,7 @@ async fn scenario_h_full_wal_streaming_replication_e2e() {
         WalRecord::CreateTable {
             schema: schema.clone(),
         },
-        WalRecord::BeginTxn {
-            txn_id: TxnId(100),
-        },
+        WalRecord::BeginTxn { txn_id: TxnId(100) },
         WalRecord::Insert {
             txn_id: TxnId(100),
             table_id: TableId(1),
@@ -741,9 +758,7 @@ async fn scenario_h_full_wal_streaming_replication_e2e() {
             commit_ts: Timestamp(1),
         },
         // Second transaction
-        WalRecord::BeginTxn {
-            txn_id: TxnId(101),
-        },
+        WalRecord::BeginTxn { txn_id: TxnId(101) },
         WalRecord::Insert {
             txn_id: TxnId(101),
             table_id: TableId(1),
@@ -875,15 +890,21 @@ async fn scenario_h_full_wal_streaming_replication_e2e() {
         .collect();
 
     assert!(
-        row_values.iter().any(|(id, amt, c)| *id == 1 && *amt == 9999 && c == "alice"),
+        row_values
+            .iter()
+            .any(|(id, amt, c)| *id == 1 && *amt == 9999 && c == "alice"),
         "Missing row: (1, 9999, alice)"
     );
     assert!(
-        row_values.iter().any(|(id, amt, c)| *id == 2 && *amt == 4500 && c == "bob"),
+        row_values
+            .iter()
+            .any(|(id, amt, c)| *id == 2 && *amt == 4500 && c == "bob"),
         "Missing row: (2, 4500, bob)"
     );
     assert!(
-        row_values.iter().any(|(id, amt, c)| *id == 3 && *amt == 1200 && c == "charlie"),
+        row_values
+            .iter()
+            .any(|(id, amt, c)| *id == 3 && *amt == 1200 && c == "charlie"),
         "Missing row: (3, 1200, charlie)"
     );
 
@@ -918,8 +939,8 @@ async fn scenario_h_full_wal_streaming_replication_e2e() {
 async fn scenario_h_incremental_wal_subscribe_from_lsn() {
     use falcon_cluster::grpc_transport::WalReplicationService;
     use falcon_cluster::proto::wal_replication_server::WalReplicationServer;
-    use falcon_cluster::replication::ReplicationLog;
     use falcon_cluster::replication::catchup::apply_wal_record_to_engine;
+    use falcon_cluster::replication::ReplicationLog;
     use falcon_common::datum::{Datum, OwnedRow};
     use falcon_common::schema::{ColumnDef, TableSchema};
     use falcon_common::types::*;
@@ -942,7 +963,8 @@ async fn scenario_h_incremental_wal_subscribe_from_lsn() {
                 nullable: false,
                 is_primary_key: true,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             },
             ColumnDef {
                 id: ColumnId(1),
@@ -951,7 +973,8 @@ async fn scenario_h_incremental_wal_subscribe_from_lsn() {
                 nullable: true,
                 is_primary_key: false,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             },
         ],
         primary_key_columns: vec![0],
@@ -964,24 +987,16 @@ async fn scenario_h_incremental_wal_subscribe_from_lsn() {
         WalRecord::CreateTable {
             schema: schema.clone(),
         },
-        WalRecord::BeginTxn {
+        WalRecord::BeginTxn { txn_id: TxnId(100) },
+        WalRecord::Insert {
             txn_id: TxnId(100),
+            table_id: TableId(1),
+            row: OwnedRow::new(vec![Datum::Int32(1), Datum::Text("alpha".into())]),
         },
         WalRecord::Insert {
             txn_id: TxnId(100),
             table_id: TableId(1),
-            row: OwnedRow::new(vec![
-                Datum::Int32(1),
-                Datum::Text("alpha".into()),
-            ]),
-        },
-        WalRecord::Insert {
-            txn_id: TxnId(100),
-            table_id: TableId(1),
-            row: OwnedRow::new(vec![
-                Datum::Int32(2),
-                Datum::Text("beta".into()),
-            ]),
+            row: OwnedRow::new(vec![Datum::Int32(2), Datum::Text("beta".into())]),
         },
         WalRecord::CommitTxnLocal {
             txn_id: TxnId(100),
@@ -1039,7 +1054,10 @@ async fn scenario_h_incremental_wal_subscribe_from_lsn() {
         batch1_records.len()
     );
     let first_end_lsn = msg1.end_lsn;
-    assert!(first_end_lsn > 0, "end_lsn should be > 0 after initial batch");
+    assert!(
+        first_end_lsn > 0,
+        "end_lsn should be > 0 after initial batch"
+    );
     drop(stream);
 
     // ── Step 5: Apply batch 1 on replica ──
@@ -1052,8 +1070,7 @@ async fn scenario_h_incremental_wal_subscribe_from_lsn() {
         .iter()
         .map(|entry| {
             let lsn_record: falcon_cluster::replication::LsnWalRecord =
-                serde_json::from_slice(&entry.record_payload)
-                    .expect("WAL record decode");
+                serde_json::from_slice(&entry.record_payload).expect("WAL record decode");
             lsn_record.record
         })
         .collect();
@@ -1072,24 +1089,16 @@ async fn scenario_h_incremental_wal_subscribe_from_lsn() {
 
     // ── Step 6: Primary appends batch 2 (incremental records) ──
     let batch2_records = vec![
-        WalRecord::BeginTxn {
+        WalRecord::BeginTxn { txn_id: TxnId(200) },
+        WalRecord::Insert {
             txn_id: TxnId(200),
+            table_id: TableId(1),
+            row: OwnedRow::new(vec![Datum::Int32(3), Datum::Text("gamma".into())]),
         },
         WalRecord::Insert {
             txn_id: TxnId(200),
             table_id: TableId(1),
-            row: OwnedRow::new(vec![
-                Datum::Int32(3),
-                Datum::Text("gamma".into()),
-            ]),
-        },
-        WalRecord::Insert {
-            txn_id: TxnId(200),
-            table_id: TableId(1),
-            row: OwnedRow::new(vec![
-                Datum::Int32(4),
-                Datum::Text("delta".into()),
-            ]),
+            row: OwnedRow::new(vec![Datum::Int32(4), Datum::Text("delta".into())]),
         },
         WalRecord::CommitTxnLocal {
             txn_id: TxnId(200),
@@ -1146,15 +1155,13 @@ async fn scenario_h_incremental_wal_subscribe_from_lsn() {
         .iter()
         .map(|entry| {
             let lsn_record: falcon_cluster::replication::LsnWalRecord =
-                serde_json::from_slice(&entry.record_payload)
-                    .expect("WAL record decode");
+                serde_json::from_slice(&entry.record_payload).expect("WAL record decode");
             lsn_record.record
         })
         .collect();
 
     for record in &decoded_batch2 {
-        apply_wal_record_to_engine(&replica, record, &mut write_sets)
-            .expect("WAL apply batch 2");
+        apply_wal_record_to_engine(&replica, record, &mut write_sets).expect("WAL apply batch 2");
     }
 
     // ── Step 9: Verify all 4 rows on replica ──

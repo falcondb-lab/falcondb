@@ -107,7 +107,8 @@ async fn integration_list(client: &DbClient, mode: OutputMode) -> Result<String>
 
     if rows.is_empty() {
         return Ok("No integrations registered. \
-             Use \\integration add webhook <url> to register one.\n".to_owned());
+             Use \\integration add webhook <url> to register one.\n"
+            .to_owned());
     }
 
     Ok(format_rows_as_string(&rows, mode, "Integrations"))

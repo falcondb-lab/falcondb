@@ -18,8 +18,8 @@ use falcon_sql_frontend::types::*;
 
 use crate::executor::{ExecutionResult, Executor};
 use crate::vectorized::{
-    is_vectorizable, vectorized_aggregate, vectorized_filter, AggDescriptor, RecordBatch,
-    vectorized_hash_agg,
+    is_vectorizable, vectorized_aggregate, vectorized_filter, vectorized_hash_agg, AggDescriptor,
+    RecordBatch,
 };
 
 impl Executor {
@@ -127,7 +127,8 @@ impl Executor {
                     let col_name = if alias.is_empty() {
                         schema
                             .columns
-                            .get(*col_idx).map_or_else(|| format!("col{col_idx}"), |c| c.name.clone())
+                            .get(*col_idx)
+                            .map_or_else(|| format!("col{col_idx}"), |c| c.name.clone())
                     } else {
                         alias.clone()
                     };
@@ -235,7 +236,10 @@ impl Executor {
                     Some(BoundExpr::ColumnRef(idx)) => Some(*idx),
                     _ => None, // COUNT(*) or complex expr → treat as COUNT(*)
                 };
-                agg_descs.push(AggDescriptor { func: func.clone(), col_idx });
+                agg_descs.push(AggDescriptor {
+                    func: func.clone(),
+                    col_idx,
+                });
             }
         }
 
@@ -262,7 +266,8 @@ impl Executor {
                         values.push(val);
                     }
                     BoundProjection::Aggregate(..) => {
-                        let val = hash_row.values
+                        let val = hash_row
+                            .values
                             .get(num_key_cols + agg_offset)
                             .cloned()
                             .unwrap_or(Datum::Null);
@@ -297,7 +302,10 @@ impl Executor {
             result_rows.truncate(lim);
         }
 
-        Ok(ExecutionResult::Query { columns, rows: result_rows })
+        Ok(ExecutionResult::Query {
+            columns,
+            rows: result_rows,
+        })
     }
 }
 
@@ -305,7 +313,7 @@ impl Executor {
 mod columnar_group_agg_tests {
     use falcon_common::datum::Datum;
 
-    use crate::vectorized::{AggDescriptor, RecordBatch, vectorized_hash_agg};
+    use crate::vectorized::{vectorized_hash_agg, AggDescriptor, RecordBatch};
     use falcon_sql_frontend::types::AggFunc;
 
     fn make_batch(col_a: Vec<i64>, col_b: Vec<i64>) -> RecordBatch {
@@ -319,7 +327,10 @@ mod columnar_group_agg_tests {
         // col0 = category (group key), col1 = value (to SUM)
         // rows: (1,10),(1,20),(2,5),(2,15),(3,100)
         let batch = make_batch(vec![1, 1, 2, 2, 3], vec![10, 20, 5, 15, 100]);
-        let aggs = vec![AggDescriptor { func: AggFunc::Sum, col_idx: Some(1) }];
+        let aggs = vec![AggDescriptor {
+            func: AggFunc::Sum,
+            col_idx: Some(1),
+        }];
         let result = vectorized_hash_agg(&batch, &[0], &aggs);
 
         // 3 groups
@@ -339,7 +350,10 @@ mod columnar_group_agg_tests {
     #[test]
     fn test_group_by_count() {
         let batch = make_batch(vec![1, 1, 2, 2, 2], vec![0, 0, 0, 0, 0]);
-        let aggs = vec![AggDescriptor { func: AggFunc::Count, col_idx: None }];
+        let aggs = vec![AggDescriptor {
+            func: AggFunc::Count,
+            col_idx: None,
+        }];
         let result = vectorized_hash_agg(&batch, &[0], &aggs);
 
         assert_eq!(result.rows.len(), 2);
@@ -358,13 +372,20 @@ mod columnar_group_agg_tests {
         // col0 = group (A=1, B=2), col1 = values
         let batch = make_batch(vec![1, 1, 1, 2, 2], vec![3, 1, 5, 8, 2]);
         let aggs = vec![
-            AggDescriptor { func: AggFunc::Min, col_idx: Some(1) },
-            AggDescriptor { func: AggFunc::Max, col_idx: Some(1) },
+            AggDescriptor {
+                func: AggFunc::Min,
+                col_idx: Some(1),
+            },
+            AggDescriptor {
+                func: AggFunc::Max,
+                col_idx: Some(1),
+            },
         ];
         let result = vectorized_hash_agg(&batch, &[0], &aggs);
         assert_eq!(result.rows.len(), 2);
 
-        let mut minmax: std::collections::HashMap<i64, (i64, i64)> = std::collections::HashMap::new();
+        let mut minmax: std::collections::HashMap<i64, (i64, i64)> =
+            std::collections::HashMap::new();
         for row in &result.rows {
             if let (Datum::Int64(k), Datum::Int64(mn), Datum::Int64(mx)) =
                 (&row.values[0], &row.values[1], &row.values[2])
@@ -380,7 +401,10 @@ mod columnar_group_agg_tests {
     fn test_single_group_all_rows() {
         // All rows belong to the same group key
         let batch = make_batch(vec![7, 7, 7], vec![10, 20, 30]);
-        let aggs = vec![AggDescriptor { func: AggFunc::Sum, col_idx: Some(1) }];
+        let aggs = vec![AggDescriptor {
+            func: AggFunc::Sum,
+            col_idx: Some(1),
+        }];
         let result = vectorized_hash_agg(&batch, &[0], &aggs);
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0].values[1], Datum::Int64(60));
@@ -389,7 +413,10 @@ mod columnar_group_agg_tests {
     #[test]
     fn test_empty_batch() {
         let batch = RecordBatch::from_columns(vec![vec![], vec![]]);
-        let aggs = vec![AggDescriptor { func: AggFunc::Count, col_idx: None }];
+        let aggs = vec![AggDescriptor {
+            func: AggFunc::Count,
+            col_idx: None,
+        }];
         let result = vectorized_hash_agg(&batch, &[0], &aggs);
         assert_eq!(result.rows.len(), 0);
     }

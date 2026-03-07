@@ -122,7 +122,11 @@ pub struct ShardRouterServer<E: QueryExecutor, S: SubPlanExecutor> {
 
 impl<E: QueryExecutor, S: SubPlanExecutor> ShardRouterServer<E, S> {
     pub fn new(executor: E, subplan_executor: S, node_id: NodeId) -> Self {
-        Self { executor, subplan_executor, node_id }
+        Self {
+            executor,
+            subplan_executor,
+            node_id,
+        }
     }
 
     pub async fn handle_forward_query(

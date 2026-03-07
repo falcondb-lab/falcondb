@@ -139,12 +139,16 @@ Management (v0.5 — plan/apply, requires --apply to execute)
             let mut out = format!("{:<20} {:<30} {}\n", "Schema", "Name", "Type");
             out.push_str(&"-".repeat(60));
             out.push('\n');
-            let cols: Vec<String> = rows[0].columns().iter().map(|c| c.name().to_owned()).collect();
+            let cols: Vec<String> = rows[0]
+                .columns()
+                .iter()
+                .map(|c| c.name().to_owned())
+                .collect();
             let idx = |name: &str| cols.iter().position(|c| c == name);
             for row in &rows {
                 let schema = idx("table_schema").and_then(|i| row.get(i)).unwrap_or("");
-                let name   = idx("table_name").and_then(|i| row.get(i)).unwrap_or("");
-                let typ    = idx("table_type").and_then(|i| row.get(i)).unwrap_or("");
+                let name = idx("table_name").and_then(|i| row.get(i)).unwrap_or("");
+                let typ = idx("table_type").and_then(|i| row.get(i)).unwrap_or("");
                 let _ = writeln!(out, "{schema:<20} {name:<30} {typ}");
             }
             Ok(MetaResult::Output(out))
@@ -165,17 +169,23 @@ Management (v0.5 — plan/apply, requires --apply to execute)
                 )));
             }
             let mut out = format!("Table \"{table}\":\n");
-            let _ = writeln!(out, "  {:<25} {:<20} {:<10} Default",
+            let _ = writeln!(
+                out,
+                "  {:<25} {:<20} {:<10} Default",
                 "Column", "Type", "Nullable"
             );
             let _ = writeln!(out, "  {}", "-".repeat(70));
-            let cols: Vec<String> = rows[0].columns().iter().map(|c| c.name().to_owned()).collect();
+            let cols: Vec<String> = rows[0]
+                .columns()
+                .iter()
+                .map(|c| c.name().to_owned())
+                .collect();
             let idx = |name: &str| cols.iter().position(|c| c == name);
             for row in &rows {
-                let col      = idx("column_name").and_then(|i| row.get(i)).unwrap_or("");
-                let typ      = idx("data_type").and_then(|i| row.get(i)).unwrap_or("");
+                let col = idx("column_name").and_then(|i| row.get(i)).unwrap_or("");
+                let typ = idx("data_type").and_then(|i| row.get(i)).unwrap_or("");
                 let nullable = idx("is_nullable").and_then(|i| row.get(i)).unwrap_or("");
-                let default  = idx("column_default").and_then(|i| row.get(i)).unwrap_or("");
+                let default = idx("column_default").and_then(|i| row.get(i)).unwrap_or("");
                 let _ = writeln!(out, "  {col:<25} {typ:<20} {nullable:<10} {default}");
             }
             Ok(MetaResult::Output(out))
@@ -189,7 +199,11 @@ Management (v0.5 — plan/apply, requires --apply to execute)
                 return Ok(MetaResult::Output("No databases found.".to_owned()));
             }
             let mut out = "List of databases:\n".to_owned();
-            let cols: Vec<String> = rows[0].columns().iter().map(|c| c.name().to_owned()).collect();
+            let cols: Vec<String> = rows[0]
+                .columns()
+                .iter()
+                .map(|c| c.name().to_owned())
+                .collect();
             let datname_idx = cols.iter().position(|c| c == "datname").unwrap_or(0);
             for row in &rows {
                 let _ = writeln!(out, "  {}", row.get(datname_idx).unwrap_or(""));

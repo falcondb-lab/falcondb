@@ -102,7 +102,9 @@ impl WaitForGraph {
                     }
                 } else if in_stack.contains(&holder) {
                     // Found a cycle — extract it from path
-                    let cycle_start = if let Some(pos) = path.iter().position(|&t| t == holder) { pos } else {
+                    let cycle_start = if let Some(pos) = path.iter().position(|&t| t == holder) {
+                        pos
+                    } else {
                         tracing::error!("BUG: holder {:?} in in_stack but not in path", holder);
                         return None;
                     };

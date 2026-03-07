@@ -12,7 +12,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use falcon_storage::io::async_file::{AsyncFileConfig, FlushPolicy, FlushReason, SnapshotStreamConfig};
+use falcon_storage::io::async_file::{
+    AsyncFileConfig, FlushPolicy, FlushReason, SnapshotStreamConfig,
+};
 use falcon_storage::io::async_wal_writer::{AsyncWalConfig, AsyncWalWriter};
 use falcon_storage::io::snapshot_stream::{SnapshotChunk, SnapshotReader, SnapshotWriter};
 use falcon_storage::io::{create_async_file, IoErrorKind};
@@ -175,10 +177,7 @@ fn test_async_wal_group_commit_reduces_flushes() {
         "group commit should coalesce: {} syncs for 100 records",
         m.sync_count
     );
-    assert!(
-        m.group_commit_batches >= 1,
-        "at least one batch expected"
-    );
+    assert!(m.group_commit_batches >= 1, "at least one batch expected");
     assert!(
         m.avg_records_per_batch() > 1.0,
         "batch should contain multiple records: avg={}",
@@ -327,12 +326,17 @@ fn test_snapshot_stream_large_file() {
         read_ahead: 2,
     };
 
-    let mut reader = SnapshotReader::open(src_path.clone(), "snap-large".into(), config.clone()).unwrap();
+    let mut reader =
+        SnapshotReader::open(src_path.clone(), "snap-large".into(), config.clone()).unwrap();
     let mut writer = SnapshotWriter::create(dst_path.clone(), config).unwrap();
 
     let mut chunk_count = 0;
     while let Some(chunk) = reader.read_next_chunk().unwrap() {
-        assert!(chunk.verify_checksum(), "chunk {} checksum failed", chunk.chunk_index);
+        assert!(
+            chunk.verify_checksum(),
+            "chunk {} checksum failed",
+            chunk.chunk_index
+        );
         writer.write_chunk(&chunk).unwrap();
         chunk_count += 1;
     }
@@ -429,7 +433,8 @@ fn test_wal_then_snapshot_workflow() {
         chunk_size_bytes: 64 * 1024,
         ..Default::default()
     };
-    let mut reader = SnapshotReader::open(snap_src.clone(), "snap-combined".into(), config.clone()).unwrap();
+    let mut reader =
+        SnapshotReader::open(snap_src.clone(), "snap-combined".into(), config.clone()).unwrap();
     let mut writer = SnapshotWriter::create(snap_dst.clone(), config).unwrap();
 
     while let Some(chunk) = reader.read_next_chunk().unwrap() {

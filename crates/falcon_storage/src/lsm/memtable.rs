@@ -51,7 +51,9 @@ impl Default for LsmMemTable {
 impl LsmMemTable {
     pub fn new() -> Self {
         let shards: Vec<MemShard> = (0..NUM_SHARDS)
-            .map(|_| MemShard { map: RwLock::new(BTreeMap::new()) })
+            .map(|_| MemShard {
+                map: RwLock::new(BTreeMap::new()),
+            })
             .collect();
         Self {
             shards: shards.into_boxed_slice(),
@@ -77,16 +79,27 @@ impl LsmMemTable {
 
         let shard = &self.shards[shard_idx(&key)];
         let mut map = shard.map.write();
-        let old_size = map.get(&key).map(|v| entry_bytes(key.len(), v)).unwrap_or(0);
-        map.insert(key, MemTableValue { data: Some(value), seq });
+        let old_size = map
+            .get(&key)
+            .map(|v| entry_bytes(key.len(), v))
+            .unwrap_or(0);
+        map.insert(
+            key,
+            MemTableValue {
+                data: Some(value),
+                seq,
+            },
+        );
         drop(map);
 
         if old_size > 0 {
-            self.approx_bytes.fetch_sub(old_size as u64, Ordering::Relaxed);
+            self.approx_bytes
+                .fetch_sub(old_size as u64, Ordering::Relaxed);
         } else {
             self.entry_count.fetch_add(1, Ordering::Relaxed);
         }
-        self.approx_bytes.fetch_add(new_size as u64, Ordering::Relaxed);
+        self.approx_bytes
+            .fetch_add(new_size as u64, Ordering::Relaxed);
         Ok(())
     }
 
@@ -99,16 +112,21 @@ impl LsmMemTable {
 
         let shard = &self.shards[shard_idx(&key)];
         let mut map = shard.map.write();
-        let old_size = map.get(&key).map(|v| entry_bytes(key.len(), v)).unwrap_or(0);
+        let old_size = map
+            .get(&key)
+            .map(|v| entry_bytes(key.len(), v))
+            .unwrap_or(0);
         map.insert(key, MemTableValue { data: None, seq });
         drop(map);
 
         if old_size > 0 {
-            self.approx_bytes.fetch_sub(old_size as u64, Ordering::Relaxed);
+            self.approx_bytes
+                .fetch_sub(old_size as u64, Ordering::Relaxed);
         } else {
             self.entry_count.fetch_add(1, Ordering::Relaxed);
         }
-        self.approx_bytes.fetch_add(new_size as u64, Ordering::Relaxed);
+        self.approx_bytes
+            .fetch_add(new_size as u64, Ordering::Relaxed);
         Ok(())
     }
 
@@ -165,7 +183,9 @@ impl LsmMemTable {
             by_shard[shard_idx(key)].push(i);
         }
         for (si, indices) in by_shard.iter().enumerate() {
-            if indices.is_empty() { continue; }
+            if indices.is_empty() {
+                continue;
+            }
             let shard = &self.shards[si];
             let mut map = shard.map.write();
             for &i in indices {
@@ -173,13 +193,21 @@ impl LsmMemTable {
                 let new_size = key.len() + value.len() + std::mem::size_of::<MemTableValue>();
                 let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
                 let old_size = map.get(key).map(|v| entry_bytes(key.len(), v)).unwrap_or(0);
-                map.insert(key.clone(), MemTableValue { data: Some(value.clone()), seq });
+                map.insert(
+                    key.clone(),
+                    MemTableValue {
+                        data: Some(value.clone()),
+                        seq,
+                    },
+                );
                 if old_size > 0 {
-                    self.approx_bytes.fetch_sub(old_size as u64, Ordering::Relaxed);
+                    self.approx_bytes
+                        .fetch_sub(old_size as u64, Ordering::Relaxed);
                 } else {
                     self.entry_count.fetch_add(1, Ordering::Relaxed);
                 }
-                self.approx_bytes.fetch_add(new_size as u64, Ordering::Relaxed);
+                self.approx_bytes
+                    .fetch_add(new_size as u64, Ordering::Relaxed);
             }
         }
         Ok(())

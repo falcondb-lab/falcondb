@@ -121,7 +121,12 @@ async fn run_export_copy(client: &DbClient, cmd: &ExportCmd) -> Result<u64> {
 
     let mut stream = Box::pin(stream);
     let mut bytes_written: u64 = 0;
-    while let Some(chunk) = stream.as_mut().try_next().await.context("EXPORT: stream read error")? {
+    while let Some(chunk) = stream
+        .as_mut()
+        .try_next()
+        .await
+        .context("EXPORT: stream read error")?
+    {
         writer.write_all(&chunk).context("EXPORT: write error")?;
         bytes_written += chunk.len() as u64;
     }
@@ -135,7 +140,11 @@ async fn run_export_copy(client: &DbClient, cmd: &ExportCmd) -> Result<u64> {
         // Re-open and count — only for small overhead reporting
         let content = std::fs::read(&cmd.file).unwrap_or_default();
         let n = content.iter().filter(|&&b| b == b'\n').count() as u64;
-        if cmd.opts.header && n > 0 { n - 1 } else { n }
+        if cmd.opts.header && n > 0 {
+            n - 1
+        } else {
+            n
+        }
     };
 
     Ok(rows)
@@ -156,12 +165,19 @@ async fn run_export_select(client: &DbClient, cmd: &ExportCmd) -> Result<u64> {
     let col_names: Vec<String> = if rows.is_empty() {
         Vec::new()
     } else {
-        rows[0].columns().iter().map(|c| c.name().to_owned()).collect()
+        rows[0]
+            .columns()
+            .iter()
+            .map(|c| c.name().to_owned())
+            .collect()
     };
 
     if cmd.opts.header && !col_names.is_empty() {
         let delim_str = (cmd.opts.delimiter as char).to_string();
-        let header: Vec<String> = col_names.iter().map(|c| quote_field(c, &cmd.opts)).collect();
+        let header: Vec<String> = col_names
+            .iter()
+            .map(|c| quote_field(c, &cmd.opts))
+            .collect();
         writeln!(writer, "{}", header.join(&delim_str)).context("EXPORT: write error")?;
     }
 

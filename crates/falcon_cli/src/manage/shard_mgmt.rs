@@ -79,10 +79,7 @@ pub async fn apply_shard_move(
     target_node: &str,
     apply: bool,
 ) -> Result<ApplyResult> {
-    require_apply(
-        apply,
-        &format!("shard move {shard_id} to {target_node}"),
-    )?;
+    require_apply(apply, &format!("shard move {shard_id} to {target_node}"))?;
 
     let sql = format!(
         "SELECT falcon.admin_move_shard_leader('{}', '{}')",
@@ -92,9 +89,7 @@ pub async fn apply_shard_move(
     match client.query_simple(&sql).await {
         Ok(_) => Ok(ApplyResult::success(
             format!("shard move {shard_id} to {target_node}"),
-            format!(
-                "Shard '{shard_id}' leader transition to '{target_node}' initiated."
-            ),
+            format!("Shard '{shard_id}' leader transition to '{target_node}' initiated."),
         )),
         Err(e) => Ok(ApplyResult::rejected(
             format!("shard move {shard_id} to {target_node}"),

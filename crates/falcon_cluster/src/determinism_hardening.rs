@@ -102,7 +102,10 @@ pub fn resource_contracts() -> Vec<ResourceExhaustionContract> {
             resource_name: "memory_hard_limit",
             sqlstate: "53200", // out_of_memory
             error_kind: ErrorKind::Transient,
-            retry_policy: RetryPolicy::ExponentialBackoff { base_ms: 100, max_ms: 5000 },
+            retry_policy: RetryPolicy::ExponentialBackoff {
+                base_ms: 100,
+                max_ms: 5000,
+            },
             max_reject_latency_us: 100,
             metric_name: "falcon_admission_memory_rejected",
             show_visible: true,
@@ -138,7 +141,10 @@ pub fn resource_contracts() -> Vec<ResourceExhaustionContract> {
             resource_name: "connection_limit",
             sqlstate: "53300",
             error_kind: ErrorKind::Transient,
-            retry_policy: RetryPolicy::ExponentialBackoff { base_ms: 50, max_ms: 2000 },
+            retry_policy: RetryPolicy::ExponentialBackoff {
+                base_ms: 50,
+                max_ms: 2000,
+            },
             max_reject_latency_us: 50,
             metric_name: "falcon_admission_connection_rejected",
             show_visible: true,
@@ -192,16 +198,28 @@ pub fn validate_contracts() -> Result<(), Vec<String>> {
             errors.push("Empty resource_name".into());
         }
         if c.sqlstate.len() != 5 {
-            errors.push(format!("{}: SQLSTATE must be 5 chars, got '{}'", c.resource_name, c.sqlstate));
+            errors.push(format!(
+                "{}: SQLSTATE must be 5 chars, got '{}'",
+                c.resource_name, c.sqlstate
+            ));
         }
         if c.max_reject_latency_us == 0 {
-            errors.push(format!("{}: max_reject_latency_us must be > 0", c.resource_name));
+            errors.push(format!(
+                "{}: max_reject_latency_us must be > 0",
+                c.resource_name
+            ));
         }
         if c.metric_name.is_empty() {
-            errors.push(format!("{}: metric_name must not be empty", c.resource_name));
+            errors.push(format!(
+                "{}: metric_name must not be empty",
+                c.resource_name
+            ));
         }
         if !c.show_visible {
-            errors.push(format!("{}: all resources MUST be show_visible (v1.0.4 contract)", c.resource_name));
+            errors.push(format!(
+                "{}: all resources MUST be show_visible (v1.0.4 contract)",
+                c.resource_name
+            ));
         }
     }
 
@@ -213,7 +231,11 @@ pub fn validate_contracts() -> Result<(), Vec<String>> {
         }
     }
 
-    if errors.is_empty() { Ok(()) } else { Err(errors) }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -230,26 +252,16 @@ pub fn validate_contracts() -> Result<(), Vec<String>> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TxnTerminalState {
     /// Transaction committed successfully.
-    Committed {
-        commit_ts: u64,
-    },
+    Committed { commit_ts: u64 },
     /// Transaction aborted due to a retryable condition.
-    AbortedRetryable {
-        reason: AbortReason,
-    },
+    AbortedRetryable { reason: AbortReason },
     /// Transaction aborted due to a non-retryable condition.
-    AbortedNonRetryable {
-        reason: AbortReason,
-    },
+    AbortedNonRetryable { reason: AbortReason },
     /// Transaction rejected before execution (pre-admission).
-    Rejected {
-        reason: RejectReason,
-    },
+    Rejected { reason: RejectReason },
     /// Transaction outcome is indeterminate (crash/partition during commit).
     /// Client MUST check status or retry with idempotency key.
-    Indeterminate {
-        reason: String,
-    },
+    Indeterminate { reason: String },
 }
 
 /// Why a transaction was aborted.
@@ -305,8 +317,9 @@ impl TxnTerminalState {
     pub const fn sqlstate(&self) -> &'static str {
         match self {
             Self::Committed { .. } => "00000",
-            Self::AbortedRetryable { reason }
-            | Self::AbortedNonRetryable { reason } => reason.sqlstate(),
+            Self::AbortedRetryable { reason } | Self::AbortedNonRetryable { reason } => {
+                reason.sqlstate()
+            }
             Self::Rejected { reason } => reason.sqlstate(),
             Self::Indeterminate { .. } => "08006", // connection_failure
         }
@@ -315,8 +328,7 @@ impl TxnTerminalState {
     /// Retry policy for this terminal state.
     pub const fn retry_policy(&self) -> RetryPolicy {
         match self {
-            Self::Committed { .. }
-            | Self::AbortedNonRetryable { .. } => RetryPolicy::NoRetry,
+            Self::Committed { .. } | Self::AbortedNonRetryable { .. } => RetryPolicy::NoRetry,
             Self::AbortedRetryable { .. } => RetryPolicy::RetryAfter(0),
             Self::Rejected { reason } => reason.retry_policy(),
             Self::Indeterminate { .. } => RetryPolicy::ExponentialBackoff {
@@ -337,8 +349,7 @@ impl TxnTerminalState {
                 | AbortReason::ExplicitRollback => ErrorKind::UserError,
                 _ => ErrorKind::Retryable,
             },
-            Self::Rejected { .. }
-            | Self::Indeterminate { .. } => ErrorKind::Transient,
+            Self::Rejected { .. } | Self::Indeterminate { .. } => ErrorKind::Transient,
         }
     }
 
@@ -351,7 +362,9 @@ impl TxnTerminalState {
     pub fn client_message(&self) -> String {
         match self {
             Self::Committed { commit_ts } => format!("COMMIT (ts={commit_ts})"),
-            Self::AbortedRetryable { reason } => format!("ABORT (retryable): {}", reason.description()),
+            Self::AbortedRetryable { reason } => {
+                format!("ABORT (retryable): {}", reason.description())
+            }
             Self::AbortedNonRetryable { reason } => format!("ABORT: {}", reason.description()),
             Self::Rejected { reason } => format!("REJECTED: {}", reason.description()),
             Self::Indeterminate { reason } => format!("INDETERMINATE: {reason}"),
@@ -362,15 +375,13 @@ impl TxnTerminalState {
 impl AbortReason {
     pub const fn sqlstate(&self) -> &'static str {
         match self {
-            Self::SerializationConflict
-            | Self::FailoverAbort => "40001",
+            Self::SerializationConflict | Self::FailoverAbort => "40001",
             Self::Deadlock => "40P01",
             Self::ConstraintViolation(_) => "23000",
             Self::Timeout => "57014",
             Self::ExplicitRollback => "40000",
             Self::ReadOnlyViolation => "25006",
-            Self::StorageError(_)
-            | Self::InvariantViolation(_) => "XX000",
+            Self::StorageError(_) | Self::InvariantViolation(_) => "XX000",
         }
     }
 
@@ -399,24 +410,33 @@ impl RejectReason {
             | Self::WriteConcurrencyExceeded(_)
             | Self::CrossShardConcurrencyExceeded
             | Self::DdlConcurrencyExceeded => "53300",
-            Self::ReplicationLagExceeded
-            | Self::CircuitBreakerOpen(_) => "57P03",
+            Self::ReplicationLagExceeded | Self::CircuitBreakerOpen(_) => "57P03",
             Self::NodeNotAcceptingWrites => "25006",
         }
     }
 
     pub const fn retry_policy(&self) -> RetryPolicy {
         match self {
-            Self::MemoryExhausted => RetryPolicy::ExponentialBackoff { base_ms: 100, max_ms: 5000 },
+            Self::MemoryExhausted => RetryPolicy::ExponentialBackoff {
+                base_ms: 100,
+                max_ms: 5000,
+            },
             Self::ReplicationLagExceeded => RetryPolicy::RetryAfter(500),
-            Self::WalBacklogExceeded
-            | Self::DdlConcurrencyExceeded => RetryPolicy::RetryAfter(200),
-            Self::ConnectionLimitReached => RetryPolicy::ExponentialBackoff { base_ms: 50, max_ms: 2000 },
-            Self::QueryConcurrencyExceeded
-            | Self::WriteConcurrencyExceeded(_) => RetryPolicy::RetryAfter(50),
+            Self::WalBacklogExceeded | Self::DdlConcurrencyExceeded => RetryPolicy::RetryAfter(200),
+            Self::ConnectionLimitReached => RetryPolicy::ExponentialBackoff {
+                base_ms: 50,
+                max_ms: 2000,
+            },
+            Self::QueryConcurrencyExceeded | Self::WriteConcurrencyExceeded(_) => {
+                RetryPolicy::RetryAfter(50)
+            }
             Self::CrossShardConcurrencyExceeded => RetryPolicy::RetryAfter(100),
-            Self::CircuitBreakerOpen(_) => RetryPolicy::RetryOnDifferentNode { retry_after_ms: 1000 },
-            Self::NodeNotAcceptingWrites => RetryPolicy::RetryOnDifferentNode { retry_after_ms: 500 },
+            Self::CircuitBreakerOpen(_) => RetryPolicy::RetryOnDifferentNode {
+                retry_after_ms: 1000,
+            },
+            Self::NodeNotAcceptingWrites => RetryPolicy::RetryOnDifferentNode {
+                retry_after_ms: 500,
+            },
         }
     }
 
@@ -483,19 +503,33 @@ pub fn classify_error(err: &FalconError) -> TxnTerminalState {
         },
         FalconError::Transient { reason, .. } => {
             if reason.contains("memory") {
-                TxnTerminalState::Rejected { reason: RejectReason::MemoryExhausted }
+                TxnTerminalState::Rejected {
+                    reason: RejectReason::MemoryExhausted,
+                }
             } else if reason.contains("WAL") {
-                TxnTerminalState::Rejected { reason: RejectReason::WalBacklogExceeded }
+                TxnTerminalState::Rejected {
+                    reason: RejectReason::WalBacklogExceeded,
+                }
             } else if reason.contains("replication") {
-                TxnTerminalState::Rejected { reason: RejectReason::ReplicationLagExceeded }
+                TxnTerminalState::Rejected {
+                    reason: RejectReason::ReplicationLagExceeded,
+                }
             } else if reason.contains("connection") {
-                TxnTerminalState::Rejected { reason: RejectReason::ConnectionLimitReached }
+                TxnTerminalState::Rejected {
+                    reason: RejectReason::ConnectionLimitReached,
+                }
             } else if reason.contains("query") {
-                TxnTerminalState::Rejected { reason: RejectReason::QueryConcurrencyExceeded }
+                TxnTerminalState::Rejected {
+                    reason: RejectReason::QueryConcurrencyExceeded,
+                }
             } else if reason.contains("DDL") {
-                TxnTerminalState::Rejected { reason: RejectReason::DdlConcurrencyExceeded }
+                TxnTerminalState::Rejected {
+                    reason: RejectReason::DdlConcurrencyExceeded,
+                }
             } else {
-                TxnTerminalState::Rejected { reason: RejectReason::QueryConcurrencyExceeded }
+                TxnTerminalState::Rejected {
+                    reason: RejectReason::QueryConcurrencyExceeded,
+                }
             }
         }
 
@@ -539,7 +573,9 @@ pub fn validate_failover_invariants(
     let visible_set: std::collections::HashSet<_> = recovered_visible.iter().collect();
 
     for record in crash_records {
-        let expected = record.phase_at_crash.expected_recovery(local_fsync_required);
+        let expected = record
+            .phase_at_crash
+            .expected_recovery(local_fsync_required);
         let is_visible = visible_set.contains(&record.txn_id);
 
         match expected {
@@ -565,7 +601,11 @@ pub fn validate_failover_invariants(
         }
     }
 
-    if violations.is_empty() { Ok(()) } else { Err(violations) }
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(violations)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -619,7 +659,10 @@ impl QueueDepthGuard {
         let new_depth = current + 1;
         while new_depth > peak {
             match self.peak_depth.compare_exchange_weak(
-                peak, new_depth, Ordering::Relaxed, Ordering::Relaxed,
+                peak,
+                new_depth,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
             ) {
                 Ok(_) => break,
                 Err(p) => peak = p,
@@ -852,7 +895,11 @@ mod tests {
         let contracts = resource_contracts();
         let mut names = std::collections::HashSet::new();
         for c in &contracts {
-            assert!(names.insert(c.resource_name), "duplicate: {}", c.resource_name);
+            assert!(
+                names.insert(c.resource_name),
+                "duplicate: {}",
+                c.resource_name
+            );
         }
     }
 
@@ -939,7 +986,11 @@ mod tests {
         ];
         for r in &reasons {
             assert_eq!(r.sqlstate().len(), 5, "bad SQLSTATE for {:?}", r);
-            assert!(r.retry_policy().should_retry(), "{:?} should be retryable", r);
+            assert!(
+                r.retry_policy().should_retry(),
+                "{:?} should be retryable",
+                r
+            );
         }
     }
 
@@ -982,7 +1033,10 @@ mod tests {
     fn test_classify_error_read_only() {
         let err = FalconError::ReadOnly("write attempted".into());
         let state = classify_error(&err);
-        assert!(matches!(state, TxnTerminalState::AbortedNonRetryable { .. }));
+        assert!(matches!(
+            state,
+            TxnTerminalState::AbortedNonRetryable { .. }
+        ));
         assert_eq!(state.sqlstate(), "25006");
     }
 
@@ -990,7 +1044,12 @@ mod tests {
     fn test_classify_error_transient_wal() {
         let err = FalconError::transient("WAL flush queue backlog too large", 200);
         let state = classify_error(&err);
-        assert!(matches!(state, TxnTerminalState::Rejected { reason: RejectReason::WalBacklogExceeded }));
+        assert!(matches!(
+            state,
+            TxnTerminalState::Rejected {
+                reason: RejectReason::WalBacklogExceeded
+            }
+        ));
     }
 
     // ── §3: Failover Invariants ──
@@ -1178,7 +1237,10 @@ mod tests {
         assert!(matches!(r, TxnTerminalState::AbortedRetryable { .. }));
 
         // Non-retryable abort
-        let r = classify_error(&FalconError::Txn(TxnError::ConstraintViolation(TxnId(1), "pk".into())));
+        let r = classify_error(&FalconError::Txn(TxnError::ConstraintViolation(
+            TxnId(1),
+            "pk".into(),
+        )));
         assert!(matches!(r, TxnTerminalState::AbortedNonRetryable { .. }));
 
         // Rejection
@@ -1186,7 +1248,9 @@ mod tests {
         assert!(matches!(r, TxnTerminalState::Rejected { .. }));
 
         // Indeterminate
-        let r = classify_error(&FalconError::Protocol(falcon_common::error::ProtocolError::ConnectionClosed));
+        let r = classify_error(&FalconError::Protocol(
+            falcon_common::error::ProtocolError::ConnectionClosed,
+        ));
         assert!(matches!(r, TxnTerminalState::Indeterminate { .. }));
     }
 
@@ -1197,11 +1261,18 @@ mod tests {
         assert_eq!(RetryPolicy::NoRetry.initial_delay_ms(), 0);
         assert_eq!(RetryPolicy::RetryAfter(100).initial_delay_ms(), 100);
         assert_eq!(
-            RetryPolicy::ExponentialBackoff { base_ms: 50, max_ms: 1000 }.initial_delay_ms(),
+            RetryPolicy::ExponentialBackoff {
+                base_ms: 50,
+                max_ms: 1000
+            }
+            .initial_delay_ms(),
             50
         );
         assert_eq!(
-            RetryPolicy::RetryOnDifferentNode { retry_after_ms: 500 }.initial_delay_ms(),
+            RetryPolicy::RetryOnDifferentNode {
+                retry_after_ms: 500
+            }
+            .initial_delay_ms(),
             500
         );
     }

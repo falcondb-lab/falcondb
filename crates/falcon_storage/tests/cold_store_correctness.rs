@@ -136,7 +136,11 @@ fn test_segment_rotation_data_integrity() {
     }
 
     let seg_count = store.segment_count();
-    assert!(seg_count > 1, "should have rotated segments: got {}", seg_count);
+    assert!(
+        seg_count > 1,
+        "should have rotated segments: got {}",
+        seg_count
+    );
     println!("segments after 200 rows (1KB max): {}", seg_count);
 }
 
@@ -180,7 +184,11 @@ fn test_concurrent_store_and_read() {
         read_handles.push(std::thread::spawn(move || {
             let chunk_size = ah.len() / num_writers;
             let start = t * chunk_size;
-            let end = if t == num_writers - 1 { ah.len() } else { start + chunk_size };
+            let end = if t == num_writers - 1 {
+                ah.len()
+            } else {
+                start + chunk_size
+            };
             for idx in start..end {
                 let (expected_id, ref handle) = ah[idx];
                 let row = s.read_row(handle).unwrap();
@@ -294,7 +302,10 @@ fn test_cache_eviction_under_pressure() {
     }
 
     // Cache should not exceed capacity (approximately)
-    assert!(store.cache_bytes() <= 512, "cache should respect capacity limit");
+    assert!(
+        store.cache_bytes() <= 512,
+        "cache should respect capacity limit"
+    );
 }
 
 // ─── Decompress latency tracking ────────────────────────────────────────
@@ -315,7 +326,10 @@ fn test_decompress_latency_tracking() {
     let snap = store.metrics.snapshot();
     assert_eq!(snap.cold_decompress_total, 10);
     // Latency should be tracked (may be 0 on fast systems)
-    assert!(snap.cold_decompress_latency_us < 10_000_000, "latency should be reasonable");
+    assert!(
+        snap.cold_decompress_latency_us < 10_000_000,
+        "latency should be reasonable"
+    );
 }
 
 // ─── String Intern Pool ─────────────────────────────────────────────────
@@ -329,7 +343,10 @@ fn test_intern_pool_deduplication() {
     let id3 = pool.intern("STATUS_ACTIVE"); // duplicate
 
     assert_eq!(id1, id3, "same string should produce same InternId");
-    assert_ne!(id1, id2, "different strings should produce different InternIds");
+    assert_ne!(
+        id1, id2,
+        "different strings should produce different InternIds"
+    );
 
     assert_eq!(pool.resolve(id1), Some("STATUS_ACTIVE".to_string()));
     assert_eq!(pool.resolve(id2), Some("STATUS_INACTIVE".to_string()));
@@ -351,7 +368,11 @@ fn test_intern_pool_hit_rate_tracking() {
     assert_eq!(pool.hits(), 5);
     assert_eq!(pool.misses(), 5);
     let rate = pool.hit_rate();
-    assert!((rate - 0.5).abs() < 0.01, "expected ~50% hit rate, got {}", rate);
+    assert!(
+        (rate - 0.5).abs() < 0.01,
+        "expected ~50% hit rate, got {}",
+        rate
+    );
 }
 
 #[test]
@@ -378,7 +399,10 @@ fn test_intern_pool_concurrent_safety() {
     // 4 groups × 200 unique keys = 800 unique strings
     assert_eq!(pool.len(), 800);
     // Each key was interned twice (by 2 threads), so 800 hits
-    assert!(pool.hits() >= 800, "should have significant hits from thread overlap");
+    assert!(
+        pool.hits() >= 800,
+        "should have significant hits from thread overlap"
+    );
 }
 
 // ─── ColdHandle compactness ─────────────────────────────────────────────

@@ -20,8 +20,7 @@ pub struct ShardInfo {
 
 /// Callback invoked when a shard leader changes.
 /// Arguments: (shard_id, old_leader, new_leader, new_epoch).
-pub type LeaderChangeCallback =
-    Box<dyn Fn(ShardId, NodeId, NodeId, u64) + Send + Sync>;
+pub type LeaderChangeCallback = Box<dyn Fn(ShardId, NodeId, NodeId, u64) + Send + Sync>;
 
 /// Shard map: maps keys to shards via consistent hashing.
 /// MVP: single shard covering the full hash range.
@@ -151,7 +150,10 @@ impl ShardMap {
 
     /// Get the current epoch for a shard.
     pub fn shard_epoch(&self, shard_id: ShardId) -> Option<u64> {
-        self.shards.iter().find(|s| s.id == shard_id).map(|s| s.epoch)
+        self.shards
+            .iter()
+            .find(|s| s.id == shard_id)
+            .map(|s| s.epoch)
     }
 
     /// Get shard info by ID.

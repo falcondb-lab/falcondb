@@ -230,13 +230,18 @@ impl GroupCommitSyncer {
         // Notify syncer that there's work and get our sequence number
         let my_lsn = {
             let (lock, cvar) = &*self.state;
-            let mut state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut state = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.pending_count += 1;
             let seq = self.next_lsn.fetch_add(1, Ordering::Relaxed);
             cvar.notify_one();
 
             // Wait until our LSN is fsynced
-            while state.fsynced_lsn <= seq && !self.shutdown.load(Ordering::Relaxed) && !state.flush_failed {
+            while state.fsynced_lsn <= seq
+                && !self.shutdown.load(Ordering::Relaxed)
+                && !state.flush_failed
+            {
                 let timeout = Duration::from_micros(self.config.flush_interval_us * 10);
                 let result = cvar
                     .wait_timeout(state, timeout)
@@ -274,7 +279,9 @@ impl GroupCommitSyncer {
         let lsn = self.wal.append(record)?;
         {
             let (lock, cvar) = &*self.state;
-            let mut state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut state = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.pending_count += 1;
             self.next_lsn.fetch_add(1, Ordering::Relaxed);
             cvar.notify_one();
@@ -289,7 +296,9 @@ impl GroupCommitSyncer {
         let start = std::time::Instant::now();
         let seq = {
             let (lock, cvar) = &*self.state;
-            let mut state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut state = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.pending_count += count;
             let seq = self.next_lsn.fetch_add(count, Ordering::Relaxed) + count - 1;
             cvar.notify_one();
@@ -303,8 +312,14 @@ impl GroupCommitSyncer {
         loop {
             if self.atomic_fsynced_lsn.load(Ordering::Acquire) >= seq {
                 let elapsed = start.elapsed().as_micros() as u64;
-                self.stats.total_wait_us.fetch_add(elapsed, Ordering::Relaxed);
-                let _ = self.stats.max_wait_us.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| if elapsed > c { Some(elapsed) } else { None });
+                self.stats
+                    .total_wait_us
+                    .fetch_add(elapsed, Ordering::Relaxed);
+                let _ = self.stats.max_wait_us.fetch_update(
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                    |c| if elapsed > c { Some(elapsed) } else { None },
+                );
                 return Ok(());
             }
             if self.shutdown.load(Ordering::Relaxed) {
@@ -321,8 +336,13 @@ impl GroupCommitSyncer {
         // Slow path: Condvar wait
         let my_lsn = {
             let (lock, cvar) = &*self.state;
-            let mut state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            while state.fsynced_lsn <= seq && !self.shutdown.load(Ordering::Relaxed) && !state.flush_failed {
+            let mut state = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while state.fsynced_lsn <= seq
+                && !self.shutdown.load(Ordering::Relaxed)
+                && !state.flush_failed
+            {
                 let timeout = Duration::from_micros(self.config.flush_interval_us * 10);
                 let result = cvar
                     .wait_timeout(state, timeout)
@@ -333,10 +353,19 @@ impl GroupCommitSyncer {
         };
 
         let elapsed = start.elapsed().as_micros() as u64;
-        self.stats.total_wait_us.fetch_add(elapsed, Ordering::Relaxed);
-        let _ = self.stats.max_wait_us.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-            if elapsed > cur { Some(elapsed) } else { None }
-        });
+        self.stats
+            .total_wait_us
+            .fetch_add(elapsed, Ordering::Relaxed);
+        let _ = self
+            .stats
+            .max_wait_us
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                if elapsed > cur {
+                    Some(elapsed)
+                } else {
+                    None
+                }
+            });
         if my_lsn {
             return Err(StorageError::Wal("group-commit flush failed".into()));
         }
@@ -369,7 +398,9 @@ impl GroupCommitSyncer {
             }
 
             let should_flush = {
-                let state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let state = lock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
 
                 if state.pending_count == 0 {
                     // Idle: wait for work or flush_interval timeout.
@@ -400,7 +431,9 @@ impl GroupCommitSyncer {
                     tracing::error!("group-commit fsync error: {}", e);
                     // Signal all waiters that the flush failed
                     let (lock, cvar) = &*self.state;
-                    let mut state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut state = lock
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     state.flush_failed = true;
                     cvar.notify_all();
                 }
@@ -416,7 +449,9 @@ impl GroupCommitSyncer {
         // woken up by this flush's cvar.notify_all().
         let (batch_size, lsn_snapshot) = {
             let (lock, _) = &*self.state;
-            let mut state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut state = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let snap = self.next_lsn.load(Ordering::Relaxed);
             let batch = state.pending_count;
             state.pending_count = 0;
@@ -435,9 +470,12 @@ impl GroupCommitSyncer {
 
         {
             let (lock, cvar) = &*self.state;
-            let mut state = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut state = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.fsynced_lsn = lsn_snapshot;
-            self.atomic_fsynced_lsn.store(lsn_snapshot, Ordering::Release);
+            self.atomic_fsynced_lsn
+                .store(lsn_snapshot, Ordering::Release);
             cvar.notify_all();
         }
 

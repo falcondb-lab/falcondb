@@ -132,9 +132,9 @@ impl super::DistributedQueryEngine {
                         FalconError::Internal(format!("Failed to insert into temp storage: {e:?}"))
                     })?;
             }
-            temp_txn_mgr.commit(temp_txn.txn_id).map_err(|e| {
-                FalconError::Internal(format!("Failed to commit temp txn: {e:?}"))
-            })?;
+            temp_txn_mgr
+                .commit(temp_txn.txn_id)
+                .map_err(|e| FalconError::Internal(format!("Failed to commit temp txn: {e:?}")))?;
         }
         Ok(())
     }
@@ -143,7 +143,10 @@ impl super::DistributedQueryEngine {
     /// Gathers all subquery-referenced table data from all shards into a temp engine,
     /// then uses the Executor's materialize_filter to replace subquery nodes with
     /// concrete values. Returns the materialized filter expression.
-    pub(crate) fn materialize_dml_filter(&self, filter: &BoundExpr) -> Result<BoundExpr, FalconError> {
+    pub(crate) fn materialize_dml_filter(
+        &self,
+        filter: &BoundExpr,
+    ) -> Result<BoundExpr, FalconError> {
         // Collect table IDs referenced by subqueries in the filter
         let mut ids = std::collections::HashSet::new();
         Self::collect_table_ids_from_expr(filter, &mut ids);

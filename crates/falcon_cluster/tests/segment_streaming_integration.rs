@@ -41,7 +41,8 @@ fn test_empty_follower_full_catchup() {
             chunk_size: 2048,
             ..Default::default()
         },
-        5, 10000,
+        5,
+        10000,
     );
 
     // Leader has 5 sealed segments
@@ -97,7 +98,8 @@ fn test_follower_n_segments_behind() {
             chunk_size: 4096,
             ..Default::default()
         },
-        10, 5000,
+        10,
+        5000,
     );
 
     // Leader has segments 0-9
@@ -145,7 +147,8 @@ fn test_segment_to_tail_transition() {
             tail_batch_size: 512,
             ..Default::default()
         },
-        3, 20000,
+        3,
+        20000,
     );
 
     // Sealed segments 0-2
@@ -154,7 +157,9 @@ fn test_segment_to_tail_transition() {
     }
     // Active segment 3
     let mut active = vec![0u8; 20000];
-    for i in 0..20000 { active[i] = (i % 256) as u8; }
+    for i in 0..20000 {
+        active[i] = (i % 256) as u8;
+    }
     coord.register_active_segment_data(3, active);
 
     // Follower has segment 0 only
@@ -183,11 +188,17 @@ fn test_segment_to_tail_transition() {
     let hello2 = ReplicationHello::from_follower(&state);
     let path2 = coord.handle_hello(hello2);
     match path2 {
-        ReplicationPath::TailStreaming { segment_id, from_offset } => {
+        ReplicationPath::TailStreaming {
+            segment_id,
+            from_offset,
+        } => {
             assert_eq!(segment_id, 3);
             assert_eq!(from_offset, 0);
         }
-        _ => panic!("expected TailStreaming after segment catch-up, got {}", path2),
+        _ => panic!(
+            "expected TailStreaming after segment catch-up, got {}",
+            path2
+        ),
     }
 
     // Stream tail
@@ -240,8 +251,12 @@ fn test_leader_crash_error_recovery() {
 #[test]
 fn test_checksum_failure_mid_stream() {
     let coord = SegmentReplicationCoordinator::new(
-        SegmentReplicationConfig { chunk_size: 1024, ..Default::default() },
-        2, 0,
+        SegmentReplicationConfig {
+            chunk_size: 1024,
+            ..Default::default()
+        },
+        2,
+        0,
     );
 
     coord.register_segment_data(0, make_segment_data(0, 3000));
@@ -283,8 +298,12 @@ fn test_checksum_failure_mid_stream() {
 #[test]
 fn test_snapshot_full_lifecycle() {
     let coord = SegmentReplicationCoordinator::new(
-        SegmentReplicationConfig { chunk_size: 2048, ..Default::default() },
-        5, 30000,
+        SegmentReplicationConfig {
+            chunk_size: 2048,
+            ..Default::default()
+        },
+        5,
+        30000,
     );
 
     for seg in 0..5 {
@@ -356,8 +375,12 @@ fn test_multi_follower_concurrent() {
     use std::sync::Arc;
 
     let coord = Arc::new(SegmentReplicationCoordinator::new(
-        SegmentReplicationConfig { chunk_size: 2048, ..Default::default() },
-        5, 0,
+        SegmentReplicationConfig {
+            chunk_size: 2048,
+            ..Default::default()
+        },
+        5,
+        0,
     ));
 
     for seg in 0..5 {
@@ -401,7 +424,10 @@ fn test_multi_follower_concurrent() {
 
     // Metrics should reflect all handshakes
     assert_eq!(
-        coord.metrics.handshakes_total.load(std::sync::atomic::Ordering::Relaxed),
+        coord
+            .metrics
+            .handshakes_total
+            .load(std::sync::atomic::Ordering::Relaxed),
         4
     );
 }
@@ -418,11 +444,14 @@ fn test_tail_progressive_catchup() {
             tail_batch_size: 500,
             ..Default::default()
         },
-        0, 5000,
+        0,
+        5000,
     );
 
     let mut active = vec![0u8; 5000];
-    for i in 0..5000 { active[i] = (i % 256) as u8; }
+    for i in 0..5000 {
+        active[i] = (i % 256) as u8;
+    }
     coord.register_active_segment_data(0, active);
 
     // Follower at offset 0 on the same segment
@@ -449,7 +478,11 @@ fn test_tail_progressive_catchup() {
         }
     }
 
-    assert!(batches >= 10, "expected ≥10 batches of 500 bytes, got {}", batches);
+    assert!(
+        batches >= 10,
+        "expected ≥10 batches of 500 bytes, got {}",
+        batches
+    );
     let state = coord.get_follower_state(1).unwrap();
     assert_eq!(state.local_segment_offset, 5000);
 }
@@ -461,8 +494,12 @@ fn test_tail_progressive_catchup() {
 #[test]
 fn test_metrics_comprehensive() {
     let coord = SegmentReplicationCoordinator::new(
-        SegmentReplicationConfig { chunk_size: 4096, ..Default::default() },
-        3, 0,
+        SegmentReplicationConfig {
+            chunk_size: 4096,
+            ..Default::default()
+        },
+        3,
+        0,
     );
 
     for seg in 0..3 {
@@ -484,7 +521,11 @@ fn test_metrics_comprehensive() {
 
     // Inject a checksum failure
     let bad = SegmentChunk {
-        segment_id: 0, offset: 0, data: vec![1], checksum: 0, is_last: false,
+        segment_id: 0,
+        offset: 0,
+        data: vec![1],
+        checksum: 0,
+        is_last: false,
     };
     let _ = coord.follower_receive_chunk(1, &bad);
 

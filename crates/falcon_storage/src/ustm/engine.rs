@@ -9,9 +9,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::io_scheduler::{IoError, IoRequest, IoPriority, IoScheduler, IoSchedulerConfig, IoSchedulerStats};
+use super::io_scheduler::{
+    IoError, IoPriority, IoRequest, IoScheduler, IoSchedulerConfig, IoSchedulerStats,
+};
 use super::page::{AccessPriority, PageData, PageHandle, PageId, PinGuard};
-use super::prefetcher::{Prefetcher, PrefetcherConfig, PrefetcherStats, PrefetchSource};
+use super::prefetcher::{PrefetchSource, Prefetcher, PrefetcherConfig, PrefetcherStats};
 use super::zones::{ZoneConfig, ZoneError, ZoneManager, ZoneStats};
 
 // ── Engine Configuration ─────────────────────────────────────────────────────
@@ -226,7 +228,8 @@ impl UstmEngine {
         let resp = IoScheduler::execute_read_sync(&req);
         let latency = start.elapsed().as_micros() as u64;
         self.sync_reads.fetch_add(1, Ordering::Relaxed);
-        self.total_read_latency_us.fetch_add(latency, Ordering::Relaxed);
+        self.total_read_latency_us
+            .fetch_add(latency, Ordering::Relaxed);
 
         match resp.data {
             Ok(data) => {
@@ -239,10 +242,13 @@ impl UstmEngine {
     }
 
     /// Fetch a page and return a PinGuard (page stays resident until guard drops).
-    pub fn fetch_pinned(&self, page_id: PageId, priority: AccessPriority) -> Result<PinGuard, UstmError> {
+    pub fn fetch_pinned(
+        &self,
+        page_id: PageId,
+        priority: AccessPriority,
+    ) -> Result<PinGuard, UstmError> {
         match self.fetch(page_id, priority) {
-            FetchResult::Hit(h)
-            | FetchResult::Loaded(h) => Ok(PinGuard::new(h)),
+            FetchResult::Hit(h) | FetchResult::Loaded(h) => Ok(PinGuard::new(h)),
             FetchResult::Error(e) => Err(e),
         }
     }
@@ -302,7 +308,8 @@ impl UstmEngine {
         let count = responses.len();
         for resp in responses {
             if let Ok(data) = resp.data {
-                self.zones.access_warm(resp.page_id, data, AccessPriority::Prefetched);
+                self.zones
+                    .access_warm(resp.page_id, data, AccessPriority::Prefetched);
                 self.prefetcher.complete(resp.page_id);
                 self.prefetcher.mark_resident(resp.page_id);
                 self.async_reads.fetch_add(1, Ordering::Relaxed);
@@ -499,7 +506,9 @@ mod tests {
     fn test_engine_stats() {
         let engine = UstmEngine::new(test_config());
         let data = PageData::new(vec![0u8; 50]);
-        engine.alloc_hot(PageId(1), data.clone(), AccessPriority::IndexInternal).unwrap();
+        engine
+            .alloc_hot(PageId(1), data.clone(), AccessPriority::IndexInternal)
+            .unwrap();
         engine.insert_warm(PageId(2), data, AccessPriority::HotRow);
 
         let stats = engine.stats();
@@ -514,7 +523,9 @@ mod tests {
         engine.insert_warm(PageId(7), data, AccessPriority::HotRow);
 
         {
-            let guard = engine.fetch_pinned(PageId(7), AccessPriority::HotRow).unwrap();
+            let guard = engine
+                .fetch_pinned(PageId(7), AccessPriority::HotRow)
+                .unwrap();
             assert_eq!(guard.page_id(), PageId(7));
             assert!(guard.handle().is_pinned());
         }

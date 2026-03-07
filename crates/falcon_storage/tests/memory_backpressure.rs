@@ -9,8 +9,8 @@
 //! Run: cargo test -p falcon_storage --test memory_backpressure -- --nocapture
 
 use falcon_storage::memory::{
-    BackpressureAction, BackpressureLevel, GlobalMemoryGovernor, GovernorConfig,
-    MemoryBudget, MemoryTracker, PressureState,
+    BackpressureAction, BackpressureLevel, GlobalMemoryGovernor, GovernorConfig, MemoryBudget,
+    MemoryTracker, PressureState,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════

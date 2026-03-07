@@ -373,8 +373,9 @@ impl FalconError {
     /// Suggested retry delay in milliseconds (0 = retry immediately).
     pub const fn retry_after_ms(&self) -> u64 {
         match self {
-            Self::Retryable { retry_after_ms, .. }
-            | Self::Transient { retry_after_ms, .. } => *retry_after_ms,
+            Self::Retryable { retry_after_ms, .. } | Self::Transient { retry_after_ms, .. } => {
+                *retry_after_ms
+            }
             Self::Txn(TxnError::Timeout) => 100,
             Self::Txn(TxnError::MemoryPressure(_)) => 50,
             Self::Txn(TxnError::WalBacklogExceeded(_)) => 200,
@@ -393,7 +394,7 @@ impl FalconError {
             Self::Sql(SqlError::TypeMismatch { .. }) => "42804", // datatype_mismatch
             Self::Sql(SqlError::Unsupported(_)) => "0A000", // feature_not_supported
             Self::Sql(SqlError::AmbiguousColumn(_)) => "42702", // ambiguous_column
-            Self::Sql(_) => "42000", // syntax_error_or_access_rule_violation
+            Self::Sql(_) => "42000",                  // syntax_error_or_access_rule_violation
             Self::Storage(StorageError::TableAlreadyExists(_)) => "42P07", // duplicate_table
             Self::Storage(StorageError::DuplicateKey)
             | Self::Storage(StorageError::UniqueViolation { .. }) => "23505", // unique_violation
@@ -407,20 +408,22 @@ impl FalconError {
             | Self::Txn(TxnError::MemoryPressure(_))
             | Self::Txn(TxnError::MemoryLimitExceeded(_)) => "53200", // out_of_memory
             Self::Txn(TxnError::ConstraintViolation(_, _)) => "23000", // integrity_constraint_violation
-            Self::Txn(TxnError::Timeout)
-            | Self::Execution(ExecutionError::GovernorAbort(_)) => "57014", // query_canceled
+            Self::Txn(TxnError::Timeout) | Self::Execution(ExecutionError::GovernorAbort(_)) => {
+                "57014"
+            } // query_canceled
             Self::Txn(TxnError::WalBacklogExceeded(_)) => "53300", // too_many_connections (reuse)
             Self::Txn(TxnError::ReplicationLagExceeded(_)) => "57P03", // cannot_connect_now
-            Self::ReadOnly(_) => "25006", // read_only_sql_transaction
-            Self::Protocol(ProtocolError::AuthFailed) => "28P01", // invalid_password
+            Self::ReadOnly(_) => "25006",                          // read_only_sql_transaction
+            Self::Protocol(ProtocolError::AuthFailed) => "28P01",  // invalid_password
             Self::Protocol(ProtocolError::InvalidMessage(_)) => "08P01", // protocol_violation
             Self::Protocol(ProtocolError::ConnectionClosed) => "08006", // connection_failure
             Self::Execution(ExecutionError::DivisionByZero) => "22012", // division_by_zero
             Self::Execution(ExecutionError::NumericOverflow) => "22003", // numeric_value_out_of_range
-            Self::Execution(ExecutionError::TypeError(_)) => "22000",   // data_exception
+            Self::Execution(ExecutionError::TypeError(_)) => "22000",    // data_exception
             Self::Execution(ExecutionError::InsufficientPrivilege(_)) => "42501", // insufficient_privilege
-            Self::Execution(ExecutionError::ResourceExhausted(_))
-            | Self::Transient { .. } => "53000", // insufficient_resources
+            Self::Execution(ExecutionError::ResourceExhausted(_)) | Self::Transient { .. } => {
+                "53000"
+            } // insufficient_resources
             Self::Execution(ExecutionError::CheckConstraintViolation(_)) => "23514", // check_violation
             _ => "XX000", // internal_error
         }
@@ -429,9 +432,7 @@ impl FalconError {
     /// Map to a PostgreSQL severity string.
     pub const fn pg_severity(&self) -> &'static str {
         match self.kind() {
-            ErrorKind::UserError
-            | ErrorKind::Retryable
-            | ErrorKind::Transient => "ERROR",
+            ErrorKind::UserError | ErrorKind::Retryable | ErrorKind::Transient => "ERROR",
             ErrorKind::InternalBug => "FATAL",
         }
     }
@@ -621,11 +622,9 @@ impl FalconError {
             Self::Sql(_) => "sql",
             Self::Protocol(_) => "protocol",
             Self::Execution(_) => "executor",
-            Self::Cluster(_)
-            | Self::Retryable { .. } => "cluster",
+            Self::Cluster(_) | Self::Retryable { .. } => "cluster",
             Self::Transient { .. } => "resource",
-            Self::InternalBug { .. }
-            | Self::Internal(_) => "internal",
+            Self::InternalBug { .. } | Self::Internal(_) => "internal",
         }
     }
 

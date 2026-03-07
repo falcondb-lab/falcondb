@@ -32,7 +32,9 @@ mod inner {
     use io_uring::{opcode, types, IoUring};
     use parking_lot::Mutex;
 
-    use crate::io::async_file::{AsyncFile, AsyncFileConfig, FlushReason, IoError, IoErrorKind, IoMetrics};
+    use crate::io::async_file::{
+        AsyncFile, AsyncFileConfig, FlushReason, IoError, IoErrorKind, IoMetrics,
+    };
 
     /// io_uring ring size — number of SQE slots. 256 is sufficient for
     /// WAL workloads (sequential append + fsync, rarely more than a few
@@ -157,10 +159,9 @@ mod inner {
                         .map_err(|_| IoError::new(IoErrorKind::Internal, "SQ full"))?;
                 }
 
-                inner
-                    .ring
-                    .submit_and_wait(1)
-                    .map_err(|e| IoError::new(IoErrorKind::Internal, format!("io_uring submit: {e}")))?;
+                inner.ring.submit_and_wait(1).map_err(|e| {
+                    IoError::new(IoErrorKind::Internal, format!("io_uring submit: {e}"))
+                })?;
 
                 // Reap completion
                 let cqe = inner
@@ -212,10 +213,9 @@ mod inner {
                     .map_err(|_| IoError::new(IoErrorKind::Internal, "SQ full"))?;
             }
 
-            inner
-                .ring
-                .submit_and_wait(1)
-                .map_err(|e| IoError::new(IoErrorKind::Internal, format!("io_uring submit: {e}")))?;
+            inner.ring.submit_and_wait(1).map_err(|e| {
+                IoError::new(IoErrorKind::Internal, format!("io_uring submit: {e}"))
+            })?;
 
             let cqe = inner
                 .ring
@@ -262,10 +262,9 @@ mod inner {
                     .map_err(|_| IoError::new(IoErrorKind::Internal, "SQ full"))?;
             }
 
-            inner
-                .ring
-                .submit_and_wait(1)
-                .map_err(|e| IoError::new(IoErrorKind::Internal, format!("io_uring submit: {e}")))?;
+            inner.ring.submit_and_wait(1).map_err(|e| {
+                IoError::new(IoErrorKind::Internal, format!("io_uring submit: {e}"))
+            })?;
 
             let cqe = inner
                 .ring

@@ -38,10 +38,7 @@ pub async fn run_statement(
             let mut s = format_table_simple(&rows);
             if !tuples_only {
                 let count = rows.len();
-                let _ = writeln!(s, "({} row{})",
-                    count,
-                    if count == 1 { "" } else { "s" }
-                );
+                let _ = writeln!(s, "({} row{})", count, if count == 1 { "" } else { "s" });
             }
             s
         }
@@ -50,10 +47,7 @@ pub async fn run_statement(
             let mut s = format_expanded_str(&rows);
             if !tuples_only {
                 let count = rows.len();
-                let _ = writeln!(s, "({} row{})",
-                    count,
-                    if count == 1 { "" } else { "s" }
-                );
+                let _ = writeln!(s, "({} row{})", count, if count == 1 { "" } else { "s" });
             }
             s
         }
@@ -83,19 +77,13 @@ pub fn format_rows_as_string(
         OutputMode::Expanded => {
             let mut s = format_expanded_str(rows);
             let count = rows.len();
-            let _ = writeln!(s, "({} row{})",
-                count,
-                if count == 1 { "" } else { "s" }
-            );
+            let _ = writeln!(s, "({} row{})", count, if count == 1 { "" } else { "s" });
             s
         }
         OutputMode::Table => {
             let mut s = format_table_simple(rows);
             let count = rows.len();
-            let _ = writeln!(s, "({} row{})",
-                count,
-                if count == 1 { "" } else { "s" }
-            );
+            let _ = writeln!(s, "({} row{})", count, if count == 1 { "" } else { "s" });
             s
         }
     }

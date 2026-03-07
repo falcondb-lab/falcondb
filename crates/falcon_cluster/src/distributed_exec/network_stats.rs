@@ -85,15 +85,12 @@ fn estimate_datum_wire_bytes(d: &Datum) -> u64 {
         Datum::Null => 1,
         Datum::Boolean(_) => 2,
         Datum::Int32(_) | Datum::Date(_) => 5,
-        Datum::Int64(_) | Datum::Float64(_)
-        | Datum::Time(_) | Datum::Timestamp(_) => 9,
+        Datum::Int64(_) | Datum::Float64(_) | Datum::Time(_) | Datum::Timestamp(_) => 9,
         Datum::Text(s) => 5 + s.len() as u64,
         Datum::Bytea(b) => 5 + b.len() as u64,
         Datum::Interval(_, _, _) | Datum::Uuid(_) | Datum::Decimal(_, _) => 17,
         Datum::Jsonb(v) => 5 + v.to_string().len() as u64,
-        Datum::Array(a) => {
-            5 + a.iter().map(estimate_datum_wire_bytes).sum::<u64>()
-        }
+        Datum::Array(a) => 5 + a.iter().map(estimate_datum_wire_bytes).sum::<u64>(),
         Datum::TsVector(v) => 5 + (v.len() as u64) * 32,
         Datum::TsQuery(q) => 5 + q.len() as u64,
     }
@@ -147,19 +144,26 @@ impl CumulativeNetworkMetrics {
 
     /// Record a query's network stats.
     pub fn record(&self, stats: &QueryNetworkStats) {
-        self.total_bytes_in.fetch_add(stats.bytes_in, Ordering::Relaxed);
-        self.total_bytes_out.fetch_add(stats.bytes_out, Ordering::Relaxed);
-        self.total_rows_in.fetch_add(stats.rows_in, Ordering::Relaxed);
-        self.total_rows_out.fetch_add(stats.rows_out, Ordering::Relaxed);
+        self.total_bytes_in
+            .fetch_add(stats.bytes_in, Ordering::Relaxed);
+        self.total_bytes_out
+            .fetch_add(stats.bytes_out, Ordering::Relaxed);
+        self.total_rows_in
+            .fetch_add(stats.rows_in, Ordering::Relaxed);
+        self.total_rows_out
+            .fetch_add(stats.rows_out, Ordering::Relaxed);
         self.total_queries.fetch_add(1, Ordering::Relaxed);
         if stats.limit_pushed_down {
-            self.queries_with_limit_pushdown.fetch_add(1, Ordering::Relaxed);
+            self.queries_with_limit_pushdown
+                .fetch_add(1, Ordering::Relaxed);
         }
         if stats.partial_agg_used {
-            self.queries_with_partial_agg.fetch_add(1, Ordering::Relaxed);
+            self.queries_with_partial_agg
+                .fetch_add(1, Ordering::Relaxed);
         }
         if stats.filter_pushed_down {
-            self.queries_with_filter_pushdown.fetch_add(1, Ordering::Relaxed);
+            self.queries_with_filter_pushdown
+                .fetch_add(1, Ordering::Relaxed);
         }
         if stats.bytes_in > stats.bytes_out {
             self.bytes_saved_by_pushdown
@@ -182,7 +186,11 @@ impl CumulativeNetworkMetrics {
             queries_with_filter_pushdown: self.queries_with_filter_pushdown.load(Ordering::Relaxed),
             total_queries: total_q,
             bytes_saved_by_pushdown: self.bytes_saved_by_pushdown.load(Ordering::Relaxed),
-            overall_reduction_ratio: if bytes_in > 0 { bytes_out as f64 / bytes_in as f64 } else { 1.0 },
+            overall_reduction_ratio: if bytes_in > 0 {
+                bytes_out as f64 / bytes_in as f64
+            } else {
+                1.0
+            },
             avg_bytes_per_query: if total_q > 0 { bytes_in / total_q } else { 0 },
         }
     }
@@ -231,8 +239,8 @@ pub struct PushdownEstimate {
 pub fn estimate_pushdown_benefit(
     total_rows: u64,
     avg_row_bytes: u64,
-    selectivity: f64,    // fraction of rows that pass filter (0.0 - 1.0)
-    limit: Option<u64>,  // if LIMIT is present
+    selectivity: f64,   // fraction of rows that pass filter (0.0 - 1.0)
+    limit: Option<u64>, // if LIMIT is present
     shard_count: u64,
 ) -> PushdownEstimate {
     let without = total_rows * avg_row_bytes;
@@ -242,7 +250,11 @@ pub fn estimate_pushdown_benefit(
         None => after_filter,
     };
     let with = after_limit * avg_row_bytes;
-    let reduction = if without > 0 { with as f64 / without as f64 } else { 1.0 };
+    let reduction = if without > 0 {
+        with as f64 / without as f64
+    } else {
+        1.0
+    };
 
     PushdownEstimate {
         without_pushdown_bytes: without,
@@ -283,8 +295,12 @@ mod tests {
     #[test]
     fn test_estimate_rows_bytes() {
         let rows = vec![
-            OwnedRow { values: vec![Datum::Int32(1)] },
-            OwnedRow { values: vec![Datum::Int32(2)] },
+            OwnedRow {
+                values: vec![Datum::Int32(1)],
+            },
+            OwnedRow {
+                values: vec![Datum::Int32(2)],
+            },
         ];
         let bytes = estimate_rows_bytes(&rows);
         // 2 * (24 + 5) = 58

@@ -85,8 +85,7 @@ impl std::fmt::Display for GatewayDisposition {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Configuration for gateway admission control.
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct GatewayAdmissionConfig {
     /// Maximum concurrent inflight requests (local + forwarded).
     /// 0 = unlimited.
@@ -95,7 +94,6 @@ pub struct GatewayAdmissionConfig {
     /// 0 = unlimited.
     pub max_forwarded: u64,
 }
-
 
 /// Gateway admission control — fast-reject when overloaded.
 ///
@@ -132,9 +130,11 @@ impl GatewayAdmissionControl {
             if current >= self.config.max_inflight {
                 return false;
             }
-            if self.inflight.compare_exchange_weak(
-                current, current + 1, Ordering::Relaxed, Ordering::Relaxed
-            ).is_ok() {
+            if self
+                .inflight
+                .compare_exchange_weak(current, current + 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
                 return true;
             }
         }
@@ -156,9 +156,11 @@ impl GatewayAdmissionControl {
             if current >= self.config.max_forwarded {
                 return false;
             }
-            if self.forwarded.compare_exchange_weak(
-                current, current + 1, Ordering::Relaxed, Ordering::Relaxed
-            ).is_ok() {
+            if self
+                .forwarded
+                .compare_exchange_weak(current, current + 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
                 return true;
             }
         }

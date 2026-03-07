@@ -124,7 +124,6 @@ pub struct LsmEngine {
     block_crypto: RwLock<Option<std::sync::Arc<dyn super::sst::BlockCrypto>>>,
 }
 
-
 impl LsmEngine {
     /// Open or create an LSM engine at the given directory.
     pub fn open(data_dir: &Path, config: LsmConfig) -> io::Result<Self> {
@@ -153,7 +152,12 @@ impl LsmEngine {
         }
 
         // Determine starting seq from existing SSTs
-        let max_seq = levels.iter().flat_map(|l| l.iter()).map(|m| m.seq).max().unwrap_or(0);
+        let max_seq = levels
+            .iter()
+            .flat_map(|l| l.iter())
+            .map(|m| m.seq)
+            .max()
+            .unwrap_or(0);
 
         Ok(Self {
             config,
@@ -195,7 +199,11 @@ impl LsmEngine {
 
     /// Create an in-memory-only LSM engine (for testing).
     pub fn open_in_memory() -> io::Result<Self> {
-        let dir = std::env::temp_dir().join(format!("falcon_lsm_test_{}", std::process::id()));
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("falcon_lsm_test_{}_{}", std::process::id(), id));
         Self::open(
             &dir,
             LsmConfig {
@@ -340,9 +348,7 @@ impl LsmEngine {
         let sst_path = self.data_dir.join(format!("sst_L0_{:06}.sst", seq));
         let entries = frozen.iter_sorted();
 
-        let mut writer = SstWriter::new_with_crypto(
-            &sst_path, entries.len(), self.block_crypto(),
-        )?;
+        let mut writer = SstWriter::new_with_crypto(&sst_path, entries.len(), self.block_crypto())?;
         for (key, value, _seq) in &entries {
             let val = value.as_deref().unwrap_or(b"");
             writer.add(key, val)?;
@@ -391,9 +397,10 @@ impl LsmEngine {
 
         match task {
             CompactionTask::L0ToL1 => self.run_l0_compaction(),
-            CompactionTask::LevelToLevel { source_level, source_file_idx } => {
-                self.run_level_compaction(source_level, source_file_idx)
-            }
+            CompactionTask::LevelToLevel {
+                source_level,
+                source_file_idx,
+            } => self.run_level_compaction(source_level, source_file_idx),
         }
     }
 
@@ -555,37 +562,42 @@ impl LsmEngine {
     /// Returns (key, value) pairs sorted by key, deduplicated (newest wins).
     /// Tombstones (empty value) are excluded from the result.
     pub fn scan_all(&self) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        // Memtable entries carry real seq numbers (always higher than any SST seq).
-        let mut entries = self.active_memtable_snapshot();
+        let mut merger = super::merge_iter::MergeIterator::new();
 
-        // SST entries get a virtual seq based on level + file seq so that
-        // L0 (newest flush) beats L1+, and higher SST seq beats lower.
-        // All virtual seqs are capped below the minimum memtable seq (u64::MAX >> 2).
-        let base: u64 = 1 << 40; // large enough to stay below memtable seqs
+        // Memtable snapshot — highest seq (always beats SST data)
+        let mem_snapshot = self.active_memtable_snapshot();
+        let mem_seq = u64::MAX >> 1; // always wins over SST virtual seqs
+        let mem_entries: Vec<(Vec<u8>, Option<Vec<u8>>)> =
+            mem_snapshot.into_iter().map(|(k, v, _)| (k, v)).collect();
+        merger.add_source(mem_entries, mem_seq);
+
+        // SST sources — each file is an independent sorted source
+        let base: u64 = 1 << 40;
         let levels = self.levels.read();
         for (level_idx, level) in levels.iter().enumerate() {
             for meta in level {
-                // L0 gets higher virtual seq than L1+ (level_idx 0 → highest).
-                // Within L0, higher SST seq = newer flush.
                 let virtual_seq = base
                     .saturating_sub(level_idx as u64 * (1 << 20))
                     .saturating_add(meta.seq);
                 let reader = SstReader::open_with_crypto(&meta.path, meta.id, self.block_crypto())?;
-                for e in reader.scan()? {
-                    entries.push((e.key, if e.value.is_empty() { None } else { Some(e.value) }, virtual_seq));
-                }
+                let sst_entries: Vec<(Vec<u8>, Option<Vec<u8>>)> = reader
+                    .scan()?
+                    .into_iter()
+                    .map(|e| {
+                        let v = if e.value.is_empty() {
+                            None
+                        } else {
+                            Some(e.value)
+                        };
+                        (e.key, v)
+                    })
+                    .collect();
+                merger.add_source(sst_entries, virtual_seq);
             }
         }
         drop(levels);
 
-        // Sort by key then seq descending; dedup keeps the first (newest) per key.
-        entries.sort_by(|a, b| a.0.cmp(&b.0).then(b.2.cmp(&a.2)));
-        entries.dedup_by(|a, b| a.0 == b.0);
-
-        Ok(entries
-            .into_iter()
-            .filter_map(|(k, v, _)| v.map(|val| (k, val)))
-            .collect())
+        Ok(merger.collect_merged())
     }
 
     /// Range scan: same merge logic as scan_all but filtered to [start, end).
@@ -595,15 +607,20 @@ impl LsmEngine {
         start: Option<&[u8]>,
         end: Option<&[u8]>,
     ) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let in_range = |k: &[u8]| -> bool {
-            start.map_or(true, |s| k >= s) && end.map_or(true, |e| k < e)
-        };
+        let in_range =
+            |k: &[u8]| -> bool { start.is_none_or(|s| k >= s) && end.is_none_or(|e| k < e) };
 
-        let mut entries: Vec<(Vec<u8>, Option<Vec<u8>>, u64)> = self
+        let mut merger = super::merge_iter::MergeIterator::new();
+
+        // Memtable snapshot filtered to range
+        let mem_seq = u64::MAX >> 1;
+        let mem_entries: Vec<(Vec<u8>, Option<Vec<u8>>)> = self
             .active_memtable_snapshot()
             .into_iter()
             .filter(|(k, _, _)| in_range(k))
+            .map(|(k, v, _)| (k, v))
             .collect();
+        merger.add_source(mem_entries, mem_seq);
 
         let base: u64 = 1 << 40;
         let levels = self.levels.read();
@@ -624,22 +641,25 @@ impl LsmEngine {
                     .saturating_sub(level_idx as u64 * (1 << 20))
                     .saturating_add(meta.seq);
                 let reader = SstReader::open_with_crypto(&meta.path, meta.id, self.block_crypto())?;
-                for e in reader.scan()? {
-                    if in_range(&e.key) {
-                        entries.push((e.key, if e.value.is_empty() { None } else { Some(e.value) }, virtual_seq));
-                    }
-                }
+                let sst_entries: Vec<(Vec<u8>, Option<Vec<u8>>)> = reader
+                    .scan()?
+                    .into_iter()
+                    .filter(|e| in_range(&e.key))
+                    .map(|e| {
+                        let v = if e.value.is_empty() {
+                            None
+                        } else {
+                            Some(e.value)
+                        };
+                        (e.key, v)
+                    })
+                    .collect();
+                merger.add_source(sst_entries, virtual_seq);
             }
         }
         drop(levels);
 
-        entries.sort_by(|a, b| a.0.cmp(&b.0).then(b.2.cmp(&a.2)));
-        entries.dedup_by(|a, b| a.0 == b.0);
-
-        Ok(entries
-            .into_iter()
-            .filter_map(|(k, v, _)| v.map(|val| (k, val)))
-            .collect())
+        Ok(merger.collect_merged())
     }
 
     /// Shutdown the engine, flushing any pending data.
@@ -659,7 +679,10 @@ impl LsmEngine {
         };
 
         // Check cache with real (sst_id, block_offset)
-        let bk = BlockKey { sst_id: meta.id, offset: block_offset };
+        let bk = BlockKey {
+            sst_id: meta.id,
+            offset: block_offset,
+        };
         if let Some(cached) = self.block_cache.get(&bk) {
             return SstReader::search_block_pub(&cached.data, key);
         }
@@ -667,13 +690,14 @@ impl LsmEngine {
         // Cache miss: read block from disk, cache it, then search
         let block_data = reader.read_block_raw(block_offset, block_len)?;
         let result = SstReader::search_block_pub(&block_data, key)?;
-        self.block_cache.insert(bk, CachedBlock { data: block_data });
+        self.block_cache
+            .insert(bk, CachedBlock { data: block_data });
         Ok(result)
     }
 
     fn maybe_trigger_flush(&self) {
-        let needs_flush = self.active_memtable.read().approx_bytes()
-            >= self.config.memtable_budget_bytes;
+        let needs_flush =
+            self.active_memtable.read().approx_bytes() >= self.config.memtable_budget_bytes;
         if !needs_flush {
             return;
         }
@@ -690,9 +714,7 @@ impl LsmEngine {
     fn check_backpressure(&self) -> io::Result<()> {
         match self.backpressure.level() {
             BackpressureLevel::Normal => Ok(()),
-            BackpressureLevel::Delayed => {
-                self.backpressure.check_write().map_err(io::Error::from)
-            }
+            BackpressureLevel::Delayed => self.backpressure.check_write().map_err(io::Error::from),
             BackpressureLevel::Stopped => {
                 self.writes_stalled.fetch_add(1, Ordering::Relaxed);
                 self.backpressure.check_write().map_err(io::Error::from)
@@ -707,9 +729,8 @@ impl LsmEngine {
         if !levels.is_empty() {
             self.backpressure.update_l0_count(levels[0].len());
         }
-        self.backpressure.update_compaction_backlog(
-            self.compactor.pending_compaction_bytes(&levels),
-        );
+        self.backpressure
+            .update_compaction_backlog(self.compactor.pending_compaction_bytes(&levels));
     }
 
     /// Update the MVCC GC safepoint.
@@ -1051,7 +1072,7 @@ mod tests {
         engine.flush().unwrap();
         let stats = engine.stats();
         assert_eq!(stats.writes_delayed, 0);
-        assert!(stats.read_amplification >= 0);
+        let _ = stats.read_amplification;
     }
 
     #[test]

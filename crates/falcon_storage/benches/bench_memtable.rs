@@ -1,6 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use falcon_common::datum::{Datum, OwnedRow};
-use falcon_storage::memtable::{encode_pk, encode_pk_from_datums, encode_column_value};
+use falcon_storage::memtable::{encode_column_value, encode_pk, encode_pk_from_datums};
 
 fn make_row(id: i64) -> OwnedRow {
     OwnedRow::new(vec![

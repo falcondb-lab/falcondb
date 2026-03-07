@@ -17,9 +17,8 @@ pub fn parse_policy_create(arg: &str) -> Result<Policy> {
         .get("scope")
         .cloned()
         .unwrap_or_else(|| "cluster".to_owned());
-    let scope = PolicyScope::parse(&scope_str).ok_or_else(|| {
-        anyhow::anyhow!("Unknown scope '{scope_str}'. Use: cluster, shard, node")
-    })?;
+    let scope = PolicyScope::parse(&scope_str)
+        .ok_or_else(|| anyhow::anyhow!("Unknown scope '{scope_str}'. Use: cluster, shard, node"))?;
 
     let condition_str = require_key(&kv, "condition")?;
     let condition = parse_condition(&condition_str)?;
@@ -49,9 +48,7 @@ pub fn parse_policy_create(arg: &str) -> Result<Policy> {
         .cloned()
         .unwrap_or_else(|| "MEDIUM".to_owned());
     let risk_ceiling = RiskCeiling::parse(&risk_ceiling_str).ok_or_else(|| {
-        anyhow::anyhow!(
-            "Unknown risk_ceiling '{risk_ceiling_str}'. Use: LOW, MEDIUM, HIGH"
-        )
+        anyhow::anyhow!("Unknown risk_ceiling '{risk_ceiling_str}'. Use: LOW, MEDIUM, HIGH")
     })?;
     let health_prerequisite = kv
         .get("health_prereq")
@@ -188,7 +185,11 @@ fn require_key(kv: &std::collections::HashMap<String, String>, key: &str) -> Res
 fn chrono_now() -> String {
     // Use a simple timestamp without chrono dependency
     std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).map_or_else(|_| "unknown".to_owned(), |d| format!("unix:{}", d.as_secs()))
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or_else(
+            |_| "unknown".to_owned(),
+            |d| format!("unix:{}", d.as_secs()),
+        )
 }
 
 #[cfg(test)]

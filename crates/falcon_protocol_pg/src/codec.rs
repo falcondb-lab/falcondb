@@ -174,7 +174,11 @@ pub enum BackendMessage {
 }
 
 impl BackendMessage {
-    pub fn error(severity: impl Into<String>, code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn error(
+        severity: impl Into<String>,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
         BackendMessage::ErrorResponse {
             severity: severity.into(),
             code: code.into(),
@@ -457,7 +461,10 @@ pub fn decode_sasl_initial_response(buf: &mut BytesMut) -> Result<Option<Fronten
         msg_buf.to_vec()
     };
 
-    Ok(Some(FrontendMessage::SASLInitialResponse { mechanism, data }))
+    Ok(Some(FrontendMessage::SASLInitialResponse {
+        mechanism,
+        data,
+    }))
 }
 
 /// Decode a 'p' message as SASLResponse during SASL auth step 2+.
@@ -586,23 +593,30 @@ pub fn encode_message_into(buf: &mut BytesMut, msg: &BackendMessage) {
             buf.extend_from_slice(&body);
         }
         BackendMessage::DataRow { values } => {
-            let mut body = BytesMut::new();
-            body.put_i16(values.len() as i16);
+            // Pre-compute body length to write directly (avoids temp BytesMut + copy)
+            let body_len: usize = 2 + values
+                .iter()
+                .map(|v| match v {
+                    Some(s) => 4 + s.len(),
+                    None => 4,
+                })
+                .sum::<usize>();
+            buf.reserve(1 + 4 + body_len);
+            buf.put_u8(b'D');
+            buf.put_i32(4 + body_len as i32);
+            buf.put_i16(values.len() as i16);
             for val in values {
                 match val {
                     Some(s) => {
                         let bytes = s.as_bytes();
-                        body.put_i32(bytes.len() as i32);
-                        body.put_slice(bytes);
+                        buf.put_i32(bytes.len() as i32);
+                        buf.put_slice(bytes);
                     }
                     None => {
-                        body.put_i32(-1); // NULL
+                        buf.put_i32(-1);
                     }
                 }
             }
-            buf.put_u8(b'D');
-            buf.put_i32(4 + body.len() as i32);
-            buf.extend_from_slice(&body);
         }
         BackendMessage::CommandComplete { tag } => {
             let len = 4 + tag.len() + 1;
@@ -611,7 +625,9 @@ pub fn encode_message_into(buf: &mut BytesMut, msg: &BackendMessage) {
             write_cstring(buf, tag);
         }
         BackendMessage::ErrorResponse {
-            severity, code, message,
+            severity,
+            code,
+            message,
         } => {
             let mut body = BytesMut::new();
             body.put_u8(b'S');
@@ -629,7 +645,10 @@ pub fn encode_message_into(buf: &mut BytesMut, msg: &BackendMessage) {
             buf.extend_from_slice(&body);
         }
         BackendMessage::ErrorResponseExt {
-            severity, code, message, fields: ef,
+            severity,
+            code,
+            message,
+            fields: ef,
         } => {
             let mut body = BytesMut::new();
             body.put_u8(b'S');
@@ -640,14 +659,38 @@ pub fn encode_message_into(buf: &mut BytesMut, msg: &BackendMessage) {
             write_cstring(&mut body, code);
             body.put_u8(b'M');
             write_cstring(&mut body, message);
-            if let Some(ref d) = ef.detail { body.put_u8(b'D'); write_cstring(&mut body, d); }
-            if let Some(ref h) = ef.hint { body.put_u8(b'H'); write_cstring(&mut body, h); }
-            if let Some(p) = ef.position { body.put_u8(b'P'); write_cstring(&mut body, &p.to_string()); }
-            if let Some(ref s) = ef.schema_name { body.put_u8(b's'); write_cstring(&mut body, s); }
-            if let Some(ref t) = ef.table_name { body.put_u8(b't'); write_cstring(&mut body, t); }
-            if let Some(ref c) = ef.column_name { body.put_u8(b'c'); write_cstring(&mut body, c); }
-            if let Some(ref n) = ef.constraint_name { body.put_u8(b'n'); write_cstring(&mut body, n); }
-            if let Some(ref w) = ef.where_ { body.put_u8(b'W'); write_cstring(&mut body, w); }
+            if let Some(ref d) = ef.detail {
+                body.put_u8(b'D');
+                write_cstring(&mut body, d);
+            }
+            if let Some(ref h) = ef.hint {
+                body.put_u8(b'H');
+                write_cstring(&mut body, h);
+            }
+            if let Some(p) = ef.position {
+                body.put_u8(b'P');
+                write_cstring(&mut body, &p.to_string());
+            }
+            if let Some(ref s) = ef.schema_name {
+                body.put_u8(b's');
+                write_cstring(&mut body, s);
+            }
+            if let Some(ref t) = ef.table_name {
+                body.put_u8(b't');
+                write_cstring(&mut body, t);
+            }
+            if let Some(ref c) = ef.column_name {
+                body.put_u8(b'c');
+                write_cstring(&mut body, c);
+            }
+            if let Some(ref n) = ef.constraint_name {
+                body.put_u8(b'n');
+                write_cstring(&mut body, n);
+            }
+            if let Some(ref w) = ef.where_ {
+                body.put_u8(b'W');
+                write_cstring(&mut body, w);
+            }
             body.put_u8(0);
 
             buf.put_u8(b'E');

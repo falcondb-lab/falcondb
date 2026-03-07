@@ -306,15 +306,13 @@ impl CrashPoint {
     /// Whether a transaction at this crash point MUST survive recovery.
     pub const fn must_survive_recovery(&self, policy: &CommitPolicy) -> bool {
         match self {
-            Self::BeforeWalWrite
-            | Self::AfterWalWriteBeforeCommit => false,
+            Self::BeforeWalWrite | Self::AfterWalWriteBeforeCommit => false,
             Self::AfterCommitBeforeSync => {
                 // Only survives if policy doesn't require fsync
                 matches!(policy, CommitPolicy::PrimaryWalOnly)
             }
             Self::AfterSyncBeforeAck => policy.requires_local_fsync(),
-            Self::AfterAckBeforeReplication
-            | Self::AfterReplicationAck => true, // WAL is durable locally
+            Self::AfterAckBeforeReplication | Self::AfterReplicationAck => true, // WAL is durable locally
         }
     }
 
@@ -709,9 +707,7 @@ pub fn validate_commit_timeline(
     // CP-1: strict ordering
     if let (Some(l), Some(d)) = (logical_ts, durable_ts) {
         if l > d {
-            return Err(format!(
-                "CP-1 violation: logical_ts({l}) > durable_ts({d})"
-            ));
+            return Err(format!("CP-1 violation: logical_ts({l}) > durable_ts({d})"));
         }
     }
     if let (Some(d), Some(c)) = (durable_ts, client_visible_ts) {
@@ -817,9 +813,12 @@ impl fmt::Display for CommitPointEntry {
             f,
             "txn={} L={} D={} V={}",
             self.txn_id.0,
-            self.logical_us.map_or_else(|| "-".to_owned(), |v| v.to_string()),
-            self.durable_us.map_or_else(|| "-".to_owned(), |v| v.to_string()),
-            self.visible_us.map_or_else(|| "-".to_owned(), |v| v.to_string()),
+            self.logical_us
+                .map_or_else(|| "-".to_owned(), |v| v.to_string()),
+            self.durable_us
+                .map_or_else(|| "-".to_owned(), |v| v.to_string()),
+            self.visible_us
+                .map_or_else(|| "-".to_owned(), |v| v.to_string()),
         )
     }
 }
@@ -859,9 +858,15 @@ impl CommitPointTracker {
     /// Record the LogicalCommit timestamp for a transaction.
     pub fn record_logical(&self, txn_id: TxnId, timestamp_us: u64) {
         self.ensure_entry(txn_id);
-        let idx = self.index.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let idx = self
+            .index
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(&pos) = idx.get(&txn_id) {
-            let mut entries = self.entries.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut entries = self
+                .entries
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(entry) = entries.get_mut(pos) {
                 entry.logical_us = Some(timestamp_us);
             }
@@ -871,9 +876,15 @@ impl CommitPointTracker {
     /// Record the DurableCommit timestamp for a transaction.
     pub fn record_durable(&self, txn_id: TxnId, timestamp_us: u64) {
         self.ensure_entry(txn_id);
-        let idx = self.index.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let idx = self
+            .index
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(&pos) = idx.get(&txn_id) {
-            let mut entries = self.entries.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut entries = self
+                .entries
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(entry) = entries.get_mut(pos) {
                 entry.durable_us = Some(timestamp_us);
             }
@@ -883,9 +894,15 @@ impl CommitPointTracker {
     /// Record the ClientVisibleCommit timestamp for a transaction.
     pub fn record_visible(&self, txn_id: TxnId, timestamp_us: u64) {
         self.ensure_entry(txn_id);
-        let idx = self.index.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let idx = self
+            .index
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(&pos) = idx.get(&txn_id) {
-            let mut entries = self.entries.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut entries = self
+                .entries
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(entry) = entries.get_mut(pos) {
                 entry.visible_us = Some(timestamp_us);
             }
@@ -895,16 +912,25 @@ impl CommitPointTracker {
     /// Get a commit point entry for a specific transaction.
     pub fn get(&self, txn_id: TxnId) -> Option<CommitPointEntry> {
         let pos = {
-            let idx = self.index.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let idx = self
+                .index
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             *idx.get(&txn_id)?
         };
-        let entries = self.entries.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entries = self
+            .entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         entries.get(pos).cloned()
     }
 
     /// Compute aggregate lag statistics from all tracked entries.
     pub fn lag_stats(&self) -> CommitPointLagStats {
-        let entries = self.entries.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entries = self
+            .entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if entries.is_empty() {
             return CommitPointLagStats::default();
         }
@@ -967,23 +993,38 @@ impl CommitPointTracker {
 
     /// Number of tracked entries.
     pub fn len(&self) -> usize {
-        self.entries.read().unwrap_or_else(std::sync::PoisonError::into_inner).len()
+        self.entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 
     /// Whether the tracker is empty.
     pub fn is_empty(&self) -> bool {
-        self.entries.read().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty()
+        self.entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
     }
 
     fn ensure_entry(&self, txn_id: TxnId) {
         {
-            let idx = self.index.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let idx = self
+                .index
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if idx.contains_key(&txn_id) {
                 return;
             }
         }
-        let mut entries = self.entries.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut idx = self.index.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut entries = self
+            .entries
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut idx = self
+            .index
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         // Evict oldest if at capacity
         while entries.len() >= self.max_entries {

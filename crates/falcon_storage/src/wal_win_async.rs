@@ -49,10 +49,8 @@ mod inner {
     use falcon_common::error::StorageError;
     use parking_lot::Mutex;
 
-    use crate::wal::{
-        SyncMode, WalDevice, WAL_FORMAT_VERSION, WAL_MAGIC, WAL_SEGMENT_HEADER_SIZE,
-    };
     use super::WalWinAsyncConfig;
+    use crate::wal::{SyncMode, WalDevice, WAL_FORMAT_VERSION, WAL_MAGIC, WAL_SEGMENT_HEADER_SIZE};
 
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
     use windows_sys::Win32::Storage::FileSystem::FlushFileBuffers;
@@ -110,8 +108,7 @@ mod inner {
             let latest = find_latest_segment(dir);
             let seg_id = latest.unwrap_or(0);
 
-            let (file, handle, iocp, file_size) =
-                open_segment_overlapped(dir, seg_id, &config)?;
+            let (file, handle, iocp, file_size) = open_segment_overlapped(dir, seg_id, &config)?;
 
             let is_new = file_size == 0;
             let mut device = Self {
@@ -167,7 +164,8 @@ mod inner {
 
             inner.write_buf.extend_from_slice(data);
             inner.current_size += data.len() as u64;
-            self.bytes_written.fetch_add(data.len() as u64, Ordering::Relaxed);
+            self.bytes_written
+                .fetch_add(data.len() as u64, Ordering::Relaxed);
             Ok(data.len())
         }
 
@@ -203,7 +201,9 @@ mod inner {
 
         fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, StorageError> {
             let inner = self.inner.lock();
-            let seg_path = inner.dir.join(crate::wal::segment_filename(inner.current_segment));
+            let seg_path = inner
+                .dir
+                .join(crate::wal::segment_filename(inner.current_segment));
             let mut file = std::fs::File::open(&seg_path)?;
             file.seek(std::io::SeekFrom::Start(offset))?;
             let mut buf = vec![0u8; len];
@@ -277,10 +277,13 @@ mod inner {
             .write(true)
             .custom_flags(flags)
             .open(&seg_path)
-            .map_err(|e| StorageError::Wal(format!(
-                "Failed to open WAL segment {} with OVERLAPPED: {}",
-                seg_path.display(), e
-            )))?;
+            .map_err(|e| {
+                StorageError::Wal(format!(
+                    "Failed to open WAL segment {} with OVERLAPPED: {}",
+                    seg_path.display(),
+                    e
+                ))
+            })?;
 
         let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
         let handle = file.as_raw_handle() as HANDLE;
@@ -435,10 +438,7 @@ mod inner {
         inner.current_size = WAL_SEGMENT_HEADER_SIZE as u64;
         flush_buffer_overlapped(inner)?;
 
-        tracing::debug!(
-            segment = inner.current_segment,
-            "WAL IOCP device rotated"
-        );
+        tracing::debug!(segment = inner.current_segment, "WAL IOCP device rotated");
 
         Ok(inner.current_segment)
     }
@@ -545,10 +545,10 @@ pub use inner::*;
 
 #[cfg(not(windows))]
 mod stub {
-    use std::path::Path;
-    use falcon_common::error::StorageError;
-    use crate::wal::{SyncMode, WalDevice};
     use super::WalWinAsyncConfig;
+    use crate::wal::{SyncMode, WalDevice};
+    use falcon_common::error::StorageError;
+    use std::path::Path;
 
     pub struct WalDeviceWinAsync;
 
@@ -558,20 +558,38 @@ mod stub {
                 "WalDeviceWinAsync is only available on Windows".into(),
             ))
         }
-        pub fn current_segment_id(&self) -> u64 { 0 }
-        pub fn total_bytes_written(&self) -> u64 { 0 }
+        pub fn current_segment_id(&self) -> u64 {
+            0
+        }
+        pub fn total_bytes_written(&self) -> u64 {
+            0
+        }
     }
 
     impl WalDevice for WalDeviceWinAsync {
-        fn append(&self, _: &[u8]) -> Result<usize, StorageError> { unreachable!() }
-        fn flush(&self, _: SyncMode) -> Result<(), StorageError> { unreachable!() }
-        fn read(&self, _: u64, _: usize) -> Result<Vec<u8>, StorageError> { unreachable!() }
-        fn size(&self) -> u64 { 0 }
-        fn rotate(&self) -> Result<u64, StorageError> { unreachable!() }
+        fn append(&self, _: &[u8]) -> Result<usize, StorageError> {
+            unreachable!()
+        }
+        fn flush(&self, _: SyncMode) -> Result<(), StorageError> {
+            unreachable!()
+        }
+        fn read(&self, _: u64, _: usize) -> Result<Vec<u8>, StorageError> {
+            unreachable!()
+        }
+        fn size(&self) -> u64 {
+            0
+        }
+        fn rotate(&self) -> Result<u64, StorageError> {
+            unreachable!()
+        }
     }
 
-    pub fn iocp_available() -> bool { false }
-    pub fn check_no_buffering_support(_dir: &Path) -> (bool, u32) { (false, 0) }
+    pub fn iocp_available() -> bool {
+        false
+    }
+    pub fn check_no_buffering_support(_dir: &Path) -> (bool, u32) {
+        (false, 0)
+    }
     pub fn check_disk_alignment(_dir: &Path) -> (bool, u32, &'static str) {
         (false, 0, "not-windows")
     }

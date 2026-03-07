@@ -18,7 +18,10 @@ use crate::shutdown::ShutdownCoordinator;
 /// Type alias for the async server runner function.
 /// Signature: `async fn(config_path: &str, coordinator: Option<ShutdownCoordinator>) -> anyhow::Result<()>`
 pub type ServerRunnerFn = Box<
-    dyn Fn(String, Option<ShutdownCoordinator>) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>
+    dyn Fn(
+            String,
+            Option<ShutdownCoordinator>,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>
         + Send
         + Sync,
 >;
@@ -43,8 +46,8 @@ pub mod scm {
     use std::time::Duration;
 
     use windows_service::service::{
-        ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState,
-        ServiceStatus, ServiceType,
+        ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
+        ServiceType,
     };
     use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
     use windows_service::service_dispatcher;
@@ -99,8 +102,7 @@ pub mod scm {
             }
         };
 
-        let status_handle =
-            service_control_handler::register("FalconDB", event_handler)?;
+        let status_handle = service_control_handler::register("FalconDB", event_handler)?;
 
         // Report Running
         status_handle.set_service_status(ServiceStatus {
@@ -116,20 +118,18 @@ pub mod scm {
         tracing::info!("FalconDB service status: RUNNING");
 
         // Get config path (set by main before dispatch)
-        let config_path = CONFIG_PATH
-            .get()
-            .cloned()
-            .unwrap_or_else(|| {
-                super::super::paths::service_config_path()
-                    .to_string_lossy()
-                    .to_string()
-            });
+        let config_path = CONFIG_PATH.get().cloned().unwrap_or_else(|| {
+            super::super::paths::service_config_path()
+                .to_string_lossy()
+                .to_string()
+        });
 
         // Run the actual server via the registered runner
-        let runner = super::get_server_runner()
-            .expect("Server runner must be registered before dispatch");
+        let runner =
+            super::get_server_runner().expect("Server runner must be registered before dispatch");
 
-        let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime for Windows service");
+        let rt = tokio::runtime::Runtime::new()
+            .expect("failed to create tokio runtime for Windows service");
         let exit_code = rt.block_on(async {
             match runner(config_path, Some(coordinator)).await {
                 Ok(()) => 0u32,

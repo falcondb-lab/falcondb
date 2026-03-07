@@ -16,7 +16,7 @@ use falcon_common::error::StorageError;
 use falcon_common::schema::TableSchema;
 use falcon_common::types::{Timestamp, TxnId};
 
-use crate::memtable::{PrimaryKey, MemTable};
+use crate::memtable::{MemTable, PrimaryKey};
 
 /// One handle per table, carrying the engine-specific `Arc`.
 pub enum TableHandle {
@@ -40,7 +40,10 @@ impl TableHandle {
             #[cfg(feature = "columnstore")]
             TableHandle::Columnstore(t) => &t.schema,
             #[allow(unreachable_patterns)]
-            _ => self.as_storage_table().expect("unknown TableHandle variant").schema(),
+            _ => self
+                .as_storage_table()
+                .expect("unknown TableHandle variant")
+                .schema(),
         }
     }
 
@@ -55,8 +58,11 @@ impl TableHandle {
                 Ok(pk)
             }
             #[allow(unreachable_patterns)]
-            _ => self.as_storage_table()
-                .ok_or(StorageError::TableNotFound(falcon_common::types::TableId(0)))
+            _ => self
+                .as_storage_table()
+                .ok_or(StorageError::TableNotFound(falcon_common::types::TableId(
+                    0,
+                )))
                 .and_then(|t| t.insert(row, txn_id)),
         }
     }
@@ -75,8 +81,11 @@ impl TableHandle {
                 "UPDATE not supported on COLUMNSTORE tables",
             ))),
             #[allow(unreachable_patterns)]
-            _ => self.as_storage_table()
-                .ok_or(StorageError::Io(std::io::Error::other("UPDATE not supported on this engine")))
+            _ => self
+                .as_storage_table()
+                .ok_or(StorageError::Io(std::io::Error::other(
+                    "UPDATE not supported on this engine",
+                )))
                 .and_then(|t| t.update(pk, new_row, txn_id)),
         }
     }
@@ -90,8 +99,11 @@ impl TableHandle {
                 "DELETE not supported on COLUMNSTORE tables",
             ))),
             #[allow(unreachable_patterns)]
-            _ => self.as_storage_table()
-                .ok_or(StorageError::Io(std::io::Error::other("DELETE not supported on this engine")))
+            _ => self
+                .as_storage_table()
+                .ok_or(StorageError::Io(std::io::Error::other(
+                    "DELETE not supported on this engine",
+                )))
                 .and_then(|t| t.delete(pk, txn_id)),
         }
     }
@@ -108,7 +120,8 @@ impl TableHandle {
             #[cfg(feature = "columnstore")]
             TableHandle::Columnstore(_) => Ok(None),
             #[allow(unreachable_patterns)]
-            _ => self.as_storage_table()
+            _ => self
+                .as_storage_table()
                 .map_or(Ok(None), |t| t.get(pk, txn_id, read_ts)),
         }
     }
@@ -120,7 +133,8 @@ impl TableHandle {
             #[cfg(feature = "columnstore")]
             TableHandle::Columnstore(t) => t.scan(txn_id, read_ts),
             #[allow(unreachable_patterns)]
-            _ => self.as_storage_table()
+            _ => self
+                .as_storage_table()
                 .map_or_else(Vec::new, |t| t.scan(txn_id, read_ts)),
         }
     }
@@ -133,10 +147,14 @@ impl TableHandle {
         match self {
             TableHandle::Rowstore(t) => t.for_each_visible(txn_id, read_ts, |r| f(r)),
             #[allow(unreachable_patterns)]
-            _ => if let Some(t) = self.as_storage_table() {
-                t.for_each_visible(txn_id, read_ts, &mut f);
-            } else {
-                for (_, row) in self.scan(txn_id, read_ts) { f(&row); }
+            _ => {
+                if let Some(t) = self.as_storage_table() {
+                    t.for_each_visible(txn_id, read_ts, &mut f);
+                } else {
+                    for (_, row) in self.scan(txn_id, read_ts) {
+                        f(&row);
+                    }
+                }
             }
         }
     }
@@ -146,8 +164,10 @@ impl TableHandle {
         match self {
             TableHandle::Rowstore(t) => t.count_visible(txn_id, read_ts),
             #[allow(unreachable_patterns)]
-            _ => self.as_storage_table()
-                .map_or_else(|| self.scan(txn_id, read_ts).len(), |t| t.count_visible(txn_id, read_ts)),
+            _ => self.as_storage_table().map_or_else(
+                || self.scan(txn_id, read_ts).len(),
+                |t| t.count_visible(txn_id, read_ts),
+            ),
         }
     }
 
@@ -159,9 +179,10 @@ impl TableHandle {
         commit_ts: Timestamp,
     ) -> Result<(), StorageError> {
         match self {
-            TableHandle::Rowstore(t) => t.commit_keys(txn_id, commit_ts, &[pk.clone()]),
+            TableHandle::Rowstore(t) => t.commit_keys(txn_id, commit_ts, std::slice::from_ref(pk)),
             #[allow(unreachable_patterns)]
-            _ => self.as_storage_table()
+            _ => self
+                .as_storage_table()
                 .map_or(Ok(()), |t| t.commit_key(pk, txn_id, commit_ts)),
         }
     }
@@ -169,9 +190,13 @@ impl TableHandle {
     /// Abort MVCC versions for the given key.
     pub fn abort_key(&self, pk: &PrimaryKey, txn_id: TxnId) {
         match self {
-            TableHandle::Rowstore(t) => t.abort_keys(txn_id, &[pk.clone()]),
+            TableHandle::Rowstore(t) => t.abort_keys(txn_id, std::slice::from_ref(pk)),
             #[allow(unreachable_patterns)]
-            _ => if let Some(t) = self.as_storage_table() { t.abort_key(pk, txn_id); }
+            _ => {
+                if let Some(t) = self.as_storage_table() {
+                    t.abort_key(pk, txn_id);
+                }
+            }
         }
     }
 
@@ -211,19 +236,29 @@ impl TableHandle {
     ) -> Option<Result<Vec<crate::memtable::PrimaryKey>, StorageError>> {
         self.as_storage_table().map(|t| {
             let mut pks = Vec::with_capacity(rows.len());
-            for row in &rows { pks.push(t.insert(row, txn_id)?); }
+            for row in &rows {
+                pks.push(t.insert(row, txn_id)?);
+            }
             Ok(pks)
         })
     }
 
     /// Batch commit for disk-backed engines. No-op for rowstore (handled separately).
-    pub fn commit_keys_batch(&self, pks: &[PrimaryKey], txn_id: TxnId, commit_ts: Timestamp) -> Result<(), StorageError> {
-        self.as_storage_table().map_or(Ok(()), |t| t.commit_batch(pks, txn_id, commit_ts))
+    pub fn commit_keys_batch(
+        &self,
+        pks: &[PrimaryKey],
+        txn_id: TxnId,
+        commit_ts: Timestamp,
+    ) -> Result<(), StorageError> {
+        self.as_storage_table()
+            .map_or(Ok(()), |t| t.commit_batch(pks, txn_id, commit_ts))
     }
 
     /// Batch abort for disk-backed engines. No-op for rowstore (handled separately).
     pub fn abort_keys_batch(&self, pks: &[PrimaryKey], txn_id: TxnId) {
-        if let Some(t) = self.as_storage_table() { t.abort_batch(pks, txn_id); }
+        if let Some(t) = self.as_storage_table() {
+            t.abort_batch(pks, txn_id);
+        }
     }
 
     /// Returns true if this handle wraps an in-memory rowstore.

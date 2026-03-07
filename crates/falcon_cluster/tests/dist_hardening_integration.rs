@@ -26,7 +26,8 @@ fn test_schema() -> TableSchema {
             nullable: false,
             is_primary_key: true,
             default_value: None,
-            is_serial: false, max_length: None,
+            is_serial: false,
+            max_length: None,
         }],
         primary_key_columns: vec![0],
         ..Default::default()
@@ -74,7 +75,11 @@ fn dh01_hardened_promotion_succeeds_with_caught_up_replica() {
 
     // Hardened promotion should succeed
     let result = group.hardened_promote_best();
-    assert!(result.is_ok(), "hardened promotion should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "hardened promotion should succeed: {:?}",
+        result.err()
+    );
 
     // Verify promotion safety metrics
     let pm = group.promotion_guard.metrics();
@@ -83,7 +88,10 @@ fn dh01_hardened_promotion_succeeds_with_caught_up_replica() {
     assert_eq!(pm.promotions_rolled_back, 0);
 
     // Verify epoch advanced
-    assert!(group.current_epoch() > 1, "epoch should be bumped after promotion");
+    assert!(
+        group.current_epoch() > 1,
+        "epoch should be bumped after promotion"
+    );
 
     // Verify split-brain detector updated
     assert_eq!(
@@ -104,11 +112,15 @@ fn dh02_hardened_promotion_rejects_when_primary_healthy() {
     }
 
     let result = group.hardened_promote_best();
-    assert!(result.is_err(), "should reject promotion when primary is healthy");
+    assert!(
+        result.is_err(),
+        "should reject promotion when primary is healthy"
+    );
     let err_msg = result.unwrap_err().to_string();
     assert!(
         err_msg.contains("pre-flight rejected"),
-        "error should mention pre-flight: {}", err_msg
+        "error should mention pre-flight: {}",
+        err_msg
     );
 }
 
@@ -130,7 +142,10 @@ fn dh03_hardened_promotion_respects_cooldown() {
     // Need to make the new primary appear failed
     // But the cooldown should trigger first
     let second = group.hardened_promote_best();
-    assert!(second.is_err(), "second promotion should be rejected by cooldown");
+    assert!(
+        second.is_err(),
+        "second promotion should be rejected by cooldown"
+    );
 
     // After cooldown
     std::thread::sleep(Duration::from_millis(15));
@@ -140,7 +155,8 @@ fn dh03_hardened_promotion_respects_cooldown() {
         let msg = e.to_string();
         assert!(
             !msg.contains("cooldown"),
-            "after cooldown elapsed, should not reject for cooldown: {}", msg
+            "after cooldown elapsed, should not reject for cooldown: {}",
+            msg
         );
     }
 }
@@ -247,9 +263,15 @@ fn dh06_auto_restart_exponential_backoff_sequence() {
 
     // 6th failure exceeds max_restarts → permanent failure
     let b6 = sup.report_failure("wal-writer", "disk full");
-    assert!(b6.is_none(), "should be permanently failed after max restarts");
+    assert!(
+        b6.is_none(),
+        "should be permanently failed after max restarts"
+    );
 
-    assert_eq!(sup.permanently_failed_tasks(), vec!["wal-writer".to_string()]);
+    assert_eq!(
+        sup.permanently_failed_tasks(),
+        vec!["wal-writer".to_string()]
+    );
 }
 
 #[test]
@@ -278,7 +300,10 @@ fn dh07_auto_restart_resets_after_stable_run() {
 
     // Counter should be reset
     let state = sup.task_state("gc").unwrap();
-    assert_eq!(state.restart_count, 0, "restart count should reset after stable run");
+    assert_eq!(
+        state.restart_count, 0,
+        "restart count should reset after stable run"
+    );
     assert!(!state.is_permanently_failed);
 
     // Can fail again (counter reset)
@@ -336,7 +361,10 @@ fn dh09_hysteresis_prevents_false_failover_on_single_miss() {
     assert_eq!(hyst.node_status(1), DebouncedHealth::Healthy);
 
     let m = hyst.metrics();
-    assert!(m.false_alarms_prevented > 0, "should track prevented false alarms");
+    assert!(
+        m.false_alarms_prevented > 0,
+        "should track prevented false alarms"
+    );
 }
 
 #[test]
@@ -383,7 +411,10 @@ fn dh11_hysteresis_recovery_needs_consecutive_successes() {
     // A miss interrupts recovery
     hyst.record_miss(1);
     let state = hyst.node_state(1).unwrap();
-    assert_eq!(state.consecutive_successes, 0, "miss resets success counter");
+    assert_eq!(
+        state.consecutive_successes, 0,
+        "miss resets success counter"
+    );
 
     // Need 3 consecutive successes from scratch
     hyst.record_success(1);
@@ -510,7 +541,10 @@ fn dh16_data_integrity_across_hardened_failover() {
 
     // New primary should have all data
     let new_primary_lsn = group.inner.primary.current_lsn();
-    assert_eq!(new_primary_lsn, pre_lsn, "new primary must have all pre-failover data");
+    assert_eq!(
+        new_primary_lsn, pre_lsn,
+        "new primary must have all pre-failover data"
+    );
 
     // Epoch should be bumped
     assert!(group.current_epoch() > 1);
@@ -640,8 +674,14 @@ fn dh_evidence_summary() {
     // This test serves as a summary of all hardening evidence.
     // If this test runs, all preceding tests have passed.
     let evidence = vec![
-        ("DH-01", "Hardened promotion succeeds with caught-up replica"),
-        ("DH-02", "Hardened promotion rejects when primary is healthy"),
+        (
+            "DH-01",
+            "Hardened promotion succeeds with caught-up replica",
+        ),
+        (
+            "DH-02",
+            "Hardened promotion rejects when primary is healthy",
+        ),
         ("DH-03", "Hardened promotion respects cooldown"),
         ("DH-04", "Split-brain rejects stale writes after promotion"),
         ("DH-05", "Split-brain detector tracks events"),

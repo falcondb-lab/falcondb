@@ -22,9 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::{Mutex, RwLock};
 
-use falcon_storage::structured_lsn::{
-    SegmentHeader, StructuredLsn, SEGMENT_HEADER_SIZE,
-};
+use falcon_storage::structured_lsn::{SegmentHeader, StructuredLsn, SEGMENT_HEADER_SIZE};
 
 /// Simple CRC32 checksum (djb2-style) to avoid external crate dependency.
 /// For production, this would use hardware-accelerated CRC32C.
@@ -59,10 +57,10 @@ pub struct SegmentReplicationConfig {
 impl Default for SegmentReplicationConfig {
     fn default() -> Self {
         Self {
-            chunk_size: 4 * 1024 * 1024,      // 4 MB
+            chunk_size: 4 * 1024 * 1024, // 4 MB
             max_inflight_chunks: 8,
-            tail_batch_size: 64 * 1024,        // 64 KB
-            segment_size: 256 * 1024 * 1024,   // 256 MB
+            tail_batch_size: 64 * 1024,      // 64 KB
+            segment_size: 256 * 1024 * 1024, // 256 MB
         }
     }
 }
@@ -243,10 +241,13 @@ pub enum ReplicationPath {
 impl fmt::Display for ReplicationPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::SegmentStreaming { segments_to_send } =>
-                write!(f, "SEGMENT_STREAMING({} segments)", segments_to_send.len()),
-            Self::TailStreaming { segment_id, from_offset } =>
-                write!(f, "TAIL_STREAMING(seg={segment_id}, offset={from_offset})"),
+            Self::SegmentStreaming { segments_to_send } => {
+                write!(f, "SEGMENT_STREAMING({} segments)", segments_to_send.len())
+            }
+            Self::TailStreaming {
+                segment_id,
+                from_offset,
+            } => write!(f, "TAIL_STREAMING(seg={segment_id}, offset={from_offset})"),
             Self::AlreadyCaughtUp => write!(f, "CAUGHT_UP"),
         }
     }
@@ -277,7 +278,8 @@ impl LeaderState {
         let follower_sealed: BTreeSet<u64> = hello.sealed_segment_ids.iter().copied().collect();
 
         // Find segments the follower is missing
-        let mut missing: Vec<u64> = self.sealed_segments
+        let mut missing: Vec<u64> = self
+            .sealed_segments
             .iter()
             .filter(|seg_id| !follower_sealed.contains(seg_id))
             .copied()
@@ -371,7 +373,12 @@ pub struct SegmentChunkIterator {
 
 impl SegmentChunkIterator {
     /// Create an iterator over a segment's data.
-    pub const fn new(segment_id: u64, data: Vec<u8>, last_valid_offset: u64, chunk_size: u64) -> Self {
+    pub const fn new(
+        segment_id: u64,
+        data: Vec<u8>,
+        last_valid_offset: u64,
+        chunk_size: u64,
+    ) -> Self {
         Self {
             segment_id,
             data,
@@ -491,11 +498,7 @@ pub struct SnapshotManifest {
 
 impl SnapshotManifest {
     /// Create a snapshot at the current segment boundary.
-    pub fn create(
-        snapshot_id: u64,
-        leader: &LeaderState,
-        schema_metadata: Vec<u8>,
-    ) -> Self {
+    pub fn create(snapshot_id: u64, leader: &LeaderState, schema_metadata: Vec<u8>) -> Self {
         // Snapshot LSN is at the start of the current (unsealed) segment.
         // All sealed segments up to this point are included.
         let snapshot_lsn = StructuredLsn::new(leader.current_segment_id, 0);
@@ -516,8 +519,7 @@ impl SnapshotManifest {
 
     /// Check if a follower needs this snapshot (has none of the segments).
     pub fn follower_needs_full_snapshot(&self, follower: &FollowerState) -> bool {
-        follower.sealed_segments.is_empty()
-            && follower.local_last_lsn == StructuredLsn::ZERO
+        follower.sealed_segments.is_empty() && follower.local_last_lsn == StructuredLsn::ZERO
     }
 
     /// Compute the set of segments a follower needs from this snapshot.
@@ -554,7 +556,11 @@ pub struct SegmentReplicationCoordinator {
 
 impl SegmentReplicationCoordinator {
     /// Create a new coordinator (in-memory segment store).
-    pub fn new(config: SegmentReplicationConfig, leader_segment_id: u64, leader_offset: u64) -> Self {
+    pub fn new(
+        config: SegmentReplicationConfig,
+        leader_segment_id: u64,
+        leader_offset: u64,
+    ) -> Self {
         Self {
             config,
             leader: RwLock::new(LeaderState::new(leader_segment_id, leader_offset)),
@@ -566,7 +572,12 @@ impl SegmentReplicationCoordinator {
     }
 
     /// Create a coordinator with filesystem-backed segment storage.
-    pub fn with_dir(config: SegmentReplicationConfig, leader_segment_id: u64, leader_offset: u64, dir: &Path) -> Self {
+    pub fn with_dir(
+        config: SegmentReplicationConfig,
+        leader_segment_id: u64,
+        leader_offset: u64,
+        dir: &Path,
+    ) -> Self {
         if let Err(e) = std::fs::create_dir_all(dir) {
             tracing::error!(path = ?dir, error = %e, "failed to create segment directory");
         }
@@ -581,7 +592,9 @@ impl SegmentReplicationCoordinator {
     }
 
     fn segment_path(&self, segment_id: u64) -> Option<PathBuf> {
-        self.segment_dir.as_ref().map(|d| d.join(format!("segment_{:06}.dat", segment_id)))
+        self.segment_dir
+            .as_ref()
+            .map(|d| d.join(format!("segment_{:06}.dat", segment_id)))
     }
 
     fn write_segment_file(&self, segment_id: u64, data: &[u8]) {
@@ -651,7 +664,9 @@ impl SegmentReplicationCoordinator {
         );
         self.followers.write().insert(hello.node_id, follower_state);
 
-        self.metrics.handshakes_total.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .handshakes_total
+            .fetch_add(1, Ordering::Relaxed);
 
         path
     }
@@ -675,7 +690,9 @@ impl SegmentReplicationCoordinator {
             data.len() as u64
         };
 
-        self.metrics.segments_streamed_total.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .segments_streamed_total
+            .fetch_add(1, Ordering::Relaxed);
 
         Some(SegmentChunkIterator::new(
             segment_id,
@@ -688,11 +705,7 @@ impl SegmentReplicationCoordinator {
     /// Get tail bytes for a follower on the active segment.
     /// In production, this reads from the active WAL file.
     /// Here we read from the segment store for testing.
-    pub fn get_tail_batch(
-        &self,
-        segment_id: u64,
-        from_offset: u64,
-    ) -> Option<TailBatch> {
+    pub fn get_tail_batch(&self, segment_id: u64, from_offset: u64) -> Option<TailBatch> {
         let data = self.read_segment_data(segment_id)?;
 
         let leader = self.leader.read();
@@ -715,7 +728,9 @@ impl SegmentReplicationCoordinator {
         }
 
         let batch_data = data[start..end].to_vec();
-        self.metrics.tail_bytes_total.fetch_add(batch_data.len() as u64, Ordering::Relaxed);
+        self.metrics
+            .tail_bytes_total
+            .fetch_add(batch_data.len() as u64, Ordering::Relaxed);
 
         Some(TailBatch::new(segment_id, from_offset, batch_data))
     }
@@ -729,14 +744,18 @@ impl SegmentReplicationCoordinator {
     ) -> Result<bool, StreamingError> {
         // Verify integrity
         if !chunk.verify() {
-            self.metrics.checksum_failures.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .checksum_failures
+                .fetch_add(1, Ordering::Relaxed);
             return Err(StreamingError::ChecksumMismatch {
                 segment_id: chunk.segment_id,
                 offset: chunk.offset,
             });
         }
 
-        self.metrics.segment_bytes_total.fetch_add(chunk.data.len() as u64, Ordering::Relaxed);
+        self.metrics
+            .segment_bytes_total
+            .fetch_add(chunk.data.len() as u64, Ordering::Relaxed);
 
         // Update follower state
         let mut followers = self.followers.write();
@@ -758,14 +777,18 @@ impl SegmentReplicationCoordinator {
         batch: &TailBatch,
     ) -> Result<(), StreamingError> {
         if !batch.verify() {
-            self.metrics.checksum_failures.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .checksum_failures
+                .fetch_add(1, Ordering::Relaxed);
             return Err(StreamingError::ChecksumMismatch {
                 segment_id: batch.segment_id,
                 offset: batch.from_offset,
             });
         }
 
-        self.metrics.tail_bytes_total.fetch_add(batch.data.len() as u64, Ordering::Relaxed);
+        self.metrics
+            .tail_bytes_total
+            .fetch_add(batch.data.len() as u64, Ordering::Relaxed);
 
         let mut followers = self.followers.write();
         if let Some(state) = followers.get_mut(&node_id) {
@@ -796,9 +819,13 @@ impl SegmentReplicationCoordinator {
         let follower = followers.get(&node_id)?;
         let leader = self.leader.read();
 
-        let segment_lag = leader.current_segment_id.saturating_sub(follower.local_segment_id);
+        let segment_lag = leader
+            .current_segment_id
+            .saturating_sub(follower.local_segment_id);
         let byte_lag = if follower.local_segment_id == leader.current_segment_id {
-            leader.current_offset.saturating_sub(follower.local_segment_offset)
+            leader
+                .current_offset
+                .saturating_sub(follower.local_segment_offset)
         } else {
             // Rough estimate: remaining segments × segment_size + tail offset
             segment_lag * self.config.segment_size + leader.current_offset
@@ -923,7 +950,10 @@ pub enum StreamingError {
     /// Network interrupted during streaming.
     NetworkInterrupted { reason: String },
     /// Leader changed during streaming (epoch mismatch).
-    LeaderChanged { old_leader: NodeId, new_leader: NodeId },
+    LeaderChanged {
+        old_leader: NodeId,
+        new_leader: NodeId,
+    },
     /// Segment not found on leader.
     SegmentNotFound { segment_id: u64 },
     /// Follower not registered.
@@ -933,18 +963,18 @@ pub enum StreamingError {
 impl fmt::Display for StreamingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ChecksumMismatch { segment_id, offset } =>
-                write!(f, "checksum mismatch: segment={segment_id}, offset={offset}"),
-            Self::DiskFull { node_id } =>
-                write!(f, "disk full on node {node_id}"),
-            Self::NetworkInterrupted { reason } =>
-                write!(f, "network interrupted: {reason}"),
-            Self::LeaderChanged { old_leader, new_leader } =>
-                write!(f, "leader changed: {old_leader} → {new_leader}"),
-            Self::SegmentNotFound { segment_id } =>
-                write!(f, "segment {segment_id} not found"),
-            Self::UnknownFollower { node_id } =>
-                write!(f, "unknown follower: node {node_id}"),
+            Self::ChecksumMismatch { segment_id, offset } => write!(
+                f,
+                "checksum mismatch: segment={segment_id}, offset={offset}"
+            ),
+            Self::DiskFull { node_id } => write!(f, "disk full on node {node_id}"),
+            Self::NetworkInterrupted { reason } => write!(f, "network interrupted: {reason}"),
+            Self::LeaderChanged {
+                old_leader,
+                new_leader,
+            } => write!(f, "leader changed: {old_leader} → {new_leader}"),
+            Self::SegmentNotFound { segment_id } => write!(f, "segment {segment_id} not found"),
+            Self::UnknownFollower { node_id } => write!(f, "unknown follower: node {node_id}"),
         }
     }
 }
@@ -1055,7 +1085,11 @@ mod tests {
     use super::*;
 
     fn make_segment_data(segment_id: u64, payload_size: usize) -> Vec<u8> {
-        let hdr = SegmentHeader::new(segment_id, 256 * 1024 * 1024, StructuredLsn::new(segment_id, 0));
+        let hdr = SegmentHeader::new(
+            segment_id,
+            256 * 1024 * 1024,
+            StructuredLsn::new(segment_id, 0),
+        );
         let mut hdr_mod = hdr;
         hdr_mod.last_valid_offset = SEGMENT_HEADER_SIZE + payload_size as u64;
         hdr_mod.checksum = hdr_mod.compute_checksum();
@@ -1157,7 +1191,10 @@ mod tests {
         let path = leader.decide_path(&hello);
 
         match path {
-            ReplicationPath::TailStreaming { segment_id, from_offset } => {
+            ReplicationPath::TailStreaming {
+                segment_id,
+                from_offset,
+            } => {
                 assert_eq!(segment_id, 2);
                 assert_eq!(from_offset, 10000);
             }
@@ -1268,8 +1305,12 @@ mod tests {
     #[test]
     fn test_coordinator_segment_streaming_e2e() {
         let coord = SegmentReplicationCoordinator::new(
-            SegmentReplicationConfig { chunk_size: 4096, ..Default::default() },
-            3, 5000,
+            SegmentReplicationConfig {
+                chunk_size: 4096,
+                ..Default::default()
+            },
+            3,
+            5000,
         );
 
         // Register 3 sealed segments
@@ -1314,7 +1355,8 @@ mod tests {
                 tail_batch_size: 1024,
                 ..Default::default()
             },
-            2, 50000,
+            2,
+            50000,
         );
 
         // Register sealed segments 0,1 on leader side
@@ -1323,7 +1365,9 @@ mod tests {
 
         // Register active (unsealed) segment data
         let mut active_data = vec![0u8; 50000];
-        for i in 0..50000 { active_data[i] = (i % 256) as u8; }
+        for i in 0..50000 {
+            active_data[i] = (i % 256) as u8;
+        }
         coord.register_active_segment_data(2, active_data);
 
         // Follower on same segment but behind
@@ -1399,7 +1443,8 @@ mod tests {
                 segment_size: 1000, // small for testing
                 ..Default::default()
             },
-            5, 500,
+            5,
+            500,
         );
 
         let follower = FollowerState::new_empty(1);
@@ -1461,7 +1506,10 @@ mod tests {
     #[test]
     fn test_error_recovery_decisions() {
         assert_eq!(
-            decide_recovery(&StreamingError::ChecksumMismatch { segment_id: 0, offset: 0 }),
+            decide_recovery(&StreamingError::ChecksumMismatch {
+                segment_id: 0,
+                offset: 0
+            }),
             ErrorRecoveryAction::RetryChunk
         );
         assert_eq!(
@@ -1469,11 +1517,16 @@ mod tests {
             ErrorRecoveryAction::Abort
         );
         assert_eq!(
-            decide_recovery(&StreamingError::NetworkInterrupted { reason: "timeout".into() }),
+            decide_recovery(&StreamingError::NetworkInterrupted {
+                reason: "timeout".into()
+            }),
             ErrorRecoveryAction::RetryFromLastSealed
         );
         assert_eq!(
-            decide_recovery(&StreamingError::LeaderChanged { old_leader: 1, new_leader: 2 }),
+            decide_recovery(&StreamingError::LeaderChanged {
+                old_leader: 1,
+                new_leader: 2
+            }),
             ErrorRecoveryAction::RetryFromLastSealed
         );
     }
@@ -1496,7 +1549,8 @@ mod tests {
         let m = SegmentStreamingMetrics::default();
         m.handshakes_total.fetch_add(5, Ordering::Relaxed);
         m.segments_streamed_total.fetch_add(10, Ordering::Relaxed);
-        m.segment_bytes_total.fetch_add(1_000_000, Ordering::Relaxed);
+        m.segment_bytes_total
+            .fetch_add(1_000_000, Ordering::Relaxed);
 
         let snap = m.snapshot();
         assert_eq!(snap.handshakes_total, 5);
@@ -1508,14 +1562,25 @@ mod tests {
 
     #[test]
     fn test_display_impls() {
-        assert_eq!(format!("{}", FollowerPhase::SegmentStreaming), "SEGMENT_STREAMING");
-        assert_eq!(format!("{}", FollowerPhase::TailStreaming), "TAIL_STREAMING");
+        assert_eq!(
+            format!("{}", FollowerPhase::SegmentStreaming),
+            "SEGMENT_STREAMING"
+        );
+        assert_eq!(
+            format!("{}", FollowerPhase::TailStreaming),
+            "TAIL_STREAMING"
+        );
         assert_eq!(format!("{}", FollowerPhase::CaughtUp), "CAUGHT_UP");
 
-        let path = ReplicationPath::SegmentStreaming { segments_to_send: vec![0, 1, 2] };
+        let path = ReplicationPath::SegmentStreaming {
+            segments_to_send: vec![0, 1, 2],
+        };
         assert!(format!("{}", path).contains("3 segments"));
 
-        let err = StreamingError::ChecksumMismatch { segment_id: 5, offset: 100 };
+        let err = StreamingError::ChecksumMismatch {
+            segment_id: 5,
+            offset: 100,
+        };
         assert!(format!("{}", err).contains("segment=5"));
     }
 }

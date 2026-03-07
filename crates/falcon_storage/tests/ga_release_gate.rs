@@ -43,7 +43,8 @@ fn ga_schema(name: &str, table_id: TableId) -> TableSchema {
                 nullable: false,
                 is_primary_key: true,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             },
             ColumnDef {
                 id: ColumnId(1),
@@ -52,7 +53,8 @@ fn ga_schema(name: &str, table_id: TableId) -> TableSchema {
                 nullable: true,
                 is_primary_key: false,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             },
         ],
         primary_key_columns: vec![0],
@@ -106,12 +108,18 @@ fn ga_p0_1_ack_equals_durable() {
     // Phase 1: commit 10 txns, each fsynced via WAL
     {
         let engine = StorageEngine::new(Some(dir.path())).unwrap();
-        engine.create_table(ga_schema("ack_test", TableId(1))).unwrap();
+        engine
+            .create_table(ga_schema("ack_test", TableId(1)))
+            .unwrap();
 
         for i in 0..10 {
             let txn = TxnId(100 + i as u64);
-            engine.insert(TableId(1), ga_row(i, &format!("v{}", i)), txn).unwrap();
-            engine.commit_txn(txn, Timestamp(1000 + i as u64), TxnType::Local).unwrap();
+            engine
+                .insert(TableId(1), ga_row(i, &format!("v{}", i)), txn)
+                .unwrap();
+            engine
+                .commit_txn(txn, Timestamp(1000 + i as u64), TxnType::Local)
+                .unwrap();
         }
         engine.flush_wal().unwrap();
         // Simulate crash: engine dropped without clean shutdown
@@ -120,14 +128,19 @@ fn ga_p0_1_ack_equals_durable() {
     // Phase 2: recover — all 10 txns MUST exist
     let rows = recover_and_scan(dir.path(), TableId(1));
     assert_eq!(
-        rows.len(), 10,
+        rows.len(),
+        10,
         "GA-P0-1 ACK=Durable: expected 10 committed rows after crash, got {}",
         rows.len()
     );
 
     let ids = extract_ids(&rows);
     for i in 0..10 {
-        assert!(ids.contains(&i), "GA-P0-1: committed row id={} missing after recovery", i);
+        assert!(
+            ids.contains(&i),
+            "GA-P0-1: committed row id={} missing after recovery",
+            i
+        );
     }
 }
 
@@ -138,31 +151,55 @@ fn ga_p0_1_no_phantom_commit() {
 
     {
         let engine = StorageEngine::new(Some(dir.path())).unwrap();
-        engine.create_table(ga_schema("phantom_test", TableId(1))).unwrap();
+        engine
+            .create_table(ga_schema("phantom_test", TableId(1)))
+            .unwrap();
 
         // Committed txn
         let txn1 = TxnId(10);
-        engine.insert(TableId(1), ga_row(1, "committed"), txn1).unwrap();
-        engine.commit_txn(txn1, Timestamp(100), TxnType::Local).unwrap();
+        engine
+            .insert(TableId(1), ga_row(1, "committed"), txn1)
+            .unwrap();
+        engine
+            .commit_txn(txn1, Timestamp(100), TxnType::Local)
+            .unwrap();
 
         // Uncommitted txn — WAL has Insert but NO CommitTxn
         let txn2 = TxnId(20);
-        engine.insert(TableId(1), ga_row(2, "phantom"), txn2).unwrap();
+        engine
+            .insert(TableId(1), ga_row(2, "phantom"), txn2)
+            .unwrap();
 
         // Another uncommitted txn
         let txn3 = TxnId(30);
-        engine.insert(TableId(1), ga_row(3, "also_phantom"), txn3).unwrap();
+        engine
+            .insert(TableId(1), ga_row(3, "also_phantom"), txn3)
+            .unwrap();
 
         engine.flush_wal().unwrap();
     }
 
     let rows = recover_and_scan(dir.path(), TableId(1));
-    assert_eq!(rows.len(), 1, "GA-P0-1 No Phantom: expected 1 row, got {}", rows.len());
+    assert_eq!(
+        rows.len(),
+        1,
+        "GA-P0-1 No Phantom: expected 1 row, got {}",
+        rows.len()
+    );
 
     let vals = extract_vals(&rows);
-    assert!(vals.contains(&"committed".to_string()), "committed txn missing");
-    assert!(!vals.contains(&"phantom".to_string()), "PHANTOM COMMIT detected!");
-    assert!(!vals.contains(&"also_phantom".to_string()), "PHANTOM COMMIT detected!");
+    assert!(
+        vals.contains(&"committed".to_string()),
+        "committed txn missing"
+    );
+    assert!(
+        !vals.contains(&"phantom".to_string()),
+        "PHANTOM COMMIT detected!"
+    );
+    assert!(
+        !vals.contains(&"also_phantom".to_string()),
+        "PHANTOM COMMIT detected!"
+    );
 }
 
 /// At-most-once Commit: WAL replayed 5 times → identical state each time.
@@ -172,12 +209,18 @@ fn ga_p0_1_at_most_once_commit() {
 
     {
         let engine = StorageEngine::new(Some(dir.path())).unwrap();
-        engine.create_table(ga_schema("atmost_once", TableId(1))).unwrap();
+        engine
+            .create_table(ga_schema("atmost_once", TableId(1)))
+            .unwrap();
 
         for i in 0..5 {
             let txn = TxnId(10 + i as u64);
-            engine.insert(TableId(1), ga_row(i, &format!("row{}", i)), txn).unwrap();
-            engine.commit_txn(txn, Timestamp(100 + i as u64), TxnType::Local).unwrap();
+            engine
+                .insert(TableId(1), ga_row(i, &format!("row{}", i)), txn)
+                .unwrap();
+            engine
+                .commit_txn(txn, Timestamp(100 + i as u64), TxnType::Local)
+                .unwrap();
         }
         engine.flush_wal().unwrap();
     }
@@ -222,21 +265,31 @@ fn ga_p0_1_txn_terminal_states_from_wal() {
 
     {
         let engine = StorageEngine::new(Some(dir.path())).unwrap();
-        engine.create_table(ga_schema("terminal", TableId(1))).unwrap();
+        engine
+            .create_table(ga_schema("terminal", TableId(1)))
+            .unwrap();
 
         // Case 1: Committed
         let txn1 = TxnId(10);
-        engine.insert(TableId(1), ga_row(1, "committed"), txn1).unwrap();
-        engine.commit_txn(txn1, Timestamp(100), TxnType::Local).unwrap();
+        engine
+            .insert(TableId(1), ga_row(1, "committed"), txn1)
+            .unwrap();
+        engine
+            .commit_txn(txn1, Timestamp(100), TxnType::Local)
+            .unwrap();
 
         // Case 2: Explicitly aborted
         let txn2 = TxnId(20);
-        engine.insert(TableId(1), ga_row(2, "aborted"), txn2).unwrap();
+        engine
+            .insert(TableId(1), ga_row(2, "aborted"), txn2)
+            .unwrap();
         engine.abort_txn(txn2, TxnType::Local).unwrap();
 
         // Case 3: In-flight (no terminal record)
         let txn3 = TxnId(30);
-        engine.insert(TableId(1), ga_row(3, "inflight"), txn3).unwrap();
+        engine
+            .insert(TableId(1), ga_row(3, "inflight"), txn3)
+            .unwrap();
 
         engine.flush_wal().unwrap();
     }
@@ -265,8 +318,12 @@ fn ga_p0_2_crash_before_wal_write() {
 
         // One committed baseline
         let txn1 = TxnId(10);
-        engine.insert(TableId(1), ga_row(1, "baseline"), txn1).unwrap();
-        engine.commit_txn(txn1, Timestamp(100), TxnType::Local).unwrap();
+        engine
+            .insert(TableId(1), ga_row(1, "baseline"), txn1)
+            .unwrap();
+        engine
+            .commit_txn(txn1, Timestamp(100), TxnType::Local)
+            .unwrap();
         engine.flush_wal().unwrap();
 
         // "Second txn" never touches engine — simulates crash before any write
@@ -286,18 +343,28 @@ fn ga_p0_2_crash_after_insert_before_commit() {
         engine.create_table(ga_schema("cp2", TableId(1))).unwrap();
 
         let txn1 = TxnId(10);
-        engine.insert(TableId(1), ga_row(1, "committed"), txn1).unwrap();
-        engine.commit_txn(txn1, Timestamp(100), TxnType::Local).unwrap();
+        engine
+            .insert(TableId(1), ga_row(1, "committed"), txn1)
+            .unwrap();
+        engine
+            .commit_txn(txn1, Timestamp(100), TxnType::Local)
+            .unwrap();
 
         // Insert written to WAL but no commit
         let txn2 = TxnId(20);
-        engine.insert(TableId(1), ga_row(2, "no_commit_record"), txn2).unwrap();
+        engine
+            .insert(TableId(1), ga_row(2, "no_commit_record"), txn2)
+            .unwrap();
 
         engine.flush_wal().unwrap();
     }
 
     let rows = recover_and_scan(dir.path(), TableId(1));
-    assert_eq!(rows.len(), 1, "GA-P0-2 CP2: uncommitted insert must be rolled back");
+    assert_eq!(
+        rows.len(),
+        1,
+        "GA-P0-2 CP2: uncommitted insert must be rolled back"
+    );
     let vals = extract_vals(&rows);
     assert_eq!(vals[0], "committed");
 }
@@ -312,15 +379,23 @@ fn ga_p0_2_crash_after_commit_fsynced() {
         engine.create_table(ga_schema("cp3", TableId(1))).unwrap();
 
         let txn1 = TxnId(10);
-        engine.insert(TableId(1), ga_row(1, "durable"), txn1).unwrap();
-        engine.commit_txn(txn1, Timestamp(100), TxnType::Local).unwrap();
+        engine
+            .insert(TableId(1), ga_row(1, "durable"), txn1)
+            .unwrap();
+        engine
+            .commit_txn(txn1, Timestamp(100), TxnType::Local)
+            .unwrap();
         engine.flush_wal().unwrap();
 
         // Crash after fsync — drop engine
     }
 
     let rows = recover_and_scan(dir.path(), TableId(1));
-    assert_eq!(rows.len(), 1, "GA-P0-2 CP3: committed+fsynced txn MUST survive");
+    assert_eq!(
+        rows.len(),
+        1,
+        "GA-P0-2 CP3: committed+fsynced txn MUST survive"
+    );
     assert_eq!(extract_vals(&rows)[0], "durable");
 }
 
@@ -331,12 +406,16 @@ fn ga_p0_2_wal_replay_idempotent() {
 
     {
         let engine = StorageEngine::new(Some(dir.path())).unwrap();
-        engine.create_table(ga_schema("idempotent", TableId(1))).unwrap();
+        engine
+            .create_table(ga_schema("idempotent", TableId(1)))
+            .unwrap();
 
         // Mix of committed, aborted, and DDL operations
         let txn1 = TxnId(10);
         engine.insert(TableId(1), ga_row(1, "a"), txn1).unwrap();
-        engine.commit_txn(txn1, Timestamp(100), TxnType::Local).unwrap();
+        engine
+            .commit_txn(txn1, Timestamp(100), TxnType::Local)
+            .unwrap();
 
         let txn2 = TxnId(20);
         engine.insert(TableId(1), ga_row(2, "b"), txn2).unwrap();
@@ -344,11 +423,15 @@ fn ga_p0_2_wal_replay_idempotent() {
 
         let txn3 = TxnId(30);
         engine.insert(TableId(1), ga_row(3, "c"), txn3).unwrap();
-        engine.commit_txn(txn3, Timestamp(200), TxnType::Local).unwrap();
+        engine
+            .commit_txn(txn3, Timestamp(200), TxnType::Local)
+            .unwrap();
 
         // Uncommitted at crash
         let txn4 = TxnId(40);
-        engine.insert(TableId(1), ga_row(4, "inflight"), txn4).unwrap();
+        engine
+            .insert(TableId(1), ga_row(4, "inflight"), txn4)
+            .unwrap();
 
         engine.flush_wal().unwrap();
     }
@@ -391,12 +474,18 @@ fn ga_p0_2_multi_table_interleaved_recovery() {
         let txn_a = TxnId(100);
         engine.insert(TableId(1), ga_row(1, "t1_a"), txn_a).unwrap();
         engine.insert(TableId(2), ga_row(1, "t2_a"), txn_a).unwrap();
-        engine.commit_txn(txn_a, Timestamp(500), TxnType::Local).unwrap();
+        engine
+            .commit_txn(txn_a, Timestamp(500), TxnType::Local)
+            .unwrap();
 
         // txn_b: inserts into both tables, uncommitted (crash)
         let txn_b = TxnId(200);
-        engine.insert(TableId(1), ga_row(2, "t1_b_phantom"), txn_b).unwrap();
-        engine.insert(TableId(2), ga_row(2, "t2_b_phantom"), txn_b).unwrap();
+        engine
+            .insert(TableId(1), ga_row(2, "t1_b_phantom"), txn_b)
+            .unwrap();
+        engine
+            .insert(TableId(2), ga_row(2, "t2_b_phantom"), txn_b)
+            .unwrap();
 
         engine.flush_wal().unwrap();
     }
@@ -404,7 +493,9 @@ fn ga_p0_2_multi_table_interleaved_recovery() {
     let rows_t1 = recover_and_scan(dir.path(), TableId(1));
     let rows_t2 = {
         let engine = StorageEngine::recover(dir.path()).unwrap();
-        engine.scan(TableId(2), TxnId(u64::MAX - 1), Timestamp(u64::MAX - 1)).unwrap()
+        engine
+            .scan(TableId(2), TxnId(u64::MAX - 1), Timestamp(u64::MAX - 1))
+            .unwrap()
     };
 
     assert_eq!(rows_t1.len(), 1, "t1: only committed txn_a row");
@@ -420,14 +511,22 @@ fn ga_p0_2_update_delete_recovery() {
 
     {
         let engine = StorageEngine::new(Some(dir.path())).unwrap();
-        engine.create_table(ga_schema("upd_del", TableId(1))).unwrap();
+        engine
+            .create_table(ga_schema("upd_del", TableId(1)))
+            .unwrap();
 
         // Insert 3 rows
         let txn1 = TxnId(10);
-        engine.insert(TableId(1), ga_row(1, "original"), txn1).unwrap();
-        engine.insert(TableId(1), ga_row(2, "to_delete"), txn1).unwrap();
+        engine
+            .insert(TableId(1), ga_row(1, "original"), txn1)
+            .unwrap();
+        engine
+            .insert(TableId(1), ga_row(2, "to_delete"), txn1)
+            .unwrap();
         engine.insert(TableId(1), ga_row(3, "keep"), txn1).unwrap();
-        engine.commit_txn(txn1, Timestamp(100), TxnType::Local).unwrap();
+        engine
+            .commit_txn(txn1, Timestamp(100), TxnType::Local)
+            .unwrap();
 
         // Update row 1
         let txn2 = TxnId(20);
@@ -438,8 +537,12 @@ fn ga_p0_2_update_delete_recovery() {
             .find(|(_, r)| r.values[0] == Datum::Int32(1))
             .unwrap()
             .0;
-        engine.update(TableId(1), &pk1, ga_row(1, "updated"), txn2).unwrap();
-        engine.commit_txn(txn2, Timestamp(200), TxnType::Local).unwrap();
+        engine
+            .update(TableId(1), &pk1, ga_row(1, "updated"), txn2)
+            .unwrap();
+        engine
+            .commit_txn(txn2, Timestamp(200), TxnType::Local)
+            .unwrap();
 
         // Delete row 2
         let txn3 = TxnId(30);
@@ -451,7 +554,9 @@ fn ga_p0_2_update_delete_recovery() {
             .unwrap()
             .0;
         engine.delete(TableId(1), &pk2, txn3).unwrap();
-        engine.commit_txn(txn3, Timestamp(300), TxnType::Local).unwrap();
+        engine
+            .commit_txn(txn3, Timestamp(300), TxnType::Local)
+            .unwrap();
 
         engine.flush_wal().unwrap();
     }
@@ -460,8 +565,14 @@ fn ga_p0_2_update_delete_recovery() {
     let map: std::collections::HashMap<i32, String> = rows
         .iter()
         .map(|(_, r)| {
-            let id = match r.values[0] { Datum::Int32(i) => i, _ => -1 };
-            let val = match &r.values[1] { Datum::Text(s) => s.clone(), _ => "?".into() };
+            let id = match r.values[0] {
+                Datum::Int32(i) => i,
+                _ => -1,
+            };
+            let val = match &r.values[1] {
+                Datum::Text(s) => s.clone(),
+                _ => "?".into(),
+            };
             (id, val)
         })
         .collect();
@@ -484,19 +595,27 @@ fn ga_p0_3_failover_only_committed_survive() {
 
     {
         let engine = StorageEngine::new(Some(dir.path())).unwrap();
-        engine.create_table(ga_schema("failover", TableId(1))).unwrap();
+        engine
+            .create_table(ga_schema("failover", TableId(1)))
+            .unwrap();
 
         // 5 committed
         for i in 0..5 {
             let txn = TxnId(10 + i as u64);
-            engine.insert(TableId(1), ga_row(i, &format!("committed_{}", i)), txn).unwrap();
-            engine.commit_txn(txn, Timestamp(100 + i as u64), TxnType::Local).unwrap();
+            engine
+                .insert(TableId(1), ga_row(i, &format!("committed_{}", i)), txn)
+                .unwrap();
+            engine
+                .commit_txn(txn, Timestamp(100 + i as u64), TxnType::Local)
+                .unwrap();
         }
 
         // 3 in-flight (not committed)
         for i in 5..8 {
             let txn = TxnId(100 + i as u64);
-            engine.insert(TableId(1), ga_row(i, &format!("inflight_{}", i)), txn).unwrap();
+            engine
+                .insert(TableId(1), ga_row(i, &format!("inflight_{}", i)), txn)
+                .unwrap();
         }
 
         engine.flush_wal().unwrap();
@@ -504,14 +623,26 @@ fn ga_p0_3_failover_only_committed_survive() {
 
     // Simulates promote: recover from WAL
     let rows = recover_and_scan(dir.path(), TableId(1));
-    assert_eq!(rows.len(), 5, "GA-P0-3: only 5 committed txns after failover");
+    assert_eq!(
+        rows.len(),
+        5,
+        "GA-P0-3: only 5 committed txns after failover"
+    );
 
     let ids = extract_ids(&rows);
     for i in 0..5 {
-        assert!(ids.contains(&i), "Committed row {} missing after failover", i);
+        assert!(
+            ids.contains(&i),
+            "Committed row {} missing after failover",
+            i
+        );
     }
     for i in 5..8 {
-        assert!(!ids.contains(&i), "In-flight row {} survived failover (PHANTOM!)", i);
+        assert!(
+            !ids.contains(&i),
+            "In-flight row {} survived failover (PHANTOM!)",
+            i
+        );
     }
 }
 
@@ -522,11 +653,17 @@ fn ga_p0_3_new_leader_accepts_writes() {
 
     {
         let engine = StorageEngine::new(Some(dir.path())).unwrap();
-        engine.create_table(ga_schema("new_leader", TableId(1))).unwrap();
+        engine
+            .create_table(ga_schema("new_leader", TableId(1)))
+            .unwrap();
 
         let txn = TxnId(10);
-        engine.insert(TableId(1), ga_row(1, "old_leader"), txn).unwrap();
-        engine.commit_txn(txn, Timestamp(100), TxnType::Local).unwrap();
+        engine
+            .insert(TableId(1), ga_row(1, "old_leader"), txn)
+            .unwrap();
+        engine
+            .commit_txn(txn, Timestamp(100), TxnType::Local)
+            .unwrap();
         engine.flush_wal().unwrap();
     }
 
@@ -535,8 +672,12 @@ fn ga_p0_3_new_leader_accepts_writes() {
 
     // New leader writes
     let txn_new = TxnId(500);
-    engine.insert(TableId(1), ga_row(2, "new_leader_write"), txn_new).unwrap();
-    engine.commit_txn(txn_new, Timestamp(1000), TxnType::Local).unwrap();
+    engine
+        .insert(TableId(1), ga_row(2, "new_leader_write"), txn_new)
+        .unwrap();
+    engine
+        .commit_txn(txn_new, Timestamp(1000), TxnType::Local)
+        .unwrap();
     engine.flush_wal().unwrap();
 
     // Verify both old and new writes exist
@@ -601,7 +742,9 @@ fn ga_p0_4_memory_tracker_accounting() {
 /// Global memory governor: 4-tier backpressure decisions.
 #[test]
 fn ga_p0_4_global_governor_backpressure() {
-    use falcon_storage::memory::{GlobalMemoryGovernor, GovernorConfig, BackpressureLevel, BackpressureAction};
+    use falcon_storage::memory::{
+        BackpressureAction, BackpressureLevel, GlobalMemoryGovernor, GovernorConfig,
+    };
 
     let config = GovernorConfig {
         node_budget_bytes: 1_000_000,
@@ -626,14 +769,23 @@ fn ga_p0_4_global_governor_backpressure() {
     // Between hard and emergency → Hard (reject writes, allow reads)
     gov.report_usage(900_000);
     assert_eq!(gov.current_level(), BackpressureLevel::Hard);
-    assert!(matches!(gov.check(true), BackpressureAction::RejectWrite { .. }));
+    assert!(matches!(
+        gov.check(true),
+        BackpressureAction::RejectWrite { .. }
+    ));
     assert!(matches!(gov.check(false), BackpressureAction::Allow));
 
     // Above emergency → Emergency (reject all)
     gov.report_usage(960_000);
     assert_eq!(gov.current_level(), BackpressureLevel::Emergency);
-    assert!(matches!(gov.check(true), BackpressureAction::RejectAll { .. }));
-    assert!(matches!(gov.check(false), BackpressureAction::RejectAll { .. }));
+    assert!(matches!(
+        gov.check(true),
+        BackpressureAction::RejectAll { .. }
+    ));
+    assert!(matches!(
+        gov.check(false),
+        BackpressureAction::RejectAll { .. }
+    ));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -648,12 +800,18 @@ fn ga_p0_5_clean_shutdown_restart() {
     // Session 1: create data, shutdown
     {
         let engine = StorageEngine::new(Some(dir.path())).unwrap();
-        engine.create_table(ga_schema("restart", TableId(1))).unwrap();
+        engine
+            .create_table(ga_schema("restart", TableId(1)))
+            .unwrap();
 
         for i in 0..10 {
             let txn = TxnId(10 + i as u64);
-            engine.insert(TableId(1), ga_row(i, &format!("s1_{}", i)), txn).unwrap();
-            engine.commit_txn(txn, Timestamp(100 + i as u64), TxnType::Local).unwrap();
+            engine
+                .insert(TableId(1), ga_row(i, &format!("s1_{}", i)), txn)
+                .unwrap();
+            engine
+                .commit_txn(txn, Timestamp(100 + i as u64), TxnType::Local)
+                .unwrap();
         }
 
         // Clean shutdown: WAL flush
@@ -671,8 +829,12 @@ fn ga_p0_5_clean_shutdown_restart() {
         // Add more data in session 2
         for i in 10..15 {
             let txn = TxnId(100 + i as u64);
-            engine.insert(TableId(1), ga_row(i, &format!("s2_{}", i)), txn).unwrap();
-            engine.commit_txn(txn, Timestamp(500 + i as u64), TxnType::Local).unwrap();
+            engine
+                .insert(TableId(1), ga_row(i, &format!("s2_{}", i)), txn)
+                .unwrap();
+            engine
+                .commit_txn(txn, Timestamp(500 + i as u64), TxnType::Local)
+                .unwrap();
         }
         engine.shutdown();
     }
@@ -695,11 +857,15 @@ fn ga_p0_5_multiple_crash_restart_cycles() {
     // Cycle 0: initial data
     {
         let engine = StorageEngine::new(Some(dir.path())).unwrap();
-        engine.create_table(ga_schema("cycles", TableId(1))).unwrap();
+        engine
+            .create_table(ga_schema("cycles", TableId(1)))
+            .unwrap();
 
         let txn = TxnId(10);
         engine.insert(TableId(1), ga_row(0, "cycle0"), txn).unwrap();
-        engine.commit_txn(txn, Timestamp(100), TxnType::Local).unwrap();
+        engine
+            .commit_txn(txn, Timestamp(100), TxnType::Local)
+            .unwrap();
         engine.flush_wal().unwrap();
         // Crash: no shutdown()
     }
@@ -713,22 +879,33 @@ fn ga_p0_5_multiple_crash_restart_cycles() {
             .scan(TableId(1), TxnId(u64::MAX - 1), Timestamp(u64::MAX - 1))
             .unwrap();
         assert_eq!(
-            rows.len(), cycle as usize,
+            rows.len(),
+            cycle as usize,
             "Cycle {}: expected {} rows, got {}",
-            cycle, cycle, rows.len()
+            cycle,
+            cycle,
+            rows.len()
         );
 
         // Add one more committed row
         let txn = TxnId(100 + cycle as u64);
-        engine.insert(TableId(1), ga_row(cycle, &format!("cycle{}", cycle)), txn).unwrap();
-        engine.commit_txn(txn, Timestamp(1000 + cycle as u64), TxnType::Local).unwrap();
+        engine
+            .insert(TableId(1), ga_row(cycle, &format!("cycle{}", cycle)), txn)
+            .unwrap();
+        engine
+            .commit_txn(txn, Timestamp(1000 + cycle as u64), TxnType::Local)
+            .unwrap();
         engine.flush_wal().unwrap();
         // Crash: no shutdown()
     }
 
     // Final recovery: should have 6 rows (cycle0 + cycle1..5)
     let rows = recover_and_scan(dir.path(), TableId(1));
-    assert_eq!(rows.len(), 6, "GA-P0-5: 6 rows after 5 crash-restart cycles");
+    assert_eq!(
+        rows.len(),
+        6,
+        "GA-P0-5: 6 rows after 5 crash-restart cycles"
+    );
 }
 
 /// DDL operations survive restart.
@@ -738,16 +915,26 @@ fn ga_p0_5_ddl_survives_restart() {
 
     {
         let engine = StorageEngine::new(Some(dir.path())).unwrap();
-        engine.create_table(ga_schema("survive", TableId(1))).unwrap();
-        engine.create_table(ga_schema("ephemeral", TableId(2))).unwrap();
+        engine
+            .create_table(ga_schema("survive", TableId(1)))
+            .unwrap();
+        engine
+            .create_table(ga_schema("ephemeral", TableId(2)))
+            .unwrap();
 
         let txn = TxnId(10);
         engine.insert(TableId(1), ga_row(1, "keeper"), txn).unwrap();
-        engine.commit_txn(txn, Timestamp(100), TxnType::Local).unwrap();
+        engine
+            .commit_txn(txn, Timestamp(100), TxnType::Local)
+            .unwrap();
 
         let txn2 = TxnId(20);
-        engine.insert(TableId(2), ga_row(1, "dropped"), txn2).unwrap();
-        engine.commit_txn(txn2, Timestamp(200), TxnType::Local).unwrap();
+        engine
+            .insert(TableId(2), ga_row(1, "dropped"), txn2)
+            .unwrap();
+        engine
+            .commit_txn(txn2, Timestamp(200), TxnType::Local)
+            .unwrap();
 
         engine.drop_table("ephemeral").unwrap();
         engine.flush_wal().unwrap();
@@ -755,8 +942,14 @@ fn ga_p0_5_ddl_survives_restart() {
 
     let engine = StorageEngine::recover(dir.path()).unwrap();
     let catalog = engine.get_catalog();
-    assert!(catalog.find_table("survive").is_some(), "survive table must exist");
-    assert!(catalog.find_table("ephemeral").is_none(), "dropped table must not exist");
+    assert!(
+        catalog.find_table("survive").is_some(),
+        "survive table must exist"
+    );
+    assert!(
+        catalog.find_table("ephemeral").is_none(),
+        "dropped table must not exist"
+    );
 
     let rows = engine
         .scan(TableId(1), TxnId(u64::MAX - 1), Timestamp(u64::MAX - 1))
@@ -781,8 +974,12 @@ fn ga_p0_2_checkpoint_plus_delta_recovery() {
         // Pre-checkpoint data
         for i in 0..5 {
             let txn = TxnId(10 + i as u64);
-            engine.insert(TableId(1), ga_row(i, &format!("pre_{}", i)), txn).unwrap();
-            engine.commit_txn(txn, Timestamp(100 + i as u64), TxnType::Local).unwrap();
+            engine
+                .insert(TableId(1), ga_row(i, &format!("pre_{}", i)), txn)
+                .unwrap();
+            engine
+                .commit_txn(txn, Timestamp(100 + i as u64), TxnType::Local)
+                .unwrap();
         }
 
         let (_, count) = engine.checkpoint().unwrap();
@@ -791,8 +988,12 @@ fn ga_p0_2_checkpoint_plus_delta_recovery() {
         // Post-checkpoint data
         for i in 5..10 {
             let txn = TxnId(100 + i as u64);
-            engine.insert(TableId(1), ga_row(i, &format!("post_{}", i)), txn).unwrap();
-            engine.commit_txn(txn, Timestamp(500 + i as u64), TxnType::Local).unwrap();
+            engine
+                .insert(TableId(1), ga_row(i, &format!("post_{}", i)), txn)
+                .unwrap();
+            engine
+                .commit_txn(txn, Timestamp(500 + i as u64), TxnType::Local)
+                .unwrap();
         }
 
         engine.flush_wal().unwrap();

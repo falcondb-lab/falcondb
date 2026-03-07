@@ -143,14 +143,8 @@ impl StreamingMergeSort {
     ///
     /// Each element in `shard_rows` is the sorted output of one shard.
     /// `sort_columns` defines the global sort order as `(col_idx, ascending)`.
-    pub fn new(
-        shard_rows: Vec<Vec<OwnedRow>>,
-        sort_columns: Vec<(usize, bool)>,
-    ) -> Self {
-        let cursors: Vec<ShardCursor> = shard_rows
-            .into_iter()
-            .map(ShardCursor::new)
-            .collect();
+    pub fn new(shard_rows: Vec<Vec<OwnedRow>>, sort_columns: Vec<(usize, bool)>) -> Self {
+        let cursors: Vec<ShardCursor> = shard_rows.into_iter().map(ShardCursor::new).collect();
 
         let mut merger = Self {
             cursors,
@@ -179,10 +173,7 @@ impl StreamingMergeSort {
         results: &[super::ShardResult],
         sort_columns: Vec<(usize, bool)>,
     ) -> Self {
-        let shard_rows: Vec<Vec<OwnedRow>> = results
-            .iter()
-            .map(|sr| sr.rows.clone())
-            .collect();
+        let shard_rows: Vec<Vec<OwnedRow>> = results.iter().map(|sr| sr.rows.clone()).collect();
         Self::new(shard_rows, sort_columns)
     }
 
@@ -294,10 +285,7 @@ mod tests {
         let shard0 = vec![row(&[1]), row(&[3]), row(&[5]), row(&[7])];
         let shard1 = vec![row(&[2]), row(&[4]), row(&[6]), row(&[8])];
 
-        let merger = StreamingMergeSort::new(
-            vec![shard0, shard1],
-            vec![(0, true)],
-        );
+        let merger = StreamingMergeSort::new(vec![shard0, shard1], vec![(0, true)]);
 
         // OFFSET 2 LIMIT 3 → [3, 4, 5]
         let result = merger.collect_with_offset_limit(Some(2), Some(3));
@@ -338,10 +326,7 @@ mod tests {
         let shard1 = vec![row(&[1]), row(&[2])];
         let shard2 = vec![];
 
-        let merger = StreamingMergeSort::new(
-            vec![shard0, shard1, shard2],
-            vec![(0, true)],
-        );
+        let merger = StreamingMergeSort::new(vec![shard0, shard1, shard2], vec![(0, true)]);
 
         let result: Vec<OwnedRow> = merger.collect();
         assert_eq!(result.len(), 2);
@@ -353,10 +338,7 @@ mod tests {
 
         // Even unsorted input won't crash — it just won't produce sorted output.
         // The contract says shards must be pre-sorted; this test verifies no panic.
-        let merger = StreamingMergeSort::new(
-            vec![shard0],
-            vec![(0, true)],
-        );
+        let merger = StreamingMergeSort::new(vec![shard0], vec![(0, true)]);
 
         let result: Vec<OwnedRow> = merger.collect();
         assert_eq!(result.len(), 3);
@@ -377,8 +359,14 @@ mod tests {
         let vals: Vec<(i64, i64)> = result
             .iter()
             .map(|r| {
-                let a = match &r.values[0] { Datum::Int64(v) => *v, _ => 0 };
-                let b = match &r.values[1] { Datum::Int64(v) => *v, _ => 0 };
+                let a = match &r.values[0] {
+                    Datum::Int64(v) => *v,
+                    _ => 0,
+                };
+                let b = match &r.values[1] {
+                    Datum::Int64(v) => *v,
+                    _ => 0,
+                };
                 (a, b)
             })
             .collect();
@@ -389,9 +377,8 @@ mod tests {
     #[test]
     fn test_early_termination_with_limit() {
         // 3 shards × 1000 rows each = 3000 total, but we only want 5.
-        let make_shard = |start: i64| -> Vec<OwnedRow> {
-            (0..1000).map(|i| row(&[start + i * 3])).collect()
-        };
+        let make_shard =
+            |start: i64| -> Vec<OwnedRow> { (0..1000).map(|i| row(&[start + i * 3])).collect() };
 
         let merger = StreamingMergeSort::new(
             vec![make_shard(0), make_shard(1), make_shard(2)],
@@ -415,10 +402,7 @@ mod tests {
         let shard0 = vec![row(&[1]), row(&[3])];
         let shard1 = vec![row(&[2]), row(&[4])];
 
-        let mut merger = StreamingMergeSort::new(
-            vec![shard0, shard1],
-            vec![(0, true)],
-        );
+        let mut merger = StreamingMergeSort::new(vec![shard0, shard1], vec![(0, true)]);
 
         assert_eq!(merger.rows_yielded(), 0);
         merger.next();
@@ -429,10 +413,7 @@ mod tests {
 
     #[test]
     fn test_all_shards_empty() {
-        let merger = StreamingMergeSort::new(
-            vec![vec![], vec![], vec![]],
-            vec![(0, true)],
-        );
+        let merger = StreamingMergeSort::new(vec![vec![], vec![], vec![]], vec![(0, true)]);
         let result: Vec<OwnedRow> = merger.collect();
         assert!(result.is_empty());
     }

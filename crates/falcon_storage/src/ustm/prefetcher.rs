@@ -4,11 +4,11 @@
 //! the prefetcher receives hints from the executor about upcoming page
 //! accesses and submits async I/O requests *before* the data is needed.
 
-use std::collections::{BinaryHeap, HashSet};
+use parking_lot::Mutex;
 use std::cmp::Ordering as CmpOrdering;
+use std::collections::{BinaryHeap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use parking_lot::Mutex;
 
 use super::page::PageId;
 
@@ -145,29 +145,27 @@ impl Prefetcher {
         }
 
         let pages: Vec<(PageId, u64)> = match &source {
-            PrefetchSource::IndexRangeScan { next_leaf_pages } => {
-                next_leaf_pages.iter().enumerate()
-                    .map(|(i, &pid)| (pid, 100 + (next_leaf_pages.len() - i) as u64))
-                    .collect()
-            }
-            PrefetchSource::SeqScan { start_page, count } => {
-                (0..*count)
-                    .map(|i| {
-                        let pid = PageId(start_page.0 + i as u64);
-                        (pid, 50 + (*count - i) as u64)
-                    })
-                    .collect()
-            }
-            PrefetchSource::NestedLoopProbe { probe_pages } => {
-                probe_pages.iter().enumerate()
-                    .map(|(i, &pid)| (pid, 80 + (probe_pages.len() - i) as u64))
-                    .collect()
-            }
-            PrefetchSource::Compaction { pages } => {
-                pages.iter().enumerate()
-                    .map(|(i, &pid)| (pid, 10 + (pages.len() - i) as u64))
-                    .collect()
-            }
+            PrefetchSource::IndexRangeScan { next_leaf_pages } => next_leaf_pages
+                .iter()
+                .enumerate()
+                .map(|(i, &pid)| (pid, 100 + (next_leaf_pages.len() - i) as u64))
+                .collect(),
+            PrefetchSource::SeqScan { start_page, count } => (0..*count)
+                .map(|i| {
+                    let pid = PageId(start_page.0 + i as u64);
+                    (pid, 50 + (*count - i) as u64)
+                })
+                .collect(),
+            PrefetchSource::NestedLoopProbe { probe_pages } => probe_pages
+                .iter()
+                .enumerate()
+                .map(|(i, &pid)| (pid, 80 + (probe_pages.len() - i) as u64))
+                .collect(),
+            PrefetchSource::Compaction { pages } => pages
+                .iter()
+                .enumerate()
+                .map(|(i, &pid)| (pid, 10 + (pages.len() - i) as u64))
+                .collect(),
         };
 
         let mut stats = self.stats.lock();

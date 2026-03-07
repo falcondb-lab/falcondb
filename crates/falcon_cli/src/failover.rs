@@ -130,7 +130,8 @@ async fn failover_history(client: &DbClient, mode: OutputMode) -> Result<String>
 
     if rows.is_empty() {
         return Ok("No failover history available. \
-                   (falcon.failover_history view not present or no events recorded)\n".to_owned());
+                   (falcon.failover_history view not present or no events recorded)\n"
+            .to_owned());
     }
 
     Ok(format_rows_as_string(&rows, mode, "Failover History"))

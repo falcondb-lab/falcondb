@@ -442,7 +442,13 @@ pub struct PushdownPredicate {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum PushdownOp { Gt, Gte, Lt, Lte, Eq }
+pub enum PushdownOp {
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+    Eq,
+}
 
 impl ColumnStoreTable {
     /// Multi-column scan with optional zone-map pushdown.
@@ -491,12 +497,11 @@ impl ColumnStoreTable {
         result
     }
 
-    pub fn segments_skipped_count(
-        &self,
-        predicate: &PushdownPredicate,
-    ) -> usize {
+    pub fn segments_skipped_count(&self, predicate: &PushdownPredicate) -> usize {
         let segs = self.segments.read();
-        segs.iter().filter(|s| can_skip_segment(s, predicate)).count()
+        segs.iter()
+            .filter(|s| can_skip_segment(s, predicate))
+            .count()
     }
 }
 
@@ -510,7 +515,7 @@ fn can_skip_segment(seg: &Segment, pred: &PushdownPredicate) -> bool {
         _ => return false,
     };
     match pred.op {
-        PushdownOp::Gt => max <= pred.value,    // all values <= threshold → skip
+        PushdownOp::Gt => max <= pred.value, // all values <= threshold → skip
         PushdownOp::Gte => max < pred.value,
         PushdownOp::Lt => min >= pred.value,
         PushdownOp::Lte => min > pred.value,
@@ -556,7 +561,8 @@ mod tests {
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(1),
@@ -565,7 +571,8 @@ mod tests {
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(2),
@@ -574,7 +581,8 @@ mod tests {
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
             ],
             primary_key_columns: vec![0],
@@ -694,11 +702,16 @@ mod tests {
         let table = ColumnStoreTable::new(test_schema());
         let txn = TxnId(1);
         for i in 0..50i64 {
-            table.insert(OwnedRow::new(vec![
-                Datum::Int64(i),
-                Datum::Text(format!("n{i}")),
-                Datum::Float64(i as f64 * 2.0),
-            ]), txn).unwrap();
+            table
+                .insert(
+                    OwnedRow::new(vec![
+                        Datum::Int64(i),
+                        Datum::Text(format!("n{i}")),
+                        Datum::Float64(i as f64 * 2.0),
+                    ]),
+                    txn,
+                )
+                .unwrap();
         }
         table.freeze_buffer();
 
@@ -718,11 +731,16 @@ mod tests {
 
         // Segment 1: scores 0..99
         for i in 0..100i64 {
-            table.insert(OwnedRow::new(vec![
-                Datum::Int64(i),
-                Datum::Text("a".into()),
-                Datum::Float64(i as f64),
-            ]), txn).unwrap();
+            table
+                .insert(
+                    OwnedRow::new(vec![
+                        Datum::Int64(i),
+                        Datum::Text("a".into()),
+                        Datum::Float64(i as f64),
+                    ]),
+                    txn,
+                )
+                .unwrap();
         }
         table.freeze_buffer();
         assert_eq!(table.segment_count(), 1);
@@ -744,11 +762,16 @@ mod tests {
         let table = ColumnStoreTable::new(test_schema());
         let txn = TxnId(1);
         for i in 0..100i64 {
-            table.insert(OwnedRow::new(vec![
-                Datum::Int64(i),
-                Datum::Text("b".into()),
-                Datum::Float64(i as f64),
-            ]), txn).unwrap();
+            table
+                .insert(
+                    OwnedRow::new(vec![
+                        Datum::Int64(i),
+                        Datum::Text("b".into()),
+                        Datum::Float64(i as f64),
+                    ]),
+                    txn,
+                )
+                .unwrap();
         }
         table.freeze_buffer();
 
@@ -761,6 +784,10 @@ mod tests {
         assert_eq!(table.segments_skipped_count(&pred), 0);
 
         let vecs = table.scan_columnar_projected(&[2], Some(&pred), txn, Timestamp(100));
-        assert_eq!(vecs[0].len(), 100, "no segment-level pruning, row-level filter not applied here");
+        assert_eq!(
+            vecs[0].len(),
+            100,
+            "no segment-level pruning, row-level filter not applied here"
+        );
     }
 }

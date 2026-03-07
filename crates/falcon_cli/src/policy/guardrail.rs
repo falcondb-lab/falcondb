@@ -127,7 +127,9 @@ pub fn render_guardrail_report(guardrail: &Guardrail, verdicts: &[GuardrailVerdi
             }
         }
     }
-    let _ = writeln!(out, "  Config: max_frequency={} time_window={}s cooldown={}s risk_ceiling={}",
+    let _ = writeln!(
+        out,
+        "  Config: max_frequency={} time_window={}s cooldown={}s risk_ceiling={}",
         guardrail.max_frequency,
         guardrail.time_window_secs,
         guardrail.cooldown_secs,

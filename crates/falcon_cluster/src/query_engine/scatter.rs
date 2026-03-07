@@ -27,7 +27,9 @@ impl super::DistributedQueryEngine {
         gather: &DistGather,
     ) -> Result<ExecutionResult, FalconError> {
         // Track gateway forwarding
-        self.gateway_metrics.forward_total.fetch_add(1, Ordering::Relaxed);
+        self.gateway_metrics
+            .forward_total
+            .fetch_add(1, Ordering::Relaxed);
         let gw_start = Instant::now();
 
         // ── Single-shard shortcut: PK point lookup ──
@@ -36,10 +38,13 @@ impl super::DistributedQueryEngine {
             let start = Instant::now();
             let result = self.execute_on_shard_auto_txn(single_shard, subplan);
             let elapsed = start.elapsed().as_micros() as u64;
-            self.gateway_metrics.forward_latency_us.fetch_add(
-                gw_start.elapsed().as_micros() as u64, Ordering::Relaxed);
+            self.gateway_metrics
+                .forward_latency_us
+                .fetch_add(gw_start.elapsed().as_micros() as u64, Ordering::Relaxed);
             if result.is_err() {
-                self.gateway_metrics.forward_failed_total.fetch_add(1, Ordering::Relaxed);
+                self.gateway_metrics
+                    .forward_failed_total
+                    .fetch_add(1, Ordering::Relaxed);
             }
             let row_count = match &result {
                 Ok(ExecutionResult::Query { rows, .. }) => rows.len(),
@@ -123,7 +128,9 @@ impl super::DistributedQueryEngine {
                                 {
                                     let pair = std::sync::Mutex::new(false);
                                     let cvar = std::sync::Condvar::new();
-                                    let guard = pair.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                                    let guard = pair
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                                     let _ = cvar
                                         .wait_timeout(guard, std::time::Duration::from_millis(5));
                                 }
@@ -539,7 +546,10 @@ impl super::DistributedQueryEngine {
 
         let failed_shard_ids: Vec<u64> = failed_shards.iter().map(|(sid, _)| sid.0).collect();
         let merge_labels = if let DistGather::TwoPhaseAgg { agg_merges, .. } = gather {
-            agg_merges.iter().map(std::string::ToString::to_string).collect()
+            agg_merges
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect()
         } else {
             vec![]
         };
@@ -559,11 +569,13 @@ impl super::DistributedQueryEngine {
         }
 
         // Record gateway forwarding latency and failures for the full scatter/gather path
-        self.gateway_metrics.forward_latency_us.fetch_add(
-            gw_start.elapsed().as_micros() as u64, Ordering::Relaxed);
+        self.gateway_metrics
+            .forward_latency_us
+            .fetch_add(gw_start.elapsed().as_micros() as u64, Ordering::Relaxed);
         if !failed_shard_ids.is_empty() {
-            self.gateway_metrics.forward_failed_total.fetch_add(
-                failed_shard_ids.len() as u64, Ordering::Relaxed);
+            self.gateway_metrics
+                .forward_failed_total
+                .fetch_add(failed_shard_ids.len() as u64, Ordering::Relaxed);
         }
 
         Ok(ExecutionResult::Query {

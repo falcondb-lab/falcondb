@@ -252,7 +252,10 @@ pub struct FaultMetrics {
 
 impl FaultMetrics {
     pub const fn total(&self) -> u64 {
-        self.messages_dropped + self.messages_delayed + self.messages_partitioned + self.messages_passed
+        self.messages_dropped
+            + self.messages_delayed
+            + self.messages_partitioned
+            + self.messages_passed
     }
 
     pub fn drop_rate(&self) -> f64 {
@@ -410,6 +413,9 @@ mod tests {
         let fi2 = FaultInjector::new(FaultConfig::with_drop_rate(0.5));
         let decisions1: Vec<_> = (0..100).map(|_| fi1.decide(1, 2)).collect();
         let decisions2: Vec<_> = (0..100).map(|_| fi2.decide(1, 2)).collect();
-        assert_eq!(decisions1, decisions2, "fault injection should be deterministic");
+        assert_eq!(
+            decisions1, decisions2,
+            "fault injection should be deterministic"
+        );
     }
 }

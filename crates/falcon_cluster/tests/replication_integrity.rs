@@ -29,7 +29,8 @@ fn test_schema() -> TableSchema {
                 nullable: false,
                 is_primary_key: true,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             },
             ColumnDef {
                 id: ColumnId(1),
@@ -38,7 +39,8 @@ fn test_schema() -> TableSchema {
                 nullable: false,
                 is_primary_key: false,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             },
         ],
         primary_key_columns: vec![0],
@@ -120,8 +122,7 @@ fn check_integrity(group: &ShardReplicaGroup) -> IntegrityResult {
 
 #[test]
 fn empty_cluster_is_consistent() {
-    let group = ShardReplicaGroup::new(ShardId(0), &[test_schema()])
-        .expect("create group");
+    let group = ShardReplicaGroup::new(ShardId(0), &[test_schema()]).expect("create group");
     let result = check_integrity(&group);
     assert!(result.is_consistent());
     assert_eq!(result.primary_rows, 0);
@@ -130,25 +131,32 @@ fn empty_cluster_is_consistent() {
 
 #[test]
 fn after_replication_data_is_identical() {
-    let mut group = ShardReplicaGroup::new(ShardId(0), &[test_schema()])
-        .expect("create group");
+    let mut group = ShardReplicaGroup::new(ShardId(0), &[test_schema()]).expect("create group");
 
     // Write 100 rows on primary
     for i in 0..100 {
         let txn_id = TxnId(1000 + i);
         let ts = Timestamp(2000 + i);
-        let row = OwnedRow::new(vec![
-            Datum::Int32(i as i32),
-            Datum::Int64(1000 + i as i64),
-        ]);
-        group.primary.storage.insert(TableId(1), row.clone(), txn_id).unwrap();
-        group.primary.storage.commit_txn(txn_id, ts, TxnType::Local).unwrap();
+        let row = OwnedRow::new(vec![Datum::Int32(i as i32), Datum::Int64(1000 + i as i64)]);
+        group
+            .primary
+            .storage
+            .insert(TableId(1), row.clone(), txn_id)
+            .unwrap();
+        group
+            .primary
+            .storage
+            .commit_txn(txn_id, ts, TxnType::Local)
+            .unwrap();
         group.ship_wal_record(WalRecord::Insert {
             txn_id,
             table_id: TableId(1),
             row,
         });
-        group.ship_wal_record(WalRecord::CommitTxnLocal { txn_id, commit_ts: ts });
+        group.ship_wal_record(WalRecord::CommitTxnLocal {
+            txn_id,
+            commit_ts: ts,
+        });
     }
 
     // Before catch-up: replica has 0 rows
@@ -161,36 +169,48 @@ fn after_replication_data_is_identical() {
     group.catch_up_replica(0).unwrap();
     let after = check_integrity(&group);
     assert_eq!(after.primary_rows, 100);
-    assert_eq!(after.replica_rows, 100, "replica must have same row count after catch-up");
+    assert_eq!(
+        after.replica_rows, 100,
+        "replica must have same row count after catch-up"
+    );
     assert!(after.rows_match, "row counts must match after replication");
     // Checksum should also match since same data was replicated
-    assert!(after.checksum_match, 
+    assert!(
+        after.checksum_match,
         "checksums must match: primary={:#x} replica={:#x}",
-        after.primary_checksum, after.replica_checksum);
+        after.primary_checksum, after.replica_checksum
+    );
     assert!(after.is_consistent());
 }
 
 #[test]
 fn drift_detected_when_replica_misses_records() {
-    let mut group = ShardReplicaGroup::new(ShardId(0), &[test_schema()])
-        .expect("create group");
+    let mut group = ShardReplicaGroup::new(ShardId(0), &[test_schema()]).expect("create group");
 
     // Write 50 rows, ship all to replica
     for i in 0..50 {
         let txn_id = TxnId(3000 + i);
         let ts = Timestamp(4000 + i);
-        let row = OwnedRow::new(vec![
-            Datum::Int32(i as i32),
-            Datum::Int64(500 + i as i64),
-        ]);
-        group.primary.storage.insert(TableId(1), row.clone(), txn_id).unwrap();
-        group.primary.storage.commit_txn(txn_id, ts, TxnType::Local).unwrap();
+        let row = OwnedRow::new(vec![Datum::Int32(i as i32), Datum::Int64(500 + i as i64)]);
+        group
+            .primary
+            .storage
+            .insert(TableId(1), row.clone(), txn_id)
+            .unwrap();
+        group
+            .primary
+            .storage
+            .commit_txn(txn_id, ts, TxnType::Local)
+            .unwrap();
         group.ship_wal_record(WalRecord::Insert {
             txn_id,
             table_id: TableId(1),
             row,
         });
-        group.ship_wal_record(WalRecord::CommitTxnLocal { txn_id, commit_ts: ts });
+        group.ship_wal_record(WalRecord::CommitTxnLocal {
+            txn_id,
+            commit_ts: ts,
+        });
     }
     group.catch_up_replica(0).unwrap();
 
@@ -198,12 +218,17 @@ fn drift_detected_when_replica_misses_records() {
     for i in 50..60 {
         let txn_id = TxnId(3000 + i);
         let ts = Timestamp(4000 + i);
-        let row = OwnedRow::new(vec![
-            Datum::Int32(i as i32),
-            Datum::Int64(500 + i as i64),
-        ]);
-        group.primary.storage.insert(TableId(1), row, txn_id).unwrap();
-        group.primary.storage.commit_txn(txn_id, ts, TxnType::Local).unwrap();
+        let row = OwnedRow::new(vec![Datum::Int32(i as i32), Datum::Int64(500 + i as i64)]);
+        group
+            .primary
+            .storage
+            .insert(TableId(1), row, txn_id)
+            .unwrap();
+        group
+            .primary
+            .storage
+            .commit_txn(txn_id, ts, TxnType::Local)
+            .unwrap();
         // NOT shipped to replica — simulates network partition
     }
 
@@ -212,39 +237,55 @@ fn drift_detected_when_replica_misses_records() {
     assert_eq!(result.primary_rows, 60);
     assert_eq!(result.replica_rows, 50);
     assert!(!result.rows_match, "row count drift must be detected");
-    assert!(!result.is_consistent(), "drift must be flagged as inconsistent");
+    assert!(
+        !result.is_consistent(),
+        "drift must be flagged as inconsistent"
+    );
 
-    println!("Drift detected: primary={} replica={}", result.primary_rows, result.replica_rows);
+    println!(
+        "Drift detected: primary={} replica={}",
+        result.primary_rows, result.replica_rows
+    );
 }
 
 #[test]
 fn integrity_survives_failover() {
-    let mut group = ShardReplicaGroup::new(ShardId(0), &[test_schema()])
-        .expect("create group");
+    let mut group = ShardReplicaGroup::new(ShardId(0), &[test_schema()]).expect("create group");
 
     // Write + replicate
     for i in 0..30 {
         let txn_id = TxnId(5000 + i);
         let ts = Timestamp(6000 + i);
-        let row = OwnedRow::new(vec![
-            Datum::Int32(i as i32),
-            Datum::Int64(i as i64 * 100),
-        ]);
-        group.primary.storage.insert(TableId(1), row.clone(), txn_id).unwrap();
-        group.primary.storage.commit_txn(txn_id, ts, TxnType::Local).unwrap();
+        let row = OwnedRow::new(vec![Datum::Int32(i as i32), Datum::Int64(i as i64 * 100)]);
+        group
+            .primary
+            .storage
+            .insert(TableId(1), row.clone(), txn_id)
+            .unwrap();
+        group
+            .primary
+            .storage
+            .commit_txn(txn_id, ts, TxnType::Local)
+            .unwrap();
         group.ship_wal_record(WalRecord::Insert {
             txn_id,
             table_id: TableId(1),
             row,
         });
-        group.ship_wal_record(WalRecord::CommitTxnLocal { txn_id, commit_ts: ts });
+        group.ship_wal_record(WalRecord::CommitTxnLocal {
+            txn_id,
+            commit_ts: ts,
+        });
     }
     group.catch_up_replica(0).unwrap();
 
     // Verify pre-failover consistency (row count match)
     let pre = check_integrity(&group);
-    assert!(pre.rows_match, "pre-failover row counts must match: p={} r={}",
-        pre.primary_rows, pre.replica_rows);
+    assert!(
+        pre.rows_match,
+        "pre-failover row counts must match: p={} r={}",
+        pre.primary_rows, pre.replica_rows
+    );
 
     // Promote replica
     group.promote(0).unwrap();
@@ -253,12 +294,17 @@ fn integrity_survives_failover() {
     for i in 30..40 {
         let txn_id = TxnId(5000 + i);
         let ts = Timestamp(6000 + i);
-        let row = OwnedRow::new(vec![
-            Datum::Int32(i as i32),
-            Datum::Int64(i as i64 * 100),
-        ]);
-        group.primary.storage.insert(TableId(1), row, txn_id).unwrap();
-        group.primary.storage.commit_txn(txn_id, ts, TxnType::Local).unwrap();
+        let row = OwnedRow::new(vec![Datum::Int32(i as i32), Datum::Int64(i as i64 * 100)]);
+        group
+            .primary
+            .storage
+            .insert(TableId(1), row, txn_id)
+            .unwrap();
+        group
+            .primary
+            .storage
+            .commit_txn(txn_id, ts, TxnType::Local)
+            .unwrap();
     }
 
     // New primary has 40 rows, old primary (now replica) has 30
@@ -268,8 +314,7 @@ fn integrity_survives_failover() {
 
 #[test]
 fn large_dataset_checksum_consistency() {
-    let mut group = ShardReplicaGroup::new(ShardId(0), &[test_schema()])
-        .expect("create group");
+    let mut group = ShardReplicaGroup::new(ShardId(0), &[test_schema()]).expect("create group");
 
     // Write 1000 rows
     for i in 0..1000 {
@@ -279,22 +324,38 @@ fn large_dataset_checksum_consistency() {
             Datum::Int32(i as i32),
             Datum::Int64(i as i64 * 7 + 42),
         ]);
-        group.primary.storage.insert(TableId(1), row.clone(), txn_id).unwrap();
-        group.primary.storage.commit_txn(txn_id, ts, TxnType::Local).unwrap();
+        group
+            .primary
+            .storage
+            .insert(TableId(1), row.clone(), txn_id)
+            .unwrap();
+        group
+            .primary
+            .storage
+            .commit_txn(txn_id, ts, TxnType::Local)
+            .unwrap();
         group.ship_wal_record(WalRecord::Insert {
             txn_id,
             table_id: TableId(1),
             row,
         });
-        group.ship_wal_record(WalRecord::CommitTxnLocal { txn_id, commit_ts: ts });
+        group.ship_wal_record(WalRecord::CommitTxnLocal {
+            txn_id,
+            commit_ts: ts,
+        });
     }
     group.catch_up_replica(0).unwrap();
 
     let result = check_integrity(&group);
     assert_eq!(result.primary_rows, 1000);
     assert_eq!(result.replica_rows, 1000, "replica must have 1000 rows");
-    assert!(result.rows_match, "row counts must match for 1000-row dataset");
-    assert!(result.checksum_match,
+    assert!(
+        result.rows_match,
+        "row counts must match for 1000-row dataset"
+    );
+    assert!(
+        result.checksum_match,
         "1000-row checksum must match: primary={:#x} replica={:#x}",
-        result.primary_checksum, result.replica_checksum);
+        result.primary_checksum, result.replica_checksum
+    );
 }

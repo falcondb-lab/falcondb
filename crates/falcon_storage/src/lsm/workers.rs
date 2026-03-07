@@ -35,7 +35,15 @@ impl BgWorkers {
             let compaction_notify = compaction_notify.clone();
             let isolator = isolator.clone();
             tokio::spawn(async move {
-                flush_loop(engine, shutdown, notify, compaction_notify, flush_interval, isolator).await;
+                flush_loop(
+                    engine,
+                    shutdown,
+                    notify,
+                    compaction_notify,
+                    flush_interval,
+                    isolator,
+                )
+                .await;
             })
         };
 
@@ -115,7 +123,8 @@ async fn flush_loop(
             // Charge estimated flush I/O (memtable size estimate)
             iso.io.consume_blocking(eng.stats().memtable_bytes);
             r
-        }).await;
+        })
+        .await;
         drop(guard);
         match result {
             Ok(Ok(())) => {

@@ -44,8 +44,8 @@ use falcon_common::types::{NodeId, ShardId};
 use falcon_storage::engine::StorageEngine;
 
 use crate::dist_hardening::{
-    FailoverPreFlight, PreFlightConfig, PreFlightInput,
-    PromotionSafetyGuard, SplitBrainDetector, WriteEpochCheck, SplitBrainVerdict,
+    FailoverPreFlight, PreFlightConfig, PreFlightInput, PromotionSafetyGuard, SplitBrainDetector,
+    SplitBrainVerdict, WriteEpochCheck,
 };
 use crate::replication::promote::ShardReplicaGroup;
 use crate::replication::replica_state::{ReplicaNode, ReplicaRole};
@@ -382,8 +382,15 @@ impl HAReplicaGroup {
 
     /// Validate a write using the split-brain detector.
     /// Returns `Ok(())` if the write epoch is current, or `Err` if stale.
-    pub fn check_write_epoch(&self, writer_epoch: u64, writer_node: u64) -> Result<(), FalconError> {
-        let check = WriteEpochCheck { writer_epoch, writer_node };
+    pub fn check_write_epoch(
+        &self,
+        writer_epoch: u64,
+        writer_node: u64,
+    ) -> Result<(), FalconError> {
+        let check = WriteEpochCheck {
+            writer_epoch,
+            writer_node,
+        };
         match self.split_brain_detector.check_write(&check) {
             SplitBrainVerdict::Allowed => Ok(()),
             SplitBrainVerdict::Rejected { writer_epoch, current_epoch, writer_node } => {
@@ -444,15 +451,21 @@ impl HAReplicaGroup {
         if let Err(e) = self.inner.catch_up_replica(best_idx) {
             // ROLLBACK: unfence old primary
             self.inner.primary.unfence();
-            self.promotion_guard.rollback(&format!("catch-up failed: {e}"));
+            self.promotion_guard
+                .rollback(&format!("catch-up failed: {e}"));
             return Err(e);
         }
 
         let caught_up_lsn = self.inner.replicas[best_idx].current_lsn();
-        if self.promotion_guard.record_caught_up(caught_up_lsn).is_err() {
+        if self
+            .promotion_guard
+            .record_caught_up(caught_up_lsn)
+            .is_err()
+        {
             // ROLLBACK: unfence old primary
             self.inner.primary.unfence();
-            self.promotion_guard.rollback("candidate did not reach target LSN");
+            self.promotion_guard
+                .rollback("candidate did not reach target LSN");
             return Err(FalconError::Internal(
                 "promotion aborted: candidate replica did not reach target LSN".into(),
             ));
@@ -496,7 +509,10 @@ impl HAReplicaGroup {
         *self.last_failover.lock() = Some(Instant::now());
 
         // Record metrics
-        self.inner.metrics.promote_count.fetch_add(1, Ordering::SeqCst);
+        self.inner
+            .metrics
+            .promote_count
+            .fetch_add(1, Ordering::SeqCst);
 
         tracing::info!(
             shard = ?self.inner.shard_id,
@@ -888,9 +904,7 @@ impl FailoverOrchestrator {
                     error = %e,
                     "failed to spawn background thread — node DEGRADED"
                 );
-                FalconError::Internal(format!(
-                    "failed to spawn failover orchestrator thread: {e}"
-                ))
+                FalconError::Internal(format!("failed to spawn failover orchestrator thread: {e}"))
             })?;
 
         Ok(FailoverOrchestratorHandle {
@@ -973,7 +987,9 @@ impl SyncReplicationWaiter {
             // The condvar is never notified, so this always times out after
             // poll_interval — but it yields the thread properly and is
             // interruptible by the OS scheduler (unlike a busy-spin).
-            let guard = pair.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let guard = pair
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let _ = cvar.wait_timeout(guard, poll_interval);
         }
     }
@@ -1003,7 +1019,8 @@ mod tests {
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
                 ColumnDef {
                     id: ColumnId(1),
@@ -1012,7 +1029,8 @@ mod tests {
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
-                    is_serial: false, max_length: None,
+                    is_serial: false,
+                    max_length: None,
                 },
             ],
             primary_key_columns: vec![0],

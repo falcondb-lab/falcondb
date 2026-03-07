@@ -10,9 +10,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use falcon_cluster::raft_integration::{
-    GrpcNetworkFactory, RaftShardCoordinator, RaftWalGroup,
-};
+use falcon_cluster::raft_integration::{GrpcNetworkFactory, RaftShardCoordinator, RaftWalGroup};
 use falcon_cluster::routing::shard_map::ShardMap;
 use falcon_common::datum::{Datum, OwnedRow};
 use falcon_common::schema::{ColumnDef, TableSchema};
@@ -34,7 +32,8 @@ fn test_schema() -> TableSchema {
                 nullable: false,
                 is_primary_key: true,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             },
             ColumnDef {
                 id: ColumnId(1),
@@ -43,7 +42,8 @@ fn test_schema() -> TableSchema {
                 nullable: true,
                 is_primary_key: false,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             },
         ],
         primary_key_columns: vec![0],
@@ -135,11 +135,7 @@ async fn test_coordinator_with_grpc_network_full_lifecycle() {
     // Verify leaders are elected
     for shard_idx in 0u64..2 {
         let leader = coordinator.shard_leader(ShardId(shard_idx)).await;
-        assert!(
-            leader.is_some(),
-            "Shard {} must have a leader",
-            shard_idx
-        );
+        assert!(leader.is_some(), "Shard {} must have a leader", shard_idx);
     }
 
     // Propose InsertRow + CommitTxn on each shard
@@ -186,11 +182,10 @@ async fn test_coordinator_with_grpc_network_full_lifecycle() {
 
     // Verify data visible on each shard's storage engine
     for (shard_idx, engine) in engines.iter().enumerate() {
-        let rows = engine
-            .scan(TableId(1), TxnId(999), Timestamp(100))
-            .unwrap();
+        let rows = engine.scan(TableId(1), TxnId(999), Timestamp(100)).unwrap();
         assert!(
-            rows.iter().any(|(_pk, r)| r.values.first() == Some(&Datum::Int32(shard_idx as i32))),
+            rows.iter()
+                .any(|(_pk, r)| r.values.first() == Some(&Datum::Int32(shard_idx as i32))),
             "Shard {} should have its inserted row visible",
             shard_idx
         );
@@ -245,10 +240,7 @@ async fn test_coordinator_multi_shard_leader_failover() {
             WalRecord::Insert {
                 txn_id: TxnId(200),
                 table_id: TableId(1),
-                row: OwnedRow::new(vec![
-                    Datum::Int32(10),
-                    Datum::Text("pre-failover".into()),
-                ]),
+                row: OwnedRow::new(vec![Datum::Int32(10), Datum::Text("pre-failover".into())]),
             },
         )
         .await
@@ -286,18 +278,25 @@ async fn test_coordinator_multi_shard_leader_failover() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
-    assert_ne!(new_leader, old_leader, "New leader must differ from partitioned leader");
+    assert_ne!(
+        new_leader, old_leader,
+        "New leader must differ from partitioned leader"
+    );
 
     // Shard 1 should still have its leader (unaffected)
     let shard1_leader = coordinator.shard_leader(ShardId(1)).await;
-    assert!(shard1_leader.is_some(), "Shard 1 leader should survive shard 0 partition");
+    assert!(
+        shard1_leader.is_some(),
+        "Shard 1 leader should survive shard 0 partition"
+    );
 
     // Pre-failover data should still be visible
     let rows = engines[0]
         .scan(TableId(1), TxnId(999), Timestamp(100))
         .unwrap();
     assert!(
-        rows.iter().any(|(_pk, r)| r.values.first() == Some(&Datum::Int32(10))),
+        rows.iter()
+            .any(|(_pk, r)| r.values.first() == Some(&Datum::Int32(10))),
         "Pre-failover row should be visible"
     );
 }
@@ -388,5 +387,8 @@ async fn test_coordinator_add_remove_voter() {
 
     // Cluster should still function
     let leader = coordinator.shard_leader(ShardId(0)).await;
-    assert!(leader.is_some(), "Cluster should still have a leader after membership change");
+    assert!(
+        leader.is_some(),
+        "Cluster should still have a leader after membership change"
+    );
 }

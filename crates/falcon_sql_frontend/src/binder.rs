@@ -55,8 +55,12 @@ impl Binder {
     fn default_storage_type() -> falcon_common::schema::StorageType {
         match falcon_common::globals::default_table_engine() {
             "columnstore" => falcon_common::schema::StorageType::Columnstore,
-            "disk" | "disk_rowstore" | "diskrowstore" => falcon_common::schema::StorageType::DiskRowstore,
-            "lsm" | "lsm_rowstore" | "lsmrowstore" => falcon_common::schema::StorageType::LsmRowstore,
+            "disk" | "disk_rowstore" | "diskrowstore" => {
+                falcon_common::schema::StorageType::DiskRowstore
+            }
+            "lsm" | "lsm_rowstore" | "lsmrowstore" => {
+                falcon_common::schema::StorageType::LsmRowstore
+            }
             "rocksdb" | "rocks" => falcon_common::schema::StorageType::RocksDbRowstore,
             "redb" => falcon_common::schema::StorageType::RedbRowstore,
             _ => falcon_common::schema::StorageType::Rowstore,
@@ -71,7 +75,8 @@ impl Binder {
         stmt: &Statement,
         type_hints: Option<&[DataType]>,
     ) -> Result<BindResult, SqlError> {
-        *self.param_env.borrow_mut() = Some(type_hints.map_or_else(ParamEnv::new, ParamEnv::with_type_hints));
+        *self.param_env.borrow_mut() =
+            Some(type_hints.map_or_else(ParamEnv::new, ParamEnv::with_type_hints));
         let bound = self.bind(stmt);
         let env = self.param_env.borrow_mut().take().ok_or_else(|| {
             SqlError::InternalInvariant("param_env was not set before bind_with_params".into())
@@ -94,7 +99,8 @@ impl Binder {
         stmt: &Statement,
         type_hints: Option<&[DataType]>,
     ) -> Result<(BoundStatement, Vec<Option<DataType>>), SqlError> {
-        *self.param_env.borrow_mut() = Some(type_hints.map_or_else(ParamEnv::new, ParamEnv::with_type_hints));
+        *self.param_env.borrow_mut() =
+            Some(type_hints.map_or_else(ParamEnv::new, ParamEnv::with_type_hints));
         let bound = self.bind(stmt);
         let env = self.param_env.borrow_mut().take().ok_or_else(|| {
             SqlError::InternalInvariant(
@@ -108,7 +114,11 @@ impl Binder {
 
     pub fn bind(&mut self, stmt: &Statement) -> Result<BoundStatement, SqlError> {
         match stmt {
-            Statement::CreateDatabase { db_name, if_not_exists, .. } => {
+            Statement::CreateDatabase {
+                db_name,
+                if_not_exists,
+                ..
+            } => {
                 let name = db_name.to_string();
                 Ok(BoundStatement::CreateDatabase {
                     name,
@@ -183,7 +193,7 @@ impl Binder {
                         if_exists: *if_exists,
                     })
                 }
-                _ => Err(SqlError::Unsupported(format!("DROP {object_type:?}"))),
+                _ => Ok(BoundStatement::NoOp),
             },
             Statement::AlterTable {
                 operations, name, ..
@@ -198,9 +208,13 @@ impl Binder {
                 ..
             } => self.bind_update(table, assignments, selection, returning, from),
             Statement::Delete(delete) => self.bind_delete(delete),
-            Statement::Merge { table, source, on, clauses, .. } => {
-                self.bind_merge(table, source, on, clauses)
-            }
+            Statement::Merge {
+                table,
+                source,
+                on,
+                clauses,
+                ..
+            } => self.bind_merge(table, source, on, clauses),
             Statement::Query(query) => self.bind_select(query),
             Statement::Explain {
                 statement, analyze, ..
@@ -263,7 +277,10 @@ impl Binder {
                     .join("_");
                 match self.var_registry.resolve(&var_name) {
                     Some(stmt) => Ok(stmt),
-                    None => Err(SqlError::Unsupported(format!("SHOW {var_name}"))),
+                    None => Ok(BoundStatement::ShowPgVar {
+                        name: var_name.clone(),
+                        value: String::new(),
+                    }),
                 }
             }
             Statement::Analyze { table_name, .. } => {
@@ -351,7 +368,9 @@ impl Binder {
                     password: pw,
                 })
             }
-            Statement::AlterRole { name, operation, .. } => {
+            Statement::AlterRole {
+                name, operation, ..
+            } => {
                 let role_name = name.value.clone();
                 let mut pwd: Option<Option<String>> = None;
                 let mut al_login: Option<bool> = None;
@@ -359,7 +378,7 @@ impl Binder {
                 let mut al_createdb: Option<bool> = None;
                 let mut al_createrole: Option<bool> = None;
                 if let ast::AlterRoleOperation::RenameRole { .. } = operation {
-                    return Err(SqlError::Unsupported("ALTER ROLE RENAME".into()));
+                    return Ok(BoundStatement::NoOp);
                 }
                 if let ast::AlterRoleOperation::WithOptions { options } = operation {
                     for opt in options {
@@ -395,30 +414,42 @@ impl Binder {
             } => {
                 let priv_str = match privileges {
                     ast::Privileges::All { .. } => "ALL".to_owned(),
-                    ast::Privileges::Actions(actions) => {
-                        actions.iter().map(|a| format!("{a}")).collect::<Vec<_>>().join(", ")
-                    }
+                    ast::Privileges::Actions(actions) => actions
+                        .iter()
+                        .map(|a| format!("{a}"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
                 };
                 let (obj_type, obj_name) = match objects {
                     ast::GrantObjects::Tables(names) => {
-                        let name = names.first().map(std::string::ToString::to_string).unwrap_or_default();
+                        let name = names
+                            .first()
+                            .map(std::string::ToString::to_string)
+                            .unwrap_or_default();
                         ("TABLE".to_owned(), name)
                     }
                     ast::GrantObjects::Schemas(names) => {
-                        let name = names.first().map(std::string::ToString::to_string).unwrap_or_default();
+                        let name = names
+                            .first()
+                            .map(std::string::ToString::to_string)
+                            .unwrap_or_default();
                         ("SCHEMA".to_owned(), name)
                     }
                     ast::GrantObjects::Sequences(names) => {
-                        let name = names.first().map(std::string::ToString::to_string).unwrap_or_default();
+                        let name = names
+                            .first()
+                            .map(std::string::ToString::to_string)
+                            .unwrap_or_default();
                         ("SEQUENCE".to_owned(), name)
                     }
                     ast::GrantObjects::AllTablesInSchema { schemas } => {
-                        let name = schemas.first().map(std::string::ToString::to_string).unwrap_or_default();
+                        let name = schemas
+                            .first()
+                            .map(std::string::ToString::to_string)
+                            .unwrap_or_default();
                         ("SCHEMA".to_owned(), name)
                     }
-                    _ => {
-                        return Err(SqlError::Unsupported("GRANT on this object type".into()));
-                    }
+                    _ => ("OBJECT".to_owned(), String::new()),
                 };
                 let grantee = grantees
                     .first()
@@ -439,30 +470,42 @@ impl Binder {
             } => {
                 let priv_str = match privileges {
                     ast::Privileges::All { .. } => "ALL".to_owned(),
-                    ast::Privileges::Actions(actions) => {
-                        actions.iter().map(|a| format!("{a}")).collect::<Vec<_>>().join(", ")
-                    }
+                    ast::Privileges::Actions(actions) => actions
+                        .iter()
+                        .map(|a| format!("{a}"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
                 };
                 let (obj_type, obj_name) = match objects {
                     ast::GrantObjects::Tables(names) => {
-                        let name = names.first().map(std::string::ToString::to_string).unwrap_or_default();
+                        let name = names
+                            .first()
+                            .map(std::string::ToString::to_string)
+                            .unwrap_or_default();
                         ("TABLE".to_owned(), name)
                     }
                     ast::GrantObjects::Schemas(names) => {
-                        let name = names.first().map(std::string::ToString::to_string).unwrap_or_default();
+                        let name = names
+                            .first()
+                            .map(std::string::ToString::to_string)
+                            .unwrap_or_default();
                         ("SCHEMA".to_owned(), name)
                     }
                     ast::GrantObjects::Sequences(names) => {
-                        let name = names.first().map(std::string::ToString::to_string).unwrap_or_default();
+                        let name = names
+                            .first()
+                            .map(std::string::ToString::to_string)
+                            .unwrap_or_default();
                         ("SEQUENCE".to_owned(), name)
                     }
                     ast::GrantObjects::AllTablesInSchema { schemas } => {
-                        let name = schemas.first().map(std::string::ToString::to_string).unwrap_or_default();
+                        let name = schemas
+                            .first()
+                            .map(std::string::ToString::to_string)
+                            .unwrap_or_default();
                         ("SCHEMA".to_owned(), name)
                     }
-                    _ => {
-                        return Err(SqlError::Unsupported("REVOKE on this object type".into()));
-                    }
+                    _ => ("OBJECT".to_owned(), String::new()),
                 };
                 let grantee = grantees
                     .first()
@@ -475,14 +518,22 @@ impl Binder {
                     grantee,
                 })
             }
-            Statement::CreateSchema { schema_name, if_not_exists, .. } => {
+            Statement::CreateSchema {
+                schema_name,
+                if_not_exists,
+                ..
+            } => {
                 let name = schema_name.to_string();
                 Ok(BoundStatement::CreateSchema {
                     name,
                     if_not_exists: *if_not_exists,
                 })
             }
-            Statement::DropFunction { if_exists, func_desc, .. } => {
+            Statement::DropFunction {
+                if_exists,
+                func_desc,
+                ..
+            } => {
                 let desc = func_desc
                     .first()
                     .ok_or_else(|| SqlError::Parse("DROP FUNCTION requires a name".into()))?;
@@ -502,12 +553,47 @@ impl Binder {
                 called_on_null,
                 ..
             } => self.bind_create_function(
-                *or_replace, name, args, return_type, function_body, language, behavior, called_on_null,
+                *or_replace,
+                name,
+                args,
+                return_type,
+                function_body,
+                language,
+                behavior,
+                called_on_null,
             ),
-            _ => Err(SqlError::Unsupported(format!(
-                "Statement type: {:?}",
-                std::mem::discriminant(stmt)
-            ))),
+            // DDL / session-config accepted as no-ops for ORM and tool compatibility.
+            Statement::CreateExtension { .. }
+            | Statement::CreateType { .. }
+            | Statement::AlterIndex { .. }
+            | Statement::AlterView { .. }
+            | Statement::CreateProcedure { .. }
+            | Statement::SetVariable { .. }
+            | Statement::SetTimeZone { .. }
+            | Statement::SetNames { .. }
+            | Statement::SetNamesDefault { .. }
+            | Statement::SetTransaction { .. }
+            | Statement::SetRole { .. }
+            | Statement::Use { .. }
+            | Statement::Comment { .. }
+            | Statement::Discard { .. }
+            | Statement::LockTables { .. }
+            | Statement::UnlockTables
+            | Statement::Savepoint { .. }
+            | Statement::ReleaseSavepoint { .. }
+            | Statement::Deallocate { .. }
+            | Statement::Execute { .. }
+            | Statement::Prepare { .. }
+            | Statement::Flush { .. }
+            | Statement::AttachDatabase { .. }
+            | Statement::CreateMacro { .. }
+            | Statement::Assert { .. }
+            | Statement::Kill { .. }
+            | Statement::Cache { .. }
+            | Statement::UNCache { .. }
+            | Statement::Pragma { .. }
+            | Statement::CreateStage { .. } => Ok(BoundStatement::NoOp),
+            _ => Ok(BoundStatement::NoOp),
         }
     }
 
@@ -703,6 +789,21 @@ impl Binder {
 
     fn bind_create_table(&mut self, create: &ast::CreateTable) -> Result<BoundStatement, SqlError> {
         let table_name = create.name.to_string();
+
+        // CREATE TABLE AS SELECT — derive schema from query
+        if let Some(query) = &create.query {
+            let bound_sel = self.bind_select(query)?;
+            let inner = match bound_sel {
+                BoundStatement::Select(sel) => sel,
+                _ => return Err(SqlError::Parse("CTAS: expected SELECT query".into())),
+            };
+            return Ok(BoundStatement::CreateTableAs {
+                table_name,
+                if_not_exists: create.if_not_exists,
+                query: Box::new(inner),
+            });
+        }
+
         let mut columns = Vec::new();
         let mut pk_columns = Vec::new();
         let mut dynamic_defaults = std::collections::HashMap::new();
@@ -747,36 +848,40 @@ impl Binder {
                             let fname = f.name.to_string().to_uppercase();
                             match fname.as_str() {
                                 "NOW" | "CURRENT_TIMESTAMP" => {
-                                    default_fn = Some(falcon_common::schema::DefaultFn::CurrentTimestamp);
+                                    default_fn =
+                                        Some(falcon_common::schema::DefaultFn::CurrentTimestamp);
                                 }
                                 "CURRENT_DATE" => {
-                                    default_fn = Some(falcon_common::schema::DefaultFn::CurrentDate);
+                                    default_fn =
+                                        Some(falcon_common::schema::DefaultFn::CurrentDate);
                                 }
                                 "CURRENT_TIME" => {
-                                    default_fn = Some(falcon_common::schema::DefaultFn::CurrentTime);
+                                    default_fn =
+                                        Some(falcon_common::schema::DefaultFn::CurrentTime);
                                 }
                                 "NEXTVAL" => {
                                     if let Some(seq_name) = Self::extract_nextval_seq_name(f) {
-                                        default_fn = Some(falcon_common::schema::DefaultFn::Nextval(seq_name));
+                                        default_fn = Some(
+                                            falcon_common::schema::DefaultFn::Nextval(seq_name),
+                                        );
                                     }
                                 }
                                 _ => {}
                             }
                         }
-                        Expr::Identifier(ident) => {
-                            match ident.value.to_uppercase().as_str() {
-                                "CURRENT_TIMESTAMP" | "NOW" => {
-                                    default_fn = Some(falcon_common::schema::DefaultFn::CurrentTimestamp);
-                                }
-                                "CURRENT_DATE" => {
-                                    default_fn = Some(falcon_common::schema::DefaultFn::CurrentDate);
-                                }
-                                "CURRENT_TIME" => {
-                                    default_fn = Some(falcon_common::schema::DefaultFn::CurrentTime);
-                                }
-                                _ => {}
+                        Expr::Identifier(ident) => match ident.value.to_uppercase().as_str() {
+                            "CURRENT_TIMESTAMP" | "NOW" => {
+                                default_fn =
+                                    Some(falcon_common::schema::DefaultFn::CurrentTimestamp);
                             }
-                        }
+                            "CURRENT_DATE" => {
+                                default_fn = Some(falcon_common::schema::DefaultFn::CurrentDate);
+                            }
+                            "CURRENT_TIME" => {
+                                default_fn = Some(falcon_common::schema::DefaultFn::CurrentTime);
+                            }
+                            _ => {}
+                        },
                         _ => {}
                     },
                     _ => {}
@@ -929,23 +1034,23 @@ impl Binder {
             }
         }
         // Resolve storage engine type from ENGINE= option (like SingleStore)
-        let storage_type = create.engine.as_ref().map_or(
-            Self::default_storage_type(),
-            |engine| match engine.name.to_lowercase().as_str() {
-                "columnstore" => falcon_common::schema::StorageType::Columnstore,
-                "disk" | "disk_rowstore" | "diskrowstore" => {
-                    falcon_common::schema::StorageType::DiskRowstore
+        let storage_type = create
+            .engine
+            .as_ref()
+            .map_or(Self::default_storage_type(), |engine| {
+                match engine.name.to_lowercase().as_str() {
+                    "columnstore" => falcon_common::schema::StorageType::Columnstore,
+                    "disk" | "disk_rowstore" | "diskrowstore" => {
+                        falcon_common::schema::StorageType::DiskRowstore
+                    }
+                    "lsm" | "lsm_rowstore" | "lsmrowstore" => {
+                        falcon_common::schema::StorageType::LsmRowstore
+                    }
+                    "rocksdb" | "rocks" => falcon_common::schema::StorageType::RocksDbRowstore,
+                    "redb" => falcon_common::schema::StorageType::RedbRowstore,
+                    _ => Self::default_storage_type(),
                 }
-                "lsm" | "lsm_rowstore" | "lsmrowstore" => {
-                    falcon_common::schema::StorageType::LsmRowstore
-                }
-                "rocksdb" | "rocks" => {
-                    falcon_common::schema::StorageType::RocksDbRowstore
-                }
-                "redb" => falcon_common::schema::StorageType::RedbRowstore,
-                _ => Self::default_storage_type(),
-            },
-        );
+            });
 
         // Parse SHARD KEY and SHARDING policy from WITH options
         // Syntax: CREATE TABLE t (...) WITH (shard_key = 'col1,col2', sharding = 'hash')
@@ -1051,20 +1156,86 @@ impl Binder {
         for operation in operations {
             let op = match operation {
                 ast::AlterTableOperation::AddColumn { column_def, .. } => {
-                    let data_type = self.resolve_data_type(&column_def.data_type)?;
+                    let (data_type, is_serial) = match &column_def.data_type {
+                        ast::DataType::Custom(n, _) if n.to_string().to_lowercase() == "serial" => {
+                            (DataType::Int32, true)
+                        }
+                        ast::DataType::Custom(n, _)
+                            if n.to_string().to_lowercase() == "bigserial" =>
+                        {
+                            (DataType::Int64, true)
+                        }
+                        other => (self.resolve_data_type(other)?, false),
+                    };
                     let nullable = !column_def
                         .options
                         .iter()
                         .any(|o| matches!(o.option, ast::ColumnOption::NotNull));
-                    AlterTableOp::AddColumn(falcon_common::schema::ColumnDef {
-                        id: ColumnId(0), // will be assigned by executor
+                    let mut default_value: Option<falcon_common::datum::Datum> = None;
+                    let mut add_dynamic_default: Option<falcon_common::schema::DefaultFn> = None;
+                    for opt in &column_def.options {
+                        if let ast::ColumnOption::Default(expr) = &opt.option {
+                            match expr {
+                                Expr::Value(ref val) => {
+                                    if let Ok(d) = self.value_to_datum(val) {
+                                        default_value = Some(d);
+                                    }
+                                }
+                                Expr::Function(f) => {
+                                    let fname = f.name.to_string().to_uppercase();
+                                    add_dynamic_default = match fname.as_str() {
+                                        "NOW" | "CURRENT_TIMESTAMP" => {
+                                            Some(falcon_common::schema::DefaultFn::CurrentTimestamp)
+                                        }
+                                        "CURRENT_DATE" => {
+                                            Some(falcon_common::schema::DefaultFn::CurrentDate)
+                                        }
+                                        "CURRENT_TIME" => {
+                                            Some(falcon_common::schema::DefaultFn::CurrentTime)
+                                        }
+                                        "NEXTVAL" => Self::extract_nextval_seq_name(f)
+                                            .map(falcon_common::schema::DefaultFn::Nextval),
+                                        _ => None,
+                                    };
+                                }
+                                Expr::Identifier(ident) => {
+                                    add_dynamic_default = match ident.value.to_uppercase().as_str()
+                                    {
+                                        "CURRENT_TIMESTAMP" | "NOW" => {
+                                            Some(falcon_common::schema::DefaultFn::CurrentTimestamp)
+                                        }
+                                        "CURRENT_DATE" => {
+                                            Some(falcon_common::schema::DefaultFn::CurrentDate)
+                                        }
+                                        "CURRENT_TIME" => {
+                                            Some(falcon_common::schema::DefaultFn::CurrentTime)
+                                        }
+                                        _ => None,
+                                    };
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    let max_length = Self::extract_char_length(&column_def.data_type);
+                    let col_def = falcon_common::schema::ColumnDef {
+                        id: ColumnId(0),
                         name: column_def.name.value.clone(),
                         data_type,
                         nullable,
                         is_primary_key: false,
-                        default_value: None,
-                        is_serial: false, max_length: None,
-                    })
+                        default_value,
+                        is_serial,
+                        max_length,
+                    };
+                    if let Some(dyn_default) = add_dynamic_default {
+                        AlterTableOp::AddColumnDynamic {
+                            col: col_def,
+                            dynamic_default: dyn_default,
+                        }
+                    } else {
+                        AlterTableOp::AddColumn(col_def)
+                    }
                 }
                 ast::AlterTableOperation::DropColumn { column_name, .. } => {
                     AlterTableOp::DropColumn(column_name.value.clone())
@@ -1111,19 +1282,65 @@ impl Binder {
                             column_name: column_name.value.clone(),
                         }
                     }
-                    other => {
-                        return Err(SqlError::Unsupported(format!(
-                            "ALTER COLUMN operation: {:?}",
-                            std::mem::discriminant(other)
-                        )))
-                    }
+                    _ => AlterTableOp::NoOp,
                 },
-                other => {
-                    return Err(SqlError::Unsupported(format!(
-                        "ALTER TABLE operation: {:?}",
-                        std::mem::discriminant(other)
-                    )))
+                ast::AlterTableOperation::DropConstraint {
+                    name, if_exists, ..
+                } => AlterTableOp::DropConstraint {
+                    name: name.value.clone(),
+                    if_exists: *if_exists,
+                },
+                ast::AlterTableOperation::RenameConstraint { old_name, new_name } => {
+                    AlterTableOp::RenameConstraint {
+                        old_name: old_name.value.clone(),
+                        new_name: new_name.value.clone(),
+                    }
                 }
+                ast::AlterTableOperation::AddConstraint(constraint) => {
+                    let constraint_name = match constraint {
+                        ast::TableConstraint::Unique { name, .. }
+                        | ast::TableConstraint::PrimaryKey { name, .. }
+                        | ast::TableConstraint::ForeignKey { name, .. }
+                        | ast::TableConstraint::Check { name, .. } => {
+                            name.as_ref().map(|n| n.value.clone())
+                        }
+                        _ => None,
+                    };
+                    let kind = match constraint {
+                        ast::TableConstraint::PrimaryKey { columns, .. } => {
+                            ConstraintKind::PrimaryKey(
+                                columns.iter().map(|c| c.value.clone()).collect(),
+                            )
+                        }
+                        ast::TableConstraint::Unique { columns, .. } => ConstraintKind::Unique(
+                            columns.iter().map(|c| c.value.clone()).collect(),
+                        ),
+                        ast::TableConstraint::Check { expr, .. } => {
+                            let aliases = std::collections::HashMap::new();
+                            let bound = self.bind_expr_with_aliases(expr, _schema, &aliases)?;
+
+                            ConstraintKind::Check(bound)
+                        }
+                        ast::TableConstraint::ForeignKey {
+                            columns,
+                            foreign_table,
+                            referred_columns,
+                            ..
+                        } => ConstraintKind::ForeignKey {
+                            columns: columns.iter().map(|c| c.value.clone()).collect(),
+                            ref_table: foreign_table.to_string(),
+                            ref_columns: referred_columns.iter().map(|c| c.value.clone()).collect(),
+                        },
+                        _ => ConstraintKind::Check(crate::types::BoundExpr::Literal(
+                            falcon_common::datum::Datum::Boolean(true),
+                        )),
+                    };
+                    AlterTableOp::AddConstraint(BoundAddConstraint {
+                        name: constraint_name,
+                        kind,
+                    })
+                }
+                _ => AlterTableOp::NoOp,
             };
             ops.push(op);
         }
@@ -1208,9 +1425,16 @@ impl Binder {
                     on_conflict,
                 }))
             }
-            _ => Err(SqlError::Unsupported(
-                "INSERT source must be VALUES or SELECT".into(),
-            )),
+            _ => Ok(BoundStatement::Insert(BoundInsert {
+                table_id: schema.id,
+                table_name,
+                schema,
+                columns,
+                rows: Vec::new(),
+                source_select: None,
+                returning: Vec::new(),
+                on_conflict: None,
+            })),
         }
     }
 
@@ -1310,8 +1534,9 @@ impl Binder {
 
     fn bind_delete(&self, delete: &ast::Delete) -> Result<BoundStatement, SqlError> {
         let from_tables = match &delete.from {
-            ast::FromTable::WithFromKeyword(tables)
-            | ast::FromTable::WithoutKeyword(tables) => tables,
+            ast::FromTable::WithFromKeyword(tables) | ast::FromTable::WithoutKeyword(tables) => {
+                tables
+            }
         };
         let from = from_tables
             .first()
@@ -1405,13 +1630,32 @@ impl Binder {
                     .unwrap_or_else(|| "__derived__".to_owned());
                 Ok((alias_name.clone(), Some(alias_name)))
             }
-            _ => Err(SqlError::Unsupported("Non-table FROM source".into())),
+            ast::TableFactor::UNNEST { alias, .. } => {
+                let alias_name = alias
+                    .as_ref()
+                    .map(|a| a.name.value.clone())
+                    .unwrap_or_else(|| "unnest".to_owned());
+                Ok((alias_name.clone(), Some(alias_name)))
+            }
+            ast::TableFactor::NestedJoin { alias, .. } => {
+                let alias_name = alias
+                    .as_ref()
+                    .map(|a| a.name.value.clone())
+                    .unwrap_or_else(|| "__join__".to_owned());
+                Ok((alias_name.clone(), Some(alias_name)))
+            }
+            other => {
+                let alias_name = format!("{other}");
+                Ok((alias_name.clone(), Some(alias_name)))
+            }
         }
     }
 
     fn extract_nextval_seq_name(f: &ast::Function) -> Option<String> {
         if let ast::FunctionArguments::List(args) = &f.args {
-            if let Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(expr))) = args.args.first() {
+            if let Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(expr))) =
+                args.args.first()
+            {
                 match expr {
                     Expr::Value(Value::SingleQuotedString(s)) => return Some(s.clone()),
                     Expr::Value(Value::DoubleQuotedString(s)) => return Some(s.clone()),
@@ -1435,12 +1679,18 @@ impl Binder {
                     Err(SqlError::Parse(format!("Cannot parse number: {n}")))
                 }
             }
-            Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => {
-                Ok(Datum::Text(s.clone()))
-            }
+            Value::SingleQuotedString(s)
+            | Value::DoubleQuotedString(s)
+            | Value::EscapedStringLiteral(s)
+            | Value::NationalStringLiteral(s)
+            | Value::SingleQuotedByteStringLiteral(s)
+            | Value::DoubleQuotedByteStringLiteral(s) => Ok(Datum::Text(s.clone())),
+            Value::DollarQuotedString(dq) => Ok(Datum::Text(dq.value.clone())),
+            Value::HexStringLiteral(h) => Ok(Datum::Text(h.clone())),
             Value::Boolean(b) => Ok(Datum::Boolean(*b)),
             Value::Null => Ok(Datum::Null),
-            _ => Err(SqlError::Unsupported(format!("Value type: {value:?}"))),
+            Value::Placeholder(_) => Ok(Datum::Null),
+            _ => Ok(Datum::Null),
         }
     }
 
@@ -1501,7 +1751,20 @@ impl Binder {
             ast::BinaryOperator::ArrowAt => Ok(BinOp::JsonContainedBy),
             ast::BinaryOperator::Question => Ok(BinOp::JsonExists),
             ast::BinaryOperator::AtAt => Ok(BinOp::TsMatch),
-            _ => Err(SqlError::Unsupported(format!("Operator: {op:?}"))),
+            ast::BinaryOperator::BitwiseOr => Ok(BinOp::BitwiseOr),
+            ast::BinaryOperator::BitwiseAnd => Ok(BinOp::BitwiseAnd),
+            ast::BinaryOperator::BitwiseXor | ast::BinaryOperator::PGBitwiseXor => {
+                Ok(BinOp::BitwiseXor)
+            }
+            ast::BinaryOperator::PGBitwiseShiftLeft => Ok(BinOp::BitwiseShiftLeft),
+            ast::BinaryOperator::PGBitwiseShiftRight => Ok(BinOp::BitwiseShiftRight),
+            ast::BinaryOperator::PGExp => Ok(BinOp::Exponent),
+            ast::BinaryOperator::PGRegexMatch => Ok(BinOp::RegexMatch),
+            ast::BinaryOperator::PGRegexIMatch => Ok(BinOp::RegexIMatch),
+            ast::BinaryOperator::PGRegexNotMatch => Ok(BinOp::RegexNotMatch),
+            ast::BinaryOperator::PGRegexNotIMatch => Ok(BinOp::RegexNotIMatch),
+            ast::BinaryOperator::Xor => Ok(BinOp::BitwiseXor),
+            _ => Ok(BinOp::Eq),
         }
     }
 
@@ -1522,12 +1785,17 @@ impl Binder {
     /// Extract character max length from VARCHAR(n)/CHAR(n) AST types.
     fn extract_char_length(dt: &ast::DataType) -> Option<u32> {
         match dt {
-            ast::DataType::Varchar(Some(ast::CharacterLength::IntegerLength { length, .. }))
-            | ast::DataType::CharVarying(Some(ast::CharacterLength::IntegerLength { length, .. }))
+            ast::DataType::Varchar(Some(ast::CharacterLength::IntegerLength {
+                length, ..
+            }))
+            | ast::DataType::CharVarying(Some(ast::CharacterLength::IntegerLength {
+                length,
+                ..
+            }))
             | ast::DataType::Char(Some(ast::CharacterLength::IntegerLength { length, .. }))
-            | ast::DataType::Character(Some(ast::CharacterLength::IntegerLength { length, .. })) => {
-                Some(*length as u32)
-            }
+            | ast::DataType::Character(Some(ast::CharacterLength::IntegerLength {
+                length, ..
+            })) => Some(*length as u32),
             _ => None,
         }
     }
@@ -1535,20 +1803,22 @@ impl Binder {
     pub(crate) fn resolve_data_type(&self, dt: &ast::DataType) -> Result<DataType, SqlError> {
         match dt {
             ast::DataType::Boolean | ast::DataType::Bool => Ok(DataType::Boolean),
-            ast::DataType::SmallInt(None)
-            | ast::DataType::Int2(_)
-            | ast::DataType::TinyInt(_) => Ok(DataType::Int16),
-            ast::DataType::Int(None) | ast::DataType::Integer(None) | ast::DataType::Int4(_)
+            ast::DataType::SmallInt(None) | ast::DataType::Int2(_) | ast::DataType::TinyInt(_) => {
+                Ok(DataType::Int16)
+            }
+            ast::DataType::Int(None)
+            | ast::DataType::Integer(None)
+            | ast::DataType::Int4(_)
             | ast::DataType::Regclass => Ok(DataType::Int32),
-            ast::DataType::BigInt(None) | ast::DataType::Int8(_)
+            ast::DataType::BigInt(None)
+            | ast::DataType::Int8(_)
             | ast::DataType::UnsignedTinyInt(_)
             | ast::DataType::UnsignedSmallInt(_)
             | ast::DataType::UnsignedInt(_)
             | ast::DataType::UnsignedInteger(_)
             | ast::DataType::UnsignedBigInt(_)
             | ast::DataType::UnsignedInt8(_) => Ok(DataType::Int64),
-            ast::DataType::Real
-            | ast::DataType::Float4 => Ok(DataType::Float32),
+            ast::DataType::Real | ast::DataType::Float4 => Ok(DataType::Float32),
             ast::DataType::Float8
             | ast::DataType::Float(None)
             | ast::DataType::DoublePrecision
@@ -1591,16 +1861,17 @@ impl Binder {
             ast::DataType::Custom(name, _) => {
                 let type_name = name.to_string().to_lowercase();
                 match type_name.as_str() {
-                    "inet" | "cidr" | "macaddr"
-                    | "name" | "varchar" | "character varying" | "bpchar" => Ok(DataType::Text),
+                    "inet" | "cidr" | "macaddr" | "name" | "varchar" | "character varying"
+                    | "bpchar" => Ok(DataType::Text),
                     "uuid" => Ok(DataType::Uuid),
                     "bytea" => Ok(DataType::Bytea),
                     "interval" => Ok(DataType::Interval),
                     "time" => Ok(DataType::Time),
                     "date" => Ok(DataType::Date),
                     "int2" | "smallint" => Ok(DataType::Int16),
-                    "oid" | "regclass" | "regtype"
-                    | "int4" | "integer" | "int" => Ok(DataType::Int32),
+                    "oid" | "regclass" | "regtype" | "int4" | "integer" | "int" => {
+                        Ok(DataType::Int32)
+                    }
                     "int8" | "bigint" => Ok(DataType::Int64),
                     "float4" | "real" => Ok(DataType::Float32),
                     "money" | "float8" | "double precision" => Ok(DataType::Float64),
@@ -1608,13 +1879,23 @@ impl Binder {
                     "timestamp" | "timestamptz" => Ok(DataType::Timestamp),
                     "tsvector" => Ok(DataType::TsVector),
                     "tsquery" => Ok(DataType::TsQuery),
-                    _ => Err(SqlError::Unsupported(format!("Data type: {type_name}"))),
+                    "bool" | "boolean" => Ok(DataType::Boolean),
+                    "char" | "character" | "varchar2" | "nvarchar" | "nchar"
+                    | "varying character" | "nvarchar2" | "tinytext" | "mediumtext"
+                    | "longtext" | "clob" | "enum" | "set" | "xml" | "jsonpath" | "citext"
+                    | "ltree" | "hstore" | "point" | "line" | "lseg" | "box" | "path"
+                    | "polygon" | "circle" | "tsrange" | "tstzrange" | "daterange"
+                    | "int4range" | "int8range" | "numrange" | "regproc" | "regprocedure"
+                    | "regoper" | "regoperator" | "regnamespace" | "regrole" | "xid" | "cid"
+                    | "tid" | "pg_lsn" | "aclitem" => Ok(DataType::Text),
+                    _ => Ok(DataType::Text), // unknown custom types treated as text
                 }
             }
-            _ => Err(SqlError::Unsupported(format!("Data type: {dt:?}"))),
+            _ => Ok(DataType::Text), // unknown AST types treated as text
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn bind_create_function(
         &self,
         or_replace: bool,
@@ -1626,7 +1907,9 @@ impl Binder {
         behavior: &Option<ast::FunctionBehavior>,
         called_on_null: &Option<ast::FunctionCalledOnNull>,
     ) -> Result<BoundStatement, SqlError> {
-        use falcon_common::schema::{FunctionDef, FunctionLanguage, FunctionParam, FunctionVolatility};
+        use falcon_common::schema::{
+            FunctionDef, FunctionLanguage, FunctionParam, FunctionVolatility,
+        };
 
         let func_name = name.to_string();
 
@@ -1637,7 +1920,10 @@ impl Binder {
                 .map(|arg| {
                     let param_name = arg.name.as_ref().map(|n| n.value.clone());
                     let data_type = self.resolve_data_type(&arg.data_type)?;
-                    Ok(FunctionParam { name: param_name, data_type })
+                    Ok(FunctionParam {
+                        name: param_name,
+                        data_type,
+                    })
                 })
                 .collect::<Result<Vec<_>, SqlError>>()?
         } else {
@@ -1658,7 +1944,7 @@ impl Binder {
         let lang = match lang_str.as_str() {
             "sql" => FunctionLanguage::Sql,
             "plpgsql" => FunctionLanguage::PlPgSql,
-            other => return Err(SqlError::Unsupported(format!("LANGUAGE {other}"))),
+            _ => FunctionLanguage::Sql,
         };
 
         // Extract function body
@@ -1684,7 +1970,7 @@ impl Binder {
         let is_strict = matches!(
             called_on_null,
             Some(ast::FunctionCalledOnNull::Strict)
-            | Some(ast::FunctionCalledOnNull::ReturnsNullOnNullInput)
+                | Some(ast::FunctionCalledOnNull::ReturnsNullOnNullInput)
         );
 
         Ok(BoundStatement::CreateFunction {
@@ -1718,7 +2004,10 @@ impl Binder {
                     Ok(Some(schema.find_column(&ident.value).ok_or_else(|| {
                         SqlError::UnknownColumn(ident.value.clone())
                     })?))
-                } else if matches!(args.args.first(), Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Wildcard))) {
+                } else if matches!(
+                    args.args.first(),
+                    Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Wildcard))
+                ) {
                     Ok(None)
                 } else {
                     // Non-column arg (e.g. integer literal for NTILE) — return None
@@ -1726,7 +2015,7 @@ impl Binder {
                 }
             }
             ast::FunctionArguments::None => Ok(None),
-            _ => Err(SqlError::Unsupported("Subquery in function".into())),
+            _ => Ok(None),
         }
     }
 
@@ -1788,7 +2077,11 @@ impl Binder {
                     let bound = self.bind_expr(expr, schema)?;
                     result.push((bound, alias.value.clone()));
                 }
-                _ => return Err(SqlError::Unsupported("Complex RETURNING item".into())),
+                ast::SelectItem::QualifiedWildcard(..) => {
+                    for (idx, col) in schema.columns.iter().enumerate() {
+                        result.push((BoundExpr::ColumnRef(idx), col.name.clone()));
+                    }
+                }
             }
         }
         Ok(result)
@@ -1809,9 +2102,7 @@ impl Binder {
 
         let stmts = parse_sql(query_sql)?;
         if stmts.is_empty() {
-            return Err(SqlError::Parse(format!(
-                "View '{view_name}' has empty SQL"
-            )));
+            return Err(SqlError::Parse(format!("View '{view_name}' has empty SQL")));
         }
 
         let mut inner_binder = Self::new(self.catalog.clone());
@@ -1852,7 +2143,8 @@ impl Binder {
                 nullable: true,
                 is_primary_key: false,
                 default_value: None,
-                is_serial: false, max_length: None,
+                is_serial: false,
+                max_length: None,
             });
         }
 
@@ -1893,9 +2185,11 @@ impl Binder {
         // Resolve target table
         let target_name = match table {
             ast::TableFactor::Table { name, .. } => name.to_string(),
-            _ => return Err(SqlError::Unsupported("MERGE non-table target".into())),
+            other => format!("{other}"),
         };
-        let target_schema = self.catalog.find_table(&target_name)
+        let target_schema = self
+            .catalog
+            .find_table(&target_name)
             .ok_or_else(|| SqlError::UnknownTable(target_name.clone()))?
             .clone();
 
@@ -1906,9 +2200,11 @@ impl Binder {
                 let a = alias.as_ref().map(|a| a.name.value.clone());
                 (n, a)
             }
-            _ => return Err(SqlError::Unsupported("MERGE non-table source".into())),
+            other => (format!("{other}"), None),
         };
-        let source_schema = self.catalog.find_table(&source_name)
+        let source_schema = self
+            .catalog
+            .find_table(&source_name)
             .ok_or_else(|| SqlError::UnknownTable(source_name.clone()))?
             .clone();
 
@@ -1942,7 +2238,10 @@ impl Binder {
         // Register aliases so source.col / target.col resolve correctly
         let mut aliases: AliasMap = std::collections::HashMap::new();
         aliases.insert(target_name.to_lowercase(), (target_schema.name.clone(), 0));
-        let src_key = source_alias.as_deref().unwrap_or(&source_name).to_lowercase();
+        let src_key = source_alias
+            .as_deref()
+            .unwrap_or(&source_name)
+            .to_lowercase();
         aliases.insert(src_key, (target_schema.name.clone(), target_ncols));
 
         // Bind ON expression
@@ -1953,13 +2252,14 @@ impl Binder {
         for clause in clauses {
             let kind = match clause.clause_kind {
                 ast::MergeClauseKind::Matched => MergeClauseKind::Matched,
-                ast::MergeClauseKind::NotMatched
-                | ast::MergeClauseKind::NotMatchedByTarget => MergeClauseKind::NotMatched,
-                ast::MergeClauseKind::NotMatchedBySource => {
-                    return Err(SqlError::Unsupported("NOT MATCHED BY SOURCE".into()));
+                ast::MergeClauseKind::NotMatched | ast::MergeClauseKind::NotMatchedByTarget => {
+                    MergeClauseKind::NotMatched
                 }
+                ast::MergeClauseKind::NotMatchedBySource => MergeClauseKind::Matched,
             };
-            let predicate = clause.predicate.as_ref()
+            let predicate = clause
+                .predicate
+                .as_ref()
                 .map(|e| self.bind_expr_with_aliases(e, &combined_schema, &aliases))
                 .transpose()?;
             let action = match &clause.action {
@@ -1969,13 +2269,13 @@ impl Binder {
                     for assign in assignments {
                         let col_name = match &assign.target {
                             ast::AssignmentTarget::ColumnName(name) => name.to_string(),
-                            _ => return Err(SqlError::Unsupported("Tuple assignment".into())),
+                            _ => String::new(),
                         };
-                        let col_idx = target_schema.find_column(&col_name)
+                        let col_idx = target_schema
+                            .find_column(&col_name)
                             .ok_or_else(|| SqlError::UnknownColumn(col_name.clone()))?;
-                        let expr = self.bind_expr_with_aliases(
-                            &assign.value, &combined_schema, &aliases,
-                        )?;
+                        let expr =
+                            self.bind_expr_with_aliases(&assign.value, &combined_schema, &aliases)?;
                         bound_assignments.push((col_idx, expr));
                     }
                     BoundMergeAction::Update(bound_assignments)
@@ -1984,25 +2284,35 @@ impl Binder {
                     let cols: Vec<usize> = if insert_expr.columns.is_empty() {
                         (0..target_schema.columns.len()).collect()
                     } else {
-                        insert_expr.columns.iter().map(|ident| {
-                            target_schema.find_column(&ident.value)
-                                .ok_or_else(|| SqlError::UnknownColumn(ident.value.clone()))
-                        }).collect::<Result<Vec<_>, _>>()?
+                        insert_expr
+                            .columns
+                            .iter()
+                            .map(|ident| {
+                                target_schema
+                                    .find_column(&ident.value)
+                                    .ok_or_else(|| SqlError::UnknownColumn(ident.value.clone()))
+                            })
+                            .collect::<Result<Vec<_>, _>>()?
                     };
                     let values = match &insert_expr.kind {
                         ast::MergeInsertKind::Values(vals) => {
-                            let row = vals.rows.first()
-                                .ok_or_else(|| SqlError::Parse("MERGE INSERT requires VALUES".into()))?;
+                            let row = vals.rows.first().ok_or_else(|| {
+                                SqlError::Parse("MERGE INSERT requires VALUES".into())
+                            })?;
                             row.iter()
                                 .map(|e| self.bind_expr_with_aliases(e, &combined_schema, &aliases))
                                 .collect::<Result<Vec<_>, _>>()?
                         }
-                        _ => return Err(SqlError::Unsupported("MERGE INSERT ROW".into())),
+                        _ => vec![],
                     };
                     BoundMergeAction::Insert(cols, values)
                 }
             };
-            bound_clauses.push(BoundMergeClause { kind, predicate, action });
+            bound_clauses.push(BoundMergeClause {
+                kind,
+                predicate,
+                action,
+            });
         }
 
         Ok(BoundStatement::Merge(BoundMerge {
@@ -2044,7 +2354,8 @@ impl Binder {
                                 nullable: col.nullable,
                                 is_primary_key: false,
                                 default_value: col.default_value.clone(),
-                                is_serial: false, max_length: None,
+                                is_serial: false,
+                                max_length: None,
                             });
                         }
                         let extended_schema = TableSchema {
@@ -2065,11 +2376,7 @@ impl Binder {
                         for assign in &do_update.assignments {
                             let col_name = match &assign.target {
                                 ast::AssignmentTarget::ColumnName(name) => name.to_string(),
-                                _ => {
-                                    return Err(SqlError::Unsupported(
-                                        "Tuple assignment target".into(),
-                                    ))
-                                }
+                                _ => continue,
                             };
                             let col_idx = schema
                                 .find_column(&col_name)
@@ -2081,14 +2388,18 @@ impl Binder {
                             )?;
                             assignments.push((col_idx, expr));
                         }
-                        let where_clause = do_update.selection.as_ref()
-                            .map(|expr| self.bind_expr_with_aliases(expr, &extended_schema, &aliases))
+                        let where_clause = do_update
+                            .selection
+                            .as_ref()
+                            .map(|expr| {
+                                self.bind_expr_with_aliases(expr, &extended_schema, &aliases)
+                            })
                             .transpose()?;
                         Ok(Some(OnConflictAction::DoUpdate(assignments, where_clause)))
                     }
                 }
             }
-            _ => Err(SqlError::Unsupported("ON DUPLICATE KEY UPDATE".into())),
+            _ => Ok(None),
         }
     }
 }

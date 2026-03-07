@@ -54,13 +54,13 @@ pub struct GcBudgetConfig {
 impl Default for GcBudgetConfig {
     fn default() -> Self {
         Self {
-            max_sweep_us: 5_000,         // 5ms max per sweep
-            max_keys_per_sweep: 10_000,  // 10k keys max per sweep
-            normal_interval_ms: 500,     // 500ms
-            pressure_interval_ms: 100,   // 100ms under pressure
-            critical_interval_ms: 20,    // 20ms under critical
-            latency_guard_p99_us: 0,     // disabled by default
-            latency_throttle_factor: 4,  // 4x slower when guarding
+            max_sweep_us: 5_000,        // 5ms max per sweep
+            max_keys_per_sweep: 10_000, // 10k keys max per sweep
+            normal_interval_ms: 500,    // 500ms
+            pressure_interval_ms: 100,  // 100ms under pressure
+            critical_interval_ms: 20,   // 20ms under critical
+            latency_guard_p99_us: 0,    // disabled by default
+            latency_throttle_factor: 4, // 4x slower when guarding
             histogram_buckets: vec![1, 2, 3, 5, 10, 20, 50, 100],
         }
     }
@@ -121,7 +121,11 @@ impl ChainLengthHistogram {
 
     /// Mean chain length.
     pub fn mean(&self) -> f64 {
-        if self.total == 0 { 0.0 } else { self.sum_lengths as f64 / self.total as f64 }
+        if self.total == 0 {
+            0.0
+        } else {
+            self.sum_lengths as f64 / self.total as f64
+        }
     }
 
     /// Reset all counters.
@@ -194,9 +198,7 @@ pub fn sweep_memtable_budgeted(
 
     for entry in &table.data {
         // Time budget check (every 64 keys to amortize syscall cost)
-        if processed.is_multiple_of(64) && processed > 0
-            && start.elapsed() >= max_time
-        {
+        if processed.is_multiple_of(64) && processed > 0 && start.elapsed() >= max_time {
             result.budget_exhausted = true;
             result.inner.keys_skipped += table.data.len() as u64 - processed;
             break;
@@ -281,7 +283,8 @@ impl GcBudgetMetrics {
     /// Record a budget sweep result.
     pub fn record(&self, result: &BudgetSweepResult) {
         self.total_sweeps.fetch_add(1, Ordering::Relaxed);
-        self.sum_sweep_us.fetch_add(result.inner.sweep_duration_us, Ordering::Relaxed);
+        self.sum_sweep_us
+            .fetch_add(result.inner.sweep_duration_us, Ordering::Relaxed);
         if result.budget_exhausted {
             self.time_budget_hits.fetch_add(1, Ordering::Relaxed);
         }
@@ -298,7 +301,12 @@ impl GcBudgetMetrics {
         let dur = result.inner.sweep_duration_us;
         let mut current = self.max_sweep_us.load(Ordering::Relaxed);
         while dur > current {
-            match self.max_sweep_us.compare_exchange_weak(current, dur, Ordering::Relaxed, Ordering::Relaxed) {
+            match self.max_sweep_us.compare_exchange_weak(
+                current,
+                dur,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
                 Ok(_) => break,
                 Err(actual) => current = actual,
             }
@@ -315,7 +323,11 @@ impl GcBudgetMetrics {
             latency_throttled: self.latency_throttled.load(Ordering::Relaxed),
             completed_in_budget: self.completed_in_budget.load(Ordering::Relaxed),
             max_sweep_us: self.max_sweep_us.load(Ordering::Relaxed),
-            mean_sweep_us: if total > 0 { sum as f64 / total as f64 } else { 0.0 },
+            mean_sweep_us: if total > 0 {
+                sum as f64 / total as f64
+            } else {
+                0.0
+            },
             total_sweeps: total,
         }
     }
@@ -342,8 +354,11 @@ pub struct GcBudgetSnapshot {
 impl GcBudgetSnapshot {
     /// Fraction of sweeps that completed within budget.
     pub fn in_budget_rate(&self) -> f64 {
-        if self.total_sweeps == 0 { 1.0 }
-        else { self.completed_in_budget as f64 / self.total_sweeps as f64 }
+        if self.total_sweeps == 0 {
+            1.0
+        } else {
+            self.completed_in_budget as f64 / self.total_sweeps as f64
+        }
     }
 }
 
@@ -480,8 +495,8 @@ mod tests {
     #[test]
     fn test_histogram_boundary_values() {
         let mut h = ChainLengthHistogram::new(&[1, 5, 10]);
-        h.observe(1);  // exactly on boundary → bucket 0
-        h.observe(5);  // exactly on boundary → bucket 1
+        h.observe(1); // exactly on boundary → bucket 0
+        h.observe(5); // exactly on boundary → bucket 1
         h.observe(10); // exactly on boundary → bucket 2
         assert_eq!(h.counts[0], 1);
         assert_eq!(h.counts[1], 1);

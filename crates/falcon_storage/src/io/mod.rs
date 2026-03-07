@@ -14,13 +14,13 @@
 pub mod async_file;
 pub mod async_wal_writer;
 pub mod epoch_fence;
+#[cfg(all(target_os = "linux", feature = "io_uring"))]
+pub mod linux_io_uring;
+#[cfg(target_os = "linux")]
+pub mod linux_platform;
 pub mod sync_file;
 #[cfg(target_os = "windows")]
 pub mod windows_iocp;
-#[cfg(target_os = "linux")]
-pub mod linux_platform;
-#[cfg(all(target_os = "linux", feature = "io_uring"))]
-pub mod linux_io_uring;
 
 pub mod snapshot_stream;
 
@@ -40,7 +40,8 @@ pub fn create_async_file(
     #[cfg(target_os = "windows")]
     {
         if config.async_io_enabled {
-            return windows_iocp::IocpFile::open(path, config).map(|f| Box::new(f) as Box<dyn AsyncFile>);
+            return windows_iocp::IocpFile::open(path, config)
+                .map(|f| Box::new(f) as Box<dyn AsyncFile>);
         }
     }
     #[cfg(all(target_os = "linux", feature = "io_uring"))]

@@ -65,7 +65,9 @@ pub struct FalconConfig {
     pub resource_isolation: ResourceIsolationSectionConfig,
 }
 
-const fn default_config_version() -> u32 { CURRENT_CONFIG_VERSION }
+const fn default_config_version() -> u32 {
+    CURRENT_CONFIG_VERSION
+}
 
 /// Cluster lifecycle configuration section in falcon.toml.
 ///
@@ -106,13 +108,27 @@ pub struct ClusterSectionConfig {
     pub peers: Vec<String>,
 }
 
-const fn default_heartbeat_interval_ms() -> u64 { 2000 }
-const fn default_suspect_threshold_ms() -> u64 { 5000 }
-const fn default_offline_threshold_ms() -> u64 { 15000 }
-const fn default_config_sync_interval_ms() -> u64 { 10000 }
-const fn default_slo_eval_interval_ms() -> u64 { 30000 }
-const fn default_max_shards() -> u32 { 64 }
-const fn default_max_consecutive_misses() -> u32 { 5 }
+const fn default_heartbeat_interval_ms() -> u64 {
+    2000
+}
+const fn default_suspect_threshold_ms() -> u64 {
+    5000
+}
+const fn default_offline_threshold_ms() -> u64 {
+    15000
+}
+const fn default_config_sync_interval_ms() -> u64 {
+    10000
+}
+const fn default_slo_eval_interval_ms() -> u64 {
+    30000
+}
+const fn default_max_shards() -> u32 {
+    64
+}
+const fn default_max_consecutive_misses() -> u32 {
+    5
+}
 
 impl Default for ClusterSectionConfig {
     fn default() -> Self {
@@ -176,11 +192,21 @@ pub struct RebalanceSectionConfig {
     pub start_paused: bool,
 }
 
-const fn default_rebalance_check_interval_ms() -> u64 { 30_000 }
-fn default_rebalance_imbalance_threshold() -> f64 { 1.25 }
-const fn default_rebalance_batch_size() -> usize { 512 }
-const fn default_rebalance_min_donor_rows() -> u64 { 100 }
-const fn default_rebalance_cooldown_ms() -> u64 { 5_000 }
+const fn default_rebalance_check_interval_ms() -> u64 {
+    30_000
+}
+fn default_rebalance_imbalance_threshold() -> f64 {
+    1.25
+}
+const fn default_rebalance_batch_size() -> usize {
+    512
+}
+const fn default_rebalance_min_donor_rows() -> u64 {
+    100
+}
+const fn default_rebalance_cooldown_ms() -> u64 {
+    5_000
+}
 
 impl Default for RebalanceSectionConfig {
     fn default() -> Self {
@@ -228,15 +254,25 @@ pub struct CdcConfig {
     /// Oldest events are evicted when the buffer is full.
     #[serde(default = "default_cdc_buffer_size")]
     pub buffer_size: usize,
+    /// How often (in CDC events) to persist slot state to disk for crash recovery.
+    /// 0 = disable persistence (default: 1000).
+    #[serde(default = "default_cdc_persist_every")]
+    pub persist_every: u64,
 }
 
-const fn default_cdc_buffer_size() -> usize { 100_000 }
+const fn default_cdc_buffer_size() -> usize {
+    100_000
+}
+
+const fn default_cdc_persist_every() -> u64 {
+    1000
+}
 
 /// Point-in-Time Recovery (PITR) configuration section in falcon.toml.
 ///
 /// PITR enables recovery to any point in time by archiving WAL segments
 /// to a local directory. Combine with base backups for full data protection.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PitrConfig {
     /// Enable WAL archiving for PITR (default: false).
     #[serde(default)]
@@ -251,22 +287,12 @@ pub struct PitrConfig {
     pub retention_hours: u64,
 }
 
-impl Default for PitrConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            archive_dir: String::new(),
-            retention_hours: 0,
-        }
-    }
-}
-
 /// Multi-tenant isolation and metering configuration section in falcon.toml.
 ///
 /// When enabled, tenant quota enforcement (QPS, memory, concurrent txns) and
 /// per-tenant resource metering are active. Tenants are created via SQL:
 /// `CREATE TENANT name [MAX_QPS n] [MAX_STORAGE_BYTES n]`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MultiTenantConfig {
     /// Enable multi-tenant isolation (default: false).
     /// When false, all sessions use SYSTEM_TENANT_ID with unlimited quotas.
@@ -312,7 +338,9 @@ pub struct TdeConfig {
     pub encrypt_data: bool,
 }
 
-fn default_tde_key_env_var() -> String { "FALCON_TDE_KEY".into() }
+fn default_tde_key_env_var() -> String {
+    "FALCON_TDE_KEY".into()
+}
 
 impl Default for TdeConfig {
     fn default() -> Self {
@@ -325,24 +353,12 @@ impl Default for TdeConfig {
     }
 }
 
-impl Default for MultiTenantConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            metering_enabled: false,
-            default_max_qps: 0,
-            default_max_concurrent_txns: 0,
-            default_max_memory_bytes: 0,
-            default_max_storage_bytes: 0,
-        }
-    }
-}
-
 impl Default for CdcConfig {
     fn default() -> Self {
         Self {
             enabled: true,
             buffer_size: default_cdc_buffer_size(),
+            persist_every: default_cdc_persist_every(),
         }
     }
 }
@@ -367,10 +383,18 @@ pub struct ResourceIsolationSectionConfig {
     pub fg_pressure_threshold: u64,
 }
 
-const fn default_ri_io_rate() -> u64 { 128 * 1024 * 1024 }
-const fn default_ri_io_burst() -> u64 { 64 * 1024 * 1024 }
-const fn default_ri_bg_threads() -> u64 { 2 }
-const fn default_ri_fg_threshold() -> u64 { 100 }
+const fn default_ri_io_rate() -> u64 {
+    128 * 1024 * 1024
+}
+const fn default_ri_io_burst() -> u64 {
+    64 * 1024 * 1024
+}
+const fn default_ri_bg_threads() -> u64 {
+    2
+}
+const fn default_ri_fg_threshold() -> u64 {
+    100
+}
 
 impl Default for ResourceIsolationSectionConfig {
     fn default() -> Self {
@@ -391,14 +415,12 @@ impl Default for ResourceIsolationSectionConfig {
 /// violations are logged as WARN but startup proceeds.
 ///
 /// This is FalconDB's "no foot-guns in production" guard rail.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProductionSafetyConfig {
     /// Enable production safety enforcement. Default: false (warn only).
     #[serde(default)]
     pub enforce: bool,
 }
-
 
 /// A single production safety check result.
 #[derive(Debug, Clone)]
@@ -422,7 +444,8 @@ pub fn validate_production_safety(config: &FalconConfig) -> Vec<SafetyViolation>
             id: "PS-1",
             message: "WAL is disabled (storage.wal_enabled=false). \
                       Data will not survive crashes. \
-                      The Deterministic Commit Guarantee (DCG) is void.".into(),
+                      The Deterministic Commit Guarantee (DCG) is void."
+                .into(),
             severity: "CRITICAL",
         });
     }
@@ -433,7 +456,8 @@ pub fn validate_production_safety(config: &FalconConfig) -> Vec<SafetyViolation>
             id: "PS-2",
             message: "WAL sync_mode is 'none'. \
                       Committed data may be lost on crash. \
-                      Set wal.sync_mode = 'fsync' or 'fdatasync'.".into(),
+                      Set wal.sync_mode = 'fsync' or 'fdatasync'."
+                .into(),
             severity: "CRITICAL",
         });
     }
@@ -444,7 +468,8 @@ pub fn validate_production_safety(config: &FalconConfig) -> Vec<SafetyViolation>
             id: "PS-3",
             message: "Authentication method is 'trust' (no password required). \
                       Any client can connect and modify data. \
-                      Set server.auth.method = 'scram-sha-256'.".into(),
+                      Set server.auth.method = 'scram-sha-256'."
+                .into(),
             severity: "CRITICAL",
         });
     }
@@ -455,7 +480,8 @@ pub fn validate_production_safety(config: &FalconConfig) -> Vec<SafetyViolation>
             id: "PS-4",
             message: "No memory hard limit configured (memory.shard_hard_limit_bytes=0). \
                       Unbounded memory usage may cause OOM kill. \
-                      Set a hard limit appropriate for your hardware.".into(),
+                      Set a hard limit appropriate for your hardware."
+                .into(),
             severity: "WARN",
         });
     }
@@ -466,7 +492,8 @@ pub fn validate_production_safety(config: &FalconConfig) -> Vec<SafetyViolation>
             id: "PS-5",
             message: "No statement timeout configured (server.statement_timeout_ms=0). \
                       Runaway queries may hold locks indefinitely. \
-                      Set a timeout (e.g. 30000 for 30s).".into(),
+                      Set a timeout (e.g. 30000 for 30s)."
+                .into(),
             severity: "WARN",
         });
     }
@@ -477,7 +504,8 @@ pub fn validate_production_safety(config: &FalconConfig) -> Vec<SafetyViolation>
             id: "PS-6",
             message: "TLS is not configured. \
                       Client connections are unencrypted. \
-                      Set server.tls.cert_path and server.tls.key_path.".into(),
+                      Set server.tls.cert_path and server.tls.key_path."
+                .into(),
             severity: "WARN",
         });
     }
@@ -488,7 +516,8 @@ pub fn validate_production_safety(config: &FalconConfig) -> Vec<SafetyViolation>
             id: "PS-7",
             message: "Shutdown drain timeout is 0. \
                       Active connections will be killed immediately on shutdown. \
-                      Set server.shutdown_drain_timeout_secs >= 10.".into(),
+                      Set server.shutdown_drain_timeout_secs >= 10."
+                .into(),
             severity: "WARN",
         });
     }
@@ -513,9 +542,15 @@ pub struct GcSectionConfig {
     pub min_chain_length: usize,
 }
 
-const fn default_true() -> bool { true }
-const fn default_gc_interval() -> u64 { 1000 }
-const fn default_min_chain_length() -> usize { 2 }
+const fn default_true() -> bool {
+    true
+}
+const fn default_gc_interval() -> u64 {
+    1000
+}
+const fn default_min_chain_length() -> usize {
+    2
+}
 
 /// Logging configuration section in falcon.toml.
 ///
@@ -567,11 +602,21 @@ pub struct LoggingConfig {
     pub slow_query_log: String,
 }
 
-fn default_log_level() -> String { "info".to_owned() }
-fn default_log_format() -> String { "text".to_owned() }
-fn default_log_rotation() -> String { "daily".to_owned() }
-const fn default_log_max_size_mb() -> u64 { 100 }
-const fn default_log_max_files() -> usize { 7 }
+fn default_log_level() -> String {
+    "info".to_owned()
+}
+fn default_log_format() -> String {
+    "text".to_owned()
+}
+fn default_log_rotation() -> String {
+    "daily".to_owned()
+}
+const fn default_log_max_size_mb() -> u64 {
+    100
+}
+const fn default_log_max_files() -> usize {
+    7
+}
 
 impl Default for LoggingConfig {
     fn default() -> Self {
@@ -715,17 +760,39 @@ const fn default_slow_txn_threshold_us() -> u64 {
     100_000 // 100ms
 }
 
-fn default_wal_backend() -> String { "file".to_owned() }
-const fn default_group_commit_window_us() -> u64 { 200 }
-fn default_wal_enabled() -> bool { true }
-fn default_data_dir() -> String { "./falcon_data".to_owned() }
-fn default_group_commit() -> bool { true }
-fn default_flush_interval_us() -> u64 { 1000 }
-fn default_wal_sync_mode() -> String { "fdatasync".to_owned() }
-fn default_segment_size_bytes() -> u64 { 64 * 1024 * 1024 }
-fn default_compression_profile() -> String { "balanced".to_owned() }
-fn default_wal_mode() -> String { "auto".to_owned() }
-fn default_storage_default_engine() -> String { "rocksdb".to_owned() }
+fn default_wal_backend() -> String {
+    "file".to_owned()
+}
+const fn default_group_commit_window_us() -> u64 {
+    200
+}
+fn default_wal_enabled() -> bool {
+    true
+}
+fn default_data_dir() -> String {
+    "./falcon_data".to_owned()
+}
+fn default_group_commit() -> bool {
+    true
+}
+fn default_flush_interval_us() -> u64 {
+    1000
+}
+fn default_wal_sync_mode() -> String {
+    "fdatasync".to_owned()
+}
+fn default_segment_size_bytes() -> u64 {
+    64 * 1024 * 1024
+}
+fn default_compression_profile() -> String {
+    "balanced".to_owned()
+}
+fn default_wal_mode() -> String {
+    "auto".to_owned()
+}
+fn default_storage_default_engine() -> String {
+    "rocksdb".to_owned()
+}
 
 impl Default for AuthConfig {
     fn default() -> Self {
@@ -841,11 +908,21 @@ pub struct SpillConfig {
     pub recursive_cte_max_rows: usize,
 }
 
-const fn default_spill_memory_rows_threshold() -> usize { 500_000 }
-const fn default_spill_merge_fan_in() -> usize { 16 }
-const fn default_hash_agg_group_limit() -> usize { 1_000_000 }
-fn default_pressure_spill_trigger() -> String { "soft".to_owned() }
-const fn default_recursive_cte_max_rows() -> usize { 1_000_000 }
+const fn default_spill_memory_rows_threshold() -> usize {
+    500_000
+}
+const fn default_spill_merge_fan_in() -> usize {
+    16
+}
+const fn default_hash_agg_group_limit() -> usize {
+    1_000_000
+}
+fn default_pressure_spill_trigger() -> String {
+    "soft".to_owned()
+}
+const fn default_recursive_cte_max_rows() -> usize {
+    1_000_000
+}
 
 impl Default for SpillConfig {
     fn default() -> Self {
@@ -981,13 +1058,27 @@ pub struct RaftConfig {
     pub election_timeout_max_ms: u64,
 }
 
-fn default_raft_node_id() -> u64 { 1 }
-fn default_raft_node_ids() -> Vec<u64> { vec![1] }
-fn default_raft_listen_addr() -> String { "0.0.0.0:50052".to_owned() }
-fn default_raft_poll_interval_ms() -> u64 { 200 }
-fn default_raft_heartbeat_ms() -> u64 { 50 }
-fn default_raft_election_min_ms() -> u64 { 150 }
-fn default_raft_election_max_ms() -> u64 { 300 }
+fn default_raft_node_id() -> u64 {
+    1
+}
+fn default_raft_node_ids() -> Vec<u64> {
+    vec![1]
+}
+fn default_raft_listen_addr() -> String {
+    "0.0.0.0:50052".to_owned()
+}
+fn default_raft_poll_interval_ms() -> u64 {
+    200
+}
+fn default_raft_heartbeat_ms() -> u64 {
+    50
+}
+fn default_raft_election_min_ms() -> u64 {
+    150
+}
+fn default_raft_election_max_ms() -> u64 {
+    300
+}
 
 impl Default for RaftConfig {
     fn default() -> Self {
@@ -1010,9 +1101,7 @@ impl RaftConfig {
         self.peers
             .iter()
             .filter_map(|entry| {
-                let mut parts = entry.splitn(2, '=');
-                let id_str = parts.next()?;
-                let addr = parts.next()?;
+                let (id_str, addr) = entry.split_once('=')?;
                 let id: u64 = id_str.trim().parse().ok()?;
                 Some((id, addr.trim().to_owned()))
             })
@@ -1144,8 +1233,8 @@ impl Default for UstmSectionConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            hot_capacity_bytes: 512 * 1024 * 1024,   // 512 MB
-            warm_capacity_bytes: 256 * 1024 * 1024,   // 256 MB
+            hot_capacity_bytes: 512 * 1024 * 1024,  // 512 MB
+            warm_capacity_bytes: 256 * 1024 * 1024, // 256 MB
             lirs_lir_capacity: 4096,
             lirs_hir_capacity: 1024,
             background_iops_limit: 500,
@@ -1244,9 +1333,15 @@ pub struct GatewayConfig {
     pub topology_staleness_secs: u64,
 }
 
-fn default_gateway_role() -> String { "smart_gateway".to_owned() }
-const fn default_forward_timeout_ms() -> u64 { 5000 }
-const fn default_topology_staleness_secs() -> u64 { 30 }
+fn default_gateway_role() -> String {
+    "smart_gateway".to_owned()
+}
+const fn default_forward_timeout_ms() -> u64 {
+    5000
+}
+const fn default_topology_staleness_secs() -> u64 {
+    30
+}
 
 impl Default for GatewayConfig {
     fn default() -> Self {

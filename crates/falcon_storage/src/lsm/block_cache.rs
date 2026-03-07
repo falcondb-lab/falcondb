@@ -3,7 +3,7 @@
 //! 16 shards keyed by (sst_id ^ offset). Each shard is a HashMap with
 //! capacity-based eviction. O(1) insert/lookup per shard.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
@@ -23,17 +23,34 @@ pub struct CachedBlock {
 
 struct CacheShard {
     map: HashMap<BlockKey, CachedBlock>,
+    lru_order: VecDeque<BlockKey>, // front = most recent, back = least recent
     current_bytes: usize,
     capacity_bytes: usize,
 }
 
 impl CacheShard {
     fn new(capacity: usize) -> Self {
-        Self { map: HashMap::new(), current_bytes: 0, capacity_bytes: capacity }
+        Self {
+            map: HashMap::new(),
+            lru_order: VecDeque::new(),
+            current_bytes: 0,
+            capacity_bytes: capacity,
+        }
+    }
+
+    fn touch(&mut self, key: &BlockKey) {
+        if let Some(pos) = self.lru_order.iter().position(|k| k == key) {
+            self.lru_order.remove(pos);
+        }
+        self.lru_order.push_front(*key);
     }
 
     fn get(&mut self, key: &BlockKey) -> Option<CachedBlock> {
-        self.map.get(key).cloned()
+        let block = self.map.get(key).cloned();
+        if block.is_some() {
+            self.touch(key);
+        }
+        block
     }
 
     fn insert(&mut self, key: BlockKey, block: CachedBlock) -> (bool, u32) {
@@ -47,14 +64,14 @@ impl CacheShard {
             self.current_bytes -= old.data.len();
             self.current_bytes += block_size;
             *old = block;
+            self.touch(&key);
             return (false, 0);
         }
 
-        // Evict until room
+        // Evict LRU entries from back until room
         let mut evicted = 0u32;
         while self.current_bytes + block_size > self.capacity_bytes {
-            // Remove an arbitrary entry (HashMap iteration order)
-            let evict_key = match self.map.keys().next().copied() {
+            let evict_key = match self.lru_order.pop_back() {
                 Some(k) => k,
                 None => break,
             };
@@ -65,7 +82,8 @@ impl CacheShard {
         }
 
         self.current_bytes += block_size;
-        self.map.insert(key, block);
+        self.map.insert(key, block.clone());
+        self.lru_order.push_front(key);
         (true, evicted)
     }
 }
@@ -155,7 +173,11 @@ impl BlockCache {
     pub fn hit_rate(&self) -> f64 {
         let h = self.hits() as f64;
         let m = self.misses() as f64;
-        if h + m == 0.0 { 0.0 } else { h / (h + m) }
+        if h + m == 0.0 {
+            0.0
+        } else {
+            h / (h + m)
+        }
     }
 
     pub fn snapshot(&self) -> BlockCacheSnapshot {
@@ -191,8 +213,13 @@ mod tests {
     #[test]
     fn test_cache_basic_insert_get() {
         let cache = BlockCache::new(4096);
-        let key = BlockKey { sst_id: 1, offset: 0 };
-        let block = CachedBlock { data: vec![1, 2, 3, 4] };
+        let key = BlockKey {
+            sst_id: 1,
+            offset: 0,
+        };
+        let block = CachedBlock {
+            data: vec![1, 2, 3, 4],
+        };
 
         cache.insert(key, block.clone());
         let result = cache.get(&key);
@@ -204,7 +231,10 @@ mod tests {
     #[test]
     fn test_cache_miss() {
         let cache = BlockCache::new(4096);
-        let key = BlockKey { sst_id: 99, offset: 0 };
+        let key = BlockKey {
+            sst_id: 99,
+            offset: 0,
+        };
         assert!(cache.get(&key).is_none());
         assert_eq!(cache.misses(), 1);
     }
@@ -214,8 +244,13 @@ mod tests {
         // 1600 bytes / 16 shards = 100 per shard, fits ~1-2 blocks of 50 bytes
         let cache = BlockCache::new(1600);
         for i in 0..100u64 {
-            let key = BlockKey { sst_id: i, offset: 0 };
-            let block = CachedBlock { data: vec![0u8; 50] };
+            let key = BlockKey {
+                sst_id: i,
+                offset: 0,
+            };
+            let block = CachedBlock {
+                data: vec![0u8; 50],
+            };
             cache.insert(key, block);
         }
         assert!(cache.evictions() > 0);
@@ -225,12 +260,18 @@ mod tests {
     #[test]
     fn test_cache_hit_rate() {
         let cache = BlockCache::new(4096);
-        let key = BlockKey { sst_id: 1, offset: 0 };
+        let key = BlockKey {
+            sst_id: 1,
+            offset: 0,
+        };
         cache.insert(key, CachedBlock { data: vec![1] });
 
         cache.get(&key); // hit
         cache.get(&key); // hit
-        cache.get(&BlockKey { sst_id: 99, offset: 0 }); // miss
+        cache.get(&BlockKey {
+            sst_id: 99,
+            offset: 0,
+        }); // miss
 
         assert_eq!(cache.hits(), 2);
         assert_eq!(cache.misses(), 1);
@@ -240,8 +281,13 @@ mod tests {
     #[test]
     fn test_cache_oversized_block_rejected() {
         let cache = BlockCache::new(100);
-        let key = BlockKey { sst_id: 1, offset: 0 };
-        let block = CachedBlock { data: vec![0u8; 200] };
+        let key = BlockKey {
+            sst_id: 1,
+            offset: 0,
+        };
+        let block = CachedBlock {
+            data: vec![0u8; 200],
+        };
         cache.insert(key, block);
         assert!(cache.is_empty());
     }

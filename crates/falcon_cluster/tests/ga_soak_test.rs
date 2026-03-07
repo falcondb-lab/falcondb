@@ -9,8 +9,8 @@
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
-use falcon_cluster::ga_hardening::*;
 use falcon_cluster::cost_capacity::*;
+use falcon_cluster::ga_hardening::*;
 use falcon_common::types::{NodeId, TableId};
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -31,8 +31,15 @@ fn test_crash_recovery_deterministic_startup() {
     coord.record_startup(
         ComponentType::DataNode,
         vec![
-            RecoveryAction::WalReplay { records_replayed: 5000, from_lsn: 100, to_lsn: 5100 },
-            RecoveryAction::InDoubtTxnResolution { committed: 3, aborted: 2 },
+            RecoveryAction::WalReplay {
+                records_replayed: 5000,
+                from_lsn: 100,
+                to_lsn: 5100,
+            },
+            RecoveryAction::InDoubtTxnResolution {
+                committed: 3,
+                aborted: 2,
+            },
             RecoveryAction::IndexRebuild { indexes_rebuilt: 5 },
         ],
         ShutdownType::Crash,
@@ -42,7 +49,9 @@ fn test_crash_recovery_deterministic_startup() {
     // Simulate startup with checkpoint on gateway
     coord.record_startup(
         ComponentType::Gateway,
-        vec![RecoveryAction::CheckpointRestore { checkpoint_lsn: 5000 }],
+        vec![RecoveryAction::CheckpointRestore {
+            checkpoint_lsn: 5000,
+        }],
         ShutdownType::Clean,
         100,
     );
@@ -103,7 +112,11 @@ fn test_multi_crash_recovery_cycles() {
                 from_lsn: cycle * 1000,
                 to_lsn: (cycle + 1) * 1000,
             }],
-            if cycle % 2 == 0 { ShutdownType::Crash } else { ShutdownType::Clean },
+            if cycle % 2 == 0 {
+                ShutdownType::Crash
+            } else {
+                ShutdownType::Clean
+            },
             200 + cycle * 50,
         );
     }
@@ -142,10 +155,22 @@ fn test_config_staged_rollout_full_cycle() {
 
     // Stage → Canary → RollingOut → Applied
     let v = mgr.stage_change("replication_factor", "3", "ops-bot");
-    assert_eq!(mgr.key_history("replication_factor").last().unwrap().rollout_state, RolloutState::Staged);
+    assert_eq!(
+        mgr.key_history("replication_factor")
+            .last()
+            .unwrap()
+            .rollout_state,
+        RolloutState::Staged
+    );
 
     mgr.advance_rollout("replication_factor", v, RolloutState::Canary);
-    assert_eq!(mgr.key_history("replication_factor").last().unwrap().rollout_state, RolloutState::Canary);
+    assert_eq!(
+        mgr.key_history("replication_factor")
+            .last()
+            .unwrap()
+            .rollout_state,
+        RolloutState::Canary
+    );
 
     mgr.advance_rollout("replication_factor", v, RolloutState::RollingOut);
     mgr.advance_rollout("replication_factor", v, RolloutState::Applied);
@@ -203,16 +228,21 @@ fn test_72h_stable_resources_no_leak() {
         // Slight jitter but stable
         let jitter = if hour % 3 == 0 { 1 } else { 0 };
         vals.insert(LeakResourceType::FileDescriptor, 120 + jitter);
-        vals.insert(LeakResourceType::HotMemoryBytes, 500_000_000 + (jitter * 1000));
+        vals.insert(
+            LeakResourceType::HotMemoryBytes,
+            500_000_000 + (jitter * 1000),
+        );
         vals.insert(LeakResourceType::Thread, 24 + jitter);
         detector.record_snapshot_at(vals, base_ts + hour * 3600);
     }
 
     let results = detector.analyze_all();
     for result in &results {
-        assert!(!result.is_leaking,
+        assert!(
+            !result.is_leaking,
             "Resource {:?} falsely detected as leaking (rate={:.2}/h, confidence={:.2})",
-            result.resource, result.growth_rate_per_hour, result.confidence);
+            result.resource, result.growth_rate_per_hour, result.confidence
+        );
     }
 }
 
@@ -245,7 +275,10 @@ fn test_memory_leak_detected_but_fd_stable() {
     for hour in 0..24u64 {
         let mut vals = HashMap::new();
         vals.insert(LeakResourceType::FileDescriptor, 50i64); // stable
-        vals.insert(LeakResourceType::HotMemoryBytes, 100_000_000 + (hour as i64) * 2_000_000); // leaking 2MB/h
+        vals.insert(
+            LeakResourceType::HotMemoryBytes,
+            100_000_000 + (hour as i64) * 2_000_000,
+        ); // leaking 2MB/h
         detector.record_snapshot_at(vals, base_ts + hour * 3600);
     }
 
@@ -310,7 +343,11 @@ fn test_guardrail_under_pressure_p99_stable() {
 
     // Normal load: 99% of ops under 5ms, 1% at 8ms
     for i in 0..10_000u64 {
-        let lat = if i % 100 == 0 { 8_000 } else { 2_000 + (i % 3_000) };
+        let lat = if i % 100 == 0 {
+            8_000
+        } else {
+            2_000 + (i % 3_000)
+        };
         engine.record(GuardedPath::TxnCommit, lat);
     }
 
@@ -350,8 +387,12 @@ fn test_bg_tasks_dont_starve_foreground() {
     isolator.set_foreground_load(0.2);
     for (task, _, _) in &tasks {
         let decision = isolator.request(*task, 100_000);
-        assert_eq!(decision, ThrottleDecision::Allow,
-            "{} should be allowed at low fg load", task);
+        assert_eq!(
+            decision,
+            ThrottleDecision::Allow,
+            "{} should be allowed at low fg load",
+            task
+        );
     }
 
     // High foreground load — background throttled
@@ -458,14 +499,21 @@ fn test_audit_trace_correlation_across_components() {
     let components = vec!["gateway", "executor", "storage", "replication"];
     for (i, comp) in components.iter().enumerate() {
         log.record(UnifiedAuditEvent {
-            id: 0, timestamp: 1000 + i as u64,
-            trace_id: trace.into(), span_id: format!("span-{}", i),
-            category: "DATA".into(), severity: "INFO".into(),
-            actor: "alice".into(), source_ip: "10.0.0.1".into(),
-            action: "SELECT".into(), resource: "users".into(),
-            outcome: "OK".into(), details: "".into(),
+            id: 0,
+            timestamp: 1000 + i as u64,
+            trace_id: trace.into(),
+            span_id: format!("span-{}", i),
+            category: "DATA".into(),
+            severity: "INFO".into(),
+            actor: "alice".into(),
+            source_ip: "10.0.0.1".into(),
+            action: "SELECT".into(),
+            resource: "users".into(),
+            outcome: "OK".into(),
+            details: "".into(),
             component: comp.to_string(),
-            node_id: Some(NodeId(1)), shard_id: Some(0),
+            node_id: Some(NodeId(1)),
+            shard_id: Some(0),
             duration_us: Some(100 * (i as u64 + 1)),
         });
     }
@@ -482,14 +530,22 @@ fn test_audit_trace_correlation_across_components() {
 fn test_audit_siem_export_format() {
     let log = HardenedAuditLog::new(1000);
     log.record(UnifiedAuditEvent {
-        id: 0, timestamp: 1718000000,
-        trace_id: "tr-1".into(), span_id: "sp-1".into(),
-        category: "AUTH".into(), severity: "WARN".into(),
-        actor: "bob".into(), source_ip: "192.168.1.1".into(),
-        action: "LOGIN_FAILED".into(), resource: "system".into(),
-        outcome: "DENIED".into(), details: "bad password".into(),
+        id: 0,
+        timestamp: 1718000000,
+        trace_id: "tr-1".into(),
+        span_id: "sp-1".into(),
+        category: "AUTH".into(),
+        severity: "WARN".into(),
+        actor: "bob".into(),
+        source_ip: "192.168.1.1".into(),
+        action: "LOGIN_FAILED".into(),
+        resource: "system".into(),
+        outcome: "DENIED".into(),
+        details: "bad password".into(),
         component: "gateway".into(),
-        node_id: None, shard_id: None, duration_us: Some(50),
+        node_id: None,
+        shard_id: None,
+        duration_us: Some(50),
     });
 
     let lines = log.export_jsonl(1);
@@ -523,40 +579,72 @@ fn test_postmortem_full_incident_replay() {
 
     // Decision points
     gen.record_decision_at(
-        "LEADER_ELECTION", "Node 2 heartbeat timeout",
-        "heartbeat_gap_ms", 5000.0, 3000.0,
+        "LEADER_ELECTION",
+        "Node 2 heartbeat timeout",
+        "heartbeat_gap_ms",
+        5000.0,
+        3000.0,
         "initiated leader election for shard 0",
         1002,
     );
     gen.record_decision_at(
-        "BACKPRESSURE", "p99 exceeded guardrail",
-        "latency_p99_ms", 70.0, 20.0,
+        "BACKPRESSURE",
+        "p99 exceeded guardrail",
+        "latency_p99_ms",
+        70.0,
+        20.0,
         "activated backpressure on gateway",
         1010,
     );
     gen.record_decision_at(
-        "REBALANCE", "Node 2 marked offline",
-        "node_count", 2.0, 3.0,
+        "REBALANCE",
+        "Node 2 marked offline",
+        "node_count",
+        2.0,
+        3.0,
         "scheduled shard migration from node 2",
         1015,
     );
 
     let timeline = vec![
-        PostmortemTimelineEntry { timestamp: 1000, event_type: "NODE_FAILURE".into(),
-            description: "Node 2 process crashed (SIGKILL)".into(), severity: "CRITICAL".into() },
-        PostmortemTimelineEntry { timestamp: 1002, event_type: "LEADER_ELECTION".into(),
-            description: "Shard 0 leader transferred to node 3".into(), severity: "HIGH".into() },
-        PostmortemTimelineEntry { timestamp: 1005, event_type: "CLIENT_ERRORS".into(),
-            description: "15 client connections reset".into(), severity: "HIGH".into() },
-        PostmortemTimelineEntry { timestamp: 1010, event_type: "BACKPRESSURE".into(),
-            description: "Gateway backpressure activated".into(), severity: "MEDIUM".into() },
-        PostmortemTimelineEntry { timestamp: 1020, event_type: "RECOVERY".into(),
-            description: "Latency returning to normal".into(), severity: "INFO".into() },
+        PostmortemTimelineEntry {
+            timestamp: 1000,
+            event_type: "NODE_FAILURE".into(),
+            description: "Node 2 process crashed (SIGKILL)".into(),
+            severity: "CRITICAL".into(),
+        },
+        PostmortemTimelineEntry {
+            timestamp: 1002,
+            event_type: "LEADER_ELECTION".into(),
+            description: "Shard 0 leader transferred to node 3".into(),
+            severity: "HIGH".into(),
+        },
+        PostmortemTimelineEntry {
+            timestamp: 1005,
+            event_type: "CLIENT_ERRORS".into(),
+            description: "15 client connections reset".into(),
+            severity: "HIGH".into(),
+        },
+        PostmortemTimelineEntry {
+            timestamp: 1010,
+            event_type: "BACKPRESSURE".into(),
+            description: "Gateway backpressure activated".into(),
+            severity: "MEDIUM".into(),
+        },
+        PostmortemTimelineEntry {
+            timestamp: 1020,
+            event_type: "RECOVERY".into(),
+            description: "Latency returning to normal".into(),
+            severity: "INFO".into(),
+        },
     ];
 
     let report = gen.generate_report(
-        42, "Node 2 Crash — Production Incident",
-        1000, 1030, timeline,
+        42,
+        "Node 2 Crash — Production Incident",
+        1000,
+        1030,
+        timeline,
     );
 
     assert_eq!(report.incident_id, 42);
@@ -583,7 +671,8 @@ fn test_change_impact_all_scenarios() {
 
     // Compression increase: low risk
     let est = preview.preview(&ProposedChange::IncreaseCompression {
-        from: "balanced".into(), to: "aggressive".into(),
+        from: "balanced".into(),
+        to: "aggressive".into(),
     });
     assert_eq!(est.risk, ImpactRisk::Low);
     assert!(est.guardrail_ok);
@@ -703,7 +792,11 @@ fn test_full_soak_7day_simulation() {
             assert!(coord.any_failed());
             coord.record_startup(
                 ComponentType::DataNode,
-                vec![RecoveryAction::WalReplay { records_replayed: 500, from_lsn: 1000, to_lsn: 1500 }],
+                vec![RecoveryAction::WalReplay {
+                    records_replayed: 500,
+                    from_lsn: 1000,
+                    to_lsn: 1500,
+                }],
                 ShutdownType::Crash,
                 300,
             );
@@ -725,13 +818,18 @@ fn test_full_soak_7day_simulation() {
     // No resource leaks
     let leak_results = leak_detector.analyze_all();
     for r in &leak_results {
-        assert!(!r.is_leaking,
+        assert!(
+            !r.is_leaking,
             "SOAK FAIL: Resource {:?} leaking (rate={:.2}/h, confidence={:.2})",
-            r.resource, r.growth_rate_per_hour, r.confidence);
+            r.resource, r.growth_rate_per_hour, r.confidence
+        );
     }
 
     // Latency guardrails never breached (no absolute breaches)
-    assert_eq!(guardrail.metrics.absolute_breaches.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        guardrail.metrics.absolute_breaches.load(Ordering::Relaxed),
+        0
+    );
 
     // Config rollback worked
     assert_eq!(config_mgr.get("pool_size").unwrap().value, "10");

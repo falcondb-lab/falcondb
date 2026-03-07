@@ -21,7 +21,7 @@ use std::time::Instant;
 
 /// Per-phase latency breakdown for a single transaction.
 /// Every field is in **microseconds** (0 = phase not entered).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct TxnLatencyBreakdown {
     /// SQL parse + bind time.
     pub parse_bind_us: u64,
@@ -70,10 +70,7 @@ impl TxnLatencyBreakdown {
             ("commit_finalize", self.commit_finalize_us),
             ("queue_wait", self.queue_wait_us),
         ];
-        phases
-            .iter()
-            .max_by_key(|p| p.1)
-            .map_or("unknown", |p| p.0)
+        phases.iter().max_by_key(|p| p.1).map_or("unknown", |p| p.0)
     }
 
     /// Format as a compact waterfall string: `phase=Xus|phase=Yus|...`

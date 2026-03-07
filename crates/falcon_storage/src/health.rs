@@ -167,13 +167,22 @@ impl HealthScorer {
         });
 
         // Weighted average
-        let overall = f64::from(mem_score)
-            .mul_add(0.20, f64::from(wal_score)
-            .mul_add(0.15, f64::from(repl_score)
-            .mul_add(0.15, f64::from(txn_score)
-            .mul_add(0.20, f64::from(gc_score)
-            .mul_add(0.10, f64::from(storage_score)
-            .mul_add(0.10, f64::from(conn_score) * 0.10)))))) as u32;
+        let overall = f64::from(mem_score).mul_add(
+            0.20,
+            f64::from(wal_score).mul_add(
+                0.15,
+                f64::from(repl_score).mul_add(
+                    0.15,
+                    f64::from(txn_score).mul_add(
+                        0.20,
+                        f64::from(gc_score).mul_add(
+                            0.10,
+                            f64::from(storage_score).mul_add(0.10, f64::from(conn_score) * 0.10),
+                        ),
+                    ),
+                ),
+            ),
+        ) as u32;
 
         let overall = overall.min(100);
 
