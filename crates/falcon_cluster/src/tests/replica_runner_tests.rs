@@ -143,11 +143,12 @@ async fn test_replica_runner_e2e_cross_node() {
             );
         }
         // Check if replica has the table (schema bootstrapped from checkpoint)
+        // and that the connection is established.
         if replica_storage.get_table_schema("accounts").is_some() {
             let rows = replica_storage
                 .scan(TableId(1), TxnId(999), Timestamp(100))
                 .unwrap_or_default();
-            if rows.len() >= 2 {
+            if rows.len() >= 2 && handle.metrics().snapshot().connected {
                 break;
             }
         }

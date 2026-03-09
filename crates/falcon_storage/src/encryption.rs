@@ -670,7 +670,7 @@ mod tests {
         let encrypted = km.encrypt_block(dek_id, plaintext).unwrap();
 
         // Rotate master key
-        km.rotate_master_key("new-password");
+        km.rotate_master_key("new-password").unwrap();
 
         // DEK should still decrypt correctly with new master key wrapping
         let decrypted = km.decrypt_block(dek_id, &encrypted).unwrap();
@@ -681,7 +681,7 @@ mod tests {
     fn test_master_key_rotation_salt_changes() {
         let mut km = KeyManager::new("pass");
         let salt_before = *km.salt();
-        km.rotate_master_key("new-pass");
+        km.rotate_master_key("new-pass").unwrap();
         let salt_after = *km.salt();
         // Salt should change on rotation (overwhelmingly likely with 16 random bytes)
         assert_ne!(salt_before, salt_after);

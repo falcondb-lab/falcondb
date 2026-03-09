@@ -168,7 +168,6 @@ fn test_wal_purge_segments() {
 
 // ── TDE WAL encryption tests ─────────────────────────────────────────
 
-#[cfg(feature = "encryption_tde")]
 #[test]
 fn test_wal_tde_encrypt_decrypt_roundtrip() {
     use crate::encryption::EncryptionKey;
@@ -180,7 +179,7 @@ fn test_wal_tde_encrypt_decrypt_roundtrip() {
     let key = EncryptionKey::generate();
     let enc = WalEncryption::from_key(&key);
 
-    let mut wal = WalWriter::open(&dir, SyncMode::None).unwrap();
+    let wal = WalWriter::open(&dir, SyncMode::None).unwrap();
     wal.set_encryption(enc);
     assert!(wal.is_encrypted());
 
@@ -225,7 +224,6 @@ fn test_wal_tde_encrypt_decrypt_roundtrip() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[cfg(feature = "encryption_tde")]
 #[test]
 fn test_wal_tde_wrong_key_fails() {
     use crate::encryption::EncryptionKey;
@@ -237,7 +235,7 @@ fn test_wal_tde_wrong_key_fails() {
     let key1 = EncryptionKey::generate();
     let enc = WalEncryption::from_key(&key1);
 
-    let mut wal = WalWriter::open(&dir, SyncMode::None).unwrap();
+    let wal = WalWriter::open(&dir, SyncMode::None).unwrap();
     wal.set_encryption(enc);
     wal.append(&WalRecord::BeginTxn { txn_id: TxnId(1) })
         .unwrap();
@@ -257,7 +255,6 @@ fn test_wal_tde_wrong_key_fails() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[cfg(feature = "encryption_tde")]
 #[test]
 fn test_wal_tde_without_decryption_fails() {
     use crate::encryption::EncryptionKey;
@@ -269,7 +266,7 @@ fn test_wal_tde_without_decryption_fails() {
     let key = EncryptionKey::generate();
     let enc = WalEncryption::from_key(&key);
 
-    let mut wal = WalWriter::open(&dir, SyncMode::None).unwrap();
+    let wal = WalWriter::open(&dir, SyncMode::None).unwrap();
     wal.set_encryption(enc);
     wal.append(&WalRecord::BeginTxn { txn_id: TxnId(1) })
         .unwrap();
@@ -287,7 +284,6 @@ fn test_wal_tde_without_decryption_fails() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[cfg(feature = "encryption_tde")]
 #[test]
 fn test_wal_tde_segment_rotation() {
     use crate::encryption::EncryptionKey;
@@ -300,7 +296,7 @@ fn test_wal_tde_segment_rotation() {
     let enc = WalEncryption::from_key(&key);
 
     // Tiny segment size to force rotation
-    let mut wal = WalWriter::open_with_options(&dir, SyncMode::None, 200, 100).unwrap();
+    let wal = WalWriter::open_with_options(&dir, SyncMode::None, 200, 100).unwrap();
     wal.set_encryption(enc);
 
     for i in 0..20 {
@@ -337,7 +333,6 @@ fn test_wal_tde_segment_rotation() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[cfg(feature = "encryption_tde")]
 #[test]
 fn test_wal_tde_keymanager_integration() {
     use crate::encryption::{EncryptionScope, KeyManager};

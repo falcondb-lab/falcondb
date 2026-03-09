@@ -23,6 +23,7 @@ pub mod metering;
 pub mod mvcc;
 pub mod partition;
 pub mod role_catalog;
+pub mod scan_optimizer;
 pub mod security_manager;
 pub mod stats;
 pub mod storage_trait;
@@ -44,10 +45,6 @@ pub mod zstd_streaming;
 // ── Enterprise stubs (always compiled for handler compat, disabled at runtime) ──
 pub mod cdc;
 pub mod cdc_wal_bridge;
-#[cfg(feature = "encryption_tde")]
-pub mod encryption;
-#[cfg(not(feature = "encryption_tde"))]
-#[path = "encryption_stub.rs"]
 pub mod encryption;
 #[cfg(feature = "online_ddl_full")]
 pub mod online_ddl;

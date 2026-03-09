@@ -12,7 +12,7 @@ idle_timeout_ms = 0
 [storage]
 memory_limit_bytes = 0
 wal_enabled = true
-data_dir = "./falcon_data_primary"
+data_dir = "./primary_data"
 # LSM table durability: false = WAL guarantees recovery (faster bulk insert)
 # true  = every LSM write is fsynced (extra durability, slower writes)
 lsm_sync_writes = false

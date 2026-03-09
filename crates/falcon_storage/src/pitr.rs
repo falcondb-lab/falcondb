@@ -1,6 +1,3 @@
-//! # Module Status: STUB — not on the production OLTP write path.
-//! Do NOT reference from planner/executor/txn for production workloads.
-//!
 //! Point-in-Time Recovery (PITR) — WAL-based recovery to any target timestamp.
 //!
 //! Enterprise feature for data protection and disaster recovery.
@@ -420,6 +417,69 @@ impl RecoveryExecutor {
     }
 }
 
+/// Plan for archive-based PITR recovery.
+/// Produced by `WalArchiver::plan_recovery`, consumed by the engine.
+#[derive(Debug, Clone)]
+pub struct RecoveryPlan {
+    pub base_backup: BaseBackup,
+    pub segments: Vec<ArchivedSegment>,
+    pub target: RecoveryTarget,
+}
+
+impl WalArchiver {
+    /// Build a recovery plan: select the best base backup and the WAL segments
+    /// needed to reach the target. Returns `None` if no suitable backup exists.
+    pub fn plan_recovery(&self, target: &RecoveryTarget) -> Option<RecoveryPlan> {
+        let target = match target {
+            RecoveryTarget::RestorePoint(name) => {
+                let rp = self.find_restore_point(name)?;
+                RecoveryTarget::Lsn(rp.lsn)
+            }
+            other => other.clone(),
+        };
+
+        let backup = self.find_base_backup(&target)?;
+        let segments: Vec<ArchivedSegment> = self
+            .segments_for_recovery(backup, &target)
+            .into_iter()
+            .cloned()
+            .collect();
+
+        Some(RecoveryPlan {
+            base_backup: backup.clone(),
+            segments,
+            target,
+        })
+    }
+
+    /// Stage archived WAL segments into `staging_dir` so the engine can replay them.
+    /// Copies each segment from the archive path into the staging directory.
+    /// Returns the number of segments staged.
+    pub fn stage_segments(
+        &self,
+        plan: &RecoveryPlan,
+        staging_dir: &Path,
+    ) -> Result<usize, std::io::Error> {
+        std::fs::create_dir_all(staging_dir)?;
+        let mut count = 0;
+        for seg in &plan.segments {
+            let dest = staging_dir.join(&seg.filename);
+            if seg.archive_path.exists() {
+                std::fs::copy(&seg.archive_path, &dest)?;
+                count += 1;
+            } else {
+                tracing::warn!(
+                    "PITR: archived segment {} not found at {:?}, skipping",
+                    seg.filename,
+                    seg.archive_path
+                );
+            }
+        }
+        tracing::info!("PITR: staged {} WAL segments into {:?}", count, staging_dir);
+        Ok(count)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -594,5 +654,108 @@ mod tests {
             RecoveryTarget::RestorePoint("v1".into()).to_string(),
             "restore_point:v1"
         );
+    }
+
+    #[test]
+    fn test_plan_recovery_by_lsn() {
+        let tmp = std::env::temp_dir().join("falcondb_pitr_test_plan");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let wal_src = tmp.join("wal_src");
+        std::fs::create_dir_all(&wal_src).unwrap();
+        let archive = tmp.join("archive");
+
+        let mut archiver = WalArchiver::new(&archive);
+        archiver.register_base_backup(BaseBackup {
+            label: "base".into(),
+            start_lsn: Lsn(0),
+            end_lsn: Lsn(500),
+            start_time_ms: 0,
+            end_time_ms: 0,
+            backup_path: PathBuf::new(),
+            size_bytes: 0,
+            consistent: true,
+        });
+        for i in 0..3u64 {
+            let fname = format!("seg_{i}.wal");
+            let src = wal_src.join(&fname);
+            std::fs::write(&src, vec![0u8; 128]).unwrap();
+            archiver
+                .archive_segment(&src, &fname, Lsn(i * 1000), Lsn((i + 1) * 1000 - 1), 128)
+                .unwrap();
+        }
+
+        let plan = archiver.plan_recovery(&RecoveryTarget::Lsn(Lsn(1500))).unwrap();
+        assert_eq!(plan.base_backup.label, "base");
+        assert_eq!(plan.segments.len(), 2); // seg_0, seg_1
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_plan_recovery_restore_point() {
+        let archive = PathBuf::from("/tmp/pitr_rp_test");
+        let mut archiver = WalArchiver::new(&archive);
+        archiver.register_base_backup(BaseBackup {
+            label: "base".into(),
+            start_lsn: Lsn(0),
+            end_lsn: Lsn(500),
+            start_time_ms: 0,
+            end_time_ms: 0,
+            backup_path: PathBuf::new(),
+            size_bytes: 0,
+            consistent: true,
+        });
+        archiver.create_restore_point("before_deploy", Lsn(300));
+
+        let plan = archiver
+            .plan_recovery(&RecoveryTarget::RestorePoint("before_deploy".into()))
+            .unwrap();
+        // RestorePoint resolves to Lsn(300)
+        assert!(matches!(plan.target, RecoveryTarget::Lsn(Lsn(300))));
+    }
+
+    #[test]
+    fn test_plan_recovery_no_backup_returns_none() {
+        let archive = PathBuf::from("/tmp/pitr_no_backup");
+        let archiver = WalArchiver::new(&archive);
+        assert!(archiver.plan_recovery(&RecoveryTarget::Latest).is_none());
+    }
+
+    #[test]
+    fn test_stage_segments() {
+        let tmp = std::env::temp_dir().join("falcondb_pitr_test_stage");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let wal_src = tmp.join("wal_src");
+        std::fs::create_dir_all(&wal_src).unwrap();
+        let archive = tmp.join("archive");
+        let staging = tmp.join("staging");
+
+        let mut archiver = WalArchiver::new(&archive);
+        archiver.register_base_backup(BaseBackup {
+            label: "base".into(),
+            start_lsn: Lsn(0),
+            end_lsn: Lsn(500),
+            start_time_ms: 0,
+            end_time_ms: 0,
+            backup_path: PathBuf::new(),
+            size_bytes: 0,
+            consistent: true,
+        });
+        for i in 0..2u64 {
+            let fname = format!("seg_{i}.wal");
+            let src = wal_src.join(&fname);
+            std::fs::write(&src, vec![0xABu8; 64]).unwrap();
+            archiver
+                .archive_segment(&src, &fname, Lsn(i * 1000), Lsn((i + 1) * 1000 - 1), 64)
+                .unwrap();
+        }
+
+        let plan = archiver.plan_recovery(&RecoveryTarget::Latest).unwrap();
+        let count = archiver.stage_segments(&plan, &staging).unwrap();
+        assert_eq!(count, 2);
+        assert!(staging.join("seg_0.wal").exists());
+        assert!(staging.join("seg_1.wal").exists());
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

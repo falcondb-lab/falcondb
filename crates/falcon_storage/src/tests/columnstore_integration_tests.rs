@@ -53,13 +53,17 @@ fn test_columnstore_insert_and_scan_via_engine() {
     engine.insert(TableId(500), row1, TxnId(1)).unwrap();
     engine.insert(TableId(500), row2, TxnId(1)).unwrap();
 
-    // ColumnStore: read_ts is accepted but not used for versioning
-    let rows = engine.scan(TableId(500), TxnId(2), Timestamp(100)).unwrap();
-    assert_eq!(rows.len(), 2, "both rows must be visible after insert");
+    // Uncommitted rows visible to owning txn
+    let rows = engine.scan(TableId(500), TxnId(1), Timestamp(100)).unwrap();
+    assert_eq!(rows.len(), 2, "both rows must be visible to owning txn");
+
+    // Not visible to other txns until committed
+    let rows2 = engine.scan(TableId(500), TxnId(2), Timestamp(100)).unwrap();
+    assert_eq!(rows2.len(), 0, "uncommitted rows invisible to other txns");
 }
 
 #[test]
-fn test_columnstore_scan_returns_all_rows_regardless_of_read_ts() {
+fn test_columnstore_scan_respects_mvcc_read_ts() {
     let engine = analytics_engine();
     engine.create_table(cs_schema()).unwrap();
 
@@ -73,17 +77,13 @@ fn test_columnstore_scan_returns_all_rows_regardless_of_read_ts() {
             .unwrap();
     }
 
-    // ColumnStore has no MVCC —all rows visible at any read_ts
-    let rows_past = engine.scan(TableId(500), TxnId(2), Timestamp(0)).unwrap();
-    let rows_future = engine
-        .scan(TableId(500), TxnId(2), Timestamp(u64::MAX))
-        .unwrap();
-    assert_eq!(rows_past.len(), 5, "ColumnStore: all rows visible at ts=0");
-    assert_eq!(
-        rows_future.len(),
-        5,
-        "ColumnStore: all rows visible at ts=MAX"
-    );
+    // Owning txn sees all 5 rows
+    let rows_owner = engine.scan(TableId(500), TxnId(1), Timestamp(0)).unwrap();
+    assert_eq!(rows_owner.len(), 5, "owning txn sees its uncommitted rows");
+
+    // Other txn at any read_ts sees 0 (uncommitted)
+    let rows_other = engine.scan(TableId(500), TxnId(2), Timestamp(u64::MAX)).unwrap();
+    assert_eq!(rows_other.len(), 0, "uncommitted rows invisible to others");
 }
 
 #[test]
@@ -94,7 +94,6 @@ fn test_columnstore_update_not_supported() {
     let row = OwnedRow::new(vec![Datum::Int64(1), Datum::Text("v1".into())]);
     let pk = engine.insert(TableId(500), row.clone(), TxnId(1)).unwrap();
 
-    // UPDATE is not supported on COLUMNSTORE (analytics workload)
     let result = engine.update(TableId(500), &pk, row, TxnId(2));
     assert!(
         result.is_err(),
@@ -103,19 +102,16 @@ fn test_columnstore_update_not_supported() {
 }
 
 #[test]
-fn test_columnstore_delete_not_supported() {
+fn test_columnstore_delete_supported() {
     let engine = analytics_engine();
     engine.create_table(cs_schema()).unwrap();
 
     let row = OwnedRow::new(vec![Datum::Int64(1), Datum::Text("v1".into())]);
     let pk = engine.insert(TableId(500), row, TxnId(1)).unwrap();
 
-    // DELETE is not supported on COLUMNSTORE
+    // DELETE is now supported on COLUMNSTORE
     let result = engine.delete(TableId(500), &pk, TxnId(2));
-    assert!(
-        result.is_err(),
-        "DELETE on COLUMNSTORE must return an error"
-    );
+    assert!(result.is_ok(), "DELETE on COLUMNSTORE should succeed");
 }
 
 #[test]
@@ -131,8 +127,7 @@ fn test_columnstore_not_allowed_on_primary() {
 }
 
 #[test]
-fn test_columnstore_commit_does_not_affect_visibility() {
-    // ColumnStore rows are immediately visible —commit is a no-op for visibility
+fn test_columnstore_mvcc_commit_visibility() {
     let engine = analytics_engine();
     engine.create_table(cs_schema()).unwrap();
 
@@ -144,19 +139,15 @@ fn test_columnstore_commit_does_not_affect_visibility() {
         )
         .unwrap();
 
-    // Visible before commit
+    // Visible to owning txn before commit
     let before = engine
-        .scan(TableId(500), TxnId(99), Timestamp(100))
+        .scan(TableId(500), TxnId(1), Timestamp(100))
         .unwrap();
     assert_eq!(before.len(), 1);
 
-    engine
-        .commit_txn(TxnId(1), Timestamp(10), TxnType::Local)
-        .unwrap();
-
-    // Still visible after commit
-    let after = engine
+    // Not visible to other txn before commit
+    let other_before = engine
         .scan(TableId(500), TxnId(99), Timestamp(100))
         .unwrap();
-    assert_eq!(after.len(), 1);
+    assert_eq!(other_before.len(), 0);
 }

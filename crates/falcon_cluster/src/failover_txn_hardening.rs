@@ -1366,7 +1366,7 @@ mod tests {
             ..Default::default()
         });
         let ttl_enforcer = InDoubtTtlEnforcer::new();
-        let blocked_guard = FailoverBlockedTxnGuard::new();
+        let _blocked_guard = FailoverBlockedTxnGuard::new();
 
         // Phase 0: Normal
         assert_eq!(coord.current_phase(), FailoverTxnPhase::Normal);

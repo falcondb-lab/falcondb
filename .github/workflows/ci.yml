@@ -63,7 +63,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: chmod +x scripts/ci_failover_gate.sh && ./scripts/ci_failover_gate.sh
+      - run: chmod +x scripts/ci/ci_failover_gate.sh && ./scripts/ci/ci_failover_gate.sh
 
   jdbc-smoke:
     name: JDBC Smoke
@@ -78,14 +78,14 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      - run: chmod +x scripts/ci_jdbc_smoke.sh && ./scripts/ci_jdbc_smoke.sh
+      - run: chmod +x scripts/ci/ci_jdbc_smoke.sh && ./scripts/ci/ci_jdbc_smoke.sh
 
   version-check:
     name: Version Consistency
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: chmod +x scripts/ci_version_check.sh && ./scripts/ci_version_check.sh
+      - run: chmod +x scripts/ci/ci_version_check.sh && ./scripts/ci/ci_version_check.sh
 
   distributed-invariants:
     name: Distributed Invariants
@@ -116,8 +116,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run YCSB regression gate
         run: |
-          chmod +x scripts/ci_perf_regression.sh
-          ./scripts/ci_perf_regression.sh
+          chmod +x scripts/ci/ci_perf_regression.sh
+          ./scripts/ci/ci_perf_regression.sh
         env:
           PERF_OPS: "5000"
           PERF_READ_PCT: "50"

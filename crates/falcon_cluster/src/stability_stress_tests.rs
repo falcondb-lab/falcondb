@@ -34,7 +34,7 @@ mod stress {
 
         let mut committed = 0u64;
         let mut retried = 0u64;
-        let mut rejected = 0u64;
+        let mut _rejected = 0u64;
 
         // Simulate 100 transactions with varying retry counts
         for i in 1..=100u64 {
@@ -51,7 +51,7 @@ mod stress {
                 match retry_guard.check_retry(tid, phase, i * 1000) {
                     Ok(()) => retried += 1,
                     Err(_) => {
-                        rejected += 1;
+                        _rejected += 1;
                         continue;
                     }
                 }

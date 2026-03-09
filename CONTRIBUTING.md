@@ -106,7 +106,7 @@ Open a PR against `main`. Fill out the PR template (auto-populated).
 | `crates/falcon_protocol_native/` | Native binary protocol codec + compression |
 | `crates/falcon_native_server/` | Native protocol server + session + executor bridge |
 | `clients/falcondb-jdbc/` | Java JDBC driver (Maven project) |
-| `tools/native-proto-spec/vectors/` | Golden test vectors for cross-language validation |
+| `docs/design/native-proto-spec/vectors/` | Golden test vectors for cross-language validation |
 | `scripts/` | Demo, CI, and setup scripts |
 | `docs/` | Architecture decisions, design docs |
 

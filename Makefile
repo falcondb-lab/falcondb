@@ -52,8 +52,8 @@ e2e_failover:
 	$(CARGO) build --release $(CARGO_FLAGS) 2>&1 | tail -3 | tee -a $(EVIDENCE)/e2e_failover/build.log
 	@echo "" | tee -a $(EVIDENCE)/e2e_failover/verdict.txt
 	@echo "--- Step 2: Failover Gate ---" | tee -a $(EVIDENCE)/e2e_failover/verdict.txt
-	@if [ -x scripts/ci_failover_gate.sh ]; then \
-		bash scripts/ci_failover_gate.sh 2>&1 | tee $(EVIDENCE)/e2e_failover/gate.log; \
+	@if [ -x scripts/ci/ci_failover_gate.sh ]; then \
+		bash scripts/ci/ci_failover_gate.sh 2>&1 | tee $(EVIDENCE)/e2e_failover/gate.log; \
 		GATE_RC=$$?; \
 		echo "" | tee -a $(EVIDENCE)/e2e_failover/verdict.txt; \
 		echo "--- Step 3: Verdict ---" | tee -a $(EVIDENCE)/e2e_failover/verdict.txt; \
@@ -129,8 +129,8 @@ bench_backpressure:
 	$(CARGO) test -p falcon_txn --lib -- admission 2>&1 | tee $(EVIDENCE)/backpressure/wal_admission.log
 	@echo "" | tee -a $(EVIDENCE)/backpressure/verdict.txt
 	@echo "--- Step 5: Backpressure Bench (if available) ---" | tee -a $(EVIDENCE)/backpressure/verdict.txt
-	@if [ -x scripts/bench_backpressure.sh ]; then \
-		bash scripts/bench_backpressure.sh 2>&1 | tee $(EVIDENCE)/backpressure/bench.log; \
+	@if [ -x scripts/bench/bench_backpressure.sh ]; then \
+		bash scripts/bench/bench_backpressure.sh 2>&1 | tee $(EVIDENCE)/backpressure/bench.log; \
 	else \
 		echo "(bench_backpressure.sh not found — skipping benchmark run)" | tee -a $(EVIDENCE)/backpressure/verdict.txt; \
 	fi

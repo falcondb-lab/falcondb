@@ -25,7 +25,7 @@ mkdir -p "${RESULTS_DIR}"
 
 # ── Config ────────────────────────────────────────────────────────────────
 FALCON_BIN="${FALCON_BIN:-target/release/falcon_server}"
-FALCON_CONFIG="${FALCON_CONFIG:-bench_configs/falcon.bench.toml}"
+FALCON_CONFIG="${FALCON_CONFIG:-benchmarks/configs/falcon.bench.toml}"
 DATA_DIR="${DATA_DIR:-/tmp/falcon_crash_test_data}"
 HOST="127.0.0.1"
 PORT=5433

@@ -815,6 +815,15 @@ pub struct StorageConfig {
     #[serde(default = "default_wal_enabled")]
     pub wal_enabled: bool,
     /// Data directory for WAL and snapshots.
+    ///
+    /// ## Naming Convention:
+    /// - Single node: `./falcon_data`
+    /// - PoC/Demo: `./{project}_data` (e.g., `./bench_data`, `./mes_data`, `./pitr_data`)
+    /// - Primary/Replica: `./primary_data`, `./replica_data`
+    /// - Multi-node cluster: `./node1_data`, `./node2_data`, `./node3_data`, ...
+    /// - Production: `/var/lib/falcondb` or `/var/lib/falcondb/node{N}` for multi-node
+    ///
+    /// Pattern: Always use `*_data` suffix (except production paths) for .gitignore matching.
     #[serde(default = "default_data_dir")]
     pub data_dir: String,
     /// Write-path enforcement level for OLTP purity on Primary nodes.

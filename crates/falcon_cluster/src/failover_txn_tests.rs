@@ -30,7 +30,7 @@ mod failover_txn_matrix {
 
     use crate::failover_txn_hardening::{
         FailoverBlockedTxnConfig, FailoverBlockedTxnGuard, FailoverDamper, FailoverDamperConfig,
-        FailoverTxnConfig, FailoverTxnCoordinator, FailoverTxnPhase, FailoverTxnResolution,
+        FailoverTxnConfig, FailoverTxnCoordinator, FailoverTxnResolution,
         InDoubtTtlConfig, InDoubtTtlEnforcer,
     };
     use crate::ha::{HAConfig, HAReplicaGroup};
@@ -133,11 +133,11 @@ mod failover_txn_matrix {
     /// 2-shard HA cluster: each shard has 1 leader + 1 replica.
     struct TestCluster {
         shard0: HAReplicaGroup,
-        shard1: HAReplicaGroup,
+        _shard1: HAReplicaGroup,
         /// TxnManager for shard 0 (primary)
         mgr0: TxnManager,
         /// TxnManager for shard 1 (primary)
-        mgr1: TxnManager,
+        _mgr1: TxnManager,
         /// In-doubt resolver
         resolver: Arc<InDoubtResolver>,
         /// Outcome cache
@@ -203,9 +203,9 @@ mod failover_txn_matrix {
 
             Self {
                 shard0,
-                shard1,
+                _shard1: shard1,
                 mgr0,
-                mgr1,
+                _mgr1: mgr1,
                 resolver,
                 outcome_cache,
                 fo_coord,
@@ -304,7 +304,7 @@ mod failover_txn_matrix {
     ///         retry of same txn_id is safe; no permanent in-doubt.
     #[test]
     fn test_ss01_kill_leader_during_execution() {
-        let mut cluster = TestCluster::new();
+        let cluster = TestCluster::new();
         cluster.load_initial_balances();
 
         // Begin a local txn on shard 0
@@ -356,7 +356,7 @@ mod failover_txn_matrix {
     /// Assert: no commit-after-success anomaly; atomicity preserved.
     #[test]
     fn test_ss02_kill_leader_before_commit() {
-        let mut cluster = TestCluster::new();
+        let cluster = TestCluster::new();
         cluster.load_initial_balances();
 
         let txn = cluster.mgr0.begin(IsolationLevel::ReadCommitted);
@@ -552,7 +552,11 @@ mod failover_txn_matrix {
         // I5: in-doubt txn is visible
         assert_eq!(cluster.resolver.indoubt_count(), 1);
 
-        // I5: resolver sweeps and resolves (default: abort when no cached decision)
+        // Coordinator is lost — no commit decision was written.
+        // Record explicit abort so the resolver can apply it on first sweep.
+        cluster.outcome_cache.record(txn_id, TxnOutcome::Aborted);
+
+        // I5: resolver sweeps and resolves
         let resolved = cluster.resolver.sweep();
         assert_eq!(resolved, 1);
         assert_eq!(cluster.resolver.indoubt_count(), 0);
@@ -780,6 +784,9 @@ mod failover_txn_matrix {
             .resolver
             .register_indoubt(txn_id, vec![(ShardId(0), txn_id), (ShardId(1), txn_id)]);
 
+        // Partition healed but coordinator never committed — record abort decision
+        cluster.outcome_cache.record(txn_id, TxnOutcome::Aborted);
+
         // I5: no permanent prepared state — resolver cleans up
         cluster.resolver.sweep();
         assert_eq!(cluster.resolver.indoubt_count(), 0);
@@ -837,10 +844,10 @@ mod failover_txn_matrix {
         cluster.load_initial_balances();
 
         let mut committed_count = 0u32;
-        let mut aborted_count = 0u32;
+        let mut _aborted_count = 0u32;
         let failover_rounds = 3;
 
-        for round in 0..failover_rounds {
+        for _round in 0..failover_rounds {
             // Check damper
             let epoch = cluster.shard0.current_epoch() + 1;
             let damper_ok = cluster.damper.check_failover_allowed(epoch, 0).is_ok();
@@ -861,7 +868,7 @@ mod failover_txn_matrix {
                 // Abort all active txns
                 for tid in &txn_ids {
                     if cluster.mgr0.abort(*tid).is_ok() {
-                        aborted_count += 1;
+                        _aborted_count += 1;
                     }
                     cluster.fo_coord.record_affected_txn(
                         *tid,
@@ -923,7 +930,7 @@ mod failover_txn_matrix {
 
         let mut indoubt_total = 0u32;
 
-        for round in 0..3u64 {
+        for _round in 0..3u64 {
             // Start a cross-shard txn
             let txn = cluster.mgr0.begin_with_classification(
                 IsolationLevel::ReadCommitted,
@@ -941,7 +948,8 @@ mod failover_txn_matrix {
             cluster.ttl_enforcer.register(txn_id);
             indoubt_total += 1;
 
-            // Coordinator comes back, resolves via sweep (default: abort)
+            // Coordinator comes back — no commit decision found, record abort
+            cluster.outcome_cache.record(txn_id, TxnOutcome::Aborted);
             cluster.resolver.sweep();
             cluster.ttl_enforcer.remove(txn_id);
         }

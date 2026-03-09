@@ -951,7 +951,7 @@ fn test_e2e_explain_analyze_dist_plan() {
                 "Should show total latency"
             );
             assert!(
-                joined.contains("Shard 0 latency:") || joined.contains("Shard 1 latency:"),
+                joined.contains("Shard 0:") || joined.contains("Shard 1:"),
                 "Should show per-shard latency"
             );
         }
@@ -1972,7 +1972,7 @@ fn test_e2e_explain_analyze_output() {
             );
             assert!(joined.contains("Shard"), "Should contain per-shard details");
             assert!(
-                joined.contains("rows:"),
+                joined.contains("rows="),
                 "Should contain per-shard row counts"
             );
         }

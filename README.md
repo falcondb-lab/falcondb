@@ -44,12 +44,12 @@ reproducible benchmarks.
 This is FalconDB's core engineering property, called the **Deterministic Commit Guarantee (DCG)**.
 It is not a configuration option — it is the default behavior under the `LocalWalSync` commit policy.
 
-- **Prove it yourself**: [falcondb-poc-dcg/](falcondb-poc-dcg/) — one-click demo: write 1,000 orders → kill -9 primary → verify zero data loss
-- **Benchmark it yourself**: [falcondb-poc-pgbench/](falcondb-poc-pgbench/) — pgbench comparison vs PostgreSQL under identical durability settings
-- **Crash under load**: [falcondb-poc-failover-under-load/](falcondb-poc-failover-under-load/) — kill -9 primary during sustained writes → verify zero data loss + automatic recovery
-- **See inside**: [falcondb-poc-observability/](falcondb-poc-observability/) — live Grafana dashboard, Prometheus metrics, operational controls
-- **Migrate from PG**: [falcondb-poc-migration/](falcondb-poc-migration/) — migrate a real PostgreSQL app by changing only the connection string
-- **Recover after disaster**: [falcondb-poc-backup-pitr/](falcondb-poc-backup-pitr/) — destroy the database, restore from backup, replay to exact second, verify every row matches
+- **Prove it yourself**: [pocs/falcondb-poc-dcg/](pocs/falcondb-poc-dcg/) — one-click demo: write 1,000 orders → kill -9 primary → verify zero data loss
+- **Benchmark it yourself**: [pocs/falcondb-poc-pgbench/](pocs/falcondb-poc-pgbench/) — pgbench comparison vs PostgreSQL under identical durability settings
+- **Crash under load**: [pocs/falcondb-poc-failover-under-load/](pocs/falcondb-poc-failover-under-load/) — kill -9 primary during sustained writes → verify zero data loss + automatic recovery
+- **See inside**: [pocs/falcondb-poc-observability/](pocs/falcondb-poc-observability/) — live Grafana dashboard, Prometheus metrics, operational controls
+- **Migrate from PG**: [pocs/falcondb-poc-migration/](pocs/falcondb-poc-migration/) — migrate a real PostgreSQL app by changing only the connection string
+- **Recover after disaster**: [pocs/falcondb-poc-backup-pitr/](pocs/falcondb-poc-backup-pitr/) — destroy the database, restore from backup, replay to exact second, verify every row matches
 
 ### Supported Platforms
 
@@ -723,7 +723,6 @@ and `sync-replica` (primary waits for replica WAL ack, RPO ≈ 0). See [docs/rpo
 | [docs/self_healing.md](docs/self_healing.md) | Self-healing architecture |
 | [docs/design/](docs/design/) | Design docs: MVCC, WAL, sharding, vectorized exec |
 | [docs/adr/](docs/adr/) | Architecture Decision Records (ADR-001–007) |
-| [deploy/helm/falcondb/](deploy/helm/falcondb/) | Kubernetes Helm chart |
 | [CHANGELOG.md](CHANGELOG.md) | Semantic versioning changelog (v0.1–v1.2) |
 
 ---

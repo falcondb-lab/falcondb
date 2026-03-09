@@ -197,12 +197,10 @@ pub trait BlockCrypto: Send + Sync {
 }
 
 /// AES-256-GCM block encryption backed by a single DEK.
-#[cfg(feature = "encryption_tde")]
 pub struct AesGcmBlockCrypto {
     cipher: aes_gcm::Aes256Gcm,
 }
 
-#[cfg(feature = "encryption_tde")]
 impl AesGcmBlockCrypto {
     pub fn new(key: &crate::encryption::EncryptionKey) -> Self {
         use aes_gcm::KeyInit;
@@ -212,7 +210,6 @@ impl AesGcmBlockCrypto {
     }
 }
 
-#[cfg(feature = "encryption_tde")]
 impl BlockCrypto for AesGcmBlockCrypto {
     fn encrypt(&self, plaintext: &[u8]) -> io::Result<Vec<u8>> {
         use aes_gcm::aead::{Aead, OsRng};

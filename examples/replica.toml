@@ -12,7 +12,7 @@ idle_timeout_ms = 0
 [storage]
 memory_limit_bytes = 0
 wal_enabled = true
-data_dir = "./falcon_data_replica"
+data_dir = "./replica_data"
 
 [wal]
 group_commit = true

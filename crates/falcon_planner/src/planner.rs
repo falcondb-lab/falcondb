@@ -1812,13 +1812,18 @@ impl Planner {
         // Lower to physical plan
         let plan = Self::lower_to_physical(optimized, stats, indexes)?;
 
-        // AI plan selection: score the plan and record for future learning.
-        // Currently a single-candidate pass — the model scores the plan and
-        // the features are stored for feedback association.
+        // AI plan selection: generate candidates, let the model pick the best.
         let ai = global_ai_optimizer();
-        let _ = ai.select_plan(&[(plan.clone(), features)]);
-
-        Ok(plan)
+        let candidates =
+            crate::ai_optimizer::generate_candidates(plan.clone(), features, stats, indexes);
+        if candidates.len() > 1 {
+            let (best_idx, _cost) = ai.select_plan(&candidates);
+            let (selected, _) = candidates.into_iter().nth(best_idx).unwrap_or((plan, features));
+            Ok(selected)
+        } else {
+            let _ = ai.select_plan(&candidates);
+            Ok(plan)
+        }
     }
 
     /// Lower an optimized `LogicalPlan` tree to a `PhysicalPlan`.

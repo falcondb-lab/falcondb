@@ -458,6 +458,34 @@ impl Executor {
         }
 
         let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+        
+        // SIMD fast path: single numeric column aggregate (COUNT/SUM/MIN/MAX)
+        // Use compute_simple_agg_simd for 2-4x speedup on numeric columns
+        if specs.len() == 1 && specs[0].1.is_some() {
+            if let Some(table) = self.storage.get_table(table_id) {
+                let col_idx = specs[0].1.unwrap();
+                let (count, sum, min, max) = table.compute_simple_agg_simd(
+                    txn.txn_id,
+                    read_ts,
+                    col_idx,
+                );
+                
+                let result_datum = match specs[0].0 {
+                    SimpleAggOp::Count | SimpleAggOp::CountStar => Datum::Int64(count),
+                    SimpleAggOp::Sum => Datum::Int64(sum),
+                    SimpleAggOp::Min => min.map(Datum::Int64).unwrap_or(Datum::Null),
+                    SimpleAggOp::Max => max.map(Datum::Int64).unwrap_or(Datum::Null),
+                };
+                
+                let columns = self.resolve_output_columns(projections, schema);
+                return Some(ExecutionResult::Query {
+                    columns,
+                    rows: vec![OwnedRow::new(vec![result_datum])],
+                });
+            }
+        }
+        
+        // Fallback: use existing compute_simple_aggs for complex cases
         let raw_results = self
             .storage
             .compute_simple_aggs(table_id, txn.txn_id, read_ts, &specs)

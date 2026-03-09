@@ -38,12 +38,10 @@ use serde::{Deserialize, Serialize};
 // WAL Encryption — transparent per-record AES-256-GCM encryption
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg(feature = "encryption_tde")]
 pub struct WalEncryption {
     cipher: aes_gcm::Aes256Gcm,
 }
 
-#[cfg(feature = "encryption_tde")]
 impl WalEncryption {
     pub fn from_key(key: &crate::encryption::EncryptionKey) -> Self {
         use aes_gcm::KeyInit;
@@ -91,24 +89,9 @@ impl WalEncryption {
     }
 }
 
-#[cfg(feature = "encryption_tde")]
 impl std::fmt::Debug for WalEncryption {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "WalEncryption(AES-256-GCM)")
-    }
-}
-
-#[cfg(not(feature = "encryption_tde"))]
-#[derive(Debug)]
-pub struct WalEncryption;
-
-#[cfg(not(feature = "encryption_tde"))]
-impl WalEncryption {
-    fn encrypt(&self, _: &[u8]) -> Result<Vec<u8>, StorageError> {
-        Err(StorageError::Wal("TDE not compiled".into()))
-    }
-    fn decrypt(&self, _: &[u8]) -> Result<Vec<u8>, StorageError> {
-        Err(StorageError::Wal("TDE not compiled".into()))
     }
 }
 

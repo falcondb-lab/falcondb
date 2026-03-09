@@ -71,7 +71,6 @@ Use this checklist before promoting a FalconDB deployment to production.
 
 ## 8. Kubernetes (if applicable)
 
-- [ ] **Helm chart** deployed from `deploy/helm/falcondb/`
 - [ ] **PVC**: `persistence.enabled = true` with appropriate `storageClass`
 - [ ] **PDB**: `podDisruptionBudget.enabled = true` with `minAvailable: 1`
 - [ ] **Resource limits**: CPU and memory limits set to avoid noisy-neighbor

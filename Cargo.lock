@@ -1091,6 +1091,7 @@ version = "1.2.0"
 dependencies = [
  "bytes",
  "falcon_common",
+ "lz4_flex",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

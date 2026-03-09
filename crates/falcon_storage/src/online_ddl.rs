@@ -1,6 +1,3 @@
-//! # Module Status: STUB — not on the production OLTP write path.
-//! Do NOT reference from planner/executor/txn for production workloads.
-//!
 //! Online schema change (DDL) manager.
 //!
 //! Provides non-blocking ALTER TABLE operations that allow concurrent reads

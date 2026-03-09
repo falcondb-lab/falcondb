@@ -12,8 +12,8 @@ use crate::memtable::MemTable;
 use std::sync::atomic::Ordering as AtomicOrdering;
 
 thread_local! {
-    /// (engine_id, table_id, Arc<MemTable>) — skip engine_tables DashMap lookup.
-    static TABLE_CACHE: std::cell::RefCell<Option<(u64, TableId, Arc<MemTable>)>> = const { std::cell::RefCell::new(None) };
+    /// (engine_id, ddl_epoch, table_id, Arc<MemTable>) — skip engine_tables DashMap lookup.
+    static TABLE_CACHE: std::cell::RefCell<Option<(u64, u64, TableId, Arc<MemTable>)>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(any(feature = "columnstore", feature = "disk_rowstore"))]
@@ -57,10 +57,11 @@ impl StorageEngine {
         self.check_write_pressure()?;
 
         let eid = self.engine_id;
+        let epoch = self.ddl_epoch.load(std::sync::atomic::Ordering::Relaxed);
         let cached = TABLE_CACHE.with(|c| {
             let slot = c.borrow();
             match slot.as_ref() {
-                Some((e, id, t)) if *e == eid && *id == table_id => Some(Arc::clone(t)),
+                Some((e, ep, id, t)) if *e == eid && *ep == epoch && *id == table_id => Some(Arc::clone(t)),
                 _ => None,
             }
         });
@@ -75,7 +76,7 @@ impl StorageEngine {
 
         match handle.value() {
             TableHandle::Rowstore(table) => {
-                TABLE_CACHE.with(|c| *c.borrow_mut() = Some((eid, table_id, Arc::clone(table))));
+                TABLE_CACHE.with(|c| *c.borrow_mut() = Some((eid, epoch, table_id, Arc::clone(table))));
                 self.insert_rowstore(table, table_id, row, txn_id)
             }
             #[cfg(feature = "columnstore")]
@@ -87,7 +88,8 @@ impl StorageEngine {
                     row: row.clone(),
                 })?;
                 let pk = crate::memtable::encode_pk(&row, cs.schema.pk_indices());
-                let _ = cs.insert(row, txn_id);
+                cs.insert(row, txn_id)?;
+                self.record_write(txn_id, table_id, pk.clone());
                 Ok(pk)
             }
             #[allow(unreachable_patterns)]
@@ -275,10 +277,32 @@ impl StorageEngine {
                 }
                 Ok(pks)
             }
+            #[cfg(feature = "columnstore")]
+            TableHandle::Columnstore(cs) => {
+                self.record_write_path_violation_columnstore()?;
+                let wal_record = WalRecord::BatchInsert {
+                    txn_id,
+                    table_id,
+                    rows,
+                };
+                self.append_wal(&wal_record)?;
+                let rows = match wal_record {
+                    WalRecord::BatchInsert { rows, .. } => rows,
+                    _ => unreachable!(),
+                };
+                let mut pks = Vec::with_capacity(rows.len());
+                for row in &rows {
+                    pks.push(crate::memtable::encode_pk(row, cs.schema.pk_indices()));
+                }
+                cs.insert_batch(rows, txn_id)?;
+                for pk in &pks {
+                    self.record_write_no_dedup(txn_id, table_id, pk.clone());
+                }
+                Ok(pks)
+            }
             #[allow(unreachable_patterns)]
             _ => {
                 if let Some(result) = handle.batch_insert_disk(rows.clone(), txn_id) {
-                    // lsm / rocksdb / redb: WAL first, then bulk insert
                     let wal_record = WalRecord::BatchInsert {
                         txn_id,
                         table_id,
@@ -291,7 +315,6 @@ impl StorageEngine {
                     }
                     Ok(pks)
                 } else {
-                    // columnstore / disk_rowstore: fall through to per-row insert
                     drop(handle);
                     let mut pks = Vec::new();
                     for row in rows {
@@ -431,11 +454,15 @@ impl StorageEngine {
                 Ok(())
             }
             #[cfg(feature = "columnstore")]
-            TableHandle::Columnstore(_) => {
-                self.record_write_path_violation_columnstore()?;
-                Err(StorageError::Io(std::io::Error::other(
-                    "DELETE not supported on COLUMNSTORE tables",
-                )))
+            TableHandle::Columnstore(t) => {
+                self.append_wal(&WalRecord::Delete {
+                    txn_id,
+                    table_id,
+                    pk: pk.clone(),
+                })?;
+                t.delete_by_pk(pk, txn_id);
+                self.record_write(txn_id, table_id, pk.clone());
+                Ok(())
             }
             #[allow(unreachable_patterns)]
             _ => {
@@ -482,7 +509,7 @@ impl StorageEngine {
                 Ok(table.get(pk, txn_id, read_ts))
             }
             #[cfg(feature = "columnstore")]
-            TableHandle::Columnstore(_) => Ok(None),
+            TableHandle::Columnstore(cs) => Ok(cs.get(pk, txn_id, read_ts)),
             #[allow(unreachable_patterns)]
             _ => {
                 if let Some(t) = handle.as_storage_table() {

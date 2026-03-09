@@ -1373,7 +1373,7 @@ mod tests {
     #[test]
     fn test_config_rollback() {
         let mgr = ConfigRollbackManager::new(100);
-        let v1 = mgr.set("pool_size", "10", "admin");
+        let _v1 = mgr.set("pool_size", "10", "admin");
         let _v2 = mgr.set("pool_size", "20", "admin");
         assert_eq!(mgr.get("pool_size").unwrap().value, "20");
         assert!(mgr.rollback("pool_size"));

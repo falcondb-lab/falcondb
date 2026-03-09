@@ -13,8 +13,7 @@
 //! - `compress_tag = 0x01` → payload is LZ4-compressed; first 4 bytes of payload
 //!   are the uncompressed size (LE u32), followed by compressed data
 //!
-//! This module provides a software-only LZ4-style compressor for small payloads.
-//! For production use, replace the inner functions with `lz4-flex` or similar.
+//! This module uses `lz4_flex` for LZ4 block compression.
 
 use bytes::{BufMut, BytesMut};
 
@@ -132,74 +131,13 @@ pub fn decode_compressed_payload(tag_and_payload: &[u8]) -> Result<Vec<u8>, Nati
     decompress_payload(&tag_and_payload[1..], algo)
 }
 
-// ── Minimal LZ4-compatible compression ───────────────────────────────
-//
-// This is a simplified implementation for protocol development.
-// For production, replace with `lz4-flex` crate.
-
 fn lz4_compress(input: &[u8]) -> Vec<u8> {
-    // Simple RLE-style compression as a placeholder.
-    // Real LZ4 would use hash-based match finding.
-    let mut output = Vec::with_capacity(input.len());
-    let mut i = 0;
-    while i < input.len() {
-        // Look for a run of identical bytes
-        let start = i;
-        let b = input[i];
-        i += 1;
-        while i < input.len() && input[i] == b && (i - start) < 255 {
-            i += 1;
-        }
-        let run_len = i - start;
-        if run_len >= 4 {
-            // Encode as: 0xFF marker, byte, count
-            output.push(0xFF);
-            output.push(b);
-            output.push(run_len as u8);
-        } else {
-            // Literal bytes
-            for &byte in &input[start..i] {
-                if byte == 0xFF {
-                    // Escape the marker
-                    output.push(0xFF);
-                    output.push(0xFF);
-                    output.push(1);
-                } else {
-                    output.push(byte);
-                }
-            }
-        }
-    }
-    output
+    lz4_flex::compress(input)
 }
 
 fn lz4_decompress(input: &[u8], expected_size: usize) -> Result<Vec<u8>, String> {
-    let mut output = Vec::with_capacity(expected_size);
-    let mut i = 0;
-    while i < input.len() {
-        if input[i] == 0xFF {
-            if i + 2 >= input.len() {
-                return Err("truncated RLE sequence".into());
-            }
-            let byte = input[i + 1];
-            let count = input[i + 2] as usize;
-            for _ in 0..count {
-                output.push(byte);
-            }
-            i += 3;
-        } else {
-            output.push(input[i]);
-            i += 1;
-        }
-    }
-    if output.len() != expected_size {
-        return Err(format!(
-            "size mismatch: expected {}, got {}",
-            expected_size,
-            output.len()
-        ));
-    }
-    Ok(output)
+    lz4_flex::decompress(input, expected_size)
+        .map_err(|e| format!("lz4 decompression error: {e}"))
 }
 
 // ── Negotiation helper ───────────────────────────────────────────────

@@ -53,4 +53,4 @@ jobs:
         run: cargo test -p falcon_cluster --test enterprise_compliance -- --nocapture
 
       - name: Existing chaos gate
-        run: chmod +x scripts/ci_distributed_chaos.sh && ./scripts/ci_distributed_chaos.sh || true
+        run: chmod +x scripts/ci/ci_distributed_chaos.sh && ./scripts/ci/ci_distributed_chaos.sh || true

@@ -24,6 +24,12 @@ use crate::lsm_table::LsmTable;
 use super::engine::{datatype_to_cast_target, IndexMeta, StorageEngine};
 
 impl StorageEngine {
+    /// Bump the DDL epoch to invalidate thread-local TABLE_CACHE entries.
+    #[inline]
+    fn bump_ddl_epoch(&self) {
+        self.ddl_epoch.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
     // ── Database DDL ─────────────────────────────────────────────────
 
     pub fn create_database(&self, name: &str, owner: &str) -> Result<u32, StorageError> {
@@ -524,6 +530,7 @@ impl StorageEngine {
         match schema.storage_type {
             StorageType::Rowstore => {
                 let table = Arc::new(MemTable::new(schema.clone()));
+                table.ensure_gin_indexes();
                 self.engine_tables
                     .insert(table_id, crate::table_handle::TableHandle::Rowstore(table));
             }
@@ -655,6 +662,7 @@ impl StorageEngine {
         // Remove from storage map and catalog AFTER WAL is written
         self.engine_tables.remove(&table_id);
         catalog.drop_table(name);
+        self.bump_ddl_epoch();
         Ok(())
     }
 
@@ -677,6 +685,7 @@ impl StorageEngine {
         match schema.storage_type {
             StorageType::Rowstore => {
                 let table = Arc::new(MemTable::new(schema));
+                table.ensure_gin_indexes();
                 self.engine_tables
                     .insert(table_id, crate::table_handle::TableHandle::Rowstore(table));
             }

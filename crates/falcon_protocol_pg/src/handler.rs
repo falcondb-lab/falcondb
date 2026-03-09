@@ -1117,8 +1117,8 @@ impl QueryHandler {
             ) {
                 let actual_us = query_duration.as_micros() as u64;
                 let kind = PlanKind::from_physical(&plan);
-                // Extract features from empty vec as placeholder (features were extracted at plan time)
-                let features = [0.0f64; falcon_planner::FEATURE_DIM];
+                let features =
+                    falcon_planner::ai_optimizer::extract_features_from_physical(&plan);
                 global_ai_optimizer().record_feedback(FeedbackRecord {
                     features,
                     plan_kind: kind,

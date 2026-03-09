@@ -515,6 +515,9 @@ pub struct StorageEngine {
     // ── Enterprise / non-core extensions (RLS, TDE, PITR, CDC, tenancy, cold store) ──
     /// Grouped enterprise features — see [`EnterpriseExtensions`].
     pub ext: EnterpriseExtensions,
+    /// Monotonic DDL epoch — bumped on every CREATE/DROP/ALTER/TRUNCATE.
+    /// Used by the thread-local TABLE_CACHE in engine_dml to invalidate stale entries.
+    pub(crate) ddl_epoch: AtomicU64,
 }
 
 impl StorageEngine {
@@ -679,6 +682,7 @@ impl StorageEngine {
             auto_analyze_running: AtomicBool::new(false),
             self_weak: parking_lot::RwLock::new(std::sync::Weak::new()),
             ext: EnterpriseExtensions::default(),
+            ddl_epoch: AtomicU64::new(0),
         }
     }
 
@@ -940,7 +944,6 @@ impl StorageEngine {
         self.ext.job_scheduler.start();
     }
 
-    #[cfg(feature = "encryption_tde")]
     pub fn configure_tde(
         &self,
         enabled: bool,
@@ -1016,19 +1019,6 @@ impl StorageEngine {
         );
     }
 
-    #[cfg(not(feature = "encryption_tde"))]
-    pub fn configure_tde(
-        &self,
-        enabled: bool,
-        _key_env_var: &str,
-        _encrypt_wal: bool,
-        _encrypt_data: bool,
-    ) {
-        if enabled {
-            tracing::warn!("TDE requested but not compiled (enable encryption_tde feature)");
-        }
-    }
-
     /// Configure CDC WAL bridge from the [cdc] config section.
     /// Call this after construction to enable WAL-backed CDC event generation.
     ///
@@ -1093,7 +1083,6 @@ impl StorageEngine {
         }
     }
 
-    #[cfg(feature = "encryption_tde")]
     pub fn tde_list_deks(&self) -> Vec<TdeDekInfo> {
         let km = self.ext.key_manager.read();
         km.list_deks()
@@ -1107,12 +1096,6 @@ impl StorageEngine {
             .collect()
     }
 
-    #[cfg(not(feature = "encryption_tde"))]
-    pub fn tde_list_deks(&self) -> Vec<TdeDekInfo> {
-        vec![]
-    }
-
-    #[cfg(feature = "encryption_tde")]
     pub fn tde_rotate_master_key(&self, new_passphrase: &str) -> Result<(), String> {
         let mut km = self.ext.key_manager.write();
         if !km.is_enabled() {
@@ -1124,12 +1107,6 @@ impl StorageEngine {
         Ok(())
     }
 
-    #[cfg(not(feature = "encryption_tde"))]
-    pub fn tde_rotate_master_key(&self, _: &str) -> Result<(), String> {
-        Err("TDE not compiled (enable encryption_tde feature)".into())
-    }
-
-    #[cfg(feature = "encryption_tde")]
     pub fn tde_generate_dek(
         &self,
         scope: crate::encryption::EncryptionScope,
@@ -1145,10 +1122,6 @@ impl StorageEngine {
         Ok(dek_id.0)
     }
 
-    #[cfg(not(feature = "encryption_tde"))]
-    pub fn tde_generate_dek(&self, _: crate::encryption::EncryptionScope) -> Result<u64, String> {
-        Err("TDE not compiled (enable encryption_tde feature)".into())
-    }
 
     /// Configure multi-tenant isolation and metering from the [multi_tenant] config section.
     /// Call this after construction to enable tenant quota enforcement and resource metering.
@@ -2204,6 +2177,10 @@ impl StorageEngine {
                     crate::table_handle::TableHandle::Rowstore(t) => {
                         t.commit_keys(txn_id, commit_ts, keys)?
                     }
+                    #[cfg(feature = "columnstore")]
+                    crate::table_handle::TableHandle::Columnstore(t) => {
+                        t.commit(txn_id, commit_ts);
+                    }
                     _ => handle.commit_keys_batch(keys, txn_id, commit_ts)?,
                 }
             }
@@ -2240,6 +2217,8 @@ impl StorageEngine {
             if let Some(handle) = self.engine_tables.get(&table_id) {
                 match handle.value() {
                     crate::table_handle::TableHandle::Rowstore(t) => t.abort_keys(txn_id, &keys),
+                    #[cfg(feature = "columnstore")]
+                    crate::table_handle::TableHandle::Columnstore(t) => t.abort(txn_id),
                     _ => handle.abort_keys_batch(&keys, txn_id),
                 }
             }
@@ -2303,14 +2282,11 @@ impl StorageEngine {
             .engine_tables
             .get(&schema.id)
             .ok_or(StorageError::TableNotFound(schema.id))?;
-        let table = handle
-            .as_rowstore()
-            .ok_or(StorageError::TableNotFound(schema.id))?;
 
         // Snapshot scan: use a sentinel txn/ts to read all committed data
         let read_txn = TxnId(u64::MAX);
         let read_ts = Timestamp(u64::MAX);
-        let rows: Vec<Vec<falcon_common::datum::Datum>> = table
+        let rows: Vec<Vec<falcon_common::datum::Datum>> = handle
             .scan(read_txn, read_ts)
             .into_iter()
             .map(|(_pk, row)| row.values)
@@ -2338,10 +2314,12 @@ impl StorageEngine {
         };
 
         // Update cached threshold on MemTable so commit fast path avoids table_stats lookup
-        let new_threshold = (stats.row_count / 5).max(500);
-        table
-            .analyze_threshold
-            .store(new_threshold, AtomicOrdering::Relaxed);
+        if let Some(table) = handle.as_rowstore() {
+            let new_threshold = (stats.row_count / 5).max(500);
+            table
+                .analyze_threshold
+                .store(new_threshold, AtomicOrdering::Relaxed);
+        }
 
         self.table_stats.insert(schema.id, stats.clone());
         Ok(stats)
@@ -2917,6 +2895,12 @@ impl StorageEngine {
         };
 
         for entry in &self.engine_tables {
+            #[cfg(feature = "columnstore")]
+            if let crate::table_handle::TableHandle::Columnstore(cs) = entry.value() {
+                let purged = cs.gc_purge(watermark);
+                aggregate.reclaimed_versions += purged as u64;
+                continue;
+            }
             let Some(memtable) = entry.value().as_rowstore() else {
                 continue;
             };
@@ -2940,10 +2924,15 @@ impl StorageEngine {
     /// Estimate the in-memory size of a single table in bytes.
     pub fn estimate_table_size_bytes(&self, table_id: TableId) -> u64 {
         self.engine_tables.get(&table_id).map_or(0, |handle| {
-            handle.as_rowstore().map_or(0, |t| {
-                // row count * ~128 bytes per row (rough estimate)
-                (t.data.len() as u64) * 128
-            })
+            match handle.value() {
+                #[cfg(feature = "columnstore")]
+                crate::table_handle::TableHandle::Columnstore(cs) => {
+                    (cs.row_count_approx() as u64) * 128
+                }
+                _ => handle.as_rowstore().map_or(0, |t| {
+                    (t.data.len() as u64) * 128
+                }),
+            }
         })
     }
 
@@ -2958,7 +2947,13 @@ impl StorageEngine {
     pub fn total_chain_count(&self) -> usize {
         self.engine_tables
             .iter()
-            .filter_map(|e| e.value().as_rowstore().map(|t| t.data.len()))
+            .map(|e| {
+                match e.value() {
+                    #[cfg(feature = "columnstore")]
+                    crate::table_handle::TableHandle::Columnstore(cs) => cs.row_count_approx(),
+                    _ => e.value().as_rowstore().map_or(0, |t| t.data.len()),
+                }
+            })
             .sum()
     }
 
@@ -3099,12 +3094,11 @@ impl StorageEngine {
         let dummy_txn = TxnId(0);
         let mut table_data = Vec::new();
         for entry in &self.engine_tables {
-            let Some(memtable) = entry.value().as_rowstore() else {
-                continue;
-            };
             let table_id = *entry.key();
-            let rows: Vec<(Vec<u8>, OwnedRow)> = memtable.scan(dummy_txn, read_ts);
-            table_data.push((table_id, rows));
+            let rows: Vec<(Vec<u8>, OwnedRow)> = entry.value().scan(dummy_txn, read_ts);
+            if !rows.is_empty() {
+                table_data.push((table_id, rows));
+            }
         }
 
         let (segment_id, lsn) = self
@@ -3142,6 +3136,22 @@ impl StorageEngine {
         for (table_id, rows) in &ckpt.table_data {
             let schema = self.catalog.read().find_table_by_id(*table_id).cloned();
             if let Some(schema) = schema {
+                #[cfg(feature = "columnstore")]
+                if schema.storage_type == falcon_common::schema::StorageType::Columnstore {
+                    let cs = Arc::new(crate::columnstore::ColumnStoreTable::new(schema));
+                    let sentinel_txn = TxnId(0);
+                    let sentinel_ts = Timestamp(1);
+                    for (_pk, row) in rows {
+                        let _ = cs.insert(row.clone(), sentinel_txn);
+                    }
+                    cs.commit(sentinel_txn, sentinel_ts);
+                    cs.freeze_buffer();
+                    self.engine_tables.insert(
+                        *table_id,
+                        crate::table_handle::TableHandle::Columnstore(cs),
+                    );
+                    continue;
+                }
                 let memtable = Arc::new(MemTable::new(schema));
                 let sentinel_txn = TxnId(0);
                 let sentinel_ts = Timestamp(1);
@@ -3151,6 +3161,7 @@ impl StorageEngine {
                     chain.commit(sentinel_txn, sentinel_ts);
                     memtable.data.insert(pk.clone(), chain);
                 }
+                memtable.ensure_gin_indexes();
                 memtable.rebuild_secondary_indexes();
                 self.engine_tables.insert(
                     *table_id,
@@ -3190,7 +3201,7 @@ impl StorageEngine {
                     let sentinel_ts = Timestamp(1);
                     match schema.storage_type {
                         #[cfg(feature = "rocksdb")]
-                        StorageType::RocksDbRowstore => {
+                        falcon_common::schema::StorageType::RocksDbRowstore => {
                             let data_dir = engine
                                 .data_dir
                                 .as_deref()
@@ -3220,6 +3231,19 @@ impl StorageEngine {
                                     crate::table_handle::TableHandle::RocksDb(Arc::clone(&rdb)),
                                 );
                             }
+                        }
+                        #[cfg(feature = "columnstore")]
+                        falcon_common::schema::StorageType::Columnstore => {
+                            let cs = Arc::new(crate::columnstore::ColumnStoreTable::new(schema));
+                            for (_pk, row) in rows {
+                                let _ = cs.insert(row.clone(), sentinel_txn);
+                            }
+                            cs.commit(sentinel_txn, sentinel_ts);
+                            cs.freeze_buffer();
+                            engine.engine_tables.insert(
+                                *table_id,
+                                crate::table_handle::TableHandle::Columnstore(cs),
+                            );
                         }
                         _ => {
                             let memtable = Arc::new(MemTable::new(schema));
@@ -3357,6 +3381,14 @@ impl StorageEngine {
                                     crate::table_handle::TableHandle::Lsm(Arc::clone(&lsm)),
                                 );
                             }
+                        }
+                        #[cfg(feature = "columnstore")]
+                        StorageType::Columnstore => {
+                            let cs = Arc::new(crate::columnstore::ColumnStoreTable::new(schema.clone()));
+                            engine.engine_tables.insert(
+                                schema.id,
+                                crate::table_handle::TableHandle::Columnstore(cs),
+                            );
                         }
                         _ => {
                             // Fallback: create as in-memory Rowstore
@@ -3949,13 +3981,14 @@ impl StorageEngine {
             *engine.recovered_prepared_gids.write() = prepared_gid_mappings;
         }
 
-        // Rebuild secondary indexes from committed rows only.
+        // Rebuild secondary indexes and GIN indexes from committed rows only.
         // Limitation: rows written by in-doubt (prepared but unresolved) transactions
         // are NOT indexed until the transaction is resolved via COMMIT/ROLLBACK PREPARED
         // or the in-doubt resolver. Queries using secondary index scans may miss these
         // rows; primary key lookups are unaffected.
         for entry in &engine.engine_tables {
             if let Some(memtable) = entry.value().as_rowstore() {
+                memtable.ensure_gin_indexes();
                 memtable.rebuild_secondary_indexes();
             }
         }
@@ -4449,9 +4482,10 @@ impl StorageEngine {
             engine.apply_abort_to_write_set(txn_id, &write_set);
         }
 
-        // Rebuild secondary indexes
+        // Rebuild secondary indexes and GIN indexes
         for entry in &engine.engine_tables {
             if let Some(memtable) = entry.value().as_rowstore() {
+                memtable.ensure_gin_indexes();
                 memtable.rebuild_secondary_indexes();
             }
         }
@@ -4474,6 +4508,41 @@ impl StorageEngine {
             max_commit_ts
         );
         Ok((engine, records_replayed, final_lsn))
+    }
+
+    /// PITR: Recover from archived WAL segments.
+    ///
+    /// 1. Builds a recovery plan from the archiver (selects base backup + WAL segments).
+    /// 2. Stages archived segments into a temporary directory.
+    /// 3. Delegates to `recover_to_target` for actual replay.
+    ///
+    /// Returns `(engine, records_replayed, final_lsn)` on success.
+    pub fn recover_from_archive(
+        archiver: &crate::pitr::WalArchiver,
+        target: crate::pitr::RecoveryTarget,
+        staging_dir: &Path,
+    ) -> Result<(Self, u64, u64), StorageError> {
+        let plan = archiver
+            .plan_recovery(&target)
+            .ok_or_else(|| StorageError::Other(
+                "no suitable base backup found for the requested recovery target".into(),
+            ))?;
+
+        tracing::info!(
+            "PITR: recovery plan — base_backup='{}' (LSN {}..{}), {} WAL segments, target={}",
+            plan.base_backup.label,
+            plan.base_backup.start_lsn,
+            plan.base_backup.end_lsn,
+            plan.segments.len(),
+            plan.target,
+        );
+
+        let staged = archiver.stage_segments(&plan, staging_dir).map_err(|e| {
+            StorageError::Other(format!("failed to stage WAL segments: {e}"))
+        })?;
+        tracing::info!("PITR: {staged} segments staged to {:?}", staging_dir);
+
+        Self::recover_to_target(staging_dir, plan.target)
     }
 
     /// Gracefully shut down the storage engine.

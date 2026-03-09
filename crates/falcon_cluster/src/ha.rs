@@ -1114,7 +1114,7 @@ mod tests {
             failover_cooldown: Duration::from_millis(0),
             ..Default::default()
         };
-        let mut group = HAReplicaGroup::new(ShardId(0), &[test_schema()], config).unwrap();
+        let group = HAReplicaGroup::new(ShardId(0), &[test_schema()], config).unwrap();
 
         // Insert data and only catch up replica 1 (not 0 or 2)
         insert_and_replicate(&group, 1, "a", 1);

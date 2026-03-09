@@ -54,7 +54,7 @@ impl TableHandle {
             #[cfg(feature = "columnstore")]
             TableHandle::Columnstore(t) => {
                 let pk = crate::memtable::encode_pk(row, t.schema.pk_indices());
-                let _ = t.insert(row.clone(), txn_id);
+                t.insert(row.clone(), txn_id)?;
                 Ok(pk)
             }
             #[allow(unreachable_patterns)]
@@ -95,9 +95,10 @@ impl TableHandle {
         match self {
             TableHandle::Rowstore(t) => t.delete(pk, txn_id),
             #[cfg(feature = "columnstore")]
-            TableHandle::Columnstore(_) => Err(StorageError::Io(std::io::Error::other(
-                "DELETE not supported on COLUMNSTORE tables",
-            ))),
+            TableHandle::Columnstore(t) => {
+                t.delete_by_pk(pk, txn_id);
+                Ok(())
+            }
             #[allow(unreachable_patterns)]
             _ => self
                 .as_storage_table()
@@ -118,7 +119,7 @@ impl TableHandle {
         match self {
             TableHandle::Rowstore(t) => Ok(t.get(pk, txn_id, read_ts)),
             #[cfg(feature = "columnstore")]
-            TableHandle::Columnstore(_) => Ok(None),
+            TableHandle::Columnstore(t) => Ok(t.get(pk, txn_id, read_ts)),
             #[allow(unreachable_patterns)]
             _ => self
                 .as_storage_table()
@@ -146,6 +147,12 @@ impl TableHandle {
     {
         match self {
             TableHandle::Rowstore(t) => t.for_each_visible(txn_id, read_ts, |r| f(r)),
+            #[cfg(feature = "columnstore")]
+            TableHandle::Columnstore(t) => {
+                for (_, row) in t.scan(txn_id, read_ts) {
+                    f(&row);
+                }
+            }
             #[allow(unreachable_patterns)]
             _ => {
                 if let Some(t) = self.as_storage_table() {
@@ -163,6 +170,8 @@ impl TableHandle {
     pub fn count_visible(&self, txn_id: TxnId, read_ts: Timestamp) -> usize {
         match self {
             TableHandle::Rowstore(t) => t.count_visible(txn_id, read_ts),
+            #[cfg(feature = "columnstore")]
+            TableHandle::Columnstore(t) => t.row_count_approx(),
             #[allow(unreachable_patterns)]
             _ => self.as_storage_table().map_or_else(
                 || self.scan(txn_id, read_ts).len(),
@@ -180,6 +189,11 @@ impl TableHandle {
     ) -> Result<(), StorageError> {
         match self {
             TableHandle::Rowstore(t) => t.commit_keys(txn_id, commit_ts, std::slice::from_ref(pk)),
+            #[cfg(feature = "columnstore")]
+            TableHandle::Columnstore(t) => {
+                t.commit(txn_id, commit_ts);
+                Ok(())
+            }
             #[allow(unreachable_patterns)]
             _ => self
                 .as_storage_table()
@@ -191,6 +205,8 @@ impl TableHandle {
     pub fn abort_key(&self, pk: &PrimaryKey, txn_id: TxnId) {
         match self {
             TableHandle::Rowstore(t) => t.abort_keys(txn_id, std::slice::from_ref(pk)),
+            #[cfg(feature = "columnstore")]
+            TableHandle::Columnstore(t) => t.abort(txn_id),
             #[allow(unreachable_patterns)]
             _ => {
                 if let Some(t) = self.as_storage_table() {
@@ -243,19 +259,29 @@ impl TableHandle {
         })
     }
 
-    /// Batch commit for disk-backed engines. No-op for rowstore (handled separately).
+    /// Batch commit for disk-backed engines. Columnstore uses txn-level commit.
     pub fn commit_keys_batch(
         &self,
         pks: &[PrimaryKey],
         txn_id: TxnId,
         commit_ts: Timestamp,
     ) -> Result<(), StorageError> {
+        #[cfg(feature = "columnstore")]
+        if let TableHandle::Columnstore(t) = self {
+            t.commit(txn_id, commit_ts);
+            return Ok(());
+        }
         self.as_storage_table()
             .map_or(Ok(()), |t| t.commit_batch(pks, txn_id, commit_ts))
     }
 
-    /// Batch abort for disk-backed engines. No-op for rowstore (handled separately).
+    /// Batch abort for disk-backed engines. Columnstore uses txn-level abort.
     pub fn abort_keys_batch(&self, pks: &[PrimaryKey], txn_id: TxnId) {
+        #[cfg(feature = "columnstore")]
+        if let TableHandle::Columnstore(t) = self {
+            t.abort(txn_id);
+            return;
+        }
         if let Some(t) = self.as_storage_table() {
             t.abort_batch(pks, txn_id);
         }
