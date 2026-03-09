@@ -417,6 +417,20 @@ impl Planner {
                 name: name.clone(),
                 args: args.clone(),
             }),
+            BoundStatement::DoBlock { body, language } => Ok(PhysicalPlan::DoBlock {
+                body: body.clone(),
+                language: language.clone(),
+            }),
+            BoundStatement::CreateTrigger { trigger } => Ok(PhysicalPlan::CreateTrigger {
+                trigger: trigger.clone(),
+            }),
+            BoundStatement::DropTrigger { trigger_name, table_name, if_exists } => {
+                Ok(PhysicalPlan::DropTrigger {
+                    trigger_name: trigger_name.clone(),
+                    table_name: table_name.clone(),
+                    if_exists: *if_exists,
+                })
+            }
             BoundStatement::CreateTableAs {
                 table_name,
                 if_not_exists,
@@ -425,6 +439,14 @@ impl Planner {
                 table_name: table_name.clone(),
                 if_not_exists: *if_not_exists,
                 query: query.clone(),
+            }),
+            BoundStatement::CreateType { name, labels } => Ok(PhysicalPlan::CreateType {
+                name: name.clone(),
+                labels: labels.clone(),
+            }),
+            BoundStatement::DropType { name, if_exists } => Ok(PhysicalPlan::DropType {
+                name: name.clone(),
+                if_exists: *if_exists,
             }),
             BoundStatement::NoOp => Ok(PhysicalPlan::NoOp),
             BoundStatement::ShowPgVar { name, value } => Ok(PhysicalPlan::ShowPgVar {
@@ -458,6 +480,7 @@ impl Planner {
             BoundStatement::DropJob { job_id } => Ok(PhysicalPlan::DropJob { job_id: *job_id }),
             BoundStatement::ShowJobs => Ok(PhysicalPlan::ShowJobs),
             BoundStatement::ShowBackupStatus => Ok(PhysicalPlan::ShowBackupStatus),
+            BoundStatement::ShowAiStats => Ok(PhysicalPlan::ShowAiStats),
         }
     }
 

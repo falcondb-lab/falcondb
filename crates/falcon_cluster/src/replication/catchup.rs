@@ -275,6 +275,12 @@ pub fn apply_wal_record_to_engine(
         WalRecord::DropFunction { name } => {
             let _ = engine.drop_function(name);
         }
+        WalRecord::CreateTrigger { def } => {
+            let _ = engine.create_trigger(def.clone());
+        }
+        WalRecord::DropTrigger { table_name, trigger_name } => {
+            let _ = engine.drop_trigger(table_name, trigger_name);
+        }
     }
     Ok(())
 }

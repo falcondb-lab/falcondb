@@ -342,6 +342,58 @@ pub struct FunctionDef {
     pub or_replace: bool,
 }
 
+/// When a trigger fires relative to the DML operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TriggerTiming {
+    Before,
+    After,
+    InsteadOf,
+}
+
+/// DML events that can activate a trigger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TriggerEvent {
+    Insert,
+    Update,
+    Delete,
+}
+
+/// Row-level vs statement-level granularity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TriggerLevel {
+    Row,
+    Statement,
+}
+
+/// Stored definition of a trigger.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriggerDef {
+    pub name: String,
+    pub table_name: String,
+    pub timing: TriggerTiming,
+    pub events: Vec<TriggerEvent>,
+    pub level: TriggerLevel,
+    /// The trigger function name (must exist in functions catalog).
+    pub function_name: String,
+    /// Optional WHEN condition SQL expression.
+    pub when_condition: Option<String>,
+    /// If false, this trigger is disabled and will not fire.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// User-defined ENUM type definition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnumTypeDef {
+    pub name: String,
+    /// Ordered list of valid label strings.
+    pub labels: Vec<String>,
+}
+
 /// In-memory catalog: all known tables, views, schemas, roles, and privileges.
 ///
 /// Thread-safe via external synchronization (RwLock in storage).
@@ -376,6 +428,12 @@ pub struct Catalog {
     /// User-defined functions, keyed by lowercase name.
     #[serde(default)]
     functions: HashMap<String, FunctionDef>,
+    /// Triggers, keyed by lowercase "table_name.trigger_name".
+    #[serde(default)]
+    triggers: HashMap<String, TriggerDef>,
+    /// User-defined ENUM types, keyed by lowercase type name.
+    #[serde(default)]
+    enum_types: HashMap<String, EnumTypeDef>,
 }
 
 impl Catalog {
@@ -440,6 +498,8 @@ impl Catalog {
             grant_entries: Vec::new(),
             role_catalog: None,
             functions: HashMap::new(),
+            triggers: HashMap::new(),
+            enum_types: HashMap::new(),
         };
         catalog.rebuild_role_catalog();
         catalog
@@ -929,6 +989,90 @@ impl Catalog {
 
     pub fn list_functions(&self) -> Vec<&FunctionDef> {
         self.functions.values().collect()
+    }
+
+    // ── Trigger management ──
+
+    fn trigger_key(table_name: &str, trigger_name: &str) -> String {
+        format!("{}.{}", table_name.to_lowercase(), trigger_name.to_lowercase())
+    }
+
+    pub fn create_trigger(&mut self, trigger: TriggerDef) -> Result<(), String> {
+        let key = Self::trigger_key(&trigger.table_name, &trigger.name);
+        if self.triggers.contains_key(&key) {
+            return Err(format!(
+                "trigger \"{}\" for table \"{}\" already exists",
+                trigger.name, trigger.table_name
+            ));
+        }
+        self.triggers.insert(key, trigger);
+        Ok(())
+    }
+
+    pub fn drop_trigger(&mut self, table_name: &str, trigger_name: &str) -> Result<(), String> {
+        let key = Self::trigger_key(table_name, trigger_name);
+        if self.triggers.remove(&key).is_some() {
+            Ok(())
+        } else {
+            Err(format!(
+                "trigger \"{trigger_name}\" for table \"{table_name}\" does not exist"
+            ))
+        }
+    }
+
+    pub fn find_trigger(&self, table_name: &str, trigger_name: &str) -> Option<&TriggerDef> {
+        let key = Self::trigger_key(table_name, trigger_name);
+        self.triggers.get(&key)
+    }
+
+    /// Returns all triggers defined on the given table, in insertion order.
+    pub fn triggers_for_table(&self, table_name: &str) -> Vec<&TriggerDef> {
+        let prefix = format!("{}.", table_name.to_lowercase());
+        let mut result: Vec<&TriggerDef> = self
+            .triggers
+            .values()
+            .filter(|t| t.table_name.to_lowercase() == table_name.to_lowercase())
+            .collect();
+        let _ = prefix;
+        result.sort_by(|a, b| a.name.cmp(&b.name));
+        result
+    }
+
+    pub fn list_triggers(&self) -> Vec<&TriggerDef> {
+        self.triggers.values().collect()
+    }
+
+    /// Drop all triggers associated with a table (used when dropping the table).
+    pub fn drop_triggers_for_table(&mut self, table_name: &str) {
+        let lower = table_name.to_lowercase();
+        self.triggers.retain(|_, t| t.table_name.to_lowercase() != lower);
+    }
+
+    // ── Enum type management ──
+
+    pub fn create_enum_type(&mut self, def: EnumTypeDef) -> Result<(), String> {
+        let key = def.name.to_lowercase();
+        if self.enum_types.contains_key(&key) {
+            return Err(format!("type \"{}\" already exists", def.name));
+        }
+        self.enum_types.insert(key, def);
+        Ok(())
+    }
+
+    pub fn drop_enum_type(&mut self, name: &str, if_exists: bool) -> Result<(), String> {
+        let key = name.to_lowercase();
+        if self.enum_types.remove(&key).is_none() && !if_exists {
+            return Err(format!("type \"{name}\" does not exist"));
+        }
+        Ok(())
+    }
+
+    pub fn find_enum_type(&self, name: &str) -> Option<&EnumTypeDef> {
+        self.enum_types.get(&name.to_lowercase())
+    }
+
+    pub fn list_enum_types(&self) -> Vec<&EnumTypeDef> {
+        self.enum_types.values().collect()
     }
 
     /// Check if a role has a specific privilege on an object.

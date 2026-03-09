@@ -156,6 +156,75 @@ impl StorageEngine {
         Ok(())
     }
 
+    pub fn create_trigger(
+        &self,
+        def: falcon_common::schema::TriggerDef,
+    ) -> Result<(), StorageError> {
+        {
+            let catalog = self.catalog.read();
+            if catalog.find_trigger(&def.table_name, &def.name).is_some() {
+                return Err(StorageError::Other(format!(
+                    "trigger \"{}\" for table \"{}\" already exists",
+                    def.name, def.table_name
+                )));
+            }
+        }
+        self.append_wal(&WalRecord::CreateTrigger { def: def.clone() })?;
+        let mut catalog = self.catalog.write();
+        let _ = catalog.create_trigger(def);
+        Ok(())
+    }
+
+    pub fn drop_trigger(
+        &self,
+        table_name: &str,
+        trigger_name: &str,
+    ) -> Result<(), StorageError> {
+        {
+            let catalog = self.catalog.read();
+            if catalog.find_trigger(table_name, trigger_name).is_none() {
+                return Err(StorageError::Other(format!(
+                    "trigger \"{trigger_name}\" for table \"{table_name}\" does not exist"
+                )));
+            }
+        }
+        self.append_wal(&WalRecord::DropTrigger {
+            table_name: table_name.to_owned(),
+            trigger_name: trigger_name.to_owned(),
+        })?;
+        let mut catalog = self.catalog.write();
+        let _ = catalog.drop_trigger(table_name, trigger_name);
+        Ok(())
+    }
+
+    // ── Enum type DDL ─────────────────────────────────────────────────
+
+    pub fn create_enum_type(
+        &self,
+        def: falcon_common::schema::EnumTypeDef,
+    ) -> Result<(), StorageError> {
+        {
+            let catalog = self.catalog.read();
+            if catalog.find_enum_type(&def.name).is_some() {
+                return Err(StorageError::Other(format!(
+                    "type \"{}\" already exists",
+                    def.name
+                )));
+            }
+        }
+        let mut catalog = self.catalog.write();
+        catalog
+            .create_enum_type(def)
+            .map_err(StorageError::Other)
+    }
+
+    pub fn drop_enum_type(&self, name: &str, if_exists: bool) -> Result<(), StorageError> {
+        let mut catalog = self.catalog.write();
+        catalog
+            .drop_enum_type(name, if_exists)
+            .map_err(StorageError::Other)
+    }
+
     pub fn drop_function(&self, name: &str) -> Result<(), StorageError> {
         {
             let catalog = self.catalog.read();
@@ -631,7 +700,16 @@ impl StorageEngine {
         );
 
         let mut catalog = self.catalog.write();
-        catalog.add_table(schema);
+        catalog.add_table(schema.clone());
+        // CDC schema registry: record initial schema version.
+        if self.ext.cdc_manager.is_enabled() {
+            self.ext.cdc_schema_registry.register(
+                table_id,
+                &schema.name,
+                schema.columns.clone(),
+                Some(&format!("CREATE TABLE {}", schema.name)),
+            );
+        }
         Ok(table_id)
     }
 
@@ -994,6 +1072,19 @@ impl StorageEngine {
         );
         self.online_ddl.start(ddl_id);
 
+        // CDC schema registry: record new schema version after ADD COLUMN.
+        if self.ext.cdc_manager.is_enabled() {
+            let new_cols = self.catalog.read()
+                .find_table(table_name)
+                .map(|s| s.columns.clone())
+                .unwrap_or_default();
+            self.ext.cdc_schema_registry.register(
+                table_id,
+                table_name,
+                new_cols,
+                Some(&format!("ALTER TABLE {table_name} ADD COLUMN {}", col.name)),
+            );
+        }
         // CDC: emit DDL event for ALTER TABLE ADD COLUMN
         if self.ext.cdc_manager.is_enabled() {
             let txn_id = falcon_common::types::TxnId(0);
@@ -1310,6 +1401,19 @@ impl StorageEngine {
         );
         self.online_ddl.start(ddl_id);
 
+        // CDC schema registry: record new schema version after DROP COLUMN.
+        if self.ext.cdc_manager.is_enabled() {
+            let new_cols = self.catalog.read()
+                .find_table(table_name)
+                .map(|s| s.columns.clone())
+                .unwrap_or_default();
+            self.ext.cdc_schema_registry.register(
+                table_id,
+                table_name,
+                new_cols,
+                Some(&format!("ALTER TABLE {table_name} DROP COLUMN {col_name}")),
+            );
+        }
         // CDC: emit DDL event for ALTER TABLE DROP COLUMN
         if self.ext.cdc_manager.is_enabled() {
             let txn_id = falcon_common::types::TxnId(0);

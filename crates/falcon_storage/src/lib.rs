@@ -44,8 +44,10 @@ pub mod zstd_streaming;
 
 // ── Enterprise stubs (always compiled for handler compat, disabled at runtime) ──
 pub mod cdc;
+pub mod cdc_schema_registry;
 pub mod cdc_wal_bridge;
 pub mod encryption;
+pub mod object_store_backend;
 #[cfg(feature = "online_ddl_full")]
 pub mod online_ddl;
 #[cfg(not(feature = "online_ddl_full"))]

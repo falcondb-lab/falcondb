@@ -307,6 +307,91 @@ impl Executor {
             rows: result_rows,
         })
     }
+    /// Execute a plain SELECT (no aggregates) over pre-scanned columnar data.
+    ///
+    /// Applies filter + column projection directly on the RecordBatch, materialising
+    /// OwnedRows only for the surviving rows and requested columns.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn exec_columnar_scan(
+        &self,
+        col_vecs: Vec<Vec<Datum>>,
+        schema: &TableSchema,
+        projections: &[BoundProjection],
+        filter: Option<&BoundExpr>,
+        order_by: &[BoundOrderBy],
+        limit: Option<usize>,
+        offset: Option<usize>,
+        distinct: &DistinctMode,
+    ) -> Result<ExecutionResult, FalconError> {
+        let mut batch = RecordBatch::from_columns(col_vecs);
+
+        if let Some(f) = filter {
+            if is_vectorizable(projections, Some(f)) {
+                vectorized_filter(&mut batch, f);
+            } else {
+                let rows = batch.to_rows();
+                let mut kept = Vec::new();
+                for row in &rows {
+                    if crate::expr_engine::ExprEngine::eval_filter(f, row)
+                        .map_err(FalconError::Execution)?
+                    {
+                        kept.push(row.clone());
+                    }
+                }
+                batch = RecordBatch::from_rows(&kept, schema.columns.len());
+            }
+        }
+
+        let active = batch.active_indices();
+        let columns = self.resolve_output_columns(projections, schema);
+
+        // Build projected rows from active indices.
+        let mut result_rows: Vec<OwnedRow> = Vec::with_capacity(active.len());
+        for &idx in &*active {
+            let mut values = Vec::with_capacity(projections.len());
+            for proj in projections {
+                match proj {
+                    BoundProjection::Column(col_idx, _) => {
+                        let v = batch
+                            .columns
+                            .get(*col_idx)
+                            .map_or(Datum::Null, |c| c.get_datum(idx));
+                        values.push(v);
+                    }
+                    BoundProjection::Expr(expr, _) => {
+                        // Materialise this row for eval.
+                        let row_vals: Vec<Datum> = batch
+                            .columns
+                            .iter()
+                            .map(|c| c.get_datum(idx))
+                            .collect();
+                        let row = OwnedRow::new(row_vals);
+                        let v = crate::expr_engine::ExprEngine::eval_row(expr, &row)
+                            .map_err(FalconError::Execution)?;
+                        values.push(v);
+                    }
+                    _ => values.push(Datum::Null),
+                }
+            }
+            result_rows.push(OwnedRow::new(values));
+        }
+
+        crate::external_sort::sort_rows(&mut result_rows, order_by, self.external_sorter.as_ref())?;
+        self.apply_distinct(distinct, &mut result_rows);
+
+        if let Some(off) = offset {
+            if off < result_rows.len() {
+                result_rows.drain(..off);
+            } else {
+                result_rows.clear();
+            }
+        }
+        if let Some(lim) = limit {
+            result_rows.truncate(lim);
+        }
+
+        Ok(ExecutionResult::Query { columns, rows: result_rows })
+    }
 }
 
 #[cfg(test)]

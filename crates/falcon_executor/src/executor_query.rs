@@ -5,7 +5,7 @@ use falcon_common::error::FalconError;
 use falcon_common::schema::TableSchema;
 use falcon_common::types::TableId;
 use falcon_sql_frontend::types::*;
-use falcon_storage::memtable::{encode_column_value, encode_pk_from_datums, SimpleAggOp};
+use falcon_storage::memtable::{encode_column_value, encode_pk_from_datums, GinSearchTerm, SimpleAggOp};
 use falcon_txn::TxnHandle;
 
 use crate::executor::{CteData, ExecutionResult, Executor};
@@ -515,6 +515,65 @@ impl Executor {
             columns,
             rows: vec![OwnedRow::new(values)],
         })
+    }
+
+    /// Try to detect a GIN-eligible FTS predicate: `tsvector_col @@ 'query_string'`.
+    /// Returns (column_idx, gin_terms, remaining_filter) on success.
+    /// The caller MUST apply the full @@ filter as a residual to handle NOT/AND semantics correctly.
+    pub(crate) fn try_gin_scan_predicate(
+        &self,
+        filter: Option<&BoundExpr>,
+        table_id: TableId,
+    ) -> Option<(usize, Vec<GinSearchTerm>, Option<BoundExpr>)> {
+        let f = filter?;
+        // Flatten AND conjuncts to find a @@ predicate.
+        let mut conjuncts: Vec<&BoundExpr> = Vec::new();
+        Self::flatten_and(f, &mut conjuncts);
+
+        for (i, conj) in conjuncts.iter().enumerate() {
+            if let Some((col_idx, terms)) = Self::extract_gin_terms(conj) {
+                if self.storage.has_gin_index(table_id, col_idx) {
+                    // Keep the @@ conjunct as residual for correctness (NOT/AND semantics).
+                    let remaining_conjuncts: Vec<BoundExpr> = conjuncts
+                        .iter()
+                        .enumerate()
+                        .filter(|(j, _)| *j != i)
+                        .map(|(_, e)| (*e).clone())
+                        .collect();
+                    // Always keep the original @@ as residual filter for row-level verification.
+                    let residual = Self::conjoin(
+                        std::iter::once((*conj).clone())
+                            .chain(remaining_conjuncts)
+                            .collect(),
+                    );
+                    return Some((col_idx, terms, residual));
+                }
+            }
+        }
+        None
+    }
+
+    /// Extract GIN search terms from a `col @@ Literal(tsquery)` expression.
+    /// Returns (column_idx, terms) if the expression is GIN-eligible.
+    fn extract_gin_terms(expr: &BoundExpr) -> Option<(usize, Vec<GinSearchTerm>)> {
+        if let BoundExpr::BinaryOp {
+            left,
+            op: BinOp::TsMatch,
+            right,
+        } = expr
+        {
+            let (col_idx, query_str) = match (left.as_ref(), right.as_ref()) {
+                (BoundExpr::ColumnRef(idx), BoundExpr::Literal(Datum::TsQuery(q))) => (*idx, q),
+                (BoundExpr::Literal(Datum::TsQuery(q)), BoundExpr::ColumnRef(idx)) => (*idx, q),
+                _ => return None,
+            };
+            let terms = crate::fts::extract_gin_terms_from_tsquery(query_str);
+            if terms.is_empty() {
+                return None;
+            }
+            return Some((col_idx, terms));
+        }
+        None
     }
 
     /// Detect ORDER BY <pk_col> [ASC|DESC] LIMIT K pattern for scan_top_k_by_pk.
@@ -1064,8 +1123,22 @@ impl Executor {
                 // to skip redundant sort+limit later. We do this via a wrapper
                 // that returns the rows and signals "already sorted".
                 (rows, filter.cloned())
+            } else if let Some((gin_col, gin_terms, residual)) =
+                self.try_gin_scan_predicate(filter, table_id)
+            {
+                // GIN index scan: use inverted index to get candidate PKs, skip full table scan.
+                // Residual filter is always kept for row-level @@ re-verification.
+                let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+                match self.storage.gin_scan(table_id, gin_col, &gin_terms, txn.txn_id, read_ts) {
+                    Some(rows) => (rows, residual),
+                    None => (
+                        self.storage.scan(table_id, txn.txn_id, read_ts)?,
+                        filter.cloned(),
+                    ),
+                }
             } else {
                 let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+                self.txn_mgr.register_ssi_read(txn, table_id.0);
                 (
                     self.storage.scan(table_id, txn.txn_id, read_ts)?,
                     filter.cloned(),
@@ -1081,6 +1154,37 @@ impl Executor {
         // Check if the materialized filter still contains correlated subqueries.
         // If so, we need per-row re-materialization during filtering.
         let filter_has_correlated_sub = mat_filter.as_ref().is_some_and(Self::expr_has_outer_ref);
+
+        // ── Columnar scan fast path for plain SELECT (no aggregates, no window) ──
+        // When: no agg/group/window/having/correlated-filter, table is ColumnStore,
+        // all projections are simple column refs or expressions (no subqueries).
+        if !has_agg
+            && group_by.is_empty()
+            && grouping_sets.is_empty()
+            && !has_window
+            && having.is_none()
+            && !filter_has_correlated_sub
+            && virtual_rows.is_empty()
+            && table_id != TableId(0)
+            && cte_data.get(&table_id).is_none()
+            && projections.iter().all(|p| {
+                matches!(p, BoundProjection::Column(..) | BoundProjection::Expr(..))
+            })
+        {
+            let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+            if let Some(col_vecs) = self.storage.scan_columnar(table_id, txn.txn_id, read_ts) {
+                return self.exec_columnar_scan(
+                    col_vecs,
+                    schema,
+                    projections,
+                    mat_filter.as_ref(),
+                    order_by,
+                    limit,
+                    offset,
+                    distinct,
+                );
+            }
+        }
 
         // (has_window and has_agg already computed above)
 

@@ -462,7 +462,10 @@ impl LogicalPlan {
             | BoundStatement::ShowGrants { .. }
             | BoundStatement::CreateFunction { .. }
             | BoundStatement::DropFunction { .. }
-            | BoundStatement::CallProcedure { .. } => {
+            | BoundStatement::CallProcedure { .. }
+            | BoundStatement::DoBlock { .. }
+            | BoundStatement::CreateTrigger { .. }
+            | BoundStatement::DropTrigger { .. } => {
                 Err(falcon_common::error::SqlError::Unsupported(
                     "Schema/Role/Grant/Function DDL uses legacy planner path".into(),
                 ))
@@ -486,8 +489,11 @@ impl LogicalPlan {
             | BoundStatement::CreateJob { .. }
             | BoundStatement::DropJob { .. }
             | BoundStatement::ShowJobs
-            | BoundStatement::ShowBackupStatus => Err(falcon_common::error::SqlError::Unsupported(
-                "Backup/Job commands use legacy planner path".into(),
+            | BoundStatement::ShowBackupStatus
+            | BoundStatement::CreateType { .. }
+            | BoundStatement::DropType { .. }
+            | BoundStatement::ShowAiStats => Err(falcon_common::error::SqlError::Unsupported(
+                "Backup/Job/Type/AI commands use legacy planner path".into(),
             )),
         }
     }

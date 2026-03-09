@@ -7,6 +7,40 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.3.0] — 2026-03-09
+
+### Added — PITR Object Storage Archival (`falcon_storage`)
+
+- **`ObjectStoreBackend` trait** (`object_store_backend.rs`) — Pluggable archive backend for WAL segments. `LocalFsBackend` (default, no extra deps), `S3Backend` (AWS S3 / MinIO / Ceph, via `--features pitr_object_store`), `AzureBackend` (Azure Blob Storage, feature-gated).
+- **`ObjectStoreConfig`** — TOML-deserializable config enum (`type = "local" | "s3" | "azure"`) for `[pitr]` section in `falcon.toml`. `build(local_path)` returns a `Box<dyn ObjectStoreBackend>`.
+- **`WalArchiver::with_backend()`** — New constructor accepting any `Box<dyn ObjectStoreBackend>`. `archive_segment()` now reads the WAL file and uploads via the backend (key: `wal/<filename>`). `stage_segments()` downloads via backend instead of local `fs::copy`.
+- **`pitr_object_store` feature** — Enables S3/Azure backends; depends on `object_store = "0.11"` crate (Apache Arrow ecosystem, pure Rust S3/Azure/GCS clients).
+- 15 PITR tests pass (unchanged semantics, updated path assertions).
+
+### Added — CDC Schema Registry (`falcon_storage`)
+
+- **`CdcSchemaRegistry`** (`cdc_schema_registry.rs`) — Per-table schema version history for CDC consumers. Each DDL operation that changes a table's columns (CREATE TABLE, ADD COLUMN, DROP COLUMN) registers a new monotonically-increasing `SchemaVersion`. Consumers can call `registry.get(table_id, version)` to decode row data at any historical schema version.
+- **`SchemaEntry`** — Captures column list, effective timestamp, and DDL text at each version. `find_column()` for case-insensitive lookup.
+- **`SchemaVersion`** — Strongly-typed `u32` wrapper; `INITIAL = v1`. GC keeps max 64 versions per table (configurable via `with_max_versions()`).
+- **`EnterpriseExtensions::cdc_schema_registry`** — New `Arc<CdcSchemaRegistry>` field, initialized in `Default`. All `StorageEngine` constructors pick it up automatically.
+- **DDL integration** — `create_table`, `alter_table_add_column`, `alter_table_drop_column` now automatically register a schema version when CDC is enabled.
+- 8 schema registry unit tests.
+
+### Added — Serializable Snapshot Isolation (SSI) (`falcon_txn`)
+
+- **`SsiLockManager` integration** in `TxnManager` — `ssi: SsiLockManager` field initialized in all constructors.
+- **Commit path** — For `IsolationLevel::Serializable`: registers write intents, calls `check_rw_conflicts()`, aborts on rw-antidependency.
+- **`register_ssi_read()`** — Public method on `TxnManager`; executor calls this at full table scan to register table-level read predicates.
+- **Cleanup** — `ssi.remove_txn()` on commit, storage-commit failure, and abort.
+- 3 new SSI tests in `falcon_txn`.
+
+### Changed
+
+- **Version bump** `1.2.0 → 1.3.0` across all workspace crates.
+- **`WalArchiver`** no longer derives `Debug` (manual impl); `disabled()` is no longer `const fn` (needs `Box<dyn ObjectStoreBackend>`).
+
+---
+
 ## [Unreleased]
 
 ### Added — Cost-Based Query Optimizer (`falcon_planner`)

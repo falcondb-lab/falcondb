@@ -3,6 +3,9 @@ name = "falcon_executor"
 version.workspace = true
 edition.workspace = true
 
+[features]
+columnstore = ["falcon_storage/columnstore"]
+
 [dependencies]
 falcon_common = { path = "../falcon_common" }
 falcon_storage = { path = "../falcon_storage" }

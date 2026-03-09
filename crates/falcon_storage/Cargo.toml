@@ -17,6 +17,7 @@ io_uring = ["dep:io-uring"]
 # Enterprise features (STUB). Default OFF.
 encryption_tde = []
 pitr = []
+pitr_object_store = ["pitr", "dep:object_store"]
 online_ddl_full = []
 resource_isolation = []
 tenant = []
@@ -47,6 +48,7 @@ aes-gcm.workspace = true
 rand.workspace = true
 rocksdb = { workspace = true, optional = true }
 redb = { workspace = true, optional = true }
+object_store = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = [

@@ -208,7 +208,32 @@ pub enum BoundStatement {
         name: String,
         args: Vec<BoundExpr>,
     },
-    /// Accepted but ignored — e.g. CREATE EXTENSION, CREATE TYPE, ALTER INDEX, CREATE TRIGGER.
+    /// DO $$ ... $$ — anonymous PL/pgSQL block
+    DoBlock {
+        body: String,
+        language: String,
+    },
+    /// CREATE TRIGGER
+    CreateTrigger {
+        trigger: falcon_common::schema::TriggerDef,
+    },
+    /// DROP TRIGGER [IF EXISTS] name ON table
+    DropTrigger {
+        trigger_name: String,
+        table_name: String,
+        if_exists: bool,
+    },
+    /// CREATE TYPE name AS ENUM (...)  
+    CreateType {
+        name: String,
+        labels: Vec<String>,
+    },
+    /// DROP TYPE [IF EXISTS] name
+    DropType {
+        name: String,
+        if_exists: bool,
+    },
+    /// Accepted but ignored — e.g. CREATE EXTENSION, ALTER INDEX.
     NoOp,
     /// SHOW <pg_var> — returns a single-row result with the variable value.
     ShowPgVar {
@@ -242,6 +267,8 @@ pub enum BoundStatement {
     ShowJobs,
     /// SHOW BACKUP STATUS
     ShowBackupStatus,
+    /// SHOW AI STATS — returns AI optimizer diagnostics
+    ShowAiStats,
 }
 
 #[derive(Debug, Clone)]

@@ -25,7 +25,6 @@ pub(crate) fn classification_from_routing_hint(
 /// Extract a simple `WHERE col = 'value'` from a lowercased SQL string.
 /// Returns the value if found, None otherwise.
 pub(crate) fn extract_where_eq(sql: &str, column: &str) -> Option<String> {
-    // Look for patterns like: column = 'value' or column='value'
     let pattern = format!("{column} = '");
     let pattern2 = format!("{column}='");
     let start = sql
@@ -35,6 +34,45 @@ pub(crate) fn extract_where_eq(sql: &str, column: &str) -> Option<String> {
     let rest = &sql[start..];
     let end = rest.find('\'')?;
     Some(rest[..end].to_string())
+}
+
+/// Extract `WHERE col = <integer>` (unquoted) from a lowercased SQL string.
+pub(crate) fn extract_where_eq_int(sql: &str, column: &str) -> Option<i64> {
+    for pattern in &[format!("{column} = "), format!("{column}=")] {
+        if let Some(pos) = sql.find(pattern.as_str()) {
+            let rest = sql[pos + pattern.len()..].trim_start();
+            let num_end = rest
+                .find(|c: char| !c.is_ascii_digit() && c != '-')
+                .unwrap_or(rest.len());
+            if num_end > 0 {
+                if let Ok(v) = rest[..num_end].parse::<i64>() {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    // Also try quoted form as fallback
+    extract_where_eq(sql, column).and_then(|s| s.parse::<i64>().ok())
+}
+
+/// Extract `WHERE col IN (v1, v2, ...)` values from a lowercased SQL string.
+/// Returns the list of string values (trimmed, unquoted) if found.
+#[allow(dead_code)]
+pub(crate) fn extract_where_in(sql: &str, column: &str) -> Option<Vec<String>> {
+    let pattern = format!("{column} in (");
+    let start = sql.find(pattern.as_str()).map(|i| i + pattern.len())?;
+    let rest = &sql[start..];
+    let end = rest.find(')')?;
+    let values: Vec<String> = rest[..end]
+        .split(',')
+        .map(|s| s.trim().trim_matches('\'').trim_matches('"').to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if values.is_empty() {
+        None
+    } else {
+        Some(values)
+    }
 }
 
 /// Parse `SET log_min_duration_statement = <ms>` or `SET log_min_duration_statement TO <ms>`.

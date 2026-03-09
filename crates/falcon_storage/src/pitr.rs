@@ -20,6 +20,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::object_store_backend::{LocalFsBackend, ObjectKey, ObjectStoreBackend};
+
 /// WAL position (Log Sequence Number).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Lsn(pub u64);
@@ -123,9 +125,10 @@ pub enum RecoveryStatus {
 }
 
 /// WAL Archive Manager — manages WAL segment archiving for PITR.
-#[derive(Debug)]
 pub struct WalArchiver {
-    /// Directory where archived WAL segments are stored.
+    /// Object storage backend (local FS / S3 / Azure).
+    backend: Box<dyn ObjectStoreBackend>,
+    /// Local directory path (used as fallback reference and for local backend).
     archive_dir: PathBuf,
     /// Index of archived segments (ordered by start_lsn).
     segments: BTreeMap<Lsn, ArchivedSegment>,
@@ -141,10 +144,36 @@ pub struct WalArchiver {
     bytes_archived: u64,
 }
 
+impl std::fmt::Debug for WalArchiver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WalArchiver")
+            .field("backend", &self.backend.uri())
+            .field("archive_dir", &self.archive_dir)
+            .field("enabled", &self.enabled)
+            .field("segments_archived", &self.segments_archived)
+            .finish()
+    }
+}
+
 impl WalArchiver {
-    /// Create a new WAL archiver.
+    /// Create a new WAL archiver with local filesystem backend.
     pub fn new(archive_dir: &Path) -> Self {
         Self {
+            backend: Box::new(LocalFsBackend::new(archive_dir)),
+            archive_dir: archive_dir.to_path_buf(),
+            segments: BTreeMap::new(),
+            restore_points: Vec::new(),
+            base_backups: Vec::new(),
+            enabled: true,
+            segments_archived: 0,
+            bytes_archived: 0,
+        }
+    }
+
+    /// Create a WAL archiver with a custom object storage backend (S3, Azure, etc.).
+    pub fn with_backend(archive_dir: &Path, backend: Box<dyn ObjectStoreBackend>) -> Self {
+        Self {
+            backend,
             archive_dir: archive_dir.to_path_buf(),
             segments: BTreeMap::new(),
             restore_points: Vec::new(),
@@ -156,8 +185,9 @@ impl WalArchiver {
     }
 
     /// Create a disabled archiver (archiving off).
-    pub const fn disabled() -> Self {
+    pub fn disabled() -> Self {
         Self {
+            backend: Box::new(LocalFsBackend::new(Path::new("/dev/null"))),
             archive_dir: PathBuf::new(),
             segments: BTreeMap::new(),
             restore_points: Vec::new(),
@@ -173,13 +203,10 @@ impl WalArchiver {
         self.enabled
     }
 
-    /// Archive a completed WAL segment by copying it to the archive directory.
+    /// Archive a completed WAL segment to the configured object store backend.
     ///
-    /// `source_path` is the path to the WAL segment file on the local filesystem.
-    /// The file is copied (not moved) so the original remains available for
-    /// crash-recovery replay until it is explicitly recycled.
-    ///
-    /// Returns `Err` if the archive directory cannot be created or the copy fails.
+    /// Reads `source_path` from local disk and uploads via the backend.
+    /// The `archive_path` field of the returned `ArchivedSegment` holds the object key.
     pub fn archive_segment(
         &mut self,
         source_path: &Path,
@@ -188,18 +215,19 @@ impl WalArchiver {
         end_lsn: Lsn,
         size_bytes: u64,
     ) -> Result<ArchivedSegment, std::io::Error> {
-        // Ensure archive directory exists (idempotent).
-        std::fs::create_dir_all(&self.archive_dir)?;
-
-        let archive_path = self.archive_dir.join(filename);
-        // Copy WAL segment to archive.
-        std::fs::copy(source_path, &archive_path)?;
+        let data = std::fs::read(source_path)?;
+        let key = ObjectKey::new(format!("wal/{filename}"));
+        self.backend.put(&key, &data).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, e)
+        })?;
 
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
 
+        // archive_path stores the object key as a PathBuf for backward compat.
+        let archive_path = PathBuf::from(key.as_str());
         let segment = ArchivedSegment {
             filename: filename.to_owned(),
             start_lsn,
@@ -213,6 +241,7 @@ impl WalArchiver {
         self.segments.insert(start_lsn, segment.clone());
         self.segments_archived += 1;
         self.bytes_archived += size_bytes;
+        tracing::debug!("PITR: archived {} → {}", filename, self.backend.uri());
         Ok(segment)
     }
 
@@ -453,7 +482,7 @@ impl WalArchiver {
     }
 
     /// Stage archived WAL segments into `staging_dir` so the engine can replay them.
-    /// Copies each segment from the archive path into the staging directory.
+    /// Downloads each segment from the object store backend.
     /// Returns the number of segments staged.
     pub fn stage_segments(
         &self,
@@ -463,16 +492,21 @@ impl WalArchiver {
         std::fs::create_dir_all(staging_dir)?;
         let mut count = 0;
         for seg in &plan.segments {
-            let dest = staging_dir.join(&seg.filename);
-            if seg.archive_path.exists() {
-                std::fs::copy(&seg.archive_path, &dest)?;
-                count += 1;
-            } else {
-                tracing::warn!(
-                    "PITR: archived segment {} not found at {:?}, skipping",
-                    seg.filename,
-                    seg.archive_path
-                );
+            let key = ObjectKey::new(format!("wal/{}", seg.filename));
+            match self.backend.get(&key) {
+                Ok(data) => {
+                    let dest = staging_dir.join(&seg.filename);
+                    std::fs::write(&dest, &data)?;
+                    count += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "PITR: failed to fetch segment {} from {}: {}",
+                        seg.filename,
+                        self.backend.uri(),
+                        e
+                    );
+                }
             }
         }
         tracing::info!("PITR: staged {} WAL segments into {:?}", count, staging_dir);
@@ -518,8 +552,10 @@ mod tests {
         assert_eq!(seg.end_lsn, Lsn(1000));
         assert_eq!(archiver.segment_count(), 1);
         assert_eq!(archiver.total_bytes(), 4096);
-        // Verify the file was actually copied.
-        assert!(archive_dir.join("falcon_000001.wal").exists());
+        // With local backend, the object is stored as wal/filename inside archive_dir.
+        assert!(archive_dir.join("wal").join("falcon_000001.wal").exists());
+        // archive_path holds the object key string.
+        assert_eq!(seg.archive_path.to_str().unwrap(), "wal/falcon_000001.wal");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

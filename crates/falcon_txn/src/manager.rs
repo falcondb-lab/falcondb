@@ -37,6 +37,8 @@ use falcon_common::types::{IsolationLevel, ShardId, Timestamp, TxnContext, TxnId
 pub use falcon_common::types::{TxnPath, TxnType};
 use falcon_storage::engine::StorageEngine;
 
+use crate::deadlock::{SsiLockManager, SsiWriteIntent};
+
 /// Slow-path mode for cross-shard transactions.
 /// - `Xa2Pc`: XA-style two-phase commit (default, fully implemented).
 /// - `AutocommitSplit`: split a multi-shard write into per-shard autocommit txns
@@ -709,6 +711,8 @@ pub struct TxnManager {
     latency_sample_divisor: u64,
     /// Named prepared transactions: GID → TxnId (for PREPARE TRANSACTION / COMMIT PREPARED).
     prepared_gids: DashMap<String, TxnId>,
+    /// SSI predicate lock manager for Serializable isolation anti-dependency detection.
+    ssi: SsiLockManager,
 }
 
 impl TxnManager {
@@ -730,6 +734,7 @@ impl TxnManager {
             hlc: None,
             latency_sample_divisor: 64,
             prepared_gids: DashMap::new(),
+            ssi: SsiLockManager::new(),
         }
     }
 
@@ -755,6 +760,7 @@ impl TxnManager {
             hlc: Some(hlc),
             latency_sample_divisor: 64,
             prepared_gids: DashMap::new(),
+            ssi: SsiLockManager::new(),
         }
     }
 
@@ -1344,9 +1350,33 @@ impl TxnManager {
                 drop(entry);
                 if self.storage.validate_read_set(txn_id, start_ts).is_err() {
                     self.stats.record_occ_conflict();
+                    self.ssi.remove_txn(txn_id);
                     self.abort(txn_id)?;
                     return Err(TxnError::SerializationConflict(txn_id));
                 }
+
+                // SSI: check rw-antidependency for Serializable transactions.
+                // Register write intents, then detect if any committed txn's read
+                // predicate overlaps our writes (T_committed →rw→ T_self).
+                if isolation == IsolationLevel::Serializable {
+                    let write_keys = self.storage.write_set_keys(txn_id);
+                    if !write_keys.is_empty() {
+                        for (table_id, key) in &write_keys {
+                            self.ssi.add_write_intent(txn_id, SsiWriteIntent {
+                                table_id: *table_id,
+                                key: key.clone(),
+                            });
+                        }
+                        let conflicts = self.ssi.check_rw_conflicts(txn_id);
+                        if !conflicts.is_empty() {
+                            self.stats.record_occ_conflict();
+                            self.ssi.remove_txn(txn_id);
+                            self.abort(txn_id)?;
+                            return Err(TxnError::SerializationConflict(txn_id));
+                        }
+                    }
+                }
+
                 entry = self
                     .active_txns
                     .get_mut(&txn_id)
@@ -1378,12 +1408,16 @@ impl TxnManager {
                 if matches!(e, StorageError::UniqueViolation { .. }) {
                     self.stats.record_constraint_violation();
                 }
+                self.ssi.remove_txn(txn_id);
                 self.active_txns.remove(&txn_id);
                 return Err(Self::storage_err_to_txn_err(txn_id, e));
             }
 
             // Skip redundant get_mut for state update — we remove immediately
             let latency_us = entry_begin_instant.map_or(0, |i| i.elapsed().as_micros() as u64);
+            if isolation == IsolationLevel::Serializable {
+                self.ssi.remove_txn(txn_id);
+            }
             self.active_txns.remove(&txn_id);
             self.record_completed(TxnRecord {
                 txn_id,
@@ -1575,10 +1609,24 @@ impl TxnManager {
             latency_breakdown,
         });
 
+        self.ssi.remove_txn(txn_id);
         self.active_txns.remove(&txn_id);
         self.stats.record_abort();
         tracing::debug!("TXN abort: {} reason={}", txn_id, reason);
         Ok(())
+    }
+
+    /// Register a table-level read predicate for SSI anti-dependency tracking.
+    /// Only has effect for Serializable transactions; no-op otherwise.
+    pub fn register_ssi_read(&self, txn: &TxnHandle, table_id: u64) {
+        if txn.isolation != IsolationLevel::Serializable {
+            return;
+        }
+        self.ssi.add_predicate(txn.txn_id, crate::deadlock::SsiPredicate {
+            table_id,
+            range_start: None,
+            range_end: None,
+        });
     }
 
     /// Number of currently active transactions.

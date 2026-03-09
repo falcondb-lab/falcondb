@@ -2,7 +2,7 @@ use crate::codec::{BackendMessage, FieldDescription};
 use crate::session::{PgSession, PG_COMPAT_VERSION, PG_COMPAT_VERSION_NUM};
 
 use crate::handler::QueryHandler;
-use crate::handler_utils::extract_where_eq;
+use crate::handler_utils::{extract_where_eq, extract_where_eq_int};
 
 impl QueryHandler {
     /// Route information_schema and pg_catalog queries.
@@ -34,6 +34,31 @@ impl QueryHandler {
             }
             if sql_lower.contains("information_schema.constraint_column_usage") {
                 return Some(self.handle_information_schema_constraint_column_usage());
+            }
+            if sql_lower.contains("information_schema.views") {
+                return Some(self.handle_information_schema_views());
+            }
+            if sql_lower.contains("information_schema.check_constraints") {
+                return Some(self.handle_information_schema_check_constraints());
+            }
+            if sql_lower.contains("information_schema.sequences") {
+                return Some(self.handle_information_schema_sequences());
+            }
+            if sql_lower.contains("information_schema.triggers") {
+                return Some(self.single_row_result(
+                    vec![
+                        ("trigger_catalog", 25, -1i16),
+                        ("trigger_schema", 25, -1),
+                        ("trigger_name", 25, -1),
+                        ("event_manipulation", 25, -1),
+                        ("event_object_table", 25, -1),
+                        ("action_timing", 25, -1),
+                    ],
+                    vec![],
+                ));
+            }
+            if sql_lower.contains("information_schema.routines") {
+                return Some(self.handle_information_schema_routines());
             }
             return Some(self.single_row_result(vec![], vec![]));
         }
@@ -108,15 +133,7 @@ impl QueryHandler {
             }
             // pg_proc — function/procedure listing (ORM introspection)
             if sql_lower.contains("pg_proc") {
-                return Some(self.single_row_result(
-                    vec![
-                        ("oid", 23, 4),
-                        ("proname", 25, -1),
-                        ("pronamespace", 23, 4),
-                        ("prorettype", 23, 4),
-                    ],
-                    vec![],
-                ));
+                return Some(self.handle_pg_proc(sql_lower));
             }
             // pg_enum — enum type values (ORM introspection)
             if sql_lower.contains("pg_enum") {
@@ -184,15 +201,7 @@ impl QueryHandler {
             }
             // pg_attrdef — column defaults (Hibernate, Django, SQLAlchemy)
             if sql_lower.contains("pg_attrdef") {
-                return Some(self.single_row_result(
-                    vec![
-                        ("oid", 26, 4i16),
-                        ("adrelid", 26, 4),
-                        ("adnum", 21, 2),
-                        ("adbin", 25, -1),
-                    ],
-                    vec![],
-                ));
+                return Some(self.handle_pg_attrdef(sql_lower));
             }
             // pg_depend — object dependencies (pg_dump, ORMs)
             if sql_lower.contains("pg_depend") {
@@ -280,7 +289,7 @@ impl QueryHandler {
             return Some(self.single_row_result(vec![], vec![]));
         }
 
-        // Unqualified pg_stat_activity / pg_locks (used by falcon_cli fallback queries)
+        // Unqualified system table queries (no pg_catalog. prefix — used by ORMs and psql)
         if sql_lower.contains("pg_stat_activity") {
             return Some(self.handle_pg_stat_activity(_session));
         }
@@ -298,6 +307,60 @@ impl QueryHandler {
                 ],
                 vec![],
             ));
+        }
+        if sql_lower.contains("pg_attribute") {
+            return Some(self.handle_pg_attribute(sql_lower));
+        }
+        if sql_lower.contains("pg_type") && !sql_lower.contains("pg_typeof") {
+            return Some(self.handle_pg_type(sql_lower));
+        }
+        if sql_lower.contains("pg_index") {
+            return Some(self.handle_pg_index(sql_lower));
+        }
+        if sql_lower.contains("pg_constraint") {
+            return Some(self.handle_pg_constraint(sql_lower));
+        }
+        if sql_lower.contains("pg_namespace") {
+            return Some(self.handle_pg_namespace());
+        }
+        if sql_lower.contains("pg_attrdef") {
+            return Some(self.handle_pg_attrdef(sql_lower));
+        }
+        if sql_lower.contains("pg_proc") && !sql_lower.contains("pg_process") {
+            return Some(self.handle_pg_proc(sql_lower));
+        }
+        if sql_lower.contains("pg_class") && sql_lower.contains("relkind") {
+            return Some(self.handle_list_tables());
+        }
+        if sql_lower.contains("pg_class") {
+            return Some(self.handle_pg_class(sql_lower));
+        }
+        if sql_lower.contains("pg_stat_user_tables") {
+            return Some(self.handle_pg_stat_user_tables());
+        }
+        if sql_lower.contains("pg_statio_user_tables") {
+            return Some(self.handle_pg_statio_user_tables());
+        }
+        if sql_lower.contains("pg_tables") {
+            return Some(self.handle_pg_tables(sql_lower));
+        }
+        if sql_lower.contains("pg_sequences") {
+            return Some(self.handle_pg_sequences());
+        }
+        if sql_lower.contains("pg_roles") || sql_lower.contains("pg_user") {
+            return Some(self.handle_pg_roles());
+        }
+        if sql_lower.contains("pg_database") {
+            return Some(self.handle_pg_database());
+        }
+        if sql_lower.contains("pg_settings") {
+            return Some(self.handle_pg_settings());
+        }
+        if sql_lower.contains("pg_stat_database") {
+            return Some(self.handle_pg_stat_database(_session));
+        }
+        if sql_lower.contains("pg_stat_bgwriter") {
+            return Some(self.handle_pg_stat_bgwriter());
         }
 
         None
@@ -446,7 +509,7 @@ impl QueryHandler {
                     default_str,
                     Some(if col.nullable { "YES" } else { "NO" }.into()),
                     Some(col.data_type.pg_type_name().into()),
-                    None, // character_maximum_length (Falcon has no VARCHAR(n) yet)
+                    col.max_length.map(|v| v.to_string()), // character_maximum_length
                     col.data_type.numeric_precision().map(|v| v.to_string()),
                     col.data_type.numeric_scale().map(|v| v.to_string()),
                     col.data_type.datetime_precision().map(|v| v.to_string()),
@@ -580,38 +643,78 @@ impl QueryHandler {
         self.single_row_result(cols, rows)
     }
 
-    /// pg_attribute handler for psql \d table_name
+    /// pg_attribute handler — returns proper PG catalog format for ORMs and psql \d
     fn handle_pg_attribute(&self, sql_lower: &str) -> Vec<BackendMessage> {
         let catalog = self.storage.get_catalog();
 
-        // Try to extract table name from the query
-        let table_name = extract_where_eq(sql_lower, "relname");
-        if let Some(ref name) = table_name {
-            if let Some(schema) = catalog.find_table(name) {
-                let cols = vec![
-                    ("column_name", 25, -1i16),
-                    ("data_type", 25, -1),
-                    ("is_nullable", 25, -1),
-                    ("column_default", 25, -1),
-                ];
-                let rows: Vec<Vec<Option<String>>> = schema
-                    .columns
-                    .iter()
-                    .map(|col| {
-                        vec![
-                            Some(col.name.clone()),
-                            Some(col.data_type.pg_type_name().into()),
-                            Some(if col.nullable { "YES" } else { "NO" }.into()),
-                            col.default_value.as_ref().map(|d| format!("{d}")),
-                        ]
-                    })
-                    .collect();
-                return self.single_row_result(cols, rows);
+        let cols = vec![
+            ("attrelid", 26, 4i16),
+            ("attname", 25, -1),
+            ("atttypid", 26, 4),
+            ("attstattarget", 23, 4),
+            ("attlen", 21, 2),
+            ("attnum", 21, 2),
+            ("attndims", 23, 4),
+            ("attcacheoff", 23, 4),
+            ("atttypmod", 23, 4),
+            ("attbyval", 16, 1),
+            ("attstorage", 18, 1),
+            ("attalign", 18, 1),
+            ("attnotnull", 16, 1),
+            ("atthasdef", 16, 1),
+            ("attidentity", 18, 1),
+            ("attgenerated", 18, 1),
+            ("attisdropped", 16, 1),
+            ("attislocal", 16, 1),
+            ("attinhcount", 23, 4),
+            ("attcollation", 26, 4),
+        ];
+
+        // Filter by relname (table name) or attrelid (table OID)
+        let filter_name = extract_where_eq(sql_lower, "relname");
+        let filter_oid = extract_where_eq_int(sql_lower, "attrelid");
+        let filter_attnum_gt = sql_lower.contains("attnum > 0") || sql_lower.contains("attnum>0");
+
+        let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+        for schema in catalog.list_tables() {
+            let table_oid = schema.id.0 as i64 + 16384;
+            if let Some(f) = filter_oid {
+                if f != table_oid { continue; }
+            } else if let Some(ref name) = filter_name {
+                if schema.name.to_lowercase() != *name { continue; }
+            }
+            for (i, col) in schema.columns.iter().enumerate() {
+                let attnum = (i as i16 + 1).to_string();
+                let type_oid = col.data_type.pg_type_oid();
+                let type_len = col.data_type.pg_type_len();
+                let has_default = col.default_value.is_some() || col.is_serial;
+                rows.push(vec![
+                    Some(table_oid.to_string()),   // attrelid
+                    Some(col.name.clone()),         // attname
+                    Some(type_oid.to_string()),     // atttypid
+                    Some("-1".into()),              // attstattarget
+                    Some(type_len.to_string()),     // attlen
+                    Some(attnum),                   // attnum
+                    Some("0".into()),               // attndims
+                    Some("-1".into()),              // attcacheoff
+                    Some(col.data_type.pg_type_mod().to_string()), // atttypmod
+                    Some("f".into()),               // attbyval
+                    Some("x".into()),               // attstorage
+                    Some("i".into()),               // attalign
+                    Some(if col.nullable { "f" } else { "t" }.into()), // attnotnull
+                    Some(if has_default { "t" } else { "f" }.into()),  // atthasdef
+                    Some(if col.is_serial { "d" } else { "" }.into()), // attidentity
+                    Some("".into()),                // attgenerated
+                    Some("f".into()),               // attisdropped
+                    Some("t".into()),               // attislocal
+                    Some("0".into()),               // attinhcount
+                    Some("0".into()),               // attcollation
+                ]);
             }
         }
 
-        // Fallback: empty result
-        self.single_row_result(vec![], vec![])
+        let _ = filter_attnum_gt;
+        self.single_row_result(cols, rows)
     }
 
     /// pg_catalog.pg_type — type OID mapping for ORMs and drivers.
@@ -676,14 +779,20 @@ impl QueryHandler {
         let filter_name = extract_where_eq(sql_lower, "typname");
 
         let cols = vec![
-            ("typname", 25, -1i16),
-            ("oid", 23, 4),
-            ("typarray", 23, 4),
-            ("typlen", 21, 2),
-            ("typtype", 18, 1),
+            ("oid", 23, 4i16),
+            ("typname", 25, -1),
             ("typnamespace", 23, 4),
+            ("typowner", 23, 4),
+            ("typlen", 21, 2),
+            ("typbyval", 16, 1),
+            ("typtype", 18, 1),
+            ("typcategory", 18, 1),
             ("typnotnull", 16, 1),
             ("typbasetype", 23, 4),
+            ("typtypmod", 23, 4),
+            ("typarray", 23, 4),
+            ("typinput", 25, -1),
+            ("typoutput", 25, -1),
         ];
 
         let rows: Vec<Vec<Option<String>>> = builtin_types
@@ -694,14 +803,20 @@ impl QueryHandler {
             })
             .map(|(name, oid, typarray, len, typtype)| {
                 vec![
-                    Some(name.to_string()),
                     Some(oid.to_string()),
-                    Some(typarray.to_string()),
-                    Some(len.to_string()),
-                    Some(typtype.to_string()),
+                    Some(name.to_string()),
                     Some("11".into()),
+                    Some("10".into()),
+                    Some(len.to_string()),
+                    Some("f".into()),
+                    Some(typtype.to_string()),
+                    Some("N".into()),
                     Some("f".into()),
                     Some("0".into()),
+                    Some("-1".into()),
+                    Some(typarray.to_string()),
+                    Some(String::new()),
+                    Some(String::new()),
                 ]
             })
             .collect();
@@ -738,7 +853,8 @@ impl QueryHandler {
         let catalog = self.storage.get_catalog();
         let tables = catalog.list_tables();
 
-        let filter_rel = extract_where_eq(sql_lower, "indrelid");
+        let filter_rel_int = extract_where_eq_int(sql_lower, "indrelid");
+        let filter_rel_str = extract_where_eq(sql_lower, "indrelid");
 
         let cols = vec![
             ("indexrelid", 23, 4i16),
@@ -747,6 +863,8 @@ impl QueryHandler {
             ("indisunique", 16, 1),
             ("indisprimary", 16, 1),
             ("indkey", 25, -1),
+            ("indpred", 25, -1),
+            ("indexprs", 25, -1),
         ];
 
         let mut rows: Vec<Vec<Option<String>>> = Vec::new();
@@ -754,7 +872,11 @@ impl QueryHandler {
 
         for table in tables {
             let table_oid = table.id.0 as i64 + 16384;
-            if let Some(ref f) = filter_rel {
+            if let Some(f) = filter_rel_int {
+                if f != table_oid {
+                    continue;
+                }
+            } else if let Some(ref f) = filter_rel_str {
                 if f.parse::<i64>().ok() != Some(table_oid) {
                     continue;
                 }
@@ -774,6 +896,8 @@ impl QueryHandler {
                     Some("t".into()),
                     Some("t".into()),
                     Some(indkey),
+                    None,
+                    None,
                 ]);
                 fake_idx_oid += 1;
             }
@@ -791,6 +915,29 @@ impl QueryHandler {
                     Some("t".into()),
                     Some("f".into()),
                     Some(indkey),
+                    None,
+                    None,
+                ]);
+                fake_idx_oid += 1;
+            }
+            // Secondary indexes
+            let secondary_idxs = self.storage.get_indexed_columns(table.id);
+            for (col_idx, is_unique) in &secondary_idxs {
+                // Skip if already in PK or unique constraints
+                let is_pk = table.primary_key_columns.contains(col_idx);
+                let is_uc = table.unique_constraints.iter().any(|uc| uc.contains(col_idx));
+                if is_pk || is_uc {
+                    continue;
+                }
+                rows.push(vec![
+                    Some(fake_idx_oid.to_string()),
+                    Some(table_oid.to_string()),
+                    Some("1".into()),
+                    Some(if *is_unique { "t" } else { "f" }.into()),
+                    Some("f".into()),
+                    Some((col_idx + 1).to_string()),
+                    None,
+                    None,
                 ]);
                 fake_idx_oid += 1;
             }
@@ -804,7 +951,8 @@ impl QueryHandler {
         let catalog = self.storage.get_catalog();
         let tables = catalog.list_tables();
 
-        let filter_rel = extract_where_eq(sql_lower, "conrelid");
+        let filter_rel_int = extract_where_eq_int(sql_lower, "conrelid");
+        let filter_rel_str = extract_where_eq(sql_lower, "conrelid");
 
         let cols = vec![
             ("oid", 23, 4i16),
@@ -815,6 +963,9 @@ impl QueryHandler {
             ("confrelid", 23, 4), // 0 for non-FK
             ("conkey", 25, -1),   // array of column numbers
             ("confkey", 25, -1),  // array of FK referenced column numbers
+            ("condeferrable", 16, 1),
+            ("condeferred", 16, 1),
+            ("convalidated", 16, 1),
         ];
 
         let mut rows: Vec<Vec<Option<String>>> = Vec::new();
@@ -822,7 +973,11 @@ impl QueryHandler {
 
         for table in &tables {
             let table_oid = table.id.0 as i64 + 16384;
-            if let Some(ref f) = filter_rel {
+            if let Some(f) = filter_rel_int {
+                if f != table_oid {
+                    continue;
+                }
+            } else if let Some(ref f) = filter_rel_str {
                 if f.parse::<i64>().ok() != Some(table_oid) {
                     continue;
                 }
@@ -848,6 +1003,9 @@ impl QueryHandler {
                     Some("0".into()),
                     Some(conkey),
                     None,
+                    Some("f".into()),
+                    Some("f".into()),
+                    Some("t".into()),
                 ]);
                 fake_oid += 1;
             }
@@ -865,6 +1023,9 @@ impl QueryHandler {
                     Some("0".into()),
                     Some(conkey),
                     None,
+                    Some("f".into()),
+                    Some("f".into()),
+                    Some("t".into()),
                 ]);
                 fake_oid += 1;
             }
@@ -879,12 +1040,10 @@ impl QueryHandler {
                         .collect::<Vec<_>>()
                         .join(",")
                 );
-                // Resolve referenced table OID
                 let ref_oid = tables
                     .iter()
                     .find(|t| t.name.to_lowercase() == fk.ref_table.to_lowercase())
                     .map_or(0, |t| t.id.0 as i64 + 16384);
-                // Resolve referenced column numbers
                 let confkey = if ref_oid > 0 {
                     let ref_table = tables
                         .iter()
@@ -911,6 +1070,9 @@ impl QueryHandler {
                     Some(ref_oid.to_string()),
                     Some(conkey),
                     confkey,
+                    Some("f".into()),
+                    Some("f".into()),
+                    Some("t".into()),
                 ]);
                 fake_oid += 1;
             }
@@ -926,6 +1088,9 @@ impl QueryHandler {
                     Some("0".into()),
                     None,
                     None,
+                    Some("f".into()),
+                    Some("f".into()),
+                    Some("t".into()),
                 ]);
                 fake_oid += 1;
             }
@@ -1152,46 +1317,88 @@ impl QueryHandler {
         let tables = catalog.list_tables();
 
         let filter_name = extract_where_eq(sql_lower, "relname");
-        let filter_oid = extract_where_eq(sql_lower, "oid");
+        let filter_oid_str = extract_where_eq(sql_lower, "oid");
+        let filter_oid_int = extract_where_eq_int(sql_lower, "oid");
 
         let cols = vec![
             ("oid", 23, 4i16),
             ("relname", 25, -1),
             ("relnamespace", 23, 4),
-            ("relkind", 18, 1),
-            ("reltuples", 701, 8),
-            ("relpages", 23, 4),
-            ("relhasindex", 16, 1),
+            ("reltype", 23, 4),
+            ("reloftype", 23, 4),
             ("relowner", 23, 4),
+            ("relam", 23, 4),
+            ("relfilenode", 23, 4),
+            ("reltablespace", 23, 4),
+            ("relpages", 23, 4),
+            ("reltuples", 701, 8),
+            ("relallvisible", 23, 4),
+            ("reltoastrelid", 23, 4),
+            ("relhasindex", 16, 1),
+            ("relisshared", 16, 1),
+            ("relpersistence", 18, 1),
+            ("relkind", 18, 1),
+            ("relnatts", 21, 2),
+            ("relchecks", 21, 2),
+            ("relhasrules", 16, 1),
+            ("relhastriggers", 16, 1),
+            ("relrowsecurity", 16, 1),
+            ("relforcerowsecurity", 16, 1),
+            ("relispopulated", 16, 1),
+            ("relreplident", 18, 1),
+            ("relispartition", 16, 1),
+            ("relfrozenxid", 28, 4),
+            ("relminmxid", 28, 4),
+            ("relacl", 25, -1),
+            ("reloptions", 25, -1),
         ];
 
         let mut rows: Vec<Vec<Option<String>>> = Vec::new();
         for t in &tables {
-            let oid = (t.id.0 as i64 + 16384).to_string();
+            let oid_num = t.id.0 as i64 + 16384;
+            let oid = oid_num.to_string();
             if let Some(ref f) = filter_name {
-                if t.name.to_lowercase() != *f {
-                    continue;
-                }
+                if t.name.to_lowercase() != *f { continue; }
             }
-            if let Some(ref f) = filter_oid {
-                if *f != oid {
-                    continue;
-                }
+            if let Some(f) = filter_oid_int {
+                if f != oid_num { continue; }
+            } else if let Some(ref f) = filter_oid_str {
+                if *f != oid { continue; }
             }
-            let has_index = if !t.primary_key_columns.is_empty() {
-                "t"
-            } else {
-                "f"
-            };
+            let has_index = (!t.primary_key_columns.is_empty()).to_string();
+            let ncols = t.columns.len() as i16;
+            let nchecks = t.check_constraints.len() as i16;
             rows.push(vec![
-                Some(oid),
+                Some(oid.clone()),
                 Some(t.name.clone()),
-                Some("2200".into()), // public namespace
+                Some("2200".into()),
+                Some("0".into()),
+                Some("0".into()),
+                Some("10".into()),
+                Some("403".into()),  // btree AM
+                Some(oid.clone()),
+                Some("0".into()),
+                Some("0".into()),
+                Some("-1".into()),
+                Some("0".into()),
+                Some("0".into()),
+                Some(has_index),
+                Some("f".into()),
+                Some("p".into()),    // permanent
                 Some("r".into()),    // ordinary table
-                Some("0".into()),    // reltuples (unknown)
-                Some("0".into()),    // relpages
-                Some(has_index.into()),
-                Some("10".into()), // owner OID
+                Some(ncols.to_string()),
+                Some(nchecks.to_string()),
+                Some("f".into()),
+                Some("f".into()),
+                Some("f".into()),
+                Some("f".into()),
+                Some("t".into()),
+                Some("d".into()),    // default replica identity
+                Some("f".into()),
+                Some("0".into()),
+                Some("1".into()),
+                None,
+                None,
             ]);
         }
 
@@ -1245,9 +1452,35 @@ impl QueryHandler {
                 Some(addr),
                 None, // client_hostname
                 Some(port),
-                None,                                     // backend_start (no wall-clock yet)
-                s.xact_start_secs.map(|_| String::new()), // placeholder
-                s.query_start_secs.map(|_| String::new()),
+                {
+                    let now_unix = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs_f64();
+                    let ts = (now_unix - s.backend_start_secs) as i64;
+                    chrono::DateTime::from_timestamp(ts, 0)
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.3f+00").to_string())
+                },
+                s.xact_start_secs.map(|rel| {
+                    let now_unix = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs_f64();
+                    let ts = (now_unix - rel) as i64;
+                    chrono::DateTime::from_timestamp(ts, 0)
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.3f+00").to_string())
+                        .unwrap_or_default()
+                }),
+                s.query_start_secs.map(|rel| {
+                    let now_unix = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs_f64();
+                    let ts = (now_unix - rel) as i64;
+                    chrono::DateTime::from_timestamp(ts, 0)
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.3f+00").to_string())
+                        .unwrap_or_default()
+                }),
                 None, // state_change
                 None,
                 None, // wait_event_type, wait_event
@@ -1564,5 +1797,181 @@ impl QueryHandler {
             }
         }
         self.single_row_result(cols, rows)
+    }
+
+    /// pg_catalog.pg_attrdef — column default value expressions
+    pub(crate) fn handle_pg_attrdef(&self, sql_lower: &str) -> Vec<BackendMessage> {
+        let catalog = self.storage.get_catalog();
+        let cols = vec![
+            ("oid", 23, 4i16),
+            ("adrelid", 26, 4),
+            ("adnum", 21, 2),
+            ("adbin", 25, -1),
+        ];
+        let filter_relid = extract_where_eq_int(sql_lower, "adrelid");
+        let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+        let mut fake_oid = 70000i64;
+        for t in catalog.list_tables() {
+            let table_oid = t.id.0 as i64 + 16384;
+            if let Some(f) = filter_relid {
+                if f != table_oid { continue; }
+            }
+            for (i, col) in t.columns.iter().enumerate() {
+                let default_expr = if col.is_serial {
+                    Some(format!("nextval('{}_{}_seq'::regclass)", t.name, col.name))
+                } else {
+                    col.default_value.as_ref().map(|d| format!("{d}"))
+                };
+                if let Some(expr) = default_expr {
+                    rows.push(vec![
+                        Some(fake_oid.to_string()),
+                        Some(table_oid.to_string()),
+                        Some((i as i16 + 1).to_string()),
+                        Some(expr),
+                    ]);
+                    fake_oid += 1;
+                }
+            }
+        }
+        self.single_row_result(cols, rows)
+    }
+
+    /// pg_catalog.pg_proc — function/procedure catalog (minimal stub for ORM compatibility)
+    pub(crate) fn handle_pg_proc(&self, sql_lower: &str) -> Vec<BackendMessage> {
+        let cols = vec![
+            ("oid", 23, 4i16),
+            ("proname", 25, -1),
+            ("pronamespace", 23, 4),
+            ("proowner", 23, 4),
+            ("prolang", 23, 4),
+            ("proisagg", 16, 1),
+            ("prorettype", 23, 4),
+            ("proargtypes", 25, -1),
+            ("prosrc", 25, -1),
+        ];
+        // Built-in functions relevant to ORM compatibility
+        let builtins: &[(i32, &str, i32)] = &[
+            (1240, "nextval", 25),   // nextval(regclass) -> bigint
+            (1241, "currval", 25),
+            (1242, "setval", 25),
+            (1559, "format_type", 25),
+            (25, "text", 25),
+            (2400, "pg_get_indexdef", 25),
+            (1716, "pg_get_constraintdef", 25),
+        ];
+        let filter_name = extract_where_eq(sql_lower, "proname");
+        let rows: Vec<Vec<Option<String>>> = builtins.iter()
+            .filter(|(_, name, _)| filter_name.as_ref().is_none_or(|f| f == name))
+            .map(|(oid, name, ret)| vec![
+                Some(oid.to_string()),
+                Some((*name).to_string()),
+                Some("11".into()),  // pg_catalog namespace
+                Some("10".into()),  // superuser owner
+                Some("14".into()),  // SQL language
+                Some("f".into()),
+                Some(ret.to_string()),
+                Some("".into()),
+                Some(String::new()),
+            ])
+            .collect();
+        self.single_row_result(cols, rows)
+    }
+
+    fn handle_information_schema_views(&self) -> Vec<BackendMessage> {
+        let cols = vec![
+            ("table_catalog", 25, -1i16),
+            ("table_schema", 25, -1),
+            ("table_name", 25, -1),
+            ("view_definition", 25, -1),
+            ("check_option", 25, -1),
+            ("is_updatable", 25, -1),
+            ("is_insertable_into", 25, -1),
+            ("is_trigger_updatable", 25, -1),
+            ("is_trigger_deletable", 25, -1),
+            ("is_trigger_insertable_into", 25, -1),
+        ];
+        // FalconDB currently has no persistent view catalog entries — return empty
+        self.single_row_result(cols, vec![])
+    }
+
+    fn handle_information_schema_check_constraints(&self) -> Vec<BackendMessage> {
+        let catalog = self.storage.get_catalog();
+        let tables = catalog.list_tables();
+        let cols = vec![
+            ("constraint_catalog", 25, -1i16),
+            ("constraint_schema", 25, -1),
+            ("constraint_name", 25, -1),
+            ("check_clause", 25, -1),
+        ];
+        let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+        for t in &tables {
+            for (i, expr) in t.check_constraints.iter().enumerate() {
+                rows.push(vec![
+                    Some("falcon".into()),
+                    Some("public".into()),
+                    Some(format!("{}_check_{}", t.name, i + 1)),
+                    Some(format!("{expr:?}")),
+                ]);
+            }
+        }
+        self.single_row_result(cols, rows)
+    }
+
+    fn handle_information_schema_sequences(&self) -> Vec<BackendMessage> {
+        let catalog = self.storage.get_catalog();
+        let tables = catalog.list_tables();
+        let cols = vec![
+            ("sequence_catalog", 25, -1i16),
+            ("sequence_schema", 25, -1),
+            ("sequence_name", 25, -1),
+            ("data_type", 25, -1),
+            ("numeric_precision", 23, 4),
+            ("numeric_precision_radix", 23, 4),
+            ("numeric_scale", 23, 4),
+            ("start_value", 25, -1),
+            ("minimum_value", 25, -1),
+            ("maximum_value", 25, -1),
+            ("increment", 25, -1),
+            ("cycle_option", 25, -1),
+        ];
+        let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+        for t in &tables {
+            for col in &t.columns {
+                if col.is_serial {
+                    rows.push(vec![
+                        Some("falcon".into()),
+                        Some("public".into()),
+                        Some(format!("{}_{}_seq", t.name, col.name)),
+                        Some("bigint".into()),
+                        Some("64".into()),
+                        Some("2".into()),
+                        Some("0".into()),
+                        Some("1".into()),
+                        Some("1".into()),
+                        Some("9223372036854775807".into()),
+                        Some("1".into()),
+                        Some("NO".into()),
+                    ]);
+                }
+            }
+        }
+        self.single_row_result(cols, rows)
+    }
+
+    fn handle_information_schema_routines(&self) -> Vec<BackendMessage> {
+        let cols = vec![
+            ("specific_catalog", 25, -1i16),
+            ("specific_schema", 25, -1),
+            ("specific_name", 25, -1),
+            ("routine_catalog", 25, -1),
+            ("routine_schema", 25, -1),
+            ("routine_name", 25, -1),
+            ("routine_type", 25, -1),
+            ("data_type", 25, -1),
+            ("routine_body", 25, -1),
+            ("routine_definition", 25, -1),
+            ("external_language", 25, -1),
+        ];
+        self.single_row_result(cols, vec![])
     }
 }

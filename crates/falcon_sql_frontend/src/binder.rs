@@ -112,6 +112,89 @@ impl Binder {
         Ok((bound, types))
     }
 
+    /// Bind a raw SQL string — intercepts statements sqlparser cannot handle:
+    /// - `DO $$ ... $$` anonymous blocks
+    /// - `CREATE TYPE name AS ENUM (...)`
+    /// - `DROP TYPE [IF EXISTS] name`
+    /// Returns `Some(result)` if intercepted, `None` otherwise.
+    pub fn bind_sql_str(&mut self, sql: &str) -> Option<Result<BoundStatement, SqlError>> {
+        let trimmed = sql.trim();
+        let upper = trimmed.to_uppercase();
+
+        // ── CREATE TYPE name AS ENUM (...) ──
+        if upper.starts_with("CREATE TYPE ") {
+            if let Some(as_pos) = upper.find(" AS ENUM") {
+                let type_name = trimmed[12..as_pos].trim().to_string();
+                let after = trimmed[as_pos + 8..].trim();
+                let labels = if after.starts_with('(') && after.ends_with(')') {
+                    let inner = &after[1..after.len() - 1];
+                    inner
+                        .split(',')
+                        .map(|s| s.trim().trim_matches('\'').to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                } else {
+                    vec![]
+                };
+                return Some(Ok(BoundStatement::CreateType { name: type_name, labels }));
+            }
+        }
+
+        // ── SHOW AI STATS ──
+        if upper.starts_with("SHOW AI STATS") {
+            return Some(Ok(BoundStatement::ShowAiStats));
+        }
+
+        // ── DROP TYPE [IF EXISTS] name ──
+        if upper.starts_with("DROP TYPE ") {
+            let rest = trimmed[10..].trim();
+            let (if_exists, name_part) = if rest.to_uppercase().starts_with("IF EXISTS ") {
+                (true, rest[10..].trim())
+            } else {
+                (false, rest)
+            };
+            let name = name_part.trim_end_matches(';').trim().to_string();
+            if !name.is_empty() {
+                return Some(Ok(BoundStatement::DropType { name, if_exists }));
+            }
+        }
+
+        // Must start with "DO " or "DO\t" or be exactly "DO"
+        let is_do = upper.starts_with("DO ")
+            || upper.starts_with("DO\t")
+            || upper.starts_with("DO\n")
+            || upper == "DO";
+        if !is_do {
+            return None;
+        }
+
+        let after_do = trimmed[2..].trim();
+
+        // Check for: DO LANGUAGE lang $$ body $$
+        let upper_after = after_do.to_uppercase();
+        let (body_raw, language): (&str, String) =
+            if upper_after.starts_with("LANGUAGE ") {
+                let rest = &after_do[9..]; // skip "LANGUAGE "
+                let sp = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
+                let lang = rest[..sp].trim().to_lowercase();
+                (rest[sp..].trim(), lang)
+            } else {
+                // Check for trailing: $$ body $$ LANGUAGE lang
+                if let Some(lang_pos) = upper_after.rfind(" LANGUAGE ") {
+                    let lang_str = after_do[lang_pos + 10..].trim().to_lowercase();
+                    (after_do[..lang_pos].trim(), lang_str)
+                } else {
+                    (after_do, "plpgsql".to_string())
+                }
+            };
+
+        let body = strip_dollar_quotes(body_raw);
+        Some(Ok(BoundStatement::DoBlock {
+            body: body.to_owned(),
+            language,
+        }))
+    }
+
     pub fn bind(&mut self, stmt: &Statement) -> Result<BoundStatement, SqlError> {
         match stmt {
             Statement::CreateDatabase {
@@ -193,6 +276,7 @@ impl Binder {
                         if_exists: *if_exists,
                     })
                 }
+                // DROP TYPE is intercepted in bind_sql_str before reaching here.
                 _ => Ok(BoundStatement::NoOp),
             },
             Statement::AlterTable {
@@ -562,9 +646,43 @@ impl Binder {
                 behavior,
                 called_on_null,
             ),
+            Statement::CreateTrigger {
+                or_replace,
+                name,
+                period,
+                events,
+                table_name,
+                trigger_object,
+                condition,
+                exec_body,
+                ..
+            } => self.bind_create_trigger(
+                *or_replace,
+                name,
+                period,
+                events,
+                table_name,
+                trigger_object,
+                condition,
+                exec_body,
+            ),
+            Statement::DropTrigger {
+                if_exists,
+                trigger_name,
+                table_name,
+                ..
+            } => Ok(BoundStatement::DropTrigger {
+                trigger_name: trigger_name.to_string(),
+                table_name: table_name.to_string(),
+                if_exists: *if_exists,
+            }),
             // DDL / session-config accepted as no-ops for ORM and tool compatibility.
+            Statement::CreateType { name, .. } => {
+                // sqlparser 0.43 only parses CREATE TYPE ... AS (composite).
+                // ENUM types are intercepted before parsing in bind_sql_str.
+                Ok(BoundStatement::CreateType { name: name.to_string(), labels: vec![] })
+            }
             Statement::CreateExtension { .. }
-            | Statement::CreateType { .. }
             | Statement::AlterIndex { .. }
             | Statement::AlterView { .. }
             | Statement::CreateProcedure { .. }
@@ -595,6 +713,61 @@ impl Binder {
             | Statement::CreateStage { .. } => Ok(BoundStatement::NoOp),
             _ => Ok(BoundStatement::NoOp),
         }
+    }
+
+    fn bind_create_trigger(
+        &self,
+        or_replace: bool,
+        name: &ast::ObjectName,
+        period: &ast::TriggerPeriod,
+        events: &[ast::TriggerEvent],
+        table_name: &ast::ObjectName,
+        trigger_object: &ast::TriggerObject,
+        condition: &Option<ast::Expr>,
+        exec_body: &ast::TriggerExecBody,
+    ) -> Result<BoundStatement, SqlError> {
+        use falcon_common::schema::{TriggerDef, TriggerEvent, TriggerLevel, TriggerTiming};
+
+        let trigger_name = name.to_string();
+        let tbl = table_name.to_string();
+
+        let timing = match period {
+            ast::TriggerPeriod::Before => TriggerTiming::Before,
+            ast::TriggerPeriod::After => TriggerTiming::After,
+            ast::TriggerPeriod::InsteadOf => TriggerTiming::InsteadOf,
+        };
+
+        let mapped_events: Vec<TriggerEvent> = events
+            .iter()
+            .filter_map(|e| match e {
+                ast::TriggerEvent::Insert => Some(TriggerEvent::Insert),
+                ast::TriggerEvent::Update(_) => Some(TriggerEvent::Update),
+                ast::TriggerEvent::Delete => Some(TriggerEvent::Delete),
+                ast::TriggerEvent::Truncate => None,
+            })
+            .collect();
+
+        let level = match trigger_object {
+            ast::TriggerObject::Row => TriggerLevel::Row,
+            ast::TriggerObject::Statement => TriggerLevel::Statement,
+        };
+
+        let function_name = exec_body.func_desc.name.to_string();
+
+        let when_condition = condition.as_ref().map(|e| format!("{e}"));
+
+        let trigger = TriggerDef {
+            name: trigger_name,
+            table_name: tbl,
+            timing,
+            events: mapped_events,
+            level,
+            function_name,
+            when_condition,
+            enabled: true,
+        };
+        let _ = or_replace;
+        Ok(BoundStatement::CreateTrigger { trigger })
     }
 
     fn bind_copy(
@@ -2402,4 +2575,20 @@ impl Binder {
             _ => Ok(None),
         }
     }
+}
+
+fn strip_dollar_quotes(s: &str) -> &str {
+    let s = s.trim();
+    if s.starts_with("$$") && s.ends_with("$$") && s.len() >= 4 {
+        return &s[2..s.len() - 2];
+    }
+    if let Some(rest) = s.strip_prefix('$') {
+        if let Some(tag_end) = rest.find('$') {
+            let tag = &s[..tag_end + 2]; // includes both $
+            if s.ends_with(tag) && s.len() >= tag.len() * 2 {
+                return &s[tag.len()..s.len() - tag.len()];
+            }
+        }
+    }
+    s
 }

@@ -435,7 +435,32 @@ pub enum PhysicalPlan {
         name: String,
         args: Vec<BoundExpr>,
     },
-    /// Accepted but produces no effect (CREATE EXTENSION, CREATE TYPE, ALTER INDEX, etc.)
+    /// DO $$ ... $$ anonymous block
+    DoBlock {
+        body: String,
+        language: String,
+    },
+    /// CREATE TRIGGER
+    CreateTrigger {
+        trigger: falcon_common::schema::TriggerDef,
+    },
+    /// DROP TRIGGER [IF EXISTS]
+    DropTrigger {
+        trigger_name: String,
+        table_name: String,
+        if_exists: bool,
+    },
+    /// CREATE TYPE name AS ENUM (...)
+    CreateType {
+        name: String,
+        labels: Vec<String>,
+    },
+    /// DROP TYPE [IF EXISTS] name
+    DropType {
+        name: String,
+        if_exists: bool,
+    },
+    /// Accepted but produces no effect (CREATE EXTENSION, ALTER INDEX, etc.)
     NoOp,
     ShowPgVar {
         name: String,
@@ -468,6 +493,8 @@ pub enum PhysicalPlan {
     ShowJobs,
     /// SHOW BACKUP STATUS
     ShowBackupStatus,
+    /// SHOW AI STATS — returns AI optimizer diagnostics
+    ShowAiStats,
     /// Distributed plan: wraps a local subplan for scatter/gather execution
     /// across multiple shards. The executor dispatches this to the
     /// DistributedExecutor for parallel execution + merge.

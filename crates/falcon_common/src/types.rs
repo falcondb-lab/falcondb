@@ -239,6 +239,57 @@ impl DataType {
         }
     }
 
+    /// Convert a PG type OID back to DataType (for format_type() support).
+    pub fn from_pg_oid(oid: i32) -> Option<Self> {
+        match oid {
+            16 => Some(Self::Boolean),
+            17 => Some(Self::Bytea),
+            20 => Some(Self::Int64),
+            21 => Some(Self::Int16),
+            23 => Some(Self::Int32),
+            25 => Some(Self::Text),
+            700 => Some(Self::Float32),
+            701 => Some(Self::Float64),
+            1082 => Some(Self::Date),
+            1083 => Some(Self::Time),
+            1114 => Some(Self::Timestamp),
+            1186 => Some(Self::Interval),
+            1700 => Some(Self::Decimal(18, 6)),
+            2950 => Some(Self::Uuid),
+            3614 => Some(Self::TsVector),
+            3615 => Some(Self::TsQuery),
+            3802 => Some(Self::Jsonb),
+            _ => None,
+        }
+    }
+
+    /// PG attlen: storage size in bytes (-1 = variable length).
+    pub const fn pg_type_len(&self) -> i16 {
+        match self {
+            Self::Boolean => 1,
+            Self::Int16 => 2,
+            Self::Int32 => 4,
+            Self::Int64 => 8,
+            Self::Float32 => 4,
+            Self::Float64 => 8,
+            Self::Date => 4,
+            Self::Time => 8,
+            Self::Timestamp => 8,
+            Self::Uuid => 16,
+            Self::Interval => 16,
+            _ => -1,
+        }
+    }
+
+    /// PG atttypmod: type-specific modifier (-1 = no modifier).
+    /// For DECIMAL(p,s): encodes as ((p << 16) | s) + 4 (PG convention).
+    pub const fn pg_type_mod(&self) -> i32 {
+        match self {
+            Self::Decimal(p, s) => ((*p as i32) << 16) | (*s as i32) + 4,
+            _ => -1,
+        }
+    }
+
     /// PG-compatible type name for information_schema.columns.data_type.
     pub const fn pg_type_name(&self) -> &'static str {
         match self {

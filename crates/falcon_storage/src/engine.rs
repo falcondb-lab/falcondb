@@ -36,6 +36,7 @@ use falcon_common::rls::RlsPolicyManager;
 
 use crate::backup::BackupManager;
 use crate::cdc::{CdcManager, DEFAULT_CDC_BUFFER_SIZE};
+use crate::cdc_schema_registry::CdcSchemaRegistry;
 use crate::cdc_wal_bridge::WalCdcBridge;
 use crate::encryption::KeyManager;
 use crate::job_scheduler::JobScheduler;
@@ -392,6 +393,8 @@ pub struct EnterpriseExtensions {
     pub tenant_registry: Arc<TenantRegistry>,
     /// P3-3: Resource meter — per-tenant billing and throttling.
     pub resource_meter: Arc<ResourceMeter>,
+    /// CDC schema registry — tracks per-table schema version history for consumers.
+    pub cdc_schema_registry: Arc<CdcSchemaRegistry>,
     /// WAL → CDC bridge: converts WAL records into CDC change events with real LSNs.
     /// `None` until explicitly configured via `configure_cdc_bridge()`.
     pub cdc_bridge: RwLock<Option<Arc<WalCdcBridge>>>,
@@ -413,6 +416,7 @@ impl Default for EnterpriseExtensions {
             partition_manager: RwLock::new(PartitionManager::new()),
             wal_archiver: Arc::new(RwLock::new(WalArchiver::disabled())),
             cdc_manager: Arc::new(CdcManager::new(DEFAULT_CDC_BUFFER_SIZE)),
+            cdc_schema_registry: Arc::new(CdcSchemaRegistry::new()),
             cold_store: Arc::new(crate::cold_store::ColdStore::new_in_memory()),
             intern_pool: Arc::new(crate::cold_store::StringInternPool::new()),
             tenant_registry: Arc::new(TenantRegistry::new()),
@@ -2043,6 +2047,17 @@ impl StorageEngine {
         }
     }
 
+    /// Return write-set keys as (table_id_u64, pk_bytes) for SSI anti-dependency detection.
+    pub fn write_set_keys(&self, txn_id: TxnId) -> Vec<(u64, Vec<u8>)> {
+        self.flush_local_cache();
+        self.txn_local.get(&txn_id).map_or_else(Vec::new, |s| {
+            s.write_set
+                .iter()
+                .map(|op| (op.table_id.0, op.pk.clone()))
+                .collect()
+        })
+    }
+
     /// Return the current read-set length for a transaction.
     pub fn read_set_snapshot(&self, txn_id: TxnId) -> usize {
         self.flush_local_cache();
@@ -2265,6 +2280,45 @@ impl StorageEngine {
         } else {
             vec![]
         }
+    }
+
+    /// GIN index scan: look up candidate PKs for a tsvector column matching the given search terms.
+    /// Returns None if no GIN index exists for the column.
+    /// The caller must still apply a residual `@@` filter for correctness (NOT/AND semantics).
+    pub fn gin_scan(
+        &self,
+        table_id: TableId,
+        column_idx: usize,
+        terms: &[crate::memtable::GinSearchTerm],
+        txn_id: TxnId,
+        read_ts: Timestamp,
+    ) -> Option<Vec<(Vec<u8>, falcon_common::datum::OwnedRow)>> {
+        let handle = self.engine_tables.get(&table_id)?;
+        let memtable = handle.as_rowstore()?;
+        let candidate_pks = memtable.gin_search(column_idx, terms)?;
+        if candidate_pks.is_empty() {
+            return Some(vec![]);
+        }
+        let mut rows = Vec::with_capacity(candidate_pks.len());
+        for pk in candidate_pks {
+            if let Some(chain) = memtable.data.get(&pk) {
+                if let Some(arc_row) = chain.read_for_txn(txn_id, read_ts) {
+                    rows.push((pk, (*arc_row).clone()));
+                }
+            }
+        }
+        Some(rows)
+    }
+
+    /// Check whether a table has a GIN index on any tsvector column.
+    pub fn has_gin_index(&self, table_id: TableId, column_idx: usize) -> bool {
+        if let Some(handle) = self.engine_tables.get(&table_id) {
+            if let Some(memtable) = handle.as_rowstore() {
+                let gin = memtable.gin_indexes.read();
+                return gin.iter().any(|g| g.column_idx == column_idx);
+            }
+        }
+        false
     }
 
     // ── Table statistics (ANALYZE) ─────────────────────────────────
@@ -3601,6 +3655,12 @@ impl StorageEngine {
                 WalRecord::DropFunction { name } => {
                     let _ = engine.catalog.write().drop_function(name);
                 }
+                WalRecord::CreateTrigger { def } => {
+                    let _ = engine.catalog.write().create_trigger(def.clone());
+                }
+                WalRecord::DropTrigger { table_name, trigger_name } => {
+                    let _ = engine.catalog.write().drop_trigger(table_name, trigger_name);
+                }
                 WalRecord::AlterTable { table_name, op } => {
                     use crate::wal::AlterTableOp;
                     match op {
@@ -4402,6 +4462,12 @@ impl StorageEngine {
                 }
                 WalRecord::DropFunction { name } => {
                     let _ = engine.catalog.write().drop_function(name);
+                }
+                WalRecord::CreateTrigger { def } => {
+                    let _ = engine.catalog.write().create_trigger(def.clone());
+                }
+                WalRecord::DropTrigger { table_name, trigger_name } => {
+                    let _ = engine.catalog.write().drop_trigger(table_name, trigger_name);
                 }
                 WalRecord::CreateSchema { name, owner } => {
                     let _ = engine.catalog.write().create_schema(name, owner);

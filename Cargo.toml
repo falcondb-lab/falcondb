@@ -22,7 +22,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.2.0"
+version = "1.3.0"
 edition = "2021"
 rust-version = "1.75"
 license = "Apache-2.0"
@@ -109,6 +109,9 @@ rocksdb = "0.22"
 
 # redb
 redb = "3.1.0"
+
+# Object storage (PITR archival to S3/Azure/GCS/local)
+object_store = { version = "0.11", features = ["aws", "azure", "gcp", "http"] }
 
 # Compression
 lz4_flex = "0.11"

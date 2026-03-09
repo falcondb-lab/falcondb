@@ -63,6 +63,24 @@ pub struct FalconConfig {
     /// v1.3.0: Resource isolation — throttle background I/O and CPU under foreground pressure.
     #[serde(default)]
     pub resource_isolation: ResourceIsolationSectionConfig,
+    /// v1.3.0: Trigger support. Disabled by default to avoid DML fast-path overhead.
+    #[serde(default)]
+    pub triggers: TriggersConfig,
+}
+
+/// Trigger execution configuration.
+///
+/// Enable via falcon.toml:
+/// ```toml
+/// [triggers]
+/// enabled = true
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TriggersConfig {
+    /// Enable trigger execution. Default: false.
+    /// When false, triggers are parsed and stored but never fired.
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 const fn default_config_version() -> u32 {
@@ -1418,6 +1436,7 @@ impl Default for FalconConfig {
             logging: LoggingConfig::default(),
             cluster: ClusterSectionConfig::default(),
             resource_isolation: ResourceIsolationSectionConfig::default(),
+            triggers: TriggersConfig::default(),
         }
     }
 }

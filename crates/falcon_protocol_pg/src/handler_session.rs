@@ -957,6 +957,126 @@ impl QueryHandler {
             ));
         }
 
+        // pg_get_indexdef(oid [, col, pretty]) — return index DDL string
+        if sql_lower.contains("pg_get_indexdef(") {
+            let idx_oid: i64 = sql_lower.find("pg_get_indexdef(")
+                .and_then(|i| {
+                    let after = &sql_lower[i + "pg_get_indexdef(".len()..];
+                    let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+                    after[..end].parse::<i64>().ok()
+                })
+                .unwrap_or(0);
+            let ddl = if idx_oid > 0 {
+                // idx_oid range 90000+ assigned in handle_pg_index
+                let catalog = self.storage.get_catalog();
+                let mut result = String::new();
+                let mut fake_oid = 90000i64;
+                'outer: for t in catalog.list_tables() {
+                    if !t.primary_key_columns.is_empty() {
+                        if fake_oid == idx_oid {
+                            let cols: Vec<&str> = t.primary_key_columns.iter()
+                                .map(|&i| t.columns[i].name.as_str())
+                                .collect();
+                            result = format!("CREATE UNIQUE INDEX ON {} ({})", t.name, cols.join(", "));
+                            break 'outer;
+                        }
+                        fake_oid += 1;
+                    }
+                    for uc in &t.unique_constraints {
+                        if fake_oid == idx_oid {
+                            let cols: Vec<&str> = uc.iter().map(|&i| t.columns[i].name.as_str()).collect();
+                            result = format!("CREATE UNIQUE INDEX ON {} ({})", t.name, cols.join(", "));
+                            break 'outer;
+                        }
+                        fake_oid += 1;
+                    }
+                }
+                result
+            } else {
+                String::new()
+            };
+            return Some(self.single_row_result(
+                vec![("pg_get_indexdef", 25, -1)],
+                vec![vec![Some(ddl)]],
+            ));
+        }
+
+        // pg_get_constraintdef(oid [, pretty]) — return constraint DDL string
+        if sql_lower.contains("pg_get_constraintdef(") {
+            return Some(self.single_row_result(
+                vec![("pg_get_constraintdef", 25, -1)],
+                vec![vec![Some(String::new())]],
+            ));
+        }
+
+        // format_type(type_oid, typemod) — return SQL type name
+        if sql_lower.contains("format_type(") {
+            let type_name: String = if let Some(after) = sql_lower.find("format_type(").map(|i| i + "format_type(".len()) {
+                let args_str = &sql_lower[after..];
+                let end = args_str.find(')').unwrap_or(args_str.len());
+                let first_arg = args_str[..end].split(',').next().unwrap_or("").trim();
+                first_arg.parse::<i32>().ok().map(|oid: i32| {
+                    falcon_common::types::DataType::from_pg_oid(oid)
+                        .map(|dt| dt.pg_type_name().to_string())
+                        .unwrap_or_else(|| format!("type({})", oid))
+                }).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            return Some(self.single_row_result(
+                vec![("format_type", 25, -1)],
+                vec![vec![Some(type_name)]],
+            ));
+        }
+
+        // obj_description(oid [, catalog]) / col_description(table_oid, col_num) — return NULL (no comments stored)
+        if sql_lower.contains("obj_description(") || sql_lower.contains("col_description(") {
+            let col_name = if sql_lower.contains("col_description(") { "col_description" } else { "obj_description" };
+            return Some(self.single_row_result(
+                vec![(col_name, 25, -1)],
+                vec![vec![None]],
+            ));
+        }
+
+        // pg_encoding_to_char(encoding_id) — return encoding name
+        if sql_lower.contains("pg_encoding_to_char(") {
+            return Some(self.single_row_result(
+                vec![("pg_encoding_to_char", 25, -1)],
+                vec![vec![Some("UTF8".into())]],
+            ));
+        }
+
+        // pg_get_expr(adbin, adrelid [, pretty]) — return default expression string
+        if sql_lower.contains("pg_get_expr(") {
+            return Some(self.single_row_result(
+                vec![("pg_get_expr", 25, -1)],
+                vec![vec![None]],
+            ));
+        }
+
+        // pg_get_serial_sequence(table, column) — return sequence name
+        if sql_lower.contains("pg_get_serial_sequence(") {
+            let catalog = self.storage.get_catalog();
+            let result: Option<String> = (|| {
+                let after = sql_lower.find("pg_get_serial_sequence(")? + "pg_get_serial_sequence(".len();
+                let args_str = &sql_lower[after..];
+                let end = args_str.find(')')?;
+                let parts: Vec<&str> = args_str[..end].split(',').collect();
+                let table = parts.first()?.trim().trim_matches('\'').trim_matches('"');
+                let col = parts.get(1)?.trim().trim_matches('\'').trim_matches('"');
+                let schema = catalog.find_table(table)?;
+                if schema.columns.iter().any(|c| c.name.to_lowercase() == col && c.is_serial) {
+                    Some(format!("public.{}_{}_seq", table, col))
+                } else {
+                    None
+                }
+            })();
+            return Some(self.single_row_result(
+                vec![("pg_get_serial_sequence", 25, -1)],
+                vec![vec![result]],
+            ));
+        }
+
         // Delegate information_schema and pg_catalog queries to handler_catalog module
         if let Some(result) = self.handle_catalog_query(sql_lower, session) {
             return Some(result);

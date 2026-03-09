@@ -480,6 +480,84 @@ impl QueryHandler {
         // Fast-path INSERT/UPDATE already attempted in handle_query_dispatch;
         // if we're here, they didn't match — go straight to sqlparser.
 
+        // ── DO $$ block fast-path (sqlparser 0.50 cannot parse DO) ──
+        {
+            let catalog = self.storage.get_catalog();
+            let mut binder = Binder::new(catalog);
+            if let Some(do_result) = binder.bind_sql_str(sql) {
+                let bound = match do_result {
+                    Ok(b) => b,
+                    Err(e) => return Ok(vec![self.error_response(&FalconError::Sql(e))]),
+                };
+                let plan = match Planner::plan(&bound) {
+                    Ok(p) => p,
+                    Err(e) => return Ok(vec![self.error_response(&FalconError::Sql(e))]),
+                };
+                // Ensure active txn for DO block
+                let auto_txn = if session.txn.is_none() {
+                    let txn = match self.txn_mgr.try_begin_with_classification(
+                        session.default_isolation,
+                        TxnClassification::local(ShardId(0)),
+                    ) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            let ce: FalconError = e.into();
+                            return Ok(vec![self.error_response(&ce)]);
+                        }
+                    };
+                    session.txn = Some(txn);
+                    true
+                } else {
+                    false
+                };
+                let result = self.executor.execute(&plan, session.txn.as_ref());
+                if auto_txn {
+                    if let Some(ref txn) = session.txn {
+                        match result {
+                            Ok(_) => { let _ = self.txn_mgr.commit(txn.txn_id); }
+                            Err(_) => { let _ = self.txn_mgr.abort(txn.txn_id); }
+                        }
+                    }
+                    session.txn = None;
+                }
+                let msgs = match result {
+                    Ok(ExecutionResult::Dml { tag, .. }) => {
+                        vec![BackendMessage::CommandComplete { tag: tag.to_string() }]
+                    }
+                    Ok(ExecutionResult::Ddl { message }) => {
+                        vec![BackendMessage::CommandComplete { tag: message }]
+                    }
+                    Ok(ExecutionResult::Query { columns, rows }) => {
+                        let fields: Vec<FieldDescription> = columns
+                            .iter()
+                            .map(|(name, dt)| FieldDescription {
+                                name: name.clone(),
+                                table_oid: 0,
+                                column_attr: 0,
+                                type_oid: dt.pg_oid(),
+                                type_len: dt.type_len(),
+                                type_modifier: -1,
+                                format_code: 0,
+                            })
+                            .collect();
+                        let mut out = vec![BackendMessage::RowDescription { fields }];
+                        for row in &rows {
+                            let values: Vec<Option<String>> =
+                                row.values.iter().map(|d| Some(d.to_string())).collect();
+                            out.push(BackendMessage::DataRow { values });
+                        }
+                        out.push(BackendMessage::CommandComplete {
+                            tag: format!("SELECT {}", rows.len()),
+                        });
+                        out
+                    }
+                    Ok(_) => vec![BackendMessage::CommandComplete { tag: "DO".into() }],
+                    Err(e) => vec![self.error_response(&e)],
+                };
+                return Ok(msgs);
+            }
+        }
+
         // ── Standard path: sqlparser + binder + planner ──
         let stmts = match parse_sql(sql) {
             Ok(stmts) => stmts,

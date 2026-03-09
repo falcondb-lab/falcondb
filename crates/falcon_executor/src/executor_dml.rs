@@ -172,18 +172,24 @@ impl Executor {
         on_conflict: &Option<OnConflictAction>,
         txn: &TxnHandle,
     ) -> Result<ExecutionResult, FalconError> {
-        // ── Fast path: no RETURNING, no ON CONFLICT ──────────────────────
-        if returning.is_empty() && on_conflict.is_none() {
-            return self.exec_insert_batch(table_id, schema, columns, rows, txn);
-        }
+        use falcon_common::schema::{TriggerEvent, TriggerTiming};
+        self.fire_triggers(&schema.name, TriggerTiming::Before, TriggerEvent::Insert, txn)?;
+        let result = (|| {
+            // ── Fast path: no RETURNING, no ON CONFLICT ──────────────────────
+            if returning.is_empty() && on_conflict.is_none() {
+                return self.exec_insert_batch(table_id, schema, columns, rows, txn);
+            }
 
-        // ── Fast path: ON CONFLICT DO NOTHING without RETURNING ──────────
-        if returning.is_empty() && matches!(on_conflict, Some(OnConflictAction::DoNothing)) {
-            return self.exec_insert_conflict_skip(table_id, schema, columns, rows, txn);
-        }
+            // ── Fast path: ON CONFLICT DO NOTHING without RETURNING ──────────
+            if returning.is_empty() && matches!(on_conflict, Some(OnConflictAction::DoNothing)) {
+                return self.exec_insert_conflict_skip(table_id, schema, columns, rows, txn);
+            }
 
-        // ── Slow path: RETURNING or ON CONFLICT DO UPDATE ────────────────
-        self.exec_insert_slow(table_id, schema, columns, rows, returning, on_conflict, txn)
+            // ── Slow path: RETURNING or ON CONFLICT DO UPDATE ────────────────
+            self.exec_insert_slow(table_id, schema, columns, rows, returning, on_conflict, txn)
+        })()?;
+        self.fire_triggers(&schema.name, TriggerTiming::After, TriggerEvent::Insert, txn)?;
+        Ok(result)
     }
 
     /// INSERT ... ON CONFLICT DO NOTHING fast path: build row, try insert, skip on DuplicateKey.
@@ -395,15 +401,27 @@ impl Executor {
             }
         }
 
-        let count = built_rows.len() as u64;
-        self.storage
-            .batch_insert(table_id, built_rows, txn.txn_id)
-            .map_err(FalconError::Storage)?;
+        use falcon_common::schema::{TriggerEvent, TriggerLevel, TriggerTiming};
+        let catalog = self.storage.get_catalog();
+        let has_row_triggers = catalog.triggers_for_table(&schema.name)
+            .iter()
+            .any(|t| t.enabled && t.events.contains(&TriggerEvent::Insert) && t.level == TriggerLevel::Row);
 
-        Ok(ExecutionResult::Dml {
-            rows_affected: count,
-            tag: "INSERT",
-        })
+        if !has_row_triggers {
+            let count = built_rows.len() as u64;
+            self.storage.batch_insert(table_id, built_rows, txn.txn_id).map_err(FalconError::Storage)?;
+            return Ok(ExecutionResult::Dml { rows_affected: count, tag: "INSERT" });
+        }
+
+        let mut count = 0u64;
+        for row in built_rows {
+            let new_vars = Self::build_new_row_vars(schema, &row);
+            self.fire_row_trigger(&schema.name, TriggerTiming::Before, TriggerEvent::Insert, &new_vars, txn)?;
+            self.storage.insert(table_id, row, txn.txn_id).map_err(FalconError::Storage)?;
+            self.fire_row_trigger(&schema.name, TriggerTiming::After, TriggerEvent::Insert, &new_vars, txn)?;
+            count += 1;
+        }
+        Ok(ExecutionResult::Dml { rows_affected: count, tag: "INSERT" })
     }
 
     /// Slow per-row INSERT path: supports RETURNING and ON CONFLICT.
@@ -543,9 +561,24 @@ impl Executor {
                 }
             }
 
+            let new_vars = {
+                use falcon_common::schema::{TriggerEvent, TriggerLevel, TriggerTiming};
+                let cat = self.storage.get_catalog();
+                let needs = cat.triggers_for_table(&schema.name).iter()
+                    .any(|t| t.enabled && t.events.contains(&TriggerEvent::Insert) && t.level == TriggerLevel::Row);
+                if needs { Some(Self::build_new_row_vars(schema, &OwnedRow::new(values.clone()))) } else { None }
+            };
+            if let Some(ref rv) = new_vars {
+                use falcon_common::schema::{TriggerEvent, TriggerTiming};
+                self.fire_row_trigger(&schema.name, TriggerTiming::Before, TriggerEvent::Insert, rv, txn)?;
+            }
             let row = OwnedRow::new(values.clone());
             match self.storage.insert(table_id, row, txn.txn_id) {
                 Ok(_) => {
+                    if let Some(ref rv) = new_vars {
+                        use falcon_common::schema::{TriggerEvent, TriggerTiming};
+                        self.fire_row_trigger(&schema.name, TriggerTiming::After, TriggerEvent::Insert, rv, txn)?;
+                    }
                     if !returning.is_empty() {
                         let ret_row = OwnedRow::new(values);
                         let ret_vals: Vec<Datum> = returning
@@ -950,6 +983,23 @@ impl Executor {
         from_table: Option<&BoundFromTable>,
         txn: &TxnHandle,
     ) -> Result<ExecutionResult, FalconError> {
+        use falcon_common::schema::{TriggerEvent, TriggerTiming};
+        self.fire_triggers(&schema.name, TriggerTiming::Before, TriggerEvent::Update, txn)?;
+        let result = self.exec_update_inner(table_id, schema, assignments, filter, returning, from_table, txn)?;
+        self.fire_triggers(&schema.name, TriggerTiming::After, TriggerEvent::Update, txn)?;
+        Ok(result)
+    }
+
+    fn exec_update_inner(
+        &self,
+        table_id: falcon_common::types::TableId,
+        schema: &TableSchema,
+        assignments: &[(usize, BoundExpr)],
+        filter: Option<&BoundExpr>,
+        returning: &[(BoundExpr, String)],
+        from_table: Option<&BoundFromTable>,
+        txn: &TxnHandle,
+    ) -> Result<ExecutionResult, FalconError> {
         // Multi-table UPDATE ... FROM: nested loop join approach
         if let Some(ft) = from_table {
             return self.exec_update_from(
@@ -1067,6 +1117,23 @@ impl Executor {
             // Apply FK cascading actions for child tables if referenced columns changed
             self.apply_fk_on_update(schema, row, &new_values, txn)?;
 
+            let row_trigger_vars = {
+                use falcon_common::schema::{TriggerEvent, TriggerLevel};
+                let cat = self.storage.get_catalog();
+                let needs = cat.triggers_for_table(&schema.name).iter()
+                    .any(|t| t.enabled && t.events.contains(&TriggerEvent::Update) && t.level == TriggerLevel::Row);
+                if needs {
+                    let new_row_tmp = OwnedRow::new(new_values.clone());
+                    Some(Self::build_update_row_vars(schema, row, &new_row_tmp))
+                } else {
+                    None
+                }
+            };
+            if let Some(ref rv) = row_trigger_vars {
+                use falcon_common::schema::{TriggerEvent, TriggerTiming};
+                self.fire_row_trigger(&schema.name, TriggerTiming::Before, TriggerEvent::Update, rv, txn)?;
+            }
+
             if !returning.is_empty() {
                 let ret_row = OwnedRow::new(new_values.clone());
                 let ret_vals: Vec<Datum> = returning
@@ -1080,6 +1147,10 @@ impl Executor {
 
             let new_row = OwnedRow::new(new_values);
             self.storage.update(table_id, pk, new_row, txn.txn_id)?;
+            if let Some(ref rv) = row_trigger_vars {
+                use falcon_common::schema::{TriggerEvent, TriggerTiming};
+                self.fire_row_trigger(&schema.name, TriggerTiming::After, TriggerEvent::Update, rv, txn)?;
+            }
             count += 1;
         }
 
@@ -1109,6 +1180,22 @@ impl Executor {
     }
 
     pub(crate) fn exec_delete(
+        &self,
+        table_id: falcon_common::types::TableId,
+        schema: &TableSchema,
+        filter: Option<&BoundExpr>,
+        returning: &[(BoundExpr, String)],
+        using_table: Option<&BoundFromTable>,
+        txn: &TxnHandle,
+    ) -> Result<ExecutionResult, FalconError> {
+        use falcon_common::schema::{TriggerEvent, TriggerTiming};
+        self.fire_triggers(&schema.name, TriggerTiming::Before, TriggerEvent::Delete, txn)?;
+        let result = self.exec_delete_inner(table_id, schema, filter, returning, using_table, txn)?;
+        self.fire_triggers(&schema.name, TriggerTiming::After, TriggerEvent::Delete, txn)?;
+        Ok(result)
+    }
+
+    fn exec_delete_inner(
         &self,
         table_id: falcon_common::types::TableId,
         schema: &TableSchema,
@@ -1147,11 +1234,27 @@ impl Executor {
         let mat_filter = self.materialize_filter(effective_filter.as_ref(), txn)?;
         let mut returning_rows = Vec::new();
 
+        use falcon_common::schema::{TriggerEvent, TriggerLevel, TriggerTiming};
+        let has_row_triggers = {
+            let cat = self.storage.get_catalog();
+            cat.triggers_for_table(&schema.name).iter()
+                .any(|t| t.enabled && t.events.contains(&TriggerEvent::Delete) && t.level == TriggerLevel::Row)
+        };
+
         for (pk, row) in &rows {
             if let Some(ref f) = mat_filter {
                 if !ExprEngine::eval_filter(f, row).map_err(FalconError::Execution)? {
                     continue;
                 }
+            }
+
+            let old_vars = if has_row_triggers {
+                Some(Self::build_old_row_vars(schema, row))
+            } else {
+                None
+            };
+            if let Some(ref ov) = old_vars {
+                self.fire_row_trigger(&schema.name, TriggerTiming::Before, TriggerEvent::Delete, ov, txn)?;
             }
 
             if !returning.is_empty() {
@@ -1164,10 +1267,12 @@ impl Executor {
                 returning_rows.push(ret_vals);
             }
 
-            // Apply FK cascading actions for child tables referencing this row
             self.apply_fk_on_delete(schema, row, txn)?;
-
             self.storage.delete(table_id, pk, txn.txn_id)?;
+
+            if let Some(ref ov) = old_vars {
+                self.fire_row_trigger(&schema.name, TriggerTiming::After, TriggerEvent::Delete, ov, txn)?;
+            }
             count += 1;
         }
 
@@ -2177,6 +2282,136 @@ impl Executor {
             ))),
         }
     }
+
+    fn subst_vars_in_sql(sql: &str, vars: &std::collections::HashMap<String, Datum>) -> String {
+        if vars.is_empty() {
+            return sql.to_owned();
+        }
+        let mut result = sql.to_owned();
+        let mut pairs: Vec<_> = vars.iter().collect();
+        // longest keys first to avoid partial substitutions
+        pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        for (k, v) in pairs {
+            let literal = datum_to_sql_literal(v);
+            // word-boundary replacement
+            let mut out = String::with_capacity(result.len());
+            let bytes = result.as_bytes();
+            let mut i = 0;
+            while i < result.len() {
+                if result[i..].starts_with(k.as_str()) {
+                    let end = i + k.len();
+                    let before_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_';
+                    let after_ok = end >= result.len() || !bytes[end].is_ascii_alphanumeric() && bytes[end] != b'_';
+                    if before_ok && after_ok {
+                        out.push_str(&literal);
+                        i = end;
+                        continue;
+                    }
+                }
+                out.push(result[i..].chars().next().unwrap());
+                i += result[i..].chars().next().unwrap().len_utf8();
+            }
+            result = out;
+        }
+        result
+    }
+
+    fn row_to_vars(schema: &TableSchema, row: &OwnedRow) -> std::collections::HashMap<String, Datum> {
+        schema.columns.iter().enumerate()
+            .map(|(i, col)| (col.name.to_lowercase(), row.values.get(i).cloned().unwrap_or(Datum::Null)))
+            .collect()
+    }
+
+    pub(crate) fn fire_triggers(
+        &self,
+        table_name: &str,
+        timing: falcon_common::schema::TriggerTiming,
+        event: falcon_common::schema::TriggerEvent,
+        txn: &TxnHandle,
+    ) -> Result<(), FalconError> {
+        use falcon_common::schema::TriggerLevel;
+        self.fire_triggers_inner(table_name, timing, event, TriggerLevel::Statement, None, txn)
+    }
+
+    pub(crate) fn fire_row_trigger(
+        &self,
+        table_name: &str,
+        timing: falcon_common::schema::TriggerTiming,
+        event: falcon_common::schema::TriggerEvent,
+        row_vars: &std::collections::HashMap<String, Datum>,
+        txn: &TxnHandle,
+    ) -> Result<(), FalconError> {
+        use falcon_common::schema::TriggerLevel;
+        self.fire_triggers_inner(table_name, timing, event, TriggerLevel::Row, Some(row_vars), txn)
+    }
+
+    /// Build vars for row trigger: includes plain col names, new_col / old_col prefixed names.
+    fn build_new_row_vars(schema: &TableSchema, new_row: &OwnedRow) -> std::collections::HashMap<String, Datum> {
+        let mut vars = Self::row_to_vars(schema, new_row);
+        for (col, val) in vars.clone() {
+            vars.insert(format!("new_{col}"), val.clone());
+            vars.insert(format!("new.{col}"), val);
+        }
+        vars
+    }
+
+    fn build_old_row_vars(schema: &TableSchema, old_row: &OwnedRow) -> std::collections::HashMap<String, Datum> {
+        let mut vars = Self::row_to_vars(schema, old_row);
+        for (col, val) in vars.clone() {
+            vars.insert(format!("old_{col}"), val.clone());
+            vars.insert(format!("old.{col}"), val);
+        }
+        vars
+    }
+
+    fn build_update_row_vars(schema: &TableSchema, old_row: &OwnedRow, new_row: &OwnedRow) -> std::collections::HashMap<String, Datum> {
+        let mut vars = Self::build_new_row_vars(schema, new_row);
+        for (col, val) in Self::row_to_vars(schema, old_row) {
+            vars.insert(format!("old_{col}"), val.clone());
+            vars.insert(format!("old.{col}"), val);
+        }
+        vars
+    }
+
+    fn fire_triggers_inner(
+        &self,
+        table_name: &str,
+        timing: falcon_common::schema::TriggerTiming,
+        event: falcon_common::schema::TriggerEvent,
+        level: falcon_common::schema::TriggerLevel,
+        row_vars: Option<&std::collections::HashMap<String, Datum>>,
+        txn: &TxnHandle,
+    ) -> Result<(), FalconError> {
+        let catalog = self.storage.get_catalog();
+        let triggers: Vec<_> = catalog.triggers_for_table(table_name)
+            .into_iter()
+            .filter(|t| t.enabled && t.timing == timing && t.events.contains(&event) && t.level == level)
+            .map(|t| t.function_name.clone())
+            .collect();
+        if triggers.is_empty() {
+            return Ok(());
+        }
+        let empty_vars = std::collections::HashMap::new();
+        let extra = row_vars.unwrap_or(&empty_vars);
+        for func_name in triggers {
+            let func_def = match catalog.find_function(&func_name).cloned() {
+                Some(f) => f,
+                None => continue,
+            };
+            let eval_sql = |sql: &str, vars: &std::collections::HashMap<String, Datum>| -> Result<Datum, falcon_common::error::ExecutionError> {
+                let resolved = Self::subst_vars_in_sql(sql, vars);
+                self.eval_sql_expr_in_txn(&resolved, txn)
+                    .map_err(|e| falcon_common::error::ExecutionError::TypeError(e.to_string()))
+            };
+            let eval_rows = |sql: &str, vars: &std::collections::HashMap<String, Datum>| -> Result<Vec<std::collections::HashMap<String, Datum>>, falcon_common::error::ExecutionError> {
+                let resolved = Self::subst_vars_in_sql(sql, vars);
+                self.eval_sql_rows(&resolved, Some(txn))
+                    .map_err(|e| falcon_common::error::ExecutionError::TypeError(e.to_string()))
+            };
+            let _ = crate::plpgsql::execute_plpgsql_with_vars(&func_def, &[], extra, eval_sql, eval_rows);
+        }
+        Ok(())
+    }
 }
 
 /// Map a DataType to the cast target string used by eval_cast.
@@ -2200,5 +2435,17 @@ fn datatype_to_cast_target(dt: &DataType) -> String {
         DataType::Bytea => "bytea".into(),
         DataType::TsVector => "tsvector".into(),
         DataType::TsQuery => "tsquery".into(),
+    }
+}
+
+fn datum_to_sql_literal(d: &Datum) -> String {
+    match d {
+        Datum::Null => "NULL".to_owned(),
+        Datum::Boolean(b) => if *b { "TRUE".to_owned() } else { "FALSE".to_owned() },
+        Datum::Int32(i) => i.to_string(),
+        Datum::Int64(i) => i.to_string(),
+        Datum::Float64(f) => format!("{f}"),
+        Datum::Text(s) => format!("'{}'", s.replace('\'', "''")),
+        other => format!("'{other}'"),
     }
 }

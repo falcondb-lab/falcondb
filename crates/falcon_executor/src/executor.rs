@@ -11,6 +11,7 @@ use falcon_common::security::{
     SUPERUSER_ROLE_ID,
 };
 use falcon_common::types::{DataType, TableId};
+use falcon_planner::ai_optimizer::{extract_features_from_physical, AiOptimizer, FeedbackRecord, PlanKind};
 use falcon_planner::PhysicalPlan;
 use falcon_sql_frontend::types::*;
 use falcon_storage::engine::StorageEngine;
@@ -66,6 +67,8 @@ pub struct Executor {
     privilege_manager: Option<Arc<std::sync::RwLock<PrivilegeManager>>>,
     /// RBAC: current session role.
     current_role: RoleId,
+    /// AI query optimizer for plan selection feedback.
+    pub(crate) ai_optimizer: Arc<AiOptimizer>,
 }
 
 impl Executor {
@@ -78,6 +81,7 @@ impl Executor {
             max_connections: 0,
             external_sorter: None,
             hash_agg_group_limit: 0,
+            ai_optimizer: Arc::new(AiOptimizer::new()),
             recursive_cte_max_rows: 0,
             parallel_config: ParallelConfig::default(),
             role_catalog: None,
@@ -96,6 +100,7 @@ impl Executor {
             max_connections: 0,
             external_sorter: None,
             hash_agg_group_limit: 0,
+            ai_optimizer: Arc::new(AiOptimizer::new()),
             recursive_cte_max_rows: 0,
             parallel_config: ParallelConfig::default(),
             role_catalog: None,
@@ -327,6 +332,20 @@ impl Executor {
         self.execute(&substituted, txn)
     }
 
+    /// Whether a plan is a query that benefits from AI feedback.
+    fn is_query_plan(plan: &PhysicalPlan) -> bool {
+        matches!(
+            plan,
+            PhysicalPlan::SeqScan { .. }
+                | PhysicalPlan::IndexScan { .. }
+                | PhysicalPlan::IndexRangeScan { .. }
+                | PhysicalPlan::ColumnScan { .. }
+                | PhysicalPlan::HashJoin { .. }
+                | PhysicalPlan::NestedLoopJoin { .. }
+                | PhysicalPlan::MergeSortJoin { .. }
+        )
+    }
+
     /// Execute a physical plan within a transaction context.
     /// `txn` is None for DDL and txn control statements.
     pub fn execute(
@@ -335,6 +354,32 @@ impl Executor {
         txn: Option<&TxnHandle>,
     ) -> Result<ExecutionResult, FalconError> {
         crate::eval::scalar_time::reset_statement_ts();
+
+        // AI feedback: time query plans and record actual execution cost.
+        if Self::is_query_plan(plan) {
+            let t0 = Instant::now();
+            let result = self.execute_inner(plan, txn);
+            let elapsed_us = t0.elapsed().as_micros() as u64;
+            let features = extract_features_from_physical(plan);
+            let kind = PlanKind::from_physical(plan);
+            let predicted = self.ai_optimizer.predict_cost(&features, kind);
+            self.ai_optimizer.record_feedback(FeedbackRecord {
+                features,
+                plan_kind: kind,
+                actual_us: elapsed_us,
+                predicted_log2_cost: predicted,
+            });
+            return result;
+        }
+
+        self.execute_inner(plan, txn)
+    }
+
+    fn execute_inner(
+        &self,
+        plan: &PhysicalPlan,
+        txn: Option<&TxnHandle>,
+    ) -> Result<ExecutionResult, FalconError> {
         match plan {
             PhysicalPlan::CreateDatabase {
                 name,
@@ -1457,6 +1502,49 @@ impl Executor {
                 })?;
                 self.exec_call_procedure(name, args, txn)
             }
+            PhysicalPlan::DoBlock { body, language } => {
+                let txn = txn.ok_or_else(|| {
+                    FalconError::Internal("DO requires active transaction".into())
+                })?;
+                self.exec_do_block(body, language, txn)
+            }
+            PhysicalPlan::CreateTrigger { trigger } => {
+                self.reject_if_read_only("CREATE TRIGGER")?;
+                self.storage
+                    .create_trigger(trigger.clone())
+                    .map_err(FalconError::Storage)?;
+                Ok(ExecutionResult::Ddl {
+                    message: "CREATE TRIGGER".to_owned(),
+                })
+            }
+            PhysicalPlan::DropTrigger { trigger_name, table_name, if_exists } => {
+                self.reject_if_read_only("DROP TRIGGER")?;
+                match self.storage.drop_trigger(table_name, trigger_name) {
+                    Ok(()) => Ok(ExecutionResult::Ddl {
+                        message: "DROP TRIGGER".to_owned(),
+                    }),
+                    Err(_) if *if_exists => Ok(ExecutionResult::Ddl {
+                        message: "DROP TRIGGER".to_owned(),
+                    }),
+                    Err(e) => Err(FalconError::Storage(e)),
+                }
+            }
+            PhysicalPlan::CreateType { name, labels } => {
+                self.reject_if_read_only("CREATE TYPE")?;
+                use falcon_common::schema::EnumTypeDef;
+                let def = EnumTypeDef { name: name.clone(), labels: labels.clone() };
+                self.storage
+                    .create_enum_type(def)
+                    .map_err(FalconError::Storage)?;
+                Ok(ExecutionResult::Ddl { message: "CREATE TYPE".to_owned() })
+            }
+            PhysicalPlan::DropType { name, if_exists } => {
+                self.reject_if_read_only("DROP TYPE")?;
+                self.storage
+                    .drop_enum_type(name, *if_exists)
+                    .map_err(FalconError::Storage)?;
+                Ok(ExecutionResult::Ddl { message: "DROP TYPE".to_owned() })
+            }
             PhysicalPlan::NoOp => Ok(ExecutionResult::Ddl {
                 message: "DO".to_owned(),
             }),
@@ -1641,6 +1729,38 @@ impl Executor {
                     .collect();
                 Ok(ExecutionResult::Query { columns, rows })
             }
+            PhysicalPlan::ShowAiStats => {
+                use falcon_common::datum::{Datum, OwnedRow};
+                use falcon_common::types::DataType;
+                let diag = self.ai_optimizer.diagnostics();
+                let columns = vec![
+                    ("metric".to_owned(), DataType::Text),
+                    ("value".to_owned(), DataType::Text),
+                ];
+                let rows = vec![
+                    OwnedRow::new(vec![
+                        Datum::Text("enabled".into()),
+                        Datum::Text(diag.enabled.to_string()),
+                    ]),
+                    OwnedRow::new(vec![
+                        Datum::Text("samples_trained".into()),
+                        Datum::Text(diag.n_samples.to_string()),
+                    ]),
+                    OwnedRow::new(vec![
+                        Datum::Text("model_ready".into()),
+                        Datum::Text(diag.model_ready.to_string()),
+                    ]),
+                    OwnedRow::new(vec![
+                        Datum::Text("ema_mae_log2".into()),
+                        Datum::Text(format!("{:.4}", diag.ema_mae)),
+                    ]),
+                    OwnedRow::new(vec![
+                        Datum::Text("query_fingerprints".into()),
+                        Datum::Text(diag.n_fingerprints.to_string()),
+                    ]),
+                ];
+                Ok(ExecutionResult::Query { columns, rows })
+            }
             PhysicalPlan::DistPlan { .. } => Err(FalconError::Internal(
                 "DistPlan must be executed via DistributedQueryEngine, not the local Executor"
                     .into(),
@@ -1728,6 +1848,23 @@ impl Executor {
                 _ => Ok(Datum::Null),
             }
         };
+        let eval_rows_no_txn = |sql: &str,
+                                vars: &std::collections::HashMap<String, Datum>|
+         -> Result<Vec<std::collections::HashMap<String, Datum>>, ExecutionError> {
+            let mut resolved = sql.to_owned();
+            for (k, v) in vars {
+                resolved = resolved.replace(k.as_str(), &Self::datum_to_sql_literal(v));
+            }
+            let select_sql = if resolved.to_uppercase().starts_with("SELECT ") {
+                resolved
+            } else {
+                format!("SELECT {}", resolved)
+            };
+            match self.eval_sql_rows(&select_sql, None) {
+                Ok(rows) => Ok(rows),
+                Err(e) => Err(ExecutionError::TypeError(format!("FOR row eval: {e}"))),
+            }
+        };
 
         let result = match func_def.language {
             FunctionLanguage::Sql => {
@@ -1735,11 +1872,89 @@ impl Executor {
                     .map_err(FalconError::Execution)?
             }
             FunctionLanguage::PlPgSql => {
-                crate::plpgsql::execute_plpgsql(&func_def, &arg_vals, eval_sql)
+                crate::plpgsql::execute_plpgsql(&func_def, &arg_vals, eval_sql, eval_rows_no_txn)
                     .map_err(FalconError::Execution)?
             }
         };
         Ok(result)
+    }
+
+    fn exec_do_block(
+        &self,
+        body: &str,
+        language: &str,
+        txn: &TxnHandle,
+    ) -> Result<ExecutionResult, FalconError> {
+        use falcon_common::schema::{FunctionDef, FunctionLanguage, FunctionVolatility};
+        use falcon_common::error::ExecutionError;
+
+        let lang = match language.to_lowercase().as_str() {
+            "plpgsql" | "plpg_sql" | "" => FunctionLanguage::PlPgSql,
+            "sql" => FunctionLanguage::Sql,
+            other => {
+                return Err(FalconError::Execution(ExecutionError::TypeError(
+                    format!("DO: unsupported language '{other}'"),
+                )))
+            }
+        };
+
+        let func_def = FunctionDef {
+            name: "<anonymous>".into(),
+            params: vec![],
+            return_type: None,
+            language: lang,
+            body: body.to_owned(),
+            volatility: FunctionVolatility::Volatile,
+            is_strict: false,
+            or_replace: false,
+        };
+
+        let eval_sql = |sql: &str,
+                        vars: &std::collections::HashMap<String, Datum>|
+         -> Result<Datum, ExecutionError> {
+            let mut resolved = sql.to_owned();
+            for (k, v) in vars {
+                resolved = resolved.replace(k.as_str(), &Self::datum_to_sql_literal(v));
+            }
+            let select_sql = if resolved.to_uppercase().starts_with("SELECT ") {
+                resolved.clone()
+            } else {
+                format!("SELECT {}", resolved)
+            };
+            match self.eval_sql_expr_in_txn(&select_sql, txn) {
+                Ok(val) => Ok(val),
+                Err(_) => match self.eval_sql_stmt_in_txn(&resolved, txn) {
+                    Ok(_) => Ok(Datum::Null),
+                    Err(e) => Err(ExecutionError::TypeError(format!("DO eval: {e}"))),
+                },
+            }
+        };
+
+        let txn_ptr = txn as *const TxnHandle;
+        let eval_rows = |sql: &str,
+                         vars: &std::collections::HashMap<String, Datum>|
+         -> Result<Vec<std::collections::HashMap<String, Datum>>, ExecutionError> {
+            let mut resolved = sql.to_owned();
+            for (k, v) in vars {
+                resolved = resolved.replace(k.as_str(), &Self::datum_to_sql_literal(v));
+            }
+            let select_sql = if resolved.to_uppercase().starts_with("SELECT ") {
+                resolved
+            } else {
+                format!("SELECT {}", resolved)
+            };
+            let t = unsafe { &*txn_ptr };
+            self.eval_sql_rows(&select_sql, Some(t))
+                .map_err(|e| ExecutionError::TypeError(format!("DO FOR row eval: {e}")))
+        };
+
+        crate::plpgsql::execute_plpgsql(&func_def, &[], eval_sql, eval_rows)
+            .map_err(FalconError::Execution)?;
+
+        Ok(ExecutionResult::Dml {
+            rows_affected: 0,
+            tag: "DO",
+        })
     }
 
     fn exec_call_procedure(
@@ -1797,23 +2012,43 @@ impl Executor {
             }
         };
 
+        let txn_ptr = txn as *const TxnHandle;
+        let eval_rows_txn = |sql: &str,
+                             vars: &std::collections::HashMap<String, Datum>|
+         -> Result<Vec<std::collections::HashMap<String, Datum>>, ExecutionError> {
+            let mut resolved = sql.to_owned();
+            for (k, v) in vars {
+                resolved = resolved.replace(k.as_str(), &Self::datum_to_sql_literal(v));
+            }
+            let select_sql = if resolved.to_uppercase().starts_with("SELECT ") {
+                resolved
+            } else {
+                format!("SELECT {}", resolved)
+            };
+            // SAFETY: txn lives for the duration of exec_call_procedure
+            let t = unsafe { &*txn_ptr };
+            self.eval_sql_rows(&select_sql, Some(t))
+                .map_err(|e| ExecutionError::TypeError(format!("FOR row eval: {e}")))
+        };
+
         let result = match func_def.language {
             FunctionLanguage::Sql => {
                 crate::plpgsql::execute_sql_function(&func_def, &arg_vals, eval_sql)
                     .map_err(FalconError::Execution)?
             }
             FunctionLanguage::PlPgSql => {
-                crate::plpgsql::execute_plpgsql(&func_def, &arg_vals, eval_sql)
+                crate::plpgsql::execute_plpgsql(&func_def, &arg_vals, eval_sql, eval_rows_txn)
                     .map_err(FalconError::Execution)?
             }
         };
 
-        Ok(ExecutionResult::Ddl {
-            message: format!("CALL {}", result),
+        Ok(ExecutionResult::Dml {
+            rows_affected: 0,
+            tag: "CALL",
         })
     }
 
-    fn eval_sql_expr_in_txn(&self, sql: &str, txn: &TxnHandle) -> Result<Datum, FalconError> {
+    pub(crate) fn eval_sql_expr_in_txn(&self, sql: &str, txn: &TxnHandle) -> Result<Datum, FalconError> {
         let dialect = sqlparser::dialect::PostgreSqlDialect {};
         let stmts = sqlparser::parser::Parser::parse_sql(&dialect, sql).map_err(|e| {
             FalconError::Execution(ExecutionError::TypeError(format!("SQL parse: {e}")))
@@ -1861,6 +2096,45 @@ impl Executor {
         let plan = falcon_planner::Planner::plan(&bound)
             .map_err(|e| FalconError::Execution(ExecutionError::TypeError(format!("plan: {e}"))))?;
         self.execute(&plan, Some(txn))
+    }
+
+    /// Execute a SELECT and return all rows as column-name → Datum maps.
+    /// Used by PL/pgSQL `FOR row IN SELECT ... LOOP`.
+    pub(crate) fn eval_sql_rows(
+        &self,
+        sql: &str,
+        txn: Option<&TxnHandle>,
+    ) -> Result<Vec<std::collections::HashMap<String, Datum>>, FalconError> {
+        let dialect = sqlparser::dialect::PostgreSqlDialect {};
+        let stmts = sqlparser::parser::Parser::parse_sql(&dialect, sql).map_err(|e| {
+            FalconError::Execution(ExecutionError::TypeError(format!("SQL parse: {e}")))
+        })?;
+        let stmt = stmts
+            .into_iter()
+            .next()
+            .ok_or_else(|| FalconError::Execution(ExecutionError::TypeError("empty SQL".into())))?;
+        let catalog = self.storage.get_catalog();
+        let mut binder = falcon_sql_frontend::binder::Binder::new(catalog);
+        let bound = binder
+            .bind(&stmt)
+            .map_err(|e| FalconError::Execution(ExecutionError::TypeError(format!("bind: {e}"))))?;
+        let plan = falcon_planner::Planner::plan(&bound)
+            .map_err(|e| FalconError::Execution(ExecutionError::TypeError(format!("plan: {e}"))))?;
+        match self.execute(&plan, txn)? {
+            ExecutionResult::Query { columns, rows } => {
+                Ok(rows
+                    .into_iter()
+                    .map(|row| {
+                        columns
+                            .iter()
+                            .zip(row.values.into_iter())
+                            .map(|(col, val)| (col.0.to_lowercase(), val))
+                            .collect()
+                    })
+                    .collect())
+            }
+            _ => Ok(vec![]),
+        }
     }
 
     fn exec_create_table(

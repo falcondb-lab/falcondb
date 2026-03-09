@@ -1611,4 +1611,90 @@ mod txn_state_machine_tests {
         mgr.abort(txn_id).unwrap();
         assert!(mgr.get_txn(txn_id).is_none());
     }
+
+}
+
+#[cfg(test)]
+mod ssi_tests {
+    use std::sync::Arc;
+
+    use falcon_common::datum::{Datum, OwnedRow};
+    use falcon_common::schema::{ColumnDef, TableSchema};
+    use falcon_common::types::{ColumnId, DataType, IsolationLevel, TableId};
+    use falcon_storage::engine::StorageEngine;
+
+    use crate::manager::TxnManager;
+
+    fn test_schema() -> TableSchema {
+        TableSchema {
+            id: TableId(1),
+            name: "ssi_test".into(),
+            columns: vec![
+                ColumnDef {
+                    id: ColumnId(0),
+                    name: "id".into(),
+                    data_type: DataType::Int32,
+                    nullable: false,
+                    is_primary_key: true,
+                    default_value: None,
+                    is_serial: false,
+                    max_length: None,
+                },
+                ColumnDef {
+                    id: ColumnId(1),
+                    name: "val".into(),
+                    data_type: DataType::Text,
+                    nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                    is_serial: false,
+                    max_length: None,
+                },
+            ],
+            primary_key_columns: vec![0],
+            ..Default::default()
+        }
+    }
+
+    fn setup() -> (Arc<StorageEngine>, Arc<TxnManager>) {
+        let storage = Arc::new(StorageEngine::new_in_memory());
+        storage.create_table(test_schema()).unwrap();
+        let mgr = TxnManager::new(storage.clone());
+        (storage, Arc::new(mgr))
+    }
+
+    #[test]
+    fn test_serializable_commit_no_conflict() {
+        let (storage, mgr) = setup();
+        let txn = mgr.begin(IsolationLevel::Serializable);
+        let row = OwnedRow::new(vec![Datum::Int32(42), Datum::Text("hello".into())]);
+        storage.insert(TableId(1), row, txn.txn_id).unwrap();
+        mgr.commit(txn.txn_id).unwrap();
+    }
+
+    #[test]
+    fn test_serializable_abort_cleans_ssi_state() {
+        let (storage, mgr) = setup();
+        let txn = mgr.begin(IsolationLevel::Serializable);
+        let row = OwnedRow::new(vec![Datum::Int32(99), Datum::Text("x".into())]);
+        storage.insert(TableId(1), row, txn.txn_id).unwrap();
+        mgr.abort(txn.txn_id).unwrap();
+        assert!(mgr.get_txn(txn.txn_id).is_none());
+    }
+
+    #[test]
+    fn test_serializable_two_independent_txns_both_commit() {
+        let (storage, mgr) = setup();
+
+        let t1 = mgr.begin(IsolationLevel::Serializable);
+        let r1 = OwnedRow::new(vec![Datum::Int32(1), Datum::Text("a".into())]);
+        storage.insert(TableId(1), r1, t1.txn_id).unwrap();
+
+        let t2 = mgr.begin(IsolationLevel::Serializable);
+        let r2 = OwnedRow::new(vec![Datum::Int32(2), Datum::Text("b".into())]);
+        storage.insert(TableId(1), r2, t2.txn_id).unwrap();
+
+        mgr.commit(t1.txn_id).unwrap();
+        mgr.commit(t2.txn_id).unwrap();
+    }
 }

@@ -233,6 +233,51 @@ fn parse_atom(tokens: &[QToken]) -> Result<(TsQueryNode, &[QToken]), ExecutionEr
     }
 }
 
+/// Extract positive search terms from a tsquery string for GIN index lookup.
+/// Only extracts Term and Prefix nodes that are not inside NOT branches.
+/// Returns empty Vec if query cannot be parsed or yields no positive terms.
+pub fn extract_gin_terms_from_tsquery(
+    query_str: &str,
+) -> Vec<falcon_storage::memtable::GinSearchTerm> {
+    let Ok(node) = parse_tsquery(query_str) else {
+        return vec![];
+    };
+    let mut terms = Vec::new();
+    collect_positive_terms(&node, &mut terms, false);
+    terms
+}
+
+fn collect_positive_terms(
+    node: &TsQueryNode,
+    out: &mut Vec<falcon_storage::memtable::GinSearchTerm>,
+    negated: bool,
+) {
+    match node {
+        TsQueryNode::Term(w) => {
+            if !negated {
+                out.push(falcon_storage::memtable::GinSearchTerm::Exact(w.clone()));
+            }
+        }
+        TsQueryNode::Prefix(p) => {
+            if !negated {
+                out.push(falcon_storage::memtable::GinSearchTerm::Prefix(p.clone()));
+            }
+        }
+        TsQueryNode::Not(inner) => {
+            // Do not recurse into NOT branches — those terms are exclusions, not candidates.
+            let _ = inner;
+        }
+        TsQueryNode::And(a, b) => {
+            collect_positive_terms(a, out, negated);
+            collect_positive_terms(b, out, negated);
+        }
+        TsQueryNode::Or(a, b) => {
+            collect_positive_terms(a, out, negated);
+            collect_positive_terms(b, out, negated);
+        }
+    }
+}
+
 // ── @@ matching ──
 
 pub fn ts_match(vector: &[(String, Vec<u16>)], query: &TsQueryNode) -> bool {

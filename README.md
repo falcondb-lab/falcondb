@@ -16,7 +16,7 @@
   <a href="https://github.com/falcondb-lab/falcondb/actions/workflows/ci.yml">
     <img src="https://github.com/falcondb-lab/falcondb/actions/workflows/ci.yml/badge.svg" alt="CI" />
   </a>
-  <img src="https://img.shields.io/badge/version-1.2.0-blue" alt="Version" />
+  <img src="https://img.shields.io/badge/version-1.3.0-blue" alt="Version" />
   <img src="https://img.shields.io/badge/MSRV-1.75-blue" alt="MSRV" />
   <img src="https://img.shields.io/badge/license-Apache--2.0-green" alt="License" />
 </p>
@@ -88,26 +88,27 @@ It is not a configuration option — it is the default behavior under the `Local
 | **DML** | INSERT (incl. ON CONFLICT, RETURNING, SELECT), UPDATE (incl. FROM, RETURNING), DELETE (incl. USING, RETURNING), COPY |
 | **Queries** | WHERE, ORDER BY, LIMIT/OFFSET, DISTINCT, GROUP BY/HAVING, JOINs (INNER/LEFT/RIGHT/FULL/CROSS/NATURAL), subqueries (scalar/IN/EXISTS/correlated), CTEs (incl. RECURSIVE), UNION/INTERSECT/EXCEPT, window functions |
 | **Aggregates** | COUNT, SUM, AVG, MIN, MAX, STRING_AGG, BOOL_AND/OR, ARRAY_AGG |
-| **Types** | INT, BIGINT, FLOAT8, DECIMAL/NUMERIC, TEXT, BOOLEAN, TIMESTAMP, DATE, JSONB, ARRAY, SERIAL/BIGSERIAL |
+| **Types** | INT, BIGINT, FLOAT8, DECIMAL/NUMERIC, TEXT, BOOLEAN, TIMESTAMP, DATE, JSONB, ARRAY, SERIAL/BIGSERIAL, user-defined ENUM |
 | **Transactions** | BEGIN/COMMIT/ROLLBACK, READ ONLY/READ WRITE, per-txn timeout, Read Committed, Snapshot Isolation |
 | **Functions** | 500+ scalar functions (string, math, date/time, crypto, JSON, array) |
 | **Observability** | SHOW falcon.*, EXPLAIN, EXPLAIN ANALYZE, CHECKPOINT, ANALYZE TABLE, pg_stat_statements |
 
-### <a id="not-supported"></a>Not Supported (v1.2)
+### <a id="not-supported"></a>Not Supported (v1.3)
 
-The following features are **explicitly out of scope** for v1.2.
+The following features are **explicitly out of scope** for v1.3.
 Attempting to use them returns a clear `ErrorResponse` with the appropriate SQLSTATE code.
 
 | Feature | Error Code | Error Message |
 |---------|-----------|---------------|
 | ~~Stored procedures / PL/pgSQL~~ | ✅ | **Implemented** — `CREATE [OR REPLACE] FUNCTION ... LANGUAGE SQL/plpgsql`, `DROP FUNCTION`, `CALL`, PL/pgSQL: DECLARE, IF/ELSIF/ELSE, WHILE/FOR LOOP, RETURN, RAISE, PERFORM |
-| Triggers | `0A000` | `triggers are not supported` |
+| ~~Triggers~~ | ✅ | **Implemented** — `CREATE TRIGGER`, `DROP TRIGGER [IF EXISTS]`, BEFORE/AFTER INSERT/UPDATE/DELETE, FOR EACH ROW/STATEMENT, PL/pgSQL trigger functions. Enable via `[triggers]` config section (`enabled = true`). |
+| ~~Custom types (beyond JSONB)~~ | ✅ | **Implemented** — `CREATE TYPE name AS ENUM (...)`, `DROP TYPE [IF EXISTS]`, enum values usable as column defaults and in expressions. |
 | ~~Materialized views~~ | ✅ | **Implemented** — `CREATE MATERIALIZED VIEW ... AS SELECT`, `DROP MATERIALIZED VIEW [IF EXISTS]`, `REFRESH MATERIALIZED VIEW` |
 | Foreign data wrappers (FDW) | `0A000` | `foreign data wrappers are not supported` |
 | ~~Full-text search~~ | ✅ | **Implemented** — `tsvector`/`tsquery` types, `@@` operator, `to_tsvector`/`to_tsquery`/`ts_rank`/`ts_headline` + 10 more FTS functions |
 | HTAP / ColumnStore analytics | — | ColumnStore storage + vectorized AGG pushdown implemented; full analytics pipeline in progress |
 | ~~Automatic rebalancing~~ | ✅ | **Implemented** — production-grade `RebalanceRunner` with policy-driven shard migration, batched row transfer, pause/resume, Prometheus metrics, Raft-aware rebalance, 47 chaos tests. Enable via `[rebalance]` config section. |
-| Custom types (beyond JSONB) | `0A000` | `custom types are not supported` |
+| Full-text search (advanced) | — | Basic FTS implemented; phrase search, custom dictionaries in progress |
 
 > **Scope Guard**: Full HTAP analytics pipeline is in progress. ColumnStore
 > storage and vectorized GROUP BY AGG pushdown are implemented. Raft consensus
@@ -549,6 +550,100 @@ See [docs/observability.md](docs/observability.md) for full metric descriptions.
 
 ---
 
+## AI Query Optimizer
+
+FalconDB includes a built-in **online-learning query optimizer** that sits on top of the rule-based planner. It requires no external services and adds zero cold-start latency — the rule-based plan is always the fallback until the model has enough data.
+
+### How It Works
+
+```
+SQL → Binder → LogicalPlan
+                    │
+          extract_features()          ← 15-dim numeric vector
+                    │
+          generate_candidates()       ← rule-based plan + alternatives
+                    │
+          AiOptimizer::select_plan()  ← linear cost model (SGD)
+                    │
+             Executor runs plan
+                    │
+          record_feedback(actual_us)  ← online SGD weight update
+```
+
+### Feature Vector (15 dimensions)
+
+| Index | Feature |
+|-------|---------|
+| 0 | log₂(estimated output rows + 1) |
+| 1 | join count |
+| 2 | filter predicate count |
+| 3 | has GROUP BY (0/1) |
+| 4 | has ORDER BY (0/1) |
+| 5 | has LIMIT (0/1) |
+| 6 | index available on any scanned table (0/1) |
+| 7 | log₂(largest table rows + 1) |
+| 8 | log₂(second-largest table rows + 1) |
+| 9 | cross-table selectivity estimate (0..1) |
+| 10 | projection column count |
+| 11 | has aggregation (0/1) |
+| 12 | has DISTINCT (0/1) |
+| 13 | subquery depth |
+| 14 | log₂(total bytes estimate + 1) |
+
+### Cost Model
+
+- **Algorithm**: online SGD (stochastic gradient descent) with L2 regularization
+- **Prediction target**: `log₂(execution_time_μs)`
+- **Plan-kind bias**: 7 one-hot dimensions for `SeqScan / IndexScan / IndexRangeScan / NestedLoopJoin / HashJoin / MergeSortJoin / Other`
+- **Model dimension**: 23 weights (15 features + 7 plan-kind one-hot + 1 bias)
+- **Warm-up threshold**: 50 samples — model falls back to rule-based plan until trained
+- **Per-query fingerprint history**: tracks average execution time per query shape for secondary statistics
+
+### Candidate Plan Generation
+
+When the rule-based optimizer selects an `IndexScan`, the AI layer also generates a `SeqScan` candidate. The model scores both and picks the lower predicted cost. This lets the system learn when stale index statistics make a full scan faster.
+
+### Observability
+
+```sql
+-- View AI optimizer diagnostics
+SHOW AI STATS;
+```
+
+Returns:
+
+| metric | description |
+|--------|-------------|
+| `enabled` | Whether AI plan selection is active |
+| `samples_trained` | Total SGD updates performed |
+| `model_ready` | Whether warm-up threshold (50 samples) is met |
+| `ema_mae_log2` | Exponentially-weighted mean absolute error (log₂ cost units) |
+| `query_fingerprints` | Number of distinct query shapes tracked |
+
+### Enable / Disable
+
+AI plan selection is **enabled by default**. It has no observable effect until the warm-up threshold is reached — during warm-up the rule-based plan is always used.
+
+```sql
+-- The optimizer self-tunes continuously; no manual config needed.
+-- Use SHOW AI STATS to monitor training progress.
+SHOW AI STATS;
+```
+
+### Weight Persistence
+
+Model weights can be exported and imported via the Rust API for cross-restart learning:
+
+```rust
+// Export weights for persistence
+let weights = executor.ai_optimizer.export_weights();
+
+// Import previously saved weights
+executor.ai_optimizer.import_weights(weights);
+```
+
+---
+
 ## Architecture
 
 ```
@@ -557,7 +652,7 @@ See [docs/observability.md](docs/observability.md) for full metric descriptions.
 ├──────────────────────────┴─────────────────────────────┤
 │         SQL Frontend (sqlparser-rs → Binder)            │
 ├────────────────────────────────────────────────────────┤
-│         Planner / CBO / Router                          │
+│         Planner / CBO / AI Optimizer / Router            │
 ├────────────────────────────────────────────────────────┤
 │         Executor (row + vectorized + fused streaming)    │
 ├──────────────────┬─────────────────────────────────────┤
@@ -584,7 +679,7 @@ See [docs/observability.md](docs/observability.md) for full metric descriptions.
 | `falcon_storage` | Multi-engine storage: unified `TableHandle` dispatch → `StorageTable` trait; Rowstore (in-memory), LSM, RocksDB, redb; MVCC, secondary indexes, WAL, GC, USTM prefetch, TDE, CDC |
 | `falcon_txn` | Transaction lifecycle, OCC validation, timestamp allocation |
 | `falcon_sql_frontend` | SQL parsing (sqlparser-rs) + binding/analysis |
-| `falcon_planner` | Plan generation, cost-based optimizer (selectivity, scan cost, plan_optimized), routing hints, distributed wrapping, view/DDL plans |
+| `falcon_planner` | Plan generation, cost-based optimizer (selectivity, scan cost, plan_optimized), AI optimizer (online SGD cost model, candidate plan selection, execution feedback), routing hints, distributed wrapping, view/DDL plans |
 | `falcon_executor` | Operator execution, expression evaluation, governor, fused streaming aggregates, FTS engine, vectorized columnstore AGG |
 | `falcon_protocol_pg` | PostgreSQL wire protocol codec + TCP server |
 | `falcon_protocol_native` | FalconDB native binary protocol — encode/decode, compression, type mapping |
@@ -683,7 +778,7 @@ cargo build --workspace
 
 ## Roadmap
 
-All milestones through v1.2 are released. Current test count: **4,350+** across 18 crates (432 `.rs` files, ~246K lines of Rust).
+All milestones through v1.3 are released. Current test count: **4,380+** across 18 crates (432 `.rs` files, ~246K lines of Rust).
 
 | Milestone | Highlights |
 |-----------|------------|
@@ -691,6 +786,7 @@ All milestones through v1.2 are released. Current test count: **4,350+** across 
 | **v1.0** ✅ | LSM engine, SQL completeness, enterprise features (RLS/TDE/PITR/CDC), distributed hardening |
 | **v1.0.1–v1.0.3** ✅ | Zero-panic, failover×txn matrix, determinism & trust hardening |
 | **v1.1–v1.2** ✅ | USTM tiered memory, fused streaming aggregates, near-PG query parity |
+| **v1.3** ✅ | PL/pgSQL triggers (CREATE/DROP TRIGGER, BEFORE/AFTER, FOR EACH ROW/STATEMENT), Spring Boot / JDBC compatibility improvements, ColumnStore GC & truncate, `CREATE TYPE ... AS ENUM` custom enum types, AI optimizer integration (online SGD cost model, `SHOW AI STATS`) |
 
 ### RPO / RTO
 
@@ -730,14 +826,14 @@ and `sync-replica` (primary waits for replica WAL ack, RPO ≈ 0). See [docs/rpo
 ## Testing
 
 ```bash
-# Run all tests (4,350+ total)
+# Run all tests (4,380+ total)
 cargo test --workspace
 
 # By crate (key ones)
 cargo test -p falcon_cluster   # 1,050+ tests
 cargo test -p falcon_storage   # 820+ tests
 cargo test -p falcon_server    # 420+ tests
-cargo test -p falcon_executor  # 300+ tests
+cargo test -p falcon_executor  # 320+ tests
 cargo test -p falcon_common    # 250+ tests
 
 # Lint
